@@ -1,0 +1,16 @@
+[package]
+name = "enclavid-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+enclavid-session-store = { path = "../session-store" }
+
+wasmtime = { version = "43", default-features = false, features = [
+    "cranelift",
+    "component-model",
+    "runtime",
+    "std",
+] }

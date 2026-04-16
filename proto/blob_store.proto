@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package enclavid.blob_store;
+
+service BlobStore {
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Exists(ExistsRequest) returns (ExistsResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}
+
+message PutRequest {
+  string key = 1;
+  bytes data = 2;
+}
+
+message PutResponse {}
+
+message GetRequest {
+  string key = 1;
+}
+
+message GetResponse {
+  optional bytes data = 1;
+}
+
+message ExistsRequest {
+  string key = 1;
+}
+
+message ExistsResponse {
+  bool exists = 1;
+}
+
+message DeleteRequest {
+  string key = 1;
+}
+
+message DeleteResponse {}

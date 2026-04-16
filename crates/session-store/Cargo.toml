@@ -1,0 +1,13 @@
+[package]
+name = "enclavid-session-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tonic = "0.13"
+prost = "0.13"
+
+[build-dependencies]
+tonic-build = "0.13"

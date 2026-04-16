@@ -1,0 +1,10 @@
+package enclavid:form;
+
+interface form {
+    type image = list<u8>;
+
+    capture-passport: func() -> image;
+    capture-id-card: func() -> tuple<image, image>;
+    capture-drivers-license: func() -> tuple<image, image>;
+    capture-liveness: func() -> list<image>;
+}

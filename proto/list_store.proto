@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package enclavid.list_store;
+
+service ListStore {
+  rpc Append(AppendRequest) returns (AppendResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+}
+
+message AppendRequest {
+  string key = 1;
+  bytes data = 2;
+}
+
+message AppendResponse {}
+
+message GetRequest {
+  string key = 1;
+}
+
+message GetResponse {
+  repeated bytes items = 1;
+}

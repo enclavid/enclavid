@@ -1,0 +1,12 @@
+package enclavid:policy;
+
+interface policy {
+    enum decision {
+        approved,
+        rejected,
+        rejected-retryable,
+        review
+    }
+
+    evaluate: func() -> decision;
+}

@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package enclavid.state;
+
+// Session metadata created by external service when bank creates a session.
+// Read-only from TEE perspective.
+message SessionMetadata {
+  string policy_id = 1;
+  string bank_id = 2;
+  string bank_public_key = 3;
+}
+
+// Internal session state — media and intermediate results for policy replay.
+// Encrypted with client key + TEE key before persistence.
+message SessionState {
+  optional bytes passport = 1;
+  optional TwoSidedDocument id_card = 2;
+  optional TwoSidedDocument drivers_license = 3;
+  repeated bytes liveness_frames = 4;
+}
+
+message TwoSidedDocument {
+  bytes front = 1;
+  bytes back = 2;
+}

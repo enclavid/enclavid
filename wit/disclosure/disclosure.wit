@@ -1,0 +1,10 @@
+package enclavid:disclosure;
+
+interface disclosure {
+    record display-field {
+        label: string,
+        value: string,
+    }
+
+    request-disclosure: func(fields: list<display-field>) -> bool;
+}
