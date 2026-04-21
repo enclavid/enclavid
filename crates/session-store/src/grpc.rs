@@ -19,6 +19,13 @@ pub async fn connect_uds(socket_path: &str) -> Result<GrpcChannel, StoreError> {
     Ok(channel)
 }
 
+/// Builds a Channel without actually dialing — RPCs will fail if made, but
+/// the channel is a valid value for constructing store clients. Intended
+/// for tests that inject stores without exercising them.
+pub fn lazy_channel() -> GrpcChannel {
+    Channel::from_static("http://localhost").connect_lazy()
+}
+
 /// BlobStore client — read/write/delete single blobs by key.
 #[derive(Clone)]
 pub struct GrpcBlobStore {

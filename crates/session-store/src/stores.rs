@@ -46,13 +46,13 @@ impl StateStore {
     pub async fn get(
         &self,
         session_id: &str,
-        _client_key: &[u8],
+        _applicant_key: &[u8],
         _tee_key: &[u8],
     ) -> Result<Option<SessionState>, StoreError> {
         match self.inner.get(session_id).await? {
             None => Ok(None),
             Some(_bytes) => {
-                // TODO: decrypt with tee_key, then client_key
+                // TODO: decrypt with tee_key, then applicant_key
                 let decrypted = _bytes;
                 Ok(Some(SessionState::decode(decrypted.as_slice())?))
             }
@@ -63,11 +63,11 @@ impl StateStore {
         &self,
         session_id: &str,
         state: &SessionState,
-        _client_key: &[u8],
+        _applicant_key: &[u8],
         _tee_key: &[u8],
     ) -> Result<(), StoreError> {
         let bytes = state.encode_to_vec();
-        // TODO: encrypt with client_key, then tee_key
+        // TODO: encrypt with applicant_key, then tee_key
         let encrypted = bytes;
         self.inner.put(session_id, encrypted).await
     }
@@ -81,8 +81,8 @@ impl StateStore {
     }
 }
 
-/// Append-only store for consent-approved data for the bank.
-/// Each chunk encrypted with the bank's public key.
+/// Append-only store for consent-approved data for the client.
+/// Each chunk encrypted with the client's public key.
 /// TEE cannot read back — only append.
 #[derive(Clone)]
 pub struct DisclosureStore {
@@ -100,10 +100,37 @@ impl DisclosureStore {
         &self,
         session_id: &str,
         chunk: Vec<u8>,
-        _bank_public_key: &[u8],
+        _client_public_key: &[u8],
     ) -> Result<(), StoreError> {
-        // TODO: encrypt chunk with bank_public_key (hybrid: AES data + RSA/ECC key)
+        // TODO: encrypt chunk with client_public_key (hybrid: AES data + RSA/ECC key)
         let encrypted = chunk;
         self.inner.append(session_id, encrypted).await
+    }
+}
+
+/// Append-only store for anonymous user reports against policies.
+/// Entries keyed by `policy_id` so the platform can aggregate reports per policy.
+/// No session_id is included in the payload — reports are unlinkable to specific users.
+#[derive(Clone)]
+pub struct ReportStore {
+    inner: GrpcListStore,
+}
+
+impl ReportStore {
+    pub fn new(channel: GrpcChannel) -> Self {
+        Self {
+            inner: GrpcListStore::new(channel, "report"),
+        }
+    }
+
+    pub async fn append(
+        &self,
+        policy_id: &str,
+        chunk: Vec<u8>,
+        _platform_public_key: &[u8],
+    ) -> Result<(), StoreError> {
+        // TODO: encrypt chunk with platform_public_key (hybrid)
+        let encrypted = chunk;
+        self.inner.append(policy_id, encrypted).await
     }
 }

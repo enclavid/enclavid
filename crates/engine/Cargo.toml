@@ -13,4 +13,14 @@ wasmtime = { version = "43", default-features = false, features = [
     "component-model",
     "runtime",
     "std",
+    "async",
 ] }
+
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+blake3 = "1"
+prost = "0.13"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wit-component = "0.247"

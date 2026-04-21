@@ -8,5 +8,13 @@ interface policy {
         review
     }
 
-    evaluate: func() -> decision;
+    variant eval-args {
+        %string(string),
+        int(s64),
+        float(f64),
+        %bool(bool),
+        null,
+    }
+
+    evaluate: func(args: list<tuple<string, eval-args>>) -> decision;
 }

@@ -1,13 +1,48 @@
-use crate::enclavid::disclosure::disclosure::Host;
-use enclavid_session_store::SessionState;
+use enclavid_session_store::{suspended, ConsentRequest, DisplayField as ProtoDisplayField};
+use prost::Message;
 
-impl Host for SessionState {
-    fn request_disclosure(
+use crate::enclavid::disclosure::disclosure::{DisplayField, Host};
+use crate::host_state::HostState;
+use crate::sanitize;
+
+impl Host for HostState {
+    async fn prompt_disclosure(
         &mut self,
-        _fields: Vec<crate::enclavid::disclosure::disclosure::DisplayField>,
+        fields: Vec<DisplayField>,
     ) -> wasmtime::Result<bool> {
-        // TODO: yield to client, show consent UI, wait for response
-        // For now: auto-approve
-        Ok(true)
+        sanitize::validate_fields(&fields)?;
+        let sanitized = sanitize::sanitize_fields(fields);
+        let proto_fields: Vec<ProtoDisplayField> = sanitized
+            .into_iter()
+            .map(|f| ProtoDisplayField { label: f.label, value: f.value })
+            .collect();
+
+        let accepted = self
+            .replay
+            .current_suspended()
+            .and_then(|s| s.request.as_ref())
+            .and_then(|r| match r {
+                suspended::Request::Consent(c) => c.accepted,
+                _ => None,
+            });
+
+        match accepted {
+            None => Err(suspended::Request::consent(proto_fields).into()),
+            Some(false) => Ok(false),
+            Some(true) => {
+                // Reuse ConsentRequest as the disclosed-record schema:
+                // same fields + an explicit `accepted` marker.
+                let payload = ConsentRequest {
+                    fields: proto_fields,
+                    accepted: Some(true),
+                }
+                .encode_to_vec();
+                self.disclosure_store
+                    .append(&self.session_id, payload, &self.client_pk)
+                    .await
+                    .map_err(|e| wasmtime::Error::msg(format!("disclosure append failed: {e}")))?;
+                Ok(true)
+            }
+        }
     }
 }

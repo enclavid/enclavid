@@ -1,0 +1,17 @@
+package enclavid:form;
+
+interface biometrics {
+    use documents.{image};
+
+    // Mode selector for liveness capture. Future: may grow to record per
+    // variant (duration, challenge phrase, etc.) or gain new modes.
+    variant liveness-params {
+        selfie-video,
+    }
+
+    variant liveness-data {
+        selfie-video(list<image>),
+    }
+
+    prompt-liveness: func(params: liveness-params) -> liveness-data;
+}

@@ -6,5 +6,5 @@ interface disclosure {
         value: string,
     }
 
-    request-disclosure: func(fields: list<display-field>) -> bool;
+    prompt-disclosure: func(fields: list<display-field>) -> bool;
 }

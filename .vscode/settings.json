@@ -1,0 +1,6 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "./Cargo.toml",
+        "./crates/engine/tests/fixtures/test-policy/Cargo.toml"
+    ]
+}

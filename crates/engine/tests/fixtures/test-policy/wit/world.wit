@@ -1,0 +1,9 @@
+package enclavid:test-policy;
+
+world policy {
+    import enclavid:disclosure/disclosure;
+    import enclavid:form/documents;
+    import enclavid:form/biometrics;
+    import enclavid:form/form-group;
+    export enclavid:policy/policy;
+}

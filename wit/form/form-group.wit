@@ -1,0 +1,39 @@
+package enclavid:form;
+
+interface form-group {
+    use documents.{image};
+    use biometrics.{liveness-params, liveness-data};
+
+    // Single slot within a group — what user must provide.
+    variant group-params {
+        passport,
+        id-card,
+        drivers-license,
+        liveness(liveness-params),
+    }
+
+    // AND group — user must provide ALL items.
+    record all-of {
+        items: list<group-params>,
+    }
+
+    // Result for a single slot, in order of items within the chosen alternative.
+    variant group-result {
+        passport(image),
+        id-card(tuple<image, image>),
+        drivers-license(tuple<image, image>),
+        liveness(liveness-data),
+    }
+
+    // Capture via OR of AND-groups (DNF). User satisfies exactly one
+    // all-of group; UI drives greedy path-completion client-side.
+    //
+    // Policy authoring guidelines:
+    // 1. Alternatives must not be prefixes of each other — shorter wins
+    //    in greedy UX.
+    // 2. Options at each step should be categorically coherent
+    //    (don't mix document choice with biometric choice at the same step).
+    // 3. Within a single alternative, pick one liveness mode — avoid forcing
+    //    the user to choose selfie-video vs voice-phrase mid-flow.
+    prompt-any-of: func(any-of: list<all-of>) -> list<group-result>;
+}

@@ -1,11 +1,15 @@
+mod biometrics;
 mod disclosure;
-mod form;
-mod runner;
-mod suspend;
+mod documents;
+mod form_group;
+mod host_state;
+mod replay;
+pub mod policy;
+mod sanitize;
+pub mod wasmtime_shim;
 
-pub use enclavid_session_store::{SessionMetadata, SessionState};
-pub use runner::{RunOutcome, Runner};
-pub use suspend::{MediaRequest, Suspend};
+pub use enclavid_session_store::{suspended, SessionMetadata, SessionState};
+pub use policy::{EvalArgs, RunStatus, Runner};
 
 wasmtime::component::bindgen!({
     inline: r#"
@@ -13,7 +17,10 @@ wasmtime::component::bindgen!({
 
         world host {
             import enclavid:disclosure/disclosure;
-            import enclavid:form/form;
+            import enclavid:form/documents;
+            import enclavid:form/biometrics;
+            import enclavid:form/form-group;
+            export enclavid:policy/policy;
         }
     "#,
     path: [
@@ -21,8 +28,11 @@ wasmtime::component::bindgen!({
         "../../wit/form",
         "../../wit/policy",
     ],
-    imports: {
-        "enclavid:form/form": trappable,
-        "enclavid:disclosure/disclosure": trappable,
-    },
+    imports: { default: async | trappable },
+    exports: { default: async },
+    additional_derives: [
+        serde::Serialize,
+        serde::Deserialize,
+    ],
+    wasmtime_crate: crate::wasmtime_shim,
 });

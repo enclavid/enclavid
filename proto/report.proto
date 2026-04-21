@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package enclavid.report;
+
+// User-submitted report about a policy requesting excessive or suspicious data.
+// Stored anonymously — no session_id, no applicant identity.
+message Report {
+  string policy_id = 1;
+  string client_id = 2;
+  bytes policy_hash = 3;  // version of policy at the time of the report
+  ReportReason reason = 4;
+  string details = 5;
+  repeated string field_labels = 6;
+  int64 timestamp = 7;
+}
+
+enum ReportReason {
+  REPORT_REASON_UNSPECIFIED = 0;
+  REQUESTING_TOO_MUCH_DATA = 1;
+  UNEXPECTED_FIELDS = 2;
+  SUSPICIOUS_VALUES = 3;
+  OTHER = 4;
+}

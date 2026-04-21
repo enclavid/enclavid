@@ -5,10 +5,10 @@ use axum::http::StatusCode;
 use base64ct::{Base64, Encoding};
 use secrecy::SecretBox;
 
-use crate::state::ClientKey;
+use crate::state::ApplicantKey;
 
-/// Extractor wrapping the client key parsed from `Authorization: Bearer <base64>`.
-pub struct BearerKey(pub ClientKey);
+/// Extractor wrapping the applicant key parsed from `Authorization: Bearer <base64>`.
+pub struct BearerKey(pub ApplicantKey);
 
 impl<S: Send + Sync> FromRequestParts<S> for BearerKey {
     type Rejection = StatusCode;

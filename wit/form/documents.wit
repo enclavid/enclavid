@@ -1,0 +1,9 @@
+package enclavid:form;
+
+interface documents {
+    type image = list<u8>;
+
+    prompt-passport: func() -> image;
+    prompt-id-card: func() -> tuple<image, image>;
+    prompt-drivers-license: func() -> tuple<image, image>;
+}

@@ -6,20 +6,130 @@ package enclavid.state;
 // Read-only from TEE perspective.
 message SessionMetadata {
   string policy_id = 1;
-  string bank_id = 2;
-  string bank_public_key = 3;
+  string client_id = 2;
+  string client_public_key = 3;
+  bytes input = 4;  // JSON claims for Match Mode; 1KB max enforced at TEE read
 }
 
-// Internal session state — media and intermediate results for policy replay.
+// Internal session state for policy replay.
 // Encrypted with client key + TEE key before persistence.
 message SessionState {
-  optional bytes passport = 1;
-  optional TwoSidedDocument id_card = 2;
-  optional TwoSidedDocument drivers_license = 3;
-  repeated bytes liveness_frames = 4;
+  bytes policy_hash = 1;
+  repeated CallEvent events = 2;
 }
 
-message TwoSidedDocument {
+// One record per host call. Position in `events` = call index (assigned
+// monotonically as the policy executes). On replay, intercept walks events
+// in order, verifies fn_name + args_hash match, and either returns the
+// cached Completed result or re-runs the body for Suspended/unset status.
+message CallEvent {
+  string fn_name = 1;
+  bytes args_hash = 2;
+  oneof status {
+    Completed completed = 3;
+    Suspended suspended = 4;
+  }
+}
+
+message Completed {
+  bytes result = 1;
+}
+
+// Suspension request — typed by category with kind-specific params.
+// UI renders based on which oneof variant is populated.
+message Suspended {
+  oneof request {
+    DocumentRequest document = 1;
+    BiometricRequest biometric = 2;
+    ConsentRequest consent = 3;
+    VerificationSetRequest verification_set = 4;
+  }
+}
+
+message DocumentRequest {
+  // Document kind + optional user-submitted data combined into one oneof.
+  // Variant = what the policy asked for; `data` inside = user's answer.
+  oneof kind {
+    Passport passport = 1;
+    IdCard id_card = 2;
+    DriversLicense drivers_license = 3;
+  }
+}
+
+message Passport {
+  optional bytes image = 1;
+}
+
+message IdCard {
+  optional TwoSidedImage images = 1;
+}
+
+message DriversLicense {
+  optional TwoSidedImage images = 1;
+}
+
+message TwoSidedImage {
   bytes front = 1;
   bytes back = 2;
+}
+
+message BiometricRequest {
+  oneof kind {
+    Liveness liveness = 1;
+  }
+}
+
+message Liveness {
+  LivenessMode mode = 1;
+  optional LivenessFrames frames = 2;
+}
+
+message LivenessFrames {
+  repeated bytes frames = 1;
+}
+
+message ConsentRequest {
+  repeated DisplayField fields = 1;
+  // User's answer to the consent prompt.
+  optional bool accepted = 2;
+}
+
+// OR of alternatives (DNF). User satisfies exactly one alternative by
+// providing all items in it. UI walks via progressive disclosure: at each
+// step shows union of next items across still-viable alternatives.
+message VerificationSetRequest {
+  repeated CaptureGroup alternatives = 1;
+  // User's submission: sequence of CaptureItems (from the chosen
+  // alternative) with their data fields populated.
+  optional VerificationSetData data = 2;
+}
+
+message VerificationSetData {
+  repeated CaptureItem items = 1;
+}
+
+message CaptureGroup {
+  repeated CaptureItem items = 1;
+}
+
+// Used both to describe a requested slot (data = None) and to carry a
+// submitted value (data = Some). Same shape, different lifecycle phase.
+message CaptureItem {
+  oneof item {
+    Passport passport = 1;
+    IdCard id_card = 2;
+    DriversLicense drivers_license = 3;
+    Liveness liveness = 4;
+  }
+}
+
+enum LivenessMode {
+  LIVENESS_MODE_UNKNOWN = 0;
+  SELFIE_VIDEO = 1;
+}
+
+// Field shown to user on consent screen. Sanitized before storage.
+message DisplayField {
+  string label = 1;
+  string value = 2;
 }
