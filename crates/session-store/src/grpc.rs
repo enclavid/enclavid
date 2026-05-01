@@ -8,23 +8,7 @@ use crate::proto::blob::{
 use crate::proto::list::list_store_client::ListStoreClient;
 use crate::proto::list::{AppendRequest, GetRequest as ListGetRequest};
 
-pub use tonic::transport::Channel as GrpcChannel;
-
-/// Connects to the store gRPC server over a Unix domain socket.
-pub async fn connect_uds(socket_path: &str) -> Result<GrpcChannel, StoreError> {
-    let channel = Channel::from_shared(format!("unix://{socket_path}"))
-        .map_err(|e| StoreError::Transport(e.to_string()))?
-        .connect()
-        .await?;
-    Ok(channel)
-}
-
-/// Builds a Channel without actually dialing — RPCs will fail if made, but
-/// the channel is a valid value for constructing store clients. Intended
-/// for tests that inject stores without exercising them.
-pub fn lazy_channel() -> GrpcChannel {
-    Channel::from_static("http://localhost").connect_lazy()
-}
+pub use crate::transport::{connect_store, GrpcChannel};
 
 /// BlobStore client — read/write/delete single blobs by key.
 #[derive(Clone)]
@@ -32,10 +16,6 @@ pub struct GrpcBlobStore {
     client: BlobStoreClient<Channel>,
     namespace: String,
 }
-
-// fn test <T: Into<dyn ::prost::Message + Sized>>(s: T) {
-//     println!("blabla");
-// }
 
 impl GrpcBlobStore {
     pub fn new(channel: GrpcChannel, namespace: &str) -> Self {

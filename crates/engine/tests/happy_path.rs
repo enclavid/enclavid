@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use enclavid_engine::policy::{Decision, RunResources};
 use enclavid_engine::{RunStatus, Runner, SessionState};
 use enclavid_session_store::{
-    call_event, document_request, lazy_channel, suspended, DisclosureStore, Passport,
+    call_event, document_request, suspended, DisclosureStore, GrpcChannel, Passport,
     SessionState as SessionStateProto,
 };
 use wit_component::ComponentEncoder;
@@ -100,6 +100,12 @@ fn test_resources() -> RunResources {
         session_id: "test-session".to_string(),
         client_pk: b"test-pk".to_vec(),
     }
+}
+
+/// Local test helper: a Channel that never dials. Fine because this test
+/// avoids the disclosure append path (consent=false).
+fn lazy_channel() -> GrpcChannel {
+    GrpcChannel::from_static("http://localhost").connect_lazy()
 }
 
 fn fake_image() -> Vec<u8> {

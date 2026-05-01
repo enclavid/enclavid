@@ -4,11 +4,12 @@ use std::time::Duration;
 use moka::future::Cache;
 use secrecy::SecretBox;
 
-use enclavid_engine::wasmtime_shim::component::Component;
 use enclavid_engine::Runner;
 use enclavid_session_store::{
-    connect_uds, DisclosureStore, MetadataStore, ReportStore, StateStore,
+    DisclosureStore, GrpcChannel, MetadataStore, ReportStore, StateStore, connect_store,
 };
+
+use crate::runtime::SessionPolicyCache;
 
 /// Applicant key held in TEE memory for the duration of a session.
 /// Raw bytes used for AES-256-GCM encryption of session state.
@@ -21,8 +22,13 @@ pub type ApplicantKey = SecretBox<Vec<u8>>;
 pub type ApplicantKeyCache = Cache<String, Arc<ApplicantKey>>;
 
 pub struct AppState {
-    pub runner: Runner,
-    pub policy: Component,
+    /// Shared with the client API state (same Engine compiles policy on
+    /// /init, runs it on /input).
+    pub runner: Arc<Runner>,
+    /// Compiled per-session components, populated by /init in the client
+    /// API and read here on every /input. Lookup miss = session not yet
+    /// initialized or evicted past TTL.
+    pub policies: SessionPolicyCache,
     pub metadata_store: MetadataStore,
     pub state_store: StateStore,
     pub disclosure_store: DisclosureStore,
@@ -31,27 +37,33 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn init(socket_path: &str, policy_bytes: &[u8]) -> Self {
-        let channel = connect_uds(socket_path)
-            .await
-            .expect("failed to connect store");
-
+    pub fn new(channel: GrpcChannel, runner: Arc<Runner>, policies: SessionPolicyCache) -> Self {
         let applicant_keys = Cache::builder()
             .max_capacity(10_000)
             .time_to_idle(Duration::from_secs(3600))
             .build();
 
-        let runner = Runner::new().expect("failed to create runner");
-        let policy = runner.compile(policy_bytes).expect("failed to compile policy");
-
         Self {
             runner,
-            policy,
+            policies,
             metadata_store: MetadataStore::new(channel.clone()),
             state_store: StateStore::new(channel.clone()),
             disclosure_store: DisclosureStore::new(channel.clone()),
             report_store: ReportStore::new(channel),
             applicant_keys,
         }
+    }
+
+    /// Connect to session-store and build state. The runner and policy
+    /// cache are passed in so they can be shared with the client API.
+    pub async fn init(
+        transport_out: &str,
+        runner: Arc<Runner>,
+        policies: SessionPolicyCache,
+    ) -> Self {
+        let channel = connect_store(transport_out)
+            .await
+            .expect("failed to connect store");
+        Self::new(channel, runner, policies)
     }
 }

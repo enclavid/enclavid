@@ -1,0 +1,13 @@
+[package]
+name = "enclavid-untrusted"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Tiny utility crate: provides the `Untrusted<T>` wrapper that marks
+# values originating from an untrusted source (e.g., host gRPC calls)
+# and forces an explicit `.trust(...)` step before the inner T is
+# accessible. No deps on purpose — keep it ambient and cheap.
+
+[dependencies]

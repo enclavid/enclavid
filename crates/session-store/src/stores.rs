@@ -1,13 +1,16 @@
 //! Concrete stores for each kind of session data.
 //! Each encapsulates its own transport + encryption requirements.
 
+use enclavid_untrusted::Untrusted;
 use prost::Message;
 
 use crate::error::StoreError;
 use crate::grpc::{GrpcBlobStore, GrpcChannel, GrpcListStore};
 use crate::proto::state::{SessionMetadata, SessionState};
 
-/// Read-only store for session metadata created by the external service.
+/// Read/write store for session metadata. The TEE creates entries on
+/// session create and updates them as the session progresses through
+/// the lifecycle.
 #[derive(Clone)]
 pub struct MetadataStore {
     inner: GrpcBlobStore,
@@ -20,11 +23,26 @@ impl MetadataStore {
         }
     }
 
-    pub async fn get(&self, session_id: &str) -> Result<Option<SessionMetadata>, StoreError> {
+    /// Read metadata from the host's BlobStore. The host can return any
+    /// bytes — content authenticity is NOT verified at this layer. The
+    /// caller MUST go through `Untrusted::trust(...)` with a context-
+    /// specific predicate (workspace-boundary check, status check, etc.)
+    /// before using fields. See architecture.md → Network Isolation.
+    pub async fn get(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<Untrusted<SessionMetadata>>, StoreError> {
         match self.inner.get(session_id).await? {
             None => Ok(None),
-            Some(bytes) => Ok(Some(SessionMetadata::decode(bytes.as_slice())?)),
+            Some(bytes) => {
+                let m = SessionMetadata::decode(bytes.as_slice())?;
+                Ok(Some(Untrusted::new(m)))
+            }
         }
+    }
+
+    pub async fn put(&self, session_id: &str, metadata: &SessionMetadata) -> Result<(), StoreError> {
+        self.inner.put(session_id, metadata.encode_to_vec()).await
     }
 }
 

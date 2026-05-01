@@ -1,6 +1,9 @@
+mod auth;
 mod error;
 mod grpc;
+mod registry;
 mod stores;
+mod transport;
 
 mod proto {
     pub mod blob {
@@ -15,16 +18,27 @@ mod proto {
     pub mod report {
         tonic::include_proto!("enclavid.report");
     }
+    pub mod registry {
+        tonic::include_proto!("enclavid.registry");
+    }
+    pub mod auth {
+        tonic::include_proto!("enclavid.auth");
+    }
 }
 
+pub use auth::{AuthClient, AuthError};
+pub use enclavid_untrusted::Untrusted;
 pub use error::StoreError;
-pub use grpc::{connect_uds, lazy_channel, GrpcBlobStore, GrpcChannel, GrpcListStore};
+pub use grpc::{connect_store, GrpcBlobStore, GrpcChannel, GrpcListStore};
+pub use proto::auth::ClientOperation;
+pub use proto::registry::PullResponse as RegistryPullResponse;
+pub use registry::RegistryClient;
 pub use proto::report::{Report, ReportReason};
 pub use proto::state::{
     biometric_request, call_event, capture_item, document_request, suspended, BiometricRequest,
     CallEvent, CaptureGroup, CaptureItem, Completed, ConsentRequest, DisplayField,
     DocumentRequest, DriversLicense, IdCard, Liveness, LivenessFrames, LivenessMode, Passport,
-    SessionMetadata, SessionState, Suspended, TwoSidedImage, VerificationSetData,
+    SessionMetadata, SessionState, SessionStatus, Suspended, TwoSidedImage, VerificationSetData,
     VerificationSetRequest,
 };
 pub use stores::{DisclosureStore, MetadataStore, ReportStore, StateStore};

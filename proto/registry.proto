@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package enclavid.registry;
+
+// Host-side proxy for OCI registry pulls. The TEE has no network stack
+// (see Network Isolation in architecture.md); the host fetches by digest
+// and forwards bytes over vsock.
+//
+// Trust model: host is NOT trusted on response content. The TEE recomputes
+// the manifest digest and each layer digest against the request reference
+// before trusting bytes — host can swap to any (manifest, layers) tuple
+// whose digests match the requested reference, but cannot inject arbitrary
+// content. Privacy of applicant data depends on the K_client backstop in
+// session creation, not on the integrity of these responses.
+service Registry {
+  // Pull an encrypted policy artifact (manifest + all layers).
+  //
+  // The TEE provides the logical identity of the policy
+  // (workspace + name + frozen digest). The host knows how that maps
+  // onto the registry's actual path layout — TEE never constructs
+  // OCI references and never depends on registry deployment details.
+  rpc Pull(PullRequest) returns (PullResponse);
+}
+
+message PullRequest {
+  // Workspace the session belongs to. Used by the host to scope the
+  // pull into that workspace's namespace.
+  string workspace_id = 1;
+  // Policy name within the workspace (e.g. `kyc-standard`).
+  string policy_name = 2;
+  // Pinned content digest (`sha256:<hex>`). Tag resolution happens
+  // outside this RPC (at session-create time) — TEE only ever asks
+  // by digest, eliminating tag-race surface.
+  string policy_digest = 3;
+}
+
+message PullResponse {
+  // The OCI manifest JSON as raw bytes.
+  bytes manifest = 1;
+  // Hex-encoded sha256 of `manifest` bytes — host must compute this and
+  // the TEE re-verifies it matches the request reference's digest before
+  // trusting the body. This is integrity, not authenticity: a lying host
+  // can swap to ANY (manifest, layers) tuple where digest matches; what
+  // it cannot do is alter content silently after we've started parsing.
+  string manifest_digest = 2;
+  // Layer payloads. Order matches `layers[]` array in the manifest JSON.
+  // The TEE recomputes each layer digest before trusting bytes — same
+  // integrity property as `manifest_digest`.
+  repeated bytes layers = 3;
+}

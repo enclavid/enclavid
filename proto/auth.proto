@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package enclavid.auth;
+
+// Host-side RBAC + identity gate. The TEE never validates credentials
+// itself — it forwards the client's Authorization header + the operation
+// it wants to perform, and trusts the host's verdict.
+//
+// Trust model: equivalent to TEE-validates-with-host-fetched-JWKS. Host
+// can lie about anything here, but K_client backstop in session creation
+// (see architecture.md → Client-Facing Session Creation) bounds the
+// damage to "fake PendingInit sessions", caught by rate-limit and audit
+// log on the host side.
+//
+// Two-layer authorization:
+//  1. Host (this RPC) — does this credential have permission for this
+//     operation? Owns identity, JWT validation, mTLS-cert checks, RBAC.
+//  2. TEE (after this RPC) — for operations on a specific session, does
+//     the session's workspace_id match the credential's workspace_id?
+//     Pure data-plane ownership check, no policy logic.
+service Auth {
+  rpc AuthorizeClient(AuthorizeClientRequest) returns (AuthorizeClientResponse);
+}
+
+// Operations the client API exposes. TEE always sets this; host decides
+// whether the credential's permissions cover it. Adding an operation is a
+// proto change visible to both sides — intentional, prevents typos that
+// would result in either side silently misclassifying.
+enum ClientOperation {
+  CLIENT_OPERATION_UNSPECIFIED = 0;
+  // POST /api/v1/sessions — create a new session in PendingInit.
+  SESSION_CREATE = 1;
+  // POST /api/v1/sessions/:id/init — deliver wrapped K_client, transition to Running.
+  SESSION_INIT = 2;
+  // GET /api/v1/sessions/:id/status — poll session state.
+  SESSION_READ = 3;
+  // GET /api/v1/sessions/:id/shared-data — pull applicant-consented data.
+  DATA_READ = 4;
+}
+
+message AuthorizeClientRequest {
+  // Verbatim value of the HTTP Authorization header. TEE does not parse,
+  // classify, or strip prefixes — host detects scheme (Bearer JWT, mTLS
+  // cert thumbprint, etc.) and validates accordingly.
+  string authorization_header = 1;
+
+  // What the caller wants to do. UNSPECIFIED is rejected.
+  ClientOperation operation = 2;
+}
+
+message AuthorizeClientResponse {
+  // Workspace this credential is bound to. TEE uses this for resource
+  // ownership: any session-specific operation must additionally verify
+  // the session's workspace_id == this value (TEE-side data-plane check).
+  string workspace_id = 1;
+}

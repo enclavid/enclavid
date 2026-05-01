@@ -5,9 +5,23 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Default is TCP transport (works on all platforms, used for dev / CI /
+# cross-provider deployment). Enable `vsock` for the attested production
+# build — replaces TCP with vsock; no IP stack needed in the TEE kernel.
+# The two are mutually exclusive at the binary level.
+default = []
+vsock = ["dep:tokio-vsock", "dep:tower", "dep:hyper-util"]
+
 [dependencies]
+enclavid-untrusted = { path = "../untrusted" }
 tonic = "0.13"
 prost = "0.13"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = { version = "0.7", optional = true }
+tower = { version = "0.5", optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 
 [build-dependencies]
 tonic-build = "0.13"

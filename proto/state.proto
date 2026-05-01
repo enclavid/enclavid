@@ -2,13 +2,69 @@ syntax = "proto3";
 
 package enclavid.state;
 
-// Session metadata created by external service when bank creates a session.
-// Read-only from TEE perspective.
+// Session metadata, created by the TEE on POST /sessions and updated as
+// the session progresses through the lifecycle (see architecture.md →
+// Client-Facing Session Creation → State machine). Persisted via
+// session-store gRPC. Read AND written from TEE.
 message SessionMetadata {
-  string policy_id = 1;
-  string client_id = 2;
-  string client_public_key = 3;
-  bytes input = 4;  // JSON claims for Match Mode; 1KB max enforced at TEE read
+  // Workspace (Logto organization) the session belongs to. Set at create
+  // time from the auth verdict (host-side AuthorizeClient response);
+  // never changes afterwards.
+  string workspace_id = 1;
+
+  // Policy reference resolved at create time. Tag → digest happens once,
+  // here, atomically. The digest is then frozen for the session lifetime
+  // and is what the TEE uses to pull from the registry at init time.
+  string policy_name = 2;
+  string policy_digest = 3;
+
+  // Public part of the per-session ephemeral X25519 keypair. The private
+  // half lives only in TEE process memory and is dropped on transition
+  // out of PendingInit. Returned on idempotent retry of session create.
+  bytes ephemeral_pubkey = 4;
+
+  // Current state in the session lifecycle.
+  SessionStatus status = 5;
+
+  // Hashes set after a successful init: D_enc = sha256 of encrypted layer
+  // (= manifest layer digest), D_plain = sha256 of decrypted wasm. Both
+  // bound into the attestation report_data so clients can verify after
+  // the fact what bytes the TEE actually executed. Empty until init
+  // succeeds.
+  string d_enc = 6;
+  string d_plain = 7;
+
+  // Disclosure recipient pubkey: applicant-consented data is encrypted
+  // to this in expose_data flows. Provided by the client at session
+  // create time.
+  string client_disclosure_pubkey = 8;
+
+  // JSON claims for Match Mode (per-applicant input the policy
+  // consumes). 1KB max enforced at TEE read.
+  bytes input = 9;
+}
+
+// Session lifecycle state. Transitions and semantics are documented in
+// architecture.md → Client-Facing Session Creation → State machine.
+enum SessionStatus {
+  SESSION_STATUS_UNSPECIFIED = 0;
+  // Session created, ephemeral keypair generated, attestation quote
+  // returned to client. Waiting for /init with wrapped K_client.
+  PENDING_INIT = 1;
+  // K_client unwrapped successfully, policy decrypted, executing.
+  // Multiple /input rounds happen here.
+  RUNNING = 2;
+  // Policy returned a domain Status (Completed or Failed) — webhook
+  // fired, shared data may be available for client pull.
+  COMPLETED = 3;
+  // Unrecoverable infrastructure error. Distinct from policy
+  // Status::Failed which is a domain outcome that lands in Completed.
+  FAILED = 4;
+  // K_client could not unwrap or could not decrypt the policy artifact.
+  // Client retries by creating a new session.
+  FAILED_INIT = 5;
+  // Pending TTL elapsed without /init being called.
+  EXPIRED = 6;
 }
 
 // Internal session state for policy replay.

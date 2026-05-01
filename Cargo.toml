@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/api", "crates/engine", "crates/session-store"]
+members = [
+    "crates/api",
+    "crates/attestation",
+    "crates/engine",
+    "crates/session-store",
+    "crates/untrusted",
+]
 
 [workspace.package]
 version = "0.1.0"
