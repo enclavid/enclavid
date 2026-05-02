@@ -13,7 +13,7 @@ compile_error!(
 
 use tonic::transport::Channel;
 
-use crate::error::StoreError;
+use crate::error::BridgeError;
 
 pub use tonic::transport::Channel as GrpcChannel;
 
@@ -23,16 +23,16 @@ pub use tonic::transport::Channel as GrpcChannel;
 /// - default (TCP): `http://host:port` — e.g. `http://10.0.0.10:50051`
 /// - `vsock` feature: `vsock://CID:PORT` — e.g. `vsock://2:50051`
 #[cfg(not(feature = "vsock"))]
-pub async fn connect_store(addr: &str) -> Result<GrpcChannel, StoreError> {
+pub async fn connect_store(addr: &str) -> Result<GrpcChannel, BridgeError> {
     let channel = Channel::from_shared(addr.to_string())
-        .map_err(|e| StoreError::Transport(e.to_string()))?
+        .map_err(|e| BridgeError::Transport(e.to_string()))?
         .connect()
         .await?;
     Ok(channel)
 }
 
 #[cfg(feature = "vsock")]
-pub async fn connect_store(addr: &str) -> Result<GrpcChannel, StoreError> {
+pub async fn connect_store(addr: &str) -> Result<GrpcChannel, BridgeError> {
     use hyper_util::rt::TokioIo;
     use tokio_vsock::{VsockAddr, VsockStream};
     use tonic::transport::Endpoint;
@@ -41,7 +41,7 @@ pub async fn connect_store(addr: &str) -> Result<GrpcChannel, StoreError> {
     let (cid, port) = parse_vsock(addr)?;
 
     let channel = Endpoint::try_from("http://[::]:50051")
-        .map_err(|e| StoreError::Transport(e.to_string()))?
+        .map_err(|e| BridgeError::Transport(e.to_string()))?
         .connect_with_connector(service_fn(move |_| async move {
             let stream = VsockStream::connect(&VsockAddr::new(cid, port))
                 .await
@@ -49,24 +49,24 @@ pub async fn connect_store(addr: &str) -> Result<GrpcChannel, StoreError> {
             Ok::<_, std::io::Error>(TokioIo::new(stream))
         }))
         .await
-        .map_err(|e| StoreError::Transport(e.to_string()))?;
+        .map_err(|e| BridgeError::Transport(e.to_string()))?;
     Ok(channel)
 }
 
 #[cfg(feature = "vsock")]
-fn parse_vsock(addr: &str) -> Result<(u32, u32), StoreError> {
+fn parse_vsock(addr: &str) -> Result<(u32, u32), BridgeError> {
     let rest = addr
         .strip_prefix("vsock://")
-        .ok_or_else(|| StoreError::Transport(format!("expected vsock://CID:PORT, got {addr}")))?;
+        .ok_or_else(|| BridgeError::Transport(format!("expected vsock://CID:PORT, got {addr}")))?;
     let (cid, port) = rest
         .split_once(':')
-        .ok_or_else(|| StoreError::Transport(format!("expected vsock://CID:PORT, got {addr}")))?;
+        .ok_or_else(|| BridgeError::Transport(format!("expected vsock://CID:PORT, got {addr}")))?;
     let cid: u32 = cid
         .parse()
-        .map_err(|_| StoreError::Transport(format!("invalid vsock CID: {cid}")))?;
+        .map_err(|_| BridgeError::Transport(format!("invalid vsock CID: {cid}")))?;
     let port: u32 = port
         .parse()
-        .map_err(|_| StoreError::Transport(format!("invalid vsock port: {port}")))?;
+        .map_err(|_| BridgeError::Transport(format!("invalid vsock port: {port}")))?;
     Ok((cid, port))
 }
 

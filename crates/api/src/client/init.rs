@@ -9,7 +9,7 @@ use axum::routing::{MethodRouter, post};
 use base64ct::{Base64, Encoding};
 use serde::{Deserialize, Serialize};
 
-use enclavid_session_store::SessionStatus;
+use enclavid_host_bridge::SessionStatus;
 
 use crate::client_state::ClientState;
 use crate::policy_pull;
@@ -44,25 +44,23 @@ async fn init(
     Json(body): Json<InitSessionRequest>,
 ) -> Result<Json<InitSessionResponse>, StatusCode> {
     // Trust gates: tenant boundary + state machine. The host is not
-    // trusted on metadata content — these checks are what makes the
-    // record usable downstream.
+    // trusted on existence OR content — both are decided in this
+    // single closure. None or wrong-workspace collapse to 404 (we
+    // don't leak existence of other workspaces' sessions).
     let mut metadata = state
         .metadata_store
         .get(&session_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?
-        .trust(|m| {
-            // Pretend the session doesn't exist rather than leaking
-            // that one does for another workspace.
-            if m.workspace_id != workspace_id {
-                return Err(StatusCode::NOT_FOUND);
+        .trust(|opt| match opt {
+            None => Err(StatusCode::NOT_FOUND),
+            Some(m) if m.workspace_id != workspace_id => Err(StatusCode::NOT_FOUND),
+            Some(m) if m.status != SessionStatus::PendingInit as i32 => {
+                Err(StatusCode::CONFLICT)
             }
-            if m.status != SessionStatus::PendingInit as i32 {
-                return Err(StatusCode::CONFLICT);
-            }
-            Ok(())
-        })?;
+            Some(_) => Ok(()),
+        })?
+        .expect("None branch returned Err above");
 
     // Pull the ephemeral identity from in-memory cache. If gone (TTL
     // elapsed or pod restart), the session is unrecoverable — transition
@@ -71,6 +69,9 @@ async fn init(
         Some(id) => id,
         None => {
             metadata.status = SessionStatus::Expired as i32;
+            // Best-effort terminal-state write. We return the error to
+            // the client regardless; whether the host persisted the
+            // transition is don't-care from the TEE's perspective.
             let _ = state.metadata_store.put(&session_id, &metadata).await;
             return Err(StatusCode::GONE);
         }
@@ -85,6 +86,9 @@ async fn init(
         Ok(k) => k,
         Err(_) => {
             metadata.status = SessionStatus::FailedInit as i32;
+            // Best-effort terminal-state write. We return the error to
+            // the client regardless; whether the host persisted the
+            // transition is don't-care from the TEE's perspective.
             let _ = state.metadata_store.put(&session_id, &metadata).await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
@@ -104,6 +108,9 @@ async fn init(
         Ok(d) => d,
         Err(_) => {
             metadata.status = SessionStatus::FailedInit as i32;
+            // Best-effort terminal-state write. We return the error to
+            // the client regardless; whether the host persisted the
+            // transition is don't-care from the TEE's perspective.
             let _ = state.metadata_store.put(&session_id, &metadata).await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
@@ -118,6 +125,9 @@ async fn init(
         Ok(c) => Arc::new(c),
         Err(_) => {
             metadata.status = SessionStatus::FailedInit as i32;
+            // Best-effort terminal-state write. We return the error to
+            // the client regardless; whether the host persisted the
+            // transition is don't-care from the TEE's perspective.
             let _ = state.metadata_store.put(&session_id, &metadata).await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
@@ -130,11 +140,15 @@ async fn init(
     metadata.status = SessionStatus::Running as i32;
     metadata.d_enc = decrypted.d_enc.clone();
     metadata.d_plain = decrypted.d_plain.clone();
+    // Host's "Ok" is a claim that the Running transition was persisted.
+    // If it lied: subsequent /status would still report PendingInit, the
+    // client would retry /init — idempotency catches it. No data leak.
     state
         .metadata_store
         .put(&session_id, &metadata)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .trust_unchecked();
     state.ephemeral_identities.invalidate(&session_id).await;
 
     Ok(Json(InitSessionResponse {

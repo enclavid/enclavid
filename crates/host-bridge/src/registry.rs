@@ -13,13 +13,13 @@
 use enclavid_untrusted::Untrusted;
 use tonic::transport::Channel;
 
-use crate::error::StoreError;
+use crate::error::BridgeError;
 use crate::proto::registry::registry_client::RegistryClient as ProtoRegistryClient;
 use crate::proto::registry::{PullRequest, PullResponse};
 use crate::transport::GrpcChannel;
 
 /// Client for the host-side `Registry` service exposed over the same
-/// vsock channel as the rest of session-store.
+/// vsock channel as the rest of host-bridge.
 #[derive(Clone)]
 pub struct RegistryClient {
     client: ProtoRegistryClient<Channel>,
@@ -45,7 +45,7 @@ impl RegistryClient {
         workspace_id: &str,
         policy_name: &str,
         policy_digest: &str,
-    ) -> Result<Untrusted<PullResponse>, StoreError> {
+    ) -> Result<Untrusted<PullResponse>, BridgeError> {
         let response = self
             .client
             .clone()

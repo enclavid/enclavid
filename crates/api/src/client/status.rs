@@ -6,7 +6,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use enclavid_session_store::SessionStatus;
+use enclavid_host_bridge::SessionStatus;
 
 use crate::client_state::ClientState;
 
@@ -29,21 +29,19 @@ async fn status(
     Workspace(workspace_id): Workspace,
     Path(session_id): Path<String>,
 ) -> Result<Json<StatusResponse>, StatusCode> {
-    // Trust gate: session only visible to its own workspace. NOT_FOUND
-    // (not 403) so we don't leak existence of other workspaces' sessions.
+    // Trust gate: session only visible to its own workspace. None and
+    // wrong-workspace both collapse to NOT_FOUND so we don't leak
+    // existence of other workspaces' sessions.
     let metadata = state
         .metadata_store
         .get(&session_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?
-        .trust(|m| {
-            if m.workspace_id == workspace_id {
-                Ok(())
-            } else {
-                Err(StatusCode::NOT_FOUND)
-            }
-        })?;
+        .trust(|opt| match opt {
+            Some(m) if m.workspace_id == workspace_id => Ok(()),
+            _ => Err(StatusCode::NOT_FOUND),
+        })?
+        .expect("trust closure rejects None");
 
     Ok(Json(StatusResponse {
         session_id,

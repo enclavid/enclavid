@@ -1,5 +1,4 @@
 mod applicant;
-mod auth;
 mod client;
 mod client_state;
 mod input;

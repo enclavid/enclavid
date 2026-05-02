@@ -11,7 +11,7 @@ use age::x25519::Identity;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use enclavid_session_store::RegistryClient;
+use enclavid_host_bridge::RegistryClient;
 
 const POLICY_LAYER_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.wasm.v1.encrypted";
 

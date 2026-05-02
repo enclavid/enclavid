@@ -8,7 +8,7 @@ pub mod policy;
 mod sanitize;
 pub mod wasmtime_shim;
 
-pub use enclavid_session_store::{suspended, SessionMetadata, SessionState};
+pub use enclavid_host_bridge::{suspended, SessionMetadata, SessionState};
 pub use policy::{EvalArgs, RunStatus, Runner};
 // Re-exported so callers (api crate) can hold compiled components in
 // their session caches without taking a direct wasmtime dependency.

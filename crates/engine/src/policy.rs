@@ -3,7 +3,7 @@
 //! `EvalArgs` is re-exported from bindgen for callers constructing the
 //! typed args passed to `policy.evaluate`.
 
-use enclavid_session_store::{suspended, SessionState};
+use enclavid_host_bridge::{suspended, SessionState};
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine, Store};
 

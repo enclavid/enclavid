@@ -694,7 +694,7 @@ dependencies = [
  "base64ct",
  "enclavid-attestation",
  "enclavid-engine",
- "enclavid-session-store",
+ "enclavid-host-bridge",
  "hex",
  "hyper",
  "hyper-util",
@@ -731,7 +731,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "blake3",
- "enclavid-session-store",
+ "enclavid-host-bridge",
  "prost",
  "serde",
  "tokio",
@@ -740,7 +740,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "enclavid-session-store"
+name = "enclavid-host-bridge"
 version = "0.1.0"
 dependencies = [
  "enclavid-untrusted",

@@ -1,4 +1,4 @@
-use enclavid_session_store::{biometric_request, suspended, LivenessMode};
+use enclavid_host_bridge::{biometric_request, suspended, LivenessMode};
 
 use crate::enclavid::form::biometrics::{Host, LivenessData, LivenessParams};
 use crate::host_state::HostState;

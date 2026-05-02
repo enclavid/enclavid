@@ -1,12 +1,12 @@
 //! JSON-serializable view types and converters for the run-triggering
-//! handlers (`/init`, `/input`). Keep purely data-shape — no I/O, no
-//! AppState. Everything here is used by both init.rs and input.rs.
+//! handlers (`/connect`, `/input`). Keep purely data-shape — no I/O, no
+//! AppState. Everything here is used by both connect.rs and input.rs.
 
 use serde::Serialize;
 
 use enclavid_engine::policy::Decision;
 use enclavid_engine::RunStatus;
-use enclavid_session_store::{
+use enclavid_host_bridge::{
     biometric_request, capture_item, document_request, suspended, CaptureItem, DisplayField,
     LivenessMode,
 };

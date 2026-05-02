@@ -1,4 +1,4 @@
-use enclavid_session_store::{DisclosureStore, SessionState};
+use enclavid_host_bridge::{DisclosureStore, SessionState};
 
 use crate::replay::Replay;
 

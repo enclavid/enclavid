@@ -1,4 +1,4 @@
-use enclavid_session_store::{document_request, suspended};
+use enclavid_host_bridge::{document_request, suspended};
 
 use crate::enclavid::form::documents::{Host, Image};
 use crate::host_state::HostState;

@@ -5,7 +5,7 @@ package enclavid.state;
 // Session metadata, created by the TEE on POST /sessions and updated as
 // the session progresses through the lifecycle (see architecture.md →
 // Client-Facing Session Creation → State machine). Persisted via
-// session-store gRPC. Read AND written from TEE.
+// host-bridge gRPC. Read AND written from TEE.
 message SessionMetadata {
   // Workspace (Logto organization) the session belongs to. Set at create
   // time from the auth verdict (host-side AuthorizeClient response);

@@ -1,7 +1,7 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use enclavid_session_store::{
+use enclavid_host_bridge::{
     call_event, suspended, CallEvent, Completed, SessionState, Suspended,
 };
 

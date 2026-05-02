@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use enclavid_engine::policy::{Decision, RunResources};
 use enclavid_engine::{RunStatus, Runner, SessionState};
-use enclavid_session_store::{
+use enclavid_host_bridge::{
     call_event, document_request, suspended, DisclosureStore, GrpcChannel, Passport,
     SessionState as SessionStateProto,
 };

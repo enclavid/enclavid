@@ -3,37 +3,46 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Json;
+use axum::routing::{MethodRouter, post};
 use secrecy::ExposeSecret;
 
 use enclavid_engine::SessionState;
-use enclavid_session_store::{call_event, document_request, suspended, Passport};
+use enclavid_host_bridge::{call_event, document_request, suspended, Passport};
 
-use crate::auth::BearerKey;
 use crate::state::AppState;
 
+use super::auth::CallerKey;
 use super::shared::{
-    build_resources, fetch_metadata, lookup_policy, parse_args, verify_claim, TEE_KEY,
+    build_resources, fetch_metadata, lookup_policy, parse_args, TEE_KEY,
 };
 use super::views::{progress_from, SessionProgress};
 
+/// Route factory. Auth attached at router level via
+/// `.layer(auth(AuthMode::Verify))` — see `applicant::router`.
+pub(super) fn post_input() -> MethodRouter<Arc<AppState>> {
+    post(input)
+}
+
 /// POST /session/:id/input — submits applicant media for the suspended
 /// step. Continues the policy flow.
-pub async fn post_input(
+async fn input(
     Path(session_id): Path<String>,
     State(state): State<Arc<AppState>>,
-    BearerKey(applicant_key): BearerKey,
+    CallerKey(applicant_key): CallerKey,
     body: axum::body::Bytes,
 ) -> Result<Json<SessionProgress>, StatusCode> {
-    verify_claim(&state, &session_id, &applicant_key).await?;
-
     let metadata = fetch_metadata(&state, &session_id).await?;
     let args = parse_args(&metadata)?;
 
+    // Existence is host-controlled; absence collapses to NOT_FOUND.
+    // Content of Some is decrypt-integrity-verified once the AEAD
+    // path lands.
     let mut session_state = state
         .state_store
         .get(&session_id, applicant_key.expose_secret(), TEE_KEY)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .trust_unchecked()
         .ok_or(StatusCode::NOT_FOUND)?;
 
     // Attach user input to the last Suspended request's typed data field.
@@ -48,11 +57,15 @@ pub async fn post_input(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Accept the host's "Ok" as a claim. A dropped write causes the
+    // next /input to replay against stale state — disruptive UX, not
+    // a confidentiality break.
     state
         .state_store
         .put(&session_id, &session_state, applicant_key.expose_secret(), TEE_KEY)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .trust_unchecked();
 
     Ok(Json(progress_from(status)))
 }

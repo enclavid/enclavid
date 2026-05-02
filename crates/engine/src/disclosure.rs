@@ -1,4 +1,4 @@
-use enclavid_session_store::{suspended, ConsentRequest, DisplayField as ProtoDisplayField};
+use enclavid_host_bridge::{suspended, ConsentRequest, DisplayField as ProtoDisplayField};
 use prost::Message;
 
 use crate::enclavid::disclosure::disclosure::{DisplayField, Host};
@@ -37,10 +37,17 @@ impl Host for HostState {
                     accepted: Some(true),
                 }
                 .encode_to_vec();
+                // Host's "Ok" is a claim of append. A lying host that
+                // drops disclosure entries means the client never receives
+                // consented data — operationally observable (client polls
+                // /shared-data and sees nothing), not a confidentiality
+                // break. Confidentiality holds because chunks are
+                // encrypted to client_pk before append.
                 self.disclosure_store
                     .append(&self.session_id, payload, &self.client_pk)
                     .await
-                    .map_err(|e| wasmtime::Error::msg(format!("disclosure append failed: {e}")))?;
+                    .map_err(|e| wasmtime::Error::msg(format!("disclosure append failed: {e}")))?
+                    .trust_unchecked();
                 Ok(true)
             }
         }

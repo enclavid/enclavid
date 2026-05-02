@@ -5,7 +5,7 @@ use moka::future::Cache;
 use secrecy::SecretBox;
 
 use enclavid_engine::Runner;
-use enclavid_session_store::{
+use enclavid_host_bridge::{
     DisclosureStore, GrpcChannel, MetadataStore, ReportStore, StateStore, connect_store,
 };
 
@@ -54,7 +54,7 @@ impl AppState {
         }
     }
 
-    /// Connect to session-store and build state. The runner and policy
+    /// Connect to host-bridge and build state. The runner and policy
     /// cache are passed in so they can be shared with the client API.
     pub async fn init(
         transport_out: &str,

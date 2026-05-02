@@ -16,7 +16,7 @@ use moka::future::Cache;
 
 use enclavid_attestation::Attestor;
 use enclavid_engine::Runner;
-use enclavid_session_store::{
+use enclavid_host_bridge::{
     AuthClient, GrpcChannel, MetadataStore, RegistryClient, connect_store,
 };
 

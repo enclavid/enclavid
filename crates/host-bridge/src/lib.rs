@@ -28,7 +28,7 @@ mod proto {
 
 pub use auth::{AuthClient, AuthError};
 pub use enclavid_untrusted::Untrusted;
-pub use error::StoreError;
+pub use error::BridgeError;
 pub use grpc::{connect_store, GrpcBlobStore, GrpcChannel, GrpcListStore};
 pub use proto::auth::ClientOperation;
 pub use proto::registry::PullResponse as RegistryPullResponse;

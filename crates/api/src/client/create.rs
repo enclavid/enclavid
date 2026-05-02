@@ -10,7 +10,7 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use enclavid_attestation::ReportData;
-use enclavid_session_store::{SessionMetadata, SessionStatus};
+use enclavid_host_bridge::{SessionMetadata, SessionStatus};
 
 use crate::client_state::ClientState;
 
@@ -102,11 +102,16 @@ async fn create(
         client_disclosure_pubkey: body.client_disclosure_pubkey,
         input: Vec::new(),
     };
+    // Host's "Ok" is a claim that PendingInit metadata was persisted.
+    // If it lied: subsequent /init returns 404 (no metadata) — the
+    // client retries, no data exposure. K_client backstop ensures a
+    // host that retains stale metadata can't drive applicant flow.
     state
         .metadata_store
         .put(&session_id, &metadata)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .trust_unchecked();
 
     state
         .ephemeral_identities

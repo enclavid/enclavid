@@ -1,5 +1,5 @@
 [package]
-name = "enclavid-session-store"
+name = "enclavid-host-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

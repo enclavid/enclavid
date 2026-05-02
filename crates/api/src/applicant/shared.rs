@@ -6,14 +6,13 @@
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use secrecy::{ExposeSecret, SecretBox};
 
 use enclavid_engine::policy::RunResources;
 use enclavid_engine::{Component, EvalArgs};
-use enclavid_session_store::SessionMetadata;
+use enclavid_host_bridge::SessionMetadata;
 
 use crate::input::parse_input;
-use crate::state::{AppState, ApplicantKey};
+use crate::state::AppState;
 
 // TODO: real TEE key (KMS attestation-bound).
 pub(super) const TEE_KEY: &[u8] = &[0u8; 32];
@@ -24,51 +23,26 @@ pub(super) async fn fetch_metadata(
     state: &AppState,
     session_id: &str,
 ) -> Result<SessionMetadata, StatusCode> {
+    // Applicant flow has no per-session info to cross-check metadata
+    // against — security relies on the bearer-key auth layer plus the
+    // K_client encryption chain ensuring host-side metadata tampering
+    // breaks the policy decryption / attestation chain. We accept the
+    // host's existence claim and content at face value here; the trust
+    // delegation is concentrated in `trust_unchecked` so callers don't
+    // have to repeat the analysis.
     state
         .metadata_store
         .get(session_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .trust_unchecked()
         .ok_or(StatusCode::NOT_FOUND)
-        // Applicant flow has no per-session info to cross-check metadata
-        // against — security relies on `verify_claim` (applicant holds
-        // the session-claiming key) plus the K_client encryption chain
-        // ensuring host-side metadata tampering breaks the policy
-        // decryption / attestation chain. Document the delegation here
-        // so callers don't have to.
-        .map(|m| m.trust_unchecked())
 }
 
 pub(super) fn parse_args(
     metadata: &SessionMetadata,
 ) -> Result<Vec<(String, EvalArgs)>, StatusCode> {
     parse_input(&metadata.input).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-/// Verify the provided applicant key matches the one that claimed the
-/// session. If the cache was evicted or the pod restarted, accept and
-/// re-populate — state is still decryptable since the applicant holds
-/// the key.
-pub(super) async fn verify_claim(
-    state: &AppState,
-    session_id: &str,
-    applicant_key: &ApplicantKey,
-) -> Result<(), StatusCode> {
-    match state.applicant_keys.get(session_id).await {
-        Some(existing) if existing.expose_secret() == applicant_key.expose_secret() => Ok(()),
-        Some(_) => Err(StatusCode::FORBIDDEN),
-        None => {
-            let cloned = applicant_key.expose_secret().clone();
-            state
-                .applicant_keys
-                .insert(
-                    session_id.to_string(),
-                    Arc::new(SecretBox::new(Box::new(cloned))),
-                )
-                .await;
-            Ok(())
-        }
-    }
 }
 
 /// Build per-run resources from AppState + session metadata.

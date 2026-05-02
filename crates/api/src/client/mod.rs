@@ -23,7 +23,7 @@ use axum::extract::Extension;
 use axum::middleware::from_fn_with_state;
 use tower::ServiceBuilder;
 
-use enclavid_session_store::ClientOperation;
+use enclavid_host_bridge::ClientOperation;
 
 use crate::client_state::ClientState;
 

@@ -4,7 +4,7 @@ members = [
     "crates/api",
     "crates/attestation",
     "crates/engine",
-    "crates/session-store",
+    "crates/host-bridge",
     "crates/untrusted",
 ]
 

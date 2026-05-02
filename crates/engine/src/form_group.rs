@@ -1,4 +1,4 @@
-use enclavid_session_store::{
+use enclavid_host_bridge::{
     capture_item as proto_capture_item, suspended, CaptureGroup as ProtoCaptureGroup,
     CaptureItem as ProtoCaptureItem, DriversLicense as ProtoDriversLicense, IdCard as ProtoIdCard,
     Liveness as ProtoLiveness, LivenessMode, Passport as ProtoPassport,

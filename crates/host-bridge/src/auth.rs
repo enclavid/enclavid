@@ -15,7 +15,7 @@ use enclavid_untrusted::Untrusted;
 use tonic::transport::Channel;
 use tonic::Code;
 
-use crate::error::StoreError;
+use crate::error::BridgeError;
 use crate::proto::auth::auth_client::AuthClient as ProtoAuthClient;
 use crate::proto::auth::{AuthorizeClientRequest, ClientOperation};
 use crate::transport::GrpcChannel;
@@ -34,17 +34,17 @@ pub enum AuthError {
     /// Transport-level failure talking to the host (channel down,
     /// timeout, etc.). Distinct from auth-decision failures so callers
     /// can pick the right HTTP status.
-    Transport(StoreError),
+    Transport(BridgeError),
 }
 
-impl From<StoreError> for AuthError {
-    fn from(e: StoreError) -> Self {
+impl From<BridgeError> for AuthError {
+    fn from(e: BridgeError) -> Self {
         AuthError::Transport(e)
     }
 }
 
 /// Client for the host-side `Auth` service exposed over the same vsock
-/// channel as the rest of session-store.
+/// channel as the rest of host-bridge.
 #[derive(Clone)]
 pub struct AuthClient {
     client: ProtoAuthClient<Channel>,
@@ -80,7 +80,7 @@ impl AuthClient {
             Err(status) => match status.code() {
                 Code::Unauthenticated => Err(AuthError::Unauthenticated),
                 Code::PermissionDenied => Err(AuthError::PermissionDenied),
-                _ => Err(AuthError::Transport(StoreError::from(status))),
+                _ => Err(AuthError::Transport(BridgeError::from(status))),
             },
         }
     }

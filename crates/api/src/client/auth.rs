@@ -29,7 +29,7 @@ use axum::http::{StatusCode, header, request::Parts};
 use axum::middleware::Next;
 use axum::response::Response;
 
-use enclavid_session_store::{AuthError, ClientOperation};
+use enclavid_host_bridge::{AuthError, ClientOperation};
 
 use crate::client_state::ClientState;
 

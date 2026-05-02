@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-enclavid-session-store = { path = "../session-store" }
+enclavid-host-bridge = { path = "../host-bridge" }
 
 wasmtime = { version = "43", default-features = false, features = [
     "cranelift",
