@@ -35,8 +35,8 @@ impl GrpcBlobStore {
         }
     }
 
-    fn key(&self, session_id: &str) -> String {
-        format!("{}:{}", self.namespace, session_id)
+    fn key(&self, key: &str) -> String {
+        format!("{}:{}", self.namespace, key)
     }
 
     /// Returns `Untrusted<()>` — store-write carries no payload back, so
@@ -45,13 +45,13 @@ impl GrpcBlobStore {
     /// wrapper; `delete`/`append` carry an actual count instead.
     pub async fn put(
         &self,
-        session_id: &str,
+        key: &str,
         data: Vec<u8>,
     ) -> Result<Untrusted<()>, BridgeError> {
         self.client
             .clone()
             .put(PutRequest {
-                key: self.key(session_id),
+                key: self.key(key),
                 data,
             })
             .await?;
@@ -65,13 +65,13 @@ impl GrpcBlobStore {
     /// accept the host's existence claim.
     pub async fn get(
         &self,
-        session_id: &str,
+        key: &str,
     ) -> Result<Untrusted<Option<Vec<u8>>>, BridgeError> {
         let response = self
             .client
             .clone()
             .get(BlobGetRequest {
-                key: self.key(session_id),
+                key: self.key(key),
             })
             .await?;
         Ok(Untrusted::new(response.into_inner().data))
@@ -79,13 +79,13 @@ impl GrpcBlobStore {
 
     pub async fn exists(
         &self,
-        session_id: &str,
+        key: &str,
     ) -> Result<Untrusted<bool>, BridgeError> {
         let response = self
             .client
             .clone()
             .exists(ExistsRequest {
-                key: self.key(session_id),
+                key: self.key(key),
             })
             .await?;
         Ok(Untrusted::new(response.into_inner().exists))
@@ -98,13 +98,13 @@ impl GrpcBlobStore {
     /// fake either direction.
     pub async fn delete(
         &self,
-        session_id: &str,
+        key: &str,
     ) -> Result<Untrusted<u64>, BridgeError> {
         let response = self
             .client
             .clone()
             .delete(DeleteRequest {
-                key: self.key(session_id),
+                key: self.key(key),
             })
             .await?;
         Ok(Untrusted::new(response.into_inner().deleted))
@@ -128,8 +128,8 @@ impl GrpcListStore {
         }
     }
 
-    fn key(&self, session_id: &str) -> String {
-        format!("{}:{}", self.namespace, session_id)
+    fn key(&self, key: &str) -> String {
+        format!("{}:{}", self.namespace, key)
     }
 
     /// Returns `Untrusted<u64>` — list length after the append.
@@ -137,14 +137,14 @@ impl GrpcListStore {
     /// numbers; not a security signal.
     pub async fn append(
         &self,
-        session_id: &str,
+        key: &str,
         data: Vec<u8>,
     ) -> Result<Untrusted<u64>, BridgeError> {
         let response = self
             .client
             .clone()
             .append(AppendRequest {
-                key: self.key(session_id),
+                key: self.key(key),
                 data,
             })
             .await?;
@@ -153,13 +153,13 @@ impl GrpcListStore {
 
     pub async fn get(
         &self,
-        session_id: &str,
+        key: &str,
     ) -> Result<Untrusted<Vec<Vec<u8>>>, BridgeError> {
         let response = self
             .client
             .clone()
             .get(ListGetRequest {
-                key: self.key(session_id),
+                key: self.key(key),
             })
             .await?;
         Ok(Untrusted::new(response.into_inner().items))

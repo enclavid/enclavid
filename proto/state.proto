@@ -42,6 +42,14 @@ message SessionMetadata {
   // JSON claims for Match Mode (per-applicant input the policy
   // consumes). 1KB max enforced at TEE read.
   bytes input = 9;
+
+  // Client-supplied opaque identifier for this verification. Optional.
+  // NOT indexed by the TEE — clients keep their own
+  // `external_ref → session_id` mapping. Proxied back in webhook
+  // payloads and `GET /sessions/:id/status` responses for client-side
+  // reconciliation. Length-bounded (≤128 ASCII graphic chars). MUST
+  // NOT contain PII — SessionMetadata is host-visible.
+  string external_ref = 10;
 }
 
 // Session lifecycle state. Transitions and semantics are documented in

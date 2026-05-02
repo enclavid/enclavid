@@ -19,6 +19,11 @@ use super::auth::Workspace;
 /// Length of session_id random bytes (≥ 16 = 128 bits entropy per arch doc).
 const SESSION_ID_RANDOM_BYTES: usize = 32;
 
+/// Maximum length of `external_ref`. Bounds host storage growth and
+/// keeps wire frames small. UUIDs and typical client identifiers fit
+/// comfortably.
+const MAX_EXTERNAL_REF_LEN: usize = 128;
+
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
     /// Policy reference: `name:tag` (mutable) or `name@sha256:...` (pinned).
@@ -26,6 +31,12 @@ pub struct CreateSessionRequest {
     /// Disclosure recipient pubkey: applicant-consented data is encrypted
     /// to this. Provided as age recipient string `age1...`.
     pub client_disclosure_pubkey: String,
+    /// Opaque client-side identifier for this verification — proxied
+    /// back in webhook payloads and `GET /sessions/:id/status`. NOT
+    /// indexed: clients reconcile `external_ref → session_id` on their
+    /// own side. Optional. Length-bounded for storage hygiene.
+    #[serde(default)]
+    pub external_ref: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -59,6 +70,10 @@ pub(super) fn post_create() -> MethodRouter<Arc<ClientState>> {
     post(create)
 }
 
+/// POST /api/v1/sessions — creates a PendingInit session, returns
+/// `session_id`, `ephemeral_pubkey`, and an attestation quote binding
+/// the three. The client unwraps and verifies, then proceeds to /init
+/// with the wrapped K_client.
 async fn create(
     State(state): State<Arc<ClientState>>,
     Workspace(workspace_id): Workspace,
@@ -69,6 +84,8 @@ async fn create(
     // is rejected at parse_pinned_reference with 400.
     let (policy_name, policy_digest) =
         parse_pinned_reference(&body.policy).ok_or(StatusCode::BAD_REQUEST)?;
+
+    let external_ref = validate_external_ref(body.external_ref.as_deref())?;
 
     // Per-session ephemeral X25519 keypair. Private half lives only in
     // the in-memory cache — never persisted, dropped on transition out
@@ -101,6 +118,7 @@ async fn create(
         d_plain: String::new(),
         client_disclosure_pubkey: body.client_disclosure_pubkey,
         input: Vec::new(),
+        external_ref: external_ref.unwrap_or_default(),
     };
     // Host's "Ok" is a claim that PendingInit metadata was persisted.
     // If it lied: subsequent /init returns 404 (no metadata) — the
@@ -131,6 +149,27 @@ async fn create(
             measurement: quote.measurement,
         },
     }))
+}
+
+/// Allow printable ASCII excluding control/whitespace, length-bounded.
+/// Empty/missing → None (field is optional). Restricted charset avoids
+/// host-side key parsing surprises and disallows zero-width / RTL-
+/// override confusables that could spoof reconciliation on the bank
+/// dashboard.
+fn validate_external_ref(value: Option<&str>) -> Result<Option<String>, StatusCode> {
+    let Some(s) = value else {
+        return Ok(None);
+    };
+    if s.is_empty() {
+        return Ok(None);
+    }
+    if s.len() > MAX_EXTERNAL_REF_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if s.chars().any(|c| !c.is_ascii_graphic()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Some(s.to_string()))
 }
 
 fn generate_session_id() -> String {
