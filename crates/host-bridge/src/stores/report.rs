@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use enclavid_untrusted::{Exposed, Untrusted};
+use prost::Message;
 use tonic::transport::Channel;
 
 use crate::error::BridgeError;
+use crate::proto::report::Report;
 use crate::proto::report_store::report_store_client::ReportStoreClient;
 use crate::proto::report_store::AppendRequest;
 use crate::transport::GrpcChannel;
@@ -33,22 +35,51 @@ impl ReportStore {
         }
     }
 
-    /// Caller passes plaintext bytes; the bridge seals them under
-    /// `platform_pubkey` and releases the resulting ciphertext to the
-    /// host. Symmetric with how `SessionStore` handles state and
-    /// metadata — encryption + `Exposed` boundary live inside the
-    /// bridge, API consumers stay key-free.
+    /// Caller passes a typed `Report`; the bridge encodes, seals
+    /// under `platform_pubkey`, and releases the ciphertext to the
+    /// host. Encoding inside the store (vs. caller-side
+    /// `encode_to_vec`) prevents passing arbitrary or wrong-type
+    /// bytes, mirroring `SessionStore`'s typed `SetMetadata` /
+    /// `SetState` markers.
     pub async fn append(
         &self,
         policy_digest: &str,
-        payload: Vec<u8>,
+        report: &Report,
     ) -> Result<Untrusted<u64>, BridgeError> {
-        // TODO encrypt: hybrid age-encrypt `payload` to
+        let plaintext = report.encode_to_vec();
+        // TODO encrypt: hybrid age-encrypt `plaintext` to
         // `self.platform_pubkey` BEFORE wrapping. This is the seal step
         // that produces the `Exposed<Vec<u8>>` — same shape as
         // WriteField::build_op for SessionStore ops.
+        //
+        // Protection model (after the seal lands): host sees opaque
+        // ciphertext only the platform operator can open; the
+        // recipient pubkey is bound to a long-lived platform identity
+        // distinct from any per-session material. Entries are
+        // partitioned by `policy_digest` and carry no session_id, so
+        // the host cannot link an appended report back to a specific
+        // applicant session — per-policy aggregation is the only
+        // observation available.
+        //
+        // What the platform operator sees if they decrypt: only the
+        // bounded `Report` schema —
+        //   - `policy_id` / `policy_hash` (public policy identifiers)
+        //   - `client_id` (workspace id of the platform consumer)
+        //   - `reason` (fixed enum: requesting-too-much / unexpected
+        //     fields / suspicious-values / other)
+        //   - `field_labels` (labels from the policy's own display
+        //     schema — already public to the applicant in the consent
+        //     prompt)
+        //   - `timestamp`
+        //   - `details`: free-form text the applicant typed in the
+        //     report form. Length-bounded; intended as complaint
+        //     context, not as a side-channel for applicant data.
+        // Notably absent: biometrics, document images, decrypted
+        // identity fields, or any cross-session correlator. None of
+        // the verification pipeline's applicant-side data lands in
+        // a Report by construction.
         let _ = &self.platform_pubkey;
-        let sealed: Exposed<Vec<u8>> = Exposed::expose(payload);
+        let sealed: Exposed<Vec<u8>> = Exposed::expose(plaintext);
 
         let response = self
             .client

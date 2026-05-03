@@ -6,13 +6,10 @@
 use enclavid_untrusted::{Exposed, Untrusted};
 
 use crate::error::BridgeError;
-use crate::proto::session_store::field_selector::Kind as SelectorKind;
 use crate::proto::session_store::read_response::Slot;
 use crate::proto::session_store::read_response::slot::Kind as SlotKind;
 use crate::proto::session_store::write_request::Op;
-use crate::proto::session_store::write_request::op::Kind as OpKind;
-use crate::proto::session_store::write_request::{BlobWrite, ListAppend};
-use crate::proto::session_store::{BlobField, FieldSelector, ListField};
+use crate::proto::session_store::FieldSelector;
 
 use super::Ctx;
 use super::SessionStore;
@@ -78,39 +75,6 @@ pub(super) fn unwrap_list(slot: Slot) -> Result<Vec<Vec<u8>>, BridgeError> {
         )),
         None => Err(BridgeError::Transport("missing slot kind".to_string())),
     }
-}
-
-pub(super) fn blob_selector(field: BlobField) -> FieldSelector {
-    FieldSelector {
-        kind: Some(SelectorKind::Blob(field as i32)),
-    }
-}
-
-pub(super) fn list_selector(field: ListField) -> FieldSelector {
-    FieldSelector {
-        kind: Some(SelectorKind::List(field as i32)),
-    }
-}
-
-/// `value` is post-encryption (or otherwise opaque) — wrapping in
-/// `Exposed` here ties the marker to the seal-output, so the only
-/// way to construct an `Op` headed for the wire is via these helpers.
-pub(super) fn blob_op(field: BlobField, value: Vec<u8>) -> Exposed<Op> {
-    Exposed::expose(Op {
-        kind: Some(OpKind::Blob(BlobWrite {
-            field: field as i32,
-            value,
-        })),
-    })
-}
-
-pub(super) fn list_append_op(field: ListField, value: Vec<u8>) -> Exposed<Op> {
-    Exposed::expose(Op {
-        kind: Some(OpKind::ListAppend(ListAppend {
-            field: field as i32,
-            value,
-        })),
-    })
 }
 
 // ---------- ReadTuple ----------

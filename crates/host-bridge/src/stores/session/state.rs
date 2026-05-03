@@ -12,14 +12,16 @@ use enclavid_untrusted::Exposed;
 use prost::Message;
 
 use crate::error::BridgeError;
+use crate::proto::session_store::field_selector::Kind as SelectorKind;
 use crate::proto::session_store::read_response::Slot;
-use crate::proto::session_store::write_request::Op;
+use crate::proto::session_store::write_request::op::Kind as OpKind;
+use crate::proto::session_store::write_request::{BlobWrite, Op};
 use crate::proto::session_store::{BlobField, FieldSelector};
 use crate::proto::state::SessionState;
 
 use super::Ctx;
 use super::aead;
-use super::core::{ReadField, WriteField, blob_op, blob_selector, unwrap_scalar};
+use super::core::{ReadField, WriteField, unwrap_scalar};
 
 /// Read marker: session state blob. Carries the applicant key for the
 /// inner AEAD layer; `None` until the applicant connects and runs the
@@ -40,7 +42,9 @@ impl ReadField for State<'_> {
     type Output = Option<SessionState>;
 
     fn selector(&self) -> FieldSelector {
-        blob_selector(BlobField::State)
+        FieldSelector {
+            kind: Some(SelectorKind::Blob(BlobField::State as i32)),
+        }
     }
 
     fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
@@ -59,6 +63,17 @@ impl WriteField for SetState<'_> {
         let plaintext = self.state.encode_to_vec();
         let inner = aead::seal(&plaintext, self.applicant_key, ctx.aad())?;
         let value = aead::seal(&inner, ctx.tee_key, ctx.aad())?;
-        Ok(blob_op(BlobField::State, value))
+        // Double-AEAD ciphertext: inner layer keyed to the applicant's
+        // per-session bearer key (held only by the connected
+        // applicant); outer layer keyed to the TEE-side per-instance
+        // key. Host has neither key. Replay log content (documents,
+        // biometrics, intermediate plugin outputs) never leaves the
+        // TEE in plaintext.
+        Ok(Exposed::expose(Op {
+            kind: Some(OpKind::Blob(BlobWrite {
+                field: BlobField::State as i32,
+                value,
+            })),
+        }))
     }
 }

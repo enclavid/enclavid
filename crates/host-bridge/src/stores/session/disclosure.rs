@@ -7,12 +7,14 @@
 use enclavid_untrusted::Exposed;
 
 use crate::error::BridgeError;
+use crate::proto::session_store::field_selector::Kind as SelectorKind;
 use crate::proto::session_store::read_response::Slot;
-use crate::proto::session_store::write_request::Op;
+use crate::proto::session_store::write_request::op::Kind as OpKind;
+use crate::proto::session_store::write_request::{ListAppend, Op};
 use crate::proto::session_store::{FieldSelector, ListField};
 
 use super::Ctx;
-use super::core::{ReadField, WriteField, list_append_op, list_selector, unwrap_list};
+use super::core::{ReadField, WriteField, unwrap_list};
 
 /// Read marker: per-session disclosure list. Output is
 /// `Vec<Vec<u8>>` — empty when the list has no entries (or has never
@@ -32,7 +34,9 @@ impl ReadField for Disclosure {
     type Output = Vec<Vec<u8>>;
 
     fn selector(&self) -> FieldSelector {
-        list_selector(ListField::Disclosure)
+        FieldSelector {
+            kind: Some(SelectorKind::List(ListField::Disclosure as i32)),
+        }
     }
 
     fn decode(self, slot: Slot, _ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
@@ -42,10 +46,23 @@ impl ReadField for Disclosure {
 
 impl WriteField for AppendDisclosure {
     fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op>, BridgeError> {
-        // Engine pre-encrypts to client_pk; we ship opaque bytes. We
-        // clone the payload because `&self` doesn't allow moving out
-        // of the marker; disclosure entries are typically small
+        // Once the seal-to-`client_pk` step lands in the persister,
+        // these bytes are hybrid public-key ciphertext keyed to the
+        // platform consumer's disclosure recipient pubkey (provided
+        // at session creation). Host cannot decrypt; only the
+        // consumer's corresponding private key can open. Note: entry
+        // COUNT and append timing per session ARE observable to the
+        // host — confidentiality is on disclosure CONTENT, not on
+        // the metadata fact "session X disclosed N items at time T".
+        //
+        // We clone the payload because `&self` doesn't allow moving
+        // out of the marker; disclosure entries are typically small
         // (<1 KB) so the copy is negligible.
-        Ok(list_append_op(ListField::Disclosure, self.0.clone()))
+        Ok(Exposed::expose(Op {
+            kind: Some(OpKind::ListAppend(ListAppend {
+                field: ListField::Disclosure as i32,
+                value: self.0.clone(),
+            })),
+        }))
     }
 }

@@ -5,13 +5,15 @@
 use enclavid_untrusted::Exposed;
 
 use crate::error::BridgeError;
-use crate::proto::session_store::write_request::Op;
-use crate::proto::session_store::{BlobField, FieldSelector};
+use crate::proto::session_store::field_selector::Kind as SelectorKind;
 use crate::proto::session_store::read_response::Slot;
+use crate::proto::session_store::write_request::op::Kind as OpKind;
+use crate::proto::session_store::write_request::{BlobWrite, Op};
+use crate::proto::session_store::{BlobField, FieldSelector};
 use crate::proto::state::SessionStatus;
 
 use super::Ctx;
-use super::core::{ReadField, WriteField, blob_op, blob_selector, unwrap_scalar};
+use super::core::{ReadField, WriteField, unwrap_scalar};
 
 /// Read marker: session status. Output is `Option<SessionStatus>` —
 /// `None` when the host has no value (not yet written or expired).
@@ -24,7 +26,9 @@ impl ReadField for Status {
     type Output = Option<SessionStatus>;
 
     fn selector(&self) -> FieldSelector {
-        blob_selector(BlobField::Status)
+        FieldSelector {
+            kind: Some(SelectorKind::Blob(BlobField::Status as i32)),
+        }
     }
 
     fn decode(self, slot: Slot, _ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
@@ -41,6 +45,16 @@ impl ReadField for Status {
 
 impl WriteField for SetStatus {
     fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op>, BridgeError> {
-        Ok(blob_op(BlobField::Status, vec![self.0 as i32 as u8]))
+        // Single plaintext byte by design — the host needs it for
+        // session lifecycle management (TTL, cleanup). Nothing
+        // applicant-specific lands here, only the lifecycle marker
+        // (PendingInit / Running / Completed / Failed / Expired).
+        // Intentionally not confidential.
+        Ok(Exposed::expose(Op {
+            kind: Some(OpKind::Blob(BlobWrite {
+                field: BlobField::Status as i32,
+                value: vec![self.0 as i32 as u8],
+            })),
+        }))
     }
 }

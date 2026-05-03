@@ -5,7 +5,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{MethodRouter, post};
-use prost::Message;
 use serde::Deserialize;
 
 use enclavid_host_bridge::{Report, ReportReason};
@@ -71,7 +70,7 @@ async fn report(
     // happens inside `ReportStore::append`.
     state
         .report_store
-        .append(&metadata.policy_digest, report.encode_to_vec())
+        .append(&metadata.policy_digest, &report)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .trust_unchecked();
