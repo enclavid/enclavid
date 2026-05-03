@@ -6,7 +6,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use enclavid_host_bridge::SessionStatus;
+use enclavid_host_bridge::{Metadata, SessionStatus, Status};
 
 use crate::client_state::ClientState;
 
@@ -29,28 +29,30 @@ async fn status(
     Workspace(workspace_id): Workspace,
     Path(session_id): Path<String>,
 ) -> Result<Json<StatusResponse>, StatusCode> {
-    // Trust gate: session only visible to its own workspace. None and
-    // wrong-workspace both collapse to NOT_FOUND so we don't leak
-    // existence of other workspaces' sessions.
-    let metadata = state
-        .metadata_store
-        .get(&session_id)
+    // Need both: status (to label) and metadata (to enforce workspace
+    // boundary). Single Read RPC fetches both fields; missing or
+    // wrong-workspace collapse to 404 to avoid leaking existence of
+    // other workspaces' sessions.
+    let (status_opt, metadata_opt) = state
+        .session_store
+        .read(&session_id, (Status, Metadata))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust(|opt| match opt {
-            Some(m) if m.workspace_id == workspace_id => Ok(()),
+        .trust(|(s, m)| match (s, m) {
+            (Some(_), Some(m)) if m.workspace_id == workspace_id => Ok(()),
             _ => Err(StatusCode::NOT_FOUND),
-        })?
-        .expect("trust closure rejects None");
+        })?;
+    let status_value = status_opt.expect("trust closure validated Some");
+    let _ = metadata_opt; // workspace already validated; metadata content unused.
 
     Ok(Json(StatusResponse {
         session_id,
-        status: status_label(metadata.status),
+        status: status_label(status_value),
     }))
 }
 
-fn status_label(status: i32) -> &'static str {
-    match SessionStatus::try_from(status).unwrap_or(SessionStatus::Unspecified) {
+fn status_label(status: SessionStatus) -> &'static str {
+    match status {
         SessionStatus::PendingInit => "pending_init",
         SessionStatus::Running => "running",
         SessionStatus::Completed => "completed",

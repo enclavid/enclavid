@@ -5,7 +5,9 @@ package enclavid.state;
 // Session metadata, created by the TEE on POST /sessions and updated as
 // the session progresses through the lifecycle (see architecture.md →
 // Client-Facing Session Creation → State machine). Persisted via
-// host-bridge gRPC. Read AND written from TEE.
+// SessionStore gRPC as the METADATA field — opaque blob to host.
+// Status lives separately as the STATUS field (plaintext, host-visible
+// for TTL/cleanup).
 message SessionMetadata {
   // Workspace (Logto organization) the session belongs to. Set at create
   // time from the auth verdict (host-side AuthorizeClient response);
@@ -23,33 +25,29 @@ message SessionMetadata {
   // out of PendingInit. Returned on idempotent retry of session create.
   bytes ephemeral_pubkey = 4;
 
-  // Current state in the session lifecycle.
-  SessionStatus status = 5;
-
   // Hashes set after a successful init: D_enc = sha256 of encrypted layer
   // (= manifest layer digest), D_plain = sha256 of decrypted wasm. Both
   // bound into the attestation report_data so clients can verify after
   // the fact what bytes the TEE actually executed. Empty until init
   // succeeds.
-  string d_enc = 6;
-  string d_plain = 7;
+  string d_enc = 5;
+  string d_plain = 6;
 
   // Disclosure recipient pubkey: applicant-consented data is encrypted
   // to this in expose_data flows. Provided by the client at session
   // create time.
-  string client_disclosure_pubkey = 8;
+  string client_disclosure_pubkey = 7;
 
   // JSON claims for Match Mode (per-applicant input the policy
   // consumes). 1KB max enforced at TEE read.
-  bytes input = 9;
+  bytes input = 8;
 
   // Client-supplied opaque identifier for this verification. Optional.
   // NOT indexed by the TEE — clients keep their own
   // `external_ref → session_id` mapping. Proxied back in webhook
   // payloads and `GET /sessions/:id/status` responses for client-side
-  // reconciliation. Length-bounded (≤128 ASCII graphic chars). MUST
-  // NOT contain PII — SessionMetadata is host-visible.
-  string external_ref = 10;
+  // reconciliation. Length-bounded (≤128 ASCII graphic chars).
+  string external_ref = 9;
 }
 
 // Session lifecycle state. Transitions and semantics are documented in

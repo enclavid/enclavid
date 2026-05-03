@@ -6,12 +6,12 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 use secrecy::ExposeSecret;
 
+use enclavid_host_bridge::{SetState, State as StateField, WriteField};
+
 use crate::state::AppState;
 
 use super::auth::CallerKey;
-use super::shared::{
-    build_resources, fetch_metadata, lookup_policy, parse_args, TEE_KEY,
-};
+use super::shared::{build_resources, fetch_metadata, lookup_policy, parse_args};
 use super::views::{progress_from, SessionProgress};
 
 /// Route factory: bare `post(handler)` MethodRouter. Auth attached at
@@ -40,30 +40,42 @@ async fn connect(
     // content of Some is integrity-verified by AEAD. We accept None at
     // face value — a lying host hiding a real blob just makes us
     // replay from default state (disruptive UX, not a leak).
-    let session_state = state
-        .state_store
-        .get(&session_id, applicant_key.expose_secret(), TEE_KEY)
+    let (state_opt,) = state
+        .session_store
+        .read(
+            &session_id,
+            (StateField {
+                applicant_key: applicant_key.expose_secret(),
+            },),
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked()
-        .unwrap_or_default();
+        .trust_unchecked();
+    let session_state = state_opt.unwrap_or_default();
 
-    let resources = build_resources(&state, &session_id, &metadata);
+    let resources = build_resources(&metadata);
     let policy = lookup_policy(&state, &session_id).await?;
 
-    let (status, session_state) = state
+    let (status, session_state, pending_disclosures) = state
         .runner
         .run(&policy, session_state, args, resources)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // We accept "Ok" as the host's claim that the encrypted blob was
-    // persisted. Not verifiable: a host that silently drops writes
-    // causes the next /connect to replay from default state —
-    // disruptive but not a confidentiality break (no plaintext leaks).
+    // Atomic write of the new state + any disclosures the policy
+    // staged during the run, all in one transaction. Host wraps in
+    // MULTI/EXEC so a partial commit (state without disclosures or
+    // vice versa) cannot be observed. The slice mixes the static
+    // `SetState` marker with the dynamic disclosure buffer.
+    let set_state = SetState {
+        state: &session_state,
+        applicant_key: applicant_key.expose_secret(),
+    };
+    let mut ops: Vec<&dyn WriteField> = vec![&set_state];
+    ops.extend(pending_disclosures.iter().map(|d| d as &dyn WriteField));
     state
-        .state_store
-        .put(&session_id, &session_state, applicant_key.expose_secret(), TEE_KEY)
+        .session_store
+        .write(&session_id, &ops)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .trust_unchecked();

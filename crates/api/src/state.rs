@@ -5,9 +5,7 @@ use moka::future::Cache;
 use secrecy::SecretBox;
 
 use enclavid_engine::Runner;
-use enclavid_host_bridge::{
-    DisclosureStore, GrpcChannel, MetadataStore, ReportStore, StateStore, connect_store,
-};
+use enclavid_host_bridge::{GrpcChannel, ReportStore, SessionStore, connect_store};
 
 use crate::runtime::SessionPolicyCache;
 
@@ -29,15 +27,18 @@ pub struct AppState {
     /// API and read here on every /input. Lookup miss = session not yet
     /// initialized or evicted past TTL.
     pub policies: SessionPolicyCache,
-    pub metadata_store: MetadataStore,
-    pub state_store: StateStore,
-    pub disclosure_store: DisclosureStore,
+    pub session_store: Arc<SessionStore>,
     pub report_store: ReportStore,
     pub applicant_keys: ApplicantKeyCache,
 }
 
 impl AppState {
-    pub fn new(channel: GrpcChannel, runner: Arc<Runner>, policies: SessionPolicyCache) -> Self {
+    pub fn new(
+        session_store: Arc<SessionStore>,
+        channel: GrpcChannel,
+        runner: Arc<Runner>,
+        policies: SessionPolicyCache,
+    ) -> Self {
         let applicant_keys = Cache::builder()
             .max_capacity(10_000)
             .time_to_idle(Duration::from_secs(3600))
@@ -46,9 +47,7 @@ impl AppState {
         Self {
             runner,
             policies,
-            metadata_store: MetadataStore::new(channel.clone()),
-            state_store: StateStore::new(channel.clone()),
-            disclosure_store: DisclosureStore::new(channel.clone()),
+            session_store,
             report_store: ReportStore::new(channel),
             applicant_keys,
         }
@@ -58,12 +57,13 @@ impl AppState {
     /// cache are passed in so they can be shared with the client API.
     pub async fn init(
         transport_out: &str,
+        session_store: Arc<SessionStore>,
         runner: Arc<Runner>,
         policies: SessionPolicyCache,
     ) -> Self {
         let channel = connect_store(transport_out)
             .await
             .expect("failed to connect store");
-        Self::new(channel, runner, policies)
+        Self::new(session_store, channel, runner, policies)
     }
 }

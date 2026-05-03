@@ -580,6 +580,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
+ "rand_core",
  "typenum",
 ]
 
@@ -743,9 +744,11 @@ dependencies = [
 name = "enclavid-host-bridge"
 version = "0.1.0"
 dependencies = [
+ "chacha20poly1305",
  "enclavid-untrusted",
  "hyper-util",
  "prost",
+ "rand_core",
  "tokio-vsock",
  "tonic",
  "tonic-build",

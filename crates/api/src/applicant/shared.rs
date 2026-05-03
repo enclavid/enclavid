@@ -9,14 +9,13 @@ use axum::http::StatusCode;
 
 use enclavid_engine::policy::RunResources;
 use enclavid_engine::{Component, EvalArgs};
-use enclavid_host_bridge::SessionMetadata;
+use enclavid_host_bridge::{Metadata, SessionMetadata};
 
 use crate::input::parse_input;
 use crate::state::AppState;
 
-// TODO: real TEE key (KMS attestation-bound).
-pub(super) const TEE_KEY: &[u8] = &[0u8; 32];
-// TODO: real platform key.
+// TODO: real platform key (used by ReportStore — disclosure / state
+// keys live on SessionStore now).
 pub(super) const PLATFORM_KEY: &[u8] = &[0u8; 32];
 
 pub(super) async fn fetch_metadata(
@@ -30,13 +29,13 @@ pub(super) async fn fetch_metadata(
     // host's existence claim and content at face value here; the trust
     // delegation is concentrated in `trust_unchecked` so callers don't
     // have to repeat the analysis.
-    state
-        .metadata_store
-        .get(session_id)
+    let (metadata,) = state
+        .session_store
+        .read(session_id, (Metadata,))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked()
-        .ok_or(StatusCode::NOT_FOUND)
+        .trust_unchecked();
+    metadata.ok_or(StatusCode::NOT_FOUND)
 }
 
 pub(super) fn parse_args(
@@ -45,15 +44,12 @@ pub(super) fn parse_args(
     parse_input(&metadata.input).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// Build per-run resources from AppState + session metadata.
-pub(super) fn build_resources(
-    state: &AppState,
-    session_id: &str,
-    metadata: &SessionMetadata,
-) -> RunResources {
+/// Build per-run resources from session metadata. Engine no longer
+/// needs a host-store handle — disclosure entries accumulate in the
+/// engine's `HostState` buffer and are returned by `Runner::run`. The
+/// API merges them into `SessionStore::commit` for atomicity.
+pub(super) fn build_resources(metadata: &SessionMetadata) -> RunResources {
     RunResources {
-        disclosure_store: state.disclosure_store.clone(),
-        session_id: session_id.to_string(),
         client_pk: metadata.client_disclosure_pubkey.as_bytes().to_vec(),
     }
 }

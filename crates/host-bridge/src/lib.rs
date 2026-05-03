@@ -1,16 +1,15 @@
 mod auth;
 mod error;
-mod grpc;
 mod registry;
 mod stores;
 mod transport;
 
 mod proto {
-    pub mod blob {
-        tonic::include_proto!("enclavid.blob_store");
+    pub mod session_store {
+        tonic::include_proto!("enclavid.session_store");
     }
-    pub mod list {
-        tonic::include_proto!("enclavid.list_store");
+    pub mod report_store {
+        tonic::include_proto!("enclavid.report_store");
     }
     pub mod state {
         tonic::include_proto!("enclavid.state");
@@ -26,22 +25,25 @@ mod proto {
     }
 }
 
-pub use auth::{AuthClient, AuthError};
+pub use auth::{AuthClient, AuthVerdict, WorkspaceId};
 pub use enclavid_untrusted::Untrusted;
 pub use error::BridgeError;
-pub use grpc::{connect_store, GrpcBlobStore, GrpcChannel, GrpcListStore};
+pub use transport::{GrpcChannel, connect_store};
 pub use proto::auth::ClientOperation;
 pub use proto::registry::PullResponse as RegistryPullResponse;
 pub use registry::RegistryClient;
 pub use proto::report::{Report, ReportReason};
 pub use proto::state::{
-    biometric_request, call_event, capture_item, document_request, suspended, BiometricRequest,
-    CallEvent, CaptureGroup, CaptureItem, Completed, ConsentRequest, DisplayField,
-    DocumentRequest, DriversLicense, IdCard, Liveness, LivenessFrames, LivenessMode, Passport,
-    SessionMetadata, SessionState, SessionStatus, Suspended, TwoSidedImage, VerificationSetData,
-    VerificationSetRequest,
+    BiometricRequest, CallEvent, CaptureGroup, CaptureItem, Completed, ConsentRequest,
+    DisplayField, DocumentRequest, DriversLicense, IdCard, Liveness, LivenessFrames, LivenessMode,
+    Passport, SessionMetadata, SessionState, SessionStatus, Suspended, TwoSidedImage,
+    VerificationSetData, VerificationSetRequest, biometric_request, call_event, capture_item,
+    document_request, suspended,
 };
-pub use stores::{DisclosureStore, MetadataStore, ReportStore, StateStore};
+pub use stores::{
+    AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, ReportStore, SessionStore,
+    SetMetadata, SetState, SetStatus, State, Status, WriteField,
+};
 
 // --- Suspension as wasmtime trap error ---
 //

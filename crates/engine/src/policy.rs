@@ -3,7 +3,7 @@
 //! `EvalArgs` is re-exported from bindgen for callers constructing the
 //! typed args passed to `policy.evaluate`.
 
-use enclavid_host_bridge::{suspended, SessionState};
+use enclavid_host_bridge::{AppendDisclosure, SessionState, suspended};
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine, Store};
 
@@ -40,17 +40,23 @@ impl Runner {
         Component::new(&self.engine, bytes)
     }
 
-    /// Run or resume a policy: replay existing events, execute to next suspend
-    /// or completion. Host fibers returning `Err(suspended::Request)` propagate
-    /// as wasmtime traps. We distinguish our suspend trap from a real bug trap
-    /// by checking for a Suspended event at the tail of the log.
+    /// Run or resume a policy: replay existing events, execute to next
+    /// suspend or completion. Host fibers returning
+    /// `Err(suspended::Request)` propagate as wasmtime traps. We
+    /// distinguish our suspend trap from a real bug trap by checking
+    /// for a Suspended event at the tail of the log.
+    ///
+    /// Returns `(status, updated_session, pending_disclosures)`. The
+    /// disclosures are accumulated by host fns during the run; the
+    /// caller (api handler) merges them into the next
+    /// `SessionStore::commit` so state + disclosures publish atomically.
     pub async fn run(
         &self,
         component: &Component,
         session: SessionState,
         args: Vec<(String, EvalArgs)>,
         resources: HostResources,
-    ) -> wasmtime::Result<(RunStatus, SessionState)> {
+    ) -> wasmtime::Result<(RunStatus, SessionState, Vec<AppendDisclosure>)> {
         let mut linker: Linker<HostState> = Linker::new(&self.engine, |s| &mut s.replay);
         GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
 
@@ -70,7 +76,8 @@ impl Runner {
                 None => return Err(e),
             },
         };
-        Ok((status, data.into_session()))
+        let (session, pending) = data.into_parts();
+        Ok((status, session, pending))
     }
 }
 

@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package enclavid.report_store;
+
+// Append-only log of anonymous applicant reports against policies.
+// Partitioned by policy_digest — entries are unlinkable to specific
+// sessions or applicants. Host stores opaque bytes; TEE encrypts to
+// the platform recipient before append.
+service ReportStore {
+  rpc Append(AppendRequest) returns (AppendResponse);
+  rpc Read(ReadRequest) returns (ReadResponse);
+}
+
+message AppendRequest {
+  string policy_digest = 1;
+  bytes data = 2;
+}
+
+message AppendResponse {
+  // List length after the append. Useful for observability — TEE can
+  // compare to expected sequence numbers.
+  uint64 length = 1;
+}
+
+message ReadRequest {
+  string policy_digest = 1;
+}
+
+message ReadResponse {
+  repeated bytes items = 1;
+}

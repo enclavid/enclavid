@@ -7,14 +7,14 @@ use axum::routing::{MethodRouter, post};
 use secrecy::ExposeSecret;
 
 use enclavid_engine::SessionState;
-use enclavid_host_bridge::{call_event, document_request, suspended, Passport};
+use enclavid_host_bridge::{
+    Passport, SetState, State as StateField, WriteField, call_event, document_request, suspended,
+};
 
 use crate::state::AppState;
 
 use super::auth::CallerKey;
-use super::shared::{
-    build_resources, fetch_metadata, lookup_policy, parse_args, TEE_KEY,
-};
+use super::shared::{build_resources, fetch_metadata, lookup_policy, parse_args};
 use super::views::{progress_from, SessionProgress};
 
 /// Route factory. Auth attached at router level via
@@ -37,32 +37,45 @@ async fn input(
     // Existence is host-controlled; absence collapses to NOT_FOUND.
     // Content of Some is decrypt-integrity-verified once the AEAD
     // path lands.
-    let mut session_state = state
-        .state_store
-        .get(&session_id, applicant_key.expose_secret(), TEE_KEY)
+    let (state_opt,) = state
+        .session_store
+        .read(
+            &session_id,
+            (StateField {
+                applicant_key: applicant_key.expose_secret(),
+            },),
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked()
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .trust_unchecked();
+    let mut session_state = state_opt.ok_or(StatusCode::NOT_FOUND)?;
 
     // Attach user input to the last Suspended request's typed data field.
     apply_input(&mut session_state, &body)?;
 
-    let resources = build_resources(&state, &session_id, &metadata);
+    let resources = build_resources(&metadata);
     let policy = lookup_policy(&state, &session_id).await?;
 
-    let (status, session_state) = state
+    let (status, session_state, pending_disclosures) = state
         .runner
         .run(&policy, session_state, args, resources)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Accept the host's "Ok" as a claim. A dropped write causes the
-    // next /input to replay against stale state — disruptive UX, not
-    // a confidentiality break.
+    // Atomic write of the new state + any disclosures the policy
+    // staged during this run (e.g. consent acceptance produced a
+    // disclosure entry — both must publish together to avoid
+    // duplicate disclosures on retry). The slice mixes the static
+    // `SetState` marker with the dynamic disclosure buffer.
+    let set_state = SetState {
+        state: &session_state,
+        applicant_key: applicant_key.expose_secret(),
+    };
+    let mut ops: Vec<&dyn WriteField> = vec![&set_state];
+    ops.extend(pending_disclosures.iter().map(|d| d as &dyn WriteField));
     state
-        .state_store
-        .put(&session_id, &session_state, applicant_key.expose_secret(), TEE_KEY)
+        .session_store
+        .write(&session_id, &ops)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .trust_unchecked();

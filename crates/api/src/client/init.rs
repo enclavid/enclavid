@@ -9,7 +9,7 @@ use axum::routing::{MethodRouter, post};
 use base64ct::{Base64, Encoding};
 use serde::{Deserialize, Serialize};
 
-use enclavid_host_bridge::SessionStatus;
+use enclavid_host_bridge::{Metadata, SessionStatus, SetMetadata, SetStatus, Status};
 
 use crate::client_state::ClientState;
 use crate::policy_pull;
@@ -43,24 +43,25 @@ async fn init(
     Path(session_id): Path<String>,
     Json(body): Json<InitSessionRequest>,
 ) -> Result<Json<InitSessionResponse>, StatusCode> {
-    // Trust gates: tenant boundary + state machine. The host is not
-    // trusted on existence OR content — both are decided in this
-    // single closure. None or wrong-workspace collapse to 404 (we
+    // Trust gate combines existence + tenant boundary + state machine
+    // into one closure. None or wrong-workspace collapse to 404 (we
     // don't leak existence of other workspaces' sessions).
-    let mut metadata = state
-        .metadata_store
-        .get(&session_id)
+    let (status_opt, metadata_opt) = state
+        .session_store
+        .read(&session_id, (Status, Metadata))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust(|opt| match opt {
-            None => Err(StatusCode::NOT_FOUND),
-            Some(m) if m.workspace_id != workspace_id => Err(StatusCode::NOT_FOUND),
-            Some(m) if m.status != SessionStatus::PendingInit as i32 => {
-                Err(StatusCode::CONFLICT)
+        .trust(|(s, m)| match (s, m) {
+            (Some(s), Some(m))
+                if m.workspace_id == workspace_id && *s == SessionStatus::PendingInit =>
+            {
+                Ok(())
             }
-            Some(_) => Ok(()),
-        })?
-        .expect("None branch returned Err above");
+            (Some(_), Some(_)) => Err(StatusCode::CONFLICT),
+            _ => Err(StatusCode::NOT_FOUND),
+        })?;
+    let mut metadata = metadata_opt.expect("trust closure validated Some metadata");
+    let _ = status_opt; // status validated above; not needed downstream.
 
     // Pull the ephemeral identity from in-memory cache. If gone (TTL
     // elapsed or pod restart), the session is unrecoverable — transition
@@ -68,11 +69,12 @@ async fn init(
     let identity = match state.ephemeral_identities.get(&session_id).await {
         Some(id) => id,
         None => {
-            metadata.status = SessionStatus::Expired as i32;
-            // Best-effort terminal-state write. We return the error to
-            // the client regardless; whether the host persisted the
-            // transition is don't-care from the TEE's perspective.
-            let _ = state.metadata_store.put(&session_id, &metadata).await;
+            // Best-effort terminal-state write. Status only — metadata
+            // didn't change. Don't-care if host persists.
+            let _ = state
+                .session_store
+                .write(&session_id, &[&SetStatus(SessionStatus::Expired)])
+                .await;
             return Err(StatusCode::GONE);
         }
     };
@@ -85,11 +87,10 @@ async fn init(
     let k_client = match unwrap_k_client(&wrapped, &identity) {
         Ok(k) => k,
         Err(_) => {
-            metadata.status = SessionStatus::FailedInit as i32;
-            // Best-effort terminal-state write. We return the error to
-            // the client regardless; whether the host persisted the
-            // transition is don't-care from the TEE's perspective.
-            let _ = state.metadata_store.put(&session_id, &metadata).await;
+            let _ = state
+                .session_store
+                .write(&session_id, &[&SetStatus(SessionStatus::FailedInit)])
+                .await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
     };
@@ -107,11 +108,10 @@ async fn init(
     {
         Ok(d) => d,
         Err(_) => {
-            metadata.status = SessionStatus::FailedInit as i32;
-            // Best-effort terminal-state write. We return the error to
-            // the client regardless; whether the host persisted the
-            // transition is don't-care from the TEE's perspective.
-            let _ = state.metadata_store.put(&session_id, &metadata).await;
+            let _ = state
+                .session_store
+                .write(&session_id, &[&SetStatus(SessionStatus::FailedInit)])
+                .await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
     };
@@ -124,28 +124,32 @@ async fn init(
     let component = match state.runner.compile(&decrypted.wasm_bytes) {
         Ok(c) => Arc::new(c),
         Err(_) => {
-            metadata.status = SessionStatus::FailedInit as i32;
-            // Best-effort terminal-state write. We return the error to
-            // the client regardless; whether the host persisted the
-            // transition is don't-care from the TEE's perspective.
-            let _ = state.metadata_store.put(&session_id, &metadata).await;
+            let _ = state
+                .session_store
+                .write(&session_id, &[&SetStatus(SessionStatus::FailedInit)])
+                .await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
     };
     state.policies.insert(session_id.clone(), component).await;
 
-    // Transition to Running. Persist d_enc/d_plain for audit; drop the
-    // ephemeral identity from the cache so a leaked process dump can't
-    // revive past wrapped blobs.
-    metadata.status = SessionStatus::Running as i32;
+    // Transition to Running. Persist d_enc/d_plain into metadata for
+    // audit; drop the ephemeral identity from the cache so a leaked
+    // process dump can't revive past wrapped blobs.
     metadata.d_enc = decrypted.d_enc.clone();
     metadata.d_plain = decrypted.d_plain.clone();
-    // Host's "Ok" is a claim that the Running transition was persisted.
-    // If it lied: subsequent /status would still report PendingInit, the
-    // client would retry /init — idempotency catches it. No data leak.
+    // Atomic update: status flips to Running together with the new
+    // metadata blob (d_enc/d_plain populated). Single MSET-equivalent
+    // on the host side.
     state
-        .metadata_store
-        .put(&session_id, &metadata)
+        .session_store
+        .write(
+            &session_id,
+            &[
+                &SetMetadata(&metadata),
+                &SetStatus(SessionStatus::Running),
+            ],
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .trust_unchecked();

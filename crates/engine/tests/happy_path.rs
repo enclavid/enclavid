@@ -11,8 +11,7 @@ use std::sync::OnceLock;
 use enclavid_engine::policy::{Decision, RunResources};
 use enclavid_engine::{RunStatus, Runner, SessionState};
 use enclavid_host_bridge::{
-    call_event, document_request, suspended, DisclosureStore, GrpcChannel, Passport,
-    SessionState as SessionStateProto,
+    Passport, SessionState as SessionStateProto, call_event, document_request, suspended,
 };
 use wit_component::ComponentEncoder;
 
@@ -29,7 +28,7 @@ async fn passport_then_consent_rejected() {
     let session = SessionState::default();
 
     // Round 1: evaluate → prompt-passport → Suspended.
-    let (status, mut session) = runner
+    let (status, mut session, _pending) = runner
         .run(&component, session, vec![], test_resources())
         .await
         .unwrap();
@@ -39,7 +38,7 @@ async fn passport_then_consent_rejected() {
     attach_passport(&mut session, fake_image());
 
     // Round 2: replays passport → prompt-disclosure → Suspended.
-    let (status, mut session) = runner
+    let (status, mut session, _pending) = runner
         .run(&component, session, vec![], test_resources())
         .await
         .unwrap();
@@ -49,7 +48,7 @@ async fn passport_then_consent_rejected() {
     attach_consent(&mut session, false);
 
     // Round 3: replays both → Completed(Rejected).
-    let (status, _) = runner
+    let (status, _, _pending) = runner
         .run(&component, session, vec![], test_resources())
         .await
         .unwrap();
@@ -91,21 +90,15 @@ fn test_policy_component() -> &'static [u8] {
         .as_slice()
 }
 
-/// Stub host resources — `lazy_channel` builds a non-dialed channel so the
-/// DisclosureStore is valid as a Rust value but any RPC through it would
-/// fail. This test stays on the consent=false path that never appends.
+/// Stub host resources for the engine. After the buffer-on-engine
+/// refactor there's no DisclosureStore handle to inject — pending
+/// disclosures accumulate in HostState in-memory and would be returned
+/// by `runner.run` for the api to commit. This test stays on the
+/// consent=false path so no disclosure entries are produced.
 fn test_resources() -> RunResources {
     RunResources {
-        disclosure_store: DisclosureStore::new(lazy_channel()),
-        session_id: "test-session".to_string(),
         client_pk: b"test-pk".to_vec(),
     }
-}
-
-/// Local test helper: a Channel that never dials. Fine because this test
-/// avoids the disclosure append path (consent=false).
-fn lazy_channel() -> GrpcChannel {
-    GrpcChannel::from_static("http://localhost").connect_lazy()
 }
 
 fn fake_image() -> Vec<u8> {

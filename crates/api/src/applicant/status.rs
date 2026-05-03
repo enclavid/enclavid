@@ -6,6 +6,8 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
+use enclavid_host_bridge::{SessionStatus, Status};
+
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -30,30 +32,23 @@ async fn status(
     Path(session_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<StatusResponse>, StatusCode> {
-    // Existence-only probe: only the discriminator matters. We accept
-    // the host's claim (UX hint, decryption on /connect is the real
-    // boundary) and bail with 404 if it says no record.
-    state
-        .metadata_store
-        .get(&session_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked()
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    // Advisory UI hint, not a security boundary. A lying host (claims
-    // true when no blob exists, or vice versa) only causes UX confusion:
-    // any branch funnels into /connect, where decryption is the actual
-    // ownership check. `trust_unchecked` documents the delegation.
-    let initialized = state
-        .state_store
-        .exists(&session_id)
+    // Single Read on the plaintext status sidecar. Host can lie about
+    // status — we accept it as an advisory UX hint (decryption on
+    // /connect is the actual ownership check). 404 if no status record
+    // exists at all.
+    let (status_opt,) = state
+        .session_store
+        .read(&session_id, (Status,))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .trust_unchecked();
+    let session_status = status_opt.ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(Json(StatusResponse {
-        initialized,
-        completed: false,
+        initialized: matches!(
+            session_status,
+            SessionStatus::Running | SessionStatus::Completed
+        ),
+        completed: session_status == SessionStatus::Completed,
     }))
 }

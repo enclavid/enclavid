@@ -26,15 +26,17 @@ async fn reset(
     Path(session_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, StatusCode> {
-    // The `u64` we discard is the host's claim of how many keys were
-    // removed (0 = was already absent, 1 = wiped). Available for
-    // observability if/when we want to distinguish "real reset" from
-    // "no-op reset" — not used today. Trust-wise: a lying host can
-    // fake either direction; the value is informational, not a
-    // security signal. Confidentiality holds via encryption with the
-    // applicant key the user is now discarding.
+    // The `u64` we discard is the host's claim of how many state
+    // entries were removed (0 = was already absent, 1 = wiped).
+    // Available for observability if/when we want to distinguish "real
+    // reset" from "no-op reset" — not used today. Trust-wise: a lying
+    // host can fake either direction; the value is informational, not
+    // a security signal. Confidentiality holds via encryption with the
+    // applicant key the user is now discarding. Metadata + status
+    // remain — only the state field is cleared, so the next /connect
+    // can claim the session with a fresh key.
     state
-        .state_store
+        .session_store
         .delete(&session_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?

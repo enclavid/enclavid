@@ -6,7 +6,9 @@
 //! continues from a session that this listener already created.
 //!
 //! `runner` and `policies` are shared with `AppState` — same Engine
-//! compiles wasm at /init and runs it at /input.
+//! compiles wasm at /init and runs it at /input. `session_store` is also
+//! shared so writes from this side (metadata, status transitions) and
+//! reads from the applicant side (state) hit the same backing service.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,9 +18,7 @@ use moka::future::Cache;
 
 use enclavid_attestation::Attestor;
 use enclavid_engine::Runner;
-use enclavid_host_bridge::{
-    AuthClient, GrpcChannel, MetadataStore, RegistryClient, connect_store,
-};
+use enclavid_host_bridge::{AuthClient, GrpcChannel, RegistryClient, SessionStore, connect_store};
 
 use crate::runtime::SessionPolicyCache;
 
@@ -33,7 +33,7 @@ pub type EphemeralIdentityCache = Cache<String, Arc<Identity>>;
 pub struct ClientState {
     pub auth: AuthClient,
     pub registry: RegistryClient,
-    pub metadata_store: MetadataStore,
+    pub session_store: Arc<SessionStore>,
     pub attestor: Arc<dyn Attestor>,
     pub ephemeral_identities: EphemeralIdentityCache,
     /// Compiles decrypted policy wasm to a `Component` and inserts under
@@ -44,6 +44,7 @@ pub struct ClientState {
 
 impl ClientState {
     pub fn new(
+        session_store: Arc<SessionStore>,
         channel: GrpcChannel,
         attestor: Arc<dyn Attestor>,
         runner: Arc<Runner>,
@@ -56,8 +57,8 @@ impl ClientState {
 
         Self {
             auth: AuthClient::new(channel.clone()),
-            registry: RegistryClient::new(channel.clone()),
-            metadata_store: MetadataStore::new(channel),
+            registry: RegistryClient::new(channel),
+            session_store,
             attestor,
             ephemeral_identities,
             runner,
@@ -67,6 +68,7 @@ impl ClientState {
 
     pub async fn init(
         transport_out: &str,
+        session_store: Arc<SessionStore>,
         attestor: Arc<dyn Attestor>,
         runner: Arc<Runner>,
         policies: SessionPolicyCache,
@@ -74,6 +76,6 @@ impl ClientState {
         let channel = connect_store(transport_out)
             .await
             .expect("failed to connect store");
-        Self::new(channel, attestor, runner, policies)
+        Self::new(session_store, channel, attestor, runner, policies)
     }
 }

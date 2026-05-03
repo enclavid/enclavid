@@ -1,0 +1,153 @@
+syntax = "proto3";
+
+package enclavid.session_store;
+
+// Domain service for per-session data. Replaces the storage-primitive
+// BlobStore/ListStore that exposed Redis-style key-value semantics to
+// the TEE. The TEE asks for typed session fields; the host decides how
+// to map them to its storage backend (Redis hash, separate keys,
+// MongoDB document, etc.).
+//
+// Visibility model: STATUS is plaintext (host-visible — used for TTL
+// and cleanup logic). METADATA and STATE are encrypted on the TEE
+// side; the host receives opaque bytes. Disclosure list entries are
+// also encrypted on the TEE side (age-encrypted to client recipient).
+//
+// Field shape is split across two enums so misuse is rejected at proto
+// generation: scalar selectors carry `BlobField`, list selectors carry
+// `ListField`. No runtime "wrong field shape" errors possible.
+service SessionStore {
+  // Read scalar and/or list fields in one batch. Slots come back in
+  // the same order as request selectors; each slot's oneof matches
+  // the selector's kind (scalar selector → ScalarSlot, list selector
+  // → ListSlot). When backing storage supports it, the host returns
+  // a consistent snapshot across all selected fields.
+  rpc Read(ReadRequest) returns (ReadResponse);
+
+  // Atomic write of any number of field ops. Each op is either a
+  // scalar field overwrite or a list-field append. When the list
+  // contains multiple ops the host wraps execution in MULTI/EXEC (or
+  // equivalent) so partial commit is not observable.
+  rpc Write(WriteRequest) returns (WriteResponse);
+
+  // Delete a scalar field's value (session record continues to exist
+  // with the remaining fields). Used by /reset to drop state.
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // Existence check — does the session record exist at all?
+  rpc Exists(ExistsRequest) returns (ExistsResponse);
+}
+
+// Scalar fields. One value per (session, field).
+enum BlobField {
+  BLOB_FIELD_UNSPECIFIED = 0;
+  // Plaintext SessionStatus enum (single byte).
+  STATUS = 1;
+  // Encrypted SessionMetadata (TEE_key, AAD=session_id).
+  METADATA = 2;
+  // Encrypted SessionState (applicant_key + TEE_key, AAD=session_id).
+  STATE = 3;
+}
+
+// List fields. Append-only ordered sequences per (session, field).
+enum ListField {
+  LIST_FIELD_UNSPECIFIED = 0;
+  // Encrypted disclosure entries (age-encrypted to
+  // client_disclosure_pubkey on the TEE side).
+  DISCLOSURE = 1;
+}
+
+// Selector for a single field in `Read`. Picks scalar or list shape.
+message FieldSelector {
+  oneof kind {
+    BlobField blob = 1;
+    ListField list = 2;
+  }
+}
+
+message ReadRequest {
+  string session_id = 1;
+  repeated FieldSelector fields = 2;
+}
+
+message ReadResponse {
+  // Same length and order as request.fields. The slot's oneof matches
+  // the selector's kind for that index — scalar selector pairs with
+  // ScalarSlot, list selector with ListSlot.
+  repeated Slot slots = 1;
+
+  message Slot {
+    oneof kind {
+      ScalarSlot scalar = 1;
+      ListSlot list = 2;
+    }
+  }
+}
+
+message ScalarSlot {
+  // `optional` distinguishes "field absent" (None) from "field present
+  // with empty bytes" (Some(empty)). Encoded `SessionMetadata` /
+  // `SessionState` with all-default values serializes to empty bytes —
+  // without `optional`, a default record on the wire would be
+  // indistinguishable from "no record".
+  optional bytes value = 1;
+}
+
+message ListSlot {
+  // All entries in append order. Empty when the list is absent or
+  // never written; the two are not distinguished (lists have no
+  // "default value" pitfall like scalars).
+  repeated bytes items = 1;
+}
+
+message WriteRequest {
+  string session_id = 1;
+
+  // Single homogeneous list of operations applied atomically. Mixing
+  // scalar writes and list appends in one call is the common case for
+  // /input and /connect commit (state update + accumulated disclosure
+  // entries). When the list contains both shapes, host wraps the
+  // execution in MULTI/EXEC (or equivalent) so partial commit is not
+  // observable.
+  repeated Op ops = 2;
+
+  message Op {
+    oneof kind {
+      // Replace a scalar field's value.
+      BlobWrite blob = 1;
+      // Append to a list field.
+      ListAppend list_append = 2;
+    }
+  }
+
+  message BlobWrite {
+    BlobField field = 1;
+    bytes value = 2;
+  }
+
+  message ListAppend {
+    ListField field = 1;
+    bytes value = 2;
+  }
+}
+
+message WriteResponse {}
+
+message DeleteRequest {
+  string session_id = 1;
+  BlobField field = 2;
+}
+
+message DeleteResponse {
+  // 1 if the field had a value and was removed, 0 if it was already
+  // absent. Informational; not a security signal.
+  uint64 deleted = 1;
+}
+
+message ExistsRequest {
+  string session_id = 1;
+}
+
+message ExistsResponse {
+  bool exists = 1;
+}

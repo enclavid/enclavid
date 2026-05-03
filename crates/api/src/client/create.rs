@@ -10,7 +10,7 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use enclavid_attestation::ReportData;
-use enclavid_host_bridge::{SessionMetadata, SessionStatus};
+use enclavid_host_bridge::{SessionMetadata, SessionStatus, SetMetadata, SetStatus};
 
 use crate::client_state::ClientState;
 
@@ -113,20 +113,27 @@ async fn create(
         policy_name: policy_name.clone(),
         policy_digest: policy_digest.clone(),
         ephemeral_pubkey: ephemeral_pubkey_str.clone().into_bytes(),
-        status: SessionStatus::PendingInit as i32,
         d_enc: String::new(),
         d_plain: String::new(),
         client_disclosure_pubkey: body.client_disclosure_pubkey,
         input: Vec::new(),
         external_ref: external_ref.unwrap_or_default(),
     };
-    // Host's "Ok" is a claim that PendingInit metadata was persisted.
-    // If it lied: subsequent /init returns 404 (no metadata) — the
-    // client retries, no data exposure. K_client backstop ensures a
-    // host that retains stale metadata can't drive applicant flow.
+    // Atomic write of the encrypted metadata blob + plaintext status
+    // sidecar through the SessionStore service. Host's "Ok" is a claim
+    // that PendingInit was persisted. If it lied: subsequent /init
+    // returns 404, the client retries, no data exposure. K_client
+    // backstop ensures a host that retains stale metadata can't drive
+    // applicant flow.
     state
-        .metadata_store
-        .put(&session_id, &metadata)
+        .session_store
+        .write(
+            &session_id,
+            &[
+                &SetMetadata(&metadata),
+                &SetStatus(SessionStatus::PendingInit),
+            ],
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .trust_unchecked();

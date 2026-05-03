@@ -29,7 +29,7 @@ use axum::http::{StatusCode, header, request::Parts};
 use axum::middleware::Next;
 use axum::response::Response;
 
-use enclavid_host_bridge::{AuthError, ClientOperation};
+use enclavid_host_bridge::{AuthVerdict, ClientOperation};
 
 use crate::client_state::ClientState;
 
@@ -119,11 +119,16 @@ pub(super) async fn enforce(
     //
     // See architecture.md → Network Isolation → "External content fetch"
     // for the full threat-model write-up.
-    let workspace_id = match state.auth.authorize(auth_header, op).await {
-        Ok(ws) => ws.trust_unchecked(),
-        Err(AuthError::Unauthenticated) => return Err(StatusCode::UNAUTHORIZED),
-        Err(AuthError::PermissionDenied) => return Err(StatusCode::FORBIDDEN),
-        Err(AuthError::Transport(_)) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    let verdict = state
+        .auth
+        .authorize(auth_header, op)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .trust_unchecked();
+    let workspace_id = match verdict {
+        AuthVerdict::Allowed(ws) => ws.0,
+        AuthVerdict::Unauthenticated => return Err(StatusCode::UNAUTHORIZED),
+        AuthVerdict::PermissionDenied => return Err(StatusCode::FORBIDDEN),
     };
     req.extensions_mut().insert(Workspace(workspace_id));
 

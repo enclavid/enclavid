@@ -1,4 +1,6 @@
-use enclavid_host_bridge::{suspended, ConsentRequest, DisplayField as ProtoDisplayField};
+use enclavid_host_bridge::{
+    AppendDisclosure, ConsentRequest, DisplayField as ProtoDisplayField, suspended,
+};
 use prost::Message;
 
 use crate::enclavid::disclosure::disclosure::{DisplayField, Host};
@@ -37,17 +39,21 @@ impl Host for HostState {
                     accepted: Some(true),
                 }
                 .encode_to_vec();
-                // Host's "Ok" is a claim of append. A lying host that
-                // drops disclosure entries means the client never receives
-                // consented data — operationally observable (client polls
-                // /shared-data and sees nothing), not a confidentiality
-                // break. Confidentiality holds because chunks are
-                // encrypted to client_pk before append.
-                self.disclosure_store
-                    .append(&self.session_id, payload, &self.client_pk)
-                    .await
-                    .map_err(|e| wasmtime::Error::msg(format!("disclosure append failed: {e}")))?
-                    .trust_unchecked();
+                // TODO encrypt: encrypt `payload` to `self.client_pk`
+                // (age recipient, hybrid AES+X25519) BEFORE staging.
+                // The host stores opaque bytes — encryption is the
+                // engine's responsibility. Confidentiality of
+                // disclosure data depends on this landing.
+                let _ = &self.client_pk;
+                let encrypted = payload;
+                // Stage in the in-memory buffer. The API harvests
+                // pending disclosures after `runner.run` returns and
+                // merges them into the next `SessionStore::commit` —
+                // so the consent answer in state and the disclosure
+                // entry land in one atomic transaction. No
+                // duplicate-on-retry race.
+                self.pending_disclosures
+                    .push(AppendDisclosure(encrypted));
                 Ok(true)
             }
         }

@@ -17,6 +17,11 @@ vsock = ["dep:tokio-vsock", "dep:tower", "dep:hyper-util"]
 enclavid-untrusted = { path = "../untrusted" }
 tonic = "0.13"
 prost = "0.13"
+# AEAD for session blob encryption (TEE_key for METADATA, applicant_key
+# + TEE_key nested for STATE). ChaCha20-Poly1305 chosen over AES-GCM:
+# constant-time without AES-NI assumptions, smaller dep tree.
+chacha20poly1305 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = { version = "0.7", optional = true }
