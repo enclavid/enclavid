@@ -1,3 +1,4 @@
+mod age_seal;
 mod auth;
 mod error;
 mod registry;
@@ -25,6 +26,7 @@ mod proto {
     }
 }
 
+pub use age_seal::seal_to_recipient;
 pub use auth::{AuthClient, AuthVerdict, WorkspaceId};
 pub use enclavid_untrusted::{Exposed, Untrusted};
 pub use error::BridgeError;

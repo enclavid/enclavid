@@ -63,7 +63,7 @@ async fn connect(
         session_store: state.session_store.clone(),
         session_id: session_id.clone(),
         applicant_key: applicant_key.expose_secret().to_vec(),
-        client_pk: metadata.client_disclosure_pubkey.as_bytes().to_vec(),
+        client_pk: metadata.client_disclosure_pubkey.clone(),
     });
     let resources = build_resources(persister);
     let policy = lookup_policy(&state, &session_id).await?;

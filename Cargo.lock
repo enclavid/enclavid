@@ -744,6 +744,7 @@ dependencies = [
 name = "enclavid-host-bridge"
 version = "0.1.0"
 dependencies = [
+ "age",
  "chacha20poly1305",
  "enclavid-untrusted",
  "hyper-util",

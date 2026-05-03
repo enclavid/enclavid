@@ -4,6 +4,7 @@ use enclavid_untrusted::{Exposed, Untrusted};
 use prost::Message;
 use tonic::transport::Channel;
 
+use crate::age_seal;
 use crate::error::BridgeError;
 use crate::proto::report::Report;
 use crate::proto::report_store::report_store_client::ReportStoreClient;
@@ -18,20 +19,20 @@ use crate::transport::GrpcChannel;
 #[derive(Clone)]
 pub struct ReportStore {
     client: ReportStoreClient<Channel>,
-    /// Recipient pubkey for sealing reports before exposure to the
-    /// host (age recipient: hybrid X25519 + AES). The host stores
-    /// opaque ciphertext; only the platform can open these.
-    /// Phase A: caller injects (placeholder).
-    /// Phase B: derived from attestation / KMS-bound material.
-    /// `Arc` so cloning the store stays cheap.
-    platform_pubkey: Arc<Vec<u8>>,
+    /// Age recipient string (`age1...`) for sealing reports before
+    /// exposure to the host. The host stores opaque ciphertext; only
+    /// the holder of the matching age identity can open these.
+    /// Phase B: caller injects (currently a startup-generated stub).
+    /// Phase C: derived from a long-lived platform identity / KMS.
+    /// `Arc<str>` so cloning the store stays cheap.
+    platform_pubkey: Arc<str>,
 }
 
 impl ReportStore {
-    pub fn new(channel: GrpcChannel, platform_pubkey: Vec<u8>) -> Self {
+    pub fn new(channel: GrpcChannel, platform_pubkey: String) -> Self {
         Self {
             client: ReportStoreClient::new(channel),
-            platform_pubkey: Arc::new(platform_pubkey),
+            platform_pubkey: Arc::from(platform_pubkey),
         }
     }
 
@@ -47,19 +48,14 @@ impl ReportStore {
         report: &Report,
     ) -> Result<Untrusted<u64>, BridgeError> {
         let plaintext = report.encode_to_vec();
-        // TODO encrypt: hybrid age-encrypt `plaintext` to
-        // `self.platform_pubkey` BEFORE wrapping. This is the seal step
-        // that produces the `Exposed<Vec<u8>>` — same shape as
-        // WriteField::build_op for SessionStore ops.
-        //
-        // Protection model (after the seal lands): host sees opaque
-        // ciphertext only the platform operator can open; the
-        // recipient pubkey is bound to a long-lived platform identity
-        // distinct from any per-session material. Entries are
-        // partitioned by `policy_digest` and carry no session_id, so
-        // the host cannot link an appended report back to a specific
-        // applicant session — per-policy aggregation is the only
-        // observation available.
+        // age-seal to the platform recipient — host sees opaque
+        // ciphertext only the holder of the platform private key can
+        // open. The recipient is bound to a long-lived platform
+        // identity distinct from any per-session material. Entries
+        // are partitioned by `policy_digest` and carry no session_id,
+        // so the host cannot link an appended report back to a
+        // specific applicant session — per-policy aggregation is the
+        // only observation available.
         //
         // What the platform operator sees if they decrypt: only the
         // bounded `Report` schema —
@@ -78,8 +74,8 @@ impl ReportStore {
         // identity fields, or any cross-session correlator. None of
         // the verification pipeline's applicant-side data lands in
         // a Report by construction.
-        let _ = &self.platform_pubkey;
-        let sealed: Exposed<Vec<u8>> = Exposed::expose(plaintext);
+        let ciphertext = age_seal::seal_to_recipient(&plaintext, &self.platform_pubkey)?;
+        let sealed: Exposed<Vec<u8>> = Exposed::expose(ciphertext);
 
         let response = self
             .client

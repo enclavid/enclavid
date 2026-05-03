@@ -27,15 +27,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use enclavid_engine::{RunError, RunResult, SessionChange, SessionListener};
-use enclavid_host_bridge::{AppendDisclosure, SessionStore, SetState, WriteField};
+use enclavid_host_bridge::{
+    AppendDisclosure, SessionStore, SetState, WriteField, seal_to_recipient,
+};
 
 pub(super) struct SessionPersister {
     pub session_store: Arc<SessionStore>,
     pub session_id: String,
     pub applicant_key: Vec<u8>,
-    /// age recipient pubkey for disclosure entries. Pulled from
-    /// session metadata at run start.
-    pub client_pk: Vec<u8>,
+    /// Age recipient string (`age1...`) for disclosure entries.
+    /// Pulled from session metadata at run start; provided by the
+    /// platform consumer when creating the session, so the consumer
+    /// holds the matching private key.
+    pub client_pk: String,
 }
 
 impl SessionListener for SessionPersister {
@@ -44,13 +48,18 @@ impl SessionListener for SessionPersister {
         change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
         Box::pin(async move {
-            // TODO encrypt: age-encrypt each payload to `self.client_pk`
-            // (hybrid X25519 + AES) BEFORE wrapping in AppendDisclosure.
-            // The host stores opaque bytes; only the client can open
-            // these. Confidentiality of disclosure data depends on
-            // this landing.
-            let _ = &self.client_pk;
-            let sealed: Vec<Vec<u8>> = change.disclosures.to_vec();
+            // age-seal each plaintext payload to the client's
+            // disclosure recipient. The host stores opaque bytes;
+            // only the platform consumer (who provided the recipient
+            // at session creation) can open. Sealing failures map to
+            // a run-level error — same path as a transport failure on
+            // the persist itself.
+            let sealed: Vec<Vec<u8>> = change
+                .disclosures
+                .iter()
+                .map(|payload| seal_to_recipient(payload, &self.client_pk))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| RunError::msg(format!("disclosure seal failed: {e}")))?;
 
             // Bridge field markers borrow into our locals; we materialize
             // both vectors first so the slice we pass to `write` can hold

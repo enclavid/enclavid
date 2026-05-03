@@ -22,6 +22,12 @@ prost = "0.13"
 # constant-time without AES-NI assumptions, smaller dep tree.
 chacha20poly1305 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
+# Hybrid public-key encryption for outbound consumer-readable blobs
+# (`AppendDisclosure` to client_pk, `ReportStore::append` to
+# platform_pubkey). Same library the rest of the codebase uses for
+# K_client wrapping / policy artifact pulls; recipient strings are
+# `age1...` so wire formats line up across components.
+age = "0.11"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = { version = "0.7", optional = true }
