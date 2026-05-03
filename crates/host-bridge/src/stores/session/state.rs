@@ -8,6 +8,7 @@
 //! `/connect` and the policy runs at least one round; before that the
 //! field is absent (`Option::None` from the read marker).
 
+use enclavid_untrusted::Exposed;
 use prost::Message;
 
 use crate::error::BridgeError;
@@ -51,7 +52,7 @@ impl ReadField for State<'_> {
 }
 
 impl WriteField for SetState<'_> {
-    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Op, BridgeError> {
+    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op>, BridgeError> {
         // Inner under applicant_key, outer under TEE_key. Each layer
         // gets its own random nonce; AAD identical so cross-session
         // copies fail at the outer layer.

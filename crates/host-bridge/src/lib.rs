@@ -26,7 +26,7 @@ mod proto {
 }
 
 pub use auth::{AuthClient, AuthVerdict, WorkspaceId};
-pub use enclavid_untrusted::Untrusted;
+pub use enclavid_untrusted::{Exposed, Untrusted};
 pub use error::BridgeError;
 pub use transport::{GrpcChannel, connect_store};
 pub use proto::auth::ClientOperation;

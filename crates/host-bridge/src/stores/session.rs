@@ -106,6 +106,11 @@ impl SessionStore {
     /// All ops commit together via the gRPC `Write` RPC; the host
     /// wraps execution in `MULTI/EXEC` so partial commit is not
     /// observable.
+    ///
+    /// Each `build_op` returns `Exposed<Op>` — the seal-output. We
+    /// `release()` only here, at the wire boundary, just before the
+    /// gRPC send. That's the single point where TEE-side data
+    /// becomes raw bytes on the channel.
     pub async fn write(
         &self,
         id: &str,
@@ -114,7 +119,7 @@ impl SessionStore {
         let ctx = Ctx { tee_key: self.tee_key(), session_id: id };
         let mut ops: Vec<Op> = Vec::with_capacity(fields.len());
         for f in fields {
-            ops.push(f.build_op(&ctx)?);
+            ops.push(f.build_op(&ctx)?.release());
         }
         self.client
             .clone()

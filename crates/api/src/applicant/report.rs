@@ -13,7 +13,7 @@ use enclavid_host_bridge::{Report, ReportReason};
 use crate::state::AppState;
 
 use super::auth::CallerKey;
-use super::shared::{fetch_metadata, PLATFORM_KEY};
+use super::shared::fetch_metadata;
 
 #[derive(Deserialize)]
 pub struct ReportBody {
@@ -67,10 +67,11 @@ async fn report(
     // Accept "Ok" as the host's claim of append. A lying host that
     // silently drops reports would suppress audit signal — operational
     // concern (alert on dropped reports via separate health check),
-    // not a confidentiality break.
+    // not a confidentiality break. Sealing under platform pubkey
+    // happens inside `ReportStore::append`.
     state
         .report_store
-        .append(&metadata.policy_digest, report.encode_to_vec(), PLATFORM_KEY)
+        .append(&metadata.policy_digest, report.encode_to_vec())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .trust_unchecked();

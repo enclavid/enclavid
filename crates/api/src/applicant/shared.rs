@@ -14,10 +14,6 @@ use enclavid_host_bridge::{Metadata, SessionMetadata};
 use crate::input::parse_input;
 use crate::state::AppState;
 
-// TODO: real platform key (used by ReportStore — disclosure / state
-// keys live on SessionStore now).
-pub(super) const PLATFORM_KEY: &[u8] = &[0u8; 32];
-
 pub(super) async fn fetch_metadata(
     state: &AppState,
     session_id: &str,

@@ -9,7 +9,9 @@ use axum::routing::{MethodRouter, post};
 use base64ct::{Base64, Encoding};
 use serde::{Deserialize, Serialize};
 
-use enclavid_host_bridge::{Metadata, SessionStatus, SetMetadata, SetStatus, Status};
+use enclavid_host_bridge::{
+    Metadata, SessionStatus, SetMetadata, SetStatus, Status, WriteField,
+};
 
 use crate::client_state::ClientState;
 use crate::policy_pull;
@@ -71,9 +73,10 @@ async fn init(
         None => {
             // Best-effort terminal-state write. Status only — metadata
             // didn't change. Don't-care if host persists.
+            let ops: &[&dyn WriteField] = &[&SetStatus(SessionStatus::Expired)];
             let _ = state
                 .session_store
-                .write(&session_id, &[&SetStatus(SessionStatus::Expired)])
+                .write(&session_id, ops)
                 .await;
             return Err(StatusCode::GONE);
         }
@@ -87,9 +90,10 @@ async fn init(
     let k_client = match unwrap_k_client(&wrapped, &identity) {
         Ok(k) => k,
         Err(_) => {
+            let ops: &[&dyn WriteField] = &[&SetStatus(SessionStatus::FailedInit)];
             let _ = state
                 .session_store
-                .write(&session_id, &[&SetStatus(SessionStatus::FailedInit)])
+                .write(&session_id, ops)
                 .await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
@@ -108,9 +112,10 @@ async fn init(
     {
         Ok(d) => d,
         Err(_) => {
+            let ops: &[&dyn WriteField] = &[&SetStatus(SessionStatus::FailedInit)];
             let _ = state
                 .session_store
-                .write(&session_id, &[&SetStatus(SessionStatus::FailedInit)])
+                .write(&session_id, ops)
                 .await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
@@ -124,9 +129,10 @@ async fn init(
     let component = match state.runner.compile(&decrypted.wasm_bytes) {
         Ok(c) => Arc::new(c),
         Err(_) => {
+            let ops: &[&dyn WriteField] = &[&SetStatus(SessionStatus::FailedInit)];
             let _ = state
                 .session_store
-                .write(&session_id, &[&SetStatus(SessionStatus::FailedInit)])
+                .write(&session_id, ops)
                 .await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
@@ -141,15 +147,13 @@ async fn init(
     // Atomic update: status flips to Running together with the new
     // metadata blob (d_enc/d_plain populated). Single MSET-equivalent
     // on the host side.
+    let ops: &[&dyn WriteField] = &[
+        &SetMetadata(&metadata),
+        &SetStatus(SessionStatus::Running),
+    ];
     state
         .session_store
-        .write(
-            &session_id,
-            &[
-                &SetMetadata(&metadata),
-                &SetStatus(SessionStatus::Running),
-            ],
-        )
+        .write(&session_id, ops)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .trust_unchecked();

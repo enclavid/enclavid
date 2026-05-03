@@ -9,6 +9,12 @@ use enclavid_host_bridge::{GrpcChannel, ReportStore, SessionStore, connect_store
 
 use crate::runtime::SessionPolicyCache;
 
+// TODO: real platform recipient pubkey — derived from a long-lived
+// platform identity (KMS-bound). Used by `ReportStore` to seal
+// anonymous applicant reports before they leave the TEE. Stub of
+// 32 zero bytes for Phase A.
+const PLATFORM_PUBKEY: &[u8] = &[0u8; 32];
+
 /// Applicant key held in TEE memory for the duration of a session.
 /// Raw bytes used for AES-256-GCM encryption of session state.
 /// `SecretBox` provides zeroization on drop and redacts from Debug output.
@@ -48,7 +54,7 @@ impl AppState {
             runner,
             policies,
             session_store,
-            report_store: ReportStore::new(channel),
+            report_store: ReportStore::new(channel, PLATFORM_PUBKEY.to_vec()),
             applicant_keys,
         }
     }

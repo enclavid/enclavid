@@ -4,6 +4,8 @@
 //! opaque bytes (encryption is to the client's `client_disclosure_pubkey`,
 //! engine-side, before the entry is staged for commit).
 
+use enclavid_untrusted::Exposed;
+
 use crate::error::BridgeError;
 use crate::proto::session_store::read_response::Slot;
 use crate::proto::session_store::write_request::Op;
@@ -21,8 +23,9 @@ pub struct Disclosure;
 /// engine during a policy run and merged into the next `write` call
 /// so the state update + disclosure entries commit atomically.
 ///
-/// Already-encrypted bytes (engine age-encrypts to client_pk before
-/// pushing). The host-bridge layer doesn't add another envelope.
+/// Already-encrypted bytes (persister age-encrypts to client_pk
+/// before wrapping). The host-bridge layer doesn't add another
+/// envelope.
 pub struct AppendDisclosure(pub Vec<u8>);
 
 impl ReadField for Disclosure {
@@ -38,7 +41,7 @@ impl ReadField for Disclosure {
 }
 
 impl WriteField for AppendDisclosure {
-    fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Op, BridgeError> {
+    fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op>, BridgeError> {
         // Engine pre-encrypts to client_pk; we ship opaque bytes. We
         // clone the payload because `&self` doesn't allow moving out
         // of the marker; disclosure entries are typically small

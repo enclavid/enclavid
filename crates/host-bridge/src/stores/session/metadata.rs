@@ -3,6 +3,7 @@
 //! client disclosure pubkey, input claims, external_ref). AEAD'd with
 //! `TEE_key`; AAD = session_id binds it to the session that wrote it.
 
+use enclavid_untrusted::Exposed;
 use prost::Message;
 
 use crate::error::BridgeError;
@@ -39,7 +40,7 @@ impl ReadField for Metadata {
 }
 
 impl WriteField for SetMetadata<'_> {
-    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Op, BridgeError> {
+    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op>, BridgeError> {
         let plaintext = self.0.encode_to_vec();
         let value = aead::seal(&plaintext, ctx.tee_key, ctx.aad())?;
         Ok(blob_op(BlobField::Metadata, value))

@@ -10,7 +10,9 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use enclavid_attestation::ReportData;
-use enclavid_host_bridge::{SessionMetadata, SessionStatus, SetMetadata, SetStatus};
+use enclavid_host_bridge::{
+    SessionMetadata, SessionStatus, SetMetadata, SetStatus, WriteField,
+};
 
 use crate::client_state::ClientState;
 
@@ -125,15 +127,13 @@ async fn create(
     // returns 404, the client retries, no data exposure. K_client
     // backstop ensures a host that retains stale metadata can't drive
     // applicant flow.
+    let ops: &[&dyn WriteField] = &[
+        &SetMetadata(&metadata),
+        &SetStatus(SessionStatus::PendingInit),
+    ];
     state
         .session_store
-        .write(
-            &session_id,
-            &[
-                &SetMetadata(&metadata),
-                &SetStatus(SessionStatus::PendingInit),
-            ],
-        )
+        .write(&session_id, ops)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .trust_unchecked();

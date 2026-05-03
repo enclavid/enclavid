@@ -2,6 +2,8 @@
 //! TTL and cleanup logic). No crypto on either side; readers map the
 //! single byte to `SessionStatus` enum, writers emit the byte.
 
+use enclavid_untrusted::Exposed;
+
 use crate::error::BridgeError;
 use crate::proto::session_store::write_request::Op;
 use crate::proto::session_store::{BlobField, FieldSelector};
@@ -38,7 +40,7 @@ impl ReadField for Status {
 }
 
 impl WriteField for SetStatus {
-    fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Op, BridgeError> {
+    fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op>, BridgeError> {
         Ok(blob_op(BlobField::Status, vec![self.0 as i32 as u8]))
     }
 }

@@ -3,7 +3,7 @@
 //! file impls `ReadField` / `WriteField` for its own markers using
 //! the helpers exposed here.
 
-use enclavid_untrusted::Untrusted;
+use enclavid_untrusted::{Exposed, Untrusted};
 
 use crate::error::BridgeError;
 use crate::proto::session_store::field_selector::Kind as SelectorKind;
@@ -39,6 +39,14 @@ pub trait ReadField: Sized {
 /// `Op::Blob` or `Op::ListAppend` shape so the SessionStore client
 /// stays uniform across both kinds of write.
 ///
+/// `build_op` returns `Exposed<Op>`: the act of producing an `Op` IS
+/// the moment plaintext (state, metadata, ...) becomes ciphertext
+/// destined for the host. The wrapper makes that transition explicit
+/// in the type — anything that goes onto the wire must come through
+/// here, and the `release()` only happens inside `SessionStore::write`
+/// at the wire boundary. Reviewers grep for `Exposed::expose` to find
+/// every TEE → host data release.
+///
 /// Object-safe by design (`&self` method, no `Sized` bound) so callers
 /// pass heterogeneous slices `&[&dyn WriteField]` for atomic writes
 /// mixing static markers and dynamic accumulator buffers (e.g.
@@ -47,7 +55,7 @@ pub trait ReadField: Sized {
 /// `Send + Sync` supertraits keep the trait-object usable across
 /// async-await boundaries (axum requires `Send` futures).
 pub trait WriteField: Send + Sync {
-    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Op, BridgeError>;
+    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op>, BridgeError>;
 }
 
 // ---------- slot / op helpers ----------
@@ -84,22 +92,25 @@ pub(super) fn list_selector(field: ListField) -> FieldSelector {
     }
 }
 
-pub(super) fn blob_op(field: BlobField, value: Vec<u8>) -> Op {
-    Op {
+/// `value` is post-encryption (or otherwise opaque) — wrapping in
+/// `Exposed` here ties the marker to the seal-output, so the only
+/// way to construct an `Op` headed for the wire is via these helpers.
+pub(super) fn blob_op(field: BlobField, value: Vec<u8>) -> Exposed<Op> {
+    Exposed::expose(Op {
         kind: Some(OpKind::Blob(BlobWrite {
             field: field as i32,
             value,
         })),
-    }
+    })
 }
 
-pub(super) fn list_append_op(field: ListField, value: Vec<u8>) -> Op {
-    Op {
+pub(super) fn list_append_op(field: ListField, value: Vec<u8>) -> Exposed<Op> {
+    Exposed::expose(Op {
         kind: Some(OpKind::ListAppend(ListAppend {
             field: field as i32,
             value,
         })),
-    }
+    })
 }
 
 // ---------- ReadTuple ----------

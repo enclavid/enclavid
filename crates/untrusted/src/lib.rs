@@ -1,15 +1,26 @@
-//! `Untrusted<T>`: type-level marker for values that came from a source
-//! the TEE does not trust on content (host gRPC responses, registry
-//! pulls, etc.). The inner `T` is inaccessible until the caller passes a
-//! verification predicate to `trust(...)` / `trust_if(...)` — no field
-//! accessors, no `Deref`, no `into_inner`. Compiler enforces that any
-//! use of host-mediated data is gated by an explicit trust step;
-//! reviewers / auditors can grep for `.trust(` to find every gate.
+//! Type-level markers for values crossing the TEE ↔ host trust
+//! boundary. Two dual wrappers, one per direction:
+//!
+//! `Untrusted<T>` — INBOUND: value came from a source the TEE doesn't
+//! trust (host gRPC response, registry pull, etc.). Cannot be
+//! inspected until caller passes a verification predicate to
+//! `trust(...)` or explicitly delegates via `trust_unchecked()`.
+//! Reviewers grep for `.trust(` to find every gate.
+//!
+//! `Exposed<T>` — OUTBOUND: value being released to the host. The
+//! wrapping IS the marker — caller acknowledges via
+//! `Exposed::expose(...)` that this batch of bytes leaves the trust
+//! boundary. Transport unwraps via `release()` only at the point of
+//! handing to the wire. Reviewers grep for `Exposed::expose` to find
+//! every release point. Sealing (AEAD, age) happens in the WriteField
+//! impls / persister BEFORE the wrap; `Exposed<T>` is documentary,
+//! not load-bearing for confidentiality.
 //!
 //! Pair this with sources that DO authenticate themselves (e.g., a
 //! decrypted blob whose decryption is the verification step) — those
-//! don't need wrapping. The marker is for content the TEE genuinely
-//! cannot independently authenticate.
+//! don't need wrapping. The markers are for content the TEE genuinely
+//! cannot independently authenticate (incoming) / for the architectural
+//! visibility of releases (outgoing).
 
 /// Wrapper for a value originating from an untrusted source. The inner
 /// `T` cannot be inspected without an explicit trust gate.
@@ -58,6 +69,34 @@ impl<T> Untrusted<T> {
         F: FnOnce(T) -> U,
     {
         Untrusted(f(self.0))
+    }
+}
+
+/// Marker for values being released across the TEE → host boundary.
+/// Constructed via `Exposed::expose(...)` at call sites that hand
+/// data to the host; unwrapped via `release()` only inside the
+/// transport layer at the point of placing on the wire. The wrap is
+/// the audit trail — every release of TEE-side data is a `expose(`
+/// grep away.
+#[derive(Debug)]
+pub struct Exposed<T>(T);
+
+impl<T> Exposed<T> {
+    /// Wrap a value being released to the host. Sealing (encryption,
+    /// integrity protection) must already have happened upstream —
+    /// `Exposed<T>` is documentary, not cryptographic. The act of
+    /// calling `expose` is the explicit acknowledgment that this
+    /// value is leaving the trust boundary.
+    pub fn expose(value: T) -> Self {
+        Self(value)
+    }
+
+    /// Unwrap at the point of handing to the wire. Used inside the
+    /// transport layer right before the gRPC send. Outside that layer,
+    /// callers should not need to release — the value's purpose is to
+    /// be sent.
+    pub fn release(self) -> T {
+        self.0
     }
 }
 
@@ -129,5 +168,11 @@ mod tests {
         // Still wrapped — must call trust(_unchecked) to escape.
         let v = mapped.trust_unchecked();
         assert_eq!(v, 2);
+    }
+
+    #[test]
+    fn exposed_round_trips() {
+        let e = Exposed::expose(vec![1u8, 2, 3]);
+        assert_eq!(e.release(), vec![1, 2, 3]);
     }
 }
