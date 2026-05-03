@@ -6,11 +6,12 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 use secrecy::ExposeSecret;
 
-use enclavid_host_bridge::{SetState, State as StateField, WriteField};
+use enclavid_host_bridge::State as StateField;
 
 use crate::state::AppState;
 
 use super::auth::CallerKey;
+use super::persister::SessionPersister;
 use super::shared::{build_resources, fetch_metadata, lookup_policy, parse_args};
 use super::views::{progress_from, SessionProgress};
 
@@ -53,32 +54,25 @@ async fn connect(
         .trust_unchecked();
     let session_state = state_opt.unwrap_or_default();
 
-    let resources = build_resources(&metadata);
+    // Per-run persister: engine fires `on_session_change` after each
+    // committed CallEvent, persister seals disclosures to the client
+    // recipient pubkey then writes (SetState + AppendDisclosures) in
+    // one atomic SessionStore.write. One run = N writes (one per host
+    // call), not one final flush.
+    let persister = Arc::new(SessionPersister {
+        session_store: state.session_store.clone(),
+        session_id: session_id.clone(),
+        applicant_key: applicant_key.expose_secret().to_vec(),
+        client_pk: metadata.client_disclosure_pubkey.as_bytes().to_vec(),
+    });
+    let resources = build_resources(persister);
     let policy = lookup_policy(&state, &session_id).await?;
 
-    let (status, session_state, pending_disclosures) = state
+    let (status, _session_state) = state
         .runner
         .run(&policy, session_state, args, resources)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Atomic write of the new state + any disclosures the policy
-    // staged during the run, all in one transaction. Host wraps in
-    // MULTI/EXEC so a partial commit (state without disclosures or
-    // vice versa) cannot be observed. The slice mixes the static
-    // `SetState` marker with the dynamic disclosure buffer.
-    let set_state = SetState {
-        state: &session_state,
-        applicant_key: applicant_key.expose_secret(),
-    };
-    let mut ops: Vec<&dyn WriteField> = vec![&set_state];
-    ops.extend(pending_disclosures.iter().map(|d| d as &dyn WriteField));
-    state
-        .session_store
-        .write(&session_id, &ops)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked();
 
     Ok(Json(progress_from(status)))
 }

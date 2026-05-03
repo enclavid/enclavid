@@ -8,12 +8,13 @@ use secrecy::ExposeSecret;
 
 use enclavid_engine::SessionState;
 use enclavid_host_bridge::{
-    Passport, SetState, State as StateField, WriteField, call_event, document_request, suspended,
+    Passport, State as StateField, call_event, document_request, suspended,
 };
 
 use crate::state::AppState;
 
 use super::auth::CallerKey;
+use super::persister::SessionPersister;
 use super::shared::{build_resources, fetch_metadata, lookup_policy, parse_args};
 use super::views::{progress_from, SessionProgress};
 
@@ -53,32 +54,24 @@ async fn input(
     // Attach user input to the last Suspended request's typed data field.
     apply_input(&mut session_state, &body)?;
 
-    let resources = build_resources(&metadata);
+    // Per-run persister: engine fires `on_session_change` after each
+    // committed CallEvent, persister seals disclosures to the client
+    // recipient pubkey then writes (SetState + AppendDisclosures) in
+    // one atomic SessionStore.write per host call.
+    let persister = Arc::new(SessionPersister {
+        session_store: state.session_store.clone(),
+        session_id: session_id.clone(),
+        applicant_key: applicant_key.expose_secret().to_vec(),
+        client_pk: metadata.client_disclosure_pubkey.as_bytes().to_vec(),
+    });
+    let resources = build_resources(persister);
     let policy = lookup_policy(&state, &session_id).await?;
 
-    let (status, session_state, pending_disclosures) = state
+    let (status, _session_state) = state
         .runner
         .run(&policy, session_state, args, resources)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Atomic write of the new state + any disclosures the policy
-    // staged during this run (e.g. consent acceptance produced a
-    // disclosure entry — both must publish together to avoid
-    // duplicate disclosures on retry). The slice mixes the static
-    // `SetState` marker with the dynamic disclosure buffer.
-    let set_state = SetState {
-        state: &session_state,
-        applicant_key: applicant_key.expose_secret(),
-    };
-    let mut ops: Vec<&dyn WriteField> = vec![&set_state];
-    ops.extend(pending_disclosures.iter().map(|d| d as &dyn WriteField));
-    state
-        .session_store
-        .write(&session_id, &ops)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked();
 
     Ok(Json(progress_from(status)))
 }

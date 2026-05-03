@@ -3,12 +3,12 @@
 //! `EvalArgs` is re-exported from bindgen for callers constructing the
 //! typed args passed to `policy.evaluate`.
 
-use enclavid_host_bridge::{AppendDisclosure, SessionState, suspended};
+use enclavid_host_bridge::{SessionState, suspended};
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine, Store};
 
 use crate::host_state::{HostResources, HostState};
-use crate::wasmtime_shim::component::Linker;
+use crate::wasmtime_shim::component::{InterceptView, Linker};
 use crate::Host_ as GeneratedHost;
 
 pub use crate::exports::enclavid::policy::policy::{Decision, EvalArgs};
@@ -46,18 +46,23 @@ impl Runner {
     /// distinguish our suspend trap from a real bug trap by checking
     /// for a Suspended event at the tail of the log.
     ///
-    /// Returns `(status, updated_session, pending_disclosures)`. The
-    /// disclosures are accumulated by host fns during the run; the
-    /// caller (api handler) merges them into the next
-    /// `SessionStore::commit` so state + disclosures publish atomically.
+    /// Side effects (state mutations + disclosure entries) are
+    /// published per host call via `RunResources::listener` — see
+    /// `SessionListener`. The returned `SessionState` mirrors what the
+    /// listener last acknowledged; engine itself doesn't write
+    /// anywhere.
     pub async fn run(
         &self,
         component: &Component,
         session: SessionState,
         args: Vec<(String, EvalArgs)>,
         resources: HostResources,
-    ) -> wasmtime::Result<(RunStatus, SessionState, Vec<AppendDisclosure>)> {
-        let mut linker: Linker<HostState> = Linker::new(&self.engine, |s| &mut s.replay);
+    ) -> wasmtime::Result<(RunStatus, SessionState)> {
+        let mut linker: Linker<HostState> = Linker::new(&self.engine, |s| InterceptView {
+            replay: &mut s.replay,
+            disclosures: &mut s.pending_disclosures,
+            listener: &s.listener,
+        });
         GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
 
         let mut store = Store::new(&self.engine, HostState::new(session, resources));
@@ -76,8 +81,7 @@ impl Runner {
                 None => return Err(e),
             },
         };
-        let (session, pending) = data.into_parts();
-        Ok((status, session, pending))
+        Ok((status, data.into_session()))
     }
 }
 

@@ -25,11 +25,22 @@ pub mod component {
 
     use wasmtime::AsContextMut;
 
+    use crate::listener::{SessionChange, SessionListener};
     use crate::replay::{hash_args, CallResponse, CallRequest, Replay};
 
-    /// Accessor giving the shim access to the replay machinery from Store
+    /// Borrowed view the shim needs from Store data: replay machinery
+    /// for cache-or-record, the per-call disclosure buffer to drain
+    /// into the listener, and the listener itself. Returned by the
+    /// accessor so all three are reachable in one borrow.
+    pub struct InterceptView<'a> {
+        pub replay: &'a mut Replay,
+        pub disclosures: &'a mut Vec<Vec<u8>>,
+        pub listener: &'a Arc<dyn SessionListener>,
+    }
+
+    /// Accessor giving the shim access to the intercept view from Store
     /// data. A bare function pointer — `Copy`, no hidden `T: 'static` bound.
-    type StateGetter<T> = fn(&mut T) -> &mut Replay;
+    type StateGetter<T> = fn(&mut T) -> InterceptView<'_>;
 
     /// Wraps `wasmtime::component::Linker`. Construction requires an accessor
     /// function exposing intercept state from Store data; methods otherwise
@@ -138,7 +149,7 @@ pub mod component {
                         };
 
                         // Phase 1: step — cached replay or mark call as live.
-                        match state_getter(store.data_mut()).next::<Return>(&req)? {
+                        match state_getter(store.data_mut()).replay.next::<Return>(&req)? {
                             CallResponse::Cached(r) => return Ok(r),
                             CallResponse::Live => {}
                         }
@@ -147,8 +158,32 @@ pub mod component {
                         let inner_fut = user_f(store.as_context_mut(), params);
                         let result: wasmtime::Result<Return> = Box::into_pin(inner_fut).await;
 
-                        // Phase 3: write response. Err propagates natively as wasm trap.
-                        state_getter(store.data_mut()).write(req, &result)?;
+                        // Phase 3: write response, then notify listener of
+                        // the freshly-committed change. Snapshot state +
+                        // drain disclosures + clone listener Arc inside one
+                        // borrow scope so the &mut on Store data is dropped
+                        // before we await the listener.
+                        let snapshot = {
+                            let view = state_getter(store.data_mut());
+                            let committed = view.replay.write(req, &result)?;
+                            if !committed {
+                                // Non-Suspend Err: state untouched, no change
+                                // to publish. Trap propagates and ends the run.
+                                return result;
+                            }
+                            let state = view.replay.session().clone();
+                            let disclosures = std::mem::take(view.disclosures);
+                            let listener = view.listener.clone();
+                            (state, disclosures, listener)
+                        };
+                        let (state, disclosures, listener) = snapshot;
+                        listener
+                            .on_session_change(SessionChange {
+                                state: &state,
+                                disclosures: &disclosures,
+                            })
+                            .await?;
+
                         result
                     })
                 })

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 
 use enclavid_engine::policy::RunResources;
-use enclavid_engine::{Component, EvalArgs};
+use enclavid_engine::{Component, EvalArgs, SessionListener};
 use enclavid_host_bridge::{Metadata, SessionMetadata};
 
 use crate::input::parse_input;
@@ -44,14 +44,14 @@ pub(super) fn parse_args(
     parse_input(&metadata.input).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// Build per-run resources from session metadata. Engine no longer
-/// needs a host-store handle — disclosure entries accumulate in the
-/// engine's `HostState` buffer and are returned by `Runner::run`. The
-/// API merges them into `SessionStore::commit` for atomicity.
-pub(super) fn build_resources(metadata: &SessionMetadata) -> RunResources {
-    RunResources {
-        client_pk: metadata.client_disclosure_pubkey.as_bytes().to_vec(),
-    }
+/// Build per-run resources for the engine. The listener is the only
+/// side-effect channel — it fires after every committed CallEvent and
+/// is responsible for sealing + persisting state and disclosures
+/// atomically. Engine itself holds no keys; encryption lives on the
+/// listener side, symmetric with how state/metadata are sealed inside
+/// host-bridge.
+pub(super) fn build_resources(listener: Arc<dyn SessionListener>) -> RunResources {
+    RunResources { listener }
 }
 
 /// Look up the compiled policy for a session. The component is inserted

@@ -8,12 +8,30 @@
 use std::process::Command;
 use std::sync::OnceLock;
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use enclavid_engine::policy::{Decision, RunResources};
-use enclavid_engine::{RunStatus, Runner, SessionState};
+use enclavid_engine::{RunStatus, Runner, SessionChange, SessionListener, SessionState};
 use enclavid_host_bridge::{
     Passport, SessionState as SessionStateProto, call_event, document_request, suspended,
 };
 use wit_component::ComponentEncoder;
+
+/// Test listener: drops every committed change silently. The happy-path
+/// test only inspects the final `SessionState` returned from `run`, so
+/// we don't need to assert on per-event hook calls here.
+struct NoopListener;
+
+impl SessionListener for NoopListener {
+    fn on_session_change<'a>(
+        &'a self,
+        _change: SessionChange<'a>,
+    ) -> Pin<Box<dyn Future<Output = wasmtime::Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
 
 #[tokio::test]
 async fn passport_then_consent_rejected() {
@@ -28,7 +46,7 @@ async fn passport_then_consent_rejected() {
     let session = SessionState::default();
 
     // Round 1: evaluate → prompt-passport → Suspended.
-    let (status, mut session, _pending) = runner
+    let (status, mut session) = runner
         .run(&component, session, vec![], test_resources())
         .await
         .unwrap();
@@ -38,7 +56,7 @@ async fn passport_then_consent_rejected() {
     attach_passport(&mut session, fake_image());
 
     // Round 2: replays passport → prompt-disclosure → Suspended.
-    let (status, mut session, _pending) = runner
+    let (status, mut session) = runner
         .run(&component, session, vec![], test_resources())
         .await
         .unwrap();
@@ -48,7 +66,7 @@ async fn passport_then_consent_rejected() {
     attach_consent(&mut session, false);
 
     // Round 3: replays both → Completed(Rejected).
-    let (status, _, _pending) = runner
+    let (status, _) = runner
         .run(&component, session, vec![], test_resources())
         .await
         .unwrap();
@@ -90,14 +108,12 @@ fn test_policy_component() -> &'static [u8] {
         .as_slice()
 }
 
-/// Stub host resources for the engine. After the buffer-on-engine
-/// refactor there's no DisclosureStore handle to inject — pending
-/// disclosures accumulate in HostState in-memory and would be returned
-/// by `runner.run` for the api to commit. This test stays on the
-/// consent=false path so no disclosure entries are produced.
+/// Stub host resources for the engine. The listener is a no-op — the
+/// test stays on the consent=false path so the only events fired are
+/// state-only (no disclosures), and we don't assert on them.
 fn test_resources() -> RunResources {
     RunResources {
-        client_pk: b"test-pk".to_vec(),
+        listener: Arc::new(NoopListener),
     }
 }
 

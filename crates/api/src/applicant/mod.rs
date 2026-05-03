@@ -10,6 +10,7 @@
 mod auth;
 mod connect;
 mod input;
+mod persister;
 mod report;
 mod reset;
 mod shared;

@@ -37,6 +37,13 @@ impl Replay {
         self.session
     }
 
+    /// Read-only view of the current session state. Used by the shim
+    /// to pass a snapshot to `SessionListener::on_session_change` after each
+    /// successful `write`.
+    pub fn session(&self) -> &SessionState {
+        &self.session
+    }
+
     /// Advance the call stream by one step. Completed cache hit advances the
     /// cursor and returns `Cached(value)`. Anything else (Suspended status,
     /// absent status, past end of log) returns `Live` — body must run, and
@@ -99,13 +106,18 @@ impl Replay {
     /// Write the response of the current live call to the log. On Ok: stores
     /// Completed, replacing any Suspended-in-place (resume) or appending a
     /// fresh event (past-end). On Err(Suspended): stores Suspended (new
-    /// request, data cleared). Advances the cursor. A non-Suspend Err leaves
-    /// state unchanged and propagates the trap to end the run.
+    /// request, data cleared). Advances the cursor.
+    ///
+    /// Return value tells the shim whether it should fire the post-commit
+    /// listener: `Ok(true)` for committed (Completed/Suspended),
+    /// `Ok(false)` for non-Suspend Err — body returned a real wasm trap,
+    /// state stays untouched and the trap will end the run, no listener
+    /// invocation needed.
     pub fn write<R: Serialize>(
         &mut self,
         req: CallRequest,
         result: &wasmtime::Result<R>,
-    ) -> wasmtime::Result<()> {
+    ) -> wasmtime::Result<bool> {
         let status = match result {
             Ok(r) => {
                 let bytes = bincode::serialize(r).map_err(wasmtime::Error::from)?;
@@ -115,7 +127,7 @@ impl Replay {
                 Some(sreq) => call_event::Status::Suspended(Suspended {
                     request: Some(sreq.clone()),
                 }),
-                None => return Ok(()),
+                None => return Ok(false),
             },
         };
 
@@ -133,7 +145,7 @@ impl Replay {
             });
         }
         self.cursor += 1;
-        Ok(())
+        Ok(true)
     }
 }
 
