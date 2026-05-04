@@ -3,7 +3,7 @@
 //! client disclosure pubkey, input claims, external_ref). AEAD'd with
 //! `TEE_key`; AAD = session_id binds it to the session that wrote it.
 
-use enclavid_untrusted::Exposed;
+use enclavid_untrusted::{AuthZ, Exposed, Replay, Untrusted, reason};
 use prost::Message;
 
 use crate::error::BridgeError;
@@ -19,8 +19,11 @@ use super::aead;
 use super::core::{ReadField, WriteField, unwrap_scalar};
 
 /// Read marker: session metadata blob. Output is
-/// `Option<SessionMetadata>`. AEAD-decrypts under TEE_key before
-/// prost-decoding.
+/// `Untrusted<Option<SessionMetadata>, (AuthZ, Replay)>`. AuthN is
+/// already cleared inside `decode` by the AEAD authentication step
+/// — bytes are guaranteed to be ours and bound to this session_id.
+/// AuthZ remains open (caller checks workspace_id); Replay remains
+/// open (host may have served a stale snapshot).
 pub struct Metadata;
 
 /// Write marker: replace session metadata with a freshly-encoded
@@ -28,7 +31,7 @@ pub struct Metadata;
 pub struct SetMetadata<'a>(pub &'a SessionMetadata);
 
 impl ReadField for Metadata {
-    type Output = Option<SessionMetadata>;
+    type Output = Untrusted<Option<SessionMetadata>, (AuthZ, Replay)>;
 
     fn selector(&self) -> FieldSelector {
         FieldSelector {
@@ -37,9 +40,21 @@ impl ReadField for Metadata {
     }
 
     fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
-        let Some(b) = unwrap_scalar(slot)? else { return Ok(None) };
+        let scope_reason = reason!(r#"
+AEAD-decrypt under TEE_key with session_id as AAD succeeded —
+bytes are ours, bound to this session (AuthN cleared). AuthZ
+open: caller must check `workspace_id` matches the authenticated
+principal. Replay open: host might serve a pre-/init snapshot;
+bound by version-CAS at next write.
+        "#);
+        let Some(b) = unwrap_scalar(slot)? else {
+            return Ok(Untrusted::new(None, scope_reason));
+        };
         let plaintext = aead::open(&b, ctx.tee_key, ctx.aad())?;
-        Ok(Some(SessionMetadata::decode(plaintext.as_slice())?))
+        Ok(Untrusted::new(
+            Some(SessionMetadata::decode(plaintext.as_slice())?),
+            scope_reason,
+        ))
     }
 }
 

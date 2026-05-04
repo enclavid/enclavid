@@ -29,7 +29,7 @@ use axum::http::{StatusCode, header, request::Parts};
 use axum::middleware::Next;
 use axum::response::Response;
 
-use enclavid_host_bridge::{AuthVerdict, ClientOperation};
+use enclavid_host_bridge::{AuthN, AuthVerdict, ClientOperation, Replay, reason};
 
 use crate::client_state::ClientState;
 
@@ -124,7 +124,21 @@ pub(super) async fn enforce(
         .authorize(auth_header, op)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked();
+        .trust_unchecked::<AuthN, _>(reason!(r#"
+TEE has nothing to verify a credential against — host parses
+tokens, TEE never sees them. A lying host can claim an invalid
+credential is valid or substitute a different workspace_id.
+Neither escalates: /init needs K_client (a secret the host
+doesn't have), so a fake session stalls in PendingInit and gets
+garbage-collected.
+        "#))
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Stale verdict (yesterday's answer for today's request — e.g.
+accepting a since-revoked credential) caps at the same place:
+spurious denial or a stalled shell session that can't progress
+without K_client. No data leak path.
+        "#))
+        .into_inner();
     let workspace_id = match verdict {
         AuthVerdict::Allowed(ws) => ws.0,
         AuthVerdict::Unauthenticated => return Err(StatusCode::UNAUTHORIZED),

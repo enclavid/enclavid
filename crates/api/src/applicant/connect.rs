@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -6,7 +7,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 use secrecy::ExposeSecret;
 
-use enclavid_host_bridge::State as StateField;
+use enclavid_host_bridge::{AuthN, Replay, State as StateField, reason};
 
 use crate::state::AppState;
 
@@ -37,11 +38,13 @@ async fn connect(
     let metadata = fetch_metadata(&state, &session_id).await?;
     let args = parse_args(&metadata)?;
 
-    // Existence claim is host-controlled; once decrypt is in place,
-    // content of Some is integrity-verified by AEAD. We accept None at
-    // face value — a lying host hiding a real blob just makes us
-    // replay from default state (disruptive UX, not a leak).
-    let (state_opt,) = state
+    // Existence claim is host-controlled; content of Some is
+    // AEAD-integrity-verified at decode (AuthN cleared, AuthZ implicit
+    // by holding the right applicant_key). We accept None at face
+    // value — a lying host hiding a real blob just makes us replay
+    // from default state (disruptive UX, not a leak). The version
+    // seeds the persister's per-call writes within this run.
+    let ((state_opt,), version) = state
         .session_store
         .read(
             &session_id,
@@ -50,20 +53,42 @@ async fn connect(
             },),
         )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked();
-    let session_state = state_opt.unwrap_or_default();
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let session_state = state_opt
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Stale state is bounded by per-call version-CAS during the run.
+The first write on a stale snapshot fails with VersionMismatch
+and the run aborts cleanly — replay from the latest persisted
+state on retry.
+        "#))
+        .into_inner()
+        .unwrap_or_default();
+
+    let version = version
+        .trust_unchecked::<AuthN, _>(reason!(r#"
+Version is a CAS token only. A lying host either fails our
+writes (DoS) or stomps a concurrent winner (UX regression). No
+data leak path.
+        "#))
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Staleness on the version manifests as CAS mismatch on first
+persist; same containment as above.
+        "#))
+        .into_inner();
 
     // Per-run persister: engine fires `on_session_change` after each
     // committed CallEvent, persister seals disclosures to the client
-    // recipient pubkey then writes (SetState + AppendDisclosures) in
-    // one atomic SessionStore.write. One run = N writes (one per host
-    // call), not one final flush.
+    // recipient pubkey then writes (SetState + AppendDisclosures)
+    // in one atomic SessionStore.write per host call. One run = N
+    // writes (one per host call), not one final flush; persister
+    // threads the version through the run's writes.
     let persister = Arc::new(SessionPersister {
         session_store: state.session_store.clone(),
         session_id: session_id.clone(),
         applicant_key: applicant_key.expose_secret().to_vec(),
         client_pk: metadata.client_disclosure_pubkey.clone(),
+        current_version: AtomicU64::new(version),
     });
     let resources = build_resources(persister);
     let policy = lookup_policy(&state, &session_id).await?;

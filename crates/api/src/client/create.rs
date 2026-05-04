@@ -7,7 +7,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 use base64ct::{Base64, Encoding};
 use rand_core::{OsRng, RngCore};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use enclavid_attestation::ReportData;
 use enclavid_host_bridge::{
@@ -36,9 +36,37 @@ pub struct CreateSessionRequest {
     /// Opaque client-side identifier for this verification — proxied
     /// back in webhook payloads and `GET /sessions/:id/status`. NOT
     /// indexed: clients reconcile `external_ref → session_id` on their
-    /// own side. Optional. Length-bounded for storage hygiene.
-    #[serde(default)]
+    /// own side. Optional. Validated at deserialization (length and
+    /// charset) so a malformed value surfaces as a serde error → 400
+    /// before the handler even runs.
+    #[serde(default, deserialize_with = "deserialize_external_ref")]
     pub external_ref: Option<String>,
+}
+
+/// Length-bound + printable-ASCII gate on `external_ref`. Empty
+/// strings collapse to `None` (treated identically to "missing").
+/// The restricted charset avoids host-side key parsing surprises
+/// and disallows zero-width / RTL-override confusables that could
+/// spoof reconciliation on the consumer's dashboard.
+fn deserialize_external_ref<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<String>, D::Error> {
+    let opt = <Option<String>>::deserialize(d)?;
+    let Some(s) = opt else { return Ok(None) };
+    if s.is_empty() {
+        return Ok(None);
+    }
+    if s.len() > MAX_EXTERNAL_REF_LEN {
+        return Err(serde::de::Error::custom(format!(
+            "must not exceed {MAX_EXTERNAL_REF_LEN} bytes"
+        )));
+    }
+    if s.chars().any(|c| !c.is_ascii_graphic()) {
+        return Err(serde::de::Error::custom(
+            "must consist of printable ASCII only (no whitespace, no control chars)",
+        ));
+    }
+    Ok(Some(s))
 }
 
 #[derive(Serialize)]
@@ -87,8 +115,6 @@ async fn create(
     let (policy_name, policy_digest) =
         parse_pinned_reference(&body.policy).ok_or(StatusCode::BAD_REQUEST)?;
 
-    let external_ref = validate_external_ref(body.external_ref.as_deref())?;
-
     // Per-session ephemeral X25519 keypair. Private half lives only in
     // the in-memory cache — never persisted, dropped on transition out
     // of PendingInit.
@@ -119,7 +145,7 @@ async fn create(
         d_plain: String::new(),
         client_disclosure_pubkey: body.client_disclosure_pubkey,
         input: Vec::new(),
-        external_ref: external_ref.unwrap_or_default(),
+        external_ref: body.external_ref.unwrap_or_default(),
     };
     // Atomic write of the encrypted metadata blob + plaintext status
     // sidecar through the SessionStore service. Host's "Ok" is a claim
@@ -131,12 +157,19 @@ async fn create(
         &SetMetadata(&metadata),
         &SetStatus(SessionStatus::PendingInit),
     ];
+    // /create writes with `None` — host accepts only if the
+    // session does not exist yet. With 32-byte random session_ids
+    // a collision is astronomically unlikely; the primary effect
+    // is rejecting accidental double-/create on the same id.
+    // Returned version is wrapped (Untrusted<u64, (AuthN, Replay)>);
+    // we don't use it here, so it's dropped without peeling. Race
+    // safety is provided by the host-side existence-must-not-exist
+    // check on this write.
     state
         .session_store
-        .write(&session_id, ops)
+        .write(&session_id, None, ops)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked();
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     state
         .ephemeral_identities
@@ -156,27 +189,6 @@ async fn create(
             measurement: quote.measurement,
         },
     }))
-}
-
-/// Allow printable ASCII excluding control/whitespace, length-bounded.
-/// Empty/missing → None (field is optional). Restricted charset avoids
-/// host-side key parsing surprises and disallows zero-width / RTL-
-/// override confusables that could spoof reconciliation on the bank
-/// dashboard.
-fn validate_external_ref(value: Option<&str>) -> Result<Option<String>, StatusCode> {
-    let Some(s) = value else {
-        return Ok(None);
-    };
-    if s.is_empty() {
-        return Ok(None);
-    }
-    if s.len() > MAX_EXTERNAL_REF_LEN {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    if s.chars().any(|c| !c.is_ascii_graphic()) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    Ok(Some(s.to_string()))
 }
 
 fn generate_session_id() -> String {

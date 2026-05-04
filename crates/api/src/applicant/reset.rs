@@ -35,12 +35,13 @@ async fn reset(
     // applicant key the user is now discarding. Metadata + status
     // remain — only the state field is cleared, so the next /connect
     // can claim the session with a fresh key.
+    // Returned deletion count is host-supplied; we drop it without
+    // explicit peeling — purely informational, no security gate.
     state
         .session_store
         .delete(&session_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked();
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state.applicant_keys.invalidate(&session_id).await;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -68,12 +68,14 @@ async fn report(
     // concern (alert on dropped reports via separate health check),
     // not a confidentiality break. Sealing under platform pubkey
     // happens inside `ReportStore::append`.
+    // Returned list-length is host-supplied; we discard it here.
+    // The Untrusted<u64> drops without explicit peeling — operational
+    // signal only, no security gate hangs on it.
     state
         .report_store
         .append(&metadata.policy_digest, &report)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked();
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::NO_CONTENT)
 }

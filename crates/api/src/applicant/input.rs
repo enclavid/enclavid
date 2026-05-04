@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -8,7 +9,7 @@ use secrecy::ExposeSecret;
 
 use enclavid_engine::SessionState;
 use enclavid_host_bridge::{
-    Passport, State as StateField, call_event, document_request, suspended,
+    AuthN, Passport, Replay, State as StateField, call_event, document_request, reason, suspended,
 };
 
 use crate::state::AppState;
@@ -36,9 +37,11 @@ async fn input(
     let args = parse_args(&metadata)?;
 
     // Existence is host-controlled; absence collapses to NOT_FOUND.
-    // Content of Some is decrypt-integrity-verified once the AEAD
-    // path lands.
-    let (state_opt,) = state
+    // Content of Some is AEAD-integrity-verified at decode (AuthN
+    // cleared, AuthZ implicit by holding the right applicant_key).
+    // The version seeds the persister's per-call writes within this
+    // run.
+    let ((state_opt,), version) = state
         .session_store
         .read(
             &session_id,
@@ -47,22 +50,46 @@ async fn input(
             },),
         )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked();
-    let mut session_state = state_opt.ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut session_state = state_opt
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Stale state bounded by per-call version-CAS during the run —
+first persist fails with VersionMismatch on stomped version,
+run aborts and client retries against fresh state.
+        "#))
+        .into_inner()
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let version = version
+        .trust_unchecked::<AuthN, _>(reason!(r#"
+Version is a CAS token only. A lying host either fails our
+writes (DoS) or stomps a concurrent winner (UX regression). No
+data leak path.
+        "#))
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Staleness on the version manifests as CAS mismatch on first
+persist; same containment as above.
+        "#))
+        .into_inner();
 
     // Attach user input to the last Suspended request's typed data field.
     apply_input(&mut session_state, &body)?;
 
     // Per-run persister: engine fires `on_session_change` after each
     // committed CallEvent, persister seals disclosures to the client
-    // recipient pubkey then writes (SetState + AppendDisclosures) in
-    // one atomic SessionStore.write per host call.
+    // recipient pubkey then writes (SetState + AppendDisclosures)
+    // in one atomic SessionStore.write per host call. Concurrent
+    // /input or /connect for the same session bumps the version
+    // past us; our next write fails with VersionMismatch and the
+    // run aborts cleanly — replay from latest persisted state on
+    // retry.
     let persister = Arc::new(SessionPersister {
         session_store: state.session_store.clone(),
         session_id: session_id.clone(),
         applicant_key: applicant_key.expose_secret().to_vec(),
         client_pk: metadata.client_disclosure_pubkey.clone(),
+        current_version: AtomicU64::new(version),
     });
     let resources = build_resources(persister);
     let policy = lookup_policy(&state, &session_id).await?;

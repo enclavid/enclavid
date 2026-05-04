@@ -6,7 +6,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use enclavid_host_bridge::{Metadata, SessionStatus, Status};
+use enclavid_host_bridge::{AuthN, AuthZ, Metadata, Replay, SessionStatus, Status, reason};
 
 use crate::client_state::ClientState;
 
@@ -33,17 +33,39 @@ async fn status(
     // boundary). Single Read RPC fetches both fields; missing or
     // wrong-workspace collapse to 404 to avoid leaking existence of
     // other workspaces' sessions.
-    let (status_opt, metadata_opt) = state
+    let ((status_opt, metadata_opt), _version) = state
         .session_store
         .read(&session_id, (Status, Metadata))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust(|(s, m)| match (s, m) {
-            (Some(_), Some(m)) if m.workspace_id == workspace_id => Ok(()),
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Metadata: AuthN cleared at decode (AEAD). AuthZ checked inline
+    // — workspace_id match is the whole point of fetching metadata
+    // here.
+    let _metadata = metadata_opt
+        .trust::<AuthZ, _, _, _>(|m| match m {
+            Some(m) if m.workspace_id == workspace_id => Ok(()),
             _ => Err(StatusCode::NOT_FOUND),
-        })?;
-    let status_value = status_opt.expect("trust closure validated Some");
-    let _ = metadata_opt; // workspace already validated; metadata content unused.
+        })?
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Stale metadata only affects which historical workspace_id we
+check against. AEAD-binding to session_id ensures we're never
+comparing a different session's metadata.
+        "#))
+        .into_inner();
+
+    let status_value = status_opt
+        .trust_unchecked::<AuthN, _>(reason!(r#"
+Status here is an advisory UX label only. Actual ownership
+boundary is the workspace check on metadata above — a lying
+status byte just changes the label string.
+        "#))
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Stale status returns yesterday's label string; not a security
+gate.
+        "#))
+        .into_inner()
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(Json(StatusResponse {
         session_id,

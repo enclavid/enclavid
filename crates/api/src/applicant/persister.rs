@@ -25,10 +25,12 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use enclavid_engine::{RunError, RunResult, SessionChange, SessionListener};
 use enclavid_host_bridge::{
-    AppendDisclosure, SessionStore, SetState, WriteField, seal_to_recipient,
+    AppendDisclosure, AuthN, Replay, SessionStore, SetState, WriteField, reason,
+    seal_to_recipient,
 };
 
 pub(super) struct SessionPersister {
@@ -40,6 +42,13 @@ pub(super) struct SessionPersister {
     /// platform consumer when creating the session, so the consumer
     /// holds the matching private key.
     pub client_pk: String,
+    /// Session version we expect on the host. Initialized from the
+    /// read that precedes the run; updated after each successful
+    /// `write` so subsequent writes within the same run don't
+    /// re-read. A concurrent run pushes the version past us; our
+    /// next write fails with `VersionMismatch` and the run aborts
+    /// cleanly — replay from the latest persisted state on retry.
+    pub current_version: AtomicU64,
 }
 
 impl SessionListener for SessionPersister {
@@ -74,10 +83,26 @@ impl SessionListener for SessionPersister {
             ops.push(&set_state);
             ops.extend(appends.iter().map(|a| a as &dyn WriteField));
 
-            self.session_store
-                .write(&self.session_id, &ops)
+            // Persister is single-threaded within a run (engine
+            // serializes hooks), so the ordering here is purely
+            // formal. Atomic chosen over Mutex for zero allocation.
+            let expected = self.current_version.load(Ordering::SeqCst);
+            let new_version = self
+                .session_store
+                .write(&self.session_id, Some(expected), &ops)
                 .await
-                .map_err(|e| RunError::msg(format!("persist failed: {e}")))?;
+                .map_err(|e| RunError::msg(format!("persist failed: {e}")))?
+                .trust_unchecked::<AuthN, _>(reason!(r#"
+Version is a CAS token only. A lying host either fails the next
+write (DoS) or stomps a concurrent winner (UX regression). No
+data leak path.
+                "#))
+                .trust_unchecked::<Replay, _>(reason!(r#"
+Staleness on the chained version manifests as next-write CAS
+mismatch; persister returns Err and the run aborts cleanly.
+                "#))
+                .into_inner();
+            self.current_version.store(new_version, Ordering::SeqCst);
             Ok(())
         })
     }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use enclavid_untrusted::{Exposed, Untrusted};
+use enclavid_untrusted::{AuthN, Exposed, Replay, Untrusted, reason};
 use prost::Message;
 use tonic::transport::Channel;
 
@@ -46,7 +46,7 @@ impl ReportStore {
         &self,
         policy_digest: &str,
         report: &Report,
-    ) -> Result<Untrusted<u64>, BridgeError> {
+    ) -> Result<Untrusted<u64, (AuthN, Replay)>, BridgeError> {
         let plaintext = report.encode_to_vec();
         // age-seal to the platform recipient — host sees opaque
         // ciphertext only the holder of the platform private key can
@@ -85,6 +85,10 @@ impl ReportStore {
                 data: sealed.release(),
             })
             .await?;
-        Ok(Untrusted::new(response.into_inner().length))
+        Ok(Untrusted::new(response.into_inner().length, reason!(r#"
+Post-append list-length is host-supplied operational data;
+informational only, no security gate hangs on it. AuthN/Replay
+open, AuthZ N/A.
+        "#)))
     }
 }

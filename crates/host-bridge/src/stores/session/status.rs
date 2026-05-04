@@ -2,7 +2,7 @@
 //! TTL and cleanup logic). No crypto on either side; readers map the
 //! single byte to `SessionStatus` enum, writers emit the byte.
 
-use enclavid_untrusted::Exposed;
+use enclavid_untrusted::{AuthN, Exposed, Replay, Untrusted, reason};
 
 use crate::error::BridgeError;
 use crate::proto::session_store::field_selector::Kind as SelectorKind;
@@ -15,15 +15,20 @@ use crate::proto::state::SessionStatus;
 use super::Ctx;
 use super::core::{ReadField, WriteField, unwrap_scalar};
 
-/// Read marker: session status. Output is `Option<SessionStatus>` —
-/// `None` when the host has no value (not yet written or expired).
+/// Read marker: session status. Output is
+/// `Untrusted<Option<SessionStatus>, (AuthN, Replay)>` — host
+/// plaintext, so the caller addresses both authenticity (host can
+/// emit any byte) and replay (could be a stale snapshot). AuthZ is
+/// not part of the scope: status is read for routing/UX inside
+/// flows where the calling principal is already authenticated, and
+/// status itself is not access-controlled at this layer.
 pub struct Status;
 
 /// Write marker: replace session status with a fresh enum value.
 pub struct SetStatus(pub SessionStatus);
 
 impl ReadField for Status {
-    type Output = Option<SessionStatus>;
+    type Output = Untrusted<Option<SessionStatus>, (AuthN, Replay)>;
 
     fn selector(&self) -> FieldSelector {
         FieldSelector {
@@ -32,14 +37,22 @@ impl ReadField for Status {
     }
 
     fn decode(self, slot: Slot, _ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
-        let Some(b) = unwrap_scalar(slot)? else { return Ok(None) };
+        let scope_reason = reason!(r#"
+Status is host-readable plaintext (1 byte enum, host needs it
+for TTL/cleanup). Host can fabricate the value (AuthN open) or
+return an old one (Replay open). AuthZ N/A: routing/UX hint
+only, not an ownership signal.
+        "#);
+        let Some(b) = unwrap_scalar(slot)? else {
+            return Ok(Untrusted::new(None, scope_reason));
+        };
         let byte = *b
             .first()
             .ok_or_else(|| BridgeError::Transport("empty status field".to_string()))?;
         let status = SessionStatus::try_from(byte as i32).map_err(|_| {
             BridgeError::Transport(format!("invalid status byte: {byte}"))
         })?;
-        Ok(Some(status))
+        Ok(Untrusted::new(Some(status), scope_reason))
     }
 }
 

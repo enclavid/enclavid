@@ -40,3 +40,4 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/report", report::post_report().layer(auth()))
         .with_state(state)
 }
+

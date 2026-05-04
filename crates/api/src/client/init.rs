@@ -10,7 +10,8 @@ use base64ct::{Base64, Encoding};
 use serde::{Deserialize, Serialize};
 
 use enclavid_host_bridge::{
-    Metadata, SessionStatus, SetMetadata, SetStatus, Status, WriteField,
+    AuthN, AuthZ, BridgeError, Metadata, Replay, SessionStatus, SetMetadata, SetStatus, Status,
+    WriteField, reason,
 };
 
 use crate::client_state::ClientState;
@@ -45,25 +46,76 @@ async fn init(
     Path(session_id): Path<String>,
     Json(body): Json<InitSessionRequest>,
 ) -> Result<Json<InitSessionResponse>, StatusCode> {
-    // Trust gate combines existence + tenant boundary + state machine
-    // into one closure. None or wrong-workspace collapse to 404 (we
-    // don't leak existence of other workspaces' sessions).
-    let (status_opt, metadata_opt) = state
+    let ((status_opt, metadata_opt), version) = state
         .session_store
         .read(&session_id, (Status, Metadata))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust(|(s, m)| match (s, m) {
-            (Some(s), Some(m))
-                if m.workspace_id == workspace_id && *s == SessionStatus::PendingInit =>
-            {
-                Ok(())
-            }
-            (Some(_), Some(_)) => Err(StatusCode::CONFLICT),
-            _ => Err(StatusCode::NOT_FOUND),
-        })?;
-    let mut metadata = metadata_opt.expect("trust closure validated Some metadata");
-    let _ = status_opt; // status validated above; not needed downstream.
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let status_opt = status_opt
+        .trust_unchecked::<AuthN, _>(reason!(r#"
+Status is host plaintext, used here for routing only. The actual
+security boundary is the AEAD-verified workspace check on metadata
+below — a lying status byte changes which branch we take, not
+who can see what.
+        "#))
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Stale status routes us into /init re-run, which converges via
+host-side version-CAS at write time — either we hit the
+idempotent-Running branch or the PendingInit flow, both safe.
+        "#))
+        .into_inner();
+
+    // Metadata: AuthN cleared at decode (AEAD). AuthZ checked inline:
+    // metadata.workspace_id must match the authenticated caller's
+    // workspace, otherwise we collapse the result to a NOT_FOUND-shaped
+    // error so we don't leak existence of other workspaces' sessions.
+    let metadata_opt = metadata_opt
+        .trust::<AuthZ, _, _, _>(|m| match m {
+            Some(m) if m.workspace_id == workspace_id => Ok(()),
+            Some(_) => Err(StatusCode::CONFLICT),
+            None => Err(StatusCode::NOT_FOUND),
+        })?
+        .trust_unchecked::<Replay, _>(reason!(r#"
+/init is idempotent w.r.t. stale metadata — Running branch
+returns existing d_*/d_plain, PendingInit branch re-runs init
+which CAS-fails on stomped version and falls into the idempotent
+path on re-read.
+        "#))
+        .into_inner();
+
+    let version = version
+        .trust_unchecked::<AuthN, _>(reason!(r#"
+Version is a CAS token only. A lying host either fails our next
+write (DoS) or stomps a concurrent winner (UX regression). No
+data leak path opens.
+        "#))
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Staleness on the version manifests as CAS mismatch at write
+time — we fall through into the idempotent re-read path, no
+unsafe state lands.
+        "#))
+        .into_inner();
+
+    let metadata_some = metadata_opt.expect("AuthZ predicate validated Some");
+
+    let mut metadata = match status_opt {
+        // Already initialized. Treat as idempotent success: return
+        // the same d_enc/d_plain a fresh /init would produce. Covers
+        // legitimate client retry-after-success.
+        Some(SessionStatus::Running) => {
+            return Ok(Json(InitSessionResponse {
+                status: "running",
+                d_enc: metadata_some.d_enc,
+                d_plain: metadata_some.d_plain,
+            }));
+        }
+        // The legitimate path: PendingInit, matching workspace.
+        Some(SessionStatus::PendingInit) => metadata_some,
+        // Wrong status (FailedInit / Expired / Completed).
+        Some(_) => return Err(StatusCode::CONFLICT),
+        None => return Err(StatusCode::NOT_FOUND),
+    };
 
     // Pull the ephemeral identity from in-memory cache. If gone (TTL
     // elapsed or pod restart), the session is unrecoverable — transition
@@ -71,12 +123,13 @@ async fn init(
     let identity = match state.ephemeral_identities.get(&session_id).await {
         Some(id) => id,
         None => {
-            // Best-effort terminal-state write. Status only — metadata
-            // didn't change. Don't-care if host persists.
+            // Best-effort terminal-state write. Pass the expected
+            // version so we don't stomp a concurrent winner; on
+            // version mismatch we just give up — best-effort.
             let ops: &[&dyn WriteField] = &[&SetStatus(SessionStatus::Expired)];
             let _ = state
                 .session_store
-                .write(&session_id, ops)
+                .write(&session_id, Some(version), ops)
                 .await;
             return Err(StatusCode::GONE);
         }
@@ -93,7 +146,7 @@ async fn init(
             let ops: &[&dyn WriteField] = &[&SetStatus(SessionStatus::FailedInit)];
             let _ = state
                 .session_store
-                .write(&session_id, ops)
+                .write(&session_id, Some(version), ops)
                 .await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
@@ -115,7 +168,7 @@ async fn init(
             let ops: &[&dyn WriteField] = &[&SetStatus(SessionStatus::FailedInit)];
             let _ = state
                 .session_store
-                .write(&session_id, ops)
+                .write(&session_id, Some(version), ops)
                 .await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
@@ -132,7 +185,7 @@ async fn init(
             let ops: &[&dyn WriteField] = &[&SetStatus(SessionStatus::FailedInit)];
             let _ = state
                 .session_store
-                .write(&session_id, ops)
+                .write(&session_id, Some(version), ops)
                 .await;
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
@@ -144,19 +197,68 @@ async fn init(
     // process dump can't revive past wrapped blobs.
     metadata.d_enc = decrypted.d_enc.clone();
     metadata.d_plain = decrypted.d_plain.clone();
-    // Atomic update: status flips to Running together with the new
-    // metadata blob (d_enc/d_plain populated). Single MSET-equivalent
-    // on the host side.
+    // Atomic update with version check: host applies only if the
+    // session's version is still `version`. VersionMismatch means
+    // a concurrent /init beat us (race) or we're a sequential
+    // retry — either way, fall back to the idempotent path: re-read,
+    // and if the session is now Running for our workspace, return
+    // the existing d_*/d_plain instead of erroring.
     let ops: &[&dyn WriteField] = &[
         &SetMetadata(&metadata),
         &SetStatus(SessionStatus::Running),
     ];
-    state
+    match state
         .session_store
-        .write(&session_id, ops)
+        .write(&session_id, Some(version), ops)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked();
+    {
+        Ok(_) => {}
+        Err(BridgeError::VersionMismatch) => {
+            let ((status_opt, metadata_opt), _version) = state
+                .session_store
+                .read(&session_id, (Status, Metadata))
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let status_opt = status_opt
+                .trust_unchecked::<AuthN, _>(reason!(r#"
+Fallback re-read: status is used for routing only here, same
+intent as the initial read up top.
+                "#))
+                .trust_unchecked::<Replay, _>(reason!(r#"
+Fallback re-read IS the convergence path on detected staleness —
+we accept whatever the host now reports and let the match below
+decide.
+                "#))
+                .into_inner();
+            // Same AuthZ pattern as the initial read above: the
+            // workspace check is the predicate, not a downstream
+            // match arm. Anything that doesn't match collapses to
+            // CONFLICT — we don't leak existence of other
+            // workspaces' sessions and we don't accept a host's
+            // attempt to substitute a different workspace's
+            // metadata on the fallback path.
+            let metadata_some = metadata_opt
+                .trust::<AuthZ, _, _, _>(|m| match m {
+                    Some(m) if m.workspace_id == workspace_id => Ok(()),
+                    _ => Err(StatusCode::CONFLICT),
+                })?
+                .trust_unchecked::<Replay, _>(reason!(r#"
+Fallback accepts whatever metadata host actually committed for
+our workspace; downstream match handles the status.
+                "#))
+                .into_inner()
+                .expect("AuthZ predicate validated Some");
+            return match status_opt {
+                Some(SessionStatus::Running) => Ok(Json(InitSessionResponse {
+                    status: "running",
+                    d_enc: metadata_some.d_enc,
+                    d_plain: metadata_some.d_plain,
+                })),
+                _ => Err(StatusCode::CONFLICT),
+            };
+        }
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
     state.ephemeral_identities.invalidate(&session_id).await;
 
     Ok(Json(InitSessionResponse {

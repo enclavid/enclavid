@@ -6,7 +6,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use enclavid_host_bridge::{SessionStatus, Status};
+use enclavid_host_bridge::{AuthN, Replay, SessionStatus, Status, reason};
 
 use crate::state::AppState;
 
@@ -36,13 +36,24 @@ async fn status(
     // status — we accept it as an advisory UX hint (decryption on
     // /connect is the actual ownership check). 404 if no status record
     // exists at all.
-    let (status_opt,) = state
+    let ((status_opt,), _version) = state
         .session_store
         .read(&session_id, (Status,))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked();
-    let session_status = status_opt.ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let session_status = status_opt
+        .trust_unchecked::<AuthN, _>(reason!(r#"
+Advisory UX hint only. The actual ownership boundary in the
+applicant flow is AEAD-decryption of state via applicant_key on
+/connect — wrong key, no progress.
+        "#))
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Stale status returns yesterday's label string; not a security
+gate.
+        "#))
+        .into_inner()
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(Json(StatusResponse {
         initialized: matches!(

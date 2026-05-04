@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 
 use enclavid_engine::policy::RunResources;
 use enclavid_engine::{Component, EvalArgs, SessionListener};
-use enclavid_host_bridge::{Metadata, SessionMetadata};
+use enclavid_host_bridge::{AuthZ, Metadata, Replay, SessionMetadata, reason};
 
 use crate::input::parse_input;
 use crate::state::AppState;
@@ -25,13 +25,27 @@ pub(super) async fn fetch_metadata(
     // host's existence claim and content at face value here; the trust
     // delegation is concentrated in `trust_unchecked` so callers don't
     // have to repeat the analysis.
-    let (metadata,) = state
+    let ((metadata,), _version) = state
         .session_store
         .read(session_id, (Metadata,))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked();
-    metadata.ok_or(StatusCode::NOT_FOUND)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    metadata
+        .trust_unchecked::<AuthZ, _>(reason!(r#"
+Applicant flow doesn't authenticate per-workspace, so we have
+no workspace_id to cross-check here. Security relies on the
+bearer-key auth layer at the route plus AEAD-binding on state
+under applicant_key.
+        "#))
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Applicant flow uses metadata only for engine-resource fields
+(client_disclosure_pubkey, policy_digest, input). Their
+staleness has no security impact — these fields are stable
+across the session lifetime.
+        "#))
+        .into_inner()
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 pub(super) fn parse_args(

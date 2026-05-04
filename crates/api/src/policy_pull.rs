@@ -11,7 +11,7 @@ use age::x25519::Identity;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use enclavid_host_bridge::RegistryClient;
+use enclavid_host_bridge::{AuthN, Replay, RegistryClient, reason};
 
 const POLICY_LAYER_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.wasm.v1.encrypted";
 
@@ -68,15 +68,17 @@ pub async fn pull_and_decrypt(
     policy_digest: &str,
     k_client: &Identity,
 ) -> Result<DecryptedPolicy, PullError> {
-    // The registry response is `Untrusted<PullResponse>` — host can swap
-    // bytes freely. The trust gate below is the cryptographic verification
-    // that closes the gap: we only accept the response if all digests
-    // recompute to what the session record asked for.
+    // The registry response carries (AuthN, Replay) as open concerns.
+    // The AuthN trust gate below closes via cryptographic verification:
+    // we only accept the response if all digests recompute to what the
+    // session record asked for. Replay is then blanket-accepted because
+    // content is content-addressed: an "old" response for the same
+    // digest is, by definition, the same bytes.
     let response = registry
         .pull(workspace_id, policy_name, policy_digest)
         .await
         .map_err(|e| PullError::Transport(format!("{e:?}")))?
-        .trust(|r| {
+        .trust::<AuthN, _, _, _>(|r| {
             // Manifest bytes must hash to what the session record was
             // created against (passed in as `policy_digest`).
             let manifest_actual = sha256_hex(&r.manifest);
@@ -121,7 +123,13 @@ pub async fn pull_and_decrypt(
                 }
             }
             Ok(())
-        })?;
+        })?
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Registry artifacts are content-addressed: an old response for
+the same digest is, by definition, the same bytes. Replay is
+not meaningful for digest-pinned content.
+        "#))
+        .into_inner();
 
     // After trust gate: response is plain `PullResponse`. Re-parse the
     // manifest (cheap — JSON is small) to find the encrypted-policy layer.

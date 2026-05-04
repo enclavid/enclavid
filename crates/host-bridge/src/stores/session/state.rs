@@ -8,7 +8,7 @@
 //! `/connect` and the policy runs at least one round; before that the
 //! field is absent (`Option::None` from the read marker).
 
-use enclavid_untrusted::Exposed;
+use enclavid_untrusted::{Exposed, Replay, Untrusted, reason};
 use prost::Message;
 
 use crate::error::BridgeError;
@@ -23,9 +23,14 @@ use super::Ctx;
 use super::aead;
 use super::core::{ReadField, WriteField, unwrap_scalar};
 
-/// Read marker: session state blob. Carries the applicant key for the
-/// inner AEAD layer; `None` until the applicant connects and runs the
-/// policy at least once.
+/// Read marker: session state blob. Carries the applicant key for
+/// the inner AEAD layer. Output is `Untrusted<Option<SessionState>,
+/// (Replay,)>` — both AEAD layers (applicant_key + tee_key) execute
+/// inside `decode`, clearing AuthN on success; AuthZ is implicitly
+/// established by holding the right `applicant_key` (the inner AEAD
+/// authenticates against it). Only Replay remains as a callee
+/// concern. `None` until the applicant connects and runs the policy
+/// at least once.
 pub struct State<'a> {
     pub applicant_key: &'a [u8],
 }
@@ -39,7 +44,7 @@ pub struct SetState<'a> {
 }
 
 impl ReadField for State<'_> {
-    type Output = Option<SessionState>;
+    type Output = Untrusted<Option<SessionState>, (Replay,)>;
 
     fn selector(&self) -> FieldSelector {
         FieldSelector {
@@ -48,10 +53,23 @@ impl ReadField for State<'_> {
     }
 
     fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
-        let Some(b) = unwrap_scalar(slot)? else { return Ok(None) };
+        let scope_reason = reason!(r#"
+Double-AEAD'd: outer under TEE_key, inner under applicant_key,
+both AAD'd to session_id. Both opens succeeded ⇒ bytes are ours
+(AuthN cleared) AND caller has the right applicant_key, which
+itself authorizes state access (AuthZ implicit). Replay open:
+host might serve an older blob from before recent /input; bound
+by per-call version-CAS during the run.
+        "#);
+        let Some(b) = unwrap_scalar(slot)? else {
+            return Ok(Untrusted::new(None, scope_reason));
+        };
         let outer = aead::open(&b, ctx.tee_key, ctx.aad())?;
         let inner = aead::open(&outer, self.applicant_key, ctx.aad())?;
-        Ok(Some(SessionState::decode(inner.as_slice())?))
+        Ok(Untrusted::new(
+            Some(SessionState::decode(inner.as_slice())?),
+            scope_reason,
+        ))
     }
 }
 

@@ -2,11 +2,9 @@ syntax = "proto3";
 
 package enclavid.session_store;
 
-// Domain service for per-session data. Replaces the storage-primitive
-// BlobStore/ListStore that exposed Redis-style key-value semantics to
-// the TEE. The TEE asks for typed session fields; the host decides how
-// to map them to its storage backend (Redis hash, separate keys,
-// MongoDB document, etc.).
+// Domain service for per-session data. The TEE asks for typed session
+// fields; the host is free to choose how to lay them out in its
+// storage backend.
 //
 // Visibility model: STATUS is plaintext (host-visible — used for TTL
 // and cleanup logic). METADATA and STATE are encrypted on the TEE
@@ -25,9 +23,9 @@ service SessionStore {
   rpc Read(ReadRequest) returns (ReadResponse);
 
   // Atomic write of any number of field ops. Each op is either a
-  // scalar field overwrite or a list-field append. When the list
-  // contains multiple ops the host wraps execution in MULTI/EXEC (or
-  // equivalent) so partial commit is not observable.
+  // scalar field overwrite or a list-field append. All ops within
+  // one request commit together; partial commit must not be
+  // observable to other clients.
   rpc Write(WriteRequest) returns (WriteResponse);
 
   // Delete a scalar field's value (session record continues to exist
@@ -76,6 +74,12 @@ message ReadResponse {
   // ScalarSlot, list selector with ListSlot.
   repeated Slot slots = 1;
 
+  // Current session version. 0 if the session does not exist.
+  // Read-then-write paths echo this back in
+  // WriteRequest.expected_version so concurrent modifications are
+  // detected.
+  uint64 version = 2;
+
   message Slot {
     oneof kind {
       ScalarSlot scalar = 1;
@@ -103,13 +107,18 @@ message ListSlot {
 message WriteRequest {
   string session_id = 1;
 
-  // Single homogeneous list of operations applied atomically. Mixing
-  // scalar writes and list appends in one call is the common case for
-  // /input and /connect commit (state update + accumulated disclosure
-  // entries). When the list contains both shapes, host wraps the
-  // execution in MULTI/EXEC (or equivalent) so partial commit is not
-  // observable.
+  // Single homogeneous list of operations applied atomically.
+  // Mixing scalar writes and list appends in one call is the common
+  // case for /input and /connect commit (state update + accumulated
+  // disclosure entries). The host commits all ops together; partial
+  // commit must not be observable to other clients.
   repeated Op ops = 2;
+
+  // Expected current version of the session. The host applies the
+  // ops only if the session's version matches; mismatch returns
+  // FailedPrecondition without changing state. Absent means "the
+  // session must not exist yet" (used by session creation).
+  optional uint64 expected_version = 3;
 
   message Op {
     oneof kind {
@@ -131,7 +140,11 @@ message WriteRequest {
   }
 }
 
-message WriteResponse {}
+message WriteResponse {
+  // Session version after the write. Callers chain subsequent
+  // writes by feeding this back as the next expected_version.
+  uint64 new_version = 1;
+}
 
 message DeleteRequest {
   string session_id = 1;

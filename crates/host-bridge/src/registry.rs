@@ -10,7 +10,7 @@
 //! layer digest before trusting bytes. See proto/registry.proto and
 //! architecture.md → Network Isolation for the full analysis.
 
-use enclavid_untrusted::Untrusted;
+use enclavid_untrusted::{AuthN, Replay, Untrusted, reason};
 use tonic::transport::Channel;
 
 use crate::error::BridgeError;
@@ -45,7 +45,7 @@ impl RegistryClient {
         workspace_id: &str,
         policy_name: &str,
         policy_digest: &str,
-    ) -> Result<Untrusted<PullResponse>, BridgeError> {
+    ) -> Result<Untrusted<PullResponse, (AuthN, Replay)>, BridgeError> {
         let response = self
             .client
             .clone()
@@ -55,6 +55,11 @@ impl RegistryClient {
                 policy_digest: policy_digest.to_string(),
             })
             .await?;
-        Ok(Untrusted::new(response.into_inner()))
+        Ok(Untrusted::new(response.into_inner(), reason!(r#"
+Bytes the host fetched from a registry; TEE hasn't checked
+anything yet. Caller must verify manifest + per-layer digests
+to clear AuthN. Replay open (host could serve a stale cache
+entry). AuthZ enforced by registry server, not TEE.
+        "#)))
     }
 }

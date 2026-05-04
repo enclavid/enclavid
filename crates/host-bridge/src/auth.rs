@@ -11,7 +11,7 @@
 //! to applicant-data leak. See proto/auth.proto and architecture.md →
 //! Network Isolation for the full analysis.
 
-use enclavid_untrusted::Untrusted;
+use enclavid_untrusted::{AuthN, Replay, Untrusted, reason};
 use tonic::Code;
 use tonic::transport::Channel;
 
@@ -74,7 +74,7 @@ impl AuthClient {
         &self,
         authorization_header: &str,
         operation: ClientOperation,
-    ) -> Result<Untrusted<AuthVerdict>, BridgeError> {
+    ) -> Result<Untrusted<AuthVerdict, (AuthN, Replay)>, BridgeError> {
         let request = AuthorizeClientRequest {
             authorization_header: authorization_header.to_string(),
             operation: operation as i32,
@@ -91,6 +91,11 @@ impl AuthClient {
                 _ => return Err(BridgeError::from(status)),
             },
         };
-        Ok(Untrusted::new(verdict))
+        Ok(Untrusted::new(verdict, reason!(r#"
+Verdict comes straight from the host's own claim. TEE can't
+verify it (AuthN open), host could replay a stale answer (Replay
+open). AuthZ N/A: the verdict IS the authz answer, nothing
+further to check on top.
+        "#)))
     }
 }

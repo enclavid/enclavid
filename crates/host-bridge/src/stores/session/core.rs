@@ -3,7 +3,7 @@
 //! file impls `ReadField` / `WriteField` for its own markers using
 //! the helpers exposed here.
 
-use enclavid_untrusted::{Exposed, Untrusted};
+use enclavid_untrusted::{AuthN, Exposed, Replay, Untrusted};
 
 use crate::error::BridgeError;
 use crate::proto::session_store::read_response::Slot;
@@ -18,10 +18,16 @@ use super::SessionStore;
 
 /// Decode a single field from a host-returned slot. The slot's oneof
 /// shape (scalar vs list) is determined by the marker's selector;
-/// decoding mismatch surfaces as a `BridgeError::Transport`. `Output`
-/// captures any optionality (e.g. `Option<SessionStatus>` for an
-/// absent scalar) so the result tuple already reflects per-field
-/// presence semantics.
+/// decoding mismatch surfaces as a `BridgeError::Transport`.
+///
+/// `Output` is the field's typed return wrapped in an `Untrusted<_, S>`
+/// whose scope `S` lists exactly the concerns a caller still needs to
+/// address for THAT field. AEAD-verified fields (Metadata, State)
+/// have AuthN already cleared inside `decode`, so their scope omits
+/// it; host-plaintext fields (Status) leave AuthN open. Per-field
+/// scopes mean the caller's peel-pattern stays minimal — only the
+/// concerns the field actually has, no ceremony for what's already
+/// known.
 pub trait ReadField: Sized {
     type Output;
     fn selector(&self) -> FieldSelector;
@@ -79,8 +85,11 @@ pub(super) fn unwrap_list(slot: Slot) -> Result<Vec<Vec<u8>>, BridgeError> {
 
 // ---------- ReadTuple ----------
 
-/// Tuple of `ReadField`s. Provides a typed `Output` matching the
-/// requested fields and orchestrates the gRPC `Read` round-trip.
+/// Tuple of `ReadField`s. `fetch` returns the typed fields paired
+/// with the session's current version. Each field in the result
+/// tuple carries its own per-field scope (set by its `ReadField::decode`);
+/// the version comes back as `Untrusted<u64, (AuthN, Replay)>` since
+/// it's a host-controlled counter that may be fabricated or stale.
 pub trait ReadTuple {
     type Output;
     #[allow(async_fn_in_trait)]
@@ -88,7 +97,7 @@ pub trait ReadTuple {
         self,
         store: &SessionStore,
         id: &str,
-    ) -> Result<Untrusted<Self::Output>, BridgeError>;
+    ) -> Result<(Self::Output, Untrusted<u64, (AuthN, Replay)>), BridgeError>;
 }
 
 macro_rules! impl_read_tuple {
@@ -100,17 +109,16 @@ macro_rules! impl_read_tuple {
                 self,
                 store: &SessionStore,
                 id: &str,
-            ) -> Result<Untrusted<Self::Output>, BridgeError> {
+            ) -> Result<(Self::Output, Untrusted<u64, (AuthN, Replay)>), BridgeError> {
                 let ctx = Ctx { tee_key: store.tee_key(), session_id: id };
                 let selectors = vec![$(self.$idx.selector()),+];
-                let raw = store.read_raw(id, selectors).await?.trust_unchecked();
+                let (raw, version) = store.read_raw(id, selectors).await?;
                 let mut iter = raw.into_iter();
-                Ok(Untrusted::new((
-                    $(self.$idx.decode(
-                        iter.next().expect("slot count matches request"),
-                        &ctx,
-                    )?,)+
-                )))
+                let fields = ($(self.$idx.decode(
+                    iter.next().expect("slot count matches request"),
+                    &ctx,
+                )?,)+);
+                Ok((fields, version))
             }
         }
     };

@@ -4,7 +4,7 @@
 //! opaque bytes (encryption is to the client's `client_disclosure_pubkey`,
 //! engine-side, before the entry is staged for commit).
 
-use enclavid_untrusted::Exposed;
+use enclavid_untrusted::{AuthN, Exposed, Replay, Untrusted, reason};
 
 use crate::error::BridgeError;
 use crate::proto::session_store::field_selector::Kind as SelectorKind;
@@ -17,8 +17,12 @@ use super::Ctx;
 use super::core::{ReadField, WriteField, unwrap_list};
 
 /// Read marker: per-session disclosure list. Output is
-/// `Vec<Vec<u8>>` — empty when the list has no entries (or has never
-/// been written; the two are not distinguished).
+/// `Untrusted<Vec<Vec<u8>>, (AuthN, Replay)>` — TEE does not decrypt
+/// list items (they're sealed for the consumer), so authenticity of
+/// individual bytes is not verified at this layer; host could also
+/// return a partial list (replay). AuthZ is not part of the scope:
+/// disclosure entries are not consumed by the TEE itself, only
+/// forwarded as opaque bytes for the platform consumer to decrypt.
 pub struct Disclosure;
 
 /// Pending append to the per-session disclosure list. Produced by the
@@ -31,7 +35,7 @@ pub struct Disclosure;
 pub struct AppendDisclosure(pub Vec<u8>);
 
 impl ReadField for Disclosure {
-    type Output = Vec<Vec<u8>>;
+    type Output = Untrusted<Vec<Vec<u8>>, (AuthN, Replay)>;
 
     fn selector(&self) -> FieldSelector {
         FieldSelector {
@@ -40,7 +44,12 @@ impl ReadField for Disclosure {
     }
 
     fn decode(self, slot: Slot, _ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
-        unwrap_list(slot)
+        Ok(Untrusted::new(unwrap_list(slot)?, reason!(r#"
+Items are encrypted to the consumer; TEE doesn't open them.
+Individual items unverified (AuthN open), host could return a
+partial list (Replay open). AuthZ N/A: TEE relays bytes, doesn't
+consume content.
+        "#)))
     }
 }
 
