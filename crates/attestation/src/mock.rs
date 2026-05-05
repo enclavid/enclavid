@@ -143,7 +143,6 @@ mod tests {
     fn sample_data() -> ReportData {
         ReportData {
             session_id: "ses_01HF7K".to_string(),
-            ephemeral_pubkey: vec![0xAA; 32],
             policy_digest: "sha256:7e93fba".to_string(),
         }
     }

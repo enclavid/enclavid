@@ -20,6 +20,14 @@ service Registry {
   // onto the registry's actual path layout — TEE never constructs
   // OCI references and never depends on registry deployment details.
   rpc Pull(PullRequest) returns (PullResponse);
+
+  // Pull only the OCI manifest (no layer payloads). Used at session
+  // creation to validate the client's K_client cheaply via a small
+  // ciphertext token in the manifest annotation, without paying the
+  // full policy-artifact bandwidth. The TEE re-verifies
+  // `manifest_digest` against the requested digest the same way as
+  // for `Pull`.
+  rpc PullManifest(PullRequest) returns (PullManifestResponse);
 }
 
 message PullRequest {
@@ -47,4 +55,13 @@ message PullResponse {
   // The TEE recomputes each layer digest before trusting bytes — same
   // integrity property as `manifest_digest`.
   repeated bytes layers = 3;
+}
+
+message PullManifestResponse {
+  // The OCI manifest JSON as raw bytes (same shape as in PullResponse,
+  // sans the layer payloads).
+  bytes manifest = 1;
+  // Hex-encoded sha256 of `manifest` bytes — TEE re-verifies it matches
+  // the request reference's digest.
+  string manifest_digest = 2;
 }

@@ -1,19 +1,25 @@
 //! Client-facing API: session lifecycle endpoints.
 //!
 //! Routes:
-//!   POST /api/v1/sessions             — create (PendingInit)
-//!   POST /api/v1/sessions/:id/init    — deliver wrapped K_client
+//!   POST /api/v1/sessions             — create + activate (one shot)
 //!   GET  /api/v1/sessions/:id/status  — poll
-//!   GET  /api/v1/sessions/:id/shared-data — pull consented data (post-completion)
 //!
-//! See architecture.md → Client-Facing Session Creation for the protocol
-//! shape and threat model. Counterparts to the applicant API live in
-//! the sibling `applicant` module — different audience, different auth
-//! (JWT via host vs BearerKey), different state.
+//! Session creation is a single endpoint: the client supplies the
+//! policy ref + K_client + disclosure pubkey in one body, the TEE
+//! validates K_client against the policy's manifest annotation,
+//! mints attestation, persists metadata (K_client encrypted under
+//! TEE_key), and returns the session_id ready for applicant
+//! interaction. Policy artifact pull/decrypt/compile happens lazily
+//! at applicant /connect, so abandoned sessions don't pay
+//! compile-cost and TEE restarts don't strand in-flight work.
+//!
+//! See architecture.md → Client-Facing Session Creation for the
+//! protocol shape and threat model. Counterparts to the applicant
+//! API live in the sibling `applicant` module — different audience,
+//! different auth (JWT via host vs BearerKey), different state.
 
 mod auth;
 mod create;
-mod init;
 mod status;
 
 use std::sync::Arc;
@@ -49,10 +55,6 @@ pub fn router(state: Arc<ClientState>) -> Router {
         .route(
             "/api/v1/sessions",
             create::post_create().layer(auth(ClientOperation::SessionCreate)),
-        )
-        .route(
-            "/api/v1/sessions/{id}/init",
-            init::post_init().layer(auth(ClientOperation::SessionInit)),
         )
         .route(
             "/api/v1/sessions/{id}/status",

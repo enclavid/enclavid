@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use tokio::sync::Mutex;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Json;
@@ -90,9 +92,10 @@ persist; same containment as above.
         applicant_key: applicant_key.expose_secret().to_vec(),
         client_pk: metadata.client_disclosure_pubkey.clone(),
         current_version: AtomicU64::new(version),
+        metadata: Mutex::new(metadata.clone()),
     });
     let resources = build_resources(persister);
-    let policy = lookup_policy(&state, &session_id).await?;
+    let policy = lookup_policy(&state, &session_id, &metadata).await?;
 
     let (status, _session_state) = state
         .runner

@@ -6,7 +6,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use enclavid_host_bridge::{AuthN, Replay, SessionStatus, Status, reason};
+use enclavid_host_bridge::{AuthZ, Metadata, Replay, SessionStatus, reason};
 
 use crate::state::AppState;
 
@@ -23,37 +23,45 @@ pub(super) fn get_status() -> MethodRouter<Arc<AppState>> {
 
 /// GET /session/:id/status — public, no auth.
 ///
-/// Frontend uses this as the first request to decide which UI flow to
-/// run: claim the session via /connect (first time) or connect + supply
-/// input (returning visit). Whether a session exists at all leaks via
-/// 404, which is acceptable since session_ids are unguessable (≥128
-/// bits entropy).
+/// Frontend uses this as the first request to decide which UI flow
+/// to run. We read the encrypted metadata (AEAD-bound to
+/// session_id) and derive the booleans from `metadata.status` — the
+/// host-plaintext `BlobField::Status` is a TTL hint only and a
+/// lying host can flip it freely, so we ignore it for any
+/// applicant-visible decision.
 async fn status(
     Path(session_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<StatusResponse>, StatusCode> {
-    // Single Read on the plaintext status sidecar. Host can lie about
-    // status — we accept it as an advisory UX hint (decryption on
-    // /connect is the actual ownership check). 404 if no status record
-    // exists at all.
-    let ((status_opt,), _version) = state
+    let ((metadata_opt,), _version) = state
         .session_store
-        .read(&session_id, (Status,))
+        .read(&session_id, (Metadata,))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let session_status = status_opt
-        .trust_unchecked::<AuthN, _>(reason!(r#"
-Advisory UX hint only. The actual ownership boundary in the
-applicant flow is AEAD-decryption of state via applicant_key on
-/connect — wrong key, no progress.
+    // Applicant flow has no workspace_id in scope — security here
+    // relies on the bearer-key auth layer at routes that mutate
+    // state, plus AEAD-binding on session_id. /status itself is
+    // public; we just need to know whether a session exists for
+    // this id.
+    let metadata = metadata_opt
+        .trust_unchecked::<AuthZ, _>(reason!(r#"
+Applicant flow doesn't authenticate per-workspace — /status is
+public, used by the frontend on first page load before the
+applicant has any credential. Existence of the session_id is
+acceptable to leak (32-byte random, ≥128 bits entropy).
         "#))
         .trust_unchecked::<Replay, _>(reason!(r#"
-Stale status returns yesterday's label string; not a security
-gate.
+Stale metadata might return an older status (e.g. show
+"running" when session has since completed). Worst case is the
+applicant frontend renders an old UI and the next /connect
+fixes it via fresh state read. Not a security gate.
         "#))
         .into_inner()
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    let session_status = SessionStatus::try_from(metadata.status)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(StatusResponse {
         initialized: matches!(

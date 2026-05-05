@@ -32,7 +32,10 @@ pub use enclavid_untrusted::{AuthN, AuthZ, Exposed, Reason, Replay, Untrusted, r
 pub use error::BridgeError;
 pub use transport::{GrpcChannel, connect_store};
 pub use proto::auth::ClientOperation;
-pub use proto::registry::PullResponse as RegistryPullResponse;
+pub use proto::registry::{
+    PullManifestResponse as RegistryPullManifestResponse,
+    PullResponse as RegistryPullResponse,
+};
 pub use registry::RegistryClient;
 pub use proto::report::{Report, ReportReason};
 pub use proto::state::{

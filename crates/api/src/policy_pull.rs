@@ -1,19 +1,35 @@
-//! Pull-and-decrypt of an encrypted policy artifact.
+//! Policy artifact resolution: K_client validation at session create
+//! time (cheap, manifest-only round-trip) and full pull-and-decrypt
+//! lazily at /connect.
 //!
-//! Called from /init after K_client is unwrapped. Walks the OCI manifest
-//! returned by `RegistryClient`, verifies digests at every step (host is
-//! NOT trusted on response content — see Network Isolation), extracts
-//! the encrypted layer, and age-decrypts it with K_client.
+//! Verifies digests at every step (host is NOT trusted on response
+//! content — see Network Isolation), extracts the encrypted layer,
+//! and age-decrypts it with K_client.
 
+use std::collections::HashMap;
 use std::io::Read;
 
 use age::x25519::Identity;
+use base64ct::Encoding;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use enclavid_host_bridge::{AuthN, Replay, RegistryClient, reason};
+use enclavid_host_bridge::{AuthN, RegistryClient};
 
 const POLICY_LAYER_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.wasm.v1.encrypted";
+/// Manifest annotation key holding an age-ciphertext token encrypted
+/// to `K_client_pub`. POST /sessions decrypts this with the supplied
+/// K_client to confirm the key matches the artifact, before storing
+/// K_client in the session metadata. Saves us the cost of a full
+/// policy pull at create time.
+const VALIDATOR_ANNOTATION: &str = "com.enclavid.policy.validator";
+/// Plaintext that the validator annotation is expected to decrypt to.
+/// Semantically a "true" bool — the only information conveyed is
+/// "K_client matches", which is binary. Single byte; the actual age
+/// envelope is ~hundreds of bytes regardless because of the header
+/// framing, so plaintext minimisation is purely for clarity, not
+/// wire size.
+const VALIDATOR_PLAINTEXT: &[u8] = &[1u8];
 
 #[derive(Debug, thiserror::Error)]
 pub enum PullError {
@@ -35,16 +51,16 @@ pub enum PullError {
     LayerCountMismatch { layers: usize, payloads: usize },
     #[error("decryption failed (wrong K_client?)")]
     Decrypt,
+    #[error("manifest is missing the validator annotation")]
+    MissingValidator,
+    #[error("validator token base64 malformed: {0}")]
+    ValidatorBase64(String),
+    #[error("validator token did not decrypt to the expected plaintext")]
+    ValidatorMismatch,
 }
 
 /// Result of a successful pull-and-decrypt.
 pub struct DecryptedPolicy {
-    /// sha256 of the encrypted policy layer = manifest layer digest. The
-    /// "encrypted hash" we bind into attestation as `D_enc`.
-    pub d_enc: String,
-    /// sha256 of the decrypted wasm bytes. The "plaintext hash" bound
-    /// into attestation as `D_plain`.
-    pub d_plain: String,
     /// Decrypted wasm. Ready to compile with wasmtime.
     pub wasm_bytes: Vec<u8>,
 }
@@ -52,6 +68,8 @@ pub struct DecryptedPolicy {
 #[derive(Deserialize)]
 struct OciManifest {
     layers: Vec<OciDescriptor>,
+    #[serde(default)]
+    annotations: HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +79,63 @@ struct OciDescriptor {
     digest: String,
 }
 
+/// Cheap K_client validation against the manifest's validator
+/// annotation. Pulls only the manifest (no layer payloads), verifies
+/// digest, decrypts the validator ciphertext with K_client, and
+/// confirms it produces the expected plaintext.
+///
+/// Used at `POST /sessions` so that wrong-K_client errors surface
+/// synchronously to the client API call instead of breaking later
+/// during applicant flow.
+pub async fn validate_k_client(
+    registry: &RegistryClient,
+    workspace_id: &str,
+    policy_name: &str,
+    policy_digest: &str,
+    k_client: &Identity,
+) -> Result<(), PullError> {
+    let response = registry
+        .pull_manifest(workspace_id, policy_name, policy_digest)
+        .await
+        .map_err(|e| PullError::Transport(format!("{e:?}")))?
+        .trust::<AuthN, _, _, _>(|r| {
+            // Same digest verification as in `pull_and_decrypt` — the
+            // bytes must hash to the digest the session record was
+            // pinned against.
+            let manifest_actual = sha256_hex(&r.manifest);
+            if !digest_matches(policy_digest, &manifest_actual) {
+                return Err(PullError::ManifestDigest {
+                    expected: policy_digest.to_string(),
+                    actual: format!("sha256:{manifest_actual}"),
+                });
+            }
+            if r.manifest_digest != manifest_actual
+                && r.manifest_digest != format!("sha256:{manifest_actual}")
+            {
+                return Err(PullError::ManifestDigest {
+                    expected: format!("sha256:{manifest_actual}"),
+                    actual: r.manifest_digest.clone(),
+                });
+            }
+            Ok(())
+        })?
+        .into_inner();
+
+    let manifest: OciManifest = serde_json::from_slice(&response.manifest)
+        .map_err(|e| PullError::ManifestParse(e.to_string()))?;
+    let token_b64 = manifest
+        .annotations
+        .get(VALIDATOR_ANNOTATION)
+        .ok_or(PullError::MissingValidator)?;
+    let token = base64ct::Base64::decode_vec(token_b64)
+        .map_err(|e| PullError::ValidatorBase64(format!("{e:?}")))?;
+    let plaintext = age_decrypt(&token, k_client).map_err(|_| PullError::Decrypt)?;
+    if plaintext != VALIDATOR_PLAINTEXT {
+        return Err(PullError::ValidatorMismatch);
+    }
+    Ok(())
+}
+
 pub async fn pull_and_decrypt(
     registry: &RegistryClient,
     workspace_id: &str,
@@ -68,12 +143,10 @@ pub async fn pull_and_decrypt(
     policy_digest: &str,
     k_client: &Identity,
 ) -> Result<DecryptedPolicy, PullError> {
-    // The registry response carries (AuthN, Replay) as open concerns.
-    // The AuthN trust gate below closes via cryptographic verification:
-    // we only accept the response if all digests recompute to what the
-    // session record asked for. Replay is then blanket-accepted because
-    // content is content-addressed: an "old" response for the same
-    // digest is, by definition, the same bytes.
+    // The registry response carries only (AuthN) — Replay is N/A
+    // for content-addressed pulls. The AuthN trust gate below closes
+    // via cryptographic verification: we only accept the response if
+    // all digests recompute to what the session record asked for.
     let response = registry
         .pull(workspace_id, policy_name, policy_digest)
         .await
@@ -124,36 +197,24 @@ pub async fn pull_and_decrypt(
             }
             Ok(())
         })?
-        .trust_unchecked::<Replay, _>(reason!(r#"
-Registry artifacts are content-addressed: an old response for
-the same digest is, by definition, the same bytes. Replay is
-not meaningful for digest-pinned content.
-        "#))
         .into_inner();
 
     // After trust gate: response is plain `PullResponse`. Re-parse the
     // manifest (cheap — JSON is small) to find the encrypted-policy layer.
     let manifest: OciManifest = serde_json::from_slice(&response.manifest)
         .map_err(|e| PullError::ManifestParse(e.to_string()))?;
-    let (idx, descriptor) = manifest
+    let (idx, _descriptor) = manifest
         .layers
         .iter()
         .enumerate()
         .find(|(_, l)| l.media_type == POLICY_LAYER_MEDIA_TYPE)
         .ok_or(PullError::NoPolicyLayer)?;
 
-    // Decrypt with K_client. Failure here is a domain error (wrong key,
-    // corrupted artifact) and is what triggers FailedInit at the handler
-    // layer.
+    // Decrypt with K_client. Failure here is a domain error (wrong
+    // key, corrupted artifact) — surfaces from /connect as 410 Gone.
     let layer_bytes = &response.layers[idx];
     let wasm_bytes = age_decrypt(layer_bytes, k_client).map_err(|_| PullError::Decrypt)?;
-    let d_plain = sha256_hex(&wasm_bytes);
-
-    Ok(DecryptedPolicy {
-        d_enc: descriptor.digest.clone(),
-        d_plain: format!("sha256:{d_plain}"),
-        wasm_bytes,
-    })
+    Ok(DecryptedPolicy { wasm_bytes })
 }
 
 fn age_decrypt(ciphertext: &[u8], identity: &Identity) -> Result<Vec<u8>, age::DecryptError> {

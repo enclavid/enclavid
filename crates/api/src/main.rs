@@ -19,11 +19,12 @@ use crate::state::AppState;
 async fn main() {
     let address_out = std::env::var("ENCLAVID_ADDRESS_OUT").expect("ENCLAVID_ADDRESS_OUT not set");
 
-    // Shared per-process runtime: one wasmtime Engine + one cache of
-    // compiled policy components, both Arc'd into the two state structs.
-    // Compilation happens on /init (client API), instantiation on /input
-    // (applicant API). They MUST share the same Engine — components are
-    // not portable across engines.
+    // Single per-process wasmtime Engine + cache of compiled policy
+    // components, owned by the applicant `AppState`. Compilation
+    // happens lazily on the first /connect for each session
+    // (pulling and decrypting the policy artifact with the K_client
+    // persisted in metadata) and is reused for subsequent /input
+    // rounds.
     let runner = runtime::new_runner();
     let policies = runtime::new_policy_cache();
 
@@ -51,16 +52,8 @@ async fn main() {
     // Each surface owns its route table — see `client::router` and
     // `applicant::router` for the endpoint inventory.
     let attestor: Arc<dyn Attestor> = Arc::new(MockAttestor::new_random());
-    let client_state = Arc::new(
-        ClientState::init(
-            &address_out,
-            session_store.clone(),
-            attestor,
-            runner.clone(),
-            policies.clone(),
-        )
-        .await,
-    );
+    let client_state =
+        Arc::new(ClientState::init(&address_out, session_store.clone(), attestor).await);
     let applicant_state =
         Arc::new(AppState::init(&address_out, session_store, runner, policies).await);
 

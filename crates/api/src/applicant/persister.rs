@@ -18,19 +18,23 @@
 //! stays pure logic.
 //!
 //! Lifetime: one persister per `Runner::run` call. Owns session-id,
-//! the applicant key (state's inner AEAD layer), and the client
-//! disclosure pubkey (disclosure age recipient). Cheap to construct;
-//! engine drops it when the run finishes.
+//! the applicant key (state's inner AEAD layer), the client
+//! disclosure pubkey (disclosure age recipient), and a mutable copy
+//! of session metadata (so we can update `disclosure_count`
+//! atomically with each persist). Cheap to construct; engine drops
+//! it when the run finishes.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use tokio::sync::Mutex;
+
 use enclavid_engine::{RunError, RunResult, SessionChange, SessionListener};
 use enclavid_host_bridge::{
-    AppendDisclosure, AuthN, Replay, SessionStore, SetState, WriteField, reason,
-    seal_to_recipient,
+    AppendDisclosure, AuthN, Replay, SessionMetadata, SessionStore, SetMetadata, SetState,
+    WriteField, reason, seal_to_recipient,
 };
 
 pub(super) struct SessionPersister {
@@ -49,6 +53,12 @@ pub(super) struct SessionPersister {
     /// next write fails with `VersionMismatch` and the run aborts
     /// cleanly — replay from the latest persisted state on retry.
     pub current_version: AtomicU64,
+    /// Mutable copy of session metadata. We update
+    /// `disclosure_count` whenever the engine emits disclosures and
+    /// rewrite metadata atomically alongside the state + append
+    /// ops. Other metadata fields stay constant across the session
+    /// lifetime; this is purely a count bookkeeping wrapper.
+    pub metadata: Mutex<SessionMetadata>,
 }
 
 impl SessionListener for SessionPersister {
@@ -70,22 +80,35 @@ impl SessionListener for SessionPersister {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| RunError::msg(format!("disclosure seal failed: {e}")))?;
 
-            // Bridge field markers borrow into our locals; we materialize
-            // both vectors first so the slice we pass to `write` can hold
-            // borrows without lifetime gymnastics.
+            let appends: Vec<AppendDisclosure> =
+                sealed.into_iter().map(AppendDisclosure).collect();
+
+            // Bookkeeping: bump disclosure_count atomically with the
+            // append. Holding the metadata mutex across the write
+            // serializes any concurrent on_session_change calls
+            // within the same run (engine already serializes hooks
+            // sequentially, so contention here is theoretical).
+            let mut metadata_guard = self.metadata.lock().await;
             let set_state = SetState {
                 state: change.state,
                 applicant_key: &self.applicant_key,
             };
-            let appends: Vec<AppendDisclosure> =
-                sealed.into_iter().map(AppendDisclosure).collect();
-            let mut ops: Vec<&dyn WriteField> = Vec::with_capacity(1 + appends.len());
+            let mut ops: Vec<&dyn WriteField> = Vec::with_capacity(2 + appends.len());
             ops.push(&set_state);
+
+            // Only re-write metadata when there's something to
+            // increment. Most CallEvent commits don't emit
+            // disclosures (only successful `prompt_disclosure` does),
+            // so the common path is just SetState — keeps the wire
+            // payload small.
+            let set_metadata_holder;
+            if !appends.is_empty() {
+                metadata_guard.disclosure_count += appends.len() as u64;
+                set_metadata_holder = SetMetadata(&metadata_guard);
+                ops.push(&set_metadata_holder);
+            }
             ops.extend(appends.iter().map(|a| a as &dyn WriteField));
 
-            // Persister is single-threaded within a run (engine
-            // serializes hooks), so the ordering here is purely
-            // formal. Atomic chosen over Mutex for zero allocation.
             let expected = self.current_version.load(Ordering::SeqCst);
             let new_version = self
                 .session_store

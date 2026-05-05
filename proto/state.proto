@@ -20,18 +20,23 @@ message SessionMetadata {
   string policy_name = 2;
   string policy_digest = 3;
 
-  // Public part of the per-session ephemeral X25519 keypair. The private
-  // half lives only in TEE process memory and is dropped on transition
-  // out of PendingInit. Returned on idempotent retry of session create.
-  bytes ephemeral_pubkey = 4;
+  // Client's age secret-key (the policy-decryption key). Stored
+  // encrypted under TEE_key as part of the metadata blob; never
+  // host-visible. Used at /connect time to lazily pull and decrypt
+  // the policy artifact for this session — deferred from /sessions
+  // so creation stays cheap and abandoned sessions don't pay
+  // compile-cost. Held in plaintext only inside TEE memory during
+  // /sessions handler (validation) and during the first /connect
+  // (decrypt + compile).
+  bytes k_client = 4;
 
-  // Hashes set after a successful init: D_enc = sha256 of encrypted layer
-  // (= manifest layer digest), D_plain = sha256 of decrypted wasm. Both
-  // bound into the attestation report_data so clients can verify after
-  // the fact what bytes the TEE actually executed. Empty until init
-  // succeeds.
-  string d_enc = 5;
-  string d_plain = 6;
+  // Reserved (was D_enc / D_plain — encrypted/plain policy layer
+  // hashes, bound into per-session attestation in the pre-merge
+  // architecture). With the merged /sessions endpoint, the policy
+  // is not pulled or compiled until applicant /connect, so these
+  // values aren't available at attestation-mint time. Restore as
+  // a separate post-hoc audit endpoint if needed.
+  reserved 5, 6;
 
   // Disclosure recipient pubkey: applicant-consented data is encrypted
   // to this in expose_data flows. Provided by the client at session
@@ -48,29 +53,47 @@ message SessionMetadata {
   // payloads and `GET /sessions/:id/status` responses for client-side
   // reconciliation. Length-bounded (≤128 ASCII graphic chars).
   string external_ref = 9;
+
+  // Session lifecycle state, AEAD-bound to session_id by virtue of
+  // living inside this metadata blob. The plaintext copy at
+  // `BlobField::Status` exists purely as a host-side TTL/cleanup
+  // hint; the TEE consults this field for any security or UX
+  // decision so a lying host can't drive the wrong client reaction.
+  SessionStatus status = 10;
+
+  // Unix seconds at session create time. Used by /status to surface
+  // age / latency to the client; does not feed any security
+  // decision.
+  uint64 created_at = 11;
+
+  // Number of disclosure entries the engine has appended for this
+  // session. Incremented by the persister atomically with each
+  // SetState + AppendDisclosure write, so a /status read of
+  // metadata never disagrees with the actual list length on the
+  // host. Lets /status derive `has_shared_data` (or surface the
+  // exact count) without paying the wire cost of pulling the full
+  // disclosure list — entries can be tens of KB each.
+  uint64 disclosure_count = 12;
 }
 
-// Session lifecycle state. Transitions and semantics are documented in
-// architecture.md → Client-Facing Session Creation → State machine.
+// Session lifecycle state. Single creation step (POST /sessions does
+// the full setup atomically), no PendingInit / FailedInit pre-states.
 enum SessionStatus {
   SESSION_STATUS_UNSPECIFIED = 0;
-  // Session created, ephemeral keypair generated, attestation quote
-  // returned to client. Waiting for /init with wrapped K_client.
-  PENDING_INIT = 1;
-  // K_client unwrapped successfully, policy decrypted, executing.
-  // Multiple /input rounds happen here.
+  // Session created and ready: K_client validated, metadata stored.
+  // Multiple /connect + /input rounds from the applicant happen here.
   RUNNING = 2;
   // Policy returned a domain Status (Completed or Failed) — webhook
   // fired, shared data may be available for client pull.
   COMPLETED = 3;
-  // Unrecoverable infrastructure error. Distinct from policy
-  // Status::Failed which is a domain outcome that lands in Completed.
+  // Unrecoverable infrastructure error during the run.
   FAILED = 4;
-  // K_client could not unwrap or could not decrypt the policy artifact.
-  // Client retries by creating a new session.
-  FAILED_INIT = 5;
-  // Pending TTL elapsed without /init being called.
+  // Idle TTL elapsed without applicant interaction.
   EXPIRED = 6;
+  // Reserved (was PENDING_INIT in pre-merge architecture).
+  reserved 1;
+  // Reserved (was FAILED_INIT in pre-merge architecture).
+  reserved 5;
 }
 
 // Internal session state for policy replay.

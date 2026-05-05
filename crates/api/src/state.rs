@@ -6,7 +6,7 @@ use moka::future::Cache;
 use secrecy::SecretBox;
 
 use enclavid_engine::Runner;
-use enclavid_host_bridge::{GrpcChannel, ReportStore, SessionStore, connect_store};
+use enclavid_host_bridge::{GrpcChannel, RegistryClient, ReportStore, SessionStore, connect_store};
 
 use crate::runtime::SessionPolicyCache;
 
@@ -32,14 +32,18 @@ pub type ApplicantKey = SecretBox<Vec<u8>>;
 pub type ApplicantKeyCache = Cache<String, Arc<ApplicantKey>>;
 
 pub struct AppState {
-    /// Shared with the client API state (same Engine compiles policy on
-    /// /init, runs it on /input).
+    /// Shared with the client API state — the engine compiles policy
+    /// lazily at first /connect for a session, then reuses the cached
+    /// `Component` for subsequent /input rounds.
     pub runner: Arc<Runner>,
-    /// Compiled per-session components, populated by /init in the client
-    /// API and read here on every /input. Lookup miss = session not yet
-    /// initialized or evicted past TTL.
+    /// Per-session compiled components. Populated lazily by /connect
+    /// when first hit; cache miss triggers pull+decrypt+compile from
+    /// the K_client persisted in metadata.
     pub policies: SessionPolicyCache,
     pub session_store: Arc<SessionStore>,
+    /// Registry client used by /connect for the lazy policy pull.
+    /// Same channel as the rest of host-bridge.
+    pub registry: RegistryClient,
     pub report_store: ReportStore,
     pub applicant_keys: ApplicantKeyCache,
 }
@@ -60,6 +64,7 @@ impl AppState {
             runner,
             policies,
             session_store,
+            registry: RegistryClient::new(channel.clone()),
             report_store: ReportStore::new(channel, stub_platform_recipient()),
             applicant_keys,
         }

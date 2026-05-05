@@ -1,4 +1,6 @@
+use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use age::x25519::Identity;
 use axum::extract::State;
@@ -8,6 +10,7 @@ use axum::routing::{MethodRouter, post};
 use base64ct::{Base64, Encoding};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Deserializer, Serialize};
+use secrecy::{ExposeSecret, SecretBox};
 
 use enclavid_attestation::ReportData;
 use enclavid_host_bridge::{
@@ -15,6 +18,7 @@ use enclavid_host_bridge::{
 };
 
 use crate::client_state::ClientState;
+use crate::policy_pull;
 
 use super::auth::Workspace;
 
@@ -28,11 +32,17 @@ const MAX_EXTERNAL_REF_LEN: usize = 128;
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
-    /// Policy reference: `name:tag` (mutable) or `name@sha256:...` (pinned).
+    /// Policy reference: `name@sha256:...` (pinned). Tag-form rejected
+    /// at parse — TEE only ever asks the registry by digest.
     pub policy: String,
-    /// Disclosure recipient pubkey: applicant-consented data is encrypted
-    /// to this. Provided as age recipient string `age1...`.
+    /// Disclosure recipient pubkey: applicant-consented data is
+    /// encrypted to this. Provided as age recipient string `age1...`.
     pub client_disclosure_pubkey: String,
+    /// Client's age secret-key (the policy-decryption key) as the
+    /// canonical `AGE-SECRET-KEY-1...` string. Validated at session
+    /// create against the manifest's validator annotation; stored
+    /// encrypted under TEE_key in metadata for lazy use at /connect.
+    pub k_client: String,
     /// Opaque client-side identifier for this verification — proxied
     /// back in webhook payloads and `GET /sessions/:id/status`. NOT
     /// indexed: clients reconcile `external_ref → session_id` on their
@@ -87,9 +97,6 @@ pub struct ResolvedPolicyView {
 #[derive(Serialize)]
 pub struct CreateSessionResponse {
     pub session_id: String,
-    /// age recipient string (`age1...`) — clients use this directly with
-    /// stock age to wrap K_client.
-    pub ephemeral_pubkey: String,
     pub resolved_policy: ResolvedPolicyView,
     pub attestation: AttestationView,
 }
@@ -100,35 +107,53 @@ pub(super) fn post_create() -> MethodRouter<Arc<ClientState>> {
     post(create)
 }
 
-/// POST /api/v1/sessions — creates a PendingInit session, returns
-/// `session_id`, `ephemeral_pubkey`, and an attestation quote binding
-/// the three. The client unwraps and verifies, then proceeds to /init
-/// with the wrapped K_client.
+/// POST /api/v1/sessions — full session-creation flow in one shot.
+///
+/// 1. Parse + validate `policy` reference, `external_ref`, parse
+///    `k_client` as an age identity.
+/// 2. Validate K_client cheaply: pull only the manifest, decrypt the
+///    `validator` annotation token. Wrong key → 422.
+/// 3. Mint attestation quote binding (session_id, policy_digest) to
+///    this TEE measurement. Per-instance TLS-cert-to-attestation
+///    binding handles "is this the right TEE?" out of band.
+/// 4. Atomically write metadata (with K_client encrypted under
+///    TEE_key) + Status:Running to the host store.
+///
+/// K_client itself stays in TEE memory only for the duration of this
+/// handler — once written, the local copy is dropped. The persisted
+/// metadata blob is AEAD'd with the TEE-side key, AAD=session_id, so
+/// the host sees opaque bytes only.
 async fn create(
     State(state): State<Arc<ClientState>>,
     Workspace(workspace_id): Workspace,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, StatusCode> {
-    // For MVP we accept name@digest only — tag → digest resolution via
-    // registry will land alongside the Pull integration. `name:tag` form
-    // is rejected at parse_pinned_reference with 400.
     let (policy_name, policy_digest) =
         parse_pinned_reference(&body.policy).ok_or(StatusCode::BAD_REQUEST)?;
 
-    // Per-session ephemeral X25519 keypair. Private half lives only in
-    // the in-memory cache — never persisted, dropped on transition out
-    // of PendingInit.
-    let identity = Identity::generate();
-    let ephemeral_pubkey_str = identity.to_public().to_string();
+    // Parse K_client as age identity. SecretBox to ensure the
+    // plaintext string gets zeroed on drop instead of lingering in
+    // request-body buffers.
+    let k_client_secret: SecretBox<String> = SecretBox::new(Box::new(body.k_client));
+    let k_client = Identity::from_str(k_client_secret.expose_secret())
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    // Validate K_client matches the policy's validator annotation —
+    // single small RPC to the host registry, no full policy pull.
+    policy_pull::validate_k_client(
+        &state.registry,
+        &workspace_id,
+        &policy_name,
+        &policy_digest,
+        &k_client,
+    )
+    .await
+    .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
 
     let session_id = generate_session_id();
 
-    // Mint attestation quote binding (session_id, ephemeral_pubkey,
-    // policy_digest). Backend is whatever is plugged into ClientState
-    // (mock for dev, sev-snp for production).
     let report_data = ReportData {
         session_id: session_id.clone(),
-        ephemeral_pubkey: ephemeral_pubkey_str.clone().into_bytes(),
         policy_digest: policy_digest.clone(),
     };
     let quote = state
@@ -136,49 +161,44 @@ async fn create(
         .mint(&report_data)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let metadata = SessionMetadata {
         workspace_id,
         policy_name: policy_name.clone(),
         policy_digest: policy_digest.clone(),
-        ephemeral_pubkey: ephemeral_pubkey_str.clone().into_bytes(),
-        d_enc: String::new(),
-        d_plain: String::new(),
+        // K_client lives encrypted inside the metadata blob (under
+        // TEE_key, AAD=session_id). Stored as the raw secret-key
+        // string — `/connect` re-parses it as an Identity when it's
+        // time to decrypt the policy artifact.
+        k_client: k_client_secret.expose_secret().as_bytes().to_vec(),
         client_disclosure_pubkey: body.client_disclosure_pubkey,
         input: Vec::new(),
         external_ref: body.external_ref.unwrap_or_default(),
+        // Encrypted-status copy: TEE truth (vs the plaintext one in
+        // BlobField::Status which is only a host-facing TTL hint).
+        status: SessionStatus::Running as i32,
+        created_at,
+        // Persister increments this atomically with each
+        // AppendDisclosure write — see SessionPersister.
+        disclosure_count: 0,
+        // d_enc / d_plain were pre-merge fields populated at /init
+        // (see proto comment). Reserved on the wire; nothing to set.
     };
-    // Atomic write of the encrypted metadata blob + plaintext status
-    // sidecar through the SessionStore service. Host's "Ok" is a claim
-    // that PendingInit was persisted. If it lied: subsequent /init
-    // returns 404, the client retries, no data exposure. K_client
-    // backstop ensures a host that retains stale metadata can't drive
-    // applicant flow.
     let ops: &[&dyn WriteField] = &[
         &SetMetadata(&metadata),
-        &SetStatus(SessionStatus::PendingInit),
+        &SetStatus(SessionStatus::Running),
     ];
-    // /create writes with `None` — host accepts only if the
-    // session does not exist yet. With 32-byte random session_ids
-    // a collision is astronomically unlikely; the primary effect
-    // is rejecting accidental double-/create on the same id.
-    // Returned version is wrapped (Untrusted<u64, (AuthN, Replay)>);
-    // we don't use it here, so it's dropped without peeling. Race
-    // safety is provided by the host-side existence-must-not-exist
-    // check on this write.
     state
         .session_store
         .write(&session_id, None, ops)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    state
-        .ephemeral_identities
-        .insert(session_id.clone(), Arc::new(identity))
-        .await;
-
     Ok(Json(CreateSessionResponse {
         session_id,
-        ephemeral_pubkey: ephemeral_pubkey_str,
         resolved_policy: ResolvedPolicyView {
             name: policy_name,
             digest: policy_digest,

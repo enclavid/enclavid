@@ -1,13 +1,19 @@
 //! Attestation: produces and verifies hardware-signed quotes that bind
-//! TEE-side ephemeral pubkeys to session metadata.
+//! session metadata to a specific TEE measurement.
 //!
-//! The protocol-level shape is fixed and matches `architecture.md ::
-//! Client-Facing Session Creation`:
+//! The protocol-level shape is fixed:
 //!
 //! ```text
-//! report_data = sha256(session_id || ephemeral_pubkey || policy_digest)
+//! report_data = sha256(session_id || policy_digest)
 //! quote       = Sign(measurement || report_data)
 //! ```
+//!
+//! Per-instance binding (TLS cert hash → TEE measurement) is a separate
+//! attestation produced at TEE boot and verified by the client during
+//! TLS handshake — that step is what authenticates the recipient TEE
+//! identity. Per-session quotes returned in `POST /sessions` only
+//! bind session-specific data (session_id, policy_digest) to the
+//! same measurement.
 //!
 //! The signing/verification backend is pluggable. Real production uses
 //! AMD SEV-SNP (VCEK→ARK→AMD root chain). The `mock` feature swaps in a
@@ -50,7 +56,6 @@ pub struct Quote {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportData {
     pub session_id: String,
-    pub ephemeral_pubkey: Vec<u8>,
     pub policy_digest: String,
 }
 
@@ -61,8 +66,6 @@ impl ReportData {
     pub fn hash(&self) -> [u8; 32] {
         let mut h = Sha256::new();
         h.update(self.session_id.as_bytes());
-        h.update(b"\x00");
-        h.update(&self.ephemeral_pubkey);
         h.update(b"\x00");
         h.update(self.policy_digest.as_bytes());
         h.finalize().into()
