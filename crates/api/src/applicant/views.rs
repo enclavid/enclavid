@@ -1,15 +1,22 @@
 //! JSON-serializable view types and converters for the run-triggering
 //! handlers (`/connect`, `/input`). Keep purely data-shape — no I/O, no
 //! AppState. Everything here is used by both connect.rs and input.rs.
+//!
+//! Consent-related field shapes (`DisplayField`, `LocalizedText`,
+//! `FieldKey`, `DocumentRole`) live in [`crate::dto`] and are shared
+//! with the disclosure envelope written by the persister, so the
+//! applicant frontend and the platform consumer SDK see identical
+//! JSON shapes for consent fields.
 
 use serde::Serialize;
 
 use enclavid_engine::policy::Decision;
 use enclavid_engine::RunStatus;
 use enclavid_host_bridge::{
-    biometric_request, capture_item, document_request, suspended, CaptureItem, DisplayField,
-    LivenessMode,
+    biometric_request, capture_item, document_request, suspended, CaptureItem, LivenessMode,
 };
+
+use crate::dto;
 
 /// Response for run-triggering endpoints (`init`, `input`). Internally-tagged
 /// enum — the `status` field carries the variant discriminator, other fields
@@ -39,9 +46,16 @@ pub enum RequestView {
     Passport,
     IdCard,
     DriversLicense,
-    Liveness { mode: LivenessModeView },
-    Consent { fields: Vec<DisplayFieldView> },
-    VerificationSet { alternatives: Vec<Vec<CaptureItemView>> },
+    Liveness {
+        mode: LivenessModeView,
+    },
+    Consent {
+        fields: Vec<dto::DisplayField>,
+        reason: dto::LocalizedText,
+    },
+    VerificationSet {
+        alternatives: Vec<Vec<CaptureItemView>>,
+    },
 }
 
 #[derive(Serialize)]
@@ -49,12 +63,6 @@ pub enum RequestView {
 pub enum LivenessModeView {
     SelfieVideo,
     Unknown,
-}
-
-#[derive(Serialize)]
-pub struct DisplayFieldView {
-    pub label: String,
-    pub value: String,
 }
 
 /// CaptureItem with data fields stripped — only the "ask" shape, for
@@ -103,7 +111,12 @@ fn request_view(req: &suspended::Request) -> RequestView {
             None => RequestView::Liveness { mode: LivenessModeView::Unknown },
         },
         suspended::Request::Consent(c) => RequestView::Consent {
-            fields: c.fields.iter().map(display_field_view).collect(),
+            fields: c.fields.iter().map(dto::DisplayField::from).collect(),
+            reason: c
+                .reason
+                .as_ref()
+                .map(dto::LocalizedText::from)
+                .unwrap_or_default(),
         },
         suspended::Request::VerificationSet(vs) => RequestView::VerificationSet {
             alternatives: vs
@@ -120,13 +133,6 @@ fn liveness_mode_view(mode: i32) -> LivenessModeView {
         LivenessModeView::SelfieVideo
     } else {
         LivenessModeView::Unknown
-    }
-}
-
-fn display_field_view(f: &DisplayField) -> DisplayFieldView {
-    DisplayFieldView {
-        label: f.label.clone(),
-        value: f.value.clone(),
     }
 }
 

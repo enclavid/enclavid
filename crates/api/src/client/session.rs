@@ -12,6 +12,22 @@ use crate::client_state::ClientState;
 
 use super::auth::Workspace;
 
+/// Serde "remote" definition for the proto-generated `SessionStatus`
+/// enum. Variants must mirror the foreign enum exactly; serde uses
+/// this shadow type only as a description of how to serialize the
+/// real `SessionStatus` (declared in host-bridge). Lets the JSON
+/// wire shape live in the api crate without an orphan-rule wrapper
+/// or a transport-layer serde-aware build.rs.
+#[derive(Serialize)]
+#[serde(remote = "SessionStatus", rename_all = "snake_case")]
+enum SessionStatusDef {
+    Unspecified,
+    Running,
+    Completed,
+    Failed,
+    Expired,
+}
+
 #[derive(Serialize)]
 pub struct ResolvedPolicyView {
     pub name: String,
@@ -19,20 +35,26 @@ pub struct ResolvedPolicyView {
 }
 
 #[derive(Serialize)]
-pub struct StatusResponse {
+pub struct SessionView {
     pub session_id: String,
-    pub status: &'static str,
+    /// Lifecycle label, serialized as snake_case
+    /// (`"running"`, `"completed"`, ...) via the `SessionStatusDef`
+    /// remote definition above.
+    #[serde(with = "SessionStatusDef")]
+    pub status: SessionStatus,
     pub policy: ResolvedPolicyView,
     /// The client's own reconciliation key, echoed back as supplied at
     /// session create. Skipped when missing so the JSON shape stays
     /// minimal for clients who never set it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
-    /// True if the engine has emitted at least one disclosure entry
-    /// for this session. Mirrors the `has_shared_data` flag in the
-    /// future webhook payload — clients use it to decide whether
-    /// `/shared-data` will return anything.
-    pub has_shared_data: bool,
+    /// Number of disclosure entries the engine has appended for this
+    /// session. Mirrors the same field in the future webhook payload
+    /// so client SDKs can deserialize both shapes with one struct.
+    /// Counter rather than bool to support delta-detection at the
+    /// webhook receiver (`new_count - last_seen_count` = how many new
+    /// disclosures arrived since the last poll/notification).
+    pub disclosures: u64,
     /// Unix seconds at session create time. Surfaced for ops /
     /// observability (age, latency); not a security signal.
     pub created_at: u64,
@@ -40,22 +62,22 @@ pub struct StatusResponse {
 
 /// Route factory: bare `get(handler)` MethodRouter. Auth attached at
 /// router level via `.layer(auth(op))` — see `client::router`.
-pub(super) fn get_status() -> MethodRouter<Arc<ClientState>> {
-    get(status)
+pub(super) fn get_session() -> MethodRouter<Arc<ClientState>> {
+    get(read)
 }
 
-async fn status(
+async fn read(
     State(state): State<Arc<ClientState>>,
     Workspace(workspace_id): Workspace,
     Path(session_id): Path<String>,
-) -> Result<Json<StatusResponse>, StatusCode> {
-    // Read encrypted metadata only. Status comes from
-    // `metadata.status` (TEE-trust copy, AEAD-bound to session_id).
-    // Disclosure count comes from `metadata.disclosure_count`,
-    // which the persister maintains atomically with each
-    // AppendDisclosure write — so we never need to pull the actual
-    // disclosure list (entries can be tens of KB) just to compute a
-    // boolean.
+) -> Result<Json<SessionView>, StatusCode> {
+    // Read encrypted metadata. AEAD-bound to session_id so the host
+    // can't substitute another session's blob. Everything we surface
+    // here (status, policy, count, created_at) lives inside this
+    // single pull — the persister keeps `disclosure_count` and the
+    // running `disclosure_hash` chain atomic with each AppendDisclosure
+    // write, so we never need to pull the actual disclosure list
+    // (entries can be tens of KB) just to compute a counter.
     let ((metadata_opt,), _version) = state
         .session_store
         .read(&session_id, (Metadata,))
@@ -80,14 +102,12 @@ comparing a different session's metadata.
         .into_inner()
         .expect("AuthZ predicate validated Some");
 
-    let has_shared_data = metadata.disclosure_count > 0;
-
     let status = SessionStatus::try_from(metadata.status)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(StatusResponse {
+    Ok(Json(SessionView {
         session_id,
-        status: status_label(status),
+        status,
         policy: ResolvedPolicyView {
             name: metadata.policy_name,
             digest: metadata.policy_digest,
@@ -97,17 +117,7 @@ comparing a different session's metadata.
         } else {
             Some(metadata.external_ref)
         },
-        has_shared_data,
+        disclosures: metadata.disclosure_count,
         created_at: metadata.created_at,
     }))
-}
-
-fn status_label(status: SessionStatus) -> &'static str {
-    match status {
-        SessionStatus::Running => "running",
-        SessionStatus::Completed => "completed",
-        SessionStatus::Failed => "failed",
-        SessionStatus::Expired => "expired",
-        SessionStatus::Unspecified => "unspecified",
-    }
 }

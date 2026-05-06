@@ -34,7 +34,7 @@ pub mod component {
     /// accessor so all three are reachable in one borrow.
     pub struct InterceptView<'a> {
         pub replay: &'a mut Replay,
-        pub disclosures: &'a mut Vec<Vec<u8>>,
+        pub disclosures: &'a mut Vec<crate::listener::ConsentDisclosure>,
         pub listener: &'a Arc<dyn SessionListener>,
     }
 

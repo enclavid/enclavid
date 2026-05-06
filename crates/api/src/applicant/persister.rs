@@ -31,11 +31,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::Mutex;
 
-use enclavid_engine::{RunError, RunResult, SessionChange, SessionListener};
+use enclavid_engine::{ConsentDisclosure, RunError, RunResult, SessionChange, SessionListener};
 use enclavid_host_bridge::{
     AppendDisclosure, AuthN, Replay, SessionMetadata, SessionStore, SetMetadata, SetState,
     WriteField, reason, seal_to_recipient,
 };
+
+use crate::disclosure_hash;
+use crate::dto::{self, DisclosureEnvelope, ENVELOPE_VERSION};
 
 pub(super) struct SessionPersister {
     pub session_store: Arc<SessionStore>,
@@ -54,10 +57,11 @@ pub(super) struct SessionPersister {
     /// cleanly — replay from the latest persisted state on retry.
     pub current_version: AtomicU64,
     /// Mutable copy of session metadata. We update
-    /// `disclosure_count` whenever the engine emits disclosures and
-    /// rewrite metadata atomically alongside the state + append
-    /// ops. Other metadata fields stay constant across the session
-    /// lifetime; this is purely a count bookkeeping wrapper.
+    /// `disclosure_count` and the running `disclosure_hash` chain
+    /// whenever the engine emits disclosures and rewrite metadata
+    /// atomically alongside the state + append ops. Other metadata
+    /// fields stay constant across the session lifetime; this is
+    /// purely a bookkeeping wrapper.
     pub metadata: Mutex<SessionMetadata>,
 }
 
@@ -67,18 +71,18 @@ impl SessionListener for SessionPersister {
         change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
         Box::pin(async move {
-            // age-seal each plaintext payload to the client's
-            // disclosure recipient. The host stores opaque bytes;
-            // only the platform consumer (who provided the recipient
-            // at session creation) can open. Sealing failures map to
-            // a run-level error — same path as a transport failure on
-            // the persist itself.
+            // Convert each engine-emitted disclosure record to the
+            // public JSON envelope (api owns the wire format) and
+            // age-seal to the client's recipient. The host stores
+            // opaque bytes; only the platform consumer (who provided
+            // the recipient at session creation) can open. JSON-encode
+            // or seal failures map to a run-level error — same path
+            // as a transport failure on the persist itself.
             let sealed: Vec<Vec<u8>> = change
                 .disclosures
                 .iter()
-                .map(|payload| seal_to_recipient(payload, &self.client_pk))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| RunError::msg(format!("disclosure seal failed: {e}")))?;
+                .map(|d| seal_disclosure(d, &self.client_pk, &self.session_id))
+                .collect::<Result<Vec<_>, _>>()?;
 
             let appends: Vec<AppendDisclosure> =
                 sealed.into_iter().map(AppendDisclosure).collect();
@@ -100,10 +104,16 @@ impl SessionListener for SessionPersister {
             // increment. Most CallEvent commits don't emit
             // disclosures (only successful `prompt_disclosure` does),
             // so the common path is just SetState — keeps the wire
-            // payload small.
+            // payload small. When disclosures are present we extend
+            // the running `disclosure_hash` chain so the host-served
+            // list can be cryptographically checked at read time.
             let set_metadata_holder;
             if !appends.is_empty() {
                 metadata_guard.disclosure_count += appends.len() as u64;
+                for a in &appends {
+                    metadata_guard.disclosure_hash =
+                        disclosure_hash::append(&metadata_guard.disclosure_hash, &a.0);
+                }
                 set_metadata_holder = SetMetadata(&metadata_guard);
                 ops.push(&set_metadata_holder);
             }
@@ -129,4 +139,30 @@ mismatch; persister returns Err and the run aborts cleanly.
             Ok(())
         })
     }
+}
+
+/// Serialize one engine disclosure record into the public JSON
+/// envelope and age-seal to the consumer recipient. The two failure
+/// modes (encode + seal) collapse into one `RunError` — the run
+/// retries from the last persisted state on the next attempt.
+///
+/// `session_id` is embedded in the envelope as defense-in-depth:
+/// metadata-level `disclosure_hash` already binds the per-session
+/// list to its session, but a redundant in-envelope copy means a
+/// consumer that receives a disclosure out-of-band (e.g. via a
+/// future webhook payload) can also self-verify the binding.
+fn seal_disclosure(
+    d: &ConsentDisclosure,
+    recipient: &str,
+    session_id: &str,
+) -> RunResult<Vec<u8>> {
+    let envelope = DisclosureEnvelope {
+        version: ENVELOPE_VERSION,
+        session_id: session_id.to_string(),
+        fields: d.fields.iter().map(dto::DisplayField::from).collect(),
+    };
+    let json = serde_json::to_vec(&envelope)
+        .map_err(|e| RunError::msg(format!("disclosure JSON encode: {e}")))?;
+    seal_to_recipient(&json, recipient)
+        .map_err(|e| RunError::msg(format!("disclosure seal failed: {e}")))
 }

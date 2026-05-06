@@ -85,37 +85,40 @@ pub(super) async fn enforce(
     // What goes wrong if the host lies:
     //
     //   1. Host claims an invalid credential is authentic → a fake
-    //      `PendingInit` session is created.
+    //      caller reaches /sessions create.
     //   2. Host claims a valid credential belongs to workspace X when
     //      it actually belongs to Y → attempted impersonation.
     //   3. Host denies valid credentials → denial of service.
     //
     // Why none of these escalate to applicant-data leak:
     //
-    //   * To progress past `/init`, the caller must supply `K_client`
-    //     wrapped to the session's ephemeral pubkey. `K_client` lives
-    //     in the legitimate client's HSM/KMS, not on our infrastructure.
-    //     A fake or impersonated session sits in `PendingInit` forever
-    //     and is garbage-collected — the policy never decrypts, the
-    //     applicant flow never starts, no data flows.
-    //   * The attestation quote is signed by hardware (AMD-SP) and binds
-    //     (session_id, ephemeral_pubkey, policy_digest). The host can't
-    //     forge it; if a real client is somehow tricked into using a
-    //     spoofed session, the quote verification on their side fails
-    //     and they refuse to send `K_client`.
+    //   * /sessions creation requires `K_client` (the policy-decryption
+    //     age secret), validated synchronously against the policy's
+    //     `validator` manifest annotation. K_client lives in the
+    //     legitimate client's HSM / KMS, not on our infrastructure —
+    //     without it, the validator decrypt fails and the handler
+    //     returns 422 before persisting anything. A fake or
+    //     impersonated caller never gets a session at all.
+    //   * The attestation quote binds (session_id, policy_digest) to
+    //     this TEE's measurement; it's signed by hardware (AMD-SP) and
+    //     unforgeable by the host. If a real client is tricked into
+    //     using a spoofed session_id, quote verification on their side
+    //     fails and they refuse to deliver further inputs.
     //
     // What's left as residual risk:
     //
-    //   * Resource consumption — fake `PendingInit` sessions burn
-    //     storage space, ephemeral keys in cache, audit-log volume.
+    //   * Resource consumption — repeated /sessions attempts with
+    //     wrong K_client burn registry-pull bandwidth and audit-log
+    //     volume.
     //   * Reputation / spam — surface for phishing where the attacker
-    //     uses fake sessions to confuse legitimate clients.
+    //     uses spoofed session_ids to confuse legitimate clients
+    //     (mitigated by attestation as above).
     //
     // Both are operationally mitigated, not cryptographically:
     //   - Rate limit per workspace on session creation.
     //   - Audit log every authorize outcome to an append-only sink.
-    //   - Alert on bursts of `FailedInit` or unusual workspace-create
-    //     patterns (signature of a host substitution).
+    //   - Alert on bursts of /sessions failures or unusual
+    //     workspace-create patterns (signature of a host substitution).
     //
     // See architecture.md → Network Isolation → "External content fetch"
     // for the full threat-model write-up.
@@ -128,15 +131,16 @@ pub(super) async fn enforce(
 TEE has nothing to verify a credential against — host parses
 tokens, TEE never sees them. A lying host can claim an invalid
 credential is valid or substitute a different workspace_id.
-Neither escalates: /init needs K_client (a secret the host
-doesn't have), so a fake session stalls in PendingInit and gets
-garbage-collected.
+Neither escalates: /sessions needs K_client (validated against
+the policy's manifest validator annotation, secret held by the
+legitimate client) — without it the create returns 422 and
+nothing is persisted.
         "#))
         .trust_unchecked::<Replay, _>(reason!(r#"
 Stale verdict (yesterday's answer for today's request — e.g.
 accepting a since-revoked credential) caps at the same place:
-spurious denial or a stalled shell session that can't progress
-without K_client. No data leak path.
+spurious denial or a stalled caller who can't progress past
+the K_client validator check. No data leak path.
         "#))
         .into_inner();
     let workspace_id = match verdict {

@@ -44,7 +44,7 @@ pub struct CreateSessionRequest {
     /// encrypted under TEE_key in metadata for lazy use at /connect.
     pub k_client: String,
     /// Opaque client-side identifier for this verification — proxied
-    /// back in webhook payloads and `GET /sessions/:id/status`. NOT
+    /// back in webhook payloads and `GET /sessions/:id`. NOT
     /// indexed: clients reconcile `external_ref → session_id` on their
     /// own side. Optional. Validated at deserialization (length and
     /// charset) so a malformed value surfaces as a serde error → 400
@@ -184,6 +184,12 @@ async fn create(
         // Persister increments this atomically with each
         // AppendDisclosure write — see SessionPersister.
         disclosure_count: 0,
+        // Seed the running hash with the session-bound h_0 so the
+        // chain is always defined (no special "empty" state). The
+        // persister extends it on each AppendDisclosure; the
+        // disclosures handler folds the host-served list and
+        // compares against this field to detect host tampering.
+        disclosure_hash: crate::disclosure_hash::init(&session_id),
         // d_enc / d_plain were pre-merge fields populated at /init
         // (see proto comment). Reserved on the wire; nothing to set.
     };

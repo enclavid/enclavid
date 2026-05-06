@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use enclavid_host_bridge::SessionState;
 
-use crate::listener::SessionListener;
+use crate::listener::{ConsentDisclosure, SessionListener};
 use crate::replay::Replay;
 
 /// Data placed into wasmtime `Store<HostState>` for the duration of
@@ -18,12 +18,12 @@ use crate::replay::Replay;
 /// transparently inside host-bridge.
 pub struct HostState {
     pub replay: Replay,
-    /// Disclosure entries staged during the current host call body.
-    /// Plaintext payloads (encoded `ConsentRequest`) — listener seals
-    /// them to the recipient pubkey before persisting. Drained and
-    /// handed to the listener after each successful event commit;
-    /// per-call lifetime, never accumulated across calls.
-    pub pending_disclosures: Vec<Vec<u8>>,
+    /// Disclosure records staged during the current host call body.
+    /// Structured (proto-typed fields) — listener owns the public
+    /// JSON wire format and sealing to recipient. Drained and handed
+    /// to the listener after each successful event commit; per-call
+    /// lifetime, never accumulated across calls.
+    pub pending_disclosures: Vec<ConsentDisclosure>,
     /// Hook fired after each committed CallEvent. Stored as Arc so the
     /// shim can clone it cheaply across the await point that calls it.
     pub listener: Arc<dyn SessionListener>,

@@ -32,9 +32,9 @@ enum ClientOperation {
   SESSION_CREATE = 1;
   // POST /api/v1/sessions/:id/init — deliver wrapped K_client, transition to Running.
   SESSION_INIT = 2;
-  // GET /api/v1/sessions/:id/status — poll session state.
+  // GET /api/v1/sessions/:id — read session view (status, policy, ...).
   SESSION_READ = 3;
-  // GET /api/v1/sessions/:id/shared-data — pull applicant-consented data.
+  // GET /api/v1/sessions/:id/disclosures — pull age-encrypted disclosure list.
   DATA_READ = 4;
 }
 

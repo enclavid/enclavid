@@ -1,6 +1,8 @@
 mod applicant;
 mod client;
 mod client_state;
+mod disclosure_hash;
+mod dto;
 mod input;
 mod policy_pull;
 mod runtime;

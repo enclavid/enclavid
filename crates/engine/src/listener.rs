@@ -3,7 +3,7 @@
 //!
 //! The runtime's I/O layer (typically the api crate) implements
 //! `SessionListener` to persist the new state plus any side-effect
-//! outputs (disclosure payloads) emitted in this call's body. Persist
+//! outputs (disclosure records) emitted in this call's body. Persist
 //! is the caller's job — engine treats this as a neutral
 //! session-changed notification and stays free of `SessionStore` /
 //! AEAD-key knowledge.
@@ -21,16 +21,26 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use enclavid_host_bridge::SessionState;
+use enclavid_host_bridge::{DisplayField, SessionState};
+
+/// Structured disclosure record emitted by a single successful
+/// `prompt_disclosure` call. Engine emits proto-typed fields; the
+/// listener (api crate) is responsible for converting to its public
+/// JSON wire format and sealing to the consumer recipient. Keeping
+/// the engine output structured (not pre-serialized) firewalls the
+/// engine from public API shape decisions.
+pub struct ConsentDisclosure {
+    pub fields: Vec<DisplayField>,
+}
 
 /// Bundle delivered to the listener for a single committed CallEvent.
-/// `state` is the post-commit snapshot; `disclosures` are any plaintext
-/// disclosure payloads emitted in the body of this call (empty unless
+/// `state` is the post-commit snapshot; `disclosures` are any
+/// disclosure records emitted in the body of this call (empty unless
 /// the call was a successful `prompt_disclosure`). Bundled together
 /// because a sane listener commits them in one atomic transaction.
 pub struct SessionChange<'a> {
     pub state: &'a SessionState,
-    pub disclosures: &'a [Vec<u8>],
+    pub disclosures: &'a [ConsentDisclosure],
 }
 
 /// Trait fired after every committed CallEvent. Returns a boxed future

@@ -1,10 +1,71 @@
 package enclavid:disclosure;
 
 interface disclosure {
+    /// Localized free-form label for `field-key.custom`. `language` is a
+    /// BCP-47 tag (e.g. `en`, `ru`, `en-GB`); `text` is the human-readable
+    /// label in that language. SDKs render `text` as-is; well-known keys
+    /// are translated by the SDK and don't need this.
+    record localized-text {
+        language: string,
+        text: string,
+    }
+
+    /// Which physical document a `document-*` field refers to. Used to
+    /// disambiguate when a single consent prompt discloses fields from
+    /// more than one document (e.g. passport number AND drivers-license
+    /// number in the same call).
+    variant document-role {
+        passport,
+        id-card,
+        drivers-license,
+    }
+
+    /// Closed enumeration of well-known field identifiers used in consent
+    /// disclosures. Adding a variant is a breaking change to the policy
+    /// world (intentional — every new key is reviewed). `custom` is the
+    /// escape hatch for policy-specific fields not covered by the set;
+    /// SDKs render `localized-text.text` directly.
+    ///
+    /// `document-*` keys carry a `document-role` payload so two
+    /// disclosures of the same field (e.g. two `document-number`s) are
+    /// unambiguous on the consumer side.
+    ///
+    /// Format conventions (not enforced at the type level — sanitize
+    /// strips control chars and caps length, but format is policy's
+    /// responsibility):
+    ///   * dates           — ISO 8601, `YYYY-MM-DD`
+    ///   * countries       — ISO 3166-1 alpha-2 (`US`, `GB`)
+    ///   * sex             — `M` / `F` / `X` (per ICAO MRZ)
+    ///   * languages       — BCP-47 (`en`, `ru-RU`)
+    variant field-key {
+        first-name,
+        last-name,
+        middle-name,
+        date-of-birth,
+        place-of-birth,
+        nationality,
+        sex,
+        document-number(document-role),
+        document-issuing-country(document-role),
+        document-issue-date(document-role),
+        document-expiry-date(document-role),
+        country-of-residence,
+        custom(localized-text),
+    }
+
     record display-field {
-        label: string,
+        key: field-key,
         value: string,
     }
 
-    prompt-disclosure: func(fields: list<display-field>) -> bool;
+    /// Ask the applicant to consent to disclosing the listed fields to
+    /// the platform consumer. `reason` is the purpose-of-use statement
+    /// shown on the consent screen and persisted alongside the
+    /// disclosure entry — bound as part of the user's consent record so
+    /// downstream audit can answer "why was this shared?". Policy must
+    /// supply it explicitly; there is no default.
+    prompt-disclosure: func(
+        fields: list<display-field>,
+        reason: localized-text,
+    ) -> bool;
 }

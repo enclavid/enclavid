@@ -74,6 +74,20 @@ message SessionMetadata {
   // exact count) without paying the wire cost of pulling the full
   // disclosure list — entries can be tens of KB each.
   uint64 disclosure_count = 12;
+
+  // Running hash chain over the disclosure-list ciphertexts. Updated
+  // by the persister atomically with each AppendDisclosure write.
+  //
+  //   h_0 = SHA-256("enclavid-disclosure-chain" || session_id)
+  //   h_{i+1} = SHA-256(h_i || ciphertext_{i+1})
+  //
+  // Lives inside the AEAD-sealed metadata blob (TEE_key + AAD =
+  // session_id) — the host can neither read nor forge. /disclosures
+  // recomputes the chain over the host-served list and rejects a
+  // mismatch as a host-integrity violation, closing fabricate /
+  // truncate / reorder / swap on the disclosure list. 32 bytes when
+  // present, empty when no disclosures yet committed.
+  bytes disclosure_hash = 13;
 }
 
 // Session lifecycle state. Single creation step (POST /sessions does
@@ -177,6 +191,10 @@ message ConsentRequest {
   repeated DisplayField fields = 1;
   // User's answer to the consent prompt.
   optional bool accepted = 2;
+  // Purpose-of-use statement supplied by the policy. Shown on the
+  // consent screen and persisted alongside the disclosure entry —
+  // bound as part of the user's consent record for downstream audit.
+  LocalizedText reason = 3;
 }
 
 // OR of alternatives (DNF). User satisfies exactly one alternative by
@@ -214,7 +232,76 @@ enum LivenessMode {
 }
 
 // Field shown to user on consent screen. Sanitized before storage.
+//
+// `key` identifies what this field represents (typed enumeration with
+// custom escape hatch — see `FieldKey`). `value` is the stringified
+// data; format conventions are documented per-key in
+// `wit/disclosure/disclosure.wit` and not enforced at the type level.
 message DisplayField {
-  string label = 1;
+  FieldKey key = 1;
   string value = 2;
+}
+
+// Identifier for a `DisplayField`. Three shapes:
+//   * `well_known` — one of the document-agnostic keys (name, DOB,
+//     nationality, sex, residence, ...).
+//   * `document_field` — a document-* key bundled with which document
+//     it refers to (passport / id-card / DL), disambiguating same-key
+//     disclosures from multiple documents.
+//   * `custom` — escape hatch with localized free-form text.
+//
+// Mirrors `wit/disclosure/disclosure.wit:field-key` — keep in sync.
+message FieldKey {
+  oneof kind {
+    WellKnownFieldKey well_known = 1;
+    DocumentField document_field = 2;
+    LocalizedText custom = 3;
+  }
+}
+
+// Document-agnostic well-known keys. Document-* keys are intentionally
+// absent — they live in `DocumentField` so the document role is part
+// of the identifier.
+enum WellKnownFieldKey {
+  WELL_KNOWN_FIELD_KEY_UNSPECIFIED = 0;
+  FIRST_NAME = 1;
+  LAST_NAME = 2;
+  MIDDLE_NAME = 3;
+  DATE_OF_BIRTH = 4;
+  PLACE_OF_BIRTH = 5;
+  NATIONALITY = 6;
+  SEX = 7;
+  COUNTRY_OF_RESIDENCE = 8;
+}
+
+// A document-* well-known key. `role` says which physical document
+// the field belongs to; `kind` says which field of that document.
+// Together they're the equivalent of e.g. "passport-number" or
+// "drivers-license-issue-date".
+message DocumentField {
+  DocumentRole role = 1;
+  DocumentFieldKind kind = 2;
+}
+
+enum DocumentRole {
+  DOCUMENT_ROLE_UNSPECIFIED = 0;
+  PASSPORT = 1;
+  ID_CARD = 2;
+  DRIVERS_LICENSE = 3;
+}
+
+enum DocumentFieldKind {
+  DOCUMENT_FIELD_KIND_UNSPECIFIED = 0;
+  NUMBER = 1;
+  ISSUING_COUNTRY = 2;
+  ISSUE_DATE = 3;
+  EXPIRY_DATE = 4;
+}
+
+// Localized free-form text used for `FieldKey.custom` and as the
+// purpose-of-use statement in `ConsentRequest.reason`. `language` is
+// a BCP-47 tag; `text` is the human-readable text in that language.
+message LocalizedText {
+  string language = 1;
+  string text = 2;
 }

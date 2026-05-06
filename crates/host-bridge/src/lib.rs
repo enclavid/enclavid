@@ -40,10 +40,11 @@ pub use registry::RegistryClient;
 pub use proto::report::{Report, ReportReason};
 pub use proto::state::{
     BiometricRequest, CallEvent, CaptureGroup, CaptureItem, Completed, ConsentRequest,
-    DisplayField, DocumentRequest, DriversLicense, IdCard, Liveness, LivenessFrames, LivenessMode,
-    Passport, SessionMetadata, SessionState, SessionStatus, Suspended, TwoSidedImage,
-    VerificationSetData, VerificationSetRequest, biometric_request, call_event, capture_item,
-    document_request, suspended,
+    DisplayField, DocumentField, DocumentFieldKind, DocumentRequest, DocumentRole, DriversLicense,
+    FieldKey, IdCard, Liveness, LivenessFrames, LivenessMode, LocalizedText, Passport,
+    SessionMetadata, SessionState, SessionStatus, Suspended, TwoSidedImage, VerificationSetData,
+    VerificationSetRequest, WellKnownFieldKey, biometric_request, call_event, capture_item,
+    document_request, field_key, suspended,
 };
 pub use stores::{
     AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, ReportStore, SessionStore,
@@ -106,8 +107,12 @@ impl suspended::Request {
         })
     }
 
-    pub fn consent(fields: Vec<DisplayField>) -> Self {
-        Self::Consent(ConsentRequest { fields, accepted: None })
+    pub fn consent(fields: Vec<DisplayField>, reason: LocalizedText) -> Self {
+        Self::Consent(ConsentRequest {
+            fields,
+            accepted: None,
+            reason: Some(reason),
+        })
     }
 
     pub fn verification_set(alternatives: Vec<CaptureGroup>) -> Self {

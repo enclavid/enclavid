@@ -10,7 +10,7 @@ mod sanitize;
 pub mod wasmtime_shim;
 
 pub use enclavid_host_bridge::{suspended, SessionMetadata, SessionState};
-pub use listener::{SessionChange, SessionListener};
+pub use listener::{ConsentDisclosure, SessionChange, SessionListener};
 pub use policy::{EvalArgs, RunStatus, Runner};
 /// Re-exports for API callers so they can implement `SessionListener` and
 /// build futures with the right error type without depending on

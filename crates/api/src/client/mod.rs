@@ -1,8 +1,11 @@
 //! Client-facing API: session lifecycle endpoints.
 //!
 //! Routes:
-//!   POST /api/v1/sessions             — create + activate (one shot)
-//!   GET  /api/v1/sessions/:id/status  — poll
+//!   POST /api/v1/sessions                    — create + activate (one shot)
+//!   GET  /api/v1/sessions/:id                — read session view (status,
+//!                                              policy, disclosure count, ...)
+//!   GET  /api/v1/sessions/:id/disclosures    — pull age-encrypted disclosure
+//!                                              entries (opaque ciphertext)
 //!
 //! Session creation is a single endpoint: the client supplies the
 //! policy ref + K_client + disclosure pubkey in one body, the TEE
@@ -20,7 +23,8 @@
 
 mod auth;
 mod create;
-mod status;
+mod disclosures;
+mod session;
 
 use std::sync::Arc;
 
@@ -57,8 +61,12 @@ pub fn router(state: Arc<ClientState>) -> Router {
             create::post_create().layer(auth(ClientOperation::SessionCreate)),
         )
         .route(
-            "/api/v1/sessions/{id}/status",
-            status::get_status().layer(auth(ClientOperation::SessionRead)),
+            "/api/v1/sessions/{id}",
+            session::get_session().layer(auth(ClientOperation::SessionRead)),
+        )
+        .route(
+            "/api/v1/sessions/{id}/disclosures",
+            disclosures::get_disclosures().layer(auth(ClientOperation::DataRead)),
         )
         .with_state(state)
 }
