@@ -1,6 +1,7 @@
 {
     "rust-analyzer.linkedProjects": [
         "./Cargo.toml",
+        "../enclavid-host",
         "./crates/engine/tests/fixtures/test-policy/Cargo.toml"
     ]
 }

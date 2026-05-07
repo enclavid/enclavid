@@ -148,7 +148,15 @@ async fn create(
         &k_client,
     )
     .await
-    .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+    .map_err(|e| {
+        // Log the precise failure (registry transport, manifest digest
+        // mismatch, missing/malformed validator, decrypt fail, plaintext
+        // mismatch...) before collapsing to 422 — otherwise the
+        // create-session.sh smoke test sees an opaque 422 with no clue
+        // which step misfired. eprintln until we wire structured tracing.
+        eprintln!("validate_k_client failed: {e}");
+        StatusCode::UNPROCESSABLE_ENTITY
+    })?;
 
     let session_id = generate_session_id();
 

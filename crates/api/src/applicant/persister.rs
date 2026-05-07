@@ -13,9 +13,15 @@
 //! Why encryption lives here, not in engine: state and metadata are
 //! already sealed transparently inside host-bridge (`SetState` /
 //! `SetMetadata` AEAD with `tee_key`/`applicant_key`). Disclosures use
-//! a different scheme (age to `client_pk`) but the architectural slot
-//! is the same — the api layer owns "I/O + encryption keys", engine
-//! stays pure logic.
+//! a different scheme (age to the consumer's `client_disclosure_pubkey`)
+//! but the architectural slot is the same — the api layer owns "I/O +
+//! encryption keys", engine stays pure logic.
+//!
+//! Note: `client_disclosure_pubkey` ≠ `K_client`. The former is a
+//! public age recipient for outbound disclosure ciphertexts; the
+//! latter is the policy-decryption secret used at /connect to pull
+//! and decrypt the policy artifact. Different keys, different
+//! directions, different blast radii.
 //!
 //! Lifetime: one persister per `Runner::run` call. Owns session-id,
 //! the applicant key (state's inner AEAD layer), the client
@@ -31,10 +37,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::Mutex;
 
-use enclavid_engine::{ConsentDisclosure, RunError, RunResult, SessionChange, SessionListener};
+use axum::http::StatusCode;
+
+use enclavid_engine::{
+    ConsentDisclosure, RunError, RunResult, RunStatus, SessionChange, SessionListener,
+};
 use enclavid_host_bridge::{
-    AppendDisclosure, AuthN, Replay, SessionMetadata, SessionStore, SetMetadata, SetState,
-    WriteField, reason, seal_to_recipient,
+    AppendDisclosure, AuthN, Replay, SessionMetadata, SessionStatus, SessionStore, SetMetadata,
+    SetState, SetStatus, WriteField, reason, seal_to_recipient,
 };
 
 use crate::disclosure_hash;
@@ -47,8 +57,9 @@ pub(super) struct SessionPersister {
     /// Age recipient string (`age1...`) for disclosure entries.
     /// Pulled from session metadata at run start; provided by the
     /// platform consumer when creating the session, so the consumer
-    /// holds the matching private key.
-    pub client_pk: String,
+    /// holds the matching private key. Distinct from `K_client`
+    /// (the policy-decryption secret) — see module-level docs.
+    pub client_disclosure_pubkey: String,
     /// Session version we expect on the host. Initialized from the
     /// read that precedes the run; updated after each successful
     /// `write` so subsequent writes within the same run don't
@@ -81,7 +92,7 @@ impl SessionListener for SessionPersister {
             let sealed: Vec<Vec<u8>> = change
                 .disclosures
                 .iter()
-                .map(|d| seal_disclosure(d, &self.client_pk, &self.session_id))
+                .map(|d| seal_disclosure(d, &self.client_disclosure_pubkey, &self.session_id))
                 .collect::<Result<Vec<_>, _>>()?;
 
             let appends: Vec<AppendDisclosure> =
@@ -138,6 +149,59 @@ mismatch; persister returns Err and the run aborts cleanly.
             self.current_version.store(new_version, Ordering::SeqCst);
             Ok(())
         })
+    }
+}
+
+impl SessionPersister {
+    /// Atomically transition the session to Completed after the runner
+    /// returns `RunStatus::Completed`. Updates `metadata.status`
+    /// (TEE-trusted, AEAD-bound) and `BlobField::Status` (host-facing
+    /// TTL hint) in one Write RPC. No-op for Suspended runs — the
+    /// session continues into the next /input round.
+    ///
+    /// Idempotent under crash recovery: if a previous run already
+    /// finalized but the response was lost, replay re-runs the policy
+    /// (which fast-paths to `RunStatus::Completed`), and this method
+    /// re-applies the same status flip — the host's CAS accepts it
+    /// because `current_version` reflects the version after that
+    /// previous finalize.
+    ///
+    /// Failed / Expired transitions are intentionally NOT handled
+    /// here. Engine errors stay as Running (operationally retried);
+    /// TTL is host-side via `BlobField::Status` plaintext, never
+    /// propagated to TEE-trusted metadata.
+    pub(super) async fn finalize(&self, run_status: &RunStatus) -> Result<(), StatusCode> {
+        if !matches!(run_status, RunStatus::Completed(_)) {
+            return Ok(());
+        }
+        let mut metadata = self.metadata.lock().await;
+        metadata.status = SessionStatus::Completed as i32;
+        let expected = self.current_version.load(Ordering::SeqCst);
+        let new_version = self
+            .session_store
+            .write(
+                &self.session_id,
+                Some(expected),
+                &[
+                    &SetMetadata(&metadata) as &dyn WriteField,
+                    &SetStatus(SessionStatus::Completed),
+                ],
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .trust_unchecked::<AuthN, _>(reason!(r#"
+Version is a CAS token only — same containment as in
+on_session_change.
+            "#))
+            .trust_unchecked::<Replay, _>(reason!(r#"
+Staleness on the chained version manifests as VersionMismatch
+on this write; the handler returns 500 and the client retries
+against fresh state. Replay-side rerun re-emits the same
+status flip, idempotently.
+            "#))
+            .into_inner();
+        self.current_version.store(new_version, Ordering::SeqCst);
+        Ok(())
     }
 }
 

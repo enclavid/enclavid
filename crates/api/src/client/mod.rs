@@ -49,10 +49,14 @@ use self::auth::enforce;
 /// order. Tower's outer-runs-first ordering means this stack has to be
 /// per-route — see `auth::enforce` for the rationale.
 pub fn router(state: Arc<ClientState>) -> Router {
+    // ServiceBuilder layer order: the first `.layer(...)` is the
+    // OUTERMOST (runs first on the request). `Extension(op)` must
+    // wrap `enforce` so the operation tag is already in the request
+    // extensions by the time the middleware reads it.
     let auth = |op: ClientOperation| {
         ServiceBuilder::new()
-            .layer(from_fn_with_state(state.clone(), enforce))
             .layer(Extension(op))
+            .layer(from_fn_with_state(state.clone(), enforce))
     };
 
     Router::new()

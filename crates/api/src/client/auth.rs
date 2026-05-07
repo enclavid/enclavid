@@ -4,23 +4,24 @@
 //!
 //!     post(handler).layer(
 //!         ServiceBuilder::new()
-//!             .layer(from_fn_with_state(state, auth::enforce))   // inner
 //!             .layer(Extension(ClientOperation::Foo))            // outer
+//!             .layer(from_fn_with_state(state, auth::enforce))   // inner
 //!             .into_inner()
 //!     )
 //!
-//! Layer order in `ServiceBuilder` is outer-on-top, so the second
-//! `.layer(...)` (Extension) ends up wrapping the first (`enforce`).
-//! At runtime the request hits Extension first, which inserts the
-//! per-route operation into request extensions; then `enforce` runs and
-//! reads it via the `Extension<ClientOperation>` extractor. On success
-//! it injects `Workspace(workspace_id)` into request extensions so the
-//! handler downstream can read it; on failure short-circuits 401 / 403.
+//! Tower's `ServiceBuilder` layer order: the **first** `.layer(...)` is
+//! the outermost (runs first on the request). So `Extension(op)` wraps
+//! `enforce` — at runtime the request hits Extension first, which
+//! inserts the per-route operation into request extensions, then
+//! `enforce` runs and reads it via the `Extension<ClientOperation>`
+//! extractor. On success it injects `Workspace(workspace_id)` into
+//! request extensions so the handler downstream can read it; on
+//! failure short-circuits 401 / 403.
 //!
 //! A single auth layer at the router level wouldn't work — at that
-//! position the auth middleware is the outermost and runs before any
-//! per-route Extension would be set. The two have to live inside the
-//! same per-route stack with the right ordering.
+//! position the auth middleware would run before any per-route
+//! Extension is set. The two have to live inside the same per-route
+//! stack with the right ordering.
 
 use std::sync::Arc;
 

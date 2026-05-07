@@ -90,11 +90,14 @@ persist; same containment as above.
         session_store: state.session_store.clone(),
         session_id: session_id.clone(),
         applicant_key: applicant_key.expose_secret().to_vec(),
-        client_pk: metadata.client_disclosure_pubkey.clone(),
+        client_disclosure_pubkey: metadata.client_disclosure_pubkey.clone(),
         current_version: AtomicU64::new(version),
         metadata: Mutex::new(metadata.clone()),
     });
-    let resources = build_resources(persister);
+    // Engine takes one strong ref via the listener; we keep our own
+    // so we can call `finalize` on the same persister after the run
+    // completes (engine drops its ref when Store is consumed).
+    let resources = build_resources(persister.clone());
     let policy = lookup_policy(&state, &session_id, &metadata).await?;
 
     let (status, _session_state) = state
@@ -102,6 +105,10 @@ persist; same containment as above.
         .run(&policy, session_state, args, resources)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // No-op for Suspended; flips status to Completed atomically
+    // (metadata + host-plaintext Status) when the run terminated.
+    persister.finalize(&status).await?;
 
     Ok(Json(progress_from(status)))
 }

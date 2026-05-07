@@ -8,12 +8,17 @@ use serde::Serialize;
 
 use enclavid_host_bridge::{AuthZ, Metadata, Replay, SessionStatus, reason};
 
+use crate::dto;
 use crate::state::AppState;
 
 #[derive(Serialize)]
 pub struct StatusResponse {
-    pub initialized: bool,
-    pub completed: bool,
+    /// Lifecycle label — same wire shape as the client API's
+    /// `GET /sessions/:id` so frontends can switch on the same
+    /// strings ("running" / "completed" / "failed" / "expired").
+    /// Renders via the shared `dto::SessionStatusDef` remote.
+    #[serde(with = "dto::SessionStatusDef")]
+    pub status: SessionStatus,
 }
 
 /// Route factory. Public (no auth layer) — see `applicant::router`.
@@ -24,11 +29,11 @@ pub(super) fn get_status() -> MethodRouter<Arc<AppState>> {
 /// GET /session/:id/status — public, no auth.
 ///
 /// Frontend uses this as the first request to decide which UI flow
-/// to run. We read the encrypted metadata (AEAD-bound to
-/// session_id) and derive the booleans from `metadata.status` — the
-/// host-plaintext `BlobField::Status` is a TTL hint only and a
-/// lying host can flip it freely, so we ignore it for any
-/// applicant-visible decision.
+/// to run (continue running session / show "done" / show "ended").
+/// We read the encrypted metadata (AEAD-bound to session_id) and
+/// surface its `status` field — the host-plaintext `BlobField::Status`
+/// is a TTL hint only and a lying host can flip it freely, so we
+/// ignore it for any applicant-visible decision.
 async fn status(
     Path(session_id): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -60,14 +65,8 @@ fixes it via fresh state read. Not a security gate.
         .into_inner()
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let session_status = SessionStatus::try_from(metadata.status)
+    let status = SessionStatus::try_from(metadata.status)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(StatusResponse {
-        initialized: matches!(
-            session_status,
-            SessionStatus::Running | SessionStatus::Completed
-        ),
-        completed: session_status == SessionStatus::Completed,
-    }))
+    Ok(Json(StatusResponse { status }))
 }

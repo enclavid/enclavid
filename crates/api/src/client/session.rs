@@ -9,24 +9,9 @@ use serde::Serialize;
 use enclavid_host_bridge::{AuthZ, Metadata, Replay, SessionStatus, reason};
 
 use crate::client_state::ClientState;
+use crate::dto;
 
 use super::auth::Workspace;
-
-/// Serde "remote" definition for the proto-generated `SessionStatus`
-/// enum. Variants must mirror the foreign enum exactly; serde uses
-/// this shadow type only as a description of how to serialize the
-/// real `SessionStatus` (declared in host-bridge). Lets the JSON
-/// wire shape live in the api crate without an orphan-rule wrapper
-/// or a transport-layer serde-aware build.rs.
-#[derive(Serialize)]
-#[serde(remote = "SessionStatus", rename_all = "snake_case")]
-enum SessionStatusDef {
-    Unspecified,
-    Running,
-    Completed,
-    Failed,
-    Expired,
-}
 
 #[derive(Serialize)]
 pub struct ResolvedPolicyView {
@@ -38,9 +23,9 @@ pub struct ResolvedPolicyView {
 pub struct SessionView {
     pub session_id: String,
     /// Lifecycle label, serialized as snake_case
-    /// (`"running"`, `"completed"`, ...) via the `SessionStatusDef`
-    /// remote definition above.
-    #[serde(with = "SessionStatusDef")]
+    /// (`"running"`, `"completed"`, ...) via the shared
+    /// `dto::SessionStatusDef` remote definition.
+    #[serde(with = "dto::SessionStatusDef")]
     pub status: SessionStatus,
     pub policy: ResolvedPolicyView,
     /// The client's own reconciliation key, echoed back as supplied at

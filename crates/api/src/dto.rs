@@ -31,8 +31,29 @@ use serde::Serialize;
 use enclavid_host_bridge::{
     DisplayField as ProtoDisplayField, DocumentField as ProtoDocumentField, DocumentFieldKind,
     DocumentRole as ProtoDocumentRole, FieldKey as ProtoFieldKey,
-    LocalizedText as ProtoLocalizedText, WellKnownFieldKey, field_key,
+    LocalizedText as ProtoLocalizedText, SessionStatus, WellKnownFieldKey, field_key,
 };
+
+/// Serde "remote" definition for the proto-generated `SessionStatus`
+/// enum. Variants must mirror the foreign enum exactly; serde uses
+/// this shadow type only as a description of how to serialize the
+/// real `SessionStatus` (declared in host-bridge). Lets the JSON
+/// wire shape live in the api crate without an orphan-rule wrapper
+/// or a transport-layer serde-aware build.rs.
+///
+/// Used by both client/session.rs and applicant/status.rs via
+/// `#[serde(with = "dto::SessionStatusDef")]` on a `SessionStatus`
+/// field — same wire string ("running", "completed", ...) for both
+/// audiences.
+#[derive(Serialize)]
+#[serde(remote = "SessionStatus", rename_all = "snake_case")]
+pub enum SessionStatusDef {
+    Unspecified,
+    Running,
+    Completed,
+    Failed,
+    Expired,
+}
 
 /// Disclosure envelope schema version. Bumped only when the wire
 /// shape (envelope or any inner field shape) changes incompatibly.
