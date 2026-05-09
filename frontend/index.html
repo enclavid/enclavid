@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>Enclavid · Verification</title>
+    <!--
+      Pre-React placeholder. Renders the moment HTML is parsed, before
+      the JS bundle finishes downloading + executing — without it the
+      user sees a blank `#root` for ~200-500ms (white flash). Once
+      React mounts, `createRoot().render()` replaces the contents of
+      `#root` and `.pre-bootstrap` is gone; the styles below stop
+      applying because their selector no longer matches anything.
+
+      Inlined in <style> so no external CSS request blocks first
+      paint. Hardcoded colours (rather than the design tokens used by
+      the rest of the app) because Tailwind/index.css hasn't loaded
+      yet at this point in the request lifecycle.
+    -->
+    <style>
+      .pre-bootstrap {
+        display: flex;
+        min-height: 100dvh;
+        align-items: center;
+        justify-content: center;
+        background: #ffffff;
+      }
+      .pre-bootstrap__spinner {
+        width: 24px;
+        height: 24px;
+        border: 2px solid #b7b7b7;
+        border-top-color: transparent;
+        border-radius: 50%;
+        animation: pre-bootstrap-spin 0.8s linear infinite;
+      }
+      @keyframes pre-bootstrap-spin {
+        to { transform: rotate(360deg); }
+      }
+      @media (prefers-color-scheme: dark) {
+        .pre-bootstrap { background: #0a0a0a; }
+        .pre-bootstrap__spinner { border-color: #5a5a5a; border-top-color: transparent; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="pre-bootstrap">
+        <span class="pre-bootstrap__spinner" aria-hidden="true"></span>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
