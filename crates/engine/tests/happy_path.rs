@@ -5,6 +5,7 @@
 //! than via a build.rs — this keeps normal engine builds free of wasm tooling
 //! dependencies and nightly toolchain requirements.
 
+use std::collections::HashSet;
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -15,7 +16,7 @@ use std::sync::Arc;
 use enclavid_engine::policy::{Decision, RunResources};
 use enclavid_engine::{RunStatus, Runner, SessionChange, SessionListener, SessionState};
 use enclavid_host_bridge::{
-    Passport, SessionState as SessionStateProto, call_event, document_request, suspended,
+    Clip, SessionState as SessionStateProto, call_event, suspended,
 };
 use wit_component::ComponentEncoder;
 
@@ -43,11 +44,26 @@ async fn passport_then_consent_rejected() {
     let runner = Runner::new().unwrap();
     let component = runner.compile(component_bytes).unwrap();
 
+    // Pull the policy's `prepare-text-refs` declarations once and
+    // turn them into the engine's `registered_text_refs` set —
+    // union of identifier-only refs and the keys of localized
+    // entries. The host validates membership at every text-ref
+    // use-site, so this mirrors what the api crate does in
+    // `lookup_policy`.
+    let decls = runner.extract_texts(&component).await.unwrap();
+    let registered: Arc<HashSet<String>> = Arc::new(
+        decls
+            .identifiers
+            .into_iter()
+            .chain(decls.localized.into_iter().map(|block| block.key))
+            .collect(),
+    );
+
     let session = SessionState::default();
 
     // Round 1: evaluate → prompt-passport → Suspended.
     let (status, mut session) = runner
-        .run(&component, session, vec![], test_resources())
+        .run(&component, session, vec![], test_resources(&registered))
         .await
         .unwrap();
     assert_suspended(&status, 1);
@@ -57,7 +73,7 @@ async fn passport_then_consent_rejected() {
 
     // Round 2: replays passport → prompt-disclosure → Suspended.
     let (status, mut session) = runner
-        .run(&component, session, vec![], test_resources())
+        .run(&component, session, vec![], test_resources(&registered))
         .await
         .unwrap();
     assert_suspended(&status, 2);
@@ -67,7 +83,7 @@ async fn passport_then_consent_rejected() {
 
     // Round 3: replays both → Completed(Rejected).
     let (status, _) = runner
-        .run(&component, session, vec![], test_resources())
+        .run(&component, session, vec![], test_resources(&registered))
         .await
         .unwrap();
     match status {
@@ -110,10 +126,14 @@ fn test_policy_component() -> &'static [u8] {
 
 /// Stub host resources for the engine. The listener is a no-op — the
 /// test stays on the consent=false path so the only events fired are
-/// state-only (no disclosures), and we don't assert on them.
-fn test_resources() -> RunResources {
+/// state-only (no disclosures), and we don't assert on them. The
+/// `registered_text_refs` set is shared across rounds so every
+/// `prompt-disclosure` / `prompt-media` call passes the engine's
+/// membership check.
+fn test_resources(registered: &Arc<HashSet<String>>) -> RunResources {
     RunResources {
         listener: Arc::new(NoopListener),
+        registered_text_refs: registered.clone(),
     }
 }
 
@@ -128,16 +148,20 @@ fn assert_suspended(status: &RunStatus, round: usize) {
     }
 }
 
-/// Attach passport image to the last Suspended event's Document request.
-fn attach_passport(session: &mut SessionStateProto, image: Vec<u8>) {
+/// Attach a passport clip to the last Suspended event's Media request.
+/// The clip is a list of JPEG frames; tests use a single dummy frame
+/// at step index 0 (single-shot passport).
+fn attach_passport(session: &mut SessionStateProto, frame: Vec<u8>) {
     let ev = session.events.last_mut().expect("session log is empty");
     let Some(call_event::Status::Suspended(sus)) = ev.status.as_mut() else {
         panic!("last event is not Suspended: {:?}", ev.status);
     };
-    let Some(suspended::Request::Document(doc)) = sus.request.as_mut() else {
-        panic!("expected Document request");
+    let Some(suspended::Request::Media(media)) = sus.request.as_mut() else {
+        panic!("expected Media request");
     };
-    doc.kind = Some(document_request::Kind::Passport(Passport { image: Some(image) }));
+    media
+        .clips
+        .insert(0, Clip { frames: vec![frame] });
 }
 
 /// Attach consent=accepted to the last Suspended event's Consent request.

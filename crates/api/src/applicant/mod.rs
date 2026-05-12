@@ -63,7 +63,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/status", status::get_status())
         .route("/session/{id}/state", reset::delete_state())
         .route("/session/{id}/connect", connect::post_connect().layer(auth()))
-        .route("/session/{id}/input", input::post_input().layer(auth()))
+        .route("/session/{id}/input/{slot_id}", input::post_input().layer(auth()))
         .route("/session/{id}/report", report::post_report().layer(auth()));
 
     // Static SPA bundle — optional. Skip the fallback when

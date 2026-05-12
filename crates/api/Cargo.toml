@@ -16,7 +16,7 @@ vsock = ["enclavid-host-bridge/vsock", "dep:tokio-vsock", "dep:hyper-util", "dep
 enclavid-engine = { path = "../engine" }
 enclavid-host-bridge = { path = "../host-bridge" }
 enclavid-attestation = { path = "../attestation" }
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs"] }
 tokio = { version = "1", features = ["full"] }

@@ -138,63 +138,91 @@ message Completed {
 // UI renders based on which oneof variant is populated.
 message Suspended {
   oneof request {
-    DocumentRequest document = 1;
-    BiometricRequest biometric = 2;
-    ConsentRequest consent = 3;
-    VerificationSetRequest verification_set = 4;
+    MediaRequest media = 1;
+    ConsentRequest consent = 2;
+    VerificationSetRequest verification_set = 3;
   }
 }
 
-message DocumentRequest {
-  // Document kind + optional user-submitted data combined into one oneof.
-  // Variant = what the policy asked for; `data` inside = user's answer.
-  oneof kind {
-    Passport passport = 1;
-    IdCard id_card = 2;
-    DriversLicense drivers_license = 3;
-  }
-}
-
-message Passport {
-  optional bytes image = 1;
-}
-
-message IdCard {
-  optional TwoSidedImage images = 1;
-}
-
-message DriversLicense {
-  optional TwoSidedImage images = 1;
-}
-
-message TwoSidedImage {
-  bytes front = 1;
-  bytes back = 2;
-}
-
-message BiometricRequest {
-  oneof kind {
-    Liveness liveness = 1;
-  }
-}
-
-message Liveness {
-  LivenessMode mode = 1;
-  optional LivenessFrames frames = 2;
-}
-
-message LivenessFrames {
+// One captured artifact — a sequence of JPEG frames over ~1s. We
+// deliberately avoid a video container: each frame is pristine,
+// decoded independently by the enclave's plugin layer (no codec
+// CVE surface; inter-frame compression artefacts can't mask
+// forensic signals like noise residue or edge structure).
+message Clip {
   repeated bytes frames = 1;
 }
+
+// A capture request paired with whichever clips the applicant has
+// supplied so far. `spec.captures.len()` is the artifact's step
+// count (1 for single-shot, 2 for two-sided ID, N for multi-page).
+// `clips[i]` is the captured clip for step i; missing key = step
+// not yet filled. Engine returns the materialized `list<Clip>` to
+// policy only when every step is present.
+message MediaRequest {
+  MediaSpec spec = 1;
+  // Per-step clips. Keyed by step index so partial state survives
+  // re-suspension without ambiguity if step order ever changes.
+  map<uint32, Clip> clips = 2;
+}
+
+message MediaSpec {
+  // Overall artifact title (text-ref into policy's registry).
+  // Surfaced on every screen of the capture flow as context.
+  string label_ref = 1;
+  repeated CaptureStep captures = 2;
+}
+
+message CaptureStep {
+  // Optional text-ref naming a frontend-bundled artifact icon for
+  // the pre-capture intro screen. Goes through `prepare-text-refs`
+  // (host validates membership) so policy can't fabricate names at
+  // evaluate time; frontend dispatches against its closed SVG
+  // library, unknown names render as no icon.
+  optional string icon_ref = 1;
+  // text-ref for the pre-capture intro body, shown together with
+  // the icon BEFORE the camera turns on for this step.
+  string instructions_ref = 2;
+  // text-ref for the short on-camera overlay during capture.
+  string label_ref = 3;
+  CameraFacing camera = 4;
+  CaptureGuide guide = 5;
+  // text-ref for the post-capture preview-screen check copy.
+  string review_hint_ref = 6;
+}
+
+enum CameraFacing {
+  CAMERA_FACING_UNKNOWN = 0;
+  CAMERA_FACING_FRONT = 1;
+  CAMERA_FACING_REAR = 2;
+  CAMERA_FACING_ANY = 3;
+}
+
+message CaptureGuide {
+  oneof kind {
+    GuideNone none = 1;
+    GuideRect rect = 2;
+    GuideOval oval = 3;
+  }
+}
+
+message GuideNone {}
+message GuideRect {
+  float aspect = 1;
+}
+message GuideOval {}
 
 message ConsentRequest {
   repeated DisplayField fields = 1;
   // User's answer to the consent prompt.
   optional bool accepted = 2;
-  // Purpose-of-use statement supplied by the policy. Shown on the
-  // consent screen and persisted alongside the disclosure entry —
-  // bound as part of the user's consent record for downstream audit.
-  LocalizedText reason = 3;
+  // Reference to a constant declared by the policy via
+  // `prepare-localized-texts`. The purpose-of-use string is
+  // resolved host-side when assembling the RequestView (for the
+  // consent screen) and again at persistence time (so the consumer
+  // SDK sees the resolved multi-language label even though it
+  // doesn't have access to the policy's text registry).
+  string reason_ref = 3;
 }
 
 // OR of alternatives (DNF). User satisfies exactly one alternative by
@@ -202,106 +230,32 @@ message ConsentRequest {
 // step shows union of next items across still-viable alternatives.
 message VerificationSetRequest {
   repeated CaptureGroup alternatives = 1;
-  // User's submission: sequence of CaptureItems (from the chosen
-  // alternative) with their data fields populated.
+  // User's submission: sequence of media requests (from the chosen
+  // alternative) with their clips populated.
   optional VerificationSetData data = 2;
 }
 
 message VerificationSetData {
-  repeated CaptureItem items = 1;
+  repeated MediaRequest items = 1;
 }
 
 message CaptureGroup {
-  repeated CaptureItem items = 1;
+  // Each item is one media spec the user must satisfy (one
+  // prompt-media equivalent within this alternative).
+  repeated MediaSpec items = 1;
 }
 
-// Used both to describe a requested slot (data = None) and to carry a
-// submitted value (data = Some). Same shape, different lifecycle phase.
-message CaptureItem {
-  oneof item {
-    Passport passport = 1;
-    IdCard id_card = 2;
-    DriversLicense drivers_license = 3;
-    Liveness liveness = 4;
-  }
-}
-
-enum LivenessMode {
-  LIVENESS_MODE_UNKNOWN = 0;
-  SELFIE_VIDEO = 1;
-}
-
-// Field shown to user on consent screen. Sanitized before storage.
-//
-// `key` identifies what this field represents (typed enumeration with
-// custom escape hatch — see `FieldKey`). `value` is the stringified
-// data; format conventions are documented per-key in
-// `wit/disclosure/disclosure.wit` and not enforced at the type level.
+// Field shown to user on consent screen. Both `key` and `label` are
+// `text-ref`s into the per-policy registry built by
+// `prepare-localized-texts`. The host treats `key` as an opaque
+// identifier (no resolution — shown raw on the consent screen and
+// passed through to the sealed envelope), and resolves `label` to
+// the full set of language translations only for the applicant
+// frontend (the consumer envelope drops label entirely, see
+// `crates/api/src/dto.rs::DisplayField`).
 message DisplayField {
-  FieldKey key = 1;
-  string value = 2;
+  string key = 1;
+  string label = 2;
+  string value = 3;
 }
 
-// Identifier for a `DisplayField`. Three shapes:
-//   * `well_known` — one of the document-agnostic keys (name, DOB,
-//     nationality, sex, residence, ...).
-//   * `document_field` — a document-* key bundled with which document
-//     it refers to (passport / id-card / DL), disambiguating same-key
-//     disclosures from multiple documents.
-//   * `custom` — escape hatch with localized free-form text.
-//
-// Mirrors `wit/disclosure/disclosure.wit:field-key` — keep in sync.
-message FieldKey {
-  oneof kind {
-    WellKnownFieldKey well_known = 1;
-    DocumentField document_field = 2;
-    LocalizedText custom = 3;
-  }
-}
-
-// Document-agnostic well-known keys. Document-* keys are intentionally
-// absent — they live in `DocumentField` so the document role is part
-// of the identifier.
-enum WellKnownFieldKey {
-  WELL_KNOWN_FIELD_KEY_UNSPECIFIED = 0;
-  FIRST_NAME = 1;
-  LAST_NAME = 2;
-  MIDDLE_NAME = 3;
-  DATE_OF_BIRTH = 4;
-  PLACE_OF_BIRTH = 5;
-  NATIONALITY = 6;
-  SEX = 7;
-  COUNTRY_OF_RESIDENCE = 8;
-}
-
-// A document-* well-known key. `role` says which physical document
-// the field belongs to; `kind` says which field of that document.
-// Together they're the equivalent of e.g. "passport-number" or
-// "drivers-license-issue-date".
-message DocumentField {
-  DocumentRole role = 1;
-  DocumentFieldKind kind = 2;
-}
-
-enum DocumentRole {
-  DOCUMENT_ROLE_UNSPECIFIED = 0;
-  PASSPORT = 1;
-  ID_CARD = 2;
-  DRIVERS_LICENSE = 3;
-}
-
-enum DocumentFieldKind {
-  DOCUMENT_FIELD_KIND_UNSPECIFIED = 0;
-  NUMBER = 1;
-  ISSUING_COUNTRY = 2;
-  ISSUE_DATE = 3;
-  EXPIRY_DATE = 4;
-}
-
-// Localized free-form text used for `FieldKey.custom` and as the
-// purpose-of-use statement in `ConsentRequest.reason`. `language` is
-// a BCP-47 tag; `text` is the human-readable text in that language.
-message LocalizedText {
-  string language = 1;
-  string text = 2;
-}

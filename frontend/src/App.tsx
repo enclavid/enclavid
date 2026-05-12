@@ -9,7 +9,7 @@ import { Completed } from "@/screens/Completed";
 import { Terminated } from "@/screens/Terminated";
 import { getSessionId } from "@/lib/session";
 import { loadKey } from "@/lib/key";
-import { connect, getStatus, ApiError } from "@/lib/api";
+import { connect, getStatus, submitInput, ApiError } from "@/lib/api";
 import { verifyAttestation, type AttestationResult } from "@/lib/attestation";
 import type { SessionProgress } from "@/types";
 
@@ -41,27 +41,30 @@ export function App() {
 
   // Attestation runs in parallel with status — independent concerns,
   // result feeds the footer badge and Welcome's inline animation.
+  // ref guard makes this strict-mode safe in dev: React replays
+  // mount→unmount→mount, but we only want one network fetch.
+  const attestationFiredRef = useRef(false);
   useEffect(() => {
-    let cancelled = false;
+    if (attestationFiredRef.current) return;
+    attestationFiredRef.current = true;
     void (async () => {
       const result = await verifyAttestation();
-      if (!cancelled) setAttestation(result);
+      setAttestation(result);
     })();
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   // Status fetch + initial route normalization. Runs once per
   // session_id. Terminal statuses bypass the URL entirely; for a
   // running session we pin location to a valid sub-path.
+  // ref guard for strict-mode (see attestation comment above).
+  const statusFiredRef = useRef(false);
   useEffect(() => {
     if (!sessionId) return;
-    let cancelled = false;
+    if (statusFiredRef.current) return;
+    statusFiredRef.current = true;
     void (async () => {
       try {
         const { status } = await getStatus(sessionId);
-        if (cancelled) return;
         if (status === "completed") {
           setTerminal("completed");
           return;
@@ -95,7 +98,6 @@ export function App() {
         }
         setStatusFetched(true);
       } catch (e) {
-        if (cancelled) return;
         if (e instanceof ApiError && e.status === 404) {
           setTerminationReason(
             "We couldn't find this verification session. Request a new link from the service that sent you here.",
@@ -108,9 +110,6 @@ export function App() {
         setTerminal("terminated");
       }
     })();
-    return () => {
-      cancelled = true;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
@@ -149,6 +148,31 @@ export function App() {
     }
   }
 
+  async function submitAndRender(
+    slotId: string,
+    form: FormData,
+  ): Promise<void> {
+    const key = loadKey(sid);
+    if (!key) {
+      // Shouldn't happen on /verify (route guard ensures key exists),
+      // but throw rather than silently no-op so the caller surfaces
+      // it instead of looking like a successful submit.
+      throw new Error("No applicant key available.");
+    }
+    setError(null);
+    try {
+      const next = await submitInput(sid, slotId, key, form);
+      setProgress(next);
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? `Server returned ${e.status}.`
+          : "Could not reach the server.";
+      setError(msg);
+      throw e;
+    }
+  }
+
   if (terminal === "completed") return wrap("completed", <Completed />);
   if (terminal === "terminated")
     return wrap("terminated", <Terminated reason={terminationReason} />);
@@ -174,7 +198,11 @@ export function App() {
         />
       </Route>
       <Route path={`/session/${sid}/verify`}>
-        <Verify progress={progress} error={error} />
+        <Verify
+          progress={progress}
+          error={error}
+          onSubmit={submitAndRender}
+        />
       </Route>
       <Route>
         <Loading />

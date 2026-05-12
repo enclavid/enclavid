@@ -1,124 +1,56 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
-use tokio::sync::Mutex;
-
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path};
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{MethodRouter, post};
-use secrecy::ExposeSecret;
 
 use enclavid_engine::SessionState;
-use enclavid_host_bridge::{
-    AuthN, Passport, Replay, State as StateField, call_event, document_request, reason, suspended,
-};
+use enclavid_host_bridge::{Clip, MediaRequest, call_event, suspended};
 
+use crate::limits::APPLICANT_INPUT_BODY_LIMIT;
 use crate::state::AppState;
 
-use super::auth::CallerKey;
-use super::persister::SessionPersister;
-use super::shared::{build_resources, fetch_metadata, lookup_policy, parse_args};
-use super::views::{progress_from, SessionProgress};
+use super::shared::SessionRunCtx;
+use super::views::SessionProgress;
 
 /// Route factory. Auth attached at router level via
-/// `.layer(auth(AuthMode::Verify))` — see `applicant::router`.
+/// `.layer(auth())` — see `applicant::router`.
 pub(super) fn post_input() -> MethodRouter<Arc<AppState>> {
-    post(input)
+    post(input).layer(DefaultBodyLimit::max(APPLICANT_INPUT_BODY_LIMIT))
 }
 
-/// POST /session/:id/input — submits applicant media for the suspended
-/// step. Continues the policy flow.
+/// POST /session/:id/input/:slot_id — submits applicant media for the
+/// suspended step.
+///
+/// `slot_id` shapes today:
+///   * `media-N` — step `N` of the current prompt-media call's
+///     `spec.captures` (multipart parts = JPEG frames, in order)
+///   * `consent` — text part `accepted=true|false`
+///
+/// Mismatch between `slot_id` and the kind/shape of the current
+/// suspension returns 409 — the desync is surfaced explicitly
+/// rather than silently reinterpreting the body, which could trip
+/// fraud heuristics downstream.
 async fn input(
-    Path(session_id): Path<String>,
-    State(state): State<Arc<AppState>>,
-    CallerKey(applicant_key): CallerKey,
-    body: axum::body::Bytes,
+    Path((_, slot_id)): Path<(String, String)>,
+    mut ctx: SessionRunCtx,
+    multipart: Multipart,
 ) -> Result<Json<SessionProgress>, StatusCode> {
-    let metadata = fetch_metadata(&state, &session_id).await?;
-    let args = parse_args(&metadata)?;
-
-    // Existence is host-controlled; absence collapses to NOT_FOUND.
-    // Content of Some is AEAD-integrity-verified at decode (AuthN
-    // cleared, AuthZ implicit by holding the right applicant_key).
-    // The version seeds the persister's per-call writes within this
-    // run.
-    let ((state_opt,), version) = state
-        .session_store
-        .read(
-            &session_id,
-            (StateField {
-                applicant_key: applicant_key.expose_secret(),
-            },),
-        )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut session_state = state_opt
-        .trust_unchecked::<Replay, _>(reason!(r#"
-Stale state bounded by per-call version-CAS during the run —
-first persist fails with VersionMismatch on stomped version,
-run aborts and client retries against fresh state.
-        "#))
-        .into_inner()
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    let version = version
-        .trust_unchecked::<AuthN, _>(reason!(r#"
-Version is a CAS token only. A lying host either fails our
-writes (DoS) or stomps a concurrent winner (UX regression). No
-data leak path.
-        "#))
-        .trust_unchecked::<Replay, _>(reason!(r#"
-Staleness on the version manifests as CAS mismatch on first
-persist; same containment as above.
-        "#))
-        .into_inner();
-
-    // Attach user input to the last Suspended request's typed data field.
-    apply_input(&mut session_state, &body)?;
-
-    // Per-run persister: engine fires `on_session_change` after each
-    // committed CallEvent, persister seals disclosures to the client
-    // recipient pubkey then writes (SetState + AppendDisclosures)
-    // in one atomic SessionStore.write per host call. Concurrent
-    // /input or /connect for the same session bumps the version
-    // past us; our next write fails with VersionMismatch and the
-    // run aborts cleanly — replay from latest persisted state on
-    // retry.
-    let persister = Arc::new(SessionPersister {
-        session_store: state.session_store.clone(),
-        session_id: session_id.clone(),
-        applicant_key: applicant_key.expose_secret().to_vec(),
-        client_disclosure_pubkey: metadata.client_disclosure_pubkey.clone(),
-        current_version: AtomicU64::new(version),
-        metadata: Mutex::new(metadata.clone()),
-    });
-    // Engine takes one strong ref via the listener; we keep our own
-    // so we can call `finalize` on the same persister after the run
-    // completes (engine drops its ref when Store is consumed).
-    let resources = build_resources(persister.clone());
-    let policy = lookup_policy(&state, &session_id, &metadata).await?;
-
-    let (status, _session_state) = state
-        .runner
-        .run(&policy, session_state, args, resources)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // No-op for Suspended; flips status to Completed atomically
-    // (metadata + host-plaintext Status) when the run terminated.
-    persister.finalize(&status).await?;
-
-    Ok(Json(progress_from(status)))
+    let mut session_state = ctx.session_state.take().ok_or(StatusCode::NOT_FOUND)?;
+    apply_input(&mut session_state, &slot_id, multipart).await?;
+    Ok(Json(ctx.run(session_state).await?))
 }
 
-/// Attach applicant input to the currently-Suspended event's typed data
-/// field. MVP parsing: raw body bytes per variant (passport = single
-/// image, consent = first byte bool). ID card / drivers license /
-/// biometric / verification-set require multipart parsing — not yet
-/// implemented.
-fn apply_input(session: &mut SessionState, body: &[u8]) -> Result<(), StatusCode> {
+/// Attach applicant input to the currently-Suspended event's typed
+/// data field, dispatched by `slot_id`. Frame counts and per-frame
+/// bounds are document-specific and live in the plugin layer, not
+/// here.
+async fn apply_input(
+    session: &mut SessionState,
+    slot_id: &str,
+    mut multipart: Multipart,
+) -> Result<(), StatusCode> {
     let last = session.events.last_mut().ok_or(StatusCode::CONFLICT)?;
     let Some(call_event::Status::Suspended(sus)) = last.status.as_mut() else {
         return Err(StatusCode::CONFLICT);
@@ -127,19 +59,85 @@ fn apply_input(session: &mut SessionState, body: &[u8]) -> Result<(), StatusCode
         return Err(StatusCode::CONFLICT);
     };
 
-    match request {
-        suspended::Request::Document(doc) => match doc.kind.as_mut() {
-            Some(document_request::Kind::Passport(_)) => {
-                doc.kind = Some(document_request::Kind::Passport(Passport {
-                    image: Some(body.to_vec()),
-                }));
-            }
-            _ => return Err(StatusCode::NOT_IMPLEMENTED),
-        },
-        suspended::Request::Consent(c) => {
-            c.accepted = Some(body.first().map(|&b| b != 0).unwrap_or(false));
+    if let Some(step) = parse_media_slot(slot_id) {
+        let media = expect_media(request)?;
+        let total = media
+            .spec
+            .as_ref()
+            .map(|s| s.captures.len() as u32)
+            .unwrap_or(0);
+        if step >= total {
+            // Out-of-range step for the current spec — client is
+            // addressing a slot that doesn't exist in this prompt.
+            return Err(StatusCode::CONFLICT);
         }
-        _ => return Err(StatusCode::NOT_IMPLEMENTED),
+        let frames = collect_frames(&mut multipart).await?;
+        media.clips.insert(step, Clip { frames });
+        return Ok(());
+    }
+
+    match slot_id {
+        "consent" => {
+            let suspended::Request::Consent(c) = request else {
+                return Err(StatusCode::CONFLICT);
+            };
+            c.accepted = Some(read_consent(&mut multipart).await?);
+        }
+        _ => return Err(StatusCode::BAD_REQUEST),
     }
     Ok(())
+}
+
+/// Parse `media-N` slot ids into the step index. Returns `None` for
+/// slot ids that don't follow this pattern (consent, future shapes).
+fn parse_media_slot(slot_id: &str) -> Option<u32> {
+    slot_id.strip_prefix("media-")?.parse().ok()
+}
+
+/// Extract the `Media` payload from the current suspension. Wrong
+/// suspension kind is a 409 — the client thinks it's at a media
+/// capture step but the policy is asking for something else.
+fn expect_media(
+    request: &mut suspended::Request,
+) -> Result<&mut MediaRequest, StatusCode> {
+    match request {
+        suspended::Request::Media(m) => Ok(m),
+        _ => Err(StatusCode::CONFLICT),
+    }
+}
+
+/// Drain a multipart stream into a flat list of byte buffers, one per
+/// part. Order is preserved — used for clip frames where the per-
+/// part name is irrelevant (HTML's repeated `name="frame"` convention).
+async fn collect_frames(
+    multipart: &mut Multipart,
+) -> Result<Vec<Vec<u8>>, StatusCode> {
+    let mut frames = Vec::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+    {
+        let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+        frames.push(bytes.to_vec());
+    }
+    Ok(frames)
+}
+
+/// Pull a single `accepted=true|false` text part from a consent
+/// multipart payload. Anything else is a malformed body.
+async fn read_consent(
+    multipart: &mut Multipart,
+) -> Result<bool, StatusCode> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+    {
+        if field.name() == Some("accepted") {
+            let text = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+            return Ok(matches!(text.as_str(), "true" | "1"));
+        }
+    }
+    Err(StatusCode::BAD_REQUEST)
 }

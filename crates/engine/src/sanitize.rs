@@ -1,24 +1,45 @@
-//! Hardening for prompt_disclosure: size limits + unicode sanitization.
-//! Runs inside attested TEE code; policy cannot bypass.
+//! Hardening for the policy → host text channel. Runs inside the
+//! attested TEE; policy cannot bypass.
+//!
+//! Two surfaces are sanitised here:
+//!
+//!   1. `DisplayField`s from `prompt-disclosure` — structured consent
+//!      data shown to the applicant and persisted to the consumer.
+//!      `value` is policy-supplied free text (typically the actual
+//!      PII like "Alice"); `key` and `label` are text-refs into the
+//!      policy's registry (membership-checked + format-validated).
+//!   2. `translation` entries inside `localized-text` declarations
+//!      from `prepare-text-refs` — the registered constant strings
+//!      policy can reference at use sites. Sanitised once at
+//!      registration time, cached thereafter — never re-sanitised
+//!      at lookup.
+//!
+//! Stripping rules (control chars, BIDI overrides, zero-width chars,
+//! Unicode tag characters) are shared across both surfaces; only the
+//! length budgets differ.
 
-use crate::enclavid::disclosure::disclosure::{DisplayField, FieldKey, LocalizedText};
+use std::collections::HashSet;
 
-pub const MAX_EXPOSE_FIELDS: usize = 20;
-pub const MAX_VALUE_LENGTH: usize = 200;
-/// Generous BCP-47 cap (longest realistic tag is ~12 bytes, e.g.
-/// `zh-Hant-HK`). Anything longer is policy bug or covert channel.
-pub const MAX_CUSTOM_LANGUAGE_LENGTH: usize = 16;
-/// Custom label rendered as-is by SDKs. Same budget as old free-text
-/// label.
-pub const MAX_CUSTOM_TEXT_LENGTH: usize = 50;
-/// Purpose-of-use prose shown on the consent screen — longer than a
-/// single label since it usually describes one or two sentences worth
-/// of justification.
-pub const MAX_REASON_TEXT_LENGTH: usize = 200;
+use crate::enclavid::disclosure::disclosure::DisplayField;
+use crate::limits::{
+    MAX_EXPOSE_FIELDS, MAX_KEY_LENGTH, MAX_LANGUAGE_LENGTH, MAX_TEXT_VALUE_SOFT_CHARS,
+    MAX_VALUE_LENGTH,
+};
 
-/// Enforce structural limits. Policies exceeding them trap —
-/// this is a programming error, not user input.
-pub fn validate_fields(fields: &[DisplayField]) -> wasmtime::Result<()> {
+/// Enforce structural limits + registration on `DisplayField`s from
+/// `prompt-disclosure`. Policies exceeding them trap — this is a
+/// programming error or a covert-channel attempt, not user input.
+///
+/// Both `key` and `label` are checked against `registered` (the set
+/// of text-refs the policy declared via `prepare-localized-texts`).
+/// Membership matters because that declaration runs before the
+/// policy ever sees per-session args — refusing unregistered refs
+/// at this point blocks any "craft a text-ref string from user
+/// attribute bits at evaluate time" pattern. Unregistered = trap.
+pub fn validate_fields(
+    fields: &[DisplayField],
+    registered: &HashSet<String>,
+) -> wasmtime::Result<()> {
     if fields.len() > MAX_EXPOSE_FIELDS {
         return Err(wasmtime::Error::msg(format!(
             "prompt_disclosure exceeds {MAX_EXPOSE_FIELDS} fields"
@@ -30,46 +51,118 @@ pub fn validate_fields(fields: &[DisplayField]) -> wasmtime::Result<()> {
                 "prompt_disclosure value exceeds {MAX_VALUE_LENGTH} bytes"
             )));
         }
-        if let FieldKey::Custom(loc) = &field.key {
-            if loc.language.len() > MAX_CUSTOM_LANGUAGE_LENGTH {
-                return Err(wasmtime::Error::msg(format!(
-                    "prompt_disclosure custom language exceeds {MAX_CUSTOM_LANGUAGE_LENGTH} bytes"
-                )));
-            }
-            if loc.text.len() > MAX_CUSTOM_TEXT_LENGTH {
-                return Err(wasmtime::Error::msg(format!(
-                    "prompt_disclosure custom text exceeds {MAX_CUSTOM_TEXT_LENGTH} bytes"
-                )));
-            }
+        ensure_registered(&field.key, registered, "prompt_disclosure field key")?;
+        ensure_registered(&field.label, registered, "prompt_disclosure field label")?;
+    }
+    Ok(())
+}
+
+/// Format-validate + check membership in the policy's pre-declared
+/// text-ref set. Used at every text-ref use-site inside host fns so
+/// the engine never accepts a runtime-crafted ref. `role` is the
+/// human-readable site name (e.g. "prompt_disclosure reason",
+/// "prompt_media spec label") embedded in the error message; helps
+/// audit a trap back to the host fn that fired it.
+pub fn ensure_registered(
+    text_ref: &str,
+    registered: &HashSet<String>,
+    role: &str,
+) -> wasmtime::Result<()> {
+    validate_key_format(text_ref)?;
+    if !registered.contains(text_ref) {
+        return Err(wasmtime::Error::msg(format!(
+            "{role} text-ref '{text_ref}' is not registered in prepare-localized-texts"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate the structure of a `text-ref` key — applied at
+/// registration time (every key emitted from `prepare-text-refs`)
+/// and at use-site time (consent field key/label, media labels,
+/// consent reason). ASCII letters/digits/`-`/`_`, max 128 chars,
+/// must start with a lowercase letter. Allowing `_` alongside `-`
+/// lets policy authors keep their language-idiomatic identifier
+/// convention; either form parses cleanly and renders harmlessly
+/// on the consent screen.
+pub fn validate_key_format(key: &str) -> wasmtime::Result<()> {
+    if key.is_empty() {
+        return Err(wasmtime::Error::msg("text-ref key is empty"));
+    }
+    if key.len() > MAX_KEY_LENGTH {
+        return Err(wasmtime::Error::msg(format!(
+            "text-ref key exceeds {MAX_KEY_LENGTH} bytes"
+        )));
+    }
+    let mut chars = key.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_lowercase() {
+        return Err(wasmtime::Error::msg(
+            "text-ref key must start with lowercase ASCII letter",
+        ));
+    }
+    for c in chars {
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+            return Err(wasmtime::Error::msg(
+                "text-ref key contains invalid character (allowed: a-z, 0-9, '-', '_')",
+            ));
         }
     }
     Ok(())
 }
 
-/// Validate a consent prompt's purpose-of-use statement.
-pub fn validate_reason(reason: &LocalizedText) -> wasmtime::Result<()> {
-    if reason.language.len() > MAX_CUSTOM_LANGUAGE_LENGTH {
+/// Validate a BCP-47-shaped language tag on a `translation` entry.
+/// Cheap defensive check: letters/digits/`-`, ≤16 chars, starts with
+/// a letter. Doesn't enforce real BCP-47 grammar — that's a lot of
+/// rules for marginal benefit. Goal here is bounding cardinality
+/// and rejecting obvious garbage (multi-KB strings, embedded NULs)
+/// that policy might try to smuggle through the language field.
+pub fn validate_language(lang: &str) -> wasmtime::Result<()> {
+    if lang.is_empty() {
+        return Err(wasmtime::Error::msg("translation language is empty"));
+    }
+    if lang.len() > MAX_LANGUAGE_LENGTH {
         return Err(wasmtime::Error::msg(format!(
-            "prompt_disclosure reason language exceeds {MAX_CUSTOM_LANGUAGE_LENGTH} bytes"
+            "translation language exceeds {MAX_LANGUAGE_LENGTH} bytes"
         )));
     }
-    if reason.text.len() > MAX_REASON_TEXT_LENGTH {
-        return Err(wasmtime::Error::msg(format!(
-            "prompt_disclosure reason text exceeds {MAX_REASON_TEXT_LENGTH} bytes"
-        )));
+    let mut chars = lang.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() {
+        return Err(wasmtime::Error::msg(
+            "translation language must start with ASCII letter",
+        ));
+    }
+    for c in chars {
+        if !(c.is_ascii_alphanumeric() || c == '-') {
+            return Err(wasmtime::Error::msg(
+                "translation language contains invalid character (allowed: A-Za-z0-9, '-')",
+            ));
+        }
     }
     Ok(())
 }
 
-pub fn sanitize_localized(loc: LocalizedText) -> LocalizedText {
-    LocalizedText {
-        language: sanitize_string(&loc.language),
-        text: sanitize_string(&loc.text),
+/// Soft-sanitise a single text-entry's raw value: NFC-normalize,
+/// strip control / BIDI / zero-width chars, then truncate to a
+/// per-character budget. Bytes-level hard reject happens upstream
+/// (caller checks `value.len() <= MAX_TEXT_VALUE_HARD_BYTES` before
+/// reaching here).
+pub fn sanitize_text_value(s: &str) -> String {
+    let cleaned: String = s.chars().filter(|c| !is_stripped(*c)).collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() <= MAX_TEXT_VALUE_SOFT_CHARS {
+        return trimmed.to_string();
     }
+    // Truncate by char count, not byte count — multi-byte unicode
+    // safe.
+    trimmed
+        .chars()
+        .take(MAX_TEXT_VALUE_SOFT_CHARS)
+        .collect()
 }
 
 /// Strip invisible/control/bidi-override codepoints.
-/// Silent (no error) — sanitization is defensive, not a policy bug signal.
 pub fn sanitize_string(s: &str) -> String {
     s.chars()
         .filter(|c| !is_stripped(*c))
@@ -82,22 +175,26 @@ pub fn sanitize_fields(fields: Vec<DisplayField>) -> Vec<DisplayField> {
     fields
         .into_iter()
         .map(|f| DisplayField {
-            key: sanitize_key(f.key),
+            // `key` and `label` are `text-ref`s — already passed
+            // `validate_key_format` (ASCII kebab-case), so they
+            // contain no characters that would need stripping.
+            // `value` is policy-supplied free text and gets stripped
+            // here (control / BIDI / zero-width).
+            key: f.key,
+            label: f.label,
             value: sanitize_string(&f.value),
         })
         .collect()
 }
 
-fn sanitize_key(key: FieldKey) -> FieldKey {
-    match key {
-        FieldKey::Custom(loc) => FieldKey::Custom(sanitize_localized(loc)),
-        // Well-known variants carry no policy-controlled string content.
-        well_known => well_known,
-    }
-}
-
 fn is_stripped(c: char) -> bool {
     if c.is_control() {
+        return true;
+    }
+    // Unicode Tags block — explicitly-invisible "ASCII smuggler"
+    // codepoints used to steganographically embed bytes inside
+    // human-readable text. Stripped unconditionally.
+    if matches!(c, '\u{E0000}'..='\u{E007F}') {
         return true;
     }
     matches!(
@@ -130,19 +227,18 @@ fn is_stripped(c: char) -> bool {
 mod tests {
     use super::*;
 
-    fn known(key: FieldKey, value: &str) -> DisplayField {
+    fn field(key: &str, value: &str) -> DisplayField {
         DisplayField {
-            key,
+            key: key.to_string(),
+            label: "first-name-label".to_string(),
             value: value.to_string(),
         }
     }
 
-    fn custom(language: &str, text: &str, value: &str) -> DisplayField {
+    fn field_with_label(key: &str, label: &str, value: &str) -> DisplayField {
         DisplayField {
-            key: FieldKey::Custom(LocalizedText {
-                language: language.to_string(),
-                text: text.to_string(),
-            }),
+            key: key.to_string(),
+            label: label.to_string(),
             value: value.to_string(),
         }
     }
@@ -176,82 +272,108 @@ mod tests {
     }
 
     #[test]
+    fn strips_unicode_tag_chars() {
+        // ASCII smuggler: invisible codepoints in U+E0000..=U+E007F
+        // that map to ASCII letters/digits. A policy could otherwise
+        // hide bytes inside an otherwise plain-looking value.
+        assert_eq!(
+            sanitize_string("Alice\u{E0041}\u{E0042}\u{E0043}"),
+            "Alice"
+        );
+    }
+
+    #[test]
+    fn validate_language_accepts_bcp47_shapes() {
+        assert!(validate_language("en").is_ok());
+        assert!(validate_language("en-US").is_ok());
+        assert!(validate_language("zh-Hant-HK").is_ok());
+    }
+
+    #[test]
+    fn validate_language_rejects_garbage() {
+        assert!(validate_language("").is_err()); // empty
+        assert!(validate_language("a".repeat(MAX_LANGUAGE_LENGTH + 1).as_str()).is_err());
+        assert!(validate_language("1-bad").is_err()); // digit start
+        assert!(validate_language("en US").is_err()); // space
+        assert!(validate_language("en_US").is_err()); // underscore not BCP-47
+        assert!(validate_language("en\u{0}").is_err()); // embedded NUL
+    }
+
+    fn registered() -> HashSet<String> {
+        ["first-name", "tax-id", "first-name-label"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
     fn validate_too_many_fields_traps() {
-        let fields: Vec<_> = (0..21)
-            .map(|_| known(FieldKey::FirstName, "v"))
-            .collect();
-        assert!(validate_fields(&fields).is_err());
+        let fields: Vec<_> = (0..21).map(|_| field("first-name", "v")).collect();
+        assert!(validate_fields(&fields, &registered()).is_err());
     }
 
     #[test]
     fn validate_long_value_traps() {
         let long = "x".repeat(MAX_VALUE_LENGTH + 1);
-        assert!(validate_fields(&[known(FieldKey::FirstName, &long)]).is_err());
+        assert!(validate_fields(&[field("first-name", &long)], &registered()).is_err());
     }
 
     #[test]
-    fn validate_long_custom_language_traps() {
-        let long = "x".repeat(MAX_CUSTOM_LANGUAGE_LENGTH + 1);
-        assert!(validate_fields(&[custom(&long, "Tax ID", "v")]).is_err());
+    fn validate_invalid_key_traps() {
+        // Bad: starts with digit
+        assert!(validate_fields(&[field("1bad", "v")], &registered()).is_err());
+        // Bad: uppercase
+        assert!(validate_fields(&[field("Bad", "v")], &registered()).is_err());
+        // Bad: dot separator
+        assert!(validate_fields(&[field("a.b", "v")], &registered()).is_err());
+        // OK: kebab-case ASCII + registered
+        assert!(validate_fields(&[field("tax-id", "v")], &registered()).is_ok());
     }
 
     #[test]
-    fn validate_long_custom_text_traps() {
-        let long = "x".repeat(MAX_CUSTOM_TEXT_LENGTH + 1);
-        assert!(validate_fields(&[custom("en", &long, "v")]).is_err());
+    fn validate_unregistered_key_traps() {
+        // Well-formed but NOT in `prepare-localized-texts` — the
+        // timing-based defence: policy can't craft a fresh text-ref
+        // at evaluate time based on user attributes.
+        assert!(
+            validate_fields(&[field("loyalty-tier-ru", "v")], &registered()).is_err()
+        );
     }
 
     #[test]
-    fn validate_at_limits_ok() {
-        let value = "x".repeat(MAX_VALUE_LENGTH);
-        let language = "x".repeat(MAX_CUSTOM_LANGUAGE_LENGTH);
-        let text = "x".repeat(MAX_CUSTOM_TEXT_LENGTH);
-        let mut fields: Vec<_> = (0..MAX_EXPOSE_FIELDS - 1)
-            .map(|_| known(FieldKey::FirstName, &value))
-            .collect();
-        fields.push(custom(&language, &text, &value));
-        assert!(validate_fields(&fields).is_ok());
+    fn validate_invalid_label_traps() {
+        // Label format rules mirror key — bad label fails the same
+        // way as a bad key.
+        assert!(validate_fields(
+            &[field_with_label("first-name", "Bad", "v")],
+            &registered()
+        )
+        .is_err());
+        assert!(validate_fields(
+            &[field_with_label("first-name", "a.b", "v")],
+            &registered()
+        )
+        .is_err());
+        assert!(validate_fields(
+            &[field_with_label("first-name", "first-name-label", "v")],
+            &registered()
+        )
+        .is_ok());
     }
 
     #[test]
-    fn sanitize_strips_custom_text() {
-        let f = custom("en", "Tax\u{200B}ID", "value");
-        let cleaned = sanitize_fields(vec![f]);
-        match &cleaned[0].key {
-            FieldKey::Custom(loc) => assert_eq!(loc.text, "TaxID"),
-            _ => panic!("expected custom"),
-        }
-    }
-
-    fn reason(language: &str, text: &str) -> LocalizedText {
-        LocalizedText {
-            language: language.to_string(),
-            text: text.to_string(),
-        }
+    fn validate_unregistered_label_traps() {
+        assert!(validate_fields(
+            &[field_with_label("first-name", "unregistered-label", "v")],
+            &registered()
+        )
+        .is_err());
     }
 
     #[test]
-    fn validate_long_reason_text_traps() {
-        let long = "x".repeat(MAX_REASON_TEXT_LENGTH + 1);
-        assert!(validate_reason(&reason("en", &long)).is_err());
-    }
-
-    #[test]
-    fn validate_long_reason_language_traps() {
-        let long = "x".repeat(MAX_CUSTOM_LANGUAGE_LENGTH + 1);
-        assert!(validate_reason(&reason(&long, "ok")).is_err());
-    }
-
-    #[test]
-    fn validate_reason_at_limits_ok() {
-        let language = "x".repeat(MAX_CUSTOM_LANGUAGE_LENGTH);
-        let text = "x".repeat(MAX_REASON_TEXT_LENGTH);
-        assert!(validate_reason(&reason(&language, &text)).is_ok());
-    }
-
-    #[test]
-    fn sanitize_strips_reason_text() {
-        let cleaned = sanitize_localized(reason("en", "Required\u{200B}for compliance"));
-        assert_eq!(cleaned.text, "Requiredfor compliance");
+    fn sanitize_truncates_long_value() {
+        let long = "a".repeat(MAX_TEXT_VALUE_SOFT_CHARS + 100);
+        let cleaned = sanitize_text_value(&long);
+        assert_eq!(cleaned.chars().count(), MAX_TEXT_VALUE_SOFT_CHARS);
     }
 }

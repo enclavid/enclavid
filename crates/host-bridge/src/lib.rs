@@ -39,12 +39,10 @@ pub use proto::registry::{
 pub use registry::RegistryClient;
 pub use proto::report::{Report, ReportReason};
 pub use proto::state::{
-    BiometricRequest, CallEvent, CaptureGroup, CaptureItem, Completed, ConsentRequest,
-    DisplayField, DocumentField, DocumentFieldKind, DocumentRequest, DocumentRole, DriversLicense,
-    FieldKey, IdCard, Liveness, LivenessFrames, LivenessMode, LocalizedText, Passport,
-    SessionMetadata, SessionState, SessionStatus, Suspended, TwoSidedImage, VerificationSetData,
-    VerificationSetRequest, WellKnownFieldKey, biometric_request, call_event, capture_item,
-    document_request, field_key, suspended,
+    CallEvent, CameraFacing, CaptureGroup, CaptureGuide, CaptureStep, Clip, Completed,
+    ConsentRequest, DisplayField, GuideNone, GuideOval, GuideRect, MediaRequest, MediaSpec,
+    SessionMetadata, SessionState, SessionStatus, Suspended, VerificationSetData,
+    VerificationSetRequest, call_event, capture_guide, suspended,
 };
 pub use stores::{
     AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, ReportStore, SessionStore,
@@ -60,8 +58,11 @@ pub use stores::{
 impl std::fmt::Display for suspended::Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Document(_) => write!(f, "suspend: document"),
-            Self::Biometric(_) => write!(f, "suspend: biometric"),
+            Self::Media(m) => write!(
+                f,
+                "suspend: media ({} steps)",
+                m.spec.as_ref().map(|s| s.captures.len()).unwrap_or(0),
+            ),
             Self::Consent(_) => write!(f, "suspend: consent"),
             Self::VerificationSet(r) => {
                 write!(f, "suspend: verification-set ({} alternatives)", r.alternatives.len())
@@ -74,44 +75,34 @@ impl std::error::Error for suspended::Request {}
 
 // --- Constructor helpers ---
 //
-// Keep host-side code concise: `suspended::Request::passport().into()`
+// Keep host-side code concise: `suspended::Request::media(spec).into()`
 // rather than explicit struct/enum construction.
 
 impl suspended::Request {
-    pub fn passport() -> Self {
-        Self::Document(DocumentRequest {
-            kind: Some(document_request::Kind::Passport(Passport { image: None })),
+    /// Initial suspension — no clips captured yet. The empty map's
+    /// step indices fill in as /input arrives for each step.
+    pub fn media(spec: MediaSpec) -> Self {
+        Self::media_with(spec, Default::default())
+    }
+
+    /// Re-suspend preserving whatever clips have already been
+    /// captured. Used when policy re-invokes prompt-media and some
+    /// (but not all) steps were filled by previous /input rounds.
+    pub fn media_with(
+        spec: MediaSpec,
+        clips: std::collections::HashMap<u32, Clip>,
+    ) -> Self {
+        Self::Media(MediaRequest {
+            spec: Some(spec),
+            clips,
         })
     }
 
-    pub fn id_card() -> Self {
-        Self::Document(DocumentRequest {
-            kind: Some(document_request::Kind::IdCard(IdCard { images: None })),
-        })
-    }
-
-    pub fn drivers_license() -> Self {
-        Self::Document(DocumentRequest {
-            kind: Some(document_request::Kind::DriversLicense(DriversLicense {
-                images: None,
-            })),
-        })
-    }
-
-    pub fn liveness(mode: LivenessMode) -> Self {
-        Self::Biometric(BiometricRequest {
-            kind: Some(biometric_request::Kind::Liveness(Liveness {
-                mode: mode as i32,
-                frames: None,
-            })),
-        })
-    }
-
-    pub fn consent(fields: Vec<DisplayField>, reason: LocalizedText) -> Self {
+    pub fn consent(fields: Vec<DisplayField>, reason_ref: String) -> Self {
         Self::Consent(ConsentRequest {
             fields,
             accepted: None,
-            reason: Some(reason),
+            reason_ref,
         })
     }
 

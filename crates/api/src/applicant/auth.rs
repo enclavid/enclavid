@@ -18,6 +18,7 @@
 //! `/status` and `/state` (DELETE) are intentionally unauthenticated
 //! and bypass this layer at the router level.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{FromRequestParts, Path, Request, State};
@@ -56,10 +57,15 @@ where
 
 pub(super) async fn enforce(
     State(state): State<Arc<AppState>>,
-    Path(session_id): Path<String>,
+    // Routes carrying this middleware have variable shape ({id} only
+    // for /connect /report, {id}+{slot_id} for /input/{slot_id}). The
+    // HashMap form sidesteps per-route Path shape and lets us look up
+    // just the param we care about.
+    Path(params): Path<HashMap<String, String>>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let session_id = params.get("id").cloned().ok_or(StatusCode::BAD_REQUEST)?;
     let key = parse_bearer(&req)?;
     let key_arc = Arc::new(SecretBox::new(Box::new(key)));
 

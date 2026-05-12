@@ -1,0 +1,123 @@
+package enclavid:form;
+
+interface media {
+    use enclavid:policy/policy.{text-ref};
+
+    /// One JPEG-encoded frame, decoded independently by the enclave's
+    /// plugin layer. Bytes are pristine — no container, no inter-
+    /// frame compression that could mask forensic signals.
+    type frame = list<u8>;
+
+    /// One artifact's capture stream — typically 8–12 JPEG frames
+    /// over ~1s. Anti-replay and forensic signals (parallax, glare
+    /// drift, hand jitter) live in inter-frame differences.
+    type clip = list<frame>;
+
+    /// Which physical camera the capture step should use.
+    variant camera-facing {
+        front,                    // selfie
+        rear,                     // documents
+        any,                      // browser picks; useful for laptops without a rear lens
+    }
+
+    /// On-screen guideline shown over the camera preview. Purely UX
+    /// hint — doesn't affect the captured bytes.
+    variant capture-guide {
+        %none,                    // no overlay
+        rect(f32),                // rectangle of given width:height aspect (1.42 passport, 1.585 ID-1)
+        oval,                     // face oval for selfie / liveness
+    }
+
+    /// One step within a multi-step capture. For two-sided documents:
+    /// front + back. For multi-page documents: one step per page.
+    /// Single-shot captures (passport photo page, selfie) use a single step.
+    /// Multi-step captures within ONE prompt-media call belong to the
+    /// SAME artifact — plugins analyse them together.
+    ///
+    /// All text fields on this record (including `icon`) are
+    /// `text-ref`s into `prepare-text-refs`. The host validates
+    /// membership at every use-site; unregistered refs trap.
+    /// Two reasons the icon-name goes through text-ref rather than
+    /// being a free-form string:
+    ///
+    ///   1. **Frozen-before-evaluate.** `prepare-text-refs` runs
+    ///      before `evaluate` ever sees per-session args / clips.
+    ///      Routing icon through it blocks a policy from minting
+    ///      `passport-<user-country>` at evaluate time and using
+    ///      icon choice as a per-user signal — the registered set
+    ///      is enumerable at audit time.
+    ///   2. **Push toward well-known plugin.** The eventual
+    ///      `enclavid:well-known` plugin will export canonical
+    ///      icon-name constants. Policy imports those, gets
+    ///      type-safe-ish use-sites, never types a magic string
+    ///      by hand. text-ref keeps that migration path open while
+    ///      a free-form string would normalise hand-written names
+    ///      that never reach the plugin world.
+    ///
+    /// Frontend keeps its own bundled SVG library keyed by the
+    /// ref string. Unknown names render as no icon (graceful) —
+    /// new icons ship as a frontend release without WIT churn.
+    /// `none` (no value) skips the icon area explicitly.
+    ///
+    /// The three remaining text surfaces:
+    ///   * `instructions` — pre-capture intro body. Paired with
+    ///     `icon` to form "what you're about to do". Shown before
+    ///     the camera turns on for THIS step — even between steps
+    ///     of a multi-step capture ("now flip to the back").
+    ///   * `label` — short on-camera overlay shown during capture
+    ///     ("Photo page", "Back side").
+    ///   * `review-hint` — post-capture check on the preview screen
+    ///     ("Make sure the MRZ is sharp and free of glare").
+    record capture-step {
+        icon: option<text-ref>,
+        instructions: text-ref,
+        label: text-ref,
+        camera: camera-facing,
+        guide: capture-guide,
+        review-hint: text-ref,
+    }
+
+    /// Spec for one prompt-media call. Use multiple steps for
+    /// multi-side / multi-page captures of the same artifact. Use
+    /// multiple prompt-media calls for independent artifacts (e.g.,
+    /// shareholder passports).
+    ///
+    /// `label` is the overall artifact title surfaced as context on
+    /// every screen of the capture flow ("Your passport"). Per-step
+    /// copy — pre-capture instructions, on-camera prompt,
+    /// post-capture review — lives on `capture-step`.
+    record media-spec {
+        label: text-ref,
+        captures: list<capture-step>,
+    }
+
+    /// Capture media from the applicant. Returns one clip per
+    /// `media-spec.captures` step, in declaration order.
+    prompt-media: func(spec: media-spec) -> list<clip>;
+
+    /// AND-group: applicant must satisfy ALL items by completing the
+    /// captures each spec asks for. Each `media-spec` is one
+    /// prompt-media equivalent — order drives the UI walk.
+    record all-of {
+        items: list<media-spec>,
+    }
+
+    /// One spec's resulting clips, in the order declared by its
+    /// `media-spec.captures` step list.
+    record group-result {
+        clips: list<clip>,
+    }
+
+    /// DNF of capture groups (OR of ANDs). Applicant satisfies
+    /// exactly one alt by completing every item in it. UI walks via
+    /// progressive disclosure: at each step shows union of next
+    /// items across still-viable alternatives.
+    ///
+    /// Policy authoring guidelines:
+    /// 1. Alternatives must not be prefixes of each other — shorter
+    ///    wins in greedy UX.
+    /// 2. Options at each step should be categorically coherent
+    ///    (don't mix document choice with biometric choice at the
+    ///    same step).
+    prompt-any-of: func(any-of: list<all-of>) -> list<group-result>;
+}

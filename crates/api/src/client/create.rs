@@ -18,17 +18,10 @@ use enclavid_host_bridge::{
 };
 
 use crate::client_state::ClientState;
+use crate::limits::{MAX_EXTERNAL_REF_LEN, SESSION_ID_RANDOM_BYTES};
 use crate::policy_pull;
 
 use super::auth::Workspace;
-
-/// Length of session_id random bytes (≥ 16 = 128 bits entropy per arch doc).
-const SESSION_ID_RANDOM_BYTES: usize = 32;
-
-/// Maximum length of `external_ref`. Bounds host storage growth and
-/// keeps wire frames small. UUIDs and typical client identifiers fit
-/// comfortably.
-const MAX_EXTERNAL_REF_LEN: usize = 128;
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {

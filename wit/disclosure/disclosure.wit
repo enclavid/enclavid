@@ -1,71 +1,63 @@
 package enclavid:disclosure;
 
 interface disclosure {
-    /// Localized free-form label for `field-key.custom`. `language` is a
-    /// BCP-47 tag (e.g. `en`, `ru`, `en-GB`); `text` is the human-readable
-    /// label in that language. SDKs render `text` as-is; well-known keys
-    /// are translated by the SDK and don't need this.
-    record localized-text {
-        language: string,
-        text: string,
-    }
+    use enclavid:policy/policy.{text-ref};
 
-    /// Which physical document a `document-*` field refers to. Used to
-    /// disambiguate when a single consent prompt discloses fields from
-    /// more than one document (e.g. passport number AND drivers-license
-    /// number in the same call).
-    variant document-role {
-        passport,
-        id-card,
-        drivers-license,
-    }
-
-    /// Closed enumeration of well-known field identifiers used in consent
-    /// disclosures. Adding a variant is a breaking change to the policy
-    /// world (intentional — every new key is reviewed). `custom` is the
-    /// escape hatch for policy-specific fields not covered by the set;
-    /// SDKs render `localized-text.text` directly.
+    /// One consented field surfaced on the applicant's consent
+    /// screen and (modulo the label) included in the sealed
+    /// disclosure envelope to the consumer.
     ///
-    /// `document-*` keys carry a `document-role` payload so two
-    /// disclosures of the same field (e.g. two `document-number`s) are
-    /// unambiguous on the consumer side.
+    /// Both `key` and `label` are `text-ref`s into the policy's
+    /// `prepare-text-refs` dictionary; the host membership-checks
+    /// them at every call (unregistered ref → trap, closing the
+    /// runtime text-ref-crafting channel).
     ///
-    /// Format conventions (not enforced at the type level — sanitize
-    /// strips control chars and caps length, but format is policy's
-    /// responsibility):
-    ///   * dates           — ISO 8601, `YYYY-MM-DD`
-    ///   * countries       — ISO 3166-1 alpha-2 (`US`, `GB`)
-    ///   * sex             — `M` / `F` / `X` (per ICAO MRZ)
-    ///   * languages       — BCP-47 (`en`, `ru-RU`)
-    variant field-key {
-        first-name,
-        last-name,
-        middle-name,
-        date-of-birth,
-        place-of-birth,
-        nationality,
-        sex,
-        document-number(document-role),
-        document-issuing-country(document-role),
-        document-issue-date(document-role),
-        document-expiry-date(document-role),
-        country-of-residence,
-        custom(localized-text),
-    }
-
+    ///   * `key` is the stable machine identifier the consumer SDK
+    ///     uses for typed mapping. The host treats it as an opaque
+    ///     string and **always shows it raw** on the consent screen.
+    ///     Two complementary defences against a policy that tries
+    ///     to encode categorical data (country, gender, bucket id,
+    ///     ...) into key cardinality:
+    ///       (a) Pre-registration in `prepare-text-refs` — the set
+    ///           is frozen before any per-session input reaches the
+    ///           policy, so a fresh `passport-number-<user-country>`
+    ///           can't be minted at evaluate time.
+    ///       (b) Visibility on the consent UI — the raw text-ref
+    ///           is displayed alongside the resolved label for any
+    ///           non-canonical key, so any pre-registered variant
+    ///           the policy picks at runtime is staring the user
+    ///           in the face before they tap Allow.
+    ///     Convention: pick stable, human-readable kebab/snake-case
+    ///     names (`passport-number`, `first-name`) for routine
+    ///     fields so the consumer SDK can map by literal; unusual
+    ///     names trigger the consent UI's "custom" highlight.
+    ///   * `label` is the human-readable field name. The host
+    ///     resolves it via the policy's text registry into the full
+    ///     set of language translations; the frontend picks the
+    ///     user's locale. Resolved label is sent to the frontend
+    ///     **only** — it never reaches the sealed envelope, closing
+    ///     any covert translation channel where non-user-locale
+    ///     variants might otherwise smuggle data to the consumer.
+    ///
+    /// `value` is the policy-supplied data. Sanitised host-side
+    /// (control chars / BIDI overrides / zero-width / Unicode-tag
+    /// chars stripped, length-bounded to 200 bytes); format is
+    /// policy's call.
     record display-field {
-        key: field-key,
+        key: text-ref,
+        label: text-ref,
         value: string,
     }
 
-    /// Ask the applicant to consent to disclosing the listed fields to
-    /// the platform consumer. `reason` is the purpose-of-use statement
-    /// shown on the consent screen and persisted alongside the
-    /// disclosure entry — bound as part of the user's consent record so
-    /// downstream audit can answer "why was this shared?". Policy must
-    /// supply it explicitly; there is no default.
+    /// Ask the applicant to consent to disclosing the listed fields
+    /// to the platform consumer. `reason` is the purpose-of-use
+    /// statement shown on the consent screen and persisted alongside
+    /// the disclosure entry — bound as part of the user's consent
+    /// record so downstream audit can answer "why was this shared?".
+    /// Policy must supply it explicitly via a constant declared in
+    /// `prepare-text-refs`; there is no default.
     prompt-disclosure: func(
         fields: list<display-field>,
-        reason: localized-text,
+        reason: text-ref,
     ) -> bool;
 }

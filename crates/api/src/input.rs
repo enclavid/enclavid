@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use enclavid_engine::EvalArgs;
 
-pub const MAX_INPUT_SIZE: usize = 1024;
+use crate::limits::MAX_MATCH_INPUT_SIZE;
 
 #[derive(Debug)]
 pub enum InputError {
@@ -22,7 +22,7 @@ pub enum InputError {
 impl std::fmt::Display for InputError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::TooLarge => write!(f, "input exceeds {MAX_INPUT_SIZE} bytes"),
+            Self::TooLarge => write!(f, "input exceeds {MAX_MATCH_INPUT_SIZE} bytes"),
             Self::InvalidJson => write!(f, "input is not valid JSON"),
             Self::NotAnObject => write!(f, "input must be a JSON object"),
             Self::NestedValue => write!(f, "input values must be scalars (no objects or arrays)"),
@@ -38,7 +38,7 @@ pub fn parse_input(bytes: &[u8]) -> Result<Vec<(String, EvalArgs)>, InputError> 
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
-    if bytes.len() > MAX_INPUT_SIZE {
+    if bytes.len() > MAX_MATCH_INPUT_SIZE {
         return Err(InputError::TooLarge);
     }
     let root: Value = serde_json::from_slice(bytes).map_err(|_| InputError::InvalidJson)?;
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn rejects_oversized() {
-        let big = vec![b'x'; MAX_INPUT_SIZE + 1];
+        let big = vec![b'x'; MAX_MATCH_INPUT_SIZE + 1];
         let err = parse_input(&big).unwrap_err();
         assert!(matches!(err, InputError::TooLarge));
     }

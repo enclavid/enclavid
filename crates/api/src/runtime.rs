@@ -12,6 +12,17 @@ use moka::future::Cache;
 
 use enclavid_engine::{Component, Runner};
 
+use crate::text_registry::TextRegistry;
+
+/// Per-session compiled policy artifact: the wasmtime `Component`
+/// plus the localized-text registry the policy declared via
+/// `prepare-localized-texts`. Both are immutable for the lifetime of
+/// the session entry.
+pub struct PolicyEntry {
+    pub component: Arc<Component>,
+    pub texts: Arc<TextRegistry>,
+}
+
 /// Cache of compiled policy components, keyed by session_id.
 ///
 /// Compiled at /init from the decrypted wasm bytes; looked up on every
@@ -20,7 +31,7 @@ use enclavid_engine::{Component, Runner};
 /// `Engine` that produced these components — they are NOT portable across
 /// engines, so all states sharing this cache must reference the same
 /// `Runner` Arc below.
-pub type SessionPolicyCache = Cache<String, Arc<Component>>;
+pub type SessionPolicyCache = Cache<String, Arc<PolicyEntry>>;
 
 pub fn new_policy_cache() -> SessionPolicyCache {
     Cache::builder()

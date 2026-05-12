@@ -92,7 +92,13 @@ impl SessionListener for SessionPersister {
             let sealed: Vec<Vec<u8>> = change
                 .disclosures
                 .iter()
-                .map(|d| seal_disclosure(d, &self.client_disclosure_pubkey, &self.session_id))
+                .map(|d| {
+                    seal_disclosure(
+                        d,
+                        &self.client_disclosure_pubkey,
+                        &self.session_id,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
 
             let appends: Vec<AppendDisclosure> =
@@ -223,7 +229,17 @@ fn seal_disclosure(
     let envelope = DisclosureEnvelope {
         version: ENVELOPE_VERSION,
         session_id: session_id.to_string(),
-        fields: d.fields.iter().map(dto::DisplayField::from).collect(),
+        // Envelope carries `{ key, value }` only — no label. Consumer
+        // dispatches by typed `key`; the per-session policy text
+        // registry stays inside the TEE so its multi-language
+        // translations never reach the consumer (closing the covert
+        // channel where non-user-locale variants would otherwise
+        // travel in `LocalizedText`).
+        fields: d
+            .fields
+            .iter()
+            .map(dto::display_field_from_proto)
+            .collect(),
     };
     let json = serde_json::to_vec(&envelope)
         .map_err(|e| RunError::msg(format!("disclosure JSON encode: {e}")))?;

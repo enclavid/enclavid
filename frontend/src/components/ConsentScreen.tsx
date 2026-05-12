@@ -10,14 +10,46 @@
 //
 // Sanitization of invisible/control/bidi codepoints is performed server-side
 // in `crates/engine/src/sanitize.rs` before the fields reach this component.
+//
+// Custom-key visual treatment:
+// Each field carries a policy-declared `key` text-ref. For keys not in
+// `KNOWN_GOOD_KEYS` the row is highlighted (left border + tinted
+// background) and the raw text-ref is shown alongside the label. This
+// is the visibility check against a policy that tries to encode
+// categorical data (country, gender, ...) via key cardinality —
+// anything off-canon flags itself before the user taps Allow.
 
-export type DisplayField = {
-  label: string;
-  value: string;
-};
+import { pickLocalized } from "@/lib/i18n";
+import type { ConsentFieldView } from "@/types";
+
+/// Canonical keys the consent UI treats as "ordinary". Adding a key
+/// here is a frontend UX call (just suppresses the raw-ref display);
+/// the backend is unaware. Keep snake_case-or-kebab-case spellings
+/// matching what policies use as text-refs.
+const KNOWN_GOOD_KEYS = new Set<string>([
+  "passport-number",
+  "id-card-number",
+  "drivers-license-number",
+  "first-name",
+  "last-name",
+  "middle-name",
+  "full-name",
+  "date-of-birth",
+  "gender",
+  "nationality",
+  "residence-country",
+  "document-expiry",
+  "document-issued",
+  "document-issuing-country",
+  "address",
+  "email",
+  "phone",
+  "tax-id",
+]);
 
 export type ConsentScreenProps = {
-  fields: DisplayField[];
+  fields: ConsentFieldView[];
+  reasonText: string;
   onAllow: () => void;
   onDeny: () => void;
   onReport: () => void;
@@ -33,10 +65,31 @@ const valueStyle: React.CSSProperties = {
   unicodeBidi: "plaintext",
 };
 
-export function ConsentScreen({ fields, onAllow, onDeny, onReport }: ConsentScreenProps) {
+const customRowStyle: React.CSSProperties = {
+  borderLeft: "3px solid #d97706",
+  backgroundColor: "rgba(217, 119, 6, 0.06)",
+};
+
+const customRefStyle: React.CSSProperties = {
+  fontFamily: "monospace",
+  fontSize: "0.75em",
+  opacity: 0.75,
+  marginLeft: "0.4em",
+  direction: "ltr",
+  unicodeBidi: "plaintext",
+};
+
+export function ConsentScreen({
+  fields,
+  reasonText,
+  onAllow,
+  onDeny,
+  onReport,
+}: ConsentScreenProps) {
   return (
     <div>
       <h2>Review what will be shared</h2>
+      <p>{reasonText}</p>
       <p>
         Review carefully. Only tap Allow if you agree with every field below.
         If anything looks unexpected, tap Deny or Report.
@@ -44,12 +97,18 @@ export function ConsentScreen({ fields, onAllow, onDeny, onReport }: ConsentScre
 
       <table>
         <tbody>
-          {fields.map((f, i) => (
-            <tr key={i}>
-              <td>{f.label}</td>
-              <td style={valueStyle}>{f.value}</td>
-            </tr>
-          ))}
+          {fields.map((f, i) => {
+            const isCustom = !KNOWN_GOOD_KEYS.has(f.key);
+            return (
+              <tr key={i} style={isCustom ? customRowStyle : undefined}>
+                <td>
+                  {pickLocalized(f.label)}
+                  {isCustom && <span style={customRefStyle}>({f.key})</span>}
+                </td>
+                <td style={valueStyle}>{f.value}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
 

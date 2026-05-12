@@ -68,7 +68,20 @@ impl Replay {
                 )));
             }
             if let Some(call_event::Status::Completed(c)) = &ev.status {
-                let decoded = bincode::deserialize(&c.result).map_err(wasmtime::Error::from)?;
+                // bincode error messages can leak type-layout shape
+                // ("unexpected variant index 7 for enum X") which
+                // is internal info the caller has no business
+                // seeing. Log details to stderr (inside TEE, never
+                // host-visible) and surface a generic error.
+                let decoded = bincode::deserialize(&c.result).map_err(|e| {
+                    eprintln!(
+                        "replay deserialize failed for fn {}: {e}",
+                        ev.fn_name,
+                    );
+                    wasmtime::Error::msg(
+                        "replay deserialize failed (corrupt session state)",
+                    )
+                })?;
                 self.cursor += 1;
                 return Ok(CallResponse::Cached(decoded));
             }

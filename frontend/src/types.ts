@@ -16,53 +16,91 @@ export type StatusResponse = {
   status: SessionStatus;
 };
 
-// --- Consent display fields (mirror dto::FieldKey) ---
+// --- Consent display fields (mirror dto::DisplayField) ---
 
-export type DocumentRole = "passport" | "id_card" | "drivers_license" | "unknown";
-
-export type FieldKey =
-  | { key: "first-name" }
-  | { key: "last-name" }
-  | { key: "middle-name" }
-  | { key: "date-of-birth" }
-  | { key: "place-of-birth" }
-  | { key: "nationality" }
-  | { key: "sex" }
-  | { key: "country-of-residence" }
-  | { key: "document-number"; document: DocumentRole }
-  | { key: "document-issuing-country"; document: DocumentRole }
-  | { key: "document-issue-date"; document: DocumentRole }
-  | { key: "document-expiry-date"; document: DocumentRole }
-  | { key: "custom"; language: string; text: string }
-  | { key: "unknown" };
-
-// `key` is flattened into the same JSON object as `value` via
-// `#[serde(flatten)]` on the Rust side — so the TS type is the union
-// of FieldKey + a `value` string.
-export type DisplayField = FieldKey & { value: string };
-
-export type LocalizedText = {
+/// One translation row: the human-readable `text` in a specific
+/// `language`. Frontend picks the row matching the user's locale
+/// with fallback to `en` then any.
+export type LocalizedString = {
   language: string;
   text: string;
 };
 
+/// Full translation set for one `text-ref`. Empty list = policy
+/// declared no translations for this slot (defensive — engine traps
+/// on unresolved refs before they reach this layer).
+///
+/// Mirror of `dto::Translations`. Named for what it actually
+/// contains; the WIT-level concept `localized-text` is `{key +
+/// translations}`, a different shape.
+export type Translations = LocalizedString[];
+
+/// One consented field as it appears on the applicant's consent
+/// screen. `key` is the policy-declared text-ref — opaque string,
+/// shown raw on the consent UI for non-canonical names (see
+/// `KNOWN_GOOD_KEYS` in `components/ConsentScreen`). `label` is the
+/// host-resolved multi-language text (`pickLocalized` picks the
+/// user's locale). `value` is the actual data.
+///
+/// Mirror of `dto::ConsentFieldView`. Distinct from the
+/// sealed-envelope `DisplayField` shape (`{ key, value }` only) on
+/// the consumer side — the frontend never reads the envelope, so
+/// only this view shape is modelled here.
+export type ConsentFieldView = {
+  key: string;
+  label: Translations;
+  value: string;
+};
+
 // --- Suspended request shapes (mirror RequestView) ---
 
-export type LivenessMode = "selfie_video" | "unknown";
+export type CameraFacing = "front" | "rear" | "any";
 
-export type CaptureItem =
-  | { kind: "passport" }
-  | { kind: "id_card" }
-  | { kind: "drivers_license" }
-  | { kind: "liveness"; mode: LivenessMode };
+export type CaptureGuide =
+  | { kind: "none" }
+  | { kind: "rect"; aspect: number }
+  | { kind: "oval" };
+
+export type CaptureStep = {
+  /// Optional text-ref naming a frontend-bundled artifact icon.
+  /// `null` skips the icon area entirely. Otherwise the frontend
+  /// looks the name up in its bundled SVG library; unknown names
+  /// render as no icon (graceful fallback across host releases —
+  /// new policies can request new icons without breaking old
+  /// frontends).
+  icon: string | null;
+  /// Pre-capture intro body, paired with `icon` on the intro
+  /// screen for this step.
+  instructions: Translations;
+  /// Short on-camera overlay text shown during capture.
+  label: Translations;
+  camera: CameraFacing;
+  guide: CaptureGuide;
+  /// Post-capture review-screen copy ("Make sure the MRZ is sharp,
+  /// no glare"). Policy-supplied via `capture-step.review-hint` so
+  /// each artifact type gets its own targeted check.
+  review_hint: Translations;
+};
+
+export type MediaSpec = {
+  label: Translations;
+  captures: CaptureStep[];
+};
 
 export type RequestView =
-  | { kind: "passport" }
-  | { kind: "id_card" }
-  | { kind: "drivers_license" }
-  | { kind: "liveness"; mode: LivenessMode }
-  | { kind: "consent"; fields: DisplayField[]; reason: LocalizedText }
-  | { kind: "verification_set"; alternatives: CaptureItem[][] };
+  | {
+      kind: "media";
+      /// Overall artifact title surfaced on every screen of the
+      /// capture flow as context ("Your passport").
+      label: Translations;
+      captures: CaptureStep[];
+      /// Step indices already captured (subset of 0..captures.length).
+      filled: number[];
+      /// Slot id to POST the next step to (`/input/<slot_id>`).
+      next_slot_id: string;
+    }
+  | { kind: "consent"; fields: ConsentFieldView[]; reason: Translations }
+  | { kind: "verification_set"; alternatives: MediaSpec[][] };
 
 // --- /connect, /input response (mirror SessionProgress) ---
 

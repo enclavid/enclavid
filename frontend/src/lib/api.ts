@@ -50,16 +50,20 @@ export async function connect(
 
 export async function submitInput(
   sessionId: string,
+  slotId: string,
   applicantKey: Uint8Array,
-  body: ArrayBuffer | Uint8Array,
+  body: FormData,
 ): Promise<SessionProgress> {
-  const res = await fetch(`/session/${encodeURIComponent(sessionId)}/input`, {
+  // Don't set Content-Type — fetch derives `multipart/form-data;
+  // boundary=…` from the FormData itself. Setting it manually
+  // breaks the boundary detection.
+  const path =
+    `/session/${encodeURIComponent(sessionId)}` +
+    `/input/${encodeURIComponent(slotId)}`;
+  const res = await fetch(path, {
     method: "POST",
-    headers: {
-      ...bearer(applicantKey),
-      "Content-Type": "application/octet-stream",
-    },
-    body: body as BodyInit,
+    headers: bearer(applicantKey),
+    body,
   });
   return parseOrThrow(res);
 }

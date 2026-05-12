@@ -10,11 +10,9 @@
 //!     policy-internal field (debug variant, future-only flag, ...)
 //!     would silently appear in the public API. The dto module is
 //!     where we explicitly opt fields IN to the wire contract.
-//!   * **Shape control.** WIT-generated tuple-variants (`Custom(loc)`)
-//!     are incompatible with serde's `tag = "..."` flat form. dto
-//!     uses struct-variants so the JSON is a discriminated union
-//!     keyed on `key` with payload alongside (`{"key":"custom",
-//!     "language":"en","text":"..."}`).
+//!   * **Shape control.** Aliasing through serde-remote (e.g.
+//!     `SessionStatusDef`) keeps wire shapes stable independently of
+//!     foreign type evolution.
 //!
 //! Used by:
 //!   * `applicant::persister` — wraps engine's structured
@@ -22,17 +20,12 @@
 //!     encodes, age-seals to the consumer recipient.
 //!   * `applicant::views` — converts proto `Suspended::Consent` into
 //!     `RequestView::Consent` for the applicant frontend.
-//!
-//! Both consumers see the same field/key shape — a single change
-//! here updates both surfaces.
 
 use serde::Serialize;
 
-use enclavid_host_bridge::{
-    DisplayField as ProtoDisplayField, DocumentField as ProtoDocumentField, DocumentFieldKind,
-    DocumentRole as ProtoDocumentRole, FieldKey as ProtoFieldKey,
-    LocalizedText as ProtoLocalizedText, SessionStatus, WellKnownFieldKey, field_key,
-};
+use enclavid_host_bridge::{DisplayField as ProtoDisplayField, SessionStatus};
+
+use crate::text_registry::TextRegistry;
 
 /// Serde "remote" definition for the proto-generated `SessionStatus`
 /// enum. Variants must mirror the foreign enum exactly; serde uses
@@ -80,129 +73,72 @@ pub struct DisclosureEnvelope {
     pub fields: Vec<DisplayField>,
 }
 
-/// One consented field. `key` is flattened into the same JSON object
-/// as `value` — see `FieldKey` for the discriminator shape.
+/// Wire shape for the **sealed envelope to the consumer**. Just the
+/// policy-declared `key` text-ref and the data; no label.
+///
+/// Rationale: the consumer authored the policy and dispatches by the
+/// literal `key` string (`"passport-number"`, `"first-name"`, ...).
+/// Translations live in the per-session text registry inside the
+/// TEE — sending them in the envelope would otherwise leak non-user-
+/// locale variants the applicant never saw on consent.
 #[derive(Serialize)]
 pub struct DisplayField {
-    #[serde(flatten)]
-    pub key: FieldKey,
+    pub key: String,
     pub value: String,
 }
 
-/// Identifier for a `DisplayField`. Serialized as a discriminated
-/// union with `key` as the tag:
-///
-///   * Simple well-known: `{"key": "first-name"}`
-///   * Document-* keys carry the document role alongside:
-///     `{"key": "document-number", "document": "passport"}`
-///   * Custom escape hatch carries language + label text:
-///     `{"key": "custom", "language": "en", "text": "Tax ID"}`
-///   * Unknown — fallback for proto values we didn't expect (host
-///     garbage or version skew). Defensive; a well-behaved engine
-///     never emits this.
+/// Wire shape for the **applicant consent screen**. Adds the host-
+/// resolved `label` translations so the frontend can render a
+/// human-readable name without round-tripping. The raw `key`
+/// text-ref is still surfaced — the consent UI shows it for any
+/// non-canonical key as a visible flag against categorical encoding
+/// via key choice.
 #[derive(Serialize)]
-#[serde(tag = "key", rename_all = "kebab-case")]
-pub enum FieldKey {
-    FirstName,
-    LastName,
-    MiddleName,
-    DateOfBirth,
-    PlaceOfBirth,
-    Nationality,
-    Sex,
-    DocumentNumber { document: DocumentRole },
-    DocumentIssuingCountry { document: DocumentRole },
-    DocumentIssueDate { document: DocumentRole },
-    DocumentExpiryDate { document: DocumentRole },
-    CountryOfResidence,
-    Custom { language: String, text: String },
-    Unknown,
+pub struct ConsentFieldView {
+    pub key: String,
+    pub label: Translations,
+    pub value: String,
 }
 
-/// Which physical document a `document-*` field belongs to.
-#[derive(Serialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-pub enum DocumentRole {
-    Passport,
-    IdCard,
-    DriversLicense,
-    /// Defensive fallback — see `FieldKey::Unknown`.
-    Unknown,
-}
-
-/// BCP-47 language tag + human-readable text. Shared shape for the
-/// `Custom` field key payload and any other localized prose
-/// surfaced to applicants (e.g. consent `reason`).
-#[derive(Serialize, Default)]
-pub struct LocalizedText {
+/// One translation row: the human-readable `text` in a specific
+/// `language`. The applicant frontend picks the row matching the
+/// user's locale (with fallback).
+#[derive(Serialize, Clone, Default)]
+pub struct LocalizedString {
     pub language: String,
     pub text: String,
 }
 
-// --- proto → dto conversions ---
+/// Full translation set for one `text-ref`. Serializes as a JSON
+/// array of `{language, text}` rows — frontend / SDK do locale
+/// selection. (Named to reflect what it actually contains; not
+/// "LocalizedText" because that's already the WIT-level concept
+/// `{key + translations}`.)
+pub type Translations = Vec<LocalizedString>;
 
-impl From<&ProtoDisplayField> for DisplayField {
-    fn from(f: &ProtoDisplayField) -> Self {
-        Self {
-            key: f.key.as_ref().map(FieldKey::from).unwrap_or(FieldKey::Unknown),
-            value: f.value.clone(),
-        }
+// --- proto → dto conversion ---
+
+/// Envelope-shape conversion: copies `key` + `value`. No registry
+/// dependency. Used by the persister when sealing disclosures for
+/// the consumer.
+pub fn display_field_from_proto(f: &ProtoDisplayField) -> DisplayField {
+    DisplayField {
+        key: f.key.clone(),
+        value: f.value.clone(),
     }
 }
 
-impl From<&ProtoFieldKey> for FieldKey {
-    fn from(fk: &ProtoFieldKey) -> Self {
-        match fk.kind.as_ref() {
-            Some(field_key::Kind::WellKnown(wk)) => well_known_to_dto(*wk),
-            Some(field_key::Kind::DocumentField(df)) => document_field_to_dto(df),
-            Some(field_key::Kind::Custom(c)) => FieldKey::Custom {
-                language: c.language.clone(),
-                text: c.text.clone(),
-            },
-            None => FieldKey::Unknown,
-        }
-    }
-}
-
-impl From<&ProtoLocalizedText> for LocalizedText {
-    fn from(loc: &ProtoLocalizedText) -> Self {
-        Self {
-            language: loc.language.clone(),
-            text: loc.text.clone(),
-        }
-    }
-}
-
-fn well_known_to_dto(wk: i32) -> FieldKey {
-    match WellKnownFieldKey::try_from(wk).unwrap_or(WellKnownFieldKey::Unspecified) {
-        WellKnownFieldKey::FirstName => FieldKey::FirstName,
-        WellKnownFieldKey::LastName => FieldKey::LastName,
-        WellKnownFieldKey::MiddleName => FieldKey::MiddleName,
-        WellKnownFieldKey::DateOfBirth => FieldKey::DateOfBirth,
-        WellKnownFieldKey::PlaceOfBirth => FieldKey::PlaceOfBirth,
-        WellKnownFieldKey::Nationality => FieldKey::Nationality,
-        WellKnownFieldKey::Sex => FieldKey::Sex,
-        WellKnownFieldKey::CountryOfResidence => FieldKey::CountryOfResidence,
-        WellKnownFieldKey::Unspecified => FieldKey::Unknown,
-    }
-}
-
-fn document_field_to_dto(df: &ProtoDocumentField) -> FieldKey {
-    let document = document_role_to_dto(df.role);
-    match DocumentFieldKind::try_from(df.kind).unwrap_or(DocumentFieldKind::Unspecified) {
-        DocumentFieldKind::Number => FieldKey::DocumentNumber { document },
-        DocumentFieldKind::IssuingCountry => FieldKey::DocumentIssuingCountry { document },
-        DocumentFieldKind::IssueDate => FieldKey::DocumentIssueDate { document },
-        DocumentFieldKind::ExpiryDate => FieldKey::DocumentExpiryDate { document },
-        DocumentFieldKind::Unspecified => FieldKey::Unknown,
-    }
-}
-
-fn document_role_to_dto(role: i32) -> DocumentRole {
-    match ProtoDocumentRole::try_from(role).unwrap_or(ProtoDocumentRole::Unspecified) {
-        ProtoDocumentRole::Passport => DocumentRole::Passport,
-        ProtoDocumentRole::IdCard => DocumentRole::IdCard,
-        ProtoDocumentRole::DriversLicense => DocumentRole::DriversLicense,
-        ProtoDocumentRole::Unspecified => DocumentRole::Unknown,
+/// Consent-screen conversion: resolves the `label` text-ref through
+/// the policy's per-session text registry into the full set of
+/// translations. Used by the api view layer when building
+/// `RequestView::Consent` for the applicant frontend.
+pub fn consent_field_view_from_proto(
+    f: &ProtoDisplayField,
+    registry: &TextRegistry,
+) -> ConsentFieldView {
+    ConsentFieldView {
+        key: f.key.clone(),
+        label: registry.resolve(&f.label),
+        value: f.value.clone(),
     }
 }

@@ -1,9 +1,8 @@
-mod biometrics;
 mod disclosure;
-mod documents;
-mod form_group;
 mod host_state;
+pub mod limits;
 mod listener;
+mod media;
 mod replay;
 pub mod policy;
 mod sanitize;
@@ -11,7 +10,7 @@ pub mod wasmtime_shim;
 
 pub use enclavid_host_bridge::{suspended, SessionMetadata, SessionState};
 pub use listener::{ConsentDisclosure, SessionChange, SessionListener};
-pub use policy::{EvalArgs, RunStatus, Runner};
+pub use policy::{EvalArgs, LocalizedDecl, RunStatus, Runner, TextDecls};
 /// Re-exports for API callers so they can implement `SessionListener` and
 /// build futures with the right error type without depending on
 /// wasmtime directly. `RunError` is `anyhow::Error` under the hood.
@@ -26,16 +25,14 @@ wasmtime::component::bindgen!({
 
         world host {
             import enclavid:disclosure/disclosure;
-            import enclavid:form/documents;
-            import enclavid:form/biometrics;
-            import enclavid:form/form-group;
+            import enclavid:form/media;
             export enclavid:policy/policy;
         }
     "#,
     path: [
+        "../../wit/policy",
         "../../wit/disclosure",
         "../../wit/form",
-        "../../wit/policy",
     ],
     imports: { default: async | trappable },
     exports: { default: async },
