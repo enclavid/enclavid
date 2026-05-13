@@ -11,7 +11,7 @@ import { getSessionId } from "@/lib/session";
 import { loadKey } from "@/lib/key";
 import { connect, getStatus, submitInput, ApiError } from "@/lib/api";
 import { verifyAttestation, type AttestationResult } from "@/lib/attestation";
-import type { SessionProgress } from "@/types";
+import type { Decision, SessionProgress } from "@/types";
 
 // Routing model. The browser URL is the source of truth for which
 // "real" screen is shown — wouter does the path matching and the back
@@ -33,6 +33,9 @@ export function App() {
     null,
   );
   const [progress, setProgress] = useState<SessionProgress | null>(null);
+  const [completedDecision, setCompletedDecision] = useState<
+    Decision | undefined
+  >(undefined);
   const [error, setError] = useState<string | null>(null);
   // Per-mount latch on the auto-/connect effect: re-armed every time
   // the user leaves /verify so back→forward navigation re-fires the
@@ -66,6 +69,26 @@ export function App() {
       try {
         const { status } = await getStatus(sessionId);
         if (status === "completed") {
+          // /status is decisionless on purpose (public endpoint —
+          // sensitive verdict shouldn't leak via forwarded URLs).
+          // To show the right Completed variant on reload we
+          // re-fetch the decision via authenticated /connect,
+          // which requires the applicant key. If the key is gone
+          // (cleared storage, link reopened in a different
+          // browser) we fall through to the neutral fallback.
+          const key = loadKey(sessionId);
+          if (key) {
+            try {
+              const next = await connect(sessionId, key);
+              if (next.status === "completed") {
+                setCompletedDecision(next.decision);
+              }
+            } catch {
+              // Decision unknown — Completed renders its neutral
+              // fallback. Not worth a UI error, the session is
+              // already done.
+            }
+          }
           setTerminal("completed");
           return;
         }
@@ -116,8 +139,18 @@ export function App() {
   // Auto-/connect on /verify. Re-arms whenever we leave /verify so
   // back→forward through the history re-issues the call (the user may
   // have redrawn the key on the way).
+  //
+  // Gate on `statusFetched`: the status useEffect sets that flag only
+  // for running sessions. Terminal sessions (completed / failed /
+  // expired) short-circuit before setting it. Without this gate, a
+  // reload on `/verify` for an already-completed session would race
+  // the status effect's own /connect (fired to fetch the decision)
+  // against this effect's /connect — both reading the same starting
+  // version, both racing to finalize, second one failing CAS with
+  // version-mismatch.
   useEffect(() => {
     if (!sessionId) return;
+    if (!statusFetched) return;
     const onVerify = location === `/session/${sessionId}/verify`;
     if (!onVerify) {
       connectFiredRef.current = false;
@@ -129,7 +162,7 @@ export function App() {
     connectFiredRef.current = true;
     void connectAndRender(sessionId, key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location, sessionId]);
+  }, [location, sessionId, statusFetched]);
 
   if (!sessionId) return <SessionRequired />;
   const sid = sessionId;
@@ -173,7 +206,8 @@ export function App() {
     }
   }
 
-  if (terminal === "completed") return wrap("completed", <Completed />);
+  if (terminal === "completed")
+    return wrap("completed", <Completed decision={completedDecision} />);
   if (terminal === "terminated")
     return wrap("terminated", <Terminated reason={terminationReason} />);
   if (!statusFetched) return wrap("loading", <Loading />);

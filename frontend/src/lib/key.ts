@@ -18,11 +18,15 @@
 const STORAGE_PREFIX = "enclavid:key:";
 const KEY_LEN = 32;
 
-// Pointer-move events fire at ~60-120Hz, so this maps to roughly
-// 5-8 seconds of continuous drawing. Threshold is purely UX — long
-// enough that the ritual feels deliberate and the explanation copy
-// has time to be read; once met, we let the user proceed.
-const ENTROPY_TARGET_POINTS = 500;
+// Empirically maps to roughly 2-3 seconds of continuous drawing
+// on mobile. In theory pointermove fires at 60-120Hz, but browsers
+// coalesce events and users draw in short discrete strokes (lift,
+// stroke, lift, stroke) so the effective rate is closer to ~30Hz.
+// Threshold is purely UX — long enough that the ritual feels
+// deliberate, short enough that users don't get bored. Anything
+// above ~100 saturates at the same perceived duration because
+// extra points are dominated by the natural pause between strokes.
+const ENTROPY_TARGET_POINTS = 80;
 
 // --- Storage ---
 

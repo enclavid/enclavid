@@ -54,11 +54,17 @@ pub const POLICY_FUEL_BUDGET: u64 = 10_000_000_000;
 /// Allow). 20 lines on a phone is already a lot to read.
 pub const MAX_EXPOSE_FIELDS: usize = 20;
 
-/// Per-field cap on `display-field.value` byte length. Bounds the
-/// most a single consented field can carry. Larger payloads are a
-/// policy bug or a covert channel — the consumer wants stable data
-/// shapes, not free-form blobs.
-pub const MAX_VALUE_LENGTH: usize = 200;
+/// Per-field cap on `display-field.value` byte length. Generous
+/// enough for legitimate free-form data — multi-segment international
+/// addresses, long legal-entity names, multi-line composite IDs —
+/// across all UTF-8 scripts (4096 bytes ≈ 4000 ASCII chars / ~2000
+/// Cyrillic / ~1300 CJK). The consent UI handles values past its
+/// own visible-region threshold by collapsing with an explicit
+/// "Show full" toggle, so the user can always inspect the entire
+/// value before consenting. Anything beyond this byte cap is still
+/// a policy bug or covert-channel attempt — the cap is the hard
+/// outer ceiling, the UI is the in-band UX boundary.
+pub const MAX_VALUE_LENGTH: usize = 4096;
 
 /// BCP-47-shaped `translation.language` tag length cap (longest
 /// realistic tag is ~12 bytes, `zh-Hant-HK`). Anything longer is a

@@ -50,14 +50,27 @@ interface disclosure {
     }
 
     /// Ask the applicant to consent to disclosing the listed fields
-    /// to the platform consumer. `reason` is the purpose-of-use
-    /// statement shown on the consent screen and persisted alongside
-    /// the disclosure entry — bound as part of the user's consent
-    /// record so downstream audit can answer "why was this shared?".
-    /// Policy must supply it explicitly via a constant declared in
-    /// `prepare-text-refs`; there is no default.
+    /// to the platform consumer.
+    ///
+    ///   * `reason` is the purpose-of-use statement shown on the
+    ///     consent screen and persisted alongside the disclosure
+    ///     entry — bound as part of the user's consent record so
+    ///     downstream audit can answer "why was this disclosed?".
+    ///   * `requester` is the human-readable name of the party that
+    ///     requested this verification (e.g. "Acme Trading"). Shown
+    ///     prominently on the consent screen so the applicant knows
+    ///     to whom the data is being disclosed — distinguishes the
+    ///     consumer (recipient) from the Enclavid platform (which
+    ///     runs the check but never sees the data). NOT included in
+    ///     the sealed envelope: the consumer authored the policy
+    ///     and already knows their own name; including it there
+    ///     would just bloat the disclosure ciphertext.
+    ///
+    /// Both are `text-ref`s into `prepare-text-refs` (host-validates
+    /// membership; no default).
     prompt-disclosure: func(
         fields: list<display-field>,
         reason: text-ref,
+        requester: text-ref,
     ) -> bool;
 }

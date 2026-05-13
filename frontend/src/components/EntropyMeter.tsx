@@ -25,7 +25,11 @@ export function EntropyMeter({ progress, className }: Props) {
       setDisplayed((prev) => {
         const diff = targetRef.current - prev;
         if (Math.abs(diff) < 0.0005) return targetRef.current;
-        return prev + diff * 0.12;
+        // 25% per frame ≈ catches up to a sudden target jump in
+        // ~12 frames (~200ms at 60Hz). Faster than the previous
+        // 0.12 (which felt laggy — the bar trailed visibly behind
+        // the user's drawing).
+        return prev + diff * 0.25;
       });
       raf = requestAnimationFrame(tick);
     };

@@ -141,7 +141,23 @@ impl SessionListener for SessionPersister {
                 .session_store
                 .write(&self.session_id, Some(expected), &ops)
                 .await
-                .map_err(|e| RunError::msg(format!("persist failed: {e}")))?
+                .map_err(|e| {
+                    // Listener-side failures can be misclassified by
+                    // the engine as "this host fn just suspended" if
+                    // the replay log was committed before the listener
+                    // ran (the suspension event is there, even though
+                    // its persistence failed). The misclassification
+                    // is recovered from on the next round, but only
+                    // if the actual cause shows up in the logs —
+                    // hence the explicit eprintln before the RunError
+                    // string flows back through wasmtime.
+                    eprintln!(
+                        "persister.on_session_change: session_store.write \
+                         failed for {} (expected version {expected}): {e}",
+                        self.session_id,
+                    );
+                    RunError::msg(format!("persist failed: {e}"))
+                })?
                 .trust_unchecked::<AuthN, _>(reason!(r#"
 Version is a CAS token only. A lying host either fails the next
 write (DoS) or stomps a concurrent winner (UX regression). No
@@ -194,7 +210,14 @@ impl SessionPersister {
                 ],
             )
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|e| {
+                eprintln!(
+                    "persister.finalize: session_store.write failed for {} \
+                     (expected version {expected}): {e}",
+                    self.session_id,
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
             .trust_unchecked::<AuthN, _>(reason!(r#"
 Version is a CAS token only — same containment as in
 on_session_change.

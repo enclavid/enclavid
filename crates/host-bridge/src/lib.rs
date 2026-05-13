@@ -98,11 +98,16 @@ impl suspended::Request {
         })
     }
 
-    pub fn consent(fields: Vec<DisplayField>, reason_ref: String) -> Self {
+    pub fn consent(
+        fields: Vec<DisplayField>,
+        reason_ref: String,
+        requester_ref: String,
+    ) -> Self {
         Self::Consent(ConsentRequest {
             fields,
             accepted: None,
             reason_ref,
+            requester_ref,
         })
     }
 

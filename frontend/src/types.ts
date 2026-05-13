@@ -99,7 +99,18 @@ export type RequestView =
       /// Slot id to POST the next step to (`/input/<slot_id>`).
       next_slot_id: string;
     }
-  | { kind: "consent"; fields: ConsentFieldView[]; reason: Translations }
+  | {
+      kind: "consent";
+      fields: ConsentFieldView[];
+      reason: Translations;
+      /// Policy-supplied name of the party requesting verification
+      /// ("Acme Trading"). Rendered prominently in the consent
+      /// screen header so the applicant knows to whom the
+      /// disclosure is being made — distinguishes the consumer
+      /// (the receiving party) from the Enclavid platform (which
+      /// runs the check but never reads the data).
+      requester: Translations;
+    }
   | { kind: "verification_set"; alternatives: MediaSpec[][] };
 
 // --- /connect, /input response (mirror SessionProgress) ---

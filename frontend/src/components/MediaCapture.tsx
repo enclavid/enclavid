@@ -22,6 +22,13 @@ type Props = {
   /// the list to the plugin layer for analysis — no client-side
   /// warp, no video container, just the frames.
   onCapture: (form: FormData) => void;
+  /// True while the parent is submitting the form. Disables both
+  /// Retake and Use-photo buttons so the user can't double-tap or
+  /// retake mid-submit. Surfaced as a prop (not local state) so the
+  /// parent's submit lifecycle is the single source of truth — on
+  /// error the parent flips it back to false and the buttons
+  /// re-enable for retry.
+  sending?: boolean;
   /// Optional cancel callback for permission-denied flows etc.
   onCancel?: () => void;
 };
@@ -61,6 +68,7 @@ export function MediaCapture({
   stepNumber,
   totalSteps,
   onCapture,
+  sending = false,
   onCancel,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -228,6 +236,12 @@ export function MediaCapture({
 
   function confirm() {
     if (framesRef.current.length === 0) return;
+    // Guard against double-fire: the buttons themselves get
+    // disabled while `sending`, but tap-bursts on touch devices can
+    // sometimes register two onClicks before React commits the
+    // disabled state. This local check makes the second one a
+    // no-op.
+    if (sending) return;
     const form = new FormData();
     framesRef.current.forEach((blob, i) => {
       // RFC 7578 allows repeated names — axum's Multipart preserves
@@ -330,6 +344,7 @@ export function MediaCapture({
               size="lg"
               className="h-12 flex-1 bg-white/10 text-white hover:bg-white/20"
               onClick={retake}
+              disabled={sending}
             >
               Retake
             </Button>
@@ -337,8 +352,19 @@ export function MediaCapture({
               size="lg"
               className="h-12 flex-1 bg-white text-black hover:bg-white/90"
               onClick={confirm}
+              disabled={sending}
             >
-              Use photo
+              {sending ? (
+                <span className="inline-flex items-center gap-2">
+                  <span
+                    aria-hidden
+                    className="size-3.5 animate-spin rounded-full border-2 border-black/30 border-t-black"
+                  />
+                  Sending…
+                </span>
+              ) : (
+                "Use photo"
+              )}
             </Button>
           </>
         ) : (

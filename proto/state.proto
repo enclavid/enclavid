@@ -216,13 +216,20 @@ message ConsentRequest {
   repeated DisplayField fields = 1;
   // User's answer to the consent prompt.
   optional bool accepted = 2;
-  // Reference to a constant declared by the policy via
-  // `prepare-localized-texts`. The purpose-of-use string is
-  // resolved host-side when assembling the RequestView (for the
-  // consent screen) and again at persistence time (so the consumer
-  // SDK sees the resolved multi-language label even though it
-  // doesn't have access to the policy's text registry).
+  // text-ref into `prepare-text-refs`. Purpose-of-use string,
+  // resolved host-side when assembling the RequestView for the
+  // consent screen. Persisted in the replay log; NOT included in
+  // the sealed disclosure envelope (the consumer authored the
+  // policy and already knows the reason — duplicating it there
+  // would only bloat the ciphertext).
   string reason_ref = 3;
+  // text-ref into `prepare-text-refs`. Human-readable name of the
+  // party that requested this verification ("Acme Trading", etc.).
+  // Shown prominently on the consent screen so the applicant knows
+  // to whom the disclosure is being made. Persisted in the replay
+  // log; NOT included in the sealed envelope (same reasoning as
+  // reason_ref).
+  string requester_ref = 4;
 }
 
 // OR of alternatives (DNF). User satisfies exactly one alternative by

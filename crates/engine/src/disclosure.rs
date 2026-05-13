@@ -10,17 +10,22 @@ impl Host for HostState {
         &mut self,
         fields: Vec<DisplayField>,
         reason_ref: String,
+        requester_ref: String,
     ) -> wasmtime::Result<bool> {
         sanitize::validate_fields(&fields, &self.registered_text_refs)?;
-        // The reason itself is a `text-ref` — host resolves to a
-        // human-readable string when assembling the consent screen.
-        // It must be in the policy's pre-declared dictionary; that
-        // closes the runtime-crafting channel (policy can't pick a
-        // reason string at evaluate time based on user attributes).
+        // Both `reason` and `requester` are text-refs into the
+        // policy's pre-declared dictionary. Membership-check closes
+        // the runtime-crafting channel — policy can't mint either
+        // string at evaluate time based on user attributes.
         sanitize::ensure_registered(
             &reason_ref,
             &self.registered_text_refs,
             "prompt_disclosure reason",
+        )?;
+        sanitize::ensure_registered(
+            &requester_ref,
+            &self.registered_text_refs,
+            "prompt_disclosure requester",
         )?;
         let sanitized = sanitize::sanitize_fields(fields);
 
@@ -36,7 +41,12 @@ impl Host for HostState {
         let proto_fields: Vec<ProtoDisplayField> = sanitized.into_iter().map(Into::into).collect();
 
         match accepted {
-            None => Err(suspended::Request::consent(proto_fields, reason_ref).into()),
+            None => Err(suspended::Request::consent(
+                proto_fields,
+                reason_ref,
+                requester_ref,
+            )
+            .into()),
             Some(false) => Ok(false),
             Some(true) => {
                 self.pending_disclosures

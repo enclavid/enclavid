@@ -33,7 +33,6 @@ mod auth;
 mod connect;
 mod input;
 mod persister;
-mod report;
 mod reset;
 mod shared;
 mod status;
@@ -63,8 +62,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/status", status::get_status())
         .route("/session/{id}/state", reset::delete_state())
         .route("/session/{id}/connect", connect::post_connect().layer(auth()))
-        .route("/session/{id}/input/{slot_id}", input::post_input().layer(auth()))
-        .route("/session/{id}/report", report::post_report().layer(auth()));
+        .route("/session/{id}/input/{slot_id}", input::post_input().layer(auth()));
 
     // Static SPA bundle — optional. Skip the fallback when
     // `ENCLAVID_FRONTEND_DIR` is unset so dev workflows can run Vite

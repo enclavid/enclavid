@@ -33,11 +33,24 @@ pub(super) fn post_input() -> MethodRouter<Arc<AppState>> {
 /// rather than silently reinterpreting the body, which could trip
 /// fraud heuristics downstream.
 async fn input(
-    Path((_, slot_id)): Path<(String, String)>,
+    Path((session_id, slot_id)): Path<(String, String)>,
     mut ctx: SessionRunCtx,
     multipart: Multipart,
 ) -> Result<Json<SessionProgress>, StatusCode> {
-    let mut session_state = ctx.session_state.take().ok_or(StatusCode::NOT_FOUND)?;
+    let mut session_state = ctx.session_state.take().ok_or_else(|| {
+        // /input fires with the assumption that /connect already
+        // persisted at least one suspended event. If state is None
+        // here, either /connect never reached this far (frontend
+        // bug — going to /input without /connect succeeding) or
+        // /connect ran but the listener silently failed to persist
+        // (engine bug). Log enough to disambiguate either case.
+        eprintln!(
+            "/input/{slot_id}: session_state missing for {session_id} — \
+             /connect either never ran or its persistence step did \
+             not commit before this /input arrived",
+        );
+        StatusCode::NOT_FOUND
+    })?;
     apply_input(&mut session_state, &slot_id, multipart).await?;
     Ok(Json(ctx.run(session_state).await?))
 }

@@ -34,8 +34,20 @@ const KEY_PASSPORT_INSTRUCTIONS: &str = "passport-instructions";
 const KEY_PASSPORT_STEP: &str = "passport-step";
 const KEY_PASSPORT_REVIEW_HINT: &str = "passport-review-hint";
 const KEY_CONSENT_REASON: &str = "consent-reason";
+const KEY_CONSENT_REQUESTER: &str = "consent-requester";
 const KEY_PASSPORT_NUMBER: &str = "passport-number";
 const KEY_PASSPORT_NUMBER_LABEL: &str = "passport-number-label";
+/// Deliberately off-canon — exercises the consent screen's
+/// "non-standard key" warning UX. A real policy with this would
+/// trip the amber-tinted row + "custom" badge.
+const KEY_RISK_CATEGORY: &str = "risk-category";
+const KEY_RISK_CATEGORY_LABEL: &str = "risk-category-label";
+/// Canonical key, but the value is intentionally close to
+/// `MAX_VALUE_LENGTH` (200 bytes) — stress-tests the consent
+/// screen's `break-all` wrapping on a realistic multi-segment
+/// address that's right at the engine-enforced ceiling.
+const KEY_ADDRESS: &str = "address";
+const KEY_ADDRESS_LABEL: &str = "address-label";
 
 impl Guest for TestPolicy {
     fn prepare_text_refs() -> Vec<TextDecl> {
@@ -90,10 +102,33 @@ impl Guest for TestPolicy {
                 }],
             }),
             TextDecl::Localized(LocalizedText {
+                key: KEY_CONSENT_REQUESTER.into(),
+                translations: vec![Translation {
+                    language: "en".into(),
+                    value: "Enclavid Test Co".into(),
+                }],
+            }),
+            TextDecl::Localized(LocalizedText {
                 key: KEY_PASSPORT_NUMBER_LABEL.into(),
                 translations: vec![Translation {
                     language: "en".into(),
                     value: "Passport number".into(),
+                }],
+            }),
+            TextDecl::Identifier(KEY_RISK_CATEGORY.into()),
+            TextDecl::Localized(LocalizedText {
+                key: KEY_RISK_CATEGORY_LABEL.into(),
+                translations: vec![Translation {
+                    language: "en".into(),
+                    value: "Risk category".into(),
+                }],
+            }),
+            TextDecl::Identifier(KEY_ADDRESS.into()),
+            TextDecl::Localized(LocalizedText {
+                key: KEY_ADDRESS_LABEL.into(),
+                translations: vec![Translation {
+                    language: "en".into(),
+                    value: "Residence address".into(),
                 }],
             }),
         ]
@@ -114,12 +149,32 @@ impl Guest for TestPolicy {
             }],
         });
         let consented = prompt_disclosure(
-            &[DisplayField {
-                key: KEY_PASSPORT_NUMBER.into(),
-                label: KEY_PASSPORT_NUMBER_LABEL.into(),
-                value: "123456".into(),
-            }],
+            &[
+                DisplayField {
+                    key: KEY_PASSPORT_NUMBER.into(),
+                    label: KEY_PASSPORT_NUMBER_LABEL.into(),
+                    value: "123456".into(),
+                },
+                DisplayField {
+                    key: KEY_RISK_CATEGORY.into(),
+                    label: KEY_RISK_CATEGORY_LABEL.into(),
+                    value: "tier-3".into(),
+                },
+                DisplayField {
+                    key: KEY_ADDRESS.into(),
+                    label: KEY_ADDRESS_LABEL.into(),
+                    // ~500 chars — well past the consent screen's
+                    // 200-char collapse threshold. Exercises the
+                    // "Show full (+N chars)" toggle: visible chunk
+                    // first, expansion reveals the rest. Realistic
+                    // multi-segment international address fluffed
+                    // with extra landmarks / c/o lines to push the
+                    // length without being unrealistic.
+                    value: "Block C-42, Phase III, Sapphire Heights Apartments, Plot No. 1284/B (the building with the blue gate next to the old banyan tree), Old Industrial Estate Road, Bandra-Kurla Complex Extension, Mumbai Suburban District, Maharashtra State 400051, India. c/o The Front Desk Manager, 4th Floor, between the elevator lobby and the staircase facing east. Cross street: Junction of MG Road and Linking Road, opposite the Sai Baba Temple. Landmark: behind the Big Bazaar supermarket.".into(),
+                },
+            ],
             KEY_CONSENT_REASON,
+            KEY_CONSENT_REQUESTER,
         );
         if consented {
             Decision::Approved

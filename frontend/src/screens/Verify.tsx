@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { ConsentScreen } from "@/components/ConsentScreen";
 import { MediaCapture } from "@/components/MediaCapture";
 import { MediaInstructions } from "@/components/MediaInstructions";
+import { Spinner } from "@/components/icons";
+import { Completed } from "@/screens/Completed";
 import { pickLocalized } from "@/lib/i18n";
 import type { RequestView, SessionProgress } from "@/types";
 
@@ -18,23 +20,20 @@ type Props = {
 
 export function Verify({ progress, error, onSubmit }: Props) {
   if (!progress) {
+    // /connect either hasn't returned yet OR returned an error. With
+    // progress still null we have no request to render — show the
+    // error if one came back, otherwise stay on the loading state.
+    if (error) return <ConnectError message={error} />;
     return <Loading />;
   }
   if (progress.status === "completed") {
-    return (
-      <main
-        className="flex min-h-dvh flex-col items-center justify-center gap-4 px-6 text-center"
-        style={{
-          paddingTop: "max(env(safe-area-inset-top), 1rem)",
-          paddingBottom: "max(env(safe-area-inset-bottom), 1.5rem)",
-        }}
-      >
-        <h1 className="text-xl font-semibold">Decision: {progress.decision}</h1>
-        <p className="text-sm text-muted-foreground">
-          The verification has finished. You can close this tab.
-        </p>
-      </main>
-    );
+    // Fresh-submit path: we have the decision, hand it to
+    // `<Completed>` so the applicant sees the appropriate
+    // variant (approved / rejected / rejected_retryable / review).
+    // The reload path (App.tsx terminal short-circuit) renders
+    // `<Completed />` WITHOUT a decision — see Completed.tsx for
+    // the neutral fallback.
+    return <Completed decision={progress.decision} />;
   }
   return (
     <RequestRenderer
@@ -47,8 +46,36 @@ export function Verify({ progress, error, onSubmit }: Props) {
 
 function Loading() {
   return (
-    <main className="flex min-h-dvh items-center justify-center px-6">
-      <p className="text-sm text-muted-foreground">Connecting…</p>
+    <main
+      className="flex min-h-dvh flex-col items-center justify-center gap-4 px-6 text-center"
+      style={{
+        paddingTop: "max(env(safe-area-inset-top), 1rem)",
+        paddingBottom: "max(env(safe-area-inset-bottom), 1.5rem)",
+      }}
+    >
+      <Spinner className="size-7 text-muted-foreground" />
+      <p className="text-sm text-muted-foreground">
+        Loading verification session…
+      </p>
+    </main>
+  );
+}
+
+function ConnectError({ message }: { message: string }) {
+  return (
+    <main
+      className="flex min-h-dvh flex-col items-center justify-center gap-3 px-6 text-center"
+      style={{
+        paddingTop: "max(env(safe-area-inset-top), 1rem)",
+        paddingBottom: "max(env(safe-area-inset-bottom), 1.5rem)",
+      }}
+    >
+      <h1 className="text-xl font-semibold">Can't start verification</h1>
+      <p className="text-sm text-muted-foreground">{message}</p>
+      <p className="text-xs text-muted-foreground">
+        Try reloading the page. If the problem persists, request a new
+        link from the service that sent you here.
+      </p>
     </main>
   );
 }
@@ -138,14 +165,12 @@ function RequestRenderer({
           stepNumber={(nextIndex ?? 0) + 1}
           totalSteps={total}
           onCapture={handle}
+          sending={submitting}
         />
-        {(error || localError || submitting) && (
-          <div className="pointer-events-none fixed inset-x-0 bottom-24 z-50 flex justify-center px-6">
-            <div className="rounded-md bg-black/80 px-4 py-2 text-center text-sm text-white">
-              {submitting ? "Sending…" : (localError ?? error ?? "")}
-            </div>
-          </div>
-        )}
+        <StatusOverlay
+          submitting={submitting}
+          message={localError ?? error}
+        />
       </>
     );
   }
@@ -171,22 +196,15 @@ function RequestRenderer({
         <ConsentScreen
           fields={request.fields}
           reasonText={pickLocalized(request.reason)}
+          requesterName={pickLocalized(request.requester)}
+          sending={submitting}
           onAllow={() => void submit(true)}
           onDeny={() => void submit(false)}
-          // Report is a separate disclosure-fraud reporting flow that
-          // lives outside the engine's accept/deny path. Stub for
-          // now — wiring up the report channel is its own task.
-          onReport={() => {
-            console.warn("Report channel not yet wired.");
-          }}
         />
-        {(error || localError || submitting) && (
-          <div className="pointer-events-none fixed inset-x-0 bottom-24 z-50 flex justify-center px-6">
-            <div className="rounded-md bg-black/80 px-4 py-2 text-center text-sm text-white">
-              {submitting ? "Sending…" : (localError ?? error ?? "")}
-            </div>
-          </div>
-        )}
+        <StatusOverlay
+          submitting={submitting}
+          message={localError ?? error}
+        />
       </>
     );
   }
@@ -224,4 +242,37 @@ function parseStepIndex(slotId: string): number | null {
   if (!m) return null;
   const n = parseInt(m[1], 10);
   return Number.isFinite(n) ? n : null;
+}
+
+/// Floating panel pinned above the safe area. Two modes:
+///   - submitting → spinner + "Sending…" (no progress metering;
+///     the network call is short enough that movement-of-the-icon
+///     beats a fake percentage)
+///   - error → message text
+/// Nothing rendered when idle and no error.
+function StatusOverlay({
+  submitting,
+  message,
+}: {
+  submitting: boolean;
+  message: string | null;
+}) {
+  if (!submitting && !message) return null;
+  return (
+    <div className="pointer-events-none fixed inset-x-0 bottom-24 z-50 flex justify-center px-6">
+      <div className="rounded-md bg-black/80 px-4 py-2 text-sm text-white">
+        {submitting ? (
+          <span className="inline-flex items-center gap-2">
+            <span
+              aria-hidden
+              className="size-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white"
+            />
+            Sending…
+          </span>
+        ) : (
+          message
+        )}
+      </div>
+    </div>
+  );
 }

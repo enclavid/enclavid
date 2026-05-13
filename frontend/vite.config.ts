@@ -21,10 +21,18 @@ export default defineConfig({
   // get served as index.html. Production builds ignore this section
   // entirely — the api binary serves both static + JSON from one
   // origin (see `crates/api/src/applicant/mod.rs`).
+  //
+  // Note: `input` matches WITH a required trailing slot segment
+  // (`input/<slot_id>`) because that's the only shape the backend
+  // accepts — bare `/session/:id/input` has no route. Keeping the
+  // slot segment IN the regex is critical: without it, POSTs to
+  // `/input/media-N` silently fall through to Vite's SPA fallback
+  // and return 404 from the dev server, before the api binary ever
+  // sees the request.
   server: {
     proxy: {
       "/.well-known": API_TARGET,
-      "^/session/[^/]+/(status|state|connect|input|report)$": API_TARGET,
+      "^/session/[^/]+/(status|state|connect|input/[^/]+)$": API_TARGET,
     },
   },
 });

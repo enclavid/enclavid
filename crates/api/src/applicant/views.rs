@@ -63,6 +63,12 @@ pub enum RequestView {
     Consent {
         fields: Vec<dto::ConsentFieldView>,
         reason: dto::Translations,
+        /// Human-readable name of the party that requested this
+        /// verification, resolved from `prompt-disclosure.requester`
+        /// via the policy's text registry. Surfaced in the consent
+        /// screen header so the applicant sees exactly to whom the
+        /// disclosure is being made.
+        requester: dto::Translations,
     },
     VerificationSet {
         alternatives: Vec<Vec<MediaSpecView>>,
@@ -147,6 +153,7 @@ fn request_view(req: &suspended::Request, texts: &TextRegistry) -> RequestView {
                 .map(|f| dto::consent_field_view_from_proto(f, texts))
                 .collect(),
             reason: texts.resolve(&c.reason_ref),
+            requester: texts.resolve(&c.requester_ref),
         },
         suspended::Request::VerificationSet(vs) => RequestView::VerificationSet {
             alternatives: vs
