@@ -44,20 +44,12 @@ async fn passport_then_consent_rejected() {
     let runner = Runner::new().unwrap();
     let component = runner.compile(component_bytes).unwrap();
 
-    // Pull the policy's `prepare-text-refs` declarations once and
-    // turn them into the engine's `registered_text_refs` set —
-    // union of identifier-only refs and the keys of localized
-    // entries. The host validates membership at every text-ref
-    // use-site, so this mirrors what the api crate does in
-    // `lookup_policy`.
-    let decls = runner.extract_texts(&component).await.unwrap();
-    let registered: Arc<HashSet<String>> = Arc::new(
-        decls
-            .identifiers
-            .into_iter()
-            .chain(decls.localized.into_iter().map(|block| block.key))
-            .collect(),
-    );
+    // Load the polici manifest from the fixture's `policy.json` —
+    // single declarative file whose bytes ARE the wire format
+    // (no assembly). Engine resolves the registered text-ref set
+    // from it via `load_manifest`. Same path the api crate takes
+    // in `lookup_policy`.
+    let registered: Arc<HashSet<String>> = Arc::new(load_test_manifest());
 
     let session = SessionState::default();
 
@@ -122,6 +114,21 @@ fn test_policy_component() -> &'static [u8] {
                 .expect("componentize test-policy")
         })
         .as_slice()
+}
+
+/// Load the test-policy manifest. `policy.json` IS the wire format
+/// — no assembly, just read bytes and parse. Mirrors the api flow
+/// where `lookup_policy` reads the assets layer verbatim.
+fn load_test_manifest() -> HashSet<String> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = format!("{manifest_dir}/tests/fixtures/test-policy/policy.json");
+    let bytes = std::fs::read(&path).expect("read policy.json");
+    let decls = enclavid_engine::load_manifest(&bytes).expect("load_manifest");
+    decls
+        .identifiers
+        .into_iter()
+        .chain(decls.localized.into_iter().map(|block| block.key))
+        .collect()
 }
 
 /// Stub host resources for the engine. The listener is a no-op — the

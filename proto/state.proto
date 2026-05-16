@@ -9,16 +9,29 @@ package enclavid.state;
 // Status lives separately as the STATUS field (plaintext, host-visible
 // for TTL/cleanup).
 message SessionMetadata {
-  // Workspace (Logto organization) the session belongs to. Set at create
-  // time from the auth verdict (host-side AuthorizeClient response);
-  // never changes afterwards.
-  string workspace_id = 1;
+  // Tenant identity the session belongs to — opaque string returned by
+  // host-side AuthorizeClient. Today this happens to be the Logto
+  // organization id, but the TEE treats it as opaque: pure data-plane
+  // ownership check on subsequent calls (must equal the credential's
+  // tenant_id reported by AuthorizeClient). Set at create time from the
+  // auth verdict; never changes afterwards.
+  string tenant_id = 1;
 
-  // Policy reference resolved at create time. Tag → digest happens once,
-  // here, atomically. The digest is then frozen for the session lifetime
-  // and is what the TEE uses to pull from the registry at init time.
-  string policy_name = 2;
-  string policy_digest = 3;
+  // Full pinned OCI reference for the policy artifact, of the shape
+  // `<registry>/<repository>@sha256:<hex>`. The consumer supplies this
+  // at /sessions create — registry hostname, namespace, and content
+  // digest are all baked in. TEE extracts the digest substring for
+  // content-addressing verification at pull time; it never resolves
+  // tags. Frozen for the session lifetime.
+  string policy_ref = 2;
+  // Opaque bearer/credential payload the TEE forwards verbatim to the
+  // host on every registry pull (host attaches as `Authorization`).
+  // Empty = anonymous pull (public registry). TEE does NOT inspect
+  // (no JWT parsing, no validation) — courier semantics. Stored
+  // encrypted under TEE_key inside this metadata blob; host only sees
+  // it briefly when the pull RPC executes. See architecture.md →
+  // Registry Decoupling.
+  bytes registry_auth = 3;
 
   // Client's age secret-key (the policy-decryption key). Stored
   // encrypted under TEE_key as part of the metadata blob; never

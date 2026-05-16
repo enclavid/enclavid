@@ -4,7 +4,6 @@ import { MediaCapture } from "@/components/MediaCapture";
 import { MediaInstructions } from "@/components/MediaInstructions";
 import { Spinner } from "@/components/icons";
 import { Completed } from "@/screens/Completed";
-import { pickLocalized } from "@/lib/i18n";
 import type { RequestView, SessionProgress } from "@/types";
 
 type Props = {
@@ -195,8 +194,8 @@ function RequestRenderer({
       <>
         <ConsentScreen
           fields={request.fields}
-          reasonText={pickLocalized(request.reason)}
-          requesterName={pickLocalized(request.requester)}
+          reasonText={request.reason}
+          requesterName={request.requester}
           sending={submitting}
           onAllow={() => void submit(true)}
           onDeny={() => void submit(false)}

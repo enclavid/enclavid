@@ -1,5 +1,5 @@
 //! `METADATA` session field. Encrypted blob carrying per-session
-//! configuration (workspace_id, policy ref, ephemeral pubkey, d_*,
+//! configuration (tenant_id, policy ref, ephemeral pubkey, d_*,
 //! client disclosure pubkey, input claims, external_ref). AEAD'd with
 //! `TEE_key`; AAD = session_id binds it to the session that wrote it.
 
@@ -22,7 +22,7 @@ use super::core::{ReadField, WriteField, unwrap_scalar};
 /// `Untrusted<Option<SessionMetadata>, (AuthZ, Replay)>`. AuthN is
 /// already cleared inside `decode` by the AEAD authentication step
 /// — bytes are guaranteed to be ours and bound to this session_id.
-/// AuthZ remains open (caller checks workspace_id); Replay remains
+/// AuthZ remains open (caller checks tenant_id); Replay remains
 /// open (host may have served a stale snapshot).
 pub struct Metadata;
 
@@ -43,7 +43,7 @@ impl ReadField for Metadata {
         let scope_reason = reason!(r#"
 AEAD-decrypt under TEE_key with session_id as AAD succeeded —
 bytes are ours, bound to this session (AuthN cleared). AuthZ
-open: caller must check `workspace_id` matches the authenticated
+open: caller must check `tenant_id` matches the authenticated
 principal. Replay open: host might serve a pre-/init snapshot;
 bound by version-CAS at next write.
         "#);

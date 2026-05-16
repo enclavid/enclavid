@@ -1,8 +1,10 @@
 //! Client wrapper for the host-side `Registry` gRPC service.
 //!
-//! Pulls OCI artifacts (encrypted policy bundles) from the configured
-//! Enclavid registry. The TEE has no network stack — host fetches by
-//! pinned digest reference and forwards bytes over vsock.
+//! Pulls OCI artifacts (encrypted policy bundles) from whichever
+//! registry the supplied OCI reference points at — our Angos by
+//! default, but any OCI-compliant registry works. The TEE has no
+//! network stack: host fetches by pinned-digest reference and
+//! forwards bytes over vsock.
 //!
 //! Trust model: host can swap the response to ANY (manifest, layers)
 //! tuple whose digests match the requested reference, but cannot inject
@@ -32,27 +34,26 @@ impl RegistryClient {
         }
     }
 
-    /// Pull an encrypted policy artifact by its logical identity.
+    /// Pull an encrypted policy artifact by its full OCI reference.
     ///
-    /// The TEE supplies the abstract triple (workspace, name, digest);
-    /// the host translates it into a registry-specific reference. The
-    /// response is wrapped in `Untrusted` — caller MUST verify via
-    /// `.trust(...)` that the manifest hashes to the requested digest
-    /// and that each declared layer's bytes hash to the descriptor's
-    /// digest before any decryption or wasm loading happens.
+    /// `policy_ref` is the pinned ref `<registry>/<repo>@sha256:<hex>`;
+    /// `registry_auth` is the opaque bearer payload the host attaches
+    /// as `Authorization` (empty for anonymous pulls). The response is
+    /// wrapped in `Untrusted` — caller MUST verify via `.trust(...)`
+    /// that the manifest hashes to the requested digest and that each
+    /// declared layer's bytes hash to the descriptor's digest before
+    /// any decryption or wasm loading happens.
     pub async fn pull(
         &self,
-        workspace_id: &str,
-        policy_name: &str,
-        policy_digest: &str,
+        policy_ref: &str,
+        registry_auth: &[u8],
     ) -> Result<Untrusted<PullResponse, (AuthN,)>, BridgeError> {
         let response = self
             .client
             .clone()
             .pull(PullRequest {
-                workspace_id: workspace_id.to_string(),
-                policy_name: policy_name.to_string(),
-                policy_digest: policy_digest.to_string(),
+                policy_ref: policy_ref.to_string(),
+                registry_auth: registry_auth.to_vec(),
             })
             .await?;
         Ok(Untrusted::new(response.into_inner(), reason!(r#"
@@ -72,17 +73,15 @@ enforced by registry server, not TEE.
     /// may be created at high volume and most never reach /connect.
     pub async fn pull_manifest(
         &self,
-        workspace_id: &str,
-        policy_name: &str,
-        policy_digest: &str,
+        policy_ref: &str,
+        registry_auth: &[u8],
     ) -> Result<Untrusted<PullManifestResponse, (AuthN,)>, BridgeError> {
         let response = self
             .client
             .clone()
             .pull_manifest(PullRequest {
-                workspace_id: workspace_id.to_string(),
-                policy_name: policy_name.to_string(),
-                policy_digest: policy_digest.to_string(),
+                policy_ref: policy_ref.to_string(),
+                registry_auth: registry_auth.to_vec(),
             })
             .await?;
         Ok(Untrusted::new(response.into_inner(), reason!(r#"

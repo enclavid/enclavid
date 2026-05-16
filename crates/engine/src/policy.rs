@@ -4,16 +4,13 @@
 //! typed args passed to `policy.evaluate`.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use enclavid_host_bridge::{SessionState, suspended};
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine, Store};
 
 use crate::host_state::{HostResources, HostState};
-use crate::limits::{MAX_TEXT_ENTRIES, MAX_TEXT_VALUE_HARD_BYTES, POLICY_FUEL_BUDGET};
-use crate::listener::{SessionChange, SessionListener};
-use crate::sanitize;
+use crate::limits::{MAX_TEXT_ENTRIES, POLICY_FUEL_BUDGET};
 use crate::wasmtime_shim::component::{InterceptView, Linker};
 use crate::Host_ as GeneratedHost;
 
@@ -39,11 +36,13 @@ pub enum RunStatus {
 ///     translation set. `TextRegistry::from_decls` indexes these by
 ///     key and the host membership-check union is `identifiers ∪
 ///     localized.keys`.
+#[derive(Debug, Default)]
 pub struct TextDecls {
     pub identifiers: Vec<String>,
     pub localized: Vec<LocalizedDecl>,
 }
 
+#[derive(Debug)]
 pub struct LocalizedDecl {
     pub key: String,
     /// `(language, value)` rows. Per-language uniqueness is a policy-
@@ -74,47 +73,6 @@ impl Runner {
     /// Compile a policy component from its binary (wasm or wat).
     pub fn compile(&self, bytes: &[u8]) -> wasmtime::Result<Component> {
         Component::new(&self.engine, bytes)
-    }
-
-    /// Instantiate the policy briefly, call its `prepare-text-refs`
-    /// export, and return the declared text-refs already split into
-    /// identifier-only refs and translation rows. Called once per
-    /// policy load — the caller (api crate) caches the result
-    /// alongside the compiled component and never re-invokes this.
-    ///
-    /// The instantiation uses a stub session + no-op listener: the
-    /// policy isn't supposed to make host calls inside this export
-    /// (it's pure constant declarations). The empty registered set
-    /// guarantees that any disallowed host fn call traps loudly,
-    /// surfacing the policy bug at load time rather than at first
-    /// /input.
-    pub async fn extract_texts(
-        &self,
-        component: &Component,
-    ) -> wasmtime::Result<TextDecls> {
-        let mut linker: Linker<HostState> = Linker::new(&self.engine, |s| InterceptView {
-            replay: &mut s.replay,
-            disclosures: &mut s.pending_disclosures,
-            listener: &s.listener,
-        });
-        GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
-
-        let session = SessionState::default();
-        let resources = HostResources {
-            listener: Arc::new(NoopListener),
-            registered_text_refs: Arc::new(Default::default()),
-        };
-        let mut store = Store::new(&self.engine, HostState::new(session, resources));
-        store.limiter(|s| &mut s.limits);
-        store.set_fuel(POLICY_FUEL_BUDGET)?;
-        let bindings = GeneratedHost::instantiate_async(&mut store, component, &linker).await?;
-
-        let raw_decls = bindings
-            .enclavid_policy_policy()
-            .call_prepare_text_refs(&mut store)
-            .await?;
-
-        process_decls(raw_decls)
     }
 
     /// Run or resume a policy: replay existing events, execute to next
@@ -164,90 +122,109 @@ impl Runner {
     }
 }
 
-/// Walk the WIT-bindgen output of `prepare-text-refs` into the
-/// engine-owned `TextDecls` shape, enforcing every invariant the
-/// host promises in `wit/policy/policy.wit`:
-///
-///   * Top-level decl count ≤ `MAX_TEXT_ENTRIES` — bounds registry
-///     memory; pairs with the wasmtime linear-memory cap.
-///   * Every text-ref key passes `validate_key_format` (ASCII,
-///     ≤128 chars, starts with a letter).
-///   * No duplicate keys across identifier + localized variants —
-///     each text-ref is declared at most once.
-///   * No duplicate `(key, language)` pair inside a `localized`
-///     block.
-///   * Each translation `language` passes `validate_language`
-///     (BCP-47-shaped, ≤16 chars).
-///   * Each translation `value` is hard-rejected if it exceeds
-///     `MAX_TEXT_VALUE_HARD_BYTES`, otherwise sanitised
-///     (strip control / BIDI / zero-width / Unicode-tag chars,
-///     soft-truncate to `MAX_TEXT_VALUE_SOFT_CHARS`).
-///
-/// Failures trap; the policy load fails and the api crate maps
-/// that to a generic 500 — the surfaced error message is
-/// host-controlled (function role + bound name) and never echoes
-/// raw policy bytes back to the caller.
-fn process_decls(
-    raw: Vec<crate::exports::enclavid::policy::policy::TextDecl>,
-) -> wasmtime::Result<TextDecls> {
-    use crate::exports::enclavid::policy::policy::TextDecl;
+/// Current policy manifest schema version. Engine accepts manifests
+/// declaring `version: 1` (or omitting the field — back-compat with
+/// pre-versioning early artifacts).
+const POLICY_MANIFEST_VERSION_CURRENT: u32 = 1;
 
-    if raw.len() > MAX_TEXT_ENTRIES {
+/// Parse the polici manifest blob (the plain JSON layer alongside the
+/// encrypted wasm in the OCI artifact). Replaces the wasm-side
+/// `prepare-text-refs` export: declarations are now static data, not
+/// executed code.
+///
+/// Wire format:
+///
+/// ```json
+/// {
+///   "version": 1,
+///   "disclosure_fields": ["passport_number", "risk_category"],
+///   "localized": {
+///     "passport_title":  { "en": "Your passport", "ru": "Ваш паспорт" },
+///     "consent_reason":  { "en": "Identity verification...", "ru": "..." }
+///   }
+/// }
+/// ```
+///
+/// `disclosure_fields` lists machine keys used as `prompt_disclosure`
+/// `DisplayField.key`. `localized` carries translation rows for refs
+/// that render as UI strings.
+///
+/// **Validation strategy: lazy.** Engine here enforces only what's
+/// needed to bound memory (total entry count cap, plus schema
+/// version dispatch). Per-entry format / language / length /
+/// sanitisation checks happen at use time — `TextRegistry::resolve_string`
+/// sanitises text values when actually returning them, and the
+/// engine-side `sanitize::ensure_registered` validates ref format on
+/// every polici-supplied key when polici invokes a host function.
+///
+/// Rationale: this is defence-in-depth, not primary validation.
+/// Author-side `enclavid validate` and (future) push-time linting
+/// catch malformed manifests before they reach the registry. TEE
+/// just needs to bound resource use and trap if anything malformed
+/// is actually exercised at evaluate time. Eager validation here
+/// would also do work for declarations the polici never uses (replay
+/// strategy means many entries may go unresolved per session).
+pub fn load_manifest(bytes: &[u8]) -> wasmtime::Result<TextDecls> {
+    use std::collections::BTreeMap;
+
+    #[derive(serde::Deserialize)]
+    struct PolicyManifest {
+        /// Optional for forward/backward compat. Omitted = treat as
+        /// current schema version. Future BREAKING schema changes
+        /// will require dispatch on this field — additive changes
+        /// (new optional top-level keys) don't.
+        #[serde(default)]
+        version: Option<u32>,
+        #[serde(default)]
+        disclosure_fields: Vec<String>,
+        #[serde(default)]
+        localized: BTreeMap<String, BTreeMap<String, String>>,
+    }
+
+    let manifest: PolicyManifest = serde_json::from_slice(bytes)
+        .map_err(|e| wasmtime::Error::msg(format!("policy manifest JSON parse: {e}")))?;
+
+    if let Some(v) = manifest.version {
+        if v != POLICY_MANIFEST_VERSION_CURRENT {
+            return Err(wasmtime::Error::msg(format!(
+                "policy manifest version {v} not supported (engine knows version {POLICY_MANIFEST_VERSION_CURRENT})",
+            )));
+        }
+    }
+
+    // Memory bound — independent of per-entry validation. Stops a
+    // malicious or malformed manifest from blowing up TextRegistry
+    // state. Per-translation byte sizes bounded separately by the
+    // transport-level cap on the assets layer in `policy_pull`.
+    let total = manifest.disclosure_fields.len() + manifest.localized.len();
+    if total > MAX_TEXT_ENTRIES {
         return Err(wasmtime::Error::msg(format!(
-            "prepare-text-refs returned {} declarations, max is {MAX_TEXT_ENTRIES}",
-            raw.len(),
+            "policy manifest declares {total} entries, max is {MAX_TEXT_ENTRIES}",
         )));
     }
 
-    let mut identifiers = Vec::new();
-    let mut localized = Vec::new();
-    let mut seen_keys: HashSet<String> = HashSet::new();
+    // Disclosure fields: dedupe within the list (JSON allows
+    // duplicates in arrays — collapse here so the membership set
+    // doesn't accidentally double-count). Overlap with `localized`
+    // is permitted by design.
+    let mut seen_disclosure: HashSet<String> = HashSet::new();
+    let identifiers: Vec<String> = manifest
+        .disclosure_fields
+        .into_iter()
+        .filter(|key| seen_disclosure.insert(key.clone()))
+        .collect();
 
-    for d in raw {
-        match d {
-            TextDecl::Identifier(key) => {
-                sanitize::validate_key_format(&key)?;
-                if !seen_keys.insert(key.clone()) {
-                    return Err(wasmtime::Error::msg(format!(
-                        "prepare-text-refs declared text-ref '{key}' more than once"
-                    )));
-                }
-                identifiers.push(key);
-            }
-            TextDecl::Localized(lt) => {
-                sanitize::validate_key_format(&lt.key)?;
-                if !seen_keys.insert(lt.key.clone()) {
-                    return Err(wasmtime::Error::msg(format!(
-                        "prepare-text-refs declared text-ref '{}' more than once",
-                        lt.key,
-                    )));
-                }
-                let mut translations = Vec::with_capacity(lt.translations.len());
-                let mut seen_langs: HashSet<String> = HashSet::new();
-                for t in lt.translations {
-                    sanitize::validate_language(&t.language)?;
-                    if !seen_langs.insert(t.language.clone()) {
-                        return Err(wasmtime::Error::msg(format!(
-                            "localized-text '{}' declares language '{}' more than once",
-                            lt.key, t.language,
-                        )));
-                    }
-                    if t.value.len() > MAX_TEXT_VALUE_HARD_BYTES {
-                        return Err(wasmtime::Error::msg(format!(
-                            "translation value for '{}' / '{}' exceeds {MAX_TEXT_VALUE_HARD_BYTES} bytes",
-                            lt.key, t.language,
-                        )));
-                    }
-                    let value = sanitize::sanitize_text_value(&t.value);
-                    translations.push((t.language, value));
-                }
-                localized.push(LocalizedDecl {
-                    key: lt.key,
-                    translations,
-                });
-            }
-        }
-    }
+    // `manifest.localized` is a BTreeMap (JSON object keys unique by
+    // construction). Push verbatim — format / language / length /
+    // sanitisation deferred to `TextRegistry::resolve_string`.
+    let localized: Vec<LocalizedDecl> = manifest
+        .localized
+        .into_iter()
+        .map(|(key, translations)| LocalizedDecl {
+            key,
+            translations: translations.into_iter().collect(),
+        })
+        .collect();
 
     Ok(TextDecls { identifiers, localized })
 }
@@ -261,18 +238,145 @@ impl wasmtime::component::HasData for HasHost {
     type Data<'a> = &'a mut HostState;
 }
 
-/// No-op listener used only by `extract_texts` — the
-/// `prepare-localized-texts` export shouldn't trigger any host
-/// calls, but the host machinery requires a listener to be present.
-struct NoopListener;
+#[cfg(test)]
+mod load_manifest_tests {
+    use super::*;
 
-impl SessionListener for NoopListener {
-    fn on_session_change<'a>(
-        &'a self,
-        _change: SessionChange<'a>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = wasmtime::Result<()>> + Send + 'a>,
-    > {
-        Box::pin(async { Ok(()) })
+    fn parse(json: &str) -> wasmtime::Result<TextDecls> {
+        load_manifest(json.as_bytes())
+    }
+
+    #[test]
+    fn happy_path() {
+        let decls = parse(r#"{
+            "version": 1,
+            "disclosure_fields": ["passport_number", "risk_category"],
+            "localized": {
+                "passport_title": {
+                    "en": "Your passport",
+                    "ru": "Ваш паспорт"
+                },
+                "consent_reason": {
+                    "en": "Identity verification."
+                }
+            }
+        }"#).expect("parse");
+
+        assert_eq!(
+            decls.identifiers,
+            vec!["passport_number".to_string(), "risk_category".to_string()],
+        );
+        // BTreeMap iteration is alphabetical by key — consent_reason
+        // before passport_title.
+        assert_eq!(decls.localized.len(), 2);
+        assert_eq!(decls.localized[0].key, "consent_reason");
+        assert_eq!(decls.localized[1].key, "passport_title");
+        assert_eq!(decls.localized[1].translations.len(), 2);
+    }
+
+    #[test]
+    fn version_optional_back_compat() {
+        // Manifests without version field load as current schema.
+        let decls = parse(r#"{ "disclosure_fields": ["a_key"] }"#).expect("parse");
+        assert_eq!(decls.identifiers, vec!["a_key".to_string()]);
+    }
+
+    #[test]
+    fn rejects_unknown_version() {
+        let err = parse(r#"{ "version": 99 }"#).unwrap_err();
+        assert!(err.to_string().contains("version 99"), "{err}");
+    }
+
+    #[test]
+    fn defaults_when_sections_missing() {
+        let decls = parse(r#"{ "disclosure_fields": ["only_this"] }"#).expect("parse");
+        assert_eq!(decls.identifiers, vec!["only_this".to_string()]);
+        assert!(decls.localized.is_empty());
+
+        let decls = parse(r#"{}"#).expect("parse");
+        assert!(decls.identifiers.is_empty());
+        assert!(decls.localized.is_empty());
+    }
+
+    #[test]
+    fn dedupes_duplicate_disclosure_fields() {
+        // JSON arrays allow dupes; we dedupe in-place rather than
+        // trapping. Membership set is still consistent.
+        let decls = parse(r#"{
+            "disclosure_fields": ["dup_key", "dup_key"]
+        }"#).expect("parse");
+        assert_eq!(decls.identifiers, vec!["dup_key".to_string()]);
+    }
+
+    #[test]
+    fn allows_dual_use_in_disclosure_fields_and_localized() {
+        // Same ref can be declared in both lists — polici may use it
+        // as `field.key` (raw identifier) AND as a localized label
+        // or reason. `TextRegistry` builds its `keys` set as a union.
+        let decls = parse(r#"{
+            "disclosure_fields": ["dual_use"],
+            "localized": { "dual_use": { "en": "Dual use label" } }
+        }"#).expect("parse");
+        assert!(decls.identifiers.contains(&"dual_use".to_string()));
+        assert_eq!(decls.localized.len(), 1);
+        assert_eq!(decls.localized[0].key, "dual_use");
+    }
+
+    #[test]
+    fn accepts_bad_key_format_lazily() {
+        // Load doesn't validate per-key format — that happens at
+        // use-time via `sanitize::ensure_registered` when polici
+        // calls a host fn with the ref. A malformed declaration
+        // here is harmless if polici never uses it.
+        let decls = parse(r#"{
+            "disclosure_fields": ["BadKeyWithCaps"]
+        }"#).expect("parse");
+        assert_eq!(decls.identifiers, vec!["BadKeyWithCaps".to_string()]);
+    }
+
+    #[test]
+    fn accepts_bad_language_lazily() {
+        // Same: language tag format isn't validated at load. A bad
+        // tag just won't match any locale lookup, falls through to
+        // en or first-available in `resolve_string`.
+        let decls = parse(r#"{
+            "localized": { "k": { "en_US": "Underscore-tag value" } }
+        }"#).expect("parse");
+        assert_eq!(decls.localized.len(), 1);
+        assert_eq!(decls.localized[0].translations[0].0, "en_US");
+    }
+
+    #[test]
+    fn accepts_oversized_translation_lazily() {
+        // Per-value length cap is gone from load. Transport-level
+        // cap in `policy_pull` bounds the aggregate manifest size.
+        let huge = "x".repeat(MAX_TEXT_ENTRIES);
+        let payload = format!(r#"{{
+            "localized": {{ "k": {{ "en": {} }} }}
+        }}"#, serde_json::to_string(&huge).unwrap());
+        let decls = parse(&payload).expect("parse");
+        assert_eq!(decls.localized.len(), 1);
+        assert!(decls.localized[0].translations[0].1.len() >= MAX_TEXT_ENTRIES);
+    }
+
+    #[test]
+    fn rejects_too_many_entries() {
+        // Total-count cap is the one validation we DO eagerly,
+        // because it bounds TextRegistry memory.
+        let mut disclosure_fields: Vec<String> = Vec::new();
+        for i in 0..=MAX_TEXT_ENTRIES {
+            disclosure_fields.push(format!("k_{i}"));
+        }
+        let payload = serde_json::json!({
+            "disclosure_fields": disclosure_fields,
+        });
+        let err = parse(&payload.to_string()).unwrap_err();
+        assert!(err.to_string().contains("max is"), "{err}");
+    }
+
+    #[test]
+    fn rejects_malformed_json() {
+        let err = parse(r#"{ "disclosure_fields": [oops] }"#).unwrap_err();
+        assert!(err.to_string().contains("JSON parse"), "{err}");
     }
 }

@@ -14,7 +14,7 @@
 //! `enforce` — at runtime the request hits Extension first, which
 //! inserts the per-route operation into request extensions, then
 //! `enforce` runs and reads it via the `Extension<ClientOperation>`
-//! extractor. On success it injects `Workspace(workspace_id)` into
+//! extractor. On success it injects `Tenant(tenant_id)` into
 //! request extensions so the handler downstream can read it; on
 //! failure short-circuits 401 / 403.
 //!
@@ -34,14 +34,13 @@ use enclavid_host_bridge::{AuthN, AuthVerdict, ClientOperation, Replay, reason};
 
 use crate::client_state::ClientState;
 
-/// Workspace context attached to a request by `enforce`. Handlers
-/// extract this to learn which workspace the caller is bound to;
-/// downstream tenant-boundary checks (session ownership) compare
-/// against it.
+/// Tenant context attached to a request by `enforce`. Handlers
+/// extract this to learn which tenant the caller is bound to;
+/// downstream session-ownership checks compare against it.
 #[derive(Clone, Debug)]
-pub(super) struct Workspace(pub String);
+pub(super) struct Tenant(pub String);
 
-impl<S> FromRequestParts<S> for Workspace
+impl<S> FromRequestParts<S> for Tenant
 where
     S: Send + Sync,
 {
@@ -50,7 +49,7 @@ where
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
         parts
             .extensions
-            .get::<Workspace>()
+            .get::<Tenant>()
             .cloned()
             // 500 here means the protective layer didn't run — a router
             // wiring bug, not a runtime auth failure. Surfacing as 500
@@ -63,7 +62,7 @@ where
 /// Auth middleware body. Reads the operation from request extensions
 /// (placed there by the outer `Extension(op)` layer in the per-route
 /// `ServiceBuilder` stack) and forwards the Authorization header to the
-/// host-side Auth service. On success injects `Workspace(workspace_id)`
+/// host-side Auth service. On success injects `Tenant(tenant_id)`
 /// for the handler to extract.
 pub(super) async fn enforce(
     State(state): State<Arc<ClientState>>,
@@ -80,14 +79,14 @@ pub(super) async fn enforce(
     // Identity verification is delegated to the host: the TEE has no
     // network stack and no way to validate a credential itself. The
     // host receives the Authorization header, talks to the identity
-    // provider, and tells us the workspace this credential belongs to.
+    // provider, and tells us the tenant this credential belongs to.
     // We accept its word.
     //
     // What goes wrong if the host lies:
     //
     //   1. Host claims an invalid credential is authentic → a fake
     //      caller reaches /sessions create.
-    //   2. Host claims a valid credential belongs to workspace X when
+    //   2. Host claims a valid credential belongs to tenant X when
     //      it actually belongs to Y → attempted impersonation.
     //   3. Host denies valid credentials → denial of service.
     //
@@ -116,10 +115,10 @@ pub(super) async fn enforce(
     //     (mitigated by attestation as above).
     //
     // Both are operationally mitigated, not cryptographically:
-    //   - Rate limit per workspace on session creation.
+    //   - Rate limit per tenant on session creation.
     //   - Audit log every authorize outcome to an append-only sink.
     //   - Alert on bursts of /sessions failures or unusual
-    //     workspace-create patterns (signature of a host substitution).
+    //     tenant-create patterns (signature of a host substitution).
     //
     // See architecture.md → Network Isolation → "External content fetch"
     // for the full threat-model write-up.
@@ -131,7 +130,7 @@ pub(super) async fn enforce(
         .trust_unchecked::<AuthN, _>(reason!(r#"
 TEE has nothing to verify a credential against — host parses
 tokens, TEE never sees them. A lying host can claim an invalid
-credential is valid or substitute a different workspace_id.
+credential is valid or substitute a different tenant_id.
 Neither escalates: /sessions needs K_client (validated against
 the policy's manifest validator annotation, secret held by the
 legitimate client) — without it the create returns 422 and
@@ -144,12 +143,12 @@ spurious denial or a stalled caller who can't progress past
 the K_client validator check. No data leak path.
         "#))
         .into_inner();
-    let workspace_id = match verdict {
-        AuthVerdict::Allowed(ws) => ws.0,
+    let tenant_id = match verdict {
+        AuthVerdict::Allowed(t) => t.0,
         AuthVerdict::Unauthenticated => return Err(StatusCode::UNAUTHORIZED),
         AuthVerdict::PermissionDenied => return Err(StatusCode::FORBIDDEN),
     };
-    req.extensions_mut().insert(Workspace(workspace_id));
+    req.extensions_mut().insert(Tenant(tenant_id));
 
     Ok(next.run(req).await)
 }

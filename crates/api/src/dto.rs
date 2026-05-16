@@ -25,6 +25,7 @@ use serde::Serialize;
 
 use enclavid_host_bridge::{DisplayField as ProtoDisplayField, SessionStatus};
 
+use crate::locale::Locale;
 use crate::text_registry::TextRegistry;
 
 /// Serde "remote" definition for the proto-generated `SessionStatus`
@@ -87,34 +88,18 @@ pub struct DisplayField {
     pub value: String,
 }
 
-/// Wire shape for the **applicant consent screen**. Adds the host-
-/// resolved `label` translations so the frontend can render a
-/// human-readable name without round-tripping. The raw `key`
+/// Wire shape for the **applicant consent screen**. `label` is
+/// pre-resolved to the applicant's locale by the server — frontend
+/// renders the string verbatim, no client-side i18n. The raw `key`
 /// text-ref is still surfaced — the consent UI shows it for any
 /// non-canonical key as a visible flag against categorical encoding
 /// via key choice.
 #[derive(Serialize)]
 pub struct ConsentFieldView {
     pub key: String,
-    pub label: Translations,
+    pub label: String,
     pub value: String,
 }
-
-/// One translation row: the human-readable `text` in a specific
-/// `language`. The applicant frontend picks the row matching the
-/// user's locale (with fallback).
-#[derive(Serialize, Clone, Default)]
-pub struct LocalizedString {
-    pub language: String,
-    pub text: String,
-}
-
-/// Full translation set for one `text-ref`. Serializes as a JSON
-/// array of `{language, text}` rows — frontend / SDK do locale
-/// selection. (Named to reflect what it actually contains; not
-/// "LocalizedText" because that's already the WIT-level concept
-/// `{key + translations}`.)
-pub type Translations = Vec<LocalizedString>;
 
 // --- proto → dto conversion ---
 
@@ -129,16 +114,17 @@ pub fn display_field_from_proto(f: &ProtoDisplayField) -> DisplayField {
 }
 
 /// Consent-screen conversion: resolves the `label` text-ref through
-/// the policy's per-session text registry into the full set of
-/// translations. Used by the api view layer when building
-/// `RequestView::Consent` for the applicant frontend.
+/// the policy's per-session text registry to the applicant's locale.
+/// Used by the api view layer when building `RequestView::Consent`
+/// for the applicant frontend.
 pub fn consent_field_view_from_proto(
     f: &ProtoDisplayField,
     registry: &TextRegistry,
+    locale: &Locale,
 ) -> ConsentFieldView {
     ConsentFieldView {
         key: f.key.clone(),
-        label: registry.resolve(&f.label),
+        label: registry.resolve_string(&f.label, locale),
         value: f.value.clone(),
     }
 }

@@ -49,7 +49,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { SlideToConfirm } from "@/components/SlideToConfirm";
-import { pickLocalized } from "@/lib/i18n";
 import type { ConsentFieldView } from "@/types";
 
 /// Canonical text-refs the consent UI treats as "ordinary". Adding a
@@ -262,7 +261,7 @@ function FieldRow({ field }: { field: ConsentFieldView }) {
     ? codePoints.slice(0, VALUE_COLLAPSE_THRESHOLD).join("")
     : field.value;
   const hiddenCount = codePoints.length - VALUE_COLLAPSE_THRESHOLD;
-  const label = pickLocalized(field.label);
+  const label = field.label;
   return (
     <li className="rounded-lg border border-border bg-card px-4 py-3">
       <div className="mb-1.5 flex items-start justify-between gap-3">

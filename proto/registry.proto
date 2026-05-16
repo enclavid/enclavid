@@ -15,10 +15,10 @@ package enclavid.registry;
 service Registry {
   // Pull an encrypted policy artifact (manifest + all layers).
   //
-  // The TEE provides the logical identity of the policy
-  // (workspace + name + frozen digest). The host knows how that maps
-  // onto the registry's actual path layout — TEE never constructs
-  // OCI references and never depends on registry deployment details.
+  // The TEE passes the full pinned OCI ref + an opaque bearer payload;
+  // the host parses the ref and authenticates to the named registry.
+  // TEE doesn't care whether it's the Enclavid Angos or any other
+  // OCI-compliant registry — same RPC either way.
   rpc Pull(PullRequest) returns (PullResponse);
 
   // Pull only the OCI manifest (no layer payloads). Used at session
@@ -31,15 +31,18 @@ service Registry {
 }
 
 message PullRequest {
-  // Workspace the session belongs to. Used by the host to scope the
-  // pull into that workspace's namespace.
-  string workspace_id = 1;
-  // Policy name within the workspace (e.g. `kyc-standard`).
-  string policy_name = 2;
-  // Pinned content digest (`sha256:<hex>`). Tag resolution happens
-  // outside this RPC (at session-create time) — TEE only ever asks
-  // by digest, eliminating tag-race surface.
-  string policy_digest = 3;
+  // Full pinned OCI reference: `<registry>/<repository>@sha256:<hex>`.
+  // Host parses to construct the actual registry request; TEE only
+  // produces it (extracting the digest substring for content-addressing
+  // verification post-response). Tag-form is rejected upstream, so by
+  // construction the host always receives a digest-pinned ref.
+  string policy_ref = 1;
+  // Opaque bearer payload the host attaches as `Authorization` when
+  // calling the registry. Empty = anonymous pull (public registries).
+  // TEE forwards verbatim from `SessionMetadata.registry_auth`; never
+  // parses or inspects. See proto/state.proto and architecture.md →
+  // Registry Decoupling.
+  bytes registry_auth = 2;
 }
 
 message PullResponse {

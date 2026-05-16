@@ -11,11 +11,13 @@ use enclavid_host_bridge::{AuthZ, Metadata, Replay, SessionStatus, reason};
 use crate::client_state::ClientState;
 use crate::dto;
 
-use super::auth::Workspace;
+use super::auth::Tenant;
 
 #[derive(Serialize)]
 pub struct ResolvedPolicyView {
-    pub name: String,
+    /// Full pinned OCI reference from session metadata.
+    pub reference: String,
+    /// Convenience: digest substring extracted from `reference`.
     pub digest: String,
 }
 
@@ -53,7 +55,7 @@ pub(super) fn get_session() -> MethodRouter<Arc<ClientState>> {
 
 async fn read(
     State(state): State<Arc<ClientState>>,
-    Workspace(workspace_id): Workspace,
+    Tenant(tenant_id): Tenant,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionView>, StatusCode> {
     // Read encrypted metadata. AEAD-bound to session_id so the host
@@ -70,17 +72,17 @@ async fn read(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Metadata: AuthN cleared at decode (AEAD). AuthZ checked
-    // inline — workspace_id match is the whole point of fetching
-    // metadata here, and absent or wrong-workspace metadata
+    // inline — tenant_id match is the whole point of fetching
+    // metadata here, and absent or wrong-tenant metadata
     // collapses to 404 so we don't leak existence of other
-    // workspaces' sessions.
+    // tenants' sessions.
     let metadata = metadata_opt
         .trust::<AuthZ, _, _, _>(|m| match m {
-            Some(m) if m.workspace_id == workspace_id => Ok(()),
+            Some(m) if m.tenant_id == tenant_id => Ok(()),
             _ => Err(StatusCode::NOT_FOUND),
         })?
         .trust_unchecked::<Replay, _>(reason!(r#"
-Stale metadata only affects which historical workspace_id we
+Stale metadata only affects which historical tenant_id we
 check against. AEAD-binding to session_id ensures we're never
 comparing a different session's metadata.
         "#))
@@ -90,12 +92,16 @@ comparing a different session's metadata.
     let status = SessionStatus::try_from(metadata.status)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let digest = crate::policy_pull::split_pinned_ref(&metadata.policy_ref)
+        .map(|(_, d)| d.to_string())
+        .unwrap_or_default();
+
     Ok(Json(SessionView {
         session_id,
         status,
         policy: ResolvedPolicyView {
-            name: metadata.policy_name,
-            digest: metadata.policy_digest,
+            reference: metadata.policy_ref,
+            digest,
         },
         external_ref: if metadata.external_ref.is_empty() {
             None

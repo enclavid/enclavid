@@ -22,6 +22,7 @@ use enclavid_host_bridge::{
 };
 
 use crate::input::parse_input;
+use crate::locale::Locale;
 use crate::policy_pull;
 use crate::runtime::PolicyEntry;
 use crate::state::AppState;
@@ -55,8 +56,8 @@ pub(super) async fn fetch_metadata(
 
     metadata
         .trust_unchecked::<AuthZ, _>(reason!(r#"
-Applicant flow doesn't authenticate per-workspace, so we have
-no workspace_id to cross-check here. Security relies on the
+Applicant flow doesn't authenticate per-tenant, so we have
+no tenant_id to cross-check here. Security relies on the
 bearer-key auth layer at the route plus AEAD-binding on state
 under applicant_key.
         "#))
@@ -120,6 +121,10 @@ pub(super) struct SessionRunCtx {
     /// requests / consent disclosures through this when assembling
     /// JSON for the frontend or the consumer SDK.
     pub(super) texts: Arc<TextRegistry>,
+    /// Applicant's preferred locale (from `Accept-Language` header).
+    /// Text-ref resolution happens server-side so the wire payload is
+    /// a plain string per ref — frontend doesn't carry i18n logic.
+    locale: Locale,
     persister: Arc<SessionPersister>,
     args: Vec<(String, EvalArgs)>,
     policy: Arc<Component>,
@@ -139,6 +144,7 @@ impl SessionRunCtx {
             state,
             session_id,
             texts,
+            locale,
             persister,
             args,
             policy,
@@ -156,7 +162,7 @@ impl SessionRunCtx {
         // No-op for Suspended; flips status to Completed atomically
         // (metadata + host-plaintext Status) when the run terminated.
         persister.finalize(&status).await?;
-        Ok(progress_from(status, &texts))
+        Ok(progress_from(status, &texts, &locale))
     }
 }
 
@@ -181,6 +187,10 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
             .ok_or(StatusCode::BAD_REQUEST)?;
         let CallerKey(applicant_key) =
             CallerKey::from_request_parts(parts, state).await?;
+        // Applicant locale from `Accept-Language` — captured once per
+        // request and threaded through view construction so every
+        // text-ref resolves to the user's preferred language.
+        let locale = Locale::from_request_parts(parts, state).await?;
 
         let metadata = fetch_metadata(state, &session_id).await?;
         let args = parse_args(&metadata)?;
@@ -263,6 +273,7 @@ persist; same containment as above.
             session_id,
             session_state,
             texts,
+            locale,
             persister,
             args,
             policy,
@@ -304,23 +315,22 @@ async fn lookup_policy(
         eprintln!("lookup_policy: k_client age::Identity parse failed for {session_id}: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let decrypted = policy_pull::pull_and_decrypt(
+    let artifact = policy_pull::pull_and_decrypt(
         &state.registry,
-        &metadata.workspace_id,
-        &metadata.policy_name,
-        &metadata.policy_digest,
+        &metadata.policy_ref,
+        &metadata.registry_auth,
         &k_client,
     )
     .await
     .map_err(|e| {
         eprintln!(
             "lookup_policy: pull_and_decrypt failed for session {session_id} \
-             (workspace={}, policy={}, digest={}): {e}",
-            metadata.workspace_id, metadata.policy_name, metadata.policy_digest,
+             (tenant={}, policy_ref={}): {e}",
+            metadata.tenant_id, metadata.policy_ref,
         );
         StatusCode::GONE
     })?;
-    let component = Arc::new(state.runner.compile(&decrypted.wasm_bytes).map_err(
+    let component = Arc::new(state.runner.compile(&artifact.wasm_bytes).map_err(
         |e| {
             eprintln!(
                 "lookup_policy: wasm compile failed for {session_id}: {e}",
@@ -328,19 +338,22 @@ async fn lookup_policy(
             StatusCode::INTERNAL_SERVER_ERROR
         },
     )?);
-    // Extract the policy's text-ref declarations once at load time.
-    // Errors here (policy made a host call inside prepare-text-refs,
-    // returned malformed entries, ...) surface as 500 with a generic
-    // body — debug detail goes to logs without echoing
-    // policy-supplied content.
-    let decls = state.runner.extract_texts(&component).await.map_err(|e| {
-        eprintln!(
-            "lookup_policy: prepare_text_refs failed for {session_id} \
-             (policy_digest {}): {e}",
-            metadata.policy_digest,
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // Parse the polici manifest from its OCI layer (plain JSON,
+    // sibling of the encrypted wasm). Missing layer → empty
+    // registry; polici without host-visible UI (decision-only stubs,
+    // test fixtures) need no decls, every text-ref use-site traps in
+    // that case.
+    let decls = match &artifact.manifest_bytes {
+        Some(bytes) => enclavid_engine::load_manifest(bytes).map_err(|e| {
+            eprintln!(
+                "lookup_policy: load_manifest failed for {session_id} \
+                 (policy_ref {}): {e}",
+                metadata.policy_ref,
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?,
+        None => enclavid_engine::TextDecls::default(),
+    };
     let texts = Arc::new(TextRegistry::from_decls(decls));
     let entry = Arc::new(PolicyEntry { component, texts });
     state

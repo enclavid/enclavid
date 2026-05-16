@@ -4,10 +4,11 @@ mod client_state;
 mod disclosure_hash;
 mod dto;
 mod input;
+mod limits;
+mod locale;
 mod policy_pull;
 mod runtime;
 mod state;
-mod limits;
 mod text_registry;
 mod transport;
 

@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "disclosure_fields": [
+    "passport_number",
+    "risk_category",
+    "address"
+  ],
+  "localized": {
+    "passport_title": {
+      "en": "Your passport"
+    },
+    "passport_instructions": {
+      "en": "Have your passport ready, open to the photo page. We'll take a quick 1-second capture — make sure you're in good lighting and the page lies flat."
+    },
+    "passport_step": {
+      "en": "Open to the photo page"
+    },
+    "passport_review_hint": {
+      "en": "Check that the data page is sharp, with no glare or shadow over the text."
+    },
+    "consent_reason": {
+      "en": "Identity verification for the test policy."
+    },
+    "consent_requester": {
+      "en": "Enclavid Test Co"
+    },
+    "passport_number_label": {
+      "en": "Passport number"
+    },
+    "risk_category_label": {
+      "en": "Risk category"
+    },
+    "address_label": {
+      "en": "Residence address"
+    }
+  }
+}

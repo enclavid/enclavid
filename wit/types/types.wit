@@ -1,0 +1,28 @@
+package enclavid:types;
+
+/// Shared primitive types used across multiple interfaces. Kept in a
+/// dedicated package so that consuming interfaces (disclosure, form,
+/// future plugins) can `use` them without dragging in the semantic
+/// definitions of the interface where they originated.
+///
+/// Why this matters: wit-bindgen's host-side trait generation treats
+/// any interface whose types are `use`d elsewhere as "imported for
+/// types" — even if the interface itself is purely exported. That
+/// produced a spurious `Host` trait on the host side requiring a
+/// dummy `unreachable!()` stub. Putting shared types in their own
+/// pure-types interface (no functions) avoids the false-import
+/// signal and lets `policy` interface be purely exported.
+interface types {
+    /// Reference to a string declared by the polici manifest's
+    /// `disclosure_fields` (machine keys) or `localized` map
+    /// (translatable UI strings). Opaque key — the host validates
+    /// membership in the registered set at every use-site
+    /// (`prompt-disclosure` field key/label, reason, media labels)
+    /// and traps if absent. Format also enforced:
+    /// `[a-z][a-z0-9_-]{0,127}` so the value is safe to display raw
+    /// on the consent screen when surfaced for non-canonical keys.
+    /// Type alias (not a record) so SDKs can compose constants
+    /// cheaply: typically backed by a compile-time enum that
+    /// surfaces a `&'static str` per entry.
+    type text-ref = string;
+}

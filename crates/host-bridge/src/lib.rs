@@ -27,7 +27,7 @@ mod proto {
 }
 
 pub use age_seal::seal_to_recipient;
-pub use auth::{AuthClient, AuthVerdict, WorkspaceId};
+pub use auth::{AuthClient, AuthVerdict, TenantId};
 pub use enclavid_untrusted::{AuthN, AuthZ, Exposed, Reason, Replay, Untrusted, reason};
 pub use error::BridgeError;
 pub use transport::{GrpcChannel, connect_store};

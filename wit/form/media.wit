@@ -1,7 +1,7 @@
 package enclavid:form;
 
 interface media {
-    use enclavid:policy/policy.{text-ref};
+    use enclavid:types/types.{text-ref};
 
     /// One JPEG-encoded frame, decoded independently by the enclave's
     /// plugin layer. Bytes are pristine — no container, no inter-
@@ -34,32 +34,16 @@ interface media {
     /// Multi-step captures within ONE prompt-media call belong to the
     /// SAME artifact — plugins analyse them together.
     ///
-    /// All text fields on this record (including `icon`) are
-    /// `text-ref`s into `prepare-text-refs`. The host validates
-    /// membership at every use-site; unregistered refs trap.
-    /// Two reasons the icon-name goes through text-ref rather than
-    /// being a free-form string:
+    /// `icon` is a free-form string dispatched against the frontend's
+    /// bundled SVG library — closed set of well-known artifact icons
+    /// (passport, id-card, drivers-license, selfie, ...). The policy
+    /// picks one. Unknown names render with no icon (graceful
+    /// fallback); new icons ship via frontend release without WIT
+    /// churn. Not a text-ref because there's nothing to localise —
+    /// icon-name is purely a dispatch token, never displayed verbatim.
     ///
-    ///   1. **Frozen-before-evaluate.** `prepare-text-refs` runs
-    ///      before `evaluate` ever sees per-session args / clips.
-    ///      Routing icon through it blocks a policy from minting
-    ///      `passport-<user-country>` at evaluate time and using
-    ///      icon choice as a per-user signal — the registered set
-    ///      is enumerable at audit time.
-    ///   2. **Push toward well-known plugin.** The eventual
-    ///      `enclavid:well-known` plugin will export canonical
-    ///      icon-name constants. Policy imports those, gets
-    ///      type-safe-ish use-sites, never types a magic string
-    ///      by hand. text-ref keeps that migration path open while
-    ///      a free-form string would normalise hand-written names
-    ///      that never reach the plugin world.
-    ///
-    /// Frontend keeps its own bundled SVG library keyed by the
-    /// ref string. Unknown names render as no icon (graceful) —
-    /// new icons ship as a frontend release without WIT churn.
-    /// `none` (no value) skips the icon area explicitly.
-    ///
-    /// The three remaining text surfaces:
+    /// The three remaining surfaces ARE text-refs into the policy's
+    /// pre-declared registry:
     ///   * `instructions` — pre-capture intro body. Paired with
     ///     `icon` to form "what you're about to do". Shown before
     ///     the camera turns on for THIS step — even between steps
@@ -69,7 +53,7 @@ interface media {
     ///   * `review-hint` — post-capture check on the preview screen
     ///     ("Make sure the MRZ is sharp and free of glare").
     record capture-step {
-        icon: option<text-ref>,
+        icon: option<string>,
         instructions: text-ref,
         label: text-ref,
         camera: camera-facing,

@@ -1,7 +1,7 @@
 package enclavid:disclosure;
 
 interface disclosure {
-    use enclavid:policy/policy.{text-ref};
+    use enclavid:types/types.{text-ref};
 
     /// One consented field surfaced on the applicant's consent
     /// screen and (modulo the label) included in the sealed

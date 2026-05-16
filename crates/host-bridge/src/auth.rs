@@ -1,12 +1,12 @@
 //! Client wrapper for the host-side `Auth` gRPC service.
 //!
 //! TEE forwards the raw HTTP `Authorization` header value plus the
-//! intended operation, host validates and returns the workspace context.
+//! intended operation, host validates and returns the tenant context.
 //! TEE never parses JWTs / certificates / etc. — host is the source of
 //! truth for client identity and RBAC.
 //!
 //! Trust model: host can return arbitrary verdicts (e.g. claim a token
-//! is valid when it isn't, or substitute a different workspace_id).
+//! is valid when it isn't, or substitute a different tenant_id).
 //! K_client backstop in session creation prevents this from escalating
 //! to applicant-data leak. See proto/auth.proto and architecture.md →
 //! Network Isolation for the full analysis.
@@ -20,20 +20,20 @@ use crate::proto::auth::auth_client::AuthClient as ProtoAuthClient;
 use crate::proto::auth::{AuthorizeClientRequest, ClientOperation};
 use crate::transport::GrpcChannel;
 
-/// Workspace identifier returned by the host. Opaque string from the
+/// Tenant identifier returned by the host. Opaque string from the
 /// TEE's perspective — host is authoritative on identity; the TEE
-/// uses it as a tenant key for cross-session boundary checks.
+/// uses it as the per-credential key for cross-session boundary checks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct WorkspaceId(pub String);
+pub struct TenantId(pub String);
 
-impl WorkspaceId {
+impl TenantId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
 /// Outcome of an authorization request. The whole verdict is the
-/// host's word — substitution (Allowed→different workspace) and
+/// host's word — substitution (Allowed→different tenant) and
 /// spurious denial (Allowed→Unauthenticated) are both observed-but-
 /// not-trusted. The TEE never escalates verdict trust into a data
 /// release; the K_client backstop on `/init` bounds substitution to
@@ -41,8 +41,8 @@ impl WorkspaceId {
 /// Isolation for the full analysis.
 #[derive(Debug)]
 pub enum AuthVerdict {
-    /// Host claims the credential is valid and bound to this workspace.
-    Allowed(WorkspaceId),
+    /// Host claims the credential is valid and bound to this tenant.
+    Allowed(TenantId),
     /// Bad credential: missing, malformed, expired, or otherwise
     /// rejected by the host's identity provider.
     Unauthenticated,
@@ -82,8 +82,8 @@ impl AuthClient {
 
         let verdict = match self.client.clone().authorize_client(request).await {
             Ok(response) => {
-                let workspace_id = WorkspaceId(response.into_inner().workspace_id);
-                AuthVerdict::Allowed(workspace_id)
+                let tenant_id = TenantId(response.into_inner().tenant_id);
+                AuthVerdict::Allowed(tenant_id)
             }
             Err(status) => match status.code() {
                 Code::Unauthenticated => AuthVerdict::Unauthenticated,

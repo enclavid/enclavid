@@ -46,3 +46,24 @@ pub const SESSION_ID_RANDOM_BYTES: usize = 32;
 /// Bounds host storage growth and keeps wire frames small; UUIDs
 /// and typical client identifiers fit comfortably.
 pub const MAX_EXTERNAL_REF_LEN: usize = 128;
+
+/// Maximum byte length of the `Authorization` header value the TEE
+/// is willing to forward as `registry_auth`. Typical Logto-issued
+/// JWT access tokens land around 1–2 KB; 8 KB is comfortably above
+/// realistic bearer sizes while still bounding session-metadata
+/// growth in case a malicious consumer supplies a giant string.
+/// Enforced at session-create time, before any persistence.
+pub const MAX_REGISTRY_AUTH_LEN: usize = 8 * 1024;
+
+// ----- Policy artifact transport caps -----
+
+/// Maximum byte size of the polici manifest layer (the plain-JSON
+/// blob holding `disclosure_fields` + `localized`). Bounds the
+/// memory the TEE allocates when a host serves a malformed or
+/// malicious artifact — engine-side parse + entry-count cap kicks
+/// in *after* this, so this is the outer ring of defence.
+///
+/// 1 MB is generous for realistic polici (typical: a few KB, max
+/// realistic ~100 KB for many locales × long translations).
+/// Anything bigger is a policy bug or DoS attempt.
+pub const MAX_POLICY_MANIFEST_BYTES: usize = 1024 * 1024;

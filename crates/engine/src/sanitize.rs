@@ -22,7 +22,7 @@ use std::collections::HashSet;
 
 use crate::enclavid::disclosure::disclosure::DisplayField;
 use crate::limits::{
-    MAX_EXPOSE_FIELDS, MAX_KEY_LENGTH, MAX_LANGUAGE_LENGTH, MAX_TEXT_VALUE_SOFT_CHARS,
+    MAX_EXPOSE_FIELDS, MAX_KEY_LENGTH, MAX_TEXT_VALUE_SOFT_CHARS,
     MAX_VALUE_LENGTH,
 };
 
@@ -112,37 +112,6 @@ pub fn validate_key_format(key: &str) -> wasmtime::Result<()> {
 }
 
 /// Validate a BCP-47-shaped language tag on a `translation` entry.
-/// Cheap defensive check: letters/digits/`-`, ≤16 chars, starts with
-/// a letter. Doesn't enforce real BCP-47 grammar — that's a lot of
-/// rules for marginal benefit. Goal here is bounding cardinality
-/// and rejecting obvious garbage (multi-KB strings, embedded NULs)
-/// that policy might try to smuggle through the language field.
-pub fn validate_language(lang: &str) -> wasmtime::Result<()> {
-    if lang.is_empty() {
-        return Err(wasmtime::Error::msg("translation language is empty"));
-    }
-    if lang.len() > MAX_LANGUAGE_LENGTH {
-        return Err(wasmtime::Error::msg(format!(
-            "translation language exceeds {MAX_LANGUAGE_LENGTH} bytes"
-        )));
-    }
-    let mut chars = lang.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_alphabetic() {
-        return Err(wasmtime::Error::msg(
-            "translation language must start with ASCII letter",
-        ));
-    }
-    for c in chars {
-        if !(c.is_ascii_alphanumeric() || c == '-') {
-            return Err(wasmtime::Error::msg(
-                "translation language contains invalid character (allowed: A-Za-z0-9, '-')",
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// Soft-sanitise a single text-entry's raw value: NFC-normalize,
 /// strip control / BIDI / zero-width chars, then truncate to a
 /// per-character budget. Bytes-level hard reject happens upstream
@@ -280,23 +249,6 @@ mod tests {
             sanitize_string("Alice\u{E0041}\u{E0042}\u{E0043}"),
             "Alice"
         );
-    }
-
-    #[test]
-    fn validate_language_accepts_bcp47_shapes() {
-        assert!(validate_language("en").is_ok());
-        assert!(validate_language("en-US").is_ok());
-        assert!(validate_language("zh-Hant-HK").is_ok());
-    }
-
-    #[test]
-    fn validate_language_rejects_garbage() {
-        assert!(validate_language("").is_err()); // empty
-        assert!(validate_language("a".repeat(MAX_LANGUAGE_LENGTH + 1).as_str()).is_err());
-        assert!(validate_language("1-bad").is_err()); // digit start
-        assert!(validate_language("en US").is_err()); // space
-        assert!(validate_language("en_US").is_err()); // underscore not BCP-47
-        assert!(validate_language("en\u{0}").is_err()); // embedded NUL
     }
 
     fn registered() -> HashSet<String> {

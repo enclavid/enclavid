@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use age::x25519::Identity;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 use base64ct::{Base64, Encoding};
@@ -18,15 +18,19 @@ use enclavid_host_bridge::{
 };
 
 use crate::client_state::ClientState;
-use crate::limits::{MAX_EXTERNAL_REF_LEN, SESSION_ID_RANDOM_BYTES};
+use crate::limits::{MAX_EXTERNAL_REF_LEN, MAX_REGISTRY_AUTH_LEN, SESSION_ID_RANDOM_BYTES};
 use crate::policy_pull;
 
-use super::auth::Workspace;
+use super::auth::Tenant;
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
-    /// Policy reference: `name@sha256:...` (pinned). Tag-form rejected
-    /// at parse — TEE only ever asks the registry by digest.
+    /// Full pinned OCI reference for the policy artifact:
+    /// `<registry>/<repository>@sha256:<hex>`. Tag-form rejected at
+    /// parse — TEE only ever asks the registry by digest. The
+    /// registry hostname is part of the ref, so any OCI-compliant
+    /// registry works (our Angos by default; ghcr, ECR, etc. via
+    /// PR4 once `registry_auth` is wired up).
     pub policy: String,
     /// Disclosure recipient pubkey: applicant-consented data is
     /// encrypted to this. Provided as age recipient string `age1...`.
@@ -44,6 +48,16 @@ pub struct CreateSessionRequest {
     /// before the handler even runs.
     #[serde(default, deserialize_with = "deserialize_external_ref")]
     pub external_ref: Option<String>,
+    /// Optional override for the bearer used on registry pulls. Useful
+    /// when the API-auth credential and the registry-auth credential
+    /// differ — e.g. the consumer authenticates to our API with a
+    /// Logto JWT but the polici lives in `ghcr.io` and needs a GitHub
+    /// PAT. Format: full `Authorization` header value, e.g.
+    /// `"Bearer <token>"`. When absent (the common case for our
+    /// Angos) we fall back to the inbound `Authorization` header so
+    /// consumers don't have to supply the same JWT twice.
+    #[serde(default)]
+    pub registry_auth: Option<String>,
 }
 
 /// Length-bound + printable-ASCII gate on `external_ref`. Empty
@@ -83,7 +97,11 @@ pub struct AttestationView {
 
 #[derive(Serialize)]
 pub struct ResolvedPolicyView {
-    pub name: String,
+    /// Full pinned OCI reference echoed back from the request.
+    pub reference: String,
+    /// Convenience: just the `sha256:<hex>` digest, extracted from
+    /// `reference`. Same value the attestation quote binds in
+    /// `ReportData.policy_digest`.
     pub digest: String,
 }
 
@@ -118,11 +136,37 @@ pub(super) fn post_create() -> MethodRouter<Arc<ClientState>> {
 /// the host sees opaque bytes only.
 async fn create(
     State(state): State<Arc<ClientState>>,
-    Workspace(workspace_id): Workspace,
+    Tenant(tenant_id): Tenant,
+    headers: HeaderMap,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, StatusCode> {
-    let (policy_name, policy_digest) =
-        parse_pinned_reference(&body.policy).ok_or(StatusCode::BAD_REQUEST)?;
+    // Validate the ref shape up-front — tag-form (no `@sha256:`) or
+    // bad-algo refs trap here with a clean 400, instead of failing
+    // later inside policy_pull with an opaque error.
+    let policy_digest = policy_pull::split_pinned_ref(&body.policy)
+        .map(|(_, d)| d.to_string())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let policy_ref = body.policy.clone();
+
+    // Resolve the bearer the host will attach on every registry pull
+    // for this session. Body-supplied `registry_auth` wins (covers the
+    // "API auth ≠ registry auth" case — e.g. our Logto JWT for /sessions
+    // call vs a GitHub PAT for ghcr pull); otherwise fall back to the
+    // inbound `Authorization` header (the common case where the same
+    // credential serves both — our Angos b-migrate path). The TEE
+    // never inspects: it's opaque bytes ferried to the host on each
+    // pull. Length-bounded so a malicious consumer can't bloat
+    // session metadata. See architecture.md → Registry Decoupling.
+    let registry_auth: Vec<u8> = match body.registry_auth.as_deref() {
+        Some(s) => s.as_bytes().to_vec(),
+        None => headers
+            .get(header::AUTHORIZATION)
+            .map(|v| v.as_bytes().to_vec())
+            .unwrap_or_default(),
+    };
+    if registry_auth.len() > MAX_REGISTRY_AUTH_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     // Parse K_client as age identity. SecretBox to ensure the
     // plaintext string gets zeroed on drop instead of lingering in
@@ -133,11 +177,13 @@ async fn create(
 
     // Validate K_client matches the policy's validator annotation —
     // single small RPC to the host registry, no full policy pull.
+    // Uses the same `registry_auth` bearer the artifact pull will use
+    // later at /connect, so any auth failure surfaces here
+    // synchronously rather than mid-applicant-flow.
     policy_pull::validate_k_client(
         &state.registry,
-        &workspace_id,
-        &policy_name,
-        &policy_digest,
+        &policy_ref,
+        &registry_auth,
         &k_client,
     )
     .await
@@ -167,9 +213,9 @@ async fn create(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let metadata = SessionMetadata {
-        workspace_id,
-        policy_name: policy_name.clone(),
-        policy_digest: policy_digest.clone(),
+        tenant_id,
+        policy_ref: policy_ref.clone(),
+        registry_auth,
         // K_client lives encrypted inside the metadata blob (under
         // TEE_key, AAD=session_id). Stored as the raw secret-key
         // string — `/connect` re-parses it as an Identity when it's
@@ -207,7 +253,7 @@ async fn create(
     Ok(Json(CreateSessionResponse {
         session_id,
         resolved_policy: ResolvedPolicyView {
-            name: policy_name,
+            reference: policy_ref,
             digest: policy_digest,
         },
         attestation: AttestationView {
@@ -224,14 +270,3 @@ fn generate_session_id() -> String {
     format!("ses_{}", hex::encode(bytes))
 }
 
-/// Split a pinned reference `<name>@sha256:<hex>` into (name, digest).
-/// Returns None for any other shape (e.g. `name:tag` form) — tag → digest
-/// resolution is a separate concern that lives in the create handler if
-/// we ever support it.
-fn parse_pinned_reference(reference: &str) -> Option<(String, String)> {
-    let (name, digest) = reference.split_once('@')?;
-    if !digest.starts_with("sha256:") {
-        return None;
-    }
-    Some((name.to_string(), digest.to_string()))
-}

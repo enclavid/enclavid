@@ -16,7 +16,18 @@ use sha2::{Digest, Sha256};
 
 use enclavid_host_bridge::{AuthN, RegistryClient};
 
-const POLICY_LAYER_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.wasm.v1.encrypted";
+use crate::limits::MAX_POLICY_MANIFEST_BYTES;
+
+/// OCI layer media-type for the encrypted polici wasm. Decrypted
+/// inside the TEE with K_client.
+const POLICY_WASM_LAYER: &str = "application/vnd.enclavid.policy.wasm.v1.encrypted";
+/// OCI layer media-type for the polici manifest (frozen text-ref
+/// registry: disclosure_fields + localized translations + schema
+/// version). Plain JSON — applicant-facing UI strings are public by
+/// nature, integrity comes from the OCI manifest content-addressing.
+/// Optional: polici with no host-visible UI (decision-only stubs)
+/// can ship without this layer.
+const POLICY_MANIFEST_LAYER: &str = "application/vnd.enclavid.policy.manifest.v1.json";
 /// Manifest annotation key holding an age-ciphertext token encrypted
 /// to `K_client_pub`. POST /sessions decrypts this with the supplied
 /// K_client to confirm the key matches the artifact, before storing
@@ -35,6 +46,8 @@ const VALIDATOR_PLAINTEXT: &[u8] = &[1u8];
 pub enum PullError {
     #[error("registry transport: {0}")]
     Transport(String),
+    #[error("policy_ref must be `<registry>/<repository>@sha256:<hex>`: {0}")]
+    InvalidRef(String),
     #[error("manifest JSON malformed: {0}")]
     ManifestParse(String),
     #[error("manifest digest mismatch: expected {expected}, got {actual}")]
@@ -47,6 +60,8 @@ pub enum PullError {
     },
     #[error("manifest declares no layer with the policy media type")]
     NoPolicyLayer,
+    #[error("policy manifest layer is {size} bytes, max is {max}")]
+    ManifestTooLarge { size: usize, max: usize },
     #[error("manifest layer/payload count mismatch: {layers} vs {payloads}")]
     LayerCountMismatch { layers: usize, payloads: usize },
     #[error("decryption failed (wrong K_client?)")]
@@ -59,10 +74,22 @@ pub enum PullError {
     ValidatorMismatch,
 }
 
-/// Result of a successful pull-and-decrypt.
-pub struct DecryptedPolicy {
+/// Result of a successful pull-and-decrypt: the polici's executable
+/// wasm plus its (optional) frozen policy manifest. The two layers
+/// live side-by-side in the OCI artifact but ship with different
+/// confidentiality treatments — wasm is K_client-encrypted
+/// (proprietary algorithm), policy manifest is plain JSON
+/// (applicant-facing UI strings + machine keys, inspectable for
+/// audit). Both are integrity-checked by the OCI content-addressing
+/// chain.
+pub struct PolicyArtifact {
     /// Decrypted wasm. Ready to compile with wasmtime.
     pub wasm_bytes: Vec<u8>,
+    /// Policy manifest bytes verbatim (JSON). `None` if the OCI
+    /// manifest declares no manifest layer — polici without
+    /// host-visible UI (decision-only stubs, test fixtures) can omit
+    /// it. Engine caller treats `None` as an empty registry.
+    pub manifest_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Deserialize)]
@@ -89,13 +116,14 @@ struct OciDescriptor {
 /// during applicant flow.
 pub async fn validate_k_client(
     registry: &RegistryClient,
-    workspace_id: &str,
-    policy_name: &str,
-    policy_digest: &str,
+    policy_ref: &str,
+    registry_auth: &[u8],
     k_client: &Identity,
 ) -> Result<(), PullError> {
+    let policy_digest = extract_digest(policy_ref)
+        .ok_or_else(|| PullError::InvalidRef(policy_ref.to_string()))?;
     let response = registry
-        .pull_manifest(workspace_id, policy_name, policy_digest)
+        .pull_manifest(policy_ref, registry_auth)
         .await
         .map_err(|e| PullError::Transport(format!("{e:?}")))?
         .trust::<AuthN, _, _, _>(|r| {
@@ -138,22 +166,23 @@ pub async fn validate_k_client(
 
 pub async fn pull_and_decrypt(
     registry: &RegistryClient,
-    workspace_id: &str,
-    policy_name: &str,
-    policy_digest: &str,
+    policy_ref: &str,
+    registry_auth: &[u8],
     k_client: &Identity,
-) -> Result<DecryptedPolicy, PullError> {
+) -> Result<PolicyArtifact, PullError> {
+    let policy_digest = extract_digest(policy_ref)
+        .ok_or_else(|| PullError::InvalidRef(policy_ref.to_string()))?;
     // The registry response carries only (AuthN) — Replay is N/A
     // for content-addressed pulls. The AuthN trust gate below closes
     // via cryptographic verification: we only accept the response if
     // all digests recompute to what the session record asked for.
     let response = registry
-        .pull(workspace_id, policy_name, policy_digest)
+        .pull(policy_ref, registry_auth)
         .await
         .map_err(|e| PullError::Transport(format!("{e:?}")))?
         .trust::<AuthN, _, _, _>(|r| {
-            // Manifest bytes must hash to what the session record was
-            // created against (passed in as `policy_digest`).
+            // Manifest bytes must hash to the digest baked into
+            // `policy_ref` (which was pinned at session-create time).
             let manifest_actual = sha256_hex(&r.manifest);
             if !digest_matches(policy_digest, &manifest_actual) {
                 return Err(PullError::ManifestDigest {
@@ -200,21 +229,47 @@ pub async fn pull_and_decrypt(
         .into_inner();
 
     // After trust gate: response is plain `PullResponse`. Re-parse the
-    // manifest (cheap — JSON is small) to find the encrypted-policy layer.
+    // manifest (cheap — JSON is small) to dispatch layers by
+    // media-type. Wasm layer is required; assets layer is optional.
     let manifest: OciManifest = serde_json::from_slice(&response.manifest)
         .map_err(|e| PullError::ManifestParse(e.to_string()))?;
-    let (idx, _descriptor) = manifest
-        .layers
-        .iter()
-        .enumerate()
-        .find(|(_, l)| l.media_type == POLICY_LAYER_MEDIA_TYPE)
-        .ok_or(PullError::NoPolicyLayer)?;
 
-    // Decrypt with K_client. Failure here is a domain error (wrong
-    // key, corrupted artifact) — surfaces from /connect as 410 Gone.
-    let layer_bytes = &response.layers[idx];
-    let wasm_bytes = age_decrypt(layer_bytes, k_client).map_err(|_| PullError::Decrypt)?;
-    Ok(DecryptedPolicy { wasm_bytes })
+    let mut wasm_bytes: Option<Vec<u8>> = None;
+    let mut manifest_bytes: Option<Vec<u8>> = None;
+    for (idx, descriptor) in manifest.layers.iter().enumerate() {
+        let payload = &response.layers[idx];
+        match descriptor.media_type.as_str() {
+            POLICY_WASM_LAYER => {
+                // K_client-encrypted; decrypt for compilation.
+                let plaintext =
+                    age_decrypt(payload, k_client).map_err(|_| PullError::Decrypt)?;
+                wasm_bytes = Some(plaintext);
+            }
+            POLICY_MANIFEST_LAYER => {
+                // Plain JSON; integrity already verified via the
+                // descriptor digest in the trust gate above.
+                // Transport cap: protect TEE from a malformed /
+                // malicious artifact that ships a megabyte-sized
+                // manifest. Engine-side `load_manifest` still
+                // applies an entry-count cap on top of this.
+                if payload.len() > MAX_POLICY_MANIFEST_BYTES {
+                    return Err(PullError::ManifestTooLarge {
+                        size: payload.len(),
+                        max: MAX_POLICY_MANIFEST_BYTES,
+                    });
+                }
+                manifest_bytes = Some(payload.clone());
+            }
+            _ => {
+                // Unknown media-type — ignore for forward-compat.
+                // Future versions may add new layer types; older
+                // hosts should skip them rather than refuse to load.
+            }
+        }
+    }
+
+    let wasm_bytes = wasm_bytes.ok_or(PullError::NoPolicyLayer)?;
+    Ok(PolicyArtifact { wasm_bytes, manifest_bytes })
 }
 
 fn age_decrypt(ciphertext: &[u8], identity: &Identity) -> Result<Vec<u8>, age::DecryptError> {
@@ -236,4 +291,22 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn digest_matches(expected: &str, actual_hex: &str) -> bool {
     let expected_hex = expected.strip_prefix("sha256:").unwrap_or(expected);
     expected_hex.eq_ignore_ascii_case(actual_hex)
+}
+
+/// Split a pinned OCI reference `<repo>@sha256:<hex>` into its parts.
+/// `<repo>` may include the registry hostname (e.g.
+/// `registry.example.com/path`). Returns None for tag-form refs (no
+/// `@`) or non-sha256 digest algorithms — TEE only accepts pinned
+/// sha256 refs.
+pub fn split_pinned_ref(policy_ref: &str) -> Option<(&str, &str)> {
+    let (repo, digest) = policy_ref.rsplit_once('@')?;
+    if !digest.starts_with("sha256:") {
+        return None;
+    }
+    Some((repo, digest))
+}
+
+/// Extract just the `sha256:<hex>` digest substring from a pinned ref.
+fn extract_digest(policy_ref: &str) -> Option<&str> {
+    split_pinned_ref(policy_ref).map(|(_, d)| d)
 }

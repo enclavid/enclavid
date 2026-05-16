@@ -115,11 +115,14 @@ impl Host for HostState {
 }
 
 /// Format + registration check for every text-ref inside a
-/// `MediaSpec` (its own label plus the label on each capture step).
-/// Same timing-based defence as `prompt_disclosure`: every ref must
-/// be in the policy's pre-declared `prepare-localized-texts` set,
-/// blocking runtime-crafted refs encoded with per-session user
-/// info.
+/// `MediaSpec`. Same timing-based defence as `prompt_disclosure`:
+/// every ref must be in the policy's frozen asset registry,
+/// blocking runtime-crafted refs encoded with per-session user info.
+///
+/// `icon` is intentionally NOT checked — it's a free-form string
+/// dispatched against the frontend's bundled SVG library. Unknown
+/// names render with no icon (graceful fallback); polici doesn't
+/// declare icons.
 fn validate_media_spec(
     spec: &MediaSpec,
     registered: &std::collections::HashSet<String>,
@@ -131,13 +134,6 @@ fn validate_media_spec(
     }
     sanitize::ensure_registered(&spec.label, registered, "prompt_media spec label")?;
     for step in &spec.captures {
-        if let Some(icon) = &step.icon {
-            sanitize::ensure_registered(
-                icon,
-                registered,
-                "prompt_media capture-step icon",
-            )?;
-        }
         sanitize::ensure_registered(
             &step.instructions,
             registered,

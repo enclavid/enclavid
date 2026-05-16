@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { pickLocalized } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-import type { CaptureStep, Translations } from "@/types";
+import type { CaptureStep } from "@/types";
 
 type Props = {
   /// Header shown at the top of the capture screen — describes
   /// the artifact as a whole (e.g. "Your passport", "Holder A's ID").
-  promptLabel: Translations;
+  promptLabel: string;
   /// One step of the artifact's capture sequence. Drives camera
   /// facing, the overlay guide (rect / oval / none) and the
   /// per-step hint label.
@@ -252,8 +251,8 @@ export function MediaCapture({
   }
 
   const showCamera = phase === "streaming" || phase === "recording";
-  const stepText = pickLocalized(step.label);
-  const promptText = pickLocalized(promptLabel);
+  const stepText = step.label;
+  const promptText = promptLabel;
   const stepHint =
     totalSteps > 1
       ? `Step ${stepNumber} of ${totalSteps}. ${stepText}`
@@ -316,7 +315,7 @@ export function MediaCapture({
                 paddingTop: "max(env(safe-area-inset-top), 0.5rem)",
               }}
             >
-              {pickLocalized(step.review_hint)}
+              {step.review_hint}
             </div>
           </>
         )}

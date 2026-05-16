@@ -10,7 +10,12 @@ pub mod wasmtime_shim;
 
 pub use enclavid_host_bridge::{suspended, SessionMetadata, SessionState};
 pub use listener::{ConsentDisclosure, SessionChange, SessionListener};
-pub use policy::{EvalArgs, LocalizedDecl, RunStatus, Runner, TextDecls};
+pub use policy::{load_manifest, EvalArgs, LocalizedDecl, RunStatus, Runner, TextDecls};
+/// Re-exported for the api crate so it can apply the same
+/// control/BIDI/zero-width/Unicode-tag stripping to manifest
+/// translation values at resolve time (lazy validation strategy —
+/// see `policy::load_manifest` docs).
+pub use sanitize::sanitize_text_value;
 /// Re-exports for API callers so they can implement `SessionListener` and
 /// build futures with the right error type without depending on
 /// wasmtime directly. `RunError` is `anyhow::Error` under the hood.
@@ -30,6 +35,7 @@ wasmtime::component::bindgen!({
         }
     "#,
     path: [
+        "../../wit/types",
         "../../wit/policy",
         "../../wit/disclosure",
         "../../wit/form",

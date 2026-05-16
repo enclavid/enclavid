@@ -12,15 +12,16 @@ use enclavid_host_bridge::{AuthN, AuthZ, Disclosure, Metadata, Replay, reason};
 use crate::client_state::ClientState;
 use crate::disclosure_hash;
 
-use super::auth::Workspace;
+use super::auth::Tenant;
 
 #[derive(Serialize)]
 pub struct DisclosuresResponse {
     /// Each entry is one age-encrypted record sealed to the
-    /// workspace's `client_disclosure_pubkey` (provided at session
-    /// create). Base64-standard for JSON wire safety; client decodes
-    /// then opens with the matching age identity. Order is append
-    /// order — index `i` is the i-th disclosure the engine emitted.
+    /// consumer-supplied `client_disclosure_pubkey` (provided at
+    /// session create). Base64-standard for JSON wire safety; client
+    /// decodes then opens with the matching age identity. Order is
+    /// append order — index `i` is the i-th disclosure the engine
+    /// emitted.
     pub items: Vec<String>,
 }
 
@@ -32,11 +33,11 @@ pub(super) fn get_disclosures() -> MethodRouter<Arc<ClientState>> {
 
 async fn read(
     State(state): State<Arc<ClientState>>,
-    Workspace(workspace_id): Workspace,
+    Tenant(tenant_id): Tenant,
     Path(session_id): Path<String>,
 ) -> Result<Json<DisclosuresResponse>, StatusCode> {
     // Pull metadata + disclosure list in a single Read RPC. Metadata
-    // is the workspace-ownership gate AND the source of truth for the
+    // is the tenant-ownership gate AND the source of truth for the
     // running `disclosure_hash` chain — we recompute the chain over
     // the host-served list and compare, so any host fabrication /
     // truncation / reorder / swap-with-other-list shows up as a hash
@@ -47,16 +48,16 @@ async fn read(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // AuthZ via metadata: absent or wrong-workspace collapses to 404
-    // so we don't leak existence of other workspaces' sessions.
+    // AuthZ via metadata: absent or wrong-tenant collapses to 404
+    // so we don't leak existence of other tenants' sessions.
     let metadata = metadata_opt
         .trust::<AuthZ, _, _, _>(|m| match m {
-            Some(m) if m.workspace_id == workspace_id => Ok(()),
+            Some(m) if m.tenant_id == tenant_id => Ok(()),
             _ => Err(StatusCode::NOT_FOUND),
         })?
         .trust_unchecked::<Replay, _>(reason!(r#"
-Workspace_id is set at /sessions create and never changes, so
-a stale metadata snapshot still answers the workspace-ownership
+tenant_id is set at /sessions create and never changes, so
+a stale metadata snapshot still answers the tenant-ownership
 question correctly. AEAD-binding to session_id (AAD) prevents
 substitution with another session's metadata.
         "#))

@@ -16,7 +16,7 @@ package enclavid.auth;
 //  1. Host (this RPC) — does this credential have permission for this
 //     operation? Owns identity, JWT validation, mTLS-cert checks, RBAC.
 //  2. TEE (after this RPC) — for operations on a specific session, does
-//     the session's workspace_id match the credential's workspace_id?
+//     the session's tenant_id match the credential's tenant_id?
 //     Pure data-plane ownership check, no policy logic.
 service Auth {
   rpc AuthorizeClient(AuthorizeClientRequest) returns (AuthorizeClientResponse);
@@ -49,8 +49,11 @@ message AuthorizeClientRequest {
 }
 
 message AuthorizeClientResponse {
-  // Workspace this credential is bound to. TEE uses this for resource
-  // ownership: any session-specific operation must additionally verify
-  // the session's workspace_id == this value (TEE-side data-plane check).
-  string workspace_id = 1;
+  // Tenant identity this credential is bound to — opaque string the TEE
+  // uses for resource ownership: any session-specific operation must
+  // additionally verify the session's tenant_id == this value (TEE-side
+  // data-plane check). Host-side this is typically the Logto organization
+  // id, but the TEE doesn't depend on that — any opaque per-credential
+  // identifier suffices.
+  string tenant_id = 1;
 }

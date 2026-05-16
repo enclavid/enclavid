@@ -44,14 +44,14 @@ async fn status(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Applicant flow has no workspace_id in scope — security here
+    // Applicant flow has no tenant_id in scope — security here
     // relies on the bearer-key auth layer at routes that mutate
     // state, plus AEAD-binding on session_id. /status itself is
     // public; we just need to know whether a session exists for
     // this id.
     let metadata = metadata_opt
         .trust_unchecked::<AuthZ, _>(reason!(r#"
-Applicant flow doesn't authenticate per-workspace — /status is
+Applicant flow doesn't authenticate per-tenant — /status is
 public, used by the frontend on first page load before the
 applicant has any credential. Existence of the session_id is
 acceptable to leak (32-byte random, ≥128 bits entropy).

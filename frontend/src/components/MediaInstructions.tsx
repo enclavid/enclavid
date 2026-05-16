@@ -22,25 +22,24 @@
 //     text
 //   - Bottom: "Start capture" CTA + camera-permission priming hint
 //
-// `pickLocalized` selects the user's locale from the policy-
-// supplied translation set; the icon is dispatched against the
-// frontend-bundled SVG library so no policy-controlled imagery
+// Labels arrive already resolved to the user's locale (server
+// resolves via `Accept-Language` header). Icon is dispatched against
+// the frontend-bundled SVG library so no policy-controlled imagery
 // ever reaches the DOM.
 
 import { ArtifactIcon } from "@/components/ArtifactIcon";
 import { Button } from "@/components/ui/button";
-import { pickLocalized } from "@/lib/i18n";
-import type { Translations } from "@/types";
 
 type Props = {
-  /// `media-spec.label` — overall artifact title.
-  artifactLabel: Translations;
-  /// `capture-step.icon` text-ref name; null = no icon area.
+  /// `media-spec.label` — overall artifact title, locale-resolved.
+  artifactLabel: string;
+  /// `capture-step.icon` dispatch name; null = no icon area.
   /// Unknown values gracefully render as no icon (see
   /// `ArtifactIcon` component).
   icon: string | null;
-  /// `capture-step.instructions` — per-step pre-capture body.
-  instructions: Translations;
+  /// `capture-step.instructions` — per-step pre-capture body,
+  /// locale-resolved.
+  instructions: string;
   /// 1-based step index for the badge.
   stepNumber: number;
   /// Total step count; badge is hidden when 1.
@@ -66,7 +65,7 @@ export function MediaInstructions({
       }}
     >
       <header className="mt-10 flex flex-col items-center gap-1 text-center">
-        <h1 className="text-2xl font-semibold">{pickLocalized(artifactLabel)}</h1>
+        <h1 className="text-2xl font-semibold">{artifactLabel}</h1>
         {totalSteps > 1 && (
           <p className="text-sm text-muted-foreground">
             Step {stepNumber} of {totalSteps}
@@ -85,7 +84,7 @@ export function MediaInstructions({
           hasIcon ? "" : "mt-10"
         }`}
       >
-        {pickLocalized(instructions)}
+        {instructions}
       </p>
 
       <div className="mt-auto pt-8">
