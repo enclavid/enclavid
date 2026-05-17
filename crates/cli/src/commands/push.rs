@@ -21,7 +21,7 @@ const POLICY_MANIFEST_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.manife
 const POLICY_CONFIG_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.config.v1+json";
 
 /// Manifest annotation key consumed by `POST /api/v1/sessions` to
-/// validate the supplied K_client matches the artifact this manifest
+/// validate the supplied client_policy_key matches the artifact this manifest
 /// describes. Must match the constant on the api side
 /// (`crates/api/src/policy_pull.rs::VALIDATOR_ANNOTATION`).
 const VALIDATOR_ANNOTATION: &str = "com.enclavid.policy.validator";
@@ -56,10 +56,10 @@ pub async fn run(
         .with_context(|| format!("reading {}", artifact.display()))?;
 
     // Mint the validator annotation: a fresh age envelope around a
-    // single byte, encrypted to the K_client's recipient. The session
-    // create handler decrypts this with the K_client the platform
+    // single byte, encrypted to the client_policy_key's recipient. The session
+    // create handler decrypts this with the client_policy_key the platform
     // consumer hands it to confirm the right key without pulling the
-    // whole artifact. Same `K_client` path the user passed to `encrypt`.
+    // whole artifact. Same `client_policy_key` path the user passed to `encrypt`.
     let identity = read_identity(&key)
         .with_context(|| format!("reading key from {}", key.display()))?;
     let validator_b64 = mint_validator(&identity).context("minting validator annotation")?;
@@ -157,7 +157,7 @@ pub async fn run(
     Ok(())
 }
 
-/// Read an age `Identity` (K_client) from the keygen output file.
+/// Read an age `Identity` (client_policy_key) from the keygen output file.
 /// Skips comment lines, takes the first AGE-SECRET-KEY-1 line.
 fn read_identity(path: &PathBuf) -> Result<Identity> {
     let mut content = String::new();
@@ -175,7 +175,7 @@ fn read_identity(path: &PathBuf) -> Result<Identity> {
     anyhow::bail!("no AGE-SECRET-KEY-1 line found in {}", path.display())
 }
 
-/// Encrypt the validator plaintext to the K_client recipient and
+/// Encrypt the validator plaintext to the client_policy_key recipient and
 /// return the base64-encoded age envelope (the manifest annotation
 /// value).
 fn mint_validator(identity: &Identity) -> Result<String> {

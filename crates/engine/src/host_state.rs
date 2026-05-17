@@ -15,7 +15,7 @@ use crate::replay::Replay;
 /// Engine never talks to the host and holds no keys: every committed
 /// CallEvent fires `SessionListener::on_session_change`, the listener (api
 /// crate) does whatever encryption + persistence the destination
-/// requires (`tee_key`/`applicant_key` AEAD for state via the bridge;
+/// requires (`tee_seal_key`/`applicant_session_token` AEAD for state via the bridge;
 /// `client_pk` age-encrypt for disclosures inside the listener
 /// itself). Symmetric with how state and metadata are already sealed
 /// transparently inside host-bridge.

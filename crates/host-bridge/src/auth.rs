@@ -6,8 +6,8 @@
 //! truth for client identity and RBAC.
 //!
 //! Trust model: host can return arbitrary verdicts (e.g. claim a token
-//! is valid when it isn't, or substitute a different tenant_id).
-//! K_client backstop in session creation prevents this from escalating
+//! is valid when it isn't, or substitute a different host_ref).
+//! client_policy_key backstop in session creation prevents this from escalating
 //! to applicant-data leak. See proto/auth.proto and architecture.md →
 //! Network Isolation for the full analysis.
 
@@ -20,13 +20,13 @@ use crate::proto::auth::auth_client::AuthClient as ProtoAuthClient;
 use crate::proto::auth::{AuthorizeClientRequest, ClientOperation};
 use crate::transport::GrpcChannel;
 
-/// Tenant identifier returned by the host. Opaque string from the
+/// HostRef identifier returned by the host. Opaque string from the
 /// TEE's perspective — host is authoritative on identity; the TEE
 /// uses it as the per-credential key for cross-session boundary checks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TenantId(pub String);
+pub struct HostRef(pub String);
 
-impl TenantId {
+impl HostRef {
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -36,13 +36,13 @@ impl TenantId {
 /// host's word — substitution (Allowed→different tenant) and
 /// spurious denial (Allowed→Unauthenticated) are both observed-but-
 /// not-trusted. The TEE never escalates verdict trust into a data
-/// release; the K_client backstop on `/init` bounds substitution to
+/// release; the client_policy_key backstop on `/init` bounds substitution to
 /// at-worst denial-of-service. See architecture.md → Network
 /// Isolation for the full analysis.
 #[derive(Debug)]
 pub enum AuthVerdict {
     /// Host claims the credential is valid and bound to this tenant.
-    Allowed(TenantId),
+    Allowed(HostRef),
     /// Bad credential: missing, malformed, expired, or otherwise
     /// rejected by the host's identity provider.
     Unauthenticated,
@@ -82,8 +82,8 @@ impl AuthClient {
 
         let verdict = match self.client.clone().authorize_client(request).await {
             Ok(response) => {
-                let tenant_id = TenantId(response.into_inner().tenant_id);
-                AuthVerdict::Allowed(tenant_id)
+                let host_ref = HostRef(response.into_inner().host_ref);
+                AuthVerdict::Allowed(host_ref)
             }
             Err(status) => match status.code() {
                 Code::Unauthenticated => AuthVerdict::Unauthenticated,

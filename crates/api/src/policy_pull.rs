@@ -1,10 +1,10 @@
-//! Policy artifact resolution: K_client validation at session create
+//! Policy artifact resolution: client_policy_key validation at session create
 //! time (cheap, manifest-only round-trip) and full pull-and-decrypt
 //! lazily at /connect.
 //!
 //! Verifies digests at every step (host is NOT trusted on response
 //! content — see Network Isolation), extracts the encrypted layer,
-//! and age-decrypts it with K_client.
+//! and age-decrypts it with client_policy_key.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -19,7 +19,7 @@ use enclavid_host_bridge::{AuthN, RegistryClient};
 use crate::limits::MAX_POLICY_MANIFEST_BYTES;
 
 /// OCI layer media-type for the encrypted polici wasm. Decrypted
-/// inside the TEE with K_client.
+/// inside the TEE with client_policy_key.
 const POLICY_WASM_LAYER: &str = "application/vnd.enclavid.policy.wasm.v1.encrypted";
 /// OCI layer media-type for the polici manifest (frozen text-ref
 /// registry: disclosure_fields + localized translations + schema
@@ -29,14 +29,14 @@ const POLICY_WASM_LAYER: &str = "application/vnd.enclavid.policy.wasm.v1.encrypt
 /// can ship without this layer.
 const POLICY_MANIFEST_LAYER: &str = "application/vnd.enclavid.policy.manifest.v1.json";
 /// Manifest annotation key holding an age-ciphertext token encrypted
-/// to `K_client_pub`. POST /sessions decrypts this with the supplied
-/// K_client to confirm the key matches the artifact, before storing
-/// K_client in the session metadata. Saves us the cost of a full
+/// to `client_policy_key_pub`. POST /sessions decrypts this with the supplied
+/// client_policy_key to confirm the key matches the artifact, before storing
+/// client_policy_key in the session metadata. Saves us the cost of a full
 /// policy pull at create time.
 const VALIDATOR_ANNOTATION: &str = "com.enclavid.policy.validator";
 /// Plaintext that the validator annotation is expected to decrypt to.
 /// Semantically a "true" bool — the only information conveyed is
-/// "K_client matches", which is binary. Single byte; the actual age
+/// "client_policy_key matches", which is binary. Single byte; the actual age
 /// envelope is ~hundreds of bytes regardless because of the header
 /// framing, so plaintext minimisation is purely for clarity, not
 /// wire size.
@@ -64,7 +64,7 @@ pub enum PullError {
     ManifestTooLarge { size: usize, max: usize },
     #[error("manifest layer/payload count mismatch: {layers} vs {payloads}")]
     LayerCountMismatch { layers: usize, payloads: usize },
-    #[error("decryption failed (wrong K_client?)")]
+    #[error("decryption failed (wrong client_policy_key?)")]
     Decrypt,
     #[error("manifest is missing the validator annotation")]
     MissingValidator,
@@ -77,7 +77,7 @@ pub enum PullError {
 /// Result of a successful pull-and-decrypt: the polici's executable
 /// wasm plus its (optional) frozen policy manifest. The two layers
 /// live side-by-side in the OCI artifact but ship with different
-/// confidentiality treatments — wasm is K_client-encrypted
+/// confidentiality treatments — wasm is client_policy_key-encrypted
 /// (proprietary algorithm), policy manifest is plain JSON
 /// (applicant-facing UI strings + machine keys, inspectable for
 /// audit). Both are integrity-checked by the OCI content-addressing
@@ -106,19 +106,19 @@ struct OciDescriptor {
     digest: String,
 }
 
-/// Cheap K_client validation against the manifest's validator
+/// Cheap client_policy_key validation against the manifest's validator
 /// annotation. Pulls only the manifest (no layer payloads), verifies
-/// digest, decrypts the validator ciphertext with K_client, and
+/// digest, decrypts the validator ciphertext with client_policy_key, and
 /// confirms it produces the expected plaintext.
 ///
-/// Used at `POST /sessions` so that wrong-K_client errors surface
+/// Used at `POST /sessions` so that wrong-client_policy_key errors surface
 /// synchronously to the client API call instead of breaking later
 /// during applicant flow.
-pub async fn validate_k_client(
+pub async fn validate_client_policy_key(
     registry: &RegistryClient,
     policy_ref: &str,
     registry_auth: &[u8],
-    k_client: &Identity,
+    client_policy_key: &Identity,
 ) -> Result<(), PullError> {
     let policy_digest = extract_digest(policy_ref)
         .ok_or_else(|| PullError::InvalidRef(policy_ref.to_string()))?;
@@ -157,7 +157,7 @@ pub async fn validate_k_client(
         .ok_or(PullError::MissingValidator)?;
     let token = base64ct::Base64::decode_vec(token_b64)
         .map_err(|e| PullError::ValidatorBase64(format!("{e:?}")))?;
-    let plaintext = age_decrypt(&token, k_client).map_err(|_| PullError::Decrypt)?;
+    let plaintext = age_decrypt(&token, client_policy_key).map_err(|_| PullError::Decrypt)?;
     if plaintext != VALIDATOR_PLAINTEXT {
         return Err(PullError::ValidatorMismatch);
     }
@@ -168,7 +168,7 @@ pub async fn pull_and_decrypt(
     registry: &RegistryClient,
     policy_ref: &str,
     registry_auth: &[u8],
-    k_client: &Identity,
+    client_policy_key: &Identity,
 ) -> Result<PolicyArtifact, PullError> {
     let policy_digest = extract_digest(policy_ref)
         .ok_or_else(|| PullError::InvalidRef(policy_ref.to_string()))?;
@@ -240,9 +240,9 @@ pub async fn pull_and_decrypt(
         let payload = &response.layers[idx];
         match descriptor.media_type.as_str() {
             POLICY_WASM_LAYER => {
-                // K_client-encrypted; decrypt for compilation.
+                // client_policy_key-encrypted; decrypt for compilation.
                 let plaintext =
-                    age_decrypt(payload, k_client).map_err(|_| PullError::Decrypt)?;
+                    age_decrypt(payload, client_policy_key).map_err(|_| PullError::Decrypt)?;
                 wasm_bytes = Some(plaintext);
             }
             POLICY_MANIFEST_LAYER => {

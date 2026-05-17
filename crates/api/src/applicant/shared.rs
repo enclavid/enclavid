@@ -38,7 +38,7 @@ pub(super) async fn fetch_metadata(
 ) -> Result<SessionMetadata, StatusCode> {
     // Applicant flow has no per-session info to cross-check metadata
     // against — security relies on the bearer-key auth layer plus the
-    // K_client encryption chain ensuring host-side metadata tampering
+    // client_policy_key encryption chain ensuring host-side metadata tampering
     // breaks the policy decryption / attestation chain. We accept the
     // host's existence claim and content at face value here; the trust
     // delegation is concentrated in `trust_unchecked` so callers don't
@@ -57,9 +57,9 @@ pub(super) async fn fetch_metadata(
     metadata
         .trust_unchecked::<AuthZ, _>(reason!(r#"
 Applicant flow doesn't authenticate per-tenant, so we have
-no tenant_id to cross-check here. Security relies on the
+no host_ref to cross-check here. Security relies on the
 bearer-key auth layer at the route plus AEAD-binding on state
-under applicant_key.
+under applicant_session_token.
         "#))
         .trust_unchecked::<Replay, _>(reason!(r#"
 Applicant flow uses metadata only for engine-resource fields
@@ -112,7 +112,7 @@ pub(super) fn build_resources(
 pub(super) struct SessionRunCtx {
     state: Arc<AppState>,
     pub(super) session_id: String,
-    /// State previously persisted under this `applicant_key`. `None`
+    /// State previously persisted under this `applicant_session_token`. `None`
     /// for a session whose `/connect` has never reached this far —
     /// connect treats that as "fresh start", input as 404.
     pub(super) session_state: Option<SessionState>,
@@ -185,7 +185,7 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
             .get("id")
             .cloned()
             .ok_or(StatusCode::BAD_REQUEST)?;
-        let CallerKey(applicant_key) =
+        let CallerKey(applicant_session_token) =
             CallerKey::from_request_parts(parts, state).await?;
         // Applicant locale from `Accept-Language` — captured once per
         // request and threaded through view construction so every
@@ -197,14 +197,14 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
 
         // Existence claim is host-controlled; content of Some is
         // AEAD-integrity-verified at decode (AuthN cleared, AuthZ
-        // implicit by holding the right applicant_key). The version
+        // implicit by holding the right applicant_session_token). The version
         // seeds the persister's per-call writes within this run.
         let ((state_opt,), version) = state
             .session_store
             .read(
                 &session_id,
                 (StateField {
-                    applicant_key: applicant_key.expose_secret(),
+                    applicant_session_token: applicant_session_token.expose_secret(),
                 },),
             )
             .await
@@ -258,7 +258,7 @@ persist; same containment as above.
         let persister = Arc::new(SessionPersister {
             session_store: state.session_store.clone(),
             session_id: session_id.clone(),
-            applicant_key: applicant_key.expose_secret().to_vec(),
+            applicant_session_token: applicant_session_token.expose_secret().to_vec(),
             client_disclosure_pubkey: metadata.client_disclosure_pubkey.clone(),
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata.clone()),
@@ -287,16 +287,16 @@ persist; same containment as above.
 /// pull+decrypt+compile cost; subsequent calls and /input rounds
 /// hit the cache.
 ///
-/// On cache miss the metadata's `k_client` field is parsed as an
+/// On cache miss the metadata's `client_policy_key` field is parsed as an
 /// age identity, used to decrypt the policy artifact pulled from
 /// the registry, and the resulting wasm is compiled into a
-/// `Component`. K_client lives in TEE memory only for the duration
-/// of this function — once the `Component` is in the cache, K_client
+/// `Component`. client_policy_key lives in TEE memory only for the duration
+/// of this function — once the `Component` is in the cache, client_policy_key
 /// is dropped.
 ///
 /// Errors map to HTTP statuses the handler can pass through directly:
 ///   * 410 Gone — registry pull / decrypt / compile failed (the
-///     session was created with the wrong K_client, or the policy
+///     session was created with the wrong client_policy_key, or the policy
 ///     artifact has been removed)
 ///   * 5xx — transport / infra problems
 async fn lookup_policy(
@@ -307,26 +307,26 @@ async fn lookup_policy(
     if let Some(e) = state.policies.get(session_id).await {
         return Ok(e);
     }
-    let k_client_str = std::str::from_utf8(&metadata.k_client).map_err(|e| {
-        eprintln!("lookup_policy: k_client not utf8 for {session_id}: {e}");
+    let client_policy_key_str = std::str::from_utf8(&metadata.client_policy_key).map_err(|e| {
+        eprintln!("lookup_policy: client_policy_key not utf8 for {session_id}: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let k_client = Identity::from_str(k_client_str).map_err(|e| {
-        eprintln!("lookup_policy: k_client age::Identity parse failed for {session_id}: {e}");
+    let client_policy_key = Identity::from_str(client_policy_key_str).map_err(|e| {
+        eprintln!("lookup_policy: client_policy_key age::Identity parse failed for {session_id}: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let artifact = policy_pull::pull_and_decrypt(
         &state.registry,
         &metadata.policy_ref,
         &metadata.registry_auth,
-        &k_client,
+        &client_policy_key,
     )
     .await
     .map_err(|e| {
         eprintln!(
             "lookup_policy: pull_and_decrypt failed for session {session_id} \
-             (tenant={}, policy_ref={}): {e}",
-            metadata.tenant_id, metadata.policy_ref,
+             (policy_ref={}): {e}",
+            metadata.policy_ref,
         );
         StatusCode::GONE
     })?;

@@ -9,13 +9,13 @@ package enclavid.state;
 // Status lives separately as the STATUS field (plaintext, host-visible
 // for TTL/cleanup).
 message SessionMetadata {
-  // Tenant identity the session belongs to — opaque string returned by
-  // host-side AuthorizeClient. Today this happens to be the Logto
-  // organization id, but the TEE treats it as opaque: pure data-plane
-  // ownership check on subsequent calls (must equal the credential's
-  // tenant_id reported by AuthorizeClient). Set at create time from the
-  // auth verdict; never changes afterwards.
-  string tenant_id = 1;
+  // HostRef identity moved to a separate host-visible `BlobField::HOST_REF`
+  // field. The TEE no longer uses host_ref for authorization on reads
+  // (`client_session_token` is the per-session capability gate);
+  // the host indexes session→tenant via the plaintext field for its
+  // own concerns (revocation, rate-limit, billing).
+  reserved 1;
+  reserved "host_ref";
 
   // Full pinned OCI reference for the policy artifact, of the shape
   // `<registry>/<repository>@sha256:<hex>`. The consumer supplies this
@@ -28,20 +28,20 @@ message SessionMetadata {
   // host on every registry pull (host attaches as `Authorization`).
   // Empty = anonymous pull (public registry). TEE does NOT inspect
   // (no JWT parsing, no validation) — courier semantics. Stored
-  // encrypted under TEE_key inside this metadata blob; host only sees
+  // encrypted under tee_seal_key inside this metadata blob; host only sees
   // it briefly when the pull RPC executes. See architecture.md →
   // Registry Decoupling.
   bytes registry_auth = 3;
 
   // Client's age secret-key (the policy-decryption key). Stored
-  // encrypted under TEE_key as part of the metadata blob; never
+  // encrypted under tee_seal_key as part of the metadata blob; never
   // host-visible. Used at /connect time to lazily pull and decrypt
   // the policy artifact for this session — deferred from /sessions
   // so creation stays cheap and abandoned sessions don't pay
   // compile-cost. Held in plaintext only inside TEE memory during
   // /sessions handler (validation) and during the first /connect
   // (decrypt + compile).
-  bytes k_client = 4;
+  bytes client_policy_key = 4;
 
   // Reserved (was D_enc / D_plain — encrypted/plain policy layer
   // hashes, bound into per-session attestation in the pre-merge
@@ -62,10 +62,10 @@ message SessionMetadata {
 
   // Client-supplied opaque identifier for this verification. Optional.
   // NOT indexed by the TEE — clients keep their own
-  // `external_ref → session_id` mapping. Proxied back in webhook
+  // `client_ref → session_id` mapping. Proxied back in webhook
   // payloads and `GET /sessions/:id/status` responses for client-side
   // reconciliation. Length-bounded (≤128 ASCII graphic chars).
-  string external_ref = 9;
+  string client_ref = 9;
 
   // Session lifecycle state, AEAD-bound to session_id by virtue of
   // living inside this metadata blob. The plaintext copy at
@@ -94,20 +94,31 @@ message SessionMetadata {
   //   h_0 = SHA-256("enclavid-disclosure-chain" || session_id)
   //   h_{i+1} = SHA-256(h_i || ciphertext_{i+1})
   //
-  // Lives inside the AEAD-sealed metadata blob (TEE_key + AAD =
+  // Lives inside the AEAD-sealed metadata blob (tee_seal_key + AAD =
   // session_id) — the host can neither read nor forge. /disclosures
   // recomputes the chain over the host-served list and rejects a
   // mismatch as a host-integrity violation, closing fabricate /
   // truncate / reorder / swap on the disclosure list. 32 bytes when
   // present, empty when no disclosures yet committed.
   bytes disclosure_hash = 13;
+
+  // SHA-256 hash of the per-session bearer (`client_session_token`)
+  // the TEE generates at POST /sessions and returns to the client
+  // (TLS-encrypted response, host doesn't see). Stored as hash, not
+  // raw, so tee_seal_key compromise alone doesn't reveal the token (pre-
+  // image resistance). On every client-side read endpoint the TEE
+  // recomputes hash of the presented X-Session-Token header and
+  // compares constant-time. Mismatch → 404. Host has no way to forge
+  // (token is TLS-protected, host can't see). See docs/security-model.md
+  // for the full protocol.
+  bytes client_session_token_hash = 14;
 }
 
 // Session lifecycle state. Single creation step (POST /sessions does
 // the full setup atomically), no PendingInit / FailedInit pre-states.
 enum SessionStatus {
   SESSION_STATUS_UNSPECIFIED = 0;
-  // Session created and ready: K_client validated, metadata stored.
+  // Session created and ready: client_policy_key validated, metadata stored.
   // Multiple /connect + /input rounds from the applicant happen here.
   RUNNING = 2;
   // Policy returned a domain Status (Completed or Failed) — webhook

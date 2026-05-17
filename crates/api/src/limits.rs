@@ -11,7 +11,7 @@
 //!     reject specific user classes (see the host_state-side `limits`
 //!     module for the same threat applied to fuel/memory).
 //!   * Stretch the entropy of `session_id` down to brute-forceable.
-//!   * Inflate `external_ref` so it becomes a covert data sink.
+//!   * Inflate `client_ref` so it becomes a covert data sink.
 //!
 //! Changing a value here changes the trust contract. Bump the
 //! image, re-attest, communicate to consumers.
@@ -41,11 +41,17 @@ pub const MAX_MATCH_INPUT_SIZE: usize = 1024;
 /// guessing infeasible; this is comfortable headroom.
 pub const SESSION_ID_RANDOM_BYTES: usize = 32;
 
-/// Maximum length of the consumer-supplied `external_ref` field
+/// Random bytes drawn for the `client_session_token` (per-session
+/// bearer the client presents in `X-Session-Token` on read endpoints).
+/// 32 bytes = 256-bit entropy — unguessable, and matches the
+/// applicant_session_token width for symmetry.
+pub const CLIENT_SESSION_TOKEN_BYTES: usize = 32;
+
+/// Maximum length of the consumer-supplied `client_ref` field
 /// (their per-session reconciliation tag, opaque to the TEE).
 /// Bounds host storage growth and keeps wire frames small; UUIDs
 /// and typical client identifiers fit comfortably.
-pub const MAX_EXTERNAL_REF_LEN: usize = 128;
+pub const MAX_CLIENT_REF_LEN: usize = 128;
 
 /// Maximum byte length of the `Authorization` header value the TEE
 /// is willing to forward as `registry_auth`. Typical Logto-issued

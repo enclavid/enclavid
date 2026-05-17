@@ -10,7 +10,7 @@ package enclavid.registry;
 // the manifest digest and each layer digest against the request reference
 // before trusting bytes — host can swap to any (manifest, layers) tuple
 // whose digests match the requested reference, but cannot inject arbitrary
-// content. Privacy of applicant data depends on the K_client backstop in
+// content. Privacy of applicant data depends on the client_policy_key backstop in
 // session creation, not on the integrity of these responses.
 service Registry {
   // Pull an encrypted policy artifact (manifest + all layers).
@@ -22,7 +22,7 @@ service Registry {
   rpc Pull(PullRequest) returns (PullResponse);
 
   // Pull only the OCI manifest (no layer payloads). Used at session
-  // creation to validate the client's K_client cheaply via a small
+  // creation to validate the client's client_policy_key cheaply via a small
   // ciphertext token in the manifest annotation, without paying the
   // full policy-artifact bandwidth. The TEE re-verifies
   // `manifest_digest` against the requested digest the same way as

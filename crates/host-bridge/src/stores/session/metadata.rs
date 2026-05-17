@@ -1,7 +1,7 @@
 //! `METADATA` session field. Encrypted blob carrying per-session
-//! configuration (tenant_id, policy ref, ephemeral pubkey, d_*,
-//! client disclosure pubkey, input claims, external_ref). AEAD'd with
-//! `TEE_key`; AAD = session_id binds it to the session that wrote it.
+//! configuration (host_ref, policy ref, ephemeral pubkey, d_*,
+//! client disclosure pubkey, input claims, client_ref). AEAD'd with
+//! `tee_seal_key`; AAD = session_id binds it to the session that wrote it.
 
 use enclavid_untrusted::{AuthZ, Exposed, Replay, Untrusted, reason};
 use prost::Message;
@@ -22,12 +22,12 @@ use super::core::{ReadField, WriteField, unwrap_scalar};
 /// `Untrusted<Option<SessionMetadata>, (AuthZ, Replay)>`. AuthN is
 /// already cleared inside `decode` by the AEAD authentication step
 /// — bytes are guaranteed to be ours and bound to this session_id.
-/// AuthZ remains open (caller checks tenant_id); Replay remains
+/// AuthZ remains open (caller checks host_ref); Replay remains
 /// open (host may have served a stale snapshot).
 pub struct Metadata;
 
 /// Write marker: replace session metadata with a freshly-encoded
-/// blob. AEAD-seal under TEE_key happens inside `build_op`.
+/// blob. AEAD-seal under tee_seal_key happens inside `build_op`.
 pub struct SetMetadata<'a>(pub &'a SessionMetadata);
 
 impl ReadField for Metadata {
@@ -41,16 +41,16 @@ impl ReadField for Metadata {
 
     fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
         let scope_reason = reason!(r#"
-AEAD-decrypt under TEE_key with session_id as AAD succeeded —
+AEAD-decrypt under tee_seal_key with session_id as AAD succeeded —
 bytes are ours, bound to this session (AuthN cleared). AuthZ
-open: caller must check `tenant_id` matches the authenticated
+open: caller must check `host_ref` matches the authenticated
 principal. Replay open: host might serve a pre-/init snapshot;
 bound by version-CAS at next write.
         "#);
         let Some(b) = unwrap_scalar(slot)? else {
             return Ok(Untrusted::new(None, scope_reason));
         };
-        let plaintext = aead::open(&b, ctx.tee_key, ctx.aad())?;
+        let plaintext = aead::open(&b, ctx.tee_seal_key, ctx.aad())?;
         Ok(Untrusted::new(
             Some(SessionMetadata::decode(plaintext.as_slice())?),
             scope_reason,
@@ -61,7 +61,7 @@ bound by version-CAS at next write.
 impl WriteField for SetMetadata<'_> {
     fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op>, BridgeError> {
         let plaintext = self.0.encode_to_vec();
-        let value = aead::seal(&plaintext, ctx.tee_key, ctx.aad())?;
+        let value = aead::seal(&plaintext, ctx.tee_seal_key, ctx.aad())?;
         // AEAD ciphertext under the TEE-side per-instance key, AAD =
         // session_id. Host cannot decrypt; cross-session copies fail
         // authentication (AAD mismatch) before any plaintext is

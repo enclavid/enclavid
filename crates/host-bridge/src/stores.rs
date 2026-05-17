@@ -28,5 +28,5 @@ mod session;
 pub use report::ReportStore;
 pub use session::{
     AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, SessionStore, SetMetadata,
-    SetState, SetStatus, State, Status, WriteField,
+    SetState, SetStatus, SetHostRef, State, Status, WriteField,
 };

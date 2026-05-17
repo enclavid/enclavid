@@ -28,13 +28,13 @@ use axum::response::Response;
 use base64ct::{Base64, Encoding};
 use secrecy::{ExposeSecret, SecretBox};
 
-use crate::state::{AppState, ApplicantKey};
+use crate::state::{AppState, ApplicantSessionToken};
 
 /// Applicant key attached to a request by `enforce`. Handlers extract
 /// this to encrypt/decrypt session state. `Arc` so it can be cloned
-/// cheaply between extension storage and `applicant_keys` cache.
+/// cheaply between extension storage and `applicant_session_tokens` cache.
 #[derive(Clone)]
-pub(super) struct CallerKey(pub Arc<ApplicantKey>);
+pub(super) struct CallerKey(pub Arc<ApplicantSessionToken>);
 
 impl<S> FromRequestParts<S> for CallerKey
 where
@@ -69,12 +69,12 @@ pub(super) async fn enforce(
     let key = parse_bearer(&req)?;
     let key_arc = Arc::new(SecretBox::new(Box::new(key)));
 
-    match state.applicant_keys.get(&session_id).await {
+    match state.applicant_session_tokens.get(&session_id).await {
         Some(existing) if existing.expose_secret() == key_arc.expose_secret() => {}
         Some(_) => return Err(StatusCode::FORBIDDEN),
         None => {
             state
-                .applicant_keys
+                .applicant_session_tokens
                 .insert(session_id.clone(), key_arc.clone())
                 .await;
         }

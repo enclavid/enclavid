@@ -11,7 +11,7 @@ use enclavid_host_bridge::{AuthZ, Metadata, Replay, SessionStatus, reason};
 use crate::client_state::ClientState;
 use crate::dto;
 
-use super::auth::Tenant;
+use super::auth::{SessionToken, verify_session_token};
 
 #[derive(Serialize)]
 pub struct ResolvedPolicyView {
@@ -34,7 +34,7 @@ pub struct SessionView {
     /// session create. Skipped when missing so the JSON shape stays
     /// minimal for clients who never set it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub external_ref: Option<String>,
+    pub client_ref: Option<String>,
     /// Number of disclosure entries the engine has appended for this
     /// session. Mirrors the same field in the future webhook payload
     /// so client SDKs can deserialize both shapes with one struct.
@@ -55,7 +55,7 @@ pub(super) fn get_session() -> MethodRouter<Arc<ClientState>> {
 
 async fn read(
     State(state): State<Arc<ClientState>>,
-    Tenant(tenant_id): Tenant,
+    SessionToken(presented_token): SessionToken,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionView>, StatusCode> {
     // Read encrypted metadata. AEAD-bound to session_id so the host
@@ -71,23 +71,33 @@ async fn read(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Metadata: AuthN cleared at decode (AEAD). AuthZ checked
-    // inline — tenant_id match is the whole point of fetching
-    // metadata here, and absent or wrong-tenant metadata
-    // collapses to 404 so we don't leak existence of other
-    // tenants' sessions.
+    // Metadata: AuthN cleared at decode (AEAD). AuthZ enforced via
+    // `client_session_token` — crypto-bound per-session capability the
+    // client supplied at create. Host can't forge it (TLS-protected
+    // from host view), so this closes the host-lies-in-verdict hole
+    // that the previous `host_ref == verdict.host_ref` check could
+    // not cover. Absent metadata or wrong token collapses to 404 so
+    // we don't leak session-existence to wrong tenants. Host-side
+    // gate (revocation, rate-limit) runs ahead of TEE via the auth
+    // middleware on the route.
     let metadata = metadata_opt
-        .trust::<AuthZ, _, _, _>(|m| match m {
-            Some(m) if m.tenant_id == tenant_id => Ok(()),
-            _ => Err(StatusCode::NOT_FOUND),
-        })?
+        .trust_unchecked::<AuthZ, _>(reason!(r#"
+Token capability check is below this `trust_unchecked` — once
+verify_session_token() passes, the caller has proven session
+ownership cryptographically. Host's auth middleware additionally
+validated the Authorization JWT before invoking the handler.
+        "#))
         .trust_unchecked::<Replay, _>(reason!(r#"
-Stale metadata only affects which historical tenant_id we
-check against. AEAD-binding to session_id ensures we're never
-comparing a different session's metadata.
+Metadata fields (status, policy_ref, client_ref, ...) are
+stable across the session lifetime; a stale snapshot answers
+the same value the current snapshot would. AEAD-binding to
+session_id (AAD) prevents substitution with another session's
+metadata.
         "#))
         .into_inner()
-        .expect("AuthZ predicate validated Some");
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    verify_session_token(&presented_token, &metadata.client_session_token_hash)?;
 
     let status = SessionStatus::try_from(metadata.status)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -103,10 +113,10 @@ comparing a different session's metadata.
             reference: metadata.policy_ref,
             digest,
         },
-        external_ref: if metadata.external_ref.is_empty() {
+        client_ref: if metadata.client_ref.is_empty() {
             None
         } else {
-            Some(metadata.external_ref)
+            Some(metadata.client_ref)
         },
         disclosures: metadata.disclosure_count,
         created_at: metadata.created_at,

@@ -13,7 +13,7 @@ Prebuilt binaries for Linux / macOS / Windows will be published via GitHub Relea
 ## Quickstart
 
 ```bash
-# 1. One-time setup: generate your encryption key (K_client)
+# 1. One-time setup: generate your encryption key (client_policy_key)
 enclavid keygen --output client.key
 #    Store client.key in your secrets manager (HSM / Vault / equivalent).
 #    If you lose it, your encrypted policies become unrecoverable.

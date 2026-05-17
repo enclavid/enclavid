@@ -9,8 +9,8 @@
 //!
 //! Key length: 32 bytes (ChaCha20-Poly1305 standard).
 //!
-//! Layered encryption (e.g. STATE = inner(applicant_key) +
-//! outer(TEE_key)) is composed at the call site by chaining `seal`
+//! Layered encryption (e.g. STATE = inner(applicant_session_token) +
+//! outer(tee_seal_key)) is composed at the call site by chaining `seal`
 //! twice — each layer carries its own random nonce, and AAD is the
 //! same on both layers.
 

@@ -7,7 +7,7 @@ package enclavid.auth;
 // it wants to perform, and trusts the host's verdict.
 //
 // Trust model: equivalent to TEE-validates-with-host-fetched-JWKS. Host
-// can lie about anything here, but K_client backstop in session creation
+// can lie about anything here, but client_policy_key backstop in session creation
 // (see architecture.md → Client-Facing Session Creation) bounds the
 // damage to "fake PendingInit sessions", caught by rate-limit and audit
 // log on the host side.
@@ -16,7 +16,7 @@ package enclavid.auth;
 //  1. Host (this RPC) — does this credential have permission for this
 //     operation? Owns identity, JWT validation, mTLS-cert checks, RBAC.
 //  2. TEE (after this RPC) — for operations on a specific session, does
-//     the session's tenant_id match the credential's tenant_id?
+//     the session's host_ref match the credential's host_ref?
 //     Pure data-plane ownership check, no policy logic.
 service Auth {
   rpc AuthorizeClient(AuthorizeClientRequest) returns (AuthorizeClientResponse);
@@ -30,7 +30,7 @@ enum ClientOperation {
   CLIENT_OPERATION_UNSPECIFIED = 0;
   // POST /api/v1/sessions — create a new session in PendingInit.
   SESSION_CREATE = 1;
-  // POST /api/v1/sessions/:id/init — deliver wrapped K_client, transition to Running.
+  // POST /api/v1/sessions/:id/init — deliver wrapped client_policy_key, transition to Running.
   SESSION_INIT = 2;
   // GET /api/v1/sessions/:id — read session view (status, policy, ...).
   SESSION_READ = 3;
@@ -49,11 +49,11 @@ message AuthorizeClientRequest {
 }
 
 message AuthorizeClientResponse {
-  // Tenant identity this credential is bound to — opaque string the TEE
+  // HostRef identity this credential is bound to — opaque string the TEE
   // uses for resource ownership: any session-specific operation must
-  // additionally verify the session's tenant_id == this value (TEE-side
+  // additionally verify the session's host_ref == this value (TEE-side
   // data-plane check). Host-side this is typically the Logto organization
   // id, but the TEE doesn't depend on that — any opaque per-credential
   // identifier suffices.
-  string tenant_id = 1;
+  string host_ref = 1;
 }

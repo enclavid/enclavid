@@ -12,12 +12,12 @@ use crate::runtime::SessionPolicyCache;
 /// Applicant key held in TEE memory for the duration of a session.
 /// Raw bytes used for AES-256-GCM encryption of session state.
 /// `SecretBox` provides zeroization on drop and redacts from Debug output.
-pub type ApplicantKey = SecretBox<Vec<u8>>;
+pub type ApplicantSessionToken = SecretBox<Vec<u8>>;
 
 /// LRU cache of active session applicant keys.
 /// Size-bounded to prevent DoS via unbounded session creation.
 /// TTL-bounded to evict stale keys.
-pub type ApplicantKeyCache = Cache<String, Arc<ApplicantKey>>;
+pub type ApplicantSessionTokenCache = Cache<String, Arc<ApplicantSessionToken>>;
 
 pub struct AppState {
     /// Shared with the client API state — the engine compiles policy
@@ -26,13 +26,13 @@ pub struct AppState {
     pub runner: Arc<Runner>,
     /// Per-session compiled components. Populated lazily by /connect
     /// when first hit; cache miss triggers pull+decrypt+compile from
-    /// the K_client persisted in metadata.
+    /// the client_policy_key persisted in metadata.
     pub policies: SessionPolicyCache,
     pub session_store: Arc<SessionStore>,
     /// Registry client used by /connect for the lazy policy pull.
     /// Same channel as the rest of host-bridge.
     pub registry: RegistryClient,
-    pub applicant_keys: ApplicantKeyCache,
+    pub applicant_session_tokens: ApplicantSessionTokenCache,
 }
 
 impl AppState {
@@ -42,7 +42,7 @@ impl AppState {
         runner: Arc<Runner>,
         policies: SessionPolicyCache,
     ) -> Self {
-        let applicant_keys = Cache::builder()
+        let applicant_session_tokens = Cache::builder()
             .max_capacity(10_000)
             .time_to_idle(Duration::from_secs(3600))
             .build();
@@ -52,7 +52,7 @@ impl AppState {
             policies,
             session_store,
             registry: RegistryClient::new(channel),
-            applicant_keys,
+            applicant_session_tokens,
         }
     }
 

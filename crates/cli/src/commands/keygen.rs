@@ -27,7 +27,7 @@ pub fn run(output: PathBuf) -> Result<()> {
         .open(&output)
         .with_context(|| format!("creating {}", output.display()))?;
 
-    writeln!(file, "# Enclavid encryption key (K_client)")?;
+    writeln!(file, "# Enclavid encryption key (client_policy_key)")?;
     writeln!(file, "# public recipient: {}", recipient)?;
     writeln!(
         file,
@@ -35,7 +35,7 @@ pub fn run(output: PathBuf) -> Result<()> {
     )?;
     writeln!(file, "{}", identity.to_string().expose_secret())?;
 
-    println!("Generated K_client at {}", output.display());
+    println!("Generated client_policy_key at {}", output.display());
     println!("Public recipient:   {}", recipient);
     eprintln!();
     eprintln!("Next:");

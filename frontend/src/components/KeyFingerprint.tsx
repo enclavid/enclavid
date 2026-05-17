@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 type Props = {
-  /// First 8 bytes of the finalized applicant_key, rendered as 16
+  /// First 8 bytes of the finalized applicant_session_token, rendered as 16
   /// hex chars grouped 4·4·4·4. Null while finalize is still in
   /// flight — characters cycle through random hex digits. Once
   /// provided, the cycling phase holds for a minimum duration so

@@ -1,6 +1,6 @@
 // Applicant key generation + storage.
 //
-// The applicant_key is a 32-byte secret used as the inner AEAD key
+// The applicant_session_token is a 32-byte secret used as the inner AEAD key
 // for session state on the host. Real entropy comes from
 // `crypto.getRandomValues` — that's what the security guarantee
 // rests on. We additionally collect pointer move events while the
@@ -52,7 +52,7 @@ export function clearKey(sessionId: string): void {
 
 /// Accumulator for pointer-event entropy during the ritual. Holds
 /// raw event tuples until `finalize()` mixes them into a 32-byte
-/// applicant_key alongside fresh `crypto.getRandomValues` material.
+/// applicant_session_token alongside fresh `crypto.getRandomValues` material.
 export class EntropyAccumulator {
   private points: Array<[number, number, number]> = [];
 

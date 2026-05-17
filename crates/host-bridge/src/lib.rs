@@ -27,7 +27,7 @@ mod proto {
 }
 
 pub use age_seal::seal_to_recipient;
-pub use auth::{AuthClient, AuthVerdict, TenantId};
+pub use auth::{AuthClient, AuthVerdict, HostRef};
 pub use enclavid_untrusted::{AuthN, AuthZ, Exposed, Reason, Replay, Untrusted, reason};
 pub use error::BridgeError;
 pub use transport::{GrpcChannel, connect_store};
@@ -46,7 +46,7 @@ pub use proto::state::{
 };
 pub use stores::{
     AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, ReportStore, SessionStore,
-    SetMetadata, SetState, SetStatus, State, Status, WriteField,
+    SetMetadata, SetState, SetStatus, SetHostRef, State, Status, WriteField,
 };
 
 // --- Suspension as wasmtime trap error ---

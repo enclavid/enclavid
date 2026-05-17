@@ -67,7 +67,7 @@ enforced by registry server, not TEE.
     }
 
     /// Pull only the OCI manifest for the artifact (no layer payloads).
-    /// Used by `POST /sessions` to validate the client's K_client via
+    /// Used by `POST /sessions` to validate the client's client_policy_key via
     /// a small ciphertext token in the manifest annotation, without
     /// paying the full-artifact bandwidth — important when sessions
     /// may be created at high volume and most never reach /connect.

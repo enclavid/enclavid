@@ -12,12 +12,12 @@
 //!
 //! Why encryption lives here, not in engine: state and metadata are
 //! already sealed transparently inside host-bridge (`SetState` /
-//! `SetMetadata` AEAD with `tee_key`/`applicant_key`). Disclosures use
+//! `SetMetadata` AEAD with `tee_seal_key`/`applicant_session_token`). Disclosures use
 //! a different scheme (age to the consumer's `client_disclosure_pubkey`)
 //! but the architectural slot is the same — the api layer owns "I/O +
 //! encryption keys", engine stays pure logic.
 //!
-//! Note: `client_disclosure_pubkey` ≠ `K_client`. The former is a
+//! Note: `client_disclosure_pubkey` ≠ `client_policy_key`. The former is a
 //! public age recipient for outbound disclosure ciphertexts; the
 //! latter is the policy-decryption secret used at /connect to pull
 //! and decrypt the policy artifact. Different keys, different
@@ -53,11 +53,11 @@ use crate::dto::{self, DisclosureEnvelope, ENVELOPE_VERSION};
 pub(super) struct SessionPersister {
     pub session_store: Arc<SessionStore>,
     pub session_id: String,
-    pub applicant_key: Vec<u8>,
+    pub applicant_session_token: Vec<u8>,
     /// Age recipient string (`age1...`) for disclosure entries.
     /// Pulled from session metadata at run start; provided by the
     /// platform consumer when creating the session, so the consumer
-    /// holds the matching private key. Distinct from `K_client`
+    /// holds the matching private key. Distinct from `client_policy_key`
     /// (the policy-decryption secret) — see module-level docs.
     pub client_disclosure_pubkey: String,
     /// Session version we expect on the host. Initialized from the
@@ -112,7 +112,7 @@ impl SessionListener for SessionPersister {
             let mut metadata_guard = self.metadata.lock().await;
             let set_state = SetState {
                 state: change.state,
-                applicant_key: &self.applicant_key,
+                applicant_session_token: &self.applicant_session_token,
             };
             let mut ops: Vec<&dyn WriteField> = Vec::with_capacity(2 + appends.len());
             ops.push(&set_state);

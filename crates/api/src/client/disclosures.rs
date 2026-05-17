@@ -12,7 +12,7 @@ use enclavid_host_bridge::{AuthN, AuthZ, Disclosure, Metadata, Replay, reason};
 use crate::client_state::ClientState;
 use crate::disclosure_hash;
 
-use super::auth::Tenant;
+use super::auth::{SessionToken, verify_session_token};
 
 #[derive(Serialize)]
 pub struct DisclosuresResponse {
@@ -33,36 +33,44 @@ pub(super) fn get_disclosures() -> MethodRouter<Arc<ClientState>> {
 
 async fn read(
     State(state): State<Arc<ClientState>>,
-    Tenant(tenant_id): Tenant,
+    SessionToken(presented_token): SessionToken,
     Path(session_id): Path<String>,
 ) -> Result<Json<DisclosuresResponse>, StatusCode> {
     // Pull metadata + disclosure list in a single Read RPC. Metadata
-    // is the tenant-ownership gate AND the source of truth for the
-    // running `disclosure_hash` chain — we recompute the chain over
-    // the host-served list and compare, so any host fabrication /
-    // truncation / reorder / swap-with-other-list shows up as a hash
-    // mismatch.
+    // is the capability gate (via `client_session_token`) AND the
+    // source of truth for the running `disclosure_hash` chain — we
+    // recompute the chain over the host-served list and compare, so
+    // any host fabrication / truncation / reorder / swap-with-other-
+    // list shows up as a hash mismatch.
     let ((metadata_opt, disclosures), _version) = state
         .session_store
         .read(&session_id, (Metadata, Disclosure))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // AuthZ via metadata: absent or wrong-tenant collapses to 404
-    // so we don't leak existence of other tenants' sessions.
+    // AuthZ via `client_session_token` (crypto-bound capability the
+    // client supplied at create; host can't forge it because it's
+    // TLS-protected from host view). Host-side gate (revocation,
+    // rate-limit) ran ahead of this via the auth middleware on the
+    // route. Absent metadata → 404 so we don't leak session-existence.
     let metadata = metadata_opt
-        .trust::<AuthZ, _, _, _>(|m| match m {
-            Some(m) if m.tenant_id == tenant_id => Ok(()),
-            _ => Err(StatusCode::NOT_FOUND),
-        })?
+        .trust_unchecked::<AuthZ, _>(reason!(r#"
+Capability check (verify_session_token) immediately follows this
+trust_unchecked — caller has proven session ownership before any
+metadata field is surfaced. Host's auth middleware additionally
+validated the Authorization JWT.
+        "#))
         .trust_unchecked::<Replay, _>(reason!(r#"
-tenant_id is set at /sessions create and never changes, so
-a stale metadata snapshot still answers the tenant-ownership
-question correctly. AEAD-binding to session_id (AAD) prevents
-substitution with another session's metadata.
+disclosure_hash in metadata is the source of truth for list
+integrity; a stale metadata snapshot answers the chain-check
+question against an older head, which is caught by the AuthN
+trust gate on the list below. AEAD-binding to session_id (AAD)
+prevents substitution with another session's metadata.
         "#))
         .into_inner()
-        .expect("AuthZ predicate validated Some");
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    verify_session_token(&presented_token, &metadata.client_session_token_hash)?;
 
     // AuthN on the list is discharged by recomputing the
     // `disclosure_hash` chain and comparing to the AEAD-sealed copy

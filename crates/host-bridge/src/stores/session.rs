@@ -37,11 +37,13 @@ mod disclosure;
 mod metadata;
 mod state;
 mod status;
+mod host_ref;
 
 pub use self::core::{ReadField, ReadTuple, WriteField};
 pub use disclosure::{AppendDisclosure, Disclosure};
 pub use metadata::{Metadata, SetMetadata};
 pub use state::{SetState, State};
+pub use host_ref::SetHostRef;
 pub use status::{SetStatus, Status};
 
 use std::sync::Arc;
@@ -62,7 +64,7 @@ use crate::transport::GrpcChannel;
 /// session_id used as AAD, so a ciphertext copied between sessions
 /// fails authentication.
 pub struct Ctx<'a> {
-    pub tee_key: &'a [u8],
+    pub tee_seal_key: &'a [u8],
     pub session_id: &'a str,
 }
 
@@ -80,19 +82,19 @@ pub struct SessionStore {
     /// Phase B: derived from attestation report / KMS-bound material.
     /// `Arc` so cloning the store is cheap (tonic clones it on every
     /// RPC) without copying 32 bytes each time.
-    tee_key: Arc<[u8; 32]>,
+    tee_seal_key: Arc<[u8; 32]>,
 }
 
 impl SessionStore {
-    pub fn new(channel: GrpcChannel, tee_key: [u8; 32]) -> Self {
+    pub fn new(channel: GrpcChannel, tee_seal_key: [u8; 32]) -> Self {
         Self {
             client: SessionStoreClient::new(channel),
-            tee_key: Arc::new(tee_key),
+            tee_seal_key: Arc::new(tee_seal_key),
         }
     }
 
-    pub(crate) fn tee_key(&self) -> &[u8] {
-        self.tee_key.as_slice()
+    pub(crate) fn tee_seal_key(&self) -> &[u8] {
+        self.tee_seal_key.as_slice()
     }
 
     /// Read typed session fields in one batch. Returns
@@ -137,7 +139,7 @@ impl SessionStore {
         expected_version: Option<u64>,
         fields: &[&dyn WriteField],
     ) -> Result<Untrusted<u64, (AuthN, Replay)>, BridgeError> {
-        let ctx = Ctx { tee_key: self.tee_key(), session_id: id };
+        let ctx = Ctx { tee_seal_key: self.tee_seal_key(), session_id: id };
         let mut ops: Vec<Op> = Vec::with_capacity(fields.len());
         for f in fields {
             ops.push(f.build_op(&ctx)?.release());

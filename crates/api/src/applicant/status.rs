@@ -44,7 +44,7 @@ async fn status(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Applicant flow has no tenant_id in scope — security here
+    // Applicant flow has no host_ref in scope — security here
     // relies on the bearer-key auth layer at routes that mutate
     // state, plus AEAD-binding on session_id. /status itself is
     // public; we just need to know whether a session exists for

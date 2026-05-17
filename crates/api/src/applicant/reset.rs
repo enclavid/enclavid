@@ -42,6 +42,6 @@ async fn reset(
         .delete(&session_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    state.applicant_keys.invalidate(&session_id).await;
+    state.applicant_session_tokens.invalidate(&session_id).await;
     Ok(StatusCode::NO_CONTENT)
 }

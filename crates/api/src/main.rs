@@ -27,7 +27,7 @@ async fn main() {
     // Single per-process wasmtime Engine + cache of compiled policy
     // components, owned by the applicant `AppState`. Compilation
     // happens lazily on the first /connect for each session
-    // (pulling and decrypting the policy artifact with the K_client
+    // (pulling and decrypting the policy artifact with the client_policy_key
     // persisted in metadata) and is reused for subsequent /input
     // rounds.
     let runner = runtime::new_runner();
@@ -40,15 +40,15 @@ async fn main() {
     // the DisclosureStore facade and both state structs hold the same
     // tonic channel underneath.
     //
-    // TODO: derive `tee_key` from attestation / KMS rather than env.
+    // TODO: derive `tee_seal_key` from attestation / KMS rather than env.
     // For Phase A we accept a 32-byte hex from `ENCLAVID_TEE_KEY` (set
     // to a random value per deployment). When attestation-bound key
     // material lands, this becomes derive-on-startup.
-    let tee_key = load_tee_key();
+    let tee_seal_key = load_tee_seal_key();
     let channel = connect_store(&address_out)
         .await
         .expect("failed to connect host-bridge");
-    let session_store = Arc::new(SessionStore::new(channel, tee_key));
+    let session_store = Arc::new(SessionStore::new(channel, tee_seal_key));
 
     // Two listeners, two routers, one process. Topology rationale: TLS
     // terminates inside this TEE, so a host-side proxy can only route by
@@ -87,7 +87,7 @@ async fn main() {
 /// (hex-encoded, 64 chars). Phase B: derive from attestation /
 /// KMS-bound material so a process restart with a fresh key cannot
 /// read prior session state.
-fn load_tee_key() -> [u8; 32] {
+fn load_tee_seal_key() -> [u8; 32] {
     let hex_str = std::env::var("ENCLAVID_TEE_KEY")
         .expect("ENCLAVID_TEE_KEY not set (32-byte hex)");
     let bytes = hex::decode(hex_str).expect("ENCLAVID_TEE_KEY: invalid hex");

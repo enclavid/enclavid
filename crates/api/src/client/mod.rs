@@ -8,10 +8,10 @@
 //!                                              entries (opaque ciphertext)
 //!
 //! Session creation is a single endpoint: the client supplies the
-//! policy ref + K_client + disclosure pubkey in one body, the TEE
-//! validates K_client against the policy's manifest annotation,
-//! mints attestation, persists metadata (K_client encrypted under
-//! TEE_key), and returns the session_id ready for applicant
+//! policy ref + client_policy_key + disclosure pubkey in one body, the TEE
+//! validates client_policy_key against the policy's manifest annotation,
+//! mints attestation, persists metadata (client_policy_key encrypted under
+//! tee_seal_key), and returns the session_id ready for applicant
 //! interaction. Policy artifact pull/decrypt/compile happens lazily
 //! at applicant /connect, so abandoned sessions don't pay
 //! compile-cost and TEE restarts don't strand in-flight work.

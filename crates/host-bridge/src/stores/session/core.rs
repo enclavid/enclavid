@@ -110,7 +110,7 @@ macro_rules! impl_read_tuple {
                 store: &SessionStore,
                 id: &str,
             ) -> Result<(Self::Output, Untrusted<u64, (AuthN, Replay)>), BridgeError> {
-                let ctx = Ctx { tee_key: store.tee_key(), session_id: id };
+                let ctx = Ctx { tee_seal_key: store.tee_seal_key(), session_id: id };
                 let selectors = vec![$(self.$idx.selector()),+];
                 let (raw, version) = store.read_raw(id, selectors).await?;
                 let mut iter = raw.into_iter();
