@@ -19,9 +19,9 @@ use exports::enclavid::policy::policy::{Decision, EvalArgs, Guest};
 struct TestPolicy;
 
 // Text-ref constants used in evaluate. Declarations live in the
-// polici manifest (`policy.json` at repo root) under
+// policy manifest (`policy.json` at repo root) under
 // `disclosure_fields` (machine keys) and `localized` (translatable
-// UI strings). Engine validates every ref the polici passes to host
+// UI strings). Engine validates every ref the policy passes to host
 // fns against the resulting registry; unknown refs trap with a
 // clear "not registered" error.
 //

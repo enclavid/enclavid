@@ -50,6 +50,23 @@ pub struct Discovery {
     pub provider_metadata: EnclavidProviderMetadata,
 }
 
+impl Discovery {
+    /// The Enclavid registry hostname, used as the key into
+    /// `~/.docker/config.json`'s `credHelpers` map by `enclavid login`.
+    /// Derived by stripping the URL scheme/path from `registry_resource`
+    /// (the audience claim is `http://<host>[:port]/`). Returns `None`
+    /// if `registry_resource` isn't a valid URL — login then falls
+    /// back to ENCLAVID_REGISTRY env / explicit guidance.
+    pub fn registry_host(&self) -> Option<String> {
+        let url = url::Url::parse(&self.registry_resource).ok()?;
+        let host = url.host_str()?;
+        match url.port() {
+            Some(p) => Some(format!("{host}:{p}")),
+            None => Some(host.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliConfig {
     issuer_url: String,
@@ -103,6 +120,14 @@ pub fn get() -> &'static Discovery {
         .expect("discovery::load() must be called before discovery::get()")
 }
 
+/// Non-panicking variant — returns `None` when discovery hasn't been
+/// loaded (or load failed). Used by commands that can operate on
+/// cached local state but want to enrich output with discovery-derived
+/// info (e.g. push-prefix hint in `cloud workspace show`).
+pub fn try_get() -> Option<&'static Discovery> {
+    DISCOVERY.get()
+}
+
 pub type HttpClient = openidconnect::reqwest::Client;
 
 /// Build an async http client suitable for openidconnect requests.
@@ -142,10 +167,24 @@ fn discovery_url() -> String {
 }
 
 fn default_scopes() -> Vec<String> {
-    ["openid", "profile", "offline_access"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect()
+    // `urn:logto:scope:organizations` adds the `organizations` claim
+    // (list of org_ids the user is a member of) to the id_token.
+    // `urn:logto:scope:organization_data` adds `organization_data`
+    // (the same list but with names / metadata) — what we render in
+    // the workspace picker. Both Logto-specific, no equivalent in
+    // standard OIDC; if discovery returns a non-Logto issuer in the
+    // future these become no-ops (Logto ignores unknown scopes on
+    // non-Logto IdPs anyway).
+    [
+        "openid",
+        "profile",
+        "offline_access",
+        "urn:logto:scope:organizations",
+        "urn:logto:scope:organization_data",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
 }
 
 fn full_env_override() -> Option<CliConfig> {

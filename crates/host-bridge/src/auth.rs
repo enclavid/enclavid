@@ -6,7 +6,7 @@
 //! truth for client identity and RBAC.
 //!
 //! Trust model: host can return arbitrary verdicts (e.g. claim a token
-//! is valid when it isn't, or substitute a different host_ref).
+//! is valid when it isn't, or substitute a different principal).
 //! client_policy_key backstop in session creation prevents this from escalating
 //! to applicant-data leak. See proto/auth.proto and architecture.md →
 //! Network Isolation for the full analysis.
@@ -20,29 +20,36 @@ use crate::proto::auth::auth_client::AuthClient as ProtoAuthClient;
 use crate::proto::auth::{AuthorizeClientRequest, ClientOperation};
 use crate::transport::GrpcChannel;
 
-/// HostRef identifier returned by the host. Opaque string from the
+/// Principal identifier returned by the host. Opaque string from the
 /// TEE's perspective — host is authoritative on identity; the TEE
 /// uses it as the per-credential key for cross-session boundary checks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct HostRef(pub String);
+pub struct Principal(pub String);
 
-impl HostRef {
+impl Principal {
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
 /// Outcome of an authorization request. The whole verdict is the
-/// host's word — substitution (Allowed→different tenant) and
+/// host's word — substitution (Allowed→different principal) and
 /// spurious denial (Allowed→Unauthenticated) are both observed-but-
 /// not-trusted. The TEE never escalates verdict trust into a data
-/// release; the client_policy_key backstop on `/init` bounds substitution to
-/// at-worst denial-of-service. See architecture.md → Network
+/// release; the client_policy_key backstop on `/init` bounds substitution
+/// to at-worst denial-of-service. See architecture.md → Network
 /// Isolation for the full analysis.
+///
+/// `Allowed` carries an optional principal (authenticated identity) —
+/// host's attribution data, opaque to TEE. None is valid: not every
+/// auth scheme produces a principal. TEE forwards the optional value
+/// to host-side storage if present.
 #[derive(Debug)]
 pub enum AuthVerdict {
-    /// Host claims the credential is valid and bound to this tenant.
-    Allowed(HostRef),
+    /// Host claims the credential is valid. Carries the authenticated
+    /// principal as attribution data for host-side bookkeeping
+    /// (billing/rate-limit/audit); TEE itself doesn't act on it.
+    Allowed { principal: Option<Principal> },
     /// Bad credential: missing, malformed, expired, or otherwise
     /// rejected by the host's identity provider.
     Unauthenticated,
@@ -82,8 +89,12 @@ impl AuthClient {
 
         let verdict = match self.client.clone().authorize_client(request).await {
             Ok(response) => {
-                let host_ref = HostRef(response.into_inner().host_ref);
-                AuthVerdict::Allowed(host_ref)
+                let principal = response
+                    .into_inner()
+                    .principal
+                    .filter(|s| !s.is_empty())
+                    .map(Principal);
+                AuthVerdict::Allowed { principal }
             }
             Err(status) => match status.code() {
                 Code::Unauthenticated => AuthVerdict::Unauthenticated,

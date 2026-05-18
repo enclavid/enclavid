@@ -45,12 +45,12 @@ enum BlobField {
   METADATA = 2;
   // Encrypted SessionState (applicant_session_token + tee_seal_key, AAD=session_id).
   STATE = 3;
-  // Plaintext host_ref (Logto organization id, opaque to TEE). Set
+  // Plaintext principal (Logto organization id, opaque to TEE). Set
   // at session create from the AuthorizeClient verdict; host uses it
   // for revocation, rate-limit and billing indexing. NOT used by TEE
   // for authorization on reads — that's `client_session_token`.
   // Host-visible by design.
-  HOST_REF = 4;
+  PRINCIPAL = 4;
 }
 
 // List fields. Append-only ordered sequences per (session, field).

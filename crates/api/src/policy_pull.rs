@@ -18,32 +18,36 @@ use enclavid_host_bridge::{AuthN, RegistryClient};
 
 use crate::limits::MAX_POLICY_MANIFEST_BYTES;
 
-/// OCI layer media-type for the encrypted polici wasm. Decrypted
+/// OCI layer media-type for the encrypted policy wasm. Decrypted
 /// inside the TEE with client_policy_key.
 const POLICY_WASM_LAYER: &str = "application/vnd.enclavid.policy.wasm.v1.encrypted";
-/// OCI layer media-type for the polici manifest (frozen text-ref
+/// OCI layer media-type for the policy manifest (frozen text-ref
 /// registry: disclosure_fields + localized translations + schema
 /// version). Plain JSON — applicant-facing UI strings are public by
 /// nature, integrity comes from the OCI manifest content-addressing.
-/// Optional: polici with no host-visible UI (decision-only stubs)
+/// Optional: policy with no host-visible UI (decision-only stubs)
 /// can ship without this layer.
 const POLICY_MANIFEST_LAYER: &str = "application/vnd.enclavid.policy.manifest.v1.json";
-/// Manifest annotation key holding an age-ciphertext token encrypted
-/// to `client_policy_key_pub`. POST /sessions decrypts this with the supplied
-/// client_policy_key to confirm the key matches the artifact, before storing
-/// client_policy_key in the session metadata. Saves us the cost of a full
-/// policy pull at create time.
-const VALIDATOR_ANNOTATION: &str = "com.enclavid.policy.validator";
-/// Plaintext that the validator annotation is expected to decrypt to.
-/// Semantically a "true" bool — the only information conveyed is
-/// "client_policy_key matches", which is binary. Single byte; the actual age
-/// envelope is ~hundreds of bytes regardless because of the header
-/// framing, so plaintext minimisation is purely for clarity, not
-/// wire size.
-const VALIDATOR_PLAINTEXT: &[u8] = &[1u8];
+/// Manifest annotation key holding a base64-encoded prefix of the
+/// encrypted wasm layer's age stream: header (version line +
+/// recipient stanzas + MAC) + 16-byte nonce. POST /sessions feeds
+/// this prefix to `age::Decryptor::new(...)?.decrypt(client_policy_key)`
+/// — successful recipient-stanza unwrap proves the supplied key
+/// matches the artifact's recipient, *without pulling the full layer*.
+/// Saves the cost of a multi-megabyte pull on bad-key calls.
+///
+/// Must match the constant on the CLI side
+/// (`crates/cli/src/commands/push.rs::AGE_HEADER_ANNOTATION`).
+const AGE_HEADER_ANNOTATION: &str = "com.enclavid.policy.age-header";
 
 #[derive(Debug, thiserror::Error)]
 pub enum PullError {
+    /// Registry told us "this manifest doesn't exist" (HTTP 404
+    /// `MANIFEST_UNKNOWN`). Distinct from `Transport` so callers can
+    /// surface 404 to the API consumer rather than swallowing it as
+    /// a generic transport / processing error.
+    #[error("manifest not found in registry")]
+    NotFound,
     #[error("registry transport: {0}")]
     Transport(String),
     #[error("policy_ref must be `<registry>/<repository>@sha256:<hex>`: {0}")]
@@ -66,15 +70,31 @@ pub enum PullError {
     LayerCountMismatch { layers: usize, payloads: usize },
     #[error("decryption failed (wrong client_policy_key?)")]
     Decrypt,
-    #[error("manifest is missing the validator annotation")]
-    MissingValidator,
-    #[error("validator token base64 malformed: {0}")]
-    ValidatorBase64(String),
-    #[error("validator token did not decrypt to the expected plaintext")]
-    ValidatorMismatch,
+    #[error("manifest is missing the age-header annotation")]
+    MissingAgeHeader,
+    #[error("age-header annotation base64 malformed: {0}")]
+    AgeHeaderBase64(String),
+    #[error("age-header annotation is not a valid age stream prefix: {0}")]
+    AgeHeaderParse(String),
 }
 
-/// Result of a successful pull-and-decrypt: the polici's executable
+/// Stringly-typed 404 detection for the host-bridge registry error.
+/// `RegistryClient::pull_*` currently returns `tonic::Status` whose
+/// message string we don't structure. Standard OCI Distribution spec
+/// errors land here as `code: 404` ± `MANIFEST_UNKNOWN`; we match on
+/// the substring to surface `NotFound` rather than treat as generic
+/// transport. Fragile by nature — should be replaced when host-bridge
+/// grows a typed `RegistryError::NotFound` variant.
+fn classify_transport_error<E: std::fmt::Debug>(e: E) -> PullError {
+    let msg = format!("{e:?}");
+    if msg.contains("code: 404") || msg.contains("MANIFEST_UNKNOWN") {
+        PullError::NotFound
+    } else {
+        PullError::Transport(msg)
+    }
+}
+
+/// Result of a successful pull-and-decrypt: the policy's executable
 /// wasm plus its (optional) frozen policy manifest. The two layers
 /// live side-by-side in the OCI artifact but ship with different
 /// confidentiality treatments — wasm is client_policy_key-encrypted
@@ -86,7 +106,7 @@ pub struct PolicyArtifact {
     /// Decrypted wasm. Ready to compile with wasmtime.
     pub wasm_bytes: Vec<u8>,
     /// Policy manifest bytes verbatim (JSON). `None` if the OCI
-    /// manifest declares no manifest layer — polici without
+    /// manifest declares no manifest layer — policy without
     /// host-visible UI (decision-only stubs, test fixtures) can omit
     /// it. Engine caller treats `None` as an empty registry.
     pub manifest_bytes: Option<Vec<u8>>,
@@ -106,14 +126,16 @@ struct OciDescriptor {
     digest: String,
 }
 
-/// Cheap client_policy_key validation against the manifest's validator
-/// annotation. Pulls only the manifest (no layer payloads), verifies
-/// digest, decrypts the validator ciphertext with client_policy_key, and
-/// confirms it produces the expected plaintext.
+/// Cheap client_policy_key validation against the manifest's
+/// age-header annotation. Pulls only the manifest (no layer payloads),
+/// verifies digest, then runs `age::Decryptor::new(prefix)?
+/// .decrypt(client_policy_key)` against the embedded stream prefix.
+/// Successful unwrap of the recipient stanza proves the supplied key
+/// matches what `enclavid encrypt` sealed against.
 ///
 /// Used at `POST /sessions` so that wrong-client_policy_key errors surface
 /// synchronously to the client API call instead of breaking later
-/// during applicant flow.
+/// during applicant flow. Cost: 1 RTT for the manifest, no layer pull.
 pub async fn validate_client_policy_key(
     registry: &RegistryClient,
     policy_ref: &str,
@@ -125,7 +147,7 @@ pub async fn validate_client_policy_key(
     let response = registry
         .pull_manifest(policy_ref, registry_auth)
         .await
-        .map_err(|e| PullError::Transport(format!("{e:?}")))?
+        .map_err(classify_transport_error)?
         .trust::<AuthN, _, _, _>(|r| {
             // Same digest verification as in `pull_and_decrypt` — the
             // bytes must hash to the digest the session record was
@@ -151,16 +173,34 @@ pub async fn validate_client_policy_key(
 
     let manifest: OciManifest = serde_json::from_slice(&response.manifest)
         .map_err(|e| PullError::ManifestParse(e.to_string()))?;
-    let token_b64 = manifest
+    let prefix_b64 = manifest
         .annotations
-        .get(VALIDATOR_ANNOTATION)
-        .ok_or(PullError::MissingValidator)?;
-    let token = base64ct::Base64::decode_vec(token_b64)
-        .map_err(|e| PullError::ValidatorBase64(format!("{e:?}")))?;
-    let plaintext = age_decrypt(&token, client_policy_key).map_err(|_| PullError::Decrypt)?;
-    if plaintext != VALIDATOR_PLAINTEXT {
-        return Err(PullError::ValidatorMismatch);
+        .get(AGE_HEADER_ANNOTATION)
+        .ok_or(PullError::MissingAgeHeader)?;
+    let prefix = base64ct::Base64::decode_vec(prefix_b64)
+        .map_err(|e| PullError::AgeHeaderBase64(format!("{e:?}")))?;
+
+    // `Decryptor::new` parses version line + recipient stanzas + MAC
+    // + 16-byte nonce; on success the stream's header is structurally
+    // valid and HMAC-consistent. `.decrypt(...)` then performs the
+    // ECDH unwrap of the file_key against the supplied identity —
+    // that's the actual key-match check. We drop the returned reader:
+    // no payload bytes follow in this prefix and we never intended
+    // to decrypt content here anyway.
+    let decryptor = age::Decryptor::new(&prefix[..])
+        .map_err(|e| PullError::AgeHeaderParse(format!("{e:?}")))?;
+    if decryptor.is_scrypt() {
+        // Passphrase-encrypted policy would imply "anyone with the
+        // passphrase can mint sessions" — not our threat model. CLI
+        // push rejects these up-front, so reaching here means the
+        // artifact was crafted outside our toolchain.
+        return Err(PullError::AgeHeaderParse(
+            "passphrase-recipient streams not supported".to_string(),
+        ));
     }
+    let _ = decryptor
+        .decrypt(std::iter::once(client_policy_key as &dyn age::Identity))
+        .map_err(|_| PullError::Decrypt)?;
     Ok(())
 }
 
@@ -179,7 +219,7 @@ pub async fn pull_and_decrypt(
     let response = registry
         .pull(policy_ref, registry_auth)
         .await
-        .map_err(|e| PullError::Transport(format!("{e:?}")))?
+        .map_err(classify_transport_error)?
         .trust::<AuthN, _, _, _>(|r| {
             // Manifest bytes must hash to the digest baked into
             // `policy_ref` (which was pinned at session-create time).

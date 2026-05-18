@@ -27,7 +27,7 @@ mod proto {
 }
 
 pub use age_seal::seal_to_recipient;
-pub use auth::{AuthClient, AuthVerdict, HostRef};
+pub use auth::{AuthClient, AuthVerdict, Principal};
 pub use enclavid_untrusted::{AuthN, AuthZ, Exposed, Reason, Replay, Untrusted, reason};
 pub use error::BridgeError;
 pub use transport::{GrpcChannel, connect_store};
@@ -39,14 +39,14 @@ pub use proto::registry::{
 pub use registry::RegistryClient;
 pub use proto::report::{Report, ReportReason};
 pub use proto::state::{
-    CallEvent, CameraFacing, CaptureGroup, CaptureGuide, CaptureStep, Clip, Completed,
-    ConsentRequest, DisplayField, GuideNone, GuideOval, GuideRect, MediaRequest, MediaSpec,
-    SessionMetadata, SessionState, SessionStatus, Suspended, VerificationSetData,
+    CallEvent, CameraFacing, CaptureGroup, CaptureGuide, CaptureStep, Client, ClientAccess, Clip,
+    Completed, ConsentRequest, DisplayField, GuideNone, GuideOval, GuideRect, MediaRequest,
+    MediaSpec, SessionMetadata, SessionState, SessionStatus, Suspended, VerificationSetData,
     VerificationSetRequest, call_event, capture_guide, suspended,
 };
 pub use stores::{
     AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, ReportStore, SessionStore,
-    SetMetadata, SetState, SetStatus, SetHostRef, State, Status, WriteField,
+    SetMetadata, SetState, SetStatus, SetPrincipal, State, Status, WriteField,
 };
 
 // --- Suspension as wasmtime trap error ---

@@ -21,6 +21,7 @@ use enclavid_host_bridge::{
     AuthN, AuthZ, Metadata, Replay, SessionMetadata, State as StateField, reason,
 };
 
+use crate::error::ApiError;
 use crate::input::parse_input;
 use crate::locale::Locale;
 use crate::policy_pull;
@@ -57,7 +58,7 @@ pub(super) async fn fetch_metadata(
     metadata
         .trust_unchecked::<AuthZ, _>(reason!(r#"
 Applicant flow doesn't authenticate per-tenant, so we have
-no host_ref to cross-check here. Security relies on the
+no principal to cross-check here. Security relies on the
 bearer-key auth layer at the route plus AEAD-binding on state
 under applicant_session_token.
         "#))
@@ -139,7 +140,7 @@ impl SessionRunCtx {
     pub(super) async fn run(
         self,
         session_state: SessionState,
-    ) -> Result<SessionProgress, StatusCode> {
+    ) -> Result<SessionProgress, ApiError> {
         let SessionRunCtx {
             state,
             session_id,
@@ -155,15 +156,66 @@ impl SessionRunCtx {
             .runner
             .run(&policy, session_state, args, resources)
             .await
-            .map_err(|e| {
-                eprintln!("session_run_ctx: runner.run failed for {session_id}: {e}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+            .map_err(|e| classify_run_error(&session_id, &e))?;
         // No-op for Suspended; flips status to Completed atomically
         // (metadata + host-plaintext Status) when the run terminated.
         persister.finalize(&status).await?;
         Ok(progress_from(status, &texts, &locale))
     }
+}
+
+/// Inspect a wasmtime/anyhow chain coming out of `runner.run`. Most
+/// failures are opaque to the API consumer — surface as 500. Two
+/// classes are well-known and worth turning into structured 422s:
+///
+///   * Unregistered text-ref — policy was pushed without the matching
+///     `policy.json` manifest layer (or the manifest doesn't declare
+///     a ref the policy uses). Surface as 422 + missing-ref key, so
+///     frontend can show "policy X needs manifest entry Y" instead
+///     of a blank "internal error".
+///
+/// The detection is substring-based against the engine's
+/// `ensure_registered` message format ([`engine::sanitize`] →
+/// `"... text-ref '<key>' is not registered in prepare-localized-texts"`).
+/// Fragile by nature — if engine rewords the trap, this detection
+/// degrades silently to 500. Acceptable trade-off given the
+/// alternative (typed error all the way through wasmtime trap →
+/// host fn → engine → applicant) is significantly more code.
+fn classify_run_error(session_id: &str, e: &enclavid_engine::RunError) -> ApiError {
+    // `{e:#}` walks the anyhow chain — without this we only see the
+    // top-level "wasm error / trap" line and miss the underlying
+    // `ensure_registered` message buried below the wasm backtrace.
+    let chain = format!("{e:#}");
+    eprintln!("session_run_ctx: runner.run failed for {session_id}: {chain}");
+    if let Some(missing) = extract_unregistered_text_ref(&chain) {
+        return ApiError::with_body(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({
+                "error": "policy_uses_unregistered_text_ref",
+                "missing": missing,
+                "hint": "policy references a text-ref that isn't declared in its \
+                         manifest. Ensure `policy.json` lists the ref under \
+                         `disclosure_fields` or `localized`, and that the manifest \
+                         was pushed (run `enclavid policy push` with `policy.json` \
+                         next to the artifact, or `--manifest <path>`).",
+            }),
+        );
+    }
+    ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Pull `<key>` out of an `... text-ref '<key>' is not registered ...`
+/// message embedded anywhere in the error chain. Walks the marker
+/// substring; isolates the most-recent `'<key>'` pair preceding it.
+/// Returns None when the marker isn't present — caller falls back to
+/// generic 500.
+fn extract_unregistered_text_ref(msg: &str) -> Option<String> {
+    let marker_pos = msg.find("is not registered")?;
+    let prefix = &msg[..marker_pos];
+    let close = prefix.rfind('\'')?;
+    let before = &prefix[..close];
+    let open = before.rfind('\'')?;
+    Some(prefix[open + 1..close].to_string())
 }
 
 impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
@@ -255,11 +307,21 @@ persist; same containment as above.
         // session bumps the version past us; our next write fails
         // with VersionMismatch and the run aborts cleanly — replay
         // from latest persisted state on retry.
+        let disclosure_pubkey = metadata
+            .client
+            .as_ref()
+            .map(|c| c.disclosure_pubkey.clone())
+            .ok_or_else(|| {
+                eprintln!(
+                    "session_run_ctx: metadata.client missing for {session_id}",
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
         let persister = Arc::new(SessionPersister {
             session_store: state.session_store.clone(),
             session_id: session_id.clone(),
             applicant_session_token: applicant_session_token.expose_secret().to_vec(),
-            client_disclosure_pubkey: metadata.client_disclosure_pubkey.clone(),
+            client_disclosure_pubkey: disclosure_pubkey,
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata.clone()),
         });
@@ -307,7 +369,11 @@ async fn lookup_policy(
     if let Some(e) = state.policies.get(session_id).await {
         return Ok(e);
     }
-    let client_policy_key_str = std::str::from_utf8(&metadata.client_policy_key).map_err(|e| {
+    let client = metadata.client.as_ref().ok_or_else(|| {
+        eprintln!("lookup_policy: metadata.client missing for {session_id}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let client_policy_key_str = std::str::from_utf8(&client.policy_key).map_err(|e| {
         eprintln!("lookup_policy: client_policy_key not utf8 for {session_id}: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -318,7 +384,7 @@ async fn lookup_policy(
     let artifact = policy_pull::pull_and_decrypt(
         &state.registry,
         &metadata.policy_ref,
-        &metadata.registry_auth,
+        &client.registry_auth,
         &client_policy_key,
     )
     .await
@@ -338,9 +404,9 @@ async fn lookup_policy(
             StatusCode::INTERNAL_SERVER_ERROR
         },
     )?);
-    // Parse the polici manifest from its OCI layer (plain JSON,
+    // Parse the policy manifest from its OCI layer (plain JSON,
     // sibling of the encrypted wasm). Missing layer → empty
-    // registry; polici without host-visible UI (decision-only stubs,
+    // registry; policy without host-visible UI (decision-only stubs,
     // test fixtures) need no decls, every text-ref use-site traps in
     // that case.
     let decls = match &artifact.manifest_bytes {

@@ -121,7 +121,7 @@ impl Host for HostState {
 ///
 /// `icon` is intentionally NOT checked — it's a free-form string
 /// dispatched against the frontend's bundled SVG library. Unknown
-/// names render with no icon (graceful fallback); polici doesn't
+/// names render with no icon (graceful fallback); policy doesn't
 /// declare icons.
 fn validate_media_spec(
     spec: &MediaSpec,

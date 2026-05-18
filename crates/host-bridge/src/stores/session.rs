@@ -37,13 +37,13 @@ mod disclosure;
 mod metadata;
 mod state;
 mod status;
-mod host_ref;
+mod principal;
 
 pub use self::core::{ReadField, ReadTuple, WriteField};
 pub use disclosure::{AppendDisclosure, Disclosure};
 pub use metadata::{Metadata, SetMetadata};
 pub use state::{SetState, State};
-pub use host_ref::SetHostRef;
+pub use principal::SetPrincipal;
 pub use status::{SetStatus, Status};
 
 use std::sync::Arc;

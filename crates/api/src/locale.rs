@@ -3,7 +3,7 @@
 //! The applicant API resolves every text-ref into a single string for
 //! the user's preferred language server-side, so the wire payload is
 //! a plain `String` instead of a per-locale translation map. This
-//! halves-or-more the response size for polici with multi-language
+//! halves-or-more the response size for policy with multi-language
 //! coverage and keeps the frontend free of i18n logic.
 //!
 //! Locale comes from the standard `Accept-Language` HTTP header

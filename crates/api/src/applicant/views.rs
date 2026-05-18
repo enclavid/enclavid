@@ -7,7 +7,7 @@
 //! dto types so the applicant frontend and the consumer SDK see
 //! consistent JSON shapes per audience.
 //!
-//! Locale resolution is **server-side**: every text-ref the polici
+//! Locale resolution is **server-side**: every text-ref the policy
 //! emits is resolved to a single string for the request's
 //! `Accept-Language` preference, with `en` fallback. The frontend
 //! never sees a per-locale translation map.
@@ -86,7 +86,7 @@ pub struct CaptureStepView {
     /// Free-form icon name dispatched against the frontend's bundled
     /// SVG library (passport, id-card, drivers-license, selfie).
     /// Unknown names render with no icon (graceful fallback); the
-    /// polici declares whatever it wants — frontend version controls
+    /// policy declares whatever it wants — frontend version controls
     /// the accepted set.
     pub icon: Option<String>,
     /// Pre-capture intro body, paired with `icon` on the intro

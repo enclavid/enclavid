@@ -14,7 +14,7 @@
 //! `enforce` — at runtime the request hits Extension first, which
 //! inserts the per-route operation into request extensions, then
 //! `enforce` runs and reads it via the `Extension<ClientOperation>`
-//! extractor. On success it injects `HostRef(host_ref)` into
+//! extractor. On success it injects `Principal(principal)` into
 //! request extensions so the handler downstream can read it; on
 //! failure short-circuits 401 / 403.
 //!
@@ -31,7 +31,9 @@ use axum::middleware::Next;
 use axum::response::Response;
 use base64ct::{Base64, Encoding};
 
-use enclavid_host_bridge::{AuthN, AuthVerdict, ClientOperation, Replay, reason};
+use enclavid_host_bridge::{
+    AuthN, AuthVerdict, AuthZ, ClientOperation, Replay, SessionMetadata, Untrusted, reason,
+};
 
 use crate::client_state::ClientState;
 
@@ -41,13 +43,16 @@ use crate::client_state::ClientState;
 /// → "HTTP transport convention".
 pub(super) const SESSION_TOKEN_HEADER: HeaderName = HeaderName::from_static("x-session-token");
 
-/// HostRef context attached to a request by `enforce`. Handlers
-/// extract this to learn which tenant the caller is bound to;
-/// downstream session-ownership checks compare against it.
+/// Principal context attached to a request by `enforce`. Carries the
+/// optional authenticated identity from the auth verdict — `None`
+/// means the host's auth scheme didn't produce a principal (Allowed
+/// but anonymous; not currently used in MVP but the type allows for
+/// it). TEE doesn't act on the value — it's pure attribution data
+/// the create handler forwards to host-side storage via `SetPrincipal`.
 #[derive(Clone, Debug)]
-pub(super) struct HostRef(pub String);
+pub(super) struct Principal(pub Option<String>);
 
-impl<S> FromRequestParts<S> for HostRef
+impl<S> FromRequestParts<S> for Principal
 where
     S: Send + Sync,
 {
@@ -56,7 +61,7 @@ where
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
         parts
             .extensions
-            .get::<HostRef>()
+            .get::<Principal>()
             .cloned()
             // 500 here means the protective layer didn't run — a router
             // wiring bug, not a runtime auth failure. Surfacing as 500
@@ -94,14 +99,96 @@ where
     }
 }
 
-/// Verify a presented `client_session_token` against the SHA-256 hash
-/// stored in session metadata. SHA-256 the bytes, then compare
-/// constant-time. Returns Ok if match, Err(404) otherwise.
+/// Peel both trust scopes off an already-decrypted
+/// `Untrusted<Option<SessionMetadata>, (AuthZ, Replay)>` for a
+/// Client-side read endpoint: discharge AuthZ via
+/// `check_client_access` (token + principal match), trust Replay
+/// (metadata fields stable across session lifetime), and unwrap the
+/// `Option`. Returns the verified `SessionMetadata` ready for the
+/// handler to consume.
 ///
-/// `404` instead of `403` is deliberate — we don't want to leak
-/// existence-of-session information to an attacker probing with
-/// random tokens.
-pub(super) fn verify_session_token(
+/// (Decryption / AEAD-unseal already happened inside
+/// `SessionStore::read`; this function operates purely on the trust
+/// machinery wrapping the decrypted value.)
+///
+/// Mirrors `applicant/shared.rs::fetch_metadata` for the Client side:
+/// callers do the storage read themselves (so e.g. `/disclosures`
+/// keeps its batched `(Metadata, Disclosure)` read), then hand the
+/// resulting `Untrusted` here for the auth peel.
+///
+/// Errors:
+///   * `404 NOT_FOUND` — metadata absent, or token/principal mismatch
+///     (uniform reject; no session-existence leak).
+///   * `500 INTERNAL_SERVER_ERROR` — malformed metadata
+///     (`client`/`access` block absent — TEE-side invariant violation).
+pub(super) fn trust_metadata(
+    metadata: Untrusted<Option<SessionMetadata>, (AuthZ, Replay)>,
+    presented_token: &[u8],
+    presented_principal: &Option<String>,
+) -> Result<SessionMetadata, StatusCode> {
+    metadata
+        .trust::<AuthZ, _, _, _>(|opt_md| {
+            let md = opt_md.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+            check_client_access(md, presented_token, presented_principal)
+        })?
+        .trust_unchecked::<Replay, _>(reason!(r#"
+Metadata fields (status, policy_ref, client.ref, ...) are stable
+across the session lifetime; a stale snapshot answers the same
+values the current snapshot would. AEAD-binding to session_id
+(AAD) prevents substitution with another session's metadata. For
+endpoints that pair this read with another list (e.g. disclosures),
+the freshness of that list is checked by its own AuthN trust gate
+against metadata's running hash.
+        "#))
+        .into_inner()
+        .ok_or_else(|| {
+            // Predicate already rejected None via NOT_FOUND, so this
+            // arm is defensive against future-edit drift only.
+            eprintln!("trust_metadata: metadata unexpectedly None");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+/// Client-side AuthZ predicate body — verifies both layers of the
+/// access gate against the session's sealed metadata:
+///
+///   1. `client_session_token`: SHA-256 of the presented bearer must
+///      match `metadata.client.access.session_token_hash`. Defends
+///      against host-malice + intra-tenant insider.
+///   2. `principal`: the auth verdict's principal must equal the one
+///      pinned at create-time. Defends against cross-tenant attacks
+///      via stolen credentials.
+///
+/// Returned errors:
+///   * 500 — malformed metadata (`client` / `access` block absent;
+///     TEE-side invariant violation, not a runtime auth failure).
+///   * 404 — token or principal mismatch (uniform reject — don't
+///     leak session-existence info to wrong principals).
+///
+/// Used as the predicate inside `.trust::<AuthZ>(...)` on every
+/// client-side read endpoint so the AuthZ scope on metadata is
+/// **physically discharged by this check**, not blanket-trusted.
+pub(super) fn check_client_access(
+    metadata: &SessionMetadata,
+    presented_token: &[u8],
+    presented_principal: &Option<String>,
+) -> Result<(), StatusCode> {
+    let access = metadata
+        .client
+        .as_ref()
+        .and_then(|c| c.access.as_ref())
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    verify_session_token_hash(presented_token, &access.session_token_hash)?;
+    if access.principal != *presented_principal {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(())
+}
+
+/// SHA-256 the presented bytes and compare constant-time against the
+/// stored hash. Mismatch → 404 (uniform with other auth failures —
+/// don't leak which-session info to attacker probing random tokens).
+fn verify_session_token_hash(
     presented: &[u8],
     stored_hash: &[u8],
 ) -> Result<(), StatusCode> {
@@ -132,7 +219,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Auth middleware body. Reads the operation from request extensions
 /// (placed there by the outer `Extension(op)` layer in the per-route
 /// `ServiceBuilder` stack) and forwards the Authorization header to the
-/// host-side Auth service. On success injects `HostRef(host_ref)`
+/// host-side Auth service. On success injects `Principal(principal)`
 /// for the handler to extract.
 pub(super) async fn enforce(
     State(state): State<Arc<ClientState>>,
@@ -200,7 +287,7 @@ pub(super) async fn enforce(
         .trust_unchecked::<AuthN, _>(reason!(r#"
 TEE has nothing to verify a credential against — host parses
 tokens, TEE never sees them. A lying host can claim an invalid
-credential is valid or substitute a different host_ref.
+credential is valid or substitute a different principal.
 Neither escalates: /sessions needs client_policy_key (validated against
 the policy's manifest validator annotation, secret held by the
 legitimate client) — without it the create returns 422 and
@@ -213,12 +300,12 @@ spurious denial or a stalled caller who can't progress past
 the client_policy_key validator check. No data leak path.
         "#))
         .into_inner();
-    let host_ref = match verdict {
-        AuthVerdict::Allowed(t) => t.0,
+    let principal = match verdict {
+        AuthVerdict::Allowed { principal } => principal.map(|p| p.0),
         AuthVerdict::Unauthenticated => return Err(StatusCode::UNAUTHORIZED),
         AuthVerdict::PermissionDenied => return Err(StatusCode::FORBIDDEN),
     };
-    req.extensions_mut().insert(HostRef(host_ref));
+    req.extensions_mut().insert(Principal(principal));
 
     Ok(next.run(req).await)
 }

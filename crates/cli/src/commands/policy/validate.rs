@@ -1,4 +1,4 @@
-//! `enclavid validate [path]` — lint the polici manifest against the
+//! `enclavid validate [path]` — lint the policy manifest against the
 //! same rules the TEE engine enforces at load time.
 //!
 //! Run before `push` to catch issues at author time with a clean

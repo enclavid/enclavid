@@ -1,6 +1,6 @@
 // Anonymous report submission dialog.
 //
-// POSTs to /session/:id/report with the BearerKey the client already holds for
+// POSTs to /api/v1/sessions/:id/report with the BearerKey the client already holds for
 // the session. The TEE uses the key only to authenticate the submission (prove
 // session participation) and strips the session_id before persisting the
 // report — the platform cannot link reports back to specific users.
@@ -42,7 +42,7 @@ export function ReportDialog({
   async function submit() {
     setSubmitting(true);
     try {
-      const res = await fetch(`/session/${sessionId}/report`, {
+      const res = await fetch(`/api/v1/sessions/${sessionId}/report`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

@@ -9,75 +9,38 @@ package enclavid.state;
 // Status lives separately as the STATUS field (plaintext, host-visible
 // for TTL/cleanup).
 message SessionMetadata {
-  // HostRef identity moved to a separate host-visible `BlobField::HOST_REF`
-  // field. The TEE no longer uses host_ref for authorization on reads
-  // (`client_session_token` is the per-session capability gate);
-  // the host indexes session→tenant via the plaintext field for its
-  // own concerns (revocation, rate-limit, billing).
-  reserved 1;
-  reserved "host_ref";
-
   // Full pinned OCI reference for the policy artifact, of the shape
   // `<registry>/<repository>@sha256:<hex>`. The consumer supplies this
   // at /sessions create — registry hostname, namespace, and content
   // digest are all baked in. TEE extracts the digest substring for
   // content-addressing verification at pull time; it never resolves
   // tags. Frozen for the session lifetime.
-  string policy_ref = 2;
-  // Opaque bearer/credential payload the TEE forwards verbatim to the
-  // host on every registry pull (host attaches as `Authorization`).
-  // Empty = anonymous pull (public registry). TEE does NOT inspect
-  // (no JWT parsing, no validation) — courier semantics. Stored
-  // encrypted under tee_seal_key inside this metadata blob; host only sees
-  // it briefly when the pull RPC executes. See architecture.md →
-  // Registry Decoupling.
-  bytes registry_auth = 3;
-
-  // Client's age secret-key (the policy-decryption key). Stored
-  // encrypted under tee_seal_key as part of the metadata blob; never
-  // host-visible. Used at /connect time to lazily pull and decrypt
-  // the policy artifact for this session — deferred from /sessions
-  // so creation stays cheap and abandoned sessions don't pay
-  // compile-cost. Held in plaintext only inside TEE memory during
-  // /sessions handler (validation) and during the first /connect
-  // (decrypt + compile).
-  bytes client_policy_key = 4;
-
-  // Reserved (was D_enc / D_plain — encrypted/plain policy layer
-  // hashes, bound into per-session attestation in the pre-merge
-  // architecture). With the merged /sessions endpoint, the policy
-  // is not pulled or compiled until applicant /connect, so these
-  // values aren't available at attestation-mint time. Restore as
-  // a separate post-hoc audit endpoint if needed.
-  reserved 5, 6;
-
-  // Disclosure recipient pubkey: applicant-consented data is encrypted
-  // to this in expose_data flows. Provided by the client at session
-  // create time.
-  string client_disclosure_pubkey = 7;
+  string policy_ref = 1;
 
   // JSON claims for Match Mode (per-applicant input the policy
   // consumes). 1KB max enforced at TEE read.
-  bytes input = 8;
+  bytes input = 2;
 
-  // Client-supplied opaque identifier for this verification. Optional.
-  // NOT indexed by the TEE — clients keep their own
-  // `client_ref → session_id` mapping. Proxied back in webhook
-  // payloads and `GET /sessions/:id/status` responses for client-side
-  // reconciliation. Length-bounded (≤128 ASCII graphic chars).
-  string client_ref = 9;
+  // Client-supplied + client-derived data bundle. Auth gate fields
+  // (principal + session token hash) under `client.auth`; crypto
+  // material (policy key, disclosure pubkey, registry auth) and
+  // reconciliation tag at the top of `Client`. See message
+  // definition below for per-field semantics.
+  Client client = 3;
+
+  // --- Operational / persister-maintained lifecycle ---
 
   // Session lifecycle state, AEAD-bound to session_id by virtue of
   // living inside this metadata blob. The plaintext copy at
   // `BlobField::Status` exists purely as a host-side TTL/cleanup
   // hint; the TEE consults this field for any security or UX
   // decision so a lying host can't drive the wrong client reaction.
-  SessionStatus status = 10;
+  SessionStatus status = 4;
 
   // Unix seconds at session create time. Used by /status to surface
   // age / latency to the client; does not feed any security
   // decision.
-  uint64 created_at = 11;
+  uint64 created_at = 5;
 
   // Number of disclosure entries the engine has appended for this
   // session. Incremented by the persister atomically with each
@@ -86,7 +49,7 @@ message SessionMetadata {
   // host. Lets /status derive `has_shared_data` (or surface the
   // exact count) without paying the wire cost of pulling the full
   // disclosure list — entries can be tens of KB each.
-  uint64 disclosure_count = 12;
+  uint64 disclosure_count = 6;
 
   // Running hash chain over the disclosure-list ciphertexts. Updated
   // by the persister atomically with each AppendDisclosure write.
@@ -100,18 +63,89 @@ message SessionMetadata {
   // mismatch as a host-integrity violation, closing fabricate /
   // truncate / reorder / swap on the disclosure list. 32 bytes when
   // present, empty when no disclosures yet committed.
-  bytes disclosure_hash = 13;
+  bytes disclosure_hash = 7;
+}
 
-  // SHA-256 hash of the per-session bearer (`client_session_token`)
-  // the TEE generates at POST /sessions and returns to the client
-  // (TLS-encrypted response, host doesn't see). Stored as hash, not
-  // raw, so tee_seal_key compromise alone doesn't reveal the token (pre-
-  // image resistance). On every client-side read endpoint the TEE
-  // recomputes hash of the presented X-Session-Token header and
-  // compares constant-time. Mismatch → 404. Host has no way to forge
-  // (token is TLS-protected, host can't see). See docs/security-model.md
-  // for the full protocol.
-  bytes client_session_token_hash = 14;
+// All client-related fields for a session, grouped so the
+// auth/crypto/reconciliation surface reads as a coherent unit.
+// "Client" = the customer (bank/exchange/...) integrating Enclavid;
+// distinct from the applicant.
+message Client {
+  // Per-session access gate: principal + session_token_hash. Both
+  // verified on every Client read endpoint; mismatch on either →
+  // 404. Named `access` (not `auth`) to disambiguate from
+  // `registry_auth` (a bearer for a different system); see
+  // ClientAccess doc for per-field threat coverage.
+  ClientAccess access = 1;
+
+  // age secret-key for polici wasm decryption (the `client_policy_key`).
+  // Stored encrypted under tee_seal_key as part of the metadata blob;
+  // never host-visible. Used at `/connect` time to lazily pull and
+  // decrypt the policy artifact for this session — deferred from
+  // /sessions so creation stays cheap and abandoned sessions don't
+  // pay compile-cost. Held in plaintext only inside TEE memory
+  // during /sessions handler (validation) and during the first
+  // /connect (decrypt + compile).
+  bytes policy_key = 2;
+
+  // age recipient — TEE seals each disclosure entry to this on
+  // consent. Client holds the matching privkey; only they can
+  // decrypt the disclosure ciphertexts pulled via
+  // `GET /sessions/:id/disclosures`.
+  string disclosure_pubkey = 3;
+
+  // Client-supplied opaque reconciliation tag (was `client_ref` at
+  // top level). NOT indexed by the TEE — clients keep their own
+  // `ref → session_id` mapping. Proxied back in webhook payloads
+  // and `GET /sessions/:id` responses for client-side reconciliation.
+  // Length-bounded (≤128 ASCII graphic chars) at request validation.
+  // Renamed proto field: `ref` (was `client_ref`); Rust accesses it
+  // via `client.r#ref` due to keyword.
+  string ref = 4;
+
+  // Opaque bearer/credential payload the TEE forwards verbatim to
+  // the host on every registry pull (host attaches as
+  // `Authorization`). Empty = anonymous pull (public registry). TEE
+  // does NOT inspect (no JWT parsing, no validation) — courier
+  // semantics. Stored encrypted under tee_seal_key inside this
+  // metadata blob; host only sees it briefly when the pull RPC
+  // executes. See architecture.md → Registry Decoupling.
+  bytes registry_auth = 5;
+}
+
+// Per-session access gate — two orthogonal layers checked at every
+// Client read endpoint. Mismatch on either → 404 (don't leak
+// session-existence to wrong principals). Named `Access` (not
+// `Auth`) to avoid clashing with `registry_auth` (a different
+// concept — bearer for OCI registry pulls).
+message ClientAccess {
+  // The authenticated principal captured at session create from the
+  // AuthorizeClient verdict (Logto organization_id in MVP; opaque
+  // string to TEE). Verified on every Client read against the
+  // current request's verdict.principal — mismatch → 404.
+  //
+  // **Defends against**: cross-tenant attacks via stolen
+  // session_token + a different tenant's own credentials (their
+  // verdict produces a different principal → fail).
+  //
+  // Optional: None when the auth scheme didn't produce a principal.
+  // In that case the read endpoint accepts only requests whose
+  // verdict also has no principal.
+  optional string principal = 1;
+
+  // SHA-256 of the per-session bearer (`client_session_token`) the
+  // TEE generates at POST /sessions and returns to the client in the
+  // TLS-encrypted response (host doesn't see). On every Client read
+  // the TEE recomputes hash of the presented `X-Session-Token`
+  // header and compares constant-time.
+  //
+  // **Defends against**: host-malice (host doesn't have the token —
+  // TLS-protected) and intra-tenant insider attacks (raises the bar
+  // to a per-session secret beyond the broader api_token).
+  //
+  // Stored as hash, not raw, so tee_seal_key compromise alone
+  // doesn't reveal the token (pre-image resistance).
+  bytes session_token_hash = 2;
 }
 
 // Session lifecycle state. Single creation step (POST /sessions does

@@ -44,7 +44,7 @@ async fn passport_then_consent_rejected() {
     let runner = Runner::new().unwrap();
     let component = runner.compile(component_bytes).unwrap();
 
-    // Load the polici manifest from the fixture's `policy.json` —
+    // Load the policy manifest from the fixture's `policy.json` —
     // single declarative file whose bytes ARE the wire format
     // (no assembly). Engine resolves the registered text-ref set
     // from it via `load_manifest`. Same path the api crate takes

@@ -42,6 +42,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::middleware::from_fn_with_state;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::state::AppState;
@@ -54,15 +55,27 @@ use self::auth::enforce;
 pub fn router(state: Arc<AppState>) -> Router {
     let auth = || from_fn_with_state(state.clone(), enforce);
 
+    // Applicant API routes live under the same `/api/v1/sessions/...`
+    // prefix as the client API (see `client::router`) for a consistent
+    // surface across the two audiences. The user-facing SPA route in
+    // the browser stays `/session/<id>/...` (short, pretty) — handled
+    // by the ServeDir fallback below; only the JSON endpoints under
+    // it are versioned/plural.
     let routes = Router::new()
         // Public per-instance attestation manifest. Mounted ahead of
         // the SPA fallback so `/.well-known/...` paths don't get
         // swallowed by ServeDir.
         .route("/.well-known/attestation", attestation::get_attestation())
-        .route("/session/{id}/status", status::get_status())
-        .route("/session/{id}/state", reset::delete_state())
-        .route("/session/{id}/connect", connect::post_connect().layer(auth()))
-        .route("/session/{id}/input/{slot_id}", input::post_input().layer(auth()));
+        .route("/api/v1/sessions/{id}/status", status::get_status())
+        .route("/api/v1/sessions/{id}/state", reset::delete_state())
+        .route(
+            "/api/v1/sessions/{id}/connect",
+            connect::post_connect().layer(auth()),
+        )
+        .route(
+            "/api/v1/sessions/{id}/input/{slot_id}",
+            input::post_input().layer(auth()),
+        );
 
     // Static SPA bundle — optional. Skip the fallback when
     // `ENCLAVID_FRONTEND_DIR` is unset so dev workflows can run Vite
@@ -75,5 +88,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         Err(_) => routes,
     };
 
-    routes.with_state(state)
+    // Outermost safety net: see client/mod.rs for rationale. Caches
+    // panics from any source into clean 500s.
+    routes.layer(CatchPanicLayer::new()).with_state(state)
 }

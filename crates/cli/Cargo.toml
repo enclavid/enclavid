@@ -12,6 +12,15 @@ readme = "README.md"
 name = "enclavid"
 path = "src/main.rs"
 
+# Docker credential helper. Invoked by docker / oras / podman / our
+# own `enclavid policy push` when a registry is configured to use
+# helper-based auth (`credHelpers.<registry> = "enclavid"` in
+# `~/.docker/config.json`). The protocol is simple: read registry
+# hostname from stdin, print {"Username", "Secret"} JSON to stdout.
+[[bin]]
+name = "docker-credential-enclavid"
+path = "src/bin/cred_helper.rs"
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 
@@ -38,3 +47,4 @@ sha2 = "0.10"
 open = "5"
 dirs = "5"
 base64 = "0.22"
+dialoguer = "0.11"

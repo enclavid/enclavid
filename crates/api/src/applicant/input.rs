@@ -8,6 +8,7 @@ use axum::routing::{MethodRouter, post};
 use enclavid_engine::SessionState;
 use enclavid_host_bridge::{Clip, MediaRequest, call_event, suspended};
 
+use crate::error::ApiError;
 use crate::limits::APPLICANT_INPUT_BODY_LIMIT;
 use crate::state::AppState;
 
@@ -36,20 +37,24 @@ async fn input(
     Path((session_id, slot_id)): Path<(String, String)>,
     mut ctx: SessionRunCtx,
     multipart: Multipart,
-) -> Result<Json<SessionProgress>, StatusCode> {
+) -> Result<Json<SessionProgress>, ApiError> {
     let mut session_state = ctx.session_state.take().ok_or_else(|| {
         // /input fires with the assumption that /connect already
         // persisted at least one suspended event. If state is None
         // here, either /connect never reached this far (frontend
         // bug — going to /input without /connect succeeding) or
         // /connect ran but the listener silently failed to persist
-        // (engine bug). Log enough to disambiguate either case.
+        // (engine bug). 409 (not 404): the session itself exists
+        // (auth passed), but its engine state isn't initialised —
+        // a precondition failure, consistent with the other
+        // wrong-state-shape branches below. Log enough to
+        // disambiguate either cause.
         eprintln!(
             "/input/{slot_id}: session_state missing for {session_id} — \
              /connect either never ran or its persistence step did \
              not commit before this /input arrived",
         );
-        StatusCode::NOT_FOUND
+        StatusCode::CONFLICT
     })?;
     apply_input(&mut session_state, &slot_id, multipart).await?;
     Ok(Json(ctx.run(session_state).await?))

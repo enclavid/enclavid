@@ -3,6 +3,7 @@ mod client;
 mod client_state;
 mod disclosure_hash;
 mod dto;
+mod error;
 mod input;
 mod limits;
 mod locale;

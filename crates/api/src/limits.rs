@@ -63,13 +63,13 @@ pub const MAX_REGISTRY_AUTH_LEN: usize = 8 * 1024;
 
 // ----- Policy artifact transport caps -----
 
-/// Maximum byte size of the polici manifest layer (the plain-JSON
+/// Maximum byte size of the policy manifest layer (the plain-JSON
 /// blob holding `disclosure_fields` + `localized`). Bounds the
 /// memory the TEE allocates when a host serves a malformed or
 /// malicious artifact — engine-side parse + entry-count cap kicks
 /// in *after* this, so this is the outer ring of defence.
 ///
-/// 1 MB is generous for realistic polici (typical: a few KB, max
+/// 1 MB is generous for realistic policy (typical: a few KB, max
 /// realistic ~100 KB for many locales × long translations).
 /// Anything bigger is a policy bug or DoS attempt.
 pub const MAX_POLICY_MANIFEST_BYTES: usize = 1024 * 1024;

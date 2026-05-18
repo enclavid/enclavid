@@ -88,7 +88,7 @@ pub struct AuthN;
 
 /// Authorization concern: the principal who made this request might
 /// not be allowed to access this resource. Cleared by an
-/// application-level predicate (e.g., host_ref match against the
+/// application-level predicate (e.g., principal match against the
 /// authenticated caller). Not a cryptographic property — it is
 /// always handled at the application layer.
 pub struct AuthZ;

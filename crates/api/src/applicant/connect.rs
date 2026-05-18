@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 
+use crate::error::ApiError;
 use crate::state::AppState;
 
 use super::shared::SessionRunCtx;
@@ -23,7 +23,7 @@ pub(super) fn post_connect() -> MethodRouter<Arc<AppState>> {
 /// different key on an already-claimed session is rejected at the
 /// auth layer with 403; recovery requires `DELETE /session/:id/state`
 /// first (no auth, by design — see reset.rs).
-async fn connect(mut ctx: SessionRunCtx) -> Result<Json<SessionProgress>, StatusCode> {
+async fn connect(mut ctx: SessionRunCtx) -> Result<Json<SessionProgress>, ApiError> {
     // No persisted state means a brand-new session — start from a
     // default-initialised SessionState. (input.rs treats the same
     // case as 404; that divergence is the only logic split between

@@ -12,12 +12,11 @@ package enclavid.auth;
 // damage to "fake PendingInit sessions", caught by rate-limit and audit
 // log on the host side.
 //
-// Two-layer authorization:
-//  1. Host (this RPC) — does this credential have permission for this
-//     operation? Owns identity, JWT validation, mTLS-cert checks, RBAC.
-//  2. TEE (after this RPC) — for operations on a specific session, does
-//     the session's host_ref match the credential's host_ref?
-//     Pure data-plane ownership check, no policy logic.
+// Verdict carries an optional `principal` — the authenticated identity
+// (Logto organization_id in MVP). TEE never uses it for security
+// decisions (`client_session_token` covers per-session capability);
+// the host stores it alongside the session for its own concerns
+// (billing/rate-limit/revocation/audit). See docs/security-model.md.
 service Auth {
   rpc AuthorizeClient(AuthorizeClientRequest) returns (AuthorizeClientResponse);
 }
@@ -49,11 +48,17 @@ message AuthorizeClientRequest {
 }
 
 message AuthorizeClientResponse {
-  // HostRef identity this credential is bound to — opaque string the TEE
-  // uses for resource ownership: any session-specific operation must
-  // additionally verify the session's host_ref == this value (TEE-side
-  // data-plane check). Host-side this is typically the Logto organization
-  // id, but the TEE doesn't depend on that — any opaque per-credential
-  // identifier suffices.
-  string host_ref = 1;
+  // The authenticated principal — opaque identity string the host
+  // extracted from the credential (Logto `organization_id` claim in
+  // MVP). **Optional**: the host may return Allowed without a
+  // principal when the auth scheme doesn't produce one (no current
+  // use case — MVP always returns Some — but the proto allows for
+  // anonymous-allowed flows down the road).
+  //
+  // TEE-side semantics: opaque courier. TEE doesn't use this for any
+  // authorization decision (`client_session_token` covers session-
+  // ownership); it just forwards the string to host-side storage as
+  // `SetPrincipal` so the host can index sessions by principal for
+  // billing / rate-limit / revocation / audit.
+  optional string principal = 1;
 }

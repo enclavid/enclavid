@@ -1,4 +1,4 @@
-//! Polici manifest: single declarative file the polici author keeps
+//! Policy manifest: single declarative file the policy author keeps
 //! alongside their source code, shipped as the plain-JSON layer of
 //! the OCI artifact.
 //!
@@ -45,7 +45,7 @@ use std::path::Path;
 // ---------- Engine-side limits, mirrored here ----------
 //
 // Engine source: `crates/engine/src/limits.rs`. Keep in sync — drift
-// means a polici that passes `enclavid validate` trips at engine
+// means a policy that passes `enclavid validate` trips at engine
 // load, which is exactly what the lint is supposed to prevent.
 //
 // Bump in both places when the engine changes.
@@ -136,7 +136,7 @@ pub fn validate(manifest: &PolicyManifest) -> Report {
     if manifest.version != CURRENT_VERSION {
         r.fail(format!(
             "version {} not supported (CLI knows version {CURRENT_VERSION}); \
-             upgrade enclavid-cli if your polici targets a newer schema",
+             upgrade enclavid-cli if your policy targets a newer schema",
             manifest.version,
         ));
     }

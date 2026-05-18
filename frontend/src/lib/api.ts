@@ -32,8 +32,16 @@ async function parseOrThrow<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
+// All applicant endpoints live under `/api/v1/sessions/<id>/...`,
+// matching the client-side surface. The user-facing browser URL is
+// still `/session/<id>/...` (SPA shell, served by the api binary's
+// ServeDir fallback) — only the JSON endpoints are namespaced.
+function endpoint(sessionId: string, suffix: string): string {
+  return `/api/v1/sessions/${encodeURIComponent(sessionId)}${suffix}`;
+}
+
 export async function getStatus(sessionId: string): Promise<StatusResponse> {
-  const res = await fetch(`/session/${encodeURIComponent(sessionId)}/status`);
+  const res = await fetch(endpoint(sessionId, "/status"));
   return parseOrThrow(res);
 }
 
@@ -41,7 +49,7 @@ export async function connect(
   sessionId: string,
   applicantKey: Uint8Array,
 ): Promise<SessionProgress> {
-  const res = await fetch(`/session/${encodeURIComponent(sessionId)}/connect`, {
+  const res = await fetch(endpoint(sessionId, "/connect"), {
     method: "POST",
     headers: bearer(applicantKey),
   });
@@ -57,19 +65,19 @@ export async function submitInput(
   // Don't set Content-Type — fetch derives `multipart/form-data;
   // boundary=…` from the FormData itself. Setting it manually
   // breaks the boundary detection.
-  const path =
-    `/session/${encodeURIComponent(sessionId)}` +
-    `/input/${encodeURIComponent(slotId)}`;
-  const res = await fetch(path, {
-    method: "POST",
-    headers: bearer(applicantKey),
-    body,
-  });
+  const res = await fetch(
+    endpoint(sessionId, `/input/${encodeURIComponent(slotId)}`),
+    {
+      method: "POST",
+      headers: bearer(applicantKey),
+      body,
+    },
+  );
   return parseOrThrow(res);
 }
 
 export async function resetState(sessionId: string): Promise<void> {
-  const res = await fetch(`/session/${encodeURIComponent(sessionId)}/state`, {
+  const res = await fetch(endpoint(sessionId, "/state"), {
     method: "DELETE",
   });
   if (!res.ok) {

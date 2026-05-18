@@ -32,6 +32,7 @@ use axum::Router;
 use axum::extract::Extension;
 use axum::middleware::from_fn_with_state;
 use tower::ServiceBuilder;
+use tower_http::catch_panic::CatchPanicLayer;
 
 use enclavid_host_bridge::ClientOperation;
 
@@ -72,5 +73,14 @@ pub fn router(state: Arc<ClientState>) -> Router {
             "/api/v1/sessions/{id}/disclosures",
             disclosures::get_disclosures().layer(auth(ClientOperation::DataRead)),
         )
+        // Outermost safety net: any panic from a handler / dependency
+        // / async runtime is caught and converted to a clean 500
+        // response instead of aborting the connection. Our handlers
+        // shouldn't panic (errors go through Result + ok_or), but
+        // this guards against unexpected sources (deps, OOM-like
+        // conditions) — especially important for a long-running TEE
+        // service where aborted connections add operational noise
+        // and a hard crash forces re-attestation.
+        .layer(CatchPanicLayer::new())
         .with_state(state)
 }

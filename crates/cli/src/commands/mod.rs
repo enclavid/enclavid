@@ -1,7 +1,3 @@
-pub mod encrypt;
-pub mod keygen;
-pub mod login;
-pub mod logout;
-pub mod push;
-pub mod token;
-pub mod validate;
+pub mod cloud;
+pub mod policy;
+pub mod session;

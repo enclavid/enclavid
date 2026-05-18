@@ -6,12 +6,12 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use enclavid_host_bridge::{AuthZ, Metadata, Replay, SessionStatus, reason};
+use enclavid_host_bridge::{Metadata, SessionStatus};
 
 use crate::client_state::ClientState;
 use crate::dto;
 
-use super::auth::{SessionToken, verify_session_token};
+use super::auth::{Principal, SessionToken, trust_metadata};
 
 #[derive(Serialize)]
 pub struct ResolvedPolicyView {
@@ -55,6 +55,7 @@ pub(super) fn get_session() -> MethodRouter<Arc<ClientState>> {
 
 async fn read(
     State(state): State<Arc<ClientState>>,
+    Principal(presented_principal): Principal,
     SessionToken(presented_token): SessionToken,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionView>, StatusCode> {
@@ -65,39 +66,36 @@ async fn read(
     // running `disclosure_hash` chain atomic with each AppendDisclosure
     // write, so we never need to pull the actual disclosure list
     // (entries can be tens of KB) just to compute a counter.
-    let ((metadata_opt,), _version) = state
+    let ((metadata_untrusted,), _version) = state
         .session_store
         .read(&session_id, (Metadata,))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Metadata: AuthN cleared at decode (AEAD). AuthZ enforced via
-    // `client_session_token` — crypto-bound per-session capability the
-    // client supplied at create. Host can't forge it (TLS-protected
-    // from host view), so this closes the host-lies-in-verdict hole
-    // that the previous `host_ref == verdict.host_ref` check could
-    // not cover. Absent metadata or wrong token collapses to 404 so
-    // we don't leak session-existence to wrong tenants. Host-side
-    // gate (revocation, rate-limit) runs ahead of TEE via the auth
-    // middleware on the route.
-    let metadata = metadata_opt
-        .trust_unchecked::<AuthZ, _>(reason!(r#"
-Token capability check is below this `trust_unchecked` — once
-verify_session_token() passes, the caller has proven session
-ownership cryptographically. Host's auth middleware additionally
-validated the Authorization JWT before invoking the handler.
-        "#))
-        .trust_unchecked::<Replay, _>(reason!(r#"
-Metadata fields (status, policy_ref, client_ref, ...) are
-stable across the session lifetime; a stale snapshot answers
-the same value the current snapshot would. AEAD-binding to
-session_id (AAD) prevents substitution with another session's
-metadata.
-        "#))
-        .into_inner()
-        .ok_or(StatusCode::NOT_FOUND)?;
+    // Discharge AuthZ (token + principal) and Replay scopes via the
+    // shared helper; returns verified `SessionMetadata`.
+    let metadata = trust_metadata(
+        metadata_untrusted,
+        &presented_token,
+        &presented_principal,
+    )?;
 
-    verify_session_token(&presented_token, &metadata.client_session_token_hash)?;
+    // `metadata.client` is `Option<Client>` purely because of proto3
+    // semantics: sub-messages are always presence-tracked at the
+    // wire level (proto3 has no `required` for messages). TEE always
+    // populates `client` at session create, and `check_client_access`
+    // inside the trust predicate above already returns 500 on the
+    // malformed-None path — so None here is unreachable in practice.
+    // We still `.ok_or` (not `.expect`) to fail gracefully instead
+    // of panicking; aborts at this layer would corrupt the HTTP
+    // response and add noise to logs without operational benefit.
+    let client = metadata.client.ok_or_else(|| {
+        eprintln!(
+            "client/session: metadata.client unexpectedly None for {session_id} \
+             — TEE invariant violation (always populated at create)",
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let status = SessionStatus::try_from(metadata.status)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -113,10 +111,10 @@ metadata.
             reference: metadata.policy_ref,
             digest,
         },
-        client_ref: if metadata.client_ref.is_empty() {
+        client_ref: if client.r#ref.is_empty() {
             None
         } else {
-            Some(metadata.client_ref)
+            Some(client.r#ref)
         },
         disclosures: metadata.disclosure_count,
         created_at: metadata.created_at,

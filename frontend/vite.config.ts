@@ -16,23 +16,16 @@ export default defineConfig({
     },
   },
   // Dev-server only: forward API paths to the running api binary.
-  // Regex anchored with `^...$` so SPA-shell requests like
-  // `/session/<id>/` (no endpoint suffix) fall through to Vite and
-  // get served as index.html. Production builds ignore this section
-  // entirely — the api binary serves both static + JSON from one
-  // origin (see `crates/api/src/applicant/mod.rs`).
-  //
-  // Note: `input` matches WITH a required trailing slot segment
-  // (`input/<slot_id>`) because that's the only shape the backend
-  // accepts — bare `/session/:id/input` has no route. Keeping the
-  // slot segment IN the regex is critical: without it, POSTs to
-  // `/input/media-N` silently fall through to Vite's SPA fallback
-  // and return 404 from the dev server, before the api binary ever
-  // sees the request.
+  // Applicant JSON endpoints live under `/api/v1/sessions/<id>/...` —
+  // forward the whole prefix wholesale. The user-facing SPA shell URL
+  // is `/session/<id>/...` (no `/api/v1/` prefix); those requests
+  // fall through to Vite and get served as `index.html`. Production
+  // builds ignore this section entirely — the api binary serves both
+  // static + JSON from one origin (see `crates/api/src/applicant/mod.rs`).
   server: {
     proxy: {
       "/.well-known": API_TARGET,
-      "^/session/[^/]+/(status|state|connect|input/[^/]+)$": API_TARGET,
+      "/api": API_TARGET,
     },
   },
 });

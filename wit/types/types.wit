@@ -13,7 +13,7 @@ package enclavid:types;
 /// pure-types interface (no functions) avoids the false-import
 /// signal and lets `policy` interface be purely exported.
 interface types {
-    /// Reference to a string declared by the polici manifest's
+    /// Reference to a string declared by the policy manifest's
     /// `disclosure_fields` (machine keys) or `localized` map
     /// (translatable UI strings). Opaque key — the host validates
     /// membership in the registered set at every use-site

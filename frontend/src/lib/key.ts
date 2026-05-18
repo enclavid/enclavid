@@ -26,7 +26,7 @@ const KEY_LEN = 32;
 // deliberate, short enough that users don't get bored. Anything
 // above ~100 saturates at the same perceived duration because
 // extra points are dominated by the natural pause between strokes.
-const ENTROPY_TARGET_POINTS = 80;
+const ENTROPY_TARGET_POINTS = 200;
 
 // --- Storage ---
 

@@ -127,7 +127,7 @@ impl Runner {
 /// pre-versioning early artifacts).
 const POLICY_MANIFEST_VERSION_CURRENT: u32 = 1;
 
-/// Parse the polici manifest blob (the plain JSON layer alongside the
+/// Parse the policy manifest blob (the plain JSON layer alongside the
 /// encrypted wasm in the OCI artifact). Replaces the wasm-side
 /// `prepare-text-refs` export: declarations are now static data, not
 /// executed code.
@@ -155,14 +155,14 @@ const POLICY_MANIFEST_VERSION_CURRENT: u32 = 1;
 /// sanitisation checks happen at use time — `TextRegistry::resolve_string`
 /// sanitises text values when actually returning them, and the
 /// engine-side `sanitize::ensure_registered` validates ref format on
-/// every polici-supplied key when polici invokes a host function.
+/// every policy-supplied key when policy invokes a host function.
 ///
 /// Rationale: this is defence-in-depth, not primary validation.
 /// Author-side `enclavid validate` and (future) push-time linting
 /// catch malformed manifests before they reach the registry. TEE
 /// just needs to bound resource use and trap if anything malformed
 /// is actually exercised at evaluate time. Eager validation here
-/// would also do work for declarations the polici never uses (replay
+/// would also do work for declarations the policy never uses (replay
 /// strategy means many entries may go unresolved per session).
 pub fn load_manifest(bytes: &[u8]) -> wasmtime::Result<TextDecls> {
     use std::collections::BTreeMap;
@@ -310,7 +310,7 @@ mod load_manifest_tests {
 
     #[test]
     fn allows_dual_use_in_disclosure_fields_and_localized() {
-        // Same ref can be declared in both lists — polici may use it
+        // Same ref can be declared in both lists — policy may use it
         // as `field.key` (raw identifier) AND as a localized label
         // or reason. `TextRegistry` builds its `keys` set as a union.
         let decls = parse(r#"{
@@ -325,9 +325,9 @@ mod load_manifest_tests {
     #[test]
     fn accepts_bad_key_format_lazily() {
         // Load doesn't validate per-key format — that happens at
-        // use-time via `sanitize::ensure_registered` when polici
+        // use-time via `sanitize::ensure_registered` when policy
         // calls a host fn with the ref. A malformed declaration
-        // here is harmless if polici never uses it.
+        // here is harmless if policy never uses it.
         let decls = parse(r#"{
             "disclosure_fields": ["BadKeyWithCaps"]
         }"#).expect("parse");

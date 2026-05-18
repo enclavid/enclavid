@@ -15,7 +15,8 @@ use sha2::{Digest, Sha256};
 
 use enclavid_attestation::ReportData;
 use enclavid_host_bridge::{
-    SessionMetadata, SessionStatus, SetMetadata, SetStatus, SetHostRef, WriteField,
+    Client, ClientAccess, SessionMetadata, SessionStatus, SetMetadata, SetPrincipal, SetStatus,
+    WriteField,
 };
 
 use crate::client_state::ClientState;
@@ -23,9 +24,9 @@ use crate::limits::{
     CLIENT_SESSION_TOKEN_BYTES, MAX_CLIENT_REF_LEN, MAX_REGISTRY_AUTH_LEN,
     SESSION_ID_RANDOM_BYTES,
 };
-use crate::policy_pull;
+use crate::policy_pull::{self, PullError};
 
-use super::auth::HostRef;
+use super::auth::Principal;
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
@@ -55,7 +56,7 @@ pub struct CreateSessionRequest {
     /// Optional override for the bearer used on registry pulls. Useful
     /// when the API-auth credential and the registry-auth credential
     /// differ — e.g. the consumer authenticates to our API with a
-    /// Logto JWT but the polici lives in `ghcr.io` and needs a GitHub
+    /// Logto JWT but the policy lives in `ghcr.io` and needs a GitHub
     /// PAT. Format: full `Authorization` header value, e.g.
     /// `"Bearer <token>"`. When absent (the common case for our
     /// Angos) we fall back to the inbound `Authorization` header so
@@ -148,7 +149,7 @@ pub(super) fn post_create() -> MethodRouter<Arc<ClientState>> {
 /// the host sees opaque bytes only.
 async fn create(
     State(state): State<Arc<ClientState>>,
-    HostRef(host_ref): HostRef,
+    Principal(principal): Principal,
     headers: HeaderMap,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, StatusCode> {
@@ -200,13 +201,11 @@ async fn create(
     )
     .await
     .map_err(|e| {
-        // Log the precise failure (registry transport, manifest digest
-        // mismatch, missing/malformed validator, decrypt fail, plaintext
-        // mismatch...) before collapsing to 422 — otherwise the
-        // create-session.sh smoke test sees an opaque 422 with no clue
-        // which step misfired. eprintln until we wire structured tracing.
+        // Log the precise failure before mapping — gives the smoke
+        // test / api operator visibility into which step misfired.
+        // eprintln until we wire structured tracing.
         eprintln!("validate_client_policy_key failed: {e}");
-        StatusCode::UNPROCESSABLE_ENTITY
+        pull_error_to_status(&e)
     })?;
 
     let session_id = generate_session_id();
@@ -236,22 +235,33 @@ async fn create(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let metadata = SessionMetadata {
-        // host_ref is no longer a metadata field — it lives as a
-        // separate plaintext `BlobField::HOST_REF` written below via
-        // `SetHostRef`. Host indexes by it for revocation/rate-limit/
-        // billing; TEE doesn't use it for authorization (that's
-        // `client_session_token`).
-        policy_ref: policy_ref.clone(),
+    let client_block = Client {
+        // Per-session access gate (defense-in-depth) — see
+        // ClientAccess proto doc.
+        access: Some(ClientAccess {
+            // Principal lives both here (crypto-pinned for the
+            // TEE-side cross-tenant check on reads) and as a separate
+            // plaintext `SetPrincipal` op below (host-visible for
+            // billing/revocation indexing). Same value, different
+            // consumers, different protection properties.
+            principal: principal.clone(),
+            // SHA-256 of the bearer we returned to the client in the
+            // POST /sessions response.
+            session_token_hash: client_session_token_hash,
+        }),
+        // age secret-key — lives encrypted inside this metadata blob
+        // (tee_seal_key, AAD=session_id). Stored as raw secret-key
+        // string; `/connect` re-parses as Identity when decrypting
+        // the policy wasm.
+        policy_key: client_policy_key_secret.expose_secret().as_bytes().to_vec(),
+        disclosure_pubkey: body.client_disclosure_pubkey,
+        r#ref: body.client_ref.unwrap_or_default(),
         registry_auth,
-        // client_policy_key lives encrypted inside the metadata blob (under
-        // tee_seal_key, AAD=session_id). Stored as the raw secret-key
-        // string — `/connect` re-parses it as an Identity when it's
-        // time to decrypt the policy artifact.
-        client_policy_key: client_policy_key_secret.expose_secret().as_bytes().to_vec(),
-        client_disclosure_pubkey: body.client_disclosure_pubkey,
+    };
+    let metadata = SessionMetadata {
+        policy_ref: policy_ref.clone(),
         input: Vec::new(),
-        client_ref: body.client_ref.unwrap_or_default(),
+        client: Some(client_block),
         // Encrypted-status copy: TEE truth (vs the plaintext one in
         // BlobField::Status which is only a host-facing TTL hint).
         status: SessionStatus::Running as i32,
@@ -265,20 +275,21 @@ async fn create(
         // disclosures handler folds the host-served list and
         // compares against this field to detect host tampering.
         disclosure_hash: crate::disclosure_hash::init(&session_id),
-        // SHA-256 of the client_session_token (above). Phase C will
-        // wire the X-Session-Token comparison on consumer reads.
-        client_session_token_hash,
-        // d_enc / d_plain were pre-merge fields populated at /init
-        // (see proto comment). Reserved on the wire; nothing to set.
     };
-    let ops: &[&dyn WriteField] = &[
-        &SetMetadata(&metadata),
-        &SetStatus(SessionStatus::Running),
-        &SetHostRef(&host_ref),
-    ];
+    // Always write metadata + status. Principal is optional: skip the
+    // op entirely when the auth scheme didn't produce one (host stores
+    // nothing under `principal` in that case — fine, host-side
+    // attribution features just won't have this session indexed).
+    let set_metadata = SetMetadata(&metadata);
+    let set_status = SetStatus(SessionStatus::Running);
+    let set_principal = principal.as_deref().map(SetPrincipal);
+    let mut ops: Vec<&dyn WriteField> = vec![&set_metadata, &set_status];
+    if let Some(op) = set_principal.as_ref() {
+        ops.push(op);
+    }
     state
         .session_store
-        .write(&session_id, None, ops)
+        .write(&session_id, None, &ops)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -295,6 +306,40 @@ async fn create(
             measurement: quote.measurement,
         },
     }))
+}
+
+/// Map a `PullError` from `validate_client_policy_key` to the right
+/// HTTP status. Three buckets:
+///
+/// * **4xx tied to the caller's supplied inputs** —
+///   `NotFound` (`policy` ref points at nothing) → 404,
+///   `InvalidRef` (malformed ref shape) → 400,
+///   `Decrypt` / `MissingAgeHeader` / `AgeHeaderBase64` /
+///   `AgeHeaderParse` (key doesn't match or policy was pushed without
+///   the validation hook) → 422.
+///
+/// * **5xx tied to upstream registry behaviour** — `Transport`,
+///   `ManifestParse`, `ManifestDigest`, `LayerDigest` / `LayerCount`
+///   / `ManifestTooLarge` / `NoPolicyLayer` — these all mean the
+///   registry returned something we couldn't trust or process,
+///   surface as 502 so the API consumer can distinguish "your inputs
+///   are wrong" from "the system behind us is misbehaving".
+fn pull_error_to_status(e: &PullError) -> StatusCode {
+    match e {
+        PullError::NotFound => StatusCode::NOT_FOUND,
+        PullError::InvalidRef(_) => StatusCode::BAD_REQUEST,
+        PullError::Decrypt
+        | PullError::MissingAgeHeader
+        | PullError::AgeHeaderBase64(_)
+        | PullError::AgeHeaderParse(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        PullError::Transport(_)
+        | PullError::ManifestParse(_)
+        | PullError::ManifestDigest { .. }
+        | PullError::LayerDigest { .. }
+        | PullError::NoPolicyLayer
+        | PullError::ManifestTooLarge { .. }
+        | PullError::LayerCountMismatch { .. } => StatusCode::BAD_GATEWAY,
+    }
 }
 
 fn generate_session_id() -> String {

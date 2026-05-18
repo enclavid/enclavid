@@ -30,7 +30,7 @@ struct LocalizedRow {
 }
 
 /// Resolved text dictionary keyed by the policy-declared `text-ref`.
-/// Each entry holds every translation the polici declared. The flat
+/// Each entry holds every translation the policy declared. The flat
 /// key set is cached as `Arc<HashSet<String>>` so the engine can
 /// cheaply check membership at every text-ref use-site without taking
 /// a dependency on this api-crate type.
@@ -41,7 +41,7 @@ pub struct TextRegistry {
 }
 
 impl TextRegistry {
-    /// Build a registry from the polici's declarations, already
+    /// Build a registry from the policy's declarations, already
     /// validated by `enclavid_engine::load_assets` into pure
     /// identifiers and grouped localized blocks.
     ///
