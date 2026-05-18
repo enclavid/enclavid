@@ -30,15 +30,24 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::Extension;
+use axum::http::header::{AUTHORIZATION, HeaderName};
 use axum::middleware::from_fn_with_state;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 
 use enclavid_host_bridge::ClientOperation;
 
 use crate::client_state::ClientState;
 
 use self::auth::enforce;
+
+/// Per-session capability bearer client sends on every read endpoint.
+/// Mirrors `client::auth::SESSION_TOKEN_HEADER`; duplicated as a
+/// constant here so the sensitive-headers layer can reference it
+/// without dragging the auth module into the public surface of
+/// `mod.rs`.
+const SESSION_TOKEN_HEADER: HeaderName = HeaderName::from_static("x-session-token");
 
 /// Build the client-facing router.
 ///
@@ -73,6 +82,19 @@ pub fn router(state: Arc<ClientState>) -> Router {
             "/api/v1/sessions/{id}/disclosures",
             disclosures::get_disclosures().layer(auth(ClientOperation::DataRead)),
         )
+        // Mark auth-bearing request headers as sensitive. Two
+        // payoffs: (1) when http/2 is enabled, sensitive headers go
+        // out as `literal never-indexed` and skip HPACK's dynamic
+        // table — closes the CRIME-style compression side-channel
+        // on the JWT and X-Session-Token; (2) any `tracing` / Debug
+        // formatting of the headers map renders `Sensitive` in
+        // place of the value, so accidental `?headers` logs don't
+        // leak credentials. Marking is per-byte metadata only, no
+        // payload mutation.
+        .layer(SetSensitiveRequestHeadersLayer::new([
+            AUTHORIZATION,
+            SESSION_TOKEN_HEADER,
+        ]))
         // Outermost safety net: any panic from a handler / dependency
         // / async runtime is caught and converted to a clean 500
         // response instead of aborting the connection. Our handlers

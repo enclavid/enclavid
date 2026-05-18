@@ -21,7 +21,7 @@ export type StatusResponse = {
 /// One consented field as it appears on the applicant's consent
 /// screen. `key` is the policy-declared text-ref — opaque string,
 /// shown raw on the consent UI for non-canonical names (see
-/// `KNOWN_GOOD_KEYS` in `components/ConsentScreen`). `label` is
+/// `WELL_KNOWN_KEYS` in `components/ConsentScreen`). `label` is
 /// already resolved to the applicant's locale by the server (per
 /// the request's `Accept-Language` header). `value` is the actual
 /// data.

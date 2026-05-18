@@ -1145,6 +1145,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tower-service",
+ "wasmparser 0.247.0",
 ]
 
 [[package]]
@@ -1183,6 +1184,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wasm-encoder 0.247.0",
 ]
 
 [[package]]
@@ -1618,6 +1620,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
 dependencies = [
  "foldhash 0.2.0",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -4640,6 +4644,7 @@ dependencies = [
  "hashbrown 0.17.0",
  "indexmap 2.14.0",
  "semver",
+ "serde",
 ]
 
 [[package]]

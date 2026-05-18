@@ -48,3 +48,9 @@ open = "5"
 dirs = "5"
 base64 = "0.22"
 dialoguer = "0.11"
+
+# Custom-section writer for embedding the policy manifest into the
+# encrypted wasm bundle (see commands/policy/encrypt.rs). Pinned to
+# the version wasmtime transitively pulls — keeps the dep tree from
+# fanning out across multiple wasm-encoder versions.
+wasm-encoder = "0.247"

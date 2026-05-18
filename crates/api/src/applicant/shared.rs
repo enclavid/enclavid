@@ -405,21 +405,19 @@ async fn lookup_policy(
         },
     )?);
     // Parse the policy manifest from its OCI layer (plain JSON,
-    // sibling of the encrypted wasm). Missing layer → empty
-    // registry; policy without host-visible UI (decision-only stubs,
-    // test fixtures) need no decls, every text-ref use-site traps in
-    // that case.
-    let decls = match &artifact.manifest_bytes {
-        Some(bytes) => enclavid_engine::load_manifest(bytes).map_err(|e| {
-            eprintln!(
-                "lookup_policy: load_manifest failed for {session_id} \
-                 (policy_ref {}): {e}",
-                metadata.policy_ref,
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?,
-        None => enclavid_engine::TextDecls::default(),
-    };
+    // sibling of the encrypted wasm). The manifest layer is
+    // mandatory — `enclavid policy push` refuses to ship an artifact
+    // without it, and `pull_and_decrypt` surfaces `NoPolicyManifestLayer`
+    // when missing. Policies without UI strings still ship an empty
+    // `{"version": 1}` to satisfy the requirement.
+    let decls = enclavid_engine::load_manifest(&artifact.manifest_bytes).map_err(|e| {
+        eprintln!(
+            "lookup_policy: load_manifest failed for {session_id} \
+             (policy_ref {}): {e}",
+            metadata.policy_ref,
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let texts = Arc::new(TextRegistry::from_decls(decls));
     let entry = Arc::new(PolicyEntry { component, texts });
     state

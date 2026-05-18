@@ -1,3 +1,12 @@
+//! `enclavid policy push` — uploads a sealed `.age` policy bundle to
+//! an OCI registry as a single layer.
+//!
+//! The bundle is self-contained: `enclavid policy seal` embedded
+//! the manifest into the wasm component as a custom section, then
+//! age-encrypted the whole thing. Push knows nothing about manifests
+//! anymore — it ships the opaque blob plus the age-header annotation
+//! `POST /sessions` uses for the cheap key-match check.
+
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -10,19 +19,18 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{policy_manifest, registry_auth};
+use crate::registry_auth;
 
 const POLICY_LAYER_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.wasm.v1.encrypted";
-const POLICY_MANIFEST_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.manifest.v1.json";
 const POLICY_CONFIG_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.config.v1+json";
 
 /// Manifest annotation key consumed by `POST /api/v1/sessions` for a
-/// cheap (`<1 KB`) client_policy_key check against the artifact this
-/// manifest describes. Value is base64-standard of the artifact's age
-/// stream prefix — header (version line + recipient stanzas + MAC) +
-/// 16-byte nonce — enough for `age::Decryptor::new()` to fully parse,
-/// after which `.decrypt(identity)` performs the recipient-stanza
-/// unwrap that proves the key matches.
+/// cheap (`<1 KB`) client_policy_key check. Value is base64-standard
+/// of the artifact's age stream prefix — header (version line +
+/// recipient stanzas + MAC) + 16-byte nonce — enough for
+/// `age::Decryptor::new()` to fully parse, after which
+/// `.decrypt(identity)` performs the recipient-stanza unwrap that
+/// proves the key matches.
 ///
 /// Must match the constant on the api side
 /// (`crates/api/src/policy_pull.rs::AGE_HEADER_ANNOTATION`).
@@ -32,7 +40,6 @@ pub async fn run(
     artifact: PathBuf,
     reference: String,
     auth_override: Option<String>,
-    manifest_path: PathBuf,
 ) -> Result<()> {
     // Parse the user-supplied OCI ref. If the user didn't include a
     // tag, default to a timestamp; that gets back into the reference
@@ -57,63 +64,13 @@ pub async fn run(
     let bytes = std::fs::read(&artifact)
         .with_context(|| format!("reading {}", artifact.display()))?;
 
-    // Snapshot the age stream prefix (header + 16-byte nonce) into a
-    // manifest annotation. `POST /api/v1/sessions` reads it and runs
-    // `age::Decryptor::new(prefix)?.decrypt(client_policy_key)` —
-    // recipient-stanza unwrap succeeds iff the supplied key matches
-    // the one the policy was encrypted to. No `--key` needed at push
-    // time: the recipient is already crypto-baked into the file by
-    // `enclavid policy encrypt`, we just lift the front of the stream.
     let age_header_b64 = extract_age_header(&bytes)
         .with_context(|| format!("extracting age header from {}", artifact.display()))?;
     let mut annotations = BTreeMap::new();
     annotations.insert(AGE_HEADER_ANNOTATION.to_string(), age_header_b64);
 
-    // Optional policy manifest layer. Read + validate the
-    // `policy.json` file; skip if absent (policy with no UI strings
-    // — decision-only stubs). Validation errors abort the push so
-    // the policy author sees the same problem here that the TEE
-    // would trap on at first /connect.
-    //
-    // Ship the on-disk bytes verbatim: serde re-serialization could
-    // reorder map keys, changing the layer digest. Content-addressing
-    // means same source = same digest across pushes.
-    let manifest_layer: Option<ImageLayer> = if manifest_path.is_file() {
-        let parsed = policy_manifest::read(&manifest_path)?;
-        let report = policy_manifest::validate(&parsed);
-        for w in &report.warnings {
-            println!("warning: {w}");
-        }
-        if !report.ok() {
-            for e in &report.errors {
-                println!("error: {e}");
-            }
-            anyhow::bail!(
-                "manifest validation failed ({} error(s)) — run `enclavid policy validate {}` for full report",
-                report.errors.len(),
-                manifest_path.display(),
-            );
-        }
-        let bytes = policy_manifest::read_bytes(&manifest_path)?;
-        println!(
-            "Manifest layer: {} byte(s), {} disclosure field(s), {} localized ref(s)",
-            bytes.len(),
-            parsed.disclosure_fields.len(),
-            parsed.localized.len(),
-        );
-        Some(ImageLayer::new(
-            bytes,
-            POLICY_MANIFEST_MEDIA_TYPE.to_string(),
-            None,
-        ))
-    } else {
-        None
-    };
-
     let wasm_layer = ImageLayer::new(bytes, POLICY_LAYER_MEDIA_TYPE.to_string(), None);
-    let layers: Vec<ImageLayer> = std::iter::once(wasm_layer.clone())
-        .chain(manifest_layer.clone())
-        .collect();
+    let layers: Vec<ImageLayer> = vec![wasm_layer];
 
     // Empty config blob — manifest digest depends only on layer content, not on
     // mutable metadata like name/tag. Discrimination of artifact kind is done
@@ -194,10 +151,10 @@ pub async fn run(
 fn extract_age_header(age_bytes: &[u8]) -> Result<String> {
     let mut cursor = Cursor::new(age_bytes);
     let decryptor = age::Decryptor::new(&mut cursor)
-        .context("not a valid age stream — was the artifact produced by `enclavid policy encrypt`?")?;
+        .context("not a valid age stream — was the artifact produced by `enclavid policy seal`?")?;
     if decryptor.is_scrypt() {
         anyhow::bail!(
-            "passphrase-encrypted artifact not supported — use `enclavid policy keygen` + `enclavid policy encrypt --key`"
+            "passphrase-encrypted artifact not supported — use `enclavid policy keygen` + `enclavid policy seal --key`"
         );
     }
     let prefix_len = cursor.position() as usize;

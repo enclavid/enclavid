@@ -41,7 +41,7 @@ pub fn run(output: PathBuf) -> Result<()> {
     eprintln!("Next:");
     eprintln!("  - Store this file in your secrets manager (HSM / Vault / equivalent).");
     eprintln!(
-        "  - Encrypt policies with: enclavid policy encrypt policy.wasm --key {}",
+        "  - Seal policies with: enclavid policy seal policy.wasm --key {}",
         output.display()
     );
 

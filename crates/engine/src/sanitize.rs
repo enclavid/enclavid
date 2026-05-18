@@ -199,7 +199,7 @@ mod tests {
     fn field(key: &str, value: &str) -> DisplayField {
         DisplayField {
             key: key.to_string(),
-            label: "first-name-label".to_string(),
+            label: "first_name-label".to_string(),
             value: value.to_string(),
         }
     }
@@ -252,7 +252,7 @@ mod tests {
     }
 
     fn registered() -> HashSet<String> {
-        ["first-name", "tax-id", "first-name-label"]
+        ["first_name", "tax_id", "first_name-label"]
             .into_iter()
             .map(String::from)
             .collect()
@@ -260,14 +260,14 @@ mod tests {
 
     #[test]
     fn validate_too_many_fields_traps() {
-        let fields: Vec<_> = (0..21).map(|_| field("first-name", "v")).collect();
+        let fields: Vec<_> = (0..21).map(|_| field("first_name", "v")).collect();
         assert!(validate_fields(&fields, &registered()).is_err());
     }
 
     #[test]
     fn validate_long_value_traps() {
         let long = "x".repeat(MAX_VALUE_LENGTH + 1);
-        assert!(validate_fields(&[field("first-name", &long)], &registered()).is_err());
+        assert!(validate_fields(&[field("first_name", &long)], &registered()).is_err());
     }
 
     #[test]
@@ -278,8 +278,8 @@ mod tests {
         assert!(validate_fields(&[field("Bad", "v")], &registered()).is_err());
         // Bad: dot separator
         assert!(validate_fields(&[field("a.b", "v")], &registered()).is_err());
-        // OK: kebab-case ASCII + registered
-        assert!(validate_fields(&[field("tax-id", "v")], &registered()).is_ok());
+        // OK: snake_case ASCII + registered
+        assert!(validate_fields(&[field("tax_id", "v")], &registered()).is_ok());
     }
 
     #[test]
@@ -288,7 +288,7 @@ mod tests {
         // timing-based defence: policy can't craft a fresh text-ref
         // at evaluate time based on user attributes.
         assert!(
-            validate_fields(&[field("loyalty-tier-ru", "v")], &registered()).is_err()
+            validate_fields(&[field("loyalty_tier_ru", "v")], &registered()).is_err()
         );
     }
 
@@ -297,17 +297,17 @@ mod tests {
         // Label format rules mirror key — bad label fails the same
         // way as a bad key.
         assert!(validate_fields(
-            &[field_with_label("first-name", "Bad", "v")],
+            &[field_with_label("first_name", "Bad", "v")],
             &registered()
         )
         .is_err());
         assert!(validate_fields(
-            &[field_with_label("first-name", "a.b", "v")],
+            &[field_with_label("first_name", "a.b", "v")],
             &registered()
         )
         .is_err());
         assert!(validate_fields(
-            &[field_with_label("first-name", "first-name-label", "v")],
+            &[field_with_label("first_name", "first_name-label", "v")],
             &registered()
         )
         .is_ok());
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn validate_unregistered_label_traps() {
         assert!(validate_fields(
-            &[field_with_label("first-name", "unregistered-label", "v")],
+            &[field_with_label("first_name", "unregistered_label", "v")],
             &registered()
         )
         .is_err());

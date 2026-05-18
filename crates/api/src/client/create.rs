@@ -331,7 +331,14 @@ fn pull_error_to_status(e: &PullError) -> StatusCode {
         PullError::Decrypt
         | PullError::MissingAgeHeader
         | PullError::AgeHeaderBase64(_)
-        | PullError::AgeHeaderParse(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        | PullError::AgeHeaderParse(_)
+        // Artifact was pushed without a `policy.json` layer —
+        // caller's input (a policy ref) is wrong because the polici
+        // they're pointing at is incomplete. Surface as 422 so the
+        // consumer can fix it by re-pushing with the manifest, same
+        // bucket as "wrong client_policy_key" / "missing age-header
+        // annotation" — all are "this polici can't be used".
+        | PullError::NoPolicyManifestLayer => StatusCode::UNPROCESSABLE_ENTITY,
         PullError::Transport(_)
         | PullError::ManifestParse(_)
         | PullError::ManifestDigest { .. }

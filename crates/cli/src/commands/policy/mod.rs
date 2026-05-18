@@ -4,7 +4,7 @@
 //! one. Credentials come from the standard docker config chain (see
 //! `crates/cli/src/registry_auth.rs`).
 
-pub mod encrypt;
 pub mod keygen;
 pub mod push;
+pub mod seal;
 pub mod validate;

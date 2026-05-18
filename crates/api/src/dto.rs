@@ -78,7 +78,7 @@ pub struct DisclosureEnvelope {
 /// policy-declared `key` text-ref and the data; no label.
 ///
 /// Rationale: the consumer authored the policy and dispatches by the
-/// literal `key` string (`"passport-number"`, `"first-name"`, ...).
+/// literal `key` string (`"passport_number"`, `"first_name"`, ...).
 /// Translations live in the per-session text registry inside the
 /// TEE — sending them in the envelope would otherwise leak non-user-
 /// locale variants the applicant never saw on consent.

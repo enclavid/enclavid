@@ -41,8 +41,10 @@ mod views;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::http::header::AUTHORIZATION;
 use axum::middleware::from_fn_with_state;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::state::AppState;
@@ -87,6 +89,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         }
         Err(_) => routes,
     };
+
+    // Mark the bearer the applicant sends on /connect /input as
+    // sensitive. See `client::router` for the rationale; same posture
+    // applies here — http/2 HPACK side-channel + tracing-safe Debug
+    // formatting. Applicant flow only uses `Authorization`; there's
+    // no X-Session-Token equivalent on this surface.
+    let routes = routes.layer(SetSensitiveRequestHeadersLayer::new([AUTHORIZATION]));
 
     // Outermost safety net: see client/mod.rs for rationale. Caches
     // panics from any source into clean 500s.

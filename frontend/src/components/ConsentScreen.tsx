@@ -16,7 +16,7 @@
 //
 // Custom-key visual treatment:
 // Each field carries a policy-declared `key` text-ref. For keys not in
-// `KNOWN_GOOD_KEYS` (the frontend's "canonical" set), the row is amber-
+// `WELL_KNOWN_KEYS` (the frontend's "canonical" set), the row is amber-
 // tinted, marked with a small "custom" badge, and the raw text-ref is
 // displayed inline. This is the visibility check against a policy that
 // tries to encode categorical data (country, gender, ...) via key
@@ -64,25 +64,25 @@ import type { ConsentFieldView } from "@/types";
 /// scanability gate, not a security boundary.
 const VALUE_COLLAPSE_THRESHOLD = 200;
 
-const KNOWN_GOOD_KEYS = new Set<string>([
-  "passport-number",
-  "id-card-number",
-  "drivers-license-number",
-  "first-name",
-  "last-name",
-  "middle-name",
-  "full-name",
-  "date-of-birth",
+const WELL_KNOWN_KEYS = new Set<string>([
+  "passport_number",
+  "id_card_number",
+  "drivers_license_number",
+  "first_name",
+  "last_name",
+  "middle_name",
+  "full_name",
+  "date_of_birth",
   "gender",
   "nationality",
-  "residence-country",
-  "document-expiry",
-  "document-issued",
-  "document-issuing-country",
+  "residence_country",
+  "document_expiry",
+  "document_issued",
+  "document_issuing_country",
   "address",
   "email",
   "phone",
-  "tax-id",
+  "tax_id",
 ]);
 
 export type ConsentScreenProps = {
@@ -249,7 +249,7 @@ export function ConsentScreen({
 }
 
 function FieldRow({ field }: { field: ConsentFieldView }) {
-  const isCustom = !KNOWN_GOOD_KEYS.has(field.key);
+  const isCustom = !WELL_KNOWN_KEYS.has(field.key);
   const [showFull, setShowFull] = useState(false);
   const [showCustomInfo, setShowCustomInfo] = useState(false);
   // Code-point slicing (via Array.from / spread) so we don't cut a

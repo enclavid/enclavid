@@ -18,16 +18,14 @@ use enclavid_host_bridge::{AuthN, RegistryClient};
 
 use crate::limits::MAX_POLICY_MANIFEST_BYTES;
 
-/// OCI layer media-type for the encrypted policy wasm. Decrypted
-/// inside the TEE with client_policy_key.
+/// OCI layer media-type for the encrypted policy wasm. Single layer
+/// in the artifact — the policy manifest lives **inside** this wasm
+/// as a component-level custom section, not as a separate OCI layer.
 const POLICY_WASM_LAYER: &str = "application/vnd.enclavid.policy.wasm.v1.encrypted";
-/// OCI layer media-type for the policy manifest (frozen text-ref
-/// registry: disclosure_fields + localized translations + schema
-/// version). Plain JSON — applicant-facing UI strings are public by
-/// nature, integrity comes from the OCI manifest content-addressing.
-/// Optional: policy with no host-visible UI (decision-only stubs)
-/// can ship without this layer.
-const POLICY_MANIFEST_LAYER: &str = "application/vnd.enclavid.policy.manifest.v1.json";
+/// Component-level custom section the TEE pulls the policy manifest
+/// from after decrypt. Embedded by `enclavid policy encrypt`
+/// (`crates/cli/src/commands/policy/encrypt.rs::MANIFEST_SECTION_NAME`).
+const MANIFEST_SECTION_NAME: &str = "enclavid:policy-manifest.v1";
 /// Manifest annotation key holding a base64-encoded prefix of the
 /// encrypted wasm layer's age stream: header (version line +
 /// recipient stanzas + MAC) + 16-byte nonce. POST /sessions feeds
@@ -37,7 +35,7 @@ const POLICY_MANIFEST_LAYER: &str = "application/vnd.enclavid.policy.manifest.v1
 /// Saves the cost of a multi-megabyte pull on bad-key calls.
 ///
 /// Must match the constant on the CLI side
-/// (`crates/cli/src/commands/push.rs::AGE_HEADER_ANNOTATION`).
+/// (`crates/cli/src/commands/policy/push.rs::AGE_HEADER_ANNOTATION`).
 const AGE_HEADER_ANNOTATION: &str = "com.enclavid.policy.age-header";
 
 #[derive(Debug, thiserror::Error)]
@@ -64,6 +62,12 @@ pub enum PullError {
     },
     #[error("manifest declares no layer with the policy media type")]
     NoPolicyLayer,
+    #[error(
+        "manifest declares no layer with the policy-manifest media type \
+         — every artifact must include `policy.json` (an empty \
+         `{{\"version\": 1}}` is acceptable for policies without UI strings)"
+    )]
+    NoPolicyManifestLayer,
     #[error("policy manifest layer is {size} bytes, max is {max}")]
     ManifestTooLarge { size: usize, max: usize },
     #[error("manifest layer/payload count mismatch: {layers} vs {payloads}")]
@@ -95,21 +99,24 @@ fn classify_transport_error<E: std::fmt::Debug>(e: E) -> PullError {
 }
 
 /// Result of a successful pull-and-decrypt: the policy's executable
-/// wasm plus its (optional) frozen policy manifest. The two layers
-/// live side-by-side in the OCI artifact but ship with different
+/// wasm plus its frozen policy manifest. The two layers live
+/// side-by-side in the OCI artifact but ship with different
 /// confidentiality treatments — wasm is client_policy_key-encrypted
 /// (proprietary algorithm), policy manifest is plain JSON
 /// (applicant-facing UI strings + machine keys, inspectable for
 /// audit). Both are integrity-checked by the OCI content-addressing
 /// chain.
+///
+/// Both layers are **required** — `enclavid policy push` refuses to
+/// ship an artifact without `policy.json`, and pull_and_decrypt
+/// surfaces the absence as `PullError::NoPolicyManifestLayer`. A
+/// policy without host-visible UI can still ship an empty
+/// `{"version": 1}` to satisfy the requirement.
 pub struct PolicyArtifact {
     /// Decrypted wasm. Ready to compile with wasmtime.
     pub wasm_bytes: Vec<u8>,
-    /// Policy manifest bytes verbatim (JSON). `None` if the OCI
-    /// manifest declares no manifest layer — policy without
-    /// host-visible UI (decision-only stubs, test fixtures) can omit
-    /// it. Engine caller treats `None` as an empty registry.
-    pub manifest_bytes: Option<Vec<u8>>,
+    /// Policy manifest bytes verbatim (JSON).
+    pub manifest_bytes: Vec<u8>,
 }
 
 #[derive(Deserialize)]
@@ -173,6 +180,7 @@ pub async fn validate_client_policy_key(
 
     let manifest: OciManifest = serde_json::from_slice(&response.manifest)
         .map_err(|e| PullError::ManifestParse(e.to_string()))?;
+
     let prefix_b64 = manifest
         .annotations
         .get(AGE_HEADER_ANNOTATION)
@@ -269,13 +277,14 @@ pub async fn pull_and_decrypt(
         .into_inner();
 
     // After trust gate: response is plain `PullResponse`. Re-parse the
-    // manifest (cheap — JSON is small) to dispatch layers by
-    // media-type. Wasm layer is required; assets layer is optional.
+    // manifest (cheap — JSON is small) to find the wasm layer.
+    // Single-layer artifact: the policy manifest is no longer a
+    // sibling OCI layer, it's embedded as a wasm custom section
+    // inside the encrypted wasm (extracted after decrypt below).
     let manifest: OciManifest = serde_json::from_slice(&response.manifest)
         .map_err(|e| PullError::ManifestParse(e.to_string()))?;
 
     let mut wasm_bytes: Option<Vec<u8>> = None;
-    let mut manifest_bytes: Option<Vec<u8>> = None;
     for (idx, descriptor) in manifest.layers.iter().enumerate() {
         let payload = &response.layers[idx];
         match descriptor.media_type.as_str() {
@@ -284,21 +293,6 @@ pub async fn pull_and_decrypt(
                 let plaintext =
                     age_decrypt(payload, client_policy_key).map_err(|_| PullError::Decrypt)?;
                 wasm_bytes = Some(plaintext);
-            }
-            POLICY_MANIFEST_LAYER => {
-                // Plain JSON; integrity already verified via the
-                // descriptor digest in the trust gate above.
-                // Transport cap: protect TEE from a malformed /
-                // malicious artifact that ships a megabyte-sized
-                // manifest. Engine-side `load_manifest` still
-                // applies an entry-count cap on top of this.
-                if payload.len() > MAX_POLICY_MANIFEST_BYTES {
-                    return Err(PullError::ManifestTooLarge {
-                        size: payload.len(),
-                        max: MAX_POLICY_MANIFEST_BYTES,
-                    });
-                }
-                manifest_bytes = Some(payload.clone());
             }
             _ => {
                 // Unknown media-type — ignore for forward-compat.
@@ -309,7 +303,44 @@ pub async fn pull_and_decrypt(
     }
 
     let wasm_bytes = wasm_bytes.ok_or(PullError::NoPolicyLayer)?;
+
+    // Pull the manifest out of the component's
+    // `enclavid:policy-manifest.v1` custom section. `enclavid policy
+    // encrypt` embedded it there before age-encrypting; the section
+    // is invisible to wasmtime at compile time but exposed to
+    // `wasmparser::Parser` for our purposes.
+    let manifest_bytes = extract_embedded_manifest(&wasm_bytes)?;
+    if manifest_bytes.len() > MAX_POLICY_MANIFEST_BYTES {
+        return Err(PullError::ManifestTooLarge {
+            size: manifest_bytes.len(),
+            max: MAX_POLICY_MANIFEST_BYTES,
+        });
+    }
     Ok(PolicyArtifact { wasm_bytes, manifest_bytes })
+}
+
+/// Walk the component-level sections looking for our manifest custom
+/// section. Stops at the first match; multiple sections with the same
+/// name aren't expected (encrypt emits exactly one), and silently
+/// taking the first keeps the contract simple.
+///
+/// Component custom sections appear at the top level of the binary
+/// — `wasmparser::Parser::new(0).parse_all(&bytes)` yields them as
+/// `Payload::CustomSection` directly (no nesting through
+/// `ModuleSection`). Inner core-module customs live under
+/// `Payload::ModuleSection(_)` and aren't visited.
+fn extract_embedded_manifest(wasm_bytes: &[u8]) -> Result<Vec<u8>, PullError> {
+    use wasmparser::{Parser, Payload};
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let payload = payload
+            .map_err(|e| PullError::ManifestParse(format!("wasm parse: {e}")))?;
+        if let Payload::CustomSection(reader) = payload
+            && reader.name() == MANIFEST_SECTION_NAME
+        {
+            return Ok(reader.data().to_vec());
+        }
+    }
+    Err(PullError::NoPolicyManifestLayer)
 }
 
 fn age_decrypt(ciphertext: &[u8], identity: &Identity) -> Result<Vec<u8>, age::DecryptError> {

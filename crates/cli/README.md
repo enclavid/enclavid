@@ -26,7 +26,7 @@ enclavid
 │       └── use <id-or-name>
 ├── policy                         ← OCI artifact tooling (registry-agnostic)
 │   ├── keygen
-│   ├── encrypt
+│   ├── seal --manifest policy.json
 │   ├── push [--auth ...]
 │   └── validate
 └── session                        ← verification session lifecycle
@@ -44,8 +44,10 @@ enclavid
 #    Vault — if you lose it, your encrypted policies become unrecoverable.
 enclavid policy keygen --output client.key
 
-# 2. Encrypt your built policy.
-enclavid policy encrypt path/to/policy.wasm --key client.key -o policy.wasm.age
+# 2. Seal the policy: bundles the wasm component with `policy.json`
+#    (as a wasm custom section) and age-encrypts the whole thing.
+enclavid policy seal path/to/policy.wasm \
+    --key client.key --manifest path/to/policy.json -o policy.wasm.age
 
 # 3. Authenticate to Enclavid + auto-wire docker credentials. Prompts
 #    for workspace selection if you're a member of multiple workspaces.
@@ -102,7 +104,7 @@ For CI runners that don't want to write `~/.docker/config.json`:
 
 ```yaml
 - run: |
-    enclavid policy encrypt policy.wasm --key client.key -o policy.wasm.age
+    enclavid policy seal policy.wasm --key client.key --manifest policy.json -o policy.wasm.age
     enclavid policy push policy.wasm.age \
         ghcr.io/${{ github.repository }}/kyc:v${{ github.sha }} \
         --auth "Bearer ${{ secrets.GHCR_PAT }}"
@@ -116,7 +118,19 @@ Or via env var:
     ENCLAVID_REGISTRY_AUTH: Bearer ${{ secrets.GHCR_PAT }}
 ```
 
-> `enclavid policy push` no longer needs `--key`. It lifts the age stream prefix (recipient stanzas) directly from the already-encrypted artifact and embeds it in the OCI manifest as an annotation. `POST /api/v1/sessions` uses that prefix to verify the consumer-supplied `client_policy_key` matches the artifact — without pulling the full encrypted layer.
+> `enclavid policy push` no longer needs `--key` or `--manifest` — both are consumed at `enclavid policy seal`. Push uploads a single self-contained `.wasm.age` blob plus a `com.enclavid.policy.age-header` annotation that `POST /api/v1/sessions` uses for the cheap key-match check.
+
+### Manifest is mandatory
+
+Every `enclavid policy seal` requires a `policy.json` (default: `./policy.json`, override with `--manifest <path>`). The manifest is embedded into the wasm as a component-level custom section before age-encryption, so the resulting `.wasm.age` is a self-contained artifact — `policy.json` doesn't need to travel alongside the encrypted file at any point after seal.
+
+Policies that don't use text-refs (decision-only stubs) still ship a minimal manifest:
+
+```bash
+echo '{"version": 1}' > policy.json
+```
+
+`disclosure_fields` and `localized` are both optional within the manifest (default to empty). Seal refuses without a manifest file. If somehow an artifact reaches `POST /connect` without an embedded manifest section (e.g. produced by a non-enclavid age tool), the TEE returns `NoPolicyManifestLayer` → 422.
 
 ## Using raw `oras` / `docker push`
 
