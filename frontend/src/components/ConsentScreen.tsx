@@ -14,17 +14,14 @@
 // is performed server-side in `crates/engine/src/sanitize.rs` before the
 // fields reach this component.
 //
-// Custom-key visual treatment:
-// Each field carries a policy-declared `key` text-ref. For keys not in
-// `WELL_KNOWN_KEYS` (the frontend's "canonical" set), the row is amber-
-// tinted, marked with a small "custom" badge, and the raw text-ref is
-// displayed inline. This is the visibility check against a policy that
-// tries to encode categorical data (country, gender, ...) via key
-// cardinality — anything off-canon flags itself before the user taps
-// Allow.
+// Key visibility:
+// Each field carries a policy-declared `key` text-ref. The raw `key`
+// is shown on every row — there is no canonical/custom distinction.
+// User is the sole auditor on this screen; nothing about the
+// (key, label, value) triple is suppressed for cosmetic reasons.
 
 import { useState } from "react";
-import { Eye, Info, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Eye, ShieldAlert, ShieldCheck } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -45,16 +42,11 @@ import {
   DialogDescription,
   DialogFooter,
   DialogHeader,
-  DialogMedia,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { SlideToConfirm } from "@/components/SlideToConfirm";
 import type { ConsentFieldView } from "@/types";
 
-/// Canonical text-refs the consent UI treats as "ordinary". Adding a
-/// key here is a frontend UX call (just suppresses the custom badge);
-/// the backend is unaware. Keep kebab-case spellings matching what
-/// policies use as text-refs.
 /// Visible-region threshold (in code points) for a single field's
 /// value before the row collapses behind a "Show full" toggle. Picked
 /// to comfortably show the typical short value (passport number,
@@ -63,27 +55,6 @@ import type { ConsentFieldView } from "@/types";
 /// expand to see the full value before consenting — this is purely a
 /// scanability gate, not a security boundary.
 const VALUE_COLLAPSE_THRESHOLD = 200;
-
-const WELL_KNOWN_KEYS = new Set<string>([
-  "passport_number",
-  "id_card_number",
-  "drivers_license_number",
-  "first_name",
-  "last_name",
-  "middle_name",
-  "full_name",
-  "date_of_birth",
-  "gender",
-  "nationality",
-  "residence_country",
-  "document_expiry",
-  "document_issued",
-  "document_issuing_country",
-  "address",
-  "email",
-  "phone",
-  "tax_id",
-]);
 
 export type ConsentScreenProps = {
   fields: ConsentFieldView[];
@@ -249,9 +220,7 @@ export function ConsentScreen({
 }
 
 function FieldRow({ field }: { field: ConsentFieldView }) {
-  const isCustom = !WELL_KNOWN_KEYS.has(field.key);
   const [showFull, setShowFull] = useState(false);
-  const [showCustomInfo, setShowCustomInfo] = useState(false);
   // Code-point slicing (via Array.from / spread) so we don't cut a
   // surrogate pair in half on emoji or non-BMP scripts. Safer than
   // `String.prototype.slice` which works on UTF-16 code units.
@@ -266,43 +235,27 @@ function FieldRow({ field }: { field: ConsentFieldView }) {
     <li className="rounded-lg border border-border bg-card px-4 py-3">
       <div className="mb-1.5 flex items-start justify-between gap-3">
         <p className="text-xs font-medium text-muted-foreground">{label}</p>
-        {(isCustom || overflows) && (
+        {overflows && (
           <div className="flex shrink-0 items-center gap-1.5">
-            {overflows && (
-              <Badge
-                render={<button type="button" />}
-                onClick={() => setShowFull(true)}
-                variant="secondary"
-                aria-haspopup="dialog"
-                className="cursor-pointer"
-              >
-                <Eye />
-                {codePoints.length} chars
-              </Badge>
-            )}
-            {isCustom && (
-              <Badge
-                render={<button type="button" />}
-                onClick={() => setShowCustomInfo(true)}
-                variant="secondary"
-                aria-haspopup="dialog"
-                className="cursor-pointer"
-              >
-                <Info />
-                custom field
-              </Badge>
-            )}
+            <Badge
+              render={<button type="button" />}
+              onClick={() => setShowFull(true)}
+              variant="secondary"
+              aria-haspopup="dialog"
+              className="cursor-pointer"
+            >
+              <Eye />
+              {codePoints.length} chars
+            </Badge>
           </div>
         )}
       </div>
-      {isCustom && (
-        <p
-          className="mb-1 font-mono text-[11px] break-all text-muted-foreground"
-          style={LTR_STYLE}
-        >
-          {field.key}
-        </p>
-      )}
+      <p
+        className="mb-1 font-mono text-[11px] break-all text-muted-foreground"
+        style={LTR_STYLE}
+      >
+        {field.key}
+      </p>
       <p
         className="font-mono text-sm break-all text-foreground"
         style={LTR_STYLE}
@@ -343,34 +296,6 @@ function FieldRow({ field }: { field: ConsentFieldView }) {
             </DialogContent>
           </Dialog>
         </>
-      )}
-      {isCustom && (
-        <Dialog open={showCustomInfo} onOpenChange={setShowCustomInfo}>
-          <DialogContent className="data-[size=default]:max-w-md data-[size=default]:sm:max-w-md">
-            <DialogHeader>
-              <DialogMedia>
-                <Info />
-              </DialogMedia>
-              <DialogTitle>Custom field name</DialogTitle>
-              <DialogDescription>
-                The name{" "}
-                <code
-                  className="font-mono text-foreground"
-                  style={LTR_STYLE}
-                >
-                  {field.key}
-                </code>{" "}
-                isn't one we recognize as standard (passport-number,
-                first-name, email, address, …). Make sure the value
-                below matches what the name suggests before
-                disclosing.
-              </DialogDescription>
-            </DialogHeader>
-            <DialogFooter>
-              <DialogClose variant="default">Got it</DialogClose>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
       )}
     </li>
   );

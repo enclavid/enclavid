@@ -91,9 +91,9 @@ pub struct DisplayField {
 /// Wire shape for the **applicant consent screen**. `label` is
 /// pre-resolved to the applicant's locale by the server — frontend
 /// renders the string verbatim, no client-side i18n. The raw `key`
-/// text-ref is still surfaced — the consent UI shows it for any
-/// non-canonical key as a visible flag against categorical encoding
-/// via key choice.
+/// text-ref is surfaced alongside and the consent UI always shows
+/// it — user is the sole auditor on this screen, so the full
+/// (key, label, value) triple is rendered with nothing suppressed.
 #[derive(Serialize)]
 pub struct ConsentFieldView {
     pub key: String,

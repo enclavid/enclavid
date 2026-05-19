@@ -14,23 +14,17 @@ interface disclosure {
     ///
     ///   * `key` is the stable machine identifier the consumer SDK
     ///     uses for typed mapping. The host treats it as an opaque
-    ///     string and **always shows it raw** on the consent screen.
-    ///     Two complementary defences against a policy that tries
-    ///     to encode categorical data (country, gender, bucket id,
-    ///     ...) into key cardinality:
-    ///       (a) Pre-registration in `prepare-text-refs` — the set
-    ///           is frozen before any per-session input reaches the
-    ///           policy, so a fresh `passport-number-<user-country>`
-    ///           can't be minted at evaluate time.
-    ///       (b) Visibility on the consent UI — the raw text-ref
-    ///           is displayed alongside the resolved label for any
-    ///           non-canonical key, so any pre-registered variant
-    ///           the policy picks at runtime is staring the user
-    ///           in the face before they tap Allow.
-    ///     Convention: pick stable, human-readable kebab/snake-case
-    ///     names (`passport-number`, `first-name`) for routine
-    ///     fields so the consumer SDK can map by literal; unusual
-    ///     names trigger the consent UI's "custom" highlight.
+    ///     string and **always shows it raw** on the consent screen —
+    ///     no canonical/custom distinction, every (key, label, value)
+    ///     triple is rendered with nothing suppressed. The user is
+    ///     the sole auditor on this screen; whatever string leaves
+    ///     is whatever they saw next to the slide-to-disclose.
+    ///     Defence against a policy that tries to encode categorical
+    ///     data (country, gender, bucket id, ...) into key cardinality:
+    ///     pre-registration in `prepare-text-refs` — the set is
+    ///     frozen before any per-session input reaches the policy,
+    ///     so a fresh `passport-number-<user-country>` can't be
+    ///     minted at evaluate time.
     ///   * `label` is the human-readable field name. The host
     ///     resolves it via the policy's text registry into the full
     ///     set of language translations; the frontend picks the

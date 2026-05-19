@@ -20,7 +20,8 @@ interface types {
     /// (`prompt-disclosure` field key/label, reason, media labels)
     /// and traps if absent. Format also enforced:
     /// `[a-z][a-z0-9_-]{0,127}` so the value is safe to display raw
-    /// on the consent screen when surfaced for non-canonical keys.
+    /// on the consent screen (every key is always shown raw — see
+    /// `disclosure.display-field`).
     /// Type alias (not a record) so SDKs can compose constants
     /// cheaply: typically backed by a compile-time enum that
     /// surfaces a `&'static str` per entry.
