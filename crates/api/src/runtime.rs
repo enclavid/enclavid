@@ -10,22 +10,27 @@ use std::time::Duration;
 
 use moka::future::Cache;
 
-use enclavid_engine::{Component, PluginInstance, Runner};
-
-use crate::text_registry::TextRegistry;
+use enclavid_engine::{Component, EmbeddedRegistry, PluginInstance, Runner};
 
 /// Per-session compiled policy artifact: the wasmtime `Component`
-/// for the policy, the localized-text registry the policy declared
-/// via its manifest, and every plugin component the policy depends
-/// on (pulled per `Client.plugins` at /connect time, compiled once,
-/// shared across all subsequent /input rounds for this session).
+/// for the policy, the composition-wide `EmbeddedRegistry` (slot 0
+/// = policy, slots 1..N = plugins in pinned `Client.plugins` order;
+/// holds both `disclosure_fields` and `localized` stores), and
+/// every plugin component the policy depends on (pulled per
+/// `Client.plugins` at /connect time, compiled once, shared across
+/// all subsequent /input rounds for this session).
+///
+/// `embedded` is shared by Arc with every consumer (engine slot-
+/// bound mint + use-site lookup, api views for projecting slot-
+/// tagged refs into user-facing strings) so the slot assignment
+/// cannot drift across consumers.
 ///
 /// All three are immutable for the lifetime of the session entry;
 /// plugins are pinned by `Client.plugins[].impl_ref` digests so the
 /// same client cannot mutate the set mid-session.
 pub struct PolicyEntry {
     pub component: Arc<Component>,
-    pub texts: Arc<TextRegistry>,
+    pub embedded: Arc<EmbeddedRegistry>,
     pub plugins: Arc<Vec<PluginInstance>>,
 }
 

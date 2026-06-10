@@ -12,19 +12,23 @@ impl Host for HostState {
         reason_ref: String,
         requester_ref: String,
     ) -> wasmtime::Result<bool> {
-        sanitize::validate_fields(&fields, &self.registered_text_refs)?;
-        // Both `reason` and `requester` are text-refs into the
-        // policy's pre-declared dictionary. Membership-check closes
-        // the runtime-crafting channel — policy can't mint either
-        // string at evaluate time based on user attributes.
-        sanitize::ensure_registered(
+        sanitize::validate_fields(&fields, &self.embedded)?;
+        // Both `reason` and `requester` are localized refs minted by
+        // some component in the composition. Lookup in the localized
+        // store closes two channels at once: the runtime-crafting
+        // channel (policy can't mint a raw string at evaluate time
+        // based on user attributes) and the cross-component channel
+        // (a forged ref attributing a message to another slot fails
+        // because the only way the store has a token is for a
+        // component to have minted it through its own slot).
+        sanitize::ensure_localized(
             &reason_ref,
-            &self.registered_text_refs,
+            &self.embedded.localized,
             "prompt_disclosure reason",
         )?;
-        sanitize::ensure_registered(
+        sanitize::ensure_localized(
             &requester_ref,
-            &self.registered_text_refs,
+            &self.embedded.localized,
             "prompt_disclosure requester",
         )?;
         let sanitized = sanitize::sanitize_fields(fields);

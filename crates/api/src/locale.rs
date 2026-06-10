@@ -15,15 +15,16 @@
 //!
 //! Parsing: take the first preference, drop q-values (negligible
 //! delta in practice, simpler code). Default `"en"` when the header
-//! is missing or malformed. The `TextRegistry::resolve_string` lookup
-//! handles the fallback chain (exact → language base → en → first
-//! available) so any locale string we pass in produces a usable
-//! result.
+//! is missing or malformed. [`Locale::pick`] handles the fallback
+//! chain (exact → language base → en → first available) when
+//! projecting a localized ref's translation set to a single string.
 
 use axum::extract::FromRequestParts;
 use axum::http::header::ACCEPT_LANGUAGE;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
+
+use enclavid_engine::Translation;
 
 const DEFAULT_LOCALE: &str = "en";
 
@@ -34,6 +35,35 @@ pub struct Locale(pub String);
 impl Locale {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Pick a single translation text from a localized declaration's
+    /// row set. Fallback chain:
+    ///   1. Exact tag match (`ru-RU` ↔ `ru-RU`).
+    ///   2. Language base (`ru-RU` ↔ `ru`).
+    ///   3. `en` fallback (universal default).
+    ///   4. First available translation.
+    ///   5. `None` only if the row set is empty.
+    ///
+    /// Returns the picked text borrowed from the translation row.
+    /// Callers that need owned `String` clone after sanitisation.
+    pub fn pick<'a>(&self, translations: &'a [Translation]) -> Option<&'a str> {
+        if translations.is_empty() {
+            return None;
+        }
+        let tag = self.as_str();
+        if let Some(row) = translations.iter().find(|r| r.language == tag) {
+            return Some(&row.text);
+        }
+        if let Some((base, _)) = tag.split_once('-') {
+            if let Some(row) = translations.iter().find(|r| r.language == base) {
+                return Some(&row.text);
+            }
+        }
+        if let Some(row) = translations.iter().find(|r| r.language == "en") {
+            return Some(&row.text);
+        }
+        translations.first().map(|r| r.text.as_str())
     }
 }
 

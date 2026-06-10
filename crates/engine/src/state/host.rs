@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use enclavid_host_bridge::SessionState;
@@ -6,6 +5,7 @@ use wasm_runtime_composer::ResourceProxyView;
 use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
 
+use crate::embedded::EmbeddedRegistry;
 use crate::intercept::replay::Replay;
 use crate::limits::POLICY_MAX_MEMORY;
 use crate::listener::{ConsentDisclosure, SessionListener};
@@ -32,15 +32,18 @@ pub struct HostState {
     /// Hook fired after each committed CallEvent. Stored as Arc so the
     /// shim can clone it cheaply across the await point that calls it.
     pub listener: Arc<dyn SessionListener>,
-    /// Snapshot of the `text-ref` keys the policy registered through
-    /// `prepare-text-refs`. Frozen before any per-session input
-    /// reaches the policy; the engine consults this set at every
-    /// text-ref use-site (`prompt-disclosure` field key/label,
-    /// reason, media labels) and traps if a ref is not in it. Closes
-    /// the runtime text-ref-crafting channel where a policy might
-    /// otherwise encode user-attribute bits into a freshly-minted
-    /// key string at evaluate time.
-    pub registered_text_refs: Arc<HashSet<String>>,
+    /// Per-component `enclavid:embedded/*` registry, shared with every
+    /// plugin's `PluginHostState` so the slot-bound mint closures and
+    /// the use-site reverse-lookups read from the same frozen index.
+    /// Frozen before any per-session input reaches any component; the
+    /// engine consults it at every embedded-ref use-site
+    /// (`prompt-disclosure` field key/label, reason / requester,
+    /// media labels) and traps if a ref isn't in it. Closes the
+    /// runtime ref-crafting channel where a policy might otherwise
+    /// encode user-attribute bits into a freshly-minted key string
+    /// at evaluate time, and the cross-component channel where one
+    /// component might mint a ref attributing the message to another.
+    pub embedded: Arc<EmbeddedRegistry>,
     /// Resource caps the wasmtime runtime consults via `Store::
     /// limiter`. Bounds linear-memory growth so the policy
     /// component can't OOM the enclave. Fuel (CPU-instruction
@@ -58,15 +61,18 @@ pub struct HostState {
 
 /// Per-run inputs assembled by the api crate and handed to
 /// [`HostState::new`]. Carries the listener that ties this run to
-/// the caller's persistence layer plus the policy's pre-registered
-/// text-ref set.
+/// the caller's persistence layer plus the composition-wide
+/// `EmbeddedRegistry` — constructed once at policy-cache build time
+/// from policy + plugin embedded sections and shared by `Arc` with
+/// every consumer (engine slot-bound mint, engine use-site reverse-
+/// lookup, api view-layer ref resolution).
 ///
 /// Distinct name from the component-model "resources" concept
 /// (`wasmtime::component::Resource`) — these are the engine's
 /// per-`Runner::run` inputs, not WIT resource handles.
 pub struct RunInputs {
     pub listener: Arc<dyn SessionListener>,
-    pub registered_text_refs: Arc<HashSet<String>>,
+    pub embedded: Arc<EmbeddedRegistry>,
 }
 
 impl HostState {
@@ -75,7 +81,7 @@ impl HostState {
             replay: Replay::new(session),
             pending_disclosures: Vec::new(),
             listener: inputs.listener,
-            registered_text_refs: inputs.registered_text_refs,
+            embedded: inputs.embedded,
             limits: StoreLimitsBuilder::new()
                 .memory_size(POLICY_MAX_MEMORY)
                 .build(),

@@ -91,7 +91,7 @@ fn classify_transport_error<E: std::fmt::Debug>(e: E) -> PullError {
 /// (`enclavid:embedded.disclosure-fields.v1`,
 /// `enclavid:embedded.i18n.v1`) live inside the wasm as component-
 /// level custom sections; the caller extracts them via
-/// `enclavid_engine::load_static`. No sidecar layer.
+/// `enclavid_engine::load_embedded`. No sidecar layer.
 pub struct PolicyArtifact {
     /// Decrypted wasm. Ready to compile with wasmtime.
     pub wasm_bytes: Vec<u8>,

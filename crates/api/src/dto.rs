@@ -23,10 +23,10 @@
 
 use serde::Serialize;
 
+use enclavid_engine::EmbeddedRegistry;
 use enclavid_host_bridge::{DisplayField as ProtoDisplayField, SessionStatus};
 
 use crate::locale::Locale;
-use crate::text_registry::TextRegistry;
 
 /// Serde "remote" definition for the proto-generated `SessionStatus`
 /// enum. Variants must mirror the foreign enum exactly; serde uses
@@ -103,28 +103,63 @@ pub struct ConsentFieldView {
 
 // --- proto → dto conversion ---
 
-/// Envelope-shape conversion: copies `key` + `value`. No registry
-/// dependency. Used by the persister when sealing disclosures for
-/// the consumer.
-pub fn display_field_from_proto(f: &ProtoDisplayField) -> DisplayField {
+/// Envelope-shape conversion: resolves `f.key` (a `disclosure-field-
+/// ref`) back to its raw machine identifier via the embedded
+/// registry's disclosure-fields store — that's the literal the
+/// consumer SDK dispatches on. Used by the persister when sealing
+/// disclosures for the consumer.
+pub fn display_field_from_proto(
+    f: &ProtoDisplayField,
+    embedded: &EmbeddedRegistry,
+) -> DisplayField {
     DisplayField {
-        key: f.key.clone(),
+        key: embedded
+            .disclosure_fields
+            .lookup(&f.key)
+            .cloned()
+            .unwrap_or_else(|| f.key.clone()),
         value: f.value.clone(),
     }
 }
 
-/// Consent-screen conversion: resolves the `label` text-ref through
-/// the policy's per-session text registry to the applicant's locale.
-/// Used by the api view layer when building `RequestView::Consent`
-/// for the applicant frontend.
+/// Consent-screen conversion. `f.key` is a `disclosure-field-ref` →
+/// resolves to the machine identifier; `f.label` is a `localized-ref`
+/// → resolves to its translation set then locale-picked and
+/// sanitised. The value is policy free-text, displayed verbatim.
 pub fn consent_field_view_from_proto(
     f: &ProtoDisplayField,
-    registry: &TextRegistry,
+    embedded: &EmbeddedRegistry,
     locale: &Locale,
 ) -> ConsentFieldView {
     ConsentFieldView {
-        key: f.key.clone(),
-        label: registry.resolve_string(&f.label, locale),
+        key: embedded
+            .disclosure_fields
+            .lookup(&f.key)
+            .cloned()
+            .unwrap_or_else(|| f.key.clone()),
+        label: resolve_localized(embedded, &f.label, locale),
         value: f.value.clone(),
     }
+}
+
+/// Shared helper: localized-ref token → applicant-facing string.
+///
+/// Returns the token unchanged when it isn't in the localized store
+/// (shouldn't happen — engine traps on use-site validation, but
+/// degrades gracefully). Returns the token unchanged also when the
+/// store holds the entry but the entry has no translation rows
+/// (i18n-section entry with empty body). Sanitisation is applied
+/// once per picked value.
+pub fn resolve_localized(
+    embedded: &EmbeddedRegistry,
+    token: &str,
+    locale: &Locale,
+) -> String {
+    let Some(translations) = embedded.localized.lookup(token) else {
+        return token.to_string();
+    };
+    let Some(picked) = locale.pick(translations) else {
+        return token.to_string();
+    };
+    enclavid_engine::sanitize_text_value(picked)
 }

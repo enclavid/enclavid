@@ -2,7 +2,6 @@
 //! [`Engine`], compiles components, and drives one policy run
 //! together with its plugin composition through to a [`RunStatus`].
 
-mod decls;
 mod status;
 
 use enclavid_host_bridge::SessionState;
@@ -17,7 +16,6 @@ use crate::intercept::shim::component::{InterceptView, Linker};
 use crate::limits::POLICY_FUEL_BUDGET;
 use crate::state::{HostState, PluginHostState, RunInputs};
 
-pub use decls::{LocalizedDecl, TextDecls, load_static};
 pub use status::{Decision, EvalArgs, RunStatus};
 
 /// One compiled plugin component bundled with the WIT package id it
@@ -76,6 +74,17 @@ impl Runner {
         args: Vec<(String, EvalArgs)>,
         inputs: RunInputs,
     ) -> wasmtime::Result<(RunStatus, SessionState)> {
+        // The composition-wide embedded-ref registry is constructed
+        // **outside** the engine — in `api::applicant::shared::
+        // lookup_policy`, alongside the localized-text registry, so
+        // the same `Arc` can feed both consumers without re-walking
+        // the wasm sections (engine for slot-bound mint + use-site
+        // reverse-lookup; api views for resolving slot-tagged refs to
+        // user-facing strings). Builder discipline (slot 0 = policy,
+        // slots 1..N = plugins in the same order as `plugins` here)
+        // lives at the construction site; we just consume.
+        let embedded = inputs.embedded.clone();
+
         // Phase 1 — compose every plugin into a single Composition.
         //
         // wasm-runtime-composer:
@@ -97,14 +106,17 @@ impl Runner {
             let mut composer = Composer::new();
             for plugin in plugins {
                 let engine_for_factory = self.engine.clone();
-                // Plugin's Linker is intentionally empty: plugins are
-                // pure compute in our trust model and must not import
-                // ANY host function (no WASI clock / logging / random,
-                // no enclavid:* interfaces, nothing). See
-                // `[[project-section-level-encryption-plan]]` →
-                // "Plugin host-import constraint" for the privacy
-                // rationale. Composer will fail loud at compose-time
-                // if any plugin declares an unsatisfied import.
+                let embedded_for_factory = embedded.clone();
+                // Plugin's Linker is restricted to the two pure
+                // scoped-lookup interfaces (`enclavid:embedded/
+                // disclosure-fields` and `enclavid:embedded/i18n`) —
+                // no WASI, no suspending `enclavid:*`, nothing else.
+                // Slot-bound registration of those two interfaces
+                // lands in Step 6 of the scoping rollout; for now
+                // the Linker stays empty (no plugin currently imports
+                // either interface). Composer fails loud at compose-
+                // time if a plugin declares any other unsatisfied
+                // import.
                 let plugin_linker =
                     wasmtime::component::Linker::<PluginHostState>::new(&self.engine);
                 composer.add(ComposableDescriptor::new(
@@ -113,8 +125,10 @@ impl Runner {
                         (*plugin.component).clone(),
                         plugin_linker,
                         move || {
-                            let mut store =
-                                Store::new(&engine_for_factory, PluginHostState::new());
+                            let mut store = Store::new(
+                                &engine_for_factory,
+                                PluginHostState::new(embedded_for_factory.clone()),
+                            );
                             // Same memory ceiling enforcement we do
                             // for the policy Store — `StoreLimits` on
                             // the `T` itself, surfaced via

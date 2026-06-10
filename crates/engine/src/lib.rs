@@ -1,9 +1,15 @@
 //! Engine: policy + plugin composition + execution.
 //!
 //! ```text
-//! runner/      ← top-level executor (Runner, RunStatus, load_manifest)
+//! runner/      ← top-level executor (Runner, RunStatus)
 //!   ↓ uses
-//! host/        ← bindgen Host trait impls for policy's WIT imports
+//! host/        ← bindgen Host trait impls for suspending host fns
+//!                (prompt-disclosure, prompt-media)
+//! embedded/    ← `enclavid:embedded/*` slice: section parsing
+//!                (TextDecls + load_embedded), per-component scoping
+//!                registry (EmbeddedRegistry), and the embedded host
+//!                fn impls (slot 0 via bindgen, plugin slots via
+//!                register_for_slot)
 //!   ↓ uses
 //! state/       ← Store<T> data layer (HostState, PluginHostState, RunInputs)
 //! intercept/   ← shim Linker + replay machinery (wraps every host call)
@@ -11,6 +17,7 @@
 //! limits, sanitize  ← leaf utilities
 //! ```
 
+mod embedded;
 mod host;
 pub mod intercept;
 pub mod limits;
@@ -19,11 +26,14 @@ mod runner;
 mod sanitize;
 mod state;
 
+pub use embedded::{
+    ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedRegistry,
+    EmbeddedRegistryBuilder, Localized, LocalizedStore, RefKind, RefStore, Slot, Translation,
+    load_embedded,
+};
 pub use enclavid_host_bridge::{SessionMetadata, SessionState, suspended};
 pub use listener::{ConsentDisclosure, SessionChange, SessionListener};
-pub use runner::{
-    Decision, EvalArgs, LocalizedDecl, PluginInstance, RunStatus, Runner, TextDecls, load_static,
-};
+pub use runner::{Decision, EvalArgs, PluginInstance, RunStatus, Runner};
 pub use state::RunInputs;
 /// Re-exported for the api crate so it can apply the same
 /// control/BIDI/zero-width/Unicode-tag stripping to manifest

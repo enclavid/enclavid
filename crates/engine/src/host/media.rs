@@ -5,6 +5,7 @@ use enclavid_host_bridge::{
     suspended,
 };
 
+use crate::embedded::EmbeddedRegistry;
 use crate::enclavid::form::media::Host;
 use crate::enclavid::form::types::{
     AllOf, CameraFacing, CaptureGuide, CaptureStep, Clip, GroupResult, MediaSpec,
@@ -19,7 +20,7 @@ impl Host for HostState {
     /// `/input` and re-trigger this host fn until the data is
     /// complete.
     async fn prompt_media(&mut self, spec: MediaSpec) -> wasmtime::Result<Vec<Clip>> {
-        validate_media_spec(&spec, &self.registered_text_refs)?;
+        validate_media_spec(&spec, &self.embedded)?;
         let proto_spec: ProtoMediaSpec = (&spec).into();
 
         let media_state = self
@@ -89,7 +90,7 @@ impl Host for HostState {
                 )));
             }
             for spec in &group.items {
-                validate_media_spec(spec, &self.registered_text_refs)?;
+                validate_media_spec(spec, &self.embedded)?;
             }
         }
         let data = self
@@ -115,10 +116,11 @@ impl Host for HostState {
     }
 }
 
-/// Format + registration check for every text-ref inside a
+/// Format + registration check for every embedded ref inside a
 /// `MediaSpec`. Same timing-based defence as `prompt_disclosure`:
-/// every ref must be in the policy's frozen asset registry,
-/// blocking runtime-crafted refs encoded with per-session user info.
+/// every ref must be in the composition's frozen `EmbeddedRegistry`,
+/// blocking runtime-crafted refs encoded with per-session user info
+/// and cross-component forgery.
 ///
 /// `icon` is intentionally NOT checked — it's a free-form string
 /// dispatched against the frontend's bundled SVG library. Unknown
@@ -126,28 +128,32 @@ impl Host for HostState {
 /// declare icons.
 fn validate_media_spec(
     spec: &MediaSpec,
-    registered: &std::collections::HashSet<String>,
+    embedded: &EmbeddedRegistry,
 ) -> wasmtime::Result<()> {
     if spec.captures.is_empty() {
         return Err(wasmtime::Error::msg(
             "prompt_media / prompt_any_of spec has no capture steps",
         ));
     }
-    sanitize::ensure_registered(&spec.label, registered, "prompt_media spec label")?;
+    sanitize::ensure_localized(
+        &spec.label,
+        &embedded.localized,
+        "prompt_media spec label",
+    )?;
     for step in &spec.captures {
-        sanitize::ensure_registered(
+        sanitize::ensure_localized(
             &step.instructions,
-            registered,
+            &embedded.localized,
             "prompt_media capture-step instructions",
         )?;
-        sanitize::ensure_registered(
+        sanitize::ensure_localized(
             &step.label,
-            registered,
+            &embedded.localized,
             "prompt_media capture-step label",
         )?;
-        sanitize::ensure_registered(
+        sanitize::ensure_localized(
             &step.review_hint,
-            registered,
+            &embedded.localized,
             "prompt_media capture-step review-hint",
         )?;
     }

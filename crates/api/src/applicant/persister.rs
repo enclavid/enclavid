@@ -74,6 +74,11 @@ pub(super) struct SessionPersister {
     /// fields stay constant across the session lifetime; this is
     /// purely a bookkeeping wrapper.
     pub metadata: Mutex<SessionMetadata>,
+    /// Composition-wide embedded registry. Consulted when sealing
+    /// disclosure envelopes to project slot-tagged
+    /// `disclosure-field-ref`s back to the raw machine identifiers
+    /// the consumer SDK dispatches on.
+    pub embedded: Arc<enclavid_engine::EmbeddedRegistry>,
 }
 
 impl SessionListener for SessionPersister {
@@ -97,6 +102,7 @@ impl SessionListener for SessionPersister {
                         d,
                         &self.client_disclosure_pubkey,
                         &self.session_id,
+                        &self.embedded,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -248,6 +254,7 @@ fn seal_disclosure(
     d: &ConsentDisclosure,
     recipient: &str,
     session_id: &str,
+    embedded: &enclavid_engine::EmbeddedRegistry,
 ) -> RunResult<Vec<u8>> {
     let envelope = DisclosureEnvelope {
         version: ENVELOPE_VERSION,
@@ -257,11 +264,13 @@ fn seal_disclosure(
         // registry stays inside the TEE so its multi-language
         // translations never reach the consumer (closing the covert
         // channel where non-user-locale variants would otherwise
-        // travel in `LocalizedText`).
+        // travel in `LocalizedText`). `key` is projected from its
+        // slot-tagged ref to the raw machine identifier via the
+        // composition's disclosure-fields store.
         fields: d
             .fields
             .iter()
-            .map(dto::display_field_from_proto)
+            .map(|f| dto::display_field_from_proto(f, embedded))
             .collect(),
     };
     let json = serde_json::to_vec(&envelope)

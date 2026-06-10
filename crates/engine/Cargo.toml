@@ -9,7 +9,7 @@ repository.workspace = true
 enclavid-host-bridge = { path = "../host-bridge" }
 enclavid-embedded = { path = "../embedded" }
 
-# Used by `runner::decls::load_static` to pull the embedded custom
+# Used by `runner::decls::load_embedded` to pull the embedded custom
 # sections (disclosure-fields, i18n) straight out of a compiled policy
 # component without having to round-trip through wasmtime instantiation.
 wasmparser = "0.247"

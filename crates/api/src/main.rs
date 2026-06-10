@@ -10,7 +10,6 @@ mod locale;
 mod policy_pull;
 mod runtime;
 mod state;
-mod text_registry;
 mod transport;
 
 use std::sync::Arc;

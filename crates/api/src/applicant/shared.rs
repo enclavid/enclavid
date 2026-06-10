@@ -16,7 +16,8 @@ use secrecy::ExposeSecret;
 use tokio::sync::Mutex;
 
 use enclavid_engine::{
-    Component, EvalArgs, PluginInstance, RunInputs, SessionListener, SessionState,
+    Component, EmbeddedRegistry, EvalArgs, PluginInstance, RunInputs, SessionListener,
+    SessionState,
 };
 use enclavid_host_bridge::{
     AuthN, AuthZ, Metadata, Replay, SessionMetadata, State as StateField, reason,
@@ -28,7 +29,6 @@ use crate::locale::Locale;
 use crate::policy_pull;
 use crate::runtime::PolicyEntry;
 use crate::state::AppState;
-use crate::text_registry::TextRegistry;
 
 use super::auth::CallerKey;
 use super::persister::SessionPersister;
@@ -85,20 +85,18 @@ pub(super) fn parse_args(
     })
 }
 
-/// Build per-run resources for the engine. The listener is the only
-/// side-effect channel — it fires after every committed CallEvent and
-/// is responsible for sealing + persisting state and disclosures
-/// atomically. Engine itself holds no keys; encryption lives on the
-/// listener side, symmetric with how state/metadata are sealed inside
-/// host-bridge.
+/// Build per-run resources for the engine. Listener: side-effect
+/// channel — fires after every committed CallEvent, seals + persists
+/// state and disclosures atomically. Embedded registry: composition-
+/// wide `EmbeddedRegistry`, constructed once at policy-cache build
+/// time (see [`lookup_policy`]) and threaded into both engine (slot-
+/// bound mint + use-site reverse-lookup) and api view-layer (ref →
+/// user-facing text) so all consumers agree on slot attribution.
 pub(super) fn build_run_inputs(
     listener: Arc<dyn SessionListener>,
-    texts: &TextRegistry,
+    embedded: Arc<EmbeddedRegistry>,
 ) -> RunInputs {
-    RunInputs {
-        listener,
-        registered_text_refs: texts.registered_keys(),
-    }
+    RunInputs { listener, embedded }
 }
 
 /// Pre-flight context shared by `/connect` and `/input`. The extractor
@@ -118,11 +116,12 @@ pub(super) struct SessionRunCtx {
     /// for a session whose `/connect` has never reached this far —
     /// connect treats that as "fresh start", input as 404.
     pub(super) session_state: Option<SessionState>,
-    /// Localized text dictionary registered by the policy at load
-    /// time. Handlers resolve `text-ref` strings inside suspended
-    /// requests / consent disclosures through this when assembling
-    /// JSON for the frontend or the consumer SDK.
-    pub(super) texts: Arc<TextRegistry>,
+    /// Composition-wide `EmbeddedRegistry`. Handlers project slot-
+    /// tagged refs inside suspended requests / consent disclosures
+    /// through this when assembling JSON for the frontend or the
+    /// consumer SDK; same `Arc` is also threaded into the engine
+    /// via `RunInputs`.
+    pub(super) embedded: Arc<EmbeddedRegistry>,
     /// Applicant's preferred locale (from `Accept-Language` header).
     /// Text-ref resolution happens server-side so the wire payload is
     /// a plain string per ref — frontend doesn't carry i18n logic.
@@ -150,7 +149,7 @@ impl SessionRunCtx {
         let SessionRunCtx {
             state,
             session_id,
-            texts,
+            embedded,
             locale,
             persister,
             args,
@@ -167,7 +166,7 @@ impl SessionRunCtx {
         // No-op for Suspended; flips status to Completed atomically
         // (metadata + host-plaintext Status) when the run terminated.
         persister.finalize(&status).await?;
-        Ok(progress_from(status, &texts, &locale))
+        Ok(progress_from(status, &embedded, &locale))
     }
 }
 
@@ -296,15 +295,15 @@ persist; same containment as above.
             .into_inner();
 
         // Resolve the policy and its registered text constants
-        // before the persister is built — the persister needs
-        // `texts` to embed resolved labels into outbound disclosure
-        // envelopes (the consumer SDK doesn't have access to the
-        // policy's registry).
+        // before the persister is built — the persister consults the
+        // embedded registry to project slot-tagged disclosure-field-
+        // refs back to their machine identifiers when sealing the
+        // envelope to the consumer SDK.
         let policy_entry = lookup_policy(state, &session_id, &metadata).await?;
         // PolicyEntry is reference-counted in the cache; cheap to
         // unpack its inner Arcs into per-run fields.
         let policy = policy_entry.component.clone();
-        let texts = policy_entry.texts.clone();
+        let embedded = policy_entry.embedded.clone();
         let plugins = policy_entry.plugins.clone();
 
         // Per-run persister: engine fires `on_session_change` after
@@ -332,17 +331,18 @@ persist; same containment as above.
             client_disclosure_pubkey: disclosure_pubkey,
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata.clone()),
+            embedded: embedded.clone(),
         });
         // Engine takes one strong ref via the listener; we keep our
         // own so `finalize` lands on the same persister after the run
         // completes (engine drops its ref when Store is consumed).
-        let run_inputs = build_run_inputs(persister.clone(), &texts);
+        let run_inputs = build_run_inputs(persister.clone(), embedded.clone());
 
         Ok(SessionRunCtx {
             state: state.clone(),
             session_id,
             session_state,
-            texts,
+            embedded,
             locale,
             persister,
             args,
@@ -456,23 +456,34 @@ async fn lookup_policy(
             StatusCode::INTERNAL_SERVER_ERROR
         },
     )?);
-    // Parse the policy's embedded text-ref declarations directly
-    // from the decrypted wasm component — both
+    // Parse the policy's embedded sections directly from the
+    // decrypted wasm component — both
     // `enclavid:embedded.disclosure-fields.v1` and
     // `enclavid:embedded.i18n.v1` custom sections are optional, and
     // either / both / neither may be present.
-    let decls = enclavid_engine::load_static(&artifact.wasm_bytes).map_err(|e| {
+    let policy_decls = enclavid_engine::load_embedded(&artifact.wasm_bytes).map_err(|e| {
         eprintln!(
-            "lookup_policy: load_static failed for {session_id} \
+            "lookup_policy: load_embedded failed for {session_id} \
              (policy_ref {}): {e}",
             metadata.policy_ref,
         );
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let texts = Arc::new(TextRegistry::from_decls(decls));
+    // Build the composition-wide `EmbeddedRegistry`. Slot 0 = policy
+    // decls; slots 1..N = plugin decls in the same order as
+    // `plugin_instances` (mirrors `client.plugins`). Plugin embedded
+    // section parsing lands in Step 6 of the scoping rollout — for
+    // now we reserve their slots with empty decls so slot attribution
+    // is stable even before plugin sections are populated.
+    let mut embedded_builder = EmbeddedRegistry::builder();
+    embedded_builder.add_component(policy_decls);
+    for _ in &plugin_instances {
+        embedded_builder.add_component(enclavid_engine::ComponentDecls::default());
+    }
+    let embedded = Arc::new(embedded_builder.finish());
     let entry = Arc::new(PolicyEntry {
         component,
-        texts,
+        embedded,
         plugins: Arc::new(plugin_instances),
     });
     state

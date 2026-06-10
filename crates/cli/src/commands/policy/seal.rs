@@ -17,7 +17,7 @@
 //! sections are spec-defined as arbitrary metadata that wasm runtimes
 //! ignore for execution — wasmtime will compile the component as if
 //! the sections weren't there. The TEE extracts whichever sections
-//! are present at /connect time via `enclavid_engine::load_static`.
+//! are present at /connect time via `enclavid_engine::load_embedded`.
 //!
 //! Rationale: a single self-contained `.age` file is the unit of
 //! distribution. After seal, push doesn't need declarations flags,

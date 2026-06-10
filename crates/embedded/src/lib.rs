@@ -47,7 +47,7 @@ use std::path::Path;
 // size and per-key/per-value shapes. They live here because they are
 // part of the schema definition itself, not a runtime concern — both
 // the author-time linter (CLI `validate` / `seal`) and the runtime
-// loader (engine `load_static`) consult them through this crate.
+// loader (engine `load_embedded`) consult them through this crate.
 // The engine re-exports them via `enclavid-engine::limits` so engine
 // callers can use one short path; bumps land here once.
 

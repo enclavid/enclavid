@@ -14,14 +14,13 @@
 
 use serde::Serialize;
 
-use enclavid_engine::{Decision, RunStatus};
+use enclavid_engine::{Decision, EmbeddedRegistry, RunStatus};
 use enclavid_host_bridge::{
     CameraFacing, CaptureGuide, CaptureStep, MediaSpec, capture_guide, suspended,
 };
 
 use crate::dto;
 use crate::locale::Locale;
-use crate::text_registry::TextRegistry;
 
 /// Response for run-triggering endpoints (`init`, `input`). Internally-tagged
 /// enum — the `status` field carries the variant discriminator, other fields
@@ -128,7 +127,7 @@ pub enum CaptureGuideView {
 
 pub(super) fn progress_from(
     status: RunStatus,
-    texts: &TextRegistry,
+    embedded: &EmbeddedRegistry,
     locale: &Locale,
 ) -> SessionProgress {
     match status {
@@ -136,7 +135,7 @@ pub(super) fn progress_from(
             decision: decision_view(decision),
         },
         RunStatus::Suspended(req) => SessionProgress::AwaitingInput {
-            request: request_view(&req, texts, locale),
+            request: request_view(&req, embedded, locale),
         },
     }
 }
@@ -152,19 +151,19 @@ fn decision_view(d: Decision) -> DecisionView {
 
 fn request_view(
     req: &suspended::Request,
-    texts: &TextRegistry,
+    embedded: &EmbeddedRegistry,
     locale: &Locale,
 ) -> RequestView {
     match req {
-        suspended::Request::Media(m) => media_view(m, texts, locale),
+        suspended::Request::Media(m) => media_view(m, embedded, locale),
         suspended::Request::Consent(c) => RequestView::Consent {
             fields: c
                 .fields
                 .iter()
-                .map(|f| dto::consent_field_view_from_proto(f, texts, locale))
+                .map(|f| dto::consent_field_view_from_proto(f, embedded, locale))
                 .collect(),
-            reason: texts.resolve_string(&c.reason_ref, locale),
-            requester: texts.resolve_string(&c.requester_ref, locale),
+            reason: dto::resolve_localized(embedded,&c.reason_ref, locale),
+            requester: dto::resolve_localized(embedded,&c.requester_ref, locale),
         },
         suspended::Request::VerificationSet(vs) => RequestView::VerificationSet {
             alternatives: vs
@@ -173,7 +172,7 @@ fn request_view(
                 .map(|g| {
                     g.items
                         .iter()
-                        .map(|s| media_spec_view(s, texts, locale))
+                        .map(|s| media_spec_view(s, embedded, locale))
                         .collect()
                 })
                 .collect(),
@@ -183,7 +182,7 @@ fn request_view(
 
 fn media_view(
     m: &enclavid_host_bridge::MediaRequest,
-    texts: &TextRegistry,
+    embedded: &EmbeddedRegistry,
     locale: &Locale,
 ) -> RequestView {
     let spec = m.spec.as_ref();
@@ -192,7 +191,7 @@ fn media_view(
         .map(|s| {
             s.captures
                 .iter()
-                .map(|c| capture_step_view(c, texts, locale))
+                .map(|c| capture_step_view(c, embedded, locale))
                 .collect()
         })
         .unwrap_or_default();
@@ -214,7 +213,7 @@ fn media_view(
     let next_slot_id = format!("media-{next_index}");
     RequestView::Media {
         label: spec
-            .map(|s| texts.resolve_string(&s.label_ref, locale))
+            .map(|s| dto::resolve_localized(embedded,&s.label_ref, locale))
             .unwrap_or_default(),
         captures,
         filled,
@@ -224,22 +223,22 @@ fn media_view(
 
 fn media_spec_view(
     s: &MediaSpec,
-    texts: &TextRegistry,
+    embedded: &EmbeddedRegistry,
     locale: &Locale,
 ) -> MediaSpecView {
     MediaSpecView {
-        label: texts.resolve_string(&s.label_ref, locale),
+        label: dto::resolve_localized(embedded,&s.label_ref, locale),
         captures: s
             .captures
             .iter()
-            .map(|c| capture_step_view(c, texts, locale))
+            .map(|c| capture_step_view(c, embedded, locale))
             .collect(),
     }
 }
 
 fn capture_step_view(
     s: &CaptureStep,
-    texts: &TextRegistry,
+    embedded: &EmbeddedRegistry,
     locale: &Locale,
 ) -> CaptureStepView {
     CaptureStepView {
@@ -247,11 +246,11 @@ fn capture_step_view(
         // against its bundled icon library with fallback to no-icon.
         // Not a text-ref; not localised.
         icon: s.icon_ref.clone(),
-        instructions: texts.resolve_string(&s.instructions_ref, locale),
-        label: texts.resolve_string(&s.label_ref, locale),
+        instructions: dto::resolve_localized(embedded,&s.instructions_ref, locale),
+        label: dto::resolve_localized(embedded,&s.label_ref, locale),
         camera: camera_view(s.camera),
         guide: guide_view(s.guide.as_ref()),
-        review_hint: texts.resolve_string(&s.review_hint_ref, locale),
+        review_hint: dto::resolve_localized(embedded,&s.review_hint_ref, locale),
     }
 }
 

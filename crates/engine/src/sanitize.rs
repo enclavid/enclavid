@@ -6,39 +6,38 @@
 //!   1. `DisplayField`s from `prompt-disclosure` — structured consent
 //!      data shown to the applicant and persisted to the consumer.
 //!      `value` is policy-supplied free text (typically the actual
-//!      PII like "Alice"); `key` and `label` are text-refs into the
-//!      policy's registry (membership-checked + format-validated).
-//!   2. `translation` entries inside `localized-text` declarations
-//!      from `prepare-text-refs` — the registered constant strings
-//!      policy can reference at use sites. Sanitised once at
-//!      registration time, cached thereafter — never re-sanitised
-//!      at lookup.
+//!      PII like "Alice"); `key` and `label` are embedded refs minted
+//!      by `enclavid:embedded/disclosure-fields` /
+//!      `enclavid:embedded/i18n`, reverse-looked-up in the
+//!      composition's `EmbeddedRegistry`.
+//!   2. `translation` entries inside `i18n` sections — the registered
+//!      constant strings every component can reference at use sites.
+//!      Sanitised once at registration time, cached thereafter —
+//!      never re-sanitised at lookup.
 //!
 //! Stripping rules (control chars, BIDI overrides, zero-width chars,
 //! Unicode tag characters) are shared across both surfaces; only the
 //! length budgets differ.
 
-use std::collections::HashSet;
-
+use crate::embedded::{DisclosureFieldsStore, EmbeddedRegistry, LocalizedStore};
 use crate::enclavid::disclosure::types::DisplayField;
 use crate::limits::{
-    MAX_EXPOSE_FIELDS, MAX_KEY_LENGTH, MAX_TEXT_VALUE_SOFT_CHARS,
-    MAX_VALUE_LENGTH,
+    MAX_EXPOSE_FIELDS, MAX_KEY_LENGTH, MAX_TEXT_VALUE_SOFT_CHARS, MAX_VALUE_LENGTH,
 };
 
 /// Enforce structural limits + registration on `DisplayField`s from
 /// `prompt-disclosure`. Policies exceeding them trap — this is a
 /// programming error or a covert-channel attempt, not user input.
 ///
-/// Both `key` and `label` are checked against `registered` (the set
-/// of text-refs the policy declared via `prepare-localized-texts`).
-/// Membership matters because that declaration runs before the
-/// policy ever sees per-session args — refusing unregistered refs
-/// at this point blocks any "craft a text-ref string from user
-/// attribute bits at evaluate time" pattern. Unregistered = trap.
+/// `key` is a disclosure-field-ref → reverse-looked-up in the
+/// composition's disclosure-fields store; `label` is a localized-ref
+/// → looked up in the localized store. Each store only knows tokens
+/// it itself minted, so a token that crossed kinds (a localized ref
+/// passed as a key, etc.) fails the right-store check and traps
+/// cleanly.
 pub fn validate_fields(
     fields: &[DisplayField],
-    registered: &HashSet<String>,
+    embedded: &EmbeddedRegistry,
 ) -> wasmtime::Result<()> {
     if fields.len() > MAX_EXPOSE_FIELDS {
         return Err(wasmtime::Error::msg(format!(
@@ -51,60 +50,98 @@ pub fn validate_fields(
                 "prompt_disclosure value exceeds {MAX_VALUE_LENGTH} bytes"
             )));
         }
-        ensure_registered(&field.key, registered, "prompt_disclosure field key")?;
-        ensure_registered(&field.label, registered, "prompt_disclosure field label")?;
+        ensure_disclosure_field(
+            &field.key,
+            &embedded.disclosure_fields,
+            "prompt_disclosure field key",
+        )?;
+        ensure_localized(
+            &field.label,
+            &embedded.localized,
+            "prompt_disclosure field label",
+        )?;
     }
     Ok(())
 }
 
-/// Format-validate + check membership in the policy's pre-declared
-/// text-ref set. Used at every text-ref use-site inside host fns so
-/// the engine never accepts a runtime-crafted ref. `role` is the
-/// human-readable site name (e.g. "prompt_disclosure reason",
-/// "prompt_media spec label") embedded in the error message; helps
-/// audit a trap back to the host fn that fired it.
-pub fn ensure_registered(
-    text_ref: &str,
-    registered: &HashSet<String>,
+/// Format-validate + lookup in the disclosure-fields store. Used at
+/// every disclosure-field-ref use-site inside host fns so the engine
+/// never accepts a runtime-crafted or cross-store ref.
+pub fn ensure_disclosure_field(
+    token: &str,
+    store: &DisclosureFieldsStore,
     role: &str,
 ) -> wasmtime::Result<()> {
-    validate_key_format(text_ref)?;
-    if !registered.contains(text_ref) {
+    ensure_registered_in(token, role, "disclosure-field", |t| store.contains(t))
+}
+
+/// Format-validate + lookup in the localized store. Used at every
+/// localized-ref use-site (consent reason/requester, media labels,
+/// instructions, ...).
+pub fn ensure_localized(
+    token: &str,
+    store: &LocalizedStore,
+    role: &str,
+) -> wasmtime::Result<()> {
+    ensure_registered_in(token, role, "localized", |t| store.contains(t))
+}
+
+/// Shared body: format check then membership through the
+/// store-specific `contains` closure. `kind` is the interface name
+/// surfaced in the trap message; the store type itself is erased
+/// behind the closure so this function doesn't need to know which
+/// store it's checking.
+fn ensure_registered_in(
+    token: &str,
+    role: &str,
+    kind: &str,
+    contains: impl FnOnce(&str) -> bool,
+) -> wasmtime::Result<()> {
+    validate_ref_format(token)?;
+    if !contains(token) {
         return Err(wasmtime::Error::msg(format!(
-            "{role} text-ref '{text_ref}' is not registered in prepare-localized-texts"
+            "{role} {kind} ref '{token}' is not registered in any component's \
+             enclavid:embedded.{kind}s section"
         )));
     }
     Ok(())
 }
 
-/// Validate the structure of a `text-ref` key — applied at
-/// registration time (every key emitted from `prepare-text-refs`)
-/// and at use-site time (consent field key/label, media labels,
-/// consent reason). ASCII letters/digits/`-`/`_`, max 128 chars,
-/// must start with a lowercase letter. Allowing `_` alongside `-`
-/// lets policy authors keep their language-idiomatic identifier
-/// convention; either form parses cleanly and renders harmlessly
-/// on the consent screen.
-pub fn validate_key_format(key: &str) -> wasmtime::Result<()> {
-    if key.is_empty() {
-        return Err(wasmtime::Error::msg("text-ref key is empty"));
+/// Validate the structure of an embedded-ref token: a sanity gate
+/// applied before the registry reverse-lookup so the trap message can
+/// distinguish "well-formed but unknown" from "ill-formed".
+///
+/// Bounded length (≤ `MAX_KEY_LENGTH` + slot/kind prefix headroom)
+/// and ASCII-only characters keep the parser predictable and stop
+/// unicode shenanigans from sliding past the index lookup. The set
+/// — lowercase letters, digits, `-`, `_`, and `:` (the Phase A
+/// slot/kind separator) — accommodates both formats:
+///
+///   * Phase A debug refs: `"<slot>:<kind>:<key>"` — letters/digits
+///     in slot, single-letter kind tag, kebab/snake_case key.
+///   * Phase B HMAC refs: lowercase hex digest (`[0-9a-f]+`).
+///
+/// Validation is intentionally permissive — the **forgery defence**
+/// lives in the registry's reverse-index, not here. Anything past
+/// this format check that isn't a minted token fails the membership
+/// step.
+pub fn validate_ref_format(token: &str) -> wasmtime::Result<()> {
+    if token.is_empty() {
+        return Err(wasmtime::Error::msg("embedded ref is empty"));
     }
-    if key.len() > MAX_KEY_LENGTH {
+    // Generous upper bound: a Phase A ref tops out at ~MAX_KEY_LENGTH
+    // + a few bytes of slot/kind prefix; a Phase B ref is fixed-width
+    // hex. Anything past this is malformed.
+    if token.len() > MAX_KEY_LENGTH + 16 {
         return Err(wasmtime::Error::msg(format!(
-            "text-ref key exceeds {MAX_KEY_LENGTH} bytes"
+            "embedded ref exceeds {} bytes",
+            MAX_KEY_LENGTH + 16,
         )));
     }
-    let mut chars = key.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_lowercase() {
-        return Err(wasmtime::Error::msg(
-            "text-ref key must start with lowercase ASCII letter",
-        ));
-    }
-    for c in chars {
-        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+    for c in token.chars() {
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' || c == ':') {
             return Err(wasmtime::Error::msg(
-                "text-ref key contains invalid character (allowed: a-z, 0-9, '-', '_')",
+                "embedded ref contains invalid character (allowed: a-z, 0-9, '-', '_', ':')",
             ));
         }
     }
@@ -144,11 +181,12 @@ pub fn sanitize_fields(fields: Vec<DisplayField>) -> Vec<DisplayField> {
     fields
         .into_iter()
         .map(|f| DisplayField {
-            // `key` and `label` are `text-ref`s — already passed
-            // `validate_key_format` (ASCII kebab-case), so they
-            // contain no characters that would need stripping.
-            // `value` is policy-supplied free text and gets stripped
-            // here (control / BIDI / zero-width).
+            // `key` and `label` are embedded refs — already passed
+            // `validate_ref_format` (ASCII subset) and reverse-
+            // looked-up in the registry, so they contain no
+            // characters that would need stripping. `value` is
+            // policy-supplied free text and gets stripped here
+            // (control / BIDI / zero-width).
             key: f.key,
             label: f.label,
             value: sanitize_string(&f.value),
@@ -195,11 +233,13 @@ fn is_stripped(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embedded::{ComponentDecls, EmbeddedRegistry, Translation};
+    use std::collections::HashMap;
 
     fn field(key: &str, value: &str) -> DisplayField {
         DisplayField {
             key: key.to_string(),
-            label: "first_name-label".to_string(),
+            label: "0:l:first_name-label".to_string(),
             value: value.to_string(),
         }
     }
@@ -251,73 +291,110 @@ mod tests {
         );
     }
 
-    fn registered() -> HashSet<String> {
-        ["first_name", "tax_id", "first_name-label"]
-            .into_iter()
-            .map(String::from)
-            .collect()
+    /// Mint refs through a fresh single-slot (policy) registry, then
+    /// return both the registry and pre-minted refs for the tests
+    /// below. Mirrors what `Runner::run` builds, scaled down.
+    struct Fixture {
+        embedded: EmbeddedRegistry,
+        first_name_key: String,
+        tax_id_key: String,
+        first_name_label: String,
+    }
+
+    fn fixture() -> Fixture {
+        let mut localized: HashMap<String, Vec<Translation>> = HashMap::new();
+        localized.insert("first_name-label".into(), vec![]);
+        let mut b = EmbeddedRegistry::builder();
+        b.add_component(ComponentDecls {
+            disclosure_fields: ["first_name", "tax_id"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            localized,
+        });
+        let embedded = b.finish();
+        Fixture {
+            first_name_key: embedded.disclosure_fields.get_token(0, "first_name").unwrap(),
+            tax_id_key: embedded.disclosure_fields.get_token(0, "tax_id").unwrap(),
+            first_name_label: embedded.localized.get_token(0, "first_name-label").unwrap(),
+            embedded,
+        }
     }
 
     #[test]
     fn validate_too_many_fields_traps() {
-        let fields: Vec<_> = (0..21).map(|_| field("first_name", "v")).collect();
-        assert!(validate_fields(&fields, &registered()).is_err());
+        let f = fixture();
+        let fields: Vec<_> = (0..21).map(|_| field(&f.first_name_key, "v")).collect();
+        assert!(validate_fields(&fields, &f.embedded).is_err());
     }
 
     #[test]
     fn validate_long_value_traps() {
+        let f = fixture();
         let long = "x".repeat(MAX_VALUE_LENGTH + 1);
-        assert!(validate_fields(&[field("first_name", &long)], &registered()).is_err());
-    }
-
-    #[test]
-    fn validate_invalid_key_traps() {
-        // Bad: starts with digit
-        assert!(validate_fields(&[field("1bad", "v")], &registered()).is_err());
-        // Bad: uppercase
-        assert!(validate_fields(&[field("Bad", "v")], &registered()).is_err());
-        // Bad: dot separator
-        assert!(validate_fields(&[field("a.b", "v")], &registered()).is_err());
-        // OK: snake_case ASCII + registered
-        assert!(validate_fields(&[field("tax_id", "v")], &registered()).is_ok());
-    }
-
-    #[test]
-    fn validate_unregistered_key_traps() {
-        // Well-formed but NOT in `prepare-localized-texts` — the
-        // timing-based defence: policy can't craft a fresh text-ref
-        // at evaluate time based on user attributes.
         assert!(
-            validate_fields(&[field("loyalty_tier_ru", "v")], &registered()).is_err()
+            validate_fields(&[field(&f.first_name_key, &long)], &f.embedded).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_well_formed_minted_key_passes() {
+        let f = fixture();
+        assert!(
+            validate_fields(&[field(&f.tax_id_key, "v")], &f.embedded).is_ok(),
+            "tax_id minted by policy slot should round-trip"
+        );
+    }
+
+    #[test]
+    fn validate_invalid_ref_format_traps() {
+        let f = fixture();
+        // Uppercase characters not allowed inside an embedded ref.
+        assert!(validate_fields(&[field("Bad", "v")], &f.embedded).is_err());
+        // Dot separator not allowed.
+        assert!(validate_fields(&[field("a.b", "v")], &f.embedded).is_err());
+    }
+
+    #[test]
+    fn validate_unminted_key_traps() {
+        let f = fixture();
+        // Well-formed but never minted by any slot in the registry —
+        // the timing-based + cross-component defence: a component
+        // can't synthesise a foreign ref at evaluate time.
+        assert!(
+            validate_fields(&[field("0:d:loyalty_tier_ru", "v")], &f.embedded)
+                .is_err()
         );
     }
 
     #[test]
     fn validate_invalid_label_traps() {
+        let f = fixture();
         // Label format rules mirror key — bad label fails the same
         // way as a bad key.
         assert!(validate_fields(
-            &[field_with_label("first_name", "Bad", "v")],
-            &registered()
+            &[field_with_label(&f.first_name_key, "Bad", "v")],
+            &f.embedded
         )
         .is_err());
         assert!(validate_fields(
-            &[field_with_label("first_name", "a.b", "v")],
-            &registered()
+            &[field_with_label(&f.first_name_key, "a.b", "v")],
+            &f.embedded
         )
         .is_err());
         assert!(validate_fields(
-            &[field_with_label("first_name", "first_name-label", "v")],
-            &registered()
+            &[field_with_label(&f.first_name_key, &f.first_name_label, "v")],
+            &f.embedded
         )
         .is_ok());
     }
 
     #[test]
-    fn validate_unregistered_label_traps() {
+    fn validate_unminted_label_traps() {
+        let f = fixture();
         assert!(validate_fields(
-            &[field_with_label("first_name", "unregistered_label", "v")],
-            &registered()
+            &[field_with_label(&f.first_name_key, "0:l:unregistered_label", "v")],
+            &f.embedded
         )
         .is_err());
     }

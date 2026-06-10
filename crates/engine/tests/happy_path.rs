@@ -5,7 +5,6 @@
 //! than via a build.rs — this keeps normal engine builds free of wasm tooling
 //! dependencies and nightly toolchain requirements.
 
-use std::collections::HashSet;
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -14,7 +13,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use enclavid_engine::{
-    Decision, RunInputs, RunStatus, Runner, SessionChange, SessionListener, SessionState,
+    ComponentDecls, Decision, EmbeddedRegistry, RunInputs, RunStatus, Runner, SessionChange,
+    SessionListener, SessionState, Translation,
 };
 use enclavid_host_bridge::{
     Clip, SessionState as SessionStateProto, call_event, suspended,
@@ -45,18 +45,19 @@ async fn passport_then_consent_rejected() {
     let runner = Runner::new().unwrap();
     let component = runner.compile(component_bytes).unwrap();
 
-    // Load the policy manifest from the fixture's `manifest.json` —
-    // single declarative file whose bytes ARE the wire format
-    // (no assembly). Engine resolves the registered text-ref set
-    // from it via `load_manifest`. Same path the api crate takes
-    // in `lookup_policy`.
-    let registered: Arc<HashSet<String>> = Arc::new(load_test_text_refs());
+    // Build the composition-wide `EmbeddedRegistry` for this run.
+    // Test policy lives at slot 0; no plugins. Same construction the
+    // api crate does in `lookup_policy`, scaled down.
+    let policy_decls = load_test_policy_decls();
+    let mut builder = EmbeddedRegistry::builder();
+    builder.add_component(policy_decls);
+    let embedded = Arc::new(builder.finish());
 
     let session = SessionState::default();
 
     // Round 1: evaluate → prompt-passport → Suspended.
     let (status, mut session) = runner
-        .run(&component, &[], session, vec![], test_run_inputs(&registered))
+        .run(&component, &[], session, vec![], test_run_inputs(&embedded))
         .await
         .unwrap();
     assert_suspended(&status, 1);
@@ -66,7 +67,7 @@ async fn passport_then_consent_rejected() {
 
     // Round 2: replays passport → prompt-disclosure → Suspended.
     let (status, mut session) = runner
-        .run(&component, &[], session, vec![], test_run_inputs(&registered))
+        .run(&component, &[], session, vec![], test_run_inputs(&embedded))
         .await
         .unwrap();
     assert_suspended(&status, 2);
@@ -76,7 +77,7 @@ async fn passport_then_consent_rejected() {
 
     // Round 3: replays both → Completed(Rejected).
     let (status, _) = runner
-        .run(&component, &[], session, vec![], test_run_inputs(&registered))
+        .run(&component, &[], session, vec![], test_run_inputs(&embedded))
         .await
         .unwrap();
     match status {
@@ -117,41 +118,51 @@ fn test_policy_component() -> &'static [u8] {
         .as_slice()
 }
 
-/// Load the test-policy's embedded text-ref declarations straight
-/// from the on-disk source files. We bypass `load_static(wasm_bytes)`
-/// here because the test fixture isn't sealed — it's just a raw
-/// componentized wasm without the embedded custom sections.
-/// Production path (`api::applicant::shared::lookup_policy`) reads
-/// the sections directly out of the wasm via `load_static`.
-fn load_test_text_refs() -> HashSet<String> {
+/// Load the test-policy's embedded sections straight from the on-disk
+/// source files and project into `ComponentDecls`. We bypass
+/// `load_embedded(wasm_bytes)` here because the test fixture isn't
+/// sealed — it's just a raw componentized wasm without the embedded
+/// custom sections. Production path
+/// (`api::applicant::shared::lookup_policy`) reads the sections
+/// directly out of the wasm via `load_embedded`.
+fn load_test_policy_decls() -> ComponentDecls {
     use enclavid_embedded::{read_disclosure_fields, read_i18n};
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let disclosure_path =
         format!("{manifest_dir}/tests/fixtures/test-policy/disclosure-fields.json");
     let i18n_path = format!("{manifest_dir}/tests/fixtures/test-policy/i18n.json");
-    let fields = read_disclosure_fields(std::path::Path::new(&disclosure_path))
+    let disclosure_fields = read_disclosure_fields(std::path::Path::new(&disclosure_path))
         .expect("read disclosure-fields.json")
-        .map(|s| s.fields)
+        .map(|s| s.fields.into_iter().collect())
         .unwrap_or_default();
-    let i18n_keys = read_i18n(std::path::Path::new(&i18n_path))
+    let localized = read_i18n(std::path::Path::new(&i18n_path))
         .expect("read i18n.json")
         .map(|s| s.entries)
         .unwrap_or_default()
-        .into_keys()
-        .collect::<Vec<_>>();
-    fields.into_iter().chain(i18n_keys).collect()
+        .into_iter()
+        .map(|(key, translations)| {
+            let rows: Vec<Translation> = translations
+                .into_iter()
+                .map(|(language, text)| Translation { language, text })
+                .collect();
+            (key, rows)
+        })
+        .collect();
+    ComponentDecls {
+        disclosure_fields,
+        localized,
+    }
 }
 
 /// Stub host resources for the engine. The listener is a no-op — the
 /// test stays on the consent=false path so the only events fired are
 /// state-only (no disclosures), and we don't assert on them. The
-/// `registered_text_refs` set is shared across rounds so every
-/// `prompt-disclosure` / `prompt-media` call passes the engine's
-/// membership check.
-fn test_run_inputs(registered: &Arc<HashSet<String>>) -> RunInputs {
+/// composition-wide `EmbeddedRegistry` is shared across rounds so
+/// every minted ref keeps its slot attribution stable on replay.
+fn test_run_inputs(embedded: &Arc<EmbeddedRegistry>) -> RunInputs {
     RunInputs {
         listener: Arc::new(NoopListener),
-        registered_text_refs: registered.clone(),
+        embedded: embedded.clone(),
     }
 }
 
