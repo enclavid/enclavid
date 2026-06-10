@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,8 +16,8 @@ use sha2::{Digest, Sha256};
 
 use enclavid_attestation::ReportData;
 use enclavid_host_bridge::{
-    Client, ClientAccess, SessionMetadata, SessionStatus, SetMetadata, SetPrincipal, SetStatus,
-    WriteField,
+    Client, ClientAccess, PluginPin, SessionMetadata, SessionStatus, SetMetadata, SetPrincipal,
+    SetStatus, WriteField,
 };
 
 use crate::client_state::ClientState;
@@ -53,16 +54,46 @@ pub struct CreateSessionRequest {
     /// before the handler even runs.
     #[serde(default, deserialize_with = "deserialize_external_ref")]
     pub client_ref: Option<String>,
-    /// Optional override for the bearer used on registry pulls. Useful
-    /// when the API-auth credential and the registry-auth credential
-    /// differ — e.g. the consumer authenticates to our API with a
-    /// Logto JWT but the policy lives in `ghcr.io` and needs a GitHub
-    /// PAT. Format: full `Authorization` header value, e.g.
-    /// `"Bearer <token>"`. When absent (the common case for our
-    /// Angos) we fall back to the inbound `Authorization` header so
-    /// consumers don't have to supply the same JWT twice.
+    /// Per-hostname registry bearer map. Key = registry hostname
+    /// (authority portion of an OCI ref, e.g. `closed.vendor.com`);
+    /// value = the full `Authorization` header value the host should
+    /// attach when pulling from that registry (e.g. `"Bearer <token>"`).
+    /// Applies uniformly to the policy ref AND every plugin's
+    /// `impl_ref`.
+    ///
+    /// Missing hostname / empty value ⇒ anonymous pull. When the
+    /// whole map is absent / empty AND an inbound `Authorization`
+    /// header is present on this request, the inbound header is
+    /// applied to the policy registry's hostname as a back-compat
+    /// convenience for the common "same credential everywhere" case.
+    ///
+    /// Total serialized size bounded by [`MAX_REGISTRY_AUTH_LEN`]
+    /// (sum of all values) to keep session metadata blobs cheap.
     #[serde(default)]
-    pub registry_auth: Option<String>,
+    pub registry_auth: BTreeMap<String, String>,
+
+    /// Plugin pins declared by the client at session creation. One
+    /// entry per non-host-provided WIT package the policy imports.
+    /// Each `impl_ref` MUST be digest-pinned (`@sha256:<hex>`).
+    /// Hostname portion of `impl_ref` drives the
+    /// [`Self::registry_auth`] lookup at pull time.
+    ///
+    /// Empty when the policy has no plugin imports.
+    #[serde(default)]
+    pub plugins: Vec<PluginRequest>,
+}
+
+/// One plugin pin in the create-session request. Mirrors the on-wire
+/// proto `enclavid.state.PluginPin` with serde-friendly field types;
+/// converted to the proto form before persistence.
+#[derive(Deserialize)]
+pub struct PluginRequest {
+    /// WIT package id this pin satisfies, e.g. `vendor:plugin@0.1.0`.
+    pub package: String,
+    /// Full pinned OCI reference, e.g.
+    /// `closed.vendor.com/plugin@sha256:<hex>`. Tag-form rejected at
+    /// the handler.
+    pub impl_ref: String,
 }
 
 /// Length-bound + printable-ASCII gate on `client_ref`. Empty
@@ -161,25 +192,55 @@ async fn create(
         .ok_or(StatusCode::BAD_REQUEST)?;
     let policy_ref = body.policy.clone();
 
-    // Resolve the bearer the host will attach on every registry pull
-    // for this session. Body-supplied `registry_auth` wins (covers the
-    // "API auth ≠ registry auth" case — e.g. our Logto JWT for /sessions
-    // call vs a GitHub PAT for ghcr pull); otherwise fall back to the
-    // inbound `Authorization` header (the common case where the same
-    // credential serves both — our Angos b-migrate path). The TEE
-    // never inspects: it's opaque bytes ferried to the host on each
-    // pull. Length-bounded so a malicious consumer can't bloat
-    // session metadata. See architecture.md → Registry Decoupling.
-    let registry_auth: Vec<u8> = match body.registry_auth.as_deref() {
-        Some(s) => s.as_bytes().to_vec(),
-        None => headers
-            .get(header::AUTHORIZATION)
-            .map(|v| v.as_bytes().to_vec())
-            .unwrap_or_default(),
-    };
-    if registry_auth.len() > MAX_REGISTRY_AUTH_LEN {
+    // Build the hostname-keyed bearer map. Body-supplied `registry_auth`
+    // is the authoritative source — caller specifies which hostname
+    // gets which bearer (covers heterogeneous "policy in our Angos,
+    // plugin in ghcr" deployments). When the body map is empty AND an
+    // inbound `Authorization` header is present, fall back to using
+    // that header as the bearer for the policy registry only — common
+    // case where the same credential serves both the API call and the
+    // policy pull. Length-bound the SUM of values so a malicious
+    // consumer can't bloat session metadata.
+    let mut registry_auth: HashMap<String, Vec<u8>> = HashMap::new();
+    if !body.registry_auth.is_empty() {
+        for (host, bearer) in body.registry_auth {
+            registry_auth.insert(host, bearer.into_bytes());
+        }
+    } else if let Some(hv) = headers.get(header::AUTHORIZATION) {
+        let policy_host = policy_pull::registry_hostname(&body.policy)
+            .ok_or(StatusCode::BAD_REQUEST)?;
+        registry_auth.insert(policy_host.to_string(), hv.as_bytes().to_vec());
+    }
+    let total_bearer_bytes: usize = registry_auth.values().map(Vec::len).sum();
+    if total_bearer_bytes > MAX_REGISTRY_AUTH_LEN {
         return Err(StatusCode::BAD_REQUEST);
     }
+
+    // Validate every plugin ref is digest-pinned (`@sha256:<hex>`)
+    // before persistence — surfaces typos as a clean 400 instead of
+    // an opaque pull error at /connect. Also dedupe-checks on
+    // package id — two pins for the same WIT package would create
+    // ambiguity at link time and is almost certainly a caller bug.
+    let mut seen_packages: std::collections::HashSet<&str> = Default::default();
+    for pr in &body.plugins {
+        if pr.package.is_empty() || pr.impl_ref.is_empty() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if policy_pull::split_pinned_ref(&pr.impl_ref).is_none() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if !seen_packages.insert(pr.package.as_str()) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    let plugins: Vec<PluginPin> = body
+        .plugins
+        .into_iter()
+        .map(|pr| PluginPin {
+            package: pr.package,
+            impl_ref: pr.impl_ref,
+        })
+        .collect();
 
     // Parse client_policy_key as age identity. SecretBox to ensure the
     // plaintext string gets zeroed on drop instead of lingering in
@@ -189,14 +250,15 @@ async fn create(
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Validate client_policy_key matches the policy's validator annotation —
-    // single small RPC to the host registry, no full policy pull.
-    // Uses the same `registry_auth` bearer the artifact pull will use
-    // later at /connect, so any auth failure surfaces here
-    // synchronously rather than mid-applicant-flow.
+    // single small RPC to the host registry, no full policy pull. Uses
+    // the bearer the artifact pull will use later at /connect (looked
+    // up by policy registry hostname), so any auth failure surfaces
+    // here synchronously rather than mid-applicant-flow.
+    let policy_bearer = policy_pull::bearer_for_ref(&registry_auth, &policy_ref);
     policy_pull::validate_client_policy_key(
         &state.registry,
         &policy_ref,
-        &registry_auth,
+        policy_bearer,
         &client_policy_key,
     )
     .await
@@ -257,6 +319,7 @@ async fn create(
         disclosure_pubkey: body.client_disclosure_pubkey,
         r#ref: body.client_ref.unwrap_or_default(),
         registry_auth,
+        plugins,
     };
     let metadata = SessionMetadata {
         policy_ref: policy_ref.clone(),
@@ -331,20 +394,12 @@ fn pull_error_to_status(e: &PullError) -> StatusCode {
         PullError::Decrypt
         | PullError::MissingAgeHeader
         | PullError::AgeHeaderBase64(_)
-        | PullError::AgeHeaderParse(_)
-        // Artifact was pushed without a `policy.json` layer —
-        // caller's input (a policy ref) is wrong because the polici
-        // they're pointing at is incomplete. Surface as 422 so the
-        // consumer can fix it by re-pushing with the manifest, same
-        // bucket as "wrong client_policy_key" / "missing age-header
-        // annotation" — all are "this polici can't be used".
-        | PullError::NoPolicyManifestLayer => StatusCode::UNPROCESSABLE_ENTITY,
+        | PullError::AgeHeaderParse(_) => StatusCode::UNPROCESSABLE_ENTITY,
         PullError::Transport(_)
         | PullError::ManifestParse(_)
         | PullError::ManifestDigest { .. }
         | PullError::LayerDigest { .. }
         | PullError::NoPolicyLayer
-        | PullError::ManifestTooLarge { .. }
         | PullError::LayerCountMismatch { .. } => StatusCode::BAD_GATEWAY,
     }
 }

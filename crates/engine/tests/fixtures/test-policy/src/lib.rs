@@ -1,25 +1,25 @@
 wit_bindgen::generate!({
     path: [
-        "../../../../../wit/types",
-        "../../../../../wit/policy",
+        "../../../../../wit/embedded",
         "../../../../../wit/disclosure",
         "../../../../../wit/form",
+        "../../../../../wit/policy",
         "wit",
     ],
-    world: "enclavid:test-policy/policy",
+    world: "enclavid:test-policy/policy@0.1.0",
     generate_all,
 });
 
-use enclavid::disclosure::disclosure::{prompt_disclosure, DisplayField};
-use enclavid::form::media::{
-    prompt_media, CameraFacing, CaptureGuide, CaptureStep, MediaSpec,
-};
+use enclavid::disclosure::disclosure::prompt_disclosure;
+use enclavid::disclosure::types::DisplayField;
+use enclavid::form::media::prompt_media;
+use enclavid::form::types::{CameraFacing, CaptureGuide, CaptureStep, MediaSpec};
 use exports::enclavid::policy::policy::{Decision, EvalArgs, Guest};
 
 struct TestPolicy;
 
 // Text-ref constants used in evaluate. Declarations live in the
-// policy manifest (`policy.json` at repo root) under
+// component manifest (`manifest.json` at repo root) under
 // `disclosure_fields` (machine keys) and `localized` (translatable
 // UI strings). Engine validates every ref the policy passes to host
 // fns against the resulting registry; unknown refs trap with a

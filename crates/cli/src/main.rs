@@ -7,7 +7,6 @@ mod commands;
 mod config;
 mod discovery;
 mod docker_config;
-mod policy_manifest;
 mod registry_auth;
 
 #[derive(Parser)]
@@ -114,11 +113,11 @@ enum PolicyCommand {
     },
 
     /// Seal a policy for deployment: bundles the wasm component with
-    /// its manifest (as a component-level custom section), then
-    /// age-encrypts the whole thing. The resulting `.wasm.age` is a
-    /// self-contained artifact — push takes no manifest flag, the
-    /// TEE extracts both wasm and manifest from the single ciphertext
-    /// blob.
+    /// its embedded text-ref declarations (as component-level custom
+    /// sections), then age-encrypts the whole thing. The resulting
+    /// `.wasm.age` is a self-contained artifact — push takes no
+    /// declarations flag, the TEE extracts both wasm and any
+    /// embedded sections from the single ciphertext blob.
     Seal {
         /// Path to plaintext wasm component file (output of
         /// `cargo build --target wasm32-…` / `cargo component`).
@@ -128,13 +127,25 @@ enum PolicyCommand {
         #[arg(short, long)]
         key: PathBuf,
 
-        /// Path to the policy manifest JSON file. Bundled into the
-        /// wasm component as a custom section before encryption.
-        /// Policies that don't use text-refs ship a minimal
-        /// `{"version": 1}` — the manifest is mandatory because the
-        /// TEE refuses to load a policy without one.
-        #[arg(short = 'm', long = "manifest", default_value = "policy.json")]
-        manifest: PathBuf,
+        /// Path to the disclosure-fields declarations file (flat JSON
+        /// list of identifier keys). Bundled into the wasm as the
+        /// `enclavid:embedded.disclosure-fields.v1` custom section
+        /// before encryption. Optional — components without
+        /// `prompt-disclosure` calls can omit it. Defaults to
+        /// `disclosure-fields.json` in the current directory; an
+        /// absent file is silently treated as "no declarations".
+        #[arg(long = "disclosure-fields", default_value = "disclosure-fields.json")]
+        disclosure_fields: PathBuf,
+
+        /// Path to the i18n translations catalog (JSON map of
+        /// `key → { locale → text }`). Bundled into the wasm as the
+        /// `enclavid:embedded.i18n.v1` custom section before
+        /// encryption. Optional — components without UI text refs
+        /// can omit it. Defaults to `i18n.json` in the current
+        /// directory; an absent file is silently treated as "no
+        /// translations".
+        #[arg(long = "i18n", default_value = "i18n.json")]
+        i18n: PathBuf,
 
         /// Output path for the sealed artifact. Defaults to the wasm
         /// path with `.age` appended.
@@ -175,9 +186,13 @@ enum PolicyCommand {
     /// engine enforces at load time. Run before `push` to catch
     /// issues at author time with clean error messages.
     Validate {
-        /// Path to the manifest file (default: `./policy.json`).
-        #[arg(default_value = "policy.json")]
-        path: PathBuf,
+        /// Path to the policy project directory containing the
+        /// embedded declarations files (`disclosure-fields.json`,
+        /// `i18n.json`). Both files are optional — missing files are
+        /// silently treated as "no declarations of that kind".
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        dir: PathBuf,
     },
 }
 
@@ -296,15 +311,16 @@ async fn main() -> Result<()> {
             PolicyCommand::Seal {
                 wasm,
                 key,
-                manifest,
+                disclosure_fields,
+                i18n,
                 output,
-            } => commands::policy::seal::run(wasm, key, manifest, output),
+            } => commands::policy::seal::run(wasm, key, disclosure_fields, i18n, output),
             PolicyCommand::Push {
                 artifact,
                 reference,
                 auth,
             } => commands::policy::push::run(artifact, reference, auth).await,
-            PolicyCommand::Validate { path } => commands::policy::validate::run(path).await,
+            PolicyCommand::Validate { dir } => commands::policy::validate::run(dir).await,
         },
         Commands::Session { command } => match command {
             SessionCommand::Create {

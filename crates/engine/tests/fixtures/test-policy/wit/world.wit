@@ -1,7 +1,9 @@
-package enclavid:test-policy;
+package enclavid:test-policy@0.1.0;
 
 world policy {
-    import enclavid:disclosure/disclosure;
-    import enclavid:form/media;
-    export enclavid:policy/policy;
+    import enclavid:embedded/disclosure-fields@0.1.0;
+    import enclavid:embedded/i18n@0.1.0;
+    import enclavid:disclosure/disclosure@0.1.0;
+    import enclavid:form/media@0.1.0;
+    export enclavid:policy/policy@0.1.0;
 }

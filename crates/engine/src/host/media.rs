@@ -5,11 +5,12 @@ use enclavid_host_bridge::{
     suspended,
 };
 
-use crate::enclavid::form::media::{
-    AllOf, CameraFacing, CaptureGuide, CaptureStep, Clip, GroupResult, Host, MediaSpec,
+use crate::enclavid::form::media::Host;
+use crate::enclavid::form::types::{
+    AllOf, CameraFacing, CaptureGuide, CaptureStep, Clip, GroupResult, MediaSpec,
 };
-use crate::host_state::HostState;
 use crate::sanitize;
+use crate::state::HostState;
 
 impl Host for HostState {
     /// Capture media according to `spec`. Returns one clip per

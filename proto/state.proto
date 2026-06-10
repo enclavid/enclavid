@@ -103,14 +103,46 @@ message Client {
   // via `client.r#ref` due to keyword.
   string ref = 4;
 
-  // Opaque bearer/credential payload the TEE forwards verbatim to
-  // the host on every registry pull (host attaches as
-  // `Authorization`). Empty = anonymous pull (public registry). TEE
-  // does NOT inspect (no JWT parsing, no validation) — courier
-  // semantics. Stored encrypted under tee_seal_key inside this
-  // metadata blob; host only sees it briefly when the pull RPC
-  // executes. See architecture.md → Registry Decoupling.
-  bytes registry_auth = 5;
+  // Per-hostname registry bearer map. Key = registry hostname
+  // (authority portion of an OCI ref, e.g. "closed.vendor.com");
+  // value = opaque bearer payload the TEE forwards verbatim to the
+  // host as `Authorization` when pulling from that registry.
+  //
+  // Looked up on every pull: caller extracts the hostname from the
+  // ref (`policy_ref` or `plugins[i].impl_ref`) and forwards
+  // `registry_auth[hostname]`. Missing entry / empty bytes = anonymous
+  // pull. TEE does NOT inspect (no JWT parsing, no validation) —
+  // courier semantics. Stored encrypted under tee_seal_key inside
+  // this metadata blob; host only sees the relevant bearer briefly
+  // when its pull RPC executes. See architecture.md → Registry
+  // Decoupling.
+  map<string, bytes> registry_auth = 5;
+
+  // Plugin pins declared by the client at session creation. Each
+  // entry pins ONE plugin component the policy imports.
+  // `impl_ref` MUST be digest-pinned (`@sha256:<hex>`); TEE recomputes
+  // sha256 on pulled bytes and traps on mismatch (same content-
+  // addressing pattern as `policy_ref`). The policy's `world.wit`
+  // declares which packages are imported; the client supplies one
+  // `PluginPin` per non-host-provided import. Empty when the policy
+  // has no plugin imports.
+  repeated PluginPin plugins = 6;
+}
+
+// One plugin pin — (package id, digest-pinned OCI ref). Carried in
+// `Client.plugins`, written at session create from POST /sessions
+// body, consumed at /connect when the engine pulls + compiles plugin
+// components and links them into the policy's wasmtime Linker.
+message PluginPin {
+  // WIT package id this pin satisfies, e.g. "vendor:plugin@0.1.0".
+  // Must match a `use ... from <package>` (or `import` world) entry
+  // in the policy's world.wit.
+  string package = 1;
+
+  // Full pinned OCI reference, e.g.
+  // `closed.vendor.com/vendor-plugin@sha256:<hex>`. Authority
+  // portion (hostname) drives the `Client.registry_auth` map lookup.
+  string impl_ref = 2;
 }
 
 // Per-session access gate — two orthogonal layers checked at every

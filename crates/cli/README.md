@@ -26,7 +26,7 @@ enclavid
 │       └── use <id-or-name>
 ├── policy                         ← OCI artifact tooling (registry-agnostic)
 │   ├── keygen
-│   ├── seal --manifest policy.json
+│   ├── seal --manifest manifest.json
 │   ├── push [--auth ...]
 │   └── validate
 └── session                        ← verification session lifecycle
@@ -44,10 +44,10 @@ enclavid
 #    Vault — if you lose it, your encrypted policies become unrecoverable.
 enclavid policy keygen --output client.key
 
-# 2. Seal the policy: bundles the wasm component with `policy.json`
+# 2. Seal the policy: bundles the wasm component with `manifest.json`
 #    (as a wasm custom section) and age-encrypts the whole thing.
 enclavid policy seal path/to/policy.wasm \
-    --key client.key --manifest path/to/policy.json -o policy.wasm.age
+    --key client.key --manifest path/to/manifest.json -o policy.wasm.age
 
 # 3. Authenticate to Enclavid + auto-wire docker credentials. Prompts
 #    for workspace selection if you're a member of multiple workspaces.
@@ -104,7 +104,7 @@ For CI runners that don't want to write `~/.docker/config.json`:
 
 ```yaml
 - run: |
-    enclavid policy seal policy.wasm --key client.key --manifest policy.json -o policy.wasm.age
+    enclavid policy seal policy.wasm --key client.key --manifest manifest.json -o policy.wasm.age
     enclavid policy push policy.wasm.age \
         ghcr.io/${{ github.repository }}/kyc:v${{ github.sha }} \
         --auth "Bearer ${{ secrets.GHCR_PAT }}"
@@ -122,12 +122,12 @@ Or via env var:
 
 ### Manifest is mandatory
 
-Every `enclavid policy seal` requires a `policy.json` (default: `./policy.json`, override with `--manifest <path>`). The manifest is embedded into the wasm as a component-level custom section before age-encryption, so the resulting `.wasm.age` is a self-contained artifact — `policy.json` doesn't need to travel alongside the encrypted file at any point after seal.
+Every `enclavid policy seal` requires a `manifest.json` (default: `./manifest.json`, override with `--manifest <path>`). The manifest is embedded into the wasm as a component-level custom section before age-encryption, so the resulting `.wasm.age` is a self-contained artifact — `manifest.json` doesn't need to travel alongside the encrypted file at any point after seal.
 
 Policies that don't use text-refs (decision-only stubs) still ship a minimal manifest:
 
 ```bash
-echo '{"version": 1}' > policy.json
+echo '{"version": 1, "kind": "policy"}' > manifest.json
 ```
 
 `disclosure_fields` and `localized` are both optional within the manifest (default to empty). Seal refuses without a manifest file. If somehow an artifact reaches `POST /connect` without an embedded manifest section (e.g. produced by a non-enclavid age tool), the TEE returns `NoPolicyManifestLayer` → 422.

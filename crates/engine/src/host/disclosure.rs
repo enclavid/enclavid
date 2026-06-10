@@ -1,9 +1,9 @@
 use enclavid_host_bridge::{DisplayField as ProtoDisplayField, suspended};
 
 use crate::enclavid::disclosure::disclosure::{DisplayField, Host};
-use crate::host_state::HostState;
 use crate::listener::ConsentDisclosure;
 use crate::sanitize;
+use crate::state::HostState;
 
 impl Host for HostState {
     async fn prompt_disclosure(

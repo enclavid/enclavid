@@ -129,7 +129,7 @@ impl TextRegistry {
     }
 
     /// Shared, immutable view of the full set of registered
-    /// `text-ref` keys. Handed to the engine as `RunResources::
+    /// `text-ref` keys. Handed to the engine as `RunInputs::
     /// registered_text_refs` so every text-ref use-site
     /// (`prompt-disclosure` field key/label, reason, media labels)
     /// can be membership-checked against the policy's frozen

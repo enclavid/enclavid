@@ -41,8 +41,8 @@ pub use proto::report::{Report, ReportReason};
 pub use proto::state::{
     CallEvent, CameraFacing, CaptureGroup, CaptureGuide, CaptureStep, Client, ClientAccess, Clip,
     Completed, ConsentRequest, DisplayField, GuideNone, GuideOval, GuideRect, MediaRequest,
-    MediaSpec, SessionMetadata, SessionState, SessionStatus, Suspended, VerificationSetData,
-    VerificationSetRequest, call_event, capture_guide, suspended,
+    MediaSpec, PluginPin, SessionMetadata, SessionState, SessionStatus, Suspended,
+    VerificationSetData, VerificationSetRequest, call_event, capture_guide, suspended,
 };
 pub use stores::{
     AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, ReportStore, SessionStore,

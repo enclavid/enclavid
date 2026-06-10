@@ -15,8 +15,9 @@ use axum::http::request::Parts;
 use secrecy::ExposeSecret;
 use tokio::sync::Mutex;
 
-use enclavid_engine::policy::RunResources;
-use enclavid_engine::{Component, EvalArgs, SessionListener, SessionState};
+use enclavid_engine::{
+    Component, EvalArgs, PluginInstance, RunInputs, SessionListener, SessionState,
+};
 use enclavid_host_bridge::{
     AuthN, AuthZ, Metadata, Replay, SessionMetadata, State as StateField, reason,
 };
@@ -90,11 +91,11 @@ pub(super) fn parse_args(
 /// atomically. Engine itself holds no keys; encryption lives on the
 /// listener side, symmetric with how state/metadata are sealed inside
 /// host-bridge.
-pub(super) fn build_resources(
+pub(super) fn build_run_inputs(
     listener: Arc<dyn SessionListener>,
     texts: &TextRegistry,
-) -> RunResources {
-    RunResources {
+) -> RunInputs {
+    RunInputs {
         listener,
         registered_text_refs: texts.registered_keys(),
     }
@@ -129,7 +130,12 @@ pub(super) struct SessionRunCtx {
     persister: Arc<SessionPersister>,
     args: Vec<(String, EvalArgs)>,
     policy: Arc<Component>,
-    resources: RunResources,
+    /// Plugin components the policy depends on, pinned at session
+    /// create and compiled on first /connect (see
+    /// [`lookup_policy`]). Shared by Arc with the cache entry — the
+    /// list itself is immutable for the session's lifetime.
+    plugins: Arc<Vec<PluginInstance>>,
+    run_inputs: RunInputs,
 }
 
 impl SessionRunCtx {
@@ -149,12 +155,13 @@ impl SessionRunCtx {
             persister,
             args,
             policy,
-            resources,
+            plugins,
+            run_inputs,
             ..
         } = self;
         let (status, _session_state) = state
             .runner
-            .run(&policy, session_state, args, resources)
+            .run(&policy, &plugins, session_state, args, run_inputs)
             .await
             .map_err(|e| classify_run_error(&session_id, &e))?;
         // No-op for Suspended; flips status to Completed atomically
@@ -169,7 +176,7 @@ impl SessionRunCtx {
 /// classes are well-known and worth turning into structured 422s:
 ///
 ///   * Unregistered text-ref — policy was pushed without the matching
-///     `policy.json` manifest layer (or the manifest doesn't declare
+///     `manifest.json` manifest layer (or the manifest doesn't declare
 ///     a ref the policy uses). Surface as 422 + missing-ref key, so
 ///     frontend can show "policy X needs manifest entry Y" instead
 ///     of a blank "internal error".
@@ -194,9 +201,9 @@ fn classify_run_error(session_id: &str, e: &enclavid_engine::RunError) -> ApiErr
                 "error": "policy_uses_unregistered_text_ref",
                 "missing": missing,
                 "hint": "policy references a text-ref that isn't declared in its \
-                         manifest. Ensure `policy.json` lists the ref under \
+                         manifest. Ensure `manifest.json` lists the ref under \
                          `disclosure_fields` or `localized`, and that the manifest \
-                         was pushed (run `enclavid policy push` with `policy.json` \
+                         was pushed (run `enclavid policy push` with `manifest.json` \
                          next to the artifact, or `--manifest <path>`).",
             }),
         );
@@ -298,6 +305,7 @@ persist; same containment as above.
         // unpack its inner Arcs into per-run fields.
         let policy = policy_entry.component.clone();
         let texts = policy_entry.texts.clone();
+        let plugins = policy_entry.plugins.clone();
 
         // Per-run persister: engine fires `on_session_change` after
         // each committed CallEvent, persister seals disclosures to
@@ -328,7 +336,7 @@ persist; same containment as above.
         // Engine takes one strong ref via the listener; we keep our
         // own so `finalize` lands on the same persister after the run
         // completes (engine drops its ref when Store is consumed).
-        let resources = build_resources(persister.clone(), &texts);
+        let run_inputs = build_run_inputs(persister.clone(), &texts);
 
         Ok(SessionRunCtx {
             state: state.clone(),
@@ -339,7 +347,8 @@ persist; same containment as above.
             persister,
             args,
             policy,
-            resources,
+            plugins,
+            run_inputs,
         })
     }
 }
@@ -381,14 +390,38 @@ async fn lookup_policy(
         eprintln!("lookup_policy: client_policy_key age::Identity parse failed for {session_id}: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let artifact = policy_pull::pull_and_decrypt(
+    // Look up the bearer for the policy registry by hostname. Same
+    // lookup applies per plugin below. Missing entry collapses to an
+    // empty slice ⇒ anonymous pull (host attaches no Authorization
+    // header).
+    let policy_bearer =
+        policy_pull::bearer_for_ref(&client.registry_auth, &metadata.policy_ref);
+
+    // Run the policy pull and every plugin pull concurrently so the
+    // /connect critical path is bounded by the slowest fetch instead
+    // of paying linear network latency. Each future is independent —
+    // policy decrypt vs plain plugin pulls — and only the final
+    // outputs feed `Runner::run`.
+    let policy_fut = policy_pull::pull_and_decrypt(
         &state.registry,
         &metadata.policy_ref,
-        &client.registry_auth,
+        policy_bearer,
         &client_policy_key,
-    )
-    .await
-    .map_err(|e| {
+    );
+
+    let plugin_futs = client.plugins.iter().map(|pin| {
+        let bearer = policy_pull::bearer_for_ref(&client.registry_auth, &pin.impl_ref);
+        let registry = &state.registry;
+        async move {
+            policy_pull::pull_plugin(registry, &pin.impl_ref, bearer)
+                .await
+                .map(|art| (pin.package.clone(), art))
+        }
+    });
+    let (policy_res, plugin_results) =
+        futures::future::join(policy_fut, futures::future::join_all(plugin_futs)).await;
+
+    let artifact = policy_res.map_err(|e| {
         eprintln!(
             "lookup_policy: pull_and_decrypt failed for session {session_id} \
              (policy_ref={}): {e}",
@@ -396,6 +429,25 @@ async fn lookup_policy(
         );
         StatusCode::GONE
     })?;
+
+    let mut plugin_instances: Vec<PluginInstance> = Vec::with_capacity(plugin_results.len());
+    for res in plugin_results {
+        let (package, art) = res.map_err(|e| {
+            eprintln!(
+                "lookup_policy: pull_plugin failed for session {session_id}: {e}",
+            );
+            StatusCode::GONE
+        })?;
+        let component = Arc::new(state.runner.compile(&art.wasm_bytes).map_err(|e| {
+            eprintln!(
+                "lookup_policy: plugin wasm compile failed for {session_id} \
+                 (package {package}): {e}",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?);
+        plugin_instances.push(PluginInstance { package, component });
+    }
+
     let component = Arc::new(state.runner.compile(&artifact.wasm_bytes).map_err(
         |e| {
             eprintln!(
@@ -404,22 +456,25 @@ async fn lookup_policy(
             StatusCode::INTERNAL_SERVER_ERROR
         },
     )?);
-    // Parse the policy manifest from its OCI layer (plain JSON,
-    // sibling of the encrypted wasm). The manifest layer is
-    // mandatory — `enclavid policy push` refuses to ship an artifact
-    // without it, and `pull_and_decrypt` surfaces `NoPolicyManifestLayer`
-    // when missing. Policies without UI strings still ship an empty
-    // `{"version": 1}` to satisfy the requirement.
-    let decls = enclavid_engine::load_manifest(&artifact.manifest_bytes).map_err(|e| {
+    // Parse the policy's embedded text-ref declarations directly
+    // from the decrypted wasm component — both
+    // `enclavid:embedded.disclosure-fields.v1` and
+    // `enclavid:embedded.i18n.v1` custom sections are optional, and
+    // either / both / neither may be present.
+    let decls = enclavid_engine::load_static(&artifact.wasm_bytes).map_err(|e| {
         eprintln!(
-            "lookup_policy: load_manifest failed for {session_id} \
+            "lookup_policy: load_static failed for {session_id} \
              (policy_ref {}): {e}",
             metadata.policy_ref,
         );
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let texts = Arc::new(TextRegistry::from_decls(decls));
-    let entry = Arc::new(PolicyEntry { component, texts });
+    let entry = Arc::new(PolicyEntry {
+        component,
+        texts,
+        plugins: Arc::new(plugin_instances),
+    });
     state
         .policies
         .insert(session_id.to_string(), entry.clone())

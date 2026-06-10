@@ -1,20 +1,34 @@
-mod disclosure;
-mod host_state;
+//! Engine: policy + plugin composition + execution.
+//!
+//! ```text
+//! runner/      ← top-level executor (Runner, RunStatus, load_manifest)
+//!   ↓ uses
+//! host/        ← bindgen Host trait impls for policy's WIT imports
+//!   ↓ uses
+//! state/       ← Store<T> data layer (HostState, PluginHostState, RunInputs)
+//! intercept/   ← shim Linker + replay machinery (wraps every host call)
+//! listener     ← outbound contract (SessionListener trait, SessionChange)
+//! limits, sanitize  ← leaf utilities
+//! ```
+
+mod host;
+pub mod intercept;
 pub mod limits;
 mod listener;
-mod media;
-mod replay;
-pub mod policy;
+mod runner;
 mod sanitize;
-pub mod wasmtime_shim;
+mod state;
 
-pub use enclavid_host_bridge::{suspended, SessionMetadata, SessionState};
+pub use enclavid_host_bridge::{SessionMetadata, SessionState, suspended};
 pub use listener::{ConsentDisclosure, SessionChange, SessionListener};
-pub use policy::{load_manifest, EvalArgs, LocalizedDecl, RunStatus, Runner, TextDecls};
+pub use runner::{
+    Decision, EvalArgs, LocalizedDecl, PluginInstance, RunStatus, Runner, TextDecls, load_static,
+};
+pub use state::RunInputs;
 /// Re-exported for the api crate so it can apply the same
 /// control/BIDI/zero-width/Unicode-tag stripping to manifest
 /// translation values at resolve time (lazy validation strategy —
-/// see `policy::load_manifest` docs).
+/// see `runner::load_manifest` docs).
 pub use sanitize::sanitize_text_value;
 /// Re-exports for API callers so they can implement `SessionListener` and
 /// build futures with the right error type without depending on
@@ -26,19 +40,21 @@ pub use wasmtime::component::Component;
 
 wasmtime::component::bindgen!({
     inline: r#"
-        package enclavid:engine;
+        package enclavid:engine@0.1.0;
 
         world host {
-            import enclavid:disclosure/disclosure;
-            import enclavid:form/media;
-            export enclavid:policy/policy;
+            import enclavid:embedded/disclosure-fields@0.1.0;
+            import enclavid:embedded/i18n@0.1.0;
+            import enclavid:disclosure/disclosure@0.1.0;
+            import enclavid:form/media@0.1.0;
+            export enclavid:policy/policy@0.1.0;
         }
     "#,
     path: [
-        "../../wit/types",
-        "../../wit/policy",
+        "../../wit/embedded",
         "../../wit/disclosure",
         "../../wit/form",
+        "../../wit/policy",
     ],
     imports: { default: async | trappable },
     exports: { default: async },
@@ -46,5 +62,5 @@ wasmtime::component::bindgen!({
         serde::Serialize,
         serde::Deserialize,
     ],
-    wasmtime_crate: crate::wasmtime_shim,
+    wasmtime_crate: crate::intercept::shim,
 });

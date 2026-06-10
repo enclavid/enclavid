@@ -1,0 +1,15 @@
+[package]
+name = "enclavid-embedded"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared schema for the embedded-data sections (disclosure-fields + i18n) carried inside Enclavid policy and plugin wasm components"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

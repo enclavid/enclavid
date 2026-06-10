@@ -20,7 +20,7 @@
 
 use std::collections::HashSet;
 
-use crate::enclavid::disclosure::disclosure::DisplayField;
+use crate::enclavid::disclosure::types::DisplayField;
 use crate::limits::{
     MAX_EXPOSE_FIELDS, MAX_KEY_LENGTH, MAX_TEXT_VALUE_SOFT_CHARS,
     MAX_VALUE_LENGTH,

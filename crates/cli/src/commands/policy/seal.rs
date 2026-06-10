@@ -1,21 +1,28 @@
-//! `enclavid policy seal` — bundles a wasm policy component with
-//! its manifest, then age-encrypts the result. "Seal" because the
-//! step both binds (wasm + manifest cryptographically welded) and
-//! locks (age-encrypted to the client's key) — once sealed, the
-//! artifact is ready for shipping.
+//! `enclavid policy seal` — bundles a wasm policy component with its
+//! optional embedded text-ref declarations, then age-encrypts the
+//! result. "Seal" because the step both binds (wasm + declarations
+//! cryptographically welded) and locks (age-encrypted to the
+//! client's key) — once sealed, the artifact is ready for shipping.
 //!
-//! Bundling: the manifest JSON is appended to the wasm as a
-//! component-level custom section (`enclavid:policy-manifest.v1`).
-//! Custom sections are spec-defined as arbitrary metadata that wasm
-//! runtimes ignore for execution — wasmtime will compile the
-//! component as if the section weren't there. The TEE extracts the
-//! manifest from this section at /connect time
-//! (see `crates/api/src/policy_pull.rs`).
+//! Bundling: each declarations file is appended to the wasm as its
+//! own component-level custom section:
+//!
+//!   * `enclavid:embedded.disclosure-fields.v1` — flat list of
+//!     identifiers.
+//!   * `enclavid:embedded.i18n.v1` — translation catalog.
+//!
+//! Both sections are independently optional. A policy without
+//! `prompt-disclosure` calls can ship without `disclosure-fields.json`;
+//! a policy without UI text refs can ship without `i18n.json`. Custom
+//! sections are spec-defined as arbitrary metadata that wasm runtimes
+//! ignore for execution — wasmtime will compile the component as if
+//! the sections weren't there. The TEE extracts whichever sections
+//! are present at /connect time via `enclavid_engine::load_static`.
 //!
 //! Rationale: a single self-contained `.age` file is the unit of
-//! distribution. After seal, push doesn't need a `--manifest` flag,
+//! distribution. After seal, push doesn't need declarations flags,
 //! OCI artifacts have a single layer, and there's no way for the
-//! wasm and the manifest to drift out of sync — they're
+//! wasm and the declarations to drift out of sync — they're
 //! cryptographically welded together by the age envelope.
 
 use age::Encryptor;
@@ -28,15 +35,18 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use wasm_encoder::ComponentSection;
 
-use crate::policy_manifest;
+use enclavid_embedded::{
+    SECTION_DISCLOSURE_FIELDS, SECTION_I18N, read_bytes, read_disclosure_fields, read_i18n,
+    validate,
+};
 
-/// Component-level custom section name. Namespaced with `enclavid:`
-/// for hygiene against unrelated tooling, dot-separated `.v1` so
-/// future schema bumps can ship parallel `.v2` sections during
-/// transitions if needed.
-const MANIFEST_SECTION_NAME: &str = "enclavid:policy-manifest.v1";
-
-pub fn run(wasm: PathBuf, key: PathBuf, manifest: PathBuf, output: Option<PathBuf>) -> Result<()> {
+pub fn run(
+    wasm: PathBuf,
+    key: PathBuf,
+    disclosure_fields_path: PathBuf,
+    i18n_path: PathBuf,
+    output: Option<PathBuf>,
+) -> Result<()> {
     let identity = read_identity(&key)
         .with_context(|| format!("reading key from {}", key.display()))?;
     let recipient = identity.to_public();
@@ -44,11 +54,14 @@ pub fn run(wasm: PathBuf, key: PathBuf, manifest: PathBuf, output: Option<PathBu
     let wasm_bytes = std::fs::read(&wasm)
         .with_context(|| format!("reading {}", wasm.display()))?;
 
-    // Validate manifest up-front so the author sees the same errors
-    // here that the TEE would trap on at /connect. Push will see the
-    // already-bundled .age and have nothing to validate.
-    let parsed = policy_manifest::read(&manifest)?;
-    let report = policy_manifest::validate(&parsed);
+    // Parse + validate whatever sections the author supplied. Both
+    // are independently optional — `read_*` return None for an
+    // absent file, validation runs over whatever's present.
+    let parsed_disclosure = read_disclosure_fields(&disclosure_fields_path)
+        .with_context(|| format!("reading {}", disclosure_fields_path.display()))?;
+    let parsed_i18n = read_i18n(&i18n_path)
+        .with_context(|| format!("reading {}", i18n_path.display()))?;
+    let report = validate(parsed_disclosure.as_ref(), parsed_i18n.as_ref());
     for w in &report.warnings {
         println!("warning: {w}");
     }
@@ -57,14 +70,32 @@ pub fn run(wasm: PathBuf, key: PathBuf, manifest: PathBuf, output: Option<PathBu
             println!("error: {e}");
         }
         anyhow::bail!(
-            "manifest validation failed ({} error(s)) — run `enclavid policy validate {}` for full report",
+            "embedded-sections validation failed ({} error(s)) — \
+             run `enclavid policy validate <dir>` for the full report",
             report.errors.len(),
-            manifest.display(),
         );
     }
-    let manifest_bytes = policy_manifest::read_bytes(&manifest)?;
 
-    let bundled = bundle_with_manifest(&wasm_bytes, &manifest_bytes);
+    // Read the raw on-disk bytes (verbatim, never re-serialized) of
+    // whichever section files exist, so wasm custom-section bytes are
+    // byte-identical to the on-disk source — content-addressing of
+    // the sealed artifact is reproducible from the source.
+    let disclosure_bytes = if parsed_disclosure.is_some() {
+        Some(read_bytes(&disclosure_fields_path)?)
+    } else {
+        None
+    };
+    let i18n_bytes = if parsed_i18n.is_some() {
+        Some(read_bytes(&i18n_path)?)
+    } else {
+        None
+    };
+
+    let bundled = bundle_with_sections(
+        &wasm_bytes,
+        disclosure_bytes.as_deref(),
+        i18n_bytes.as_deref(),
+    );
     let plaintext_digest = sha256_hex(&bundled);
 
     let output_path = output.unwrap_or_else(|| derive_output_path(&wasm));
@@ -90,11 +121,14 @@ pub fn run(wasm: PathBuf, key: PathBuf, manifest: PathBuf, output: Option<PathBu
     let ciphertext = std::fs::read(&output_path).context("re-reading ciphertext for digest")?;
     let ciphertext_digest = sha256_hex(&ciphertext);
 
+    let disclosure_len = disclosure_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
+    let i18n_len = i18n_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
     println!(
-        "Encrypted: {} (wasm {} B + manifest {} B → bundled {} B) → {}",
+        "Encrypted: {} (wasm {} B + disclosure-fields {} B + i18n {} B → bundled {} B) → {}",
         wasm.display(),
         wasm_bytes.len(),
-        manifest_bytes.len(),
+        disclosure_len,
+        i18n_len,
         bundled.len(),
         output_path.display(),
     );
@@ -106,25 +140,45 @@ pub fn run(wasm: PathBuf, key: PathBuf, manifest: PathBuf, output: Option<PathBu
     Ok(())
 }
 
-/// Append the manifest as a component-level custom section to the
-/// wasm component bytes. `wasm-encoder::CustomSection` writes the
-/// canonical encoding (`0x00` section id + LEB128-prefixed name and
-/// payload); we just stitch its output onto the tail of the existing
-/// bytes.
+/// Append the embedded declarations as component-level custom
+/// sections to the wasm component bytes. `wasm-encoder::CustomSection`
+/// writes the canonical encoding (`0x00` section id + LEB128-prefixed
+/// name and payload); we just stitch its output onto the tail of the
+/// existing bytes.
 ///
 /// Custom sections per the WASM core spec can appear anywhere
 /// (before, between, or after standard sections). Appending at the
 /// end keeps us from re-parsing the existing wasm and matches the
 /// convention LLVM/rustc/cargo-component already follow for `name` /
 /// `producers` sections.
-fn bundle_with_manifest(wasm_bytes: &[u8], manifest_json: &[u8]) -> Vec<u8> {
-    let section = wasm_encoder::CustomSection {
-        name: Cow::Borrowed(MANIFEST_SECTION_NAME),
-        data: Cow::Borrowed(manifest_json),
-    };
-    let mut bundled = Vec::with_capacity(wasm_bytes.len() + manifest_json.len() + 32);
+///
+/// Sections are appended only when their source files were present;
+/// absent files simply produce no section, and the TEE-side loader
+/// treats the missing section as "no declarations of this kind".
+fn bundle_with_sections(
+    wasm_bytes: &[u8],
+    disclosure: Option<&[u8]>,
+    i18n: Option<&[u8]>,
+) -> Vec<u8> {
+    let extra_capacity = disclosure.map(|b| b.len()).unwrap_or(0)
+        + i18n.map(|b| b.len()).unwrap_or(0)
+        + 64;
+    let mut bundled = Vec::with_capacity(wasm_bytes.len() + extra_capacity);
     bundled.extend_from_slice(wasm_bytes);
-    section.append_to_component(&mut bundled);
+    if let Some(bytes) = disclosure {
+        wasm_encoder::CustomSection {
+            name: Cow::Borrowed(SECTION_DISCLOSURE_FIELDS),
+            data: Cow::Borrowed(bytes),
+        }
+        .append_to_component(&mut bundled);
+    }
+    if let Some(bytes) = i18n {
+        wasm_encoder::CustomSection {
+            name: Cow::Borrowed(SECTION_I18N),
+            data: Cow::Borrowed(bytes),
+        }
+        .append_to_component(&mut bundled);
+    }
     bundled
 }
 

@@ -22,6 +22,8 @@ name = "docker-credential-enclavid"
 path = "src/bin/cred_helper.rs"
 
 [dependencies]
+enclavid-embedded = { path = "../embedded" }
+
 clap = { version = "4.5", features = ["derive"] }
 
 age = "0.11"

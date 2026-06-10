@@ -14,8 +14,7 @@
 
 use serde::Serialize;
 
-use enclavid_engine::policy::Decision;
-use enclavid_engine::RunStatus;
+use enclavid_engine::{Decision, RunStatus};
 use enclavid_host_bridge::{
     CameraFacing, CaptureGuide, CaptureStep, MediaSpec, capture_guide, suspended,
 };

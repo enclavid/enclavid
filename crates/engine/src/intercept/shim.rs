@@ -2,7 +2,7 @@
 //! `component::LinkerInstance` with wrappers injecting intercept/replay logic
 //! around every host function registration.
 //!
-//! Wiring: `bindgen!` gets `wasmtime_crate: crate::wasmtime_shim`, so all
+//! Wiring: `bindgen!` gets `wasmtime_crate: crate::intercept::shim`, so all
 //! paths in generated code (e.g. `{wt}::component::Linker::instance(...)`,
 //! `{wt}::component::LinkerInstance::func_wrap_async(...)`) resolve here.
 //!
@@ -25,8 +25,8 @@ pub mod component {
 
     use wasmtime::AsContextMut;
 
+    use crate::intercept::replay::{hash_args, CallRequest, CallResponse, Replay};
     use crate::listener::{SessionChange, SessionListener};
-    use crate::replay::{hash_args, CallResponse, CallRequest, Replay};
 
     /// Borrowed view the shim needs from Store data: replay machinery
     /// for cache-or-record, the per-call disclosure buffer to drain

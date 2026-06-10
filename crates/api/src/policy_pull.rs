@@ -16,16 +16,11 @@ use sha2::{Digest, Sha256};
 
 use enclavid_host_bridge::{AuthN, RegistryClient};
 
-use crate::limits::MAX_POLICY_MANIFEST_BYTES;
-
 /// OCI layer media-type for the encrypted policy wasm. Single layer
-/// in the artifact — the policy manifest lives **inside** this wasm
-/// as a component-level custom section, not as a separate OCI layer.
+/// in the artifact — any embedded text-ref declarations live
+/// **inside** this wasm as component-level custom sections, not as
+/// separate OCI layers.
 const POLICY_WASM_LAYER: &str = "application/vnd.enclavid.policy.wasm.v1.encrypted";
-/// Component-level custom section the TEE pulls the policy manifest
-/// from after decrypt. Embedded by `enclavid policy encrypt`
-/// (`crates/cli/src/commands/policy/encrypt.rs::MANIFEST_SECTION_NAME`).
-const MANIFEST_SECTION_NAME: &str = "enclavid:policy-manifest.v1";
 /// Manifest annotation key holding a base64-encoded prefix of the
 /// encrypted wasm layer's age stream: header (version line +
 /// recipient stanzas + MAC) + 16-byte nonce. POST /sessions feeds
@@ -62,14 +57,6 @@ pub enum PullError {
     },
     #[error("manifest declares no layer with the policy media type")]
     NoPolicyLayer,
-    #[error(
-        "manifest declares no layer with the policy-manifest media type \
-         — every artifact must include `policy.json` (an empty \
-         `{{\"version\": 1}}` is acceptable for policies without UI strings)"
-    )]
-    NoPolicyManifestLayer,
-    #[error("policy manifest layer is {size} bytes, max is {max}")]
-    ManifestTooLarge { size: usize, max: usize },
     #[error("manifest layer/payload count mismatch: {layers} vs {payloads}")]
     LayerCountMismatch { layers: usize, payloads: usize },
     #[error("decryption failed (wrong client_policy_key?)")]
@@ -98,25 +85,16 @@ fn classify_transport_error<E: std::fmt::Debug>(e: E) -> PullError {
     }
 }
 
-/// Result of a successful pull-and-decrypt: the policy's executable
-/// wasm plus its frozen policy manifest. The two layers live
-/// side-by-side in the OCI artifact but ship with different
-/// confidentiality treatments — wasm is client_policy_key-encrypted
-/// (proprietary algorithm), policy manifest is plain JSON
-/// (applicant-facing UI strings + machine keys, inspectable for
-/// audit). Both are integrity-checked by the OCI content-addressing
-/// chain.
-///
-/// Both layers are **required** — `enclavid policy push` refuses to
-/// ship an artifact without `policy.json`, and pull_and_decrypt
-/// surfaces the absence as `PullError::NoPolicyManifestLayer`. A
-/// policy without host-visible UI can still ship an empty
-/// `{"version": 1}` to satisfy the requirement.
+/// Result of a successful pull-and-decrypt: the policy's decrypted
+/// wasm component bytes, ready for compile. Any embedded text-ref
+/// declarations
+/// (`enclavid:embedded.disclosure-fields.v1`,
+/// `enclavid:embedded.i18n.v1`) live inside the wasm as component-
+/// level custom sections; the caller extracts them via
+/// `enclavid_engine::load_static`. No sidecar layer.
 pub struct PolicyArtifact {
     /// Decrypted wasm. Ready to compile with wasmtime.
     pub wasm_bytes: Vec<u8>,
-    /// Policy manifest bytes verbatim (JSON).
-    pub manifest_bytes: Vec<u8>,
 }
 
 #[derive(Deserialize)]
@@ -303,44 +281,108 @@ pub async fn pull_and_decrypt(
     }
 
     let wasm_bytes = wasm_bytes.ok_or(PullError::NoPolicyLayer)?;
-
-    // Pull the manifest out of the component's
-    // `enclavid:policy-manifest.v1` custom section. `enclavid policy
-    // encrypt` embedded it there before age-encrypting; the section
-    // is invisible to wasmtime at compile time but exposed to
-    // `wasmparser::Parser` for our purposes.
-    let manifest_bytes = extract_embedded_manifest(&wasm_bytes)?;
-    if manifest_bytes.len() > MAX_POLICY_MANIFEST_BYTES {
-        return Err(PullError::ManifestTooLarge {
-            size: manifest_bytes.len(),
-            max: MAX_POLICY_MANIFEST_BYTES,
-        });
-    }
-    Ok(PolicyArtifact { wasm_bytes, manifest_bytes })
+    Ok(PolicyArtifact { wasm_bytes })
 }
 
-/// Walk the component-level sections looking for our manifest custom
-/// section. Stops at the first match; multiple sections with the same
-/// name aren't expected (encrypt emits exactly one), and silently
-/// taking the first keeps the contract simple.
+/// OCI layer media type for plain (unencrypted) wasm component layers.
+/// Used by tier-1 OSS plugins. Encrypted plugins (tier-2/tier-3) also
+/// publish under this media type — `wkg`'s pull whitelist accepts only
+/// `application/wasm` (see `[[project-wkg-wac-poc-findings]]`); encryption
+/// is signalled via OCI manifest annotations or a config-blob extension
+/// rather than the layer media type.
+const PLAIN_WASM_LAYER: &str = "application/wasm";
+
+/// One pulled plugin component. Same shape as `PolicyArtifact` but no
+/// decryption step — plugin bytes are plain (or, for tier-3, encrypted
+/// with the vendor's own scheme that the TEE handles via KBS attestation
+/// rather than the client_policy_key path used for policies).
 ///
-/// Component custom sections appear at the top level of the binary
-/// — `wasmparser::Parser::new(0).parse_all(&bytes)` yields them as
-/// `Payload::CustomSection` directly (no nesting through
-/// `ModuleSection`). Inner core-module customs live under
-/// `Payload::ModuleSection(_)` and aren't visited.
-fn extract_embedded_manifest(wasm_bytes: &[u8]) -> Result<Vec<u8>, PullError> {
-    use wasmparser::{Parser, Payload};
-    for payload in Parser::new(0).parse_all(wasm_bytes) {
-        let payload = payload
-            .map_err(|e| PullError::ManifestParse(format!("wasm parse: {e}")))?;
-        if let Payload::CustomSection(reader) = payload
-            && reader.name() == MANIFEST_SECTION_NAME
-        {
-            return Ok(reader.data().to_vec());
+/// Plugins are pure compute under our trust model — they may not import
+/// any host function — so they ship no embedded declarations sections.
+pub struct PluginArtifact {
+    /// Plain wasm component bytes — ready to compile with wasmtime.
+    pub wasm_bytes: Vec<u8>,
+}
+
+/// Pull and integrity-check a plugin OCI artifact.
+///
+/// Same trust path as `pull_and_decrypt` (host is untrusted on response
+/// content; every hash recomputed in the TEE against the pinned digest)
+/// minus the age decryption — plugin bytes are not client_policy_key-
+/// encrypted. The pinned ref `plugin_ref` MUST be of the form
+/// `<repo>@sha256:<hex>` (digest-pinned); tag-only refs are rejected
+/// because they break replay reproducibility.
+pub async fn pull_plugin(
+    registry: &RegistryClient,
+    plugin_ref: &str,
+    registry_auth: &[u8],
+) -> Result<PluginArtifact, PullError> {
+    let plugin_digest = extract_digest(plugin_ref)
+        .ok_or_else(|| PullError::InvalidRef(plugin_ref.to_string()))?;
+    let response = registry
+        .pull(plugin_ref, registry_auth)
+        .await
+        .map_err(classify_transport_error)?
+        .trust::<AuthN, _, _, _>(|r| {
+            // Identical digest-validation flow as `pull_and_decrypt`:
+            // (1) manifest bytes hash to the pinned digest, (2) host's
+            // self-reported digest agrees with our recompute,
+            // (3) each layer payload hashes to its descriptor digest.
+            let manifest_actual = sha256_hex(&r.manifest);
+            if !digest_matches(plugin_digest, &manifest_actual) {
+                return Err(PullError::ManifestDigest {
+                    expected: plugin_digest.to_string(),
+                    actual: format!("sha256:{manifest_actual}"),
+                });
+            }
+            if r.manifest_digest != manifest_actual
+                && r.manifest_digest != format!("sha256:{manifest_actual}")
+            {
+                return Err(PullError::ManifestDigest {
+                    expected: format!("sha256:{manifest_actual}"),
+                    actual: r.manifest_digest.clone(),
+                });
+            }
+            let manifest: OciManifest = serde_json::from_slice(&r.manifest)
+                .map_err(|e| PullError::ManifestParse(e.to_string()))?;
+            if manifest.layers.len() != r.layers.len() {
+                return Err(PullError::LayerCountMismatch {
+                    layers: manifest.layers.len(),
+                    payloads: r.layers.len(),
+                });
+            }
+            for (idx, (descriptor, payload)) in
+                manifest.layers.iter().zip(r.layers.iter()).enumerate()
+            {
+                let layer_actual = sha256_hex(payload);
+                if !digest_matches(&descriptor.digest, &layer_actual) {
+                    return Err(PullError::LayerDigest {
+                        index: idx,
+                        expected: descriptor.digest.clone(),
+                        actual: format!("sha256:{layer_actual}"),
+                    });
+                }
+            }
+            Ok(())
+        })?
+        .into_inner();
+
+    let manifest: OciManifest = serde_json::from_slice(&response.manifest)
+        .map_err(|e| PullError::ManifestParse(e.to_string()))?;
+
+    // Find the plain wasm layer. We accept the first matching layer
+    // (single-layer is the norm; multi-layer plugin artifacts are
+    // explicitly unsupported by wkg's pull validation anyway, see
+    // `[[project-wkg-wac-poc-findings]]`).
+    let mut wasm_bytes: Option<Vec<u8>> = None;
+    for (idx, descriptor) in manifest.layers.iter().enumerate() {
+        if descriptor.media_type == PLAIN_WASM_LAYER {
+            wasm_bytes = Some(response.layers[idx].clone());
+            break;
         }
     }
-    Err(PullError::NoPolicyManifestLayer)
+    let wasm_bytes = wasm_bytes.ok_or(PullError::NoPolicyLayer)?;
+    Ok(PluginArtifact { wasm_bytes })
 }
 
 fn age_decrypt(ciphertext: &[u8], identity: &Identity) -> Result<Vec<u8>, age::DecryptError> {
@@ -375,6 +417,38 @@ pub fn split_pinned_ref(policy_ref: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((repo, digest))
+}
+
+/// Extract the registry hostname (authority portion) from a pinned
+/// OCI ref. The host is everything up to the first `/` in the
+/// `<repo>` part, so for `closed.vendor.com/path/foo@sha256:HEX` the
+/// answer is `closed.vendor.com`. Returns None for malformed refs
+/// (tag-form, non-sha256, or no path component).
+///
+/// Used to drive the `Client.registry_auth` hostname-keyed bearer
+/// lookup at pull time — same hostname rule for policy and plugin
+/// refs, so the API consumer only has to populate one entry per
+/// registry.
+pub fn registry_hostname(oci_ref: &str) -> Option<&str> {
+    let (repo, _) = split_pinned_ref(oci_ref)?;
+    repo.split_once('/').map(|(host, _)| host)
+}
+
+/// Look up the bearer for an OCI ref against the hostname-keyed
+/// `Client.registry_auth` map. Returns an empty slice when the
+/// hostname has no entry (anonymous pull) — the existing RegistryClient
+/// API treats empty bytes as "no Authorization header".
+pub fn bearer_for_ref<'a>(
+    registry_auth: &'a std::collections::HashMap<String, Vec<u8>>,
+    oci_ref: &str,
+) -> &'a [u8] {
+    let Some(host) = registry_hostname(oci_ref) else {
+        return &[];
+    };
+    registry_auth
+        .get(host)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
 }
 
 /// Extract just the `sha256:<hex>` digest substring from a pinned ref.

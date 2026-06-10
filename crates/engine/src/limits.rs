@@ -66,31 +66,42 @@ pub const MAX_EXPOSE_FIELDS: usize = 20;
 /// outer ceiling, the UI is the in-band UX boundary.
 pub const MAX_VALUE_LENGTH: usize = 4096;
 
-/// BCP-47-shaped `translation.language` tag length cap (longest
-/// realistic tag is ~12 bytes, `zh-Hant-HK`). Anything longer is a
-/// policy bug or covert channel.
-pub const MAX_LANGUAGE_LENGTH: usize = 16;
-
-/// `text-ref` identifier length cap. Blocks unicode shenanigans on
-/// the registry cache index and bounds per-entry memory.
-pub const MAX_KEY_LENGTH: usize = 128;
-
 /// Soft cap on a sanitised `translation.value` (in characters,
 /// not bytes — UTF-8 safe). Labels are well under, consent reasons
 /// usually fit. Values longer than this get truncated rather than
-/// rejected; the hard cap below is the rejection threshold.
+/// rejected; [`MAX_TEXT_VALUE_HARD_BYTES`] is the rejection threshold.
 pub const MAX_TEXT_VALUE_SOFT_CHARS: usize = 1000;
 
-/// Hard cap on the **raw** byte length of a `translation.value`
-/// before sanitisation. Refuses the whole policy load if any
-/// single entry exceeds this. Second-line guard behind
-/// `POLICY_MAX_MEMORY` — wasmtime caps total linear memory, this
-/// caps per-entry size so a million 1-byte entries can't slip
-/// under the memory wire by spreading the payload.
-pub const MAX_TEXT_VALUE_HARD_BYTES: usize = 16 * 1024;
-
-/// Total cap on declarations returned from `prepare-text-refs`.
-/// Bounds how much memory the per-session text registry can
-/// occupy and the audit cardinality of "what strings can this
-/// policy show". Second-line guard behind `POLICY_MAX_MEMORY`.
-pub const MAX_TEXT_ENTRIES: usize = 4096;
+// ----- Schema-level caps re-exported from `enclavid-embedded` -----
+//
+// These are the wire-format limits that bound what a single source
+// file can declare. They're owned by the schema crate and engine
+// re-exports them here so callers inside engine continue using
+// `crate::limits::*` without reaching across crate paths. Single
+// source of truth — bumps land in `enclavid-embedded::lib.rs`.
+//
+// Naming kept verbatim to avoid touching call sites; semantic
+// meanings preserved from when they lived here directly:
+//
+//   * `MAX_LANGUAGE_LENGTH` — BCP-47-shaped `translation.language`
+//     tag length cap (longest realistic tag is ~12 bytes,
+//     `zh-Hant-HK`). Anything longer is a policy bug or covert
+//     channel.
+//   * `MAX_KEY_LENGTH` — `text-ref` identifier length cap. Blocks
+//     unicode shenanigans on the registry cache index and bounds
+//     per-entry memory.
+//   * `MAX_TEXT_VALUE_HARD_BYTES` — hard cap on the raw byte length
+//     of a `translation.value` before sanitisation. Refuses the
+//     whole policy load if any single entry exceeds this. Second-
+//     line guard behind `POLICY_MAX_MEMORY` — wasmtime caps total
+//     linear memory, this caps per-entry size so a million 1-byte
+//     entries can't slip under the memory wire by spreading the
+//     payload.
+//   * `MAX_TEXT_ENTRIES` — total cap on declarations across the two
+//     embedded sections. Bounds how much memory the per-session
+//     text registry can occupy and the audit cardinality of "what
+//     strings can this policy show". Second-line guard behind
+//     `POLICY_MAX_MEMORY`.
+pub use enclavid_embedded::{
+    MAX_KEY_LENGTH, MAX_LANGUAGE_LENGTH, MAX_TEXT_ENTRIES, MAX_TEXT_VALUE_HARD_BYTES,
+};

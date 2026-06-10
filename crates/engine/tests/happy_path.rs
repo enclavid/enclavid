@@ -13,8 +13,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use enclavid_engine::policy::{Decision, RunResources};
-use enclavid_engine::{RunStatus, Runner, SessionChange, SessionListener, SessionState};
+use enclavid_engine::{
+    Decision, RunInputs, RunStatus, Runner, SessionChange, SessionListener, SessionState,
+};
 use enclavid_host_bridge::{
     Clip, SessionState as SessionStateProto, call_event, suspended,
 };
@@ -44,18 +45,18 @@ async fn passport_then_consent_rejected() {
     let runner = Runner::new().unwrap();
     let component = runner.compile(component_bytes).unwrap();
 
-    // Load the policy manifest from the fixture's `policy.json` —
+    // Load the policy manifest from the fixture's `manifest.json` —
     // single declarative file whose bytes ARE the wire format
     // (no assembly). Engine resolves the registered text-ref set
     // from it via `load_manifest`. Same path the api crate takes
     // in `lookup_policy`.
-    let registered: Arc<HashSet<String>> = Arc::new(load_test_manifest());
+    let registered: Arc<HashSet<String>> = Arc::new(load_test_text_refs());
 
     let session = SessionState::default();
 
     // Round 1: evaluate → prompt-passport → Suspended.
     let (status, mut session) = runner
-        .run(&component, session, vec![], test_resources(&registered))
+        .run(&component, &[], session, vec![], test_run_inputs(&registered))
         .await
         .unwrap();
     assert_suspended(&status, 1);
@@ -65,7 +66,7 @@ async fn passport_then_consent_rejected() {
 
     // Round 2: replays passport → prompt-disclosure → Suspended.
     let (status, mut session) = runner
-        .run(&component, session, vec![], test_resources(&registered))
+        .run(&component, &[], session, vec![], test_run_inputs(&registered))
         .await
         .unwrap();
     assert_suspended(&status, 2);
@@ -75,7 +76,7 @@ async fn passport_then_consent_rejected() {
 
     // Round 3: replays both → Completed(Rejected).
     let (status, _) = runner
-        .run(&component, session, vec![], test_resources(&registered))
+        .run(&component, &[], session, vec![], test_run_inputs(&registered))
         .await
         .unwrap();
     match status {
@@ -116,19 +117,29 @@ fn test_policy_component() -> &'static [u8] {
         .as_slice()
 }
 
-/// Load the test-policy manifest. `policy.json` IS the wire format
-/// — no assembly, just read bytes and parse. Mirrors the api flow
-/// where `lookup_policy` reads the assets layer verbatim.
-fn load_test_manifest() -> HashSet<String> {
+/// Load the test-policy's embedded text-ref declarations straight
+/// from the on-disk source files. We bypass `load_static(wasm_bytes)`
+/// here because the test fixture isn't sealed — it's just a raw
+/// componentized wasm without the embedded custom sections.
+/// Production path (`api::applicant::shared::lookup_policy`) reads
+/// the sections directly out of the wasm via `load_static`.
+fn load_test_text_refs() -> HashSet<String> {
+    use enclavid_embedded::{read_disclosure_fields, read_i18n};
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = format!("{manifest_dir}/tests/fixtures/test-policy/policy.json");
-    let bytes = std::fs::read(&path).expect("read policy.json");
-    let decls = enclavid_engine::load_manifest(&bytes).expect("load_manifest");
-    decls
-        .identifiers
-        .into_iter()
-        .chain(decls.localized.into_iter().map(|block| block.key))
-        .collect()
+    let disclosure_path =
+        format!("{manifest_dir}/tests/fixtures/test-policy/disclosure-fields.json");
+    let i18n_path = format!("{manifest_dir}/tests/fixtures/test-policy/i18n.json");
+    let fields = read_disclosure_fields(std::path::Path::new(&disclosure_path))
+        .expect("read disclosure-fields.json")
+        .map(|s| s.fields)
+        .unwrap_or_default();
+    let i18n_keys = read_i18n(std::path::Path::new(&i18n_path))
+        .expect("read i18n.json")
+        .map(|s| s.entries)
+        .unwrap_or_default()
+        .into_keys()
+        .collect::<Vec<_>>();
+    fields.into_iter().chain(i18n_keys).collect()
 }
 
 /// Stub host resources for the engine. The listener is a no-op — the
@@ -137,8 +148,8 @@ fn load_test_manifest() -> HashSet<String> {
 /// `registered_text_refs` set is shared across rounds so every
 /// `prompt-disclosure` / `prompt-media` call passes the engine's
 /// membership check.
-fn test_resources(registered: &Arc<HashSet<String>>) -> RunResources {
-    RunResources {
+fn test_run_inputs(registered: &Arc<HashSet<String>>) -> RunInputs {
+    RunInputs {
         listener: Arc::new(NoopListener),
         registered_text_refs: registered.clone(),
     }

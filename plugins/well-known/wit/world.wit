@@ -1,0 +1,77 @@
+package enclavid:well-known@0.1.0;
+
+/// Icon name identifiers for capture flows. Returns the dispatch
+/// string consumed by `CaptureStep.icon`; frontend maps to its
+/// bundled SVG library.
+interface icons {
+    passport: func() -> string;
+    id-card: func() -> string;
+    drivers-license: func() -> string;
+    selfie: func() -> string;
+}
+
+/// DisplayField helpers for canonical KYC fields.
+///
+/// Each function returns a `display-field` with `key` and `label`
+/// pre-set to canonical text-ref strings. Tenants MUST register the
+/// returned text-refs in their `policy.json` (`disclosure_fields` map
+/// for keys, `localized` map for labels) — see plugin README for a
+/// drop-in JSON snippet.
+interface disclosure-fields {
+    use enclavid:disclosure/types@0.1.0.{display-field};
+
+    // Document identifiers
+    passport-number: func(value: string) -> display-field;
+    id-card-number: func(value: string) -> display-field;
+    drivers-license-number: func(value: string) -> display-field;
+    document-issuing-country: func(value: string) -> display-field;
+    document-expiry: func(value: string) -> display-field;
+    document-issued: func(value: string) -> display-field;
+
+    // Identity
+    given-name: func(value: string) -> display-field;
+    family-name: func(value: string) -> display-field;
+    full-name: func(value: string) -> display-field;
+    date-of-birth: func(value: string) -> display-field;
+    sex: func(value: string) -> display-field;
+    nationality: func(value: string) -> display-field;
+
+    // Contact / location
+    residence-country: func(value: string) -> display-field;
+    address: func(value: string) -> display-field;
+    email: func(value: string) -> display-field;
+    phone: func(value: string) -> display-field;
+
+    // Other
+    tax-id: func(value: string) -> display-field;
+}
+
+/// Pre-baked MediaSpec / CaptureStep helpers for common KYC documents.
+///
+/// `*_spec` functions return a complete `media-spec` ready for
+/// `prompt-media`. For multi-side documents (id-card, drivers-license)
+/// the spec includes both sides as separate steps.
+///
+/// `*_step` functions return individual `capture-step`s for tenants
+/// who want to compose custom flows mixing sides.
+interface capture {
+    use enclavid:form/types@0.1.0.{capture-step, media-spec};
+
+    // Full MediaSpecs
+    passport: func() -> media-spec;
+    id-card: func() -> media-spec;
+    drivers-license: func() -> media-spec;
+    selfie: func() -> media-spec;
+
+    // Individual steps for multi-side documents
+    id-card-front-step: func() -> capture-step;
+    id-card-back-step: func() -> capture-step;
+    drivers-license-front-step: func() -> capture-step;
+    drivers-license-back-step: func() -> capture-step;
+}
+
+world well-known {
+    export icons;
+    export disclosure-fields;
+    export capture;
+}

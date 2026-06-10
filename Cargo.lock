@@ -1129,6 +1129,7 @@ dependencies = [
  "enclavid-attestation",
  "enclavid-engine",
  "enclavid-host-bridge",
+ "futures",
  "hex",
  "hyper",
  "hyper-util",
@@ -1171,6 +1172,7 @@ dependencies = [
  "clap",
  "dialoguer",
  "dirs",
+ "enclavid-embedded",
  "hex",
  "oci-client",
  "open",
@@ -1188,16 +1190,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclavid-embedded"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "enclavid-engine"
 version = "0.1.0"
 dependencies = [
  "bincode",
  "blake3",
+ "enclavid-embedded",
  "enclavid-host-bridge",
  "prost",
  "serde",
  "serde_json",
  "tokio",
+ "wasm-runtime-composer",
+ "wasmparser 0.247.0",
  "wasmtime",
  "wit-component 0.247.0",
 ]
@@ -4594,6 +4608,16 @@ dependencies = [
  "indexmap 2.14.0",
  "wasm-encoder 0.247.0",
  "wasmparser 0.247.0",
+]
+
+[[package]]
+name = "wasm-runtime-composer"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasmtime",
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-package enclavid:policy;
+package enclavid:policy@0.1.0;
 
 interface policy {
     enum decision {
