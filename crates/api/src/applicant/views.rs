@@ -73,19 +73,60 @@ pub enum RequestView {
         /// screen header so the applicant sees exactly to whom the
         /// disclosure is being made.
         requester: String,
+        /// Surfaces the policy's full `disclosure-fields` vocabulary
+        /// — the only embedded section that leaks raw keys into the
+        /// consumer envelope. Frontend renders a footnote with
+        /// `total_declared` vs `used_in_call` and an expand-toggle
+        /// showing `all_keys` for drill-down audit (defends against
+        /// suffix-style covert encodings the user could otherwise
+        /// miss). Other kinds (`localized`, `icons`) don't reach the
+        /// consumer envelope so their bandwidth isn't surfaced here.
+        disclosure_schema: DisclosureSchema,
     },
     VerificationSet {
         alternatives: Vec<Vec<MediaSpecView>>,
     },
 }
 
+/// Schema visibility for the composition's `disclosure-fields`
+/// vocabulary. Built per-consent-screen so the applicant can audit
+/// covert-channel bandwidth — the composition can only encode
+/// `log2(total_declared)` bits per `DisplayField.key` position, and
+/// "wide vocabulary with few shown" (`total_declared >>
+/// used_in_call`) is the visual signal of possible synonym-encoding
+/// (`country_a / country_b / …`).
+///
+/// Aggregates across the **whole composition** (policy slot 0 + each
+/// plugin slot ≥ 1) — plugins may legitimately declare DF keys too
+/// (well-known auxiliary fields, e.g.). Same raw key declared by
+/// multiple slots resolves to identical envelope output so we
+/// deduplicate by string here: the count and the vocabulary list
+/// reflect what the consumer can actually distinguish.
+#[derive(Serialize)]
+pub struct DisclosureSchema {
+    /// Number of distinct `disclosure-field` keys across the
+    /// composition after dedup. Engine-side per-component
+    /// cardinality cap: [`MAX_DECLARED_DISCLOSURE_FIELDS`](
+    /// enclavid_engine::limits::MAX_DECLARED_DISCLOSURE_FIELDS).
+    pub total_declared: usize,
+    /// How many of those keys this particular `prompt-disclosure`
+    /// call surfaces. `used_in_call ≤ MAX_EXPOSE_FIELDS`.
+    pub used_in_call: usize,
+    /// Full deduplicated vocabulary, sorted alphabetically for
+    /// stable display across rounds. Drill-down view on the consent
+    /// screen — user can scroll and spot suffix patterns
+    /// (`tier_001 .. tier_256`) that bare counts wouldn't catch.
+    pub all_keys: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct CaptureStepView {
-    /// Free-form icon name dispatched against the frontend's bundled
-    /// SVG library (passport, id-card, drivers-license, selfie).
-    /// Unknown names render with no icon (graceful fallback); the
-    /// policy declares whatever it wants — frontend version controls
-    /// the accepted set.
+    /// Icon name resolved from the policy's `icons` declarations
+    /// (engine-side `enclavid:embedded/icons` ref). Frontend
+    /// dispatches against its bundled SVG library; unknown names
+    /// render no icon (graceful fallback). Declarations bounded by
+    /// `MAX_DECLARED_ICONS` — icon names never reach the consumer
+    /// envelope so a tight cap is the right shape.
     pub icon: Option<String>,
     /// Pre-capture intro body, paired with `icon` on the intro
     /// screen for this step.
@@ -156,15 +197,34 @@ fn request_view(
 ) -> RequestView {
     match req {
         suspended::Request::Media(m) => media_view(m, embedded, locale),
-        suspended::Request::Consent(c) => RequestView::Consent {
-            fields: c
-                .fields
-                .iter()
-                .map(|f| dto::consent_field_view_from_proto(f, embedded, locale))
-                .collect(),
-            reason: dto::resolve_localized(embedded,&c.reason_ref, locale),
-            requester: dto::resolve_localized(embedded,&c.requester_ref, locale),
-        },
+        suspended::Request::Consent(c) => {
+            let used_in_call = c.fields.len();
+            // Aggregate disclosure-field keys across the whole
+            // composition (policy slot 0 + every plugin slot). Same
+            // raw key declared by multiple slots resolves to the
+            // same envelope value — consumer can't tell which slot
+            // minted it — so we dedupe by string for the audit
+            // view. `BTreeSet` gives the dedup AND the canonical
+            // alphabetical ordering for stable display.
+            let unique_keys: std::collections::BTreeSet<String> =
+                embedded.disclosure_fields.declared().cloned().collect();
+            let total_declared = unique_keys.len();
+            let all_keys: Vec<String> = unique_keys.into_iter().collect();
+            RequestView::Consent {
+                fields: c
+                    .fields
+                    .iter()
+                    .map(|f| dto::consent_field_view_from_proto(f, embedded, locale))
+                    .collect(),
+                reason: dto::resolve_localized(embedded, &c.reason_ref, locale),
+                requester: dto::resolve_localized(embedded, &c.requester_ref, locale),
+                disclosure_schema: DisclosureSchema {
+                    total_declared,
+                    used_in_call,
+                    all_keys,
+                },
+            }
+        }
         suspended::Request::VerificationSet(vs) => RequestView::VerificationSet {
             alternatives: vs
                 .alternatives
@@ -242,10 +302,15 @@ fn capture_step_view(
     locale: &Locale,
 ) -> CaptureStepView {
     CaptureStepView {
-        // Icon string passes through verbatim — frontend resolves it
-        // against its bundled icon library with fallback to no-icon.
-        // Not a text-ref; not localised.
-        icon: s.icon_ref.clone(),
+        // Icon-ref reverse-lookup → declared icon name. Frontend
+        // dispatches against its bundled icon library and falls back
+        // to no-icon on unknown names. Unresolvable tokens (engine
+        // would have trapped on use-site validation already, but
+        // graceful degrade) pass through verbatim.
+        icon: s
+            .icon_ref
+            .as_deref()
+            .and_then(|t| embedded.icons.lookup(t).cloned().or_else(|| Some(t.to_string()))),
         instructions: dto::resolve_localized(embedded,&s.instructions_ref, locale),
         label: dto::resolve_localized(embedded,&s.label_ref, locale),
         camera: camera_view(s.camera),

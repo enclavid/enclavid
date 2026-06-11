@@ -8,18 +8,24 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-use enclavid_embedded::{FILE_DISCLOSURE_FIELDS, FILE_I18N, read_disclosure_fields, read_i18n, validate};
+use enclavid_embedded::{
+    FILE_DISCLOSURE_FIELDS, FILE_I18N, FILE_ICONS, read_disclosure_fields, read_i18n,
+    read_icons, validate,
+};
 
 pub async fn run(dir: PathBuf) -> Result<()> {
     let disclosure_path = dir.join(FILE_DISCLOSURE_FIELDS);
     let i18n_path = dir.join(FILE_I18N);
+    let icons_path = dir.join(FILE_ICONS);
 
     let disclosure = read_disclosure_fields(&disclosure_path)?;
     let i18n = read_i18n(&i18n_path)?;
-    let report = validate(disclosure.as_ref(), i18n.as_ref());
+    let icons = read_icons(&icons_path)?;
+    let report = validate(disclosure.as_ref(), i18n.as_ref(), icons.as_ref());
 
     let disclosure_count = disclosure.as_ref().map(|d| d.fields.len()).unwrap_or(0);
     let i18n_count = i18n.as_ref().map(|i| i.entries.len()).unwrap_or(0);
+    let icons_count = icons.as_ref().map(|i| i.names.len()).unwrap_or(0);
     let locale_set: std::collections::BTreeSet<&str> = i18n
         .as_ref()
         .map(|i| {
@@ -47,6 +53,14 @@ pub async fn run(dir: PathBuf) -> Result<()> {
         },
         i18n_count,
         locale_set.len(),
+    );
+    println!(
+        "  icons:             {} ({} entries)",
+        match &icons {
+            Some(_) => icons_path.display().to_string(),
+            None => format!("{} (absent)", icons_path.display()),
+        },
+        icons_count,
     );
     if !locale_set.is_empty() {
         let tags: Vec<&str> = locale_set.iter().copied().collect();

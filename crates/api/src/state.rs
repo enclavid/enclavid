@@ -7,7 +7,9 @@ use secrecy::SecretBox;
 use enclavid_engine::Runner;
 use enclavid_host_bridge::{GrpcChannel, RegistryClient, SessionStore, connect_store};
 
+use crate::ref_key::RefKey;
 use crate::runtime::SessionPolicyCache;
+use crate::shuffle::ShuffleKey;
 
 /// Applicant key held in TEE memory for the duration of a session.
 /// Raw bytes used for AES-256-GCM encryption of session state.
@@ -33,6 +35,18 @@ pub struct AppState {
     /// Same channel as the rest of host-bridge.
     pub registry: RegistryClient,
     pub applicant_session_tokens: ApplicantSessionTokenCache,
+    /// Per-session `DisplayField` shuffle seeds are HKDF-derived from
+    /// this key + the session id at `/connect`-time and threaded
+    /// into `engine::RunInputs`. See [`crate::shuffle`] for the
+    /// derivation contract and threat model.
+    pub shuffle_key: Arc<ShuffleKey>,
+    /// Base key for the engine's `EmbeddedRegistry` ref token
+    /// derivation. Per-policy 32-byte ref_keys are HKDF-derived from
+    /// this base at `lookup_policy`-time and passed into
+    /// `EmbeddedRegistry::builder(ref_key)`. See [`crate::ref_key`]
+    /// for the derivation contract and threat model (forgery defence
+    /// against a guest WASM synthesising a foreign-slot ref).
+    pub ref_key: Arc<RefKey>,
 }
 
 impl AppState {
@@ -41,6 +55,8 @@ impl AppState {
         channel: GrpcChannel,
         runner: Arc<Runner>,
         policies: SessionPolicyCache,
+        shuffle_key: Arc<ShuffleKey>,
+        ref_key: Arc<RefKey>,
     ) -> Self {
         let applicant_session_tokens = Cache::builder()
             .max_capacity(10_000)
@@ -53,6 +69,8 @@ impl AppState {
             session_store,
             registry: RegistryClient::new(channel),
             applicant_session_tokens,
+            shuffle_key,
+            ref_key,
         }
     }
 
@@ -63,10 +81,12 @@ impl AppState {
         session_store: Arc<SessionStore>,
         runner: Arc<Runner>,
         policies: SessionPolicyCache,
+        shuffle_key: Arc<ShuffleKey>,
+        ref_key: Arc<RefKey>,
     ) -> Self {
         let channel = connect_store(transport_out)
             .await
             .expect("failed to connect store");
-        Self::new(session_store, channel, runner, policies)
+        Self::new(session_store, channel, runner, policies, shuffle_key, ref_key)
     }
 }

@@ -12,7 +12,9 @@
 //! layer digest before trusting bytes. See proto/registry.proto and
 //! architecture.md → Network Isolation for the full analysis.
 
-use enclavid_untrusted::{AuthN, Untrusted, reason};
+use crate::boundary;
+use crate::boundary::{AuthN, AuthZ, Replay, Untrusted};
+use crate::reason;
 use tonic::transport::Channel;
 
 use crate::error::BridgeError;
@@ -47,7 +49,7 @@ impl RegistryClient {
         &self,
         policy_ref: &str,
         registry_auth: &[u8],
-    ) -> Result<Untrusted<PullResponse, (AuthN,)>, BridgeError> {
+    ) -> Result<Untrusted<PullResponse, (AuthN, AuthZ, Replay)>, BridgeError> {
         let response = self
             .client
             .clone()
@@ -56,13 +58,12 @@ impl RegistryClient {
                 registry_auth: registry_auth.to_vec(),
             })
             .await?;
-        Ok(Untrusted::new(response.into_inner(), reason!(r#"
-Bytes the host fetched from a registry; TEE hasn't checked
-anything yet. Caller must verify manifest + per-layer digests
-to clear AuthN. Replay is N/A: registry pulls are
-content-addressed (request is by digest), so an "old" response
-for the same digest is identical to the current one. AuthZ
-enforced by registry server, not TEE.
+        Ok(boundary::inbound::from_host(response.into_inner(), reason!(r#"
+OCI artifact pull response from host Registry.Pull. No work-backed
+close at this layer — caller peels with rationale (typical:
+AuthN closed by manifest+layer digest verification; AuthZ delegated
+to the registry server via the host-supplied bearer; Replay N/A
+since the request is content-addressed by digest).
         "#)))
     }
 
@@ -75,7 +76,7 @@ enforced by registry server, not TEE.
         &self,
         policy_ref: &str,
         registry_auth: &[u8],
-    ) -> Result<Untrusted<PullManifestResponse, (AuthN,)>, BridgeError> {
+    ) -> Result<Untrusted<PullManifestResponse, (AuthN, AuthZ, Replay)>, BridgeError> {
         let response = self
             .client
             .clone()
@@ -84,11 +85,12 @@ enforced by registry server, not TEE.
                 registry_auth: registry_auth.to_vec(),
             })
             .await?;
-        Ok(Untrusted::new(response.into_inner(), reason!(r#"
-Manifest bytes from the host registry; same trust posture as a
-full pull. Caller must verify `manifest_digest` matches the
-requested digest before parsing or trusting any annotation.
-Replay is N/A — content-addressed by digest.
+        Ok(boundary::inbound::from_host(response.into_inner(), reason!(r#"
+OCI manifest-only pull response from host Registry.PullManifest.
+Same trust posture as a full pull — no work-backed close at this
+layer; caller peels with rationale (AuthN via manifest_digest
+verification, AuthZ via registry server, Replay N/A by digest
+content-addressing).
         "#)))
     }
 }

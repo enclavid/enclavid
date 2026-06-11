@@ -3,7 +3,7 @@
 //! file impls `ReadField` / `WriteField` for its own markers using
 //! the helpers exposed here.
 
-use enclavid_untrusted::{AuthN, Exposed, Replay, Untrusted};
+use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 use crate::error::BridgeError;
 use crate::proto::session_store::read_response::Slot;
@@ -42,13 +42,18 @@ pub trait ReadField: Sized {
 /// `Op::Blob` or `Op::ListAppend` shape so the SessionStore client
 /// stays uniform across both kinds of write.
 ///
-/// `build_op` returns `Exposed<Op>`: the act of producing an `Op` IS
-/// the moment plaintext (state, metadata, ...) becomes ciphertext
-/// destined for the host. The wrapper makes that transition explicit
-/// in the type — anything that goes onto the wire must come through
-/// here, and the `release()` only happens inside `SessionStore::write`
-/// at the wire boundary. Reviewers grep for `Exposed::expose` to find
-/// every TEE → host data release.
+/// `build_op` returns `Exposed<Op, ()>`: a fully-vouched outbound
+/// wrapper. Inside the body the implementation constructs an
+/// `Exposed<Op, S>` where `S` lists the outbound concerns it cares
+/// about — typically `(AuthN, AuthZ, Covert)` — and then peels each
+/// with `vouch_unchecked::<X>(reason!("…"))` recording why the
+/// concern was addressed (AEAD-seal under what key, app-level
+/// consent / by-design plaintext, sanitisation step, ...). By the
+/// time the wrapper returns, `S == ()` and only `into_inner` lifts
+/// the raw `Op` for the gRPC wire send inside
+/// [`SessionStore::write`](super::SessionStore::write). Reviewers
+/// grep for `Exposed::new` to find every TEE → host data release
+/// and for `vouch_unchecked::<` to read the per-concern rationale.
 ///
 /// Object-safe by design (`&self` method, no `Sized` bound) so callers
 /// pass heterogeneous slices `&[&dyn WriteField]` for atomic writes
@@ -58,7 +63,7 @@ pub trait ReadField: Sized {
 /// `Send + Sync` supertraits keep the trait-object usable across
 /// async-await boundaries (axum requires `Send` futures).
 pub trait WriteField: Send + Sync {
-    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op>, BridgeError>;
+    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, BridgeError>;
 }
 
 // ---------- slot / op helpers ----------
@@ -88,8 +93,11 @@ pub(super) fn unwrap_list(slot: Slot) -> Result<Vec<Vec<u8>>, BridgeError> {
 /// Tuple of `ReadField`s. `fetch` returns the typed fields paired
 /// with the session's current version. Each field in the result
 /// tuple carries its own per-field scope (set by its `ReadField::decode`);
-/// the version comes back as `Untrusted<u64, (AuthN, Replay)>` since
-/// it's a host-controlled counter that may be fabricated or stale.
+/// the version comes back as `Untrusted<u64, (AuthN, AuthZ, Replay)>`
+/// — host-supplied counter with no concern closed at this layer.
+/// Caller peels with channel-specific rationale (typical: "counter
+/// is not an ownership signal" closes AuthZ; CAS-feed-forward closes
+/// Replay; the CAS-mismatch failure path closes AuthN downstream).
 pub trait ReadTuple {
     type Output;
     #[allow(async_fn_in_trait)]
@@ -97,7 +105,7 @@ pub trait ReadTuple {
         self,
         store: &SessionStore,
         id: &str,
-    ) -> Result<(Self::Output, Untrusted<u64, (AuthN, Replay)>), BridgeError>;
+    ) -> Result<(Self::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError>;
 }
 
 macro_rules! impl_read_tuple {
@@ -109,7 +117,7 @@ macro_rules! impl_read_tuple {
                 self,
                 store: &SessionStore,
                 id: &str,
-            ) -> Result<(Self::Output, Untrusted<u64, (AuthN, Replay)>), BridgeError> {
+            ) -> Result<(Self::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError> {
                 let ctx = Ctx { tee_seal_key: store.tee_seal_key(), session_id: id };
                 let selectors = vec![$(self.$idx.selector()),+];
                 let (raw, version) = store.read_raw(id, selectors).await?;

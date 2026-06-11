@@ -14,6 +14,7 @@ use enclavid::disclosure::disclosure::prompt_disclosure;
 use enclavid::disclosure::types::DisplayField;
 use enclavid::embedded::disclosure_fields::disclosure_field as df;
 use enclavid::embedded::i18n::localized as l10n;
+use enclavid::embedded::icons::icon as ico;
 use enclavid::form::media::prompt_media;
 use enclavid::form::types::{CameraFacing, CaptureGuide, CaptureStep, MediaSpec};
 use exports::enclavid::policy::policy::{Decision, EvalArgs, Guest};
@@ -42,9 +43,10 @@ const KEY_PASSPORT_NUMBER_LABEL: &str = "passport_number_label";
 const KEY_RISK_CATEGORY_LABEL: &str = "risk_category_label";
 const KEY_ADDRESS_LABEL: &str = "address_label";
 
-// Icon name — plain string, dispatched by frontend against its
-// bundled SVG library (closed set: passport, id_card, drivers_license,
-// selfie). Not a text-ref; unknown names render as no icon.
+// Icon name — declared in `icons.json`, dispatched by frontend
+// against its bundled SVG library. Minted as an `icon-ref` token
+// through `enclavid:embedded/icons.icon` so the policy can't
+// covertly leak attributes through raw icon strings.
 const ICON_PASSPORT: &str = "passport";
 
 impl Guest for TestPolicy {
@@ -54,7 +56,7 @@ impl Guest for TestPolicy {
         let _clips = prompt_media(&MediaSpec {
             label: l10n(KEY_PASSPORT_TITLE),
             captures: vec![CaptureStep {
-                icon: Some(ICON_PASSPORT.into()),
+                icon: Some(ico(ICON_PASSPORT)),
                 instructions: l10n(KEY_PASSPORT_INSTRUCTIONS),
                 label: l10n(KEY_PASSPORT_STEP),
                 camera: CameraFacing::Rear,

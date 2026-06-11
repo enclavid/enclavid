@@ -29,6 +29,6 @@ pub use decls::load_embedded;
 pub use host::register_for_slot;
 pub use registry::{
     ComponentDecls, DisclosureFieldsStore, EmbeddedRegistry, EmbeddedRegistryBuilder,
-    LocalizedStore, Slot, Translation,
+    IconStore, LocalizedStore, Slot, Translation,
 };
-pub use store::{DisclosureFields, Localized, RefKind, RefStore};
+pub use store::{DisclosureFields, Icon, Localized, RefKind, RefStore};

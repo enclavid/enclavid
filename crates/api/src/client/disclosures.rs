@@ -7,7 +7,7 @@ use axum::routing::{MethodRouter, get};
 use base64ct::{Base64, Encoding};
 use serde::Serialize;
 
-use enclavid_host_bridge::{AuthN, Disclosure, Metadata, Replay, reason};
+use enclavid_host_bridge::{AuthN, AuthZ, Disclosure, Metadata, Replay, reason};
 
 use crate::client_state::ClientState;
 use crate::disclosure_hash;
@@ -65,14 +65,21 @@ async fn read(
     // → mismatch → we refuse the response. 500 keeps the failure
     // path consistent with other host misbehaviours here.
     let items = disclosures
-        .trust::<AuthN, _, _, _>(|items| {
-            let expected = disclosure_hash::fold(&session_id, items);
+        .trust::<AuthN, _, _, _, _>(|items| {
+            let expected = disclosure_hash::fold(&session_id, &items);
             if expected == metadata.disclosure_hash {
-                Ok(())
+                Ok(items)
             } else {
                 Err(StatusCode::INTERNAL_SERVER_ERROR)
             }
         })?
+        .trust_unchecked::<AuthZ, _>(reason!(r#"
+TEE forwards opaque sealed bytes; only the holder of the consumer's
+disclosure private key can open them. This endpoint requires the
+client AuthN'd via the bearer middleware to match the
+metadata.client predicate (closed upstream), so the recipient is
+both authenticated and the correct decryption target.
+        "#))
         .trust_unchecked::<Replay, _>(reason!(r#"
 Two replay angles to consider:
   * Stale list against current metadata's disclosure_hash —

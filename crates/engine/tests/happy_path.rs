@@ -47,11 +47,13 @@ async fn passport_then_consent_rejected() {
 
     // Build the composition-wide `EmbeddedRegistry` for this run.
     // Test policy lives at slot 0; no plugins. Same construction the
-    // api crate does in `lookup_policy`, scaled down.
+    // api crate does in `lookup_policy`, scaled down. The `ref_key`
+    // is a fixed test value here; production derives it per-policy
+    // from `tee_seal_key + policy_ref`.
     let policy_decls = load_test_policy_decls();
-    let mut builder = EmbeddedRegistry::builder();
+    let mut builder = EmbeddedRegistry::builder([7u8; 32]);
     builder.add_component(policy_decls);
-    let embedded = Arc::new(builder.finish());
+    let embedded = Arc::new(builder.build());
 
     let session = SessionState::default();
 
@@ -126,11 +128,12 @@ fn test_policy_component() -> &'static [u8] {
 /// (`api::applicant::shared::lookup_policy`) reads the sections
 /// directly out of the wasm via `load_embedded`.
 fn load_test_policy_decls() -> ComponentDecls {
-    use enclavid_embedded::{read_disclosure_fields, read_i18n};
+    use enclavid_embedded::{read_disclosure_fields, read_i18n, read_icons};
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let disclosure_path =
         format!("{manifest_dir}/tests/fixtures/test-policy/disclosure-fields.json");
     let i18n_path = format!("{manifest_dir}/tests/fixtures/test-policy/i18n.json");
+    let icons_path = format!("{manifest_dir}/tests/fixtures/test-policy/icons.json");
     let disclosure_fields = read_disclosure_fields(std::path::Path::new(&disclosure_path))
         .expect("read disclosure-fields.json")
         .map(|s| s.fields.into_iter().collect())
@@ -148,9 +151,14 @@ fn load_test_policy_decls() -> ComponentDecls {
             (key, rows)
         })
         .collect();
+    let icons = read_icons(std::path::Path::new(&icons_path))
+        .expect("read icons.json")
+        .map(|s| s.names.into_iter().collect())
+        .unwrap_or_default();
     ComponentDecls {
         disclosure_fields,
         localized,
+        icons,
     }
 }
 

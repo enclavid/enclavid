@@ -21,12 +21,14 @@
 use std::collections::{HashMap, HashSet};
 
 use enclavid_embedded::{
-    SECTION_DISCLOSURE_FIELDS, SECTION_I18N,
-    parse_disclosure_fields, parse_i18n,
+    SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS,
+    parse_disclosure_fields, parse_i18n, parse_icons,
 };
 
 use super::registry::{ComponentDecls, Translation};
-use crate::limits::MAX_TEXT_ENTRIES;
+use crate::limits::{
+    MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_ICONS, MAX_DECLARED_LOCALIZED,
+};
 
 /// Walk the component-level custom sections of a wasm component
 /// binary, look up our two embedded sections, parse whichever are
@@ -40,6 +42,7 @@ use crate::limits::MAX_TEXT_ENTRIES;
 pub fn load_embedded(wasm_bytes: &[u8]) -> wasmtime::Result<ComponentDecls> {
     let mut disclosure_section = None;
     let mut i18n_section = None;
+    let mut icons_section = None;
 
     use wasmparser::{Parser, Payload};
     for payload in Parser::new(0).parse_all(wasm_bytes) {
@@ -76,20 +79,46 @@ pub fn load_embedded(wasm_bytes: &[u8]) -> wasmtime::Result<ComponentDecls> {
                     ))
                 })?);
             }
+            n if n == SECTION_ICONS => {
+                if icons_section.is_some() {
+                    return Err(wasmtime::Error::msg(format!(
+                        "duplicate custom section `{n}` in component wasm",
+                    )));
+                }
+                icons_section = Some(parse_icons(reader.data()).map_err(|e| {
+                    wasmtime::Error::msg(format!(
+                        "parsing custom section `{n}` as JSON: {e}",
+                    ))
+                })?);
+            }
             _ => {}
         }
     }
 
-    // Memory bound — independent of per-entry validation. Stops a
-    // malicious or malformed component from blowing up registry
-    // state. Per-translation byte sizes bounded separately by the
-    // transport-level cap on the wasm layer in `policy_pull`.
+    // Per-kind cardinality caps. Each kind has a different covert-
+    // channel surface (DF leak to consumer; localized fully resolved
+    // before wire framing; icons reach browser only) and a different
+    // cap accordingly — see the constants' module-level docs in
+    // `enclavid-embedded`. Defence-in-depth alongside the seal-time
+    // `validate` check; engine refuses to load anything that slipped
+    // past the CLI validation gate.
     let df_count = disclosure_section.as_ref().map(|d| d.fields.len()).unwrap_or(0);
-    let l_count = i18n_section.as_ref().map(|i| i.entries.len()).unwrap_or(0);
-    let total = df_count + l_count;
-    if total > MAX_TEXT_ENTRIES {
+    if df_count > MAX_DECLARED_DISCLOSURE_FIELDS {
         return Err(wasmtime::Error::msg(format!(
-            "component declares {total} embedded entries, max is {MAX_TEXT_ENTRIES}",
+            "component declares {df_count} disclosure-fields, max is \
+             {MAX_DECLARED_DISCLOSURE_FIELDS}",
+        )));
+    }
+    let l_count = i18n_section.as_ref().map(|i| i.entries.len()).unwrap_or(0);
+    if l_count > MAX_DECLARED_LOCALIZED {
+        return Err(wasmtime::Error::msg(format!(
+            "component declares {l_count} i18n entries, max is {MAX_DECLARED_LOCALIZED}",
+        )));
+    }
+    let icon_count = icons_section.as_ref().map(|i| i.names.len()).unwrap_or(0);
+    if icon_count > MAX_DECLARED_ICONS {
+        return Err(wasmtime::Error::msg(format!(
+            "component declares {icon_count} icons, max is {MAX_DECLARED_ICONS}",
         )));
     }
 
@@ -120,8 +149,15 @@ pub fn load_embedded(wasm_bytes: &[u8]) -> wasmtime::Result<ComponentDecls> {
         })
         .collect();
 
+    // Icons: same set semantics as disclosure-fields — flat list of
+    // identifiers; duplicates collapse on insertion.
+    let icons: HashSet<String> = icons_section
+        .map(|s| s.names.into_iter().collect())
+        .unwrap_or_default();
+
     Ok(ComponentDecls {
         disclosure_fields,
         localized,
+        icons,
     })
 }

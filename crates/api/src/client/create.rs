@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 
 use enclavid_attestation::ReportData;
 use enclavid_host_bridge::{
-    Client, ClientAccess, PluginPin, SessionMetadata, SessionStatus, SetMetadata, SetPrincipal,
-    SetStatus, WriteField,
+    AuthN, AuthZ, Client, ClientAccess, Covert, PluginPin, SessionMetadata, SessionStatus,
+    SetMetadata, SetPrincipal, SetStatus, WriteField, boundary, reason,
 };
 
 use crate::client_state::ClientState;
@@ -343,9 +343,77 @@ async fn create(
     // op entirely when the auth scheme didn't produce one (host stores
     // nothing under `principal` in that case — fine, host-side
     // attribution features just won't have this session indexed).
-    let set_metadata = SetMetadata(&metadata);
-    let set_status = SetStatus(SessionStatus::Running);
-    let set_principal = principal.as_deref().map(SetPrincipal);
+    let set_metadata = SetMetadata(
+        boundary::outbound::to_host(&metadata, reason!(r#"
+SessionMetadata initial write at POST /sessions. Wire crossing for
+the per-session config blob (principal, policy_ref, client
+disclosure pubkey, input claims, disclosure-chain bookkeeping).
+AuthN closed inside host-bridge by AEAD-seal under tee_seal_key;
+AuthZ + Covert vouched below.
+            "#))
+        .vouch_unchecked::<AuthZ, _>(reason!(r#"
+Only the attested CVM holds tee_seal_key, so retrieval at /connect
+is gated on the same enclave that wrote it. The metadata is
+written here under POST /sessions (client AuthN'd by the host-side
+Auth service) and read by the applicant API as opaque ciphertext —
+release is implicit in key-possession.
+            "#))
+        .vouch_unchecked::<Covert, _>(reason!(r#"
+Metadata sealed under tee_seal_key — plaintext invisible to both
+host and consumer. Audit-honest caveat: ciphertext size is host-
+observable. This is the initial /create write before any policy
+has run; fields are derived from the client's /create request
+(principal, policy_ref, client.access, client_disclosure_pubkey,
+input claims), all client-controlled, not policy-controlled. Zero
+covert bandwidth from policy at this write — the channel only
+opens later via persister rewrites (see SetMetadata Covert peel
+in applicant/persister.rs).
+            "#))
+    );
+    let set_status = SetStatus(
+        boundary::outbound::to_host(SessionStatus::Running, reason!(r#"
+SessionStatus initial write at POST /sessions (Running). By-design
+plaintext for host TTL / cleanup orchestration.
+            "#))
+        .vouch_unchecked::<AuthN, _>(reason!(r#"
+By-design plaintext. Host needs the byte to manage TTL / cleanup
+without holding a TEE-side key. No applicant- or policy-specific
+data lands in the byte — only the lifecycle marker is observable.
+            "#))
+        .vouch_unchecked::<AuthZ, _>(reason!(r#"
+Lifecycle marker observable to host for orchestration is the
+explicit contract — host needs to know when to expire sessions or
+release storage. Not access-controlled at this layer.
+            "#))
+        .vouch_unchecked::<Covert, _>(reason!(r#"
+Enum cardinality = 5; ~1 status write per session lifecycle
+transition. Bounded by session-lifecycle schema.
+            "#))
+    );
+    let set_principal = principal.as_deref().map(|p| {
+        SetPrincipal(
+            boundary::outbound::to_host(p, reason!(r#"
+Tenant principal UTF-8 identifier write at POST /sessions. By-
+design plaintext: host indexes sessions per tenant for revocation
+/ rate-limit / billing.
+                "#))
+            .vouch_unchecked::<AuthN, _>(reason!(r#"
+By-design plaintext: host needs the value queryable. TEE never
+reads it back, so authenticity gate isn't needed on this side
+either. Equivalent shape to SetStatus.
+                "#))
+            .vouch_unchecked::<AuthZ, _>(reason!(r#"
+Tenant identifier is the host's own operational data (host runs
+the rate limiter and billing index); not access-controlled at
+this layer.
+                "#))
+            .vouch_unchecked::<Covert, _>(reason!(r#"
+Value is a fixed-shape tenant id chosen at /create from the
+authenticated client identity, not produced by policy at evaluate
+time. No policy-controlled bandwidth.
+                "#))
+        )
+    });
     let mut ops: Vec<&dyn WriteField> = vec![&set_metadata, &set_status];
     if let Some(op) = set_principal.as_ref() {
         ops.push(op);

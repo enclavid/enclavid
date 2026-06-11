@@ -9,6 +9,7 @@ package enclavid:form@0.1.0;
 /// import into their bindings.
 interface types {
     use enclavid:embedded/i18n@0.1.0.{localized-ref};
+    use enclavid:embedded/icons@0.1.0.{icon-ref};
 
     /// One JPEG-encoded frame, decoded independently by the enclave's
     /// plugin layer. Bytes are pristine — no container, no inter-
@@ -41,16 +42,15 @@ interface types {
     /// Multi-step captures within ONE prompt-media call belong to the
     /// SAME artifact — plugins analyse them together.
     ///
-    /// `icon` is a free-form string dispatched against the frontend's
-    /// bundled SVG library — closed set of well-known artifact icons
-    /// (passport, id-card, drivers-license, selfie, ...). The policy
-    /// picks one. Unknown names render with no icon (graceful
-    /// fallback); new icons ship via frontend release without WIT
-    /// churn. Not a text-ref because there's nothing to localise —
-    /// icon-name is purely a dispatch token, never displayed verbatim.
+    /// `icon` is an `icon-ref` minted by `enclavid:embedded/icons.icon`
+    /// — the name has to appear in the calling component's
+    /// `enclavid:embedded.icons.v1` section, blocking the free-form
+    /// covert channel a raw `option<string>` would otherwise be. Not
+    /// a text-ref because there's nothing to localise — icon-name is
+    /// purely a frontend dispatch token, never displayed verbatim.
     ///
-    /// The three remaining surfaces ARE text-refs into the policy's
-    /// pre-declared registry:
+    /// The three remaining surfaces are `localized-ref`s into the
+    /// component's pre-declared `i18n` catalog:
     ///   * `instructions` — pre-capture intro body. Paired with
     ///     `icon` to form "what you're about to do". Shown before
     ///     the camera turns on for THIS step — even between steps
@@ -60,7 +60,7 @@ interface types {
     ///   * `review-hint` — post-capture check on the preview screen
     ///     ("Make sure the MRZ is sharp and free of glare").
     record capture-step {
-        icon: option<string>,
+        icon: option<icon-ref>,
         instructions: localized-ref,
         label: localized-ref,
         camera: camera-facing,

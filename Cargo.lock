@@ -1131,10 +1131,13 @@ dependencies = [
  "enclavid-host-bridge",
  "futures",
  "hex",
+ "hkdf",
  "hyper",
  "hyper-util",
  "moka",
  "prost",
+ "rand 0.8.6",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "secrecy",
  "serde",
@@ -1222,7 +1225,6 @@ version = "0.1.0"
 dependencies = [
  "age",
  "chacha20poly1305",
- "enclavid-untrusted",
  "hyper-util",
  "prost",
  "rand_core 0.6.4",
@@ -1231,10 +1233,6 @@ dependencies = [
  "tonic-build",
  "tower",
 ]
-
-[[package]]
-name = "enclavid-untrusted"
-version = "0.1.0"
 
 [[package]]
 name = "encode_unicode"

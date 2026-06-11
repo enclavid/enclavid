@@ -14,7 +14,7 @@ use base64ct::Encoding;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use enclavid_host_bridge::{AuthN, RegistryClient};
+use enclavid_host_bridge::{AuthN, AuthZ, RegistryClient, Replay, reason};
 
 /// OCI layer media-type for the encrypted policy wasm. Single layer
 /// in the artifact — any embedded text-ref declarations live
@@ -133,7 +133,7 @@ pub async fn validate_client_policy_key(
         .pull_manifest(policy_ref, registry_auth)
         .await
         .map_err(classify_transport_error)?
-        .trust::<AuthN, _, _, _>(|r| {
+        .trust::<AuthN, _, _, _, _>(|r| {
             // Same digest verification as in `pull_and_decrypt` — the
             // bytes must hash to the digest the session record was
             // pinned against.
@@ -152,8 +152,16 @@ pub async fn validate_client_policy_key(
                     actual: r.manifest_digest.clone(),
                 });
             }
-            Ok(())
+            Ok(r)
         })?
+        .trust_unchecked::<AuthZ, _>(reason!(
+            "OCI registry server enforces pull authorisation with the host-supplied \
+             bearer; TEE doesn't gate access at this layer"
+        ))
+        .trust_unchecked::<Replay, _>(reason!(
+            "content-addressed by digest in the request — an 'old' response for the \
+             same digest is bit-identical to the current one"
+        ))
         .into_inner();
 
     let manifest: OciManifest = serde_json::from_slice(&response.manifest)
@@ -206,7 +214,7 @@ pub async fn pull_and_decrypt(
         .pull(policy_ref, registry_auth)
         .await
         .map_err(classify_transport_error)?
-        .trust::<AuthN, _, _, _>(|r| {
+        .trust::<AuthN, _, _, _, _>(|r| {
             // Manifest bytes must hash to the digest baked into
             // `policy_ref` (which was pinned at session-create time).
             let manifest_actual = sha256_hex(&r.manifest);
@@ -250,8 +258,15 @@ pub async fn pull_and_decrypt(
                     });
                 }
             }
-            Ok(())
+            Ok(r)
         })?
+        .trust_unchecked::<AuthZ, _>(reason!(
+            "OCI registry server enforces pull authorisation with the host-supplied \
+             bearer; TEE doesn't gate access at this layer"
+        ))
+        .trust_unchecked::<Replay, _>(reason!(
+            "content-addressed by digest — bit-identical responses for the same digest"
+        ))
         .into_inner();
 
     // After trust gate: response is plain `PullResponse`. Re-parse the
@@ -323,7 +338,7 @@ pub async fn pull_plugin(
         .pull(plugin_ref, registry_auth)
         .await
         .map_err(classify_transport_error)?
-        .trust::<AuthN, _, _, _>(|r| {
+        .trust::<AuthN, _, _, _, _>(|r| {
             // Identical digest-validation flow as `pull_and_decrypt`:
             // (1) manifest bytes hash to the pinned digest, (2) host's
             // self-reported digest agrees with our recompute,
@@ -363,8 +378,15 @@ pub async fn pull_plugin(
                     });
                 }
             }
-            Ok(())
+            Ok(r)
         })?
+        .trust_unchecked::<AuthZ, _>(reason!(
+            "OCI registry server enforces pull authorisation with the host-supplied \
+             bearer; TEE doesn't gate access at this layer"
+        ))
+        .trust_unchecked::<Replay, _>(reason!(
+            "content-addressed by digest — bit-identical responses for the same digest"
+        ))
         .into_inner();
 
     let manifest: OciManifest = serde_json::from_slice(&response.manifest)

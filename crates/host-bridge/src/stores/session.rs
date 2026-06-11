@@ -48,7 +48,9 @@ pub use status::{SetStatus, Status};
 
 use std::sync::Arc;
 
-use enclavid_untrusted::{AuthN, Replay, Untrusted, reason};
+use crate::boundary;
+use crate::boundary::{AuthN, AuthZ, Replay, Untrusted};
+use crate::reason;
 use tonic::transport::Channel;
 
 use crate::error::BridgeError;
@@ -109,7 +111,7 @@ impl SessionStore {
         &self,
         id: &str,
         fields: T,
-    ) -> Result<(T::Output, Untrusted<u64, (AuthN, Replay)>), BridgeError> {
+    ) -> Result<(T::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError> {
         fields.fetch(self, id).await
     }
 
@@ -129,20 +131,21 @@ impl SessionStore {
     /// run (e.g. the engine persister) feed it forward without an
     /// extra read.
     ///
-    /// Each `build_op` returns `Exposed<Op>` — the seal-output. We
-    /// `release()` only here, at the wire boundary, just before the
-    /// gRPC send. That's the single point where TEE-side data
+    /// Each `build_op` returns `Exposed<Op, ()>` — every outbound
+    /// concern has been vouched for inside the implementation. We
+    /// `into_inner()` only here, at the wire boundary, just before
+    /// the gRPC send. That's the single point where TEE-side data
     /// becomes raw bytes on the channel.
     pub async fn write(
         &self,
         id: &str,
         expected_version: Option<u64>,
         fields: &[&dyn WriteField],
-    ) -> Result<Untrusted<u64, (AuthN, Replay)>, BridgeError> {
+    ) -> Result<Untrusted<u64, (AuthN, AuthZ, Replay)>, BridgeError> {
         let ctx = Ctx { tee_seal_key: self.tee_seal_key(), session_id: id };
         let mut ops: Vec<Op> = Vec::with_capacity(fields.len());
         for f in fields {
-            ops.push(f.build_op(&ctx)?.release());
+            ops.push(f.build_op(&ctx)?.into_inner());
         }
         let response = self
             .client
@@ -153,18 +156,18 @@ impl SessionStore {
                 expected_version,
             })
             .await?;
-        Ok(Untrusted::new(response.into_inner().new_version, reason!(r#"
-Host-supplied counter. The TEE feeds it as `expected_version`
-on the next write — a lying host either fails the next CAS (DoS)
-or stomps a concurrent winner (UX regression), no data leak.
-AuthZ N/A: counter is not an ownership signal.
-        "#)))
+        Ok(boundary::inbound::from_host(response.into_inner().new_version, reason!(r#"
+Session version counter (new_version) from Write response.
+Host-supplied; host-bridge does no work-backed close on any
+concern — boundary returns maximal scope and the caller (the
+endpoint that knows the CAS-feed-forward use) peels with rationale.
+            "#)))
     }
 
     /// Delete a scalar field's value. Today only used to drop session
     /// state on `/reset`; exposed as a typed method rather than via a
     /// tuple because we have no use case for batched delete.
-    pub async fn delete(&self, id: &str) -> Result<Untrusted<u64, (AuthN, Replay)>, BridgeError> {
+    pub async fn delete(&self, id: &str) -> Result<Untrusted<u64, (AuthN, AuthZ, Replay)>, BridgeError> {
         let response = self
             .client
             .clone()
@@ -173,14 +176,14 @@ AuthZ N/A: counter is not an ownership signal.
                 field: BlobField::State as i32,
             })
             .await?;
-        Ok(Untrusted::new(response.into_inner().deleted, reason!(r#"
-Deletion-count is informational; no security gate hangs on it.
-Host can fabricate (AuthN open) or echo a stale value (Replay
-open). AuthZ N/A.
-        "#)))
+        Ok(boundary::inbound::from_host(response.into_inner().deleted, reason!(r#"
+Delete-row count from Delete response. Host-supplied; no
+work-backed close at this layer — caller peels with rationale (the
+typical one is "informational only; no security gate hangs on it").
+            "#)))
     }
 
-    pub async fn exists(&self, id: &str) -> Result<Untrusted<bool, (AuthN, Replay)>, BridgeError> {
+    pub async fn exists(&self, id: &str) -> Result<Untrusted<bool, (AuthN, AuthZ, Replay)>, BridgeError> {
         let response = self
             .client
             .clone()
@@ -188,12 +191,10 @@ open). AuthZ N/A.
                 session_id: id.to_string(),
             })
             .await?;
-        Ok(Untrusted::new(response.into_inner().exists, reason!(r#"
-Existence is a host-controlled boolean — advisory only. Actual
-gating happens via decryption / workspace check elsewhere.
-AuthN open (fabrication possible), Replay open (stale state).
-AuthZ N/A: a presence-bit isn't an ownership signal.
-        "#)))
+        Ok(boundary::inbound::from_host(response.into_inner().exists, reason!(r#"
+Existence probe answer from Exists response. Host-supplied; no
+work-backed close at this layer — caller peels with rationale.
+            "#)))
     }
 
     // ---- tuple-trait helper (crate-private) ----
@@ -206,7 +207,7 @@ AuthZ N/A: a presence-bit isn't an ownership signal.
         &self,
         id: &str,
         selectors: Vec<FieldSelector>,
-    ) -> Result<(Vec<Slot>, Untrusted<u64, (AuthN, Replay)>), BridgeError> {
+    ) -> Result<(Vec<Slot>, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError> {
         let response = self
             .client
             .clone()
@@ -219,11 +220,10 @@ AuthZ N/A: a presence-bit isn't an ownership signal.
         // the host contract; we trust that ordering here. Out-of-order
         // or missing slots would be a host bug.
         let inner = response.into_inner();
-        Ok((inner.slots, Untrusted::new(inner.version, reason!(r#"
-Host-supplied counter we pin against on subsequent writes —
-same shape as the version from `write`. AuthN/Replay open;
-AuthZ N/A. Slots carry their own per-field scopes set inside
-each ReadField::decode.
-        "#))))
+        let version = boundary::inbound::from_host(inner.version, reason!(r#"
+Session version counter (current_version) from Read response.
+Host-supplied; no work-backed close at this layer — caller peels.
+            "#));
+        Ok((inner.slots, version))
     }
 }

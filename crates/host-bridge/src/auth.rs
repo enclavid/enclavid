@@ -11,7 +11,10 @@
 //! to applicant-data leak. See proto/auth.proto and architecture.md →
 //! Network Isolation for the full analysis.
 
-use enclavid_untrusted::{AuthN, Replay, Untrusted, reason};
+use crate::boundary;
+use crate::boundary::{AuthN, AuthZ, Replay, Untrusted};
+use crate::reason;
+
 use tonic::Code;
 use tonic::transport::Channel;
 
@@ -81,7 +84,7 @@ impl AuthClient {
         &self,
         authorization_header: &str,
         operation: ClientOperation,
-    ) -> Result<Untrusted<AuthVerdict, (AuthN, Replay)>, BridgeError> {
+    ) -> Result<Untrusted<AuthVerdict, (AuthN, AuthZ, Replay)>, BridgeError> {
         let request = AuthorizeClientRequest {
             authorization_header: authorization_header.to_string(),
             operation: operation as i32,
@@ -102,11 +105,12 @@ impl AuthClient {
                 _ => return Err(BridgeError::from(status)),
             },
         };
-        Ok(Untrusted::new(verdict, reason!(r#"
-Verdict comes straight from the host's own claim. TEE can't
-verify it (AuthN open), host could replay a stale answer (Replay
-open). AuthZ N/A: the verdict IS the authz answer, nothing
-further to check on top.
+        Ok(boundary::inbound::from_host(verdict, reason!(r#"
+AuthVerdict from host Auth.AuthorizeClient response. Verdict comes
+straight from the host's own claim (TEE never parses tokens). No
+work-backed close at this layer — caller peels with rationale (the
+typical one is "verdict IS the authz answer, nothing further to
+check on top").
         "#)))
     }
 }

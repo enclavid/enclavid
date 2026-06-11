@@ -51,7 +51,30 @@ use std::path::Path;
 // The engine re-exports them via `enclavid-engine::limits` so engine
 // callers can use one short path; bumps land here once.
 
-pub const MAX_TEXT_ENTRIES: usize = 4096;
+// Per-kind cap on declarations. Split per kind because the covert-
+// channel surfaces aren't symmetric:
+//
+//   * `disclosure-fields` declarations leak their raw key into the
+//     consumer-facing envelope (consumer SDK dispatches by literal
+//     key). Channel bandwidth is `log2(MAX_DECLARED_DISCLOSURE_FIELDS)`
+//     bits per `DisplayField.key` position. Tight cap here is the
+//     primary defence; transparency UI surfaces the declared
+//     count + full vocabulary so user can audit.
+//   * `i18n` declarations never reach the consumer — the engine
+//     resolves localized refs to picked text before any wire
+//     framing. Inside the TEE the picked text is presented to user
+//     verbatim, so semantic synonyms with identical translations
+//     produce indistinguishable output: no leak channel exists at
+//     all. Generous cap is safe.
+//   * `icons` declarations reach the applicant browser as machine
+//     names (frontend dispatches against bundled SVGs) but never
+//     hit the consumer envelope. Threat model: malicious browser
+//     extension / XSS could read the icon name. Tight cap matches
+//     the realistic frontend inventory (< 16 SVGs ship today).
+pub const MAX_DECLARED_DISCLOSURE_FIELDS: usize = 256;
+pub const MAX_DECLARED_LOCALIZED: usize = 4096;
+pub const MAX_DECLARED_ICONS: usize = 64;
+
 pub const MAX_TEXT_VALUE_HARD_BYTES: usize = 16 * 1024;
 pub const MAX_KEY_LENGTH: usize = 128;
 pub const MAX_LANGUAGE_LENGTH: usize = 16;
@@ -62,12 +85,18 @@ pub const SECTION_DISCLOSURE_FIELDS: &str = "enclavid:embedded.disclosure-fields
 /// Custom section name for the i18n translation catalog.
 pub const SECTION_I18N: &str = "enclavid:embedded.i18n.v1";
 
+/// Custom section name for the icons list.
+pub const SECTION_ICONS: &str = "enclavid:embedded.icons.v1";
+
 /// Conventional on-disk filename for the disclosure-fields source.
 /// CLI seal looks here in the component's project directory.
 pub const FILE_DISCLOSURE_FIELDS: &str = "disclosure-fields.json";
 
 /// Conventional on-disk filename for the i18n source.
 pub const FILE_I18N: &str = "i18n.json";
+
+/// Conventional on-disk filename for the icons source.
+pub const FILE_ICONS: &str = "icons.json";
 
 /// Parsed contents of `disclosure-fields.json` /
 /// `enclavid:embedded.disclosure-fields.v1`. A flat list of machine
@@ -104,6 +133,25 @@ pub struct DisclosureFieldsSection {
 #[serde(transparent)]
 pub struct I18nSection {
     pub entries: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// Parsed contents of `icons.json` / `enclavid:embedded.icons.v1`.
+/// A flat list of machine identifiers the component declares it
+/// will pass as `CaptureStep.icon`. The applicant frontend
+/// dispatches against a bundled SVG library by literal name; the
+/// engine validates the name was declared. Unknown names render
+/// with no icon — declaring an icon doesn't ship its SVG, only
+/// authorises the component to surface the name.
+///
+/// Wire format:
+///
+/// ```text
+/// ["passport", "id-card", "drivers-license", "selfie"]
+/// ```
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[serde(transparent)]
+pub struct IconsSection {
+    pub names: Vec<String>,
 }
 
 /// Validation outcome with separated errors (fail) and warnings
@@ -153,6 +201,18 @@ pub fn read_i18n(path: &Path) -> Result<Option<I18nSection>> {
     Ok(Some(parsed))
 }
 
+/// Read + JSON-parse `icons.json` from disk. `Ok(None)` if missing.
+pub fn read_icons(path: &Path) -> Result<Option<IconsSection>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let parsed: IconsSection = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {} as JSON", path.display()))?;
+    Ok(Some(parsed))
+}
+
 /// Read the raw bytes of a section source file. Used by CLI seal —
 /// the wasm custom section bytes are the on-disk JSON verbatim, no
 /// re-serialization (which could change key order and break
@@ -176,12 +236,18 @@ pub fn parse_i18n(bytes: &[u8]) -> Result<I18nSection> {
     serde_json::from_slice(bytes).with_context(|| "parsing i18n JSON")
 }
 
+/// Parse an icons section from a byte buffer.
+pub fn parse_icons(bytes: &[u8]) -> Result<IconsSection> {
+    serde_json::from_slice(bytes).with_context(|| "parsing icons JSON")
+}
+
 /// Semantic validation across whatever sections the author supplied.
-/// Sections are independently optional — a component shipping neither
+/// Sections are independently optional — a component shipping none
 /// is valid. The engine traps only on actual unregistered key use.
 pub fn validate(
     disclosure_fields: Option<&DisclosureFieldsSection>,
     i18n: Option<&I18nSection>,
+    icons: Option<&IconsSection>,
 ) -> Report {
     let mut r = Report::default();
 
@@ -242,17 +308,50 @@ pub fn validate(
         }
     }
 
-    // No disjointness check: a ref can legitimately appear in both
-    // disclosure-fields (as field.key machine identifier) AND i18n
-    // (with a translation for use as label / reason). Engine handles
-    // via union semantics.
+    // --- icons checks ---
+    if let Some(icons) = icons {
+        let mut seen: std::collections::BTreeSet<&str> = Default::default();
+        for name in &icons.names {
+            if !is_valid_text_ref(name) {
+                r.fail(format!(
+                    "icons entry '{name}' fails text-ref format \
+                     (must be [a-z][a-z0-9_-]{{0,{}}})",
+                    MAX_KEY_LENGTH - 1,
+                ));
+                continue;
+            }
+            if !seen.insert(name.as_str()) {
+                r.fail(format!("icons entry '{name}' appears more than once"));
+            }
+        }
+    }
 
-    // --- total entries ---
-    let total = disclosure_fields.map(|d| d.fields.len()).unwrap_or(0)
-        + i18n.map(|i| i.entries.len()).unwrap_or(0);
-    if total > MAX_TEXT_ENTRIES {
+    // No disjointness check: a key can legitimately appear in
+    // multiple sections (e.g. `passport` as both a disclosure-field
+    // machine identifier and an icon name). Each section has its
+    // own store; refs are kind-tagged.
+
+    // --- per-kind cardinality caps ---
+    //
+    // Each cap reflects the covert-channel surface for the kind —
+    // see the constant docs in this crate's module header.
+    let df_count = disclosure_fields.map(|d| d.fields.len()).unwrap_or(0);
+    if df_count > MAX_DECLARED_DISCLOSURE_FIELDS {
         r.fail(format!(
-            "{total} total entries (disclosure-fields ∪ i18n), max is {MAX_TEXT_ENTRIES}"
+            "disclosure-fields declares {df_count} entries, max is \
+             {MAX_DECLARED_DISCLOSURE_FIELDS}"
+        ));
+    }
+    let l_count = i18n.map(|i| i.entries.len()).unwrap_or(0);
+    if l_count > MAX_DECLARED_LOCALIZED {
+        r.fail(format!(
+            "i18n declares {l_count} entries, max is {MAX_DECLARED_LOCALIZED}"
+        ));
+    }
+    let icon_count = icons.map(|i| i.names.len()).unwrap_or(0);
+    if icon_count > MAX_DECLARED_ICONS {
+        r.fail(format!(
+            "icons declares {icon_count} entries, max is {MAX_DECLARED_ICONS}"
         ));
     }
 

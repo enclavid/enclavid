@@ -1,15 +1,16 @@
 package enclavid:embedded@0.1.0;
 
 /// "Embedded" — compile-time data the component declares once and the
-/// engine reads at load: text-ref identifiers and translations. Sealed
-/// by `enclavid policy seal` into independent wasm custom sections
+/// engine reads at load: disclosure-field identifiers, i18n
+/// translations, and frontend-dispatched icon names. Sealed by
+/// `enclavid policy seal` into independent wasm custom sections
 /// (`enclavid:embedded.disclosure-fields.v1`,
-/// `enclavid:embedded.i18n.v1`),
+/// `enclavid:embedded.i18n.v1`,
+/// `enclavid:embedded.icons.v1`),
 /// then read by the host at instantiation time to build the per-
-/// component text-ref registry. All sections are optional — declare
-/// only what the component actually uses; the engine traps if the
-/// component later passes a key that hasn't been declared in any of
-/// them.
+/// component registry. All sections are optional — declare only what
+/// the component actually uses; the engine traps if the component
+/// later passes a key that hasn't been declared in any of them.
 ///
 /// Why function call (not literal strings in source): the returned
 /// ref carries provenance (issuing component's slot index) in an
@@ -46,4 +47,27 @@ interface i18n {
     /// Resolve a key from this component's `i18n` declarations.
     /// Traps if the key isn't declared.
     localized: func(key: string) -> localized-ref;
+}
+
+/// Lookup interface for the policy's `icons` declarations — machine
+/// identifiers the applicant frontend dispatches against its bundled
+/// SVG library. Closed-by-protocol set per component; declaring an
+/// icon doesn't ship its SVG, only authorises the component to pass
+/// the name through `CaptureStep.icon`. Unknown names render with no
+/// icon (graceful frontend fallback).
+///
+/// Why scoped (not a free-form string): a raw `option<string>` on
+/// `CaptureStep.icon` would let policy encode user attributes into
+/// the name bytes — small bandwidth, but a covert channel of the
+/// same kind text-refs close. Going through an embedded ref forces
+/// every shippable name to appear in the audited
+/// `enclavid:embedded.icons.v1` section.
+interface icons {
+    /// Refs that surface as machine identifiers the frontend
+    /// dispatches by literal.
+    type icon-ref = string;
+
+    /// Resolve a name from this component's `icons` declarations.
+    /// Traps if the name isn't declared.
+    icon: func(name: string) -> icon-ref;
 }

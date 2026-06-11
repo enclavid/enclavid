@@ -127,9 +127,12 @@ pub(super) fn trust_metadata(
     presented_principal: &Option<String>,
 ) -> Result<SessionMetadata, StatusCode> {
     metadata
-        .trust::<AuthZ, _, _, _>(|opt_md| {
-            let md = opt_md.as_ref().ok_or(StatusCode::NOT_FOUND)?;
-            check_client_access(md, presented_token, presented_principal)
+        .trust::<AuthZ, _, _, _, _>(|opt_md| -> Result<_, StatusCode> {
+            {
+                let md = opt_md.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+                check_client_access(md, presented_token, presented_principal)?;
+            }
+            Ok(opt_md)
         })?
         .trust_unchecked::<Replay, _>(reason!(r#"
 Metadata fields (status, policy_ref, client.ref, ...) are stable
@@ -292,6 +295,10 @@ Neither escalates: /sessions needs client_policy_key (validated against
 the policy's manifest validator annotation, secret held by the
 legitimate client) — without it the create returns 422 and
 nothing is persisted.
+        "#))
+        .trust_unchecked::<AuthZ, _>(reason!(r#"
+The AuthVerdict IS the authorisation answer for this request —
+there is no second access decision to gate on top of it.
         "#))
         .trust_unchecked::<Replay, _>(reason!(r#"
 Stale verdict (yesterday's answer for today's request — e.g.

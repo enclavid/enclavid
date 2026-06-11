@@ -147,6 +147,16 @@ enum PolicyCommand {
         #[arg(long = "i18n", default_value = "i18n.json")]
         i18n: PathBuf,
 
+        /// Path to the icons declarations file (flat JSON list of
+        /// machine identifiers). Bundled into the wasm as the
+        /// `enclavid:embedded.icons.v1` custom section before
+        /// encryption. Optional — components that never set
+        /// `CaptureStep.icon` can omit it. Defaults to `icons.json`
+        /// in the current directory; an absent file is silently
+        /// treated as "no icons".
+        #[arg(long = "icons", default_value = "icons.json")]
+        icons: PathBuf,
+
         /// Output path for the sealed artifact. Defaults to the wasm
         /// path with `.age` appended.
         #[arg(short, long)]
@@ -313,8 +323,9 @@ async fn main() -> Result<()> {
                 key,
                 disclosure_fields,
                 i18n,
+                icons,
                 output,
-            } => commands::policy::seal::run(wasm, key, disclosure_fields, i18n, output),
+            } => commands::policy::seal::run(wasm, key, disclosure_fields, i18n, icons, output),
             PolicyCommand::Push {
                 artifact,
                 reference,

@@ -122,10 +122,9 @@ impl Host for HostState {
 /// blocking runtime-crafted refs encoded with per-session user info
 /// and cross-component forgery.
 ///
-/// `icon` is intentionally NOT checked — it's a free-form string
-/// dispatched against the frontend's bundled SVG library. Unknown
-/// names render with no icon (graceful fallback); policy doesn't
-/// declare icons.
+/// `icon` is `option<icon-ref>` after Step 5.6 — when present, it's
+/// looked up in the icons store. Absent icons are fine (frontend
+/// renders no icon).
 fn validate_media_spec(
     spec: &MediaSpec,
     embedded: &EmbeddedRegistry,
@@ -141,6 +140,13 @@ fn validate_media_spec(
         "prompt_media spec label",
     )?;
     for step in &spec.captures {
+        if let Some(icon) = &step.icon {
+            sanitize::ensure_icon(
+                icon,
+                &embedded.icons,
+                "prompt_media capture-step icon",
+            )?;
+        }
         sanitize::ensure_localized(
             &step.instructions,
             &embedded.localized,

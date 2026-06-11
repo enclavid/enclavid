@@ -14,7 +14,7 @@
 //! Host accesses the field directly in Redis when servicing
 //! tenant-scoped admin queries.
 
-use enclavid_untrusted::Exposed;
+use crate::boundary::Exposed;
 
 use crate::error::BridgeError;
 use crate::proto::session_store::BlobField;
@@ -24,19 +24,22 @@ use crate::proto::session_store::write_request::{BlobWrite, Op};
 use super::Ctx;
 use super::core::WriteField;
 
-/// Write marker: set principal. Plaintext, no encryption — host needs
-/// it queryable.
-pub struct SetPrincipal<'a>(pub &'a str);
+/// Write marker: set principal. Payload is `Exposed<&str, ()>` —
+/// fully pre-vouched at the construction site (api `POST /sessions`
+/// handler). Host-bridge does **no** crypto work; just emits a
+/// `BlobWrite` op carrying the plaintext bytes. All three outbound
+/// concerns are documented at the call site with rationale tied to
+/// the host-attribution use case.
+pub struct SetPrincipal<'a>(pub Exposed<&'a str, ()>);
 
 impl<'a> WriteField for SetPrincipal<'a> {
-    fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op>, BridgeError> {
-        // Plaintext UTF-8 bytes. No confidentiality requirement here:
-        // host needs to index by tenant. The lifecycle equivalent is
-        // STATUS — both fields host-visible by design.
-        Ok(Exposed::expose(Op {
+    fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, BridgeError> {
+        // Fully pre-vouched. No sealing, no concern decisions — just
+        // rewrap the plaintext bytes as a typed `Op` for the wire.
+        Ok(self.0.clone().map(|s| Op {
             kind: Some(OpKind::Blob(BlobWrite {
                 field: BlobField::Principal as i32,
-                value: self.0.as_bytes().to_vec(),
+                value: s.as_bytes().to_vec(),
             })),
         }))
     }

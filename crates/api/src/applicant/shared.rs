@@ -288,6 +288,10 @@ Version is a CAS token only. A lying host either fails our
 writes (DoS) or stomps a concurrent winner (UX regression). No
 data leak path.
             "#))
+            .trust_unchecked::<AuthZ, _>(reason!(r#"
+Version counter is not an ownership signal — fed back as
+expected_version on the next write, no access decision hangs on it.
+            "#))
             .trust_unchecked::<Replay, _>(reason!(r#"
 Staleness on the version manifests as CAS mismatch on first
 persist; same containment as above.
@@ -332,6 +336,7 @@ persist; same containment as above.
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata.clone()),
             embedded: embedded.clone(),
+            shuffle_key: state.shuffle_key.clone(),
         });
         // Engine takes one strong ref via the listener; we keep our
         // own so `finalize` lands on the same persister after the run
@@ -431,12 +436,27 @@ async fn lookup_policy(
     })?;
 
     let mut plugin_instances: Vec<PluginInstance> = Vec::with_capacity(plugin_results.len());
+    let mut plugin_decls: Vec<enclavid_engine::ComponentDecls> =
+        Vec::with_capacity(plugin_results.len());
     for res in plugin_results {
         let (package, art) = res.map_err(|e| {
             eprintln!(
                 "lookup_policy: pull_plugin failed for session {session_id}: {e}",
             );
             StatusCode::GONE
+        })?;
+        // Parse the plugin's embedded sections before the wasm bytes
+        // get dropped. Each plugin occupies its own slot in the
+        // composition's `EmbeddedRegistry` (slot `idx + 1` in
+        // `plugin_instances` order); these decls populate that slot
+        // so the plugin can mint refs for its declared keys via the
+        // slot-bound closures `register_for_slot` wires up.
+        let decls = enclavid_engine::load_embedded(&art.wasm_bytes).map_err(|e| {
+            eprintln!(
+                "lookup_policy: load_embedded failed for plugin {package} \
+                 (session {session_id}): {e}",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
         })?;
         let component = Arc::new(state.runner.compile(&art.wasm_bytes).map_err(|e| {
             eprintln!(
@@ -446,6 +466,7 @@ async fn lookup_policy(
             StatusCode::INTERNAL_SERVER_ERROR
         })?);
         plugin_instances.push(PluginInstance { package, component });
+        plugin_decls.push(decls);
     }
 
     let component = Arc::new(state.runner.compile(&artifact.wasm_bytes).map_err(
@@ -471,16 +492,25 @@ async fn lookup_policy(
     })?;
     // Build the composition-wide `EmbeddedRegistry`. Slot 0 = policy
     // decls; slots 1..N = plugin decls in the same order as
-    // `plugin_instances` (mirrors `client.plugins`). Plugin embedded
-    // section parsing lands in Step 6 of the scoping rollout — for
-    // now we reserve their slots with empty decls so slot attribution
-    // is stable even before plugin sections are populated.
-    let mut embedded_builder = EmbeddedRegistry::builder();
+    // `plugin_instances` (mirrors `client.plugins`). Engine's
+    // `Runner::run` iterates `plugins` with the same order and calls
+    // `register_for_slot(plugin_linker, idx + 1, ...)` per plugin —
+    // slot attribution between api builder and engine Linker hooks
+    // is the iteration order of `plugin_instances`.
+    //
+    // `policy_ref_key` is HKDF-derived from `tee_seal_key +
+    // policy_ref` (see `crate::ref_key`). Stable across all sessions
+    // of this policy artifact (refs round-trip across `/connect`
+    // → `/input` rounds), distinct from every other policy's
+    // ref_key — cross-policy ref replay is cryptographically
+    // infeasible.
+    let policy_ref_key = state.ref_key.derive_for_policy(&metadata.policy_ref);
+    let mut embedded_builder = EmbeddedRegistry::builder(policy_ref_key);
     embedded_builder.add_component(policy_decls);
-    for _ in &plugin_instances {
-        embedded_builder.add_component(enclavid_engine::ComponentDecls::default());
+    for decls in plugin_decls {
+        embedded_builder.add_component(decls);
     }
-    let embedded = Arc::new(embedded_builder.finish());
+    let embedded = Arc::new(embedded_builder.build());
     let entry = Arc::new(PolicyEntry {
         component,
         embedded,

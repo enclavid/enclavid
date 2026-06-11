@@ -1,5 +1,10 @@
-//! Type-level markers for values crossing the TEE ↔ host trust
-//! boundary. Two dual wrappers, one per direction.
+//! Type-level wrappers for values crossing the TEE ↔ host trust
+//! boundary. Two dual markers, one per direction. Previously its
+//! own crate (`enclavid-untrusted`); folded into `host-bridge` as
+//! `boundary::sentinel` so the type definitions live in the same
+//! crate as the channel-specific [`inbound`](super::inbound) and
+//! [`outbound`](super::outbound) facades that own the construction
+//! sites — keeps "the perimeter" inspectable in one place.
 //!
 //! `Untrusted<T, S>` — INBOUND. Carries a tuple-typed scope `S`
 //! listing the open trust concerns for the value (authenticity,
@@ -12,12 +17,17 @@
 //! `trust_unchecked::<` / `trust::<` to see every gate; the
 //! turbofish marker says which concern was accepted.
 //!
-//! `Exposed<T>` — OUTBOUND. Marker for a sealed bytes-payload that
-//! is being released to the host. Constructed via
-//! `Exposed::expose(value)`; transport unwraps via `release()` only
-//! at the wire boundary. Sealing (encryption) happens upstream;
-//! `Exposed<T>` is documentary, not cryptographic. Reviewers grep
-//! for `Exposed::expose` to find every release point.
+//! `Exposed<T, S>` — OUTBOUND. Mirror of `Untrusted`: tuple-typed
+//! scope `S` lists the open concerns for a value being released to
+//! the host (cryptographic confidentiality to the intended
+//! recipient, application-level authorization to release, hidden-
+//! bandwidth closure). The inner `T` is reachable only via
+//! `into_inner` after every concern has been peeled with
+//! `vouch_unchecked::<X>()` / `vouch::<X>(predicate)`. Both wrappers
+//! share the [`Remove`] machinery and the `reason!` macro — the
+//! direction is carried by the wrapper type, not by the peel API.
+//! Reviewers grep for `Exposed::new` to find every release point
+//! and `vouch_unchecked::<` to see how each concern was addressed.
 
 use std::marker::PhantomData;
 
@@ -103,6 +113,19 @@ pub struct AuthZ;
 /// the practical impact to DoS / UX regression rather than data
 /// leak.
 pub struct Replay;
+
+/// Covert-channel concern: outbound data might carry policy-controlled
+/// bandwidth disguised as legitimate structure (field order, count,
+/// content). Cleared by sanitisation passes (shuffle, fixed-order,
+/// cardinality cap, value scrubbing) — or explicitly blanket-vouched
+/// via `vouch_unchecked::<Covert>()` when the data is sealed under a
+/// key the host can't read (so the bandwidth never reaches a leak
+/// destination) or has bounded cardinality by construction.
+///
+/// Outbound-only axis: inbound data isn't a covert-channel concern
+/// because we're not on the encoding side. `Exposed<T, S>` is where
+/// `Covert` appears in `S`.
+pub struct Covert;
 
 // =====================================================================
 // Position markers — used to disambiguate `Remove<X, I>` impls when
@@ -194,7 +217,13 @@ impl<T, S> Untrusted<T, S> {
     /// shrinks; both warrant explicit documentation. The token is a
     /// ZST and the reason text is discarded at compile time, so this
     /// is free at runtime.
-    pub fn new(value: T, _scope_reason: Reason) -> Self {
+    ///
+    /// `pub(crate)` by design: external callers route through
+    /// [`crate::boundary::inbound::from_host`] so every wire crossing
+    /// is grep-anchored. Inside this crate, the boundary fn and a
+    /// handful of synthesis sites (absent-blob `None` wraps) are the
+    /// only direct callers.
+    pub(crate) fn new(value: T, _scope_reason: Reason) -> Self {
         Self { value, _marker: PhantomData }
     }
 
@@ -210,16 +239,25 @@ impl<T, S> Untrusted<T, S> {
         Untrusted { value: self.value, _marker: PhantomData }
     }
 
-    /// Address concern `X` via a predicate. On `Ok(())` returns a
-    /// new `Untrusted` with `X` removed from the scope; on `Err(e)`
-    /// propagates the error and the scope is unchanged.
-    pub fn trust<X, I, F, E>(self, check: F) -> Result<Untrusted<T, S::Rest>, E>
+    /// Close concern `X` by performing the work that addresses it
+    /// (cryptographic verify, decrypt-and-decode, predicate check
+    /// returning the same value). The closure receives ownership of
+    /// the wrapped value and produces a (possibly transformed) new
+    /// value `U` — e.g. AEAD-open turns ciphertext bytes into
+    /// plaintext; a parse step turns bytes into a typed record.
+    ///
+    /// Predicate-only verification fits this signature too: return
+    /// `Ok(value)` to keep the value unchanged, `Err(e)` to fail.
+    ///
+    /// On success the scope shrinks by `X`; on failure the scope is
+    /// unchanged but the wrapper is dropped.
+    pub fn trust<X, I, U, F, E>(self, work: F) -> Result<Untrusted<U, S::Rest>, E>
     where
         S: Remove<X, I>,
-        F: FnOnce(&T) -> Result<(), E>,
+        F: FnOnce(T) -> Result<U, E>,
     {
-        check(&self.value)?;
-        Ok(Untrusted { value: self.value, _marker: PhantomData })
+        let new_value = work(self.value)?;
+        Ok(Untrusted { value: new_value, _marker: PhantomData })
     }
 
     /// Project the inner value while preserving the scope. Use when
@@ -244,28 +282,120 @@ impl<T> Untrusted<T, ()> {
 }
 
 // =====================================================================
-// Exposed<T> — outbound wrapper. (Unchanged from the prior API.)
+// Exposed<T, S> — outbound wrapper. Mirror of Untrusted.
 // =====================================================================
 
-/// Outbound wrapper. Constructed at call sites that release a
-/// (typically already-sealed) value to the host. The wrap is the
-/// audit trail — `Exposed::expose` markers grep to every TEE → host
-/// data release.
+/// Outbound wrapper. `S` is a tuple of concern markers; methods peel
+/// one concern at a time until `S = ()`, after which the inner `T`
+/// is reachable via `into_inner`.
+///
+/// Concerns are addressed by *vouching* — the caller asserts that
+/// the concern has been handled upstream (sealing, sanitisation,
+/// authorization-gate) and records why with a [`Reason`] token.
+/// Symmetric with `Untrusted`'s *trust* peel (we're not receiving
+/// data we have to trust the producer of; we're emitting data and
+/// vouching that we've cleared its risk surfaces).
 #[derive(Debug)]
-pub struct Exposed<T>(T);
+pub struct Exposed<T, S = ()> {
+    value: T,
+    _marker: PhantomData<S>,
+}
 
-impl<T> Exposed<T> {
-    /// Wrap a value being released to the host. Sealing (encryption,
-    /// integrity protection) must already have happened upstream —
-    /// `Exposed<T>` is documentary, not cryptographic.
-    pub fn expose(value: T) -> Self {
-        Self(value)
+impl<T: Clone, S> Clone for Exposed<T, S> {
+    /// Manual `Clone` impl — derive can't synthesise it when the
+    /// scope `S` may not be `Clone` (it never is, the markers are
+    /// phantom). Preserves scope.
+    fn clone(&self) -> Self {
+        Self { value: self.value.clone(), _marker: PhantomData }
+    }
+}
+
+impl<T, S> Exposed<T, S> {
+    /// Wrap a value being released to the host with an explicit
+    /// initial scope. Caller picks `S` to match the concerns
+    /// genuinely open at the construction site (e.g., a fresh
+    /// disclosure envelope starts with `(AuthN, AuthZ, Covert)` open;
+    /// a public-by-design status byte starts with `(AuthN, AuthZ,
+    /// Covert)` too but each gets peeled with a "by design observable
+    /// to host" rationale).
+    ///
+    /// Requires a [`Reason`] token built via [`reason!`] explaining
+    /// **why** this particular scope (and not a wider or narrower
+    /// one). Symmetric with `Untrusted::new`.
+    ///
+    /// `pub(crate)` by design: external callers route through
+    /// [`crate::boundary::outbound::to_host`] so every wire release
+    /// is grep-anchored.
+    pub(crate) fn new(value: T, _scope_reason: Reason) -> Self {
+        Self { value, _marker: PhantomData }
     }
 
-    /// Unwrap at the point of handing to the wire. Used inside the
-    /// transport layer right before the gRPC send.
-    pub fn release(self) -> T {
-        self.0
+    /// Vouch (blanket-accept) that concern `X` has been addressed
+    /// upstream. Requires a [`Reason`] token built via [`reason!`] —
+    /// the macro forces every call site to embed an explanation in
+    /// source for audit. Mirror of `Untrusted::trust_unchecked`; same
+    /// position-marker inference machinery (`I`) lets callers peel in
+    /// any order.
+    pub fn vouch_unchecked<X, I>(self, _reason: Reason) -> Exposed<T, S::Rest>
+    where
+        S: Remove<X, I>,
+    {
+        Exposed { value: self.value, _marker: PhantomData }
+    }
+
+    /// Close concern `X` by performing the work that addresses it
+    /// (AEAD-seal, shuffle, sanitise, predicate check returning the
+    /// same value). The closure receives ownership of the wrapped
+    /// value and produces a (possibly transformed) new value `U` —
+    /// e.g. AEAD-seal turns plaintext bytes into ciphertext;
+    /// `shuffle_fields` permutes a typed list; an identity-on-success
+    /// predicate is just `|v| { check(&v)?; Ok(v) }`.
+    ///
+    /// Symmetric to `Untrusted::trust`: inbound trusts WORK that
+    /// verifies authenticity (decrypt), outbound vouches WORK that
+    /// establishes confidentiality (encrypt). Both sides close their
+    /// concern by performing the transformation, not just attesting
+    /// to it.
+    ///
+    /// On success the scope shrinks by `X`; on failure the scope is
+    /// unchanged but the wrapper is dropped.
+    pub fn vouch<X, I, U, F, E>(self, work: F) -> Result<Exposed<U, S::Rest>, E>
+    where
+        S: Remove<X, I>,
+        F: FnOnce(T) -> Result<U, E>,
+    {
+        let new_value = work(self.value)?;
+        Ok(Exposed { value: new_value, _marker: PhantomData })
+    }
+
+    /// Project the inner value while preserving the scope. Use when
+    /// you need to transform `T` to `U` (e.g., wrap sealed bytes
+    /// into a typed `Op`) without addressing any concerns.
+    pub fn map<U, F>(self, f: F) -> Exposed<U, S>
+    where
+        F: FnOnce(T) -> U,
+    {
+        Exposed { value: f(self.value), _marker: PhantomData }
+    }
+}
+
+impl<T> Exposed<T, ()> {
+    /// Reach the inner value once every concern has been vouched
+    /// for. Only available when `S = ()`, so the type system
+    /// enforces that consumers exhaustively peel before the value
+    /// hits the wire.
+    pub fn into_inner(self) -> T {
+        self.value
+    }
+
+    /// Borrow the inner value once every concern has been vouched
+    /// for. Same `S = ()` gate as [`into_inner`](Self::into_inner) —
+    /// usable when the caller needs read-only access (e.g. to feed
+    /// the bytes through a chained hash) before later releasing the
+    /// value to wire. Reviewers grep for `into_inner` *and*
+    /// `as_inner` to find every release point.
+    pub fn as_inner(&self) -> &T {
+        &self.value
     }
 }
 
@@ -291,8 +421,8 @@ mod tests {
         );
         let after_authn = raw.trust_unchecked::<AuthN, _>(reason!("test fixture"));
         let after_authz = after_authn
-            .trust::<AuthZ, _, _, _>(|m| {
-                if m.owner == "alice" { Ok(()) } else { Err("wrong owner") }
+            .trust::<AuthZ, _, _, _, _>(|m| {
+                if m.owner == "alice" { Ok(m) } else { Err("wrong owner") }
             })
             .unwrap();
         let m = after_authz
@@ -319,15 +449,30 @@ mod tests {
     }
 
     #[test]
-    fn trust_predicate_propagates_error() {
+    fn trust_predicate_style_propagates_error() {
+        // Predicate-on-success: keep the value unchanged, fail on
+        // bad input. Same shape as a real authorization check.
         let raw: Untrusted<&'static str, (AuthZ,)> =
             Untrusted::new("mallory", reason!("test fixture"));
         let err = raw
-            .trust::<AuthZ, _, _, _>(|s| {
-                if *s == "alice" { Ok(()) } else { Err("not alice") }
+            .trust::<AuthZ, _, _, _, _>(|s| {
+                if s == "alice" { Ok(s) } else { Err("not alice") }
             })
             .unwrap_err();
         assert_eq!(err, "not alice");
+    }
+
+    #[test]
+    fn trust_transforming_changes_type_on_success() {
+        // Real inbound shape: bytes-on-wire → typed value after
+        // AEAD-open + decode. We model with a string-to-length
+        // transform to keep the test focused on the type shift.
+        let raw: Untrusted<&'static str, (AuthN,)> =
+            Untrusted::new("hello", reason!("test fixture"));
+        let len: Untrusted<usize, ()> = raw
+            .trust::<AuthN, _, _, _, _>(|s| Ok::<_, ()>(s.len()))
+            .unwrap();
+        assert_eq!(len.into_inner(), 5);
     }
 
     #[test]
@@ -360,9 +505,63 @@ mod tests {
     }
 
     #[test]
-    fn exposed_round_trips() {
-        let e = Exposed::expose(vec![1u8, 2, 3]);
-        assert_eq!(e.release(), vec![1, 2, 3]);
+    fn exposed_round_trips_empty_scope() {
+        let e: Exposed<Vec<u8>, ()> = Exposed::new(vec![1u8, 2, 3], reason!("test fixture"));
+        assert_eq!(e.into_inner(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn exposed_vouch_peels_concerns_in_any_order() {
+        let raw: Exposed<u32, (AuthN, AuthZ, Covert)> =
+            Exposed::new(42, reason!("test fixture"));
+        let v = raw
+            .vouch_unchecked::<Covert, _>(reason!("test fixture"))
+            .vouch_unchecked::<AuthN, _>(reason!("test fixture"))
+            .vouch_unchecked::<AuthZ, _>(reason!("test fixture"))
+            .into_inner();
+        assert_eq!(v, 42);
+    }
+
+    #[test]
+    fn exposed_vouch_predicate_style_propagates_error() {
+        let raw: Exposed<&'static str, (Covert,)> =
+            Exposed::new("encoded:bits", reason!("test fixture"));
+        let err = raw
+            .vouch::<Covert, _, _, _, _>(|s| {
+                if s.contains(':') {
+                    Err("looks like encoded data")
+                } else {
+                    Ok(s)
+                }
+            })
+            .unwrap_err();
+        assert_eq!(err, "looks like encoded data");
+    }
+
+    #[test]
+    fn exposed_vouch_transforming_changes_type_on_success() {
+        // Real outbound shape: plaintext value → ciphertext bytes
+        // after AEAD-seal. We model with a serialise-to-bytes step.
+        let raw: Exposed<&'static str, (AuthN,)> =
+            Exposed::new("hello", reason!("test fixture"));
+        let bytes: Exposed<Vec<u8>, ()> = raw
+            .vouch::<AuthN, _, _, _, _>(|s| Ok::<_, ()>(s.as_bytes().to_vec()))
+            .unwrap();
+        assert_eq!(bytes.into_inner(), b"hello".to_vec());
+    }
+
+    #[test]
+    fn exposed_map_preserves_scope() {
+        let raw: Exposed<Meta, (AuthN, Covert)> = Exposed::new(
+            Meta { owner: "alice".into(), version: 7 },
+            reason!("test fixture"),
+        );
+        let projected: Exposed<u32, (AuthN, Covert)> = raw.map(|m| m.version);
+        let v = projected
+            .vouch_unchecked::<AuthN, _>(reason!("test fixture"))
+            .vouch_unchecked::<Covert, _>(reason!("test fixture"))
+            .into_inner();
+        assert_eq!(v, 7);
     }
 
     // === Compile-fail expectations ===
@@ -373,6 +572,9 @@ mod tests {
     //   raw.trust_unchecked::<AuthN, _>();                // missing reason token
     //   raw.trust_unchecked::<AuthN, _>(Reason(()));      // private field
     //   raw.into_inner();                                 // scope is non-empty
+    //
+    //   exposed.vouch_unchecked::<Replay, _>(reason!()); // wrong direction
+    //   exposed.into_inner();                            // scope is non-empty
     //
     // We rely on the type system + macro hygiene to reject these.
 }

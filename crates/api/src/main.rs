@@ -8,7 +8,9 @@ mod input;
 mod limits;
 mod locale;
 mod policy_pull;
+mod ref_key;
 mod runtime;
+mod shuffle;
 mod state;
 mod transport;
 
@@ -45,6 +47,17 @@ async fn main() {
     // to a random value per deployment). When attestation-bound key
     // material lands, this becomes derive-on-startup.
     let tee_seal_key = load_tee_seal_key();
+    // Derive the process-lifetime shuffle key from the same TEE
+    // secret. Domain-separated under a distinct info string so we
+    // don't reuse the AEAD key directly for `DisplayField` shuffle
+    // PRNG seeding — see `crate::shuffle` for the threat model.
+    let shuffle_key = Arc::new(shuffle::ShuffleKey::from_tee_seal_key(&tee_seal_key));
+    // Same pattern for the engine's embedded-ref token derivation
+    // base: HKDF-stretched from `tee_seal_key` under its own info
+    // string. Per-policy 32-byte ref_keys come out of
+    // `RefKey::derive_for_policy(policy_ref)` at `lookup_policy`
+    // time. See `crate::ref_key` for the threat model.
+    let ref_key = Arc::new(ref_key::RefKey::from_tee_seal_key(&tee_seal_key));
     let channel = connect_store(&address_out)
         .await
         .expect("failed to connect host-bridge");
@@ -59,8 +72,17 @@ async fn main() {
     let attestor: Arc<dyn Attestor> = Arc::new(MockAttestor::new_random());
     let client_state =
         Arc::new(ClientState::init(&address_out, session_store.clone(), attestor).await);
-    let applicant_state =
-        Arc::new(AppState::init(&address_out, session_store, runner, policies).await);
+    let applicant_state = Arc::new(
+        AppState::init(
+            &address_out,
+            session_store,
+            runner,
+            policies,
+            shuffle_key,
+            ref_key,
+        )
+        .await,
+    );
 
     let client_app = client::router(client_state);
     let applicant_app = applicant::router(applicant_state);

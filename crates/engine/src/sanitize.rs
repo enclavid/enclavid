@@ -19,7 +19,7 @@
 //! Unicode tag characters) are shared across both surfaces; only the
 //! length budgets differ.
 
-use crate::embedded::{DisclosureFieldsStore, EmbeddedRegistry, LocalizedStore};
+use crate::embedded::{DisclosureFieldsStore, EmbeddedRegistry, IconStore, LocalizedStore};
 use crate::enclavid::disclosure::types::DisplayField;
 use crate::limits::{
     MAX_EXPOSE_FIELDS, MAX_KEY_LENGTH, MAX_TEXT_VALUE_SOFT_CHARS, MAX_VALUE_LENGTH,
@@ -84,6 +84,16 @@ pub fn ensure_localized(
     role: &str,
 ) -> wasmtime::Result<()> {
     ensure_registered_in(token, role, "localized", |t| store.contains(t))
+}
+
+/// Format-validate + lookup in the icons store. Used at every
+/// icon-ref use-site (`CaptureStep.icon`).
+pub fn ensure_icon(
+    token: &str,
+    store: &IconStore,
+    role: &str,
+) -> wasmtime::Result<()> {
+    ensure_registered_in(token, role, "icon", |t| store.contains(t))
 }
 
 /// Shared body: format check then membership through the
@@ -187,6 +197,17 @@ pub fn sanitize_fields(fields: Vec<DisplayField>) -> Vec<DisplayField> {
             // characters that would need stripping. `value` is
             // policy-supplied free text and gets stripped here
             // (control / BIDI / zero-width).
+            //
+            // Order is **not** shuffled here. Policy-controlled
+            // ordering is a covert channel only to the consumer
+            // envelope (the destination the policy author can
+            // collude with); the applicant's consent screen renders
+            // for the user — who is the defender, not the attacker
+            // — so order-preserving the consent UI is correct UX
+            // and not a leak surface. The shuffle lives at the
+            // envelope boundary instead (api persister's
+            // `seal_disclosure`), so it applies to the bytes that
+            // actually reach the consumer.
             key: f.key,
             label: f.label,
             value: sanitize_string(&f.value),
@@ -236,10 +257,21 @@ mod tests {
     use crate::embedded::{ComponentDecls, EmbeddedRegistry, Translation};
     use std::collections::HashMap;
 
+    /// Fixed test key — non-secret. Production callers derive
+    /// `ref_key` from `tee_seal_key + policy_ref` in the api crate;
+    /// tests only need stability for token round-trip.
+    const TEST_REF_KEY: [u8; 32] = [7u8; 32];
+
     fn field(key: &str, value: &str) -> DisplayField {
+        // Default-label sites are tests that fail before reaching the
+        // label-validation step (too-many-fields / long-value / key
+        // format / unminted key). The placeholder label here is
+        // intentionally a non-token string; if a callsite slips past
+        // the early gates the label gate catches the wrong-test-shape
+        // and surfaces a loud trap.
         DisplayField {
             key: key.to_string(),
-            label: "0:l:first_name-label".to_string(),
+            label: "unused-placeholder-label".to_string(),
             value: value.to_string(),
         }
     }
@@ -304,15 +336,16 @@ mod tests {
     fn fixture() -> Fixture {
         let mut localized: HashMap<String, Vec<Translation>> = HashMap::new();
         localized.insert("first_name-label".into(), vec![]);
-        let mut b = EmbeddedRegistry::builder();
+        let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
         b.add_component(ComponentDecls {
             disclosure_fields: ["first_name", "tax_id"]
                 .into_iter()
                 .map(String::from)
                 .collect(),
             localized,
+            icons: Default::default(),
         });
-        let embedded = b.finish();
+        let embedded = b.build();
         Fixture {
             first_name_key: embedded.disclosure_fields.get_token(0, "first_name").unwrap(),
             tax_id_key: embedded.disclosure_fields.get_token(0, "tax_id").unwrap(),
@@ -341,7 +374,11 @@ mod tests {
     fn validate_well_formed_minted_key_passes() {
         let f = fixture();
         assert!(
-            validate_fields(&[field(&f.tax_id_key, "v")], &f.embedded).is_ok(),
+            validate_fields(
+                &[field_with_label(&f.tax_id_key, &f.first_name_label, "v")],
+                &f.embedded
+            )
+            .is_ok(),
             "tax_id minted by policy slot should round-trip"
         );
     }
@@ -358,9 +395,19 @@ mod tests {
     #[test]
     fn validate_unminted_key_traps() {
         let f = fixture();
-        // Well-formed but never minted by any slot in the registry —
-        // the timing-based + cross-component defence: a component
-        // can't synthesise a foreign ref at evaluate time.
+        // Well-formed (passes the ASCII format gate) but never minted
+        // by any slot in the registry. Pre-Phase-B the format-shape
+        // was the Phase A debug string; under Phase B BLAKE3-keyed
+        // tokens it's a random-looking 32-hex string that no slot
+        // ever produced. Both pass `validate_ref_format` and both
+        // miss the by_token reverse-index.
+        assert!(
+            validate_fields(&[field("0123456789abcdef0123456789abcdef", "v")], &f.embedded)
+                .is_err()
+        );
+        // Phase A debug-looking string too — still well-formed by the
+        // ASCII gate (allows `:`), still unminted under the new HMAC
+        // scheme. Forgery resistance covers both shapes.
         assert!(
             validate_fields(&[field("0:d:loyalty_tier_ru", "v")], &f.embedded)
                 .is_err()
@@ -404,5 +451,170 @@ mod tests {
         let long = "a".repeat(MAX_TEXT_VALUE_SOFT_CHARS + 100);
         let cleaned = sanitize_text_value(&long);
         assert_eq!(cleaned.chars().count(), MAX_TEXT_VALUE_SOFT_CHARS);
+    }
+
+    // ---------- Multi-component scoping ----------
+    //
+    // Cover the slot-bound `enclavid:embedded/*` story end-to-end at
+    // the sanitize layer (the gate that runs on every host-fn payload
+    // carrying refs). Registry-level slot scoping is unit-tested in
+    // `embedded::registry::tests`; here we exercise that the slot
+    // discipline survives through `validate_fields`, which is where
+    // any drift between mint-time and validate-time would surface.
+
+    /// Fixture: two components, slot 0 = policy, slot 1 = plugin.
+    /// Each contributes distinct disclosure-field keys and one
+    /// localized label, with a `shared` key declared by both slots so
+    /// cross-slot-collision behaviour is observable.
+    struct MultiFixture {
+        embedded: EmbeddedRegistry,
+        policy_df: String,
+        plugin_df: String,
+        shared_policy_df: String,
+        shared_plugin_df: String,
+        policy_label: String,
+        plugin_label: String,
+    }
+
+    fn multi_component_fixture() -> MultiFixture {
+        let mut policy_localized: HashMap<String, Vec<Translation>> = HashMap::new();
+        policy_localized.insert("policy-label".into(), vec![]);
+        let mut plugin_localized: HashMap<String, Vec<Translation>> = HashMap::new();
+        plugin_localized.insert("plugin-label".into(), vec![]);
+
+        let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
+        b.add_component(ComponentDecls {
+            disclosure_fields: ["policy-only", "shared"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            localized: policy_localized,
+            icons: Default::default(),
+        });
+        b.add_component(ComponentDecls {
+            disclosure_fields: ["plugin-only", "shared"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            localized: plugin_localized,
+            icons: Default::default(),
+        });
+        let embedded = b.build();
+
+        MultiFixture {
+            policy_df: embedded.disclosure_fields.get_token(0, "policy-only").unwrap(),
+            plugin_df: embedded.disclosure_fields.get_token(1, "plugin-only").unwrap(),
+            shared_policy_df: embedded.disclosure_fields.get_token(0, "shared").unwrap(),
+            shared_plugin_df: embedded.disclosure_fields.get_token(1, "shared").unwrap(),
+            policy_label: embedded.localized.get_token(0, "policy-label").unwrap(),
+            plugin_label: embedded.localized.get_token(1, "plugin-label").unwrap(),
+            embedded,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_plugin_slot_minted_field() {
+        // A plugin (slot 1) minted both the disclosure-field-ref AND
+        // its label; the policy is just relaying the field to
+        // prompt_disclosure. validate_fields must accept it the same
+        // way it accepts policy-minted refs.
+        let f = multi_component_fixture();
+        assert!(
+            validate_fields(
+                &[field_with_label(&f.plugin_df, &f.plugin_label, "v")],
+                &f.embedded
+            )
+            .is_ok(),
+            "plugin-minted slot-1 refs round-trip through validate"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_policy_and_plugin_refs_mixed_in_one_call() {
+        // One prompt_disclosure carrying refs from both components.
+        // This is the typical multi-component flow (policy composes
+        // results from a plugin and surfaces them on the consent
+        // screen) — both slots' refs must validate together.
+        let f = multi_component_fixture();
+        let fields = vec![
+            field_with_label(&f.policy_df, &f.policy_label, "policy-value"),
+            field_with_label(&f.plugin_df, &f.plugin_label, "plugin-value"),
+        ];
+        assert!(validate_fields(&fields, &f.embedded).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_forged_cross_slot_token() {
+        // Under Phase B, "forgery" isn't a string-format manipulation
+        // attack — the BLAKE3-keyed prefix makes the token opaque —
+        // but a guest could still re-use a token it observed (e.g. a
+        // ref leaked through an earlier disclosure list). What's
+        // structurally tested here is that the registry never
+        // accepts a string that wasn't minted under the active
+        // `ref_key`, no matter how plausible it looks. Phase A debug
+        // strings ("1:d:policy-only") are the most visually obvious
+        // foreign-looking shape and are guaranteed not to collide
+        // with a Phase B HMAC digest.
+        let f = multi_component_fixture();
+        let forged = "1:d:policy-only";
+        assert!(
+            validate_fields(
+                &[field_with_label(forged, &f.plugin_label, "v")],
+                &f.embedded
+            )
+            .is_err(),
+            "Phase-A-looking cross-slot string must be rejected"
+        );
+
+        // Symmetric shape, slot 0 prefix on a slot-1-only key.
+        let forged_other_way = "0:d:plugin-only";
+        assert!(
+            validate_fields(
+                &[field_with_label(forged_other_way, &f.policy_label, "v")],
+                &f.embedded
+            )
+            .is_err()
+        );
+
+        // And a randomly-constructed Phase B-shaped token that no
+        // slot minted under this registry's ref_key — still rejected.
+        let forged_phase_b = "deadbeefcafef00d0123456789abcdef";
+        assert!(
+            validate_fields(
+                &[field_with_label(forged_phase_b, &f.policy_label, "v")],
+                &f.embedded
+            )
+            .is_err(),
+            "random 32-hex string not under by_token must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_handles_collision_key_per_slot_independently() {
+        // The raw key `shared` is declared by BOTH slot 0 and slot 1.
+        // Tokens must be distinct (slot is in the BLAKE3 input) and
+        // each must round-trip through validate_fields when paired
+        // with its own slot's label.
+        let f = multi_component_fixture();
+        assert_ne!(f.shared_policy_df, f.shared_plugin_df);
+        // Phase B tokens are opaque 32-char hex; per-slot
+        // distinguishability lives in the bytes, not a visible prefix.
+        assert_eq!(f.shared_policy_df.len(), 32);
+        assert_eq!(f.shared_plugin_df.len(), 32);
+
+        assert!(
+            validate_fields(
+                &[field_with_label(&f.shared_policy_df, &f.policy_label, "v")],
+                &f.embedded
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_fields(
+                &[field_with_label(&f.shared_plugin_df, &f.plugin_label, "v")],
+                &f.embedded
+            )
+            .is_ok()
+        );
     }
 }

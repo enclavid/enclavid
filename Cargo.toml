@@ -7,7 +7,6 @@ members = [
     "crates/engine",
     "crates/host-bridge",
     "crates/embedded",
-    "crates/untrusted",
 ]
 
 [workspace.package]

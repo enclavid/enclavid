@@ -57,6 +57,15 @@ impl RefKind for Localized {
     type Stored = Vec<super::registry::Translation>;
 }
 
+/// Marker for `enclavid:embedded/icons` refs.
+pub enum Icon {}
+
+impl RefKind for Icon {
+    const TAG: &'static str = "i";
+    const NAME: &'static str = "icon";
+    type Stored = String;
+}
+
 /// Generic backing store: per-kind reverse index over Phase A debug
 /// tokens. Carries enough to answer the two questions the host fn
 /// and the consumer ever ask:
@@ -76,6 +85,13 @@ impl RefKind for Localized {
 pub struct RefStore<K: RefKind> {
     slot_count: usize,
     by_token: HashMap<String, K::Stored>,
+    /// BLAKE3 keyed-hash secret used by [`compute_ref`]. Same value
+    /// across all three stores in one `EmbeddedRegistry` — kind
+    /// domain separation lives in the [`RefKind::TAG`] byte fed into
+    /// the hash input, not in the key itself. Production callers
+    /// derive this from `tee_seal_key + policy_ref` so it's stable
+    /// per-policy and unguessable from outside the TEE.
+    ref_key: [u8; 32],
     _marker: PhantomData<fn() -> K>,
 }
 
@@ -84,6 +100,7 @@ impl<K: RefKind> Default for RefStore<K> {
         Self {
             slot_count: 0,
             by_token: HashMap::new(),
+            ref_key: [0u8; 32],
             _marker: PhantomData,
         }
     }
@@ -107,7 +124,7 @@ impl<K: RefKind> RefStore<K> {
     /// `(key, stored)` pairs are walked once, each producing one
     /// `by_token` entry under the computed token. Slot order in the
     /// outer iterator determines slot indices (0, 1, ...).
-    pub(crate) fn build_from<I, S>(slots: I) -> Self
+    pub(crate) fn build_from<I, S>(slots: I, ref_key: [u8; 32]) -> Self
     where
         I: IntoIterator<Item = S>,
         S: IntoIterator<Item = (String, K::Stored)>,
@@ -117,7 +134,7 @@ impl<K: RefKind> RefStore<K> {
         for items in slots {
             let slot = slot_count;
             for (key, stored) in items {
-                let token = compute_ref::<K>(slot, &key);
+                let token = compute_ref::<K>(slot, &key, &ref_key);
                 by_token.insert(token, stored);
             }
             slot_count += 1;
@@ -125,6 +142,7 @@ impl<K: RefKind> RefStore<K> {
         Self {
             slot_count,
             by_token,
+            ref_key,
             _marker: PhantomData,
         }
     }
@@ -159,7 +177,7 @@ impl<K: RefKind> RefStore<K> {
         if slot >= self.slot_count {
             return None;
         }
-        let token = compute_ref::<K>(slot, key);
+        let token = compute_ref::<K>(slot, key, &self.ref_key);
         self.by_token.contains_key(&token).then_some(token)
     }
 
@@ -177,12 +195,59 @@ impl<K: RefKind> RefStore<K> {
     pub fn contains(&self, token: &str) -> bool {
         self.by_token.contains_key(token)
     }
+
+    /// Number of distinct refs this store can issue across the whole
+    /// composition (sum over slots). Surfaced to the applicant in
+    /// the consent screen so the user can audit the policy's covert-
+    /// channel bandwidth — `log2(declared_count)` bits per ref
+    /// position is the theoretical bound, the actual leak hinges on
+    /// how many ref positions a single call uses.
+    pub fn declared_count(&self) -> usize {
+        self.by_token.len()
+    }
+
+    /// Iterate over every declared `Stored` value across all slots.
+    /// Order is unspecified — caller sorts if a canonical view is
+    /// needed (consent-screen drill-down sorts by the key for stable
+    /// display).
+    pub fn declared(&self) -> impl Iterator<Item = &K::Stored> {
+        self.by_token.values()
+    }
 }
 
-/// Phase A debug format: `"{slot}:{tag}:{key}"`. Inspectable in
-/// logs; the membership check inside [`RefStore::get_token`] is what
-/// makes refs unforgeable across slots (the prefix alone is just a
-/// label). Phase B swaps this for a TEE-keyed HMAC.
-fn compute_ref<K: RefKind>(slot: Slot, key: &str) -> String {
-    format!("{slot}:{}:{key}", K::TAG)
+/// Phase B token: `hex(BLAKE3-keyed(ref_key, slot_be ‖ tag ‖ ':' ‖
+/// key))[..32]` — 128 bits of forge resistance. The `ref_key` is
+/// TEE-only (derived per-policy from `tee_seal_key + policy_ref` in
+/// the api crate), so a guest WASM component can't synthesise a
+/// foreign-slot ref by guessing the format: it doesn't have the key
+/// to compute valid BLAKE3-keyed output for any `(slot, key)` pair.
+///
+/// The reverse-index in [`RefStore::by_token`] then turns the
+/// membership check into pure data — every minted token sits in the
+/// map, and any opaque string a guest synthesises misses with
+/// overwhelming probability.
+///
+/// Domain separation across kinds rides on the TAG byte fed into the
+/// hash input; the same `ref_key` powers all three stores in one
+/// registry. Slot is encoded big-endian as 8 bytes so the input is
+/// unambiguous (a `:` literal between tag and key keeps tag/key
+/// concatenation collision-free with a similarly-tagged sibling
+/// kind).
+fn compute_ref<K: RefKind>(slot: Slot, key: &str, ref_key: &[u8; 32]) -> String {
+    let mut input = Vec::with_capacity(9 + K::TAG.len() + key.len());
+    input.extend_from_slice(&(slot as u64).to_be_bytes());
+    input.extend_from_slice(K::TAG.as_bytes());
+    input.push(b':');
+    input.extend_from_slice(key.as_bytes());
+    let hash = blake3::keyed_hash(ref_key, &input);
+    // 16 bytes = 128-bit forge resistance, 32 hex chars on wire —
+    // tight enough for the format-validator's MAX_KEY_LENGTH headroom
+    // and comfortably under any disclosure-envelope size cap.
+    let bytes = &hash.as_bytes()[..16];
+    let mut s = String::with_capacity(32);
+    use std::fmt::Write;
+    for b in bytes {
+        write!(s, "{b:02x}").expect("write into String never fails");
+    }
+    s
 }

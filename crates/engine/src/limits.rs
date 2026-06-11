@@ -97,11 +97,15 @@ pub const MAX_TEXT_VALUE_SOFT_CHARS: usize = 1000;
 //     linear memory, this caps per-entry size so a million 1-byte
 //     entries can't slip under the memory wire by spreading the
 //     payload.
-//   * `MAX_TEXT_ENTRIES` — total cap on declarations across the two
-//     embedded sections. Bounds how much memory the per-session
-//     text registry can occupy and the audit cardinality of "what
-//     strings can this policy show". Second-line guard behind
-//     `POLICY_MAX_MEMORY`.
+//   * `MAX_DECLARED_DISCLOSURE_FIELDS` / `MAX_DECLARED_LOCALIZED` /
+//     `MAX_DECLARED_ICONS` — per-kind cardinality caps on a single
+//     component's embedded declarations. Split per kind because the
+//     covert-channel surfaces aren't symmetric — see
+//     `enclavid-embedded::lib.rs` for the per-kind rationale. The
+//     compile-time bound is the system-wide trust contract; runtime
+//     transparency UI in api views surfaces the actual declared
+//     counts to the user as a second-line defence.
 pub use enclavid_embedded::{
-    MAX_KEY_LENGTH, MAX_LANGUAGE_LENGTH, MAX_TEXT_ENTRIES, MAX_TEXT_VALUE_HARD_BYTES,
+    MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_ICONS, MAX_DECLARED_LOCALIZED,
+    MAX_KEY_LENGTH, MAX_LANGUAGE_LENGTH, MAX_TEXT_VALUE_HARD_BYTES,
 };

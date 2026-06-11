@@ -104,21 +104,34 @@ impl Runner {
             None
         } else {
             let mut composer = Composer::new();
-            for plugin in plugins {
+            for (idx, plugin) in plugins.iter().enumerate() {
                 let engine_for_factory = self.engine.clone();
                 let embedded_for_factory = embedded.clone();
-                // Plugin's Linker is restricted to the two pure
+                // Slot 0 is the policy; plugins occupy slots 1..N in
+                // the order they appear in `plugins`. The api crate
+                // populated the `EmbeddedRegistry` in the same order
+                // when building the composition (see
+                // `lookup_policy`), so slot indices line up here
+                // without extra plumbing.
+                let plugin_slot = idx + 1;
+                // Plugin's Linker is restricted to the three pure
                 // scoped-lookup interfaces (`enclavid:embedded/
-                // disclosure-fields` and `enclavid:embedded/i18n`) —
-                // no WASI, no suspending `enclavid:*`, nothing else.
-                // Slot-bound registration of those two interfaces
-                // lands in Step 6 of the scoping rollout; for now
-                // the Linker stays empty (no plugin currently imports
-                // either interface). Composer fails loud at compose-
-                // time if a plugin declares any other unsatisfied
-                // import.
-                let plugin_linker =
+                // disclosure-fields`, `enclavid:embedded/i18n`,
+                // `enclavid:embedded/icons`) — no WASI, no suspending
+                // `enclavid:*`, nothing else. `register_for_slot`
+                // captures `plugin_slot` in the closure for each
+                // interface, so the only refs the plugin can issue
+                // are for keys it declared in its own embedded
+                // sections; foreign-slot refs trap inside
+                // `get_token`. Composer fails loud at compose-time
+                // if a plugin declares any other unsatisfied import.
+                let mut plugin_linker =
                     wasmtime::component::Linker::<PluginHostState>::new(&self.engine);
+                crate::embedded::register_for_slot(
+                    &mut plugin_linker,
+                    plugin_slot,
+                    embedded.clone(),
+                )?;
                 composer.add(ComposableDescriptor::new(
                     &plugin.package,
                     ComposableComponent::new(

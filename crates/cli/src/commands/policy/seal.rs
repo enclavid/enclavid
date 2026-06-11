@@ -36,8 +36,8 @@ use std::str::FromStr;
 use wasm_encoder::ComponentSection;
 
 use enclavid_embedded::{
-    SECTION_DISCLOSURE_FIELDS, SECTION_I18N, read_bytes, read_disclosure_fields, read_i18n,
-    validate,
+    SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS, read_bytes,
+    read_disclosure_fields, read_i18n, read_icons, validate,
 };
 
 pub fn run(
@@ -45,6 +45,7 @@ pub fn run(
     key: PathBuf,
     disclosure_fields_path: PathBuf,
     i18n_path: PathBuf,
+    icons_path: PathBuf,
     output: Option<PathBuf>,
 ) -> Result<()> {
     let identity = read_identity(&key)
@@ -54,14 +55,20 @@ pub fn run(
     let wasm_bytes = std::fs::read(&wasm)
         .with_context(|| format!("reading {}", wasm.display()))?;
 
-    // Parse + validate whatever sections the author supplied. Both
-    // are independently optional — `read_*` return None for an
+    // Parse + validate whatever sections the author supplied. All
+    // three are independently optional — `read_*` return None for an
     // absent file, validation runs over whatever's present.
     let parsed_disclosure = read_disclosure_fields(&disclosure_fields_path)
         .with_context(|| format!("reading {}", disclosure_fields_path.display()))?;
     let parsed_i18n = read_i18n(&i18n_path)
         .with_context(|| format!("reading {}", i18n_path.display()))?;
-    let report = validate(parsed_disclosure.as_ref(), parsed_i18n.as_ref());
+    let parsed_icons = read_icons(&icons_path)
+        .with_context(|| format!("reading {}", icons_path.display()))?;
+    let report = validate(
+        parsed_disclosure.as_ref(),
+        parsed_i18n.as_ref(),
+        parsed_icons.as_ref(),
+    );
     for w in &report.warnings {
         println!("warning: {w}");
     }
@@ -90,11 +97,17 @@ pub fn run(
     } else {
         None
     };
+    let icons_bytes = if parsed_icons.is_some() {
+        Some(read_bytes(&icons_path)?)
+    } else {
+        None
+    };
 
     let bundled = bundle_with_sections(
         &wasm_bytes,
         disclosure_bytes.as_deref(),
         i18n_bytes.as_deref(),
+        icons_bytes.as_deref(),
     );
     let plaintext_digest = sha256_hex(&bundled);
 
@@ -123,12 +136,15 @@ pub fn run(
 
     let disclosure_len = disclosure_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
     let i18n_len = i18n_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
+    let icons_len = icons_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
     println!(
-        "Encrypted: {} (wasm {} B + disclosure-fields {} B + i18n {} B → bundled {} B) → {}",
+        "Encrypted: {} (wasm {} B + disclosure-fields {} B + i18n {} B + icons {} B \
+         → bundled {} B) → {}",
         wasm.display(),
         wasm_bytes.len(),
         disclosure_len,
         i18n_len,
+        icons_len,
         bundled.len(),
         output_path.display(),
     );
@@ -159,10 +175,12 @@ fn bundle_with_sections(
     wasm_bytes: &[u8],
     disclosure: Option<&[u8]>,
     i18n: Option<&[u8]>,
+    icons: Option<&[u8]>,
 ) -> Vec<u8> {
     let extra_capacity = disclosure.map(|b| b.len()).unwrap_or(0)
         + i18n.map(|b| b.len()).unwrap_or(0)
-        + 64;
+        + icons.map(|b| b.len()).unwrap_or(0)
+        + 96;
     let mut bundled = Vec::with_capacity(wasm_bytes.len() + extra_capacity);
     bundled.extend_from_slice(wasm_bytes);
     if let Some(bytes) = disclosure {
@@ -175,6 +193,13 @@ fn bundle_with_sections(
     if let Some(bytes) = i18n {
         wasm_encoder::CustomSection {
             name: Cow::Borrowed(SECTION_I18N),
+            data: Cow::Borrowed(bytes),
+        }
+        .append_to_component(&mut bundled);
+    }
+    if let Some(bytes) = icons {
+        wasm_encoder::CustomSection {
+            name: Cow::Borrowed(SECTION_ICONS),
             data: Cow::Borrowed(bytes),
         }
         .append_to_component(&mut bundled);

@@ -7,8 +7,6 @@
 //!   `commit` atomically combines scalar field writes with accumulated
 //!   list appends — used by /input and /connect handlers to publish a
 //!   policy run's effects (state + disclosures) as one transaction.
-//! - `ReportStore` — per-policy anonymous report log via the
-//!   `ReportStore` gRPC service.
 //!
 //! Engine never talks to host-bridge directly. It accumulates pending
 //! disclosure entries (`AppendDisclosure`) in its own `HostState`
@@ -22,11 +20,9 @@
 //! acknowledge that "Ok" means "host claims success", not "TEE
 //! verified the on-disk state matches expectation".
 
-mod report;
 mod session;
 
-pub use report::ReportStore;
 pub use session::{
     AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, SessionStore, SetMetadata,
-    SetState, SetStatus, SetPrincipal, State, Status, WriteField,
+    SetPrincipal, SetState, SetStatus, State, Status, WriteField,
 };

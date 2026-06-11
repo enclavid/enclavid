@@ -1,5 +1,6 @@
 mod age_seal;
 mod auth;
+pub mod boundary;
 mod error;
 mod registry;
 mod stores;
@@ -9,14 +10,8 @@ mod proto {
     pub mod session_store {
         tonic::include_proto!("enclavid.session_store");
     }
-    pub mod report_store {
-        tonic::include_proto!("enclavid.report_store");
-    }
     pub mod state {
         tonic::include_proto!("enclavid.state");
-    }
-    pub mod report {
-        tonic::include_proto!("enclavid.report");
     }
     pub mod registry {
         tonic::include_proto!("enclavid.registry");
@@ -28,7 +23,11 @@ mod proto {
 
 pub use age_seal::seal_to_recipient;
 pub use auth::{AuthClient, AuthVerdict, Principal};
-pub use enclavid_untrusted::{AuthN, AuthZ, Exposed, Reason, Replay, Untrusted, reason};
+// Boundary-sentinel re-exports — Untrusted/Exposed/concern markers
+// live in `boundary::sentinel` after the untrusted-crate fold-in.
+// The old crate-root path is preserved so external consumers don't
+// need to update import paths.
+pub use boundary::{AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted};
 pub use error::BridgeError;
 pub use transport::{GrpcChannel, connect_store};
 pub use proto::auth::ClientOperation;
@@ -37,7 +36,6 @@ pub use proto::registry::{
     PullResponse as RegistryPullResponse,
 };
 pub use registry::RegistryClient;
-pub use proto::report::{Report, ReportReason};
 pub use proto::state::{
     CallEvent, CameraFacing, CaptureGroup, CaptureGuide, CaptureStep, Client, ClientAccess, Clip,
     Completed, ConsentRequest, DisplayField, GuideNone, GuideOval, GuideRect, MediaRequest,
@@ -45,8 +43,8 @@ pub use proto::state::{
     VerificationSetData, VerificationSetRequest, call_event, capture_guide, suspended,
 };
 pub use stores::{
-    AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, ReportStore, SessionStore,
-    SetMetadata, SetState, SetStatus, SetPrincipal, State, Status, WriteField,
+    AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, SessionStore, SetMetadata,
+    SetPrincipal, SetState, SetStatus, State, Status, WriteField,
 };
 
 // --- Suspension as wasmtime trap error ---

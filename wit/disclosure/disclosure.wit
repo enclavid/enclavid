@@ -78,6 +78,16 @@ interface disclosure {
     ///
     /// Both are `text-ref`s into `prepare-text-refs` (host-validates
     /// membership; no default).
+    ///
+    /// **Field-order in the consumer-bound envelope is not part of
+    /// the contract.** The host shuffles `fields` before sealing the
+    /// disclosure envelope, so the order on the consumer side is
+    /// not policy-controlled. Authors must not encode any
+    /// information in field order; only the set of `(key, value)`
+    /// pairs reaches the consumer. The applicant's consent screen
+    /// renders fields in the order the policy passes — useful for
+    /// UX but not a leak surface (the applicant is the defender,
+    /// not the attacker).
     prompt-disclosure: func(
         fields: list<display-field>,
         reason: localized-ref,

@@ -28,8 +28,8 @@ mod state;
 
 pub use embedded::{
     ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedRegistry,
-    EmbeddedRegistryBuilder, Localized, LocalizedStore, RefKind, RefStore, Slot, Translation,
-    load_embedded,
+    EmbeddedRegistryBuilder, Icon, IconStore, Localized, LocalizedStore, RefKind, RefStore,
+    Slot, Translation, load_embedded,
 };
 pub use enclavid_host_bridge::{SessionMetadata, SessionState, suspended};
 pub use listener::{ConsentDisclosure, SessionChange, SessionListener};
@@ -55,6 +55,7 @@ wasmtime::component::bindgen!({
         world host {
             import enclavid:embedded/disclosure-fields@0.1.0;
             import enclavid:embedded/i18n@0.1.0;
+            import enclavid:embedded/icons@0.1.0;
             import enclavid:disclosure/disclosure@0.1.0;
             import enclavid:form/media@0.1.0;
             export enclavid:policy/policy@0.1.0;
