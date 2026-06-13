@@ -23,7 +23,7 @@ struct TestPolicy;
 
 // Embedded-ref keys used in evaluate. Declarations live next to
 // `Cargo.toml` in `disclosure-fields.json` (machine keys) and
-// `i18n.json` (translatable UI strings). Refs are minted at
+// `i18n.json` (translatable UI strings). Refs are resolved at
 // evaluate time through the `enclavid:embedded/*` host fns, which
 // trap if a key isn't declared in the corresponding section.
 //

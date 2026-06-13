@@ -47,9 +47,7 @@ const POLICY_SLOT: Slot = 0;
 
 /// Emit the static binding (bindgen `Host` trait impl for slot 0)
 /// and the dynamic binding (per-plugin Linker registration helper
-/// for slots ≥ 1) for one `enclavid:embedded/*` interface. The two
-/// emitted bodies share [`get_token_or_trap`] verbatim — only the
-/// surrounding bindgen / Linker shape differs.
+/// for slots ≥ 1) for one `enclavid:embedded/*` interface.
 ///
 /// Args:
 ///
@@ -68,6 +66,13 @@ const POLICY_SLOT: Slot = 0;
 ///   * `register_fn` — name of the per-kind plugin Linker
 ///     registration fn this macro emits. Called once per kind from
 ///     [`register_for_slot`].
+/// The `slot` passed to the emitted `$register_fn` is the slot the
+/// plugin closure will validate against — picked by the caller
+/// (`register_for_slot`). DF closures get pinned to `POLICY_SLOT`
+/// at that call site (single bandwidth gate); i18n/icons closures
+/// get the plugin's own slot (per-component scoping). The macro
+/// itself is symmetric — asymmetry lives in one place at the
+/// `register_for_slot` body below.
 macro_rules! embedded_kind {
     (
         host_trait = $host_trait:path,
@@ -130,32 +135,42 @@ embedded_kind! {
     register_fn = register_icons_for_slot,
 }
 
-/// Wire `enclavid:embedded/disclosure-fields` and
-/// `enclavid:embedded/i18n` onto a plugin's Linker, with the
-/// plugin's slot index captured in the closure environment so the
-/// plugin can only obtain tokens for keys *it* declared.
+/// Wire the three `enclavid:embedded/*` interfaces onto a plugin's
+/// Linker. Each register fn captures the slot it's handed into the
+/// closure that backs the host import. **The asymmetry between
+/// kinds lives here, in the slot we pick per kind:**
+///
+///   * `disclosure-fields` → `POLICY_SLOT`. DF is the only kind
+///     that reaches the consumer envelope, so the policy (slot 0)
+///     is the single bandwidth gate — every plugin resolve validates
+///     against slot 0's catalog regardless of which plugin made
+///     the call. Emitted token is slot-0-flavored.
+///   * `i18n` / `icons` → the plugin's own `slot`. These refs are
+///     applicant-facing only (i18n resolved to text in TEE before
+///     wire, icons dispatched on the applicant frontend), never
+///     reach the consumer, so per-component scoping is sufficient.
 ///
 /// Registration happens in `Runner::run` once per plugin Linker,
-/// before `compose()`. Plugin Linkers that don't import these
-/// interfaces are unaffected — wasmtime ignores Linker entries the
+/// before `compose()`. Plugin Linkers that don't import a given
+/// interface are unaffected — wasmtime ignores Linker entries the
 /// component never imports.
 pub fn register_for_slot(
     linker: &mut wasmtime::component::Linker<PluginHostState>,
     slot: Slot,
     embedded: Arc<EmbeddedRegistry>,
 ) -> wasmtime::Result<()> {
-    register_disclosure_fields_for_slot(linker, slot, embedded.clone())?;
+    register_disclosure_fields_for_slot(linker, POLICY_SLOT, embedded.clone())?;
     register_localized_for_slot(linker, slot, embedded.clone())?;
     register_icons_for_slot(linker, slot, embedded)?;
     Ok(())
 }
 
 /// Look up the ref token for `(slot, key)` in `store`, converting
-/// an "undeclared" `None` into the canonical wasm trap. Single
-/// source of trap wording across both the bindgen Host impls
-/// (slot 0) and the plugin Linker closures (slots ≥ 1), so policy
-/// authors and plugin authors see identical error messages when
-/// they pass a key they forgot to declare.
+/// an "undeclared" `None` into the canonical wasm trap. `slot` is
+/// the effective lookup slot the caller picked (policy slot for
+/// policy-gated kinds, the calling component's own slot for
+/// per-component kinds) — the trap names it so authors know which
+/// component's section the host expected the key in.
 fn get_token_or_trap<K: RefKind>(
     store: &RefStore<K>,
     slot: Slot,
@@ -163,8 +178,8 @@ fn get_token_or_trap<K: RefKind>(
 ) -> wasmtime::Result<String> {
     store.get_token(slot, key).ok_or_else(|| {
         wasmtime::Error::msg(format!(
-            "embedded {kind}: cannot issue token for slot {slot} key '{key}' \
-             (component did not declare it in its enclavid:embedded.{kind}s section)",
+            "embedded {kind}: slot {slot} did not declare key '{key}' \
+             in its enclavid:embedded.{kind}s.v1 section",
             kind = K::NAME,
         ))
     })

@@ -1,0 +1,4 @@
+[overrides]
+"enclavid:disclosure" = { path = "../../wit/disclosure" }
+"enclavid:form" = { path = "../../wit/form" }
+"enclavid:embedded" = { path = "../../wit/embedded" }

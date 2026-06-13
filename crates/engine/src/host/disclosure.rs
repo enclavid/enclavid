@@ -13,14 +13,14 @@ impl Host for HostState {
         requester_ref: String,
     ) -> wasmtime::Result<bool> {
         sanitize::validate_fields(&fields, &self.embedded)?;
-        // Both `reason` and `requester` are localized refs minted by
+        // Both `reason` and `requester` are localized refs resolved through
         // some component in the composition. Lookup in the localized
         // store closes two channels at once: the runtime-crafting
-        // channel (policy can't mint a raw string at evaluate time
+        // channel (policy can't synthesise a raw string at evaluate time
         // based on user attributes) and the cross-component channel
         // (a forged ref attributing a message to another slot fails
         // because the only way the store has a token is for a
-        // component to have minted it through its own slot).
+        // component to have resolved it through its own slot).
         sanitize::ensure_localized(
             &reason_ref,
             &self.embedded.localized,

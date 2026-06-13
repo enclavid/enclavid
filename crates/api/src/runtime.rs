@@ -21,7 +21,7 @@ use enclavid_engine::{Component, EmbeddedRegistry, PluginInstance, Runner};
 /// all subsequent /input rounds for this session).
 ///
 /// `embedded` is shared by Arc with every consumer (engine slot-
-/// bound mint + use-site lookup, api views for projecting slot-
+/// bound resolve + use-site lookup, api views for projecting slot-
 /// tagged refs into user-facing strings) so the slot assignment
 /// cannot drift across consumers.
 ///

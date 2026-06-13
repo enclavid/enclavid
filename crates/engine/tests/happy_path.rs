@@ -166,7 +166,7 @@ fn load_test_policy_decls() -> ComponentDecls {
 /// test stays on the consent=false path so the only events fired are
 /// state-only (no disclosures), and we don't assert on them. The
 /// composition-wide `EmbeddedRegistry` is shared across rounds so
-/// every minted ref keeps its slot attribution stable on replay.
+/// every issued ref keeps its slot attribution stable on replay.
 fn test_run_inputs(embedded: &Arc<EmbeddedRegistry>) -> RunInputs {
     RunInputs {
         listener: Arc::new(NoopListener),

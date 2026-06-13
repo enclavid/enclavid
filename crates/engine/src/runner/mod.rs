@@ -78,7 +78,7 @@ impl Runner {
         // **outside** the engine — in `api::applicant::shared::
         // lookup_policy`, alongside the localized-text registry, so
         // the same `Arc` can feed both consumers without re-walking
-        // the wasm sections (engine for slot-bound mint + use-site
+        // the wasm sections (engine for slot-bound resolve + use-site
         // reverse-lookup; api views for resolving slot-tagged refs to
         // user-facing strings). Builder discipline (slot 0 = policy,
         // slots 1..N = plugins in the same order as `plugins` here)

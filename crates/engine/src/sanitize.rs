@@ -6,7 +6,7 @@
 //!   1. `DisplayField`s from `prompt-disclosure` — structured consent
 //!      data shown to the applicant and persisted to the consumer.
 //!      `value` is policy-supplied free text (typically the actual
-//!      PII like "Alice"); `key` and `label` are embedded refs minted
+//!      PII like "Alice"); `key` and `label` are embedded refs resolved
 //!      by `enclavid:embedded/disclosure-fields` /
 //!      `enclavid:embedded/i18n`, reverse-looked-up in the
 //!      composition's `EmbeddedRegistry`.
@@ -32,7 +32,7 @@ use crate::limits::{
 /// `key` is a disclosure-field-ref → reverse-looked-up in the
 /// composition's disclosure-fields store; `label` is a localized-ref
 /// → looked up in the localized store. Each store only knows tokens
-/// it itself minted, so a token that crossed kinds (a localized ref
+/// it itself issued, so a token that crossed kinds (a localized ref
 /// passed as a key, etc.) fails the right-store check and traps
 /// cleanly.
 pub fn validate_fields(
@@ -133,7 +133,7 @@ fn ensure_registered_in(
 ///
 /// Validation is intentionally permissive — the **forgery defence**
 /// lives in the registry's reverse-index, not here. Anything past
-/// this format check that isn't a minted token fails the membership
+/// this format check that isn't a registered token fails the membership
 /// step.
 pub fn validate_ref_format(token: &str) -> wasmtime::Result<()> {
     if token.is_empty() {
@@ -265,7 +265,7 @@ mod tests {
     fn field(key: &str, value: &str) -> DisplayField {
         // Default-label sites are tests that fail before reaching the
         // label-validation step (too-many-fields / long-value / key
-        // format / unminted key). The placeholder label here is
+        // format / unregistered key). The placeholder label here is
         // intentionally a non-token string; if a callsite slips past
         // the early gates the label gate catches the wrong-test-shape
         // and surfaces a loud trap.
@@ -324,7 +324,7 @@ mod tests {
     }
 
     /// Mint refs through a fresh single-slot (policy) registry, then
-    /// return both the registry and pre-minted refs for the tests
+    /// return both the registry and pre-resolved refs for the tests
     /// below. Mirrors what `Runner::run` builds, scaled down.
     struct Fixture {
         embedded: EmbeddedRegistry,
@@ -371,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_well_formed_minted_key_passes() {
+    fn validate_well_formed_registered_key_passes() {
         let f = fixture();
         assert!(
             validate_fields(
@@ -379,7 +379,7 @@ mod tests {
                 &f.embedded
             )
             .is_ok(),
-            "tax_id minted by policy slot should round-trip"
+            "tax_id registered by policy slot should round-trip"
         );
     }
 
@@ -393,9 +393,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_unminted_key_traps() {
+    fn validate_unregistered_key_traps() {
         let f = fixture();
-        // Well-formed (passes the ASCII format gate) but never minted
+        // Well-formed (passes the ASCII format gate) but never registered
         // by any slot in the registry. Pre-Phase-B the format-shape
         // was the Phase A debug string; under Phase B BLAKE3-keyed
         // tokens it's a random-looking 32-hex string that no slot
@@ -406,7 +406,7 @@ mod tests {
                 .is_err()
         );
         // Phase A debug-looking string too — still well-formed by the
-        // ASCII gate (allows `:`), still unminted under the new HMAC
+        // ASCII gate (allows `:`), still unregistered under the new HMAC
         // scheme. Forgery resistance covers both shapes.
         assert!(
             validate_fields(&[field("0:d:loyalty_tier_ru", "v")], &f.embedded)
@@ -437,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_unminted_label_traps() {
+    fn validate_unregistered_label_traps() {
         let f = fixture();
         assert!(validate_fields(
             &[field_with_label(&f.first_name_key, "0:l:unregistered_label", "v")],
@@ -460,7 +460,7 @@ mod tests {
     // carrying refs). Registry-level slot scoping is unit-tested in
     // `embedded::registry::tests`; here we exercise that the slot
     // discipline survives through `validate_fields`, which is where
-    // any drift between mint-time and validate-time would surface.
+    // any drift between registration-time and validate-time would surface.
 
     /// Fixture: two components, slot 0 = policy, slot 1 = plugin.
     /// Each contributes distinct disclosure-field keys and one
@@ -513,11 +513,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_plugin_slot_minted_field() {
-        // A plugin (slot 1) minted both the disclosure-field-ref AND
+    fn validate_accepts_plugin_slot_registered_field() {
+        // A plugin (slot 1) registered both the disclosure-field-ref AND
         // its label; the policy is just relaying the field to
         // prompt_disclosure. validate_fields must accept it the same
-        // way it accepts policy-minted refs.
+        // way it accepts policy-registered refs.
         let f = multi_component_fixture();
         assert!(
             validate_fields(
@@ -525,7 +525,7 @@ mod tests {
                 &f.embedded
             )
             .is_ok(),
-            "plugin-minted slot-1 refs round-trip through validate"
+            "plugin-registered slot-1 refs round-trip through validate"
         );
     }
 
@@ -550,7 +550,7 @@ mod tests {
         // but a guest could still re-use a token it observed (e.g. a
         // ref leaked through an earlier disclosure list). What's
         // structurally tested here is that the registry never
-        // accepts a string that wasn't minted under the active
+        // accepts a string that wasn't issued under the active
         // `ref_key`, no matter how plausible it looks. Phase A debug
         // strings ("1:d:policy-only") are the most visually obvious
         // foreign-looking shape and are guaranteed not to collide
@@ -577,7 +577,7 @@ mod tests {
         );
 
         // And a randomly-constructed Phase B-shaped token that no
-        // slot minted under this registry's ref_key — still rejected.
+        // slot issued under this registry's ref_key — still rejected.
         let forged_phase_b = "deadbeefcafef00d0123456789abcdef";
         assert!(
             validate_fields(

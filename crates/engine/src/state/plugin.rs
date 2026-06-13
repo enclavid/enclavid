@@ -29,7 +29,7 @@
 //!
 //! Hence this state carries the composer-mandated proxy table, the
 //! wasmtime memory limits, and the shared `EmbeddedRegistry` — needed
-//! by the slot-bound mint closures the runner registers on this
+//! by the slot-bound resolve closures the runner registers on this
 //! plugin's Linker. No replay / listener / disclosure surface — those
 //! are policy-only.
 
@@ -45,7 +45,7 @@ use crate::limits::POLICY_MAX_MEMORY;
 /// Data placed into wasmtime `Store<PluginHostState>` for each plugin
 /// component in a composition. Minimal: just enough to satisfy
 /// [`ResourceProxyView`], bound the plugin's linear memory, and feed
-/// the slot-bound `enclavid:embedded/*` mint closures.
+/// the slot-bound `enclavid:embedded/*` resolve closures.
 pub struct PluginHostState {
     /// Proxy table used by composer's `ComposableLinker` to forward
     /// WIT resource handles between this Store and the policy / other
@@ -62,7 +62,7 @@ pub struct PluginHostState {
     pub limits: StoreLimits,
     /// Composition-wide embedded-ref registry. Same `Arc` as the
     /// policy's `HostState.embedded` — built once at compose time in
-    /// `Runner::run`, frozen, shared into every Store. Slot-bound mint
+    /// `Runner::run`, frozen, shared into every Store. Slot-bound resolve
     /// closures registered on this plugin's Linker consult it through
     /// this field; the slot index itself is captured in the closure,
     /// not stored on the state.

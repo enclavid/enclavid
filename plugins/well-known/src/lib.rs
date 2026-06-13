@@ -2,10 +2,20 @@
 //! pre-baked capture flows. Drop-in helpers so policy authors don't
 //! hand-roll text-refs for standard data shapes.
 //!
-//! All text-refs returned by `disclosure-fields` and `capture` helpers
-//! must be registered in the consuming policy's `policy.json` (see
-//! plugin README for a drop-in JSON snippet). Without registration,
-//! the host text-ref membership check traps at use site.
+//! Every ref this plugin hands back (disclosure-field key, localized
+//! label, icon name) is resolved through the corresponding
+//! `enclavid:embedded/*` host import — the host hashes
+//! `(slot, kind, key)` under a TEE-only key and returns the opaque
+//! token. The plugin's own `enclavid:embedded.*.v1` custom sections
+//! (`disclosure-fields.json`, `i18n.json`, `icons.json`) declare the
+//! full set of keys the host will accept; anything passed to one of
+//! the embedded imports that isn't in the matching section traps at
+//! load time.
+//!
+//! Raw string construction wouldn't work: under Phase B BLAKE3-keyed
+//! tokens the engine reverse-index never sees a string the host
+//! itself didn't issue, so any hand-built `"passport-number"` would
+//! fail the use-site membership check.
 
 wit_bindgen::generate!({
     path: "wit",
@@ -14,6 +24,9 @@ wit_bindgen::generate!({
 });
 
 use enclavid::disclosure::types::DisplayField;
+use enclavid::embedded::disclosure_fields::disclosure_field as resolve_disclosure_field;
+use enclavid::embedded::i18n::localized as resolve_localized;
+use enclavid::embedded::icons::icon as resolve_icon;
 use enclavid::form::types::{CameraFacing, CaptureGuide, CaptureStep, MediaSpec};
 use exports::enclavid::well_known::capture::Guest as CaptureGuest;
 use exports::enclavid::well_known::disclosure_fields::Guest as DisclosureFieldsGuest;
@@ -25,28 +38,30 @@ struct WellKnown;
 
 impl IconsGuest for WellKnown {
     fn passport() -> String {
-        "passport".into()
+        resolve_icon("passport")
     }
     fn id_card() -> String {
-        "id-card".into()
+        resolve_icon("id_card")
     }
     fn drivers_license() -> String {
-        "drivers-license".into()
+        resolve_icon("drivers_license")
     }
     fn selfie() -> String {
-        "selfie".into()
+        resolve_icon("selfie")
     }
 }
 
 // ─── disclosure-fields ────────────────────────────────────────────
 
-/// Build a `DisplayField` for a well-known field. The label text-ref
-/// is `<key>-label` by convention — tenants register that key in their
-/// policy.json's `localized` map with the actual translated text.
+/// Build a `DisplayField` for a well-known field. `key` is the
+/// snake_case canonical name (WIT-kebab → snake mapping); the host
+/// validates it against the POLICY's `disclosure-fields.json` (slot
+/// 0 — bandwidth gate). `label` is `<key>_label` resolved from THIS
+/// PLUGIN's `i18n.json`.
 fn field(key: &str, value: String) -> DisplayField {
     DisplayField {
-        key: key.into(),
-        label: format!("{key}-label"),
+        key: resolve_disclosure_field(key),
+        label: resolve_localized(&format!("{key}_label")),
         value,
     }
 }
@@ -54,36 +69,36 @@ fn field(key: &str, value: String) -> DisplayField {
 impl DisclosureFieldsGuest for WellKnown {
     // Document identifiers
     fn passport_number(value: String) -> DisplayField {
-        field("passport-number", value)
+        field("passport_number", value)
     }
     fn id_card_number(value: String) -> DisplayField {
-        field("id-card-number", value)
+        field("id_card_number", value)
     }
     fn drivers_license_number(value: String) -> DisplayField {
-        field("drivers-license-number", value)
+        field("drivers_license_number", value)
     }
     fn document_issuing_country(value: String) -> DisplayField {
-        field("document-issuing-country", value)
+        field("document_issuing_country", value)
     }
     fn document_expiry(value: String) -> DisplayField {
-        field("document-expiry", value)
+        field("document_expiry", value)
     }
     fn document_issued(value: String) -> DisplayField {
-        field("document-issued", value)
+        field("document_issued", value)
     }
 
     // Identity
     fn given_name(value: String) -> DisplayField {
-        field("given-name", value)
+        field("given_name", value)
     }
     fn family_name(value: String) -> DisplayField {
-        field("family-name", value)
+        field("family_name", value)
     }
     fn full_name(value: String) -> DisplayField {
-        field("full-name", value)
+        field("full_name", value)
     }
     fn date_of_birth(value: String) -> DisplayField {
-        field("date-of-birth", value)
+        field("date_of_birth", value)
     }
     fn sex(value: String) -> DisplayField {
         field("sex", value)
@@ -94,7 +109,7 @@ impl DisclosureFieldsGuest for WellKnown {
 
     // Contact / location
     fn residence_country(value: String) -> DisplayField {
-        field("residence-country", value)
+        field("residence_country", value)
     }
     fn address(value: String) -> DisplayField {
         field("address", value)
@@ -108,7 +123,7 @@ impl DisclosureFieldsGuest for WellKnown {
 
     // Other
     fn tax_id(value: String) -> DisplayField {
-        field("tax-id", value)
+        field("tax_id", value)
     }
 }
 
@@ -119,23 +134,24 @@ const PASSPORT_ASPECT: f32 = 1.42;
 /// ICAO TD1 ID-1 card aspect (85.6x54mm → ~1.585).
 const ID1_ASPECT: f32 = 1.585;
 
-/// Build a CaptureStep with the canonical text-ref names. `prefix` is
-/// the per-step namespace (`passport`, `id-card-front`, etc.). Tenants
-/// register `<prefix>-instructions`, `<prefix>-step`, `<prefix>-review-hint`
-/// in policy.json's `localized` map.
+/// Build a CaptureStep, resolving every ref through the embedded
+/// host imports. `prefix` is the snake_case per-step namespace
+/// (`passport`, `id_card_front`, ...); the three localized refs
+/// follow `<prefix>_{instructions,step,review_hint}`, which
+/// `i18n.json` declares verbatim.
 fn step(
     prefix: &str,
-    icon: Option<&str>,
+    icon_name: Option<&str>,
     camera: CameraFacing,
     guide: CaptureGuide,
 ) -> CaptureStep {
     CaptureStep {
-        icon: icon.map(|s| s.into()),
-        instructions: format!("{prefix}-instructions"),
-        label: format!("{prefix}-step"),
+        icon: icon_name.map(resolve_icon),
+        instructions: resolve_localized(&format!("{prefix}_instructions")),
+        label: resolve_localized(&format!("{prefix}_step")),
         camera,
         guide,
-        review_hint: format!("{prefix}-review-hint"),
+        review_hint: resolve_localized(&format!("{prefix}_review_hint")),
     }
 }
 
@@ -150,8 +166,8 @@ fn passport_step() -> CaptureStep {
 
 fn id_card_front_step_inner() -> CaptureStep {
     step(
-        "id-card-front",
-        Some("id-card"),
+        "id_card_front",
+        Some("id_card"),
         CameraFacing::Rear,
         CaptureGuide::Rect(ID1_ASPECT),
     )
@@ -159,8 +175,8 @@ fn id_card_front_step_inner() -> CaptureStep {
 
 fn id_card_back_step_inner() -> CaptureStep {
     step(
-        "id-card-back",
-        Some("id-card"),
+        "id_card_back",
+        Some("id_card"),
         CameraFacing::Rear,
         CaptureGuide::Rect(ID1_ASPECT),
     )
@@ -168,8 +184,8 @@ fn id_card_back_step_inner() -> CaptureStep {
 
 fn drivers_license_front_step_inner() -> CaptureStep {
     step(
-        "drivers-license-front",
-        Some("drivers-license"),
+        "drivers_license_front",
+        Some("drivers_license"),
         CameraFacing::Rear,
         CaptureGuide::Rect(ID1_ASPECT),
     )
@@ -177,8 +193,8 @@ fn drivers_license_front_step_inner() -> CaptureStep {
 
 fn drivers_license_back_step_inner() -> CaptureStep {
     step(
-        "drivers-license-back",
-        Some("drivers-license"),
+        "drivers_license_back",
+        Some("drivers_license"),
         CameraFacing::Rear,
         CaptureGuide::Rect(ID1_ASPECT),
     )
@@ -196,21 +212,21 @@ fn selfie_step_inner() -> CaptureStep {
 impl CaptureGuest for WellKnown {
     fn passport() -> MediaSpec {
         MediaSpec {
-            label: "passport-title".into(),
+            label: resolve_localized("passport_title"),
             captures: vec![passport_step()],
         }
     }
 
     fn id_card() -> MediaSpec {
         MediaSpec {
-            label: "id-card-title".into(),
+            label: resolve_localized("id_card_title"),
             captures: vec![id_card_front_step_inner(), id_card_back_step_inner()],
         }
     }
 
     fn drivers_license() -> MediaSpec {
         MediaSpec {
-            label: "drivers-license-title".into(),
+            label: resolve_localized("drivers_license_title"),
             captures: vec![
                 drivers_license_front_step_inner(),
                 drivers_license_back_step_inner(),
@@ -220,7 +236,7 @@ impl CaptureGuest for WellKnown {
 
     fn selfie() -> MediaSpec {
         MediaSpec {
-            label: "selfie-title".into(),
+            label: resolve_localized("selfie_title"),
             captures: vec![selfie_step_inner()],
         }
     }

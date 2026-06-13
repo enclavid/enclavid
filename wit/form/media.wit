@@ -42,7 +42,7 @@ interface types {
     /// Multi-step captures within ONE prompt-media call belong to the
     /// SAME artifact — plugins analyse them together.
     ///
-    /// `icon` is an `icon-ref` minted by `enclavid:embedded/icons.icon`
+    /// `icon` is an `icon-ref` resolved through `enclavid:embedded/icons.icon`
     /// — the name has to appear in the calling component's
     /// `enclavid:embedded.icons.v1` section, blocking the free-form
     /// covert channel a raw `option<string>` would otherwise be. Not

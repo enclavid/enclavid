@@ -34,7 +34,7 @@ interface types {
     ///     cardinality: pre-registration in the component's manifest
     ///     — the set is frozen before any per-session input reaches
     ///     the policy, so a fresh `passport-number-<user-country>`
-    ///     can't be minted at evaluate time.
+    ///     can't be resolved at evaluate time.
     ///   * `label` is a `localized-ref` — produced by
     ///     `manifest::localized("…")`. The host resolves it via the
     ///     issuing component's text registry into the full set of

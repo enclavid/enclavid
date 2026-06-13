@@ -1,20 +1,34 @@
-//! Per-component `enclavid:embedded/*` ref scoping.
+//! `enclavid:embedded/*` ref scoping — asymmetric by kind.
 //!
-//! Two **public stores** on [`EmbeddedRegistry`], one per
+//! Three **public stores** on [`EmbeddedRegistry`], one per
 //! `enclavid:embedded/*` interface:
 //!
-//!   * [`DisclosureFieldsStore`] — machine identifiers. `lookup`
-//!     returns the raw declared key (`&str`) — the literal the
-//!     consumer SDK dispatches on.
-//!   * [`LocalizedStore`] — translation catalogs. `lookup` returns
-//!     the full `[Translation]` row set; locale-picking is the
-//!     consumer's call.
+//!   * [`DisclosureFieldsStore`] — machine identifiers consumed by
+//!     the consumer SDK as `DisplayField.key`. **Policy-gated**:
+//!     only the policy (slot 0) declares DF keys; the host fn rejects
+//!     any resolution that's not in slot 0's catalog, regardless of which
+//!     slot called it. Plugins don't ship a DF section. Single source
+//!     of truth for what's emittable to the consumer; cardinality
+//!     bound = `|policy.df|`.
+//!   * [`LocalizedStore`] — translation catalogs. **Per-component
+//!     scoped**: each slot declares its own i18n keys. Resolved to
+//!     applicant-locale text inside the TEE before any wire send;
+//!     consumer never sees refs or text.
+//!   * [`IconStore`] — frontend dispatch names. **Per-component
+//!     scoped**: each slot declares its own icon names. Reach the
+//!     applicant frontend, never the consumer envelope.
 //!
-//! Both wrap the same private generic [`RefStore`](super::store::
+//! Why the asymmetry: the bandwidth-bound concern that drives the
+//! DF gate (consumer can collude over `DisplayField.key` cardinality)
+//! doesn't apply to i18n / icons — they're applicant-facing only.
+//! The applicant is the defender, not the covert-channel adversary,
+//! so per-component scoping is fine for those.
+//!
+//! All three wrap the same private generic [`RefStore`](super::store::
 //! RefStore) so the membership / get_token / lookup mechanics live
-//! in one place. The public types are thin newtypes that pin a
-//! typed `lookup` return — `&str` vs `&[Translation]` — at the API
-//! boundary.
+//! in one place. The asymmetry lives in [`super::host::register_for_slot`]
+//! — it hands `POLICY_SLOT` to the DF closure regardless of the
+//! plugin's own slot, and the plugin's own `slot` to i18n / icons.
 //!
 //! The registry is **immutable per run**: built once in
 //! [`Runner::run`](crate::Runner::run) from `load_embedded` output for
@@ -29,11 +43,9 @@
 //! policy_ref` by the api crate), so a guest WASM component can't
 //! synthesise a foreign-slot ref by guessing the format. The
 //! `get_token` path validates the token exists in `by_token` before
-//! returning, and the only component that can produce a slot-X
-//! token via host-fn is the one bound to slot X in the closure —
-//! but even without that closure binding, the BLAKE3-keyed prefix
-//! means assembling a foreign-slot ref from raw bytes is
-//! cryptographically infeasible.
+//! returning; under DF policy-gating the closure always passes
+//! `POLICY_SLOT` so the emitted token is slot-0-flavored regardless
+//! of caller.
 
 use std::collections::{HashMap, HashSet};
 
@@ -208,14 +220,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_registry_mint_traps() {
+    fn empty_registry_resolve_traps() {
         let reg = EmbeddedRegistry::default();
         assert!(reg.disclosure_fields.get_token(0, "anything").is_none());
         assert!(reg.localized.get_token(0, "anything").is_none());
     }
 
     #[test]
-    fn disclosure_field_mint_and_lookup() {
+    fn disclosure_field_resolve_and_lookup() {
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
         b.add_component(decls(&["passport-number"], &[]));
         let reg = b.build();
@@ -235,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn localized_mint_and_lookup_returns_translations() {
+    fn localized_resolve_and_lookup_returns_translations() {
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
         b.add_component(decls(
             &[],
@@ -284,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn lookup_misses_unminted_string() {
+    fn lookup_misses_unregistered_string() {
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
         b.add_component(decls(&["a"], &[]));
         let reg = b.build();
@@ -318,5 +330,102 @@ mod tests {
         assert_ne!(token_a, token_b);
         assert!(reg_a.disclosure_fields.lookup(&token_b).is_none());
         assert!(reg_b.disclosure_fields.lookup(&token_a).is_none());
+    }
+
+    // ---------- DF policy-gating asymmetry ----------
+    //
+    // The macros in `embedded::host` are kind-symmetric — they pass
+    // whatever slot they're handed straight into `get_token`. The
+    // asymmetric pick happens in `register_for_slot`:
+    //
+    //   * DF → `POLICY_SLOT` (every plugin resolve runs against
+    //     slot 0; policy is the single bandwidth gate).
+    //   * i18n / icons → caller's own slot (per-component scoping).
+    //
+    // The tests below pin the **primitive** that those decisions
+    // depend on. If someone flips the slot in `register_for_slot`
+    // (e.g. accidentally regressing DF back to per-slot), the
+    // observable end-result is what these tests predict — they're
+    // the contract that the dispatcher's slot-pick must align with.
+
+    /// Policy-gated DF: lookup must land on slot 0 regardless of
+    /// which slot the plugin lives at. If `register_for_slot` ever
+    /// passes plugin's own slot for DF (the per-component scoping
+    /// shape used by i18n / icons), this lookup would miss even
+    /// though the policy explicitly whitelisted the key.
+    #[test]
+    fn df_resolves_at_policy_slot_when_plugin_has_no_df() {
+        // Policy (slot 0) whitelists `passport_number`; plugin
+        // (slot 1) has NO DF section — under Option C this is the
+        // normal shape (plugins don't ship DF at all).
+        let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
+        b.add_component(decls(&["passport_number"], &[]));
+        b.add_component(ComponentDecls::default()); // plugin, empty
+        let reg = b.build();
+
+        // What `register_for_slot` does for DF on plugin slot 1:
+        // passes POLICY_SLOT (0), NOT 1. Lookup at slot 0 hits.
+        assert!(
+            reg.disclosure_fields.get_token(0, "passport_number").is_some(),
+            "policy-whitelisted key resolves at slot 0 — what the DF \
+             closure does under policy-gating"
+        );
+
+        // Counter-check: if the dispatcher mistakenly used the
+        // plugin's own slot (per-component shape), the same call
+        // would miss because plugin's DF section is empty.
+        assert!(
+            reg.disclosure_fields.get_token(1, "passport_number").is_none(),
+            "plugin slot has no DF declared — would miss without \
+             policy-gating"
+        );
+    }
+
+    /// Symmetric for the rejection path: when the policy DIDN'T
+    /// whitelist a key, the policy-gated lookup misses regardless
+    /// of whether the plugin (hypothetically) "knew" about it —
+    /// because plugins don't ship DF sections under Option C.
+    #[test]
+    fn df_rejects_unwhitelisted_key_even_when_plugin_present() {
+        let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
+        b.add_component(decls(&["allowed_key"], &[])); // policy
+        b.add_component(ComponentDecls::default()); // plugin
+        let reg = b.build();
+
+        // Policy didn't whitelist `forbidden_key` → policy-gated
+        // lookup misses → host fn would trap with "slot 0 did not
+        // declare key 'forbidden_key'".
+        assert!(
+            reg.disclosure_fields.get_token(0, "forbidden_key").is_none(),
+            "unwhitelisted DF key traps via miss at slot 0"
+        );
+    }
+
+    /// Per-component i18n: lookup must use the **plugin's** slot,
+    /// not slot 0. If `register_for_slot` ever pinned i18n to
+    /// `POLICY_SLOT` (matching DF), plugins shipping their own
+    /// labels would silently fail to resolve refs even with their
+    /// `i18n.json` section embedded.
+    #[test]
+    fn i18n_resolves_at_caller_slot_per_component() {
+        let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
+        b.add_component(ComponentDecls::default()); // policy, empty i18n
+        b.add_component(decls(&[], &[("plugin_label", &[("en", "hi")])]));
+        let reg = b.build();
+
+        // Plugin's own i18n catalog gates plugin's resolve — slot 1.
+        assert!(
+            reg.localized.get_token(1, "plugin_label").is_some(),
+            "plugin's i18n resolves at its own slot (per-component)"
+        );
+
+        // Counter-check: if the dispatcher mistakenly used
+        // POLICY_SLOT for i18n, the lookup would miss because the
+        // policy didn't declare the plugin's label.
+        assert!(
+            reg.localized.get_token(0, "plugin_label").is_none(),
+            "policy has no i18n declared — would miss under DF-style \
+             gating"
+        );
     }
 }

@@ -1,0 +1,48 @@
+{
+  "passport_number_label": { "en": "Passport number" },
+  "id_card_number_label": { "en": "ID card number" },
+  "drivers_license_number_label": { "en": "Driver's license number" },
+  "document_issuing_country_label": { "en": "Issuing country" },
+  "document_expiry_label": { "en": "Expiry date" },
+  "document_issued_label": { "en": "Issue date" },
+  "given_name_label": { "en": "Given name" },
+  "family_name_label": { "en": "Family name" },
+  "full_name_label": { "en": "Full name" },
+  "date_of_birth_label": { "en": "Date of birth" },
+  "sex_label": { "en": "Sex" },
+  "nationality_label": { "en": "Nationality" },
+  "residence_country_label": { "en": "Country of residence" },
+  "address_label": { "en": "Address" },
+  "email_label": { "en": "Email" },
+  "phone_label": { "en": "Phone number" },
+  "tax_id_label": { "en": "Tax ID" },
+
+  "passport_title": { "en": "Your passport" },
+  "id_card_title": { "en": "Your ID card" },
+  "drivers_license_title": { "en": "Your driver's license" },
+  "selfie_title": { "en": "Selfie" },
+
+  "passport_instructions": { "en": "Take a photo of the photo page of your passport." },
+  "passport_step": { "en": "Photo page" },
+  "passport_review_hint": { "en": "Check the photo page is sharp and free of glare." },
+
+  "id_card_front_instructions": { "en": "Take a photo of the front of your ID card." },
+  "id_card_front_step": { "en": "Front side" },
+  "id_card_front_review_hint": { "en": "Check all text is sharp and corners are visible." },
+
+  "id_card_back_instructions": { "en": "Now flip the card and take a photo of the back." },
+  "id_card_back_step": { "en": "Back side" },
+  "id_card_back_review_hint": { "en": "Check all text is sharp and corners are visible." },
+
+  "drivers_license_front_instructions": { "en": "Take a photo of the front of your driver's license." },
+  "drivers_license_front_step": { "en": "Front side" },
+  "drivers_license_front_review_hint": { "en": "Check all text is sharp and free of glare." },
+
+  "drivers_license_back_instructions": { "en": "Now flip the card and take a photo of the back." },
+  "drivers_license_back_step": { "en": "Back side" },
+  "drivers_license_back_review_hint": { "en": "Check all text is sharp and free of glare." },
+
+  "selfie_instructions": { "en": "Hold the camera at eye level and align your face inside the oval." },
+  "selfie_step": { "en": "Look straight ahead" },
+  "selfie_review_hint": { "en": "Check your face is clearly visible and well-lit." }
+}

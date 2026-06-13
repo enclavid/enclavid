@@ -223,7 +223,7 @@ impl<K: RefKind> RefStore<K> {
 /// to compute valid BLAKE3-keyed output for any `(slot, key)` pair.
 ///
 /// The reverse-index in [`RefStore::by_token`] then turns the
-/// membership check into pure data — every minted token sits in the
+/// membership check into pure data — every issued token sits in the
 /// map, and any opaque string a guest synthesises misses with
 /// overwhelming probability.
 ///

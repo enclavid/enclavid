@@ -203,7 +203,7 @@ fn request_view(
             // composition (policy slot 0 + every plugin slot). Same
             // raw key declared by multiple slots resolves to the
             // same envelope value — consumer can't tell which slot
-            // minted it — so we dedupe by string for the audit
+            // resolved it — so we dedupe by string for the audit
             // view. `BTreeSet` gives the dedup AND the canonical
             // alphabetical ordering for stable display.
             let unique_keys: std::collections::BTreeSet<String> =

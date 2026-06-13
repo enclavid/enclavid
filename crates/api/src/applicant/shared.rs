@@ -90,7 +90,7 @@ pub(super) fn parse_args(
 /// state and disclosures atomically. Embedded registry: composition-
 /// wide `EmbeddedRegistry`, constructed once at policy-cache build
 /// time (see [`lookup_policy`]) and threaded into both engine (slot-
-/// bound mint + use-site reverse-lookup) and api view-layer (ref →
+/// bound resolve + use-site reverse-lookup) and api view-layer (ref →
 /// user-facing text) so all consumers agree on slot attribution.
 pub(super) fn build_run_inputs(
     listener: Arc<dyn SessionListener>,
@@ -449,7 +449,7 @@ async fn lookup_policy(
         // get dropped. Each plugin occupies its own slot in the
         // composition's `EmbeddedRegistry` (slot `idx + 1` in
         // `plugin_instances` order); these decls populate that slot
-        // so the plugin can mint refs for its declared keys via the
+        // so the plugin can resolve refs for its declared keys via the
         // slot-bound closures `register_for_slot` wires up.
         let decls = enclavid_engine::load_embedded(&art.wasm_bytes).map_err(|e| {
             eprintln!(

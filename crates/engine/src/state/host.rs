@@ -33,16 +33,16 @@ pub struct HostState {
     /// shim can clone it cheaply across the await point that calls it.
     pub listener: Arc<dyn SessionListener>,
     /// Per-component `enclavid:embedded/*` registry, shared with every
-    /// plugin's `PluginHostState` so the slot-bound mint closures and
+    /// plugin's `PluginHostState` so the slot-bound resolve closures and
     /// the use-site reverse-lookups read from the same frozen index.
     /// Frozen before any per-session input reaches any component; the
     /// engine consults it at every embedded-ref use-site
     /// (`prompt-disclosure` field key/label, reason / requester,
     /// media labels) and traps if a ref isn't in it. Closes the
     /// runtime ref-crafting channel where a policy might otherwise
-    /// encode user-attribute bits into a freshly-minted key string
+    /// encode user-attribute bits into a freshly-resolved key string
     /// at evaluate time, and the cross-component channel where one
-    /// component might mint a ref attributing the message to another.
+    /// component might resolve a ref attributing the message to another.
     pub embedded: Arc<EmbeddedRegistry>,
     /// Resource caps the wasmtime runtime consults via `Store::
     /// limiter`. Bounds linear-memory growth so the policy
@@ -64,7 +64,7 @@ pub struct HostState {
 /// the caller's persistence layer plus the composition-wide
 /// `EmbeddedRegistry` — constructed once at policy-cache build time
 /// from policy + plugin embedded sections and shared by `Arc` with
-/// every consumer (engine slot-bound mint, engine use-site reverse-
+/// every consumer (engine slot-bound resolve, engine use-site reverse-
 /// lookup, api view-layer ref resolution).
 ///
 /// Distinct name from the component-model "resources" concept
