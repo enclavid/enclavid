@@ -7,17 +7,12 @@ mod stores;
 mod transport;
 
 mod proto {
-    pub mod session_store {
-        tonic::include_proto!("enclavid.session_store");
-    }
+    // Only the sealed domain types remain protobuf-generated (prost,
+    // no tonic). The wire protos are gone — wire DTOs live in
+    // `broker-protocol` as serde structs. Migrating these off prost is
+    // Phase 4.5 (see [[project-broker-refactor-decisions]]).
     pub mod state {
-        tonic::include_proto!("enclavid.state");
-    }
-    pub mod registry {
-        tonic::include_proto!("enclavid.registry");
-    }
-    pub mod auth {
-        tonic::include_proto!("enclavid.auth");
+        include!(concat!(env!("OUT_DIR"), "/enclavid.state.rs"));
     }
 }
 
@@ -29,12 +24,11 @@ pub use auth::{AuthClient, AuthVerdict, Principal};
 // need to update import paths.
 pub use boundary::{AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted};
 pub use error::BridgeError;
-pub use transport::{GrpcChannel, connect_store};
-pub use proto::auth::ClientOperation;
-pub use proto::registry::{
-    PullManifestResponse as RegistryPullManifestResponse,
-    PullResponse as RegistryPullResponse,
-};
+pub use transport::{BrokerChannel, connect_store};
+// Wire DTO re-exports — the operation selector and the OCI pull
+// response now come from the shared `broker-protocol` crate.
+pub use broker_protocol::ClientOperation;
+pub use broker_protocol::PullResponse as RegistryPullResponse;
 pub use registry::RegistryClient;
 pub use proto::state::{
     CallEvent, CameraFacing, CaptureGroup, CaptureGuide, CaptureStep, Client, ClientAccess, Clip,

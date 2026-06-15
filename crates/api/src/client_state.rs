@@ -14,11 +14,10 @@
 use std::sync::Arc;
 
 use enclavid_attestation::Attestor;
-use enclavid_host_bridge::{AuthClient, GrpcChannel, RegistryClient, SessionStore, connect_store};
+use broker_client::{AuthClient, BrokerChannel, SessionStore, connect_store};
 
 pub struct ClientState {
     pub auth: AuthClient,
-    pub registry: RegistryClient,
     pub session_store: Arc<SessionStore>,
     pub attestor: Arc<dyn Attestor>,
 }
@@ -26,12 +25,11 @@ pub struct ClientState {
 impl ClientState {
     pub fn new(
         session_store: Arc<SessionStore>,
-        channel: GrpcChannel,
+        channel: BrokerChannel,
         attestor: Arc<dyn Attestor>,
     ) -> Self {
         Self {
-            auth: AuthClient::new(channel.clone()),
-            registry: RegistryClient::new(channel),
+            auth: AuthClient::new(channel),
             session_store,
             attestor,
         }

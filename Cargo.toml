@@ -3,9 +3,11 @@ resolver = "2"
 members = [
     "crates/api",
     "crates/attestation",
+    "crates/broker",
+    "crates/broker-protocol",
     "crates/cli",
     "crates/engine",
-    "crates/host-bridge",
+    "crates/broker-client",
     "crates/embedded",
 ]
 

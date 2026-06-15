@@ -15,7 +15,7 @@
 use serde::Serialize;
 
 use enclavid_engine::{Decision, EmbeddedRegistry, RunStatus};
-use enclavid_host_bridge::{
+use broker_client::{
     CameraFacing, CaptureGuide, CaptureStep, MediaSpec, capture_guide, suspended,
 };
 
@@ -154,7 +154,7 @@ pub enum CameraFacingView {
     Any,
 }
 
-/// Mirrors `enclavid_host_bridge::CaptureGuide` (proto oneof). Tagged
+/// Mirrors `broker_client::CaptureGuide` (proto oneof). Tagged
 /// JSON enum so the frontend can dispatch via the `kind` field.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -241,7 +241,7 @@ fn request_view(
 }
 
 fn media_view(
-    m: &enclavid_host_bridge::MediaRequest,
+    m: &broker_client::MediaRequest,
     embedded: &EmbeddedRegistry,
     locale: &Locale,
 ) -> RequestView {

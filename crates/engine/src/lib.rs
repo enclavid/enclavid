@@ -31,7 +31,7 @@ pub use embedded::{
     EmbeddedRegistryBuilder, Icon, IconStore, Localized, LocalizedStore, RefKind, RefStore,
     Slot, Translation, load_embedded,
 };
-pub use enclavid_host_bridge::{SessionMetadata, SessionState, suspended};
+pub use broker_client::{SessionMetadata, SessionState, suspended};
 pub use listener::{ConsentDisclosure, SessionChange, SessionListener};
 pub use runner::{Decision, EvalArgs, PluginInstance, RunStatus, Runner};
 pub use state::RunInputs;

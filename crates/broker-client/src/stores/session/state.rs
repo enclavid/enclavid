@@ -8,18 +8,14 @@
 //! `/connect` and the policy runs at least one round; before that the
 //! field is absent (`Option::None` from the read marker).
 
-use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
-use crate::reason;
+use broker_protocol::{BlobField, BlobWrite, FieldSelector, Op, Slot};
 use prost::Message;
 
 use crate::boundary;
+use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
-use crate::proto::session_store::field_selector::Kind as SelectorKind;
-use crate::proto::session_store::read_response::Slot;
-use crate::proto::session_store::write_request::op::Kind as OpKind;
-use crate::proto::session_store::write_request::{BlobWrite, Op};
-use crate::proto::session_store::{BlobField, FieldSelector};
 use crate::proto::state::SessionState;
+use crate::reason;
 
 use super::Ctx;
 use super::aead;
@@ -52,9 +48,7 @@ impl ReadField for State<'_> {
     type Output = Untrusted<Option<SessionState>, (Replay,)>;
 
     fn selector(&self) -> FieldSelector {
-        FieldSelector {
-            kind: Some(SelectorKind::Blob(BlobField::State as i32)),
-        }
+        FieldSelector::Blob(BlobField::State)
     }
 
     fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
@@ -95,11 +89,11 @@ impl WriteField for SetState<'_> {
                 aead::seal(&inner, ctx.tee_seal_key, ctx.aad())
             },
         )?;
-        Ok(sealed.map(|value| Op {
-            kind: Some(OpKind::Blob(BlobWrite {
-                field: BlobField::State as i32,
+        Ok(sealed.map(|value| {
+            Op::Blob(BlobWrite {
+                field: BlobField::State,
                 value,
-            })),
+            })
         }))
     }
 }

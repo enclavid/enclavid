@@ -7,7 +7,7 @@ use axum::routing::{MethodRouter, get};
 use base64ct::{Base64, Encoding};
 use serde::Serialize;
 
-use enclavid_host_bridge::{AuthN, AuthZ, Disclosure, Metadata, Replay, reason};
+use broker_client::{AuthN, AuthZ, Disclosure, Metadata, Replay, reason};
 
 use crate::client_state::ClientState;
 use crate::disclosure_hash;

@@ -1,4 +1,4 @@
-use enclavid_host_bridge::{DisplayField as ProtoDisplayField, suspended};
+use broker_client::{DisplayField as ProtoDisplayField, suspended};
 
 use crate::enclavid::disclosure::disclosure::{DisplayField, Host};
 use crate::listener::ConsentDisclosure;

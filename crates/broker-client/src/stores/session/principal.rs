@@ -14,12 +14,10 @@
 //! Host accesses the field directly in Redis when servicing
 //! tenant-scoped admin queries.
 
-use crate::boundary::Exposed;
+use broker_protocol::{BlobField, BlobWrite, Op};
 
+use crate::boundary::Exposed;
 use crate::error::BridgeError;
-use crate::proto::session_store::BlobField;
-use crate::proto::session_store::write_request::op::Kind as OpKind;
-use crate::proto::session_store::write_request::{BlobWrite, Op};
 
 use super::Ctx;
 use super::core::WriteField;
@@ -36,11 +34,11 @@ impl<'a> WriteField for SetPrincipal<'a> {
     fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, BridgeError> {
         // Fully pre-vouched. No sealing, no concern decisions — just
         // rewrap the plaintext bytes as a typed `Op` for the wire.
-        Ok(self.0.clone().map(|s| Op {
-            kind: Some(OpKind::Blob(BlobWrite {
-                field: BlobField::Principal as i32,
+        Ok(self.0.clone().map(|s| {
+            Op::Blob(BlobWrite {
+                field: BlobField::Principal,
                 value: s.as_bytes().to_vec(),
-            })),
+            })
         }))
     }
 }

@@ -1,6 +1,6 @@
 //! Type-level wrappers for values crossing the TEE ↔ host trust
 //! boundary. Two dual markers, one per direction. Previously its
-//! own crate (`enclavid-untrusted`); folded into `host-bridge` as
+//! own crate (`enclavid-untrusted`); folded into `broker-client` as
 //! `boundary::sentinel` so the type definitions live in the same
 //! crate as the channel-specific [`inbound`](super::inbound) and
 //! [`outbound`](super::outbound) facades that own the construction

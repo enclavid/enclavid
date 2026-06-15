@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use enclavid_host_bridge::SessionState;
+use broker_client::SessionState;
 use wasm_runtime_composer::ResourceProxyView;
 use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
@@ -20,7 +20,7 @@ use crate::listener::{ConsentDisclosure, SessionListener};
 /// requires (`tee_seal_key`/`applicant_session_token` AEAD for state via the bridge;
 /// `client_pk` age-encrypt for disclosures inside the listener
 /// itself). Symmetric with how state and metadata are already sealed
-/// transparently inside host-bridge.
+/// transparently inside broker-client.
 pub struct HostState {
     pub replay: Replay,
     /// Disclosure records staged during the current host call body.

@@ -21,7 +21,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use enclavid_host_bridge::{DisplayField, SessionState};
+use broker_client::{DisplayField, SessionState};
 
 /// Structured disclosure record emitted by a single successful
 /// `prompt_disclosure` call. Engine emits proto-typed fields; the

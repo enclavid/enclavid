@@ -1,7 +1,7 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use enclavid_host_bridge::{
+use broker_client::{
     call_event, suspended, CallEvent, Completed, SessionState, Suspended,
 };
 

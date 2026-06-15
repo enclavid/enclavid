@@ -24,14 +24,14 @@
 use serde::Serialize;
 
 use enclavid_engine::EmbeddedRegistry;
-use enclavid_host_bridge::{DisplayField as ProtoDisplayField, SessionStatus};
+use broker_client::{DisplayField as ProtoDisplayField, SessionStatus};
 
 use crate::locale::Locale;
 
 /// Serde "remote" definition for the proto-generated `SessionStatus`
 /// enum. Variants must mirror the foreign enum exactly; serde uses
 /// this shadow type only as a description of how to serialize the
-/// real `SessionStatus` (declared in host-bridge). Lets the JSON
+/// real `SessionStatus` (declared in broker-client). Lets the JSON
 /// wire shape live in the api crate without an orphan-rule wrapper
 /// or a transport-layer serde-aware build.rs.
 ///

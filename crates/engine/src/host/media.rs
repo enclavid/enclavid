@@ -1,4 +1,4 @@
-use enclavid_host_bridge::{
+use broker_client::{
     CameraFacing as ProtoCameraFacing, CaptureGroup as ProtoCaptureGroup,
     CaptureGuide as ProtoCaptureGuide, CaptureStep as ProtoCaptureStep, GuideNone, GuideOval,
     GuideRect, MediaRequest as ProtoMediaRequest, MediaSpec as ProtoMediaSpec, capture_guide,

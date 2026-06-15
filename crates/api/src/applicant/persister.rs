@@ -11,17 +11,16 @@
 //! attempt replays from there and re-emits any work past it.
 //!
 //! Why encryption lives here, not in engine: state and metadata are
-//! already sealed transparently inside host-bridge (`SetState` /
+//! already sealed transparently inside broker-client (`SetState` /
 //! `SetMetadata` AEAD with `tee_seal_key`/`applicant_session_token`). Disclosures use
 //! a different scheme (age to the consumer's `client_disclosure_pubkey`)
 //! but the architectural slot is the same — the api layer owns "I/O +
 //! encryption keys", engine stays pure logic.
 //!
-//! Note: `client_disclosure_pubkey` ≠ `client_policy_key`. The former is a
-//! public age recipient for outbound disclosure ciphertexts; the
-//! latter is the policy-decryption secret used at /connect to pull
-//! and decrypt the policy artifact. Different keys, different
-//! directions, different blast radii.
+//! `client_disclosure_pubkey` is a public age recipient for outbound
+//! disclosure ciphertexts only — the consumer holds the matching
+//! secret. This persister is concerned with the disclosure flow; the
+//! policy artifact path is independent.
 //!
 //! Lifetime: one persister per `Runner::run` call. Owns session-id,
 //! the applicant key (state's inner AEAD layer), the client
@@ -42,7 +41,7 @@ use axum::http::StatusCode;
 use enclavid_engine::{
     ConsentDisclosure, RunError, RunResult, RunStatus, SessionChange, SessionListener,
 };
-use enclavid_host_bridge::{
+use broker_client::{
     AppendDisclosure, AuthN, AuthZ, Covert, Replay, SessionMetadata, SessionStatus, SessionStore,
     SetMetadata, SetState, SetStatus, WriteField, boundary, reason, seal_to_recipient,
 };
@@ -58,8 +57,7 @@ pub(super) struct SessionPersister {
     /// Age recipient string (`age1...`) for disclosure entries.
     /// Pulled from session metadata at run start; provided by the
     /// platform consumer when creating the session, so the consumer
-    /// holds the matching private key. Distinct from `client_policy_key`
-    /// (the policy-decryption secret) — see module-level docs.
+    /// holds the matching private key.
     pub client_disclosure_pubkey: String,
     /// Session version we expect on the host. Initialized from the
     /// read that precedes the run; updated after each successful
@@ -156,7 +154,7 @@ serializes the post-consent record.
             let set_state = SetState {
                 state: boundary::outbound::to_host(change.state, reason!(r#"
 SessionState replay-log snapshot from the engine, destined for
-BlobField::State. AuthN closed inside host-bridge by the double
+BlobField::State. AuthN closed inside broker-client by the double
 AEAD-seal (inner under applicant_session_token, outer under
 tee_seal_key). AuthZ + Covert vouched below.
                 "#))
@@ -207,7 +205,7 @@ and the bits-per-session ceiling is fuel-bound.
 SessionMetadata rewrite from the engine persister — disclosure
 chain bookkeeping (count + running hash) updated atomically
 alongside the SetState op for this CallEvent commit. AuthN closed
-inside host-bridge by AEAD-seal under tee_seal_key.
+inside broker-client by AEAD-seal under tee_seal_key.
                     "#))
                     .vouch_unchecked::<AuthZ, _>(reason!(r#"
 Only the attested CVM holds tee_seal_key. Metadata is read by the
@@ -302,7 +300,7 @@ impl SessionPersister {
             boundary::outbound::to_host(&*metadata, reason!(r#"
 SessionMetadata write on finalize — flips metadata.status to
 Completed atomically with the host-facing BlobField::Status flip
-below. AuthN closed inside host-bridge by AEAD-seal.
+below. AuthN closed inside broker-client by AEAD-seal.
             "#))
             .vouch_unchecked::<AuthZ, _>(reason!(r#"
 Sealed under tee_seal_key — only the attested CVM opens. Same

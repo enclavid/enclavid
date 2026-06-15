@@ -4,7 +4,7 @@
 
 mod status;
 
-use enclavid_host_bridge::SessionState;
+use broker_client::SessionState;
 use wasm_runtime_composer::{
     Composable, ComposableComponent, ComposableDescriptor, ComposableLinker, Composer,
 };

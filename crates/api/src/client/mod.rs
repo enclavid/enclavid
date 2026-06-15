@@ -8,13 +8,12 @@
 //!                                              entries (opaque ciphertext)
 //!
 //! Session creation is a single endpoint: the client supplies the
-//! policy ref + client_policy_key + disclosure pubkey in one body, the TEE
-//! validates client_policy_key against the policy's manifest annotation,
-//! mints attestation, persists metadata (client_policy_key encrypted under
+//! policy ref + disclosure pubkey + per-plugin pins in one body, the
+//! TEE mints attestation, persists metadata (AEAD-sealed under
 //! tee_seal_key), and returns the session_id ready for applicant
-//! interaction. Policy artifact pull/decrypt/compile happens lazily
-//! at applicant /connect, so abandoned sessions don't pay
-//! compile-cost and TEE restarts don't strand in-flight work.
+//! interaction. Policy artifact pull + compile happens lazily at
+//! applicant /connect, so abandoned sessions don't pay compile-cost
+//! and TEE restarts don't strand in-flight work.
 //!
 //! See architecture.md → Client-Facing Session Creation for the
 //! protocol shape and threat model. Counterparts to the applicant
@@ -36,7 +35,7 @@ use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 
-use enclavid_host_bridge::ClientOperation;
+use broker_client::ClientOperation;
 
 use crate::client_state::ClientState;
 

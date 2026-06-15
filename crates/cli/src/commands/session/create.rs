@@ -38,16 +38,9 @@ struct AttestationView {
 
 pub async fn run(
     policy: String,
-    policy_key_path: PathBuf,
     disclosure_key_path: Option<PathBuf>,
     client_ref: Option<String>,
 ) -> Result<()> {
-    // client_policy_key — full AGE-SECRET-KEY-1… string, sent verbatim
-    // in the request body (TEE re-parses on its side).
-    let policy_key_secret = read_age_secret(&policy_key_path).with_context(|| {
-        format!("reading client_policy_key from {}", policy_key_path.display())
-    })?;
-
     // Disclosure recipient resolution. Two paths:
     //   * --disclosure-key <path> → reuse caller's keypair; we still
     //     stash the secret under sessions/<id>/disclosure.key on success
@@ -74,7 +67,6 @@ pub async fn run(
     let mut body = serde_json::json!({
         "policy": policy,
         "client_disclosure_pubkey": disclosure_pubkey,
-        "client_policy_key": policy_key_secret,
     });
     if let Some(r) = client_ref.as_deref() {
         body["client_ref"] = serde_json::Value::String(r.to_string());
@@ -126,11 +118,9 @@ pub async fn run(
     Ok(())
 }
 
-/// Pick out the AGE-SECRET-KEY-1… line from a keygen-style file:
-/// comments (lines starting with `#`) and blank lines are skipped,
-/// the first non-blank line is returned. Mirrors `policy/push.rs::
-/// read_identity` but doesn't construct an `Identity` — sessions pass
-/// the secret string straight through to the TEE.
+/// Pick out the AGE-SECRET-KEY-1… line from a key file: comments
+/// (lines starting with `#`) and blank lines are skipped, the first
+/// non-blank line is returned.
 fn read_age_secret(path: &PathBuf) -> Result<String> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("opening {}", path.display()))?;

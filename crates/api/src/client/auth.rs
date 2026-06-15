@@ -31,7 +31,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use base64ct::{Base64, Encoding};
 
-use enclavid_host_bridge::{
+use broker_client::{
     AuthN, AuthVerdict, AuthZ, ClientOperation, Replay, SessionMetadata, Untrusted, reason,
 };
 
@@ -250,35 +250,19 @@ pub(super) async fn enforce(
     //      it actually belongs to Y → attempted impersonation.
     //   3. Host denies valid credentials → denial of service.
     //
-    // Why none of these escalate to applicant-data leak:
-    //
-    //   * /sessions creation requires `client_policy_key` (the policy-decryption
-    //     age secret), validated synchronously against the policy's
-    //     `validator` manifest annotation. client_policy_key lives in the
-    //     legitimate client's HSM / KMS, not on our infrastructure —
-    //     without it, the validator decrypt fails and the handler
-    //     returns 422 before persisting anything. A fake or
-    //     impersonated caller never gets a session at all.
-    //   * The attestation quote binds (session_id, policy_digest) to
-    //     this TEE's measurement; it's signed by hardware (AMD-SP) and
-    //     unforgeable by the host. If a real client is tricked into
-    //     using a spoofed session_id, quote verification on their side
-    //     fails and they refuse to deliver further inputs.
-    //
-    // What's left as residual risk:
-    //
-    //   * Resource consumption — repeated /sessions attempts with
-    //     wrong client_policy_key burn registry-pull bandwidth and audit-log
-    //     volume.
-    //   * Reputation / spam — surface for phishing where the attacker
-    //     uses spoofed session_ids to confuse legitimate clients
-    //     (mitigated by attestation as above).
-    //
-    // Both are operationally mitigated, not cryptographically:
+    // The TEE has no independent crypto check on the verdict, so a
+    // compromised host can mint sessions on behalf of any tenant.
+    // Bounded only by operational mitigations:
     //   - Rate limit per tenant on session creation.
     //   - Audit log every authorize outcome to an append-only sink.
     //   - Alert on bursts of /sessions failures or unusual
     //     tenant-create patterns (signature of a host substitution).
+    //
+    // Attestation still protects against spoofed session_ids: the
+    // quote binds (session_id, policy_digest) to TEE measurement,
+    // signed by AMD-SP. A real client tricked into using a fake id
+    // detects the mismatch on quote verification and refuses further
+    // inputs.
     //
     // See architecture.md → Network Isolation → "External content fetch"
     // for the full threat-model write-up.
@@ -290,11 +274,8 @@ pub(super) async fn enforce(
         .trust_unchecked::<AuthN, _>(reason!(r#"
 TEE has nothing to verify a credential against — host parses
 tokens, TEE never sees them. A lying host can claim an invalid
-credential is valid or substitute a different principal.
-Neither escalates: /sessions needs client_policy_key (validated against
-the policy's manifest validator annotation, secret held by the
-legitimate client) — without it the create returns 422 and
-nothing is persisted.
+credential is valid or substitute a different principal. Bounded
+only by host-side rate-limit + audit log.
         "#))
         .trust_unchecked::<AuthZ, _>(reason!(r#"
 The AuthVerdict IS the authorisation answer for this request —
@@ -302,9 +283,9 @@ there is no second access decision to gate on top of it.
         "#))
         .trust_unchecked::<Replay, _>(reason!(r#"
 Stale verdict (yesterday's answer for today's request — e.g.
-accepting a since-revoked credential) caps at the same place:
-spurious denial or a stalled caller who can't progress past
-the client_policy_key validator check. No data leak path.
+accepting a since-revoked credential) caps at host-side
+operational mitigations (rate-limit + audit log). Same residual
+risk as the AuthN trust gate above.
         "#))
         .into_inner();
     let principal = match verdict {

@@ -3,9 +3,7 @@
 //! icons) to a wasm component as custom sections.
 //!
 //! Pure metadata embedding — no encryption, no signing. The output is
-//! a wasm component, suitable as input to `enclavid policy encrypt`
-//! (age-encrypts the whole component under `client_policy_key`) or
-//! pushed as-is for an unencrypted/dev artifact.
+//! a wasm component, ready for `enclavid policy push`.
 //!
 //! All three section files are independently optional. A policy
 //! without `prompt-disclosure` calls can omit `disclosure-fields.json`;

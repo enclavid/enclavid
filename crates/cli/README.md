@@ -16,7 +16,7 @@ Prebuilt binaries for Linux / macOS / Windows will be published via GitHub Relea
 
 ```text
 enclavid
-├── cloud                          ← Enclavid SaaS: auth + workspace selection
+├── cloud                          ← Enclavid workspace + Logto auth
 │   ├── login [--workspace <id>]
 │   ├── logout
 │   ├── token
@@ -25,12 +25,13 @@ enclavid
 │       ├── list
 │       └── use <id-or-name>
 ├── policy                         ← OCI artifact tooling (registry-agnostic)
-│   ├── keygen
-│   ├── seal --manifest manifest.json
+│   ├── embed --disclosure-fields ... --i18n ... --icons ...
 │   ├── push [--auth ...]
 │   └── validate
+├── plugin                         ← OCI artifact tooling for plugin components
+│   └── embed --i18n ... --icons ...
 └── session                        ← verification session lifecycle
-    ├── create --policy ... --policy-key ...
+    ├── create --policy ...
     ├── get <id>
     └── disclosures <id>
 ```
@@ -40,31 +41,34 @@ enclavid
 ## Quickstart
 
 ```bash
-# 1. Generate your encryption key (client_policy_key). Store in HSM /
-#    Vault — if you lose it, your encrypted policies become unrecoverable.
-enclavid policy keygen --output client.key
+# 1. Embed the policy's `enclavid:embedded.*.v1` declarations
+#    (disclosure-fields, i18n, icons) into the wasm component.
+enclavid policy embed path/to/policy.wasm \
+    --disclosure-fields disclosure-fields.json \
+    --i18n i18n.json --icons icons.json \
+    -o policy.embedded.wasm
 
-# 2. Seal the policy: bundles the wasm component with `manifest.json`
-#    (as a wasm custom section) and age-encrypts the whole thing.
-enclavid policy seal path/to/policy.wasm \
-    --key client.key --manifest path/to/manifest.json -o policy.wasm.age
-
-# 3. Authenticate to Enclavid + auto-wire docker credentials. Prompts
+# 2. Authenticate to Enclavid + auto-wire docker credentials. Prompts
 #    for workspace selection if you're a member of multiple workspaces.
 enclavid cloud login
 
-# 4. Push using a full OCI ref. Auth comes from the docker credHelper
+# 3. Push using a full OCI ref. Auth comes from the docker credHelper
 #    enclavid cloud login just registered — no extra flags needed.
-enclavid policy push policy.wasm.age \
+enclavid policy push policy.embedded.wasm \
     registry.enclavid.com/enclavid/<workspace-id>/policies/kyc:v1.0.0
 # → prints Pinned ref: registry.enclavid.com/.../kyc@sha256:<hex>
 
-# 5. Smoke-test by creating a session against your running API.
+# 4. Smoke-test by creating a session against your running API.
 enclavid session create \
-    --policy registry.enclavid.com/enclavid/<workspace-id>/policies/kyc@sha256:<hex> \
-    --policy-key client.key
+    --policy registry.enclavid.com/enclavid/<workspace-id>/policies/kyc@sha256:<hex>
 # → prints session_id + applicant URL to open in a browser
 ```
+
+> Whole-bundle encryption (the old `client_policy_key` path) was
+> removed in Phase 1 of the encryption migration. Policies and
+> plugins currently ship as plaintext `application/wasm` layers in
+> OCI; Phase 2 reintroduces attestation-gated encryption via Trustee
+> KBS at the pull seam.
 
 Every push takes a **full** OCI reference (`<registry>/<repository>[:tag]`). For the Enclavid registry, the path layout is `enclavid/<workspace_id>/policies/<name>` — this is enforced by the registry's access policy. After `enclavid cloud login` the exact prefix is printed; you can also get it later via `enclavid cloud workspace`.
 
@@ -104,8 +108,11 @@ For CI runners that don't want to write `~/.docker/config.json`:
 
 ```yaml
 - run: |
-    enclavid policy seal policy.wasm --key client.key --manifest manifest.json -o policy.wasm.age
-    enclavid policy push policy.wasm.age \
+    enclavid policy embed policy.wasm \
+        --disclosure-fields disclosure-fields.json \
+        --i18n i18n.json --icons icons.json \
+        -o policy.embedded.wasm
+    enclavid policy push policy.embedded.wasm \
         ghcr.io/${{ github.repository }}/kyc:v${{ github.sha }} \
         --auth "Bearer ${{ secrets.GHCR_PAT }}"
 ```
@@ -113,24 +120,10 @@ For CI runners that don't want to write `~/.docker/config.json`:
 Or via env var:
 
 ```yaml
-- run: enclavid policy push policy.wasm.age <ref>
+- run: enclavid policy push policy.embedded.wasm <ref>
   env:
     ENCLAVID_REGISTRY_AUTH: Bearer ${{ secrets.GHCR_PAT }}
 ```
-
-> `enclavid policy push` no longer needs `--key` or `--manifest` — both are consumed at `enclavid policy seal`. Push uploads a single self-contained `.wasm.age` blob plus a `com.enclavid.policy.age-header` annotation that `POST /api/v1/sessions` uses for the cheap key-match check.
-
-### Manifest is mandatory
-
-Every `enclavid policy seal` requires a `manifest.json` (default: `./manifest.json`, override with `--manifest <path>`). The manifest is embedded into the wasm as a component-level custom section before age-encryption, so the resulting `.wasm.age` is a self-contained artifact — `manifest.json` doesn't need to travel alongside the encrypted file at any point after seal.
-
-Policies that don't use text-refs (decision-only stubs) still ship a minimal manifest:
-
-```bash
-echo '{"version": 1, "kind": "policy"}' > manifest.json
-```
-
-`disclosure_fields` and `localized` are both optional within the manifest (default to empty). Seal refuses without a manifest file. If somehow an artifact reaches `POST /connect` without an embedded manifest section (e.g. produced by a non-enclavid age tool), the TEE returns `NoPolicyManifestLayer` → 422.
 
 ## Using raw `oras` / `docker push`
 
@@ -138,15 +131,13 @@ Both work transparently after `enclavid cloud login` (which writes the credentia
 
 ```bash
 oras push registry.enclavid.com/enclavid/<workspace-id>/policies/kyc:v1 \
-    policy.wasm.age:application/vnd.enclavid.policy.wasm.v1.encrypted
+    policy.embedded.wasm:application/wasm
 
 # or:
 docker push registry.enclavid.com/enclavid/<workspace-id>/policies/kyc:v1
 ```
 
 Both invoke `docker-credential-enclavid get` per push to fetch a current JWT.
-
-> ⚠ Raw `oras push` / `docker push` doesn't add the `com.enclavid.policy.age-header` manifest annotation that `POST /api/v1/sessions` reads to do cheap client_policy_key validation. Policy pushed without that annotation will fail at /sessions create with `MissingAgeHeader`. If you need a non-enclavid push tool, you can compute the annotation manually (first ~200 bytes of the .age file, base64'd) — see [crates/cli/src/commands/push.rs::extract_age_header](src/commands/push.rs).
 
 ## Configuration
 

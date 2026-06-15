@@ -3,13 +3,10 @@
 //! file impls `ReadField` / `WriteField` for its own markers using
 //! the helpers exposed here.
 
-use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
+use broker_protocol::{FieldSelector, Op, Slot};
 
+use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
-use crate::proto::session_store::read_response::Slot;
-use crate::proto::session_store::read_response::slot::Kind as SlotKind;
-use crate::proto::session_store::write_request::Op;
-use crate::proto::session_store::FieldSelector;
 
 use super::Ctx;
 use super::SessionStore;
@@ -34,13 +31,12 @@ pub trait ReadField: Sized {
     fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError>;
 }
 
-/// Single field-op for the gRPC `Write` request. Implementors carry
-/// the value being written; `ctx` provides keys + AAD for any
-/// encryption step. Both scalar-field markers (`SetStatus`,
-/// `SetMetadata`, `SetState`) and list-append markers
-/// (`AppendDisclosure`) implement this trait — they emit the right
-/// `Op::Blob` or `Op::ListAppend` shape so the SessionStore client
-/// stays uniform across both kinds of write.
+/// Single field-op for the `/write` request. Implementors carry the
+/// value being written; `ctx` provides keys + AAD for any encryption
+/// step. Both scalar-field markers (`SetStatus`, `SetMetadata`,
+/// `SetState`) and list-append markers (`AppendDisclosure`) implement
+/// this trait — they emit the right `Op::Blob` or `Op::ListAppend`
+/// shape so the SessionStore client stays uniform across both kinds.
 ///
 /// `build_op` returns `Exposed<Op, ()>`: a fully-vouched outbound
 /// wrapper. Inside the body the implementation constructs an
@@ -50,7 +46,7 @@ pub trait ReadField: Sized {
 /// concern was addressed (AEAD-seal under what key, app-level
 /// consent / by-design plaintext, sanitisation step, ...). By the
 /// time the wrapper returns, `S == ()` and only `into_inner` lifts
-/// the raw `Op` for the gRPC wire send inside
+/// the raw `Op` for the wire send inside
 /// [`SessionStore::write`](super::SessionStore::write). Reviewers
 /// grep for `Exposed::new` to find every TEE → host data release
 /// and for `vouch_unchecked::<` to read the per-concern rationale.
@@ -69,22 +65,20 @@ pub trait WriteField: Send + Sync {
 // ---------- slot / op helpers ----------
 
 pub(super) fn unwrap_scalar(slot: Slot) -> Result<Option<Vec<u8>>, BridgeError> {
-    match slot.kind {
-        Some(SlotKind::Scalar(s)) => Ok(s.value),
-        Some(SlotKind::List(_)) => Err(BridgeError::Transport(
+    match slot {
+        Slot::Scalar(s) => Ok(s.value),
+        Slot::List(_) => Err(BridgeError::Transport(
             "expected scalar slot, got list".to_string(),
         )),
-        None => Err(BridgeError::Transport("missing slot kind".to_string())),
     }
 }
 
 pub(super) fn unwrap_list(slot: Slot) -> Result<Vec<Vec<u8>>, BridgeError> {
-    match slot.kind {
-        Some(SlotKind::List(l)) => Ok(l.items),
-        Some(SlotKind::Scalar(_)) => Err(BridgeError::Transport(
+    match slot {
+        Slot::List(l) => Ok(l.items),
+        Slot::Scalar(_) => Err(BridgeError::Transport(
             "expected list slot, got scalar".to_string(),
         )),
-        None => Err(BridgeError::Transport("missing slot kind".to_string())),
     }
 }
 

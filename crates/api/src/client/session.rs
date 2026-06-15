@@ -6,7 +6,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use enclavid_host_bridge::{Metadata, SessionStatus};
+use broker_client::{Metadata, SessionStatus};
 
 use crate::client_state::ClientState;
 use crate::dto;

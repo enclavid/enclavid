@@ -1,7 +1,7 @@
 //! Output of one [`Runner::run`](super::Runner::run) call, plus the
 //! typed payloads bindgen produces for the policy's `evaluate` export.
 
-use enclavid_host_bridge::suspended;
+use broker_client::suspended;
 
 // Re-exported so the api crate can construct `EvalArgs` and read
 // `Decision` without taking a direct bindgen dependency.

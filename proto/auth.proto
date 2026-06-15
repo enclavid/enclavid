@@ -6,17 +6,14 @@ package enclavid.auth;
 // itself — it forwards the client's Authorization header + the operation
 // it wants to perform, and trusts the host's verdict.
 //
-// Trust model: equivalent to TEE-validates-with-host-fetched-JWKS. Host
-// can lie about anything here, but client_policy_key backstop in session creation
-// (see architecture.md → Client-Facing Session Creation) bounds the
-// damage to "fake PendingInit sessions", caught by rate-limit and audit
-// log on the host side.
+// Trust model: host compromise here lets an attacker mint fake
+// sessions; bounded only by host-side rate-limit + audit log.
 //
 // Verdict carries an optional `principal` — the authenticated identity
 // (Logto organization_id in MVP). TEE never uses it for security
 // decisions (`client_session_token` covers per-session capability);
-// the host stores it alongside the session for its own concerns
-// (billing/rate-limit/revocation/audit). See docs/security-model.md.
+// the host stores it alongside the session for rate-limit / revocation
+// / audit indexing. See docs/security-model.md.
 service Auth {
   rpc AuthorizeClient(AuthorizeClientRequest) returns (AuthorizeClientResponse);
 }
@@ -27,10 +24,10 @@ service Auth {
 // would result in either side silently misclassifying.
 enum ClientOperation {
   CLIENT_OPERATION_UNSPECIFIED = 0;
-  // POST /api/v1/sessions — create a new session in PendingInit.
+  // POST /api/v1/sessions — create a session, atomically transition to Running.
   SESSION_CREATE = 1;
-  // POST /api/v1/sessions/:id/init — deliver wrapped client_policy_key, transition to Running.
-  SESSION_INIT = 2;
+  // Reserved: see git history for prior uses.
+  reserved 2;
   // GET /api/v1/sessions/:id — read session view (status, policy, ...).
   SESSION_READ = 3;
   // GET /api/v1/sessions/:id/disclosures — pull age-encrypted disclosure list.

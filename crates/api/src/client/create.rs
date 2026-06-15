@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use age::x25519::Identity;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Json;
@@ -15,7 +13,7 @@ use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 
 use enclavid_attestation::ReportData;
-use enclavid_host_bridge::{
+use broker_client::{
     AuthN, AuthZ, Client, ClientAccess, Covert, PluginPin, SessionMetadata, SessionStatus,
     SetMetadata, SetPrincipal, SetStatus, WriteField, boundary, reason,
 };
@@ -25,7 +23,7 @@ use crate::limits::{
     CLIENT_SESSION_TOKEN_BYTES, MAX_CLIENT_REF_LEN, MAX_REGISTRY_AUTH_LEN,
     SESSION_ID_RANDOM_BYTES,
 };
-use crate::policy_pull::{self, PullError};
+use crate::policy_pull;
 
 use super::auth::Principal;
 
@@ -41,11 +39,6 @@ pub struct CreateSessionRequest {
     /// Disclosure recipient pubkey: applicant-consented data is
     /// encrypted to this. Provided as age recipient string `age1...`.
     pub client_disclosure_pubkey: String,
-    /// Client's age secret-key (the policy-decryption key) as the
-    /// canonical `AGE-SECRET-KEY-1...` string. Validated at session
-    /// create against the manifest's validator annotation; stored
-    /// encrypted under tee_seal_key in metadata for lazy use at /connect.
-    pub client_policy_key: String,
     /// Opaque client-side identifier for this verification — proxied
     /// back in webhook payloads and `GET /sessions/:id`. NOT
     /// indexed: clients reconcile `client_ref → session_id` on their
@@ -164,20 +157,14 @@ pub(super) fn post_create() -> MethodRouter<Arc<ClientState>> {
 
 /// POST /api/v1/sessions — full session-creation flow in one shot.
 ///
-/// 1. Parse + validate `policy` reference, `client_ref`, parse
-///    `client_policy_key` as an age identity.
-/// 2. Validate client_policy_key cheaply: pull only the manifest, decrypt the
-///    `validator` annotation token. Wrong key → 422.
-/// 3. Mint attestation quote binding (session_id, policy_digest) to
+/// 1. Parse + validate `policy` reference, `client_ref`, plugin pins.
+/// 2. Mint attestation quote binding (session_id, policy_digest) to
 ///    this TEE measurement. Per-instance TLS-cert-to-attestation
 ///    binding handles "is this the right TEE?" out of band.
-/// 4. Atomically write metadata (with client_policy_key encrypted under
-///    tee_seal_key) + Status:Running to the host store.
+/// 3. Atomically write metadata + Status:Running to the host store.
 ///
-/// client_policy_key itself stays in TEE memory only for the duration of this
-/// handler — once written, the local copy is dropped. The persisted
-/// metadata blob is AEAD'd with the TEE-side key, AAD=session_id, so
-/// the host sees opaque bytes only.
+/// The persisted metadata blob is AEAD'd with the TEE-side key,
+/// AAD=session_id, so the host sees opaque bytes only.
 async fn create(
     State(state): State<Arc<ClientState>>,
     Principal(principal): Principal,
@@ -242,34 +229,6 @@ async fn create(
         })
         .collect();
 
-    // Parse client_policy_key as age identity. SecretBox to ensure the
-    // plaintext string gets zeroed on drop instead of lingering in
-    // request-body buffers.
-    let client_policy_key_secret: SecretBox<String> = SecretBox::new(Box::new(body.client_policy_key));
-    let client_policy_key = Identity::from_str(client_policy_key_secret.expose_secret())
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    // Validate client_policy_key matches the policy's validator annotation —
-    // single small RPC to the host registry, no full policy pull. Uses
-    // the bearer the artifact pull will use later at /connect (looked
-    // up by policy registry hostname), so any auth failure surfaces
-    // here synchronously rather than mid-applicant-flow.
-    let policy_bearer = policy_pull::bearer_for_ref(&registry_auth, &policy_ref);
-    policy_pull::validate_client_policy_key(
-        &state.registry,
-        &policy_ref,
-        policy_bearer,
-        &client_policy_key,
-    )
-    .await
-    .map_err(|e| {
-        // Log the precise failure before mapping — gives the smoke
-        // test / api operator visibility into which step misfired.
-        // eprintln until we wire structured tracing.
-        eprintln!("validate_client_policy_key failed: {e}");
-        pull_error_to_status(&e)
-    })?;
-
     let session_id = generate_session_id();
 
     // Per-session capability bearer. Returned to the client below
@@ -311,11 +270,6 @@ async fn create(
             // POST /sessions response.
             session_token_hash: client_session_token_hash,
         }),
-        // age secret-key — lives encrypted inside this metadata blob
-        // (tee_seal_key, AAD=session_id). Stored as raw secret-key
-        // string; `/connect` re-parses as Identity when decrypting
-        // the policy wasm.
-        policy_key: client_policy_key_secret.expose_secret().as_bytes().to_vec(),
         disclosure_pubkey: body.client_disclosure_pubkey,
         r#ref: body.client_ref.unwrap_or_default(),
         registry_auth,
@@ -348,7 +302,7 @@ async fn create(
 SessionMetadata initial write at POST /sessions. Wire crossing for
 the per-session config blob (principal, policy_ref, client
 disclosure pubkey, input claims, disclosure-chain bookkeeping).
-AuthN closed inside host-bridge by AEAD-seal under tee_seal_key;
+AuthN closed inside broker-client by AEAD-seal under tee_seal_key;
 AuthZ + Covert vouched below.
             "#))
         .vouch_unchecked::<AuthZ, _>(reason!(r#"
@@ -437,39 +391,6 @@ time. No policy-controlled bandwidth.
             measurement: quote.measurement,
         },
     }))
-}
-
-/// Map a `PullError` from `validate_client_policy_key` to the right
-/// HTTP status. Three buckets:
-///
-/// * **4xx tied to the caller's supplied inputs** —
-///   `NotFound` (`policy` ref points at nothing) → 404,
-///   `InvalidRef` (malformed ref shape) → 400,
-///   `Decrypt` / `MissingAgeHeader` / `AgeHeaderBase64` /
-///   `AgeHeaderParse` (key doesn't match or policy was pushed without
-///   the validation hook) → 422.
-///
-/// * **5xx tied to upstream registry behaviour** — `Transport`,
-///   `ManifestParse`, `ManifestDigest`, `LayerDigest` / `LayerCount`
-///   / `ManifestTooLarge` / `NoPolicyLayer` — these all mean the
-///   registry returned something we couldn't trust or process,
-///   surface as 502 so the API consumer can distinguish "your inputs
-///   are wrong" from "the system behind us is misbehaving".
-fn pull_error_to_status(e: &PullError) -> StatusCode {
-    match e {
-        PullError::NotFound => StatusCode::NOT_FOUND,
-        PullError::InvalidRef(_) => StatusCode::BAD_REQUEST,
-        PullError::Decrypt
-        | PullError::MissingAgeHeader
-        | PullError::AgeHeaderBase64(_)
-        | PullError::AgeHeaderParse(_) => StatusCode::UNPROCESSABLE_ENTITY,
-        PullError::Transport(_)
-        | PullError::ManifestParse(_)
-        | PullError::ManifestDigest { .. }
-        | PullError::LayerDigest { .. }
-        | PullError::NoPolicyLayer
-        | PullError::LayerCountMismatch { .. } => StatusCode::BAD_GATEWAY,
-    }
 }
 
 fn generate_session_id() -> String {

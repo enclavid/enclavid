@@ -4,11 +4,9 @@
 //! own file.
 
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use age::x25519::Identity;
 use axum::extract::{FromRequestParts, Path};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
@@ -19,7 +17,7 @@ use enclavid_engine::{
     Component, EmbeddedRegistry, EvalArgs, PluginInstance, RunInputs, SessionListener,
     SessionState,
 };
-use enclavid_host_bridge::{
+use broker_client::{
     AuthN, AuthZ, Metadata, Replay, SessionMetadata, State as StateField, reason,
 };
 
@@ -39,12 +37,12 @@ pub(super) async fn fetch_metadata(
     session_id: &str,
 ) -> Result<SessionMetadata, StatusCode> {
     // Applicant flow has no per-session info to cross-check metadata
-    // against — security relies on the bearer-key auth layer plus the
-    // client_policy_key encryption chain ensuring host-side metadata tampering
-    // breaks the policy decryption / attestation chain. We accept the
-    // host's existence claim and content at face value here; the trust
-    // delegation is concentrated in `trust_unchecked` so callers don't
-    // have to repeat the analysis.
+    // against — security relies on the bearer-key auth layer plus
+    // AEAD-sealed metadata (`tee_seal_key`, AAD=session_id) so any
+    // host-side tampering breaks the seal at unwrap time. We accept
+    // the host's existence claim and content at face value here; the
+    // trust delegation is concentrated in `trust_unchecked` so callers
+    // don't have to repeat the analysis.
     let ((metadata,), _version) = state
         .session_store
         .read(session_id, (Metadata,))
@@ -360,20 +358,16 @@ persist; same containment as above.
 
 /// Look up the compiled policy for a session, compiling lazily on
 /// cache miss. The first /connect for a session pays the
-/// pull+decrypt+compile cost; subsequent calls and /input rounds
-/// hit the cache.
+/// pull+compile cost; subsequent calls and /input rounds hit the
+/// cache.
 ///
-/// On cache miss the metadata's `client_policy_key` field is parsed as an
-/// age identity, used to decrypt the policy artifact pulled from
-/// the registry, and the resulting wasm is compiled into a
-/// `Component`. client_policy_key lives in TEE memory only for the duration
-/// of this function — once the `Component` is in the cache, client_policy_key
-/// is dropped.
+/// On cache miss the policy artifact is pulled from the registry by
+/// the pinned ref baked into metadata and compiled into a
+/// `Component`.
 ///
 /// Errors map to HTTP statuses the handler can pass through directly:
-///   * 410 Gone — registry pull / decrypt / compile failed (the
-///     session was created with the wrong client_policy_key, or the policy
-///     artifact has been removed)
+///   * 410 Gone — registry pull / compile failed (artifact has been
+///     removed or is malformed)
 ///   * 5xx — transport / infra problems
 async fn lookup_policy(
     state: &AppState,
@@ -387,14 +381,6 @@ async fn lookup_policy(
         eprintln!("lookup_policy: metadata.client missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let client_policy_key_str = std::str::from_utf8(&client.policy_key).map_err(|e| {
-        eprintln!("lookup_policy: client_policy_key not utf8 for {session_id}: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let client_policy_key = Identity::from_str(client_policy_key_str).map_err(|e| {
-        eprintln!("lookup_policy: client_policy_key age::Identity parse failed for {session_id}: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
     // Look up the bearer for the policy registry by hostname. Same
     // lookup applies per plugin below. Missing entry collapses to an
     // empty slice ⇒ anonymous pull (host attaches no Authorization
@@ -404,15 +390,10 @@ async fn lookup_policy(
 
     // Run the policy pull and every plugin pull concurrently so the
     // /connect critical path is bounded by the slowest fetch instead
-    // of paying linear network latency. Each future is independent —
-    // policy decrypt vs plain plugin pulls — and only the final
-    // outputs feed `Runner::run`.
-    let policy_fut = policy_pull::pull_and_decrypt(
-        &state.registry,
-        &metadata.policy_ref,
-        policy_bearer,
-        &client_policy_key,
-    );
+    // of paying linear network latency. Each future is independent
+    // and only the final outputs feed `Runner::run`.
+    let policy_fut =
+        policy_pull::pull_policy(&state.registry, &metadata.policy_ref, policy_bearer);
 
     let plugin_futs = client.plugins.iter().map(|pin| {
         let bearer = policy_pull::bearer_for_ref(&client.registry_auth, &pin.impl_ref);

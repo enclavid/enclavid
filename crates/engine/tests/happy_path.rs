@@ -16,7 +16,7 @@ use enclavid_engine::{
     ComponentDecls, Decision, EmbeddedRegistry, RunInputs, RunStatus, Runner, SessionChange,
     SessionListener, SessionState, Translation,
 };
-use enclavid_host_bridge::{
+use broker_client::{
     Clip, SessionState as SessionStateProto, call_event, suspended,
 };
 use wit_component::ComponentEncoder;

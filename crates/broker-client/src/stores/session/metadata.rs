@@ -3,18 +3,14 @@
 //! client disclosure pubkey, input claims, client_ref). AEAD'd with
 //! `tee_seal_key`; AAD = session_id binds it to the session that wrote it.
 
-use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
-use crate::reason;
+use broker_protocol::{BlobField, BlobWrite, FieldSelector, Op, Slot};
 use prost::Message;
 
 use crate::boundary;
+use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
-use crate::proto::session_store::field_selector::Kind as SelectorKind;
-use crate::proto::session_store::read_response::Slot;
-use crate::proto::session_store::write_request::op::Kind as OpKind;
-use crate::proto::session_store::write_request::{BlobWrite, Op};
-use crate::proto::session_store::{BlobField, FieldSelector};
 use crate::proto::state::SessionMetadata;
+use crate::reason;
 
 use super::Ctx;
 use super::aead;
@@ -30,7 +26,7 @@ pub struct Metadata;
 
 /// Write marker: replace session metadata with a freshly-encoded
 /// blob. Payload is `Exposed<&SessionMetadata, (AuthN,)>` — caller
-/// pre-vouches AuthZ + Covert at the construction site; host-bridge
+/// pre-vouches AuthZ + Covert at the construction site; broker-client
 /// closes AuthN via AEAD-seal under `tee_seal_key`.
 pub struct SetMetadata<'a>(pub Exposed<&'a SessionMetadata, (AuthN,)>);
 
@@ -38,9 +34,7 @@ impl ReadField for Metadata {
     type Output = Untrusted<Option<SessionMetadata>, (AuthZ, Replay)>;
 
     fn selector(&self) -> FieldSelector {
-        FieldSelector {
-            kind: Some(SelectorKind::Blob(BlobField::Metadata as i32)),
-        }
+        FieldSelector::Blob(BlobField::Metadata)
     }
 
     fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
@@ -78,11 +72,11 @@ impl WriteField for SetMetadata<'_> {
                 aead::seal(&m.encode_to_vec(), ctx.tee_seal_key, ctx.aad())
             },
         )?;
-        Ok(sealed.map(|value| Op {
-            kind: Some(OpKind::Blob(BlobWrite {
-                field: BlobField::Metadata as i32,
+        Ok(sealed.map(|value| {
+            Op::Blob(BlobWrite {
+                field: BlobField::Metadata,
                 value,
-            })),
+            })
         }))
     }
 }

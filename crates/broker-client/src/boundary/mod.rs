@@ -1,7 +1,7 @@
 //! TEE ↔ host wire perimeter — one place that names every data
 //! shape crossing the boundary, with its concern scope and audit
 //! reason. Anywhere outside this module that needs to wrap
-//! something as `Untrusted` / `Exposed` for the gRPC wire goes
+//! something as `Untrusted` / `Exposed` for the wire goes
 //! through a function here.
 //!
 //! ```text
@@ -30,16 +30,16 @@
 //!
 //! Two perimeters, by design:
 //!
-//!   * `host_bridge::boundary` — the gRPC-wire perimeter. Owns the
-//!     data shapes host-bridge knows about (state/metadata/status/
+//!   * `broker_client::boundary` — the wire perimeter. Owns the
+//!     data shapes broker-client knows about (state/metadata/status/
 //!     principal/version/disclosure list). Migration target for
 //!     readers/writers in `stores/session/*.rs`.
 //!   * `api::boundary` (separate crate) — engine-emitted data that
 //!     first becomes wire-bound inside the api persister. Carries
-//!     `ConsentDisclosure` and other types the host-bridge layer
+//!     `ConsentDisclosure` and other types the broker-client layer
 //!     never sees in typed form, sealing them through the api side
-//!     before handing pre-vouched bytes down to host-bridge's
-//!     writers. Once api crate's boundary lands, host-bridge's
+//!     before handing pre-vouched bytes down to broker-client's
+//!     writers. Once api crate's boundary lands, broker-client's
 //!     writer markers consume `Exposed<_, ()>` instead of raw
 //!     bytes.
 //!
@@ -55,6 +55,6 @@ pub use sentinel::{
 pub use inbound::{FromHost, from_host};
 pub use outbound::{ToHost, to_host};
 // `reason!` is a macro_export'd top-level macro — re-export the
-// stable path so callers can write `host_bridge::reason!(...)` if
-// they prefer the boundary-scoped name. The crate-root alias
-// (`enclavid_host_bridge::reason!`) keeps working via macro_export.
+// stable path so callers can write `broker_client::boundary::reason!(...)`
+// if they prefer the boundary-scoped name. The crate-root alias
+// (`broker_client::reason!`) keeps working via macro_export.

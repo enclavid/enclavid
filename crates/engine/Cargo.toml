@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-enclavid-host-bridge = { path = "../host-bridge" }
+broker-client = { path = "../broker-client" }
 enclavid-embedded = { path = "../embedded" }
 
 # Used by `runner::decls::load_embedded` to pull the embedded custom

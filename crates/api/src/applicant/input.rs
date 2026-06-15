@@ -6,7 +6,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 
 use enclavid_engine::SessionState;
-use enclavid_host_bridge::{Clip, MediaRequest, call_event, suspended};
+use broker_client::{Clip, MediaRequest, call_event, suspended};
 
 use crate::error::ApiError;
 use crate::limits::APPLICANT_INPUT_BODY_LIMIT;

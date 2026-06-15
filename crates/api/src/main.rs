@@ -17,7 +17,7 @@ mod transport;
 use std::sync::Arc;
 
 use enclavid_attestation::{Attestor, MockAttestor};
-use enclavid_host_bridge::{SessionStore, connect_store};
+use broker_client::{SessionStore, connect_store};
 
 use crate::client_state::ClientState;
 use crate::state::AppState;
@@ -28,19 +28,18 @@ async fn main() {
 
     // Single per-process wasmtime Engine + cache of compiled policy
     // components, owned by the applicant `AppState`. Compilation
-    // happens lazily on the first /connect for each session
-    // (pulling and decrypting the policy artifact with the client_policy_key
-    // persisted in metadata) and is reused for subsequent /input
-    // rounds.
+    // happens lazily on the first /connect for each session (pulling
+    // the policy artifact via the pinned ref in metadata) and is
+    // reused for subsequent /input rounds.
     let runner = runtime::new_runner();
     let policies = runtime::new_policy_cache();
 
-    // SessionStore is the host-bridge gRPC client for per-session
-    // typed-field storage. Shared between client API (writes
-    // metadata/status on /create and /init) and applicant API
+    // SessionStore is the broker-client HTTP-over-vsock client for
+    // per-session typed-field storage. Shared between client API
+    // (writes metadata/status on /create and /init) and applicant API
     // (reads/writes state on /connect and /input). Wrapped in Arc so
     // the DisclosureStore facade and both state structs hold the same
-    // tonic channel underneath.
+    // channel underneath.
     //
     // TODO: derive `tee_seal_key` from attestation / KMS rather than env.
     // For Phase A we accept a 32-byte hex from `ENCLAVID_TEE_KEY` (set
@@ -60,7 +59,7 @@ async fn main() {
     let ref_key = Arc::new(ref_key::RefKey::from_tee_seal_key(&tee_seal_key));
     let channel = connect_store(&address_out)
         .await
-        .expect("failed to connect host-bridge");
+        .expect("failed to connect to broker");
     let session_store = Arc::new(SessionStore::new(channel, tee_seal_key));
 
     // Two listeners, two routers, one process. Topology rationale: TLS

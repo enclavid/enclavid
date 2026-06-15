@@ -22,10 +22,10 @@ message SessionMetadata {
   bytes input = 2;
 
   // Client-supplied + client-derived data bundle. Auth gate fields
-  // (principal + session token hash) under `client.auth`; crypto
-  // material (policy key, disclosure pubkey, registry auth) and
-  // reconciliation tag at the top of `Client`. See message
-  // definition below for per-field semantics.
+  // (principal + session token hash) under `client.auth`;
+  // disclosure pubkey, registry auth, and reconciliation tag at
+  // the top of `Client`. See message definition below for per-field
+  // semantics.
   Client client = 3;
 
   // --- Operational / persister-maintained lifecycle ---
@@ -78,21 +78,11 @@ message Client {
   // ClientAccess doc for per-field threat coverage.
   ClientAccess access = 1;
 
-  // age secret-key for polici wasm decryption (the `client_policy_key`).
-  // Stored encrypted under tee_seal_key as part of the metadata blob;
-  // never host-visible. Used at `/connect` time to lazily pull and
-  // decrypt the policy artifact for this session — deferred from
-  // /sessions so creation stays cheap and abandoned sessions don't
-  // pay compile-cost. Held in plaintext only inside TEE memory
-  // during /sessions handler (validation) and during the first
-  // /connect (decrypt + compile).
-  bytes policy_key = 2;
-
   // age recipient — TEE seals each disclosure entry to this on
   // consent. Client holds the matching privkey; only they can
   // decrypt the disclosure ciphertexts pulled via
   // `GET /sessions/:id/disclosures`.
-  string disclosure_pubkey = 3;
+  string disclosure_pubkey = 2;
 
   // Client-supplied opaque reconciliation tag (was `client_ref` at
   // top level). NOT indexed by the TEE — clients keep their own
@@ -101,7 +91,7 @@ message Client {
   // Length-bounded (≤128 ASCII graphic chars) at request validation.
   // Renamed proto field: `ref` (was `client_ref`); Rust accesses it
   // via `client.r#ref` due to keyword.
-  string ref = 4;
+  string ref = 3;
 
   // Per-hostname registry bearer map. Key = registry hostname
   // (authority portion of an OCI ref, e.g. "closed.vendor.com");
@@ -116,7 +106,7 @@ message Client {
   // this metadata blob; host only sees the relevant bearer briefly
   // when its pull RPC executes. See architecture.md → Registry
   // Decoupling.
-  map<string, bytes> registry_auth = 5;
+  map<string, bytes> registry_auth = 4;
 
   // Plugin pins declared by the client at session creation. Each
   // entry pins ONE plugin component the policy imports.
@@ -126,7 +116,7 @@ message Client {
   // declares which packages are imported; the client supplies one
   // `PluginPin` per non-host-provided import. Empty when the policy
   // has no plugin imports.
-  repeated PluginPin plugins = 6;
+  repeated PluginPin plugins = 5;
 }
 
 // One plugin pin — (package id, digest-pinned OCI ref). Carried in
@@ -184,20 +174,16 @@ message ClientAccess {
 // the full setup atomically), no PendingInit / FailedInit pre-states.
 enum SessionStatus {
   SESSION_STATUS_UNSPECIFIED = 0;
-  // Session created and ready: client_policy_key validated, metadata stored.
-  // Multiple /connect + /input rounds from the applicant happen here.
-  RUNNING = 2;
+  // Session created and ready: metadata stored. Multiple /connect +
+  // /input rounds from the applicant happen here.
+  RUNNING = 1;
   // Policy returned a domain Status (Completed or Failed) — webhook
   // fired, shared data may be available for client pull.
-  COMPLETED = 3;
+  COMPLETED = 2;
   // Unrecoverable infrastructure error during the run.
-  FAILED = 4;
+  FAILED = 3;
   // Idle TTL elapsed without applicant interaction.
-  EXPIRED = 6;
-  // Reserved (was PENDING_INIT in pre-merge architecture).
-  reserved 1;
-  // Reserved (was FAILED_INIT in pre-merge architecture).
-  reserved 5;
+  EXPIRED = 4;
 }
 
 // Internal session state for policy replay.

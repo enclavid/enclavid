@@ -2,16 +2,13 @@
 //! TTL and cleanup logic). No crypto on either side; readers map the
 //! single byte to `SessionStatus` enum, writers emit the byte.
 
+use broker_protocol::{BlobField, BlobWrite, FieldSelector, Op, Slot};
+
 use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::reason;
 
 use crate::boundary;
 use crate::error::BridgeError;
-use crate::proto::session_store::field_selector::Kind as SelectorKind;
-use crate::proto::session_store::read_response::Slot;
-use crate::proto::session_store::write_request::op::Kind as OpKind;
-use crate::proto::session_store::write_request::{BlobWrite, Op};
-use crate::proto::session_store::{BlobField, FieldSelector};
 use crate::proto::state::SessionStatus;
 
 use super::Ctx;
@@ -19,7 +16,7 @@ use super::core::{ReadField, WriteField, unwrap_scalar};
 
 /// Read marker: session status. Output is
 /// `Untrusted<Option<SessionStatus>, (AuthN, AuthZ, Replay)>` —
-/// host-bridge does **no** concern-closing work. The byte's value is
+/// broker-client does **no** concern-closing work. The byte's value is
 /// plaintext and host-supplied; its authenticity is unverifiable at
 /// this layer (host can return any valid enum discriminant), so AuthN
 /// stays open. The `SessionStatus::try_from` step inside `decode` is
@@ -41,9 +38,7 @@ impl ReadField for Status {
     type Output = Untrusted<Option<SessionStatus>, (AuthN, AuthZ, Replay)>;
 
     fn selector(&self) -> FieldSelector {
-        FieldSelector {
-            kind: Some(SelectorKind::Blob(BlobField::Status as i32)),
-        }
+        FieldSelector::Blob(BlobField::Status)
     }
 
     fn decode(self, slot: Slot, _ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
@@ -78,11 +73,11 @@ impl WriteField for SetStatus {
     fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, BridgeError> {
         // Fully pre-vouched at the construction site. Just emit the
         // wire op.
-        Ok(self.0.clone().map(|s| Op {
-            kind: Some(OpKind::Blob(BlobWrite {
-                field: BlobField::Status as i32,
+        Ok(self.0.clone().map(|s| {
+            Op::Blob(BlobWrite {
+                field: BlobField::Status,
                 value: vec![s as i32 as u8],
-            })),
+            })
         }))
     }
 }

@@ -5,7 +5,7 @@ use moka::future::Cache;
 use secrecy::SecretBox;
 
 use enclavid_engine::Runner;
-use enclavid_host_bridge::{GrpcChannel, RegistryClient, SessionStore, connect_store};
+use broker_client::{BrokerChannel, RegistryClient, SessionStore, connect_store};
 
 use crate::ref_key::RefKey;
 use crate::runtime::SessionPolicyCache;
@@ -27,12 +27,12 @@ pub struct AppState {
     /// `Component` for subsequent /input rounds.
     pub runner: Arc<Runner>,
     /// Per-session compiled components. Populated lazily by /connect
-    /// when first hit; cache miss triggers pull+decrypt+compile from
-    /// the client_policy_key persisted in metadata.
+    /// when first hit; cache miss triggers pull+compile from the
+    /// pinned policy ref in metadata.
     pub policies: SessionPolicyCache,
     pub session_store: Arc<SessionStore>,
     /// Registry client used by /connect for the lazy policy pull.
-    /// Same channel as the rest of host-bridge.
+    /// Same channel as the rest of broker-client.
     pub registry: RegistryClient,
     pub applicant_session_tokens: ApplicantSessionTokenCache,
     /// Per-session `DisplayField` shuffle seeds are HKDF-derived from
@@ -52,7 +52,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(
         session_store: Arc<SessionStore>,
-        channel: GrpcChannel,
+        channel: BrokerChannel,
         runner: Arc<Runner>,
         policies: SessionPolicyCache,
         shuffle_key: Arc<ShuffleKey>,
@@ -74,7 +74,7 @@ impl AppState {
         }
     }
 
-    /// Connect to host-bridge and build state. The runner and policy
+    /// Connect to broker-client and build state. The runner and policy
     /// cache are passed in so they can be shared with the client API.
     pub async fn init(
         transport_out: &str,
