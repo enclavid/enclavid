@@ -379,6 +379,30 @@ impl<T, S> Exposed<T, S> {
     }
 }
 
+/// Transpose a homogeneous batch of same-scope exposures into one
+/// exposure of the batch: `Vec<Exposed<T, S>>` → `Exposed<Vec<T>, S>`.
+///
+/// **No `Reason`, sound by construction:** every element already
+/// addressed exactly the concerns in `S` (each earned its scope through
+/// its own peel chain), so the batch has too — the scope is *derived*
+/// from the parts, never re-asserted. The uniform `S` is enforced by
+/// the `Vec`'s homogeneous element type.
+///
+/// Use to assemble a request body from per-field vouched values (e.g.
+/// the ops of a session write) and thread the `Exposed` through, instead
+/// of `into_inner`-ing each part and then rubber-stamping the envelope
+/// with a blanket `vouch_unchecked`. Pair with [`Exposed::map`] to fold
+/// in non-secret envelope fields (a version counter, …) at the same
+/// preserved scope.
+impl<T, S> From<Vec<Exposed<T, S>>> for Exposed<Vec<T>, S> {
+    fn from(items: Vec<Exposed<T, S>>) -> Self {
+        Exposed {
+            value: items.into_iter().map(|e| e.value).collect(),
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<T> Exposed<T, ()> {
     /// Reach the inner value once every concern has been vouched
     /// for. Only available when `S = ()`, so the type system

@@ -3,10 +3,10 @@
 //! cross the vsock HTTP boundary.
 //!
 //! They are NOT the sealed domain types: `SessionMetadata` /
-//! `SessionState` live in `state.proto` (prost-encoded TEE-side, then
-//! AEAD-sealed) and the broker only ever sees the opaque `value` bytes
-//! carried inside these envelopes. The broker has zero knowledge of
-//! prost or of what the sealed bytes mean.
+//! `SessionState` are CBOR-encoded TEE-side (see
+//! `broker-client::domain`) then AEAD-sealed, and the broker only ever
+//! sees the opaque `value` bytes carried inside these envelopes — it
+//! has zero knowledge of what the sealed bytes mean.
 //!
 //! Bodies are encoded with CBOR (see [`encode`]/[`decode`]) and carried
 //! as `application/octet-stream`. CBOR's named fields give schema

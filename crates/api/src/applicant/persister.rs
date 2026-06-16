@@ -294,7 +294,7 @@ impl SessionPersister {
             return Ok(());
         }
         let mut metadata = self.metadata.lock().await;
-        metadata.status = SessionStatus::Completed as i32;
+        metadata.status = SessionStatus::Completed;
         let expected = self.current_version.load(Ordering::SeqCst);
         let set_metadata = SetMetadata(
             boundary::outbound::to_host(&*metadata, reason!(r#"

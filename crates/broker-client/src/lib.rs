@@ -6,15 +6,9 @@ mod registry;
 mod stores;
 mod transport;
 
-mod proto {
-    // Only the sealed domain types remain protobuf-generated (prost,
-    // no tonic). The wire protos are gone — wire DTOs live in
-    // `broker-protocol` as serde structs. Migrating these off prost is
-    // Phase 4.5 (see [[project-broker-refactor-decisions]]).
-    pub mod state {
-        include!(concat!(env!("OUT_DIR"), "/enclavid.state.rs"));
-    }
-}
+// Sealed session-domain types — hand-written serde structs, CBOR at
+// rest. No protobuf anywhere in the project.
+mod domain;
 
 pub use age_seal::seal_to_recipient;
 pub use auth::{AuthClient, AuthVerdict, Principal};
@@ -24,13 +18,13 @@ pub use auth::{AuthClient, AuthVerdict, Principal};
 // need to update import paths.
 pub use boundary::{AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted};
 pub use error::BridgeError;
-pub use transport::{BrokerChannel, connect_store};
+pub use transport::BrokerClient;
 // Wire DTO re-exports — the operation selector and the OCI pull
 // response now come from the shared `broker-protocol` crate.
 pub use broker_protocol::ClientOperation;
 pub use broker_protocol::PullResponse as RegistryPullResponse;
 pub use registry::RegistryClient;
-pub use proto::state::{
+pub use domain::{
     CallEvent, CameraFacing, CaptureGroup, CaptureGuide, CaptureStep, Client, ClientAccess, Clip,
     Completed, ConsentRequest, DisplayField, GuideNone, GuideOval, GuideRect, MediaRequest,
     MediaSpec, PluginPin, SessionMetadata, SessionState, SessionStatus, Suspended,
@@ -43,7 +37,7 @@ pub use stores::{
 
 // --- Suspension as wasmtime trap error ---
 //
-// `suspended::Request` is the prost-generated oneof enum for Suspended.request.
+// `suspended::Request` is the oneof enum for `Suspended.request`.
 // Implementing Display + Error on it lets host fns return it via wasmtime::Error,
 // which is then caught by the shim and written into a CallEvent's Suspended status.
 

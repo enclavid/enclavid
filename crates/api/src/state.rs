@@ -5,7 +5,7 @@ use moka::future::Cache;
 use secrecy::SecretBox;
 
 use enclavid_engine::Runner;
-use broker_client::{BrokerChannel, RegistryClient, SessionStore, connect_store};
+use broker_client::{BrokerClient, RegistryClient, SessionStore};
 
 use crate::ref_key::RefKey;
 use crate::runtime::SessionPolicyCache;
@@ -32,7 +32,7 @@ pub struct AppState {
     pub policies: SessionPolicyCache,
     pub session_store: Arc<SessionStore>,
     /// Registry client used by /connect for the lazy policy pull.
-    /// Same channel as the rest of broker-client.
+    /// Same broker connection as the rest of broker-client.
     pub registry: RegistryClient,
     pub applicant_session_tokens: ApplicantSessionTokenCache,
     /// Per-session `DisplayField` shuffle seeds are HKDF-derived from
@@ -52,7 +52,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(
         session_store: Arc<SessionStore>,
-        channel: BrokerChannel,
+        broker: BrokerClient,
         runner: Arc<Runner>,
         policies: SessionPolicyCache,
         shuffle_key: Arc<ShuffleKey>,
@@ -67,7 +67,7 @@ impl AppState {
             runner,
             policies,
             session_store,
-            registry: RegistryClient::new(channel),
+            registry: RegistryClient::new(broker),
             applicant_session_tokens,
             shuffle_key,
             ref_key,
@@ -84,9 +84,9 @@ impl AppState {
         shuffle_key: Arc<ShuffleKey>,
         ref_key: Arc<RefKey>,
     ) -> Self {
-        let channel = connect_store(transport_out)
+        let broker = BrokerClient::new(transport_out)
             .await
-            .expect("failed to connect store");
-        Self::new(session_store, channel, runner, policies, shuffle_key, ref_key)
+            .expect("failed to connect to broker");
+        Self::new(session_store, broker, runner, policies, shuffle_key, ref_key)
     }
 }

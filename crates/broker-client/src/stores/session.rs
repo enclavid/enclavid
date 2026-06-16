@@ -49,12 +49,13 @@ pub use status::{SetStatus, Status};
 use std::sync::Arc;
 
 use broker_protocol::{FieldSelector, Op, ReadRequest, Slot, WriteRequest};
+use hyper::StatusCode;
 
-use crate::boundary;
-use crate::boundary::{AuthN, AuthZ, Replay, Untrusted};
+use crate::{Exposed, boundary};
+use crate::boundary::{AuthN, AuthZ, Covert, Replay, Untrusted};
 use crate::error::BridgeError;
 use crate::reason;
-use crate::transport::BrokerChannel;
+use crate::transport::BrokerClient;
 
 /// Per-call encryption context. Carries the TEE-side key plus the
 /// session_id used as AAD, so a ciphertext copied between sessions
@@ -72,7 +73,7 @@ impl Ctx<'_> {
 
 #[derive(Clone)]
 pub struct SessionStore {
-    channel: BrokerChannel,
+    broker: BrokerClient,
     /// TEE-side AEAD key used for METADATA and as outer layer of STATE.
     /// Phase A: caller injects (random or env-supplied placeholder).
     /// Phase B: derived from attestation report / KMS-bound material.
@@ -81,9 +82,9 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    pub fn new(channel: BrokerChannel, tee_seal_key: [u8; 32]) -> Self {
+    pub fn new(broker: BrokerClient, tee_seal_key: [u8; 32]) -> Self {
         Self {
-            channel,
+            broker,
             tee_seal_key: Arc::new(tee_seal_key),
         }
     }
@@ -131,20 +132,28 @@ impl SessionStore {
             tee_seal_key: self.tee_seal_key(),
             session_id: id,
         };
-        let mut ops: Vec<Op> = Vec::with_capacity(fields.len());
+        let mut ops: Vec<Exposed<Op>> = Vec::with_capacity(fields.len());
         for f in fields {
-            ops.push(f.build_op(&ctx)?.into_inner());
+            ops.push(f.build_op(&ctx)?);
         }
-        let req = WriteRequest {
+        // Each op earned its `()` via build_op's real work (metadata /
+        // state AEAD-sealed under tee_seal_key; disclosure age-sealed
+        // for the consumer). Transpose the batch via `From` — the
+        // body's `()` is *derived* from the ops, not re-asserted — then
+        // fold in the public version counter via a scope-preserving
+        // `map`. session_id rides the URL path.
+        let ops: Exposed<Vec<Op>, ()> = ops.into();
+        let req = ops.map(|ops| WriteRequest {
             ops,
             expected_version,
-        };
+        });
+        let bytes = broker_protocol::encode(&req.into_inner())?;
         let resp = self
-            .channel
-            .post(&format!("/sessions/{id}/write"), broker_protocol::encode(&req)?)
+            .broker
+            .post(&format!("/sessions/{id}/write"), bytes)
             .await?;
         match resp.status {
-            200 => {
+            StatusCode::OK => {
                 let r: broker_protocol::WriteResponse = broker_protocol::decode(&resp.body)?;
                 Ok(boundary::inbound::from_host(r.new_version, reason!(r#"
 Session version counter (new_version) from /write response.
@@ -153,7 +162,7 @@ concern — boundary returns maximal scope and the caller (the
 endpoint that knows the CAS-feed-forward use) peels with rationale.
                 "#)))
             }
-            412 => Err(BridgeError::VersionMismatch),
+            StatusCode::PRECONDITION_FAILED => Err(BridgeError::VersionMismatch),
             s => Err(BridgeError::Transport(format!("write: status {s}"))),
         }
     }
@@ -166,11 +175,11 @@ endpoint that knows the CAS-feed-forward use) peels with rationale.
         id: &str,
     ) -> Result<Untrusted<u64, (AuthN, AuthZ, Replay)>, BridgeError> {
         let resp = self
-            .channel
+            .broker
             .delete(&format!("/sessions/{id}/state"))
             .await?;
         match resp.status {
-            200 => {
+            StatusCode::OK => {
                 let r: broker_protocol::DeleteResponse = broker_protocol::decode(&resp.body)?;
                 Ok(boundary::inbound::from_host(r.deleted, reason!(r#"
 Delete-row count from /sessions/{id}/state response. Broker-supplied;
@@ -186,10 +195,10 @@ typical one is "informational only; no security gate hangs on it").
         &self,
         id: &str,
     ) -> Result<Untrusted<bool, (AuthN, AuthZ, Replay)>, BridgeError> {
-        let status = self.channel.head(&format!("/sessions/{id}")).await?;
+        let status = self.broker.head(&format!("/sessions/{id}")).await?;
         let exists = match status {
-            200 => true,
-            404 => false,
+            StatusCode::OK => true,
+            StatusCode::NOT_FOUND => false,
             s => return Err(BridgeError::Transport(format!("exists: status {s}"))),
         };
         Ok(boundary::inbound::from_host(exists, reason!(r#"
@@ -209,13 +218,26 @@ work-backed close at this layer — caller peels with rationale.
         id: &str,
         selectors: Vec<FieldSelector>,
     ) -> Result<(Vec<Slot>, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError> {
-        let req = ReadRequest { fields: selectors };
+        let req = boundary::outbound::to_host(
+            ReadRequest { fields: selectors },
+            reason!("ReadRequest → broker POST /sessions/{id}/read"),
+        )
+        .vouch_unchecked::<AuthN, _>(reason!(
+            "selectors are field-kind enum tags only — no secret, no applicant data leaves"
+        ))
+        .vouch_unchecked::<AuthZ, _>(reason!(
+            "a read request releases no TEE data; it names which fields to fetch back"
+        ))
+        .vouch_unchecked::<Covert, _>(reason!(
+            "selector set is bounded by the field enum cardinality; no policy bandwidth"
+        ));
+        let bytes = broker_protocol::encode(&req.into_inner())?;
         let resp = self
-            .channel
-            .post(&format!("/sessions/{id}/read"), broker_protocol::encode(&req)?)
+            .broker
+            .post(&format!("/sessions/{id}/read"), bytes)
             .await?;
         match resp.status {
-            200 => {
+            StatusCode::OK => {
                 let r: broker_protocol::ReadResponse = broker_protocol::decode(&resp.body)?;
                 // Slots are returned in the same order as request
                 // selectors per the broker contract; we trust that

@@ -9,12 +9,11 @@
 //! field is absent (`Option::None` from the read marker).
 
 use broker_protocol::{BlobField, BlobWrite, FieldSelector, Op, Slot};
-use prost::Message;
 
 use crate::boundary;
 use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
+use crate::domain::{self, SessionState};
 use crate::error::BridgeError;
-use crate::proto::state::SessionState;
 use crate::reason;
 
 use super::Ctx;
@@ -69,7 +68,7 @@ per-call version-CAS during the run.
             .trust::<AuthN, _, _, _, _>(|raw| aead::open(&raw, ctx.tee_seal_key, ctx.aad()))?
             .trust::<AuthZ, _, _, _, _>(|outer| {
                 let inner = aead::open(&outer, self.applicant_session_token, ctx.aad())?;
-                SessionState::decode(inner.as_slice()).map_err(BridgeError::from)
+                domain::decode::<SessionState>(&inner)
             })?;
         Ok(decoded.map(Some))
     }
@@ -84,7 +83,7 @@ impl WriteField for SetState<'_> {
         // cross-session copies fail at the outer layer.
         let sealed = self.state.clone().vouch::<AuthN, _, _, _, _>(
             |state| -> Result<Vec<u8>, BridgeError> {
-                let plaintext = state.encode_to_vec();
+                let plaintext = domain::encode(state)?;
                 let inner = aead::seal(&plaintext, self.applicant_session_token, ctx.aad())?;
                 aead::seal(&inner, ctx.tee_seal_key, ctx.aad())
             },

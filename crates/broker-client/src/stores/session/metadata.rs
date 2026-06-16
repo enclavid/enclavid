@@ -4,12 +4,11 @@
 //! `tee_seal_key`; AAD = session_id binds it to the session that wrote it.
 
 use broker_protocol::{BlobField, BlobWrite, FieldSelector, Op, Slot};
-use prost::Message;
 
 use crate::boundary;
 use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
+use crate::domain::{self, SessionMetadata};
 use crate::error::BridgeError;
-use crate::proto::state::SessionMetadata;
 use crate::reason;
 
 use super::Ctx;
@@ -56,7 +55,7 @@ calling endpoint.
             "#))
                 .trust::<AuthN, _, _, _, _>(|raw| {
                     let plaintext = aead::open(&raw, ctx.tee_seal_key, ctx.aad())?;
-                    SessionMetadata::decode(plaintext.as_slice()).map_err(BridgeError::from)
+                    domain::decode::<SessionMetadata>(&plaintext)
                 })?;
         Ok(decoded.map(Some))
     }
@@ -69,7 +68,7 @@ impl WriteField for SetMetadata<'_> {
         // owns the key for (tee_seal_key + session_id AAD).
         let sealed = self.0.clone().vouch::<AuthN, _, _, _, _>(
             |m| -> Result<Vec<u8>, BridgeError> {
-                aead::seal(&m.encode_to_vec(), ctx.tee_seal_key, ctx.aad())
+                aead::seal(&domain::encode(m)?, ctx.tee_seal_key, ctx.aad())
             },
         )?;
         Ok(sealed.map(|value| {

@@ -11,15 +11,15 @@ repository.workspace = true
 # build — replaces the TCP connect with a vsock connect; no IP stack
 # needed in the TEE kernel. The two are mutually exclusive.
 default = []
-vsock = ["dep:tokio-vsock"]
+vsock = ["dep:tokio-vsock", "dep:tower-service"]
 
 [dependencies]
-# Domain (state.proto) serialization codec — sealed at-rest types.
-# Kept until the prost→CBOR domain migration (Phase 4.5). The wire
-# envelope uses CBOR via `broker-protocol`, not prost.
-prost = "0.13"
 # Shared HTTP-over-vsock wire DTOs (CBOR-encoded).
 broker-protocol = { path = "../broker-protocol" }
+# Serde + CBOR for the sealed domain types (see src/domain.rs). Same
+# codec as the wire envelope — zero protobuf in the project.
+serde = { version = "1", features = ["derive"] }
+ciborium = "0.2"
 # AEAD for session blob encryption (tee_seal_key for METADATA, applicant_key
 # + tee_seal_key nested for STATE). ChaCha20-Poly1305 chosen over AES-GCM:
 # constant-time without AES-NI assumptions, smaller dep tree.
@@ -29,21 +29,17 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # (`AppendDisclosure` to client_pk). Recipient strings are `age1...`
 # so wire formats line up across the CLI and api crate.
 age = "0.11"
-# HTTP/1.1 client over a per-request connection (TCP or vsock). We use
-# the low-level `client::conn` handshake rather than a pooled connector
-# to keep the transport one shared code path with only the stream
-# connect cfg-split — the bulk is testable via the TCP/default build.
+# Pooled HTTP/1.1 client (hyper-util `legacy::Client`) with a cfg-split
+# connector: built-in `HttpConnector` for TCP (dev), a custom vsock
+# connector for the attested build. Same client type both ways; only
+# the connector differs. Connection reuse comes free from the pool.
 hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 bytes = "1"
 tokio = { version = "1", features = ["net", "rt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = { version = "0.7", optional = true }
-
-[build-dependencies]
-# Only the sealed domain types (state.proto) are still prost-generated;
-# the wire protos (auth/registry/session_store) are gone — replaced by
-# serde DTOs in `broker-protocol`. No tonic.
-prost-build = "0.13"
+# `tower_service::Service<Uri>` impl for the vsock connector.
+tower-service = { version = "0.3", optional = true }

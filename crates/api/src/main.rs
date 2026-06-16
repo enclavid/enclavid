@@ -17,7 +17,7 @@ mod transport;
 use std::sync::Arc;
 
 use enclavid_attestation::{Attestor, MockAttestor};
-use broker_client::{SessionStore, connect_store};
+use broker_client::{BrokerClient, SessionStore};
 
 use crate::client_state::ClientState;
 use crate::state::AppState;
@@ -39,7 +39,7 @@ async fn main() {
     // (writes metadata/status on /create and /init) and applicant API
     // (reads/writes state on /connect and /input). Wrapped in Arc so
     // the DisclosureStore facade and both state structs hold the same
-    // channel underneath.
+    // broker connection underneath.
     //
     // TODO: derive `tee_seal_key` from attestation / KMS rather than env.
     // For Phase A we accept a 32-byte hex from `ENCLAVID_TEE_KEY` (set
@@ -57,10 +57,10 @@ async fn main() {
     // `RefKey::derive_for_policy(policy_ref)` at `lookup_policy`
     // time. See `crate::ref_key` for the threat model.
     let ref_key = Arc::new(ref_key::RefKey::from_tee_seal_key(&tee_seal_key));
-    let channel = connect_store(&address_out)
+    let broker = BrokerClient::new(&address_out)
         .await
         .expect("failed to connect to broker");
-    let session_store = Arc::new(SessionStore::new(channel, tee_seal_key));
+    let session_store = Arc::new(SessionStore::new(broker, tee_seal_key));
 
     // Two listeners, two routers, one process. Topology rationale: TLS
     // terminates inside this TEE, so a host-side proxy can only route by

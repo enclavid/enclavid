@@ -281,7 +281,7 @@ async fn create(
         client: Some(client_block),
         // Encrypted-status copy: TEE truth (vs the plaintext one in
         // BlobField::Status which is only a host-facing TTL hint).
-        status: SessionStatus::Running as i32,
+        status: SessionStatus::Running,
         created_at,
         // Persister increments this atomically with each
         // AppendDisclosure write — see SessionPersister.

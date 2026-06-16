@@ -41,9 +41,9 @@ pub enum DecisionView {
     Review,
 }
 
-/// JSON-friendly view of a pending suspension request. Mirrors the proto
-/// `suspended::Request` variants but in a shape the frontend can consume
-/// without prost decoding.
+/// JSON-friendly view of a pending suspension request. Mirrors the
+/// domain `suspended::Request` variants but in a shape the frontend can
+/// consume directly.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RequestView {
@@ -319,13 +319,11 @@ fn capture_step_view(
     }
 }
 
-fn camera_view(c: i32) -> CameraFacingView {
-    if c == CameraFacing::Front as i32 {
-        CameraFacingView::Front
-    } else if c == CameraFacing::Rear as i32 {
-        CameraFacingView::Rear
-    } else {
-        CameraFacingView::Any
+fn camera_view(c: CameraFacing) -> CameraFacingView {
+    match c {
+        CameraFacing::Front => CameraFacingView::Front,
+        CameraFacing::Rear => CameraFacingView::Rear,
+        CameraFacing::Unknown | CameraFacing::Any => CameraFacingView::Any,
     }
 }
 

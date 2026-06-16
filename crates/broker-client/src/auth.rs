@@ -12,12 +12,13 @@
 //! rate-limit + audit log. See architecture.md → Network Isolation.
 
 use broker_protocol::{AuthorizeRequest, AuthorizeResponse, ClientOperation};
+use hyper::StatusCode;
 
 use crate::boundary;
-use crate::boundary::{AuthN, AuthZ, Replay, Untrusted};
+use crate::boundary::{AuthN, AuthZ, Covert, Replay, Untrusted};
 use crate::error::BridgeError;
 use crate::reason;
-use crate::transport::BrokerChannel;
+use crate::transport::BrokerClient;
 
 /// Principal identifier returned by the broker. Opaque string from the
 /// TEE's perspective — the broker is authoritative on identity; the TEE
@@ -56,15 +57,16 @@ pub enum AuthVerdict {
     PermissionDenied,
 }
 
-/// Client for the broker `/authorize` endpoint over the shared channel.
+/// Client for the broker `/authorize` endpoint over the shared broker
+/// connection.
 #[derive(Clone)]
 pub struct AuthClient {
-    channel: BrokerChannel,
+    broker: BrokerClient,
 }
 
 impl AuthClient {
-    pub fn new(channel: BrokerChannel) -> Self {
-        Self { channel }
+    pub fn new(broker: BrokerClient) -> Self {
+        Self { broker }
     }
 
     /// Authorize an HTTP request. The auth verdict (allowed / denied
@@ -80,19 +82,36 @@ impl AuthClient {
             authorization_header: authorization_header.to_string(),
             operation,
         };
-        let resp = self
-            .channel
-            .post("/authorize", broker_protocol::encode(&req)?)
-            .await?;
+        // Egress gate. The body carries the client's own credential —
+        // a by-design courier release to the broker that validates it,
+        // not a TEE secret. Vouch each concern with that rationale.
+        let req = boundary::outbound::to_host(
+            req,
+            reason!("AuthorizeRequest → broker POST /authorize"),
+        )
+        .vouch_unchecked::<AuthN, _>(reason!(
+            "authorization_header is the CLIENT's own credential, released by design \
+             to the broker that validates it — not a TEE-held secret"
+        ))
+        .vouch_unchecked::<AuthZ, _>(reason!(
+            "forwarding the credential to its validator IS the operation; no further \
+             release gate sits on top"
+        ))
+        .vouch_unchecked::<Covert, _>(reason!(
+            "header is client-supplied and the operation is a fixed enum — no \
+             policy-controlled bandwidth"
+        ));
+        let bytes = broker_protocol::encode(&req.into_inner())?;
+        let resp = self.broker.post("/authorize", bytes).await?;
 
         let verdict = match resp.status {
-            200 => {
+            StatusCode::OK => {
                 let r: AuthorizeResponse = broker_protocol::decode(&resp.body)?;
                 let principal = r.principal.filter(|s| !s.is_empty()).map(Principal);
                 AuthVerdict::Allowed { principal }
             }
-            401 => AuthVerdict::Unauthenticated,
-            403 => AuthVerdict::PermissionDenied,
+            StatusCode::UNAUTHORIZED => AuthVerdict::Unauthenticated,
+            StatusCode::FORBIDDEN => AuthVerdict::PermissionDenied,
             s => return Err(BridgeError::Transport(format!("authorize: status {s}"))),
         };
 

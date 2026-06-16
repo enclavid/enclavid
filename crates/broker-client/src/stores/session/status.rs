@@ -8,8 +8,8 @@ use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::reason;
 
 use crate::boundary;
+use crate::domain::SessionStatus;
 use crate::error::BridgeError;
-use crate::proto::state::SessionStatus;
 
 use super::Ctx;
 use super::core::{ReadField, WriteField, unwrap_scalar};
@@ -56,8 +56,8 @@ impl ReadField for Status {
         // gate: a malicious host can still return any valid
         // discriminant; the byte's authenticity is unverifiable for
         // plaintext at this layer.
-        let status = SessionStatus::try_from(byte as i32)
-            .map_err(|_| BridgeError::Transport(format!("invalid status byte: {byte}")))?;
+        let status = SessionStatus::from_byte(byte)
+            .ok_or_else(|| BridgeError::Transport(format!("invalid status byte: {byte}")))?;
         let wrapped = boundary::inbound::from_host(status, reason!(r#"
 SessionStatus byte from BlobField::Status, post-format-validation.
 Boundary entry (AuthN, AuthZ, Replay) all open: host plaintext
@@ -76,7 +76,7 @@ impl WriteField for SetStatus {
         Ok(self.0.clone().map(|s| {
             Op::Blob(BlobWrite {
                 field: BlobField::Status,
-                value: vec![s as i32 as u8],
+                value: vec![s.to_byte()],
             })
         }))
     }

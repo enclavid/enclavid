@@ -216,7 +216,7 @@ impl From<&CaptureStep> for ProtoCaptureStep {
             icon_ref: s.icon.clone(),
             instructions_ref: s.instructions.clone(),
             label_ref: s.label.clone(),
-            camera: ProtoCameraFacing::from(s.camera) as i32,
+            camera: ProtoCameraFacing::from(s.camera),
             guide: Some(ProtoCaptureGuide::from(&s.guide)),
             review_hint_ref: s.review_hint.clone(),
         }

@@ -14,22 +14,24 @@
 
 use broker_protocol::PullRequest;
 use broker_protocol::PullResponse;
+use hyper::StatusCode;
 
 use crate::boundary;
-use crate::boundary::{AuthN, AuthZ, Replay, Untrusted};
+use crate::boundary::{AuthN, AuthZ, Covert, Replay, Untrusted};
 use crate::error::BridgeError;
 use crate::reason;
-use crate::transport::BrokerChannel;
+use crate::transport::BrokerClient;
 
-/// Client for the broker `/oci/pull` endpoint over the shared channel.
+/// Client for the broker `/oci/pull` endpoint over the shared broker
+/// connection.
 #[derive(Clone)]
 pub struct RegistryClient {
-    channel: BrokerChannel,
+    broker: BrokerClient,
 }
 
 impl RegistryClient {
-    pub fn new(channel: BrokerChannel) -> Self {
-        Self { channel }
+    pub fn new(broker: BrokerClient) -> Self {
+        Self { broker }
     }
 
     /// Pull an OCI artifact (policy bundle or plugin component) by its
@@ -52,13 +54,31 @@ impl RegistryClient {
             policy_ref: policy_ref.to_string(),
             registry_auth: registry_auth.to_vec(),
         };
-        let resp = self
-            .channel
-            .post("/oci/pull", broker_protocol::encode(&req)?)
-            .await?;
+        // Egress gate. `policy_ref` is public (digest-pinned);
+        // `registry_auth` is the consumer-supplied bearer, courier-
+        // forwarded by design to the registry it authenticates.
+        let req = boundary::outbound::to_host(
+            req,
+            reason!("PullRequest → broker POST /oci/pull"),
+        )
+        .vouch_unchecked::<AuthN, _>(reason!(
+            "policy_ref is public (digest-pinned); registry_auth is the CONSUMER-supplied \
+             bearer, courier-forwarded by design to the registry it authenticates — \
+             not a TEE-held secret"
+        ))
+        .vouch_unchecked::<AuthZ, _>(reason!(
+            "forwarding the supplied bearer to the named registry IS the courier \
+             operation; no further release gate"
+        ))
+        .vouch_unchecked::<Covert, _>(reason!(
+            "both fields are consumer-supplied at session create, not policy-controlled \
+             at evaluate time"
+        ));
+        let bytes = broker_protocol::encode(&req.into_inner())?;
+        let resp = self.broker.post("/oci/pull", bytes).await?;
 
         match resp.status {
-            200 => {
+            StatusCode::OK => {
                 let r: PullResponse = broker_protocol::decode(&resp.body)?;
                 Ok(boundary::inbound::from_host(r, reason!(r#"
 OCI artifact pull response from broker /oci/pull. No work-backed
@@ -68,7 +88,7 @@ to the registry server via the broker-supplied bearer; Replay N/A
 since the request is content-addressed by digest).
                 "#)))
             }
-            404 => Err(BridgeError::NotFound),
+            StatusCode::NOT_FOUND => Err(BridgeError::NotFound),
             s => Err(BridgeError::Transport(format!("pull: status {s}"))),
         }
     }
