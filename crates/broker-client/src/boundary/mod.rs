@@ -52,9 +52,5 @@ pub mod sentinel;
 pub use sentinel::{
     AuthN, AuthZ, Covert, Exposed, Reason, Remove, Replay, Untrusted,
 };
-pub use inbound::{FromHost, from_host};
-pub use outbound::{ToHost, to_host};
-// `reason!` is a macro_export'd top-level macro — re-export the
-// stable path so callers can write `broker_client::boundary::reason!(...)`
-// if they prefer the boundary-scoped name. The crate-root alias
-// (`broker_client::reason!`) keeps working via macro_export.
+pub use inbound::{FromUntrusted, from_untrusted};
+pub use outbound::{ToUntrusted, to_untrusted};

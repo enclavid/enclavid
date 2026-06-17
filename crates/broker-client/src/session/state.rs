@@ -14,10 +14,10 @@ use crate::boundary;
 use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::domain::{self, SessionState};
 use crate::error::BridgeError;
-use crate::reason;
+
+use enclavid_crypto::aead;
 
 use super::Ctx;
-use super::aead;
 use super::core::{ReadField, WriteField, unwrap_scalar};
 
 /// Read marker: session state blob. Carries the applicant key for
@@ -52,19 +52,9 @@ impl ReadField for State<'_> {
 
     fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
         let Some(b) = unwrap_scalar(slot)? else {
-            return Ok(Untrusted::new(None, reason!(
-                "absent state blob — applicant has not connected yet \
-                 or hasn't completed any policy round"
-            )));
+            return Ok(Untrusted::new(None));
         };
-        let decoded: Untrusted<SessionState, (Replay,)> = boundary::inbound::from_host(b, reason!(r#"
-Raw bytes claimed-as-SessionState blob from BlobField::State slot.
-Boundary entry (AuthN, AuthZ, Replay) all open: AuthN closed below
-by outer-AEAD-open under tee_seal_key; AuthZ closed below by
-inner-AEAD-open under applicant_session_token (key possession is
-the authorisation gate). Replay left for the caller — bounded by
-per-call version-CAS during the run.
-            "#))
+        let decoded: Untrusted<SessionState, (Replay,)> = boundary::inbound::from_untrusted(b)
             .trust::<AuthN, _, _, _, _>(|raw| aead::open(&raw, ctx.tee_seal_key, ctx.aad()))?
             .trust::<AuthZ, _, _, _, _>(|outer| {
                 let inner = aead::open(&outer, self.applicant_session_token, ctx.aad())?;
@@ -85,7 +75,7 @@ impl WriteField for SetState<'_> {
             |state| -> Result<Vec<u8>, BridgeError> {
                 let plaintext = domain::encode(state)?;
                 let inner = aead::seal(&plaintext, self.applicant_session_token, ctx.aad())?;
-                aead::seal(&inner, ctx.tee_seal_key, ctx.aad())
+                aead::seal(&inner, ctx.tee_seal_key, ctx.aad()).map_err(Into::into)
             },
         )?;
         Ok(sealed.map(|value| {

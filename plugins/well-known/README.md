@@ -156,16 +156,31 @@ wkg wit build --wit-dir wit -o target/well-known-wit.wasm
 wkg publish target/well-known-wit.wasm
 # → enclavid:well-known@0.1.0 (WIT package)
 
-# 5. Publish component (implementation, for runtime)
-wkg oci push --insecure <registry-host> \
-    <registry-host>/enclavid/plugins/well-known:0.1.0 \
-    target/well-known.component.wasm
-# → enclavid/plugins/well-known:0.1.0 (component)
+# 5. Embed the plugin's i18n / icons declarations as custom sections.
+#    No `disclosure-fields` — the policy is the single bandwidth gate
+#    for disclosure-field refs (Option C). `embed` also asserts this is
+#    a plugin (it must NOT export `enclavid:policy/policy`) and rejects a
+#    core module — so step 3 (componentize) is required before it.
+enclavid plugin embed target/well-known.component.wasm \
+    --i18n i18n.json --icons icons.json \
+    -o target/well-known.embedded.wasm
+
+# (optional) lint the declarations standalone:
+enclavid plugin validate .
+
+# 6. Push the embedded component. `oci push` is role-agnostic — the same
+#    command pushes a policy. Auth comes from the docker-config chain
+#    after `enclavid cloud login`, or pass `--auth "Bearer <token>"`.
+enclavid oci push target/well-known.embedded.wasm \
+    <registry-host>/enclavid/plugins/well-known:0.1.0
+# → enclavid/plugins/well-known:0.1.0 (embedded component)
 ```
 
-`wkg publish` of the component blob auto-extracts `component.exports`
-and `component.imports` into the OCI config blob (`vnd.wasm.config.v0+json`)
-when given a real component — make sure step 3 runs before step 5.
+The component (steps 3–5) ships as a single `application/wasm` OCI
+layer, integrity-pinned by digest; the TEE re-verifies the layer digest
+on pull. Step 4's `wkg publish` of the WIT *package* is separate — it
+publishes the interface contract so policies / other plugins can `wkg
+wit fetch` it; it does not ship the implementation.
 
 ## Capture settings (baked in by each helper)
 

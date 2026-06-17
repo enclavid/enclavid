@@ -5,10 +5,12 @@ use std::path::PathBuf;
 mod auth;
 mod commands;
 mod config;
+mod declarations;
 mod discovery;
 mod docker_config;
 mod embed;
 mod registry_auth;
+mod wit_role;
 
 #[derive(Parser)]
 #[command(name = "enclavid")]
@@ -24,25 +26,37 @@ enum Commands {
     /// Operations against the Enclavid SaaS: authentication and
     /// workspace selection. All commands that talk to Logto / our
     /// platform live here, kept separate from the registry-agnostic
-    /// policy tooling under `enclavid policy ...`.
+    /// artifact tooling (`enclavid policy` / `plugin` / `oci`).
     Cloud {
         #[command(subcommand)]
         command: CloudCommand,
     },
 
-    /// OCI artifact operations on enclavid policy bundles.
+    /// Author a **policy** artifact: embed its `enclavid:embedded.*`
+    /// declarations (disclosure-fields / i18n / icons) and validate them.
+    /// `embed` asserts the component exports the `enclavid:policy/policy`
+    /// world. Registry push is role-agnostic — see `enclavid oci push`.
     Policy {
         #[command(subcommand)]
         command: PolicyCommand,
     },
 
-    /// OCI artifact operations on enclavid plugin components. Symmetric
-    /// with `enclavid policy ...` minus DF section (plugins don't
-    /// declare disclosure-fields under Option C — policy is the single
-    /// authority for disclosure-field refs).
+    /// Author a **plugin** artifact: embed its `enclavid:embedded.{i18n,
+    /// icons}` declarations. No disclosure-fields (policy is the single
+    /// bandwidth gate, Option C). `embed` asserts the component is NOT a
+    /// policy. Registry push is role-agnostic — see `enclavid oci push`.
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
+    },
+
+    /// Registry operations on Enclavid artifacts — role-agnostic. A
+    /// policy and a plugin are the same wasm component on the wire
+    /// (single `application/wasm` layer, digest-pinned), so push/pull
+    /// live here once rather than duplicated per role.
+    Oci {
+        #[command(subcommand)]
+        command: OciCommand,
     },
 
     /// Lifecycle of verification sessions against an Enclavid API
@@ -62,7 +76,7 @@ enum CloudCommand {
     /// (auto-confirms when the user is a member of exactly one).
     /// Also wires the Enclavid registry into `~/.docker/config.json`
     /// as a credential helper, so subsequent `docker push` / `oras
-    /// push` / `enclavid policy push` against that registry get
+    /// push` / `enclavid oci push` against that registry get
     /// fresh tokens automatically — no relogin every hour.
     Login {
         /// Skip the interactive workspace picker by selecting a
@@ -87,7 +101,7 @@ enum CloudCommand {
 
     /// Manage the active workspace (Logto organization). The active
     /// workspace determines which `enclavid/<workspace-id>/policies/...`
-    /// namespace `enclavid policy push` writes to.
+    /// namespace `enclavid oci push` writes to.
     Workspace {
         #[command(subcommand)]
         command: Option<WorkspaceCommand>,
@@ -118,7 +132,7 @@ enum PolicyCommand {
     /// Embed the policy's `enclavid:embedded.*.v1` declarations
     /// (disclosure-fields, i18n, icons) into a wasm component as
     /// custom sections. Pure metadata embedding — the output is a
-    /// wasm component ready for `enclavid policy push`.
+    /// wasm component ready for `enclavid oci push`.
     Embed {
         /// Path to the wasm component file (output of
         /// `cargo build --target wasm32-…` + `wasm-tools component
@@ -157,35 +171,6 @@ enum PolicyCommand {
         /// `<input-stem>.embedded.wasm` next to the input.
         #[arg(short, long)]
         output: Option<PathBuf>,
-    },
-
-    /// Push a wasm policy component to an OCI registry as a single
-    /// `application/wasm` layer.
-    ///
-    /// Input is the output of `enclavid policy embed` (or any wasm
-    /// component if you've handled embedding yourself). Push uploads
-    /// it as a single layer; no encryption, no annotations.
-    ///
-    /// Registry auth resolution (first match wins):
-    ///   1. `--auth "<scheme> <token>"` flag.
-    ///   2. `ENCLAVID_REGISTRY_AUTH` env var.
-    ///   3. `~/.docker/config.json` (static auths, credHelpers, credsStore).
-    Push {
-        /// Path to the wasm component file.
-        artifact: PathBuf,
-
-        /// Full OCI reference: `<registry>/<repository>[:tag]`. Examples:
-        /// `registry.enclavid.com/acme/kyc:v1`,
-        /// `ghcr.io/acme/policies/kyc:latest`. Tag defaults to a
-        /// timestamp if omitted; the artifact is also re-tagged as
-        /// `:latest` unless that's already the supplied tag.
-        reference: String,
-
-        /// Explicit registry credential: a full Authorization-header
-        /// value (e.g. `"Bearer ghp_xxxxx"` or `"Basic <base64>"`).
-        /// Takes precedence over env / docker config.
-        #[arg(long)]
-        auth: Option<String>,
     },
 
     /// Validate a policy manifest against the same rules the TEE
@@ -234,6 +219,50 @@ enum PluginCommand {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+
+    /// Validate a plugin project's embedded declarations (i18n, icons)
+    /// against the same rules the TEE engine enforces at load. No
+    /// disclosure-fields (policy is the single bandwidth gate, Option
+    /// C). Run before `enclavid oci push`.
+    Validate {
+        /// Path to the plugin project directory containing `i18n.json`
+        /// and `icons.json` (both optional — missing files are treated
+        /// as "no declarations of that kind"). Defaults to the current
+        /// directory.
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum OciCommand {
+    /// Push an Enclavid artifact (a policy OR a plugin wasm component)
+    /// to an OCI registry as a single `application/wasm` layer. Role-
+    /// agnostic: the bytes are self-contained (the `policy` / `plugin
+    /// embed` step welded the embedded declarations in), push just ships
+    /// them; the TEE re-verifies the layer digest on pull.
+    ///
+    /// Registry auth resolution (first match wins):
+    ///   1. `--auth "<scheme> <token>"` flag.
+    ///   2. `ENCLAVID_REGISTRY_AUTH` env var.
+    ///   3. `~/.docker/config.json` (static auths, credHelpers, credsStore).
+    Push {
+        /// Path to the (embedded) wasm component file.
+        artifact: PathBuf,
+
+        /// Full OCI reference: `<registry>/<repository>[:tag]`. Examples:
+        /// `registry.enclavid.com/acme/kyc:v1`,
+        /// `ghcr.io/acme/plugins/well-known:0.1.0`. Tag defaults to a
+        /// timestamp if omitted; the artifact is also re-tagged as
+        /// `:latest` unless that's already the supplied tag.
+        reference: String,
+
+        /// Explicit registry credential: a full Authorization-header
+        /// value (e.g. `"Bearer ghp_xxxxx"` or `"Basic <base64>"`).
+        /// Takes precedence over env / docker config.
+        #[arg(long)]
+        auth: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -247,7 +276,7 @@ enum SessionCommand {
     /// work without you re-passing it.
     Create {
         /// Pinned OCI ref of the policy, `<registry>/<repo>@sha256:<hex>`.
-        /// Use the value printed by `enclavid policy push` as
+        /// Use the value printed by `enclavid oci push` as
         /// `Pinned ref:`.
         #[arg(long)]
         policy: String,
@@ -348,11 +377,6 @@ async fn main() -> Result<()> {
                 icons,
                 output,
             } => commands::policy::embed::run(wasm, disclosure_fields, i18n, icons, output),
-            PolicyCommand::Push {
-                artifact,
-                reference,
-                auth,
-            } => commands::policy::push::run(artifact, reference, auth).await,
             PolicyCommand::Validate { dir } => commands::policy::validate::run(dir).await,
         },
         Commands::Plugin { command } => match command {
@@ -362,6 +386,14 @@ async fn main() -> Result<()> {
                 icons,
                 output,
             } => commands::plugin::embed::run(wasm, i18n, icons, output),
+            PluginCommand::Validate { dir } => commands::plugin::validate::run(dir).await,
+        },
+        Commands::Oci { command } => match command {
+            OciCommand::Push {
+                artifact,
+                reference,
+                auth,
+            } => commands::oci::push::run(artifact, reference, auth).await,
         },
         Commands::Session { command } => match command {
             SessionCommand::Create {

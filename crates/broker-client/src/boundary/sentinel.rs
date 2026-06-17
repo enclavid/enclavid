@@ -219,12 +219,15 @@ impl<T, S> Untrusted<T, S> {
     /// is free at runtime.
     ///
     /// `pub(crate)` by design: external callers route through
-    /// [`crate::boundary::inbound::from_host`] so every wire crossing
+    /// [`crate::boundary::inbound::from_untrusted`] so every wire crossing
     /// is grep-anchored. Inside this crate, the boundary fn and a
     /// handful of synthesis sites (absent-blob `None` wraps) are the
     /// only direct callers.
-    pub(crate) fn new(value: T, _scope_reason: Reason) -> Self {
-        Self { value, _marker: PhantomData }
+    pub(crate) fn new(value: T) -> Self {
+        Self {
+            value,
+            _marker: PhantomData,
+        }
     }
 
     /// Blanket-accept concern `X` without verification. Requires a
@@ -236,7 +239,10 @@ impl<T, S> Untrusted<T, S> {
     where
         S: Remove<X, I>,
     {
-        Untrusted { value: self.value, _marker: PhantomData }
+        Untrusted {
+            value: self.value,
+            _marker: PhantomData,
+        }
     }
 
     /// Close concern `X` by performing the work that addresses it
@@ -257,7 +263,10 @@ impl<T, S> Untrusted<T, S> {
         F: FnOnce(T) -> Result<U, E>,
     {
         let new_value = work(self.value)?;
-        Ok(Untrusted { value: new_value, _marker: PhantomData })
+        Ok(Untrusted {
+            value: new_value,
+            _marker: PhantomData,
+        })
     }
 
     /// Project the inner value while preserving the scope. Use when
@@ -268,7 +277,10 @@ impl<T, S> Untrusted<T, S> {
     where
         F: FnOnce(T) -> U,
     {
-        Untrusted { value: f(self.value), _marker: PhantomData }
+        Untrusted {
+            value: f(self.value),
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -306,7 +318,10 @@ impl<T: Clone, S> Clone for Exposed<T, S> {
     /// scope `S` may not be `Clone` (it never is, the markers are
     /// phantom). Preserves scope.
     fn clone(&self) -> Self {
-        Self { value: self.value.clone(), _marker: PhantomData }
+        Self {
+            value: self.value.clone(),
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -324,10 +339,13 @@ impl<T, S> Exposed<T, S> {
     /// one). Symmetric with `Untrusted::new`.
     ///
     /// `pub(crate)` by design: external callers route through
-    /// [`crate::boundary::outbound::to_host`] so every wire release
+    /// [`crate::boundary::outbound::to_untrusted`] so every wire release
     /// is grep-anchored.
-    pub(crate) fn new(value: T, _scope_reason: Reason) -> Self {
-        Self { value, _marker: PhantomData }
+    pub(crate) fn new(value: T) -> Self {
+        Self {
+            value,
+            _marker: PhantomData,
+        }
     }
 
     /// Vouch (blanket-accept) that concern `X` has been addressed
@@ -340,7 +358,10 @@ impl<T, S> Exposed<T, S> {
     where
         S: Remove<X, I>,
     {
-        Exposed { value: self.value, _marker: PhantomData }
+        Exposed {
+            value: self.value,
+            _marker: PhantomData,
+        }
     }
 
     /// Close concern `X` by performing the work that addresses it
@@ -365,7 +386,10 @@ impl<T, S> Exposed<T, S> {
         F: FnOnce(T) -> Result<U, E>,
     {
         let new_value = work(self.value)?;
-        Ok(Exposed { value: new_value, _marker: PhantomData })
+        Ok(Exposed {
+            value: new_value,
+            _marker: PhantomData,
+        })
     }
 
     /// Project the inner value while preserving the scope. Use when
@@ -375,7 +399,10 @@ impl<T, S> Exposed<T, S> {
     where
         F: FnOnce(T) -> U,
     {
-        Exposed { value: f(self.value), _marker: PhantomData }
+        Exposed {
+            value: f(self.value),
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -402,6 +429,44 @@ impl<T, S> From<Vec<Exposed<T, S>>> for Exposed<Vec<T>, S> {
         }
     }
 }
+
+/// Distribute one exposure of a tuple into a tuple of exposures, each
+/// component carrying the SAME scope `S`:
+/// `Exposed<(A, B, C), S>` → `(Exposed<A, S>, Exposed<B, S>, Exposed<C, S>)`.
+///
+/// The **dual** of the `From<Vec<Exposed<T, S>>>` transpose: that joins
+/// homogeneous parts into a whole; this splits a whole into its parts.
+///
+/// **No `Reason`, sound by construction:** whatever concerns are still
+/// open for the tuple are open for each of its components, so each part's
+/// scope is *derived* from the whole, never re-asserted. The split is
+/// independent — closing `S` on one component does not touch the others.
+///
+/// Note on honesty: distributing only moves the wrapper; it does not make
+/// a tuple-level blanket `vouch_unchecked` any more honest than it was.
+/// Bundle into a tuple-then-vouch ONLY when one reason genuinely covers
+/// every component (e.g. same-provenance scalars). For heterogeneous
+/// members that close a concern differently (per-field AEAD vs age-seal
+/// vs plaintext), keep them as separate per-member exposures instead.
+macro_rules! impl_exposed_distribute {
+    ($($T:ident),+) => {
+        impl<$($T,)+ S> Exposed<($($T,)+), S> {
+            #[allow(non_snake_case)]
+            pub fn distribute(self) -> ($(Exposed<$T, S>,)+) {
+                let ($($T,)+) = self.value;
+                ($(Exposed { value: $T, _marker: PhantomData },)+)
+            }
+        }
+    };
+}
+
+impl_exposed_distribute!(T0, T1);
+impl_exposed_distribute!(T0, T1, T2);
+impl_exposed_distribute!(T0, T1, T2, T3);
+impl_exposed_distribute!(T0, T1, T2, T3, T4);
+impl_exposed_distribute!(T0, T1, T2, T3, T4, T5);
+impl_exposed_distribute!(T0, T1, T2, T3, T4, T5, T6);
+impl_exposed_distribute!(T0, T1, T2, T3, T4, T5, T6, T7);
 
 impl<T> Exposed<T, ()> {
     /// Reach the inner value once every concern has been vouched
@@ -439,14 +504,18 @@ mod tests {
 
     #[test]
     fn peel_in_natural_order() {
-        let raw: Untrusted<Meta, (AuthN, AuthZ, Replay)> = Untrusted::new(
-            Meta { owner: "alice".into(), version: 1 },
-            reason!("test fixture"),
-        );
+        let raw: Untrusted<Meta, (AuthN, AuthZ, Replay)> = Untrusted::new(Meta {
+            owner: "alice".into(),
+            version: 1,
+        });
         let after_authn = raw.trust_unchecked::<AuthN, _>(reason!("test fixture"));
         let after_authz = after_authn
             .trust::<AuthZ, _, _, _, _>(|m| {
-                if m.owner == "alice" { Ok(m) } else { Err("wrong owner") }
+                if m.owner == "alice" {
+                    Ok(m)
+                } else {
+                    Err("wrong owner")
+                }
             })
             .unwrap();
         let m = after_authz
@@ -454,7 +523,10 @@ mod tests {
             .into_inner();
         assert_eq!(
             m,
-            Meta { owner: "alice".into(), version: 1 }
+            Meta {
+                owner: "alice".into(),
+                version: 1
+            }
         );
     }
 
@@ -462,8 +534,7 @@ mod tests {
     fn peel_in_arbitrary_order() {
         // Same scope, peeled in different order — type inference
         // picks the matching position marker each time.
-        let raw: Untrusted<u32, (AuthN, AuthZ, Replay)> =
-            Untrusted::new(42, reason!("test fixture"));
+        let raw: Untrusted<u32, (AuthN, AuthZ, Replay)> = Untrusted::new(42);
         let v = raw
             .trust_unchecked::<Replay, _>(reason!("test fixture"))
             .trust_unchecked::<AuthN, _>(reason!("test fixture"))
@@ -476,11 +547,14 @@ mod tests {
     fn trust_predicate_style_propagates_error() {
         // Predicate-on-success: keep the value unchanged, fail on
         // bad input. Same shape as a real authorization check.
-        let raw: Untrusted<&'static str, (AuthZ,)> =
-            Untrusted::new("mallory", reason!("test fixture"));
+        let raw: Untrusted<&'static str, (AuthZ,)> = Untrusted::new("mallory");
         let err = raw
             .trust::<AuthZ, _, _, _, _>(|s| {
-                if s == "alice" { Ok(s) } else { Err("not alice") }
+                if s == "alice" {
+                    Ok(s)
+                } else {
+                    Err("not alice")
+                }
             })
             .unwrap_err();
         assert_eq!(err, "not alice");
@@ -491,8 +565,7 @@ mod tests {
         // Real inbound shape: bytes-on-wire → typed value after
         // AEAD-open + decode. We model with a string-to-length
         // transform to keep the test focused on the type shift.
-        let raw: Untrusted<&'static str, (AuthN,)> =
-            Untrusted::new("hello", reason!("test fixture"));
+        let raw: Untrusted<&'static str, (AuthN,)> = Untrusted::new("hello");
         let len: Untrusted<usize, ()> = raw
             .trust::<AuthN, _, _, _, _>(|s| Ok::<_, ()>(s.len()))
             .unwrap();
@@ -501,10 +574,10 @@ mod tests {
 
     #[test]
     fn map_preserves_scope() {
-        let raw: Untrusted<Meta, (Replay,)> = Untrusted::new(
-            Meta { owner: "alice".into(), version: 7 },
-            reason!("test fixture"),
-        );
+        let raw: Untrusted<Meta, (Replay,)> = Untrusted::new(Meta {
+            owner: "alice".into(),
+            version: 7,
+        });
         let projected: Untrusted<u32, (Replay,)> = raw.map(|m| m.version);
         let v = projected
             .trust_unchecked::<Replay, _>(reason!("test fixture"))
@@ -517,7 +590,7 @@ mod tests {
         // For values where no concerns apply (rare, but possible at
         // boundaries we generate ourselves), `Untrusted<T, ()>` is
         // directly consumable.
-        let u: Untrusted<u32, ()> = Untrusted::new(99, reason!("test fixture"));
+        let u: Untrusted<u32, ()> = Untrusted::new(99);
         assert_eq!(u.into_inner(), 99);
     }
 
@@ -530,14 +603,13 @@ mod tests {
 
     #[test]
     fn exposed_round_trips_empty_scope() {
-        let e: Exposed<Vec<u8>, ()> = Exposed::new(vec![1u8, 2, 3], reason!("test fixture"));
+        let e: Exposed<Vec<u8>, ()> = Exposed::new(vec![1u8, 2, 3]);
         assert_eq!(e.into_inner(), vec![1, 2, 3]);
     }
 
     #[test]
     fn exposed_vouch_peels_concerns_in_any_order() {
-        let raw: Exposed<u32, (AuthN, AuthZ, Covert)> =
-            Exposed::new(42, reason!("test fixture"));
+        let raw: Exposed<u32, (AuthN, AuthZ, Covert)> = Exposed::new(42);
         let v = raw
             .vouch_unchecked::<Covert, _>(reason!("test fixture"))
             .vouch_unchecked::<AuthN, _>(reason!("test fixture"))
@@ -548,8 +620,7 @@ mod tests {
 
     #[test]
     fn exposed_vouch_predicate_style_propagates_error() {
-        let raw: Exposed<&'static str, (Covert,)> =
-            Exposed::new("encoded:bits", reason!("test fixture"));
+        let raw: Exposed<&'static str, (Covert,)> = Exposed::new("encoded:bits");
         let err = raw
             .vouch::<Covert, _, _, _, _>(|s| {
                 if s.contains(':') {
@@ -566,8 +637,7 @@ mod tests {
     fn exposed_vouch_transforming_changes_type_on_success() {
         // Real outbound shape: plaintext value → ciphertext bytes
         // after AEAD-seal. We model with a serialise-to-bytes step.
-        let raw: Exposed<&'static str, (AuthN,)> =
-            Exposed::new("hello", reason!("test fixture"));
+        let raw: Exposed<&'static str, (AuthN,)> = Exposed::new("hello");
         let bytes: Exposed<Vec<u8>, ()> = raw
             .vouch::<AuthN, _, _, _, _>(|s| Ok::<_, ()>(s.as_bytes().to_vec()))
             .unwrap();
@@ -576,10 +646,10 @@ mod tests {
 
     #[test]
     fn exposed_map_preserves_scope() {
-        let raw: Exposed<Meta, (AuthN, Covert)> = Exposed::new(
-            Meta { owner: "alice".into(), version: 7 },
-            reason!("test fixture"),
-        );
+        let raw: Exposed<Meta, (AuthN, Covert)> = Exposed::new(Meta {
+            owner: "alice".into(),
+            version: 7,
+        });
         let projected: Exposed<u32, (AuthN, Covert)> = raw.map(|m| m.version);
         let v = projected
             .vouch_unchecked::<AuthN, _>(reason!("test fixture"))

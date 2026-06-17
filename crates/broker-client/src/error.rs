@@ -32,6 +32,12 @@ impl From<broker_protocol::CodecError> for BridgeError {
     }
 }
 
+impl From<enclavid_crypto::CryptoError> for BridgeError {
+    fn from(e: enclavid_crypto::CryptoError) -> Self {
+        Self::Transport(e.to_string())
+    }
+}
+
 impl std::fmt::Display for BridgeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

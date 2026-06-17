@@ -18,7 +18,8 @@ use enclavid_engine::{
     SessionState,
 };
 use broker_client::{
-    AuthN, AuthZ, Metadata, Replay, SessionMetadata, State as StateField, reason,
+    AuthN, AuthZ, Metadata, Replay, SessionMetadata, State as StateField, public_session_id,
+    reason,
 };
 
 use crate::error::ApiError;
@@ -45,7 +46,7 @@ pub(super) async fn fetch_metadata(
     // don't have to repeat the analysis.
     let ((metadata,), _version) = state
         .session_store
-        .read(session_id, (Metadata,))
+        .read(public_session_id(session_id), (Metadata,))
         .await
         .map_err(|e| {
             eprintln!(
@@ -258,7 +259,7 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
         let ((state_opt,), version) = state
             .session_store
             .read(
-                &session_id,
+                public_session_id(&session_id),
                 (StateField {
                     applicant_session_token: applicant_session_token.expose_secret(),
                 },),

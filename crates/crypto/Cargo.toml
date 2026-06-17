@@ -1,0 +1,15 @@
+[package]
+name = "enclavid-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Symmetric AEAD for session-blob sealing. ChaCha20-Poly1305: constant-
+# time without AES-NI assumptions, small dep tree.
+chacha20poly1305 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+# Hybrid public-key sealing to `age` recipients (consumer-readable
+# blobs). `age1...` recipient strings; wire format matches stock age.
+age = "0.11"

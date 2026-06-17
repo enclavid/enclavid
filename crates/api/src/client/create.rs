@@ -298,83 +298,59 @@ async fn create(
     // nothing under `principal` in that case — fine, host-side
     // attribution features just won't have this session indexed).
     let set_metadata = SetMetadata(
-        boundary::outbound::to_host(&metadata, reason!(r#"
-SessionMetadata initial write at POST /sessions. Wire crossing for
-the per-session config blob (principal, policy_ref, client
-disclosure pubkey, input claims, disclosure-chain bookkeeping).
-AuthN closed inside broker-client by AEAD-seal under tee_seal_key;
-AuthZ + Covert vouched below.
-            "#))
-        .vouch_unchecked::<AuthZ, _>(reason!(r#"
-Only the attested CVM holds tee_seal_key, so retrieval at /connect
-is gated on the same enclave that wrote it. The metadata is
-written here under POST /sessions (client AuthN'd by the host-side
-Auth service) and read by the applicant API as opaque ciphertext —
-release is implicit in key-possession.
-            "#))
-        .vouch_unchecked::<Covert, _>(reason!(r#"
-Metadata sealed under tee_seal_key — plaintext invisible to both
-host and consumer. Audit-honest caveat: ciphertext size is host-
-observable. This is the initial /create write before any policy
-has run; fields are derived from the client's /create request
-(principal, policy_ref, client.access, client_disclosure_pubkey,
-input claims), all client-controlled, not policy-controlled. Zero
-covert bandwidth from policy at this write — the channel only
-opens later via persister rewrites (see SetMetadata Covert peel
-in applicant/persister.rs).
-            "#))
+        boundary::outbound::to_untrusted(&metadata)
+            .vouch_unchecked::<AuthZ, _>(reason!(
+                "only the attested CVM holds tee_seal_key; read at /connect as opaque ciphertext — release implicit in key-possession"
+            ))
+            .vouch_unchecked::<Covert, _>(reason!(
+                "initial /create write before any policy runs; fields are client-controlled, not policy-controlled — zero covert bandwidth"
+            )),
     );
     let set_status = SetStatus(
-        boundary::outbound::to_host(SessionStatus::Running, reason!(r#"
-SessionStatus initial write at POST /sessions (Running). By-design
-plaintext for host TTL / cleanup orchestration.
-            "#))
-        .vouch_unchecked::<AuthN, _>(reason!(r#"
-By-design plaintext. Host needs the byte to manage TTL / cleanup
-without holding a TEE-side key. No applicant- or policy-specific
-data lands in the byte — only the lifecycle marker is observable.
-            "#))
-        .vouch_unchecked::<AuthZ, _>(reason!(r#"
-Lifecycle marker observable to host for orchestration is the
-explicit contract — host needs to know when to expire sessions or
-release storage. Not access-controlled at this layer.
-            "#))
-        .vouch_unchecked::<Covert, _>(reason!(r#"
-Enum cardinality = 5; ~1 status write per session lifecycle
-transition. Bounded by session-lifecycle schema.
-            "#))
+        boundary::outbound::to_untrusted(SessionStatus::Running)
+            .vouch_unchecked::<AuthN, _>(reason!(
+                "by-design plaintext: host needs the byte for TTL; only the lifecycle marker is observable"
+            ))
+            .vouch_unchecked::<AuthZ, _>(reason!("lifecycle marker observable to host is the explicit contract"))
+            .vouch_unchecked::<Covert, _>(reason!("enum cardinality 5; ~1 status write per lifecycle transition")),
     );
     let set_principal = principal.as_deref().map(|p| {
         SetPrincipal(
-            boundary::outbound::to_host(p, reason!(r#"
-Tenant principal UTF-8 identifier write at POST /sessions. By-
-design plaintext: host indexes sessions per tenant for revocation
-/ rate-limit / billing.
-                "#))
-            .vouch_unchecked::<AuthN, _>(reason!(r#"
-By-design plaintext: host needs the value queryable. TEE never
-reads it back, so authenticity gate isn't needed on this side
-either. Equivalent shape to SetStatus.
-                "#))
-            .vouch_unchecked::<AuthZ, _>(reason!(r#"
-Tenant identifier is the host's own operational data (host runs
-the rate limiter and billing index); not access-controlled at
-this layer.
-                "#))
-            .vouch_unchecked::<Covert, _>(reason!(r#"
-Value is a fixed-shape tenant id chosen at /create from the
-authenticated client identity, not produced by policy at evaluate
-time. No policy-controlled bandwidth.
-                "#))
+            boundary::outbound::to_untrusted(p)
+                .vouch_unchecked::<AuthN, _>(reason!(
+                    "by-design plaintext: host indexes sessions per tenant; TEE never reads it back"
+                ))
+                .vouch_unchecked::<AuthZ, _>(reason!("tenant id is the host's own operational data"))
+                .vouch_unchecked::<Covert, _>(reason!(
+                    "fixed-shape tenant id chosen at /create from client identity, not policy-produced"
+                )),
         )
     });
     let mut ops: Vec<&dyn WriteField> = vec![&set_metadata, &set_status];
     if let Some(op) = set_principal.as_ref() {
         ops.push(op);
     }
+    let (sid, expected_version) =
+        boundary::outbound::to_untrusted((session_id.as_str(), None::<u64>))
+            .vouch_unchecked::<AuthN, _>(reason!(
+                "session id + version: public host identifiers, not TEE secrets"
+            ))
+            .vouch_unchecked::<AuthZ, _>(reason!("fed back to the host that owns them"))
+            .vouch_unchecked::<Covert, _>(reason!(
+                "fixed-shape UUID + no CAS precondition — no policy bandwidth"
+            ))
+            .distribute();
+    let ops = boundary::outbound::to_untrusted(&ops[..])
+        .vouch_unchecked::<AuthN, _>(reason!(
+            "recipe set; each field's content is sealed in its own build_op"
+        ))
+        .vouch_unchecked::<AuthZ, _>(reason!("each op writes its own session key"))
+        .vouch_unchecked::<Covert, _>(reason!(
+            "no policy has run at /create — op count is client-determined (principal present?), not policy bandwidth"
+        ));
     state
         .session_store
-        .write(&session_id, None, &ops)
+        .write(sid, expected_version, ops)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

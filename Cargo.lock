@@ -393,15 +393,13 @@ dependencies = [
 name = "broker-client"
 version = "0.1.0"
 dependencies = [
- "age",
  "broker-protocol",
  "bytes",
- "chacha20poly1305",
  "ciborium",
+ "enclavid-crypto",
  "http-body-util",
  "hyper",
  "hyper-util",
- "rand_core 0.6.4",
  "serde",
  "tokio",
  "tokio-vsock",
@@ -1224,6 +1222,7 @@ dependencies = [
  "base64ct",
  "broker-client",
  "enclavid-attestation",
+ "enclavid-crypto",
  "enclavid-engine",
  "futures",
  "hex",
@@ -1285,6 +1284,16 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wasm-encoder 0.247.0",
+ "wasmparser 0.247.0",
+]
+
+[[package]]
+name = "enclavid-crypto"
+version = "0.1.0"
+dependencies = [
+ "age",
+ "chacha20poly1305",
+ "rand_core 0.6.4",
 ]
 
 [[package]]

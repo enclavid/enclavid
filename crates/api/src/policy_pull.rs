@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use broker_client::{AuthN, AuthZ, RegistryClient, Replay, reason};
+use broker_client::{AuthN, AuthZ, Covert, PullRequest, RegistryClient, Replay, boundary, reason};
 
 /// OCI layer media type for wasm component layers (policies and
 /// plugins both). Per `[[project-wkg-wac-poc-findings]]`, wkg's pull
@@ -128,8 +128,22 @@ async fn pull_wasm_layer(
 ) -> Result<Vec<u8>, PullError> {
     let artifact_digest = extract_digest(artifact_ref)
         .ok_or_else(|| PullError::InvalidRef(artifact_ref.to_string()))?;
+    let req = boundary::outbound::to_untrusted(PullRequest {
+        policy_ref: artifact_ref.to_string(),
+        registry_auth: registry_auth.to_vec(),
+    })
+    .vouch_unchecked::<AuthN, _>(reason!(
+        "policy_ref public (digest-pinned); registry_auth is the consumer's bearer, \
+         courier-forwarded — not a TEE secret"
+    ))
+    .vouch_unchecked::<AuthZ, _>(reason!(
+        "forwarding the bearer to its registry IS the courier op"
+    ))
+    .vouch_unchecked::<Covert, _>(reason!(
+        "both consumer-supplied at session create, not policy-controlled"
+    ));
     let response = registry
-        .pull(artifact_ref, registry_auth)
+        .pull(req)
         .await
         .map_err(classify_transport_error)?
         .trust::<AuthN, _, _, _, _>(|r| {

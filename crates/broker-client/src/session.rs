@@ -31,7 +31,6 @@
 //! proportional (status-only read = 1-byte payload, no metadata
 //! baggage).
 
-mod aead;
 mod core;
 mod disclosure;
 mod metadata;
@@ -48,14 +47,13 @@ pub use status::{SetStatus, Status};
 
 use std::sync::Arc;
 
-use broker_protocol::{FieldSelector, Op, ReadRequest, Slot, WriteRequest};
+use broker_protocol::{Op, ReadRequest, Slot, WriteRequest};
 use hyper::StatusCode;
 
-use crate::{Exposed, boundary};
-use crate::boundary::{AuthN, AuthZ, Covert, Replay, Untrusted};
+use crate::boundary::{AuthN, AuthZ, Replay, Untrusted};
 use crate::error::BridgeError;
-use crate::reason;
 use crate::transport::BrokerClient;
+use crate::{Exposed, boundary};
 
 /// Per-call encryption context. Carries the TEE-side key plus the
 /// session_id used as AAD, so a ciphertext copied between sessions
@@ -101,9 +99,14 @@ impl SessionStore {
     /// session does not exist yet on the broker.
     pub async fn read<T: ReadTuple>(
         &self,
-        id: &str,
+        id: Exposed<&str>,
         fields: T,
     ) -> Result<(T::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError> {
+        // Type gate: the caller vouches the session id (public,
+        // host-assigned). We thread the `Exposed` into `fetch`/`read_raw`
+        // (no early `into_inner`): the id is released at the wire (URL)
+        // inside `read_raw`, and read back as AAD via `as_inner` in
+        // `fetch` for decoding the result blobs.
         fields.fetch(self, id).await
     }
 
@@ -118,16 +121,29 @@ impl SessionStore {
     /// the session's current version on the broker must equal V.
     /// Mismatch surfaces as `BridgeError::VersionMismatch` (HTTP 412).
     ///
-    /// Each `build_op` returns `Exposed<Op, ()>` — every outbound
-    /// concern has been vouched for inside the implementation. We
-    /// `into_inner()` only here, at the wire boundary. That's the
-    /// single point where TEE-side data becomes raw bytes on the wire.
+    /// Every parameter arrives as `Exposed<_, ()>` — fully vouched at
+    /// the **caller** before `write` is reached, so the signature is the
+    /// type-level guarantee that nothing un-vouched can be written:
+    ///   * `id` / `expected_version` — `boundary::outbound::public(...)`
+    ///     (host-assigned UUID / the host's own counter; trivially public
+    ///     across all outbound concerns).
+    ///   * `fields` — `boundary::outbound::batch(...)` carries only the
+    ///     collection-level concern, cardinality (`Covert`), which the
+    ///     caller peels with a count acknowledgement. Each member's
+    ///     content concerns (`AuthN`/`AuthZ`) are closed PER FIELD below
+    ///     in `build_op`, with that field's own key/recipient — they are
+    ///     deliberately NOT a collection-level concern (metadata AEAD vs
+    ///     state double-AEAD vs disclosure age-sealed-to-consumer vs
+    ///     plaintext status are not the same concern, so they can't be
+    ///     bundled into one batch vouch).
     pub async fn write(
         &self,
-        id: &str,
-        expected_version: Option<u64>,
-        fields: &[&dyn WriteField],
+        id: Exposed<&str>,
+        expected_version: Exposed<Option<u64>>,
+        fields: Exposed<&[&dyn WriteField]>,
     ) -> Result<Untrusted<u64, (AuthN, AuthZ, Replay)>, BridgeError> {
+        let id = id.into_inner();
+        let fields = fields.into_inner();
         let ctx = Ctx {
             tee_seal_key: self.tee_seal_key(),
             session_id: id,
@@ -136,31 +152,22 @@ impl SessionStore {
         for f in fields {
             ops.push(f.build_op(&ctx)?);
         }
-        // Each op earned its `()` via build_op's real work (metadata /
-        // state AEAD-sealed under tee_seal_key; disclosure age-sealed
-        // for the consumer). Transpose the batch via `From` — the
-        // body's `()` is *derived* from the ops, not re-asserted — then
-        // fold in the public version counter via a scope-preserving
-        // `map`. session_id rides the URL path.
+
         let ops: Exposed<Vec<Op>, ()> = ops.into();
         let req = ops.map(|ops| WriteRequest {
             ops,
-            expected_version,
+            expected_version: expected_version.into_inner(),
         });
         let bytes = broker_protocol::encode(&req.into_inner())?;
         let resp = self
             .broker
             .post(&format!("/sessions/{id}/write"), bytes)
             .await?;
+        
         match resp.status {
             StatusCode::OK => {
                 let r: broker_protocol::WriteResponse = broker_protocol::decode(&resp.body)?;
-                Ok(boundary::inbound::from_host(r.new_version, reason!(r#"
-Session version counter (new_version) from /write response.
-Broker-supplied; the bridge does no work-backed close on any
-concern — boundary returns maximal scope and the caller (the
-endpoint that knows the CAS-feed-forward use) peels with rationale.
-                "#)))
+                Ok(r.new_version.into())
             }
             StatusCode::PRECONDITION_FAILED => Err(BridgeError::VersionMismatch),
             s => Err(BridgeError::Transport(format!("write: status {s}"))),
@@ -172,20 +179,14 @@ endpoint that knows the CAS-feed-forward use) peels with rationale.
     /// tuple because we have no use case for batched delete.
     pub async fn delete(
         &self,
-        id: &str,
+        id: Exposed<&str>,
     ) -> Result<Untrusted<u64, (AuthN, AuthZ, Replay)>, BridgeError> {
-        let resp = self
-            .broker
-            .delete(&format!("/sessions/{id}/state"))
-            .await?;
+        let id = id.into_inner();
+        let resp = self.broker.delete(&format!("/sessions/{id}/state")).await?;
         match resp.status {
             StatusCode::OK => {
                 let r: broker_protocol::DeleteResponse = broker_protocol::decode(&resp.body)?;
-                Ok(boundary::inbound::from_host(r.deleted, reason!(r#"
-Delete-row count from /sessions/{id}/state response. Broker-supplied;
-no work-backed close at this layer — caller peels with rationale (the
-typical one is "informational only; no security gate hangs on it").
-                "#)))
+                Ok(boundary::inbound::from_untrusted(r.deleted))
             }
             s => Err(BridgeError::Transport(format!("delete: status {s}"))),
         }
@@ -193,18 +194,16 @@ typical one is "informational only; no security gate hangs on it").
 
     pub async fn exists(
         &self,
-        id: &str,
+        id: Exposed<&str>,
     ) -> Result<Untrusted<bool, (AuthN, AuthZ, Replay)>, BridgeError> {
+        let id = id.into_inner();
         let status = self.broker.head(&format!("/sessions/{id}")).await?;
         let exists = match status {
             StatusCode::OK => true,
             StatusCode::NOT_FOUND => false,
             s => return Err(BridgeError::Transport(format!("exists: status {s}"))),
         };
-        Ok(boundary::inbound::from_host(exists, reason!(r#"
-Existence probe answer from HEAD /sessions/{id}. Broker-supplied; no
-work-backed close at this layer — caller peels with rationale.
-        "#)))
+        Ok(boundary::inbound::from_untrusted(exists))
     }
 
     // ---- tuple-trait helper (crate-private) ----
@@ -215,22 +214,12 @@ work-backed close at this layer — caller peels with rationale.
     // counter.
     pub(crate) async fn read_raw(
         &self,
-        id: &str,
-        selectors: Vec<FieldSelector>,
+        id: Exposed<&str>,
+        req: Exposed<ReadRequest>,
     ) -> Result<(Vec<Slot>, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError> {
-        let req = boundary::outbound::to_host(
-            ReadRequest { fields: selectors },
-            reason!("ReadRequest → broker POST /sessions/{id}/read"),
-        )
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "selectors are field-kind enum tags only — no secret, no applicant data leaves"
-        ))
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "a read request releases no TEE data; it names which fields to fetch back"
-        ))
-        .vouch_unchecked::<Covert, _>(reason!(
-            "selector set is bounded by the field enum cardinality; no policy bandwidth"
-        ));
+        // Both arrive vouched (id by the api caller, the selector request
+        // by `fetch` which builds it) — we just release them at the wire.
+        let id = id.into_inner();
         let bytes = broker_protocol::encode(&req.into_inner())?;
         let resp = self
             .broker
@@ -243,10 +232,7 @@ work-backed close at this layer — caller peels with rationale.
                 // selectors per the broker contract; we trust that
                 // ordering here. Out-of-order or missing slots would be
                 // a broker bug.
-                let version = boundary::inbound::from_host(r.version, reason!(r#"
-Session version counter (current_version) from /read response.
-Broker-supplied; no work-backed close at this layer — caller peels.
-                "#));
+                let version = boundary::inbound::from_untrusted(r.version);
                 Ok((r.slots, version))
             }
             s => Err(BridgeError::Transport(format!("read: status {s}"))),

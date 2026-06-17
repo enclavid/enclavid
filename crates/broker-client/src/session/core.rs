@@ -3,10 +3,12 @@
 //! file impls `ReadField` / `WriteField` for its own markers using
 //! the helpers exposed here.
 
-use broker_protocol::{FieldSelector, Op, Slot};
+use broker_protocol::{FieldSelector, Op, ReadRequest, Slot};
 
-use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
+use crate::boundary;
+use crate::boundary::{AuthN, AuthZ, Covert, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
+use crate::reason;
 
 use super::Ctx;
 use super::SessionStore;
@@ -82,6 +84,20 @@ pub(super) fn unwrap_list(slot: Slot) -> Result<Vec<Vec<u8>>, BridgeError> {
     }
 }
 
+// ---------- read request ----------
+
+/// Build the vouched read request from a tuple's selectors. The
+/// selectors are field-kind enum tags chosen by the caller's marker
+/// tuple — not external secret data — so broker-client (their producer)
+/// legitimately vouches their release here, before handing the
+/// `Exposed<ReadRequest>` to `read_raw`.
+fn read_request(selectors: Vec<FieldSelector>) -> Exposed<ReadRequest, ()> {
+    boundary::outbound::to_untrusted(ReadRequest { fields: selectors })
+        .vouch_unchecked::<AuthN, _>(reason!("selectors are field-kind tags only — no TEE data leaves"))
+        .vouch_unchecked::<AuthZ, _>(reason!("a read releases no TEE data; it names fields to fetch"))
+        .vouch_unchecked::<Covert, _>(reason!("selector set bounded by field-enum cardinality"))
+}
+
 // ---------- ReadTuple ----------
 
 /// Tuple of `ReadField`s. `fetch` returns the typed fields paired
@@ -98,7 +114,7 @@ pub trait ReadTuple {
     async fn fetch(
         self,
         store: &SessionStore,
-        id: &str,
+        id: Exposed<&str>,
     ) -> Result<(Self::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError>;
 }
 
@@ -110,11 +126,14 @@ macro_rules! impl_read_tuple {
             async fn fetch(
                 self,
                 store: &SessionStore,
-                id: &str,
+                id: Exposed<&str>,
             ) -> Result<(Self::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError> {
-                let ctx = Ctx { tee_seal_key: store.tee_seal_key(), session_id: id };
+                // `as_inner` reads the vouched id for the per-blob AAD (an
+                // internal crypto binding, not a host release); `read_raw`
+                // does the URL release via `into_inner`.
+                let ctx = Ctx { tee_seal_key: store.tee_seal_key(), session_id: *id.as_inner() };
                 let selectors = vec![$(self.$idx.selector()),+];
-                let (raw, version) = store.read_raw(id, selectors).await?;
+                let (raw, version) = store.read_raw(id, read_request(selectors)).await?;
                 let mut iter = raw.into_iter();
                 let fields = ($(self.$idx.decode(
                     iter.next().expect("slot count matches request"),

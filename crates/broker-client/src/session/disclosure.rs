@@ -9,7 +9,6 @@ use broker_protocol::{FieldSelector, ListAppend, ListField, Op, Slot};
 use crate::boundary;
 use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
-use crate::reason;
 
 use super::Ctx;
 use super::core::{ReadField, WriteField, unwrap_list};
@@ -50,15 +49,7 @@ impl ReadField for Disclosure {
         // the key nor the structural check to close any concern.
         // Caller verifies the disclosure-hash chain (AuthN + Replay)
         // and peels AuthZ with channel-specific rationale.
-        Ok(boundary::inbound::from_host(unwrap_list(slot)?, reason!(r#"
-Per-session disclosure list items from ListField::Disclosure.
-Boundary entry (AuthN, AuthZ, Replay) all open: items are
-age-sealed for the consumer; broker-client has no key and no
-structural property to verify here, so every concern is left for
-the caller — the disclosure-hash chain anchors AuthN + Replay, and
-the release channel (e.g. `GET /sessions/:id/shared-data`)
-contributes the AuthZ rationale.
-            "#)))
+        Ok(boundary::inbound::from_untrusted(unwrap_list(slot)?))
     }
 }
 

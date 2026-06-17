@@ -1,27 +1,26 @@
-mod age_seal;
 mod auth;
 pub mod boundary;
 mod error;
 mod registry;
-mod stores;
+mod session;
 mod transport;
 
 // Sealed session-domain types — hand-written serde structs, CBOR at
 // rest. No protobuf anywhere in the project.
 mod domain;
 
-pub use age_seal::seal_to_recipient;
 pub use auth::{AuthClient, AuthVerdict, Principal};
 // Boundary-sentinel re-exports — Untrusted/Exposed/concern markers
 // live in `boundary::sentinel` after the untrusted-crate fold-in.
 // The old crate-root path is preserved so external consumers don't
 // need to update import paths.
 pub use boundary::{AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted};
+pub use boundary::outbound::public_session_id;
 pub use error::BridgeError;
 pub use transport::BrokerClient;
 // Wire DTO re-exports — the operation selector and the OCI pull
 // response now come from the shared `broker-protocol` crate.
-pub use broker_protocol::ClientOperation;
+pub use broker_protocol::{AuthorizeRequest, ClientOperation, PullRequest};
 pub use broker_protocol::PullResponse as RegistryPullResponse;
 pub use registry::RegistryClient;
 pub use domain::{
@@ -30,7 +29,7 @@ pub use domain::{
     MediaSpec, PluginPin, SessionMetadata, SessionState, SessionStatus, Suspended,
     VerificationSetData, VerificationSetRequest, call_event, capture_guide, suspended,
 };
-pub use stores::{
+pub use session::{
     AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, SessionStore, SetMetadata,
     SetPrincipal, SetState, SetStatus, State, Status, WriteField,
 };

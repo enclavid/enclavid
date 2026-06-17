@@ -29,6 +29,12 @@ pub fn run(
     let wasm_bytes = std::fs::read(&wasm)
         .with_context(|| format!("reading {}", wasm.display()))?;
 
+    // Role gate: this component must export the `enclavid:policy/policy`
+    // world. A plugin handed to `policy embed` is rejected here (with a
+    // pointer to `plugin embed`) — the artifacts are otherwise identical
+    // on the wire, so this WIT check is what keeps the groups honest.
+    crate::wit_role::assert_policy(&wasm_bytes)?;
+
     // Parse + validate whatever sections the author supplied. All
     // three are independently optional — `read_*` return None for
     // an absent file, validation runs over whatever's present.

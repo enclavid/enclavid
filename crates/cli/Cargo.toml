@@ -56,3 +56,7 @@ dialoguer = "0.11"
 # the version wasmtime transitively pulls — keeps the dep tree from
 # fanning out across multiple wasm-encoder versions.
 wasm-encoder = "0.247"
+# Component parser — read a component's top-level interface exports so
+# `policy`/`plugin embed` can assert the artifact's WIT role matches the
+# command group. Lockstep-versioned with wasm-encoder.
+wasmparser = "0.247"

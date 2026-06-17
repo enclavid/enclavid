@@ -5,7 +5,6 @@
 use broker_protocol::{BlobField, BlobWrite, FieldSelector, Op, Slot};
 
 use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
-use crate::reason;
 
 use crate::boundary;
 use crate::domain::SessionStatus;
@@ -43,9 +42,7 @@ impl ReadField for Status {
 
     fn decode(self, slot: Slot, _ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
         let Some(b) = unwrap_scalar(slot)? else {
-            return Ok(Untrusted::new(None, reason!(
-                "absent status byte — session record missing"
-            )));
+            return Ok(Untrusted::new(None));
         };
         let byte = *b
             .first()
@@ -58,13 +55,7 @@ impl ReadField for Status {
         // plaintext at this layer.
         let status = SessionStatus::from_byte(byte)
             .ok_or_else(|| BridgeError::Transport(format!("invalid status byte: {byte}")))?;
-        let wrapped = boundary::inbound::from_host(status, reason!(r#"
-SessionStatus byte from BlobField::Status, post-format-validation.
-Boundary entry (AuthN, AuthZ, Replay) all open: host plaintext
-means the value's authenticity is unverifiable here (host can lie
-within the valid discriminant range); AuthZ + Replay also caller
-concerns. The format-shape gate above is NOT an AuthN close.
-            "#));
+        let wrapped = boundary::inbound::from_untrusted(status);
         Ok(wrapped.map(Some))
     }
 }

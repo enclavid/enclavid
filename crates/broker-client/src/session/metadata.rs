@@ -9,10 +9,10 @@ use crate::boundary;
 use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::domain::{self, SessionMetadata};
 use crate::error::BridgeError;
-use crate::reason;
+
+use enclavid_crypto::aead;
 
 use super::Ctx;
-use super::aead;
 use super::core::{ReadField, WriteField, unwrap_scalar};
 
 /// Read marker: session metadata blob. Output is
@@ -38,21 +38,10 @@ impl ReadField for Metadata {
 
     fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
         let Some(b) = unwrap_scalar(slot)? else {
-            return Ok(Untrusted::new(None, reason!(
-                "absent metadata blob — session was never created or \
-                 was deleted"
-            )));
+            return Ok(Untrusted::new(None));
         };
         let decoded: Untrusted<SessionMetadata, (AuthZ, Replay)> =
-            boundary::inbound::from_host(b, reason!(r#"
-Raw bytes claimed-as-SessionMetadata blob from BlobField::Metadata
-slot. Boundary entry (AuthN, AuthZ, Replay) all open: AuthN closed
-below by AEAD-open under tee_seal_key (real cryptographic work);
-AuthZ and Replay left for the caller — the principal predicate (is
-the connecting credential's identity equal to the decrypted
-metadata.client?) and the CAS-bound replay reasoning live in the
-calling endpoint.
-            "#))
+            boundary::inbound::from_untrusted(b)
                 .trust::<AuthN, _, _, _, _>(|raw| {
                     let plaintext = aead::open(&raw, ctx.tee_seal_key, ctx.aad())?;
                     domain::decode::<SessionMetadata>(&plaintext)
@@ -68,7 +57,7 @@ impl WriteField for SetMetadata<'_> {
         // owns the key for (tee_seal_key + session_id AAD).
         let sealed = self.0.clone().vouch::<AuthN, _, _, _, _>(
             |m| -> Result<Vec<u8>, BridgeError> {
-                aead::seal(&domain::encode(m)?, ctx.tee_seal_key, ctx.aad())
+                aead::seal(&domain::encode(m)?, ctx.tee_seal_key, ctx.aad()).map_err(Into::into)
             },
         )?;
         Ok(sealed.map(|value| {

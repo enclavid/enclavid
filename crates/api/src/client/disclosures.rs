@@ -7,7 +7,7 @@ use axum::routing::{MethodRouter, get};
 use base64ct::{Base64, Encoding};
 use serde::Serialize;
 
-use broker_client::{AuthN, AuthZ, Disclosure, Metadata, Replay, reason};
+use broker_client::{AuthN, AuthZ, Disclosure, Metadata, Replay, public_session_id, reason};
 
 use crate::client_state::ClientState;
 use crate::disclosure_hash;
@@ -45,7 +45,7 @@ async fn read(
     // swap-with-other-list shows up as a hash mismatch.
     let ((metadata_untrusted, disclosures), _version) = state
         .session_store
-        .read(&session_id, (Metadata, Disclosure))
+        .read(public_session_id(&session_id), (Metadata, Disclosure))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

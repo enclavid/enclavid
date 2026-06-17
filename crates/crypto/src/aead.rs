@@ -18,13 +18,13 @@ use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand_core::OsRng;
 
-use crate::error::BridgeError;
+use crate::error::CryptoError;
 
 const NONCE_LEN: usize = 12;
 
 /// Encrypt `plaintext` under `key` with `aad` binding, return
 /// `nonce || ciphertext_with_tag`.
-pub fn seal(plaintext: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>, BridgeError> {
+pub fn seal(plaintext: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let cipher = cipher_for(key)?;
     let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
     let payload = chacha20poly1305::aead::Payload {
@@ -33,7 +33,7 @@ pub fn seal(plaintext: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>, BridgeE
     };
     let ciphertext = cipher
         .encrypt(&nonce, payload)
-        .map_err(|_| BridgeError::Transport("aead seal failed".to_string()))?;
+        .map_err(|_| CryptoError::new("aead seal failed"))?;
 
     let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
     out.extend_from_slice(nonce.as_slice());
@@ -47,9 +47,9 @@ pub fn seal(plaintext: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>, BridgeE
 /// AEAD authentication failure (wrong key, wrong AAD, tampered
 /// ciphertext) collapses to a transport error — caller treats it the
 /// same as a host-supplied bogus blob.
-pub fn open(blob: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>, BridgeError> {
+pub fn open(blob: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if blob.len() < NONCE_LEN {
-        return Err(BridgeError::Transport("aead blob too short".to_string()));
+        return Err(CryptoError::new("aead blob too short"));
     }
     let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
     let nonce = Nonce::from_slice(nonce_bytes);
@@ -61,12 +61,12 @@ pub fn open(blob: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>, BridgeError>
     };
     cipher
         .decrypt(nonce, payload)
-        .map_err(|_| BridgeError::Transport("aead open failed".to_string()))
+        .map_err(|_| CryptoError::new("aead open failed"))
 }
 
-fn cipher_for(key: &[u8]) -> Result<ChaCha20Poly1305, BridgeError> {
+fn cipher_for(key: &[u8]) -> Result<ChaCha20Poly1305, CryptoError> {
     if key.len() != 32 {
-        return Err(BridgeError::Transport(format!(
+        return Err(CryptoError::new(format!(
             "aead key must be 32 bytes, got {}",
             key.len()
         )));

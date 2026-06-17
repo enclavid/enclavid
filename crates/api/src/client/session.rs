@@ -6,7 +6,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use broker_client::{Metadata, SessionStatus};
+use broker_client::{Metadata, SessionStatus, public_session_id};
 
 use crate::client_state::ClientState;
 use crate::dto;
@@ -68,7 +68,7 @@ async fn read(
     // (entries can be tens of KB) just to compute a counter.
     let ((metadata_untrusted,), _version) = state
         .session_store
-        .read(&session_id, (Metadata,))
+        .read(public_session_id(&session_id), (Metadata,))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

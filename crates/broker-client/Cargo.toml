@@ -20,15 +20,9 @@ broker-protocol = { path = "../broker-protocol" }
 # codec as the wire envelope — zero protobuf in the project.
 serde = { version = "1", features = ["derive"] }
 ciborium = "0.2"
-# AEAD for session blob encryption (tee_seal_key for METADATA, applicant_key
-# + tee_seal_key nested for STATE). ChaCha20-Poly1305 chosen over AES-GCM:
-# constant-time without AES-NI assumptions, smaller dep tree.
-chacha20poly1305 = "0.10"
-rand_core = { version = "0.6", features = ["getrandom"] }
-# Hybrid public-key encryption for outbound consumer-readable blobs
-# (`AppendDisclosure` to client_pk). Recipient strings are `age1...`
-# so wire formats line up across the CLI and api crate.
-age = "0.11"
+# Crypto primitives (symmetric AEAD session seals + age recipient seals)
+# live in their own leaf crate.
+enclavid-crypto = { path = "../crypto" }
 # Pooled HTTP/1.1 client (hyper-util `legacy::Client`) with a cfg-split
 # connector: built-in `HttpConnector` for TCP (dev), a custom vsock
 # connector for the attested build. Same client type both ways; only

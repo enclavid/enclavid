@@ -4,6 +4,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{MethodRouter, delete};
 
+use broker_client::public_session_id;
+
 use crate::state::AppState;
 
 /// Route factory. Public (no auth layer) — see `applicant::router`.
@@ -39,7 +41,7 @@ async fn reset(
     // explicit peeling — purely informational, no security gate.
     state
         .session_store
-        .delete(&session_id)
+        .delete(public_session_id(&session_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state.applicant_session_tokens.invalidate(&session_id).await;

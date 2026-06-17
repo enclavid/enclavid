@@ -8,6 +8,7 @@ members = [
     "crates/cli",
     "crates/engine",
     "crates/broker-client",
+    "crates/crypto",
     "crates/embedded",
 ]
 

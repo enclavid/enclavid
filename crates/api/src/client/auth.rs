@@ -32,7 +32,8 @@ use axum::response::Response;
 use base64ct::{Base64, Encoding};
 
 use broker_client::{
-    AuthN, AuthVerdict, AuthZ, ClientOperation, Replay, SessionMetadata, Untrusted, reason,
+    AuthN, AuthVerdict, AuthZ, AuthorizeRequest, ClientOperation, Covert, Replay, SessionMetadata,
+    Untrusted, boundary, reason,
 };
 
 use crate::client_state::ClientState;
@@ -266,9 +267,20 @@ pub(super) async fn enforce(
     //
     // See architecture.md → Network Isolation → "External content fetch"
     // for the full threat-model write-up.
+    let authorize_req = boundary::outbound::to_untrusted(AuthorizeRequest {
+        authorization_header: auth_header.to_string(),
+        operation: op,
+    })
+    .vouch_unchecked::<AuthN, _>(reason!(
+        "client's own credential, released to its validating broker — not a TEE secret"
+    ))
+    .vouch_unchecked::<AuthZ, _>(reason!("forwarding the credential to its validator IS the op"))
+    .vouch_unchecked::<Covert, _>(reason!(
+        "client-supplied header + fixed-enum op — no policy bandwidth"
+    ));
     let verdict = state
         .auth
-        .authorize(auth_header, op)
+        .authorize(authorize_req)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .trust_unchecked::<AuthN, _>(reason!(r#"

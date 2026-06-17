@@ -11,13 +11,12 @@
 //! compromised broker can mint fake sessions; bounded only by host-side
 //! rate-limit + audit log. See architecture.md → Network Isolation.
 
-use broker_protocol::{AuthorizeRequest, AuthorizeResponse, ClientOperation};
+use broker_protocol::{AuthorizeRequest, AuthorizeResponse};
 use hyper::StatusCode;
 
 use crate::boundary;
-use crate::boundary::{AuthN, AuthZ, Covert, Replay, Untrusted};
+use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
-use crate::reason;
 use crate::transport::BrokerClient;
 
 /// Principal identifier returned by the broker. Opaque string from the
@@ -75,32 +74,12 @@ impl AuthClient {
     /// parse, etc.) — symmetric with the rest of the bridge API.
     pub async fn authorize(
         &self,
-        authorization_header: &str,
-        operation: ClientOperation,
+        req: Exposed<AuthorizeRequest>,
     ) -> Result<Untrusted<AuthVerdict, (AuthN, AuthZ, Replay)>, BridgeError> {
-        let req = AuthorizeRequest {
-            authorization_header: authorization_header.to_string(),
-            operation,
-        };
-        // Egress gate. The body carries the client's own credential —
-        // a by-design courier release to the broker that validates it,
-        // not a TEE secret. Vouch each concern with that rationale.
-        let req = boundary::outbound::to_host(
-            req,
-            reason!("AuthorizeRequest → broker POST /authorize"),
-        )
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "authorization_header is the CLIENT's own credential, released by design \
-             to the broker that validates it — not a TEE-held secret"
-        ))
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "forwarding the credential to its validator IS the operation; no further \
-             release gate sits on top"
-        ))
-        .vouch_unchecked::<Covert, _>(reason!(
-            "header is client-supplied and the operation is a fixed enum — no \
-             policy-controlled bandwidth"
-        ));
+        // The request arrives vouched by the api producer — the endpoint
+        // that received the client's credential. Releasing the client's
+        // own credential to its validating broker is the producer's call,
+        // not ours to self-approve; we just release it.
         let bytes = broker_protocol::encode(&req.into_inner())?;
         let resp = self.broker.post("/authorize", bytes).await?;
 
@@ -115,12 +94,6 @@ impl AuthClient {
             s => return Err(BridgeError::Transport(format!("authorize: status {s}"))),
         };
 
-        Ok(boundary::inbound::from_host(verdict, reason!(r#"
-AuthVerdict from broker /authorize response. Verdict comes straight
-from the broker's own claim (TEE never parses tokens). No
-work-backed close at this layer — caller peels with rationale (the
-typical one is "verdict IS the authz answer, nothing further to
-check on top").
-        "#)))
+        Ok(boundary::inbound::from_untrusted(verdict))
     }
 }

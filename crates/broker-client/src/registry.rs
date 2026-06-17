@@ -17,9 +17,8 @@ use broker_protocol::PullResponse;
 use hyper::StatusCode;
 
 use crate::boundary;
-use crate::boundary::{AuthN, AuthZ, Covert, Replay, Untrusted};
+use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
-use crate::reason;
 use crate::transport::BrokerClient;
 
 /// Client for the broker `/oci/pull` endpoint over the shared broker
@@ -47,46 +46,19 @@ impl RegistryClient {
     /// typed `BridgeError::NotFound`.
     pub async fn pull(
         &self,
-        policy_ref: &str,
-        registry_auth: &[u8],
+        req: Exposed<PullRequest>,
     ) -> Result<Untrusted<PullResponse, (AuthN, AuthZ, Replay)>, BridgeError> {
-        let req = PullRequest {
-            policy_ref: policy_ref.to_string(),
-            registry_auth: registry_auth.to_vec(),
-        };
-        // Egress gate. `policy_ref` is public (digest-pinned);
-        // `registry_auth` is the consumer-supplied bearer, courier-
-        // forwarded by design to the registry it authenticates.
-        let req = boundary::outbound::to_host(
-            req,
-            reason!("PullRequest → broker POST /oci/pull"),
-        )
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "policy_ref is public (digest-pinned); registry_auth is the CONSUMER-supplied \
-             bearer, courier-forwarded by design to the registry it authenticates — \
-             not a TEE-held secret"
-        ))
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "forwarding the supplied bearer to the named registry IS the courier \
-             operation; no further release gate"
-        ))
-        .vouch_unchecked::<Covert, _>(reason!(
-            "both fields are consumer-supplied at session create, not policy-controlled \
-             at evaluate time"
-        ));
+        // The request arrives vouched by the api producer (which holds
+        // the consumer-supplied ref + registry bearer). Courier-
+        // forwarding the consumer's bearer to the registry is the
+        // producer's call, not ours to self-approve; we just release it.
         let bytes = broker_protocol::encode(&req.into_inner())?;
         let resp = self.broker.post("/oci/pull", bytes).await?;
 
         match resp.status {
             StatusCode::OK => {
                 let r: PullResponse = broker_protocol::decode(&resp.body)?;
-                Ok(boundary::inbound::from_host(r, reason!(r#"
-OCI artifact pull response from broker /oci/pull. No work-backed
-close at this layer — caller peels with rationale (typical:
-AuthN closed by manifest+layer digest verification; AuthZ delegated
-to the registry server via the broker-supplied bearer; Replay N/A
-since the request is content-addressed by digest).
-                "#)))
+                Ok(boundary::inbound::from_untrusted(r))
             }
             StatusCode::NOT_FOUND => Err(BridgeError::NotFound),
             s => Err(BridgeError::Transport(format!("pull: status {s}"))),

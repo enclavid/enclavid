@@ -1,9 +1,12 @@
-//! `enclavid policy push` — uploads a wasm policy component to an
-//! OCI registry as a single `application/wasm` layer.
+//! `enclavid oci push` — uploads an Enclavid artifact (a policy OR a
+//! plugin wasm component) to an OCI registry as a single
+//! `application/wasm` layer.
 //!
-//! The artifact is self-contained: `enclavid policy embed` welded
-//! the embedded declarations (DF / i18n / icons) into the wasm
-//! component as custom sections; push just ships the bytes.
+//! Role-agnostic: a policy and a plugin are the same kind of thing on
+//! the wire. The artifact is self-contained (the `policy` / `plugin`
+//! `embed` step welded the embedded declarations into the wasm
+//! component as custom sections); push just ships the bytes. Integrity
+//! is enforced TEE-side by re-verifying the layer digest on pull.
 
 use anyhow::{Context, Result};
 use oci_client::client::{Client, ClientConfig, ClientProtocol, Config, ImageLayer};

@@ -38,12 +38,13 @@ use tokio::sync::Mutex;
 
 use axum::http::StatusCode;
 
-use enclavid_engine::{
-    ConsentDisclosure, RunError, RunResult, RunStatus, SessionChange, SessionListener,
-};
 use broker_client::{
     AppendDisclosure, AuthN, AuthZ, Covert, Replay, SessionMetadata, SessionStatus, SessionStore,
-    SetMetadata, SetState, SetStatus, WriteField, boundary, reason, seal_to_recipient,
+    SetMetadata, SetState, SetStatus, WriteField, boundary, reason,
+};
+use enclavid_crypto::seal_to_recipient;
+use enclavid_engine::{
+    ConsentDisclosure, RunError, RunResult, RunStatus, SessionChange, SessionListener,
 };
 
 use crate::disclosure_hash;
@@ -94,184 +95,184 @@ impl SessionListener for SessionPersister {
         change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
         Box::pin(async move {
-            // Convert each engine-emitted disclosure record to the
-            // public JSON envelope (api owns the wire format) and
-            // age-seal to the client's recipient. The host stores
-            // opaque bytes; only the platform consumer (who provided
-            // the recipient at session creation) can open. JSON-encode
-            // or seal failures map to a run-level error — same path
-            // as a transport failure on the persist itself.
-            // Seed the per-envelope shuffle from the running
-            // disclosure_count BEFORE this batch — distinct envelopes
-            // within the session get independent permutations, and
-            // the same envelope reproduces bit-for-bit on replay.
-            // metadata is single-writer (engine serializes
-            // `on_session_change` hooks) so a brief lock is enough.
-            let starting_disclosure_index =
-                { self.metadata.lock().await.disclosure_count };
-            let appends: Vec<AppendDisclosure> = change
-                .disclosures
-                .iter()
-                .enumerate()
-                .map(|(i, d)| -> RunResult<AppendDisclosure> {
-                    let sealed = boundary::outbound::to_host(d, reason!(r#"
-Engine-emitted ConsentDisclosure destined for ListField::Disclosure
-append. All three outbound concerns open at boundary entry: Covert
-closed by HKDF'd ChaCha20 field-shuffle below; AuthZ closed via
-engine consent-gate rationale (vouch_unchecked); AuthN closed by
-age-seal to client_disclosure_pubkey below.
-                    "#))
-                    .vouch::<Covert, _, _, _, _>(|d| -> RunResult<Vec<u8>> {
-                        shuffle_to_envelope_bytes(
-                            d,
-                            &self.session_id,
-                            starting_disclosure_index + i as u64,
-                            &self.shuffle_key,
-                            &self.embedded,
-                        )
-                    })?
-                    .vouch_unchecked::<AuthZ, _>(reason!(r#"
-Disclosure events reach this hook only after engine's
-`prompt_disclosure` returned `accepted=true` — engine never emits
-unconsented disclosures (see engine's prompt_disclosure host fn).
-The consent decision is the applicant's; api persister only
-serializes the post-consent record.
-                    "#))
-                    .vouch::<AuthN, _, _, _, _>(|bytes| -> RunResult<Vec<u8>> {
-                        seal_to_recipient(&bytes, &self.client_disclosure_pubkey)
-                            .map_err(|e| RunError::msg(format!("disclosure seal failed: {e}")))
-                    })?;
-                    Ok(AppendDisclosure(sealed))
-                })
-                .collect::<RunResult<Vec<_>>>()?;
+            // Seal the engine-emitted disclosures into append ops. The
+            // shuffle is seeded from the disclosure_count BEFORE this
+            // batch (a brief metadata lock to read it), so distinct
+            // envelopes get independent, replay-stable permutations.
+            let starting_index = self.metadata.lock().await.disclosure_count;
+            let appends = self.seal_disclosures(&change, starting_index)?;
 
-            // Bookkeeping: bump disclosure_count atomically with the
-            // append. Holding the metadata mutex across the write
-            // serializes any concurrent on_session_change calls
-            // within the same run (engine already serializes hooks
-            // sequentially, so contention here is theoretical).
-            let mut metadata_guard = self.metadata.lock().await;
-            let set_state = SetState {
-                state: boundary::outbound::to_host(change.state, reason!(r#"
-SessionState replay-log snapshot from the engine, destined for
-BlobField::State. AuthN closed inside broker-client by the double
-AEAD-seal (inner under applicant_session_token, outer under
-tee_seal_key). AuthZ + Covert vouched below.
-                "#))
-                .vouch_unchecked::<AuthZ, _>(reason!(r#"
-Inner-AEAD'd to applicant_session_token, which the applicant
-presents on /connect and /input to read the same state back. Any
-party without the token cannot decrypt — receipt of ciphertext is
-not access. AuthZ implicit in key possession.
-                "#))
-                .vouch_unchecked::<Covert, _>(reason!(r#"
-State sealed under tee_seal_key (outer) + applicant_session_token
-(inner) — plaintext invisible to both host and consumer. Audit-
-honest caveat: ciphertext size IS observable to the host. Policy
-can encode bits into the replay log by varying its host-fn call
-count / arg sizes within a round, creating a covert side-channel
-under host-consumer collusion. Bandwidth is bounded above by per-
-round wasmtime fuel caps (engine limits how much policy code runs
-before yielding). Risk minimal: the channel requires host
-compromise (an honest host doesn't relay sizes to the consumer)
-and the bits-per-session ceiling is fuel-bound.
-                "#)),
-                applicant_session_token: &self.applicant_session_token,
-            };
+            // Hold the metadata lock across the write: the state
+            // mutation and the disclosure entry land in one atomic host
+            // transaction. Engine serializes hooks, so contention is
+            // theoretical.
+            let mut metadata = self.metadata.lock().await;
+            let set_state = self.build_state_op(&change);
             let mut ops: Vec<&dyn WriteField> = Vec::with_capacity(2 + appends.len());
             ops.push(&set_state);
 
-            // Only re-write metadata when there's something to
-            // increment. Most CallEvent commits don't emit
-            // disclosures (only successful `prompt_disclosure` does),
-            // so the common path is just SetState — keeps the wire
-            // payload small. When disclosures are present we extend
-            // the running `disclosure_hash` chain so the host-served
-            // list can be cryptographically checked at read time.
+            // Only rewrite metadata when this commit emitted a
+            // disclosure — the common path is SetState-only, keeping the
+            // wire payload small. When present, `build_metadata_op`
+            // extends the running disclosure-hash chain so the host-
+            // served list can be integrity-checked at read time.
             let set_metadata_holder;
             if !appends.is_empty() {
-                metadata_guard.disclosure_count += appends.len() as u64;
-                for a in &appends {
-                    // `as_inner` is the borrow analog of `into_inner`
-                    // — read-only access to fully-vouched bytes, used
-                    // here to extend the integrity-chain hash before
-                    // the same bytes get released to wire by
-                    // `WriteField::build_op`.
-                    metadata_guard.disclosure_hash =
-                        disclosure_hash::append(&metadata_guard.disclosure_hash, a.0.as_inner());
-                }
-                set_metadata_holder = SetMetadata(
-                    boundary::outbound::to_host(&*metadata_guard, reason!(r#"
-SessionMetadata rewrite from the engine persister — disclosure
-chain bookkeeping (count + running hash) updated atomically
-alongside the SetState op for this CallEvent commit. AuthN closed
-inside broker-client by AEAD-seal under tee_seal_key.
-                    "#))
-                    .vouch_unchecked::<AuthZ, _>(reason!(r#"
-Only the attested CVM holds tee_seal_key. Metadata is read by the
-applicant API as opaque ciphertext on /connect; release is implicit
-in key-possession.
-                    "#))
-                    .vouch_unchecked::<Covert, _>(reason!(r#"
-Metadata sealed under tee_seal_key — plaintext invisible to both
-host and consumer. Audit-honest caveat: ciphertext size and
-write-presence are host-observable. Policy doesn't directly
-mutate metadata, but it can influence whether this rewrite
-happens at all (one bit per round: did the policy emit ≥1
-disclosure?) and the disclosure_count delta (log2 K bits per
-round where K is the fuel-bounded max disclosures per round).
-Bandwidth tiny, only opens under host compromise, fuel-bound —
-risk minimal, same containment shape as the SetState peel above.
-                    "#))
-                );
+                set_metadata_holder = self.build_metadata_op(&mut metadata, &appends);
                 ops.push(&set_metadata_holder);
             }
             ops.extend(appends.iter().map(|a| a as &dyn WriteField));
 
-            let expected = self.current_version.load(Ordering::SeqCst);
-            let new_version = self
-                .session_store
-                .write(&self.session_id, Some(expected), &ops)
-                .await
-                .map_err(|e| {
-                    // Listener-side failures can be misclassified by
-                    // the engine as "this host fn just suspended" if
-                    // the replay log was committed before the listener
-                    // ran (the suspension event is there, even though
-                    // its persistence failed). The misclassification
-                    // is recovered from on the next round, but only
-                    // if the actual cause shows up in the logs —
-                    // hence the explicit eprintln before the RunError
-                    // string flows back through wasmtime.
-                    eprintln!(
-                        "persister.on_session_change: session_store.write \
-                         failed for {} (expected version {expected}): {e}",
-                        self.session_id,
-                    );
-                    RunError::msg(format!("persist failed: {e}"))
-                })?
-                .trust_unchecked::<AuthN, _>(reason!(r#"
-Version is a CAS token only. A lying host either fails the next
-write (DoS) or stomps a concurrent winner (UX regression). No
-data leak path.
-                "#))
-                .trust_unchecked::<AuthZ, _>(reason!(r#"
-Version counter is not an ownership signal — no access decision
-hangs on its value; persister feeds it back as expected_version on
-the next write.
-                "#))
-                .trust_unchecked::<Replay, _>(reason!(r#"
-Staleness on the chained version manifests as next-write CAS
-mismatch; persister returns Err and the run aborts cleanly.
-                "#))
-                .into_inner();
-            self.current_version.store(new_version, Ordering::SeqCst);
-            Ok(())
+            self.commit_ops(&ops).await
         })
     }
 }
 
 impl SessionPersister {
+    /// Seal each engine-emitted disclosure into an append op: shuffle
+    /// the envelope (Covert), consent-gate (AuthZ), age-seal to the
+    /// consumer recipient (AuthN). `starting_index` seeds the per-
+    /// envelope shuffle so distinct envelopes get independent, replay-
+    /// stable permutations. Returns owned, fully-vouched append ops.
+    fn seal_disclosures(
+        &self,
+        change: &SessionChange<'_>,
+        starting_index: u64,
+    ) -> RunResult<Vec<AppendDisclosure>> {
+        change
+            .disclosures
+            .iter()
+            .enumerate()
+            .map(|(i, d)| -> RunResult<AppendDisclosure> {
+                let sealed = boundary::outbound::to_untrusted(d)
+                    .vouch::<Covert, _, _, _, _>(|d| -> RunResult<Vec<u8>> {
+                        shuffle_to_envelope_bytes(
+                            d,
+                            &self.session_id,
+                            starting_index + i as u64,
+                            &self.shuffle_key,
+                            &self.embedded,
+                        )
+                    })?
+                    .vouch_unchecked::<AuthZ, _>(reason!(
+                        "reaches this hook only after engine's prompt_disclosure returned \
+                         accepted=true; api only serializes the post-consent record"
+                    ))
+                    .vouch::<AuthN, _, _, _, _>(|bytes| -> RunResult<Vec<u8>> {
+                        seal_to_recipient(&bytes, &self.client_disclosure_pubkey)
+                            .map_err(|e| RunError::msg(format!("disclosure seal failed: {e}")))
+                    })?;
+                Ok(AppendDisclosure(sealed))
+            })
+            .collect()
+    }
+
+    /// Build the `SetState` op from the engine's replay-log snapshot.
+    /// AuthN is closed inside broker-client by the double AEAD-seal
+    /// (inner under `applicant_session_token`, outer under
+    /// `tee_seal_key`); AuthZ/Covert vouched here.
+    fn build_state_op<'a>(&'a self, change: &SessionChange<'a>) -> SetState<'a> {
+        SetState {
+            state: boundary::outbound::to_untrusted(change.state)
+                .vouch_unchecked::<AuthZ, _>(reason!(
+                    "inner-AEAD'd to applicant_session_token; receipt of ciphertext is not \
+                     access — AuthZ implicit in key possession"
+                ))
+                .vouch_unchecked::<Covert, _>(reason!(
+                    "sealed under tee_seal_key + applicant_session_token; caveat: ciphertext \
+                     size host-observable, policy can encode bits via per-round host-fn \
+                     call count, bounded by wasmtime fuel; host-compromise-gated"
+                )),
+            applicant_session_token: &self.applicant_session_token,
+        }
+    }
+
+    /// Advance the disclosure bookkeeping (count + running hash chain)
+    /// and build the `SetMetadata` op carrying the updated metadata.
+    /// AuthN is closed inside broker-client by the AEAD-seal under
+    /// `tee_seal_key`. Only called when this commit emitted disclosures.
+    fn build_metadata_op<'m>(
+        &self,
+        metadata: &'m mut SessionMetadata,
+        appends: &[AppendDisclosure],
+    ) -> SetMetadata<'m> {
+        metadata.disclosure_count += appends.len() as u64;
+        for a in appends {
+            // `as_inner` is the borrow analog of `into_inner` — read the
+            // fully-vouched bytes to extend the integrity-chain hash
+            // before the same bytes get released to wire by `build_op`.
+            metadata.disclosure_hash =
+                disclosure_hash::append(&metadata.disclosure_hash, a.0.as_inner());
+        }
+        SetMetadata(
+            boundary::outbound::to_untrusted(&*metadata)
+                .vouch_unchecked::<AuthZ, _>(reason!(
+                    "only the attested CVM holds tee_seal_key; read as opaque ciphertext on \
+                     /connect — release implicit in key-possession"
+                ))
+                .vouch_unchecked::<Covert, _>(reason!(
+                    "sealed under tee_seal_key; caveat: ciphertext size + write-presence \
+                     host-observable; policy influences whether/how much (≤log2 K bits/round, \
+                     K fuel-bounded); host-compromise-gated"
+                )),
+        )
+    }
+
+    /// Vouch the write envelope (session id + version + op set) and
+    /// commit it at the current expected version, advancing
+    /// `current_version` on success. The version verdict is host-
+    /// supplied (a CAS token only): a lying host self-limits to DoS / a
+    /// stomped concurrent winner, with no data-leak path.
+    async fn commit_ops(&self, ops: &[&dyn WriteField]) -> RunResult<()> {
+        let expected = self.current_version.load(Ordering::SeqCst);
+        let (session_id, expected_version) =
+            boundary::outbound::to_untrusted((self.session_id.as_str(), Some(expected)))
+                .vouch_unchecked::<AuthN, _>(reason!(
+                    "session id + version: public host identifiers, not TEE secrets"
+                ))
+                .vouch_unchecked::<AuthZ, _>(reason!("fed back to the host that owns them"))
+                .vouch_unchecked::<Covert, _>(reason!(
+                    "fixed-shape UUID + host's own counter — no policy bandwidth"
+                ))
+                .distribute();
+        let ops = boundary::outbound::to_untrusted(ops)
+            .vouch_unchecked::<AuthN, _>(reason!(
+                "recipe set; each field's content is sealed in its own build_op"
+            ))
+            .vouch_unchecked::<AuthZ, _>(reason!("each op writes its own session key"))
+            .vouch_unchecked::<Covert, _>(reason!(
+                "op count fuel-bounded; per-field covert closed in build_op"
+            ));
+        let new_version = self
+            .session_store
+            .write(session_id, expected_version, ops)
+            .await
+            .map_err(|e| {
+                // eprintln before the error flows back through wasmtime:
+                // a listener-side write failure can be misclassified by
+                // the engine as a suspension if the replay log committed
+                // first; the actual cause must show up in the logs.
+                eprintln!(
+                    "persister.commit_ops: session_store.write failed for {} \
+                     (expected version {expected}): {e}",
+                    self.session_id,
+                );
+                RunError::msg(format!("persist failed: {e}"))
+            })?
+            .trust_unchecked::<AuthN, _>(reason!(
+                "version is a CAS token only; a lying host self-limits to DoS / stomp, no leak"
+            ))
+            .trust_unchecked::<AuthZ, _>(reason!(
+                "version is not an ownership signal — no access decision hangs on it"
+            ))
+            .trust_unchecked::<Replay, _>(reason!(
+                "staleness surfaces as next-write CAS mismatch; the run aborts cleanly"
+            ))
+            .into_inner();
+        self.current_version.store(new_version, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// Atomically transition the session to Completed after the runner
     /// returns `RunStatus::Completed`. Updates `metadata.status`
     /// (TEE-trusted, AEAD-bound) and `BlobField::Status` (host-facing
@@ -297,50 +298,40 @@ impl SessionPersister {
         metadata.status = SessionStatus::Completed;
         let expected = self.current_version.load(Ordering::SeqCst);
         let set_metadata = SetMetadata(
-            boundary::outbound::to_host(&*metadata, reason!(r#"
-SessionMetadata write on finalize — flips metadata.status to
-Completed atomically with the host-facing BlobField::Status flip
-below. AuthN closed inside broker-client by AEAD-seal.
-            "#))
-            .vouch_unchecked::<AuthZ, _>(reason!(r#"
-Sealed under tee_seal_key — only the attested CVM opens. Same
-posture as on_session_change.
-            "#))
-            .vouch_unchecked::<Covert, _>(reason!(r#"
-Metadata sealed under tee_seal_key — plaintext invisible to both
-host and consumer. Audit-honest caveat: ciphertext size is host-
-observable, but this finalize write only flips metadata.status to
-a fixed enum value (Completed); no policy-controlled bandwidth in
-the rewrite itself. The size delta over the prior write is
-deterministic per status transition.
-            "#))
+            boundary::outbound::to_untrusted(&*metadata)
+                .vouch_unchecked::<AuthZ, _>(reason!("sealed under tee_seal_key — only the attested CVM opens"))
+                .vouch_unchecked::<Covert, _>(reason!(
+                    "finalize only flips status to a fixed enum; size delta deterministic per transition"
+                )),
         );
         let set_status = SetStatus(
-            boundary::outbound::to_host(SessionStatus::Completed, reason!(r#"
-SessionStatus host-facing flip on finalize (Completed). By-design
-plaintext for host TTL / cleanup orchestration.
-            "#))
-            .vouch_unchecked::<AuthN, _>(reason!(r#"
-By-design plaintext. Host needs the byte to manage TTL. No
-applicant- or policy-specific data lands in the byte — only the
-lifecycle marker is observable.
-            "#))
-            .vouch_unchecked::<AuthZ, _>(reason!(r#"
-Lifecycle marker observable to host for orchestration is the
-explicit contract.
-            "#))
-            .vouch_unchecked::<Covert, _>(reason!(r#"
-Enum cardinality = 5; ~1 status write per session lifecycle
-transition. Bounded by session-lifecycle schema.
-            "#))
+            boundary::outbound::to_untrusted(SessionStatus::Completed)
+                .vouch_unchecked::<AuthN, _>(reason!(
+                    "by-design plaintext: host needs the byte for TTL; only the lifecycle marker is observable"
+                ))
+                .vouch_unchecked::<AuthZ, _>(reason!("lifecycle marker observable to host is the explicit contract"))
+                .vouch_unchecked::<Covert, _>(reason!("enum cardinality 5; ~1 status write per lifecycle transition")),
         );
+        let (session_id, expected_version) =
+            boundary::outbound::to_untrusted((self.session_id.as_str(), Some(expected)))
+                .vouch_unchecked::<AuthN, _>(reason!(
+                    "session id + version: public host identifiers, not TEE secrets"
+                ))
+                .vouch_unchecked::<AuthZ, _>(reason!("fed back to the host that owns them"))
+                .vouch_unchecked::<Covert, _>(reason!(
+                    "fixed-shape UUID + host's own counter — no policy bandwidth"
+                ))
+                .distribute();
+        let fields: [&dyn WriteField; 2] = [&set_metadata, &set_status];
+        let ops = boundary::outbound::to_untrusted(&fields[..])
+            .vouch_unchecked::<AuthN, _>(reason!(
+                "recipe set; each field's content is sealed in its own build_op"
+            ))
+            .vouch_unchecked::<AuthZ, _>(reason!("each op writes its own session key"))
+            .vouch_unchecked::<Covert, _>(reason!("2 ops (metadata + status), fixed by finalize"));
         let new_version = self
             .session_store
-            .write(
-                &self.session_id,
-                Some(expected),
-                &[&set_metadata as &dyn WriteField, &set_status],
-            )
+            .write(session_id, expected_version, ops)
             .await
             .map_err(|e| {
                 eprintln!(
@@ -350,20 +341,11 @@ transition. Bounded by session-lifecycle schema.
                 );
                 StatusCode::INTERNAL_SERVER_ERROR
             })?
-            .trust_unchecked::<AuthN, _>(reason!(r#"
-Version is a CAS token only — same containment as in
-on_session_change.
-            "#))
-            .trust_unchecked::<AuthZ, _>(reason!(r#"
-Version counter is not an ownership signal — feed-forward to next
-expected_version is the only consumer.
-            "#))
-            .trust_unchecked::<Replay, _>(reason!(r#"
-Staleness on the chained version manifests as VersionMismatch
-on this write; the handler returns 500 and the client retries
-against fresh state. Replay-side rerun re-emits the same
-status flip, idempotently.
-            "#))
+            .trust_unchecked::<AuthN, _>(reason!("version is a CAS token only — no leak path"))
+            .trust_unchecked::<AuthZ, _>(reason!("version is not an ownership signal"))
+            .trust_unchecked::<Replay, _>(reason!(
+                "staleness surfaces as VersionMismatch; handler returns 500, client retries"
+            ))
             .into_inner();
         self.current_version.store(new_version, Ordering::SeqCst);
         Ok(())
@@ -422,6 +404,5 @@ fn shuffle_to_envelope_bytes(
         session_id: session_id.to_string(),
         fields,
     };
-    serde_json::to_vec(&envelope)
-        .map_err(|e| RunError::msg(format!("disclosure JSON encode: {e}")))
+    serde_json::to_vec(&envelope).map_err(|e| RunError::msg(format!("disclosure JSON encode: {e}")))
 }
