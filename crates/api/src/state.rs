@@ -4,8 +4,9 @@ use std::time::Duration;
 use moka::future::Cache;
 use secrecy::SecretBox;
 
+use enclavid_attestation::Attestor;
 use enclavid_engine::Runner;
-use broker_client::{BrokerClient, RegistryClient, SessionStore};
+use broker_client::{BrokerClient, KbsClient, RegistryClient, SessionStore};
 
 use crate::ref_key::RefKey;
 use crate::runtime::SessionPolicyCache;
@@ -34,6 +35,13 @@ pub struct AppState {
     /// Registry client used by /connect for the lazy policy pull.
     /// Same broker connection as the rest of broker-client.
     pub registry: RegistryClient,
+    /// KBS relay client for the `kbs` key_source: forwards the artifact-
+    /// key handshake to the owner's KBS through the broker. Same broker
+    /// connection.
+    pub kbs: KbsClient,
+    /// Attestor for minting the quote that binds the TEE's ephemeral key
+    /// in the `kbs` key_source handshake.
+    pub attestor: Arc<dyn Attestor>,
     pub applicant_session_tokens: ApplicantSessionTokenCache,
     /// Per-session `DisplayField` shuffle seeds are HKDF-derived from
     /// this key + the session id at `/connect`-time and threaded
@@ -57,17 +65,23 @@ impl AppState {
         policies: SessionPolicyCache,
         shuffle_key: Arc<ShuffleKey>,
         ref_key: Arc<RefKey>,
+        attestor: Arc<dyn Attestor>,
     ) -> Self {
         let applicant_session_tokens = Cache::builder()
             .max_capacity(10_000)
             .time_to_idle(Duration::from_secs(3600))
             .build();
 
+        // Registry + KBS share the same broker connection (cheap Clone:
+        // hyper Client is Arc-backed).
+        let kbs = KbsClient::new(broker.clone());
         Self {
             runner,
             policies,
             session_store,
             registry: RegistryClient::new(broker),
+            kbs,
+            attestor,
             applicant_session_tokens,
             shuffle_key,
             ref_key,
@@ -83,10 +97,19 @@ impl AppState {
         policies: SessionPolicyCache,
         shuffle_key: Arc<ShuffleKey>,
         ref_key: Arc<RefKey>,
+        attestor: Arc<dyn Attestor>,
     ) -> Self {
         let broker = BrokerClient::new(transport_out)
             .await
             .expect("failed to connect to broker");
-        Self::new(session_store, broker, runner, policies, shuffle_key, ref_key)
+        Self::new(
+            session_store,
+            broker,
+            runner,
+            policies,
+            shuffle_key,
+            ref_key,
+            attestor,
+        )
     }
 }

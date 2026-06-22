@@ -1,6 +1,7 @@
 mod auth;
 pub mod boundary;
 mod error;
+mod kbs;
 mod registry;
 mod session;
 mod transport;
@@ -22,12 +23,16 @@ pub use transport::BrokerClient;
 // response now come from the shared `broker-protocol` crate.
 pub use broker_protocol::{AuthorizeRequest, ClientOperation, PullRequest};
 pub use broker_protocol::PullResponse as RegistryPullResponse;
+pub use broker_protocol::{
+    KbsKeyRequest, KbsKeyResponse, KbsRelayRequest, KbsRelayResponse, SealedBlob,
+};
+pub use kbs::KbsClient;
 pub use registry::RegistryClient;
 pub use domain::{
     CallEvent, CameraFacing, CaptureGroup, CaptureGuide, CaptureStep, Client, ClientAccess, Clip,
-    Completed, ConsentRequest, DisplayField, GuideNone, GuideOval, GuideRect, MediaRequest,
-    MediaSpec, PluginPin, SessionMetadata, SessionState, SessionStatus, Suspended,
-    VerificationSetData, VerificationSetRequest, call_event, capture_guide, suspended,
+    Completed, ConsentRequest, DisplayField, GuideNone, GuideOval, GuideRect, KbsKey, Key,
+    MediaRequest, MediaSpec, PluginPin, SessionMetadata, SessionState, SessionStatus,
+    Suspended, VerificationSetData, VerificationSetRequest, call_event, capture_guide, suspended,
 };
 pub use session::{
     AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, SessionStore, SetMetadata,

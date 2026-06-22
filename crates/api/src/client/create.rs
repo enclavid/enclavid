@@ -74,11 +74,16 @@ pub struct CreateSessionRequest {
     /// Empty when the policy has no plugin imports.
     #[serde(default)]
     pub plugins: Vec<PluginRequest>,
+
+    /// The policy artifact's decryption key. Omit ⇒ not encrypted. See
+    /// [`KeyRequest`].
+    #[serde(default)]
+    pub policy_key: Option<KeyRequest>,
 }
 
-/// One plugin pin in the create-session request. Mirrors the on-wire
-/// proto `enclavid.state.PluginPin` with serde-friendly field types;
-/// converted to the proto form before persistence.
+/// One plugin pin in the create-session request. Mirrors the sealed
+/// `domain::PluginPin` with serde-friendly field types; converted before
+/// persistence.
 #[derive(Deserialize)]
 pub struct PluginRequest {
     /// WIT package id this pin satisfies, e.g. `vendor:plugin@0.1.0`.
@@ -87,6 +92,61 @@ pub struct PluginRequest {
     /// `closed.vendor.com/plugin@sha256:<hex>`. Tag-form rejected at
     /// the handler.
     pub impl_ref: String,
+    /// This plugin's decryption key. Omit ⇒ not encrypted. See
+    /// [`KeyRequest`].
+    #[serde(default)]
+    pub key: Option<KeyRequest>,
+}
+
+/// Client-supplied artifact key. Either the key itself as a base64 string
+/// (`"key": "<base64>"`, owner-supplied) or a KBS reference
+/// (`"key": { "kbs": { endpoint, pubkey, token } }`). Converted to the
+/// sealed [`broker_client::Key`] before persistence (the secrets then only
+/// ride inside AEAD-sealed metadata).
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum KeyRequest {
+    /// `"key": "<base64>"` — the symmetric layer key, supplied inline.
+    Inline(String),
+    /// `"key": { "kbs": { ... } }` — released by an attestation-gated KBS.
+    Kbs { kbs: KbsKeyRequest },
+}
+
+#[derive(Deserialize)]
+pub struct KbsKeyRequest {
+    pub endpoint: String,
+    /// KBS public key (base64) the request binds to.
+    pub pubkey: String,
+    pub token: String,
+}
+
+impl KeyRequest {
+    /// Convert to the sealed domain form, decoding base64 key material.
+    /// `None` ⇒ not encrypted. Bad base64 ⇒ `Err(BAD_REQUEST)`.
+    fn into_domain(this: Option<Self>) -> Result<Option<broker_client::Key>, StatusCode> {
+        use broker_client::{KbsKey, Key};
+        Ok(match this {
+            None => None,
+            Some(KeyRequest::Inline(key)) => {
+                let key = Base64::decode_vec(&key).map_err(|_| StatusCode::BAD_REQUEST)?;
+                if key.is_empty() {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                Some(Key::Inline(key))
+            }
+            Some(KeyRequest::Kbs { kbs }) => {
+                if kbs.endpoint.is_empty() {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                let pubkey = Base64::decode_vec(&kbs.pubkey).map_err(|_| StatusCode::BAD_REQUEST)?;
+                Some(Key::Kbs(KbsKey {
+                    endpoint: kbs.endpoint,
+                    pubkey,
+                    token: kbs.token,
+                }))
+            }
+        })
+    }
 }
 
 /// Length-bound + printable-ASCII gate on `client_ref`. Empty
@@ -223,11 +283,16 @@ async fn create(
     let plugins: Vec<PluginPin> = body
         .plugins
         .into_iter()
-        .map(|pr| PluginPin {
-            package: pr.package,
-            impl_ref: pr.impl_ref,
+        .map(|pr| {
+            Ok(PluginPin {
+                package: pr.package,
+                impl_ref: pr.impl_ref,
+                key: KeyRequest::into_domain(pr.key)?,
+            })
         })
-        .collect();
+        .collect::<Result<_, StatusCode>>()?;
+
+    let policy_key = KeyRequest::into_domain(body.policy_key)?;
 
     let session_id = generate_session_id();
 
@@ -243,10 +308,7 @@ async fn create(
     let client_session_token_hash =
         Sha256::digest(client_session_token.expose_secret()).to_vec();
 
-    let report_data = ReportData {
-        session_id: session_id.clone(),
-        policy_digest: policy_digest.clone(),
-    };
+    let report_data = ReportData::session(session_id.clone(), policy_digest.clone());
     let quote = state
         .attestor
         .mint(&report_data)
@@ -292,6 +354,7 @@ async fn create(
         // disclosures handler folds the host-served list and
         // compares against this field to detect host tampering.
         disclosure_hash: crate::disclosure_hash::init(&session_id),
+        policy_key,
     };
     // Always write metadata + status. Principal is optional: skip the
     // op entirely when the auth scheme didn't produce one (host stores

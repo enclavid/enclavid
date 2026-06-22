@@ -10,6 +10,8 @@ members = [
     "crates/broker-client",
     "crates/crypto",
     "crates/embedded",
+    "crates/kbs-stub",
+    "crates/kbs-client",
 ]
 
 [workspace.package]

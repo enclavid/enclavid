@@ -8,14 +8,22 @@
 //! component as custom sections); push just ships the bytes. Integrity
 //! is enforced TEE-side by re-verifying the layer digest on pull.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use oci_client::client::{Client, ClientConfig, ClientProtocol, Config, ImageLayer};
 use oci_client::manifest::OciImageManifest;
 use oci_client::Reference;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use broker_protocol::SealedBlob;
+use enclavid_crypto::kbswrap;
+use enclavid_crypto::ocicrypt;
+
+use crate::EncryptMode;
 use crate::registry_auth;
 
 /// Wasm layer media type — unified for policies and plugins. Matches
@@ -23,11 +31,16 @@ use crate::registry_auth;
 /// and `wkg`'s pull whitelist (see `[[project-wkg-wac-poc-findings]]`).
 const WASM_LAYER_MEDIA_TYPE: &str = "application/wasm";
 const POLICY_CONFIG_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.config.v1+json";
+/// Keyprovider name for the KBS-wrapped layer key annotation
+/// (`org.opencontainers.image.enc.keys.provider.enclavid-kbs`).
+const KBS_PROVIDER: &str = "provider.enclavid-kbs";
 
 pub async fn run(
     artifact: PathBuf,
     reference: String,
     auth_override: Option<String>,
+    encrypt: Option<EncryptMode>,
+    kbs_pubkey: Option<String>,
 ) -> Result<()> {
     let parsed_ref = Reference::from_str(&reference)
         .with_context(|| format!("invalid OCI reference: {reference}"))?;
@@ -46,7 +59,10 @@ pub async fn run(
     let bytes = std::fs::read(&artifact)
         .with_context(|| format!("reading {}", artifact.display()))?;
 
-    let wasm_layer = ImageLayer::new(bytes, WASM_LAYER_MEDIA_TYPE.to_string(), None);
+    // Plaintext (default) or ocicrypt-encrypted layer per `--encrypt`.
+    let (layer_bytes, layer_media_type, layer_annotations) =
+        build_layer(bytes, encrypt, kbs_pubkey.as_deref())?;
+    let wasm_layer = ImageLayer::new(layer_bytes, layer_media_type, layer_annotations);
     let layers: Vec<ImageLayer> = vec![wasm_layer];
 
     // Empty config blob — manifest digest depends only on layer content, not on
@@ -113,4 +129,70 @@ fn detect_protocol(registry: &str) -> ClientProtocol {
     } else {
         ClientProtocol::Https
     }
+}
+
+/// Build the wasm layer per the chosen encryption mode. Returns the layer
+/// bytes, its media type, and the descriptor annotations.
+///
+/// - `None` → plaintext `application/wasm`, no annotations (today's path).
+/// - `inbound` → ocicrypt-encrypted; prints the layer key (base64
+///   private-opts JSON) for the client to pass as `key_source.inbound`.
+/// - `kbs` → ocicrypt-encrypted; seals the layer key to `--kbs-pubkey`
+///   and stores it in the `enc.keys.provider.enclavid-kbs` annotation.
+fn build_layer(
+    bytes: Vec<u8>,
+    encrypt: Option<EncryptMode>,
+    kbs_pubkey: Option<&str>,
+) -> Result<(Vec<u8>, String, Option<BTreeMap<String, String>>)> {
+    let Some(mode) = encrypt else {
+        return Ok((bytes, WASM_LAYER_MEDIA_TYPE.to_string(), None));
+    };
+
+    let (ciphertext, public, private) = ocicrypt::encrypt(&bytes);
+    let mut annotations = BTreeMap::new();
+    annotations.insert(
+        ocicrypt::ANNOTATION_PUBOPTS.to_string(),
+        ocicrypt::pubopts_to_annotation(&public).map_err(|e| anyhow!("pubopts: {e}"))?,
+    );
+    let priv_json = ocicrypt::privopts_to_json(&private).map_err(|e| anyhow!("privopts: {e}"))?;
+
+    match mode {
+        EncryptMode::Inline => {
+            if kbs_pubkey.is_some() {
+                bail!("--kbs-pubkey is only valid with --encrypt kbs");
+            }
+            println!("Encrypted (ocicrypt {})", ocicrypt::CIPHER_AES256CTR_HMAC_SHA256);
+            println!("Layer key (base64): {}", BASE64.encode(&priv_json));
+            println!("  Pass it as  \"key\": \"<above>\"");
+            println!("  in POST /api/v1/sessions (per policy / plugin). Keep it secret.");
+        }
+        EncryptMode::Kbs => {
+            let pk = kbs_pubkey
+                .ok_or_else(|| anyhow!("--encrypt kbs requires --kbs-pubkey <base64 X25519>"))?;
+            let pk_bytes: [u8; 32] = BASE64
+                .decode(pk)
+                .context("--kbs-pubkey base64")?
+                .try_into()
+                .map_err(|_| anyhow!("--kbs-pubkey must be 32 bytes"))?;
+            let sealed =
+                kbswrap::seal(&pk_bytes, &priv_json).map_err(|e| anyhow!("kbs seal: {e}"))?;
+            let blob = SealedBlob {
+                sender_pub: sealed.sender_pub.to_vec(),
+                nonce: sealed.nonce.to_vec(),
+                ciphertext: sealed.ciphertext,
+            };
+            let blob_bytes = broker_protocol::encode(&blob).map_err(|e| anyhow!("encode: {e}"))?;
+            annotations.insert(
+                format!("{}{}", ocicrypt::ANNOTATION_KEYS_PREFIX, KBS_PROVIDER),
+                BASE64.encode(&blob_bytes),
+            );
+            println!("Encrypted (ocicrypt {})", ocicrypt::CIPHER_AES256CTR_HMAC_SHA256);
+            println!("Layer key sealed to the KBS public key.");
+            println!("  Pass  \"key\": {{ \"kbs\": {{ \"endpoint\", \"pubkey\", \"token\" }} }}");
+            println!("  in POST /api/v1/sessions (per policy / plugin).");
+        }
+    }
+
+    let media_type = format!("{WASM_LAYER_MEDIA_TYPE}{}", ocicrypt::ENCRYPTED_MEDIA_SUFFIX);
+    Ok((ciphertext, media_type, Some(annotations)))
 }

@@ -1,0 +1,20 @@
+[package]
+name = "enclavid-kbs-stub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Test/dev-only minimal KBS: verifies an attestation quote + token and
+# re-seals an artifact's layer key to the TEE's ephemeral key. Stands in
+# for a real Trustee KBS so the `kbs` key_source path runs end-to-end in
+# CI without SEV-SNP hardware.
+
+[dependencies]
+broker-protocol = { path = "../broker-protocol" }
+enclavid-crypto = { path = "../crypto" }
+enclavid-attestation = { path = "../attestation" }
+serde_json = "1"
+
+[dev-dependencies]
+enclavid-attestation = { path = "../attestation", features = ["mock"] }

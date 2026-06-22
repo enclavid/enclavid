@@ -389,18 +389,32 @@ async fn lookup_policy(
     let policy_bearer =
         policy_pull::bearer_for_ref(&client.registry_auth, &metadata.policy_ref);
 
+    // Context for the `kbs` key_source: relay client + attestor + session
+    // id (bound into the ephemeral-key quote). Shared by the policy and
+    // every plugin pull. `Plaintext`/`inbound` artifacts ignore it.
+    let kbs_ctx = crate::keyprovider::KbsContext {
+        kbs: &state.kbs,
+        attestor: state.attestor.as_ref(),
+    };
+
     // Run the policy pull and every plugin pull concurrently so the
     // /connect critical path is bounded by the slowest fetch instead
     // of paying linear network latency. Each future is independent
     // and only the final outputs feed `Runner::run`.
-    let policy_fut =
-        policy_pull::pull_policy(&state.registry, &metadata.policy_ref, policy_bearer);
+    let policy_fut = policy_pull::pull_policy(
+        &state.registry,
+        &metadata.policy_ref,
+        policy_bearer,
+        metadata.policy_key.as_ref(),
+        Some(&kbs_ctx),
+    );
 
     let plugin_futs = client.plugins.iter().map(|pin| {
         let bearer = policy_pull::bearer_for_ref(&client.registry_auth, &pin.impl_ref);
         let registry = &state.registry;
+        let kbs_ctx = &kbs_ctx;
         async move {
-            policy_pull::pull_plugin(registry, &pin.impl_ref, bearer)
+            policy_pull::pull_plugin(registry, &pin.impl_ref, bearer, pin.key.as_ref(), Some(kbs_ctx))
                 .await
                 .map(|art| (pin.package.clone(), art))
         }

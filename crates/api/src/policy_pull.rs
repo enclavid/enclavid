@@ -9,7 +9,12 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use broker_client::{AuthN, AuthZ, Covert, PullRequest, RegistryClient, Replay, boundary, reason};
+use broker_client::{
+    AuthN, AuthZ, Covert, Key, PullRequest, RegistryClient, Replay, boundary, reason,
+};
+use enclavid_crypto::ocicrypt;
+
+use crate::keyprovider::{self, KbsContext};
 
 /// OCI layer media type for wasm component layers (policies and
 /// plugins both). Per `[[project-wkg-wac-poc-findings]]`, wkg's pull
@@ -43,6 +48,8 @@ pub enum PullError {
     NoWasmLayer,
     #[error("manifest layer/payload count mismatch: {layers} vs {payloads}")]
     LayerCountMismatch { layers: usize, payloads: usize },
+    #[error("artifact decryption failed: {0}")]
+    Decrypt(String),
 }
 
 /// Map a bridge transport error to a `PullError`. The broker classifies
@@ -80,6 +87,10 @@ struct OciDescriptor {
     #[serde(rename = "mediaType")]
     media_type: String,
     digest: String,
+    /// ocicrypt stores the wrapped key + public cipher opts here (on the
+    /// layer descriptor). Empty for plaintext layers.
+    #[serde(default)]
+    annotations: HashMap<String, String>,
 }
 
 /// Pull and integrity-check a policy OCI artifact. Returns the
@@ -89,8 +100,10 @@ pub async fn pull_policy(
     registry: &RegistryClient,
     policy_ref: &str,
     registry_auth: &[u8],
+    key: Option<&Key>,
+    kbs_ctx: Option<&KbsContext<'_>>,
 ) -> Result<PolicyArtifact, PullError> {
-    let wasm_bytes = pull_wasm_layer(registry, policy_ref, registry_auth).await?;
+    let wasm_bytes = pull_wasm_layer(registry, policy_ref, registry_auth, key, kbs_ctx).await?;
     Ok(PolicyArtifact { wasm_bytes })
 }
 
@@ -113,8 +126,10 @@ pub async fn pull_plugin(
     registry: &RegistryClient,
     plugin_ref: &str,
     registry_auth: &[u8],
+    key: Option<&Key>,
+    kbs_ctx: Option<&KbsContext<'_>>,
 ) -> Result<PluginArtifact, PullError> {
-    let wasm_bytes = pull_wasm_layer(registry, plugin_ref, registry_auth).await?;
+    let wasm_bytes = pull_wasm_layer(registry, plugin_ref, registry_auth, key, kbs_ctx).await?;
     Ok(PluginArtifact { wasm_bytes })
 }
 
@@ -125,6 +140,8 @@ async fn pull_wasm_layer(
     registry: &RegistryClient,
     artifact_ref: &str,
     registry_auth: &[u8],
+    key: Option<&Key>,
+    kbs_ctx: Option<&KbsContext<'_>>,
 ) -> Result<Vec<u8>, PullError> {
     let artifact_digest = extract_digest(artifact_ref)
         .ok_or_else(|| PullError::InvalidRef(artifact_ref.to_string()))?;
@@ -197,12 +214,58 @@ async fn pull_wasm_layer(
     let manifest: OciManifest = serde_json::from_slice(&response.manifest)
         .map_err(|e| PullError::ManifestParse(e.to_string()))?;
 
+    // Select the wasm layer: plaintext `application/wasm`, or the
+    // ocicrypt-encrypted `application/wasm+encrypted`. Digests above were
+    // verified over the (cipher)text bytes exactly as the manifest pins
+    // them, so the integrity gate is unaffected by encryption.
     for (idx, descriptor) in manifest.layers.iter().enumerate() {
         if descriptor.media_type == WASM_LAYER {
+            // Plaintext layer. A supplied key means the client expected
+            // encryption — refuse rather than silently serving cleartext.
+            if key.is_some() {
+                return Err(PullError::Decrypt(
+                    "a key was supplied but the layer is not encrypted".to_string(),
+                ));
+            }
             return Ok(response.layers[idx].clone());
+        }
+        if let Some(inner) = descriptor.media_type.strip_suffix(ocicrypt::ENCRYPTED_MEDIA_SUFFIX) {
+            if inner != WASM_LAYER {
+                continue;
+            }
+            let key = key.ok_or_else(|| {
+                PullError::Decrypt("layer is encrypted but no key was supplied".to_string())
+            })?;
+            return decrypt_layer(
+                &response.layers[idx],
+                &descriptor.annotations,
+                key,
+                kbs_ctx,
+            )
+            .await;
         }
     }
     Err(PullError::NoWasmLayer)
+}
+
+/// Decrypt an ocicrypt-encrypted wasm layer: read the public cipher opts
+/// from the `enc.pubopts` annotation, obtain the private opts via the
+/// key dispatch, and run the AES-256-CTR+HMAC decryption.
+async fn decrypt_layer(
+    ciphertext: &[u8],
+    annotations: &HashMap<String, String>,
+    key: &Key,
+    kbs_ctx: Option<&KbsContext<'_>>,
+) -> Result<Vec<u8>, PullError> {
+    let pubopts = annotations
+        .get(ocicrypt::ANNOTATION_PUBOPTS)
+        .ok_or_else(|| PullError::Decrypt("missing enc.pubopts annotation".to_string()))?;
+    let public = ocicrypt::pubopts_from_annotation(pubopts)
+        .map_err(|e| PullError::Decrypt(e.to_string()))?;
+    let private = keyprovider::obtain_priv_opts(annotations, key, kbs_ctx)
+        .await
+        .map_err(|e| PullError::Decrypt(e.to_string()))?;
+    ocicrypt::decrypt(ciphertext, &public, &private).map_err(|e| PullError::Decrypt(e.to_string()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

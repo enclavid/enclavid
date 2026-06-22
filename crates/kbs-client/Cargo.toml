@@ -1,0 +1,27 @@
+[package]
+name = "enclavid-kbs-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# TEE-side Trustee KBS RCAR client (protocol v0.4.0). Transport-free: it
+# builds each handshake leg's request and parses each response, the caller
+# drives the I/O (broker `/kbs/relay` in prod, direct HTTP in tests) —
+# keeps the no-outbound boundary intact. See [[project-trustee-rcar-protocol]].
+
+[dependencies]
+kbs-types = "0.15"
+# Ephemeral TEE keypair (RSA-OAEP-256) + JWE response unwrap.
+rsa = "0.9"
+aes-gcm = "0.10"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64ct = { version = "1", features = ["alloc"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+thiserror = "1"
+
+[dev-dependencies]
+# Live integration test against the dev Trustee (localhost:8080).
+ureq = { version = "2", features = ["json"] }

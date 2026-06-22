@@ -11,7 +11,14 @@ repository.workspace = true
 # (firmware ioctl + VCEK chain validation) is implemented.
 default = ["mock"]
 mock = ["dep:ed25519-dalek", "dep:rand_core"]
-sev-snp = []
+# Dev SEV-SNP backend: real `sev` AttestationReport FORMAT (so policy code
+# sees real measurement / guest_svn / report_data), signed by a test key
+# under a test trust root instead of an AMD VCEK. Swap to `sev-snp` (prod)
+# with no caller change. No hardware needed.
+snp-dev = ["dep:sev", "dep:ed25519-dalek", "dep:rand_core"]
+# Prod SEV-SNP backend (later): firmware ioctl mint + AMD VCEK→ASK→ARK
+# chain verification.
+sev-snp = ["dep:sev"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -21,3 +28,7 @@ hex = "0.4"
 thiserror = "1"
 ed25519-dalek = { version = "2", features = ["rand_core"], optional = true }
 rand_core = { version = "0.6", features = ["getrandom"], optional = true }
+# Standard SEV-SNP report struct + verification (no OpenSSL: pure-Rust
+# crypto backend). Only the report FORMAT is used by `snp-dev`; the prod
+# `sev-snp` backend will also use the firmware + cert-chain APIs.
+sev = { version = "8", default-features = false, features = ["snp", "crypto_nossl", "serde"], optional = true }

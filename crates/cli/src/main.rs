@@ -262,7 +262,29 @@ enum OciCommand {
         /// Takes precedence over env / docker config.
         #[arg(long)]
         auth: Option<String>,
+
+        /// Encrypt the artifact (ocicrypt `AES_256_CTR_HMAC_SHA256`).
+        /// Omit for a plaintext push (today's default).
+        ///   `inline` — prints the layer key for the client to pass as
+        ///     `"key": "<base64>"` in POST /sessions (owner == the
+        ///     session creator).
+        ///   `kbs` — seals the layer key to `--kbs-pubkey`; the client
+        ///     passes `"key": { "kbs": … }` and the TEE fetches it at
+        ///     runtime.
+        #[arg(long, value_enum)]
+        encrypt: Option<EncryptMode>,
+
+        /// KBS public key (base64 X25519) to seal the layer key to.
+        /// Required with `--encrypt kbs`.
+        #[arg(long)]
+        kbs_pubkey: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum EncryptMode {
+    Inline,
+    Kbs,
 }
 
 #[derive(Subcommand)]
@@ -393,7 +415,9 @@ async fn main() -> Result<()> {
                 artifact,
                 reference,
                 auth,
-            } => commands::oci::push::run(artifact, reference, auth).await,
+                encrypt,
+                kbs_pubkey,
+            } => commands::oci::push::run(artifact, reference, auth, encrypt, kbs_pubkey).await,
         },
         Commands::Session { command } => match command {
             SessionCommand::Create {

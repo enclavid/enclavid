@@ -57,9 +57,37 @@ pub struct Quote {
 pub struct ReportData {
     pub session_id: String,
     pub policy_digest: String,
+    /// Optional extra binding for the artifact-key (KBS) leg: the TEE's
+    /// ephemeral public key. When `Some`, it is folded into `hash()` so a
+    /// KBS can confirm the report came from the same enclave that owns the
+    /// key it wraps the secret to. `None` for ordinary session quotes —
+    /// the hash is then bit-identical to the original two-field form.
+    pub kbs_binding: Option<Vec<u8>>,
 }
 
 impl ReportData {
+    /// Report data for an ordinary per-session quote (no KBS binding).
+    pub fn session(session_id: String, policy_digest: String) -> Self {
+        Self {
+            session_id,
+            policy_digest,
+            kbs_binding: None,
+        }
+    }
+
+    /// Report data for an artifact-key (KBS) request: binds the TEE's
+    /// ephemeral public key so the KBS releases the secret only to this
+    /// enclave's key. `session_id`/`policy_digest` are empty — the KBS
+    /// gates on measurement + the ephemeral key, not session identity, so
+    /// it can recompute this from the request without enclavid internals.
+    pub fn for_kbs(ephemeral_pubkey: Vec<u8>) -> Self {
+        Self {
+            session_id: String::new(),
+            policy_digest: String::new(),
+            kbs_binding: Some(ephemeral_pubkey),
+        }
+    }
+
     /// Canonical 32-byte hash that lands in the SEV-SNP `report_data` slot.
     /// Same computation runs in mint and verify; any divergence breaks
     /// verification.
@@ -68,6 +96,10 @@ impl ReportData {
         h.update(self.session_id.as_bytes());
         h.update(b"\x00");
         h.update(self.policy_digest.as_bytes());
+        if let Some(binding) = &self.kbs_binding {
+            h.update(b"\x00");
+            h.update(binding);
+        }
         h.finalize().into()
     }
 }
@@ -90,3 +122,8 @@ pub trait Attestor: Send + Sync {
 mod mock;
 #[cfg(feature = "mock")]
 pub use mock::MockAttestor;
+
+#[cfg(feature = "snp-dev")]
+mod snp_dev;
+#[cfg(feature = "snp-dev")]
+pub use snp_dev::SnpDevAttestor;

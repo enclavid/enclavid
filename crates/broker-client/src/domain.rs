@@ -107,6 +107,9 @@ pub struct SessionMetadata {
     pub created_at: u64,
     pub disclosure_count: u64,
     pub disclosure_hash: Vec<u8>,
+    /// The policy artifact's decryption key. `None` (incl. older blobs) ⇒
+    /// the artifact is not encrypted.
+    pub policy_key: Option<Key>,
 }
 
 /// Internal session state for policy replay (`BlobField::State`).
@@ -137,6 +140,40 @@ pub struct Client {
 pub struct PluginPin {
     pub package: String,
     pub impl_ref: String,
+    /// This plugin artifact's decryption key. `None` ⇒ not encrypted.
+    pub key: Option<Key>,
+}
+
+/// The decryption key for an encrypted artifact (policy or plugin) —
+/// either the key itself, supplied inline, or a reference to a KBS that
+/// releases it. Carries secrets (the inline key, the KBS token), so it
+/// only ever lives inside AEAD-sealed metadata — never plaintext to the
+/// host. Absence (`Option::None`) means the artifact is not encrypted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Key {
+    /// The symmetric layer key (ocicrypt private opts), supplied inline at
+    /// POST /sessions. Valid only when the session creator is the artifact
+    /// owner (it already holds the plaintext, so handing itself the key
+    /// leaks nothing). MUST NOT be used for a third-party artifact — that
+    /// would let the client decrypt the IP.
+    Inline(Vec<u8>),
+    /// The key is released by an attestation-gated KBS.
+    Kbs(KbsKey),
+}
+
+/// Parameters for a [`Key::Kbs`] reference. `endpoint` is an untrusted
+/// routing target (the broker dials it); trust rides on `pubkey` and the
+/// attestation the KBS verifies.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KbsKey {
+    /// KBS origin, e.g. `https://kbs.vendor.com:8080`.
+    pub endpoint: String,
+    /// KBS public key the request is bound to (pins the KBS so the broker
+    /// can't MITM the routing target).
+    pub pubkey: Vec<u8>,
+    /// Authorization / licensing token presented to the KBS.
+    pub token: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

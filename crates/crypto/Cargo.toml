@@ -13,3 +13,23 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # Hybrid public-key sealing to `age` recipients (consumer-readable
 # blobs). `age1...` recipient strings; wire format matches stock age.
 age = "0.11"
+
+# ocicrypt layer cipher (AES-256-CTR + HMAC-SHA256, the ocicrypt
+# `AES_256_CTR_HMAC_SHA256` scheme). In-house, byte-exact to the ocicrypt
+# LayerBlockCipherOptions format so artifacts interop with standard
+# ocicrypt tooling (skopeo / coco-keyprovider). See [`crate::ocicrypt`].
+aes = "0.8"
+ctr = "0.9"
+hmac = "0.12"
+sha2 = "0.10"
+base64ct = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+# KBS artifact-key sealed box: X25519 ECDH → HKDF-SHA256 → ChaCha20-
+# Poly1305. The KBS wraps the layer key to the TEE's attested ephemeral
+# public key; only the enclave that minted the key can open it. See
+# [`crate::kbswrap`].
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.12"

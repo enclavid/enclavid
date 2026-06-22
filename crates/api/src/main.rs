@@ -5,6 +5,7 @@ mod disclosure_hash;
 mod dto;
 mod error;
 mod input;
+mod keyprovider;
 mod limits;
 mod locale;
 mod policy_pull;
@@ -16,7 +17,7 @@ mod transport;
 
 use std::sync::Arc;
 
-use enclavid_attestation::{Attestor, MockAttestor};
+use enclavid_attestation::{Attestor, SnpDevAttestor};
 use broker_client::{BrokerClient, SessionStore};
 
 use crate::client_state::ClientState;
@@ -68,9 +69,15 @@ async fn main() {
     // certificate, port, optional mTLS posture, and rate-limit policy.
     // Each surface owns its route table — see `client::router` and
     // `applicant::router` for the endpoint inventory.
-    let attestor: Arc<dyn Attestor> = Arc::new(MockAttestor::new_random());
-    let client_state =
-        Arc::new(ClientState::init(&address_out, session_store.clone(), attestor).await);
+    // Dev attestor: real SEV-SNP report FORMAT, signed by a software test
+    // key (test trust root). Swaps to the prod `sev-snp` backend
+    // (`/dev/sev-guest` + AMD chain) with no caller change. Measurement /
+    // key-seed provisioning (so a verifier can pin them) lands with the
+    // prod backend; `new_random` is fine while nothing verifies yet.
+    let attestor: Arc<dyn Attestor> = Arc::new(SnpDevAttestor::new_random());
+    let client_state = Arc::new(
+        ClientState::init(&address_out, session_store.clone(), attestor.clone()).await,
+    );
     let applicant_state = Arc::new(
         AppState::init(
             &address_out,
@@ -79,6 +86,7 @@ async fn main() {
             policies,
             shuffle_key,
             ref_key,
+            attestor,
         )
         .await,
     );

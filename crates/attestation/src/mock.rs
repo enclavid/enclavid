@@ -141,10 +141,7 @@ mod tests {
     use super::*;
 
     fn sample_data() -> ReportData {
-        ReportData {
-            session_id: "ses_01HF7K".to_string(),
-            policy_digest: "sha256:7e93fba".to_string(),
-        }
+        ReportData::session("ses_01HF7K".to_string(), "sha256:7e93fba".to_string())
     }
 
     #[test]

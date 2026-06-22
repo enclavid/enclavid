@@ -23,6 +23,11 @@ path = "src/bin/cred_helper.rs"
 
 [dependencies]
 enclavid-embedded = { path = "../embedded" }
+# ocicrypt layer encryption (encrypt side) + KBS sealed-box wrap for the
+# `enclavid oci push --encrypt` path.
+enclavid-crypto = { path = "../crypto" }
+# SealedBlob wire shape for the KBS-wrapped layer-key annotation.
+broker-protocol = { path = "../broker-protocol" }
 
 clap = { version = "4.5", features = ["derive"] }
 
