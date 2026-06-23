@@ -76,7 +76,7 @@ async fn main() {
     // prod backend; `new_random` is fine while nothing verifies yet.
     let attestor: Arc<dyn Attestor> = Arc::new(SnpDevAttestor::new_random());
     let client_state = Arc::new(
-        ClientState::init(&address_out, session_store.clone(), attestor.clone()).await,
+        ClientState::init(&address_out, session_store.clone(), attestor).await,
     );
     let applicant_state = Arc::new(
         AppState::init(
@@ -86,7 +86,6 @@ async fn main() {
             policies,
             shuffle_key,
             ref_key,
-            attestor,
         )
         .await,
     );

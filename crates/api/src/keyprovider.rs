@@ -1,36 +1,31 @@
 //! Artifact-key acquisition ("our keyprovider").
 //!
-//! Given an encrypted OCI layer's annotations and the per-artifact
-//! `key_source`, produce the ocicrypt [`PrivateLayerBlockCipherOptions`]
-//! the TEE decrypts the layer with. This is the dispatch the security
-//! model calls the keyprovider — we run it ourselves rather than using
-//! ocicrypt's grpc/cmd/native transports, because the TEE has no outbound
-//! network and the KBS leg is relayed through the broker.
+//! Given an encrypted OCI layer's per-artifact [`Key`], produce the
+//! ocicrypt [`PrivateLayerBlockCipherOptions`] the TEE decrypts the layer
+//! with. We run this dispatch ourselves rather than using ocicrypt's
+//! grpc/cmd/native keyprovider transports, because the TEE has no outbound
+//! network — the KBS handshake is relayed leg-by-leg through the broker.
 //!
-//! - `Plaintext` → never reached (the layer is not encrypted).
-//! - `Inbound`   → the client-supplied bytes ARE the private-opts JSON
-//!   (owner == session creator).
-//! - `Kbs`       → mint an ephemeral keypair, bind it in an attestation
-//!   quote, send the wrapped-key blob + token to the owner's KBS through
-//!   the broker relay, and unseal the response to the ephemeral key.
+//! - [`Key::Inline`] → the client-supplied bytes ARE the private-opts JSON
+//!   (valid only when the session creator owns the artifact).
+//! - [`Key::Kbs`]    → run the standard Trustee **RCAR** handshake against
+//!   the author's KBS and fetch the layer key as a KBS *resource*. The
+//!   resource bytes are the private-opts JSON, JWE-sealed to a per-pull
+//!   ephemeral key. See `[[project-trustee-rcar-protocol]]`.
 
 use std::collections::HashMap;
 
-use base64ct::{Base64, Encoding};
-
 use broker_client::{
-    AuthN, AuthZ, Covert, KbsClient, KbsKey, Key, Replay, boundary, reason,
+    AuthN, AuthZ, Covert, KbsClient, Key, Replay, Untrusted, boundary, reason,
 };
-use broker_protocol::{KbsKeyRequest, KbsKeyResponse, KbsRelayRequest, SealedBlob};
-use enclavid_attestation::{Attestor, ReportData};
-use enclavid_crypto::kbswrap;
+use broker_protocol::{KbsRelayRequest, KbsRelayResponse};
 use enclavid_crypto::ocicrypt::{self, PrivateLayerBlockCipherOptions};
+use enclavid_kbs_client::{RcarSession, SampleEvidence, TeeKeyPair};
 
-/// Context the `kbs` key_source needs: the relay client and the attestor
-/// for the ephemeral-key-binding quote.
+/// Context the [`Key::Kbs`] path needs: the broker relay client that
+/// couriers each RCAR leg to the author's KBS.
 pub struct KbsContext<'a> {
     pub kbs: &'a KbsClient,
-    pub attestor: &'a dyn Attestor,
 }
 
 /// Failure obtaining the layer key. Mapped to `PullError::Decrypt` by the
@@ -62,116 +57,200 @@ pub async fn obtain_priv_opts(
         }
         Key::Kbs(params) => {
             let ctx = ctx.ok_or_else(|| KeyError::msg("kbs key requires a KBS context"))?;
-            kbs_release(annotations, params, ctx).await
+            let resource = resource_uri(annotations)?;
+            kbs_release(&params.endpoint, &resource, ctx).await
         }
     }
 }
 
+/// Drive the 3-leg Trustee RCAR handshake to release the layer key.
+///
+/// The TEE has no outbound network, so each leg is couriered through the
+/// broker `/kbs/relay`; the broker is a dumb forwarder threading the
+/// `kbs-session-id` cookie's bytes only. The released resource is JWE-
+/// sealed to a per-pull ephemeral key minted here, so the broker never
+/// sees the key material even though it carries every byte.
 async fn kbs_release(
-    annotations: &HashMap<String, String>,
-    params: &KbsKey,
+    endpoint: &str,
+    resource: &str,
     ctx: &KbsContext<'_>,
 ) -> Result<PrivateLayerBlockCipherOptions, KeyError> {
-    // The wrapped layer key lives in the artifact's `enc.keys.*`
-    // annotation (sealed to the KBS at encrypt time). Opaque to us — we
-    // forward it to the KBS, which unwraps and re-seals to our ephemeral
-    // key.
-    let wrapped = find_wrapped_key(annotations)?;
+    let resource_path = resource_path(resource)?;
 
-    // Per-pull ephemeral keypair; the public half is bound in the quote so
-    // the KBS releases the secret only to this enclave.
-    let (eph_secret, eph_public) = kbswrap::generate_keypair();
-    let report = ReportData::for_kbs(eph_public.to_vec());
-    let quote = ctx
-        .attestor
-        .mint(&report)
-        .map_err(|e| KeyError::msg(format!("attestation mint: {e}")))?;
-    let quote_bytes = serde_json::to_vec(&quote).map_err(|e| KeyError::msg(e.to_string()))?;
+    // Per-pull ephemeral keypair. Its public half is bound into the RCAR
+    // report_data; the KBS wraps the released resource's CEK to it. Dev
+    // presents CoCo `sample` evidence — the Trustee sample verifier checks
+    // only the report_data binding, no hardware signature; a real SEV-SNP
+    // deployment swaps in an SNP evidence provider here.
+    let mut session = RcarSession::new(
+        TeeKeyPair::generate().map_err(|e| KeyError::msg(format!("ephemeral key: {e}")))?,
+        SampleEvidence,
+    );
 
-    let key_req = KbsKeyRequest {
-        quote: quote_bytes,
-        tee_ephemeral_pubkey: eph_public.to_vec(),
-        token: params.token.clone(),
-        wrapped_priv_opts: wrapped,
-    };
-    let body = broker_protocol::encode(&key_req).map_err(|e| KeyError::msg(e.to_string()))?;
-
-    let relay_req = KbsRelayRequest {
-        endpoint: params.endpoint.clone(),
-        method: "POST".to_string(),
-        path: "/key".to_string(),
-        headers: vec![(
-            "content-type".to_string(),
-            "application/octet-stream".to_string(),
-        )],
-        body,
-    };
-    let exposed = boundary::outbound::to_untrusted(relay_req)
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "request carries only the wrapped-key blob (sealed to the KBS), the \
-             token, and the attestation quote — no TEE secret; broker relays it verbatim"
+    // Leg 1 — POST /kbs/v0/auth → nonce + `kbs-session-id` cookie.
+    let auth_body = session
+        .auth_body()
+        .map_err(|e| KeyError::msg(e.to_string()))?;
+    let resp = relay(ctx, endpoint, "POST", "/kbs/v0/auth", json_headers(), auth_body)
+        .await?
+        .trust_unchecked::<AuthN, _>(reason!(
+            "RCAR handshake plumbing carries no secret; the only released secret is the \
+             resource, JWE-sealed to our ephemeral key at leg 3 — tampered handshake bytes \
+             only break that unwrap and fail closed"
         ))
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "forwarding the artifact-key handshake to the owner's KBS IS the courier op"
-        ))
-        .vouch_unchecked::<Covert, _>(reason!(
-            "endpoint+token are client-supplied at session create, not policy-controlled; \
-             request shape is fixed by the protocol"
-        ));
-
-    let priv_json = ctx
-        .kbs
-        .relay(exposed)
-        .await
-        .map_err(|e| KeyError::msg(format!("kbs relay: {e}")))?
-        // AuthN is closed by the sealed-box open: forged/substituted bytes
-        // cannot open under our per-pull ephemeral secret.
-        .trust::<AuthN, _, _, _, _>(|r| {
-            if r.status != 200 {
-                return Err(KeyError::msg(format!("kbs returned status {}", r.status)));
-            }
-            let key_resp: KbsKeyResponse =
-                broker_protocol::decode(&r.body).map_err(|e| KeyError::msg(e.to_string()))?;
-            let sealed = to_sealed(key_resp.sealed)?;
-            kbswrap::open(&eph_secret, &sealed)
-                .map_err(|_| KeyError::msg("kbs response unseal failed"))
-        })?
         .trust_unchecked::<AuthZ, _>(reason!(
-            "the KBS enforces release authorization on the token + attestation policy; \
-             the TEE only consumes the sealed result"
+            "the KBS, not the TEE, authorizes release (resource policy + token)"
         ))
         .trust_unchecked::<Replay, _>(reason!(
-            "the response is sealed to a per-pull ephemeral key; a replayed blob from a \
-             prior pull cannot open under the fresh ephemeral secret"
+            "a stale challenge only breaks the report_data binding and fails the leg-3 unwrap"
         ))
         .into_inner();
+    require_ok(&resp, "auth")?;
+    let cookie = session_cookie(&resp.headers)?;
+    session
+        .set_challenge(&resp.body)
+        .map_err(|e| KeyError::msg(format!("challenge: {e}")))?;
+
+    // Leg 2 — POST /kbs/v0/attest (cookie) → attestation token (200).
+    let attest_body = session
+        .attest_body()
+        .map_err(|e| KeyError::msg(e.to_string()))?;
+    let mut headers = json_headers();
+    headers.push(("cookie".to_string(), cookie.clone()));
+    let resp = relay(ctx, endpoint, "POST", "/kbs/v0/attest", headers, attest_body)
+        .await?
+        .trust_unchecked::<AuthN, _>(reason!(
+            "handshake plumbing; release secrecy is enforced at the leg-3 JWE unwrap"
+        ))
+        .trust_unchecked::<AuthZ, _>(reason!(
+            "the KBS verifies the evidence and gates the token, not the TEE"
+        ))
+        .trust_unchecked::<Replay, _>(reason!(
+            "attestation binds this handshake's fresh nonce; a replayed token can't unwrap \
+             the resource sealed to our per-pull ephemeral key"
+        ))
+        .into_inner();
+    require_ok(&resp, "attest")?;
+
+    // Leg 3 — GET the resource (cookie) → JWE = the layer's private-opts.
+    let priv_json = relay(
+        ctx,
+        endpoint,
+        "GET",
+        &resource_path,
+        vec![("cookie".to_string(), cookie)],
+        Vec::new(),
+    )
+    .await?
+    // AuthN is closed by the JWE unwrap: only this enclave's per-pull
+    // ephemeral secret opens the released resource.
+    .trust::<AuthN, _, _, _, _>(|r| {
+        require_ok(&r, "resource")?;
+        session
+            .unwrap_resource(&r.body)
+            .map_err(|e| KeyError::msg(format!("jwe unwrap: {e}")))
+    })?
+    .trust_unchecked::<AuthZ, _>(reason!(
+        "the KBS enforces release authorization via its resource policy (Rego) + token; \
+         the TEE only consumes the sealed result"
+    ))
+    .trust_unchecked::<Replay, _>(reason!(
+        "the resource is JWE-sealed to a per-pull ephemeral key bound in this handshake's \
+         report_data; a replayed blob from a prior pull cannot open under the fresh secret"
+    ))
+    .into_inner();
 
     ocicrypt::privopts_from_json(&priv_json).map_err(|e| KeyError::msg(e.to_string()))
 }
 
-/// Find and base64-decode the first `org.opencontainers.image.enc.keys.*`
-/// annotation (the wrapped layer key). Opaque bytes — forwarded to the KBS.
-fn find_wrapped_key(annotations: &HashMap<String, String>) -> Result<Vec<u8>, KeyError> {
-    let value = annotations
-        .iter()
-        .find(|(k, _)| k.starts_with(ocicrypt::ANNOTATION_KEYS_PREFIX))
-        .map(|(_, v)| v)
-        .ok_or_else(|| KeyError::msg("encrypted layer missing enc.keys.* annotation"))?;
-    Base64::decode_vec(value).map_err(|e| KeyError::msg(format!("enc.keys base64: {e}")))
+/// Vouch and relay one RCAR leg through the broker. The leg body is public
+/// RCAR material (our ephemeral pubkey, sample evidence, the session
+/// cookie); the broker forwards it verbatim and returns the KBS response
+/// `Untrusted` for the caller to peel per-leg.
+async fn relay(
+    ctx: &KbsContext<'_>,
+    endpoint: &str,
+    method: &str,
+    path: &str,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> Result<Untrusted<KbsRelayResponse, (AuthN, AuthZ, Replay)>, KeyError> {
+    let req = KbsRelayRequest {
+        endpoint: endpoint.to_string(),
+        method: method.to_string(),
+        path: path.to_string(),
+        headers,
+        body,
+    };
+    let exposed = boundary::outbound::to_untrusted(req)
+        .vouch_unchecked::<AuthN, _>(reason!(
+            "the leg carries only public RCAR material — our ephemeral pubkey, the sample \
+             evidence, the session cookie; no TEE secret"
+        ))
+        .vouch_unchecked::<AuthZ, _>(reason!(
+            "forwarding the artifact-key handshake to the author's KBS IS the courier op"
+        ))
+        .vouch_unchecked::<Covert, _>(reason!(
+            "endpoint is client-supplied at session create and the resource URI is the \
+             artifact's digest-pinned annotation — neither is policy-controlled; leg shape \
+             is fixed by the RCAR protocol"
+        ));
+    ctx.kbs
+        .relay(exposed)
+        .await
+        .map_err(|e| KeyError::msg(format!("kbs relay: {e}")))
 }
 
-fn to_sealed(blob: SealedBlob) -> Result<kbswrap::Sealed, KeyError> {
-    let sender_pub: [u8; 32] = blob
-        .sender_pub
-        .try_into()
-        .map_err(|_| KeyError::msg("kbs sealed: sender_pub must be 32 bytes"))?;
-    let nonce: [u8; 12] = blob
-        .nonce
-        .try_into()
-        .map_err(|_| KeyError::msg("kbs sealed: nonce must be 12 bytes"))?;
-    Ok(kbswrap::Sealed {
-        sender_pub,
-        nonce,
-        ciphertext: blob.ciphertext,
-    })
+fn json_headers() -> Vec<(String, String)> {
+    vec![("content-type".to_string(), "application/json".to_string())]
+}
+
+fn require_ok(resp: &KbsRelayResponse, leg: &str) -> Result<(), KeyError> {
+    if resp.status != 200 {
+        return Err(KeyError::msg(format!(
+            "kbs {leg} leg returned status {}",
+            resp.status
+        )));
+    }
+    Ok(())
+}
+
+/// Extract the `kbs-session-id` cookie from a leg's `Set-Cookie` headers,
+/// re-formatted as a `Cookie` header value for the next leg.
+fn session_cookie(headers: &[(String, String)]) -> Result<String, KeyError> {
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("set-cookie")
+            && let Some(rest) = v.strip_prefix("kbs-session-id=")
+        {
+            let val = rest.split(';').next().unwrap_or("");
+            return Ok(format!("kbs-session-id={val}"));
+        }
+    }
+    Err(KeyError::msg("auth response missing kbs-session-id cookie"))
+}
+
+/// Read the KBS resource URI (`kbs:///<repo>/<type>/<tag>`) from the
+/// artifact's `org.opencontainers.image.enc.keys.*` annotation. Author-
+/// written and covered by the manifest digest, so the pinned reference
+/// integrity-protects which resource the layer key comes from — the broker
+/// / client cannot redirect the TEE to a different key.
+fn resource_uri(annotations: &HashMap<String, String>) -> Result<String, KeyError> {
+    annotations
+        .iter()
+        .find(|(k, _)| k.starts_with(ocicrypt::ANNOTATION_KEYS_PREFIX))
+        .map(|(_, v)| v.trim().to_string())
+        .ok_or_else(|| KeyError::msg("kbs key: encrypted layer missing enc.keys.* annotation"))
+}
+
+/// Map a `kbs:///<repo>/<type>/<tag>` resource URI to its KBS request path
+/// `/kbs/v0/resource/<repo>/<type>/<tag>`.
+fn resource_path(resource: &str) -> Result<String, KeyError> {
+    let rest = resource
+        .strip_prefix("kbs:///")
+        .ok_or_else(|| KeyError::msg("kbs resource must be kbs:///<repo>/<type>/<tag>"))?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
+        return Err(KeyError::msg("kbs resource must be kbs:///<repo>/<type>/<tag>"));
+    }
+    Ok(format!("/kbs/v0/resource/{rest}"))
 }

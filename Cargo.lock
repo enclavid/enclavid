@@ -1366,6 +1366,7 @@ dependencies = [
  "enclavid-attestation",
  "enclavid-crypto",
  "enclavid-engine",
+ "enclavid-kbs-client",
  "futures",
  "hex",
  "hkdf",
@@ -1409,7 +1410,6 @@ dependencies = [
  "age",
  "anyhow",
  "base64 0.22.1",
- "broker-protocol",
  "clap",
  "dialoguer",
  "dirs 5.0.1",
@@ -1442,7 +1442,6 @@ dependencies = [
  "chacha20poly1305",
  "ctr",
  "hex",
- "hkdf",
  "hmac",
  "rand_core 0.6.4",
  "serde",
@@ -1491,16 +1490,6 @@ dependencies = [
  "sha2",
  "thiserror 1.0.69",
  "ureq",
-]
-
-[[package]]
-name = "enclavid-kbs-stub"
-version = "0.1.0"
-dependencies = [
- "broker-protocol",
- "enclavid-attestation",
- "enclavid-crypto",
- "serde_json",
 ]
 
 [[package]]

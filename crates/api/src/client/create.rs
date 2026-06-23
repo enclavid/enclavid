@@ -100,9 +100,11 @@ pub struct PluginRequest {
 
 /// Client-supplied artifact key. Either the key itself as a base64 string
 /// (`"key": "<base64>"`, owner-supplied) or a KBS reference
-/// (`"key": { "kbs": { endpoint, pubkey, token } }`). Converted to the
-/// sealed [`broker_client::Key`] before persistence (the secrets then only
-/// ride inside AEAD-sealed metadata).
+/// (`"key": { "kbs": { endpoint } }`). The KBS resource URI naming the key
+/// lives in the artifact's digest-pinned `enc.keys.*` annotation, so the
+/// client supplies only which KBS to dial. Converted to the sealed
+/// [`broker_client::Key`] before persistence (the secrets then only ride
+/// inside AEAD-sealed metadata).
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum KeyRequest {
@@ -114,10 +116,8 @@ pub enum KeyRequest {
 
 #[derive(Deserialize)]
 pub struct KbsKeyRequest {
+    /// KBS origin the broker dials, e.g. `https://kbs.vendor.com:8080`.
     pub endpoint: String,
-    /// KBS public key (base64) the request binds to.
-    pub pubkey: String,
-    pub token: String,
 }
 
 impl KeyRequest {
@@ -138,11 +138,8 @@ impl KeyRequest {
                 if kbs.endpoint.is_empty() {
                     return Err(StatusCode::BAD_REQUEST);
                 }
-                let pubkey = Base64::decode_vec(&kbs.pubkey).map_err(|_| StatusCode::BAD_REQUEST)?;
                 Some(Key::Kbs(KbsKey {
                     endpoint: kbs.endpoint,
-                    pubkey,
-                    token: kbs.token,
                 }))
             }
         })

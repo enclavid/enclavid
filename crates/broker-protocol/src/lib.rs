@@ -148,50 +148,11 @@ pub struct KbsRelayResponse {
     pub body: Vec<u8>,
 }
 
-// --- KBS artifact-key application protocol (carried inside a relay body) ---
-//
-// These are the TEE↔KBS DTOs the relay body transports; the broker never
-// decodes them. CBOR-encoded with [`encode`]/[`decode`], placed in
-// `KbsRelayRequest.body` and read back from `KbsRelayResponse.body`. They
-// live here (the shared wire-DTO crate) so both the TEE-side keyprovider
-// and an in-repo stub KBS use one definition.
-
-/// TEE → KBS: request to release an artifact's layer key. The TEE presents
-/// an attestation quote binding `tee_ephemeral_pubkey`, the authorization
-/// token, and the wrapped private-opts blob from the artifact's
-/// `org.opencontainers.image.enc.keys.<scheme>` annotation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KbsKeyRequest {
-    /// Serialized attestation `Quote` (opaque to the broker; the KBS
-    /// deserializes + verifies it).
-    pub quote: Vec<u8>,
-    /// X25519 public key the released secret must be sealed to — bound in
-    /// the quote's `report_data`.
-    pub tee_ephemeral_pubkey: Vec<u8>,
-    /// Authorization / licensing token the KBS gates release on.
-    pub token: String,
-    /// The wrapped private-opts blob from the artifact's `enc.keys.*`
-    /// annotation; the KBS unwraps it to recover the layer key.
-    pub wrapped_priv_opts: Vec<u8>,
-}
-
-/// An X25519 sealed box (see `enclavid_crypto::kbswrap`). Used both for the
-/// artifact key sealed to the KBS at encrypt time (stored in the
-/// `enc.keys.*` annotation, CBOR-encoded) and for the KBS response sealed
-/// to the TEE's ephemeral key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SealedBlob {
-    pub sender_pub: Vec<u8>,
-    pub nonce: Vec<u8>,
-    pub ciphertext: Vec<u8>,
-}
-
-/// KBS → TEE: the artifact's private-opts JSON, sealed to
-/// `tee_ephemeral_pubkey`. Only the requesting enclave can open it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KbsKeyResponse {
-    pub sealed: SealedBlob,
-}
+// The RCAR application protocol (auth / attestation / resource bodies,
+// JWE-wrapped resource) is the standard Trustee wire; it lives in the
+// `kbs-types` crate and is driven TEE-side by `enclavid-kbs-client`. The
+// broker only ever sees those opaque bytes inside a relay body — no
+// enclavid-specific KBS DTOs cross this boundary.
 
 // ---------------------------------------------------------------------
 // Session store

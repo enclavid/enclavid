@@ -389,13 +389,10 @@ async fn lookup_policy(
     let policy_bearer =
         policy_pull::bearer_for_ref(&client.registry_auth, &metadata.policy_ref);
 
-    // Context for the `kbs` key_source: relay client + attestor + session
-    // id (bound into the ephemeral-key quote). Shared by the policy and
-    // every plugin pull. `Plaintext`/`inbound` artifacts ignore it.
-    let kbs_ctx = crate::keyprovider::KbsContext {
-        kbs: &state.kbs,
-        attestor: state.attestor.as_ref(),
-    };
+    // Context for the `kbs` key path: the broker relay client that
+    // couriers each RCAR leg. Shared by the policy and every plugin pull;
+    // inline / plaintext artifacts ignore it.
+    let kbs_ctx = crate::keyprovider::KbsContext { kbs: &state.kbs };
 
     // Run the policy pull and every plugin pull concurrently so the
     // /connect critical path is bounded by the slowest fetch instead

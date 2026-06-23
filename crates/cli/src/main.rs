@@ -268,16 +268,18 @@ enum OciCommand {
         ///   `inline` — prints the layer key for the client to pass as
         ///     `"key": "<base64>"` in POST /sessions (owner == the
         ///     session creator).
-        ///   `kbs` — seals the layer key to `--kbs-pubkey`; the client
-        ///     passes `"key": { "kbs": … }` and the TEE fetches it at
-        ///     runtime.
+        ///   `kbs` — writes the `--kbs-resource` URI into the artifact's
+        ///     `enc.keys.*` annotation and prints the layer key to register
+        ///     as that KBS resource; the client passes `"key": { "kbs":
+        ///     { endpoint } }` and the TEE fetches it under attestation.
         #[arg(long, value_enum)]
         encrypt: Option<EncryptMode>,
 
-        /// KBS public key (base64 X25519) to seal the layer key to.
-        /// Required with `--encrypt kbs`.
+        /// KBS resource URI the layer key will be registered under, e.g.
+        /// `kbs:///myrepo/key/1`. Required with `--encrypt kbs`; written
+        /// into the artifact's digest-pinned `enc.keys.*` annotation.
         #[arg(long)]
-        kbs_pubkey: Option<String>,
+        kbs_resource: Option<String>,
     },
 }
 
@@ -416,8 +418,8 @@ async fn main() -> Result<()> {
                 reference,
                 auth,
                 encrypt,
-                kbs_pubkey,
-            } => commands::oci::push::run(artifact, reference, auth, encrypt, kbs_pubkey).await,
+                kbs_resource,
+            } => commands::oci::push::run(artifact, reference, auth, encrypt, kbs_resource).await,
         },
         Commands::Session { command } => match command {
             SessionCommand::Create {

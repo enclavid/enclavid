@@ -162,18 +162,18 @@ pub enum Key {
 }
 
 /// Parameters for a [`Key::Kbs`] reference. `endpoint` is an untrusted
-/// routing target (the broker dials it); trust rides on `pubkey` and the
-/// attestation the KBS verifies.
+/// routing target (the broker dials it); trust rides on the attestation
+/// the KBS verifies and the JWE the released resource is sealed in — not
+/// on this value. The layer key is fetched as a standard Trustee **RCAR**
+/// resource; the resource URI (`kbs:///<repo>/<type>/<tag>`) lives in the
+/// artifact's digest-pinned `enc.keys.*` OCI annotation, so the client
+/// supplies only which KBS to dial. See `[[project-trustee-rcar-protocol]]`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KbsKey {
-    /// KBS origin, e.g. `https://kbs.vendor.com:8080`.
+    /// KBS origin the broker dials, e.g. `https://kbs.vendor.com:8080`.
+    /// The `kbs:///` annotation has an empty authority — this fills it in.
     pub endpoint: String,
-    /// KBS public key the request is bound to (pins the KBS so the broker
-    /// can't MITM the routing target).
-    pub pubkey: Vec<u8>,
-    /// Authorization / licensing token presented to the KBS.
-    pub token: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -19,8 +19,6 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use broker_protocol::SealedBlob;
-use enclavid_crypto::kbswrap;
 use enclavid_crypto::ocicrypt;
 
 use crate::EncryptMode;
@@ -31,7 +29,7 @@ use crate::registry_auth;
 /// and `wkg`'s pull whitelist (see `[[project-wkg-wac-poc-findings]]`).
 const WASM_LAYER_MEDIA_TYPE: &str = "application/wasm";
 const POLICY_CONFIG_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.config.v1+json";
-/// Keyprovider name for the KBS-wrapped layer key annotation
+/// Keyprovider name for the KBS resource-URI annotation
 /// (`org.opencontainers.image.enc.keys.provider.enclavid-kbs`).
 const KBS_PROVIDER: &str = "provider.enclavid-kbs";
 
@@ -40,7 +38,7 @@ pub async fn run(
     reference: String,
     auth_override: Option<String>,
     encrypt: Option<EncryptMode>,
-    kbs_pubkey: Option<String>,
+    kbs_resource: Option<String>,
 ) -> Result<()> {
     let parsed_ref = Reference::from_str(&reference)
         .with_context(|| format!("invalid OCI reference: {reference}"))?;
@@ -61,7 +59,7 @@ pub async fn run(
 
     // Plaintext (default) or ocicrypt-encrypted layer per `--encrypt`.
     let (layer_bytes, layer_media_type, layer_annotations) =
-        build_layer(bytes, encrypt, kbs_pubkey.as_deref())?;
+        build_layer(bytes, encrypt, kbs_resource.as_deref())?;
     let wasm_layer = ImageLayer::new(layer_bytes, layer_media_type, layer_annotations);
     let layers: Vec<ImageLayer> = vec![wasm_layer];
 
@@ -134,15 +132,19 @@ fn detect_protocol(registry: &str) -> ClientProtocol {
 /// Build the wasm layer per the chosen encryption mode. Returns the layer
 /// bytes, its media type, and the descriptor annotations.
 ///
+/// Both modes produce the SAME standard-ocicrypt ciphertext + `enc.pubopts`
+/// annotation; they differ only in how the layer key (the private-opts
+/// JSON) reaches the TEE:
 /// - `None` → plaintext `application/wasm`, no annotations (today's path).
-/// - `inbound` → ocicrypt-encrypted; prints the layer key (base64
-///   private-opts JSON) for the client to pass as `key_source.inbound`.
-/// - `kbs` → ocicrypt-encrypted; seals the layer key to `--kbs-pubkey`
-///   and stores it in the `enc.keys.provider.enclavid-kbs` annotation.
+/// - `inline` → prints the layer key (base64 private-opts JSON) for the
+///   client to pass directly as `"key": "<base64>"` (owner == creator).
+/// - `kbs` → writes the `--kbs-resource` URI into the `enc.keys.*`
+///   annotation (digest-pinned, the TEE reads it to locate the key) and
+///   prints the layer key to register as that KBS resource.
 fn build_layer(
     bytes: Vec<u8>,
     encrypt: Option<EncryptMode>,
-    kbs_pubkey: Option<&str>,
+    kbs_resource: Option<&str>,
 ) -> Result<(Vec<u8>, String, Option<BTreeMap<String, String>>)> {
     let Some(mode) = encrypt else {
         return Ok((bytes, WASM_LAYER_MEDIA_TYPE.to_string(), None));
@@ -158,8 +160,8 @@ fn build_layer(
 
     match mode {
         EncryptMode::Inline => {
-            if kbs_pubkey.is_some() {
-                bail!("--kbs-pubkey is only valid with --encrypt kbs");
+            if kbs_resource.is_some() {
+                bail!("--kbs-resource is only valid with --encrypt kbs");
             }
             println!("Encrypted (ocicrypt {})", ocicrypt::CIPHER_AES256CTR_HMAC_SHA256);
             println!("Layer key (base64): {}", BASE64.encode(&priv_json));
@@ -167,28 +169,35 @@ fn build_layer(
             println!("  in POST /api/v1/sessions (per policy / plugin). Keep it secret.");
         }
         EncryptMode::Kbs => {
-            let pk = kbs_pubkey
-                .ok_or_else(|| anyhow!("--encrypt kbs requires --kbs-pubkey <base64 X25519>"))?;
-            let pk_bytes: [u8; 32] = BASE64
-                .decode(pk)
-                .context("--kbs-pubkey base64")?
-                .try_into()
-                .map_err(|_| anyhow!("--kbs-pubkey must be 32 bytes"))?;
-            let sealed =
-                kbswrap::seal(&pk_bytes, &priv_json).map_err(|e| anyhow!("kbs seal: {e}"))?;
-            let blob = SealedBlob {
-                sender_pub: sealed.sender_pub.to_vec(),
-                nonce: sealed.nonce.to_vec(),
-                ciphertext: sealed.ciphertext,
-            };
-            let blob_bytes = broker_protocol::encode(&blob).map_err(|e| anyhow!("encode: {e}"))?;
+            let resource = kbs_resource.ok_or_else(|| {
+                anyhow!("--encrypt kbs requires --kbs-resource kbs:///<repo>/<type>/<tag>")
+            })?;
+            let rel = resource
+                .strip_prefix("kbs:///")
+                .ok_or_else(|| anyhow!("--kbs-resource must be kbs:///<repo>/<type>/<tag>"))?;
+            if rel.split('/').filter(|p| !p.is_empty()).count() != 3 {
+                bail!("--kbs-resource must be kbs:///<repo>/<type>/<tag>");
+            }
+            // The resource URI (not the key) goes in the artifact; it's
+            // covered by the manifest digest the TEE pins, so it can't be
+            // redirected. The key itself is registered out-of-band as that
+            // KBS resource — the TEE fetches it under attestation.
             annotations.insert(
                 format!("{}{}", ocicrypt::ANNOTATION_KEYS_PREFIX, KBS_PROVIDER),
-                BASE64.encode(&blob_bytes),
+                resource.to_string(),
             );
+            let priv_json_str = String::from_utf8_lossy(&priv_json);
             println!("Encrypted (ocicrypt {})", ocicrypt::CIPHER_AES256CTR_HMAC_SHA256);
-            println!("Layer key sealed to the KBS public key.");
-            println!("  Pass  \"key\": {{ \"kbs\": {{ \"endpoint\", \"pubkey\", \"token\" }} }}");
+            println!("Resource URI (in enc.keys annotation): {resource}");
+            println!();
+            println!("Register the layer key as that KBS resource (raw private-opts JSON):");
+            println!("  {priv_json_str}");
+            println!(
+                "  e.g.  curl -X POST <kbs>/kbs/v0/resource/{rel} \\\n         \
+                 -H \"Authorization: Bearer <admin-token>\" --data-binary '{priv_json_str}'"
+            );
+            println!();
+            println!("Then the client passes  \"key\": {{ \"kbs\": {{ \"endpoint\": \"<kbs>\" }} }}");
             println!("  in POST /api/v1/sessions (per policy / plugin).");
         }
     }

@@ -23,9 +23,7 @@ pub use transport::BrokerClient;
 // response now come from the shared `broker-protocol` crate.
 pub use broker_protocol::{AuthorizeRequest, ClientOperation, PullRequest};
 pub use broker_protocol::PullResponse as RegistryPullResponse;
-pub use broker_protocol::{
-    KbsKeyRequest, KbsKeyResponse, KbsRelayRequest, KbsRelayResponse, SealedBlob,
-};
+pub use broker_protocol::{KbsRelayRequest, KbsRelayResponse};
 pub use kbs::KbsClient;
 pub use registry::RegistryClient;
 pub use domain::{
