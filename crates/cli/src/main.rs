@@ -293,21 +293,35 @@ enum EncryptMode {
 enum SessionCommand {
     /// Create a new verification session.
     ///
-    /// Generates an ephemeral disclosure keypair (unless `--disclosure-key`
-    /// is given), caches the secret half locally so subsequent
-    /// `session disclosures` can decrypt. Caches the returned
-    /// `client_session_token` so `session get` / `session disclosures`
-    /// work without you re-passing it.
+    /// Two ways to specify the request body: `--policy <ref>` for the
+    /// trivial plaintext case, or `--from-file <spec.json>` for the full
+    /// `POST /sessions` payload (plugin pins, per-artifact keys,
+    /// registry_auth). Either way the CLI generates an ephemeral
+    /// disclosure keypair (unless one is supplied), caches the secret
+    /// locally so subsequent `session disclosures` can decrypt, and caches
+    /// the returned `client_session_token` for `session get` /
+    /// `session disclosures`.
     Create {
         /// Pinned OCI ref of the policy, `<registry>/<repo>@sha256:<hex>`.
         /// Use the value printed by `enclavid oci push` as
-        /// `Pinned ref:`.
-        #[arg(long)]
-        policy: String,
+        /// `Pinned ref:`. Mutually exclusive with `--from-file`.
+        #[arg(long, conflicts_with = "from_file")]
+        policy: Option<String>,
+
+        /// Path to a JSON file holding the **entire** `POST /sessions`
+        /// body — `policy`, `plugins: [{package, impl_ref, key?}]`,
+        /// `policy_key`, `registry_auth`, etc. (the same shape a consumer
+        /// backend would send). If it omits `client_disclosure_pubkey`,
+        /// the CLI injects an auto-generated one and caches its secret.
+        /// Mutually exclusive with `--policy`.
+        #[arg(short = 'f', long = "from-file", conflicts_with = "policy")]
+        from_file: Option<PathBuf>,
 
         /// Path to an age identity used as the disclosure recipient.
-        /// When absent, generate an ephemeral keypair and stash the
-        /// secret under `~/.config/enclavid/sessions/<id>/`.
+        /// Wins over a `client_disclosure_pubkey` in `--from-file`. When
+        /// absent (and the file supplies none), generate an ephemeral
+        /// keypair and stash the secret under
+        /// `~/.config/enclavid/sessions/<id>/`.
         #[arg(long)]
         disclosure_key: Option<PathBuf>,
 
@@ -424,10 +438,11 @@ async fn main() -> Result<()> {
         Commands::Session { command } => match command {
             SessionCommand::Create {
                 policy,
+                from_file,
                 disclosure_key,
                 client_ref,
             } => {
-                commands::session::create::run(policy, disclosure_key, client_ref).await
+                commands::session::create::run(policy, from_file, disclosure_key, client_ref).await
             }
             SessionCommand::Get { id } => commands::session::get::run(&id).await,
             SessionCommand::Disclosures {

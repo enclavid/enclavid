@@ -254,3 +254,57 @@ fn resource_path(resource: &str) -> Result<String, KeyError> {
     }
     Ok(format!("/kbs/v0/resource/{rest}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_uri_read_from_enc_keys_annotation() {
+        let mut ann = HashMap::new();
+        ann.insert(
+            format!("{}provider.enclavid-kbs", ocicrypt::ANNOTATION_KEYS_PREFIX),
+            "kbs:///myrepo/key/1".to_string(),
+        );
+        assert_eq!(resource_uri(&ann).unwrap(), "kbs:///myrepo/key/1");
+    }
+
+    #[test]
+    fn resource_uri_missing_annotation_errors() {
+        let ann = HashMap::new();
+        assert!(resource_uri(&ann).is_err());
+    }
+
+    #[test]
+    fn resource_path_maps_well_formed_uri() {
+        assert_eq!(
+            resource_path("kbs:///myrepo/key/1").unwrap(),
+            "/kbs/v0/resource/myrepo/key/1"
+        );
+    }
+
+    #[test]
+    fn resource_path_rejects_malformed() {
+        for bad in ["myrepo/key/1", "kbs:///two/parts", "kbs:///a/b/c/d", "kbs:///a//c"] {
+            assert!(resource_path(bad).is_err(), "should reject {bad}");
+        }
+    }
+
+    #[test]
+    fn session_cookie_extracts_value_dropping_attributes() {
+        let headers = vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            (
+                "Set-Cookie".to_string(),
+                "kbs-session-id=abc123; Path=/; HttpOnly; SameSite=Strict".to_string(),
+            ),
+        ];
+        assert_eq!(session_cookie(&headers).unwrap(), "kbs-session-id=abc123");
+    }
+
+    #[test]
+    fn session_cookie_absent_errors() {
+        let headers = vec![("x".to_string(), "y".to_string())];
+        assert!(session_cookie(&headers).is_err());
+    }
+}

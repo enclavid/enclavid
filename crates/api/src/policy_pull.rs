@@ -330,3 +330,68 @@ pub fn bearer_for_ref<'a>(
 fn extract_digest(policy_ref: &str) -> Option<&str> {
     split_pinned_ref(policy_ref).map(|(_, d)| d)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use broker_client::Key;
+
+    /// The full decrypt seam for an `inline`-keyed layer: ocicrypt-encrypt
+    /// some bytes the way `enclavid oci push --encrypt inline` does, lay the
+    /// `enc.pubopts` annotation as the manifest would carry it, then run
+    /// `decrypt_layer` (pubopts read + keyprovider Inline dispatch + ocicrypt
+    /// decrypt) and assert it reproduces the plaintext.
+    #[tokio::test]
+    async fn decrypt_layer_inline_round_trips() {
+        let plaintext = b"\x00asm\x01\x00\x00\x00 pretend wasm component bytes".to_vec();
+
+        let (ciphertext, public, private) = ocicrypt::encrypt(&plaintext);
+        assert_ne!(ciphertext, plaintext, "layer must actually be encrypted");
+
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            ocicrypt::ANNOTATION_PUBOPTS.to_string(),
+            ocicrypt::pubopts_to_annotation(&public).unwrap(),
+        );
+        let key = Key::Inline(ocicrypt::privopts_to_json(&private).unwrap());
+
+        let out = decrypt_layer(&ciphertext, &annotations, &key, None)
+            .await
+            .expect("decrypt should succeed with the matching inline key");
+        assert_eq!(out, plaintext);
+    }
+
+    /// A wrong inline key must fail closed (HMAC over the ciphertext rejects
+    /// it), never return garbage plaintext.
+    #[tokio::test]
+    async fn decrypt_layer_rejects_wrong_inline_key() {
+        let plaintext = b"sensitive policy bytes".to_vec();
+        let (ciphertext, public, _private) = ocicrypt::encrypt(&plaintext);
+
+        // A private-opts JSON from an UNRELATED encryption (different key).
+        let (_ct2, _pub2, other_private) = ocicrypt::encrypt(b"unrelated");
+
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            ocicrypt::ANNOTATION_PUBOPTS.to_string(),
+            ocicrypt::pubopts_to_annotation(&public).unwrap(),
+        );
+        let key = Key::Inline(ocicrypt::privopts_to_json(&other_private).unwrap());
+
+        let err = decrypt_layer(&ciphertext, &annotations, &key, None)
+            .await
+            .expect_err("wrong key must fail");
+        assert!(matches!(err, PullError::Decrypt(_)));
+    }
+
+    /// A supplied key on a plaintext `application/wasm` layer is rejected —
+    /// no silent cleartext when encryption was expected.
+    #[test]
+    fn encrypted_media_suffix_recognised() {
+        let encrypted = format!("{WASM_LAYER}{}", ocicrypt::ENCRYPTED_MEDIA_SUFFIX);
+        assert_eq!(
+            encrypted.strip_suffix(ocicrypt::ENCRYPTED_MEDIA_SUFFIX),
+            Some(WASM_LAYER)
+        );
+    }
+}

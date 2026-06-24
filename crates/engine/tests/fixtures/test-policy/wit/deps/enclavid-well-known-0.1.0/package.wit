@@ -1,0 +1,144 @@
+package enclavid:well-known@0.1.0;
+
+/// Icon name identifiers for capture flows. Returns the dispatch
+/// string consumed by `CaptureStep.icon`; frontend maps to its
+/// bundled SVG library.
+///
+/// All names are resolved against this plugin's `icons.json` section —
+/// per-component scoping, applicant-facing only (consumer never
+/// sees icon refs), no policy whitelist needed.
+interface icons {
+  passport: func() -> string;
+
+  id-card: func() -> string;
+
+  drivers-license: func() -> string;
+
+  selfie: func() -> string;
+}
+
+/// DisplayField helpers for canonical KYC fields.
+///
+/// Each function returns a `display-field` carrying a canonical
+/// disclosure-field key plus its label. The label ref is resolved
+/// from THIS PLUGIN's `i18n.json` (per-component scoping, applicant-
+/// facing); the key is resolved against the **policy's**
+/// `disclosure-fields.json` (single source of truth for what's
+/// disclosable to the consumer — see
+/// `[[project-embedded-ref-phase-b-hmac]]` and the bandwidth-bound
+/// design note).
+///
+/// **Each helper documents the exact key it emits.** Policy authors
+/// MUST whitelist any helper they use in their `disclosure-fields.json`
+/// — calling a helper for a key the policy didn't list traps at runtime
+/// with a clear "policy didn't whitelist X" message.
+///
+/// Convention: WIT function names are kebab-case (WIT requires it),
+/// emitted keys are **snake_case** (more familiar for JSON + machine
+/// identifiers). Mapping: `passport-number` (WIT func) ↔
+/// `passport_number` (key).
+interface disclosure-fields {
+  use enclavid:disclosure/types@0.1.0.{display-field};
+
+  /// ─── Document identifiers ──────────────────────────────────────
+  /// Emits key `"passport_number"`. Whitelist in policy.df.
+  passport-number: func(value: string) -> display-field;
+
+  /// Emits key `"id_card_number"`. Whitelist in policy.df.
+  id-card-number: func(value: string) -> display-field;
+
+  /// Emits key `"drivers_license_number"`. Whitelist in policy.df.
+  drivers-license-number: func(value: string) -> display-field;
+
+  /// Emits key `"document_issuing_country"`. Whitelist in policy.df.
+  document-issuing-country: func(value: string) -> display-field;
+
+  /// Emits key `"document_expiry"`. Whitelist in policy.df.
+  document-expiry: func(value: string) -> display-field;
+
+  /// Emits key `"document_issued"`. Whitelist in policy.df.
+  document-issued: func(value: string) -> display-field;
+
+  /// ─── Identity ──────────────────────────────────────────────────
+  /// Emits key `"given_name"`. Whitelist in policy.df.
+  given-name: func(value: string) -> display-field;
+
+  /// Emits key `"family_name"`. Whitelist in policy.df.
+  family-name: func(value: string) -> display-field;
+
+  /// Emits key `"full_name"`. Whitelist in policy.df.
+  full-name: func(value: string) -> display-field;
+
+  /// Emits key `"date_of_birth"`. Whitelist in policy.df.
+  date-of-birth: func(value: string) -> display-field;
+
+  /// Emits key `"sex"`. Whitelist in policy.df.
+  sex: func(value: string) -> display-field;
+
+  /// Emits key `"nationality"`. Whitelist in policy.df.
+  nationality: func(value: string) -> display-field;
+
+  /// ─── Contact / location ────────────────────────────────────────
+  /// Emits key `"residence_country"`. Whitelist in policy.df.
+  residence-country: func(value: string) -> display-field;
+
+  /// Emits key `"address"`. Whitelist in policy.df.
+  address: func(value: string) -> display-field;
+
+  /// Emits key `"email"`. Whitelist in policy.df.
+  email: func(value: string) -> display-field;
+
+  /// Emits key `"phone"`. Whitelist in policy.df.
+  phone: func(value: string) -> display-field;
+
+  /// ─── Other ─────────────────────────────────────────────────────
+  /// Emits key `"tax_id"`. Whitelist in policy.df.
+  tax-id: func(value: string) -> display-field;
+}
+
+/// Pre-baked MediaSpec / CaptureStep helpers for common KYC documents.
+///
+/// `*_spec` functions return a complete `media-spec` ready for
+/// `prompt-media`. For multi-side documents (id-card, drivers-license)
+/// the spec includes both sides as separate steps.
+///
+/// `*_step` functions return individual `capture-step`s for tenants
+/// who want to compose custom flows mixing sides.
+///
+/// All refs inside the returned records (labels, instructions, icons)
+/// are resolved against THIS PLUGIN's `i18n.json` / `icons.json` —
+/// per-component scoping, applicant-facing only, no policy whitelist
+/// needed.
+interface capture {
+  use enclavid:form/types@0.1.0.{capture-step, media-spec};
+
+  /// Full MediaSpecs
+  passport: func() -> media-spec;
+
+  id-card: func() -> media-spec;
+
+  drivers-license: func() -> media-spec;
+
+  selfie: func() -> media-spec;
+
+  /// Individual steps for multi-side documents
+  id-card-front-step: func() -> capture-step;
+
+  id-card-back-step: func() -> capture-step;
+
+  drivers-license-front-step: func() -> capture-step;
+
+  drivers-license-back-step: func() -> capture-step;
+}
+
+world well-known {
+  import enclavid:embedded/disclosure-fields@0.1.0;
+  import enclavid:embedded/i18n@0.1.0;
+  import enclavid:embedded/icons@0.1.0;
+  import enclavid:disclosure/types@0.1.0;
+  import enclavid:form/types@0.1.0;
+
+  export icons;
+  export disclosure-fields;
+  export capture;
+}

@@ -1,5 +1,8 @@
 [
+  "full_name",
+  "date_of_birth",
+  "nationality",
   "passport_number",
-  "risk_category",
+  "document_expiry",
   "address"
 ]

@@ -26,10 +26,20 @@ mod transport;
 
 use anyhow::Context;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, head, post};
 use redis::aio::ConnectionManager;
 
 use crate::auth::AuthState;
+
+/// Request-body cap for the broker. Axum defaults to 2 MB, but the
+/// `/sessions/{id}/write` body carries the sealed session STATE, which
+/// accumulates every captured media clip (passport, selfie, …) — easily
+/// past 2 MB. This is a host-side DoS guard, NOT a trust boundary: the TEE
+/// already bounds what it writes via the attested per-input limit
+/// (`api::limits::APPLICANT_INPUT_BODY_LIMIT`, 16 MB), so the host can't
+/// make the TEE write more. Sized for a realistic multi-capture session.
+const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Shared handler state. `Clone` is cheap: `ConnectionManager` and
 /// `AuthState` are both Arc-backed.
@@ -73,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/authorize", post(auth::authorize))
         .route("/oci/pull", post(oci::pull))
         .route("/kbs/relay", post(kbs::relay))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state);
 
     tracing::info!(addr = %listen_addr, "starting broker HTTP server");

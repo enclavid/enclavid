@@ -150,6 +150,17 @@ impl Runner {
                             // dead weight; wasmtime only consults it
                             // when we explicitly hand it the closure.
                             store.limiter(|s: &mut PluginHostState| &mut s.limits);
+                            // The engine has `consume_fuel` enabled
+                            // globally, so a Store starts at 0 fuel and
+                            // traps on its first instruction unless we
+                            // seed it. Each plugin Store gets its own
+                            // budget (untrusted compute is fuel-bounded
+                            // just like the policy). `set_fuel` only
+                            // errors when fuel accounting is disabled,
+                            // which it isn't here.
+                            store
+                                .set_fuel(POLICY_FUEL_BUDGET)
+                                .expect("fuel accounting enabled on the engine");
                             store
                         },
                     ),

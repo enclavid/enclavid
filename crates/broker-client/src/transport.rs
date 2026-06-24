@@ -75,7 +75,16 @@ impl BrokerClient {
         } else {
             format!("http://{addr}")
         };
-        let client = Client::builder(TokioExecutor::new()).build(Connector::new());
+        let client = Client::builder(TokioExecutor::new())
+            // Don't keep idle connections pooled. The TEE↔host control
+            // link sits idle for seconds between calls — e.g. policy
+            // compile+run between an OCI pull and the state write. The
+            // broker's keep-alive can close a pooled connection during
+            // that gap; reusing it then fails with a `SendRequest`
+            // transport error (request never sent). A fresh connection
+            // per call removes the race — cheap on a local TCP / vsock link.
+            .pool_max_idle_per_host(0)
+            .build(Connector::new());
         Ok(Self { client, base })
     }
 
@@ -84,8 +93,11 @@ impl BrokerClient {
     #[cfg(feature = "vsock")]
     pub async fn new(addr: &str) -> Result<Self, BridgeError> {
         let (cid, port) = parse_vsock(addr)?;
-        let client =
-            Client::builder(TokioExecutor::new()).build(vsock::VsockConnector { cid, port });
+        // No idle pooling — same rationale as the TCP path: avoid reusing
+        // a connection the broker closed during a slow gap between calls.
+        let client = Client::builder(TokioExecutor::new())
+            .pool_max_idle_per_host(0)
+            .build(vsock::VsockConnector { cid, port });
         // Dummy authority — the connector ignores it and dials cid/port;
         // it also keys the connection pool (all requests share one origin).
         Ok(Self {
