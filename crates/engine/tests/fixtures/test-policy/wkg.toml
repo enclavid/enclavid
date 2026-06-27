@@ -1,6 +1,5 @@
 [overrides]
 "enclavid:well-known" = { path = "../../../../../plugins/well-known/wit" }
-"enclavid:disclosure" = { path = "../../../../../wit/disclosure" }
-"enclavid:form" = { path = "../../../../../wit/form" }
+"enclavid:shared-types" = { path = "../../../../../wit/shared-types" }
 "enclavid:embedded" = { path = "../../../../../wit/embedded" }
 "enclavid:policy" = { path = "../../../../../wit/policy" }

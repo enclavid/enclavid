@@ -1,4 +1,3 @@
 [overrides]
-"enclavid:disclosure" = { path = "../../wit/disclosure" }
-"enclavid:form" = { path = "../../wit/form" }
+"enclavid:shared-types" = { path = "../../wit/shared-types" }
 "enclavid:embedded" = { path = "../../wit/embedded" }

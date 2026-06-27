@@ -1,14 +1,15 @@
-//! `SessionListener` impl that seals + persists per-call CallEvent commits
-//! to the host-side `SessionStore`. Engine fires `on_session_change` after
-//! each committed CallEvent; we age-encrypt any disclosures emitted in
-//! that call's body to the client recipient pubkey, then translate
-//! state + sealed disclosures into a single atomic Write RPC.
+//! `SessionListener` impl that seals + persists each reducer round's
+//! result to the host-side `SessionStore`. Engine fires
+//! `on_session_change` once per `handle` round; we age-encrypt any
+//! disclosure the runtime sealed that round (non-empty only when a
+//! consent-disclosure prompt was accepted) to the client recipient
+//! pubkey, then translate state + sealed disclosures into a single
+//! atomic Write RPC.
 //!
 //! Atomicity is the whole point: state mutation (consent accepted) and
 //! the disclosure entry that records what was shared land in one host
-//! transaction. A crash between calls leaves the host's replay log
-//! consistent with the last successfully-acknowledged event; the next
-//! attempt replays from there and re-emits any work past it.
+//! transaction. A failed write fails the round under version-CAS; the
+//! next attempt re-runs from the last persisted state.
 //!
 //! Why encryption lives here, not in engine: state and metadata are
 //! already sealed transparently inside broker-client (`SetState` /
@@ -155,8 +156,9 @@ impl SessionPersister {
                         )
                     })?
                     .vouch_unchecked::<AuthZ, _>(reason!(
-                        "reaches this hook only after engine's prompt_disclosure returned \
-                         accepted=true; api only serializes the post-consent record"
+                        "engine fires this disclosure only after an accepted consent-disclosure \
+                         prompt (show == seal, gated runtime-side); api only serializes the \
+                         post-consent record"
                     ))
                     .vouch::<AuthN, _, _, _, _>(|bytes| -> RunResult<Vec<u8>> {
                         seal_to_recipient(&bytes, &self.client_disclosure_pubkey)
@@ -249,9 +251,9 @@ impl SessionPersister {
             .await
             .map_err(|e| {
                 // eprintln before the error flows back through wasmtime:
-                // a listener-side write failure can be misclassified by
-                // the engine as a suspension if the replay log committed
-                // first; the actual cause must show up in the logs.
+                // a listener-side write failure surfaces to the engine as
+                // a trap that aborts the round; the actual cause must show
+                // up in the logs before it is reduced to a 5xx.
                 eprintln!(
                     "persister.commit_ops: session_store.write failed for {} \
                      (expected version {expected}): {e}",
@@ -276,8 +278,8 @@ impl SessionPersister {
     /// Atomically transition the session to Completed after the runner
     /// returns `RunStatus::Completed`. Updates `metadata.status`
     /// (TEE-trusted, AEAD-bound) and `BlobField::Status` (host-facing
-    /// TTL hint) in one Write RPC. No-op for Suspended runs — the
-    /// session continues into the next /input round.
+    /// TTL hint) in one Write RPC. No-op while the run is still
+    /// awaiting input — the session continues into the next /input round.
     ///
     /// Idempotent under crash recovery: if a previous run already
     /// finalized but the response was lost, replay re-runs the policy

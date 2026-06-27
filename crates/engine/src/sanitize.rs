@@ -20,14 +20,14 @@
 //! length budgets differ.
 
 use crate::embedded::{DisclosureFieldsStore, EmbeddedRegistry, IconStore, LocalizedStore};
-use crate::enclavid::disclosure::types::DisplayField;
+use crate::enclavid::shared_types::disclosure::DisplayField;
 use crate::limits::{
     MAX_EXPOSE_FIELDS, MAX_KEY_LENGTH, MAX_TEXT_VALUE_SOFT_CHARS, MAX_VALUE_LENGTH,
 };
 
-/// Enforce structural limits + registration on `DisplayField`s from
-/// `prompt-disclosure`. Policies exceeding them trap — this is a
-/// programming error or a covert-channel attempt, not user input.
+/// Enforce structural limits + registration on `DisplayField`s carried
+/// by a `consent-disclosure` render. Policies exceeding them trap — this
+/// is a programming error or a covert-channel attempt, not user input.
 ///
 /// `key` is a disclosure-field-ref → reverse-looked-up in the
 /// composition's disclosure-fields store; `label` is a localized-ref
@@ -41,24 +41,24 @@ pub fn validate_fields(
 ) -> wasmtime::Result<()> {
     if fields.len() > MAX_EXPOSE_FIELDS {
         return Err(wasmtime::Error::msg(format!(
-            "prompt_disclosure exceeds {MAX_EXPOSE_FIELDS} fields"
+            "consent-disclosure exceeds {MAX_EXPOSE_FIELDS} fields"
         )));
     }
     for field in fields {
         if field.value.len() > MAX_VALUE_LENGTH {
             return Err(wasmtime::Error::msg(format!(
-                "prompt_disclosure value exceeds {MAX_VALUE_LENGTH} bytes"
+                "consent-disclosure value exceeds {MAX_VALUE_LENGTH} bytes"
             )));
         }
         ensure_disclosure_field(
             &field.key,
             &embedded.disclosure_fields,
-            "prompt_disclosure field key",
+            "consent-disclosure field key",
         )?;
         ensure_localized(
             &field.label,
             &embedded.localized,
-            "prompt_disclosure field label",
+            "consent-disclosure field label",
         )?;
     }
     Ok(())

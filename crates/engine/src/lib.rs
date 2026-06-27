@@ -1,25 +1,26 @@
 //! Engine: policy + plugin composition + execution.
 //!
+//! The policy is a PURE REDUCER. `enclavid:policy/policy.handle
+//! (state, event) -> (state, action)` is called ONCE per round; the engine
+//! owns the mailbox (builds the inbound `event` from `/input`), persistence
+//! (threads the opaque `state` blob), and effects (renders prompts, seals
+//! consented disclosures). No intercept / replay / compaction.
+//!
 //! ```text
-//! runner/      ← top-level executor (Runner, RunStatus)
-//!   ↓ uses
-//! host/        ← bindgen Host trait impls for suspending host fns
-//!                (prompt-disclosure, prompt-media)
+//! runner/      ← top-level executor (Runner, RunStatus); WIT⇄domain
+//!                conversions + media/consent validation live here now
 //! embedded/    ← `enclavid:embedded/*` slice: section parsing
-//!                (TextDecls + load_embedded), per-component scoping
-//!                registry (EmbeddedRegistry), and the embedded host
-//!                fn impls (slot 0 via bindgen, plugin slots via
-//!                register_for_slot)
+//!                (load_embedded), per-component scoping registry
+//!                (EmbeddedRegistry), and the embedded host fn impls
+//!                (slot 0 via bindgen, plugin slots via register_for_slot)
 //!   ↓ uses
 //! state/       ← Store<T> data layer (HostState, PluginHostState, RunInputs)
-//! intercept/   ← shim Linker + replay machinery (wraps every host call)
-//! listener     ← outbound contract (SessionListener trait, SessionChange)
+//! listener     ← outbound contract (SessionListener trait, SessionChange);
+//!                fired by the runner on a consent-disclosure accept
 //! limits, sanitize  ← leaf utilities
 //! ```
 
 mod embedded;
-mod host;
-pub mod intercept;
 pub mod limits;
 mod listener;
 mod runner;
@@ -31,10 +32,17 @@ pub use embedded::{
     EmbeddedRegistryBuilder, Icon, IconStore, Localized, LocalizedStore, RefKind, RefStore,
     Slot, Translation, load_embedded,
 };
-pub use broker_client::{SessionMetadata, SessionState, suspended};
+pub use broker_client::{
+    Action, Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
+};
 pub use listener::{ConsentDisclosure, SessionChange, SessionListener};
-pub use runner::{Decision, EvalArgs, PluginInstance, RunStatus, Runner};
+pub use runner::{PluginInstance, RunStatus, Runner};
 pub use state::RunInputs;
+/// The bindgen-generated `enclavid:policy/types.prop` — the policy's
+/// static-config value variant. Re-exported so the api crate can build
+/// the `props` list it hands to [`Runner::run`] without taking a direct
+/// bindgen dependency.
+pub use crate::enclavid::policy::types::Prop;
 /// Re-exported for the api crate so it can apply the same
 /// control/BIDI/zero-width/Unicode-tag stripping to manifest
 /// translation values at resolve time (lazy validation strategy —
@@ -56,15 +64,13 @@ wasmtime::component::bindgen!({
             import enclavid:embedded/disclosure-fields@0.1.0;
             import enclavid:embedded/i18n@0.1.0;
             import enclavid:embedded/icons@0.1.0;
-            import enclavid:disclosure/disclosure@0.1.0;
-            import enclavid:form/media@0.1.0;
+            import enclavid:policy/context@0.1.0;
             export enclavid:policy/policy@0.1.0;
         }
     "#,
     path: [
         "../../wit/embedded",
-        "../../wit/disclosure",
-        "../../wit/form",
+        "../../wit/shared-types",
         "../../wit/policy",
     ],
     imports: { default: async | trappable },
@@ -73,5 +79,4 @@ wasmtime::component::bindgen!({
         serde::Serialize,
         serde::Deserialize,
     ],
-    wasmtime_crate: crate::intercept::shim,
 });

@@ -1,96 +1,74 @@
 use std::sync::Arc;
 
-use broker_client::SessionState;
 use wasm_runtime_composer::ResourceProxyView;
 use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
 
 use crate::embedded::EmbeddedRegistry;
-use crate::intercept::replay::Replay;
 use crate::limits::POLICY_MAX_MEMORY;
-use crate::listener::{ConsentDisclosure, SessionListener};
+use crate::listener::SessionListener;
 
-/// Data placed into wasmtime `Store<HostState>` for the duration of
-/// one run. Owns the replay machinery, the per-call disclosure buffer,
-/// and the listener.
-///
-/// Engine never talks to the host and holds no keys: every committed
-/// CallEvent fires `SessionListener::on_session_change`, the listener (api
-/// crate) does whatever encryption + persistence the destination
-/// requires (`tee_seal_key`/`applicant_session_token` AEAD for state via the bridge;
-/// `client_pk` age-encrypt for disclosures inside the listener
-/// itself). Symmetric with how state and metadata are already sealed
-/// transparently inside broker-client.
+/// Data placed into wasmtime `Store<HostState>` for the duration of one
+/// `handle` call. The policy is a pure reducer, so this state carries
+/// only ambient read surfaces (`enclavid:policy/context` props,
+/// `enclavid:embedded/*` registry) plus the runtime plumbing
+/// (listener, limits, composer proxy table). No replay log, no
+/// per-call disclosure buffer — the runner fires the listener directly
+/// on a consent-disclosure accept, around the `handle` call, not from a
+/// host-fn body.
 pub struct HostState {
-    pub replay: Replay,
-    /// Disclosure records staged during the current host call body.
-    /// Structured (proto-typed fields) — listener owns the public
-    /// JSON wire format and sealing to recipient. Drained and handed
-    /// to the listener after each successful event commit; per-call
-    /// lifetime, never accumulated across calls.
-    pub pending_disclosures: Vec<ConsentDisclosure>,
-    /// Hook fired after each committed CallEvent. Stored as Arc so the
-    /// shim can clone it cheaply across the await point that calls it.
-    pub listener: Arc<dyn SessionListener>,
+    /// Static consumer config (`metadata.input`), surfaced to the
+    /// policy through `enclavid:policy/context.props`. Constant for
+    /// the session; the policy may read it any round.
+    pub props: Vec<(String, crate::enclavid::policy::types::Prop)>,
     /// Per-component `enclavid:embedded/*` registry, shared with every
     /// plugin's `PluginHostState` so the slot-bound resolve closures and
     /// the use-site reverse-lookups read from the same frozen index.
     /// Frozen before any per-session input reaches any component; the
-    /// engine consults it at every embedded-ref use-site
-    /// (`prompt-disclosure` field key/label, reason / requester,
-    /// media labels) and traps if a ref isn't in it. Closes the
-    /// runtime ref-crafting channel where a policy might otherwise
-    /// encode user-attribute bits into a freshly-resolved key string
-    /// at evaluate time, and the cross-component channel where one
-    /// component might resolve a ref attributing the message to another.
+    /// runner consults it at every embedded-ref use-site (consent field
+    /// key/label, reason / requester, media labels) and traps if a ref
+    /// isn't in it. Closes the runtime ref-crafting channel and the
+    /// cross-component attribution channel.
     pub embedded: Arc<EmbeddedRegistry>,
     /// Resource caps the wasmtime runtime consults via `Store::
-    /// limiter`. Bounds linear-memory growth so the policy
-    /// component can't OOM the enclave. Fuel (CPU-instruction
-    /// budget) is set separately on the Store via `Store::set_fuel`.
+    /// limiter`. Bounds linear-memory growth so the policy component
+    /// can't OOM the enclave. Fuel (CPU-instruction budget) is set
+    /// separately on the Store via `Store::set_fuel`.
     pub limits: StoreLimits,
     /// Proxy table used by wasm-runtime-composer to forward resource
     /// handles between this Store and other components in the
     /// composition. Owned per Store; the composer pushes / removes
-    /// entries transparently during cross-store calls. We never read
-    /// it directly — it lives here solely to satisfy
-    /// [`ResourceProxyView`] so this Store can participate in
-    /// compositions.
+    /// entries transparently during cross-store calls. We never read it
+    /// directly — it lives here solely to satisfy [`ResourceProxyView`]
+    /// so this Store can participate in compositions.
     pub proxy_table: ResourceTable,
 }
 
 /// Per-run inputs assembled by the api crate and handed to
-/// [`HostState::new`]. Carries the listener that ties this run to
-/// the caller's persistence layer plus the composition-wide
-/// `EmbeddedRegistry` — constructed once at policy-cache build time
-/// from policy + plugin embedded sections and shared by `Arc` with
-/// every consumer (engine slot-bound resolve, engine use-site reverse-
-/// lookup, api view-layer ref resolution).
-///
-/// Distinct name from the component-model "resources" concept
-/// (`wasmtime::component::Resource`) — these are the engine's
-/// per-`Runner::run` inputs, not WIT resource handles.
+/// [`HostState::new`]. Carries the listener that ties this run to the
+/// caller's persistence layer plus the composition-wide
+/// `EmbeddedRegistry` — constructed once at policy-cache build time from
+/// policy + plugin embedded sections and shared by `Arc` with every
+/// consumer (engine slot-bound resolve, engine use-site reverse-lookup,
+/// api view-layer ref resolution).
 pub struct RunInputs {
     pub listener: Arc<dyn SessionListener>,
     pub embedded: Arc<EmbeddedRegistry>,
 }
 
 impl HostState {
-    pub(crate) fn new(session: SessionState, inputs: RunInputs) -> Self {
+    pub(crate) fn new(
+        props: Vec<(String, crate::enclavid::policy::types::Prop)>,
+        embedded: Arc<EmbeddedRegistry>,
+    ) -> Self {
         Self {
-            replay: Replay::new(session),
-            pending_disclosures: Vec::new(),
-            listener: inputs.listener,
-            embedded: inputs.embedded,
+            props,
+            embedded,
             limits: StoreLimitsBuilder::new()
                 .memory_size(POLICY_MAX_MEMORY)
                 .build(),
             proxy_table: ResourceTable::new(),
         }
-    }
-
-    pub(crate) fn into_session(self) -> SessionState {
-        self.replay.into_session()
     }
 }
 
@@ -100,8 +78,20 @@ impl ResourceProxyView for HostState {
     }
 }
 
-// Pure-types interfaces (no host functions) still generate empty
-// `Host` traits via `bindgen!`. Implementing them on `HostState`
-// satisfies the linker bound — there's nothing to actually implement.
-impl crate::enclavid::disclosure::types::Host for HostState {}
-impl crate::enclavid::form::types::Host for HostState {}
+/// `enclavid:policy/context` — the policy's ambient `props` getter.
+/// Referentially transparent: returns the same static consumer config
+/// every call, no side effect, no replay concern.
+impl crate::enclavid::policy::context::Host for HostState {
+    async fn props(
+        &mut self,
+    ) -> wasmtime::Result<Vec<(String, crate::enclavid::policy::types::Prop)>> {
+        Ok(self.props.clone())
+    }
+}
+
+// Pure-types interfaces (no host functions) still generate empty `Host`
+// traits via `bindgen!`. Implementing them on `HostState` satisfies the
+// linker bound — there's nothing to actually implement.
+impl crate::enclavid::policy::types::Host for HostState {}
+impl crate::enclavid::shared_types::capture::Host for HostState {}
+impl crate::enclavid::shared_types::disclosure::Host for HostState {}

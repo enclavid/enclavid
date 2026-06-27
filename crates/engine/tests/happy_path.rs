@@ -1,113 +1,245 @@
 //! End-to-end: runs a test policy — composed with the `enclavid:well-known`
-//! plugin — through the engine, simulating user inputs between rounds by
-//! attaching typed response data to the Suspended request.
+//! plugin — through the PURE-REDUCER engine, threading the opaque `state`
+//! blob + building a per-round `event` and asserting the returned action.
+//!
+//! The policy is `handle(state, event) -> (state, action)`.
+//! The harness owns the mailbox: each round it inspects the previous
+//! round's `current_prompt`, fabricates the matching applicant input
+//! (a fake clip for a media prompt, an accept/reject bool for a consent
+//! prompt), and calls `run` again.
+//!
+//! Two flows are driven:
+//!   * REJECT  — passport → selfie → consent-disclosure(false) → Rejected.
+//!               Asserts the CONSENT GATE: zero disclosures sealed.
+//!   * APPROVE — passport → selfie → consent-disclosure(true)  → Approved.
+//!               Asserts the disclosure WAS sealed (exactly one, with the
+//!               six canonical fields the policy rendered).
 //!
 //! The policy and the plugin wasm are compiled on-demand (first test
-//! invocation) rather than via a build.rs — this keeps normal engine builds
-//! free of wasm tooling dependencies and nightly toolchain requirements.
-//!
-//! The test policy pulls its capture flows (`capture::passport`,
-//! `capture::selfie`) and disclosure `display-field`s from the well-known
-//! plugin, so the run links one plugin at slot 1. Flow:
-//! passport capture → selfie capture → consent → Completed.
+//! invocation) rather than via a build.rs — this keeps normal engine
+//! builds free of wasm tooling dependencies and nightly requirements.
 
 use std::collections::{HashMap, HashSet};
-use std::process::Command;
-use std::sync::OnceLock;
-
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::process::Command;
+use std::sync::{Arc, Mutex, OnceLock};
 
+use broker_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use enclavid_engine::{
-    ComponentDecls, Decision, EmbeddedRegistry, PluginInstance, RunInputs, RunStatus, Runner,
-    SessionChange, SessionListener, SessionState, Translation,
-};
-use broker_client::{
-    Clip, SessionState as SessionStateProto, call_event, suspended,
+    ComponentDecls, ConsentDisclosure, EmbeddedRegistry, PluginInstance, RunInputs, RunStatus,
+    Runner, SessionChange, SessionListener, Translation,
 };
 use wit_component::ComponentEncoder;
 
-/// WIT package id the policy imports its capture / disclosure-field helpers
-/// from; used as the plugin descriptor label at compose time.
+/// WIT package id the policy imports its capture / disclosure-field
+/// helpers from; used as the plugin descriptor label at compose time.
 const WELL_KNOWN_PACKAGE: &str = "enclavid:well-known@0.1.0";
 
-/// Test listener: drops every committed change silently. The happy-path
-/// test only inspects the final `SessionState` returned from `run`, so
-/// we don't need to assert on per-event hook calls here.
-struct NoopListener;
+/// Recording listener: captures every sealed disclosure the runtime
+/// fires, so the test can assert the consent gate (reject seals nothing,
+/// accept seals exactly what was shown).
+#[derive(Default)]
+struct RecordingListener {
+    sealed: Mutex<Vec<Vec<broker_client::DisplayField>>>,
+}
 
-impl SessionListener for NoopListener {
+impl SessionListener for RecordingListener {
     fn on_session_change<'a>(
         &'a self,
-        _change: SessionChange<'a>,
+        change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = wasmtime::Result<()>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
+        let rounds: Vec<Vec<broker_client::DisplayField>> = change
+            .disclosures
+            .iter()
+            .map(|d: &ConsentDisclosure| d.fields.clone())
+            .collect();
+        Box::pin(async move {
+            let mut sealed = self.sealed.lock().unwrap();
+            sealed.extend(rounds);
+            Ok(())
+        })
     }
 }
 
 #[tokio::test]
-async fn passport_selfie_then_consent_rejected() {
-    // Exercises the full suspend/resume loop with a linked plugin, without
-    // going through consent=true — which would require a live
-    // DisclosureStore. The rejection path validates replay of both capture
-    // cache hits + the consent → typed response transition without external
-    // side effects.
-    let runner = Runner::new().unwrap();
-    let policy = runner.compile(test_policy_component()).unwrap();
-    let plugin = PluginInstance {
-        package: WELL_KNOWN_PACKAGE.to_string(),
-        component: Arc::new(runner.compile(well_known_component()).unwrap()),
-    };
-    let plugins = vec![plugin];
+async fn passport_selfie_consent_reject_seals_nothing() {
+    let h = Harness::new();
+    let listener = Arc::new(RecordingListener::default());
 
-    // Composition-wide `EmbeddedRegistry`: slot 0 = policy, slot 1 =
-    // well-known — the SAME order as `plugins` above, which the engine
-    // relies on to align slot indices. Same construction the api crate does
-    // in `lookup_policy`. The `ref_key` is a fixed test value; production
-    // derives it per-policy from `tee_seal_key + policy_ref`.
-    let mut builder = EmbeddedRegistry::builder([7u8; 32]);
-    builder.add_component(load_test_policy_decls());
-    builder.add_component(load_well_known_decls());
-    let embedded = Arc::new(builder.build());
+    let session = h.drive_to_consent(&listener).await;
 
-    let session = SessionState::default();
-
-    // Round 1: evaluate → capture::passport() → prompt-media → Suspended.
-    let (status, mut session) = runner
-        .run(&policy, &plugins, session, vec![], test_run_inputs(&embedded))
-        .await
-        .unwrap();
-    assert_suspended(&status, 1);
-    attach_media_clip(&mut session, fake_image());
-
-    // Round 2: replays passport → capture::selfie() → prompt-media → Suspended.
-    let (status, mut session) = runner
-        .run(&policy, &plugins, session, vec![], test_run_inputs(&embedded))
-        .await
-        .unwrap();
-    assert_suspended(&status, 2);
-    attach_media_clip(&mut session, fake_image());
-
-    // Round 3: replays both captures → prompt-disclosure → Suspended (Consent).
-    let (status, mut session) = runner
-        .run(&policy, &plugins, session, vec![], test_run_inputs(&embedded))
-        .await
-        .unwrap();
-    assert_suspended(&status, 3);
-    attach_consent(&mut session, false);
-
-    // Round 4: replays everything → Completed(Rejected).
-    let (status, _) = runner
-        .run(&policy, &plugins, session, vec![], test_run_inputs(&embedded))
-        .await
-        .unwrap();
+    // Reject the consent screen → Completed(Rejected), NOTHING sealed.
+    let (status, _session) = h
+        .run(session, Event::ConsentDisclosure(false), &listener)
+        .await;
     match status {
         RunStatus::Completed(Decision::Rejected) => {}
-        _ => panic!("round 4 expected Completed(Rejected)"),
+        _ => panic!("reject round expected Completed(Rejected)"),
+    }
+
+    let sealed = listener.sealed.lock().unwrap();
+    assert!(
+        sealed.is_empty(),
+        "CONSENT GATE: reject path must seal zero disclosures, got {}",
+        sealed.len(),
+    );
+}
+
+#[tokio::test]
+async fn passport_selfie_consent_accept_seals_disclosure() {
+    let h = Harness::new();
+    let listener = Arc::new(RecordingListener::default());
+
+    let session = h.drive_to_consent(&listener).await;
+
+    // Accept the consent screen → Completed(Approved), disclosure sealed.
+    let (status, _session) = h
+        .run(session, Event::ConsentDisclosure(true), &listener)
+        .await;
+    match status {
+        RunStatus::Completed(Decision::Approved) => {}
+        _ => panic!("accept round expected Completed(Approved)"),
+    }
+
+    let sealed = listener.sealed.lock().unwrap();
+    assert_eq!(
+        sealed.len(),
+        1,
+        "CONSENT GATE: accept path must seal exactly one disclosure",
+    );
+    // The six canonical KYC fields the policy rendered on the consent
+    // screen — show == seal.
+    assert_eq!(
+        sealed[0].len(),
+        6,
+        "sealed disclosure must carry all six rendered fields",
+    );
+    // Values survive verbatim (the long address triggers the runtime's
+    // sanitise path but is plain ASCII, so it round-trips unchanged).
+    assert!(
+        sealed[0].iter().any(|f| f.value == "Jane Q. Citizen"),
+        "sealed fields must include the rendered full_name value",
+    );
+}
+
+// ---------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------
+
+struct Harness {
+    runner: Runner,
+    policy: wasmtime::component::Component,
+    plugins: Vec<PluginInstance>,
+    embedded: Arc<EmbeddedRegistry>,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let runner = Runner::new().unwrap();
+        let policy = runner.compile(test_policy_component()).unwrap();
+        let plugin = PluginInstance {
+            package: WELL_KNOWN_PACKAGE.to_string(),
+            component: Arc::new(runner.compile(well_known_component()).unwrap()),
+        };
+
+        // Composition-wide `EmbeddedRegistry`: slot 0 = policy, slot 1 =
+        // well-known — the SAME order as `plugins`, which the engine relies
+        // on to align slot indices. The `ref_key` is a fixed test value;
+        // production derives it per-policy from `tee_seal_key + policy_ref`.
+        let mut builder = EmbeddedRegistry::builder([7u8; 32]);
+        builder.add_component(load_test_policy_decls());
+        builder.add_component(load_well_known_decls());
+        let embedded = Arc::new(builder.build());
+
+        Self {
+            runner,
+            policy,
+            plugins: vec![plugin],
+            embedded,
+        }
+    }
+
+    fn inputs(&self, listener: &Arc<RecordingListener>) -> RunInputs {
+        RunInputs {
+            listener: listener.clone(),
+            embedded: self.embedded.clone(),
+        }
+    }
+
+    /// One reducer round.
+    async fn run(
+        &self,
+        session: Session,
+        event: Event,
+        listener: &Arc<RecordingListener>,
+    ) -> (RunStatus, Session) {
+        self.runner
+            .run(
+                &self.policy,
+                &self.plugins,
+                session,
+                event,
+                vec![],
+                self.inputs(listener),
+            )
+            .await
+            .expect("reducer round")
+    }
+
+    /// Drive the common prefix: start → passport → selfie, leaving the
+    /// session sitting on the consent-disclosure prompt.
+    async fn drive_to_consent(&self, listener: &Arc<RecordingListener>) -> Session {
+        // Round 1: start → render media(passport).
+        let (status, session) = self.run(Session::default(), Event::Start, listener).await;
+        assert_media(&status, "round 1 (passport)");
+
+        // Round 2: media(passport) → render media(selfie).
+        let (status, session) = self
+            .run(session, Event::Media(fake_capture()), listener)
+            .await;
+        assert_media(&status, "round 2 (selfie)");
+
+        // Round 3: media(selfie) → render consent-disclosure.
+        let (status, session) = self
+            .run(session, Event::Media(fake_capture()), listener)
+            .await;
+        match &status {
+            RunStatus::AwaitingInput(Prompt::ConsentDisclosure(_)) => {}
+            _ => panic!("round 3 expected AwaitingInput(ConsentDisclosure)"),
+        }
+        // The runtime must have persisted the consent prompt as
+        // `current_prompt` — that's what gates the seal on the next round.
+        assert!(
+            matches!(session.current_prompt, Some(Prompt::ConsentDisclosure(_))),
+            "consent prompt must be persisted as current_prompt",
+        );
+        session
     }
 }
+
+fn assert_media(status: &RunStatus, ctx: &str) {
+    match status {
+        RunStatus::AwaitingInput(Prompt::Media(_)) => {}
+        _ => panic!("{ctx} expected AwaitingInput(Media)"),
+    }
+}
+
+/// A single-step fake capture result (both passport and selfie specs are
+/// single-shot, so the clip fills step index 0).
+fn fake_capture() -> MediaResult {
+    MediaResult {
+        slot: 0,
+        clip: Clip {
+            frames: vec![vec![0xFF, 0xD8, 0xFF, 0xE0]],
+        },
+    }
+}
+
+// ---------------------------------------------------------------------
+// Component build + embedded-section loading
+// ---------------------------------------------------------------------
 
 /// Build the `test-policy` fixture (cached) and componentize it.
 fn test_policy_component() -> &'static [u8] {
@@ -153,17 +285,17 @@ fn build_componentized(crate_dir: &str, module_path: &str) -> Vec<u8> {
 }
 
 /// Load the test-policy's embedded sections (slot 0) straight from the
-/// on-disk source files. We bypass `load_embedded(wasm_bytes)` here because
-/// the test fixture isn't sealed — it's a raw componentized wasm without
-/// the embedded custom sections. Production
-/// (`api::applicant::shared::lookup_policy`) reads them via `load_embedded`.
+/// on-disk source files. We bypass `load_embedded(wasm_bytes)` here
+/// because the test fixture isn't sealed — it's a raw componentized wasm
+/// without the embedded custom sections.
 fn load_test_policy_decls() -> ComponentDecls {
     use enclavid_embedded::read_disclosure_fields;
     let dir = format!("{}/tests/fixtures/test-policy", env!("CARGO_MANIFEST_DIR"));
-    let disclosure_fields = read_disclosure_fields(Path::new(&format!("{dir}/disclosure-fields.json")))
-        .expect("read disclosure-fields.json")
-        .map(|s| s.fields.into_iter().collect())
-        .unwrap_or_default();
+    let disclosure_fields =
+        read_disclosure_fields(Path::new(&format!("{dir}/disclosure-fields.json")))
+            .expect("read disclosure-fields.json")
+            .map(|s| s.fields.into_iter().collect())
+            .unwrap_or_default();
     ComponentDecls {
         disclosure_fields,
         localized: read_localized(&dir),
@@ -206,53 +338,4 @@ fn read_icon_names(dir: &str) -> HashSet<String> {
         .expect("read icons.json")
         .map(|s| s.names.into_iter().collect())
         .unwrap_or_default()
-}
-
-/// Stub host resources for the engine. The listener is a no-op — the
-/// test stays on the consent=false path so the only events fired are
-/// state-only (no disclosures), and we don't assert on them. The
-/// composition-wide `EmbeddedRegistry` is shared across rounds so
-/// every issued ref keeps its slot attribution stable on replay.
-fn test_run_inputs(embedded: &Arc<EmbeddedRegistry>) -> RunInputs {
-    RunInputs {
-        listener: Arc::new(NoopListener),
-        embedded: embedded.clone(),
-    }
-}
-
-fn fake_image() -> Vec<u8> {
-    vec![0xFF, 0xD8, 0xFF, 0xE0]
-}
-
-fn assert_suspended(status: &RunStatus, round: usize) {
-    match status {
-        RunStatus::Suspended(_) => {}
-        RunStatus::Completed(_) => panic!("round {round} expected Suspended"),
-    }
-}
-
-/// Attach a captured clip to the last Suspended event's Media request.
-/// Both the passport and selfie specs from the plugin are single-shot
-/// (one capture step), so the clip lands at step index 0.
-fn attach_media_clip(session: &mut SessionStateProto, frame: Vec<u8>) {
-    let ev = session.events.last_mut().expect("session log is empty");
-    let Some(call_event::Status::Suspended(sus)) = ev.status.as_mut() else {
-        panic!("last event is not Suspended: {:?}", ev.status);
-    };
-    let Some(suspended::Request::Media(media)) = sus.request.as_mut() else {
-        panic!("expected Media request");
-    };
-    media.clips.insert(0, Clip { frames: vec![frame] });
-}
-
-/// Attach consent=accepted to the last Suspended event's Consent request.
-fn attach_consent(session: &mut SessionStateProto, accepted: bool) {
-    let ev = session.events.last_mut().expect("session log is empty");
-    let Some(call_event::Status::Suspended(sus)) = ev.status.as_mut() else {
-        panic!("last event is not Suspended: {:?}", ev.status);
-    };
-    let Some(suspended::Request::Consent(c)) = sus.request.as_mut() else {
-        panic!("expected Consent request");
-    };
-    c.accepted = Some(accepted);
 }

@@ -15,10 +15,9 @@
 //!            plugin's Linker via `register_for_slot`.
 //! ```
 //!
-//! Stays out of `runner/` (which is about execution) and `host/`
-//! (which is about suspending host fns: disclosure, media). Embedded
-//! is its own self-contained concern — section schema + scoping
-//! contract + ref resolution all sit here.
+//! Stays out of `runner/` (which is about execution). Embedded is its
+//! own self-contained concern — section schema + scoping contract + ref
+//! resolution all sit here.
 
 pub(crate) mod decls;
 pub(crate) mod host;

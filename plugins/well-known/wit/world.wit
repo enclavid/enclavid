@@ -35,7 +35,7 @@ interface icons {
 /// identifiers). Mapping: `passport-number` (WIT func) ↔
 /// `passport_number` (key).
 interface disclosure-fields {
-    use enclavid:disclosure/types@0.1.0.{display-field};
+    use enclavid:shared-types/disclosure@0.1.0.{display-field};
 
     // ─── Document identifiers ──────────────────────────────────────
 
@@ -86,8 +86,8 @@ interface disclosure-fields {
 
 /// Pre-baked MediaSpec / CaptureStep helpers for common KYC documents.
 ///
-/// `*_spec` functions return a complete `media-spec` ready for
-/// `prompt-media`. For multi-side documents (id-card, drivers-license)
+/// `*_spec` functions return a complete `media-spec` for
+/// `action::render(prompt::media)`. For multi-side documents (id-card, drivers-license)
 /// the spec includes both sides as separate steps.
 ///
 /// `*_step` functions return individual `capture-step`s for tenants
@@ -98,7 +98,7 @@ interface disclosure-fields {
 /// per-component scoping, applicant-facing only, no policy whitelist
 /// needed.
 interface capture {
-    use enclavid:form/types@0.1.0.{capture-step, media-spec};
+    use enclavid:shared-types/capture@0.1.0.{capture-step, media-spec};
 
     // Full MediaSpecs
     passport: func() -> media-spec;

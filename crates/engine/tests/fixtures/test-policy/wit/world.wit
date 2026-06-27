@@ -8,11 +8,12 @@ world policy {
     import enclavid:well-known/capture@0.1.0;
     import enclavid:well-known/disclosure-fields@0.1.0;
 
-    // Host interfaces. Field labels, capture copy and icons all come from
-    // the plugin's own embedded sections, so the policy only resolves its
-    // own consent copy via embedded/i18n.
+    // Host interfaces. The policy resolves its own consent copy via
+    // embedded/i18n; static config comes from `context.props`. Capture and
+    // consent are driven by the `action` the policy returns from `handle`
+    // (`render(prompt::media)` / `render(prompt::consent-disclosure)`), not
+    // by suspending host imports.
     import enclavid:embedded/i18n@0.1.0;
-    import enclavid:disclosure/disclosure@0.1.0;
-    import enclavid:form/media@0.1.0;
+    import enclavid:policy/context@0.1.0;
     export enclavid:policy/policy@0.1.0;
 }

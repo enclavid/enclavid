@@ -13,8 +13,7 @@
 //!
 //! Leaf crate: no enclavid dependencies. Every function takes raw key /
 //! recipient material + bytes (+ AAD); callers own key management and
-//! map [`CryptoError`] into their own error type. Future home of the
-//! COSE envelope work — see the COSE/CBOR roadmap.
+//! map [`CryptoError`] into their own error type.
 
 mod error;
 

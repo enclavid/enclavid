@@ -14,11 +14,10 @@ use secrecy::ExposeSecret;
 use tokio::sync::Mutex;
 
 use enclavid_engine::{
-    Component, EmbeddedRegistry, EvalArgs, PluginInstance, RunInputs, SessionListener,
-    SessionState,
+    Component, EmbeddedRegistry, PluginInstance, Prop, RunInputs, SessionListener, SessionState,
 };
 use broker_client::{
-    AuthN, AuthZ, Metadata, Replay, SessionMetadata, State as StateField, public_session_id,
+    AuthN, AuthZ, Event, Metadata, Replay, SessionMetadata, State as StateField, public_session_id,
     reason,
 };
 
@@ -75,18 +74,20 @@ across the session lifetime.
         })
 }
 
-pub(super) fn parse_args(
+/// Build the static `props` list the policy reads via
+/// `context.props`, from the consumer's config bytes in metadata.
+pub(super) fn parse_props(
     metadata: &SessionMetadata,
-) -> Result<Vec<(String, EvalArgs)>, StatusCode> {
+) -> Result<Vec<(String, Prop)>, StatusCode> {
     parse_input(&metadata.input).map_err(|e| {
-        eprintln!("parse_args: parse_input failed: {e}");
+        eprintln!("parse_props: parse_input failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })
 }
 
 /// Build per-run resources for the engine. Listener: side-effect
-/// channel — fires after every committed CallEvent, seals + persists
-/// state and disclosures atomically. Embedded registry: composition-
+/// channel — fires once per reducer round, seals + persists state and
+/// any consented disclosure atomically. Embedded registry: composition-
 /// wide `EmbeddedRegistry`, constructed once at policy-cache build
 /// time (see [`lookup_policy`]) and threaded into both engine (slot-
 /// bound resolve + use-site reverse-lookup) and api view-layer (ref →
@@ -103,20 +104,23 @@ pub(super) fn build_run_inputs(
 /// session state under the caller's bearer key, looks up the compiled
 /// policy, and prepares the per-run persister + engine resources.
 ///
-/// Handlers receive a fully-loaded ctx and dispatch the (possibly
-/// transformed) `SessionState` back via [`SessionRunCtx::run`]. That's
-/// where the connect / input flows diverge: connect tolerates a
-/// missing state (default-init), input requires it (404), and input
-/// also runs `apply_input` over the loaded state before submitting.
+/// Handlers receive a fully-loaded ctx, decide on the inbound
+/// [`Event`] (connect: `Event::Start` on a fresh `SessionState`;
+/// input: the event matched against the loaded state's
+/// `current_prompt`), and dispatch both back via
+/// [`SessionRunCtx::run`]. That's where the connect / input flows
+/// diverge: connect tolerates a missing state (default-init), input
+/// requires it (409) and validates the submitted input against the
+/// prompt the session is awaiting.
 pub(super) struct SessionRunCtx {
     state: Arc<AppState>,
     pub(super) session_id: String,
     /// State previously persisted under this `applicant_session_token`. `None`
     /// for a session whose `/connect` has never reached this far —
-    /// connect treats that as "fresh start", input as 404.
+    /// connect treats that as "fresh start", input as 409.
     pub(super) session_state: Option<SessionState>,
     /// Composition-wide `EmbeddedRegistry`. Handlers project slot-
-    /// tagged refs inside suspended requests / consent disclosures
+    /// tagged refs inside rendered prompts / consent disclosures
     /// through this when assembling JSON for the frontend or the
     /// consumer SDK; same `Arc` is also threaded into the engine
     /// via `RunInputs`.
@@ -126,7 +130,7 @@ pub(super) struct SessionRunCtx {
     /// a plain string per ref — frontend doesn't carry i18n logic.
     locale: Locale,
     persister: Arc<SessionPersister>,
-    args: Vec<(String, EvalArgs)>,
+    props: Vec<(String, Prop)>,
     policy: Arc<Component>,
     /// Plugin components the policy depends on, pinned at session
     /// create and compiled on first /connect (see
@@ -137,13 +141,16 @@ pub(super) struct SessionRunCtx {
 }
 
 impl SessionRunCtx {
-    /// Run the policy with the provided session state, finalize the
-    /// persister, and project the result into the JSON view returned
-    /// to the applicant. Consumes self — handlers call it once per
-    /// request.
+    /// Drive one reducer round: feed `event` against `session_state`
+    /// into the policy, persist the returned state (done by the
+    /// persister via the engine's `on_session_change` hook), finalize
+    /// the session on a terminal decision, and project the result into
+    /// the JSON view returned to the applicant. Consumes self —
+    /// handlers call it once per request.
     pub(super) async fn run(
         self,
         session_state: SessionState,
+        event: Event,
     ) -> Result<SessionProgress, ApiError> {
         let SessionRunCtx {
             state,
@@ -151,7 +158,7 @@ impl SessionRunCtx {
             embedded,
             locale,
             persister,
-            args,
+            props,
             policy,
             plugins,
             run_inputs,
@@ -159,11 +166,12 @@ impl SessionRunCtx {
         } = self;
         let (status, _session_state) = state
             .runner
-            .run(&policy, &plugins, session_state, args, run_inputs)
+            .run(&policy, &plugins, session_state, event, props, run_inputs)
             .await
             .map_err(|e| classify_run_error(&session_id, &e))?;
-        // No-op for Suspended; flips status to Completed atomically
-        // (metadata + host-plaintext Status) when the run terminated.
+        // No-op while the run is still awaiting input; flips status to
+        // Completed atomically (metadata + host-plaintext Status) when
+        // the run terminated.
         persister.finalize(&status).await?;
         Ok(progress_from(status, &embedded, &locale))
     }
@@ -250,7 +258,7 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
         let locale = Locale::from_request_parts(parts, state).await?;
 
         let metadata = fetch_metadata(state, &session_id).await?;
-        let args = parse_args(&metadata)?;
+        let props = parse_props(&metadata)?;
 
         // Existence claim is host-controlled; content of Some is
         // AEAD-integrity-verified at decode (AuthN cleared, AuthZ
@@ -309,11 +317,11 @@ persist; same containment as above.
         let embedded = policy_entry.embedded.clone();
         let plugins = policy_entry.plugins.clone();
 
-        // Per-run persister: engine fires `on_session_change` after
-        // each committed CallEvent, persister seals disclosures to
+        // Per-run persister: engine fires `on_session_change` once per
+        // reducer round, persister seals any consented disclosure to
         // the client recipient pubkey then writes (SetState +
-        // AppendDisclosures) in one atomic SessionStore.write per
-        // host call. Concurrent /input or /connect for the same
+        // AppendDisclosures) in one atomic SessionStore.write.
+        // Concurrent /input or /connect for the same
         // session bumps the version past us; our next write fails
         // with VersionMismatch and the run aborts cleanly — replay
         // from latest persisted state on retry.
@@ -349,7 +357,7 @@ persist; same containment as above.
             embedded,
             locale,
             persister,
-            args,
+            props,
             policy,
             plugins,
             run_inputs,

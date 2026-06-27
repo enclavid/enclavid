@@ -1,6 +1,17 @@
 package enclavid:policy@0.1.0;
 
-interface policy {
+/// Value shapes the policy handles: the inbound `event`, the outbound
+/// `action` batch, and the records they carry. Kept separate from the
+/// behavioural `policy` interface (WASI-style types-vs-behaviour split)
+/// so helper plugins can `use` the records without importing the `handle`
+/// export.
+interface types {
+  use enclavid:shared-types/capture@0.1.0.{media-spec, clip};
+  use enclavid:shared-types/disclosure@0.1.0.{display-field};
+  use enclavid:embedded/i18n@0.1.0.{localized-ref};
+
+  /// Terminal outcome carried by `action::finish`. The platform renders
+  /// UI from this fixed enum — policy controls no free text.
   enum decision {
     approved,
     rejected,
@@ -8,7 +19,9 @@ interface policy {
     review,
   }
 
-  variant eval-args {
+  /// One static configuration value the consumer supplies at session
+  /// creation (was `eval-args`). Read on demand via `context.props`.
+  variant prop {
     %string(string),
     int(s64),
     float(f64),
@@ -16,6 +29,81 @@ interface policy {
     null,
   }
 
-  evaluate: func(args: list<tuple<string, eval-args>>) -> decision;
+  /// One consent-and-disclosure. The `fields` are BOTH what the
+  /// applicant is shown on the consent screen AND — if they accept —
+  /// the exact set the runtime seals to the consumer. Show == seal,
+  /// structurally: the applicant audits precisely what leaves. `reason`
+  /// and `requester` are `localized-ref`s shown on the screen; `reason`
+  /// is bound to the consent record, `requester` is applicant-facing
+  /// only (never sealed to the consumer).
+  record disclosure {
+    fields: list<display-field>,
+    reason: localized-ref,
+    requester: localized-ref,
+  }
+
+  /// What the runtime renders to the applicant. Its reply comes back as
+  /// the matching `event` on a later turn.
+  variant prompt {
+    media(media-spec),
+    /// capture one artifact; reply → event::media
+    consent-disclosure(disclosure),
+  }
+
+  /// The captured frames for one `media-spec` step (carried by
+  /// `event::media`). `slot` is the capture-step index it fills.
+  record media-result {
+    slot: u32,
+    clip: clip,
+  }
+
+  /// INBOUND: the result of a prior `action`, fed by the runtime to
+  /// `handle`, one per call.
+  variant event {
+    start,
+    /// genesis: session opened (config via `context.props`)
+    consent-disclosure(bool),
+    /// ← reply to prompt::consent-disclosure: accepted? (true ⇒ disclosure already sealed)
+    media(media-result),
+  }
+
+  /// OUTBOUND: the action the policy returns from `handle`. `render` is
+  /// result-producing — its reply arrives as a future `event`; `continue`
+  /// is a durable checkpoint (persist `state`, then re-invoke `handle`);
+  /// `finish` is terminal. Disclosure to the consumer is NOT a separate
+  /// action — it IS `render(prompt::consent-disclosure(disclosure))`,
+  /// sealed by the runtime only on accept, so what the applicant audits
+  /// is exactly what leaves.
+  variant action {
+    render(prompt),
+    /// result-producing → applicant; reply is a future `event`
+    continue,
+    /// durable checkpoint: persist `state` + re-invoke `handle`
+    finish(decision),
+  }
+}
+
+/// Ambient session context the policy IMPORTS — the actor's `Props`.
+/// Tiny (one getter), so it lives here next to the exported `policy`
+/// interface instead of its own file. It stays a SEPARATE interface
+/// because it goes the opposite direction: `context` is imported
+/// (host → policy) while `policy` is exported (policy → host), and a WIT
+/// interface is imported/exported as a whole.
+interface context {
+  use types.{prop};
+
+  /// The consumer's static config (`metadata.input`). Constant for the
+  /// session, callable any turn — referentially transparent, not a
+  /// side-effect.
+  props: func() -> list<tuple<string, prop>>;
+}
+
+/// The policy's behaviour. `handle` reacts to one `event` and returns a
+/// new opaque `state` plus an `action` for the runtime to perform. A pure
+/// function: the runtime owns the mailbox, persistence, and effects.
+interface policy {
+  use types.{event, action};
+
+  handle: func(state: list<u8>, event: event) -> tuple<list<u8>, action>;
 }
 

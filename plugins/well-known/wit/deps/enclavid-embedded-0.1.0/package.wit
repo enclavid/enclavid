@@ -22,9 +22,9 @@ package enclavid:embedded@0.1.0;
 /// in the intercept log requires non-handle representation. The hash
 /// output is a deterministic string given the session TEE key.
 /// Lookup interface for the policy's `disclosure_fields` declarations
-/// — machine identifiers that surface as `DisplayField.key` in
-/// `enclavid:disclosure/disclosure.prompt-disclosure`. SDK on the
-/// applicant side dispatches the field by literal key.
+/// — machine identifiers that surface as `display-field.key` on the
+/// consent screen (`action::render(prompt::consent-disclosure)`). SDK on
+/// the applicant side dispatches the field by literal key.
 interface disclosure-fields {
   /// Refs that surface as machine identifiers
   /// (`DisplayField.key`) — consumer SDK maps by literal.
@@ -36,9 +36,9 @@ interface disclosure-fields {
 }
 
 /// Lookup interface for the policy's `i18n` translation catalog —
-/// refs that surface as UI text (e.g. `DisplayField.label`,
-/// `CaptureStep.{instructions,label,review-hint}`,
-/// `prompt-disclosure(reason, requester)`).
+/// refs that surface as UI text (e.g. `display-field.label`,
+/// `capture-step.{instructions,label,review-hint}`,
+/// `disclosure.{reason, requester}`).
 interface i18n {
   /// Refs that surface as UI text.
   type localized-ref = string;

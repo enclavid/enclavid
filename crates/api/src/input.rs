@@ -1,5 +1,6 @@
-//! Parsing of service-provided Match Mode input (JSON bytes in SessionMetadata)
-//! into the typed `list<tuple<string, eval-args>>` accepted by `policy.evaluate`.
+//! Parsing of consumer-provided static config (JSON bytes in
+//! SessionMetadata) into the typed `list<tuple<string, prop>>` the policy
+//! reads on demand via `context.props`.
 //!
 //! Runs at the API boundary before data enters the engine. Size-capped to
 //! prevent bulk-matching exfiltration attacks — a malicious service could
@@ -7,7 +8,7 @@
 
 use serde_json::Value;
 
-use enclavid_engine::EvalArgs;
+use enclavid_engine::Prop;
 
 use crate::limits::MAX_MATCH_INPUT_SIZE;
 
@@ -32,9 +33,9 @@ impl std::fmt::Display for InputError {
 
 impl std::error::Error for InputError {}
 
-/// Parse service-provided args into a flat list of typed entries.
+/// Parse service-provided config into a flat list of typed entries.
 /// Returns an empty list if `bytes` is empty.
-pub fn parse_input(bytes: &[u8]) -> Result<Vec<(String, EvalArgs)>, InputError> {
+pub fn parse_input(bytes: &[u8]) -> Result<Vec<(String, Prop)>, InputError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
@@ -48,25 +49,25 @@ pub fn parse_input(bytes: &[u8]) -> Result<Vec<(String, EvalArgs)>, InputError> 
 
     let mut out = Vec::with_capacity(map.len());
     for (k, v) in map {
-        out.push((k, to_eval_arg(v)?));
+        out.push((k, to_prop(v)?));
     }
     Ok(out)
 }
 
-fn to_eval_arg(v: Value) -> Result<EvalArgs, InputError> {
+fn to_prop(v: Value) -> Result<Prop, InputError> {
     match v {
-        Value::Null => Ok(EvalArgs::Null),
-        Value::Bool(b) => Ok(EvalArgs::Bool(b)),
+        Value::Null => Ok(Prop::Null),
+        Value::Bool(b) => Ok(Prop::Bool(b)),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(EvalArgs::Int(i))
+                Ok(Prop::Int(i))
             } else if let Some(f) = n.as_f64() {
-                Ok(EvalArgs::Float(f))
+                Ok(Prop::Float(f))
             } else {
                 Err(InputError::InvalidJson)
             }
         }
-        Value::String(s) => Ok(EvalArgs::String(s)),
+        Value::String(s) => Ok(Prop::String(s)),
         Value::Array(_) | Value::Object(_) => Err(InputError::NestedValue),
     }
 }
@@ -92,11 +93,11 @@ mod tests {
         )
         .unwrap();
         let map: std::collections::HashMap<_, _> = parsed.into_iter().collect();
-        assert!(matches!(map.get("name"), Some(EvalArgs::String(s)) if s == "Alex"));
-        assert!(matches!(map.get("age"), Some(EvalArgs::Int(30))));
-        assert!(matches!(map.get("score"), Some(EvalArgs::Float(_))));
-        assert!(matches!(map.get("active"), Some(EvalArgs::Bool(true))));
-        assert!(matches!(map.get("note"), Some(EvalArgs::Null)));
+        assert!(matches!(map.get("name"), Some(Prop::String(s)) if s == "Alex"));
+        assert!(matches!(map.get("age"), Some(Prop::Int(30))));
+        assert!(matches!(map.get("score"), Some(Prop::Float(_))));
+        assert!(matches!(map.get("active"), Some(Prop::Bool(true))));
+        assert!(matches!(map.get("note"), Some(Prop::Null)));
     }
 
     #[test]

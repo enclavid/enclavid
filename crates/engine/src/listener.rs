@@ -1,49 +1,47 @@
-//! Hook fired after each successfully-committed CallEvent in the
-//! engine's replay log.
+//! Hook fired once per `handle` round, after the policy reducer
+//! returns, carrying the new session state plus any disclosure the
+//! runtime sealed this round (non-empty only when a consent-disclosure
+//! prompt was accepted).
 //!
 //! The runtime's I/O layer (typically the api crate) implements
 //! `SessionListener` to persist the new state plus any side-effect
-//! outputs (disclosure records) emitted in this call's body. Persist
-//! is the caller's job — engine treats this as a neutral
-//! session-changed notification and stays free of `SessionStore` /
-//! AEAD-key knowledge.
+//! outputs (disclosure records). Persist is the caller's job — engine
+//! treats this as a neutral session-changed notification and stays free
+//! of `SessionStore` / AEAD-key knowledge.
 //!
-//! Atomicity: state and disclosures emitted within the same call are
-//! delivered together in one hook invocation, so a sane listener
-//! commits them in one transaction. A crash between calls leaves the
-//! replay log on the host consistent with the last hook acknowledged
-//! Ok — the next run replays from there and re-emits any work past it.
+//! Atomicity: state and disclosures for the same round are delivered
+//! together in one hook invocation, so a sane listener commits them in
+//! one transaction.
 //!
 //! Returning Err aborts the run; engine surfaces the error to its
-//! caller (api), which maps to 5xx. The next attempt replays from the
-//! last call the listener acknowledged.
+//! caller (api), which maps to 5xx.
 
 use std::future::Future;
 use std::pin::Pin;
 
 use broker_client::{DisplayField, SessionState};
 
-/// Structured disclosure record emitted by a single successful
-/// `prompt_disclosure` call. Engine emits proto-typed fields; the
-/// listener (api crate) is responsible for converting to its public
-/// JSON wire format and sealing to the consumer recipient. Keeping
-/// the engine output structured (not pre-serialized) firewalls the
-/// engine from public API shape decisions.
+/// Structured disclosure record the runtime seals when a
+/// consent-disclosure prompt is accepted. Engine emits structured
+/// fields; the listener (api crate) is responsible for converting to
+/// its public JSON wire format and sealing to the consumer recipient.
+/// Keeping the engine output structured (not pre-serialized) firewalls
+/// the engine from public API shape decisions.
 pub struct ConsentDisclosure {
     pub fields: Vec<DisplayField>,
 }
 
-/// Bundle delivered to the listener for a single committed CallEvent.
-/// `state` is the post-commit snapshot; `disclosures` are any
-/// disclosure records emitted in the body of this call (empty unless
-/// the call was a successful `prompt_disclosure`). Bundled together
-/// because a sane listener commits them in one atomic transaction.
+/// Bundle delivered to the listener once per `handle` round. `state` is
+/// the post-round snapshot; `disclosures` is non-empty only when this
+/// round accepted a consent-disclosure prompt — the consented fields
+/// the runtime is sealing to the consumer. Bundled together because a
+/// sane listener commits them in one atomic transaction.
 pub struct SessionChange<'a> {
     pub state: &'a SessionState,
     pub disclosures: &'a [ConsentDisclosure],
 }
 
-/// Trait fired after every committed CallEvent. Returns a boxed future
+/// Trait fired once per `handle` round. Returns a boxed future
 /// rather than `async fn` so the trait stays object-safe — engine holds
 /// `Arc<dyn SessionListener>` and dispatches dynamically.
 ///

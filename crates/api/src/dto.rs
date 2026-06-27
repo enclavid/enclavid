@@ -18,7 +18,7 @@
 //!   * `applicant::persister` — wraps engine's structured
 //!     `ConsentDisclosure` records into `DisclosureEnvelope`, JSON-
 //!     encodes, age-seals to the consumer recipient.
-//!   * `applicant::views` — converts proto `Suspended::Consent` into
+//!   * `applicant::views` — converts a `Prompt::ConsentDisclosure` into
 //!     `RequestView::Consent` for the applicant frontend.
 
 use serde::Serialize;

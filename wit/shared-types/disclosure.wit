@@ -1,13 +1,9 @@
-package enclavid:disclosure@0.1.0;
+package enclavid:shared-types@0.1.0;
 
-/// Data shapes for disclosure flow.
-///
-/// Split out from the `disclosure` behavioural interface (WASI-style
-/// types-vs-behaviour separation) so that helper plugins which only
-/// need to construct `display-field` records can `use` this interface
-/// without pulling the behavioural `prompt-disclosure` host import
-/// into their bindings.
-interface types {
+/// Disclosure-flow shape — `display-field`, a consented (key, label,
+/// value) triple. Used by the `enclavid:policy` contract
+/// (`action::render(prompt::consent-disclosure)` + `event::consent-disclosure`).
+interface disclosure {
     use enclavid:embedded/disclosure-fields@0.1.0.{disclosure-field-ref};
     use enclavid:embedded/i18n@0.1.0.{localized-ref};
 
@@ -53,44 +49,4 @@ interface types {
         label: localized-ref,
         value: string,
     }
-}
-
-interface disclosure {
-    use types.{display-field};
-    use enclavid:embedded/i18n@0.1.0.{localized-ref};
-
-    /// Ask the applicant to consent to disclosing the listed fields
-    /// to the platform consumer.
-    ///
-    ///   * `reason` is the purpose-of-use statement shown on the
-    ///     consent screen and persisted alongside the disclosure
-    ///     entry — bound as part of the user's consent record so
-    ///     downstream audit can answer "why was this disclosed?".
-    ///   * `requester` is the human-readable name of the party that
-    ///     requested this verification (e.g. "Acme Trading"). Shown
-    ///     prominently on the consent screen so the applicant knows
-    ///     to whom the data is being disclosed — distinguishes the
-    ///     consumer (recipient) from the Enclavid platform (which
-    ///     runs the check but never sees the data). NOT included in
-    ///     the sealed envelope: the consumer authored the policy
-    ///     and already knows their own name; including it there
-    ///     would just bloat the disclosure ciphertext.
-    ///
-    /// Both are `text-ref`s into `prepare-text-refs` (host-validates
-    /// membership; no default).
-    ///
-    /// **Field-order in the consumer-bound envelope is not part of
-    /// the contract.** The host shuffles `fields` before sealing the
-    /// disclosure envelope, so the order on the consumer side is
-    /// not policy-controlled. Authors must not encode any
-    /// information in field order; only the set of `(key, value)`
-    /// pairs reaches the consumer. The applicant's consent screen
-    /// renders fields in the order the policy passes — useful for
-    /// UX but not a leak surface (the applicant is the defender,
-    /// not the attacker).
-    prompt-disclosure: func(
-        fields: list<display-field>,
-        reason: localized-ref,
-        requester: localized-ref,
-    ) -> bool;
 }

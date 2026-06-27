@@ -23,11 +23,11 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::disclosure::types::DisplayField;
 use enclavid::embedded::disclosure_fields::disclosure_field as resolve_disclosure_field;
 use enclavid::embedded::i18n::localized as resolve_localized;
 use enclavid::embedded::icons::icon as resolve_icon;
-use enclavid::form::types::{CameraFacing, CaptureGuide, CaptureStep, MediaSpec};
+use enclavid::shared_types::capture::{CameraFacing, CaptureGuide, CaptureStep, MediaSpec};
+use enclavid::shared_types::disclosure::DisplayField;
 use exports::enclavid::well_known::capture::Guest as CaptureGuest;
 use exports::enclavid::well_known::disclosure_fields::Guest as DisclosureFieldsGuest;
 use exports::enclavid::well_known::icons::Guest as IconsGuest;

@@ -1,16 +1,14 @@
-//! Output of one [`Runner::run`](super::Runner::run) call, plus the
-//! typed payloads bindgen produces for the policy's `evaluate` export.
+//! Output of one [`Runner::run`](super::Runner::run) call.
 
-use broker_client::suspended;
+use broker_client::{Decision, Prompt};
 
-// Re-exported so the api crate can construct `EvalArgs` and read
-// `Decision` without taking a direct bindgen dependency.
-pub use crate::exports::enclavid::policy::policy::{Decision, EvalArgs};
-
-/// Status of a policy session run.
+/// Status of a policy round.
 pub enum RunStatus {
-    /// Policy completed with a decision.
+    /// The policy rendered a prompt and is awaiting the matching
+    /// applicant input. The carried [`Prompt`] is also persisted as
+    /// [`SessionState::current_prompt`](broker_client::SessionState) so the
+    /// next round can build the inbound event and gate the consent seal.
+    AwaitingInput(Prompt),
+    /// The policy finished with a terminal decision.
     Completed(Decision),
-    /// Policy suspended, awaiting user input for the carried request.
-    Suspended(suspended::Request),
 }

@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use enclavid_engine::{Decision, EmbeddedRegistry, RunStatus};
 use broker_client::{
-    CameraFacing, CaptureGuide, CaptureStep, MediaSpec, capture_guide, suspended,
+    CameraFacing, CaptureGuide, CaptureStep, MediaSpec, Prompt, PromptDisclosure, capture_guide,
 };
 
 use crate::dto;
@@ -41,17 +41,22 @@ pub enum DecisionView {
     Review,
 }
 
-/// JSON-friendly view of a pending suspension request. Mirrors the
-/// domain `suspended::Request` variants but in a shape the frontend can
+/// JSON-friendly view of the prompt the session is awaiting input for.
+/// Mirrors the domain `Prompt` variants but in a shape the frontend can
 /// consume directly.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RequestView {
     /// All capture flows (passport, ID card, driver's license,
     /// selfie / passive liveness, multi-page documents) collapse
-    /// into this one variant. UI shape is driven by `spec.captures`
-    /// and the running `filled` set; `next_slot_id` tells the
-    /// frontend where to POST the next input.
+    /// into this one variant. UI shape is driven by `captures`;
+    /// the frontend captures each step and POSTs it to
+    /// `input/media-<step-index>`.
+    ///
+    /// The prompt carries no running fill state — the policy reducer
+    /// receives one `event::media` per round and re-renders until it
+    /// advances, so `next_slot_id` is the first capture step
+    /// (`media-0`) and the frontend walks the steps in order.
     ///
     /// Per-step instructions + icon live on `CaptureStepView` — the
     /// frontend renders an intro screen before each step (gates the
@@ -61,14 +66,13 @@ pub enum RequestView {
     Media {
         label: String,
         captures: Vec<CaptureStepView>,
-        filled: Vec<u32>,
         next_slot_id: String,
     },
     Consent {
         fields: Vec<dto::ConsentFieldView>,
         reason: String,
         /// Human-readable name of the party that requested this
-        /// verification, resolved from `prompt-disclosure.requester`
+        /// verification, resolved from the disclosure's `requester`
         /// via the policy's text registry. Surfaced in the consent
         /// screen header so the applicant sees exactly to whom the
         /// disclosure is being made.
@@ -82,9 +86,6 @@ pub enum RequestView {
         /// miss). Other kinds (`localized`, `icons`) don't reach the
         /// consumer envelope so their bandwidth isn't surfaced here.
         disclosure_schema: DisclosureSchema,
-    },
-    VerificationSet {
-        alternatives: Vec<Vec<MediaSpecView>>,
     },
 }
 
@@ -109,8 +110,8 @@ pub struct DisclosureSchema {
     /// cardinality cap: [`MAX_DECLARED_DISCLOSURE_FIELDS`](
     /// enclavid_engine::limits::MAX_DECLARED_DISCLOSURE_FIELDS).
     pub total_declared: usize,
-    /// How many of those keys this particular `prompt-disclosure`
-    /// call surfaces. `used_in_call ≤ MAX_EXPOSE_FIELDS`.
+    /// How many of those keys this particular consent-disclosure
+    /// prompt surfaces. `used_in_call ≤ MAX_EXPOSE_FIELDS`.
     pub used_in_call: usize,
     /// Full deduplicated vocabulary, sorted alphabetically for
     /// stable display across rounds. Drill-down view on the consent
@@ -138,12 +139,6 @@ pub struct CaptureStepView {
     /// Post-capture preview-screen check ("Make sure the MRZ is
     /// sharp, no glare").
     pub review_hint: String,
-}
-
-#[derive(Serialize)]
-pub struct MediaSpecView {
-    pub label: String,
-    pub captures: Vec<CaptureStepView>,
 }
 
 #[derive(Serialize)]
@@ -175,8 +170,8 @@ pub(super) fn progress_from(
         RunStatus::Completed(decision) => SessionProgress::Completed {
             decision: decision_view(decision),
         },
-        RunStatus::Suspended(req) => SessionProgress::AwaitingInput {
-            request: request_view(&req, embedded, locale),
+        RunStatus::AwaitingInput(prompt) => SessionProgress::AwaitingInput {
+            request: prompt_view(&prompt, embedded, locale),
         },
     }
 }
@@ -190,109 +185,65 @@ fn decision_view(d: Decision) -> DecisionView {
     }
 }
 
-fn request_view(
-    req: &suspended::Request,
+fn prompt_view(
+    prompt: &Prompt,
     embedded: &EmbeddedRegistry,
     locale: &Locale,
 ) -> RequestView {
-    match req {
-        suspended::Request::Media(m) => media_view(m, embedded, locale),
-        suspended::Request::Consent(c) => {
-            let used_in_call = c.fields.len();
-            // Aggregate disclosure-field keys across the whole
-            // composition (policy slot 0 + every plugin slot). Same
-            // raw key declared by multiple slots resolves to the
-            // same envelope value — consumer can't tell which slot
-            // resolved it — so we dedupe by string for the audit
-            // view. `BTreeSet` gives the dedup AND the canonical
-            // alphabetical ordering for stable display.
-            let unique_keys: std::collections::BTreeSet<String> =
-                embedded.disclosure_fields.declared().cloned().collect();
-            let total_declared = unique_keys.len();
-            let all_keys: Vec<String> = unique_keys.into_iter().collect();
-            RequestView::Consent {
-                fields: c
-                    .fields
-                    .iter()
-                    .map(|f| dto::consent_field_view_from_proto(f, embedded, locale))
-                    .collect(),
-                reason: dto::resolve_localized(embedded, &c.reason_ref, locale),
-                requester: dto::resolve_localized(embedded, &c.requester_ref, locale),
-                disclosure_schema: DisclosureSchema {
-                    total_declared,
-                    used_in_call,
-                    all_keys,
-                },
-            }
-        }
-        suspended::Request::VerificationSet(vs) => RequestView::VerificationSet {
-            alternatives: vs
-                .alternatives
-                .iter()
-                .map(|g| {
-                    g.items
-                        .iter()
-                        .map(|s| media_spec_view(s, embedded, locale))
-                        .collect()
-                })
-                .collect(),
+    match prompt {
+        Prompt::Media(spec) => media_view(spec, embedded, locale),
+        Prompt::ConsentDisclosure(d) => consent_view(d, embedded, locale),
+    }
+}
+
+fn consent_view(
+    d: &PromptDisclosure,
+    embedded: &EmbeddedRegistry,
+    locale: &Locale,
+) -> RequestView {
+    let used_in_call = d.fields.len();
+    // Aggregate disclosure-field keys across the whole composition
+    // (policy slot 0 + every plugin slot). Same raw key declared by
+    // multiple slots resolves to the same envelope value — consumer
+    // can't tell which slot resolved it — so we dedupe by string for
+    // the audit view. `BTreeSet` gives the dedup AND the canonical
+    // alphabetical ordering for stable display.
+    let unique_keys: std::collections::BTreeSet<String> =
+        embedded.disclosure_fields.declared().cloned().collect();
+    let total_declared = unique_keys.len();
+    let all_keys: Vec<String> = unique_keys.into_iter().collect();
+    RequestView::Consent {
+        fields: d
+            .fields
+            .iter()
+            .map(|f| dto::consent_field_view_from_proto(f, embedded, locale))
+            .collect(),
+        reason: dto::resolve_localized(embedded, &d.reason_ref, locale),
+        requester: dto::resolve_localized(embedded, &d.requester_ref, locale),
+        disclosure_schema: DisclosureSchema {
+            total_declared,
+            used_in_call,
+            all_keys,
         },
     }
 }
 
 fn media_view(
-    m: &broker_client::MediaRequest,
+    spec: &MediaSpec,
     embedded: &EmbeddedRegistry,
     locale: &Locale,
 ) -> RequestView {
-    let spec = m.spec.as_ref();
-    let total = spec.map(|s| s.captures.len() as u32).unwrap_or(0);
     let captures: Vec<CaptureStepView> = spec
-        .map(|s| {
-            s.captures
-                .iter()
-                .map(|c| capture_step_view(c, embedded, locale))
-                .collect()
-        })
-        .unwrap_or_default();
-    let filled: Vec<u32> = {
-        let mut v: Vec<u32> = m
-            .clips
-            .iter()
-            .filter_map(|(idx, c)| (!c.frames.is_empty()).then_some(*idx))
-            .collect();
-        v.sort_unstable();
-        v
-    };
-    // First step that hasn't been filled. The whole-prompt-completed
-    // case (filled.len() == total) doesn't reach this branch — the
-    // engine returns the tuple to policy, not suspends.
-    let next_index = (0..total)
-        .find(|i| !filled.contains(i))
-        .unwrap_or(total);
-    let next_slot_id = format!("media-{next_index}");
+        .captures
+        .iter()
+        .map(|c| capture_step_view(c, embedded, locale))
+        .collect();
     RequestView::Media {
-        label: spec
-            .map(|s| dto::resolve_localized(embedded,&s.label_ref, locale))
-            .unwrap_or_default(),
+        label: dto::resolve_localized(embedded, &spec.label_ref, locale),
         captures,
-        filled,
-        next_slot_id,
-    }
-}
-
-fn media_spec_view(
-    s: &MediaSpec,
-    embedded: &EmbeddedRegistry,
-    locale: &Locale,
-) -> MediaSpecView {
-    MediaSpecView {
-        label: dto::resolve_localized(embedded,&s.label_ref, locale),
-        captures: s
-            .captures
-            .iter()
-            .map(|c| capture_step_view(c, embedded, locale))
-            .collect(),
+        // The prompt carries no fill state; the frontend walks the
+        // capture steps from the first one and POSTs each in order.
+        next_slot_id: "media-0".to_string(),
     }
 }
 

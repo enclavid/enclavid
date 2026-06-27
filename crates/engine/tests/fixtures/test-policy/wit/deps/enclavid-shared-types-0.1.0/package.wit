@@ -1,0 +1,150 @@
+package enclavid:shared-types@0.1.0;
+
+/// Capture-flow shapes — `media-spec` / `capture-step` and friends. Pure
+/// value types used by the `enclavid:policy` contract
+/// (`action::render(prompt::media)` + `event::media`) and helper plugins
+/// (e.g. `enclavid:well-known`). The host capabilities that mint the refs
+/// these records carry live in `enclavid:embedded`.
+interface capture {
+  use enclavid:embedded/i18n@0.1.0.{localized-ref};
+  use enclavid:embedded/icons@0.1.0.{icon-ref};
+
+  /// One JPEG-encoded frame, decoded independently by the enclave's
+  /// plugin layer. Bytes are pristine — no container, no inter-
+  /// frame compression that could mask forensic signals.
+  type frame = list<u8>;
+
+  /// One artifact's capture stream — typically 8–12 JPEG frames
+  /// over ~1s. Anti-replay and forensic signals (parallax, glare
+  /// drift, hand jitter) live in inter-frame differences.
+  type clip = list<frame>;
+
+  /// Which physical camera the capture step should use.
+  variant camera-facing {
+    front,
+    /// selfie
+    rear,
+    /// documents
+    any,
+  }
+
+  /// On-screen guideline shown over the camera preview. Purely UX
+  /// hint — doesn't affect the captured bytes.
+  variant capture-guide {
+    none,
+    /// no overlay
+    rect(f32),
+    /// rectangle of given width:height aspect (1.42 passport, 1.585 ID-1)
+    oval,
+  }
+
+  /// One step within a multi-step capture. For two-sided documents:
+  /// front + back. For multi-page documents: one step per page.
+  /// Single-shot captures (passport photo page, selfie) use a single step.
+  /// Multi-step captures within ONE media render belong to the
+  /// SAME artifact — plugins analyse them together.
+  ///
+  /// `icon` is an `icon-ref` resolved through `enclavid:embedded/icons.icon`
+  /// — the name has to appear in the calling component's
+  /// `enclavid:embedded.icons.v1` section, blocking the free-form
+  /// covert channel a raw `option<string>` would otherwise be. Not
+  /// a text-ref because there's nothing to localise — icon-name is
+  /// purely a frontend dispatch token, never displayed verbatim.
+  ///
+  /// The three remaining surfaces are `localized-ref`s into the
+  /// component's pre-declared `i18n` catalog:
+  ///   * `instructions` — pre-capture intro body. Paired with
+  ///     `icon` to form "what you're about to do". Shown before
+  ///     the camera turns on for THIS step — even between steps
+  ///     of a multi-step capture ("now flip to the back").
+  ///   * `label` — short on-camera overlay shown during capture
+  ///     ("Photo page", "Back side").
+  ///   * `review-hint` — post-capture check on the preview screen
+  ///     ("Make sure the MRZ is sharp and free of glare").
+  record capture-step {
+    icon: option<icon-ref>,
+    instructions: localized-ref,
+    label: localized-ref,
+    camera: camera-facing,
+    guide: capture-guide,
+    review-hint: localized-ref,
+  }
+
+  /// Spec for one media render (`prompt::media`). Use multiple steps
+  /// for multi-side / multi-page captures of the same artifact. Use
+  /// multiple media renders for independent artifacts (e.g.,
+  /// shareholder passports).
+  ///
+  /// `label` is the overall artifact title surfaced as context on
+  /// every screen of the capture flow ("Your passport"). Per-step
+  /// copy — pre-capture instructions, on-camera prompt,
+  /// post-capture review — lives on `capture-step`.
+  record media-spec {
+    label: localized-ref,
+    captures: list<capture-step>,
+  }
+
+  /// AND-group: a conjunction of `media-spec`s that must ALL be
+  /// satisfied. `media-spec` order drives the UI walk.
+  record all-of {
+    items: list<media-spec>,
+  }
+
+  /// One spec's resulting clips, in the order declared by its
+  /// `media-spec.captures` step list.
+  record group-result {
+    clips: list<clip>,
+  }
+}
+
+/// Disclosure-flow shape — `display-field`, a consented (key, label,
+/// value) triple. Used by the `enclavid:policy` contract
+/// (`action::render(prompt::consent-disclosure)` + `event::consent-disclosure`).
+interface disclosure {
+  use enclavid:embedded/disclosure-fields@0.1.0.{disclosure-field-ref};
+  use enclavid:embedded/i18n@0.1.0.{localized-ref};
+
+  /// One consented field surfaced on the applicant's consent
+  /// screen and (modulo the label) included in the sealed
+  /// disclosure envelope to the consumer.
+  ///
+  /// Both `key` and `label` are refs produced by `manifest`
+  /// host functions of the issuing component; the host validates
+  /// every call against the per-component manifest registry
+  /// (unregistered → trap, closing the runtime ref-crafting channel).
+  ///
+  ///   * `key` is a `disclosure-field-ref` — produced by
+  ///     `manifest::disclosure-field("…")` against the issuing
+  ///     component's `disclosure_fields` list. The host treats it
+  ///     as an opaque string and **always shows the resolved
+  ///     machine key raw** on the consent screen — no canonical/
+  ///     custom distinction, every (key, label, value) triple is
+  ///     rendered with nothing suppressed. The user is the sole
+  ///     auditor on this screen; whatever string leaves is
+  ///     whatever they saw next to the slide-to-disclose.
+  ///     Defence against a policy that tries to encode categorical
+  ///     data (country, gender, bucket id, ...) into key
+  ///     cardinality: pre-registration in the component's manifest
+  ///     — the set is frozen before any per-session input reaches
+  ///     the policy, so a fresh `passport-number-<user-country>`
+  ///     can't be resolved at evaluate time.
+  ///   * `label` is a `localized-ref` — produced by
+  ///     `manifest::localized("…")`. The host resolves it via the
+  ///     issuing component's text registry into the full set of
+  ///     language translations; the frontend picks the user's
+  ///     locale. Resolved label is sent to the frontend **only**
+  ///     — it never reaches the sealed envelope, closing any
+  ///     covert translation channel where non-user-locale variants
+  ///     might otherwise smuggle data to the consumer.
+  ///
+  /// `value` is the policy-supplied data. Sanitised host-side
+  /// (control chars / BIDI overrides / zero-width / Unicode-tag
+  /// chars stripped, length-bounded to 200 bytes); format is
+  /// policy's call.
+  record display-field {
+    key: disclosure-field-ref,
+    label: localized-ref,
+    value: string,
+  }
+}
+

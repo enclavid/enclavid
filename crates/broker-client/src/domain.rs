@@ -112,13 +112,27 @@ pub struct SessionMetadata {
     pub policy_key: Option<Key>,
 }
 
-/// Internal session state for policy replay (`BlobField::State`).
+/// Internal session state for the policy reducer (`BlobField::State`).
 /// Double-AEAD-sealed (applicant key inner, tee_seal_key outer).
+///
+/// Pure-reducer model. `state` is the policy's OWN opaque
+/// serialized blob (the engine never inspects it); the engine threads
+/// it verbatim through `policy.handle(state, event)`. `current_prompt` is
+/// the prompt the runtime last rendered to the applicant and is waiting
+/// on — the runtime uses it to (a) build the matching inbound `Event`
+/// from `/input`, and (b) gate the consent-disclosure seal: a disclosure
+/// only seals to the consumer when the `current_prompt` is a
+/// `Prompt::ConsentDisclosure` and it is accepted.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionState {
     pub policy_hash: Vec<u8>,
-    pub events: Vec<CallEvent>,
+    /// The policy's own opaque serialized state, threaded verbatim
+    /// through `handle`. Empty on a fresh session (genesis `start`).
+    pub state: Vec<u8>,
+    /// The prompt the runtime is currently awaiting input for, if any.
+    /// `None` before the first render and after a `finish`.
+    pub current_prompt: Option<Prompt>,
 }
 
 // ---------------------------------------------------------------------
@@ -184,51 +198,78 @@ pub struct ClientAccess {
 }
 
 // ---------------------------------------------------------------------
-// Replay log
+// Reducer I/O — Prompt / Event / Action
 // ---------------------------------------------------------------------
 
-/// One record per host call. Position in `SessionState.events` = call
-/// index. On replay, intercept verifies fn_name + args_hash and returns
-/// the cached Completed result or re-runs for Suspended/unset status.
+/// Terminal outcome carried by [`Action::Finish`] — mirror of the WIT
+/// `decision` enum. The platform renders UI from this fixed set; the
+/// policy controls no free text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Decision {
+    #[default]
+    Approved,
+    Rejected,
+    RejectedRetryable,
+    Review,
+}
+
+/// What the runtime renders to the applicant — the sealed mirror of the
+/// WIT `prompt` variant. Stored as [`SessionState::current_prompt`] so the
+/// next `/input` round can build the matching [`Event`] and so the
+/// consent gate has the disclosure to seal on accept.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Prompt {
+    /// Capture one artifact; reply arrives as [`Event::Media`].
+    Media(MediaSpec),
+    /// Consent-to-disclose screen. ON ACCEPT the runtime seals the
+    /// carried `fields` to the consumer.
+    ConsentDisclosure(Disclosure),
+}
+
+/// One consent-and-disclosure — sealed mirror of the WIT `disclosure`
+/// record. `fields` are BOTH what the applicant sees AND, on accept,
+/// the exact set sealed to the consumer. `reason` is bound to the
+/// consent record; `requester` is applicant-facing only.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct CallEvent {
-    pub fn_name: String,
-    pub args_hash: Vec<u8>,
-    pub status: Option<call_event::Status>,
+pub struct Disclosure {
+    pub fields: Vec<DisplayField>,
+    pub reason_ref: String,
+    pub requester_ref: String,
 }
 
-pub mod call_event {
-    use serde::{Deserialize, Serialize};
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    pub enum Status {
-        Completed(super::Completed),
-        Suspended(super::Suspended),
-    }
+/// INBOUND to the policy reducer — sealed mirror of the WIT `event`
+/// variant. Built by the runtime from the applicant's `/input` against
+/// the [`SessionState::current_prompt`] prompt.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Event {
+    /// Genesis: session opened.
+    Start,
+    /// Reply to [`Prompt::ConsentDisclosure`] — accepted?
+    ConsentDisclosure(bool),
+    /// Reply to [`Prompt::Media`] — one capture step completed.
+    Media(MediaResult),
 }
 
+/// OUTBOUND from the policy reducer — sealed mirror of the WIT `action`
+/// variant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Action {
+    /// Result-producing → applicant; reply is a future [`Event`].
+    Render(Prompt),
+    /// Durable checkpoint: persist `state`, then re-invoke `handle`.
+    Continue,
+    /// Terminal.
+    Finish(Decision),
+}
+
+/// The captured frames for one `media-spec` step — sealed mirror of the
+/// WIT `media-result` record. `slot` is the capture-step index it fills.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Completed {
-    pub result: Vec<u8>,
-}
-
-/// Suspension request — typed by category. UI renders based on which
-/// variant is populated.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Suspended {
-    pub request: Option<suspended::Request>,
-}
-
-pub mod suspended {
-    use serde::{Deserialize, Serialize};
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    pub enum Request {
-        Media(super::MediaRequest),
-        Consent(super::ConsentRequest),
-        VerificationSet(super::VerificationSetRequest),
-    }
+pub struct MediaResult {
+    pub slot: u32,
+    pub clip: Clip,
 }
 
 // ---------------------------------------------------------------------
@@ -240,14 +281,6 @@ pub mod suspended {
 #[serde(default)]
 pub struct Clip {
     pub frames: Vec<Vec<u8>>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MediaRequest {
-    pub spec: Option<MediaSpec>,
-    /// Per-step clips keyed by step index.
-    pub clips: std::collections::HashMap<u32, Clip>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -299,37 +332,8 @@ pub struct GuideRect {
 pub struct GuideOval {}
 
 // ---------------------------------------------------------------------
-// Consent / verification-set
+// Consent
 // ---------------------------------------------------------------------
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ConsentRequest {
-    pub fields: Vec<DisplayField>,
-    pub accepted: Option<bool>,
-    pub reason_ref: String,
-    pub requester_ref: String,
-}
-
-/// OR of alternatives (DNF). User satisfies exactly one alternative.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct VerificationSetRequest {
-    pub alternatives: Vec<CaptureGroup>,
-    pub data: Option<VerificationSetData>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct VerificationSetData {
-    pub items: Vec<MediaRequest>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CaptureGroup {
-    pub items: Vec<MediaSpec>,
-}
 
 /// Field shown to the user on the consent screen. `key` and `label` are
 /// text-refs; the host treats `key` as opaque, resolves `label` for the

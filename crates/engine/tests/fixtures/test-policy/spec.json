@@ -1,0 +1,12 @@
+{
+  "policy": "localhost:5050/enclavid/xbb1ckat7nwr/policies/test_policy@sha256:746d891ac081cb386cc4ec57e250bc7a6f097ff161e71f56878931d50c964963",
+  "plugins": [
+    {
+      "package": "enclavid:well-known@0.1.0",
+      "impl_ref": "localhost:5050/enclavid/xbb1ckat7nwr/policies/well-known@sha256:c57a34cf4dba5d89362fe24d9db25da2aeff7f0bec23a823aa297ac328627a8d"
+    }
+  ],
+  "registry_auth": {
+    "localhost:5050": "Bearer eyJhbGciOiJFUzM4NCIsInR5cCI6ImF0K2p3dCIsImtpZCI6IlFVWnlSLTgzS2hkVGpqbXdRelR1MWZBb2VVTmszSUloYWF4dDVObWZ3dGMifQ.eyJvcmdhbml6YXRpb25faWQiOiJ4YmIxY2thdDdud3IiLCJqdGkiOiJaeHpqdmJ5ZXBIWWgtbERFNlRMdUciLCJzdWIiOiJ0dmszbHdzYjJ2ZGIiLCJpYXQiOjE3ODIyODEyMjksImV4cCI6MTc4MjI4NDgyOSwic2NvcGUiOiJyZWdpc3RyeTpyZWFkIHJlZ2lzdHJ5OnB1c2giLCJjbGllbnRfaWQiOiJiMWtyYWx4YTI5eHM1OWs4aXRwbzIiLCJpc3MiOiJodHRwOi8vbG9jYWxob3N0OjMwMDEvb2lkYyIsImF1ZCI6Imh0dHA6Ly9sb2NhbGhvc3Q6NTA1MCJ9.aKyJECENYrScdzYBbU-c4uyXkStLQsjGhS7FIwqBhnNBtL80crT9OK9FjcoTsLEJA2S56P4wd7YfFlKP8THCTPyJ-crACQ8-2bXrCI2fg3hFa1M6MxCsH9Akb1m_Hsp_"
+  }
+}
