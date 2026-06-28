@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use broker_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use enclavid_engine::{
-    ComponentDecls, ConsentDisclosure, EmbeddedRegistry, PluginInstance, RunInputs, RunStatus,
+    ComponentDecls, ConsentDisclosure, EmbeddedRegistry, PluginInstance, Prop, RunInputs, RunStatus,
     Runner, SessionChange, SessionListener, Translation,
 };
 use wit_component::ComponentEncoder;
@@ -121,6 +121,76 @@ async fn passport_selfie_consent_accept_seals_disclosure() {
     assert!(
         sealed[0].iter().any(|f| f.value == "Jane Q. Citizen"),
         "sealed fields must include the rendered full_name value",
+    );
+}
+
+#[tokio::test]
+async fn media_rounds_keep_state_minimal() {
+    let h = Harness::new();
+    let listener = Arc::new(RecordingListener::default());
+
+    // genesis → render media(passport)
+    let (_s0, after_genesis) = h.run(Session::default(), Event::Start, &listener).await;
+    let baseline = after_genesis.state.len();
+
+    // passport clip → render media(selfie)
+    let (_s1, after_passport) = h
+        .run(after_genesis, Event::Media(fake_capture()), &listener)
+        .await;
+    let after_passport_len = after_passport.state.len();
+
+    // selfie clip → render consent-disclosure
+    let (_s2, after_selfie) = h
+        .run(after_passport, Event::Media(fake_capture()), &listener)
+        .await;
+    let after_selfie_len = after_selfie.state.len();
+
+    // The clips are dropped the round they arrive — the policy keeps only
+    // its step bookkeeping, so the sealed state must NOT grow as media
+    // rounds accumulate (the data-minimization invariant).
+    assert!(baseline <= 8, "policy step state should be tiny, got {baseline}");
+    assert_eq!(
+        after_passport_len, baseline,
+        "passport media round must not grow sealed state",
+    );
+    assert_eq!(
+        after_selfie_len, baseline,
+        "selfie media round must not grow sealed state",
+    );
+}
+
+#[tokio::test]
+async fn oversized_state_traps() {
+    let h = Harness::new();
+    let listener = Arc::new(RecordingListener::default());
+
+    // Drive genesis with a consumer config that makes the policy return a
+    // blob one byte over the cap — the runtime must trap the round rather
+    // than seal an over-cap (clip-smuggling) state.
+    let over = enclavid_engine::limits::POLICY_MAX_STATE_BYTES as i64 + 1;
+    let props = vec![("state_bloat".to_string(), Prop::Int(over))];
+
+    let result = h
+        .runner
+        .run(
+            &h.policy,
+            &h.plugins,
+            Session::default(),
+            Event::Start,
+            props,
+            h.inputs(&listener),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "a state blob over POLICY_MAX_STATE_BYTES must trap the round",
+    );
+
+    // Nothing sealed on a trapped round.
+    assert!(
+        listener.sealed.lock().unwrap().is_empty(),
+        "a trapped over-cap round must seal nothing",
     );
 }
 

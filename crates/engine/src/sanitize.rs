@@ -22,7 +22,7 @@
 use crate::embedded::{DisclosureFieldsStore, EmbeddedRegistry, IconStore, LocalizedStore};
 use crate::enclavid::shared_types::disclosure::DisplayField;
 use crate::limits::{
-    MAX_EXPOSE_FIELDS, MAX_KEY_LENGTH, MAX_TEXT_VALUE_SOFT_CHARS, MAX_VALUE_LENGTH,
+    MAX_CONSENT_FIELDS, MAX_KEY_LENGTH, MAX_TEXT_VALUE_SOFT_CHARS, MAX_VALUE_LENGTH,
 };
 
 /// Enforce structural limits + registration on `DisplayField`s carried
@@ -39,9 +39,9 @@ pub fn validate_fields(
     fields: &[DisplayField],
     embedded: &EmbeddedRegistry,
 ) -> wasmtime::Result<()> {
-    if fields.len() > MAX_EXPOSE_FIELDS {
+    if fields.len() > MAX_CONSENT_FIELDS {
         return Err(wasmtime::Error::msg(format!(
-            "consent-disclosure exceeds {MAX_EXPOSE_FIELDS} fields"
+            "consent-disclosure exceeds {MAX_CONSENT_FIELDS} fields"
         )));
     }
     for field in fields {

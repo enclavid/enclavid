@@ -46,13 +46,31 @@ pub const POLICY_MAX_MEMORY: usize = 128 * 1024 * 1024;
 /// plugin work inline; tighten with plugin separation.
 pub const POLICY_FUEL_BUDGET: u64 = 10_000_000_000;
 
+/// Hard cap on the policy's opaque `state` blob, enforced in
+/// [`Runner::run`](crate::Runner::run) immediately after each `handle`
+/// round — a larger blob traps the round.
+///
+/// The engine's data-minimization backstop. The reducer model already
+/// lets a well-behaved policy keep only derived results in `state` (it
+/// processes each media clip the round it arrives and returns a verdict,
+/// never the raw bytes), but nothing in the type system stops a malicious
+/// or buggy policy from stuffing a captured clip into the blob it hands
+/// back. A clip is tens of kilobytes to megabytes (JPEG frames, liveness
+/// video); legitimate accumulated state — step bookkeeping, MRZ text, a
+/// handful of face embeddings, screening verdicts — fits well inside this
+/// cap. The bound therefore makes smuggling raw media into the sealed
+/// mailbox structurally impossible while leaving real policies untouched,
+/// and narrows the host-observable ciphertext-size covert channel to at
+/// most `log2(POLICY_MAX_STATE_BYTES)` bits per round in the blob length.
+pub const POLICY_MAX_STATE_BYTES: usize = 64 * 1024;
+
 // ----- text-ref validation -----
 
 /// Per-prompt cap on consented fields. Trapping over this is
 /// pre-emptive defence against a policy that tries to make the
 /// consent screen visually overwhelming (user fatigue → reflexive
 /// Allow). 20 lines on a phone is already a lot to read.
-pub const MAX_EXPOSE_FIELDS: usize = 20;
+pub const MAX_CONSENT_FIELDS: usize = 20;
 
 /// Per-field cap on `display-field.value` byte length. Generous
 /// enough for legitimate free-form data — multi-segment international

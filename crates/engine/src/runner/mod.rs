@@ -33,7 +33,7 @@ use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store};
 
 use crate::Host_ as GeneratedHost;
-use crate::limits::POLICY_FUEL_BUDGET;
+use crate::limits::{POLICY_FUEL_BUDGET, POLICY_MAX_STATE_BYTES};
 use crate::listener::{ConsentDisclosure, SessionChange};
 use crate::state::{HostState, PluginHostState, RunInputs};
 
@@ -194,6 +194,19 @@ impl Runner {
             .enclavid_policy_policy()
             .call_handle(&mut store, &session.state, &wit_event)
             .await?;
+
+        // Data-minimization backstop: the policy's opaque blob must stay
+        // under POLICY_MAX_STATE_BYTES so raw media clips can't be
+        // smuggled into the sealed mailbox and the ciphertext-size covert
+        // channel stays narrow. A breach traps the round.
+        if new_state.len() > POLICY_MAX_STATE_BYTES {
+            drop(plugin_composition);
+            return Err(wasmtime::Error::msg(format!(
+                "policy returned a {}-byte state blob, over the \
+                 {POLICY_MAX_STATE_BYTES}-byte POLICY_MAX_STATE_BYTES cap",
+                new_state.len(),
+            )));
+        }
 
         // Perform the action and assemble the next session record.
         let embedded_for_convert = store.data().embedded.clone();

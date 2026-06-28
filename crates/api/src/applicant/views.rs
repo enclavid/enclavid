@@ -111,7 +111,7 @@ pub struct DisclosureSchema {
     /// enclavid_engine::limits::MAX_DECLARED_DISCLOSURE_FIELDS).
     pub total_declared: usize,
     /// How many of those keys this particular consent-disclosure
-    /// prompt surfaces. `used_in_call ≤ MAX_EXPOSE_FIELDS`.
+    /// prompt surfaces. `used_in_call ≤ MAX_CONSENT_FIELDS`.
     pub used_in_call: usize,
     /// Full deduplicated vocabulary, sorted alphabetically for
     /// stable display across rounds. Drill-down view on the consent

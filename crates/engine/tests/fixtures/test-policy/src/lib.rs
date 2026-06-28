@@ -70,6 +70,20 @@ fn state_at(step: u8) -> Vec<u8> {
     vec![step]
 }
 
+/// Read the optional `state_bloat = N` value from the consumer config
+/// (`context.props`). Present only when the harness drives the engine's
+/// `POLICY_MAX_STATE_BYTES` cap; absent on every real flow.
+fn bloat_bytes() -> Option<usize> {
+    use enclavid::policy::types::Prop;
+    enclavid::policy::context::props()
+        .into_iter()
+        .find(|(k, _)| k == "state_bloat")
+        .and_then(|(_, v)| match v {
+            Prop::Int(n) if n >= 0 => Some(n as usize),
+            _ => None,
+        })
+}
+
 fn build_consent() -> Disclosure {
     Disclosure {
         // Canonical KYC fields built by the plugin: labels resolve from
@@ -93,11 +107,18 @@ fn build_consent() -> Disclosure {
 impl Guest for TestPolicy {
     fn handle(state: Vec<u8>, event: Event) -> (Vec<u8>, Action) {
         match (step_of(&state), event) {
-            // Genesis → ask for the passport photo page.
-            (STEP_START, Event::Start) => (
-                state_at(STEP_AWAIT_PASSPORT),
-                Action::Render(Prompt::Media(capture::passport())),
-            ),
+            // Genesis → ask for the passport photo page. When the consumer
+            // config carries `state_bloat = N` the policy returns an N-byte
+            // blob instead of the 1-byte step, so the harness can exercise
+            // the engine's POLICY_MAX_STATE_BYTES cap; absent the flag this
+            // is the normal 1-byte step.
+            (STEP_START, Event::Start) => {
+                let state = match bloat_bytes() {
+                    Some(n) => vec![0u8; n],
+                    None => state_at(STEP_AWAIT_PASSPORT),
+                };
+                (state, Action::Render(Prompt::Media(capture::passport())))
+            }
 
             // Passport captured → ask for the selfie.
             (STEP_AWAIT_PASSPORT, Event::Media(_)) => (
