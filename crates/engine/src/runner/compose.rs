@@ -73,8 +73,13 @@ pub(crate) fn fuse(
     // `reconstruct_strict_manifest`), and its remaining canonical
     // `enclavid:host/embedded-*` import is just the `localized-ref` type
     // dependency, which must NOT be re-routed.
-    let policy_prefused = top_level_imports(policy_wasm)?
-        .iter()
+    // Read prefused-ness off the imports wac already parsed when it
+    // registered the package — no need to walk the component again just
+    // for the top-level import names (`policy_fn_imports` below reads the
+    // same map).
+    let policy_prefused = graph.types()[graph[policy_id].ty()]
+        .imports
+        .keys()
         .any(|n| n.starts_with(EMBEDDED_SLOT_PREFIX));
     let mut manifest: Vec<EmbeddedImport> = Vec::new();
     let mut import_nodes: HashMap<String, NodeId> = HashMap::new();
