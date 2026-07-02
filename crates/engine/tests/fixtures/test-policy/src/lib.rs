@@ -29,7 +29,7 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::embedded::i18n::localized as l10n;
+use enclavid::host::embedded_i18n::localized as l10n;
 use enclavid::policy::types::{Action, Decision, Disclosure, Event, Prompt};
 // The well-known plugin (linked at /connect) supplies the capture specs
 // and the canonical KYC `display-field` helpers.

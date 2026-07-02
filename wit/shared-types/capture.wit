@@ -4,10 +4,10 @@ package enclavid:shared-types@0.1.0;
 /// value types used by the `enclavid:policy` contract
 /// (`action::render(prompt::media)` + `event::media`) and helper plugins
 /// (e.g. `enclavid:well-known`). The host capabilities that mint the refs
-/// these records carry live in `enclavid:embedded`.
+/// these records carry live in `enclavid:host`.
 interface capture {
-    use enclavid:embedded/i18n@0.1.0.{localized-ref};
-    use enclavid:embedded/icons@0.1.0.{icon-ref};
+    use enclavid:host/embedded-i18n@0.1.0.{localized-ref};
+    use enclavid:host/embedded-icons@0.1.0.{icon-ref};
 
     /// One JPEG-encoded frame, decoded independently by the enclave's
     /// plugin layer. Bytes are pristine — no container, no inter-
@@ -40,7 +40,7 @@ interface capture {
     /// Multi-step captures within ONE media render belong to the
     /// SAME artifact — plugins analyse them together.
     ///
-    /// `icon` is an `icon-ref` resolved through `enclavid:embedded/icons.icon`
+    /// `icon` is an `icon-ref` resolved through `enclavid:host/embedded-icons.icon`
     /// — the name has to appear in the calling component's
     /// `enclavid:embedded.icons.v1` section, blocking the free-form
     /// covert channel a raw `option<string>` would otherwise be. Not

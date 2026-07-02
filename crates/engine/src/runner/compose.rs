@@ -8,8 +8,8 @@
 //! `disclosure-fields` (option B: DF is merged, first-match, bounded by
 //! the visible static-set size) and `enclavid:host/session-context`, but NOT
 //! for i18n / icons, whose stored value differs per component. For those
-//! two, each component's `enclavid:embedded/<iface>` import is routed to
-//! a DISTINCT composite import named by that component's catalog
+//! two, each component's `enclavid:host/embedded-<iface>` import is routed
+//! to a DISTINCT composite import named by that component's catalog
 //! content-hash (`embedded-slot:<slug>/<iface>`), so the host can serve
 //! each from its own catalog. Byte-identical catalogs share a slug (and
 //! thus one import node) — correct, since identical content resolves the
@@ -71,7 +71,7 @@ pub(crate) fn fuse(
     // a fused core — a pre-fused core's per-component embedded imports
     // are already `embedded-slot:*` (passed through + re-emitted via
     // `reconstruct_strict_manifest`), and its remaining canonical
-    // `enclavid:embedded/*` import is just the `localized-ref` type
+    // `enclavid:host/embedded-*` import is just the `localized-ref` type
     // dependency, which must NOT be re-routed.
     let policy_prefused = top_level_imports(policy_wasm)?
         .iter()
@@ -89,11 +89,11 @@ pub(crate) fn fuse(
     // interface with the plugin that exports it. Host-reserved imports
     // (`is_host_reserved`) are deliberately excluded — they are served by
     // the host `Linker`, never by a plugin, so they bubble up as
-    // composite imports. That set covers `enclavid:host/*`,
-    // `enclavid:embedded/*`, and a pre-fused (hybrid) core's already
-    // routed `embedded-slot:*` imports (reconstructed into the manifest,
-    // not plugin-satisfied). Any other unmatched import also bubbles up
-    // (host-served, or an encode-time error if nothing satisfies it).
+    // composite imports. That set covers `enclavid:host/*` and a
+    // pre-fused (hybrid) core's already routed `embedded-slot:*` imports
+    // (reconstructed into the manifest, not plugin-satisfied). Any other
+    // unmatched import also bubbles up (host-served, or an encode-time
+    // error if nothing satisfies it).
     let policy_fn_imports: Vec<String> = graph.types()[graph[policy_id].ty()]
         .imports
         .iter()
@@ -144,8 +144,8 @@ pub(crate) fn fuse(
 /// wac merges every instance import of the SAME interface into one (it
 /// dedups by interface id), so simply renaming the import doesn't split
 /// them. To keep per-component imports distinct we give each a **twin
-/// interface**: a structural clone of `enclavid:embedded/<iface>` with a
-/// distinct id (`embedded-slot:<hash>/<iface>`). The component's
+/// interface**: a structural clone of `enclavid:host/embedded-<iface>`
+/// with a distinct id (`embedded-slot:<hash>/<iface>`). The component's
 /// canonical import subtype-checks against the twin (func-only, no
 /// resources → purely structural), and because the twin's id differs,
 /// wac keeps it as its own import. The host `Linker` then serves each
@@ -267,11 +267,13 @@ fn catalog_hash_of(wasm: &[u8]) -> wasmtime::Result<[u8; 32]> {
 }
 
 /// The strict-routed kind of an embedded import name, or `None` for DF
-/// / non-embedded imports (which stay merged).
+/// / non-embedded imports (which stay merged). Only `embedded-i18n` and
+/// `embedded-icons` are per-component routed; `disclosure-fields` and
+/// `session-context` stay merged / host-served as-is.
 fn strict_iface(name: &str) -> Option<EmbeddedIface> {
-    if name.starts_with("enclavid:embedded/i18n") {
+    if name.starts_with("enclavid:host/embedded-i18n") {
         Some(EmbeddedIface::I18n)
-    } else if name.starts_with("enclavid:embedded/icons") {
+    } else if name.starts_with("enclavid:host/embedded-icons") {
         Some(EmbeddedIface::Icons)
     } else {
         None
@@ -282,17 +284,17 @@ fn strict_iface(name: &str) -> Option<EmbeddedIface> {
 /// plugin may IMPORT one (reading the same host surface the policy does)
 /// but must never SATISFY one: wiring a plugin export into a
 /// host-reserved import would let the plugin interpose on the session
-/// config the policy reads (`enclavid:host/*`), or the applicant-facing
-/// text / icons and the consumer disclosure vocabulary
-/// (`enclavid:embedded/*`). Kept as ONE predicate so a new host
+/// config the policy reads (`session-context`), the applicant-facing
+/// text / icons (`embedded-i18n` / `embedded-icons`), or the consumer
+/// disclosure vocabulary (`disclosure-fields`) — all under the reserved
+/// `enclavid:host/` package. Kept as ONE prefix check so a new host
 /// capability under `enclavid:host/` is protected the moment it exists —
-/// no second filter to remember, no denylist to drift. `embedded-slot:*`
-/// are the synthetic per-catalog twins fusion itself derives from the
-/// embedded imports, host-owned by construction.
+/// no per-interface filter to remember, no denylist to drift.
+/// `embedded-slot:*` are the synthetic per-catalog twins fusion itself
+/// derives from the `embedded-i18n` / `embedded-icons` imports,
+/// host-owned by construction.
 fn is_host_reserved(name: &str) -> bool {
-    name.starts_with("enclavid:host/")
-        || name.starts_with("enclavid:embedded/")
-        || name.starts_with(EMBEDDED_SLOT_PREFIX)
+    name.starts_with("enclavid:host/") || name.starts_with(EMBEDDED_SLOT_PREFIX)
 }
 
 /// Reject a plugin that EXPORTS a host-reserved interface. A plugin may
@@ -331,9 +333,9 @@ mod tests {
         // A future host capability under `enclavid:host/` is protected the
         // moment it exists — no edit to this predicate needed.
         assert!(is_host_reserved("enclavid:host/timer@0.1.0"));
-        assert!(is_host_reserved("enclavid:embedded/i18n@0.1.0"));
-        assert!(is_host_reserved("enclavid:embedded/icons@0.1.0"));
-        assert!(is_host_reserved("enclavid:embedded/disclosure-fields@0.1.0"));
+        assert!(is_host_reserved("enclavid:host/embedded-i18n@0.1.0"));
+        assert!(is_host_reserved("enclavid:host/embedded-icons@0.1.0"));
+        assert!(is_host_reserved("enclavid:host/embedded-disclosure-fields@0.1.0"));
         // Synthetic per-catalog twins fusion derives from the embedded
         // imports (`embedded_import_name`): host-owned by construction.
         assert!(is_host_reserved("embedded-slot:h0123456789abcdef/i18n"));
@@ -348,7 +350,7 @@ mod tests {
         assert!(!is_host_reserved("enclavid:policy/policy@0.1.0"));
         // Load-bearing distinction: the well-known plugin's `disclosure-fields`
         // (helper constructors it EXPORTS) is NOT the host's
-        // `enclavid:embedded/disclosure-fields` (the reserved resolver). The
+        // `enclavid:host/embedded-disclosure-fields` (the reserved resolver). The
         // package segment is what separates them.
         assert!(!is_host_reserved(
             "enclavid:well-known/disclosure-fields@0.1.0"

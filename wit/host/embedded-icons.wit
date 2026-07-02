@@ -1,0 +1,20 @@
+package enclavid:host@0.1.0;
+
+/// Lookup interface for a component's `icons` declarations — machine
+/// identifiers the applicant frontend dispatches against its bundled SVG
+/// library. Declaring an icon authorises the component to pass the name
+/// through `capture-step.icon`; it doesn't ship an SVG. Unknown names
+/// render with no icon (graceful frontend fallback). Going through a ref
+/// (not a free-form string on `capture-step.icon`) forces every
+/// shippable name to appear in the audited `enclavid:embedded.icons.v1`
+/// section, closing a small covert channel. A reserved host capability,
+/// resolved per-component like `embedded-i18n`.
+interface embedded-icons {
+    /// Refs that surface as machine identifiers the frontend dispatches
+    /// by literal.
+    type icon-ref = string;
+
+    /// Resolve a name from the component's `icons` declarations. Traps if
+    /// the name isn't declared.
+    icon: func(name: string) -> icon-ref;
+}

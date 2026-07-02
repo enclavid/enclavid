@@ -1,0 +1,19 @@
+package enclavid:host@0.1.0;
+
+/// Lookup interface for a component's `i18n` translation catalog — refs
+/// that surface as UI text (`display-field.label`,
+/// `capture-step.{instructions,label,review-hint}`,
+/// `disclosure.{reason,requester}`). A reserved host capability: the TEE
+/// resolves each ref against the CALLING component's own
+/// `enclavid:embedded.i18n.v1` section (per-component content-hash
+/// routing under fusion, so a plugin's key never resolves to the
+/// policy's translation). A plugin imports this to mint text refs but
+/// never satisfies it.
+interface embedded-i18n {
+    /// Refs that surface as UI text.
+    type localized-ref = string;
+
+    /// Resolve a key from the component's `i18n` declarations. Traps if
+    /// the key isn't declared.
+    localized: func(key: string) -> localized-ref;
+}

@@ -137,7 +137,7 @@ world well-known {
     // With Phase B BLAKE3-keyed tokens, going through the host is
     // the only viable construction path either way — raw strings
     // would never round-trip through the engine's reverse index.
-    import enclavid:embedded/disclosure-fields@0.1.0;
-    import enclavid:embedded/i18n@0.1.0;
-    import enclavid:embedded/icons@0.1.0;
+    import enclavid:host/embedded-disclosure-fields@0.1.0;
+    import enclavid:host/embedded-i18n@0.1.0;
+    import enclavid:host/embedded-icons@0.1.0;
 }

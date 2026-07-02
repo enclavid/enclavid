@@ -219,9 +219,9 @@ impl Runner {
         // `component` is the already-fused policy (+plugins) from
         // `Runner::compose`. Build the host `Linker` for the imports that
         // bubbled up out of fusion. bindgen wires the CANONICAL-named
-        // imports on `HostState`: `context.props`, the merged
-        // `enclavid:embedded/disclosure-fields` (first-match, option B),
-        // and the canonical `enclavid:embedded/{i18n,icons}` (used only
+        // imports on `HostState`: `session-context.props`, the merged
+        // `enclavid:host/embedded-disclosure-fields` (first-match, option B),
+        // and the canonical `enclavid:host/embedded-{i18n,icons}` (used only
         // by a lone unfused policy — a fused component routes those
         // away, so the canonical registrations sit unused, which is
         // harmless). Plugin↔policy interfaces are internal to the fused
@@ -307,7 +307,7 @@ impl Runner {
 /// STRICTLY against the one catalog identified by `catalog_hash` — a
 /// plugin's i18n key can never resolve to the policy's translation.
 /// Instance names are unique per `(hash, iface)` (fusion dedups), so
-/// no double-registration; the canonical `enclavid:embedded/*` names
+/// no double-registration; the canonical `enclavid:host/*` names
 /// bindgen registered are disjoint from these.
 fn register_strict_embedded(
     linker: &mut Linker<HostState>,

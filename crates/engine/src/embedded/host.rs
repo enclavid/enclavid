@@ -1,9 +1,9 @@
-//! Host implementations of `enclavid:embedded/disclosure-fields`,
-//! `enclavid:embedded/i18n`, and `enclavid:embedded/icons`.
+//! Host implementations of `enclavid:host/embedded-disclosure-fields`,
+//! `enclavid:host/embedded-i18n`, and `enclavid:host/embedded-icons`.
 //!
 //! bindgen wires each interface's `Host` trait onto [`HostState`] via
 //! `add_to_linker`. Under wac single-store fusion the per-component
-//! `enclavid:embedded/*` imports unify into one host impl each, so a
+//! embedded imports unify into one host impl each, so a
 //! single call site serves the policy AND every fused plugin — the
 //! host can't attribute a call to a specific component. All three
 //! kinds therefore resolve the bare key by **first match across every
@@ -61,19 +61,19 @@ macro_rules! embedded_kind {
 }
 
 embedded_kind! {
-    host_trait = crate::enclavid::embedded::disclosure_fields::Host,
+    host_trait = crate::enclavid::host::embedded_disclosure_fields::Host,
     host_method = disclosure_field,
     store = disclosure_fields,
 }
 
 embedded_kind! {
-    host_trait = crate::enclavid::embedded::i18n::Host,
+    host_trait = crate::enclavid::host::embedded_i18n::Host,
     host_method = localized,
     store = localized,
 }
 
 embedded_kind! {
-    host_trait = crate::enclavid::embedded::icons::Host,
+    host_trait = crate::enclavid::host::embedded_icons::Host,
     host_method = icon,
     store = icons,
 }

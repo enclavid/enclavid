@@ -63,18 +63,17 @@ wasmtime::component::bindgen!({
         package enclavid:engine@0.1.0;
 
         world host {
-            import enclavid:embedded/disclosure-fields@0.1.0;
-            import enclavid:embedded/i18n@0.1.0;
-            import enclavid:embedded/icons@0.1.0;
+            import enclavid:host/embedded-disclosure-fields@0.1.0;
+            import enclavid:host/embedded-i18n@0.1.0;
+            import enclavid:host/embedded-icons@0.1.0;
             import enclavid:host/session-context@0.1.0;
             export enclavid:policy/policy@0.1.0;
         }
     "#,
     path: [
-        "../../wit/embedded",
+        "../../wit/host",
         "../../wit/shared-types",
         "../../wit/policy",
-        "../../wit/host",
     ],
     imports: { default: async | trappable },
     exports: { default: async },

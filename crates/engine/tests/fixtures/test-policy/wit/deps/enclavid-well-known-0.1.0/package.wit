@@ -132,9 +132,9 @@ interface capture {
 }
 
 world well-known {
-  import enclavid:embedded/disclosure-fields@0.1.0;
-  import enclavid:embedded/i18n@0.1.0;
-  import enclavid:embedded/icons@0.1.0;
+  import enclavid:host/embedded-disclosure-fields@0.1.0;
+  import enclavid:host/embedded-i18n@0.1.0;
+  import enclavid:host/embedded-icons@0.1.0;
   import enclavid:shared-types/disclosure@0.1.0;
   import enclavid:shared-types/capture@0.1.0;
 

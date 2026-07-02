@@ -4,8 +4,8 @@ package enclavid:shared-types@0.1.0;
 /// value) triple. Used by the `enclavid:policy` contract
 /// (`action::render(prompt::consent-disclosure)` + `event::consent-disclosure`).
 interface disclosure {
-    use enclavid:embedded/disclosure-fields@0.1.0.{disclosure-field-ref};
-    use enclavid:embedded/i18n@0.1.0.{localized-ref};
+    use enclavid:host/embedded-disclosure-fields@0.1.0.{disclosure-field-ref};
+    use enclavid:host/embedded-i18n@0.1.0.{localized-ref};
 
     /// One consented field surfaced on the applicant's consent
     /// screen and (modulo the label) included in the sealed

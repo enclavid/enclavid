@@ -1,0 +1,20 @@
+package enclavid:host@0.1.0;
+
+/// Lookup interface for a component's `disclosure_fields` declarations —
+/// machine identifiers that surface as `display-field.key` on the consent
+/// screen (`action::render(prompt::consent-disclosure)`); the consumer
+/// SDK dispatches the field by literal key. Unlike i18n/icons this
+/// resolves MERGED first-match across the whole composition (option B):
+/// plugins may own DF keys, and the covert-channel bound is the static
+/// disclosure-field-set size the applicant sees on the consent screen. A
+/// reserved host capability, resolved against the calling composition's
+/// `enclavid:embedded.disclosure-fields.v1` sections.
+interface embedded-disclosure-fields {
+    /// Refs that surface as machine identifiers (`display-field.key`) —
+    /// consumer SDK maps by literal.
+    type disclosure-field-ref = string;
+
+    /// Resolve a key from a component's `disclosure_fields` declarations.
+    /// Traps if the key isn't declared in any catalog.
+    disclosure-field: func(key: string) -> disclosure-field-ref;
+}

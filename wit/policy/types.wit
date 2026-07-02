@@ -8,7 +8,7 @@ package enclavid:policy@0.1.0;
 interface types {
     use enclavid:shared-types/capture@0.1.0.{media-spec, clip};
     use enclavid:shared-types/disclosure@0.1.0.{display-field};
-    use enclavid:embedded/i18n@0.1.0.{localized-ref};
+    use enclavid:host/embedded-i18n@0.1.0.{localized-ref};
 
     /// Terminal outcome carried by `action::finish`. The platform renders
     /// UI from this fixed enum — policy controls no free text.

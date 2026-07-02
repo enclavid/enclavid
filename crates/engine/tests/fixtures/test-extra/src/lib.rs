@@ -10,7 +10,7 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::embedded::i18n::localized;
+use enclavid::host::embedded_i18n::localized;
 use exports::enclavid::extra::tag::Guest;
 
 struct Extra;

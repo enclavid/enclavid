@@ -1,3 +1,3 @@
 [overrides]
 "enclavid:shared-types" = { path = "../../wit/shared-types" }
-"enclavid:embedded" = { path = "../../wit/embedded" }
+"enclavid:host" = { path = "../../wit/host" }

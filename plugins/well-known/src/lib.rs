@@ -4,7 +4,7 @@
 //!
 //! Every ref this plugin hands back (disclosure-field key, localized
 //! label, icon name) is resolved through the corresponding
-//! `enclavid:embedded/*` host import — the host hashes
+//! `enclavid:host/*` embedded host import — the host hashes
 //! `(slot, kind, key)` under a TEE-only key and returns the opaque
 //! token. The plugin's own `enclavid:embedded.*.v1` custom sections
 //! (`disclosure-fields.json`, `i18n.json`, `icons.json`) declare the
@@ -23,9 +23,9 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::embedded::disclosure_fields::disclosure_field as resolve_disclosure_field;
-use enclavid::embedded::i18n::localized as resolve_localized;
-use enclavid::embedded::icons::icon as resolve_icon;
+use enclavid::host::embedded_disclosure_fields::disclosure_field as resolve_disclosure_field;
+use enclavid::host::embedded_i18n::localized as resolve_localized;
+use enclavid::host::embedded_icons::icon as resolve_icon;
 use enclavid::shared_types::capture::{CameraFacing, CaptureGuide, CaptureStep, MediaSpec};
 use enclavid::shared_types::disclosure::DisplayField;
 use exports::enclavid::well_known::capture::Guest as CaptureGuest;
