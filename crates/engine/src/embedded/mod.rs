@@ -24,7 +24,7 @@ pub(crate) mod host;
 pub(crate) mod registry;
 pub(crate) mod store;
 
-pub use decls::{EmbeddedCatalog, load_embedded, load_embedded_nested};
+pub use decls::{EmbeddedCatalog, load_embedded, load_embedded_nested, top_level_imports};
 pub use hash::{catalog_hash, embedded_import_name, slug};
 pub use host::strict_token;
 pub use registry::{

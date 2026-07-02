@@ -1,20 +1,5 @@
 package enclavid:policy@0.1.0;
 
-/// Ambient session context the policy IMPORTS — the actor's `Props`.
-/// Tiny (one getter), so it lives here next to the exported `policy`
-/// interface instead of its own file. It stays a SEPARATE interface
-/// because it goes the opposite direction: `context` is imported
-/// (host → policy) while `policy` is exported (policy → host), and a WIT
-/// interface is imported/exported as a whole.
-interface context {
-    use types.{prop};
-
-    /// The consumer's static config (`metadata.input`). Constant for the
-    /// session, callable any turn — referentially transparent, not a
-    /// side-effect.
-    props: func() -> list<tuple<string, prop>>;
-}
-
 /// The policy's behaviour. `handle` reacts to one `event` and returns a
 /// new opaque `state` plus an `action` for the runtime to perform. A pure
 /// function: the runtime owns the mailbox, persistence, and effects.

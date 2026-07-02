@@ -114,6 +114,16 @@ impl Runner {
         Component::new(&self.engine, bytes)
     }
 
+    /// Fuse a policy with plugins into a self-contained component's
+    /// BYTES — the strict-routed static artifact `enclavid link` would
+    /// publish. The embedded manifest is reconstructed from these bytes
+    /// at load time (see [`compose::reconstruct_strict_manifest`]), so
+    /// it isn't returned here.
+    pub fn fuse(&self, policy_wasm: &[u8], plugins: &[PluginInstance]) -> wasmtime::Result<Vec<u8>> {
+        let (bytes, _manifest) = compose::fuse(policy_wasm, plugins)?;
+        Ok(bytes)
+    }
+
     /// Fuse a policy with its pinned plugins into ONE component and
     /// compile it. `wac-graph` single-store fusion (see
     /// [`compose::fuse`]) wires every plugin export into the policy's
@@ -126,26 +136,43 @@ impl Runner {
     /// `(policy, plugin-set)` and reuses the returned [`Composition`]
     /// across every reducer round.
     ///
-    /// With no plugins the policy is compiled as-is; its own
-    /// `enclavid:embedded/*` imports stay canonical (merged) and the
-    /// host serves them first-match — the manifest is empty. With
-    /// plugins, [`compose::fuse`] routes each component's i18n / icons
-    /// import to a distinct per-catalog import and returns them in the
-    /// manifest for the host `Linker`.
+    /// Three shapes are handled:
+    ///
+    ///   * **Dynamic** — a non-fused policy plus runtime `plugins`:
+    ///     [`compose::fuse`] routes each component's i18n / icons import
+    ///     to a distinct per-catalog import (the manifest).
+    ///   * **Static** — a pre-fused policy artifact with no runtime
+    ///     plugins: compiled as-is; the manifest is reconstructed from
+    ///     the `embedded-slot:*` imports the artifact already carries
+    ///     (empty for a lone unfused policy, whose canonical embedded
+    ///     imports the host serves first-match).
+    ///   * **Hybrid** — a pre-fused core plus runtime `plugins`: fused
+    ///     again; the core's own routed imports bubble through and are
+    ///     re-emitted alongside the freshly routed runtime ones.
     pub fn compose(
         &self,
         policy_wasm: &[u8],
         plugins: &[PluginInstance],
     ) -> wasmtime::Result<Composition> {
-        if plugins.is_empty() {
-            return Ok(Composition {
-                component: self.compile(policy_wasm)?,
-                embedded_imports: Vec::new(),
-            });
-        }
-        let (fused, embedded_imports) = compose::fuse(policy_wasm, plugins)?;
+        let (component, mut embedded_imports) = if plugins.is_empty() {
+            (
+                self.compile(policy_wasm)?,
+                compose::reconstruct_strict_manifest(policy_wasm)?,
+            )
+        } else {
+            let (fused, mut manifest) = compose::fuse(policy_wasm, plugins)?;
+            // Hybrid pass-through: the core's own `embedded-slot:*`
+            // imports came through fusion untouched — add their manifest
+            // entries. Empty for a non-fused dynamic policy.
+            manifest.extend(compose::reconstruct_strict_manifest(policy_wasm)?);
+            (Component::new(&self.engine, &fused)?, manifest)
+        };
+        // Dedup by instance name: a runtime plugin and a baked one can
+        // share a catalog (same slug) — register the host instance once.
+        let mut seen = std::collections::HashSet::new();
+        embedded_imports.retain(|e| seen.insert(e.instance_name.clone()));
         Ok(Composition {
-            component: Component::new(&self.engine, &fused)?,
+            component,
             embedded_imports,
         })
     }
@@ -154,7 +181,7 @@ impl Runner {
     /// `state` blob and the `current_prompt` prompt from the previous
     /// round; `event` is the inbound mailbox message the runtime built
     /// from the applicant's `/input`. `props` is the static consumer
-    /// config the policy reads via `enclavid:policy/context.props`.
+    /// config the policy reads via `enclavid:host/session-context.props`.
     ///
     /// Returns the next [`RunStatus`] and the updated [`SessionState`]
     /// (new opaque `state` + new `current_prompt`). The

@@ -1,0 +1,18 @@
+package enclavid:host@0.1.0;
+
+/// Value shapes carried by the host capabilities in this package. Kept
+/// in a SEPARATE types interface (WASI-style types-vs-behaviour split)
+/// so the value type can be `use`d without importing the capability
+/// getter, and so `enclavid:host` stays a self-contained leaf package.
+interface types {
+    /// One static configuration value the consumer supplies at session
+    /// creation (was `eval-args`). Read on demand via
+    /// `session-context.props`.
+    variant prop {
+        %string(string),
+        int(s64),
+        float(f64),
+        %bool(bool),
+        null,
+    }
+}

@@ -1,0 +1,24 @@
+package enclavid:host@0.1.0;
+
+// Capabilities the TEE host provides to the policy live in the RESERVED
+// `enclavid:host` package: a composed plugin may `import` an interface
+// here (reading the same host surface the policy does), but it must never
+// SATISFY one. Runtime fusion (`runner::compose`) refuses to wire a plugin
+// export into a host-reserved import and rejects outright any plugin that
+// exports one — host interfaces are served exclusively by the TEE
+// `Linker`. New host capabilities land as new interfaces in this package,
+// so the trust boundary stays a single namespace check rather than a
+// denylist that must be kept in sync.
+
+/// Ambient session context the policy IMPORTS — the actor's `Props`. A
+/// SEPARATE interface because it goes host → policy (imported), the
+/// opposite direction of the exported `enclavid:policy/policy`, and a
+/// WIT interface is imported/exported as a whole.
+interface session-context {
+    use types.{prop};
+
+    /// The consumer's static config (`metadata.input`). Constant for the
+    /// session, callable any turn — referentially transparent, not a
+    /// side-effect.
+    props: func() -> list<tuple<string, prop>>;
+}

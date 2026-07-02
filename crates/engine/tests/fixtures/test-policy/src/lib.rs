@@ -35,16 +35,18 @@ use enclavid::policy::types::{Action, Decision, Disclosure, Event, Prompt};
 // and the canonical KYC `display-field` helpers.
 use enclavid::well_known::capture;
 use enclavid::well_known::disclosure_fields as wk;
+// Second plugin (linked at runtime in the hybrid test): its `get()`
+// resolves `extra_tag` from the extra plugin's own i18n catalog.
+use enclavid::extra::tag;
 use exports::enclavid::policy::policy::Guest;
 
 struct TestPolicy;
 
-// The ONLY refs this policy authors itself: the consent screen's reason +
-// requester (both in `i18n.json`). Every field label, capture
-// instruction, guide and icon is owned by the well-known plugin's
-// embedded sections.
+// The consent screen's reason ref, authored in this policy's `i18n.json`.
+// The requester ref comes from the extra plugin (see `build_consent`).
+// Every field label, capture instruction, guide and icon is owned by the
+// well-known plugin's embedded sections.
 const KEY_CONSENT_REASON: &str = "consent_reason";
-const KEY_CONSENT_REQUESTER: &str = "consent_requester";
 
 // ~500-char value (held by the well-known `address` helper) — well past
 // the consent screen's 200-char collapse threshold, exercising the
@@ -74,8 +76,8 @@ fn state_at(step: u8) -> Vec<u8> {
 /// (`context.props`). Present only when the harness drives the engine's
 /// `POLICY_MAX_STATE_BYTES` cap; absent on every real flow.
 fn bloat_bytes() -> Option<usize> {
-    use enclavid::policy::types::Prop;
-    enclavid::policy::context::props()
+    use enclavid::host::types::Prop;
+    enclavid::host::session_context::props()
         .into_iter()
         .find(|(k, _)| k == "state_bloat")
         .and_then(|(_, v)| match v {
@@ -100,7 +102,12 @@ fn build_consent() -> Disclosure {
             wk::address(LONG_ADDRESS),
         ],
         reason: l10n(KEY_CONSENT_REASON),
-        requester: l10n(KEY_CONSENT_REQUESTER),
+        // Requester ref comes from the EXTRA plugin (`tag::get()` →
+        // `extra_tag`), resolved against the extra plugin's own catalog.
+        // Both this policy and the extra plugin declare `extra_tag` with
+        // different text, so a correct (strict) routing yields the
+        // plugin's value here — first-match would leak the policy's.
+        requester: tag::get(),
     }
 }
 

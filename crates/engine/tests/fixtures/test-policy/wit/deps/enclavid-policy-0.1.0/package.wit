@@ -19,16 +19,6 @@ interface types {
     review,
   }
 
-  /// One static configuration value the consumer supplies at session
-  /// creation (was `eval-args`). Read on demand via `context.props`.
-  variant prop {
-    %string(string),
-    int(s64),
-    float(f64),
-    %bool(bool),
-    null,
-  }
-
   /// One consent-and-disclosure. The `fields` are BOTH what the
   /// applicant is shown on the consent screen AND — if they accept —
   /// the exact set the runtime seals to the consumer. Show == seal,
@@ -81,21 +71,6 @@ interface types {
     /// durable checkpoint: persist `state` + re-invoke `handle`
     finish(decision),
   }
-}
-
-/// Ambient session context the policy IMPORTS — the actor's `Props`.
-/// Tiny (one getter), so it lives here next to the exported `policy`
-/// interface instead of its own file. It stays a SEPARATE interface
-/// because it goes the opposite direction: `context` is imported
-/// (host → policy) while `policy` is exported (policy → host), and a WIT
-/// interface is imported/exported as a whole.
-interface context {
-  use types.{prop};
-
-  /// The consumer's static config (`metadata.input`). Constant for the
-  /// session, callable any turn — referentially transparent, not a
-  /// side-effect.
-  props: func() -> list<tuple<string, prop>>;
 }
 
 /// The policy's behaviour. `handle` reacts to one `event` and returns a

@@ -97,10 +97,10 @@ pub enum RequestView {
 /// used_in_call`) is the visual signal of possible synonym-encoding
 /// (`country_a / country_b / …`).
 ///
-/// Aggregates across the **whole composition** (policy slot 0 + each
-/// plugin slot ≥ 1) — plugins may legitimately declare DF keys too
-/// (well-known auxiliary fields, e.g.). Same raw key declared by
-/// multiple slots resolves to identical envelope output so we
+/// Aggregates across the **whole composition** (the policy's catalog +
+/// every plugin's) — plugins may legitimately declare DF keys too
+/// (well-known auxiliary fields, e.g.). The same raw key declared by
+/// multiple catalogs resolves to identical envelope output so we
 /// deduplicate by string here: the count and the vocabulary list
 /// reflect what the consumer can actually distinguish.
 #[derive(Serialize)]
@@ -202,12 +202,12 @@ fn consent_view(
     locale: &Locale,
 ) -> RequestView {
     let used_in_call = d.fields.len();
-    // Aggregate disclosure-field keys across the whole composition
-    // (policy slot 0 + every plugin slot). Same raw key declared by
-    // multiple slots resolves to the same envelope value — consumer
-    // can't tell which slot resolved it — so we dedupe by string for
-    // the audit view. `BTreeSet` gives the dedup AND the canonical
-    // alphabetical ordering for stable display.
+    // Aggregate disclosure-field keys across the whole composition (the
+    // policy's catalog + every plugin's). The same raw key declared by
+    // multiple catalogs resolves to the same envelope value — the
+    // consumer can't tell which catalog resolved it — so we dedupe by
+    // string for the audit view. `BTreeSet` gives the dedup AND the
+    // canonical alphabetical ordering for stable display.
     let unique_keys: std::collections::BTreeSet<String> =
         embedded.disclosure_fields.declared().cloned().collect();
     let total_declared = unique_keys.len();

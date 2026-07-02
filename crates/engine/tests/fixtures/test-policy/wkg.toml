@@ -3,3 +3,5 @@
 "enclavid:shared-types" = { path = "../../../../../wit/shared-types" }
 "enclavid:embedded" = { path = "../../../../../wit/embedded" }
 "enclavid:policy" = { path = "../../../../../wit/policy" }
+"enclavid:host" = { path = "../../../../../wit/host" }
+"enclavid:extra" = { path = "../test-extra/wit" }

@@ -34,6 +34,26 @@ use wit_component::ComponentEncoder;
 /// WIT package id the policy imports its capture / disclosure-field
 /// helpers from; used as the plugin descriptor label at compose time.
 const WELL_KNOWN_PACKAGE: &str = "enclavid:well-known@0.1.0";
+/// Package id of the minimal second plugin the policy imports (its
+/// `tag::get()` supplies the consent requester). Linked alongside
+/// well-known in the dynamic path, and at runtime over a pre-fused core
+/// in the hybrid test.
+const EXTRA_PACKAGE: &str = "enclavid:extra@0.1.0";
+
+/// The plugins the policy imports — well-known + extra. Both must be
+/// present in every composition, since the policy calls into both.
+fn all_plugins() -> Vec<PluginInstance> {
+    vec![
+        PluginInstance {
+            package: WELL_KNOWN_PACKAGE.to_string(),
+            wasm: well_known_component().to_vec(),
+        },
+        PluginInstance {
+            package: EXTRA_PACKAGE.to_string(),
+            wasm: extra_component().to_vec(),
+        },
+    ]
+}
 
 /// Recording listener: captures every sealed disclosure the runtime
 /// fires, so the test can assert the consent gate (reject seals nothing,
@@ -192,6 +212,233 @@ async fn oversized_state_traps() {
     );
 }
 
+/// STATIC-strict consumption: fuse policy + well-known into a
+/// self-contained artifact (what `enclavid link` would ship), then feed
+/// it back with NO runtime plugins. The engine must reconstruct the
+/// embedded manifest from the artifact's own `embedded-slot:*` imports,
+/// recover the nested catalogs for the registry, and resolve both
+/// strict (plugin i18n/icons) and merged (DF) refs through it.
+#[tokio::test]
+async fn static_fused_artifact_resolves_strictly() {
+    let runner = Runner::new().unwrap();
+    let fused = runner.fuse(test_policy_component(), &all_plugins()).unwrap();
+
+    // The twins survive as distinct `embedded-slot:*` imports (strict
+    // routing) — not collapsed to canonical. policy (i18n+icons) +
+    // well-known (i18n+icons) + extra (i18n only) = 5.
+    let imports = enclavid_engine::top_level_imports(&fused).unwrap();
+    let slots: Vec<&String> = imports
+        .iter()
+        .filter(|n| n.starts_with("embedded-slot:"))
+        .collect();
+    assert_eq!(
+        slots.len(),
+        5,
+        "policy+well-known × i18n+icons + extra × i18n = 5 distinct twin imports, got {slots:?}",
+    );
+
+    // Consume with an empty plugin list — the static path. The engine
+    // reconstructs the strict manifest from the artifact's own
+    // `embedded-slot:*` imports.
+    let composition = runner.compose(&fused, &[]).unwrap();
+    assert_eq!(
+        composition.embedded_imports.len(),
+        5,
+        "static artifact's strict manifest reconstructed from its imports",
+    );
+
+    // Registry from the fused artifact's OWN nested catalogs, policy first.
+    let mut cats = enclavid_engine::load_embedded_nested(&fused).unwrap();
+    assert!(
+        cats.iter().filter(|c| c.is_policy).count() == 1,
+        "exactly one nested policy catalog recovered, got {}",
+        cats.len(),
+    );
+    cats.sort_by_key(|c| !c.is_policy);
+    let mut builder = EmbeddedRegistry::builder([7u8; 32]);
+    for c in cats {
+        builder.add_component(c.hash, c.decls);
+    }
+    let embedded = Arc::new(builder.build());
+    let listener = Arc::new(RecordingListener::default());
+
+    // start → media(passport) → media(selfie) → consent-disclosure.
+    // Each media prompt resolves the plugin's i18n/icons strictly; the
+    // consent screen resolves DF (merged) — all through the static
+    // artifact with no runtime fusion.
+    let inputs = || RunInputs {
+        listener: listener.clone(),
+        embedded: embedded.clone(),
+    };
+    let (status, session) = runner
+        .run(&composition.component, &composition.embedded_imports, Session::default(), Event::Start, vec![], inputs())
+        .await
+        .expect("static round 1");
+    assert_media(&status, "static: round 1 (passport)");
+    let (status, session) = runner
+        .run(&composition.component, &composition.embedded_imports, session, Event::Media(fake_capture()), vec![], inputs())
+        .await
+        .expect("static round 2");
+    assert_media(&status, "static: round 2 (selfie)");
+    let (status, _session) = runner
+        .run(&composition.component, &composition.embedded_imports, session, Event::Media(fake_capture()), vec![], inputs())
+        .await
+        .expect("static round 3");
+    match &status {
+        RunStatus::AwaitingInput(Prompt::ConsentDisclosure(_)) => {}
+        _ => panic!("static: round 3 expected AwaitingInput(ConsentDisclosure)"),
+    }
+}
+
+/// The definitive runtime proof of STRICT per-component isolation.
+///
+/// The test-policy and well-known BOTH declare the i18n key
+/// `passport_title` with different text. well-known's passport capture
+/// spec resolves `localized("passport_title")` — under strict routing
+/// it MUST resolve against well-known's OWN catalog ("Your passport"),
+/// via its own twin import. If resolution were first-match (the failure
+/// mode when the twins collapse), it would pick the POLICY's colliding
+/// value instead (policy is composed first). So this asserts the plugin
+/// never sees the policy's translation.
+#[tokio::test]
+async fn strict_routing_isolates_colliding_i18n_key() {
+    let h = Harness::new();
+    let listener = Arc::new(RecordingListener::default());
+
+    // Round 1: start → render media(passport). The spec's `label_ref` is
+    // the token well-known produced from `localized("passport_title")`.
+    let (status, _session) = h.run(Session::default(), Event::Start, &listener).await;
+    let spec = match status {
+        RunStatus::AwaitingInput(Prompt::Media(spec)) => spec,
+        _ => panic!("round 1 expected AwaitingInput(Media)"),
+    };
+
+    let translations = h
+        .embedded
+        .localized
+        .lookup(&spec.label_ref)
+        .expect("media title ref resolves in the registry");
+    let en = translations
+        .iter()
+        .find(|t| t.language == "en")
+        .expect("en translation present")
+        .text
+        .as_str();
+
+    assert_eq!(
+        en, "Your passport",
+        "well-known's passport spec must resolve its OWN passport_title \
+         (strict isolation) — got the policy's colliding value, which \
+         means routing collapsed to first-match",
+    );
+
+    // Guard against a vacuous test: the collision must be REAL — the
+    // policy declared a DIFFERENT passport_title that first-match (policy
+    // composed first) would have leaked here.
+    let policy_value = "POLICY-OWNED passport_title (must NOT leak into the plugin)";
+    assert!(
+        h.embedded
+            .localized
+            .declared()
+            .any(|rows| rows.iter().any(|t| t.text == policy_value)),
+        "the policy's colliding passport_title must be registered, else \
+         the isolation assertion above is vacuous",
+    );
+}
+
+/// HYBRID composition: a pre-fused core (policy + well-known baked) plus a
+/// runtime plugin (extra) linked on top. The policy imports `extra/tag`,
+/// which the core leaves unsatisfied; the runtime fusion wires it, routes
+/// extra's embedded to its own twin, and passes through the core's baked
+/// twins. The consent requester ref (`tag::get()` → `extra_tag`) must
+/// resolve against the RUNTIME extra plugin's OWN catalog — proving
+/// strict routing survives the pass-through, not first-match (which
+/// would leak the policy's colliding `extra_tag`).
+#[tokio::test]
+async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
+    let runner = Runner::new().unwrap();
+
+    // CORE: policy + well-known baked. The policy still imports extra/tag
+    // (unsatisfied — a runtime import of the core).
+    let baked = vec![PluginInstance {
+        package: WELL_KNOWN_PACKAGE.to_string(),
+        wasm: well_known_component().to_vec(),
+    }];
+    let core = runner.fuse(test_policy_component(), &baked).unwrap();
+
+    // HYBRID: link extra at runtime over the pre-fused core.
+    let runtime = vec![PluginInstance {
+        package: EXTRA_PACKAGE.to_string(),
+        wasm: extra_component().to_vec(),
+    }];
+    let composition = runner.compose(&core, &runtime).unwrap();
+
+    // Registry: policy + well-known recovered from the core's nested
+    // catalogs (policy first), plus the runtime extra catalog.
+    let mut cats = enclavid_engine::load_embedded_nested(&core).unwrap();
+    cats.sort_by_key(|c| !c.is_policy);
+    let mut builder = EmbeddedRegistry::builder([7u8; 32]);
+    for c in cats {
+        builder.add_component(c.hash, c.decls);
+    }
+    let extra_cat = enclavid_engine::load_embedded(extra_component()).unwrap();
+    builder.add_component(extra_cat.hash, extra_cat.decls);
+    let embedded = Arc::new(builder.build());
+    let listener = Arc::new(RecordingListener::default());
+
+    let inputs = || RunInputs {
+        listener: listener.clone(),
+        embedded: embedded.clone(),
+    };
+    // start → media(passport) → media(selfie) → consent-disclosure.
+    let (status, session) = runner
+        .run(&composition.component, &composition.embedded_imports, Session::default(), Event::Start, vec![], inputs())
+        .await
+        .expect("hybrid round 1");
+    assert_media(&status, "hybrid: round 1 (passport)");
+    let (status, session) = runner
+        .run(&composition.component, &composition.embedded_imports, session, Event::Media(fake_capture()), vec![], inputs())
+        .await
+        .expect("hybrid round 2");
+    assert_media(&status, "hybrid: round 2 (selfie)");
+    let (status, _session) = runner
+        .run(&composition.component, &composition.embedded_imports, session, Event::Media(fake_capture()), vec![], inputs())
+        .await
+        .expect("hybrid round 3");
+    let disclosure = match status {
+        RunStatus::AwaitingInput(Prompt::ConsentDisclosure(d)) => d,
+        _ => panic!("hybrid round 3 expected AwaitingInput(ConsentDisclosure)"),
+    };
+
+    // The requester ref came from the RUNTIME extra plugin (`tag::get()`).
+    let requester = embedded
+        .localized
+        .lookup(&disclosure.requester_ref)
+        .expect("requester ref resolves in the registry");
+    let en = requester
+        .iter()
+        .find(|t| t.language == "en")
+        .expect("en translation present")
+        .text
+        .as_str();
+    assert_eq!(
+        en, "EXTRA-PLUGIN-TAG",
+        "runtime extra plugin must resolve extra_tag against its OWN \
+         catalog in a hybrid composition — got the policy's colliding value",
+    );
+
+    // Collision is real: the policy declared a different extra_tag.
+    let policy_value = "POLICY-OWNED extra_tag (must NOT leak into the extra plugin)";
+    assert!(
+        embedded
+            .localized
+            .declared()
+            .any(|rows| rows.iter().any(|t| t.text == policy_value)),
+        "the policy's colliding extra_tag must be registered, else the \
+         isolation assertion above is vacuous",
+    );
+}
+
 // ---------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------
@@ -210,26 +457,26 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         let runner = Runner::new().unwrap();
-        // Fuse the test policy with the well-known plugin into one
-        // component (the same path `Runner::compose` takes in prod).
-        // The fixtures carry their embedded sections (embedded verbatim
-        // from the author JSON), so `compose` derives each catalog's
-        // content-hash from the same bytes the registry keys on.
-        let plugins = vec![PluginInstance {
-            package: WELL_KNOWN_PACKAGE.to_string(),
-            wasm: well_known_component().to_vec(),
-        }];
-        let composition = runner.compose(test_policy_component(), &plugins).unwrap();
+        // Fuse the test policy with BOTH plugins into one component (the
+        // same path `Runner::compose` takes in prod). The fixtures carry
+        // their embedded sections (embedded verbatim from the author
+        // JSON), so `compose` derives each catalog's content-hash from
+        // the same bytes the registry keys on.
+        let composition = runner.compose(test_policy_component(), &all_plugins()).unwrap();
 
         // Composition-wide `EmbeddedRegistry`, keyed by each component's
-        // catalog content-hash — policy first, then well-known, the same
-        // order as the fused plugins. Both decls and hash come straight
+        // catalog content-hash — policy first, then the plugins in the
+        // same order as the fused set. Both decls and hash come straight
         // from the sealed wasm (`load_embedded`), so they match exactly
         // what `compose` routed the imports under. The `ref_key` is a
         // fixed test value; production derives it per-policy from
         // `tee_seal_key + policy_ref`.
         let mut builder = EmbeddedRegistry::builder([7u8; 32]);
-        for wasm in [test_policy_component(), well_known_component()] {
+        for wasm in [
+            test_policy_component(),
+            well_known_component(),
+            extra_component(),
+        ] {
             let cat = enclavid_engine::load_embedded(wasm).expect("load embedded");
             builder.add_component(cat.hash, cat.decls);
         }
@@ -331,6 +578,10 @@ fn well_known_dir() -> String {
     format!("{}/../../plugins/well-known", env!("CARGO_MANIFEST_DIR"))
 }
 
+fn extra_dir() -> String {
+    format!("{}/tests/fixtures/test-extra", env!("CARGO_MANIFEST_DIR"))
+}
+
 /// Build the `test-policy` fixture (cached), componentize it, and embed
 /// its author JSON as `enclavid:embedded.*` custom sections — a sealed
 /// component, exactly the shape the engine sees in production.
@@ -353,6 +604,19 @@ fn well_known_component() -> &'static [u8] {
         .get_or_init(|| {
             let dir = well_known_dir();
             let module = format!("{dir}/target/wasm32-unknown-unknown/release/well_known.wasm");
+            embed_sections(build_componentized(&dir, &module), &dir)
+        })
+        .as_slice()
+}
+
+/// Build the minimal `enclavid:extra` plugin (cached), componentize it,
+/// and embed its `i18n.json` as a custom section.
+fn extra_component() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| {
+            let dir = extra_dir();
+            let module = format!("{dir}/target/wasm32-unknown-unknown/release/test_extra.wasm");
             embed_sections(build_componentized(&dir, &module), &dir)
         })
         .as_slice()

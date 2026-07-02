@@ -2,7 +2,10 @@
   "consent_reason": {
     "en": "Identity verification for the test policy."
   },
-  "consent_requester": {
-    "en": "Enclavid Test Co"
+  "passport_title": {
+    "en": "POLICY-OWNED passport_title (must NOT leak into the plugin)"
+  },
+  "extra_tag": {
+    "en": "POLICY-OWNED extra_tag (must NOT leak into the extra plugin)"
   }
 }

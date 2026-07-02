@@ -129,6 +129,33 @@ pub fn load_embedded_nested(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<EmbeddedC
 /// against pathological inputs without constraining real artifacts.
 const MAX_NESTING: usize = 8;
 
+/// The import names of a component's OWN (top-level) world. Used to
+/// recover the `embedded-slot:<hash>/<iface>` imports a pre-fused
+/// artifact already carries, so the host `Linker` can re-register them
+/// (static / hybrid consumption). Depth-0 only — nested components'
+/// imports are internal and already satisfied.
+pub fn top_level_imports(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let payload = payload.map_err(|e| wasmtime::Error::msg(format!("wasm component parse: {e}")))?;
+        match &payload {
+            Payload::ComponentSection { .. } | Payload::ModuleSection { .. } => depth += 1,
+            Payload::End(_) => depth = depth.saturating_sub(1),
+            Payload::ComponentImportSection(reader) if depth == 0 => {
+                for import in reader.clone() {
+                    let import = import.map_err(|e| {
+                        wasmtime::Error::msg(format!("component import parse: {e}"))
+                    })?;
+                    out.push(import.name.0.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 /// Accumulator for one component node's raw embedded-section bytes plus
 /// whether it exports the policy interface. Borrows the section bytes
 /// from the wasm; [`finish`](RawFrame::finish) parses + hashes them

@@ -1,0 +1,14 @@
+package enclavid:extra@0.1.0;
+
+/// Minimal second plugin for the hybrid composition test. Its single
+/// export resolves a key from its OWN i18n catalog, so the fusion must
+/// route its embedded import to a distinct twin.
+interface tag {
+    use enclavid:embedded/i18n@0.1.0.{localized-ref};
+    get: func() -> localized-ref;
+}
+
+world plugin {
+    import enclavid:embedded/i18n@0.1.0;
+    export tag;
+}
