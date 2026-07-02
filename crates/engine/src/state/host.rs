@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use wasm_runtime_composer::ResourceProxyView;
-use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
 
 use crate::embedded::EmbeddedRegistry;
@@ -12,36 +10,29 @@ use crate::listener::SessionListener;
 /// `handle` call. The policy is a pure reducer, so this state carries
 /// only ambient read surfaces (`enclavid:policy/context` props,
 /// `enclavid:embedded/*` registry) plus the runtime plumbing
-/// (listener, limits, composer proxy table). No replay log, no
-/// per-call disclosure buffer — the runner fires the listener directly
-/// on a consent-disclosure accept, around the `handle` call, not from a
-/// host-fn body.
+/// (listener, limits). No replay log, no per-call disclosure buffer —
+/// the runner fires the listener directly on a consent-disclosure
+/// accept, around the `handle` call, not from a host-fn body.
 pub struct HostState {
     /// Static consumer config (`metadata.input`), surfaced to the
     /// policy through `enclavid:policy/context.props`. Constant for
     /// the session; the policy may read it any round.
     pub props: Vec<(String, crate::enclavid::policy::types::Prop)>,
-    /// Per-component `enclavid:embedded/*` registry, shared with every
-    /// plugin's `PluginHostState` so the slot-bound resolve closures and
-    /// the use-site reverse-lookups read from the same frozen index.
-    /// Frozen before any per-session input reaches any component; the
-    /// runner consults it at every embedded-ref use-site (consent field
-    /// key/label, reason / requester, media labels) and traps if a ref
-    /// isn't in it. Closes the runtime ref-crafting channel and the
-    /// cross-component attribution channel.
+    /// Per-composition `enclavid:embedded/*` registry — one frozen
+    /// index built from the policy's and every fused plugin's embedded
+    /// sections. The `enclavid:embedded/*` host fns resolve keys
+    /// against it (first match across the merged catalogs), and the
+    /// runner reverse-looks-up every embedded ref at its use-site
+    /// (consent field key/label, reason / requester, media labels),
+    /// trapping if a ref isn't in it. Frozen before any per-session
+    /// input reaches the component; closes the runtime ref-crafting
+    /// channel.
     pub embedded: Arc<EmbeddedRegistry>,
     /// Resource caps the wasmtime runtime consults via `Store::
     /// limiter`. Bounds linear-memory growth so the policy component
     /// can't OOM the enclave. Fuel (CPU-instruction budget) is set
     /// separately on the Store via `Store::set_fuel`.
     pub limits: StoreLimits,
-    /// Proxy table used by wasm-runtime-composer to forward resource
-    /// handles between this Store and other components in the
-    /// composition. Owned per Store; the composer pushes / removes
-    /// entries transparently during cross-store calls. We never read it
-    /// directly — it lives here solely to satisfy [`ResourceProxyView`]
-    /// so this Store can participate in compositions.
-    pub proxy_table: ResourceTable,
 }
 
 /// Per-run inputs assembled by the api crate and handed to
@@ -49,7 +40,7 @@ pub struct HostState {
 /// caller's persistence layer plus the composition-wide
 /// `EmbeddedRegistry` — constructed once at policy-cache build time from
 /// policy + plugin embedded sections and shared by `Arc` with every
-/// consumer (engine slot-bound resolve, engine use-site reverse-lookup,
+/// consumer (engine first-match resolve, engine use-site reverse-lookup,
 /// api view-layer ref resolution).
 pub struct RunInputs {
     pub listener: Arc<dyn SessionListener>,
@@ -67,14 +58,7 @@ impl HostState {
             limits: StoreLimitsBuilder::new()
                 .memory_size(POLICY_MAX_MEMORY)
                 .build(),
-            proxy_table: ResourceTable::new(),
         }
-    }
-}
-
-impl ResourceProxyView for HostState {
-    fn proxy_table(&mut self) -> &mut ResourceTable {
-        &mut self.proxy_table
     }
 }
 

@@ -1,7 +1,6 @@
 //! Top-level policy execution. [`Runner`] owns the wasmtime [`Engine`],
 //! compiles components, and drives ONE pure-reducer round
-//! (`enclavid:policy/policy.handle`) together with its plugin
-//! composition through to a [`RunStatus`].
+//! (`enclavid:policy/policy.handle`) through to a [`RunStatus`].
 //!
 //! No replay, no intercept, no compaction. The runner
 //!   1. builds the inbound WIT `event` from the caller-supplied
@@ -22,34 +21,74 @@
 //! accepted on the consent screen — "show == seal". On a `false` reply,
 //! or any other event, NOTHING is sealed.
 
+mod compose;
 mod convert;
 mod status;
 
 use broker_client::{Event, Prompt, SessionState};
-use wasm_runtime_composer::{
-    Composable, ComposableComponent, ComposableDescriptor, ComposableLinker, Composer,
-};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store};
 
 use crate::Host_ as GeneratedHost;
 use crate::limits::{POLICY_FUEL_BUDGET, POLICY_MAX_STATE_BYTES};
 use crate::listener::{ConsentDisclosure, SessionChange};
-use crate::state::{HostState, PluginHostState, RunInputs};
+use crate::state::{HostState, RunInputs};
 
 pub use status::RunStatus;
 
-/// One compiled plugin component bundled with the WIT package id it
+/// One plugin's component bytes bundled with the WIT package id it
 /// satisfies. The api crate constructs these from the client-supplied
-/// `PluginPin` list at session start (pull → compile) and hands them to
-/// [`Runner::run`]. `package` is the value the client passed in
+/// `PluginPin` list at session start (pull → bytes) and hands them to
+/// [`Runner::compose`]. `package` is the value the client passed in
 /// `PluginPin.package` (e.g. `"vendor:plugin@0.1.0"`); it identifies
 /// which set of imports declared in the policy's WIT world this plugin
-/// is meant to satisfy and serves as the descriptor id when the engine
-/// hands the plugin to wasm-runtime-composer.
+/// is meant to satisfy and names the plugin in the composition graph.
+/// `wasm` is the raw component binary — fusion happens on bytes, so no
+/// pre-compiled `Component` is kept.
 pub struct PluginInstance {
     pub package: String,
-    pub component: std::sync::Arc<Component>,
+    pub wasm: Vec<u8>,
+}
+
+/// The two applicant-facing embedded interfaces routed strictly
+/// per-component (i18n and icons). DF stays merged, so it is not one of
+/// these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddedIface {
+    I18n,
+    Icons,
+}
+
+impl EmbeddedIface {
+    /// Slug segment used in the distinct import name, and the tag by
+    /// which the host `Linker` picks the matching registry store.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EmbeddedIface::I18n => "i18n",
+            EmbeddedIface::Icons => "icons",
+        }
+    }
+}
+
+/// One distinct per-component embedded import produced by fusion. The
+/// host `Linker` registers an instance named `instance_name` whose func
+/// resolves keys against the catalog with `catalog_hash` — strict
+/// per-component routing, so a plugin's i18n key never resolves to the
+/// policy's (or another plugin's) translation. Emitted only for i18n /
+/// icons; DF is merged and served first-match under its canonical name.
+pub struct EmbeddedImport {
+    pub instance_name: String,
+    pub catalog_hash: [u8; 32],
+    pub iface: EmbeddedIface,
+}
+
+/// A fused policy component plus the manifest of distinct embedded
+/// imports its host `Linker` must register. Returned by
+/// [`Runner::compose`]; the caller caches both and hands the manifest
+/// back to [`Runner::run`].
+pub struct Composition {
+    pub component: Component,
+    pub embedded_imports: Vec<EmbeddedImport>,
 }
 
 /// Runs policy WASM against session state.
@@ -75,6 +114,42 @@ impl Runner {
         Component::new(&self.engine, bytes)
     }
 
+    /// Fuse a policy with its pinned plugins into ONE component and
+    /// compile it. `wac-graph` single-store fusion (see
+    /// [`compose::fuse`]) wires every plugin export into the policy's
+    /// imports; the result runs in one wasmtime `Store`, so
+    /// cross-component WIT resources are native handles. With no
+    /// plugins this is just [`compile`](Self::compile) on the policy
+    /// bytes.
+    ///
+    /// This is a build-time step: the caller compiles once per
+    /// `(policy, plugin-set)` and reuses the returned [`Composition`]
+    /// across every reducer round.
+    ///
+    /// With no plugins the policy is compiled as-is; its own
+    /// `enclavid:embedded/*` imports stay canonical (merged) and the
+    /// host serves them first-match — the manifest is empty. With
+    /// plugins, [`compose::fuse`] routes each component's i18n / icons
+    /// import to a distinct per-catalog import and returns them in the
+    /// manifest for the host `Linker`.
+    pub fn compose(
+        &self,
+        policy_wasm: &[u8],
+        plugins: &[PluginInstance],
+    ) -> wasmtime::Result<Composition> {
+        if plugins.is_empty() {
+            return Ok(Composition {
+                component: self.compile(policy_wasm)?,
+                embedded_imports: Vec::new(),
+            });
+        }
+        let (fused, embedded_imports) = compose::fuse(policy_wasm, plugins)?;
+        Ok(Composition {
+            component: Component::new(&self.engine, &fused)?,
+            embedded_imports,
+        })
+    }
+
     /// Drive one reducer round. `session` carries the policy's opaque
     /// `state` blob and the `current_prompt` prompt from the previous
     /// round; `event` is the inbound mailbox message the runtime built
@@ -89,7 +164,7 @@ impl Runner {
     pub async fn run(
         &self,
         component: &Component,
-        plugins: &[PluginInstance],
+        embedded_imports: &[EmbeddedImport],
         session: SessionState,
         event: Event,
         props: Vec<(String, crate::Prop)>,
@@ -114,74 +189,23 @@ impl Runner {
             _ => None,
         };
 
-        // Compose every plugin into a single Composition: one Store +
-        // inbox loop per plugin, slot-scoped embedded resolvers, and a
-        // per-plugin fuel + memory cap.
-        let mut plugin_composition = if plugins.is_empty() {
-            None
-        } else {
-            let mut composer = Composer::new();
-            for (idx, plugin) in plugins.iter().enumerate() {
-                let engine_for_factory = self.engine.clone();
-                // Slot 0 is the policy; plugins occupy slots 1..N in the
-                // order they appear in `plugins`. The api crate populated
-                // the `EmbeddedRegistry` in the same order, so slot
-                // indices line up here without extra plumbing.
-                let plugin_slot = idx + 1;
-                let mut plugin_linker =
-                    wasmtime::component::Linker::<PluginHostState>::new(&self.engine);
-                crate::embedded::register_for_slot(
-                    &mut plugin_linker,
-                    plugin_slot,
-                    embedded.clone(),
-                )?;
-                composer.add(ComposableDescriptor::new(
-                    &plugin.package,
-                    ComposableComponent::new(
-                        (*plugin.component).clone(),
-                        plugin_linker,
-                        move || {
-                            let mut store = Store::new(
-                                &engine_for_factory,
-                                PluginHostState::new(),
-                            );
-                            store.limiter(|s: &mut PluginHostState| &mut s.limits);
-                            store
-                                .set_fuel(POLICY_FUEL_BUDGET)
-                                .expect("fuel accounting enabled on the engine");
-                            store
-                        },
-                    ),
-                ));
-            }
-            Some(composer.compose().await.map_err(|e| {
-                wasmtime::Error::msg(format!("wasm-runtime-composer compose plugins: {e}"))
-            })?)
-        };
-
-        // Build the policy's Linker — a plain `wasmtime::component::Linker`
-        // (no intercept shim): the reducer imports only pure read surfaces
-        // (`context.props`, `enclavid:embedded/*`) plus whatever the
-        // plugins export.
+        // `component` is the already-fused policy (+plugins) from
+        // `Runner::compose`. Build the host `Linker` for the imports that
+        // bubbled up out of fusion. bindgen wires the CANONICAL-named
+        // imports on `HostState`: `context.props`, the merged
+        // `enclavid:embedded/disclosure-fields` (first-match, option B),
+        // and the canonical `enclavid:embedded/{i18n,icons}` (used only
+        // by a lone unfused policy — a fused component routes those
+        // away, so the canonical registrations sit unused, which is
+        // harmless). Plugin↔policy interfaces are internal to the fused
+        // component, so the Linker never sees them.
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
         GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
-
-        // Plug each plugin-side export into the policy linker as an
-        // import. `Composition::link_export` already routes to the
-        // correct child composition's inbox channel.
-        if let Some(plugin_composition) = plugin_composition.as_mut() {
-            let exports = plugin_composition.ty().exports().clone();
-            for export_name in exports {
-                let mut ops = ComposableLinker::new(linker.root());
-                Composable::link_export(plugin_composition, &export_name, &mut ops).map_err(
-                    |e| {
-                        wasmtime::Error::msg(format!(
-                            "link plugin export `{export_name}` into policy linker: {e}",
-                        ))
-                    },
-                )?;
-            }
-        }
+        // Then the DISTINCT per-catalog i18n/icons instances the fusion
+        // produced (`embedded-slot:<hash>/<iface>`), each resolving
+        // strictly against its own catalog — bindgen can't emit these
+        // dynamic names.
+        register_strict_embedded(&mut linker, embedded_imports, &embedded)?;
 
         // Instantiate the policy and call `handle` ONCE.
         let mut store = Store::new(&self.engine, HostState::new(props, embedded.clone()));
@@ -200,7 +224,6 @@ impl Runner {
         // smuggled into the sealed mailbox and the ciphertext-size covert
         // channel stays narrow. A breach traps the round.
         if new_state.len() > POLICY_MAX_STATE_BYTES {
-            drop(plugin_composition);
             return Err(wasmtime::Error::msg(format!(
                 "policy returned a {}-byte state blob, over the \
                  {POLICY_MAX_STATE_BYTES}-byte POLICY_MAX_STATE_BYTES cap",
@@ -231,7 +254,6 @@ impl Runner {
                 // Durable checkpoint (persist + re-invoke `handle`). This
                 // engine does not implement it — fail loud rather than
                 // silently no-op.
-                drop(plugin_composition);
                 return Err(wasmtime::Error::msg(
                     "the `continue` action (durable checkpoint) is not supported",
                 ));
@@ -248,12 +270,52 @@ impl Runner {
             })
             .await?;
 
-        // Dropping the plugin composition closes its channels; its
-        // per-plugin inbox loops observe the closed receiver and exit.
-        drop(plugin_composition);
-
         Ok((status, next_session))
     }
+}
+
+/// Register the distinct per-catalog i18n / icons instances the fusion
+/// produced. Each [`EmbeddedImport`] names one composite import
+/// (`embedded-slot:<hash>/<iface>`) whose single func resolves keys
+/// STRICTLY against the one catalog identified by `catalog_hash` — a
+/// plugin's i18n key can never resolve to the policy's translation.
+/// Instance names are unique per `(hash, iface)` (fusion dedups), so
+/// no double-registration; the canonical `enclavid:embedded/*` names
+/// bindgen registered are disjoint from these.
+fn register_strict_embedded(
+    linker: &mut Linker<HostState>,
+    imports: &[EmbeddedImport],
+    embedded: &std::sync::Arc<crate::embedded::EmbeddedRegistry>,
+) -> wasmtime::Result<()> {
+    for imp in imports {
+        let hash = imp.catalog_hash;
+        let iface = imp.iface;
+        let embedded = embedded.clone();
+        // WIT func name inside the interface (unchanged by routing —
+        // only the instance's outer import name is renamed).
+        let func = match iface {
+            EmbeddedIface::I18n => "localized",
+            EmbeddedIface::Icons => "icon",
+        };
+        linker.root().instance(&imp.instance_name)?.func_wrap_async(
+            func,
+            move |_store, (key,): (String,)| {
+                let embedded = embedded.clone();
+                Box::new(async move {
+                    let token = match iface {
+                        EmbeddedIface::I18n => {
+                            crate::embedded::strict_token(&embedded.localized, &hash, &key)?
+                        }
+                        EmbeddedIface::Icons => {
+                            crate::embedded::strict_token(&embedded.icons, &hash, &key)?
+                        }
+                    };
+                    Ok((token,))
+                })
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// Marker type bridging bindgen's `HasData` to `&mut HostState`. Host

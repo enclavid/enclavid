@@ -131,12 +131,15 @@ pub(super) struct SessionRunCtx {
     locale: Locale,
     persister: Arc<SessionPersister>,
     props: Vec<(String, Prop)>,
+    /// The fused policy component (policy + pinned plugins, wac
+    /// single-store fused on first /connect — see [`lookup_policy`]).
+    /// Shared by Arc with the cache entry; immutable for the session's
+    /// lifetime.
     policy: Arc<Component>,
-    /// Plugin components the policy depends on, pinned at session
-    /// create and compiled on first /connect (see
-    /// [`lookup_policy`]). Shared by Arc with the cache entry — the
-    /// list itself is immutable for the session's lifetime.
-    plugins: Arc<Vec<PluginInstance>>,
+    /// Manifest of distinct per-catalog i18n/icons imports the engine
+    /// registers on the host `Linker` for this fused component. Shared
+    /// by Arc with the cache entry.
+    embedded_imports: Arc<Vec<enclavid_engine::EmbeddedImport>>,
     run_inputs: RunInputs,
 }
 
@@ -160,13 +163,13 @@ impl SessionRunCtx {
             persister,
             props,
             policy,
-            plugins,
+            embedded_imports,
             run_inputs,
             ..
         } = self;
         let (status, _session_state) = state
             .runner
-            .run(&policy, &plugins, session_state, event, props, run_inputs)
+            .run(&policy, &embedded_imports, session_state, event, props, run_inputs)
             .await
             .map_err(|e| classify_run_error(&session_id, &e))?;
         // No-op while the run is still awaiting input; flips status to
@@ -314,8 +317,8 @@ persist; same containment as above.
         // PolicyEntry is reference-counted in the cache; cheap to
         // unpack its inner Arcs into per-run fields.
         let policy = policy_entry.component.clone();
+        let embedded_imports = policy_entry.embedded_imports.clone();
         let embedded = policy_entry.embedded.clone();
-        let plugins = policy_entry.plugins.clone();
 
         // Per-run persister: engine fires `on_session_change` once per
         // reducer round, persister seals any consented disclosure to
@@ -359,7 +362,7 @@ persist; same containment as above.
             persister,
             props,
             policy,
-            plugins,
+            embedded_imports,
             run_inputs,
         })
     }
@@ -437,7 +440,7 @@ async fn lookup_policy(
     })?;
 
     let mut plugin_instances: Vec<PluginInstance> = Vec::with_capacity(plugin_results.len());
-    let mut plugin_decls: Vec<enclavid_engine::ComponentDecls> =
+    let mut plugin_catalogs: Vec<enclavid_engine::EmbeddedCatalog> =
         Vec::with_capacity(plugin_results.len());
     for res in plugin_results {
         let (package, art) = res.map_err(|e| {
@@ -447,43 +450,48 @@ async fn lookup_policy(
             StatusCode::GONE
         })?;
         // Parse the plugin's embedded sections before the wasm bytes
-        // get dropped. Each plugin occupies its own slot in the
-        // composition's `EmbeddedRegistry` (slot `idx + 1` in
-        // `plugin_instances` order); these decls populate that slot
-        // so the plugin can resolve refs for its declared keys via the
-        // slot-bound closures `register_for_slot` wires up.
-        let decls = enclavid_engine::load_embedded(&art.wasm_bytes).map_err(|e| {
+        // are moved into the `PluginInstance`. The catalog's
+        // content-hash keys its entries in the `EmbeddedRegistry` — the
+        // same hash the fuser routes this plugin's imports under, so
+        // strict per-component resolution lines up.
+        let catalog = enclavid_engine::load_embedded(&art.wasm_bytes).map_err(|e| {
             eprintln!(
                 "lookup_policy: load_embedded failed for plugin {package} \
                  (session {session_id}): {e}",
             );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-        let component = Arc::new(state.runner.compile(&art.wasm_bytes).map_err(|e| {
-            eprintln!(
-                "lookup_policy: plugin wasm compile failed for {session_id} \
-                 (package {package}): {e}",
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?);
-        plugin_instances.push(PluginInstance { package, component });
-        plugin_decls.push(decls);
+        // Keep the raw component bytes — fusion (`Runner::compose`)
+        // runs on bytes, not a pre-compiled `Component`.
+        plugin_instances.push(PluginInstance {
+            package,
+            wasm: art.wasm_bytes,
+        });
+        plugin_catalogs.push(catalog);
     }
 
-    let component = Arc::new(state.runner.compile(&artifact.wasm_bytes).map_err(
-        |e| {
+    // Fuse the policy with its pinned plugins into ONE component (wac
+    // single-store fusion) and compile it, along with the manifest of
+    // distinct per-catalog i18n/icons imports the host Linker must wire.
+    // With no plugins this is a plain compile of the policy bytes and an
+    // empty manifest.
+    let composition = state
+        .runner
+        .compose(&artifact.wasm_bytes, &plugin_instances)
+        .map_err(|e| {
             eprintln!(
-                "lookup_policy: wasm compile failed for {session_id}: {e}",
+                "lookup_policy: policy+plugin composition failed for {session_id}: {e}",
             );
             StatusCode::INTERNAL_SERVER_ERROR
-        },
-    )?);
+        })?;
+    let component = Arc::new(composition.component);
+    let embedded_imports = Arc::new(composition.embedded_imports);
     // Parse the policy's embedded sections directly from the
     // decrypted wasm component — both
     // `enclavid:embedded.disclosure-fields.v1` and
     // `enclavid:embedded.i18n.v1` custom sections are optional, and
     // either / both / neither may be present.
-    let policy_decls = enclavid_engine::load_embedded(&artifact.wasm_bytes).map_err(|e| {
+    let policy_catalog = enclavid_engine::load_embedded(&artifact.wasm_bytes).map_err(|e| {
         eprintln!(
             "lookup_policy: load_embedded failed for {session_id} \
              (policy_ref {}): {e}",
@@ -491,13 +499,10 @@ async fn lookup_policy(
         );
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    // Build the composition-wide `EmbeddedRegistry`. Slot 0 = policy
-    // decls; slots 1..N = plugin decls in the same order as
-    // `plugin_instances` (mirrors `client.plugins`). Engine's
-    // `Runner::run` iterates `plugins` with the same order and calls
-    // `register_for_slot(plugin_linker, idx + 1, ...)` per plugin —
-    // slot attribution between api builder and engine Linker hooks
-    // is the iteration order of `plugin_instances`.
+    // Build the composition-wide `EmbeddedRegistry`, keyed by each
+    // component's catalog content-hash. Policy first (composition order,
+    // which fixes the merged-path first-match order), then plugins in
+    // `plugin_instances` order (mirrors `client.plugins`).
     //
     // `policy_ref_key` is HKDF-derived from `tee_seal_key +
     // policy_ref` (see `crate::ref_key`). Stable across all sessions
@@ -507,15 +512,15 @@ async fn lookup_policy(
     // infeasible.
     let policy_ref_key = state.ref_key.derive_for_policy(&metadata.policy_ref);
     let mut embedded_builder = EmbeddedRegistry::builder(policy_ref_key);
-    embedded_builder.add_component(policy_decls);
-    for decls in plugin_decls {
-        embedded_builder.add_component(decls);
+    embedded_builder.add_component(policy_catalog.hash, policy_catalog.decls);
+    for catalog in plugin_catalogs {
+        embedded_builder.add_component(catalog.hash, catalog.decls);
     }
     let embedded = Arc::new(embedded_builder.build());
     let entry = Arc::new(PolicyEntry {
         component,
+        embedded_imports,
         embedded,
-        plugins: Arc::new(plugin_instances),
     });
     state
         .policies

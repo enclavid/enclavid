@@ -10,28 +10,28 @@ use std::time::Duration;
 
 use moka::future::Cache;
 
-use enclavid_engine::{Component, EmbeddedRegistry, PluginInstance, Runner};
+use enclavid_engine::{Component, EmbeddedImport, EmbeddedRegistry, Runner};
 
-/// Per-session compiled policy artifact: the wasmtime `Component`
-/// for the policy, the composition-wide `EmbeddedRegistry` (slot 0
-/// = policy, slots 1..N = plugins in pinned `Client.plugins` order;
-/// holds both `disclosure_fields` and `localized` stores), and
-/// every plugin component the policy depends on (pulled per
-/// `Client.plugins` at /connect time, compiled once, shared across
-/// all subsequent /input rounds for this session).
+/// Per-session compiled policy artifact: the fused wasmtime
+/// `Component` (policy + its pinned plugins, wac single-store fused at
+/// /connect via [`Runner::compose`](enclavid_engine::Runner::compose)),
+/// the manifest of distinct per-catalog i18n/icons imports the host
+/// `Linker` must register, and the composition-wide `EmbeddedRegistry`
+/// (policy first, then plugins in pinned `Client.plugins` order; holds
+/// the `disclosure_fields`, `localized`, and `icons` stores).
 ///
-/// `embedded` is shared by Arc with every consumer (engine slot-
-/// bound resolve + use-site lookup, api views for projecting slot-
-/// tagged refs into user-facing strings) so the slot assignment
-/// cannot drift across consumers.
+/// `embedded` is shared by Arc with every consumer (engine resolve +
+/// use-site lookup, api views for projecting refs into user-facing
+/// strings) so catalog attribution cannot drift across consumers.
 ///
-/// All three are immutable for the lifetime of the session entry;
-/// plugins are pinned by `Client.plugins[].impl_ref` digests so the
-/// same client cannot mutate the set mid-session.
+/// All are immutable for the lifetime of the session entry; plugins
+/// are pinned by `Client.plugins[].impl_ref` digests and fused into
+/// `component` once, so the same client cannot mutate the set
+/// mid-session.
 pub struct PolicyEntry {
     pub component: Arc<Component>,
+    pub embedded_imports: Arc<Vec<EmbeddedImport>>,
     pub embedded: Arc<EmbeddedRegistry>,
-    pub plugins: Arc<Vec<PluginInstance>>,
 }
 
 /// Cache of compiled policy components, keyed by session_id.

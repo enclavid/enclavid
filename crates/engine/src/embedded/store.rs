@@ -18,8 +18,6 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
-use super::registry::Slot;
-
 /// Static description of one `enclavid:embedded/*` interface. Picked
 /// per-kind by the marker types below ([`DisclosureFields`],
 /// [`Localized`]) so the generic [`RefStore`] can produce
@@ -66,24 +64,27 @@ impl RefKind for Icon {
     type Stored = String;
 }
 
-/// Generic backing store: per-kind reverse index over Phase A debug
-/// tokens. Carries enough to answer the two questions the host fn
-/// and the consumer ever ask:
+/// Generic backing store: per-kind reverse index over ref tokens.
+/// Carries enough to answer the two questions the host fn and the
+/// consumer ever ask:
 ///
-///   * get_token: given `(slot, key)`, does this slot own `key`
-///     under this kind? If yes, return the ref token.
-///   * lookup: given a ref token, what data did the slot that
+///   * get_token: given `(catalog_hash, key)`, did that catalog
+///     declare `key` under this kind? If yes, return the ref token.
+///   * lookup: given a ref token, what data did the catalog that
 ///     issued it declare?
 ///
-/// `slot_count` is the only piece of slot-shape state — it lets
-/// [`get_token`](Self::get_token) surface a clean "slot X has no
-/// registered component" error before the cheaper `by_token` miss
-/// path. The membership itself rides on `by_token`: a slot-X token
-/// is in the map iff some component at slot X declared the key
-/// under this kind, so a single `contains_key` answers both
-/// "key declared?" and "issued by the right slot?".
+/// Catalogs are identified by their **content-hash**
+/// ([`catalog_hash`](super::hash::catalog_hash)), not a positional
+/// slot — the hash survives wac fusion (which scrambles nesting order)
+/// so a token minted at compose time still resolves at run time. The
+/// membership itself rides on `by_token`: a token for `(hash, key)` is
+/// in the map iff the catalog with that hash declared the key, so a
+/// single `contains_key` answers "key declared by this catalog?".
+/// `catalogs` is the ordered list of contributing hashes (composition
+/// order, policy first) that [`get_token_first_match`](Self::
+/// get_token_first_match) walks.
 pub struct RefStore<K: RefKind> {
-    slot_count: usize,
+    catalogs: Vec<[u8; 32]>,
     by_token: HashMap<String, K::Stored>,
     /// BLAKE3 keyed-hash secret used by [`compute_ref`]. Same value
     /// across all three stores in one `EmbeddedRegistry` — kind
@@ -98,7 +99,7 @@ pub struct RefStore<K: RefKind> {
 impl<K: RefKind> Default for RefStore<K> {
     fn default() -> Self {
         Self {
-            slot_count: 0,
+            catalogs: Vec::new(),
             by_token: HashMap::new(),
             ref_key: [0u8; 32],
             _marker: PhantomData,
@@ -113,72 +114,75 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RefStore")
             .field("kind", &K::NAME)
-            .field("slot_count", &self.slot_count)
+            .field("catalog_count", &self.catalogs.len())
             .field("by_token", &self.by_token)
             .finish()
     }
 }
 
 impl<K: RefKind> RefStore<K> {
-    /// Build a store from per-slot iterables. Each slot's
-    /// `(key, stored)` pairs are walked once, each producing one
-    /// `by_token` entry under the computed token. Slot order in the
-    /// outer iterator determines slot indices (0, 1, ...).
-    pub(crate) fn build_from<I, S>(slots: I, ref_key: [u8; 32]) -> Self
+    /// Build a store from per-catalog iterables. Each catalog is a
+    /// `(content_hash, items)` pair; every `(key, stored)` produces one
+    /// `by_token` entry under `compute_ref(content_hash, key)`. Catalog
+    /// order in the outer iterator is composition order (policy first)
+    /// and fixes the first-match order. Byte-identical catalogs (same
+    /// hash) coalesce — recorded once, their tokens collide harmlessly.
+    pub(crate) fn build_from<I, S>(catalogs: I, ref_key: [u8; 32]) -> Self
     where
-        I: IntoIterator<Item = S>,
+        I: IntoIterator<Item = ([u8; 32], S)>,
         S: IntoIterator<Item = (String, K::Stored)>,
     {
         let mut by_token: HashMap<String, K::Stored> = HashMap::new();
-        let mut slot_count = 0usize;
-        for items in slots {
-            let slot = slot_count;
+        let mut catalog_hashes: Vec<[u8; 32]> = Vec::new();
+        for (hash, items) in catalogs {
             for (key, stored) in items {
-                let token = compute_ref::<K>(slot, &key, &ref_key);
+                let token = compute_ref::<K>(&hash, &key, &ref_key);
                 by_token.insert(token, stored);
             }
-            slot_count += 1;
+            if !catalog_hashes.contains(&hash) {
+                catalog_hashes.push(hash);
+            }
         }
         Self {
-            slot_count,
+            catalogs: catalog_hashes,
             by_token,
             ref_key,
             _marker: PhantomData,
         }
     }
 
-    /// Compute the ref token for `(slot, key)` if the pair is
-    /// declared in this store. Returns `None` when:
-    ///
-    ///   * `slot` is outside the composition (host-side wiring bug;
-    ///     unreachable from a well-formed runner).
-    ///   * The component at `slot` never declared `key` for this
-    ///     store's kind (the expected guest-side miss).
+    /// Compute the ref token for `(catalog_hash, key)` if that catalog
+    /// declared `key` under this kind, else `None` (the expected
+    /// guest-side miss for a key nobody declared).
     ///
     /// Pure data-layer Option — turning a `None` into a wasm trap is
     /// the host fn's responsibility (see [`embedded::host`](super::
     /// host)), so this type never depends on wasmtime.
     ///
-    /// Dispatched per-kind from two places:
-    ///
-    ///   * Policy slot 0: the bindgen-generated `Host` trait impls
-    ///     on [`HostState`](crate::state::HostState) in
-    ///     [`embedded::host`](super::host).
-    ///   * Plugin slots ≥ 1: the closures registered by
-    ///     [`embedded::host::register_for_slot`](super::host::
-    ///     register_for_slot) on each plugin's Linker, with `slot`
-    ///     captured.
-    ///
-    /// `slot` is set by the host, never read from the guest — that's
-    /// the per-component scoping mechanism. A guest invoking
-    /// `disclosure_field("x")` has no say in which slot the
-    /// closure attributes the call to.
-    pub fn get_token(&self, slot: Slot, key: &str) -> Option<String> {
-        if slot >= self.slot_count {
-            return None;
-        }
-        let token = compute_ref::<K>(slot, key, &self.ref_key);
+    /// Under strict per-component routing the host resolves at a
+    /// SPECIFIC catalog (the one bound to the calling component's
+    /// import); under the merged path it drives
+    /// [`get_token_first_match`](Self::get_token_first_match). Either
+    /// way `catalog_hash` is host-side data, never read from the guest.
+    pub fn get_token(&self, catalog_hash: &[u8; 32], key: &str) -> Option<String> {
+        let token = compute_ref::<K>(catalog_hash, key, &self.ref_key);
         self.by_token.contains_key(&token).then_some(token)
+    }
+
+    /// Compute the ref token for the FIRST catalog (composition order,
+    /// policy first) that declared `key`, or `None` if none did.
+    ///
+    /// The resolution mode for the MERGED path: DF always (option B —
+    /// a key any catalog declared is disclosable, bounded by the
+    /// visible static-set size + consent), and i18n / icons whenever a
+    /// component's import wasn't routed to a distinct per-catalog slot
+    /// (plain fusion). Collisions (same key, different stored value in
+    /// two catalogs) resolve by composition order; that only matters
+    /// for i18n, whose stored value is the per-component translation
+    /// set — for DF and icons the stored value IS the key, so first
+    /// match is always value-correct whichever catalog answered.
+    pub fn get_token_first_match(&self, key: &str) -> Option<String> {
+        self.catalogs.iter().find_map(|hash| self.get_token(hash, key))
     }
 
     /// Resolve a ref token to the stored data the slot that issued
@@ -215,27 +219,26 @@ impl<K: RefKind> RefStore<K> {
     }
 }
 
-/// Phase B token: `hex(BLAKE3-keyed(ref_key, slot_be ‖ tag ‖ ':' ‖
+/// Ref token: `hex(BLAKE3-keyed(ref_key, catalog_hash ‖ tag ‖ ':' ‖
 /// key))[..32]` — 128 bits of forge resistance. The `ref_key` is
 /// TEE-only (derived per-policy from `tee_seal_key + policy_ref` in
-/// the api crate), so a guest WASM component can't synthesise a
-/// foreign-slot ref by guessing the format: it doesn't have the key
-/// to compute valid BLAKE3-keyed output for any `(slot, key)` pair.
+/// the api crate), so a guest WASM component can't synthesise a ref
+/// for a key nobody declared: it doesn't have the key to compute valid
+/// BLAKE3-keyed output for any `(catalog_hash, key)` pair.
 ///
 /// The reverse-index in [`RefStore::by_token`] then turns the
 /// membership check into pure data — every issued token sits in the
 /// map, and any opaque string a guest synthesises misses with
 /// overwhelming probability.
 ///
-/// Domain separation across kinds rides on the TAG byte fed into the
-/// hash input; the same `ref_key` powers all three stores in one
-/// registry. Slot is encoded big-endian as 8 bytes so the input is
-/// unambiguous (a `:` literal between tag and key keeps tag/key
-/// concatenation collision-free with a similarly-tagged sibling
-/// kind).
-fn compute_ref<K: RefKind>(slot: Slot, key: &str, ref_key: &[u8; 32]) -> String {
-    let mut input = Vec::with_capacity(9 + K::TAG.len() + key.len());
-    input.extend_from_slice(&(slot as u64).to_be_bytes());
+/// `catalog_hash` (32 bytes) identifies the issuing catalog by content,
+/// not position, so the token survives fusion. Domain separation across
+/// kinds rides on the TAG byte; the `:` literal between tag and key
+/// keeps tag/key concatenation collision-free with a similarly-tagged
+/// sibling kind.
+fn compute_ref<K: RefKind>(catalog_hash: &[u8; 32], key: &str, ref_key: &[u8; 32]) -> String {
+    let mut input = Vec::with_capacity(32 + K::TAG.len() + 1 + key.len());
+    input.extend_from_slice(catalog_hash);
     input.extend_from_slice(K::TAG.as_bytes());
     input.push(b':');
     input.extend_from_slice(key.as_bytes());

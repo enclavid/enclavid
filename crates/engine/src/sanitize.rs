@@ -337,19 +337,23 @@ mod tests {
         let mut localized: HashMap<String, Vec<Translation>> = HashMap::new();
         localized.insert("first_name-label".into(), vec![]);
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
-        b.add_component(ComponentDecls {
-            disclosure_fields: ["first_name", "tax_id"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            localized,
-            icons: Default::default(),
-        });
+        let policy = [0u8; 32];
+        b.add_component(
+            policy,
+            ComponentDecls {
+                disclosure_fields: ["first_name", "tax_id"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                localized,
+                icons: Default::default(),
+            },
+        );
         let embedded = b.build();
         Fixture {
-            first_name_key: embedded.disclosure_fields.get_token(0, "first_name").unwrap(),
-            tax_id_key: embedded.disclosure_fields.get_token(0, "tax_id").unwrap(),
-            first_name_label: embedded.localized.get_token(0, "first_name-label").unwrap(),
+            first_name_key: embedded.disclosure_fields.get_token(&policy, "first_name").unwrap(),
+            tax_id_key: embedded.disclosure_fields.get_token(&policy, "tax_id").unwrap(),
+            first_name_label: embedded.localized.get_token(&policy, "first_name-label").unwrap(),
             embedded,
         }
     }
@@ -483,31 +487,39 @@ mod tests {
         plugin_localized.insert("plugin-label".into(), vec![]);
 
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
-        b.add_component(ComponentDecls {
-            disclosure_fields: ["policy-only", "shared"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            localized: policy_localized,
-            icons: Default::default(),
-        });
-        b.add_component(ComponentDecls {
-            disclosure_fields: ["plugin-only", "shared"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            localized: plugin_localized,
-            icons: Default::default(),
-        });
+        let policy = [0u8; 32];
+        let plugin = [1u8; 32];
+        b.add_component(
+            policy,
+            ComponentDecls {
+                disclosure_fields: ["policy-only", "shared"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                localized: policy_localized,
+                icons: Default::default(),
+            },
+        );
+        b.add_component(
+            plugin,
+            ComponentDecls {
+                disclosure_fields: ["plugin-only", "shared"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                localized: plugin_localized,
+                icons: Default::default(),
+            },
+        );
         let embedded = b.build();
 
         MultiFixture {
-            policy_df: embedded.disclosure_fields.get_token(0, "policy-only").unwrap(),
-            plugin_df: embedded.disclosure_fields.get_token(1, "plugin-only").unwrap(),
-            shared_policy_df: embedded.disclosure_fields.get_token(0, "shared").unwrap(),
-            shared_plugin_df: embedded.disclosure_fields.get_token(1, "shared").unwrap(),
-            policy_label: embedded.localized.get_token(0, "policy-label").unwrap(),
-            plugin_label: embedded.localized.get_token(1, "plugin-label").unwrap(),
+            policy_df: embedded.disclosure_fields.get_token(&policy, "policy-only").unwrap(),
+            plugin_df: embedded.disclosure_fields.get_token(&plugin, "plugin-only").unwrap(),
+            shared_policy_df: embedded.disclosure_fields.get_token(&policy, "shared").unwrap(),
+            shared_plugin_df: embedded.disclosure_fields.get_token(&plugin, "shared").unwrap(),
+            policy_label: embedded.localized.get_token(&policy, "policy-label").unwrap(),
+            plugin_label: embedded.localized.get_token(&plugin, "plugin-label").unwrap(),
             embedded,
         }
     }

@@ -1,39 +1,42 @@
-//! `enclavid:embedded/*` ref scoping — asymmetric by kind.
+//! `enclavid:embedded/*` ref scoping — first match across catalogs.
 //!
 //! Three **public stores** on [`EmbeddedRegistry`], one per
 //! `enclavid:embedded/*` interface:
 //!
 //!   * [`DisclosureFieldsStore`] — machine identifiers consumed by
-//!     the consumer SDK as `DisplayField.key`. **Policy-gated**:
-//!     only the policy (slot 0) declares DF keys; the host fn rejects
-//!     any resolution that's not in slot 0's catalog, regardless of which
-//!     slot called it. Plugins don't ship a DF section. Single source
-//!     of truth for what's emittable to the consumer; cardinality
-//!     bound = `|policy.df|`.
-//!   * [`LocalizedStore`] — translation catalogs. **Per-component
-//!     scoped**: each slot declares its own i18n keys. Resolved to
+//!     the consumer SDK as `DisplayField.key`. The one kind that
+//!     reaches the consumer.
+//!   * [`LocalizedStore`] — translation catalogs. Resolved to
 //!     applicant-locale text inside the TEE before any wire send;
 //!     consumer never sees refs or text.
-//!   * [`IconStore`] — frontend dispatch names. **Per-component
-//!     scoped**: each slot declares its own icon names. Reach the
-//!     applicant frontend, never the consumer envelope.
+//!   * [`IconStore`] — frontend dispatch names. Reach the applicant
+//!     frontend, never the consumer envelope.
 //!
-//! Why the asymmetry: the bandwidth-bound concern that drives the
-//! DF gate (consumer can collude over `DisplayField.key` cardinality)
-//! doesn't apply to i18n / icons — they're applicant-facing only.
-//! The applicant is the defender, not the covert-channel adversary,
-//! so per-component scoping is fine for those.
+//! Each component (policy at slot 0, plugins at slots 1..N) declares
+//! its own keys per kind, and all three stores resolve a bare key by
+//! **first match across the merged catalogs** (composition order,
+//! policy first). This mirrors what wac single-store fusion does to
+//! the imports: the per-component `enclavid:embedded/i18n` imports
+//! unify into one host impl, so the host resolves without knowing
+//! which component called. See [`super::host`] and
+//! [`RefStore::get_token_first_match`](super::store::RefStore::
+//! get_token_first_match).
+//!
+//! DF is not resolution-gated to the policy even though it reaches the
+//! consumer: the policy chooses which `display-field`s it discloses
+//! and the applicant consents to every `(key, label, value)` on
+//! screen (the sole auditor). That is the bound on what leaks, not the
+//! resolution slot. Each component's DF section is size-capped at
+//! build time (`MAX_DECLARED_DISCLOSURE_FIELDS`).
 //!
 //! All three wrap the same private generic [`RefStore`](super::store::
-//! RefStore) so the membership / get_token / lookup mechanics live
-//! in one place. The asymmetry lives in [`super::host::register_for_slot`]
-//! — it hands `POLICY_SLOT` to the DF closure regardless of the
-//! plugin's own slot, and the plugin's own `slot` to i18n / icons.
+//! RefStore) so the membership / get_token / lookup mechanics live in
+//! one place.
 //!
 //! The registry is **immutable per run**: built once in
 //! [`Runner::run`](crate::Runner::run) from `load_embedded` output for
-//! every component, frozen, then shared by `Arc` into every Store
-//! (policy `HostState` + each plugin `PluginHostState`).
+//! every component, frozen, then shared by `Arc` into the policy
+//! `HostState`.
 //!
 //! ## Token format
 //!
@@ -41,11 +44,11 @@
 //! [..32]` — opaque 32-character lowercase-hex strings. The
 //! `ref_key` is TEE-only (derived per-policy from `tee_seal_key +
 //! policy_ref` by the api crate), so a guest WASM component can't
-//! synthesise a foreign-slot ref by guessing the format. The
-//! `get_token` path validates the token exists in `by_token` before
-//! returning; under DF policy-gating the closure always passes
-//! `POLICY_SLOT` so the emitted token is slot-0-flavored regardless
-//! of caller.
+//! synthesise a valid ref by guessing the format: it can't compute the
+//! keyed hash. The reverse index in `by_token` then turns membership
+//! into pure data — every declared `(slot, key)` sits in the map, and
+//! first-match resolution mints the earliest-slot token whose entry is
+//! present.
 
 use std::collections::{HashMap, HashSet};
 
@@ -67,10 +70,6 @@ pub type LocalizedStore = RefStore<Localized>;
 /// returns `Option<&String>` — the declared icon name the applicant
 /// frontend dispatches against its bundled SVG library.
 pub type IconStore = RefStore<Icon>;
-
-/// Slot index assigned to a participating component. Slot 0 is always
-/// the policy; slots 1..N are plugins in `PluginInstance` list order.
-pub type Slot = usize;
 
 /// One `(language, text)` row inside a localized declaration. Engine
 /// stores every translation a component declared verbatim — locale
@@ -136,54 +135,54 @@ impl EmbeddedRegistry {
 
 // ----- Builder -----
 
-/// Staging-area for [`EmbeddedRegistry`]. Add one component per slot
-/// in slot order, then `build()` to freeze.
+/// Staging-area for [`EmbeddedRegistry`]. Add one component per
+/// catalog in composition order (policy first), then `build()` to
+/// freeze.
 pub struct EmbeddedRegistryBuilder {
-    components: Vec<ComponentDecls>,
+    /// `(content_hash, decls)` per component. The hash is the
+    /// [`catalog_hash`](super::hash::catalog_hash) the caller computed
+    /// from the component's raw embedded-section bytes — the same value
+    /// the fuser routes that component's imports under.
+    components: Vec<([u8; 32], ComponentDecls)>,
     ref_key: [u8; 32],
 }
 
 impl EmbeddedRegistryBuilder {
-    /// Append a component at the next slot index. Order matters: the
-    /// nth call to `add_component` becomes slot `n`. Caller is
-    /// responsible for invoking in the slot order it intends (policy
-    /// first, then plugins as they appear in `PluginInstance` list).
-    pub fn add_component(&mut self, decls: ComponentDecls) -> Slot {
-        let slot = self.components.len();
-        self.components.push(decls);
-        slot
+    /// Append a component's catalog under its content-hash. Order is
+    /// composition order (policy first, then plugins as they appear in
+    /// the `PluginInstance` list) and fixes the first-match order.
+    pub fn add_component(&mut self, hash: [u8; 32], decls: ComponentDecls) {
+        self.components.push((hash, decls));
     }
 
-    /// Finalise: walk every component, compute every `(slot, kind,
-    /// key)` token under the builder's `ref_key`, populate all three
-    /// stores' `by_token` maps. After this returns the registry is
-    /// immutable.
+    /// Finalise: walk every component, compute every `(catalog_hash,
+    /// kind, key)` token under the builder's `ref_key`, populate all
+    /// three stores' `by_token` maps. After this returns the registry
+    /// is immutable.
     pub fn build(self) -> EmbeddedRegistry {
-        // Materialise the per-slot iterables the generic
+        // Materialise the per-catalog iterables the generic
         // `RefStore::build_from` consumes. One walk over
-        // `self.components`, destructuring each into the three
-        // per-kind slices — each kind ends up with its own
-        // `RefStore` populated independently under the same
-        // `ref_key`; kind separation rides on the TAG byte fed into
-        // BLAKE3 inside `compute_ref`.
+        // `self.components`, destructuring each into the three per-kind
+        // catalogs — each kind ends up with its own `RefStore`
+        // populated independently under the same `ref_key`; kind
+        // separation rides on the TAG byte fed into BLAKE3 inside
+        // `compute_ref`.
         let n = self.components.len();
-        let mut df_slots: Vec<Vec<(String, String)>> = Vec::with_capacity(n);
-        let mut l_slots: Vec<Vec<(String, Vec<Translation>)>> = Vec::with_capacity(n);
-        let mut icon_slots: Vec<Vec<(String, String)>> = Vec::with_capacity(n);
-        for c in self.components {
-            df_slots.push(
-                c.disclosure_fields
-                    .into_iter()
-                    .map(|k| (k.clone(), k))
-                    .collect(),
-            );
-            l_slots.push(c.localized.into_iter().collect());
-            icon_slots.push(c.icons.into_iter().map(|n| (n.clone(), n)).collect());
+        let mut df: Vec<([u8; 32], Vec<(String, String)>)> = Vec::with_capacity(n);
+        let mut loc: Vec<([u8; 32], Vec<(String, Vec<Translation>)>)> = Vec::with_capacity(n);
+        let mut icons: Vec<([u8; 32], Vec<(String, String)>)> = Vec::with_capacity(n);
+        for (hash, c) in self.components {
+            df.push((
+                hash,
+                c.disclosure_fields.into_iter().map(|k| (k.clone(), k)).collect(),
+            ));
+            loc.push((hash, c.localized.into_iter().collect()));
+            icons.push((hash, c.icons.into_iter().map(|n| (n.clone(), n)).collect()));
         }
         EmbeddedRegistry {
-            disclosure_fields: RefStore::build_from(df_slots, self.ref_key),
-            localized: RefStore::build_from(l_slots, self.ref_key),
-            icons: RefStore::build_from(icon_slots, self.ref_key),
+            disclosure_fields: RefStore::build_from(df, self.ref_key),
+            localized: RefStore::build_from(loc, self.ref_key),
+            icons: RefStore::build_from(icons, self.ref_key),
         }
     }
 }
@@ -219,21 +218,28 @@ mod tests {
         }
     }
 
+    /// Distinct synthetic catalog hashes for tests. Production hashes
+    /// come from `catalog_hash` over raw section bytes; the store only
+    /// needs them distinct per catalog, so `[n; 32]` suffices here.
+    fn h(n: u8) -> [u8; 32] {
+        [n; 32]
+    }
+
     #[test]
     fn empty_registry_resolve_traps() {
         let reg = EmbeddedRegistry::default();
-        assert!(reg.disclosure_fields.get_token(0, "anything").is_none());
-        assert!(reg.localized.get_token(0, "anything").is_none());
+        assert!(reg.disclosure_fields.get_token(&h(0), "anything").is_none());
+        assert!(reg.localized.get_token(&h(0), "anything").is_none());
     }
 
     #[test]
     fn disclosure_field_resolve_and_lookup() {
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
-        b.add_component(decls(&["passport-number"], &[]));
+        b.add_component(h(0), decls(&["passport-number"], &[]));
         let reg = b.build();
-        let token = reg.disclosure_fields.get_token(0, "passport-number").unwrap();
-        // Phase B: opaque 32-char hex digest. Stability via round-trip
-        // (lookup returns the declared raw key), not via literal value.
+        let token = reg.disclosure_fields.get_token(&h(0), "passport-number").unwrap();
+        // Opaque 32-char hex digest. Stability via round-trip (lookup
+        // returns the declared raw key), not via literal value.
         assert_eq!(token.len(), 32);
         assert!(token.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         assert_eq!(
@@ -249,12 +255,15 @@ mod tests {
     #[test]
     fn localized_resolve_and_lookup_returns_translations() {
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
-        b.add_component(decls(
-            &[],
-            &[("consent-reason", &[("en", "Verify identity"), ("ru", "Проверка")])],
-        ));
+        b.add_component(
+            h(0),
+            decls(
+                &[],
+                &[("consent-reason", &[("en", "Verify identity"), ("ru", "Проверка")])],
+            ),
+        );
         let reg = b.build();
-        let token = reg.localized.get_token(0, "consent-reason").unwrap();
+        let token = reg.localized.get_token(&h(0), "consent-reason").unwrap();
         assert_eq!(token.len(), 32);
         let ts = reg.localized.lookup(&token).expect("token resolves");
         assert_eq!(ts.len(), 2);
@@ -265,31 +274,33 @@ mod tests {
     #[test]
     fn rejects_undeclared_key() {
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
-        b.add_component(decls(&["a"], &[("b", &[("en", "x")])]));
+        b.add_component(h(0), decls(&["a"], &[("b", &[("en", "x")])]));
         let reg = b.build();
-        assert!(reg.disclosure_fields.get_token(0, "missing").is_none());
-        assert!(reg.localized.get_token(0, "missing").is_none());
+        assert!(reg.disclosure_fields.get_token(&h(0), "missing").is_none());
+        assert!(reg.localized.get_token(&h(0), "missing").is_none());
     }
 
     #[test]
-    fn rejects_cross_slot_key() {
+    fn rejects_cross_catalog_key() {
+        // A key declared by one catalog does not resolve against
+        // another's hash — strict per-catalog isolation.
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
-        b.add_component(decls(&["policy-only"], &[]));
-        b.add_component(decls(&["plugin-only"], &[]));
+        b.add_component(h(0), decls(&["policy-only"], &[]));
+        b.add_component(h(1), decls(&["plugin-only"], &[]));
         let reg = b.build();
-        assert!(reg.disclosure_fields.get_token(0, "plugin-only").is_none());
-        assert!(reg.disclosure_fields.get_token(1, "policy-only").is_none());
-        assert!(reg.disclosure_fields.get_token(0, "policy-only").is_some());
-        assert!(reg.disclosure_fields.get_token(1, "plugin-only").is_some());
+        assert!(reg.disclosure_fields.get_token(&h(0), "plugin-only").is_none());
+        assert!(reg.disclosure_fields.get_token(&h(1), "policy-only").is_none());
+        assert!(reg.disclosure_fields.get_token(&h(0), "policy-only").is_some());
+        assert!(reg.disclosure_fields.get_token(&h(1), "plugin-only").is_some());
     }
 
     #[test]
     fn same_key_in_both_stores_yields_distinct_tokens() {
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
-        b.add_component(decls(&["shared"], &[("shared", &[("en", "x")])]));
+        b.add_component(h(0), decls(&["shared"], &[("shared", &[("en", "x")])]));
         let reg = b.build();
-        let df = reg.disclosure_fields.get_token(0, "shared").unwrap();
-        let l = reg.localized.get_token(0, "shared").unwrap();
+        let df = reg.disclosure_fields.get_token(&h(0), "shared").unwrap();
+        let l = reg.localized.get_token(&h(0), "shared").unwrap();
         assert_ne!(df, l);
         assert!(reg.localized.lookup(&df).is_none());
         assert!(reg.disclosure_fields.lookup(&l).is_none());
@@ -298,134 +309,105 @@ mod tests {
     #[test]
     fn lookup_misses_unregistered_string() {
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
-        b.add_component(decls(&["a"], &[]));
+        b.add_component(h(0), decls(&["a"], &[]));
         let reg = b.build();
         assert!(reg.disclosure_fields.lookup("a").is_none());
-        // Phase A debug-format strings no longer collide with the
-        // Phase B opaque hex tokens — neither is in the by_token map.
+        // Arbitrary non-token strings miss — nothing but a genuinely
+        // issued opaque token is in the by_token map.
         assert!(reg.disclosure_fields.lookup("9:d:a").is_none());
         assert!(reg.disclosure_fields.lookup("0:x:a").is_none());
     }
 
     #[test]
-    fn unknown_slot_traps() {
+    fn unknown_catalog_traps() {
         let reg = EmbeddedRegistry::builder(TEST_REF_KEY).build();
-        assert!(reg.disclosure_fields.get_token(0, "x").is_none());
-        assert!(reg.localized.get_token(0, "x").is_none());
+        assert!(reg.disclosure_fields.get_token(&h(0), "x").is_none());
+        assert!(reg.localized.get_token(&h(0), "x").is_none());
     }
 
     #[test]
     fn different_ref_keys_produce_different_tokens() {
-        // Forgery defence: same `(slot, key)` under two distinct
+        // Forgery defence: same `(catalog_hash, key)` under two distinct
         // `ref_key`s produces two completely unrelated tokens — and
         // neither registry recognises the other's.
         let mut a = EmbeddedRegistry::builder([1u8; 32]);
-        a.add_component(decls(&["passport-number"], &[]));
+        a.add_component(h(0), decls(&["passport-number"], &[]));
         let reg_a = a.build();
         let mut b = EmbeddedRegistry::builder([2u8; 32]);
-        b.add_component(decls(&["passport-number"], &[]));
+        b.add_component(h(0), decls(&["passport-number"], &[]));
         let reg_b = b.build();
-        let token_a = reg_a.disclosure_fields.get_token(0, "passport-number").unwrap();
-        let token_b = reg_b.disclosure_fields.get_token(0, "passport-number").unwrap();
+        let token_a = reg_a.disclosure_fields.get_token(&h(0), "passport-number").unwrap();
+        let token_b = reg_b.disclosure_fields.get_token(&h(0), "passport-number").unwrap();
         assert_ne!(token_a, token_b);
         assert!(reg_a.disclosure_fields.lookup(&token_b).is_none());
         assert!(reg_b.disclosure_fields.lookup(&token_a).is_none());
     }
 
-    // ---------- DF policy-gating asymmetry ----------
+    // ---------- first-match resolution across merged catalogs ----------
     //
-    // The macros in `embedded::host` are kind-symmetric — they pass
-    // whatever slot they're handed straight into `get_token`. The
-    // asymmetric pick happens in `register_for_slot`:
-    //
-    //   * DF → `POLICY_SLOT` (every plugin resolve runs against
-    //     slot 0; policy is the single bandwidth gate).
-    //   * i18n / icons → caller's own slot (per-component scoping).
-    //
-    // The tests below pin the **primitive** that those decisions
-    // depend on. If someone flips the slot in `register_for_slot`
-    // (e.g. accidentally regressing DF back to per-slot), the
-    // observable end-result is what these tests predict — they're
-    // the contract that the dispatcher's slot-pick must align with.
+    // The merged path (DF always; i18n/icons when not strictly routed)
+    // resolves a bare key by first match across every catalog in
+    // composition order (policy first). The tests below pin the
+    // `get_token_first_match` primitive. Scoping / anti-forgery rides on
+    // catalog membership + the keyed-hash token (see the cross-registry
+    // test above), not on a positional slot.
 
-    /// Policy-gated DF: lookup must land on slot 0 regardless of
-    /// which slot the plugin lives at. If `register_for_slot` ever
-    /// passes plugin's own slot for DF (the per-component scoping
-    /// shape used by i18n / icons), this lookup would miss even
-    /// though the policy explicitly whitelisted the key.
+    /// A key any component declared resolves — including a plugin's,
+    /// even when the policy has no such section. This is the well-known
+    /// plugin's shape: it ships its own i18n / icons and (optionally) DF
+    /// keys the policy never restated.
     #[test]
-    fn df_resolves_at_policy_slot_when_plugin_has_no_df() {
-        // Policy (slot 0) whitelists `passport_number`; plugin
-        // (slot 1) has NO DF section — under Option C this is the
-        // normal shape (plugins don't ship DF at all).
+    fn first_match_resolves_from_any_catalog() {
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
-        b.add_component(decls(&["passport_number"], &[]));
-        b.add_component(ComponentDecls::default()); // plugin, empty
+        b.add_component(h(0), ComponentDecls::default()); // policy, empty
+        b.add_component(h(1), decls(&["passport_number"], &[("plugin_label", &[("en", "hi")])]));
         let reg = b.build();
 
-        // What `register_for_slot` does for DF on plugin slot 1:
-        // passes POLICY_SLOT (0), NOT 1. Lookup at slot 0 hits.
         assert!(
-            reg.disclosure_fields.get_token(0, "passport_number").is_some(),
-            "policy-whitelisted key resolves at slot 0 — what the DF \
-             closure does under policy-gating"
+            reg.disclosure_fields
+                .get_token_first_match("passport_number")
+                .is_some(),
+            "a DF key declared by the plugin resolves via first match"
         );
-
-        // Counter-check: if the dispatcher mistakenly used the
-        // plugin's own slot (per-component shape), the same call
-        // would miss because plugin's DF section is empty.
         assert!(
-            reg.disclosure_fields.get_token(1, "passport_number").is_none(),
-            "plugin slot has no DF declared — would miss without \
-             policy-gating"
+            reg.localized.get_token_first_match("plugin_label").is_some(),
+            "a plugin's own i18n label resolves via first match"
         );
     }
 
-    /// Symmetric for the rejection path: when the policy DIDN'T
-    /// whitelist a key, the policy-gated lookup misses regardless
-    /// of whether the plugin (hypothetically) "knew" about it —
-    /// because plugins don't ship DF sections under Option C.
+    /// When two catalogs declare the same key, first match returns the
+    /// EARLIER catalog's token (composition order, policy first) —
+    /// deterministic and harmless for DF (identical keys; the policy
+    /// chooses what it discloses / the applicant consents).
     #[test]
-    fn df_rejects_unwhitelisted_key_even_when_plugin_present() {
+    fn first_match_prefers_earlier_catalog() {
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
-        b.add_component(decls(&["allowed_key"], &[])); // policy
-        b.add_component(ComponentDecls::default()); // plugin
+        b.add_component(h(0), decls(&["dup"], &[])); // policy
+        b.add_component(h(1), decls(&["dup"], &[])); // plugin
         let reg = b.build();
 
-        // Policy didn't whitelist `forbidden_key` → policy-gated
-        // lookup misses → host fn would trap with "slot 0 did not
-        // declare key 'forbidden_key'".
-        assert!(
-            reg.disclosure_fields.get_token(0, "forbidden_key").is_none(),
-            "unwhitelisted DF key traps via miss at slot 0"
+        let first = reg.disclosure_fields.get_token_first_match("dup").unwrap();
+        let earliest = reg.disclosure_fields.get_token(&h(0), "dup").unwrap();
+        assert_eq!(
+            first, earliest,
+            "first match resolves to the first catalog's token when both declare the key"
         );
     }
 
-    /// Per-component i18n: lookup must use the **plugin's** slot,
-    /// not slot 0. If `register_for_slot` ever pinned i18n to
-    /// `POLICY_SLOT` (matching DF), plugins shipping their own
-    /// labels would silently fail to resolve refs even with their
-    /// `i18n.json` section embedded.
+    /// A key no catalog declared misses under first match — the host
+    /// fn turns this into the "no component declared key" trap.
     #[test]
-    fn i18n_resolves_at_caller_slot_per_component() {
+    fn first_match_misses_undeclared_key() {
         let mut b = EmbeddedRegistry::builder(TEST_REF_KEY);
-        b.add_component(ComponentDecls::default()); // policy, empty i18n
-        b.add_component(decls(&[], &[("plugin_label", &[("en", "hi")])]));
+        b.add_component(h(0), decls(&["allowed_key"], &[])); // policy
+        b.add_component(h(1), ComponentDecls::default()); // plugin, empty
         let reg = b.build();
 
-        // Plugin's own i18n catalog gates plugin's resolve — slot 1.
         assert!(
-            reg.localized.get_token(1, "plugin_label").is_some(),
-            "plugin's i18n resolves at its own slot (per-component)"
-        );
-
-        // Counter-check: if the dispatcher mistakenly used
-        // POLICY_SLOT for i18n, the lookup would miss because the
-        // policy didn't declare the plugin's label.
-        assert!(
-            reg.localized.get_token(0, "plugin_label").is_none(),
-            "policy has no i18n declared — would miss under DF-style \
-             gating"
+            reg.disclosure_fields
+                .get_token_first_match("forbidden_key")
+                .is_none(),
+            "an undeclared key misses across every merged catalog"
         );
     }
 }

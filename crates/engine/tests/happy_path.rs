@@ -19,17 +19,15 @@
 //! invocation) rather than via a build.rs — this keeps normal engine
 //! builds free of wasm tooling dependencies and nightly requirements.
 
-use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use broker_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use enclavid_engine::{
-    ComponentDecls, ConsentDisclosure, EmbeddedRegistry, PluginInstance, Prop, RunInputs, RunStatus,
-    Runner, SessionChange, SessionListener, Translation,
+    ConsentDisclosure, EmbeddedRegistry, PluginInstance, Prop, RunInputs, RunStatus, Runner,
+    SessionChange, SessionListener,
 };
 use wit_component::ComponentEncoder;
 
@@ -174,7 +172,7 @@ async fn oversized_state_traps() {
         .runner
         .run(
             &h.policy,
-            &h.plugins,
+            &h.embedded_imports,
             Session::default(),
             Event::Start,
             props,
@@ -200,33 +198,47 @@ async fn oversized_state_traps() {
 
 struct Harness {
     runner: Runner,
+    /// The fused policy+well-known component (wac single-store fusion),
+    /// compiled once and driven through every reducer round.
     policy: wasmtime::component::Component,
-    plugins: Vec<PluginInstance>,
+    /// Distinct per-catalog i18n/icons imports the fusion produced —
+    /// handed to `run` so the host Linker registers them.
+    embedded_imports: Vec<enclavid_engine::EmbeddedImport>,
     embedded: Arc<EmbeddedRegistry>,
 }
 
 impl Harness {
     fn new() -> Self {
         let runner = Runner::new().unwrap();
-        let policy = runner.compile(test_policy_component()).unwrap();
-        let plugin = PluginInstance {
+        // Fuse the test policy with the well-known plugin into one
+        // component (the same path `Runner::compose` takes in prod).
+        // The fixtures carry their embedded sections (embedded verbatim
+        // from the author JSON), so `compose` derives each catalog's
+        // content-hash from the same bytes the registry keys on.
+        let plugins = vec![PluginInstance {
             package: WELL_KNOWN_PACKAGE.to_string(),
-            component: Arc::new(runner.compile(well_known_component()).unwrap()),
-        };
+            wasm: well_known_component().to_vec(),
+        }];
+        let composition = runner.compose(test_policy_component(), &plugins).unwrap();
 
-        // Composition-wide `EmbeddedRegistry`: slot 0 = policy, slot 1 =
-        // well-known — the SAME order as `plugins`, which the engine relies
-        // on to align slot indices. The `ref_key` is a fixed test value;
-        // production derives it per-policy from `tee_seal_key + policy_ref`.
+        // Composition-wide `EmbeddedRegistry`, keyed by each component's
+        // catalog content-hash — policy first, then well-known, the same
+        // order as the fused plugins. Both decls and hash come straight
+        // from the sealed wasm (`load_embedded`), so they match exactly
+        // what `compose` routed the imports under. The `ref_key` is a
+        // fixed test value; production derives it per-policy from
+        // `tee_seal_key + policy_ref`.
         let mut builder = EmbeddedRegistry::builder([7u8; 32]);
-        builder.add_component(load_test_policy_decls());
-        builder.add_component(load_well_known_decls());
+        for wasm in [test_policy_component(), well_known_component()] {
+            let cat = enclavid_engine::load_embedded(wasm).expect("load embedded");
+            builder.add_component(cat.hash, cat.decls);
+        }
         let embedded = Arc::new(builder.build());
 
         Self {
             runner,
-            policy,
-            plugins: vec![plugin],
+            policy: composition.component,
+            embedded_imports: composition.embedded_imports,
             embedded,
         }
     }
@@ -248,7 +260,7 @@ impl Harness {
         self.runner
             .run(
                 &self.policy,
-                &self.plugins,
+                &self.embedded_imports,
                 session,
                 event,
                 vec![],
@@ -311,26 +323,37 @@ fn fake_capture() -> MediaResult {
 // Component build + embedded-section loading
 // ---------------------------------------------------------------------
 
-/// Build the `test-policy` fixture (cached) and componentize it.
+fn policy_dir() -> String {
+    format!("{}/tests/fixtures/test-policy", env!("CARGO_MANIFEST_DIR"))
+}
+
+fn well_known_dir() -> String {
+    format!("{}/../../plugins/well-known", env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Build the `test-policy` fixture (cached), componentize it, and embed
+/// its author JSON as `enclavid:embedded.*` custom sections — a sealed
+/// component, exactly the shape the engine sees in production.
 fn test_policy_component() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
         .get_or_init(|| {
-            let dir = format!("{}/tests/fixtures/test-policy", env!("CARGO_MANIFEST_DIR"));
+            let dir = policy_dir();
             let module = format!("{dir}/target/wasm32-unknown-unknown/release/test_policy.wasm");
-            build_componentized(&dir, &module)
+            embed_sections(build_componentized(&dir, &module), &dir)
         })
         .as_slice()
 }
 
-/// Build the `enclavid:well-known` plugin (cached) and componentize it.
+/// Build the `enclavid:well-known` plugin (cached), componentize it, and
+/// embed its author JSON as custom sections.
 fn well_known_component() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
         .get_or_init(|| {
-            let dir = format!("{}/../../plugins/well-known", env!("CARGO_MANIFEST_DIR"));
+            let dir = well_known_dir();
             let module = format!("{dir}/target/wasm32-unknown-unknown/release/well_known.wasm");
-            build_componentized(&dir, &module)
+            embed_sections(build_componentized(&dir, &module), &dir)
         })
         .as_slice()
 }
@@ -354,58 +377,26 @@ fn build_componentized(crate_dir: &str, module_path: &str) -> Vec<u8> {
         .expect("componentize")
 }
 
-/// Load the test-policy's embedded sections (slot 0) straight from the
-/// on-disk source files. We bypass `load_embedded(wasm_bytes)` here
-/// because the test fixture isn't sealed — it's a raw componentized wasm
-/// without the embedded custom sections.
-fn load_test_policy_decls() -> ComponentDecls {
-    use enclavid_embedded::read_disclosure_fields;
-    let dir = format!("{}/tests/fixtures/test-policy", env!("CARGO_MANIFEST_DIR"));
-    let disclosure_fields =
-        read_disclosure_fields(Path::new(&format!("{dir}/disclosure-fields.json")))
-            .expect("read disclosure-fields.json")
-            .map(|s| s.fields.into_iter().collect())
-            .unwrap_or_default();
-    ComponentDecls {
-        disclosure_fields,
-        localized: read_localized(&dir),
-        icons: read_icon_names(&dir),
+/// Append the fixture's embedded sections (author JSON, byte-for-byte)
+/// to a componentized wasm — exactly what `enclavid embed` does. A
+/// missing file produces no section (well-known ships no
+/// disclosure-fields.json, for instance).
+fn embed_sections(mut wasm: Vec<u8>, dir: &str) -> Vec<u8> {
+    use enclavid_embedded::{SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS};
+    use wasm_encoder::{ComponentSection, CustomSection};
+    let read = |name: &str| std::fs::read(format!("{dir}/{name}")).ok();
+    for (name, data) in [
+        (SECTION_DISCLOSURE_FIELDS, read("disclosure-fields.json")),
+        (SECTION_I18N, read("i18n.json")),
+        (SECTION_ICONS, read("icons.json")),
+    ] {
+        if let Some(bytes) = data {
+            CustomSection {
+                name: name.into(),
+                data: bytes.into(),
+            }
+            .append_to_component(&mut wasm);
+        }
     }
-}
-
-/// Load the well-known plugin's embedded sections (slot 1). The plugin
-/// ships no disclosure-fields — the policy is the single source of truth
-/// for what's disclosable — so only i18n + icons are present.
-fn load_well_known_decls() -> ComponentDecls {
-    let dir = format!("{}/../../plugins/well-known", env!("CARGO_MANIFEST_DIR"));
-    ComponentDecls {
-        disclosure_fields: HashSet::new(),
-        localized: read_localized(&dir),
-        icons: read_icon_names(&dir),
-    }
-}
-
-fn read_localized(dir: &str) -> HashMap<String, Vec<Translation>> {
-    use enclavid_embedded::read_i18n;
-    read_i18n(Path::new(&format!("{dir}/i18n.json")))
-        .expect("read i18n.json")
-        .map(|s| s.entries)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(key, translations)| {
-            let rows = translations
-                .into_iter()
-                .map(|(language, text)| Translation { language, text })
-                .collect();
-            (key, rows)
-        })
-        .collect()
-}
-
-fn read_icon_names(dir: &str) -> HashSet<String> {
-    use enclavid_embedded::read_icons;
-    read_icons(Path::new(&format!("{dir}/icons.json")))
-        .expect("read icons.json")
-        .map(|s| s.names.into_iter().collect())
-        .unwrap_or_default()
+    wasm
 }

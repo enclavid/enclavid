@@ -12,9 +12,9 @@
 //! embedded/    ← `enclavid:embedded/*` slice: section parsing
 //!                (load_embedded), per-component scoping registry
 //!                (EmbeddedRegistry), and the embedded host fn impls
-//!                (slot 0 via bindgen, plugin slots via register_for_slot)
+//!                (slot 0 via bindgen)
 //!   ↓ uses
-//! state/       ← Store<T> data layer (HostState, PluginHostState, RunInputs)
+//! state/       ← Store<T> data layer (HostState, RunInputs)
 //! listener     ← outbound contract (SessionListener trait, SessionChange);
 //!                fired by the runner on a consent-disclosure accept
 //! limits, sanitize  ← leaf utilities
@@ -28,15 +28,17 @@ mod sanitize;
 mod state;
 
 pub use embedded::{
-    ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedRegistry,
+    ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedCatalog, EmbeddedRegistry,
     EmbeddedRegistryBuilder, Icon, IconStore, Localized, LocalizedStore, RefKind, RefStore,
-    Slot, Translation, load_embedded,
+    Translation, catalog_hash, load_embedded, load_embedded_nested, slug,
 };
 pub use broker_client::{
     Action, Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
 };
 pub use listener::{ConsentDisclosure, SessionChange, SessionListener};
-pub use runner::{PluginInstance, RunStatus, Runner};
+pub use runner::{
+    Composition, EmbeddedIface, EmbeddedImport, PluginInstance, RunStatus, Runner,
+};
 pub use state::RunInputs;
 /// The bindgen-generated `enclavid:policy/types.prop` — the policy's
 /// static-config value variant. Re-exported so the api crate can build

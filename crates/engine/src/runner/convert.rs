@@ -82,8 +82,9 @@ pub fn decision_to_domain(d: wit_policy::Decision) -> DDecision {
 
 /// Validate refs on a consent-disclosure render and lower it to the
 /// domain record. `fields` keys/labels go through `validate_fields`
-/// (the single bandwidth gate to the consumer); `reason` / `requester`
-/// are localized refs resolved through the composition's registry.
+/// (every key/label must be a ref the composition's registry issued
+/// before it can reach the consumer); `reason` / `requester` are
+/// localized refs resolved through that same registry.
 fn disclosure_to_domain(
     d: wit_policy::Disclosure,
     embedded: &EmbeddedRegistry,

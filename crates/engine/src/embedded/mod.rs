@@ -10,9 +10,8 @@
 //!            localized (Store<Localized>). Shared by Arc with every
 //!            consumer so slot attribution can't drift.
 //! host     ← `enclavid:embedded/disclosure-fields` and `enclavid:
-//!            embedded/i18n` host-fn impls. Policy slot (0) lives on
-//!            the `Host` trait; plugin slots are registered on each
-//!            plugin's Linker via `register_for_slot`.
+//!            embedded/i18n` host-fn impls, wired onto the policy's
+//!            `HostState` (slot 0) via the bindgen `Host` trait.
 //! ```
 //!
 //! Stays out of `runner/` (which is about execution). Embedded is its
@@ -20,14 +19,16 @@
 //! resolution all sit here.
 
 pub(crate) mod decls;
+pub(crate) mod hash;
 pub(crate) mod host;
 pub(crate) mod registry;
 pub(crate) mod store;
 
-pub use decls::load_embedded;
-pub use host::register_for_slot;
+pub use decls::{EmbeddedCatalog, load_embedded, load_embedded_nested};
+pub use hash::{catalog_hash, embedded_import_name, slug};
+pub use host::strict_token;
 pub use registry::{
     ComponentDecls, DisclosureFieldsStore, EmbeddedRegistry, EmbeddedRegistryBuilder,
-    IconStore, LocalizedStore, Slot, Translation,
+    IconStore, LocalizedStore, Translation,
 };
 pub use store::{DisclosureFields, Icon, Localized, RefKind, RefStore};

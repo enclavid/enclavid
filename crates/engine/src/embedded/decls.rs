@@ -24,76 +24,203 @@ use enclavid_embedded::{
     SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS,
     parse_disclosure_fields, parse_i18n, parse_icons,
 };
+use wasmparser::{Parser, Payload};
 
+use super::hash::catalog_hash;
 use super::registry::{ComponentDecls, Translation};
 use crate::limits::{
     MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_ICONS, MAX_DECLARED_LOCALIZED,
 };
 
-/// Walk the component-level custom sections of a wasm component
-/// binary, look up our two embedded sections, parse whichever are
-/// present, and project into [`ComponentDecls`].
+/// WIT interface a component exports iff it is the POLICY (not a
+/// plugin). Matched by prefix so a version bump doesn't break policy
+/// attribution in a fused artifact.
+const POLICY_EXPORT_PREFIX: &str = "enclavid:policy/policy";
+
+/// A single component's embedded catalog plus its identity. `hash` is
+/// the content-hash of the raw section bytes ([`catalog_hash`]) — the
+/// name each component's `enclavid:embedded/*` import is routed to
+/// under strict per-component routing, and the key the registry stores
+/// the catalog under. `is_policy` is true iff the component exports
+/// `enclavid:policy/policy` (used to attribute the policy slot when
+/// recovering catalogs from a fused artifact, where nesting order is
+/// not meaningful).
+pub struct EmbeddedCatalog {
+    pub is_policy: bool,
+    pub decls: ComponentDecls,
+    pub hash: [u8; 32],
+}
+
+/// Load one component's embedded catalog from the top-level custom
+/// sections of a wasm component binary. For a NON-fused policy or
+/// plugin this is the whole story; a component that ships no embedded
+/// sections yields an empty catalog. A fused artifact carries its
+/// catalogs NESTED — use [`load_embedded_nested`] for those.
 ///
 /// `wasm_bytes` is the (decrypted) policy or plugin wasm — caller
 /// already pulled and unwrapped any age-encrypted layer. We don't
 /// reach for wasmtime here: `wasmparser` walks the component's outer
 /// payloads without compiling anything, which is enough to extract
-/// custom sections by name.
-pub fn load_embedded(wasm_bytes: &[u8]) -> wasmtime::Result<ComponentDecls> {
-    let mut disclosure_section = None;
-    let mut i18n_section = None;
-    let mut icons_section = None;
-
-    use wasmparser::{Parser, Payload};
+/// custom sections by name and spot the policy export.
+pub fn load_embedded(wasm_bytes: &[u8]) -> wasmtime::Result<EmbeddedCatalog> {
+    // `parse_all` descends into nested components (flat stream with
+    // ComponentSection/End as depth markers), so restrict absorption to
+    // depth 0 — the component's OWN top-level sections. A non-fused
+    // policy/plugin never nests, so this is just its catalog.
+    let mut frame = RawFrame::default();
+    let mut depth = 0usize;
     for payload in Parser::new(0).parse_all(wasm_bytes) {
-        let payload = payload.map_err(|e| {
-            wasmtime::Error::msg(format!("wasm component parse: {e}"))
-        })?;
-        let Payload::CustomSection(reader) = payload else {
-            continue;
-        };
-        match reader.name() {
-            n if n == SECTION_DISCLOSURE_FIELDS => {
-                if disclosure_section.is_some() {
-                    return Err(wasmtime::Error::msg(format!(
-                        "duplicate custom section `{n}` in component wasm",
-                    )));
-                }
-                disclosure_section = Some(parse_disclosure_fields(reader.data()).map_err(
-                    |e| {
-                        wasmtime::Error::msg(format!(
-                            "parsing custom section `{n}` as JSON: {e}",
-                        ))
-                    },
-                )?);
-            }
-            n if n == SECTION_I18N => {
-                if i18n_section.is_some() {
-                    return Err(wasmtime::Error::msg(format!(
-                        "duplicate custom section `{n}` in component wasm",
-                    )));
-                }
-                i18n_section = Some(parse_i18n(reader.data()).map_err(|e| {
-                    wasmtime::Error::msg(format!(
-                        "parsing custom section `{n}` as JSON: {e}",
-                    ))
-                })?);
-            }
-            n if n == SECTION_ICONS => {
-                if icons_section.is_some() {
-                    return Err(wasmtime::Error::msg(format!(
-                        "duplicate custom section `{n}` in component wasm",
-                    )));
-                }
-                icons_section = Some(parse_icons(reader.data()).map_err(|e| {
-                    wasmtime::Error::msg(format!(
-                        "parsing custom section `{n}` as JSON: {e}",
-                    ))
-                })?);
-            }
+        let payload = payload.map_err(|e| wasmtime::Error::msg(format!("wasm component parse: {e}")))?;
+        match &payload {
+            Payload::ComponentSection { .. } | Payload::ModuleSection { .. } => depth += 1,
+            Payload::End(_) => depth = depth.saturating_sub(1),
+            other if depth == 0 => frame.absorb(other)?,
             _ => {}
         }
     }
+    frame.finish()
+}
+
+/// Recover every embedded catalog from a (possibly) fused artifact.
+/// Descends into nested sub-components — under wac fusion each original
+/// policy/plugin becomes a nested component carrying its own embedded
+/// sections. Returns one [`EmbeddedCatalog`] per component that ships
+/// at least one embedded section (empty wrappers are skipped). Works
+/// on a non-fused component too (returns its single catalog, if any).
+pub fn load_embedded_nested(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<EmbeddedCatalog>> {
+    // `parse_all` yields a flat stream across all nesting levels with
+    // ComponentSection/ModuleSection as descend markers and End as the
+    // ascend marker. Maintain a frame per open component/module: push
+    // on descend, pop + emit on ascend, absorb everything else into the
+    // current frame. Each frame collects only its OWN sections, so
+    // catalogs are correctly attributed per component.
+    let mut out = Vec::new();
+    let mut stack: Vec<RawFrame> = vec![RawFrame::default()];
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let payload = payload.map_err(|e| wasmtime::Error::msg(format!("wasm component parse: {e}")))?;
+        match &payload {
+            Payload::ComponentSection { .. } | Payload::ModuleSection { .. } => {
+                if stack.len() > MAX_NESTING {
+                    return Err(wasmtime::Error::msg(format!(
+                        "component nesting exceeds {MAX_NESTING} levels",
+                    )));
+                }
+                stack.push(RawFrame::default());
+            }
+            Payload::End(_) => {
+                if let Some(frame) = stack.pop() {
+                    if !frame.is_empty() {
+                        out.push(frame.finish()?);
+                    }
+                }
+            }
+            other => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.absorb(other)?;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Max component nesting we'll descend. `wac plug` output is depth 1;
+/// a re-fused hybrid core adds one more. A generous bound guards
+/// against pathological inputs without constraining real artifacts.
+const MAX_NESTING: usize = 8;
+
+/// Accumulator for one component node's raw embedded-section bytes plus
+/// whether it exports the policy interface. Borrows the section bytes
+/// from the wasm; [`finish`](RawFrame::finish) parses + hashes them
+/// into an owned [`EmbeddedCatalog`].
+#[derive(Default)]
+struct RawFrame<'a> {
+    disclosure_fields: Option<&'a [u8]>,
+    i18n: Option<&'a [u8]>,
+    icons: Option<&'a [u8]>,
+    is_policy: bool,
+}
+
+impl<'a> RawFrame<'a> {
+    /// True if this component shipped no embedded sections at all.
+    fn is_empty(&self) -> bool {
+        self.disclosure_fields.is_none() && self.i18n.is_none() && self.icons.is_none()
+    }
+
+    /// Fold one payload into the frame: capture our custom sections
+    /// (rejecting duplicates), and flag the policy export.
+    fn absorb(&mut self, payload: &Payload<'a>) -> wasmtime::Result<()> {
+        match payload {
+            Payload::CustomSection(reader) => {
+                let slot = match reader.name() {
+                    n if n == SECTION_DISCLOSURE_FIELDS => &mut self.disclosure_fields,
+                    n if n == SECTION_I18N => &mut self.i18n,
+                    n if n == SECTION_ICONS => &mut self.icons,
+                    _ => return Ok(()),
+                };
+                if slot.is_some() {
+                    return Err(wasmtime::Error::msg(format!(
+                        "duplicate custom section `{}` in component wasm",
+                        reader.name(),
+                    )));
+                }
+                *slot = Some(reader.data());
+            }
+            Payload::ComponentExportSection(reader) => {
+                for export in reader.clone() {
+                    let export = export.map_err(|e| {
+                        wasmtime::Error::msg(format!("component export parse: {e}"))
+                    })?;
+                    if export.name.0.starts_with(POLICY_EXPORT_PREFIX) {
+                        self.is_policy = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Parse the captured sections into a [`ComponentDecls`], enforce
+    /// the per-kind cardinality caps, and compute the content-hash.
+    fn finish(self) -> wasmtime::Result<EmbeddedCatalog> {
+        let hash = catalog_hash(self.disclosure_fields, self.i18n, self.icons);
+        let decls = build_decls(self.disclosure_fields, self.i18n, self.icons)?;
+        Ok(EmbeddedCatalog {
+            is_policy: self.is_policy,
+            decls,
+            hash,
+        })
+    }
+}
+
+/// Parse the raw section bytes into a [`ComponentDecls`], enforcing the
+/// per-kind cardinality caps.
+fn build_decls(
+    disclosure_bytes: Option<&[u8]>,
+    i18n_bytes: Option<&[u8]>,
+    icons_bytes: Option<&[u8]>,
+) -> wasmtime::Result<ComponentDecls> {
+    let disclosure_section = disclosure_bytes
+        .map(|b| parse_disclosure_fields(b))
+        .transpose()
+        .map_err(|e| {
+            wasmtime::Error::msg(format!(
+                "parsing custom section `{SECTION_DISCLOSURE_FIELDS}` as JSON: {e}",
+            ))
+        })?;
+    let i18n_section = i18n_bytes
+        .map(|b| parse_i18n(b))
+        .transpose()
+        .map_err(|e| {
+            wasmtime::Error::msg(format!("parsing custom section `{SECTION_I18N}` as JSON: {e}"))
+        })?;
+    let icons_section = icons_bytes
+        .map(|b| parse_icons(b))
+        .transpose()
+        .map_err(|e| {
+            wasmtime::Error::msg(format!("parsing custom section `{SECTION_ICONS}` as JSON: {e}"))
+        })?;
 
     // Per-kind cardinality caps. Each kind has a different covert-
     // channel surface (DF leak to consumer; localized fully resolved
