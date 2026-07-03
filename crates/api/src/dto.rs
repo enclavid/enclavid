@@ -23,8 +23,7 @@
 
 use serde::Serialize;
 
-use enclavid_engine::EmbeddedRegistry;
-use broker_client::{DisplayField as ProtoDisplayField, SessionStatus};
+use broker_client::{DisplayField as ProtoDisplayField, Localized, SessionStatus};
 
 use crate::locale::Locale;
 
@@ -101,65 +100,41 @@ pub struct ConsentFieldView {
     pub value: String,
 }
 
-// --- proto → dto conversion ---
+// --- domain → dto conversion ---
+//
+// The engine already resolved every ref at the action boundary, so the
+// domain [`ProtoDisplayField`] carries the machine `key` and the full
+// `label` translation set directly. Rendering here is registry-free —
+// just a locale pick — which is what lets a read render without the
+// policy component (self-contained sealed prompt).
 
-/// Envelope-shape conversion: resolves `f.key` (a `disclosure-field-
-/// ref`) back to its raw machine identifier via the embedded
-/// registry's disclosure-fields store — that's the literal the
-/// consumer SDK dispatches on. Used by the persister when sealing
+/// Envelope-shape conversion: `f.key` is already the machine identifier
+/// the consumer SDK dispatches on. Used by the persister when sealing
 /// disclosures for the consumer.
-pub fn display_field_from_proto(
-    f: &ProtoDisplayField,
-    embedded: &EmbeddedRegistry,
-) -> DisplayField {
+pub fn display_field_from_proto(f: &ProtoDisplayField) -> DisplayField {
     DisplayField {
-        key: embedded
-            .disclosure_fields
-            .lookup(&f.key)
-            .cloned()
-            .unwrap_or_else(|| f.key.clone()),
+        key: f.key.clone(),
         value: f.value.clone(),
     }
 }
 
-/// Consent-screen conversion. `f.key` is a `disclosure-field-ref` →
-/// resolves to the machine identifier; `f.label` is a `localized-ref`
-/// → resolves to its translation set then locale-picked and
+/// Consent-screen conversion. `f.key` is the machine identifier;
+/// `f.label` is the resolved translation set, locale-picked and
 /// sanitised. The value is policy free-text, displayed verbatim.
-pub fn consent_field_view_from_proto(
-    f: &ProtoDisplayField,
-    embedded: &EmbeddedRegistry,
-    locale: &Locale,
-) -> ConsentFieldView {
+pub fn consent_field_view_from_proto(f: &ProtoDisplayField, locale: &Locale) -> ConsentFieldView {
     ConsentFieldView {
-        key: embedded
-            .disclosure_fields
-            .lookup(&f.key)
-            .cloned()
-            .unwrap_or_else(|| f.key.clone()),
-        label: resolve_localized(embedded, &f.label, locale),
+        key: f.key.clone(),
+        label: pick_localized(&f.label, locale),
         value: f.value.clone(),
     }
 }
 
-/// Shared helper: localized-ref token → applicant-facing string.
-///
-/// Returns the token unchanged when it isn't in the localized store
-/// (shouldn't happen — engine traps on use-site validation, but
-/// degrades gracefully). Returns the token unchanged also when the
-/// store holds the entry but the entry has no translation rows
-/// (i18n-section entry with empty body). Sanitisation is applied
-/// once per picked value.
-pub fn resolve_localized(
-    embedded: &EmbeddedRegistry,
-    token: &str,
-    locale: &Locale,
-) -> String {
-    let Some(translations) = embedded.localized.lookup(token) else {
-        return token.to_string();
-    };
-    let Some(picked) = locale.pick(translations) else {
-        return token.to_string();
-    };
-    enclavid_engine::sanitize_text_value(picked)
+/// Shared helper: a resolved [`Localized`] set → applicant-facing string
+/// for the request locale (`en` fallback), sanitised. Empty when the set
+/// carries no translation rows.
+pub fn pick_localized(localized: &Localized, locale: &Locale) -> String {
+    match locale.pick(&localized.translations) {
+        Some(picked) => enclavid_engine::sanitize_text_value(picked),
+        None => String::new(),
+    }
 }

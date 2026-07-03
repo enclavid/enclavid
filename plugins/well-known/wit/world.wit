@@ -1,17 +1,17 @@
 package enclavid:well-known@0.1.0;
 
-/// Icon name identifiers for capture flows. Returns the dispatch
-/// string consumed by `CaptureStep.icon`; frontend maps to its
-/// bundled SVG library.
-///
-/// All names are resolved against this plugin's `icons.json` section —
-/// per-component scoping, applicant-facing only (consumer never
-/// sees icon refs), no policy whitelist needed.
+/// Icon-ref helpers for capture flows. Returns an `icon-ref` resource
+/// (minted from this plugin's `icons.json` section) that feeds
+/// `capture-step.icon`; the host resolves it to the dispatch name the
+/// frontend maps to its bundled SVG library. Per-component scoping,
+/// applicant-facing only (consumer never sees icon refs).
 interface icons {
-    passport: func() -> string;
-    id-card: func() -> string;
-    drivers-license: func() -> string;
-    selfie: func() -> string;
+    use enclavid:host/types@0.1.0.{icon-ref};
+
+    passport: func() -> icon-ref;
+    id-card: func() -> icon-ref;
+    drivers-license: func() -> icon-ref;
+    selfie: func() -> icon-ref;
 }
 
 /// DisplayField helpers for canonical KYC fields.

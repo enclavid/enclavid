@@ -10,9 +10,9 @@ package enclavid:host@0.1.0;
 /// section, closing a small covert channel. A reserved host capability,
 /// resolved per-component like `embedded-i18n`.
 interface embedded-icons {
-    /// Refs that surface as machine identifiers the frontend dispatches
-    /// by literal.
-    type icon-ref = string;
+    /// Ref RESOURCE in the shared `types` interface — see `embedded-i18n`
+    /// for why the twin needs it shared.
+    use types.{icon-ref};
 
     /// Resolve a name from the component's `icons` declarations. Traps if
     /// the name isn't declared.

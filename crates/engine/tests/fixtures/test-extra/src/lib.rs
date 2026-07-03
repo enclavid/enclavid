@@ -11,12 +11,13 @@ wit_bindgen::generate!({
 });
 
 use enclavid::host::embedded_i18n::localized;
+use enclavid::host::types::LocalizedRef;
 use exports::enclavid::extra::tag::Guest;
 
 struct Extra;
 
 impl Guest for Extra {
-    fn get() -> String {
+    fn get() -> LocalizedRef {
         localized("extra_tag")
     }
 }

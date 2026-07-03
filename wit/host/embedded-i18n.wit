@@ -10,8 +10,11 @@ package enclavid:host@0.1.0;
 /// policy's translation). A plugin imports this to mint text refs but
 /// never satisfies it.
 interface embedded-i18n {
-    /// Refs that surface as UI text.
-    type localized-ref = string;
+    /// The ref RESOURCE lives in the shared `types` interface so the
+    /// strict-routing twin of this interface still references it (a
+    /// clone that redeclared the resource would be a distinct nominal
+    /// type and fail to satisfy the component's import).
+    use types.{localized-ref};
 
     /// Resolve a key from the component's `i18n` declarations. Traps if
     /// the key isn't declared.

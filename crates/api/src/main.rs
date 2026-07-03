@@ -9,7 +9,6 @@ mod keyprovider;
 mod limits;
 mod locale;
 mod policy_pull;
-mod ref_key;
 mod runtime;
 mod shuffle;
 mod state;
@@ -52,12 +51,6 @@ async fn main() {
     // don't reuse the AEAD key directly for `DisplayField` shuffle
     // PRNG seeding — see `crate::shuffle` for the threat model.
     let shuffle_key = Arc::new(shuffle::ShuffleKey::from_tee_seal_key(&tee_seal_key));
-    // Same pattern for the engine's embedded-ref token derivation
-    // base: HKDF-stretched from `tee_seal_key` under its own info
-    // string. Per-policy 32-byte ref_keys come out of
-    // `RefKey::derive_for_policy(policy_ref)` at `lookup_policy`
-    // time. See `crate::ref_key` for the threat model.
-    let ref_key = Arc::new(ref_key::RefKey::from_tee_seal_key(&tee_seal_key));
     let broker = BrokerClient::new(&address_out)
         .await
         .expect("failed to connect to broker");
@@ -85,7 +78,6 @@ async fn main() {
             runner,
             policies,
             shuffle_key,
-            ref_key,
         )
         .await,
     );

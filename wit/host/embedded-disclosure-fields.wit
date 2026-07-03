@@ -10,9 +10,9 @@ package enclavid:host@0.1.0;
 /// reserved host capability, resolved against the calling composition's
 /// `enclavid:embedded.disclosure-fields.v1` sections.
 interface embedded-disclosure-fields {
-    /// Refs that surface as machine identifiers (`display-field.key`) —
-    /// consumer SDK maps by literal.
-    type disclosure-field-ref = string;
+    /// Ref RESOURCE in the shared `types` interface (DF isn't twin-routed,
+    /// but keeping all three refs together in `types` is uniform).
+    use types.{disclosure-field-ref};
 
     /// Resolve a key from a component's `disclosure_fields` declarations.
     /// Traps if the key isn't declared in any catalog.

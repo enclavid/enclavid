@@ -1,5 +1,44 @@
 package enclavid:host@0.1.0;
 
+/// Value shapes carried by the host capabilities in this package. Kept
+/// in a SEPARATE types interface (WASI-style types-vs-behaviour split)
+/// so the value type can be `use`d without importing the capability
+/// getter, and so `enclavid:host` stays a self-contained leaf package.
+///
+/// The three embedded refs (`localized-ref` / `icon-ref` /
+/// `disclosure-field-ref`) are RESOURCES, minted only by the host's
+/// `embedded-{i18n,icons,disclosure-fields}` capabilities. A component
+/// cannot construct one — the handle IS the proof the key was declared,
+/// so membership needs no crypto token. They live HERE (a shared
+/// interface) rather than inside each embedded interface so the strict
+/// per-component routing twin — a structural clone of `embedded-i18n` /
+/// `embedded-icons` with a distinct id — still references the SAME
+/// resource type and subtype-matches the component's canonical import.
+interface types {
+  /// One static configuration value the consumer supplies at session
+  /// creation (was `eval-args`). Read on demand via
+  /// `session-context.props`.
+  variant prop {
+    %string(string),
+    int(s64),
+    float(f64),
+    %bool(bool),
+    null,
+  }
+
+  /// A validated reference to a `localized` catalog entry — surfaces as
+  /// UI text once the host resolves it to the applicant's locale.
+  resource localized-ref;
+
+  /// A validated reference to an `icons` catalog entry — surfaces as a
+  /// machine icon name the applicant frontend dispatches.
+  resource icon-ref;
+
+  /// A validated reference to a `disclosure-fields` catalog entry —
+  /// surfaces as the machine `display-field.key` the consumer receives.
+  resource disclosure-field-ref;
+}
+
 /// Lookup interface for a component's `disclosure_fields` declarations —
 /// machine identifiers that surface as `display-field.key` on the consent
 /// screen (`action::render(prompt::consent-disclosure)`); the consumer
@@ -10,9 +49,7 @@ package enclavid:host@0.1.0;
 /// reserved host capability, resolved against the calling composition's
 /// `enclavid:embedded.disclosure-fields.v1` sections.
 interface embedded-disclosure-fields {
-  /// Refs that surface as machine identifiers (`display-field.key`) —
-  /// consumer SDK maps by literal.
-  type disclosure-field-ref = string;
+  use types.{disclosure-field-ref};
 
   /// Resolve a key from a component's `disclosure_fields` declarations.
   /// Traps if the key isn't declared in any catalog.
@@ -29,8 +66,7 @@ interface embedded-disclosure-fields {
 /// policy's translation). A plugin imports this to mint text refs but
 /// never satisfies it.
 interface embedded-i18n {
-  /// Refs that surface as UI text.
-  type localized-ref = string;
+  use types.{localized-ref};
 
   /// Resolve a key from the component's `i18n` declarations. Traps if
   /// the key isn't declared.
@@ -47,30 +83,11 @@ interface embedded-i18n {
 /// section, closing a small covert channel. A reserved host capability,
 /// resolved per-component like `embedded-i18n`.
 interface embedded-icons {
-  /// Refs that surface as machine identifiers the frontend dispatches
-  /// by literal.
-  type icon-ref = string;
+  use types.{icon-ref};
 
   /// Resolve a name from the component's `icons` declarations. Traps if
   /// the name isn't declared.
   icon: func(name: string) -> icon-ref;
-}
-
-/// Value shapes carried by the host capabilities in this package. Kept
-/// in a SEPARATE types interface (WASI-style types-vs-behaviour split)
-/// so the value type can be `use`d without importing the capability
-/// getter, and so `enclavid:host` stays a self-contained leaf package.
-interface types {
-  /// One static configuration value the consumer supplies at session
-  /// creation (was `eval-args`). Read on demand via
-  /// `session-context.props`.
-  variant prop {
-    %string(string),
-    int(s64),
-    float(f64),
-    %bool(bool),
-    null,
-  }
 }
 
 /// Capabilities the TEE host provides to the policy live in the RESERVED

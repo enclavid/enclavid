@@ -75,11 +75,6 @@ pub(super) struct SessionPersister {
     /// fields stay constant across the session lifetime; this is
     /// purely a bookkeeping wrapper.
     pub metadata: Mutex<SessionMetadata>,
-    /// Composition-wide embedded registry. Consulted when sealing
-    /// disclosure envelopes to project slot-tagged
-    /// `disclosure-field-ref`s back to the raw machine identifiers
-    /// the consumer SDK dispatches on.
-    pub embedded: Arc<enclavid_engine::EmbeddedRegistry>,
     /// Process-lifetime shuffle key, used to permute `DisplayField`
     /// order inside disclosure envelopes before they're sealed to
     /// the consumer. Lives here (and not in engine) because the
@@ -152,7 +147,6 @@ impl SessionPersister {
                             &self.session_id,
                             starting_index + i as u64,
                             &self.shuffle_key,
-                            &self.embedded,
                         )
                     })?
                     .vouch_unchecked::<AuthZ, _>(reason!(
@@ -379,23 +373,18 @@ fn shuffle_to_envelope_bytes(
     session_id: &str,
     disclosure_index: u64,
     shuffle_key: &ShuffleKey,
-    embedded: &enclavid_engine::EmbeddedRegistry,
 ) -> RunResult<Vec<u8>> {
     use rand::SeedableRng;
     use rand::seq::SliceRandom;
 
-    // Envelope carries `{ key, value }` only — no label. Consumer
-    // dispatches by typed `key`; the per-session policy text
-    // registry stays inside the TEE so its multi-language
-    // translations never reach the consumer (closing the covert
-    // channel where non-user-locale variants would otherwise
-    // travel in `LocalizedText`). `key` is projected from its
-    // slot-tagged ref to the raw machine identifier via the
-    // composition's disclosure-fields store.
+    // Envelope carries `{ key, value }` only — no label. The consumer
+    // dispatches by the typed machine `key` (already resolved
+    // engine-side); the label's translation set stays inside the TEE so
+    // its non-user-locale variants never reach the consumer.
     let mut fields: Vec<_> = d
         .fields
         .iter()
-        .map(|f| dto::display_field_from_proto(f, embedded))
+        .map(dto::display_field_from_proto)
         .collect();
     let seed = shuffle_key.derive_envelope_seed(session_id, disclosure_index);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(seed);

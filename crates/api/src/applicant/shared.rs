@@ -119,12 +119,6 @@ pub(super) struct SessionRunCtx {
     /// for a session whose `/connect` has never reached this far —
     /// connect treats that as "fresh start", input as 409.
     pub(super) session_state: Option<SessionState>,
-    /// Composition-wide `EmbeddedRegistry`. Handlers project slot-
-    /// tagged refs inside rendered prompts / consent disclosures
-    /// through this when assembling JSON for the frontend or the
-    /// consumer SDK; same `Arc` is also threaded into the engine
-    /// via `RunInputs`.
-    pub(super) embedded: Arc<EmbeddedRegistry>,
     /// Applicant's preferred locale (from `Accept-Language` header).
     /// Text-ref resolution happens server-side so the wire payload is
     /// a plain string per ref — frontend doesn't carry i18n logic.
@@ -158,7 +152,6 @@ impl SessionRunCtx {
         let SessionRunCtx {
             state,
             session_id,
-            embedded,
             locale,
             persister,
             props,
@@ -176,7 +169,7 @@ impl SessionRunCtx {
         // Completed atomically (metadata + host-plaintext Status) when
         // the run terminated.
         persister.finalize(&status).await?;
-        Ok(progress_from(status, &embedded, &locale))
+        Ok(progress_from(status, &locale))
     }
 }
 
@@ -345,7 +338,6 @@ persist; same containment as above.
             client_disclosure_pubkey: disclosure_pubkey,
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata.clone()),
-            embedded: embedded.clone(),
             shuffle_key: state.shuffle_key.clone(),
         });
         // Engine takes one strong ref via the listener; we keep our
@@ -357,7 +349,6 @@ persist; same containment as above.
             state: state.clone(),
             session_id,
             session_state,
-            embedded,
             locale,
             persister,
             props,
@@ -503,15 +494,7 @@ async fn lookup_policy(
     // component's catalog content-hash. Policy first (composition order,
     // which fixes the merged-path first-match order), then plugins in
     // `plugin_instances` order (mirrors `client.plugins`).
-    //
-    // `policy_ref_key` is HKDF-derived from `tee_seal_key +
-    // policy_ref` (see `crate::ref_key`). Stable across all sessions
-    // of this policy artifact (refs round-trip across `/connect`
-    // → `/input` rounds), distinct from every other policy's
-    // ref_key — cross-policy ref replay is cryptographically
-    // infeasible.
-    let policy_ref_key = state.ref_key.derive_for_policy(&metadata.policy_ref);
-    let mut embedded_builder = EmbeddedRegistry::builder(policy_ref_key);
+    let mut embedded_builder = EmbeddedRegistry::builder();
     embedded_builder.add_component(policy_catalog.hash, policy_catalog.decls);
     for catalog in plugin_catalogs {
         embedded_builder.add_component(catalog.hash, catalog.decls);

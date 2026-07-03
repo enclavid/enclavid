@@ -224,8 +224,10 @@ async fn static_fused_artifact_resolves_strictly() {
     let fused = runner.fuse(test_policy_component(), &all_plugins()).unwrap();
 
     // The twins survive as distinct `embedded-slot:*` imports (strict
-    // routing) — not collapsed to canonical. policy (i18n+icons) +
-    // well-known (i18n+icons) + extra (i18n only) = 5.
+    // routing) — not collapsed to canonical. The policy calls only
+    // `localized` (its capture icons come from well-known), so wit_bindgen
+    // elides its unused icons import; distinct twins are: policy (i18n) +
+    // well-known (i18n+icons) + extra (i18n) = 4.
     let imports = enclavid_engine::top_level_imports(&fused).unwrap();
     let slots: Vec<&String> = imports
         .iter()
@@ -233,8 +235,16 @@ async fn static_fused_artifact_resolves_strictly() {
         .collect();
     assert_eq!(
         slots.len(),
-        5,
-        "policy+well-known × i18n+icons + extra × i18n = 5 distinct twin imports, got {slots:?}",
+        4,
+        "policy(i18n) + well-known(i18n+icons) + extra(i18n) = 4 distinct twin imports, got {slots:?}",
+    );
+    // Each twin name carries the routed interface version (`0.1.0` →
+    // `-0-1-0`, kept off the semver `@` track) so two components with
+    // byte-identical catalogs but different versions can't collide onto
+    // one twin — and reconstruct can recover the version below.
+    assert!(
+        slots.iter().all(|n| n.contains("-0-1-0/")),
+        "twin names must carry the interface version, got {slots:?}",
     );
 
     // Consume with an empty plugin list — the static path. The engine
@@ -243,7 +253,7 @@ async fn static_fused_artifact_resolves_strictly() {
     let composition = runner.compose(&fused, &[]).unwrap();
     assert_eq!(
         composition.embedded_imports.len(),
-        5,
+        4,
         "static artifact's strict manifest reconstructed from its imports",
     );
 
@@ -255,7 +265,7 @@ async fn static_fused_artifact_resolves_strictly() {
         cats.len(),
     );
     cats.sort_by_key(|c| !c.is_policy);
-    let mut builder = EmbeddedRegistry::builder([7u8; 32]);
+    let mut builder = EmbeddedRegistry::builder();
     for c in cats {
         builder.add_component(c.hash, c.decls);
     }
@@ -313,12 +323,12 @@ async fn strict_routing_isolates_colliding_i18n_key() {
         _ => panic!("round 1 expected AwaitingInput(Media)"),
     };
 
-    let translations = h
-        .embedded
-        .localized
-        .lookup(&spec.label_ref)
-        .expect("media title ref resolves in the registry");
-    let en = translations
+    // The engine resolved `spec.label` (well-known's `passport_title`) at
+    // the action boundary; the domain carries the translation set
+    // directly, no registry lookup needed.
+    let en = spec
+        .label
+        .translations
         .iter()
         .find(|t| t.language == "en")
         .expect("en translation present")
@@ -377,7 +387,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     // catalogs (policy first), plus the runtime extra catalog.
     let mut cats = enclavid_engine::load_embedded_nested(&core).unwrap();
     cats.sort_by_key(|c| !c.is_policy);
-    let mut builder = EmbeddedRegistry::builder([7u8; 32]);
+    let mut builder = EmbeddedRegistry::builder();
     for c in cats {
         builder.add_component(c.hash, c.decls);
     }
@@ -410,12 +420,11 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
         _ => panic!("hybrid round 3 expected AwaitingInput(ConsentDisclosure)"),
     };
 
-    // The requester ref came from the RUNTIME extra plugin (`tag::get()`).
-    let requester = embedded
-        .localized
-        .lookup(&disclosure.requester_ref)
-        .expect("requester ref resolves in the registry");
-    let en = requester
+    // The requester came from the RUNTIME extra plugin (`tag::get()`);
+    // the engine resolved it at the boundary into `disclosure.requester`.
+    let en = disclosure
+        .requester
+        .translations
         .iter()
         .find(|t| t.language == "en")
         .expect("en translation present")
@@ -471,7 +480,7 @@ impl Harness {
         // what `compose` routed the imports under. The `ref_key` is a
         // fixed test value; production derives it per-policy from
         // `tee_seal_key + policy_ref`.
-        let mut builder = EmbeddedRegistry::builder([7u8; 32]);
+        let mut builder = EmbeddedRegistry::builder();
         for wasm in [
             test_policy_component(),
             well_known_component(),

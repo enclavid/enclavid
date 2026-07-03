@@ -68,13 +68,28 @@ pub fn slug(hash: &[u8; 32]) -> String {
 }
 
 /// The distinct composite import name a component's
-/// `enclavid:embedded/<iface>` import is routed to under strict
-/// per-component routing: `embedded-slot:<slug>/<iface>`. Versionless
-/// and in its own `embedded-slot` namespace so wac's aggregator never
-/// merges it with the versioned `enclavid:embedded/<iface>@x.y` import
-/// or with another catalog's slot. `iface` is `"i18n"` or `"icons"`.
-pub fn embedded_import_name(hash: &[u8; 32], iface: &str) -> String {
-    format!("embedded-slot:{}/{}", slug(hash), iface)
+/// `enclavid:host/embedded-<iface>` import is routed to under strict
+/// per-component routing: `embedded-slot:<slug>/<iface>` (unversioned)
+/// or `embedded-slot:<slug>-<ver>/<iface>` when the routed interface
+/// carries a version. The name lives in its own `embedded-slot`
+/// namespace and stays OFF the semver `@` track (dots in the version are
+/// hyphenated so the package segment is a valid kebab identifier) so
+/// wac's aggregator never merges it with the versioned canonical import
+/// or with another catalog's / version's slot. Because the version is
+/// part of the name, a same-catalog different-version import can't
+/// collide onto one twin. `iface` is `"i18n"` or `"icons"`; `version` is
+/// the canonical import's `@x.y.z` (empty for unversioned).
+///
+/// The slug is hex (no `-`), so the first `-` in the package segment is
+/// the slug/version boundary — [`super::super::runner`] inverts this to
+/// recover `(iface, version)`. Round-trips for `x.y.z`; pre-release
+/// versions (which contain `-`) are not used by these interfaces.
+pub fn embedded_import_name(hash: &[u8; 32], iface: &str, version: &str) -> String {
+    if version.is_empty() {
+        format!("embedded-slot:{}/{}", slug(hash), iface)
+    } else {
+        format!("embedded-slot:{}-{}/{}", slug(hash), version.replace('.', "-"), iface)
+    }
 }
 
 #[cfg(test)]
@@ -124,10 +139,22 @@ mod tests {
     }
 
     #[test]
-    fn import_name_is_versionless_embedded_slot() {
-        let name = embedded_import_name(&catalog_hash(Some(b"x"), None, None), "i18n");
-        assert!(name.starts_with("embedded-slot:h"));
-        assert!(name.ends_with("/i18n"));
-        assert!(!name.contains('@')); // off the semver track so wac won't re-merge
+    fn import_name_stays_off_semver_track() {
+        let h = catalog_hash(Some(b"x"), None, None);
+        // Unversioned.
+        let n0 = embedded_import_name(&h, "i18n", "");
+        assert!(n0.starts_with("embedded-slot:h"));
+        assert!(n0.ends_with("/i18n"));
+        assert!(!n0.contains('@'));
+        // Versioned: version hyphenated into the package segment — still
+        // no `@`, so wac won't re-merge onto the semver track.
+        let n1 = embedded_import_name(&h, "i18n", "0.1.0");
+        assert!(n1.starts_with("embedded-slot:h"));
+        assert!(n1.ends_with("/i18n"));
+        assert!(n1.contains("-0-1-0/"));
+        assert!(!n1.contains('@'), "must stay off the semver track");
+        // Distinct per version → a same-catalog different-version routed
+        // import can't collide onto one twin.
+        assert_ne!(n1, embedded_import_name(&h, "i18n", "0.2.0"));
     }
 }

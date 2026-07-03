@@ -7,7 +7,6 @@ use secrecy::SecretBox;
 use enclavid_engine::Runner;
 use broker_client::{BrokerClient, KbsClient, RegistryClient, SessionStore};
 
-use crate::ref_key::RefKey;
 use crate::runtime::SessionPolicyCache;
 use crate::shuffle::ShuffleKey;
 
@@ -44,13 +43,6 @@ pub struct AppState {
     /// into `engine::RunInputs`. See [`crate::shuffle`] for the
     /// derivation contract and threat model.
     pub shuffle_key: Arc<ShuffleKey>,
-    /// Base key for the engine's `EmbeddedRegistry` ref token
-    /// derivation. Per-policy 32-byte ref_keys are HKDF-derived from
-    /// this base at `lookup_policy`-time and passed into
-    /// `EmbeddedRegistry::builder(ref_key)`. See [`crate::ref_key`]
-    /// for the derivation contract and threat model (forgery defence
-    /// against a guest WASM synthesising a foreign-slot ref).
-    pub ref_key: Arc<RefKey>,
 }
 
 impl AppState {
@@ -60,7 +52,6 @@ impl AppState {
         runner: Arc<Runner>,
         policies: SessionPolicyCache,
         shuffle_key: Arc<ShuffleKey>,
-        ref_key: Arc<RefKey>,
     ) -> Self {
         let applicant_session_tokens = Cache::builder()
             .max_capacity(10_000)
@@ -78,7 +69,6 @@ impl AppState {
             kbs,
             applicant_session_tokens,
             shuffle_key,
-            ref_key,
         }
     }
 
@@ -90,7 +80,6 @@ impl AppState {
         runner: Arc<Runner>,
         policies: SessionPolicyCache,
         shuffle_key: Arc<ShuffleKey>,
-        ref_key: Arc<RefKey>,
     ) -> Self {
         let broker = BrokerClient::new(transport_out)
             .await
@@ -101,7 +90,6 @@ impl AppState {
             runner,
             policies,
             shuffle_key,
-            ref_key,
         )
     }
 }

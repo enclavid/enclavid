@@ -28,8 +28,9 @@ pub use kbs::KbsClient;
 pub use registry::RegistryClient;
 pub use domain::{
     Action, CameraFacing, CaptureGuide, CaptureStep, Client, ClientAccess, Clip, Decision,
-    DisplayField, Event, GuideNone, GuideOval, GuideRect, KbsKey, Key, MediaResult, MediaSpec,
-    PluginPin, Prompt, SessionMetadata, SessionState, SessionStatus, capture_guide,
+    DisplayField, Event, GuideNone, GuideOval, GuideRect, KbsKey, Key, Localized, MediaResult,
+    MediaSpec, PluginPin, Prompt, SessionMetadata, SessionState, SessionStatus, Translation,
+    capture_guide,
 };
 // Disclosure carried by `Prompt::ConsentDisclosure`. Re-exported under
 // a qualified name so it doesn't collide with the session-store

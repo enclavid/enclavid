@@ -14,7 +14,7 @@
 
 use serde::Serialize;
 
-use enclavid_engine::{Decision, EmbeddedRegistry, RunStatus};
+use enclavid_engine::{Decision, RunStatus};
 use broker_client::{
     CameraFacing, CaptureGuide, CaptureStep, MediaSpec, Prompt, PromptDisclosure, capture_guide,
 };
@@ -77,47 +77,33 @@ pub enum RequestView {
         /// screen header so the applicant sees exactly to whom the
         /// disclosure is being made.
         requester: String,
-        /// Surfaces the policy's full `disclosure-fields` vocabulary
-        /// — the only embedded section that leaks raw keys into the
-        /// consumer envelope. Frontend renders a footnote with
-        /// `total_declared` vs `used_in_call` and an expand-toggle
-        /// showing `all_keys` for drill-down audit (defends against
-        /// suffix-style covert encodings the user could otherwise
-        /// miss). Other kinds (`localized`, `icons`) don't reach the
-        /// consumer envelope so their bandwidth isn't surfaced here.
+        /// Covert-channel bandwidth of the `disclosure-fields`
+        /// vocabulary — the only embedded kind whose keys reach the
+        /// consumer envelope. Frontend renders `total_declared` vs
+        /// `used_in_call` so the applicant sees "wide vocabulary, few
+        /// shown". Resolved engine-side and sealed into the prompt, so
+        /// the read path surfaces it without the policy component.
         disclosure_schema: DisclosureSchema,
     },
 }
 
-/// Schema visibility for the composition's `disclosure-fields`
-/// vocabulary. Built per-consent-screen so the applicant can audit
-/// covert-channel bandwidth — the composition can only encode
-/// `log2(total_declared)` bits per `DisplayField.key` position, and
-/// "wide vocabulary with few shown" (`total_declared >>
-/// used_in_call`) is the visual signal of possible synonym-encoding
-/// (`country_a / country_b / …`).
-///
-/// Aggregates across the **whole composition** (the policy's catalog +
-/// every plugin's) — plugins may legitimately declare DF keys too
-/// (well-known auxiliary fields, e.g.). The same raw key declared by
-/// multiple catalogs resolves to identical envelope output so we
-/// deduplicate by string here: the count and the vocabulary list
-/// reflect what the consumer can actually distinguish.
+/// Covert-channel visibility for the composition's `disclosure-fields`
+/// vocabulary. The composition can encode at most
+/// `log2(total_declared)` bits per `DisplayField.key`, and "wide
+/// vocabulary with few shown" (`total_declared >> used_in_call`) is the
+/// visual signal of possible synonym-encoding (`country_a / country_b /
+/// …`). `total_declared` is the DISTINCT declared-key count across the
+/// whole composition (policy + every plugin), computed and sealed
+/// engine-side; the full key list is intentionally NOT surfaced — the
+/// bare count is the load-bearing signal.
 #[derive(Serialize)]
 pub struct DisclosureSchema {
-    /// Number of distinct `disclosure-field` keys across the
-    /// composition after dedup. Engine-side per-component
-    /// cardinality cap: [`MAX_DECLARED_DISCLOSURE_FIELDS`](
-    /// enclavid_engine::limits::MAX_DECLARED_DISCLOSURE_FIELDS).
+    /// Distinct `disclosure-field` keys the whole composition can
+    /// resolve, deduped. Sealed into the prompt engine-side.
     pub total_declared: usize,
-    /// How many of those keys this particular consent-disclosure
-    /// prompt surfaces. `used_in_call ≤ MAX_CONSENT_FIELDS`.
+    /// How many of those keys this consent-disclosure prompt surfaces.
+    /// `used_in_call ≤ MAX_CONSENT_FIELDS`.
     pub used_in_call: usize,
-    /// Full deduplicated vocabulary, sorted alphabetically for
-    /// stable display across rounds. Drill-down view on the consent
-    /// screen — user can scroll and spot suffix patterns
-    /// (`tier_001 .. tier_256`) that bare counts wouldn't catch.
-    pub all_keys: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -161,17 +147,13 @@ pub enum CaptureGuideView {
     Oval,
 }
 
-pub(super) fn progress_from(
-    status: RunStatus,
-    embedded: &EmbeddedRegistry,
-    locale: &Locale,
-) -> SessionProgress {
+pub(super) fn progress_from(status: RunStatus, locale: &Locale) -> SessionProgress {
     match status {
         RunStatus::Completed(decision) => SessionProgress::Completed {
             decision: decision_view(decision),
         },
         RunStatus::AwaitingInput(prompt) => SessionProgress::AwaitingInput {
-            request: prompt_view(&prompt, embedded, locale),
+            request: prompt_view(&prompt, locale),
         },
     }
 }
@@ -185,61 +167,35 @@ fn decision_view(d: Decision) -> DecisionView {
     }
 }
 
-fn prompt_view(
-    prompt: &Prompt,
-    embedded: &EmbeddedRegistry,
-    locale: &Locale,
-) -> RequestView {
+fn prompt_view(prompt: &Prompt, locale: &Locale) -> RequestView {
     match prompt {
-        Prompt::Media(spec) => media_view(spec, embedded, locale),
-        Prompt::ConsentDisclosure(d) => consent_view(d, embedded, locale),
+        Prompt::Media(spec) => media_view(spec, locale),
+        Prompt::ConsentDisclosure(d) => consent_view(d, locale),
     }
 }
 
-fn consent_view(
-    d: &PromptDisclosure,
-    embedded: &EmbeddedRegistry,
-    locale: &Locale,
-) -> RequestView {
-    let used_in_call = d.fields.len();
-    // Aggregate disclosure-field keys across the whole composition (the
-    // policy's catalog + every plugin's). The same raw key declared by
-    // multiple catalogs resolves to the same envelope value — the
-    // consumer can't tell which catalog resolved it — so we dedupe by
-    // string for the audit view. `BTreeSet` gives the dedup AND the
-    // canonical alphabetical ordering for stable display.
-    let unique_keys: std::collections::BTreeSet<String> =
-        embedded.disclosure_fields.declared().cloned().collect();
-    let total_declared = unique_keys.len();
-    let all_keys: Vec<String> = unique_keys.into_iter().collect();
+fn consent_view(d: &PromptDisclosure, locale: &Locale) -> RequestView {
     RequestView::Consent {
         fields: d
             .fields
             .iter()
-            .map(|f| dto::consent_field_view_from_proto(f, embedded, locale))
+            .map(|f| dto::consent_field_view_from_proto(f, locale))
             .collect(),
-        reason: dto::resolve_localized(embedded, &d.reason_ref, locale),
-        requester: dto::resolve_localized(embedded, &d.requester_ref, locale),
+        reason: dto::pick_localized(&d.reason, locale),
+        requester: dto::pick_localized(&d.requester, locale),
         disclosure_schema: DisclosureSchema {
-            total_declared,
-            used_in_call,
-            all_keys,
+            // Distinct declared-key count, resolved + sealed engine-side.
+            total_declared: d.total_declared,
+            used_in_call: d.fields.len(),
         },
     }
 }
 
-fn media_view(
-    spec: &MediaSpec,
-    embedded: &EmbeddedRegistry,
-    locale: &Locale,
-) -> RequestView {
-    let captures: Vec<CaptureStepView> = spec
-        .captures
-        .iter()
-        .map(|c| capture_step_view(c, embedded, locale))
-        .collect();
+fn media_view(spec: &MediaSpec, locale: &Locale) -> RequestView {
+    let captures: Vec<CaptureStepView> =
+        spec.captures.iter().map(|c| capture_step_view(c, locale)).collect();
     RequestView::Media {
-        label: dto::resolve_localized(embedded, &spec.label_ref, locale),
+        label: dto::pick_localized(&spec.label, locale),
         captures,
         // The prompt carries no fill state; the frontend walks the
         // capture steps from the first one and POSTs each in order.
@@ -247,26 +203,17 @@ fn media_view(
     }
 }
 
-fn capture_step_view(
-    s: &CaptureStep,
-    embedded: &EmbeddedRegistry,
-    locale: &Locale,
-) -> CaptureStepView {
+fn capture_step_view(s: &CaptureStep, locale: &Locale) -> CaptureStepView {
     CaptureStepView {
-        // Icon-ref reverse-lookup → declared icon name. Frontend
-        // dispatches against its bundled icon library and falls back
-        // to no-icon on unknown names. Unresolvable tokens (engine
-        // would have trapped on use-site validation already, but
-        // graceful degrade) pass through verbatim.
-        icon: s
-            .icon_ref
-            .as_deref()
-            .and_then(|t| embedded.icons.lookup(t).cloned().or_else(|| Some(t.to_string()))),
-        instructions: dto::resolve_localized(embedded,&s.instructions_ref, locale),
-        label: dto::resolve_localized(embedded,&s.label_ref, locale),
+        // Already the resolved icon name (engine deref'd the ref); the
+        // frontend dispatches against its bundled library, no-icon on
+        // unknown names.
+        icon: s.icon.clone(),
+        instructions: dto::pick_localized(&s.instructions, locale),
+        label: dto::pick_localized(&s.label, locale),
         camera: camera_view(s.camera),
         guide: guide_view(s.guide.as_ref()),
-        review_hint: dto::resolve_localized(embedded,&s.review_hint_ref, locale),
+        review_hint: dto::pick_localized(&s.review_hint, locale),
     }
 }
 

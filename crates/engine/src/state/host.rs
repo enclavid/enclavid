@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
 
 use crate::embedded::EmbeddedRegistry;
@@ -18,16 +19,22 @@ pub struct HostState {
     /// policy through `enclavid:host/session-context.props`. Constant for
     /// the session; the policy may read it any round.
     pub props: Vec<(String, crate::enclavid::host::types::Prop)>,
-    /// Per-composition `enclavid:embedded/*` registry — one frozen
+    /// Per-composition `enclavid:host/embedded-*` registry — one frozen
     /// index built from the policy's and every fused plugin's embedded
-    /// sections. The `enclavid:embedded/*` host fns resolve keys
-    /// against it (first match across the merged catalogs), and the
-    /// runner reverse-looks-up every embedded ref at its use-site
-    /// (consent field key/label, reason / requester, media labels),
-    /// trapping if a ref isn't in it. Frozen before any per-session
-    /// input reaches the component; closes the runtime ref-crafting
-    /// channel.
+    /// sections. The embedded host fns resolve a key against it (first
+    /// match across the merged catalogs, or strict against one catalog
+    /// for a routed twin) and MINT a ref resource into [`table`](Self::
+    /// table) carrying the resolved data. Frozen before any per-session
+    /// input reaches the component; a component can only reference a key
+    /// some catalog declared.
     pub embedded: Arc<EmbeddedRegistry>,
+    /// Handle table backing the embedded ref resources
+    /// (`localized-ref` / `icon-ref` / `disclosure-field-ref`). The host
+    /// funcs push resolved data here and hand the component an
+    /// unforgeable handle; the runner dereferences the handles the
+    /// returned prompt carries at the action boundary. Fresh per run,
+    /// dropped with the Store — refs never outlive the round.
+    pub table: ResourceTable,
     /// Resource caps the wasmtime runtime consults via `Store::
     /// limiter`. Bounds linear-memory growth so the policy component
     /// can't OOM the enclave. Fuel (CPU-instruction budget) is set
@@ -55,6 +62,7 @@ impl HostState {
         Self {
             props,
             embedded,
+            table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new()
                 .memory_size(POLICY_MAX_MEMORY)
                 .build(),
@@ -77,7 +85,7 @@ impl crate::enclavid::host::session_context::Host for HostState {
 // traits via `bindgen!`. Implementing them on `HostState` satisfies the
 // linker bound — there's nothing to actually implement.
 impl crate::enclavid::policy::types::Host for HostState {}
-
-impl crate::enclavid::host::types::Host for HostState {}
 impl crate::enclavid::shared_types::capture::Host for HostState {}
 impl crate::enclavid::shared_types::disclosure::Host for HostState {}
+// `enclavid:host/types::Host` + the three ref-resource destructors live
+// in `embedded::host`, next to the resolvers that mint them.

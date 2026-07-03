@@ -26,9 +26,12 @@ pub(crate) mod store;
 
 pub use decls::{EmbeddedCatalog, load_embedded, load_embedded_nested, top_level_imports};
 pub use hash::{catalog_hash, embedded_import_name, slug};
-pub use host::strict_token;
+pub use host::undeclared_trap;
 pub use registry::{
     ComponentDecls, DisclosureFieldsStore, EmbeddedRegistry, EmbeddedRegistryBuilder,
     IconStore, LocalizedStore, Translation,
 };
-pub use store::{DisclosureFields, Icon, Localized, RefKind, RefStore};
+pub use store::{
+    DisclosureFieldRef, DisclosureFields, Icon, IconRef, Localized, LocalizedRef, RefKind,
+    RefStore,
+};

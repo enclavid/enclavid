@@ -227,15 +227,24 @@ pub enum Prompt {
 }
 
 /// One consent-and-disclosure — sealed mirror of the WIT `disclosure`
-/// record. `fields` are BOTH what the applicant sees AND, on accept,
-/// the exact set sealed to the consumer. `reason` is bound to the
-/// consent record; `requester` is applicant-facing only.
+/// record, with every ref already RESOLVED by the engine at the action
+/// boundary (the WIT refs are store-bound resource handles that can't
+/// cross to the api). `fields` are BOTH what the applicant sees AND, on
+/// accept, the exact set sealed to the consumer. `reason` is bound to
+/// the consent record; `requester` is applicant-facing only. Self-
+/// contained: rendering a read needs no registry / policy component.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Disclosure {
     pub fields: Vec<DisplayField>,
-    pub reason_ref: String,
-    pub requester_ref: String,
+    pub reason: Localized,
+    pub requester: Localized,
+    /// Distinct `disclosure-field` keys the whole composition can
+    /// resolve (deduped). The consent screen's covert-channel bound:
+    /// the composition encodes at most `log2(total_declared)` bits per
+    /// `DisplayField.key`. Resolved engine-side and sealed so the read
+    /// path shows it without the registry.
+    pub total_declared: usize,
 }
 
 /// INBOUND to the policy reducer — sealed mirror of the WIT `event`
@@ -286,19 +295,21 @@ pub struct Clip {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MediaSpec {
-    pub label_ref: String,
+    pub label: Localized,
     pub captures: Vec<CaptureStep>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureStep {
-    pub icon_ref: Option<String>,
-    pub instructions_ref: String,
-    pub label_ref: String,
+    /// Resolved icon NAME (locale-agnostic) the applicant frontend
+    /// dispatches; `None` when the step declared no icon.
+    pub icon: Option<String>,
+    pub instructions: Localized,
+    pub label: Localized,
     pub camera: CameraFacing,
     pub guide: Option<CaptureGuide>,
-    pub review_hint_ref: String,
+    pub review_hint: Localized,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -335,13 +346,34 @@ pub struct GuideOval {}
 // Consent
 // ---------------------------------------------------------------------
 
-/// Field shown to the user on the consent screen. `key` and `label` are
-/// text-refs; the host treats `key` as opaque, resolves `label` for the
-/// applicant frontend.
+/// Field shown to the user on the consent screen, with refs resolved
+/// engine-side. `key` is the machine `disclosure-field` key the consumer
+/// receives (locale-agnostic); `label` is the full translation set the
+/// api narrows to the request locale for the applicant only (never
+/// sealed to the consumer); `value` is the policy-supplied data.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DisplayField {
     pub key: String,
-    pub label: String,
+    pub label: Localized,
     pub value: String,
+}
+
+/// A resolved `localized-ref`: the full translation set the engine read
+/// out of the ref resource. Applicant-facing only — the api picks the
+/// request-locale text at view time (`en` fallback); the map itself
+/// never reaches the consumer envelope, closing the covert translation
+/// channel. Sealed into `current_prompt` so a read renders without the
+/// policy component / embedded registry.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Localized {
+    pub translations: Vec<Translation>,
+}
+
+/// One `(language, text)` row of a [`Localized`] set.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Translation {
+    pub language: String,
+    pub text: String,
 }

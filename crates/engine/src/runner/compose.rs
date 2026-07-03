@@ -166,13 +166,18 @@ fn route_strict_embedded(
     import_nodes: &mut HashMap<String, NodeId>,
     manifest: &mut Vec<EmbeddedImport>,
 ) -> wasmtime::Result<()> {
-    let strict: Vec<(String, ItemKind, EmbeddedIface)> = graph.types()[graph[pkg_id].ty()]
+    let strict: Vec<(String, ItemKind, EmbeddedIface, String)> = graph.types()[graph[pkg_id].ty()]
         .imports
         .iter()
-        .filter_map(|(name, kind)| strict_iface(name).map(|iface| (name.clone(), *kind, iface)))
+        .filter_map(|(name, kind)| {
+            strict_iface(name).map(|iface| (name.clone(), *kind, iface, iface_version(name)))
+        })
         .collect();
-    for (import_name, kind, iface) in strict {
-        let instance_name = embedded_import_name(hash, iface.as_str());
+    for (import_name, kind, iface, version) in strict {
+        // The twin name carries the interface version, so two components
+        // with byte-identical catalogs (same slug) but different versions
+        // route to DISTINCT twins rather than colliding onto one.
+        let instance_name = embedded_import_name(hash, iface.as_str(), &version);
         let node = match import_nodes.get(&instance_name) {
             Some(node) => *node,
             None => {
@@ -195,6 +200,7 @@ fn route_strict_embedded(
                     instance_name,
                     catalog_hash: *hash,
                     iface,
+                    version,
                 });
                 node
             }
@@ -221,13 +227,13 @@ pub(crate) fn reconstruct_strict_manifest(wasm: &[u8]) -> wasmtime::Result<Vec<E
     let catalogs = load_embedded_nested(wasm)?;
     let mut manifest = Vec::new();
     for name in imports {
-        let Some(iface) = slot_import_iface(&name) else {
+        let Some((iface, version)) = slot_import_parts(&name) else {
             continue;
         };
         let catalog_hash = catalogs
             .iter()
             .map(|c| c.hash)
-            .find(|h| embedded_import_name(h, iface.as_str()) == name)
+            .find(|h| embedded_import_name(h, iface.as_str(), &version) == name)
             .ok_or_else(|| {
                 wasmtime::Error::msg(format!(
                     "pre-fused artifact imports `{name}` but no nested catalog matches it",
@@ -237,24 +243,39 @@ pub(crate) fn reconstruct_strict_manifest(wasm: &[u8]) -> wasmtime::Result<Vec<E
             instance_name: name,
             catalog_hash,
             iface,
+            version,
         });
     }
     Ok(manifest)
 }
 
-/// The strict-routed kind of an already-routed `embedded-slot:*` import
-/// name, or `None` if it isn't one.
-fn slot_import_iface(name: &str) -> Option<EmbeddedIface> {
-    if !name.starts_with(EMBEDDED_SLOT_PREFIX) {
-        return None;
-    }
-    if name.ends_with("/i18n") {
-        Some(EmbeddedIface::I18n)
-    } else if name.ends_with("/icons") {
-        Some(EmbeddedIface::Icons)
-    } else {
-        None
-    }
+/// The `@x.y.z` version of a canonical embedded import name, or empty if
+/// unversioned. E.g. `enclavid:host/embedded-i18n@0.1.0` → `"0.1.0"`.
+fn iface_version(name: &str) -> String {
+    name.rsplit_once('@')
+        .map(|(_, v)| v.to_string())
+        .unwrap_or_default()
+}
+
+/// The `(kind, version)` of an already-routed `embedded-slot:*` import
+/// name, or `None` if it isn't one. Inverse of [`embedded_import_name`]:
+/// `embedded-slot:<slug>[-<ver>]/<iface>` → `(iface, version)`. The slug
+/// is hex (no `-`), so the first `-` in the package segment separates it
+/// from the hyphenated version; the version is de-hyphenated back to
+/// dotted form.
+fn slot_import_parts(name: &str) -> Option<(EmbeddedIface, String)> {
+    let rest = name.strip_prefix(EMBEDDED_SLOT_PREFIX)?;
+    let (pkg, iface_seg) = rest.rsplit_once('/')?;
+    let iface = match iface_seg {
+        "i18n" => EmbeddedIface::I18n,
+        "icons" => EmbeddedIface::Icons,
+        _ => return None,
+    };
+    let version = match pkg.split_once('-') {
+        Some((_slug, ver)) => ver.replace('-', "."),
+        None => String::new(),
+    };
+    Some((iface, version))
 }
 
 /// Register a component's bytes as a package in the graph.

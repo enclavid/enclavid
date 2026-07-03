@@ -26,10 +26,11 @@ mod convert;
 mod status;
 
 use broker_client::{Event, Prompt, SessionState};
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::{Component, Linker, Resource};
 use wasmtime::{Config, Engine, Store};
 
 use crate::Host_ as GeneratedHost;
+use crate::embedded::{Icon, IconRef, Localized, LocalizedRef, undeclared_trap};
 use crate::limits::{POLICY_FUEL_BUDGET, POLICY_MAX_STATE_BYTES};
 use crate::listener::{ConsentDisclosure, SessionChange};
 use crate::state::{HostState, RunInputs};
@@ -80,6 +81,12 @@ pub struct EmbeddedImport {
     pub instance_name: String,
     pub catalog_hash: [u8; 32],
     pub iface: EmbeddedIface,
+    /// Version of the routed interface — the canonical import's `@x.y.z`
+    /// (empty if unversioned). Baked into `instance_name` so a
+    /// same-catalog different-version import can't collide onto one twin;
+    /// also lets host registration be version-aware if interface
+    /// signatures ever diverge across versions.
+    pub version: String,
 }
 
 /// A fused policy component plus the manifest of distinct embedded
@@ -240,7 +247,7 @@ impl Runner {
         store.set_fuel(POLICY_FUEL_BUDGET)?;
         let bindings = GeneratedHost::instantiate_async(&mut store, component, &linker).await?;
 
-        let wit_event = convert::event_to_wit(event, &store.data().embedded)?;
+        let wit_event = convert::event_to_wit(event)?;
         let (new_state, wit_action) = bindings
             .enclavid_policy_policy()
             .call_handle(&mut store, &session.state, &wit_event)
@@ -259,7 +266,6 @@ impl Runner {
         }
 
         // Perform the action and assemble the next session record.
-        let embedded_for_convert = store.data().embedded.clone();
         let mut next_session = SessionState {
             policy_hash: session.policy_hash,
             state: new_state,
@@ -267,10 +273,14 @@ impl Runner {
         };
         let status = match wit_action {
             crate::enclavid::policy::types::Action::Render(prompt) => {
-                // Validate every embedded ref the prompt carries BEFORE
-                // it is persisted/rendered — runtime-crafted or
-                // cross-component refs trap here.
-                let prompt = convert::prompt_to_domain(prompt, &embedded_for_convert)?;
+                // Dereference every ref-resource handle the prompt carries
+                // into its resolved data (translations / icon name / DF
+                // key), reading the run's ResourceTable, and build the
+                // self-contained sealed prompt. The handles can't cross
+                // the engine→api seam, so this is the single resolution
+                // point.
+                let host = store.data();
+                let prompt = convert::prompt_to_domain(prompt, &host.table, &host.embedded)?;
                 next_session.current_prompt = Some(prompt.clone());
                 RunStatus::AwaitingInput(prompt)
             }
@@ -314,33 +324,52 @@ fn register_strict_embedded(
     imports: &[EmbeddedImport],
     embedded: &std::sync::Arc<crate::embedded::EmbeddedRegistry>,
 ) -> wasmtime::Result<()> {
+    // Branch by kind at REGISTRATION (not inside the closure) so each
+    // func's closure has a single concrete resource return type. Each
+    // resolves STRICTLY against the bound `catalog_hash` and mints the
+    // ref resource into the run's ResourceTable.
     for imp in imports {
         let hash = imp.catalog_hash;
-        let iface = imp.iface;
-        let embedded = embedded.clone();
-        // WIT func name inside the interface (unchanged by routing —
-        // only the instance's outer import name is renamed).
-        let func = match iface {
-            EmbeddedIface::I18n => "localized",
-            EmbeddedIface::Icons => "icon",
-        };
-        linker.root().instance(&imp.instance_name)?.func_wrap_async(
-            func,
-            move |_store, (key,): (String,)| {
+        match imp.iface {
+            EmbeddedIface::I18n => {
                 let embedded = embedded.clone();
-                Box::new(async move {
-                    let token = match iface {
-                        EmbeddedIface::I18n => {
-                            crate::embedded::strict_token(&embedded.localized, &hash, &key)?
-                        }
-                        EmbeddedIface::Icons => {
-                            crate::embedded::strict_token(&embedded.icons, &hash, &key)?
-                        }
-                    };
-                    Ok((token,))
-                })
-            },
-        )?;
+                linker.root().instance(&imp.instance_name)?.func_wrap_async(
+                    "localized",
+                    move |mut store, (key,): (String,)| {
+                        let embedded = embedded.clone();
+                        Box::new(async move {
+                            let data = embedded
+                                .localized
+                                .resolve_strict(&hash, &key)
+                                .ok_or_else(|| undeclared_trap::<Localized>(&key))?
+                                .clone();
+                            let res: Resource<LocalizedRef> =
+                                store.data_mut().table.push(LocalizedRef(data))?;
+                            Ok((res,))
+                        })
+                    },
+                )?;
+            }
+            EmbeddedIface::Icons => {
+                let embedded = embedded.clone();
+                linker.root().instance(&imp.instance_name)?.func_wrap_async(
+                    "icon",
+                    move |mut store, (name,): (String,)| {
+                        let embedded = embedded.clone();
+                        Box::new(async move {
+                            let data = embedded
+                                .icons
+                                .resolve_strict(&hash, &name)
+                                .ok_or_else(|| undeclared_trap::<Icon>(&name))?
+                                .clone();
+                            let res: Resource<IconRef> =
+                                store.data_mut().table.push(IconRef(data))?;
+                            Ok((res,))
+                        })
+                    },
+                )?;
+            }
+        }
     }
     Ok(())
 }

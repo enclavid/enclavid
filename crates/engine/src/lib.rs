@@ -63,6 +63,7 @@ wasmtime::component::bindgen!({
         package enclavid:engine@0.1.0;
 
         world host {
+            import enclavid:host/types@0.1.0;
             import enclavid:host/embedded-disclosure-fields@0.1.0;
             import enclavid:host/embedded-i18n@0.1.0;
             import enclavid:host/embedded-icons@0.1.0;
@@ -77,8 +78,12 @@ wasmtime::component::bindgen!({
     ],
     imports: { default: async | trappable },
     exports: { default: async },
-    additional_derives: [
-        serde::Serialize,
-        serde::Deserialize,
-    ],
+    // The three embedded refs are host-owned resources; back each with
+    // the rep that carries its RESOLVED data (see `embedded::store`), so
+    // the action-boundary deref in `runner::convert` is self-contained.
+    with: {
+        "enclavid:host/types.localized-ref": crate::embedded::LocalizedRef,
+        "enclavid:host/types.icon-ref": crate::embedded::IconRef,
+        "enclavid:host/types.disclosure-field-ref": crate::embedded::DisclosureFieldRef,
+    },
 });

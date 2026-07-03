@@ -27,6 +27,7 @@ use enclavid::host::embedded_disclosure_fields::disclosure_field as resolve_disc
 use enclavid::host::embedded_i18n::localized as resolve_localized;
 use enclavid::host::embedded_icons::icon as resolve_icon;
 use enclavid::shared_types::capture::{CameraFacing, CaptureGuide, CaptureStep, MediaSpec};
+use enclavid::host::types::IconRef;
 use enclavid::shared_types::disclosure::DisplayField;
 use exports::enclavid::well_known::capture::Guest as CaptureGuest;
 use exports::enclavid::well_known::disclosure_fields::Guest as DisclosureFieldsGuest;
@@ -37,16 +38,16 @@ struct WellKnown;
 // ─── icons ────────────────────────────────────────────────────────
 
 impl IconsGuest for WellKnown {
-    fn passport() -> String {
+    fn passport() -> IconRef {
         resolve_icon("passport")
     }
-    fn id_card() -> String {
+    fn id_card() -> IconRef {
         resolve_icon("id_card")
     }
-    fn drivers_license() -> String {
+    fn drivers_license() -> IconRef {
         resolve_icon("drivers_license")
     }
-    fn selfie() -> String {
+    fn selfie() -> IconRef {
         resolve_icon("selfie")
     }
 }

@@ -6,8 +6,7 @@ package enclavid:shared-types@0.1.0;
 /// (e.g. `enclavid:well-known`). The host capabilities that mint the refs
 /// these records carry live in `enclavid:host`.
 interface capture {
-    use enclavid:host/embedded-i18n@0.1.0.{localized-ref};
-    use enclavid:host/embedded-icons@0.1.0.{icon-ref};
+    use enclavid:host/types@0.1.0.{localized-ref, icon-ref};
 
     /// One JPEG-encoded frame, decoded independently by the enclave's
     /// plugin layer. Bytes are pristine — no container, no inter-
