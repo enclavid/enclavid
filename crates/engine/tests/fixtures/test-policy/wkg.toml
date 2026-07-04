@@ -4,3 +4,4 @@
 "enclavid:policy" = { path = "../../../../../wit/policy" }
 "enclavid:host" = { path = "../../../../../wit/host" }
 "enclavid:extra" = { path = "../test-extra/wit" }
+"enclavid:face-age" = { path = "../../../../../plugins/face-age/wit" }

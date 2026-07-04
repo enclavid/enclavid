@@ -44,3 +44,7 @@ wasm-encoder = "0.247"
 # at seal time; keeps the fixture's text-ref set in sync with what
 # would land in the embedded sections of a sealed wasm.
 enclavid-embedded = { path = "../embedded" }
+# happy_path's fake_capture emits a real JPEG so the face-age plugin's
+# in-sandbox decode → preprocess → inference pipeline has something to
+# decode (a placeholder clip of raw bytes wouldn't).
+jpeg-encoder = "0.6"

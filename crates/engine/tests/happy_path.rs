@@ -39,9 +39,15 @@ const WELL_KNOWN_PACKAGE: &str = "enclavid:well-known@0.1.0";
 /// well-known in the dynamic path, and at runtime over a pre-fused core
 /// in the hybrid test.
 const EXTRA_PACKAGE: &str = "enclavid:extra@0.1.0";
+/// Package id of the face-age plugin the policy calls on the selfie
+/// round. Ships no embedded catalog (no i18n/icons/DF), so it adds no
+/// strict-routing twin.
+const FACE_AGE_PACKAGE: &str = "enclavid:face-age@0.1.0";
 
-/// The plugins the policy imports — well-known + extra. Both must be
-/// present in every composition, since the policy calls into both.
+/// The plugins the policy imports — well-known + extra + face-age. All
+/// must be present in every composition, since the policy calls into
+/// each (well-known for specs/DF, extra for the requester tag, face-age
+/// on the selfie round).
 fn all_plugins() -> Vec<PluginInstance> {
     vec![
         PluginInstance {
@@ -51,6 +57,10 @@ fn all_plugins() -> Vec<PluginInstance> {
         PluginInstance {
             package: EXTRA_PACKAGE.to_string(),
             wasm: extra_component().to_vec(),
+        },
+        PluginInstance {
+            package: FACE_AGE_PACKAGE.to_string(),
+            wasm: face_age_component().to_vec(),
         },
     ]
 }
@@ -203,6 +213,37 @@ async fn empty_passport_clip_is_retryable() {
 }
 
 #[tokio::test]
+async fn empty_selfie_clip_is_retryable_via_plugin() {
+    let h = Harness::new();
+    let listener = Arc::new(RecordingListener::default());
+
+    // genesis → passport prompt
+    let (status, session) = h.run(Session::default(), Event::Start, &listener).await;
+    assert_media(&status, "genesis (passport)");
+    // passport clip → selfie prompt
+    let (status, session) = h
+        .run(session, Event::Media(fake_capture()), &listener)
+        .await;
+    assert_media(&status, "passport → selfie");
+
+    // Feed a selfie capture with ZERO frames. On the selfie round the
+    // policy hands the clip to the FUSED face-age plugin; the plugin reads
+    // 0 frames and returns confidence 0; the policy maps that to a
+    // retryable rejection. Proves the plugin was invoked across the fused
+    // boundary during `handle` and actually read the clip resource — the
+    // full clip-consumer path, not just the policy-side read.
+    let empty = MediaResult {
+        slot: 0,
+        clip: Clip { frames: vec![] },
+    };
+    let (status, _session) = h.run(session, Event::Media(empty), &listener).await;
+    match status {
+        RunStatus::Completed(Decision::RejectedRetryable) => {}
+        _ => panic!("empty selfie clip must yield Completed(RejectedRetryable) via the face-age plugin"),
+    }
+}
+
+#[tokio::test]
 async fn oversized_state_traps() {
     let h = Harness::new();
     let listener = Arc::new(RecordingListener::default());
@@ -252,7 +293,8 @@ async fn static_fused_artifact_resolves_strictly() {
     // routing) — not collapsed to canonical. The policy calls only
     // `localized` (its capture icons come from well-known), so wit_bindgen
     // elides its unused icons import; distinct twins are: policy (i18n) +
-    // well-known (i18n+icons) + extra (i18n) = 4.
+    // well-known (i18n+icons) + extra (i18n) = 4. face-age ships no
+    // embedded catalog, so it adds no twin.
     let imports = enclavid_engine::top_level_imports(&fused).unwrap();
     let slots: Vec<&String> = imports
         .iter()
@@ -393,12 +435,18 @@ async fn strict_routing_isolates_colliding_i18n_key() {
 async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let runner = Runner::new().unwrap();
 
-    // CORE: policy + well-known baked. The policy still imports extra/tag
-    // (unsatisfied — a runtime import of the core).
-    let baked = vec![PluginInstance {
-        package: WELL_KNOWN_PACKAGE.to_string(),
-        wasm: well_known_component().to_vec(),
-    }];
+    // CORE: policy + well-known + face-age baked. The policy still imports
+    // extra/tag (unsatisfied — a runtime import of the core).
+    let baked = vec![
+        PluginInstance {
+            package: WELL_KNOWN_PACKAGE.to_string(),
+            wasm: well_known_component().to_vec(),
+        },
+        PluginInstance {
+            package: FACE_AGE_PACKAGE.to_string(),
+            wasm: face_age_component().to_vec(),
+        },
+    ];
     let core = runner.fuse(test_policy_component(), &baked).unwrap();
 
     // HYBRID: link extra at runtime over the pre-fused core.
@@ -590,14 +638,31 @@ fn assert_media(status: &RunStatus, ctx: &str) {
 }
 
 /// A single-step fake capture result (both passport and selfie specs are
-/// single-shot, so the clip fills step index 0).
+/// single-shot, so the clip fills step index 0). The frame is a REAL
+/// encoded JPEG so the face-age plugin's in-sandbox decode → preprocess →
+/// inference pipeline (run on the selfie round) has something to decode.
 fn fake_capture() -> MediaResult {
     MediaResult {
         slot: 0,
         clip: Clip {
-            frames: vec![vec![0xFF, 0xD8, 0xFF, 0xE0]],
+            frames: vec![jpeg_frame()],
         },
     }
+}
+
+/// A decodable solid mid-gray 64×64 RGB JPEG. The pixel values are
+/// irrelevant to the tests — only that the frame decodes so the plugin
+/// returns a usable (confidence > 0) estimate.
+fn jpeg_frame() -> Vec<u8> {
+    use jpeg_encoder::{ColorType, Encoder};
+    const W: u16 = 64;
+    const H: u16 = 64;
+    let rgb = vec![128u8; W as usize * H as usize * 3];
+    let mut buf = Vec::new();
+    Encoder::new(&mut buf, 90)
+        .encode(&rgb, W, H, ColorType::Rgb)
+        .expect("encode test jpeg");
+    buf
 }
 
 // ---------------------------------------------------------------------
@@ -614,6 +679,10 @@ fn well_known_dir() -> String {
 
 fn extra_dir() -> String {
     format!("{}/tests/fixtures/test-extra", env!("CARGO_MANIFEST_DIR"))
+}
+
+fn face_age_dir() -> String {
+    format!("{}/../../plugins/face-age", env!("CARGO_MANIFEST_DIR"))
 }
 
 /// Build the `test-policy` fixture (cached), componentize it, and embed
@@ -651,6 +720,20 @@ fn extra_component() -> &'static [u8] {
         .get_or_init(|| {
             let dir = extra_dir();
             let module = format!("{dir}/target/wasm32-unknown-unknown/release/test_extra.wasm");
+            embed_sections(build_componentized(&dir, &module), &dir)
+        })
+        .as_slice()
+}
+
+/// Build the `enclavid:face-age` plugin (cached) and componentize it. It
+/// ships no embedded JSON, so `embed_sections` appends nothing — the
+/// artifact carries only its `check` export + the host `clip` import.
+fn face_age_component() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| {
+            let dir = face_age_dir();
+            let module = format!("{dir}/target/wasm32-unknown-unknown/release/face_age.wasm");
             embed_sections(build_componentized(&dir, &module), &dir)
         })
         .as_slice()

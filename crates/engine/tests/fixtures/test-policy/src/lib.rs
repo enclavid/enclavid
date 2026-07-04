@@ -38,6 +38,9 @@ use enclavid::well_known::disclosure_fields as wk;
 // Second plugin (linked at runtime in the hybrid test): its `get()`
 // resolves `extra_tag` from the extra plugin's own i18n catalog.
 use enclavid::extra::tag;
+// The face-age plugin: reads the selfie clip host-side and returns an
+// age estimate. A real clip-consumer across the fused boundary.
+use enclavid::face_age::check as face_age;
 use exports::enclavid::policy::policy::Guest;
 
 struct TestPolicy;
@@ -146,11 +149,27 @@ impl Guest for TestPolicy {
                 }
             }
 
-            // Selfie captured → consent-to-disclose screen.
-            (STEP_AWAIT_SELFIE, Event::Media(_)) => (
-                state_at(STEP_AWAIT_CONSENT),
-                Action::Render(Prompt::ConsentDisclosure(build_consent())),
-            ),
+            // Selfie captured → hand the clip to the face-age plugin
+            // (fused single-store: the plugin reads the frames host-side
+            // via the `clip` resource and returns an estimate), then go to
+            // the consent screen. A zero-confidence estimate means the
+            // capture was unusable → ask for a retake. The age threshold
+            // itself is the policy's call and lands with the real model;
+            // for now the confidence gate exercises the plugin path.
+            (STEP_AWAIT_SELFIE, Event::Media(result)) => {
+                let estimate = face_age::estimate(&result.clip);
+                if estimate.confidence <= 0.0 {
+                    (
+                        state_at(STEP_AWAIT_SELFIE),
+                        Action::Finish(Decision::RejectedRetryable),
+                    )
+                } else {
+                    (
+                        state_at(STEP_AWAIT_CONSENT),
+                        Action::Render(Prompt::ConsentDisclosure(build_consent())),
+                    )
+                }
+            }
 
             // Consent reply → terminal decision. The runtime already
             // sealed (or didn't seal) the disclosure based on this same

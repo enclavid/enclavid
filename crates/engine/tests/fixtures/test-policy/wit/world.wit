@@ -15,6 +15,11 @@ world policy {
     // distinct twin.
     import enclavid:extra/tag@0.1.0;
 
+    // The face-age plugin: a real clip-consumer. The policy hands it the
+    // selfie `clip` during `handle` and gets back an `age-estimate`. No
+    // embedded catalog of its own, so it adds no strict-routing twin.
+    import enclavid:face-age/check@0.1.0;
+
     // Host interfaces. The policy resolves its own consent copy via
     // embedded/i18n; static config comes from `context.props`. Capture and
     // consent are driven by the `action` the policy returns from `handle`

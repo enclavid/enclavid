@@ -1,0 +1,43 @@
+package enclavid:face-age@0.1.0;
+
+/// Facial age estimation from a selfie capture.
+///
+/// This is a MODEL-AGNOSTIC contract: any estimator (SSR-Net, genderage,
+/// MiVOLO, …) satisfies it by shipping a distinct OCI artifact that
+/// exports this interface. The model is chosen per session via the pinned
+/// `impl_ref` in `POST /sessions`, and its identity is captured by that
+/// artifact's OCI digest (measured / attested) — so the model name lives
+/// on the artifact (`face-age-ssrnet`, `face-age-genderage`), never in
+/// this WIT package. A model whose OUTPUT differs (e.g. a distribution)
+/// is a versioned contract evolution, not a new package.
+interface check {
+    use enclavid:host/types@0.1.0.{clip};
+
+    /// The estimator's read on a selfie capture. `age` is the estimated
+    /// age in years; `confidence` is the model's certainty in [0,1]. Both
+    /// are a FACT the policy acts on — the policy owns the threshold
+    /// comparison, the borderline→document escalation, and what (if
+    /// anything) it discloses. A biometric estimate is inherently fuzzy,
+    /// so the policy uses `confidence` to route uncertain captures (and
+    /// treats confidence 0 as "unusable capture → retake"). No session
+    /// config, no threshold: a stateless clip→estimate function.
+    record age-estimate {
+        age: f32,
+        confidence: f32,
+    }
+
+    /// Estimate the subject's age from a selfie clip. The frames stay
+    /// host-side — the plugin pulls them on demand through the `clip`
+    /// resource, so the pixel bytes never enter the policy's memory.
+    estimate: func(selfie: borrow<clip>) -> age-estimate;
+}
+
+world face-age {
+    // The applicant's capture frames arrive as a host-owned `clip`
+    // resource; the plugin reads them via its `frame` / `frame-count`
+    // methods. This is the plugin's ONLY host dependency — no embedded
+    // catalog (no i18n / icons / disclosure-fields), so it contributes no
+    // strict-routing twin.
+    import enclavid:host/types@0.1.0;
+    export check;
+}
