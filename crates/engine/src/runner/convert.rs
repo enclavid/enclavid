@@ -37,15 +37,27 @@ use crate::sanitize;
 // ---------------------------------------------------------------------
 
 /// Lower a domain [`Event`] into the WIT `event` the policy's `handle`
-/// consumes. Media clips ride through verbatim — opaque JPEG frames.
-pub fn event_to_wit(event: Event) -> wasmtime::Result<wit_policy::Event> {
+/// consumes. The captured frames don't cross into the policy's linear
+/// memory — they're pushed into the run's [`ResourceTable`] host-side and
+/// the policy receives an unforgeable `clip` handle it forwards to a
+/// plugin. Minting the handle needs `&mut table`, so this runs before the
+/// `handle` call while the store is otherwise idle.
+pub fn event_to_wit(
+    table: &mut ResourceTable,
+    event: Event,
+) -> wasmtime::Result<wit_policy::Event> {
     Ok(match event {
         Event::Start => wit_policy::Event::Start,
         Event::ConsentDisclosure(accepted) => wit_policy::Event::ConsentDisclosure(accepted),
-        Event::Media(result) => wit_policy::Event::Media(wit_policy::MediaResult {
-            slot: result.slot,
-            clip: result.clip.frames,
-        }),
+        Event::Media(result) => {
+            let clip = table.push(crate::media::ClipRep {
+                frames: result.clip.frames,
+            })?;
+            wit_policy::Event::Media(wit_policy::MediaResult {
+                slot: result.slot,
+                clip,
+            })
+        }
     })
 }
 

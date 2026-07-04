@@ -127,11 +127,24 @@ impl Guest for TestPolicy {
                 (state, Action::Render(Prompt::Media(capture::passport())))
             }
 
-            // Passport captured → ask for the selfie.
-            (STEP_AWAIT_PASSPORT, Event::Media(_)) => (
-                state_at(STEP_AWAIT_SELFIE),
-                Action::Render(Prompt::Media(capture::selfie())),
-            ),
+            // Passport captured → validate the capture, then ask for the
+            // selfie. Exercises the host-owned `clip` resource: the frames
+            // live host-side, so the policy pulls the count (and the first
+            // frame's bytes) across the boundary on demand — the pixels
+            // only materialise where asked. An empty capture is retryable.
+            (STEP_AWAIT_PASSPORT, Event::Media(result)) => {
+                if result.clip.frame_count() == 0 || result.clip.frame(0).is_none() {
+                    (
+                        state_at(STEP_AWAIT_PASSPORT),
+                        Action::Finish(Decision::RejectedRetryable),
+                    )
+                } else {
+                    (
+                        state_at(STEP_AWAIT_SELFIE),
+                        Action::Render(Prompt::Media(capture::selfie())),
+                    )
+                }
+            }
 
             // Selfie captured → consent-to-disclose screen.
             (STEP_AWAIT_SELFIE, Event::Media(_)) => (

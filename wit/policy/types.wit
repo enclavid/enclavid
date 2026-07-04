@@ -6,9 +6,9 @@ package enclavid:policy@0.1.0;
 /// so helper plugins can `use` the records without importing the `handle`
 /// export.
 interface types {
-    use enclavid:shared-types/capture@0.1.0.{media-spec, clip};
+    use enclavid:shared-types/capture@0.1.0.{media-spec};
     use enclavid:shared-types/disclosure@0.1.0.{display-field};
-    use enclavid:host/types@0.1.0.{localized-ref};
+    use enclavid:host/types@0.1.0.{localized-ref, clip};
 
     /// Terminal outcome carried by `action::finish`. The platform renders
     /// UI from this fixed enum — policy controls no free text.
@@ -39,8 +39,10 @@ interface types {
         consent-disclosure(disclosure),   // consent-to-disclose screen; ON ACCEPT the runtime seals it to the consumer
     }
 
-    /// The captured frames for one `media-spec` step (carried by
-    /// `event::media`). `slot` is the capture-step index it fills.
+    /// The captured artifact for one `media-spec` step (carried by
+    /// `event::media`). `slot` is the capture-step index it fills; `clip`
+    /// is a host-owned handle to the frames — the policy forwards it to a
+    /// verification plugin rather than reading pixels itself.
     record media-result {
         slot: u32,
         clip: clip,

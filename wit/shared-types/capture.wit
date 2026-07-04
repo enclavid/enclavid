@@ -8,16 +8,6 @@ package enclavid:shared-types@0.1.0;
 interface capture {
     use enclavid:host/types@0.1.0.{localized-ref, icon-ref};
 
-    /// One JPEG-encoded frame, decoded independently by the enclave's
-    /// plugin layer. Bytes are pristine — no container, no inter-
-    /// frame compression that could mask forensic signals.
-    type frame = list<u8>;
-
-    /// One artifact's capture stream — typically 8–12 JPEG frames
-    /// over ~1s. Anti-replay and forensic signals (parallax, glare
-    /// drift, hand jitter) live in inter-frame differences.
-    type clip = list<frame>;
-
     /// Which physical camera the capture step should use.
     variant camera-facing {
         front,                    // selfie
@@ -77,17 +67,5 @@ interface capture {
     record media-spec {
         label: localized-ref,
         captures: list<capture-step>,
-    }
-
-    /// AND-group: a conjunction of `media-spec`s that must ALL be
-    /// satisfied. `media-spec` order drives the UI walk.
-    record all-of {
-        items: list<media-spec>,
-    }
-
-    /// One spec's resulting clips, in the order declared by its
-    /// `media-spec.captures` step list.
-    record group-result {
-        clips: list<clip>,
     }
 }

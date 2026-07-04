@@ -23,6 +23,7 @@
 mod embedded;
 pub mod limits;
 mod listener;
+mod media;
 mod runner;
 mod sanitize;
 mod state;
@@ -81,9 +82,12 @@ wasmtime::component::bindgen!({
     // The three embedded refs are host-owned resources; back each with
     // the rep that carries its RESOLVED data (see `embedded::store`), so
     // the action-boundary deref in `runner::convert` is self-contained.
+    // `clip` is likewise host-owned — its rep holds the capture frames
+    // (see `media`), minted by the runtime into `event::media`.
     with: {
         "enclavid:host/types.localized-ref": crate::embedded::LocalizedRef,
         "enclavid:host/types.icon-ref": crate::embedded::IconRef,
         "enclavid:host/types.disclosure-field-ref": crate::embedded::DisclosureFieldRef,
+        "enclavid:host/types.clip": crate::media::ClipRep,
     },
 });

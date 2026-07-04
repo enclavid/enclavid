@@ -14,6 +14,14 @@ package enclavid:host@0.1.0;
 /// per-component routing twin — a structural clone of `embedded-i18n` /
 /// `embedded-icons` with a distinct id — still references the SAME
 /// resource type and subtype-matches the component's canonical import.
+///
+/// `clip` is likewise a host-owned resource — the applicant's captured
+/// frames, minted by the runtime into `event::media`. It lives here (not
+/// in `enclavid:shared-types/capture`) so both the policy and any
+/// verification plugin reference the SAME resource type and can pass a
+/// handle across the fused policy↔plugin boundary; the pixel bytes stay
+/// host-side and enter a component's linear memory only when it pulls a
+/// frame.
 interface types {
     /// One static configuration value the consumer supplies at session
     /// creation (was `eval-args`). Read on demand via
@@ -35,4 +43,32 @@ interface types {
     /// A validated reference to a `disclosure-fields` catalog entry —
     /// surfaces as the machine `display-field.key` the consumer receives.
     resource disclosure-field-ref;
+
+    /// One JPEG-encoded frame — pristine bytes, no container, no
+    /// inter-frame compression that could mask the forensic signal.
+    type frame = list<u8>;
+
+    /// One captured artifact's frame stream — typically 8–12 JPEG frames
+    /// over ~1s, held host-side so the pixel bytes never enter the
+    /// policy's linear memory. The policy is a pure router: it receives
+    /// this unforgeable handle in `event::media` and forwards it to a
+    /// verification plugin, which reads the frames it needs. Anti-replay /
+    /// forensic signals (parallax, glare drift, hand jitter) live in
+    /// inter-frame differences — which is why a capture is a clip, not a
+    /// single photo.
+    resource clip {
+        /// Number of frames in the stream.
+        frame-count: func() -> u32;
+        /// The `index`-th frame (0-based), or none when `index` is past
+        /// the end. Streaming frames one at a time keeps peak memory at a
+        /// single frame — the right choice when each frame is processed
+        /// independently (decode → infer → drop).
+        frame: func(index: u32) -> option<frame>;
+        /// Every frame at once. Serves temporal analysis that needs the
+        /// whole clip together (inter-frame flow, a stacked tensor); it
+        /// materialises all frames in the caller's linear memory (bounded
+        /// by the component's memory limit), so prefer `frame` when
+        /// per-frame streaming suffices.
+        frames: func() -> list<frame>;
+    }
 }

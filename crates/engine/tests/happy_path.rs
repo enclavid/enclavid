@@ -178,6 +178,31 @@ async fn media_rounds_keep_state_minimal() {
 }
 
 #[tokio::test]
+async fn empty_passport_clip_is_retryable() {
+    let h = Harness::new();
+    let listener = Arc::new(RecordingListener::default());
+
+    // genesis → render media(passport)
+    let (status, session) = h.run(Session::default(), Event::Start, &listener).await;
+    assert_media(&status, "genesis (passport)");
+
+    // Feed a capture with ZERO frames. The policy reads the host-owned
+    // `clip` resource (`frame_count` / `frame`), sees an empty capture,
+    // and returns a retryable rejection — proving the frames reach the
+    // policy as a readable resource handle, not as bytes lowered into its
+    // linear memory.
+    let empty = MediaResult {
+        slot: 0,
+        clip: Clip { frames: vec![] },
+    };
+    let (status, _session) = h.run(session, Event::Media(empty), &listener).await;
+    match status {
+        RunStatus::Completed(Decision::RejectedRetryable) => {}
+        _ => panic!("empty passport clip must yield Completed(RejectedRetryable)"),
+    }
+}
+
+#[tokio::test]
 async fn oversized_state_traps() {
     let h = Harness::new();
     let listener = Arc::new(RecordingListener::default());

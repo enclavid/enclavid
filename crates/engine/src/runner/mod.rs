@@ -247,10 +247,10 @@ impl Runner {
         store.set_fuel(POLICY_FUEL_BUDGET)?;
         let bindings = GeneratedHost::instantiate_async(&mut store, component, &linker).await?;
 
-        let wit_event = convert::event_to_wit(event)?;
+        let wit_event = convert::event_to_wit(&mut store.data_mut().table, event)?;
         let (new_state, wit_action) = bindings
             .enclavid_policy_policy()
-            .call_handle(&mut store, &session.state, &wit_event)
+            .call_handle(&mut store, &session.state, wit_event)
             .await?;
 
         // Data-minimization backstop: the policy's opaque blob must stay
