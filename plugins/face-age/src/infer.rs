@@ -105,7 +105,7 @@ mod age_googlenet {
     /// are coarse — the policy treats this as a buffer/pre-filter signal,
     /// not a precise 18 cut, and escalates the buffer zone to the document
     /// DOB. (The softmax peakedness would be a natural per-frame confidence,
-    /// but that's a model-specific signal for the raw interface, not this
+    /// but it's a model-specific signal, out of scope for this
     /// model-agnostic contract.)
     pub fn decode(out: &[f32]) -> f32 {
         const CENTERS: [f32; 8] = [1.0, 5.0, 10.0, 17.5, 28.5, 40.5, 50.5, 65.0];

@@ -22,10 +22,10 @@ interface check {
     ///
     /// No `confidence` here on purpose: it isn't uniform (softmax models
     /// have one, regression models don't) and a per-frame-agreement
-    /// confidence would cost N forward passes. Model-internal certainty, if
-    /// any, belongs on the model-specific raw interface, not this
-    /// model-agnostic contract; the policy handles uncertainty via the
-    /// buffer + separate capture-quality checks.
+    /// confidence would cost N forward passes. Any model-internal certainty
+    /// is model-specific and out of scope for this model-agnostic contract;
+    /// the policy handles uncertainty via the buffer + separate
+    /// capture-quality checks.
     record age-estimate {
         age: f32,
     }
