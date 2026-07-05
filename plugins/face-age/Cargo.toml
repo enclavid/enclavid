@@ -1,5 +1,3 @@
-[workspace]
-
 [package]
 name = "face-age"
 version = "0.1.0"
@@ -9,31 +7,31 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# Build the real reference artifact: embeds an ONNX age model from the
+# FACE_AGE_MODEL build-time path (include_bytes) and switches the profile to
+# age_googlenet's format (224² BGR mean-subtracted, 8-bucket decode).
+# Default (off) = placeholder graph, no model, tests green, no committed
+# weights. Enable with a model present:
+#   FACE_AGE_MODEL=/abs/age_googlenet.onnx cargo build --features age-googlenet ...
+age-googlenet = []
+
 [dependencies]
 wit-bindgen = "0.57"
-# Pure-Rust ONNX inference, run entirely in-sandbox. default-features off
-# to drop the multithread/blas paths that don't exist on
-# wasm32-unknown-unknown (no threads, no BLAS).
-tract-onnx = { version = "0.21", default-features = false }
-# Pure-Rust JPEG decoder with DCT-scaled decoding (1/8, 1/4, 1/2) so a
-# 5-12 MP selfie frame is IDCT'd straight down to a small buffer — the
-# preprocessing bottleneck for the cheap checks. default-features off
-# drops the `rayon` multithreading that doesn't exist on wasm.
-jpeg-decoder = { version = "0.3", default-features = false }
+# Generic in-sandbox ML/image helpers — the plugin holds only the per-model
+# profile (format + decode) + the WIT glue on top of these.
+onnx-core = { path = "../onnx-core" }
+vision = { path = "../vision" }
 
-# getrandom (pulled transitively by tract for hashmap seeding) has no
-# backend on wasm32-unknown-unknown; the `custom` feature + the no-op
-# registration in lib.rs cover it. Scoped to wasm only so native builds
-# (unit tests) use the OS backend.
+# getrandom (pulled transitively via onnx-core → tract for hashmap seeding)
+# has no backend on wasm32-unknown-unknown; the `custom` feature + the
+# no-op registration in lib.rs cover it. Scoped to wasm so native builds
+# (unit tests) use the OS backend. Registered here (the final cdylib) so the
+# symbol is present at link.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["custom"] }
 
-# For native unit tests of the decode/preprocess pipeline: encode a real
+# For native unit tests of the decode/preprocess/run pipeline: encode a real
 # JPEG to feed `estimate_age` (mirrors happy_path's fake_capture).
 [dev-dependencies]
 jpeg-encoder = "0.6"
-
-[profile.release]
-opt-level = "s"
-lto = true
-strip = true

@@ -13,23 +13,29 @@ package enclavid:face-age@0.1.0;
 interface check {
     use enclavid:host/types@0.1.0.{clip};
 
-    /// The estimator's read on a selfie capture. `age` is the estimated
-    /// age in years; `confidence` is the model's certainty in [0,1]. Both
-    /// are a FACT the policy acts on — the policy owns the threshold
-    /// comparison, the borderline→document escalation, and what (if
-    /// anything) it discloses. A biometric estimate is inherently fuzzy,
-    /// so the policy uses `confidence` to route uncertain captures (and
-    /// treats confidence 0 as "unusable capture → retake"). No session
-    /// config, no threshold: a stateless clip→estimate function.
+    /// The estimator's read on a selfie capture: `age` in years, a FACT the
+    /// policy acts on. The policy owns the threshold — and because a facial
+    /// estimate is inherently fuzzy and can't resolve a precise 18 cut, it
+    /// applies a conservative BUFFER (a challenge-age well above 18) and
+    /// escalates the buffer zone to the authoritative document DOB. No
+    /// session config, no threshold: a stateless clip→age function.
+    ///
+    /// No `confidence` here on purpose: it isn't uniform (softmax models
+    /// have one, regression models don't) and a per-frame-agreement
+    /// confidence would cost N forward passes. Model-internal certainty, if
+    /// any, belongs on the model-specific raw interface, not this
+    /// model-agnostic contract; the policy handles uncertainty via the
+    /// buffer + separate capture-quality checks.
     record age-estimate {
         age: f32,
-        confidence: f32,
     }
 
-    /// Estimate the subject's age from a selfie clip. The frames stay
-    /// host-side — the plugin pulls them on demand through the `clip`
-    /// resource, so the pixel bytes never enter the policy's memory.
-    estimate: func(selfie: borrow<clip>) -> age-estimate;
+    /// Estimate the subject's age from a selfie clip. `none` = the capture
+    /// couldn't be processed (no decodable frame) → the policy asks for a
+    /// retake. The frames stay host-side — the plugin pulls them on demand
+    /// through the `clip` resource, so the pixel bytes never enter the
+    /// policy's memory.
+    estimate: func(selfie: borrow<clip>) -> option<age-estimate>;
 }
 
 world face-age {

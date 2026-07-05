@@ -1,0 +1,12 @@
+[package]
+name = "vision"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Pure-Rust JPEG decoder with DCT-scaled decoding (1/8, 1/4, 1/2) so a
+# 5-12 MP capture frame is IDCT'd straight down to a small buffer — the
+# preprocessing bottleneck for the cheap checks. default-features off
+# drops the `rayon` multithreading that doesn't exist on wasm.
+jpeg-decoder = { version = "0.3", default-features = false }

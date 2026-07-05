@@ -152,24 +152,20 @@ impl Guest for TestPolicy {
             // Selfie captured → hand the clip to the face-age plugin
             // (fused single-store: the plugin reads the frames host-side
             // via the `clip` resource and returns an estimate), then go to
-            // the consent screen. A zero-confidence estimate means the
-            // capture was unusable → ask for a retake. The age threshold
-            // itself is the policy's call and lands with the real model;
-            // for now the confidence gate exercises the plugin path.
-            (STEP_AWAIT_SELFIE, Event::Media(result)) => {
-                let estimate = face_age::estimate(&result.clip);
-                if estimate.confidence <= 0.0 {
-                    (
-                        state_at(STEP_AWAIT_SELFIE),
-                        Action::Finish(Decision::RejectedRetryable),
-                    )
-                } else {
-                    (
-                        state_at(STEP_AWAIT_CONSENT),
-                        Action::Render(Prompt::ConsentDisclosure(build_consent())),
-                    )
-                }
-            }
+            // the consent screen. `none` means the capture couldn't be
+            // processed → ask for a retake. The age threshold itself is the
+            // policy's call (buffer + document escalation) and lands with
+            // the real flow; here the `none` gate exercises the plugin path.
+            (STEP_AWAIT_SELFIE, Event::Media(result)) => match face_age::estimate(&result.clip) {
+                Some(_age) => (
+                    state_at(STEP_AWAIT_CONSENT),
+                    Action::Render(Prompt::ConsentDisclosure(build_consent())),
+                ),
+                None => (
+                    state_at(STEP_AWAIT_SELFIE),
+                    Action::Finish(Decision::RejectedRetryable),
+                ),
+            },
 
             // Consent reply → terminal decision. The runtime already
             // sealed (or didn't seal) the disclosure based on this same

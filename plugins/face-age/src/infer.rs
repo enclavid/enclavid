@@ -1,101 +1,116 @@
-//! In-sandbox preprocessing + ONNX inference via tract.
+//! Face-age inference: the generic ONNX runtime ([`onnx_core`]) + image
+//! prep ([`vision`]) + a compile-time model PROFILE — the thin per-model
+//! adapter that is the ONLY face-age-specific part: input format
+//! (resolution, channel order, normalization) + which model + output
+//! decode. The generic crates know nothing of this.
 //!
-//! The full image→estimate pipeline runs entirely inside the wasm
-//! sandbox: DCT-scaled JPEG decode → center crop → resize → normalize →
-//! an NCHW `f32` tensor → a tract model. The MODEL is a placeholder for
-//! now (a shape-correct `input * 2` so the real `[1,3,H,W]` tensor flows
-//! through tract's eval, with the "age" derived from the pixels); the
-//! real age net — embedded ONNX weights loaded once via
-//! `onnx().model_for_read` — replaces the graph and its output head. The
-//! decode / crop / resize / normalize stages are already the real ones.
+//! Profile selection is compile-time:
+//!   * default            → [`placeholder`]: a no-op graph, no weights
+//!                          (dev/tests, nothing committed to the repo).
+//!   * `--features age-googlenet` → [`age_googlenet`]: the real reference
+//!                          (ONNX embedded from `FACE_AGE_MODEL`, 224² BGR
+//!                          mean-subtracted, 8-bucket Adience → expected age).
 
-use jpeg_decoder::{Decoder, PixelFormat};
-use tract_onnx::prelude::*;
-use tract_onnx::tract_core::ops::math;
+use onnx_core::Model;
+use vision::{crop_resize, decode_jpeg_eighth};
 
-/// Model input side (square). The real age net fixes this to its own
-/// trained resolution.
-const INPUT: usize = 64;
+#[cfg(not(feature = "age-googlenet"))]
+use placeholder as profile;
+#[cfg(feature = "age-googlenet")]
+use age_googlenet as profile;
 
-/// Estimate age from the capture frames: DCT-scaled decode → preprocess →
-/// run the model. Returns `None` when no frame decodes (an unusable
-/// capture), which the caller maps to a zero-confidence estimate. v1 uses
-/// the first decodable frame; a real model would aggregate across frames.
+/// Estimate the age (years) from the capture frames: DCT-scaled decode →
+/// the profile's preprocess → build the model (once) → run → the profile's
+/// output decode. `None` when no frame decodes (unusable capture). Uses one
+/// representative frame — one forward pass; the clip's multiple frames are
+/// for anti-replay/liveness (a separate check), not the age estimate.
 pub fn estimate_age(frames: &[Vec<u8>]) -> Option<f32> {
     let (rgb, w, h) = frames.iter().find_map(|f| decode_jpeg_eighth(f))?;
-    let chw = preprocess(&rgb, w, h);
-    run_model(chw).ok()
+    let chw = profile::preprocess(&rgb, w, h);
+    let model = profile::build().ok()?;
+    let s = profile::INPUT;
+    let out = onnx_core::run(&model, &[1, 3, s, s], chw).ok()?;
+    Some(profile::decode(&out))
 }
 
-/// Decode a JPEG straight down to ~1/8 via DCT-scaled IDCT — a 5-12 MP
-/// selfie collapses to a few-hundred-px buffer without ever
-/// materialising the full-resolution image (the preprocessing bottleneck
-/// for the cheap checks). Returns RGB8 + dims; grayscale is replicated to
-/// three channels.
-fn decode_jpeg_eighth(bytes: &[u8]) -> Option<(Vec<u8>, usize, usize)> {
-    let mut decoder = Decoder::new(bytes);
-    decoder.read_info().ok()?;
-    let info = decoder.info()?;
-    // `scale` snaps the request to the nearest DCT scale (1/8, 1/4, …) and
-    // returns the actual output dims.
-    let (ow, oh) = decoder
-        .scale((info.width / 8).max(1), (info.height / 8).max(1))
-        .ok()?;
-    let pixels = decoder.decode().ok()?;
-    let rgb = match decoder.info()?.pixel_format {
-        PixelFormat::RGB24 => pixels,
-        PixelFormat::L8 => pixels.iter().flat_map(|&g| [g, g, g]).collect(),
-        // L16 / CMYK32 aren't produced by a browser camera capture.
-        _ => return None,
-    };
-    Some((rgb, ow as usize, oh as usize))
-}
+// ---------------------------------------------------------------------
+// Profile: placeholder (default) — no weights, shape-correct no-op
+// ---------------------------------------------------------------------
 
-/// Center-crop the largest square (the capture oval is centered), resize
-/// to `INPUT×INPUT` (nearest-neighbour — a real model would prefer
-/// bilinear/area), and lay out a normalized NCHW `[1,3,INPUT,INPUT]`
-/// buffer in `[0,1]`.
-fn preprocess(rgb: &[u8], w: usize, h: usize) -> Vec<f32> {
-    let side = w.min(h).max(1);
-    let x0 = (w - side) / 2;
-    let y0 = (h - side) / 2;
-    let mut chw = vec![0f32; 3 * INPUT * INPUT];
-    let plane = INPUT * INPUT;
-    for oy in 0..INPUT {
-        let sy = y0 + oy * side / INPUT;
-        for ox in 0..INPUT {
-            let sx = x0 + ox * side / INPUT;
-            let src = (sy * w + sx) * 3;
-            for c in 0..3 {
-                chw[c * plane + oy * INPUT + ox] = rgb[src + c] as f32 / 255.0;
-            }
-        }
+#[cfg(not(feature = "age-googlenet"))]
+mod placeholder {
+    use super::*;
+
+    pub const INPUT: usize = 64;
+
+    /// RGB, normalized `[0,1]`, NCHW `[1,3,64,64]`.
+    pub fn preprocess(rgb: &[u8], w: usize, h: usize) -> Vec<f32> {
+        let plane = INPUT * INPUT;
+        let mut chw = vec![0f32; 3 * plane];
+        crop_resize(rgb, w, h, INPUT, |ox, oy, r, g, b| {
+            let i = oy * INPUT + ox;
+            chw[i] = r as f32 / 255.0;
+            chw[plane + i] = g as f32 / 255.0;
+            chw[2 * plane + i] = b as f32 / 255.0;
+        });
+        chw
     }
-    chw
+
+    /// No-op graph so the pipeline runs without weights.
+    pub fn build() -> onnx_core::TractResult<Model> {
+        onnx_core::noop(&[1, 3, INPUT, INPUT])
+    }
+
+    /// Placeholder decode: map mean brightness to a plausible age band.
+    pub fn decode(out: &[f32]) -> f32 {
+        let mean = out.iter().sum::<f32>() / out.len().max(1) as f32;
+        mean * 30.0
+    }
 }
 
-/// Run the placeholder model on the preprocessed tensor. The graph is a
-/// shape-correct no-op (`input * 2`) so the real `[1,3,INPUT,INPUT]`
-/// tensor flows through tract's eval on realistic shapes; the "age" is a
-/// deterministic function of the pixels (mean of the output). Both the
-/// graph and this output decode are replaced by the real model.
-fn run_model(chw: Vec<f32>) -> TractResult<f32> {
-    let mut model = TypedModel::default();
-    let input = model.add_source("input", TypedFact::shape::<f32, _>([1, 3, INPUT, INPUT]))?;
-    // tract's typed binary ops require RANK match (dimension-wise
-    // broadcast only, no numpy rank-broadcast), so the scalar constant is
-    // rank-4 `[1,1,1,1]` to broadcast against `[1,3,INPUT,INPUT]`.
-    let two = model.add_const("two", Tensor::from_shape(&[1, 1, 1, 1], &[2.0f32])?)?;
-    let scaled = model.wire_node("scale", math::mul(), &[input, two])?;
-    model.set_output_outlets(&[scaled[0]])?;
-    let runnable = model.into_runnable()?;
+// ---------------------------------------------------------------------
+// Profile: age_googlenet (real reference, `--features age-googlenet`)
+// ---------------------------------------------------------------------
 
-    let input_tensor = Tensor::from_shape(&[1, 3, INPUT, INPUT], &chw)?;
-    let outputs = runnable.run(tvec![input_tensor.into_tvalue()])?;
-    let out = outputs[0].as_slice::<f32>()?;
-    let mean = out.iter().sum::<f32>() / out.len() as f32;
-    // Map mean brightness (~[0,2] after ×2) to a plausible age band.
-    Ok(mean * 30.0)
+#[cfg(feature = "age-googlenet")]
+mod age_googlenet {
+    use super::*;
+
+    pub const INPUT: usize = 224;
+
+    /// The ONNX age model, embedded from the `FACE_AGE_MODEL` build-time
+    /// path (a build-input, never committed).
+    const WEIGHTS: &[u8] = include_bytes!(env!("FACE_AGE_MODEL"));
+
+    /// BGR channel order, Caffe mean-subtract `[104,117,123]`, no scale,
+    /// NCHW `[1,3,224,224]` — age_googlenet's documented preprocessing.
+    pub fn preprocess(rgb: &[u8], w: usize, h: usize) -> Vec<f32> {
+        const MEAN: [f32; 3] = [104.0, 117.0, 123.0]; // B, G, R
+        let plane = INPUT * INPUT;
+        let mut chw = vec![0f32; 3 * plane];
+        crop_resize(rgb, w, h, INPUT, |ox, oy, r, g, b| {
+            let i = oy * INPUT + ox;
+            chw[i] = b as f32 - MEAN[0];
+            chw[plane + i] = g as f32 - MEAN[1];
+            chw[2 * plane + i] = r as f32 - MEAN[2];
+        });
+        chw
+    }
+
+    pub fn build() -> onnx_core::TractResult<Model> {
+        onnx_core::load(WEIGHTS)
+    }
+
+    /// Adience 8-group softmax → expected age (Σ pᵢ·centerᵢ). The buckets
+    /// are coarse — the policy treats this as a buffer/pre-filter signal,
+    /// not a precise 18 cut, and escalates the buffer zone to the document
+    /// DOB. (The softmax peakedness would be a natural per-frame confidence,
+    /// but that's a model-specific signal for the raw interface, not this
+    /// model-agnostic contract.)
+    pub fn decode(out: &[f32]) -> f32 {
+        const CENTERS: [f32; 8] = [1.0, 5.0, 10.0, 17.5, 28.5, 40.5, 50.5, 65.0];
+        out.iter().zip(CENTERS).map(|(p, c)| p * c).sum()
+    }
 }
 
 #[cfg(test)]
@@ -114,20 +129,33 @@ mod tests {
 
     #[test]
     fn decode_stage() {
-        let jpeg = gray_jpeg();
-        let decoded = decode_jpeg_eighth(&jpeg);
-        assert!(decoded.is_some(), "decode returned None");
-        let (rgb, w, h) = decoded.unwrap();
+        let (rgb, w, h) = decode_jpeg_eighth(&gray_jpeg()).expect("decode");
         eprintln!("decoded {w}x{h} = {} bytes", rgb.len());
         assert_eq!(rgb.len(), w * h * 3);
     }
 
+    // Full pipeline through the ACTIVE profile (placeholder by default,
+    // age_googlenet under the feature). Age must land in a sane range.
     #[test]
     fn full_pipeline() {
-        let (rgb, w, h) = decode_jpeg_eighth(&gray_jpeg()).unwrap();
-        let chw = preprocess(&rgb, w, h);
-        let result = run_model(chw);
-        eprintln!("run_model = {result:?}");
-        result.expect("run_model errored");
+        let age = estimate_age(&[gray_jpeg()]).expect("estimate");
+        eprintln!("age={age}");
+        assert!((0.0..=100.0).contains(&age), "age out of range: {age}");
+    }
+
+    // Manual: validates the generic load path against a downloaded ONNX
+    // (not committed). Run with a model present:
+    //   FACE_AGE_TEST_MODEL=/tmp/age_googlenet.onnx \
+    //     cargo test --target aarch64-apple-darwin load_real_onnx -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn load_real_onnx() {
+        let path = std::env::var("FACE_AGE_TEST_MODEL")
+            .unwrap_or_else(|_| "/tmp/age_googlenet.onnx".to_string());
+        let bytes = std::fs::read(&path).expect("model file present");
+        let model = onnx_core::load(&bytes).expect("load failed");
+        let out = onnx_core::run(&model, &[1, 3, 224, 224], vec![0.0f32; 3 * 224 * 224])
+            .expect("run failed");
+        eprintln!("MODEL {path}: first output len={}, values={out:?}", out.len());
     }
 }

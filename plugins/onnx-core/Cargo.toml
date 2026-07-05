@@ -1,0 +1,12 @@
+[package]
+name = "onnx-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Pure-Rust ONNX inference, run entirely in-sandbox. default-features off
+# drops the multithread/BLAS paths that don't exist on wasm32. getrandom
+# (pulled transitively for hashmap seeding) is handled by the plugin crate
+# that links this — it enables getrandom's wasm `custom` backend.
+tract-onnx = { version = "0.21", default-features = false }

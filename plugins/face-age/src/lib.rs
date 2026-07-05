@@ -1,14 +1,12 @@
 //! `enclavid:face-age` — facial age estimation from a selfie clip.
 //!
 //! The plugin reads the capture frames host-side via the `clip` resource
-//! (the pixel bytes never enter the policy's memory) and returns an
-//! `age-estimate` the policy acts on. Inference lives behind the
-//! [`estimate_from_frames`] seam — the single point where a real
-//! in-sandbox model drops in: DCT-scaled JPEG decode, a face crop on the
-//! capture oval, and a tract-run ONNX age net (per model behind a build
-//! feature; the model is embedded in this artifact and covered by its OCI
-//! digest). Today that seam holds a deterministic STUB so the composition
-//! + clip-read path is exercised end-to-end before the model lands.
+//! (the pixel bytes never enter the policy's memory) and returns an `age`
+//! the policy acts on. The pipeline lives in [`infer`]: generic ONNX
+//! runtime (`onnx-core`) + image prep (`vision`) + a compile-time model
+//! PROFILE (the only face-age-specific part: input format + model + output
+//! decode). Default builds run a no-op placeholder graph (no weights); the
+//! `age-googlenet` feature embeds the real reference model.
 
 mod infer;
 
@@ -37,21 +35,11 @@ use exports::enclavid::face_age::check::{AgeEstimate, Guest};
 struct FaceAge;
 
 impl Guest for FaceAge {
-    fn estimate(selfie: &Clip) -> AgeEstimate {
-        // Pull the whole clip and run the in-sandbox pipeline (DCT decode
-        // → crop → resize → normalize → tract). `None` means no frame
-        // decoded — an unusable capture — which the policy reads as
-        // confidence 0 and turns into a retake.
-        match infer::estimate_age(&selfie.frames()) {
-            Some(age) => AgeEstimate {
-                age,
-                confidence: 0.5,
-            },
-            None => AgeEstimate {
-                age: 0.0,
-                confidence: 0.0,
-            },
-        }
+    fn estimate(selfie: &Clip) -> Option<AgeEstimate> {
+        // `None` = no frame decoded (unusable capture) → the policy asks
+        // for a retake. The in-sandbox pipeline (DCT decode → crop →
+        // normalize → tract) runs on the frames, which stay host-side.
+        infer::estimate_age(&selfie.frames()).map(|age| AgeEstimate { age })
     }
 }
 

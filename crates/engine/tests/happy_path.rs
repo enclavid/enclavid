@@ -733,7 +733,12 @@ fn face_age_component() -> &'static [u8] {
     COMPONENT
         .get_or_init(|| {
             let dir = face_age_dir();
-            let module = format!("{dir}/target/wasm32-unknown-unknown/release/face_age.wasm");
+            // face-age is a member of the `plugins/` workspace, so its wasm
+            // lands in the SHARED workspace target, not the crate dir.
+            let module = format!(
+                "{}/../../plugins/target/wasm32-unknown-unknown/release/face_age.wasm",
+                env!("CARGO_MANIFEST_DIR"),
+            );
             embed_sections(build_componentized(&dir, &module), &dir)
         })
         .as_slice()

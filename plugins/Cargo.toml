@@ -1,0 +1,15 @@
+# Plugins workspace — a SEPARATE build unit from the host `crates/*`
+# workspace: everything here targets wasm32-unknown-unknown (sandboxed
+# components), not the native host. Shared generic crates (`onnx-core`,
+# `vision`) + the plugin crates that build on them.
+#
+# well-known stays standalone (its own [workspace]) — it has no ML, so it
+# doesn't depend on the shared crates.
+[workspace]
+resolver = "2"
+members = ["onnx-core", "vision", "face-age"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

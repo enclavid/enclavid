@@ -88,9 +88,9 @@ checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
 name = "cc"
-version = "1.2.65"
+version = "1.2.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e228eec9be7c17ccb640b59b36a5cd805ea2a564a4c5e162c2f659fea30d3b96"
+checksum = "f5d6cac793997bd970000024b2934968efe83b382de4fdcf4fcb46b6ee4ad996"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -188,9 +188,9 @@ name = "face-age"
 version = "0.1.0"
 dependencies = [
  "getrandom",
- "jpeg-decoder",
  "jpeg-encoder",
- "tract-onnx",
+ "onnx-core",
+ "vision",
  "wit-bindgen",
 ]
 
@@ -569,6 +569,13 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "onnx-core"
+version = "0.1.0"
+dependencies = [
+ "tract-onnx",
+]
 
 [[package]]
 name = "parking_lot"
@@ -1226,6 +1233,13 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vision"
+version = "0.1.0"
+dependencies = [
+ "jpeg-decoder",
+]
 
 [[package]]
 name = "walkdir"
