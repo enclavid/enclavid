@@ -16,12 +16,22 @@ crate-type = ["cdylib"]
 #   FACE_AGE_MODEL=/abs/age_googlenet.onnx cargo build --features age-googlenet ...
 age-googlenet = []
 
+# Real face detector (BlazeFace) for the crop stage, embedded from
+# FACE_DETECT_MODEL. Independent of the age model — either can be real or
+# placeholder. Forwards to face-detect's own feature.
+#   FACE_DETECT_MODEL=/abs/blaze.onnx cargo build --features blazeface ...
+blazeface = ["face-detect/blazeface"]
+
 [dependencies]
 wit-bindgen = "0.57"
 # Generic in-sandbox ML/image helpers — the plugin holds only the per-model
 # profile (format + decode) + the WIT glue on top of these.
 onnx-core = { path = "../onnx-core" }
 vision = { path = "../vision" }
+# Face detection → the crop box the age model sees (replaces the blind
+# center-crop). Placeholder-weightless by default; the real detector rides
+# its own feature.
+face-detect = { path = "../face-detect" }
 
 # getrandom (pulled transitively via onnx-core → tract for hashmap seeding)
 # has no backend on wasm32-unknown-unknown; the `custom` feature + the

@@ -1,0 +1,26 @@
+[package]
+name = "face-detect"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# An rlib (not cdylib): compiled INTO each ML plugin that needs a face crop
+# (face-age today; face-match / liveness later), for whatever target that
+# plugin builds for. Not a standalone component.
+
+[features]
+# Real detector: embeds a BlazeFace ONNX from the FACE_DETECT_MODEL build
+# path (include_bytes) and switches the profile to a 128² RGB/255 forward
+# pass. The garavv export bakes anchor-decode + sigmoid + NMS into the graph
+# → it returns already-decoded, already-NMS'd boxes (no anchor table / NMS
+# in Rust). Default (off) = placeholder (whole frame, no model, no weights).
+# Enable with a model present:
+#   FACE_DETECT_MODEL=/abs/blaze.onnx cargo build --features blazeface ...
+blazeface = ["dep:onnx-core"]
+
+[dependencies]
+# Bbox + crop/resize helpers (always needed).
+vision = { path = "../vision" }
+# tract runtime — only the real detector profile pulls it (the placeholder
+# needs no model), mirroring face-age's placeholder ↔ real split.
+onnx-core = { path = "../onnx-core", optional = true }

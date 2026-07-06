@@ -1,8 +1,9 @@
 //! Face-age inference: the generic ONNX runtime ([`onnx_core`]) + image
-//! prep ([`vision`]) + a compile-time model PROFILE — the thin per-model
-//! adapter that is the ONLY face-age-specific part: input format
-//! (resolution, channel order, normalization) + which model + output
-//! decode. The generic crates know nothing of this.
+//! prep ([`vision`]) + face detection ([`face_detect`]) + a compile-time
+//! model PROFILE — the thin per-model adapter that is the ONLY
+//! face-age-specific part: input format (resolution, channel order,
+//! normalization, crop margin) + which model + output decode. The generic
+//! crates know nothing of this.
 //!
 //! Profile selection is compile-time:
 //!   * default            → [`placeholder`]: a no-op graph, no weights
@@ -12,7 +13,7 @@
 //!                          mean-subtracted, 8-bucket Adience → expected age).
 
 use onnx_core::Model;
-use vision::{crop_resize, decode_jpeg_eighth};
+use vision::{crop_bbox_resize, decode_jpeg_eighth, Bbox};
 
 #[cfg(not(feature = "age-googlenet"))]
 use placeholder as profile;
@@ -20,13 +21,17 @@ use placeholder as profile;
 use age_googlenet as profile;
 
 /// Estimate the age (years) from the capture frames: DCT-scaled decode →
-/// the profile's preprocess → build the model (once) → run → the profile's
-/// output decode. `None` when no frame decodes (unusable capture). Uses one
-/// representative frame — one forward pass; the clip's multiple frames are
-/// for anti-replay/liveness (a separate check), not the age estimate.
+/// detect the face → crop to it (with the profile's context margin) →
+/// normalize → build the model (once) → run → decode. `None` when no frame
+/// decodes OR no face is found (unusable capture → the policy asks for a
+/// retake). Uses one representative frame — one forward pass; the clip's
+/// multiple frames are for anti-replay/liveness (a separate check), not the
+/// age estimate.
 pub fn estimate_age(frames: &[Vec<u8>]) -> Option<f32> {
     let (rgb, w, h) = frames.iter().find_map(|f| decode_jpeg_eighth(f))?;
-    let chw = profile::preprocess(&rgb, w, h);
+    let face = face_detect::detect(&rgb, w, h)?;
+    let bbox = face.bbox.expand(profile::MARGIN);
+    let chw = profile::preprocess(&rgb, w, h, bbox);
     let model = profile::build().ok()?;
     let s = profile::INPUT;
     let out = onnx_core::run(&model, &[1, 3, s, s], chw).ok()?;
@@ -43,11 +48,15 @@ mod placeholder {
 
     pub const INPUT: usize = 64;
 
-    /// RGB, normalized `[0,1]`, NCHW `[1,3,64,64]`.
-    pub fn preprocess(rgb: &[u8], w: usize, h: usize) -> Vec<f32> {
+    /// No margin: the placeholder detector already returns the whole frame,
+    /// so cropping is a centered square (today's behaviour, no change).
+    pub const MARGIN: f32 = 1.0;
+
+    /// RGB, normalized `[0,1]`, NCHW `[1,3,64,64]`, cropped to `bbox`.
+    pub fn preprocess(rgb: &[u8], w: usize, h: usize, bbox: Bbox) -> Vec<f32> {
         let plane = INPUT * INPUT;
         let mut chw = vec![0f32; 3 * plane];
-        crop_resize(rgb, w, h, INPUT, |ox, oy, r, g, b| {
+        crop_bbox_resize(rgb, w, h, bbox, INPUT, |ox, oy, r, g, b| {
             let i = oy * INPUT + ox;
             chw[i] = r as f32 / 255.0;
             chw[plane + i] = g as f32 / 255.0;
@@ -78,17 +87,24 @@ mod age_googlenet {
 
     pub const INPUT: usize = 224;
 
+    /// +40% context around the detected box: the Adience faces the model was
+    /// trained on are loosely cropped (hair / chin / some background), so a
+    /// tight detector box is grown to match. Harmless under the placeholder
+    /// detector (the frame-sized box just clamps back).
+    pub const MARGIN: f32 = 1.4;
+
     /// The ONNX age model, embedded from the `FACE_AGE_MODEL` build-time
     /// path (a build-input, never committed).
     const WEIGHTS: &[u8] = include_bytes!(env!("FACE_AGE_MODEL"));
 
     /// BGR channel order, Caffe mean-subtract `[104,117,123]`, no scale,
-    /// NCHW `[1,3,224,224]` — age_googlenet's documented preprocessing.
-    pub fn preprocess(rgb: &[u8], w: usize, h: usize) -> Vec<f32> {
+    /// NCHW `[1,3,224,224]`, cropped to `bbox` — age_googlenet's documented
+    /// preprocessing.
+    pub fn preprocess(rgb: &[u8], w: usize, h: usize, bbox: Bbox) -> Vec<f32> {
         const MEAN: [f32; 3] = [104.0, 117.0, 123.0]; // B, G, R
         let plane = INPUT * INPUT;
         let mut chw = vec![0f32; 3 * plane];
-        crop_resize(rgb, w, h, INPUT, |ox, oy, r, g, b| {
+        crop_bbox_resize(rgb, w, h, bbox, INPUT, |ox, oy, r, g, b| {
             let i = oy * INPUT + ox;
             chw[i] = b as f32 - MEAN[0];
             chw[plane + i] = g as f32 - MEAN[1];
@@ -141,6 +157,40 @@ mod tests {
         let age = estimate_age(&[gray_jpeg()]).expect("estimate");
         eprintln!("age={age}");
         assert!((0.0..=100.0).contains(&age), "age out of range: {age}");
+    }
+
+    // Manual: end-to-end on a REAL face photo (not committed) through the
+    // ACTIVE profiles — build with the real detector + model to validate the
+    // full pipeline (decode → BlazeFace detect → crop → age). Reports the
+    // detected box (sanity: a face fills a plausible sub-region, not the
+    // whole frame) + the age. Run:
+    //   FACE_DETECT_MODEL=/tmp/blaze.onnx FACE_AGE_MODEL=/tmp/age_googlenet.onnx \
+    //     cargo test -p face-age --target aarch64-apple-darwin \
+    //     --features blazeface,age-googlenet detect_and_age_real_face -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn detect_and_age_real_face() {
+        let path =
+            std::env::var("FACE_TEST_IMAGE").unwrap_or_else(|_| "/tmp/face.jpg".to_string());
+        let jpeg = std::fs::read(&path).expect("test image present");
+        let (rgb, w, h) = decode_jpeg_eighth(&jpeg).expect("decode");
+        eprintln!("decoded {w}x{h}");
+        match face_detect::detect(&rgb, w, h) {
+            Some(f) => {
+                eprintln!(
+                    "FACE bbox x={:.3} y={:.3} w={:.3} h={:.3} | landmarks={} score={:.2}",
+                    f.bbox.x, f.bbox.y, f.bbox.w, f.bbox.h, f.landmarks.len(), f.score
+                );
+                for (i, (lx, ly)) in f.landmarks.iter().enumerate() {
+                    eprintln!("  kp[{i}] = ({lx:.3}, {ly:.3})");
+                }
+            }
+            None => eprintln!("NO FACE DETECTED"),
+        }
+        match estimate_age(&[jpeg]) {
+            Some(age) => eprintln!("AGE={age:.1}"),
+            None => eprintln!("AGE: none (no face / no decode)"),
+        }
     }
 
     // Manual: validates the generic load path against a downloaded ONNX

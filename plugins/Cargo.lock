@@ -187,11 +187,20 @@ dependencies = [
 name = "face-age"
 version = "0.1.0"
 dependencies = [
+ "face-detect",
  "getrandom",
  "jpeg-encoder",
  "onnx-core",
  "vision",
  "wit-bindgen",
+]
+
+[[package]]
+name = "face-detect"
+version = "0.1.0"
+dependencies = [
+ "onnx-core",
+ "vision",
 ]
 
 [[package]]

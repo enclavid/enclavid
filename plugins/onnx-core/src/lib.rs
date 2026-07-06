@@ -43,3 +43,30 @@ pub fn run(model: &Model, shape: &[usize], data: Vec<f32>) -> TractResult<Vec<f3
     let outputs = model.run(tvec![input.into_tvalue()])?;
     Ok(outputs[0].as_slice::<f32>()?.to_vec())
 }
+
+/// One input tensor for [`run_multi`], carrying its dtype so a multi-input
+/// graph (e.g. an image plus int64 / float threshold scalars, as a
+/// post-processing-baked detector takes) is fed generically without the
+/// plugin touching tract.
+pub enum Input {
+    F32(Vec<usize>, Vec<f32>),
+    I64(Vec<usize>, Vec<i64>),
+}
+
+/// Run a multi-input model and return the FIRST output flattened as f32.
+/// `inputs` must be in the model's declared input order. The caller knows
+/// the output's row width, so the flat length carries the (possibly
+/// dynamic) row count — e.g. a detector whose in-graph NMS emits `N×16`
+/// yields `N = len / 16`, `N = 0` meaning nothing detected.
+pub fn run_multi(model: &Model, inputs: Vec<Input>) -> TractResult<Vec<f32>> {
+    let mut tv: TVec<TValue> = tvec!();
+    for input in inputs {
+        let t = match input {
+            Input::F32(shape, data) => Tensor::from_shape(&shape, &data)?,
+            Input::I64(shape, data) => Tensor::from_shape(&shape, &data)?,
+        };
+        tv.push(t.into_tvalue());
+    }
+    let outputs = model.run(tv)?;
+    Ok(outputs[0].as_slice::<f32>()?.to_vec())
+}
