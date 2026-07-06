@@ -1,0 +1,27 @@
+package enclavid:face-detect@0.1.0;
+
+/// Locate the face in a decoded frame → `face` geometry the crop consumers
+/// (age, liveness, face-match) reuse. Detection runs ONCE here; the pixels
+/// stay in the preprocess sandbox (this plugin pulls the detector input via
+/// `decoded-frame.region`), and only WHERE the face is crosses the boundary
+/// — each consumer derives its own crop.
+///
+/// MODEL-AGNOSTIC contract: any detector (BlazeFace, RetinaFace, YuNet, …)
+/// satisfies it by shipping a distinct OCI artifact exporting this
+/// interface; the model is pinned per session via `impl_ref`.
+interface detect {
+    use enclavid:vision/types@0.1.0.{decoded-frame, face};
+
+    /// Detect the single most prominent face (a KYC capture is
+    /// single-subject). `none` = no usable face → the policy asks for a
+    /// retake. The returned box + landmarks are normalized `[0,1]` over the
+    /// source frame.
+    detect: func(frame: borrow<decoded-frame>) -> option<face>;
+}
+
+world face-detect {
+    // Reads the shared `decoded-frame` (owned by the preprocess plugin) and
+    // produces `face` geometry. No host dependency, no embedded catalog.
+    import enclavid:vision/types@0.1.0;
+    export detect;
+}

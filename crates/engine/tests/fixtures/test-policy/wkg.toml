@@ -5,3 +5,6 @@
 "enclavid:host" = { path = "../../../../../wit/host" }
 "enclavid:extra" = { path = "../test-extra/wit" }
 "enclavid:face-age" = { path = "../../../../../plugins/face-age/wit" }
+"enclavid:preprocess" = { path = "../../../../../plugins/preprocess/wit" }
+"enclavid:face-detect" = { path = "../../../../../plugins/face-detect/wit" }
+"enclavid:vision" = { path = "../../../../../plugins/vision/wit" }

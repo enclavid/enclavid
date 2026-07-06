@@ -1,0 +1,14 @@
+[package]
+name = "preprocess"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.57"
+# JPEG DCT-scaled decode + pixel ops. No ONNX/tract here — preprocess has no
+# model, so no getrandom stub is needed either.
+vision = { path = "../vision" }

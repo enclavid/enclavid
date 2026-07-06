@@ -187,11 +187,8 @@ dependencies = [
 name = "face-age"
 version = "0.1.0"
 dependencies = [
- "face-detect",
  "getrandom",
- "jpeg-encoder",
  "onnx-core",
- "vision",
  "wit-bindgen",
 ]
 
@@ -199,8 +196,9 @@ dependencies = [
 name = "face-detect"
 version = "0.1.0"
 dependencies = [
+ "getrandom",
  "onnx-core",
- "vision",
+ "wit-bindgen",
 ]
 
 [[package]]
@@ -337,12 +335,6 @@ name = "jpeg-decoder"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
-
-[[package]]
-name = "jpeg-encoder"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b454d911ac55068f53495488d8ccd0646eaa540c033a28ee15b07838afafb01f"
 
 [[package]]
 name = "kstring"
@@ -691,6 +683,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "preprocess"
+version = "0.1.0"
+dependencies = [
+ "vision",
+ "wit-bindgen",
 ]
 
 [[package]]

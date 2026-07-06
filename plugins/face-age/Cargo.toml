@@ -16,32 +16,16 @@ crate-type = ["cdylib"]
 #   FACE_AGE_MODEL=/abs/age_googlenet.onnx cargo build --features age-googlenet ...
 age-googlenet = []
 
-# Real face detector (BlazeFace) for the crop stage, embedded from
-# FACE_DETECT_MODEL. Independent of the age model — either can be real or
-# placeholder. Forwards to face-detect's own feature.
-#   FACE_DETECT_MODEL=/abs/blaze.onnx cargo build --features blazeface ...
-blazeface = ["face-detect/blazeface"]
-
 [dependencies]
 wit-bindgen = "0.57"
-# Generic in-sandbox ML/image helpers — the plugin holds only the per-model
-# profile (format + decode) + the WIT glue on top of these.
+# Generic in-sandbox ONNX runtime. face-age no longer decodes or crops —
+# preprocess hands it a `decoded-frame`, from which it pulls its crop via
+# `region`; the plugin holds only the per-model normalize + model + decode.
 onnx-core = { path = "../onnx-core" }
-vision = { path = "../vision" }
-# Face detection → the crop box the age model sees (replaces the blind
-# center-crop). Placeholder-weightless by default; the real detector rides
-# its own feature.
-face-detect = { path = "../face-detect" }
 
 # getrandom (pulled transitively via onnx-core → tract for hashmap seeding)
-# has no backend on wasm32-unknown-unknown; the `custom` feature + the
-# no-op registration in lib.rs cover it. Scoped to wasm so native builds
-# (unit tests) use the OS backend. Registered here (the final cdylib) so the
-# symbol is present at link.
+# has no backend on wasm32-unknown-unknown; the `custom` feature + the no-op
+# registration in lib.rs cover it. Scoped to wasm so native builds (unit
+# tests) use the OS backend.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["custom"] }
-
-# For native unit tests of the decode/preprocess/run pipeline: encode a real
-# JPEG to feed `estimate_age` (mirrors happy_path's fake_capture).
-[dev-dependencies]
-jpeg-encoder = "0.6"

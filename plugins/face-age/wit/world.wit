@@ -1,49 +1,42 @@
 package enclavid:face-age@0.1.0;
 
-/// Facial age estimation from a selfie capture.
+/// Facial age estimation from a detected face.
 ///
 /// This is a MODEL-AGNOSTIC contract: any estimator (SSR-Net, genderage,
-/// MiVOLO, …) satisfies it by shipping a distinct OCI artifact that
-/// exports this interface. The model is chosen per session via the pinned
-/// `impl_ref` in `POST /sessions`, and its identity is captured by that
-/// artifact's OCI digest (measured / attested) — so the model name lives
-/// on the artifact (`face-age-ssrnet`, `face-age-genderage`), never in
-/// this WIT package. A model whose OUTPUT differs (e.g. a distribution)
-/// is a versioned contract evolution, not a new package.
+/// MiVOLO, …) satisfies it by shipping a distinct OCI artifact that exports
+/// this interface. The model is chosen per session via the pinned
+/// `impl_ref` in `POST /sessions`, and its identity is the artifact's OCI
+/// digest (measured / attested) — so the model name lives on the artifact
+/// (`face-age-ssrnet`, …), never in this WIT package.
 interface check {
-    use enclavid:host/types@0.1.0.{clip};
+    use enclavid:vision/types@0.1.0.{decoded-frame, face};
 
-    /// The estimator's read on a selfie capture: `age` in years, a FACT the
-    /// policy acts on. The policy owns the threshold — and because a facial
+    /// The estimator's read on a face: `age` in years, a FACT the policy
+    /// acts on. The policy owns the threshold — and because a facial
     /// estimate is inherently fuzzy and can't resolve a precise 18 cut, it
     /// applies a conservative BUFFER (a challenge-age well above 18) and
-    /// escalates the buffer zone to the authoritative document DOB. No
-    /// session config, no threshold: a stateless clip→age function.
+    /// escalates the buffer zone to the authoritative document DOB.
     ///
-    /// No `confidence` here on purpose: it isn't uniform (softmax models
-    /// have one, regression models don't) and a per-frame-agreement
-    /// confidence would cost N forward passes. Any model-internal certainty
-    /// is model-specific and out of scope for this model-agnostic contract;
-    /// the policy handles uncertainty via the buffer + separate
+    /// No `confidence`: it isn't uniform across models (softmax has one,
+    /// regression doesn't); the policy handles uncertainty via the buffer +
     /// capture-quality checks.
     record age-estimate {
         age: f32,
     }
 
-    /// Estimate the subject's age from a selfie clip. `none` = the capture
-    /// couldn't be processed (no decodable frame) → the policy asks for a
-    /// retake. The frames stay host-side — the plugin pulls them on demand
-    /// through the `clip` resource, so the pixel bytes never enter the
-    /// policy's memory.
-    estimate: func(selfie: borrow<clip>) -> option<age-estimate>;
+    /// Estimate the subject's age from the detected `face` in `frame`. The
+    /// plugin pulls its OWN crop (`face.bbox` grown by the model's context
+    /// margin) from `frame` via `region`, so it sees only the face patch at
+    /// its model resolution — one shared decode, per-model crop. `none` =
+    /// unusable input (the policy asks for a retake / escalates).
+    estimate: func(frame: borrow<decoded-frame>, face: face) -> option<age-estimate>;
 }
 
 world face-age {
-    // The applicant's capture frames arrive as a host-owned `clip`
-    // resource; the plugin reads them via its `frame` / `frame-count`
-    // methods. This is the plugin's ONLY host dependency — no embedded
-    // catalog (no i18n / icons / disclosure-fields), so it contributes no
+    // The shared vision vocabulary: `decoded-frame` (owned by the preprocess
+    // plugin — face-age just reads crops from it) and `face` geometry (from
+    // the face-detect plugin). No host dependency, no embedded catalog → no
     // strict-routing twin.
-    import enclavid:host/types@0.1.0;
+    import enclavid:vision/types@0.1.0;
     export check;
 }

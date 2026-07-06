@@ -7,7 +7,7 @@
 # doesn't depend on the shared crates.
 [workspace]
 resolver = "2"
-members = ["onnx-core", "vision", "face-detect", "face-age"]
+members = ["onnx-core", "vision", "face-detect", "preprocess", "face-age"]
 
 [profile.release]
 opt-level = "s"

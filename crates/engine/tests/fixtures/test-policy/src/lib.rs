@@ -38,9 +38,12 @@ use enclavid::well_known::disclosure_fields as wk;
 // Second plugin (linked at runtime in the hybrid test): its `get()`
 // resolves `extra_tag` from the extra plugin's own i18n catalog.
 use enclavid::extra::tag;
-// The face-age plugin: reads the selfie clip host-side and returns an
-// age estimate. A real clip-consumer across the fused boundary.
+// The vision substrate, threaded across the fused boundary: preprocess
+// decodes the selfie clip into a plugin-owned `decoded-frame`, face-detect
+// locates the `face` in it, face-age reads its crop and estimates.
 use enclavid::face_age::check as face_age;
+use enclavid::face_detect::detect as face_detect;
+use enclavid::preprocess::decode as preprocess;
 use exports::enclavid::policy::policy::Guest;
 
 struct TestPolicy;
@@ -149,23 +152,32 @@ impl Guest for TestPolicy {
                 }
             }
 
-            // Selfie captured → hand the clip to the face-age plugin
-            // (fused single-store: the plugin reads the frames host-side
-            // via the `clip` resource and returns an estimate), then go to
-            // the consent screen. `none` means the capture couldn't be
-            // processed → ask for a retake. The age threshold itself is the
-            // policy's call (buffer + document escalation) and lands with
-            // the real flow; here the `none` gate exercises the plugin path.
-            (STEP_AWAIT_SELFIE, Event::Media(result)) => match face_age::estimate(&result.clip) {
-                Some(_age) => (
-                    state_at(STEP_AWAIT_CONSENT),
-                    Action::Render(Prompt::ConsentDisclosure(build_consent())),
-                ),
-                None => (
-                    state_at(STEP_AWAIT_SELFIE),
-                    Action::Finish(Decision::RejectedRetryable),
-                ),
-            },
+            // Selfie captured → the full vision substrate across the fused
+            // boundary: preprocess decodes the clip into a plugin-owned
+            // `decoded-frame` (pixels stay in the preprocess sandbox),
+            // face-detect locates the `face`, face-age pulls its crop via
+            // `region` and estimates. The policy just threads the handles.
+            // `none` at any step (undecodable / no face / model failure) →
+            // retake. The age threshold is the policy's call (buffer +
+            // document escalation) and lands with the real flow; here the
+            // decode → detect → estimate plugin chain is what's exercised.
+            (STEP_AWAIT_SELFIE, Event::Media(result)) => {
+                let age = preprocess::decode(&result.clip, 0, preprocess::Scale::Eighth)
+                    .and_then(|frame| {
+                        face_detect::detect(&frame)
+                            .and_then(|face| face_age::estimate(&frame, &face))
+                    });
+                match age {
+                    Some(_) => (
+                        state_at(STEP_AWAIT_CONSENT),
+                        Action::Render(Prompt::ConsentDisclosure(build_consent())),
+                    ),
+                    None => (
+                        state_at(STEP_AWAIT_SELFIE),
+                        Action::Finish(Decision::RejectedRetryable),
+                    ),
+                }
+            }
 
             // Consent reply → terminal decision. The runtime already
             // sealed (or didn't seal) the disclosure based on this same

@@ -1,0 +1,31 @@
+package enclavid:preprocess@0.1.0;
+
+/// Decode a capture frame into a shared `decoded-frame`. The decode of the
+/// untrusted JPEG runs HERE (sandboxed), and the pixels stay in this
+/// plugin's memory — downstream face checks pull crops via
+/// `decoded-frame.region`, so one decode serves all of them.
+interface decode {
+    use enclavid:host/types@0.1.0.{clip};
+    use enclavid:vision/types@0.1.0.{decoded-frame};
+
+    /// Source-decode fidelity tier. The caller materializes the tier(s) its
+    /// plugin set needs — `eighth` for detection / age / liveness (small
+    /// inputs, low-frequency cues); higher only when a high-fidelity crop
+    /// (e.g. face-deepfake) is pinned.
+    enum scale {
+        eighth,
+        quarter,
+        half,
+        full,
+    }
+
+    /// Decode clip frame `index` at `scale` → a `decoded-frame`. `none` =
+    /// the frame is missing or undecodable (the caller asks for a retake).
+    decode: func(clip: borrow<clip>, index: u32, scale: scale) -> option<decoded-frame>;
+}
+
+world preprocess {
+    import enclavid:host/types@0.1.0;      // read the applicant's raw clip
+    export enclavid:vision/types@0.1.0;    // OWNS / implements decoded-frame
+    export decode;
+}

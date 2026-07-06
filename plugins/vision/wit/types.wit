@@ -1,0 +1,60 @@
+package enclavid:vision@0.1.0;
+
+/// Shared vision-pipeline vocabulary — the `decoded-frame` pixel resource
+/// plus face geometry, referenced by every vision plugin (preprocess
+/// produces `decoded-frame`; face-detect produces `face`; age / liveness /
+/// face-match consume). A NEUTRAL package (not the host, not any single
+/// plugin's namespace) so all plugins share ONE type without coupling to
+/// each other.
+///
+/// Unlike `clip` (host-owned, in `enclavid:host/types` — the TRUSTED,
+/// unforgeable capture input the runtime mints), `decoded-frame` is DERIVED
+/// by the preprocess plugin from a `clip`, so it is PLUGIN-owned: the decode
+/// of the untrusted JPEG, the pixel storage, and the `region` resample all
+/// stay inside the preprocess sandbox — the host / TCB touches no pixels.
+interface types {
+    /// A region of interest, normalized `[0,1]` over the source frame.
+    record bbox {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    }
+
+    /// One keypoint, normalized `[0,1]`.
+    record point {
+        x: f32,
+        y: f32,
+    }
+
+    /// A detected face — GEOMETRY ONLY (the pixels live in the
+    /// `decoded-frame` it was found in). The keypoint set is
+    /// detector-specific (BlazeFace: 6 points). Each consumer derives its
+    /// OWN crop from `bbox` at its own resolution / alignment — a fixed
+    /// pre-crop would break liveness (which needs an enlarged, unaligned
+    /// crop), so the substrate shares WHERE the face is, not a ready crop.
+    record face {
+        bbox: bbox,
+        landmarks: list<point>,
+        score: f32,
+    }
+
+    /// Decoded pixels of one frame, produced and OWNED by the preprocess
+    /// plugin. `region` crops `[x,y,w,h]` (source px, clamped) and
+    /// nearest-neighbour resamples to `out-w × out-h` RGB8 (row-major), so
+    /// every consumer pulls ITS resolution from ONE decode. No constructor:
+    /// only the preprocess plugin (the implementer) creates instances.
+    /// The pixel dimensions of a decoded frame.
+    record size {
+        width: u32,
+        height: u32,
+    }
+
+    resource decoded-frame {
+        /// Source dimensions of the decoded buffer — both in one call (every
+        /// consumer needs the pair to map a normalized box to source px).
+        size: func() -> size;
+        /// Crop `[x,y,w,h]` (source px) → RGB8 resampled to `out-w × out-h`.
+        region: func(x: u32, y: u32, w: u32, h: u32, out-w: u32, out-h: u32) -> list<u8>;
+    }
+}

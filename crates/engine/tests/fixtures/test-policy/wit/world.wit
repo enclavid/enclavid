@@ -15,9 +15,17 @@ world policy {
     // distinct twin.
     import enclavid:extra/tag@0.1.0;
 
-    // The face-age plugin: a real clip-consumer. The policy hands it the
-    // selfie `clip` during `handle` and gets back an `age-estimate`. No
-    // embedded catalog of its own, so it adds no strict-routing twin.
+    // The vision substrate. preprocess decodes the selfie `clip` into a
+    // plugin-owned `decoded-frame`; face-detect locates the `face` in it;
+    // face-age reads its crop and estimates. The policy just threads the
+    // handles decode → detect → estimate. `enclavid:vision/types` carries the
+    // shared `decoded-frame` / `face` vocabulary the policy holds in between.
+    import enclavid:preprocess/decode@0.1.0;
+    import enclavid:face-detect/detect@0.1.0;
+    import enclavid:vision/types@0.1.0;
+
+    // The face-age plugin: a real decoded-frame + face consumer. No embedded
+    // catalog of its own → no routing twin.
     import enclavid:face-age/check@0.1.0;
 
     // Host interfaces. The policy resolves its own consent copy via

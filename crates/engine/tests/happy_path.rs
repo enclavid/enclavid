@@ -43,6 +43,14 @@ const EXTRA_PACKAGE: &str = "enclavid:extra@0.1.0";
 /// round. Ships no embedded catalog (no i18n/icons/DF), so it adds no
 /// strict-routing twin.
 const FACE_AGE_PACKAGE: &str = "enclavid:face-age@0.1.0";
+/// Package id of the preprocess plugin — decodes the selfie `clip` into the
+/// plugin-owned `decoded-frame` the policy threads to face-age. Ships no
+/// embedded catalog, so it adds no strict-routing twin.
+const PREPROCESS_PACKAGE: &str = "enclavid:preprocess@0.1.0";
+/// Package id of the face-detect plugin — locates the `face` in the
+/// decoded-frame, which the policy threads to face-age. Ships no embedded
+/// catalog, so it adds no strict-routing twin.
+const FACE_DETECT_PACKAGE: &str = "enclavid:face-detect@0.1.0";
 
 /// The plugins the policy imports — well-known + extra + face-age. All
 /// must be present in every composition, since the policy calls into
@@ -57,6 +65,14 @@ fn all_plugins() -> Vec<PluginInstance> {
         PluginInstance {
             package: EXTRA_PACKAGE.to_string(),
             wasm: extra_component().to_vec(),
+        },
+        PluginInstance {
+            package: PREPROCESS_PACKAGE.to_string(),
+            wasm: preprocess_component().to_vec(),
+        },
+        PluginInstance {
+            package: FACE_DETECT_PACKAGE.to_string(),
+            wasm: face_detect_component().to_vec(),
         },
         PluginInstance {
             package: FACE_AGE_PACKAGE.to_string(),
@@ -435,12 +451,20 @@ async fn strict_routing_isolates_colliding_i18n_key() {
 async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let runner = Runner::new().unwrap();
 
-    // CORE: policy + well-known + face-age baked. The policy still imports
-    // extra/tag (unsatisfied — a runtime import of the core).
+    // CORE: policy + well-known + preprocess + face-age baked. The policy
+    // still imports extra/tag (unsatisfied — a runtime import of the core).
     let baked = vec![
         PluginInstance {
             package: WELL_KNOWN_PACKAGE.to_string(),
             wasm: well_known_component().to_vec(),
+        },
+        PluginInstance {
+            package: PREPROCESS_PACKAGE.to_string(),
+            wasm: preprocess_component().to_vec(),
+        },
+        PluginInstance {
+            package: FACE_DETECT_PACKAGE.to_string(),
+            wasm: face_detect_component().to_vec(),
         },
         PluginInstance {
             package: FACE_AGE_PACKAGE.to_string(),
@@ -685,6 +709,14 @@ fn face_age_dir() -> String {
     format!("{}/../../plugins/face-age", env!("CARGO_MANIFEST_DIR"))
 }
 
+fn preprocess_dir() -> String {
+    format!("{}/../../plugins/preprocess", env!("CARGO_MANIFEST_DIR"))
+}
+
+fn face_detect_dir() -> String {
+    format!("{}/../../plugins/face-detect", env!("CARGO_MANIFEST_DIR"))
+}
+
 /// Build the `test-policy` fixture (cached), componentize it, and embed
 /// its author JSON as `enclavid:embedded.*` custom sections — a sealed
 /// component, exactly the shape the engine sees in production.
@@ -727,7 +759,8 @@ fn extra_component() -> &'static [u8] {
 
 /// Build the `enclavid:face-age` plugin (cached) and componentize it. It
 /// ships no embedded JSON, so `embed_sections` appends nothing — the
-/// artifact carries only its `check` export + the host `clip` import.
+/// artifact carries only its `check` export + the `enclavid:vision/types`
+/// import (the `decoded-frame` it reads crops from).
 fn face_age_component() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
@@ -737,6 +770,41 @@ fn face_age_component() -> &'static [u8] {
             // lands in the SHARED workspace target, not the crate dir.
             let module = format!(
                 "{}/../../plugins/target/wasm32-unknown-unknown/release/face_age.wasm",
+                env!("CARGO_MANIFEST_DIR"),
+            );
+            embed_sections(build_componentized(&dir, &module), &dir)
+        })
+        .as_slice()
+}
+
+/// Build the `enclavid:preprocess` plugin (cached) and componentize it. It
+/// OWNS the `decoded-frame` resource (exports `enclavid:vision/types`) and
+/// imports the host `clip`; no embedded JSON.
+fn preprocess_component() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| {
+            let dir = preprocess_dir();
+            let module = format!(
+                "{}/../../plugins/target/wasm32-unknown-unknown/release/preprocess.wasm",
+                env!("CARGO_MANIFEST_DIR"),
+            );
+            embed_sections(build_componentized(&dir, &module), &dir)
+        })
+        .as_slice()
+}
+
+/// Build the `enclavid:face-detect` plugin (cached) and componentize it. It
+/// imports `enclavid:vision/types` (reads the preprocess-owned
+/// `decoded-frame`) and exports `detect`; no embedded JSON. Default build =
+/// the weightless placeholder (whole frame as the face).
+fn face_detect_component() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| {
+            let dir = face_detect_dir();
+            let module = format!(
+                "{}/../../plugins/target/wasm32-unknown-unknown/release/face_detect.wasm",
                 env!("CARGO_MANIFEST_DIR"),
             );
             embed_sections(build_componentized(&dir, &module), &dir)

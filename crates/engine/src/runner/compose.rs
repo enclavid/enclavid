@@ -90,35 +90,44 @@ pub(crate) fn fuse(
         route_strict_embedded(&mut graph, *inst, *id, hash, &mut import_nodes, &mut manifest)?;
     }
 
-    // Functional wiring: satisfy each policy import that names a PLUGIN
-    // interface with the plugin that exports it. Host-reserved imports
-    // (`is_host_reserved`) are deliberately excluded — they are served by
-    // the host `Linker`, never by a plugin, so they bubble up as
-    // composite imports. That set covers `enclavid:host/*` and a
-    // pre-fused (hybrid) core's already routed `embedded-slot:*` imports
-    // (reconstructed into the manifest, not plugin-satisfied). Any other
-    // unmatched import also bubbles up (host-served, or an encode-time
-    // error if nothing satisfies it).
-    let policy_fn_imports: Vec<String> = graph.types()[graph[policy_id].ty()]
-        .imports
-        .iter()
-        .filter(|(name, _)| !is_host_reserved(name))
-        .map(|(name, _)| name.clone())
+    // Functional wiring: satisfy each import that names a PLUGIN interface
+    // with the plugin that exports it — for the POLICY and for every PLUGIN.
+    // Plugin→plugin wiring is real: a vision plugin (face-age, face-detect)
+    // imports the `enclavid:vision/types` `decoded-frame` that the preprocess
+    // plugin OWNS, so its `region` calls must dispatch to preprocess. Without
+    // it, the consumer's plugin-interface import bubbles up unsatisfied and
+    // the fused component fails validation. Host-reserved imports
+    // (`is_host_reserved`) are deliberately excluded — served by the host
+    // `Linker`, never a plugin — so they bubble up as composite imports
+    // (covers `enclavid:host/*` and a pre-fused core's already-routed
+    // `embedded-slot:*`). Any other unmatched import bubbles up too.
+    let consumers: Vec<(NodeId, PackageId)> = std::iter::once((policy_inst, policy_id))
+        .chain(plugin_insts.iter().map(|(inst, id, _)| (*inst, *id)))
         .collect();
-    for import_name in policy_fn_imports {
-        let source = plugin_insts.iter().find_map(|(inst, id, _)| {
-            graph.types()[graph[*id].ty()]
-                .exports
-                .contains_key(&import_name)
+    for (consumer_inst, consumer_id) in consumers {
+        let fn_imports: Vec<String> = graph.types()[graph[consumer_id].ty()]
+            .imports
+            .iter()
+            .filter(|(name, _)| !is_host_reserved(name))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for import_name in fn_imports {
+            // Find the exporting plugin (never the consumer itself).
+            let source = plugin_insts.iter().find_map(|(inst, id, _)| {
+                (*id != consumer_id
+                    && graph.types()[graph[*id].ty()]
+                        .exports
+                        .contains_key(&import_name))
                 .then_some(*inst)
-        });
-        if let Some(inst) = source {
-            let export = graph
-                .alias_instance_export(inst, &import_name)
-                .map_err(|e| wasmtime::Error::msg(format!("wac: alias export `{import_name}`: {e}")))?;
-            graph
-                .set_instantiation_argument(policy_inst, &import_name, export)
-                .map_err(|e| wasmtime::Error::msg(format!("wac: wire import `{import_name}`: {e}")))?;
+            });
+            if let Some(inst) = source {
+                let export = graph
+                    .alias_instance_export(inst, &import_name)
+                    .map_err(|e| wasmtime::Error::msg(format!("wac: alias export `{import_name}`: {e}")))?;
+                graph
+                    .set_instantiation_argument(consumer_inst, &import_name, export)
+                    .map_err(|e| wasmtime::Error::msg(format!("wac: wire import `{import_name}`: {e}")))?;
+            }
         }
     }
 
