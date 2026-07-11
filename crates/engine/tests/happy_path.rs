@@ -2,7 +2,9 @@
 //! plugin — through the PURE-REDUCER engine, threading the opaque `state`
 //! blob + building a per-round `event` and asserting the returned action.
 //!
-//! The policy is `handle(state, event) -> (state, action)`.
+//! The policy is `handle(event) -> action`; its state lives in the
+//! `enclavid:host/storage` map the runtime threads via the opaque sealed
+//! `SessionState::state` blob (passed round-to-round by the harness).
 //! The harness owns the mailbox: each round it inspects the previous
 //! round's `current_prompt`, fabricates the matching applicant input
 //! (a fake clip for a media prompt, an accept/reject bool for a consent
@@ -192,7 +194,9 @@ async fn media_rounds_keep_state_minimal() {
     // The clips are dropped the round they arrive — the policy keeps only
     // its step bookkeeping, so the sealed state must NOT grow as media
     // rounds accumulate (the data-minimization invariant).
-    assert!(baseline <= 8, "policy step state should be tiny, got {baseline}");
+    // One `step` key holding a single tag byte, length-prefixed by the
+    // storage codec — tiny and constant, never media-sized.
+    assert!(baseline <= 32, "policy step state should be tiny, got {baseline}");
     assert_eq!(
         after_passport_len, baseline,
         "passport media round must not grow sealed state",
@@ -264,9 +268,10 @@ async fn oversized_state_traps() {
     let h = Harness::new();
     let listener = Arc::new(RecordingListener::default());
 
-    // Drive genesis with a consumer config that makes the policy return a
-    // blob one byte over the cap — the runtime must trap the round rather
-    // than seal an over-cap (clip-smuggling) state.
+    // Drive genesis with a consumer config that makes the policy stage a
+    // storage value pushing the serialized map over the cap — the runtime
+    // must trap the round rather than seal an over-cap (clip-smuggling)
+    // state.
     let over = enclavid_engine::limits::POLICY_MAX_STATE_BYTES as i64 + 1;
     let props = vec![("state_bloat".to_string(), Prop::Int(over))];
 

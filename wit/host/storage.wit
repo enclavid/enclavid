@@ -1,0 +1,19 @@
+package enclavid:host@0.1.0;
+
+/// The policy's private, per-round-transactional key/value state — the
+/// reducer's memory. Reads/writes are STAGED for the round and committed
+/// as ONE AEAD-sealed blob (under `tee_seal_key`), atomically with the
+/// runtime consuming the round's event, when `handle` returns cleanly; a
+/// trap discards them (the round rolls back and replays from the last
+/// commit). A `get` after a `set`/`delete` in the same round reflects the
+/// staged write. Values are opaque bytes. The whole map is size-capped
+/// (`POLICY_MAX_STATE_BYTES`), so media never belongs here: a capture is a
+/// `clip` handle, not bytes.
+interface storage {
+    /// The value stored under `key`, or none if unset.
+    get: func(key: string) -> option<list<u8>>;
+    /// Stage `key = value` for this round's commit.
+    set: func(key: string, value: list<u8>);
+    /// Stage removal of `key` for this round's commit.
+    delete: func(key: string);
+}

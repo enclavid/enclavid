@@ -57,6 +57,7 @@ pub(crate) fn fuse(
     for plugin in plugins {
         let id = register(&mut graph, &plugin.package, &plugin.wasm)?;
         reject_reserved_exports(&graph, id, &plugin.package)?;
+        reject_policy_exclusive_imports(&graph, id, &plugin.package)?;
         plugin_pkgs.push((id, catalog_hash_of(&plugin.wasm)?));
     }
 
@@ -356,6 +357,44 @@ fn reject_reserved_exports(
     Ok(())
 }
 
+/// Host interfaces only the POLICY may import — served by the host
+/// `Linker` but backed by a SINGLE per-store `HostState`, so a plugin
+/// importing one would read and clobber the policy's private state.
+/// `enclavid:host/storage` is the policy's MUTABLE per-round memory (one
+/// `HostState.kv`, no per-component partition — unlike the twin-routed
+/// i18n/icons); the read-only shared surfaces (`session-context`,
+/// `embedded-*`) are safe for a plugin to import, this is not. The
+/// extension point for any future policy-only host capability.
+fn is_policy_exclusive(name: &str) -> bool {
+    name.starts_with("enclavid:host/storage")
+}
+
+/// Reject a plugin that IMPORTS a policy-exclusive host interface (see
+/// [`is_policy_exclusive`]). Unlike the read-only host surfaces a plugin
+/// may share, `enclavid:host/storage` is the policy's private mutable state
+/// backed by one shared `HostState.kv` with no per-component partition —
+/// letting a plugin import it would silently share and corrupt the policy's
+/// reducer state across the untrusted-plugin boundary. Fail loud at fuse
+/// time rather than bubbling the import up to the shared host `Linker`
+/// (which the `is_host_reserved` wiring filter would otherwise do).
+fn reject_policy_exclusive_imports(
+    graph: &CompositionGraph,
+    pkg_id: PackageId,
+    package: &str,
+) -> wasmtime::Result<()> {
+    for name in graph.types()[graph[pkg_id].ty()].imports.keys() {
+        if is_policy_exclusive(name) {
+            return Err(wasmtime::Error::msg(format!(
+                "plugin `{package}` imports policy-exclusive interface `{name}`: \
+                 `enclavid:host/storage` is the policy's private per-round state \
+                 (one shared HostState.kv, no per-component partition), so only the \
+                 policy may import it",
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +429,19 @@ mod tests {
         assert!(!is_host_reserved(
             "enclavid:well-known/disclosure-fields@0.1.0"
         ));
+    }
+
+    #[test]
+    fn policy_exclusive_is_storage_only() {
+        // `storage` is the policy's private MUTABLE state — a plugin
+        // importing it would share the one `HostState.kv`, so it is
+        // policy-exclusive and rejected at fuse time.
+        assert!(is_policy_exclusive("enclavid:host/storage@0.1.0"));
+        // The read-only shared host surfaces stay plugin-importable — they
+        // are host-reserved (host-served) but NOT policy-exclusive.
+        assert!(!is_policy_exclusive("enclavid:host/session-context@0.1.0"));
+        assert!(!is_policy_exclusive("enclavid:host/embedded-i18n@0.1.0"));
+        // A plugin's own interfaces are never policy-exclusive.
+        assert!(!is_policy_exclusive("enclavid:well-known/capture@0.1.0"));
     }
 }

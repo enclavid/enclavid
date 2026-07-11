@@ -1,4 +1,4 @@
-//! Test policy — pure reducer (`enclavid:policy/policy.handle`).
+//! Test policy — pure actor (`enclavid:policy/policy.handle`).
 //!
 //! Drives a minimal KYC walk, composed with the `enclavid:well-known`
 //! plugin (linked at slot 1):
@@ -9,16 +9,18 @@
 //!   consent-disclosure(true)    → finish(approved)
 //!   consent-disclosure(false)   → finish(rejected)
 //!
-//! The reducer is stateless across calls except for the opaque `state`
-//! blob the runtime threads back in. We encode the current step as a
-//! single tag byte — no serde/bincode dependency needed for a 4-state
-//! machine. An empty `state` (genesis) is treated as `Start` so the very
-//! first `handle(&[], event::start)` works without a prior write.
+//! State is the policy's private `enclavid:host/storage` key/value map:
+//! one `step` key holding a single tag byte — no serde/bincode needed for a
+//! 4-state machine. An unset `step` (genesis) reads as `Start`, so the very
+//! first `handle(event::start)` works without a prior write. Advancing a
+//! step is a `storage::set`; a retryable round simply leaves the key
+//! untouched (skippable write). The runtime commits the map atomically with
+//! the round on a clean return.
 //!
-//! Every capture spec + canonical `display-field` comes from the
-//! well-known plugin (its own i18n / icons / disclosure-field sections);
-//! the policy authors only its consent reason + requester refs against
-//! its own `i18n.json`.
+//! Every capture spec + canonical `display-field` comes from the well-known
+//! plugin (its own i18n / icons / disclosure-field sections); the policy
+//! authors only its consent reason + requester refs against its own
+//! `i18n.json`.
 
 wit_bindgen::generate!({
     // wkg vendors the full dependency tree (embedded / shared-types /
@@ -30,6 +32,7 @@ wit_bindgen::generate!({
 });
 
 use enclavid::host::embedded_i18n::localized as l10n;
+use enclavid::host::storage;
 use enclavid::policy::types::{Action, Decision, Disclosure, Event, Prompt};
 // The well-known plugin (linked at /connect) supplies the capture specs
 // and the canonical KYC `display-field` helpers.
@@ -59,23 +62,26 @@ const KEY_CONSENT_REASON: &str = "consent_reason";
 // "Show full (+N chars)" toggle.
 const LONG_ADDRESS: &str = "Block C-42, Phase III, Sapphire Heights Apartments, Plot No. 1284/B (the building with the blue gate next to the old banyan tree), Old Industrial Estate Road, Bandra-Kurla Complex Extension, Mumbai Suburban District, Maharashtra State 400051, India. c/o The Front Desk Manager, 4th Floor, between the elevator lobby and the staircase facing east. Cross street: Junction of MG Road and Linking Road, opposite the Sai Baba Temple. Landmark: behind the Big Bazaar supermarket.";
 
-// --- Opaque state: a single tag byte ---
+// --- State: a single `step` key holding one tag byte ---
 
+const STEP_KEY: &str = "step";
 const STEP_START: u8 = 0;
 const STEP_AWAIT_PASSPORT: u8 = 1;
 const STEP_AWAIT_SELFIE: u8 = 2;
 const STEP_AWAIT_CONSENT: u8 = 3;
 
-/// Decode the step from the opaque state blob. Genesis (empty) ⇒ Start.
-fn step_of(state: &[u8]) -> u8 {
-    match state.first() {
-        None => STEP_START,
-        Some(&b) => b,
+/// Read the current step from `storage`. An unset (or empty) `step` key —
+/// genesis — reads as `Start`.
+fn current_step() -> u8 {
+    match storage::get(STEP_KEY) {
+        Some(b) if !b.is_empty() => b[0],
+        _ => STEP_START,
     }
 }
 
-fn state_at(step: u8) -> Vec<u8> {
-    vec![step]
+/// Advance the machine by staging `step = tag` for this round's commit.
+fn set_step(step: u8) {
+    storage::set(STEP_KEY, &[step]);
 }
 
 /// Read the optional `state_bloat = N` value from the consumer config
@@ -118,37 +124,35 @@ fn build_consent() -> Disclosure {
 }
 
 impl Guest for TestPolicy {
-    fn handle(state: Vec<u8>, event: Event) -> (Vec<u8>, Action) {
-        match (step_of(&state), event) {
+    fn handle(event: Event) -> Action {
+        match (current_step(), event) {
             // Genesis → ask for the passport photo page. When the consumer
-            // config carries `state_bloat = N` the policy returns an N-byte
-            // blob instead of the 1-byte step, so the harness can exercise
-            // the engine's POLICY_MAX_STATE_BYTES cap; absent the flag this
-            // is the normal 1-byte step.
+            // config carries `state_bloat = N` the policy stages an N-byte
+            // value instead of the 1-byte step, so the harness can exercise
+            // the engine's POLICY_MAX_STATE_BYTES cap (which the runner
+            // checks on the serialized storage map after `handle` returns);
+            // absent the flag this is the normal 1-byte step.
             (STEP_START, Event::Start) => {
-                let state = match bloat_bytes() {
-                    Some(n) => vec![0u8; n],
-                    None => state_at(STEP_AWAIT_PASSPORT),
-                };
-                (state, Action::Render(Prompt::Media(capture::passport())))
+                match bloat_bytes() {
+                    Some(n) => storage::set(STEP_KEY, &vec![0u8; n]),
+                    None => set_step(STEP_AWAIT_PASSPORT),
+                }
+                Action::Render(Prompt::Media(capture::passport()))
             }
 
             // Passport captured → validate the capture, then ask for the
             // selfie. Exercises the host-owned `clip` resource: the frames
             // live host-side, so the policy pulls the count (and the first
             // frame's bytes) across the boundary on demand — the pixels
-            // only materialise where asked. An empty capture is retryable.
+            // only materialise where asked. An empty capture finishes the
+            // round with the terminal `RejectedRetryable` decision (the
+            // platform surfaces a retake hint); it is not an in-actor loop.
             (STEP_AWAIT_PASSPORT, Event::Media(result)) => {
                 if result.clip.frame_count() == 0 || result.clip.frame(0).is_none() {
-                    (
-                        state_at(STEP_AWAIT_PASSPORT),
-                        Action::Finish(Decision::RejectedRetryable),
-                    )
+                    Action::Finish(Decision::RejectedRetryable)
                 } else {
-                    (
-                        state_at(STEP_AWAIT_SELFIE),
-                        Action::Render(Prompt::Media(capture::selfie())),
-                    )
+                    set_step(STEP_AWAIT_SELFIE);
+                    Action::Render(Prompt::Media(capture::selfie()))
                 }
             }
 
@@ -158,9 +162,11 @@ impl Guest for TestPolicy {
             // face-detect locates the `face`, face-age pulls its crop via
             // `region` and estimates. The policy just threads the handles.
             // `none` at any step (undecodable / no face / model failure) →
-            // retake. The age threshold is the policy's call (buffer +
-            // document escalation) and lands with the real flow; here the
-            // decode → detect → estimate plugin chain is what's exercised.
+            // terminal `RejectedRetryable` finish (platform surfaces a retake
+            // hint). The age threshold is the
+            // policy's call (buffer + document escalation) and lands with
+            // the real flow; here the decode → detect → estimate plugin
+            // chain is what's exercised.
             (STEP_AWAIT_SELFIE, Event::Media(result)) => {
                 let age = preprocess::decode(&result.clip, 0, preprocess::Scale::Eighth)
                     .and_then(|frame| {
@@ -168,14 +174,11 @@ impl Guest for TestPolicy {
                             .and_then(|face| face_age::estimate(&frame, &face))
                     });
                 match age {
-                    Some(_) => (
-                        state_at(STEP_AWAIT_CONSENT),
-                        Action::Render(Prompt::ConsentDisclosure(build_consent())),
-                    ),
-                    None => (
-                        state_at(STEP_AWAIT_SELFIE),
-                        Action::Finish(Decision::RejectedRetryable),
-                    ),
+                    Some(_) => {
+                        set_step(STEP_AWAIT_CONSENT);
+                        Action::Render(Prompt::ConsentDisclosure(build_consent()))
+                    }
+                    None => Action::Finish(Decision::RejectedRetryable),
                 }
             }
 
@@ -188,13 +191,13 @@ impl Guest for TestPolicy {
                 } else {
                     Decision::Rejected
                 };
-                (state_at(STEP_AWAIT_CONSENT), Action::Finish(decision))
+                Action::Finish(decision)
             }
 
             // Any other (step, event) pairing is a runtime/replay bug —
             // fail loud with a finish(rejected) rather than silently
             // looping. (The harness never drives this path.)
-            (_, _) => (state, Action::Finish(Decision::Rejected)),
+            (_, _) => Action::Finish(Decision::Rejected),
         }
     }
 }

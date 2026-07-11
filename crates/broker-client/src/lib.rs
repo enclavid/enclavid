@@ -27,7 +27,7 @@ pub use broker_protocol::{KbsRelayRequest, KbsRelayResponse};
 pub use kbs::KbsClient;
 pub use registry::RegistryClient;
 pub use domain::{
-    Action, CameraFacing, CaptureGuide, CaptureStep, Client, ClientAccess, Clip, Decision,
+    CameraFacing, CaptureGuide, CaptureStep, Client, ClientAccess, Clip, Decision,
     DisplayField, Event, GuideNone, GuideOval, GuideRect, KbsKey, Key, Localized, MediaResult,
     MediaSpec, PluginPin, Prompt, SessionMetadata, SessionState, SessionStatus, Translation,
     capture_guide,

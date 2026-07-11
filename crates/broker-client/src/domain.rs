@@ -115,14 +115,15 @@ pub struct SessionMetadata {
 /// Internal session state for the policy reducer (`BlobField::State`).
 /// Double-AEAD-sealed (applicant key inner, tee_seal_key outer).
 ///
-/// Pure-reducer model. `state` is the policy's OWN opaque
-/// serialized blob (the engine never inspects it); the engine threads
-/// it verbatim through `policy.handle(state, event)`. `current_prompt` is
-/// the prompt the runtime last rendered to the applicant and is waiting
-/// on — the runtime uses it to (a) build the matching inbound `Event`
-/// from `/input`, and (b) gate the consent-disclosure seal: a disclosure
-/// only seals to the consumer when the `current_prompt` is a
-/// `Prompt::ConsentDisclosure` and it is accepted.
+/// Pure-actor model. `state` is the opaque serialized blob of the policy's
+/// `enclavid:host/storage` key/value map — the engine owns the encoding and
+/// broker + host see only sealed bytes. The engine decodes it into the
+/// round's storage at the top of `handle` and re-seals the committed map
+/// after. `current_prompt` is the prompt the runtime last rendered to the
+/// applicant and is waiting on — the runtime uses it to (a) build the
+/// matching inbound `Event` from `/input`, and (b) gate the
+/// consent-disclosure seal: a disclosure only seals to the consumer when
+/// the `current_prompt` is a `Prompt::ConsentDisclosure` and it is accepted.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionState {
@@ -198,12 +199,12 @@ pub struct ClientAccess {
 }
 
 // ---------------------------------------------------------------------
-// Reducer I/O — Prompt / Event / Action
+// Reducer I/O — Prompt / Event
 // ---------------------------------------------------------------------
 
-/// Terminal outcome carried by [`Action::Finish`] — mirror of the WIT
-/// `decision` enum. The platform renders UI from this fixed set; the
-/// policy controls no free text.
+/// Terminal outcome the policy returns via the WIT `action::finish` — a
+/// sealed mirror of the WIT `decision` enum. The platform renders UI from
+/// this fixed set; the policy controls no free text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Decision {
     #[default]
@@ -258,18 +259,6 @@ pub enum Event {
     ConsentDisclosure(bool),
     /// Reply to [`Prompt::Media`] — one capture step completed.
     Media(MediaResult),
-}
-
-/// OUTBOUND from the policy reducer — sealed mirror of the WIT `action`
-/// variant.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Action {
-    /// Result-producing → applicant; reply is a future [`Event`].
-    Render(Prompt),
-    /// Durable checkpoint: persist `state`, then re-invoke `handle`.
-    Continue,
-    /// Terminal.
-    Finish(Decision),
 }
 
 /// The captured frames for one `media-spec` step — sealed mirror of the
