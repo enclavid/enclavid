@@ -50,19 +50,26 @@ pub const POLICY_FUEL_BUDGET: u64 = 10_000_000_000;
 /// [`Runner::run`](crate::Runner::run) immediately after each `handle`
 /// round — a larger blob traps the round.
 ///
-/// The engine's data-minimization backstop. The reducer model already
-/// lets a well-behaved policy keep only derived results in `state` (it
-/// processes each media clip the round it arrives and returns a verdict,
-/// never the raw bytes), but nothing in the type system stops a malicious
-/// or buggy policy from stuffing a captured clip into the blob it hands
-/// back. A clip is tens of kilobytes to megabytes (JPEG frames, liveness
-/// video); legitimate accumulated state — step bookkeeping, MRZ text, a
-/// handful of face embeddings, screening verdicts — fits well inside this
-/// cap. The bound therefore makes smuggling raw media into the sealed
-/// mailbox structurally impossible while leaving real policies untouched,
-/// and narrows the host-observable ciphertext-size covert channel to at
-/// most `log2(POLICY_MAX_STATE_BYTES)` bits per round in the blob length.
-pub const POLICY_MAX_STATE_BYTES: usize = 64 * 1024;
+/// The engine's data-minimization ceiling. The reducer model already lets a
+/// well-behaved policy keep only derived results in `state` (it processes each
+/// media clip the round it arrives and returns a verdict, never the raw bytes).
+/// This cap is the backstop for the malicious/buggy case, sized to allow one
+/// legitimate heavy use: retaining a single processed artifact across rounds —
+/// e.g. a document crop the policy will surface on the consent screen for the
+/// applicant to share — which is on the order of a megabyte for a compressed
+/// crop. It still blocks bulk media accumulation (multi-frame liveness video, a
+/// stack of full-res captures), which is tens of megabytes and up. Lighter
+/// state — step bookkeeping, MRZ text, face embeddings, screening verdicts — is
+/// a rounding error against it.
+///
+/// The host-observable ciphertext-size covert channel this blob would otherwise
+/// feed is NOT bounded here; it is CLOSED downstream by the seal-boundary
+/// constant-size padding (`broker_client::SEALED_STATE_PLAINTEXT_BYTES`), which
+/// pads every sealed `SessionState` to a fixed size. This cap is therefore the
+/// data-min ceiling only — and because the padding frame must cover a max-cap
+/// state, raising this cap raises that frame (and hence the constant per-write
+/// seal cost) in lockstep.
+pub const POLICY_MAX_STATE_BYTES: usize = 1024 * 1024;
 
 // ----- text-ref validation -----
 

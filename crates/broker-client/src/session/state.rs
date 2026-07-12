@@ -25,10 +25,16 @@ use super::core::{ReadField, WriteField, unwrap_scalar};
 /// closing the size covert channel for BOTH `state` and `current_prompt`
 /// (the policy controls their sizes; a colluding host could otherwise relay
 /// the length). Trust-contract constant: an encoded `SessionState` larger
-/// than this traps the write (re-attest on change). Must cover the max
-/// encoding — the policy `state` (≤ engine `POLICY_MAX_STATE_BYTES`) plus the
-/// largest resolved prompt.
-pub const SEALED_STATE_PLAINTEXT_BYTES: usize = 256 * 1024;
+/// than this traps the write (re-attest on change).
+///
+/// Must cover the max encoding — the policy `state` (≤ engine
+/// `POLICY_MAX_STATE_BYTES`, 1 MiB) plus the largest resolved prompt plus CBOR
+/// overhead; the 256 KiB over the state cap is that prompt/overhead headroom.
+/// Because the padding is unconditional this is also the *floor* cost of every
+/// state write: each round seals exactly this many plaintext bytes regardless of
+/// how little real state the policy carries. Raising `POLICY_MAX_STATE_BYTES`
+/// raises this frame — and thus every write's seal cost — in lockstep.
+pub const SEALED_STATE_PLAINTEXT_BYTES: usize = 1024 * 1024 + 256 * 1024;
 
 /// Encode `state` and pad it with trailing zeros to
 /// [`SEALED_STATE_PLAINTEXT_BYTES`], so the sealed ciphertext is a fixed size
