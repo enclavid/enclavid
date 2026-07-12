@@ -14,8 +14,11 @@ use secrecy::ExposeSecret;
 use tokio::sync::Mutex;
 
 use enclavid_engine::{
-    Component, EmbeddedRegistry, PluginInstance, Prop, RunInputs, SessionListener, SessionState,
+    Component, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs, SessionListener,
+    SessionState,
 };
+
+use super::media_store::BrokerMediaStore;
 use broker_client::{
     AuthN, AuthZ, Event, Metadata, Replay, SessionMetadata, State as StateField, public_session_id,
     reason,
@@ -95,8 +98,13 @@ pub(super) fn parse_props(
 pub(super) fn build_run_inputs(
     listener: Arc<dyn SessionListener>,
     embedded: Arc<EmbeddedRegistry>,
+    media_store: Arc<dyn MediaStore>,
 ) -> RunInputs {
-    RunInputs { listener, embedded }
+    RunInputs {
+        listener,
+        embedded,
+        media_store,
+    }
 }
 
 /// Pre-flight context shared by `/connect` and `/input`. The extractor
@@ -340,10 +348,18 @@ persist; same containment as above.
             metadata: Mutex::new(metadata.clone()),
             shuffle_key: state.shuffle_key.clone(),
         });
+        // The live host blob store: the engine's `frame::from-blob-ref`
+        // reads sealed captures back through this. Same session keys as the
+        // persister that WROTE them (co-committed with state each round).
+        let media_store = Arc::new(BrokerMediaStore {
+            session_store: state.session_store.clone(),
+            session_id: session_id.clone(),
+            applicant_session_token: applicant_session_token.expose_secret().to_vec(),
+        });
         // Engine takes one strong ref via the listener; we keep our
         // own so `finalize` lands on the same persister after the run
         // completes (engine drops its ref when Store is consumed).
-        let run_inputs = build_run_inputs(persister.clone(), embedded.clone());
+        let run_inputs = build_run_inputs(persister.clone(), embedded.clone(), media_store);
 
         Ok(SessionRunCtx {
             state: state.clone(),

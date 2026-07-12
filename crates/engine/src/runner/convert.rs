@@ -17,6 +17,8 @@
 //! locale from the carried translation sets. Disclosure field-count and
 //! value-length limits are enforced here, at the build seam.
 
+use std::sync::Arc;
+
 use wasmtime::component::{Resource, ResourceTable};
 
 use broker_client::{
@@ -30,6 +32,7 @@ use crate::embedded::{DisclosureFieldRef, EmbeddedRegistry, IconRef, LocalizedRe
 use crate::enclavid::policy::types as wit_policy;
 use crate::enclavid::shared_types::capture as wit_capture;
 use crate::limits::{MAX_CONSENT_FIELDS, MAX_VALUE_LENGTH};
+use crate::listener::CapturedMedia;
 use crate::sanitize;
 
 // ---------------------------------------------------------------------
@@ -37,26 +40,43 @@ use crate::sanitize;
 // ---------------------------------------------------------------------
 
 /// Lower a domain [`Event`] into the WIT `event` the policy's `handle`
-/// consumes. The captured frames don't cross into the policy's linear
-/// memory — they're pushed into the run's [`ResourceTable`] host-side and
-/// the policy receives an unforgeable `clip` handle it forwards to a
-/// plugin. Minting the handle needs `&mut table`, so this runs before the
+/// consumes, plus the [`CapturedMedia`] to seal this round (media events
+/// only). The captured pixels don't cross into the policy's linear memory —
+/// each frame is content-addressed (BLAKE3) and pushed into the run's
+/// [`ResourceTable`] host-side as an unforgeable `frame` handle; the policy
+/// receives a `clip` record bundling the handles and forwards one to a
+/// plugin. The same `(hash, bytes)` set is returned as [`CapturedMedia`] so
+/// the runner hands it to the listener for atomic sealing into the blob
+/// store. Minting handles needs `&mut table`, so this runs before the
 /// `handle` call while the store is otherwise idle.
 pub fn event_to_wit(
     table: &mut ResourceTable,
     event: Event,
-) -> wasmtime::Result<wit_policy::Event> {
+) -> wasmtime::Result<(wit_policy::Event, Option<CapturedMedia>)> {
     Ok(match event {
-        Event::Start => wit_policy::Event::Start,
-        Event::ConsentDisclosure(accepted) => wit_policy::Event::ConsentDisclosure(accepted),
+        Event::Start => (wit_policy::Event::Start, None),
+        Event::ConsentDisclosure(accepted) => {
+            (wit_policy::Event::ConsentDisclosure(accepted), None)
+        }
         Event::Media(result) => {
-            let clip = table.push(crate::media::ClipRep {
-                frames: result.clip.frames,
-            })?;
-            wit_policy::Event::Media(wit_policy::MediaResult {
+            let mut frames = Vec::with_capacity(result.clip.frames.len());
+            let mut blobs = Vec::with_capacity(result.clip.frames.len());
+            for frame_bytes in result.clip.frames {
+                let hash: [u8; 32] = blake3::hash(&frame_bytes).into();
+                let arc = Arc::new(frame_bytes);
+                let handle = table.push(crate::media::BlobRep {
+                    bytes: arc.clone(),
+                    blob_ref: hash,
+                })?;
+                frames.push(handle);
+                blobs.push((hash, arc));
+            }
+            let clip = wit_policy::Clip { frames };
+            let event = wit_policy::Event::Media(wit_policy::MediaResult {
                 slot: result.slot,
                 clip,
-            })
+            });
+            (event, Some(CapturedMedia { blobs }))
         }
     })
 }

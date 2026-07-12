@@ -24,6 +24,7 @@ mod embedded;
 pub mod limits;
 mod listener;
 mod media;
+mod media_store;
 mod runner;
 mod sanitize;
 mod state;
@@ -36,7 +37,8 @@ pub use embedded::{
 pub use broker_client::{
     Action, Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
 };
-pub use listener::{ConsentDisclosure, SessionChange, SessionListener};
+pub use listener::{CapturedMedia, ConsentDisclosure, SessionChange, SessionListener};
+pub use media_store::MediaStore;
 pub use runner::{
     Composition, EmbeddedIface, EmbeddedImport, PluginInstance, RunStatus, Runner,
 };
@@ -82,12 +84,14 @@ wasmtime::component::bindgen!({
     // The three embedded refs are host-owned resources; back each with
     // the rep that carries its RESOLVED data (see `embedded::store`), so
     // the action-boundary deref in `runner::convert` is self-contained.
-    // `clip` is likewise host-owned — its rep holds the capture frames
-    // (see `media`), minted by the runtime into `event::media`.
+    // `blob` is likewise host-owned — its rep holds one stored blob's
+    // bytes + content ref (see `media`); the runtime mints a handle per
+    // captured frame into `event::media`'s `clip` record. `clip` itself is a
+    // plain policy-side record (no rep).
     with: {
         "enclavid:host/types.localized-ref": crate::embedded::LocalizedRef,
         "enclavid:host/types.icon-ref": crate::embedded::IconRef,
         "enclavid:host/types.disclosure-field-ref": crate::embedded::DisclosureFieldRef,
-        "enclavid:host/types.clip": crate::media::ClipRep,
+        "enclavid:host/types.blob": crate::media::BlobRep,
     },
 });

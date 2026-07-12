@@ -30,6 +30,10 @@ wit_bindgen::generate!({
 });
 
 use enclavid::host::embedded_i18n::localized as l10n;
+// The host `blob` resource + its content ref: on the passport round we stash
+// the frame blob's `blob-ref` in `state`, then rehydrate it on the selfie round
+// via `Blob::from_blob_ref` — proving cross-round reload from the host store.
+use enclavid::host::types::{BlobRef, Blob};
 use enclavid::policy::types::{Action, Decision, Disclosure, Event, Prompt};
 // The well-known plugin (linked at /connect) supplies the capture specs
 // and the canonical KYC `display-field` helpers.
@@ -134,23 +138,23 @@ impl Guest for TestPolicy {
             }
 
             // Passport captured → validate the capture, then ask for the
-            // selfie. Exercises the host-owned `clip` resource: the frames
-            // live host-side, so the policy pulls the count (and the first
-            // frame's bytes) across the boundary on demand — the pixels
-            // only materialise where asked. An empty capture is retryable.
-            (STEP_AWAIT_PASSPORT, Event::Media(result)) => {
-                if result.clip.frame_count() == 0 || result.clip.frame(0).is_none() {
-                    (
-                        state_at(STEP_AWAIT_PASSPORT),
-                        Action::Finish(Decision::RejectedRetryable),
-                    )
-                } else {
-                    (
-                        state_at(STEP_AWAIT_SELFIE),
-                        Action::Render(Prompt::Media(capture::selfie())),
-                    )
+            // selfie. Exercises the host-owned `frame` resource: the pixels
+            // live host-side, so the policy is a pure router. We stash the
+            // first frame's `blob-ref` (32 bytes) in `state` — the host has
+            // already sealed the frame into its blob store — to rehydrate it on
+            // the selfie round. Only the ref lives in state; the pixels never
+            // do. An empty capture is retryable.
+            (STEP_AWAIT_PASSPORT, Event::Media(result)) => match result.clip.frames.first() {
+                None => (
+                    state_at(STEP_AWAIT_PASSPORT),
+                    Action::Finish(Decision::RejectedRetryable),
+                ),
+                Some(frame) => {
+                    let mut next = vec![STEP_AWAIT_SELFIE];
+                    next.extend_from_slice(&frame.blob_ref().hash);
+                    (next, Action::Render(Prompt::Media(capture::selfie())))
                 }
-            }
+            },
 
             // Selfie captured → the full vision substrate across the fused
             // boundary: preprocess decodes the clip into a plugin-owned
@@ -162,17 +166,28 @@ impl Guest for TestPolicy {
             // document escalation) and lands with the real flow; here the
             // decode → detect → estimate plugin chain is what's exercised.
             (STEP_AWAIT_SELFIE, Event::Media(result)) => {
-                let age = preprocess::decode(&result.clip, 0, preprocess::Scale::Eighth)
-                    .and_then(|frame| {
-                        face_detect::detect(&frame)
-                            .and_then(|face| face_age::estimate(&frame, &face))
-                    });
-                match age {
-                    Some(_) => (
+                // Rehydrate the passport frame stashed last round from its
+                // `blob-ref` (the 32 bytes after the step tag) — proving a
+                // cross-round reload from the host blob store. A miss (empty /
+                // unknown ref) is retryable.
+                let passport = Blob::from_blob_ref(&BlobRef {
+                    hash: state[1..].to_vec(),
+                });
+                // Vision DAG on the SELFIE frame: preprocess decodes it into a
+                // plugin-owned `decoded-frame`, face-detect locates the `face`,
+                // face-age reads its crop and estimates. The policy threads the
+                // handles.
+                let age = result.clip.frames.first().and_then(|frame| {
+                    preprocess::decode(frame, preprocess::Scale::Eighth).and_then(|df| {
+                        face_detect::detect(&df).and_then(|face| face_age::estimate(&df, &face))
+                    })
+                });
+                match (passport, age) {
+                    (Ok(_), Some(_)) => (
                         state_at(STEP_AWAIT_CONSENT),
                         Action::Render(Prompt::ConsentDisclosure(build_consent())),
                     ),
-                    None => (
+                    _ => (
                         state_at(STEP_AWAIT_SELFIE),
                         Action::Finish(Decision::RejectedRetryable),
                     ),

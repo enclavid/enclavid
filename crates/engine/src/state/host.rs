@@ -6,6 +6,7 @@ use wasmtime::{StoreLimits, StoreLimitsBuilder};
 use crate::embedded::EmbeddedRegistry;
 use crate::limits::POLICY_MAX_MEMORY;
 use crate::listener::SessionListener;
+use crate::media_store::MediaStore;
 
 /// Data placed into wasmtime `Store<HostState>` for the duration of one
 /// `handle` call. The policy is a pure reducer, so this state carries
@@ -28,13 +29,19 @@ pub struct HostState {
     /// input reaches the component; a component can only reference a key
     /// some catalog declared.
     pub embedded: Arc<EmbeddedRegistry>,
-    /// Handle table backing the embedded ref resources
-    /// (`localized-ref` / `icon-ref` / `disclosure-field-ref`). The host
-    /// funcs push resolved data here and hand the component an
-    /// unforgeable handle; the runner dereferences the handles the
-    /// returned prompt carries at the action boundary. Fresh per run,
-    /// dropped with the Store — refs never outlive the round.
+    /// Handle table backing the host-owned ref resources
+    /// (`localized-ref` / `icon-ref` / `disclosure-field-ref`) and the
+    /// `blob` resources. The host funcs push resolved data / capture
+    /// blobs here and hand the component an unforgeable handle; the runner
+    /// dereferences the ref handles the returned prompt carries at the
+    /// action boundary. Fresh per run, dropped with the Store — handles
+    /// never outlive the round.
     pub table: ResourceTable,
+    /// Host-side sealed blob store, injected by the runtime's I/O layer.
+    /// Backs `blob::from-blob-ref` — the policy rehydrates a stored capture
+    /// blob by its content ref mid-`handle`. `Arc<dyn>` so the host fn can
+    /// clone it out before the `.await` (releasing the borrow of `self`).
+    pub media_store: Arc<dyn MediaStore>,
     /// Resource caps the wasmtime runtime consults via `Store::
     /// limiter`. Bounds linear-memory growth so the policy component
     /// can't OOM the enclave. Fuel (CPU-instruction budget) is set
@@ -52,17 +59,20 @@ pub struct HostState {
 pub struct RunInputs {
     pub listener: Arc<dyn SessionListener>,
     pub embedded: Arc<EmbeddedRegistry>,
+    pub media_store: Arc<dyn MediaStore>,
 }
 
 impl HostState {
     pub(crate) fn new(
         props: Vec<(String, crate::enclavid::host::types::Prop)>,
         embedded: Arc<EmbeddedRegistry>,
+        media_store: Arc<dyn MediaStore>,
     ) -> Self {
         Self {
             props,
             embedded,
             table: ResourceTable::new(),
+            media_store,
             limits: StoreLimitsBuilder::new()
                 .memory_size(POLICY_MAX_MEMORY)
                 .build(),

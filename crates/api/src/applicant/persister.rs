@@ -41,7 +41,7 @@ use axum::http::StatusCode;
 
 use broker_client::{
     AppendDisclosure, AuthN, AuthZ, Covert, Replay, SessionMetadata, SessionStatus, SessionStore,
-    SetMetadata, SetState, SetStatus, WriteField, boundary, encode_padded, reason,
+    SetMedia, SetMetadata, SetState, SetStatus, WriteField, boundary, encode_padded, reason,
 };
 use enclavid_crypto::seal_to_recipient;
 use enclavid_engine::{
@@ -99,12 +99,17 @@ impl SessionListener for SessionPersister {
             let appends = self.seal_disclosures(&change, starting_index)?;
 
             // Hold the metadata lock across the write: the state
-            // mutation and the disclosure entry land in one atomic host
-            // transaction. Engine serializes hooks, so contention is
-            // theoretical.
+            // mutation, the disclosure entry, and the captured media all land
+            // in one atomic host transaction. Engine serializes hooks, so
+            // contention is theoretical.
             let mut metadata = self.metadata.lock().await;
             let set_state = self.build_state_op(&change)?;
-            let mut ops: Vec<&dyn WriteField> = Vec::with_capacity(2 + appends.len());
+            // Seal every captured frame this round into the media store,
+            // co-committed with the state (kept in a local so the `&dyn`
+            // refs below outlive the write).
+            let media_ops = self.build_media_ops(&change);
+            let mut ops: Vec<&dyn WriteField> =
+                Vec::with_capacity(2 + appends.len() + media_ops.len());
             ops.push(&set_state);
 
             // Only rewrite metadata when this commit emitted a
@@ -118,6 +123,7 @@ impl SessionListener for SessionPersister {
                 ops.push(&set_metadata_holder);
             }
             ops.extend(appends.iter().map(|a| a as &dyn WriteField));
+            ops.extend(media_ops.iter().map(|m| m as &dyn WriteField));
 
             self.commit_ops(&ops).await
         })
@@ -186,6 +192,39 @@ impl SessionPersister {
                 })?,
             applicant_session_token: &self.applicant_session_token,
         })
+    }
+
+    /// Build a `SetMedia` op per frame the runtime captured this round. Every
+    /// capture is sealed unconditionally — "always store" — so the media path
+    /// is uniform and write-presence carries no policy bandwidth. AuthN is
+    /// closed inside broker-client by the double AEAD-seal (inner under
+    /// `applicant_session_token`, outer under `tee_seal_key`, AAD =
+    /// session_id||blob_hash); AuthZ + Covert vouched here. Covert is NOT
+    /// padded (unlike state): the blob size is applicant-capture-driven and
+    /// already host-observable via the `/input` body length, so it is not a
+    /// new channel.
+    fn build_media_ops<'a>(&'a self, change: &SessionChange<'a>) -> Vec<SetMedia<'a>> {
+        let Some(media) = change.media else {
+            return Vec::new();
+        };
+        media
+            .blobs
+            .iter()
+            .map(|(hash, bytes)| SetMedia {
+                blob_hash: *hash,
+                bytes: boundary::outbound::to_untrusted(bytes.as_ref().clone())
+                    .vouch_unchecked::<AuthZ, _>(reason!(
+                        "inner-AEAD'd to applicant_session_token; receipt of ciphertext is not \
+                         access — AuthZ implicit in key possession"
+                    ))
+                    .vouch_unchecked::<Covert, _>(reason!(
+                        "blob size is applicant-capture-driven — already host-observable at the \
+                         /input body length, so not a NEW channel; every capture is stored \
+                         unconditionally (always-store), so write-presence carries no policy bandwidth"
+                    )),
+                applicant_session_token: &self.applicant_session_token,
+            })
+            .collect()
     }
 
     /// Advance the disclosure bookkeeping (count + running hash chain)

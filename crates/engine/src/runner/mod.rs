@@ -207,6 +207,7 @@ impl Runner {
     ) -> wasmtime::Result<(RunStatus, SessionState)> {
         let embedded = inputs.embedded.clone();
         let listener = inputs.listener.clone();
+        let media_store = inputs.media_store.clone();
 
         // CONSENT GATE — decide BEFORE calling the policy whether this
         // round seals a disclosure to the consumer. The seal fires iff
@@ -243,15 +244,20 @@ impl Runner {
         register_strict_embedded(&mut linker, embedded_imports, &embedded)?;
 
         // Instantiate the policy and call `handle` ONCE.
-        let mut store = Store::new(&self.engine, HostState::new(props, embedded.clone()));
+        let mut store = Store::new(
+            &self.engine,
+            HostState::new(props, embedded.clone(), media_store),
+        );
         store.limiter(|s| &mut s.limits);
         store.set_fuel(POLICY_FUEL_BUDGET)?;
         let bindings = GeneratedHost::instantiate_async(&mut store, component, &linker).await?;
 
-        let wit_event = convert::event_to_wit(&mut store.data_mut().table, event)?;
+        // Mint the frame handles for this round and stage the captured blobs
+        // (media rounds only) for the listener to seal alongside the state.
+        let (wit_event, captured) = convert::event_to_wit(&mut store.data_mut().table, event)?;
         let (new_state, wit_action) = bindings
             .enclavid_policy_policy()
-            .call_handle(&mut store, &session.state, wit_event)
+            .call_handle(&mut store, &session.state, &wit_event)
             .await?;
 
         // Data-minimization backstop: the policy's opaque blob must stay
@@ -291,13 +297,16 @@ impl Runner {
             }
         };
 
-        // Single listener fire for the round: post-round state plus the
-        // consented disclosure (only on a consent-disclosure accept).
+        // Single listener fire for the round: post-round state, the consented
+        // disclosure (only on a consent-disclosure accept), and the captured
+        // media to seal into the blob store (only on a media round). All
+        // committed in one transaction by the listener.
         let disclosures: Vec<ConsentDisclosure> = sealed_disclosure.into_iter().collect();
         listener
             .on_session_change(SessionChange {
                 state: &next_session,
                 disclosures: &disclosures,
+                media: captured.as_ref(),
             })
             .await?;
 

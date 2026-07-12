@@ -18,6 +18,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use broker_client::{DisplayField, SessionState};
 
@@ -31,14 +32,27 @@ pub struct ConsentDisclosure {
     pub fields: Vec<DisplayField>,
 }
 
+/// The applicant media captured THIS round (present only on a media
+/// round), staged for the listener to seal into the host blob store. Every
+/// captured frame is stored unconditionally — "always store" — so the
+/// listener commits these blobs in the SAME transaction as the reducer
+/// `state`. Each entry is `(blob_hash, bytes)`: the 32-byte BLAKE3 content
+/// key and the raw frame; `bytes` is `Arc`-shared with the run's frame
+/// resources so nothing is copied to reach the seal.
+pub struct CapturedMedia {
+    pub blobs: Vec<([u8; 32], Arc<Vec<u8>>)>,
+}
+
 /// Bundle delivered to the listener once per `handle` round. `state` is
 /// the post-round snapshot; `disclosures` is non-empty only when this
 /// round accepted a consent-disclosure prompt — the consented fields
-/// the runtime is sealing to the consumer. Bundled together because a
-/// sane listener commits them in one atomic transaction.
+/// the runtime is sealing to the consumer; `media` is present only on a
+/// media round — the captured frames to seal into the blob store. Bundled
+/// together because a sane listener commits them in one atomic transaction.
 pub struct SessionChange<'a> {
     pub state: &'a SessionState,
     pub disclosures: &'a [ConsentDisclosure],
+    pub media: Option<&'a CapturedMedia>,
 }
 
 /// Trait fired once per `handle` round. Returns a boxed future

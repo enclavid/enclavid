@@ -5,7 +5,7 @@ package enclavid:preprocess@0.1.0;
 /// plugin's memory — downstream face checks pull crops via
 /// `decoded-frame.region`, so one decode serves all of them.
 interface decode {
-    use enclavid:host/types@0.1.0.{clip};
+    use enclavid:host/types@0.1.0.{blob};
     use enclavid:vision/types@0.1.0.{decoded-frame};
 
     /// Source-decode fidelity tier. The caller materializes the tier(s) its
@@ -19,9 +19,10 @@ interface decode {
         full,
     }
 
-    /// Decode clip frame `index` at `scale` → a `decoded-frame`. `none` =
-    /// the frame is missing or undecodable (the caller asks for a retake).
-    decode: func(clip: borrow<clip>, index: u32, scale: scale) -> option<decoded-frame>;
+    /// Decode one captured frame `blob` at `scale` → a `decoded-frame`.
+    /// `none` = the blob is undecodable (the caller asks for a retake). The
+    /// caller picks which frame of the clip to decode and borrows it here.
+    decode: func(frame: borrow<blob>, scale: scale) -> option<decoded-frame>;
 }
 
 world preprocess {

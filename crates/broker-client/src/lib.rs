@@ -38,6 +38,6 @@ pub use domain::{
 pub use domain::Disclosure as PromptDisclosure;
 pub use session::{
     AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, SEALED_STATE_PLAINTEXT_BYTES,
-    SessionStore, SetMetadata, SetPrincipal, SetState, SetStatus, State, Status, WriteField,
-    encode_padded,
+    SessionStore, SetMedia, SetMetadata, SetPrincipal, SetState, SetStatus, State, Status,
+    WriteField, encode_padded,
 };

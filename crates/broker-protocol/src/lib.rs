@@ -179,11 +179,16 @@ pub enum ListField {
     Disclosure,
 }
 
-/// Selector for one field in a read. Picks scalar or list shape.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// Selector for one field in a read. Picks scalar, list, or keyed-media
+/// shape. (Not `Copy` — the `Media` variant carries its blob-hash key.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FieldSelector {
     Blob(BlobField),
     List(ListField),
+    /// One media blob, keyed by its content hash (32-byte BLAKE3). Lives in
+    /// a per-session media hash (`session:{id}:media`), separate from the
+    /// scalar fields; reads return a `Slot::Scalar` (absent → `None`).
+    Media(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,11 +246,23 @@ pub enum Op {
     Blob(BlobWrite),
     /// Append to a list field.
     ListAppend(ListAppend),
+    /// Write one media blob under its content-hash key into the per-session
+    /// media hash. Idempotent — the key IS the content, so a re-write is a
+    /// no-op-equivalent overwrite of identical bytes.
+    MediaWrite(MediaWrite),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobWrite {
     pub field: BlobField,
+    pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaWrite {
+    /// Content-hash key (32-byte BLAKE3 of the sealed blob's plaintext).
+    pub blob_key: Vec<u8>,
+    /// Sealed blob bytes (double-AEAD ciphertext).
     pub value: Vec<u8>,
 }
 

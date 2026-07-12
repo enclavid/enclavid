@@ -10,7 +10,10 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::host::types::Clip;
+// The host `blob` resource — one stored byte-blob (here, a captured JPEG
+// frame). Distinct name from this plugin's own `Frame` (the decoded RGB
+// buffer below).
+use enclavid::host::types::Blob;
 use exports::enclavid::preprocess::decode::{Guest as DecodeGuest, Scale};
 use exports::enclavid::vision::types::{DecodedFrame, Guest as VisionGuest, GuestDecodedFrame, Size};
 
@@ -65,8 +68,8 @@ impl VisionGuest for Preprocess {
 }
 
 impl DecodeGuest for Preprocess {
-    fn decode(clip: &Clip, index: u32, scale: Scale) -> Option<DecodedFrame> {
-        let bytes = clip.frame(index)?;
+    fn decode(frame: &Blob, scale: Scale) -> Option<DecodedFrame> {
+        let bytes = frame.bytes();
         let denom: u16 = match scale {
             Scale::Eighth => 8,
             Scale::Quarter => 4,

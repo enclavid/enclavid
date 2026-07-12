@@ -51,16 +51,18 @@ pub const POLICY_FUEL_BUDGET: u64 = 10_000_000_000;
 /// round — a larger blob traps the round.
 ///
 /// The engine's data-minimization ceiling. The reducer model already lets a
-/// well-behaved policy keep only derived results in `state` (it processes each
-/// media clip the round it arrives and returns a verdict, never the raw bytes).
-/// This cap is the backstop for the malicious/buggy case, sized to allow one
-/// legitimate heavy use: retaining a single processed artifact across rounds —
-/// e.g. a document crop the policy will surface on the consent screen for the
-/// applicant to share — which is on the order of a megabyte for a compressed
-/// crop. It still blocks bulk media accumulation (multi-frame liveness video, a
-/// stack of full-res captures), which is tens of megabytes and up. Lighter
-/// state — step bookkeeping, MRZ text, face embeddings, screening verdicts — is
-/// a rounding error against it.
+/// well-behaved policy keep only derived results in `state`: raw captures live
+/// in the host blob store, so a policy rehydrates a frame by its `blob-ref`
+/// (`frame::from-blob-ref`) each round it needs it and keeps only the 32-byte
+/// ref — never the pixels — in `state`. This cap is the backstop for the
+/// malicious/buggy case, sized to still allow one legitimate heavy use the blob
+/// store does NOT cover: caching a large policy-DERIVED artifact across rounds
+/// (a policy-produced value, not an ingest capture — e.g. a stitched or
+/// re-encoded image the policy computed), which can run to about a megabyte. It
+/// still blocks bulk media accumulation (a stack of raw frames stuffed into the
+/// blob), which is tens of megabytes and up. Lighter state — step bookkeeping,
+/// blob-refs, MRZ text, face embeddings, screening verdicts — is a rounding
+/// error against it.
 ///
 /// The host-observable ciphertext-size covert channel this blob would otherwise
 /// feed is NOT bounded here; it is CLOSED downstream by the seal-boundary

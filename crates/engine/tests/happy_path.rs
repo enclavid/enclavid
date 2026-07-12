@@ -19,6 +19,7 @@
 //! invocation) rather than via a build.rs — this keeps normal engine
 //! builds free of wasm tooling dependencies and nightly requirements.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::process::Command;
@@ -26,10 +27,27 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use broker_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use enclavid_engine::{
-    ConsentDisclosure, EmbeddedRegistry, PluginInstance, Prop, RunInputs, RunStatus, Runner,
-    SessionChange, SessionListener,
+    ConsentDisclosure, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs, RunResult,
+    RunStatus, Runner, SessionChange, SessionListener,
 };
 use wit_component::ComponentEncoder;
+
+/// In-memory stand-in for the host blob store, shared with the
+/// [`RecordingListener`] (which populates it from each round's captured
+/// media) so a later `frame::from-blob-ref` rehydrate hits. Stage 3 swaps in
+/// the broker-backed store; this proves the engine seam.
+#[derive(Clone, Default)]
+struct MemMediaStore(Arc<Mutex<HashMap<[u8; 32], Vec<u8>>>>);
+
+impl MediaStore for MemMediaStore {
+    fn load<'a>(
+        &'a self,
+        blob_hash: &'a [u8; 32],
+    ) -> Pin<Box<dyn Future<Output = RunResult<Option<Vec<u8>>>> + Send + 'a>> {
+        let hit = self.0.lock().unwrap().get(blob_hash).cloned();
+        Box::pin(async move { Ok(hit) })
+    }
+}
 
 /// WIT package id the policy imports its capture / disclosure-field
 /// helpers from; used as the plugin descriptor label at compose time.
@@ -87,6 +105,18 @@ fn all_plugins() -> Vec<PluginInstance> {
 #[derive(Default)]
 struct RecordingListener {
     sealed: Mutex<Vec<Vec<broker_client::DisplayField>>>,
+    /// Backs the shared [`MemMediaStore`] — every captured frame the runtime
+    /// stages this round is inserted here, simulating the atomic media+state
+    /// commit, so a later rehydrate finds it.
+    media: Arc<Mutex<HashMap<[u8; 32], Vec<u8>>>>,
+}
+
+impl RecordingListener {
+    /// A media store sharing this listener's blob map (write via the listener,
+    /// read via `frame::from-blob-ref`).
+    fn media_store(&self) -> Arc<dyn MediaStore> {
+        Arc::new(MemMediaStore(self.media.clone()))
+    }
 }
 
 impl SessionListener for RecordingListener {
@@ -99,9 +129,18 @@ impl SessionListener for RecordingListener {
             .iter()
             .map(|d: &ConsentDisclosure| d.fields.clone())
             .collect();
+        let blobs: Vec<([u8; 32], Vec<u8>)> = change
+            .media
+            .map(|m| {
+                m.blobs
+                    .iter()
+                    .map(|(h, b)| (*h, b.as_ref().clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         Box::pin(async move {
-            let mut sealed = self.sealed.lock().unwrap();
-            sealed.extend(rounds);
+            self.sealed.lock().unwrap().extend(rounds);
+            self.media.lock().unwrap().extend(blobs);
             Ok(())
         })
     }
@@ -189,20 +228,58 @@ async fn media_rounds_keep_state_minimal() {
         .await;
     let after_selfie_len = after_selfie.state.len();
 
-    // The clips are dropped the round they arrive — the policy keeps only its
-    // step bookkeeping, so the engine's `SessionState.state` (the REAL bytes,
-    // pre-seal) must NOT grow as media rounds accumulate. (Constant-size
-    // padding for the covert channel happens later, at the seal boundary in
-    // broker-client — this asserts the engine-visible state stays minimal.)
+    // Media BYTES never enter `state`: the frames are stored host-side and the
+    // policy keeps only a 32-byte `blob-ref` (the cross-round handle it
+    // rehydrates from). So the engine's `SessionState.state` (the REAL bytes,
+    // pre-seal) stays tiny — step tag + at most one ref — never anywhere near a
+    // JPEG frame (KiB+), no matter how many media rounds accumulate.
     assert!(baseline <= 8, "policy step state should be tiny, got {baseline}");
-    assert_eq!(
-        after_passport_len, baseline,
-        "passport media round must not grow the engine state",
+    // The passport round stashes the passport frame's ref (step + 32 bytes).
+    assert!(
+        after_passport_len <= baseline + 32,
+        "passport round state = step + one blob-ref, got {after_passport_len}",
     );
-    assert_eq!(
-        after_selfie_len, baseline,
-        "selfie media round must not grow the engine state",
+    // The selfie round rehydrates + drops the ref, back to just the step tag.
+    assert!(
+        after_selfie_len <= 8,
+        "selfie round must drop the ref, back to a tiny step state, got {after_selfie_len}",
     );
+}
+
+/// A `frame::from-blob-ref` MISS: the passport ref the policy stashed isn't in
+/// the store (here: a store that never gets the captured blobs), so the selfie
+/// round's rehydrate returns `load-error::not-found` and the policy maps it to
+/// a retryable rejection. Proves the miss path end-to-end.
+#[tokio::test]
+async fn reload_by_ref_misses() {
+    let h = Harness::new();
+    let listener = Arc::new(RecordingListener::default());
+    // An empty store, NOT the listener's map — so captured blobs never land in
+    // what `from-blob-ref` reads, forcing a miss on the selfie round.
+    let empty_store: Arc<dyn MediaStore> = Arc::new(MemMediaStore::default());
+    let inputs = || RunInputs {
+        listener: listener.clone(),
+        embedded: h.embedded.clone(),
+        media_store: empty_store.clone(),
+    };
+    let round = |session, event| {
+        h.runner.run(
+            &h.policy,
+            &h.embedded_imports,
+            session,
+            event,
+            vec![],
+            inputs(),
+        )
+    };
+
+    let (_s, session) = round(Session::default(), Event::Start).await.unwrap();
+    let (_s, session) = round(session, Event::Media(fake_capture())).await.unwrap();
+    let (status, _s) = round(session, Event::Media(fake_capture())).await.unwrap();
+    match status {
+        RunStatus::Completed(Decision::RejectedRetryable) => {}
+        _ => panic!("a from-blob-ref miss must yield Completed(RejectedRetryable)"),
+    }
 }
 
 #[tokio::test]
@@ -364,6 +441,7 @@ async fn static_fused_artifact_resolves_strictly() {
     let inputs = || RunInputs {
         listener: listener.clone(),
         embedded: embedded.clone(),
+        media_store: listener.media_store(),
     };
     let (status, session) = runner
         .run(&composition.component, &composition.embedded_imports, Session::default(), Event::Start, vec![], inputs())
@@ -498,6 +576,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let inputs = || RunInputs {
         listener: listener.clone(),
         embedded: embedded.clone(),
+        media_store: listener.media_store(),
     };
     // start → media(passport) → media(selfie) → consent-disclosure.
     let (status, session) = runner
@@ -602,6 +681,7 @@ impl Harness {
         RunInputs {
             listener: listener.clone(),
             embedded: self.embedded.clone(),
+            media_store: listener.media_store(),
         }
     }
 

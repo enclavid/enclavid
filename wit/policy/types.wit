@@ -8,7 +8,7 @@ package enclavid:policy@0.1.0;
 interface types {
     use enclavid:shared-types/capture@0.1.0.{media-spec};
     use enclavid:shared-types/disclosure@0.1.0.{display-field};
-    use enclavid:host/types@0.1.0.{localized-ref, clip};
+    use enclavid:host/types@0.1.0.{localized-ref, blob};
 
     /// Terminal outcome carried by `action::finish`. The platform renders
     /// UI from this fixed enum — policy controls no free text.
@@ -39,10 +39,22 @@ interface types {
         consent-disclosure(disclosure),   // consent-to-disclose screen; ON ACCEPT the runtime seals it to the consumer
     }
 
+    /// One captured artifact's frame stream — typically 8–12 JPEG frames over
+    /// ~1s. A plain record grouping the frames in order; each frame is a
+    /// host-owned `blob` handle (owned by `enclavid:host/types`) — "frame" is
+    /// the semantic role, `blob` the storage unit. The policy is a pure router
+    /// — it forwards a frame blob to a verification plugin, which reads the
+    /// pixels it needs. Anti-replay / forensic signals (parallax, glare drift,
+    /// hand jitter) live in inter-frame differences — which is why a capture is
+    /// a clip, not a single photo.
+    record clip {
+        frames: list<blob>,
+    }
+
     /// The captured artifact for one `media-spec` step (carried by
     /// `event::media`). `slot` is the capture-step index it fills; `clip`
-    /// is a host-owned handle to the frames — the policy forwards it to a
-    /// verification plugin rather than reading pixels itself.
+    /// bundles the host-owned frame blob handles — the policy forwards a frame
+    /// to a verification plugin rather than reading pixels itself.
     record media-result {
         slot: u32,
         clip: clip,

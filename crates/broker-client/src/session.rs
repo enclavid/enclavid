@@ -33,6 +33,7 @@
 
 mod core;
 mod disclosure;
+mod media;
 mod metadata;
 mod principal;
 mod state;
@@ -40,6 +41,7 @@ mod status;
 
 pub use self::core::{ReadField, ReadTuple, WriteField};
 pub use disclosure::{AppendDisclosure, Disclosure};
+pub use media::SetMedia;
 pub use metadata::{Metadata, SetMetadata};
 pub use principal::SetPrincipal;
 pub use state::{SEALED_STATE_PLAINTEXT_BYTES, SetState, State, encode_padded};
@@ -47,8 +49,10 @@ pub use status::{SetStatus, Status};
 
 use std::sync::Arc;
 
-use broker_protocol::{Op, ReadRequest, Slot, WriteRequest};
+use broker_protocol::{FieldSelector, Op, ReadRequest, Slot, WriteRequest};
 use hyper::StatusCode;
+
+use enclavid_crypto::aead;
 
 use crate::boundary::{AuthN, AuthZ, Replay, Untrusted};
 use crate::error::BridgeError;
@@ -190,6 +194,39 @@ impl SessionStore {
             }
             s => Err(BridgeError::Transport(format!("delete: status {s}"))),
         }
+    }
+
+    /// Read + double-open one sealed media blob by its content hash. Backs the
+    /// policy's `frame::from-blob-ref` rehydrate. `None` = no such blob in this
+    /// session (a miss → `load-error::not-found`). The plaintext comes back
+    /// `Untrusted<_, (Replay,)>` — outer-AEAD-open closes AuthN (real crypto),
+    /// inner-AEAD-open closes AuthZ (applicant-key possession authorises); only
+    /// Replay remains for the caller (trivially closed: the blob is
+    /// content-addressed, so a stale / reordered read can only return identical
+    /// bytes). AAD = session_id||blob_hash, mirroring [`SetMedia`].
+    pub async fn load_media(
+        &self,
+        id: Exposed<&str>,
+        blob_hash: &[u8; 32],
+        applicant_session_token: &[u8],
+    ) -> Result<Untrusted<Option<Vec<u8>>, (Replay,)>, BridgeError> {
+        // Read the id for the AAD before `read_raw` releases it at the URL.
+        let aad = media::media_aad(*id.as_inner(), blob_hash);
+        let req = core::read_request(vec![FieldSelector::Media(blob_hash.to_vec())]);
+        let (slots, _version) = self.read_raw(id, req).await?;
+        let slot = slots
+            .into_iter()
+            .next()
+            .ok_or_else(|| BridgeError::Transport("media read returned no slot".to_string()))?;
+        let Some(sealed) = core::unwrap_scalar(slot)? else {
+            return Ok(Untrusted::new(None));
+        };
+        let opened: Untrusted<Vec<u8>, (Replay,)> = boundary::inbound::from_untrusted(sealed)
+            .trust::<AuthN, _, _, _, _>(|raw| aead::open(&raw, self.tee_seal_key(), &aad))?
+            .trust::<AuthZ, _, _, _, _>(|outer| {
+                aead::open(&outer, applicant_session_token, &aad)
+            })?;
+        Ok(opened.map(Some))
     }
 
     pub async fn exists(

@@ -15,13 +15,19 @@ package enclavid:host@0.1.0;
 /// `embedded-icons` with a distinct id — still references the SAME
 /// resource type and subtype-matches the component's canonical import.
 ///
-/// `clip` is likewise a host-owned resource — the applicant's captured
-/// frames, minted by the runtime into `event::media`. It lives here (not
-/// in `enclavid:shared-types/capture`) so both the policy and any
-/// verification plugin reference the SAME resource type and can pass a
-/// handle across the fused policy↔plugin boundary; the pixel bytes stay
-/// host-side and enter a component's linear memory only when it pulls a
-/// frame.
+/// `blob` is likewise a host-owned resource — one stored byte-blob, minted
+/// by the runtime into `event::media` and rehydrated across rounds via its
+/// `from-blob-ref` static constructor. It is the UNIVERSAL unit: a captured
+/// camera frame is a blob, a future uploaded document / PDF is a blob — the
+/// host stores and hands them out identically. It lives here (not in
+/// `enclavid:shared-types/capture`) so both the policy and any verification
+/// plugin reference the SAME resource type and can pass a handle across the
+/// fused policy↔plugin boundary; the bytes stay host-side and enter a
+/// component's linear memory only when it pulls `bytes`. `blob-ref` is the
+/// content ref that addresses any stored blob. The `clip` record that groups
+/// the blobs of one capture is NOT here — it's policy-facing (only
+/// `media-result` uses it) and lives in `enclavid:policy/types`; this package
+/// holds only what the host mints or owns.
 interface types {
   /// One static configuration value the consumer supplies at session
   /// creation (was `eval-args`). Read on demand via
@@ -46,32 +52,50 @@ interface types {
   /// surfaces as the machine `display-field.key` the consumer receives.
   resource disclosure-field-ref;
 
-  /// One JPEG-encoded frame — pristine bytes, no container, no
-  /// inter-frame compression that could mask the forensic signal.
-  type frame = list<u8>;
+  /// A content-addressed reference to ONE stored artifact blob in the host
+  /// media store — a captured camera frame today, an uploaded document / PDF
+  /// blob in future. Every uploaded artifact is sealed host-side and keyed by
+  /// its 32-byte BLAKE3; a `blob-ref` is that hash. A plain VALUE (not a
+  /// resource) so the policy can stash it in its opaque sealed `state` and
+  /// rehydrate across rounds — resource handles are per-round and
+  /// unserializable. The store and the ref are TYPE-AGNOSTIC: a typed
+  /// resource (`frame` below, a future `document`) interprets a ref into
+  /// itself via a static constructor, so new artifact kinds reuse the same
+  /// storage without touching this type.
+  record blob-ref {
+    hash: list<u8>,
+  }
 
-  /// One captured artifact's frame stream — typically 8–12 JPEG frames
-  /// over ~1s, held host-side so the pixel bytes never enter the
-  /// policy's linear memory. The policy is a pure router: it receives
-  /// this unforgeable handle in `event::media` and forwards it to a
-  /// verification plugin, which reads the frames it needs. Anti-replay /
-  /// forensic signals (parallax, glare drift, hand jitter) live in
-  /// inter-frame differences — which is why a capture is a clip, not a
-  /// single photo.
-  resource clip {
-    /// Number of frames in the stream.
-    frame-count: func() -> u32;
-    /// The `index`-th frame (0-based), or none when `index` is past
-    /// the end. Streaming frames one at a time keeps peak memory at a
-    /// single frame — the right choice when each frame is processed
-    /// independently (decode → infer → drop).
-    frame: func(index: u32) -> option<frame>;
-    /// Every frame at once. Serves temporal analysis that needs the
-    /// whole clip together (inter-frame flow, a stacked tensor); it
-    /// materialises all frames in the caller's linear memory (bounded
-    /// by the component's memory limit), so prefer `frame` when
-    /// per-frame streaming suffices.
-    frames: func() -> list<frame>;
+  /// Why a rehydrate didn't yield the artifact. `not-found` = no such blob
+  /// in this session (unknown / wrong-length / never-uploaded ref). A
+  /// genuine transport / infra failure traps the round instead of returning
+  /// this.
+  variant load-error {
+    not-found,
+  }
+
+  /// One stored byte-blob — a host-owned lazy handle to sealed bytes plus its
+  /// content ref. The universal unit of storage and reference:
+  /// 1 blob ↔ 1 `blob-ref` ↔ 1 sealed blob host-side. A captured camera frame
+  /// is a blob; a future uploaded document / PDF is a blob too. The semantic
+  /// KIND lives in the record that groups blobs (`clip.frames`) and the
+  /// plugin that reads them — not in this type. A verification plugin pulls
+  /// the bytes via `bytes` (so they enter linear memory only at use); the
+  /// policy keeps the `blob-ref` in `state` to rehydrate the blob in a later
+  /// round. For camera frames: pristine bytes, no container, no inter-frame
+  /// compression that could mask the forensic signal.
+  resource blob {
+    /// Pull this blob's bytes into the caller's linear memory. Bounded by
+    /// the component's memory limit.
+    bytes: func() -> list<u8>;
+    /// This blob's content ref — stash in `state` to rehydrate it in a
+    /// later round.
+    blob-ref: func() -> blob-ref;
+    /// Rehydrate one stored blob by its ref. Own-session only
+    /// (cross-session is cryptographically blocked); `not-found` on an
+    /// unknown / wrong-length ref. The handle is minted into this round's
+    /// table and dropped with the Store, like a freshly-captured blob.
+    from-blob-ref: static func(ref: blob-ref) -> result<blob, load-error>;
   }
 }
 
