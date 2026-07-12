@@ -1,40 +1,24 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
 
 use crate::embedded::EmbeddedRegistry;
-use crate::limits::{POLICY_MAX_MEMORY, POLICY_MAX_STATE_BYTES};
+use crate::limits::POLICY_MAX_MEMORY;
 use crate::listener::SessionListener;
-use crate::state::kv as codec;
 
 /// Data placed into wasmtime `Store<HostState>` for the duration of one
-/// `handle` call. The policy is a pure actor, so this state carries the
-/// ambient read surfaces (`enclavid:host/session-context` props,
-/// `enclavid:embedded/*` registry), the round's private storage map
-/// (`enclavid:host/storage`), and the runtime plumbing (table, limits).
-/// No replay log, no per-call disclosure buffer — the runner fires the
-/// listener directly on a consent-disclosure accept, around the `handle`
-/// call, not from a host-fn body.
+/// `handle` call. The policy is a pure reducer, so this state carries
+/// only ambient read surfaces (`enclavid:host/session-context` props,
+/// `enclavid:embedded/*` registry) plus the runtime plumbing
+/// (listener, limits). No replay log, no per-call disclosure buffer —
+/// the runner fires the listener directly on a consent-disclosure
+/// accept, around the `handle` call, not from a host-fn body.
 pub struct HostState {
     /// Static consumer config (`metadata.input`), surfaced to the
     /// policy through `enclavid:host/session-context.props`. Constant for
     /// the session; the policy may read it any round.
     pub props: Vec<(String, crate::enclavid::host::types::Prop)>,
-    /// The policy's private per-round `enclavid:host/storage` key/value
-    /// map, decoded from the sealed `SessionState::state` blob at the top
-    /// of the round. `get`/`set`/`delete` operate on this in-memory copy;
-    /// the runner re-encodes + seals it only if `handle` returns cleanly,
-    /// so mutations are STAGED and a trap rolls the round back.
-    pub kv: BTreeMap<String, Vec<u8>>,
-    /// Running encoded byte length of `kv` (== `kv::encoded_len(&kv)`),
-    /// maintained incrementally by `set`/`delete`. `storage::set` rejects a
-    /// write that would push it over `POLICY_MAX_STATE_BYTES`, so the host
-    /// map is bounded DURING the round — closing the intra-round host-memory
-    /// growth a post-round-only cap would miss (a policy could otherwise
-    /// stage many large distinct keys before any check ran).
-    kv_bytes: usize,
     /// Per-composition `enclavid:host/embedded-*` registry — one frozen
     /// index built from the policy's and every fused plugin's embedded
     /// sections. The embedded host fns resolve a key against it (first
@@ -74,14 +58,10 @@ impl HostState {
     pub(crate) fn new(
         props: Vec<(String, crate::enclavid::host::types::Prop)>,
         embedded: Arc<EmbeddedRegistry>,
-        kv: BTreeMap<String, Vec<u8>>,
     ) -> Self {
-        let kv_bytes = codec::encoded_len(&kv);
         Self {
             props,
             embedded,
-            kv,
-            kv_bytes,
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new()
                 .memory_size(POLICY_MAX_MEMORY)
@@ -98,47 +78,6 @@ impl crate::enclavid::host::session_context::Host for HostState {
         &mut self,
     ) -> wasmtime::Result<Vec<(String, crate::enclavid::host::types::Prop)>> {
         Ok(self.props.clone())
-    }
-}
-
-/// `enclavid:host/storage` — the policy's private per-round key/value
-/// state. Operates on the in-memory map decoded from the sealed blob; the
-/// runner re-encodes + seals it only on a clean `handle` return, so these
-/// are STAGED writes with trap-rollback. A `get` after a `set`/`delete` in
-/// the same round reflects the staged mutation.
-///
-/// `set` enforces `POLICY_MAX_STATE_BYTES` as a RUNNING bound (per write,
-/// via the incrementally-tracked `kv_bytes`) rather than only at commit, so
-/// a policy can't stage many large distinct keys and balloon host memory
-/// before the round ends. A write that would breach the cap is rejected and
-/// traps the round.
-impl crate::enclavid::host::storage::Host for HostState {
-    async fn get(&mut self, key: String) -> wasmtime::Result<Option<Vec<u8>>> {
-        Ok(self.kv.get(&key).cloned())
-    }
-
-    async fn set(&mut self, key: String, value: Vec<u8>) -> wasmtime::Result<()> {
-        let new_entry = codec::entry_len(&key, &value);
-        // Overwriting an existing key reclaims its old entry's bytes.
-        let old_entry = self.kv.get(&key).map_or(0, |v| codec::entry_len(&key, v));
-        let prospective = self.kv_bytes - old_entry + new_entry;
-        if prospective > POLICY_MAX_STATE_BYTES {
-            return Err(wasmtime::Error::msg(format!(
-                "storage.set would grow the policy state to {prospective} bytes, over \
-                 the {POLICY_MAX_STATE_BYTES}-byte POLICY_MAX_STATE_BYTES cap — the \
-                 write is rejected (host memory is bounded per write, not only at commit)"
-            )));
-        }
-        self.kv_bytes = prospective;
-        self.kv.insert(key, value);
-        Ok(())
-    }
-
-    async fn delete(&mut self, key: String) -> wasmtime::Result<()> {
-        if let Some(v) = self.kv.remove(&key) {
-            self.kv_bytes -= codec::entry_len(&key, &v);
-        }
-        Ok(())
     }
 }
 

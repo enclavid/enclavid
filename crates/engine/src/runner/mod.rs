@@ -1,18 +1,16 @@
 //! Top-level policy execution. [`Runner`] owns the wasmtime [`Engine`],
-//! compiles components, and drives ONE pure-actor round
+//! compiles components, and drives ONE pure-reducer round
 //! (`enclavid:policy/policy.handle`) through to a [`RunStatus`].
 //!
 //! No replay, no intercept, no compaction. The runner
-//!   1. decodes the policy's private `enclavid:host/storage` map from the
-//!      sealed `state` blob (empty on genesis) and builds the inbound WIT
-//!      `event` from the caller-supplied [`Event`] (the runtime's mailbox);
-//!   2. calls `handle(event)` exactly once — get/set/delete mutate the
-//!      storage map, staged for commit;
-//!   3. re-encodes the storage map into the new sealed `state` (a trap
-//!      discards it: the round rolls back) and performs the returned
-//!      `action`: `render` persists the prompt as
+//!   1. builds the inbound WIT `event` from the caller-supplied
+//!      [`Event`] (the runtime's mailbox);
+//!   2. calls `handle(state, event)` exactly once;
+//!   3. performs the returned `action`: `render` persists the prompt as
 //!      [`SessionState::current_prompt`] and yields `AwaitingInput`;
-//!      `finish` yields `Completed`.
+//!      `finish` yields `Completed`. (The sealed-state size covert channel is
+//!      closed at the seal boundary in broker-client — `SetState`'s Covert
+//!      vouch pads the encoded `SessionState` to a constant — not here.)
 //!
 //! ## Consent gate (security-critical)
 //!
@@ -34,9 +32,9 @@ use wasmtime::{Config, Engine, Store};
 
 use crate::Host_ as GeneratedHost;
 use crate::embedded::{Icon, IconRef, Localized, LocalizedRef, undeclared_trap};
-use crate::limits::POLICY_FUEL_BUDGET;
+use crate::limits::{POLICY_FUEL_BUDGET, POLICY_MAX_STATE_BYTES};
 use crate::listener::{ConsentDisclosure, SessionChange};
-use crate::state::{HostState, RunInputs, kv};
+use crate::state::{HostState, RunInputs};
 
 pub use status::RunStatus;
 
@@ -244,31 +242,30 @@ impl Runner {
         // dynamic names.
         register_strict_embedded(&mut linker, embedded_imports, &embedded)?;
 
-        // Decode the policy's private `enclavid:host/storage` map from the
-        // sealed blob (empty on genesis) so get/set/delete operate on it
-        // during the round.
-        let map = kv::decode(&session.state)?;
-
         // Instantiate the policy and call `handle` ONCE.
-        let mut store = Store::new(&self.engine, HostState::new(props, embedded.clone(), map));
+        let mut store = Store::new(&self.engine, HostState::new(props, embedded.clone()));
         store.limiter(|s| &mut s.limits);
         store.set_fuel(POLICY_FUEL_BUDGET)?;
         let bindings = GeneratedHost::instantiate_async(&mut store, component, &linker).await?;
 
         let wit_event = convert::event_to_wit(&mut store.data_mut().table, event)?;
-        let wit_action = bindings
+        let (new_state, wit_action) = bindings
             .enclavid_policy_policy()
-            .call_handle(&mut store, wit_event)
+            .call_handle(&mut store, &session.state, wit_event)
             .await?;
 
-        // Commit the round's storage: re-encode the (staged) map into the
-        // opaque sealed blob. A trap above returns before this point, so the
-        // round's mutations are discarded — rollback, the "whole round or
-        // nothing" atomicity guarantee. The map is already ≤
-        // POLICY_MAX_STATE_BYTES: `storage::set` enforces that cap as a
-        // running bound per write (bounding host memory DURING the round, the
-        // data-min + covert-size backstop), so no post-round check is needed.
-        let new_state = kv::encode(&store.data().kv);
+        // Data-minimization backstop: the policy's opaque blob must stay
+        // under POLICY_MAX_STATE_BYTES so raw media clips can't be
+        // smuggled into the sealed mailbox. A breach traps the round. (The
+        // ciphertext-size covert channel is closed separately by constant-size
+        // padding at the seal boundary — see broker-client `SetState`.)
+        if new_state.len() > POLICY_MAX_STATE_BYTES {
+            return Err(wasmtime::Error::msg(format!(
+                "policy returned a {}-byte state blob, over the \
+                 {POLICY_MAX_STATE_BYTES}-byte POLICY_MAX_STATE_BYTES cap",
+                new_state.len(),
+            )));
+        }
 
         // Perform the action and assemble the next session record.
         let mut next_session = SessionState {

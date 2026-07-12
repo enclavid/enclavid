@@ -13,6 +13,5 @@
 //! by name so the two concepts don't collide in reading.
 
 pub(crate) mod host;
-pub(crate) mod kv;
 
 pub use host::{HostState, RunInputs};

@@ -42,7 +42,7 @@ pub use self::core::{ReadField, ReadTuple, WriteField};
 pub use disclosure::{AppendDisclosure, Disclosure};
 pub use metadata::{Metadata, SetMetadata};
 pub use principal::SetPrincipal;
-pub use state::{SetState, State};
+pub use state::{SEALED_STATE_PLAINTEXT_BYTES, SetState, State, encode_padded};
 pub use status::{SetStatus, Status};
 
 use std::sync::Arc;

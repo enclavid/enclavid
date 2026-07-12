@@ -27,7 +27,7 @@ pub use broker_protocol::{KbsRelayRequest, KbsRelayResponse};
 pub use kbs::KbsClient;
 pub use registry::RegistryClient;
 pub use domain::{
-    CameraFacing, CaptureGuide, CaptureStep, Client, ClientAccess, Clip, Decision,
+    Action, CameraFacing, CaptureGuide, CaptureStep, Client, ClientAccess, Clip, Decision,
     DisplayField, Event, GuideNone, GuideOval, GuideRect, KbsKey, Key, Localized, MediaResult,
     MediaSpec, PluginPin, Prompt, SessionMetadata, SessionState, SessionStatus, Translation,
     capture_guide,
@@ -37,6 +37,7 @@ pub use domain::{
 // `session::Disclosure` wire type below.
 pub use domain::Disclosure as PromptDisclosure;
 pub use session::{
-    AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, SessionStore, SetMetadata,
-    SetPrincipal, SetState, SetStatus, State, Status, WriteField,
+    AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, SEALED_STATE_PLAINTEXT_BYTES,
+    SessionStore, SetMetadata, SetPrincipal, SetState, SetStatus, State, Status, WriteField,
+    encode_padded,
 };

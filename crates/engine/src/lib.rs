@@ -1,11 +1,10 @@
 //! Engine: policy + plugin composition + execution.
 //!
-//! The policy is a PURE ACTOR. `enclavid:policy/policy.handle(event) ->
-//! action` is called ONCE per round; the engine owns the mailbox (builds
-//! the inbound `event` from `/input`), persistence (the policy's private
-//! `enclavid:host/storage` map, decoded from the opaque sealed `state` blob
-//! before the call and re-sealed after a clean return), and effects (renders
-//! prompts, seals consented disclosures). No intercept / replay / compaction.
+//! The policy is a PURE REDUCER. `enclavid:policy/policy.handle
+//! (state, event) -> (state, action)` is called ONCE per round; the engine
+//! owns the mailbox (builds the inbound `event` from `/input`), persistence
+//! (threads the opaque `state` blob), and effects (renders prompts, seals
+//! consented disclosures). No intercept / replay / compaction.
 //!
 //! ```text
 //! runner/      ← top-level executor (Runner, RunStatus); WIT⇄domain
@@ -35,7 +34,7 @@ pub use embedded::{
     Translation, catalog_hash, load_embedded, load_embedded_nested, slug, top_level_imports,
 };
 pub use broker_client::{
-    Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
+    Action, Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
 };
 pub use listener::{ConsentDisclosure, SessionChange, SessionListener};
 pub use runner::{
@@ -70,7 +69,6 @@ wasmtime::component::bindgen!({
             import enclavid:host/embedded-i18n@0.1.0;
             import enclavid:host/embedded-icons@0.1.0;
             import enclavid:host/session-context@0.1.0;
-            import enclavid:host/storage@0.1.0;
             export enclavid:policy/policy@0.1.0;
         }
     "#,

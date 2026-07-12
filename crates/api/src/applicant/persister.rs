@@ -41,7 +41,7 @@ use axum::http::StatusCode;
 
 use broker_client::{
     AppendDisclosure, AuthN, AuthZ, Covert, Replay, SessionMetadata, SessionStatus, SessionStore,
-    SetMetadata, SetState, SetStatus, WriteField, boundary, reason,
+    SetMetadata, SetState, SetStatus, WriteField, boundary, encode_padded, reason,
 };
 use enclavid_crypto::seal_to_recipient;
 use enclavid_engine::{
@@ -103,7 +103,7 @@ impl SessionListener for SessionPersister {
             // transaction. Engine serializes hooks, so contention is
             // theoretical.
             let mut metadata = self.metadata.lock().await;
-            let set_state = self.build_state_op(&change);
+            let set_state = self.build_state_op(&change)?;
             let mut ops: Vec<&dyn WriteField> = Vec::with_capacity(2 + appends.len());
             ops.push(&set_state);
 
@@ -163,24 +163,29 @@ impl SessionPersister {
             .collect()
     }
 
-    /// Build the `SetState` op from the engine's replay-log snapshot.
-    /// AuthN is closed inside broker-client by the double AEAD-seal
-    /// (inner under `applicant_session_token`, outer under
-    /// `tee_seal_key`); AuthZ/Covert vouched here.
-    fn build_state_op<'a>(&'a self, change: &SessionChange<'a>) -> SetState<'a> {
-        SetState {
+    /// Build the `SetState` op from the engine's opaque state blob.
+    /// AuthN is closed inside broker-client by the double AEAD-seal (inner
+    /// under `applicant_session_token`, outer under `tee_seal_key`); AuthZ
+    /// vouched here; Covert CLOSED here by `encode_padded`, which encodes the
+    /// `SessionState` and pads it to a constant plaintext frame so the sealed
+    /// ciphertext size is fixed. Fallible: an encoding over the frame traps.
+    fn build_state_op<'a>(&'a self, change: &SessionChange<'a>) -> RunResult<SetState<'a>> {
+        Ok(SetState {
             state: boundary::outbound::to_untrusted(change.state)
                 .vouch_unchecked::<AuthZ, _>(reason!(
                     "inner-AEAD'd to applicant_session_token; receipt of ciphertext is not \
                      access — AuthZ implicit in key possession"
                 ))
-                .vouch_unchecked::<Covert, _>(reason!(
-                    "sealed under tee_seal_key + applicant_session_token; caveat: ciphertext \
-                     size host-observable, policy can encode bits via per-round host-fn \
-                     call count, bounded by wasmtime fuel; host-compromise-gated"
-                )),
+                .vouch::<Covert, _, _, _, _>(|state| -> RunResult<Vec<u8>> {
+                    // Close the size covert channel BY DOING it here: encode +
+                    // pad the WHOLE SessionState to a constant plaintext frame,
+                    // so the sealed ciphertext is fixed-size regardless of the
+                    // `state` and `current_prompt` content (both policy-
+                    // controlled). Traps if the encoding exceeds the frame.
+                    encode_padded(state).map_err(|e| RunError::msg(format!("state pad: {e}")))
+                })?,
             applicant_session_token: &self.applicant_session_token,
-        }
+        })
     }
 
     /// Advance the disclosure bookkeeping (count + running hash chain)

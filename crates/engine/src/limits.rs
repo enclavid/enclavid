@@ -48,26 +48,21 @@ pub const POLICY_FUEL_BUDGET: u64 = 10_000_000_000;
 
 /// Hard cap on the policy's opaque `state` blob, enforced in
 /// [`Runner::run`](crate::Runner::run) immediately after each `handle`
-/// round — a larger blob traps the round. A trust-contract constant:
-/// changing it changes measured behaviour, so re-attest on change.
+/// round — a larger blob traps the round.
 ///
-/// A data-minimization + covert-channel backstop, sized with generous
-/// headroom for legitimate accumulated state (step bookkeeping, OCR / MRZ
-/// text, a handful of ~2 KB face embeddings, screening verdicts). Both
-/// bounds it enforces are WEAK levers, so the exact value is a comfort
-/// choice, not a hard security line:
-///   * data-min — a full-resolution capture (a multi-MB passport scan)
-///     can't be smuggled whole into the sealed mailbox. Softer than a
-///     tighter cap: a single compressed frame (~100-500 KB) DOES fit at
-///     1 MiB, so "no media in state" is now the reducer's process-and-drop
-///     discipline, not a structural wall.
-///   * the host-observable ciphertext-SIZE covert channel, bounded to
-///     `log2(POLICY_MAX_STATE_BYTES)` bits/round — a weak channel
-///     (host-compromise-gated, and logarithmic in the cap: ~20 bits/round
-///     at 1 MiB vs ~16 at 64 KiB, ~40 extra bits over a session). NOT a
-///     confidentiality relaxation: `state` stays AEAD-sealed under
-///     `tee_seal_key`; only the length leaks, and only to a colluding host.
-pub const POLICY_MAX_STATE_BYTES: usize = 1024 * 1024;
+/// The engine's data-minimization backstop. The reducer model already
+/// lets a well-behaved policy keep only derived results in `state` (it
+/// processes each media clip the round it arrives and returns a verdict,
+/// never the raw bytes), but nothing in the type system stops a malicious
+/// or buggy policy from stuffing a captured clip into the blob it hands
+/// back. A clip is tens of kilobytes to megabytes (JPEG frames, liveness
+/// video); legitimate accumulated state — step bookkeeping, MRZ text, a
+/// handful of face embeddings, screening verdicts — fits well inside this
+/// cap. The bound therefore makes smuggling raw media into the sealed
+/// mailbox structurally impossible while leaving real policies untouched,
+/// and narrows the host-observable ciphertext-size covert channel to at
+/// most `log2(POLICY_MAX_STATE_BYTES)` bits per round in the blob length.
+pub const POLICY_MAX_STATE_BYTES: usize = 64 * 1024;
 
 // ----- text-ref validation -----
 
