@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::http::header::AUTHORIZATION;
-use axum::middleware::from_fn_with_state;
+use axum::middleware::from_fn;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::services::{ServeDir, ServeFile};
@@ -56,7 +56,7 @@ use self::auth::enforce;
 /// Endpoint inventory lives here — colocated with auth posture and
 /// static-asset wiring — so the surface is auditable in one place.
 pub fn router(state: Arc<AppState>) -> Router {
-    let auth = || from_fn_with_state(state.clone(), enforce);
+    let auth = || from_fn(enforce);
 
     // Applicant API routes live under the same `/api/v1/sessions/...`
     // prefix as the client API (see `client::router`) for a consistent

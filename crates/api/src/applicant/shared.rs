@@ -284,6 +284,15 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
             )
             .await
             .map_err(|e| {
+                // A state blob that won't open under this bearer is a wrong key /
+                // different-device claim (the inner AEAD layer is keyed by the
+                // applicant token) — the durable, cryptographic first-claim guard.
+                // Surface it as 403 so the frontend offers `/reset`; everything
+                // else (transport, codec) is a real 500. An ABSENT state is
+                // `Ok(None)`, not an error, so a first `/connect` still proceeds.
+                if matches!(e, broker_client::BridgeError::Crypto(_)) {
+                    return StatusCode::FORBIDDEN;
+                }
                 eprintln!(
                     "session_run_ctx: session_store.read(State) failed for {session_id}: {e}",
                 );

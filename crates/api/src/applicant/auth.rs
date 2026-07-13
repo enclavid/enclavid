@@ -1,34 +1,34 @@
-//! Per-route authorization for the applicant-facing API.
+//! Per-route authentication for the applicant-facing API.
 //!
-//! Uniform model across all authenticated routes (`/connect`, `/input`,
-//! `/report`): parse the `Authorization: Bearer <base64>` header, then
-//! verify (or establish) the claim against the in-memory cache of
-//! per-session keys. The handler downstream extracts `CallerKey` from
-//! request extensions.
+//! Uniform model across the authenticated routes (`/connect`, `/input`):
+//! parse the `Authorization: Bearer <base64>` header into a [`CallerKey`]
+//! (the applicant's session token) and attach it to the request
+//! extensions. The handler downstream extracts `CallerKey` and uses it as
+//! the inner AEAD layer key for session state + media.
 //!
-//! Cache semantics:
+//! There is NO key table here. A wrong key is rejected CRYPTOGRAPHICALLY,
+//! not by a lookup: session state is sealed under the applicant token, so a
+//! mismatched bearer fails to open it at the state read in the extractor,
+//! which surfaces as **403** (see `shared::SessionRunCtx` +
+//! `BridgeError::Crypto`). The frontend treats that 403 as "wrong key /
+//! different device" and offers `/reset`. First-claim is implicit: a fresh
+//! session has no state, so the first `/connect` establishes it under
+//! whatever key is presented; `/reset` deletes the state, making the
+//! session claimable again with a new key.
 //!
-//! - match → ok, pass through
-//! - mismatch → 403 (someone else has already claimed this session;
-//!   recovery requires `DELETE /session/:id/state` first)
-//! - empty → accept and populate. After a TEE restart the cache is
-//!   rebuilt from the first matching call. Real security is the
-//!   decrypt step in the handler — wrong key fails there regardless.
-//!
-//! `/status` and `/state` (DELETE) are intentionally unauthenticated
-//! and bypass this layer at the router level.
+//! `/status` and `/state` (DELETE) are intentionally unauthenticated and
+//! bypass this layer at the router level.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{FromRequestParts, Path, Request, State};
+use axum::extract::{FromRequestParts, Request};
 use axum::http::{header, request::Parts, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use base64ct::{Base64, Encoding};
-use secrecy::{ExposeSecret, SecretBox};
+use secrecy::SecretBox;
 
-use crate::state::{AppState, ApplicantSessionToken};
+use crate::state::ApplicantSessionToken;
 
 /// Applicant key attached to a request by `enforce`. Handlers extract
 /// this to encrypt/decrypt session state. `Arc` so it can be cloned
@@ -55,31 +55,13 @@ where
     }
 }
 
-pub(super) async fn enforce(
-    State(state): State<Arc<AppState>>,
-    // Routes carrying this middleware have variable shape ({id} only
-    // for /connect /report, {id}+{slot_id} for /input/{slot_id}). The
-    // HashMap form sidesteps per-route Path shape and lets us look up
-    // just the param we care about.
-    Path(params): Path<HashMap<String, String>>,
-    mut req: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let session_id = params.get("id").cloned().ok_or(StatusCode::BAD_REQUEST)?;
+pub(super) async fn enforce(mut req: Request, next: Next) -> Result<Response, StatusCode> {
+    // Parse the bearer into the applicant session token and attach it. No
+    // lookup, no claim table: a wrong key can't open the AEAD-sealed state,
+    // so it is rejected at the state read (403), not here. A missing /
+    // malformed header is the only thing this layer rejects (401).
     let key = parse_bearer(&req)?;
     let key_arc = Arc::new(SecretBox::new(Box::new(key)));
-
-    match state.applicant_session_tokens.get(&session_id).await {
-        Some(existing) if existing.expose_secret() == key_arc.expose_secret() => {}
-        Some(_) => return Err(StatusCode::FORBIDDEN),
-        None => {
-            state
-                .applicant_session_tokens
-                .insert(session_id.clone(), key_arc.clone())
-                .await;
-        }
-    }
-
     req.extensions_mut().insert(CallerKey(key_arc));
     Ok(next.run(req).await)
 }

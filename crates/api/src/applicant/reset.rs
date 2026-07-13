@@ -13,9 +13,10 @@ pub(super) fn delete_state() -> MethodRouter<Arc<AppState>> {
     delete(reset)
 }
 
-/// DELETE /session/:id/state — drops the encrypted state blob and the
-/// in-memory key claim. After this the session is back to "unclaimed",
-/// and the next /connect can take it with any key.
+/// DELETE /session/:id/state — drops the encrypted state blob. The state
+/// IS the claim (it's sealed under the applicant key), so deleting it puts
+/// the session back to "unclaimed" and the next /connect can take it with
+/// any key — there is no separate in-memory claim to clear.
 ///
 /// No auth: the legitimate applicant who lost their key cannot prove
 /// ownership cryptographically (state is encrypted with the lost key).
@@ -44,7 +45,6 @@ async fn reset(
         .delete(public_session_id(&session_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    state.applicant_session_tokens.invalidate(&session_id).await;
     // Drop the TEE-side pull-through cache for this session (the broker's
     // `delete` above already purged the sealed backing `session:{id}:media`).
     state.media_cache.purge(&session_id).await;

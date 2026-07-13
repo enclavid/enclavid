@@ -36,19 +36,27 @@ use broker_client::{Replay, SessionStore, public_session_id, reason};
 use enclavid_engine::{MediaStore, RunError, RunResult};
 use moka::future::Cache;
 
-/// Byte budget for the pull-through media cache — a hard RAM ceiling weighed by
-/// blob length (not entry count, since blobs vary in size). Blobs are cached only
-/// on a `from-blob-ref` READ (never at write) and re-reads are rare in the
-/// current flow, so the cache normally sits far below this — it is a backstop,
-/// not a working-set target.
+/// Byte budget for the pull-through media cache — a soft RAM ceiling (moka
+/// enforces `max_capacity` via background maintenance, so the weighed size can
+/// briefly overshoot under a burst before eviction catches up) weighed by blob
+/// length, not entry count, since blobs vary in size. Blobs are cached only on a
+/// `from-blob-ref` READ (never at write) and re-reads are rare in the current
+/// flow, so the cache normally sits far below this — it is a backstop, not a
+/// working-set target.
 const MEDIA_CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
-/// Idle expiry: a session that is never reset or finalized (abandoned mid-flow)
-/// has its cached blobs dropped once untouched this long, so it can't pin RAM
-/// forever. Matches the applicant-session-token cache's 1h TTI — once that token
-/// idles out, a blob can no longer be re-pulled (it is the inner seal key), so a
-/// longer media TTI would be dead weight.
-const MEDIA_CACHE_TTI: Duration = Duration::from_secs(3600);
+/// Idle expiry for a cached blob. The covert-channel defence the cache provides
+/// is collapsing REPEAT reads of the same blob into ≤1 host-observable broker
+/// read; the repeats a colluding policy can actually drive happen WITHIN one
+/// `handle` invocation — it has no clock and cannot sleep (WASI clocks are
+/// virt-baked, and fuel bounds execution) — i.e. sub-second, so any short idle
+/// window preserves the defence. 1 minute is therefore ample: `time_to_idle`
+/// resets on each read, so a blob stays warm while actively used, and the
+/// decrypted biometric plaintext leaves host RAM ~1 minute after its last touch —
+/// tight data-minimization. It is NOT a session/token-tied boundary: a genuine
+/// re-read in a much-later round simply re-pulls once (benign; the cross-round
+/// gap is applicant-timed, not policy-controllable, so it is no covert lever).
+const MEDIA_CACHE_TTI: Duration = Duration::from_secs(60);
 
 /// Bounded pull-through cache of rehydrated media blobs, shared across rounds via
 /// `AppState`. A [`moka`] cache keyed GLOBALLY by `(session_id, blob_hash)`, so

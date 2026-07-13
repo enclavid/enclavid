@@ -1,7 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use moka::future::Cache;
 use secrecy::SecretBox;
 
 use enclavid_engine::Runner;
@@ -11,15 +9,13 @@ use crate::applicant::media_store::MediaCache;
 use crate::runtime::SessionPolicyCache;
 use crate::shuffle::ShuffleKey;
 
-/// Applicant key held in TEE memory for the duration of a session.
-/// Raw bytes used for AES-256-GCM encryption of session state.
+/// Applicant key held in TEE memory for the duration of a request. Raw
+/// bytes used as the inner AEAD layer key for session state + media.
 /// `SecretBox` provides zeroization on drop and redacts from Debug output.
+/// Sourced fresh from the request bearer by [`super::applicant::auth`]; not
+/// cached — a wrong key is rejected cryptographically at the state read
+/// (`BridgeError::Crypto` → 403), so there is no first-claim table to keep.
 pub type ApplicantSessionToken = SecretBox<Vec<u8>>;
-
-/// LRU cache of active session applicant keys.
-/// Size-bounded to prevent DoS via unbounded session creation.
-/// TTL-bounded to evict stale keys.
-pub type ApplicantSessionTokenCache = Cache<String, Arc<ApplicantSessionToken>>;
 
 pub struct AppState {
     /// Shared with the client API state — the engine compiles policy
@@ -38,7 +34,6 @@ pub struct AppState {
     /// RCAR leg to the artifact owner's KBS through the broker. Same broker
     /// connection.
     pub kbs: KbsClient,
-    pub applicant_session_tokens: ApplicantSessionTokenCache,
     /// Per-session `DisplayField` shuffle seeds are HKDF-derived from
     /// this key + the session id at `/connect`-time and threaded
     /// into `engine::RunInputs`. See [`crate::shuffle`] for the
@@ -59,11 +54,6 @@ impl AppState {
         policies: SessionPolicyCache,
         shuffle_key: Arc<ShuffleKey>,
     ) -> Self {
-        let applicant_session_tokens = Cache::builder()
-            .max_capacity(10_000)
-            .time_to_idle(Duration::from_secs(3600))
-            .build();
-
         // Registry + KBS share the same broker connection (cheap Clone:
         // hyper Client is Arc-backed).
         let kbs = KbsClient::new(broker.clone());
@@ -73,7 +63,6 @@ impl AppState {
             session_store,
             registry: RegistryClient::new(broker),
             kbs,
-            applicant_session_tokens,
             shuffle_key,
             media_cache: Arc::new(MediaCache::new()),
         }
