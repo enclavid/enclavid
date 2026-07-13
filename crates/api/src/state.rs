@@ -7,6 +7,7 @@ use secrecy::SecretBox;
 use enclavid_engine::Runner;
 use broker_client::{BrokerClient, KbsClient, RegistryClient, SessionStore};
 
+use crate::applicant::media_store::MediaCache;
 use crate::runtime::SessionPolicyCache;
 use crate::shuffle::ShuffleKey;
 
@@ -43,6 +44,11 @@ pub struct AppState {
     /// into `engine::RunInputs`. See [`crate::shuffle`] for the
     /// derivation contract and threat model.
     pub shuffle_key: Arc<ShuffleKey>,
+    /// Pull-through cache of rehydrated applicant media, shared across a
+    /// session's rounds. Serves repeat `blob::from-blob-ref` reads in-TEE so
+    /// the host sees ≤1 broker read per distinct blob. See
+    /// [`media_store`](crate::applicant::media_store).
+    pub media_cache: Arc<MediaCache>,
 }
 
 impl AppState {
@@ -69,6 +75,7 @@ impl AppState {
             kbs,
             applicant_session_tokens,
             shuffle_key,
+            media_cache: Arc::new(MediaCache::new()),
         }
     }
 

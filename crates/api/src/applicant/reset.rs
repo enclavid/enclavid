@@ -45,5 +45,8 @@ async fn reset(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state.applicant_session_tokens.invalidate(&session_id).await;
+    // Drop the TEE-side pull-through cache for this session (the broker's
+    // `delete` above already purged the sealed backing `session:{id}:media`).
+    state.media_cache.purge(&session_id);
     Ok(StatusCode::NO_CONTENT)
 }

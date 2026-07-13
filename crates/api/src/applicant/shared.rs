@@ -3,7 +3,7 @@
 //! belongs here, anything used by exactly one belongs in that handler's
 //! own file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
@@ -14,8 +14,8 @@ use secrecy::ExposeSecret;
 use tokio::sync::Mutex;
 
 use enclavid_engine::{
-    Component, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs, SessionListener,
-    SessionState,
+    Component, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs, RunStatus,
+    SessionListener, SessionState,
 };
 
 use super::media_store::BrokerMediaStore;
@@ -177,6 +177,12 @@ impl SessionRunCtx {
         // Completed atomically (metadata + host-plaintext Status) when
         // the run terminated.
         persister.finalize(&status).await?;
+        // On a terminal decision, drop this session's pull-through media cache
+        // — the captures aren't needed post-completion (the consumer never
+        // reads the media store; disclosures are a separate age-sealed channel).
+        if matches!(status, RunStatus::Completed(_)) {
+            state.media_cache.purge(&session_id);
+        }
         Ok(progress_from(status, &locale))
     }
 }
@@ -348,13 +354,22 @@ persist; same containment as above.
             metadata: Mutex::new(metadata.clone()),
             shuffle_key: state.shuffle_key.clone(),
         });
-        // The live host blob store: the engine's `frame::from-blob-ref`
-        // reads sealed captures back through this. Same session keys as the
-        // persister that WROTE them (co-committed with state each round).
+        // The live host blob store: the engine's `blob::from-blob-ref` reads
+        // sealed captures back through this — a pull-through cache over the
+        // broker backing, gated by the session's captured-hash set (from sealed
+        // metadata, prior rounds) so a fabricated ref is refused in-TEE without
+        // a broker read. Same session keys as the persister that WROTE them.
+        let captured: HashSet<[u8; 32]> = metadata
+            .captured_media
+            .iter()
+            .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok())
+            .collect();
         let media_store = Arc::new(BrokerMediaStore {
             session_store: state.session_store.clone(),
             session_id: session_id.clone(),
             applicant_session_token: applicant_session_token.expose_secret().to_vec(),
+            cache: state.media_cache.clone(),
+            captured,
         });
         // Engine takes one strong ref via the listener; we keep our
         // own so `finalize` lands on the same persister after the run

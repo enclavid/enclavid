@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use broker_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
@@ -37,14 +38,33 @@ use wit_component::ComponentEncoder;
 /// media) so a later `frame::from-blob-ref` rehydrate hits. Stage 3 swaps in
 /// the broker-backed store; this proves the engine seam.
 #[derive(Clone, Default)]
-struct MemMediaStore(Arc<Mutex<HashMap<[u8; 32], Vec<u8>>>>);
+struct MemMediaStore(Arc<Mutex<HashMap<[u8; 32], Arc<Vec<u8>>>>>);
 
 impl MediaStore for MemMediaStore {
     fn load<'a>(
         &'a self,
         blob_hash: &'a [u8; 32],
-    ) -> Pin<Box<dyn Future<Output = RunResult<Option<Vec<u8>>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = RunResult<Option<Arc<Vec<u8>>>>> + Send + 'a>> {
         let hit = self.0.lock().unwrap().get(blob_hash).cloned();
+        Box::pin(async move { Ok(hit) })
+    }
+}
+
+/// A media store that COUNTS every `load` call, over a shared blob map. Proves
+/// the pull is lazy: `from-blob-ref` alone must not load; `bytes()` must.
+#[derive(Clone, Default)]
+struct CountingMediaStore {
+    map: Arc<Mutex<HashMap<[u8; 32], Arc<Vec<u8>>>>>,
+    loads: Arc<AtomicUsize>,
+}
+
+impl MediaStore for CountingMediaStore {
+    fn load<'a>(
+        &'a self,
+        blob_hash: &'a [u8; 32],
+    ) -> Pin<Box<dyn Future<Output = RunResult<Option<Arc<Vec<u8>>>>> + Send + 'a>> {
+        self.loads.fetch_add(1, Ordering::SeqCst);
+        let hit = self.map.lock().unwrap().get(blob_hash).cloned();
         Box::pin(async move { Ok(hit) })
     }
 }
@@ -107,8 +127,9 @@ struct RecordingListener {
     sealed: Mutex<Vec<Vec<broker_client::DisplayField>>>,
     /// Backs the shared [`MemMediaStore`] — every captured frame the runtime
     /// stages this round is inserted here, simulating the atomic media+state
-    /// commit, so a later rehydrate finds it.
-    media: Arc<Mutex<HashMap<[u8; 32], Vec<u8>>>>,
+    /// commit, so a later rehydrate finds it. `Arc<Vec<u8>>` so the insert
+    /// shares the runtime's allocation (no deep copy).
+    media: Arc<Mutex<HashMap<[u8; 32], Arc<Vec<u8>>>>>,
 }
 
 impl RecordingListener {
@@ -129,14 +150,9 @@ impl SessionListener for RecordingListener {
             .iter()
             .map(|d: &ConsentDisclosure| d.fields.clone())
             .collect();
-        let blobs: Vec<([u8; 32], Vec<u8>)> = change
+        let blobs: Vec<([u8; 32], Arc<Vec<u8>>)> = change
             .media
-            .map(|m| {
-                m.blobs
-                    .iter()
-                    .map(|(h, b)| (*h, b.as_ref().clone()))
-                    .collect()
-            })
+            .map(|m| m.blobs.iter().map(|(h, b)| (*h, b.clone())).collect())
             .unwrap_or_default();
         Box::pin(async move {
             self.sealed.lock().unwrap().extend(rounds);
@@ -229,14 +245,15 @@ async fn media_rounds_keep_state_minimal() {
     let after_selfie_len = after_selfie.state.len();
 
     // Media BYTES never enter `state`: the frames are stored host-side and the
-    // policy keeps only a 32-byte `blob-ref` (the cross-round handle it
-    // rehydrates from). So the engine's `SessionState.state` (the REAL bytes,
-    // pre-seal) stays tiny — step tag + at most one ref — never anywhere near a
-    // JPEG frame (KiB+), no matter how many media rounds accumulate.
+    // policy keeps only a `blob-ref` (a 64-char hex content hash — the cross-
+    // round handle it rehydrates from). So the engine's `SessionState.state`
+    // (the REAL bytes, pre-seal) stays tiny — step tag + at most one ref —
+    // never anywhere near a JPEG frame (KiB+), no matter how many media rounds
+    // accumulate.
     assert!(baseline <= 8, "policy step state should be tiny, got {baseline}");
-    // The passport round stashes the passport frame's ref (step + 32 bytes).
+    // The passport round stashes the passport frame's ref (step + 64 hex chars).
     assert!(
-        after_passport_len <= baseline + 32,
+        after_passport_len <= baseline + 64,
         "passport round state = step + one blob-ref, got {after_passport_len}",
     );
     // The selfie round rehydrates + drops the ref, back to just the step tag.
@@ -246,10 +263,10 @@ async fn media_rounds_keep_state_minimal() {
     );
 }
 
-/// A `frame::from-blob-ref` MISS: the passport ref the policy stashed isn't in
+/// A `blob::from-blob-ref` MISS: the passport ref the policy stashed isn't in
 /// the store (here: a store that never gets the captured blobs), so the selfie
-/// round's rehydrate returns `load-error::not-found` and the policy maps it to
-/// a retryable rejection. Proves the miss path end-to-end.
+/// round's rehydrate returns `None` and the engine TRAPS the round (a fabricated
+/// / unknown ref is never a legitimate outcome). Proves the miss-traps path.
 #[tokio::test]
 async fn reload_by_ref_misses() {
     let h = Harness::new();
@@ -275,11 +292,71 @@ async fn reload_by_ref_misses() {
 
     let (_s, session) = round(Session::default(), Event::Start).await.unwrap();
     let (_s, session) = round(session, Event::Media(fake_capture())).await.unwrap();
-    let (status, _s) = round(session, Event::Media(fake_capture())).await.unwrap();
-    match status {
-        RunStatus::Completed(Decision::RejectedRetryable) => {}
-        _ => panic!("a from-blob-ref miss must yield Completed(RejectedRetryable)"),
+    // Selfie round rehydrates the passport ref and reads its `bytes()`; the ref
+    // is absent from the empty store → the lazy pull returns None → the engine
+    // TRAPS the round (a fabricated/unknown ref is never a legitimate outcome),
+    // so the run errors rather than returning a status.
+    let result = round(session, Event::Media(fake_capture())).await;
+    assert!(
+        result.is_err(),
+        "a from-blob-ref miss must trap the round, not yield a recoverable status",
+    );
+}
+
+/// LAZY pull: `blob::from-blob-ref` returns a COLD handle that does NO host
+/// load; the load fires only when `bytes()` is read. Proven with a counting
+/// store — the `skip_passport_read` prop makes the selfie round rehydrate the
+/// passport handle but skip `bytes()`, so `from-blob-ref` alone loads nothing.
+#[tokio::test]
+async fn from_blob_ref_is_lazy_load_on_bytes() {
+    async fn passport_loads(read_bytes: bool) -> usize {
+        let h = Harness::new();
+        let listener = Arc::new(RecordingListener::default());
+        let loads = Arc::new(AtomicUsize::new(0));
+        // The counting store shares the listener's captured-blob map, so the
+        // passport reload finds the frame the passport round stored.
+        let store: Arc<dyn MediaStore> = Arc::new(CountingMediaStore {
+            map: listener.media.clone(),
+            loads: loads.clone(),
+        });
+        let props: Vec<(String, Prop)> = if read_bytes {
+            vec![]
+        } else {
+            vec![("skip_passport_read".to_string(), Prop::Int(1))]
+        };
+        let inputs = || RunInputs {
+            listener: listener.clone(),
+            embedded: h.embedded.clone(),
+            media_store: store.clone(),
+        };
+        let round = |session, event| {
+            h.runner.run(
+                &h.policy,
+                &h.embedded_imports,
+                session,
+                event,
+                props.clone(),
+                inputs(),
+            )
+        };
+        let (_s, session) = round(Session::default(), Event::Start).await.unwrap();
+        let (_s, session) = round(session, Event::Media(fake_capture())).await.unwrap();
+        // Selfie round: rehydrates the passport by ref; reads bytes() iff `read_bytes`.
+        // The selfie's own frame is the warm ingest blob, so its decode loads nothing.
+        let _ = round(session, Event::Media(fake_capture())).await.unwrap();
+        loads.load(Ordering::SeqCst)
     }
+
+    assert_eq!(
+        passport_loads(false).await,
+        0,
+        "from-blob-ref alone must not trigger a host load (lazy)",
+    );
+    assert_eq!(
+        passport_loads(true).await,
+        1,
+        "reading bytes() on the rehydrated blob must pull exactly once",
+    );
 }
 
 #[tokio::test]

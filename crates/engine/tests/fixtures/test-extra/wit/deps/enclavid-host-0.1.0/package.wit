@@ -52,50 +52,46 @@ interface types {
   /// surfaces as the machine `display-field.key` the consumer receives.
   resource disclosure-field-ref;
 
-  /// A content-addressed reference to ONE stored artifact blob in the host
-  /// media store — a captured camera frame today, an uploaded document / PDF
-  /// blob in future. Every uploaded artifact is sealed host-side and keyed by
-  /// its 32-byte BLAKE3; a `blob-ref` is that hash. A plain VALUE (not a
-  /// resource) so the policy can stash it in its opaque sealed `state` and
-  /// rehydrate across rounds — resource handles are per-round and
-  /// unserializable. The store and the ref are TYPE-AGNOSTIC: a typed
-  /// resource (`frame` below, a future `document`) interprets a ref into
-  /// itself via a static constructor, so new artifact kinds reuse the same
-  /// storage without touching this type.
-  record blob-ref {
-    hash: list<u8>,
-  }
+  /// A blob's content ADDRESS — the hex-encoded 32-byte BLAKE3 of its bytes.
+  /// An opaque STRING token (NOT one of the `-ref` resources above — those are
+  /// opaque per-round capability handles; this is a serializable value): the
+  /// policy stashes it in its opaque sealed `state` and passes it to the `blob`
+  /// constructor to rehydrate across rounds; it never inspects it. A string
+  /// (not raw bytes) for cross-language ergonomics — JS/Go/Rust: JSON-safe,
+  /// `==`-comparable, map-keyable, loggable (`[]byte` can't even be a Go map
+  /// key). TYPE-AGNOSTIC: a future `document`/`pdf` resource reuses the same
+  /// store and hash. (Algo-agility, if ever needed, via a multihash-style
+  /// `algo:` prefix inside the string.)
+  type blob-hash = string;
 
-  /// Why a rehydrate didn't yield the artifact. `not-found` = no such blob
-  /// in this session (unknown / wrong-length / never-uploaded ref). A
-  /// genuine transport / infra failure traps the round instead of returning
-  /// this.
-  variant load-error {
-    not-found,
-  }
-
-  /// One stored byte-blob — a host-owned lazy handle to sealed bytes plus its
-  /// content ref. The universal unit of storage and reference:
-  /// 1 blob ↔ 1 `blob-ref` ↔ 1 sealed blob host-side. A captured camera frame
-  /// is a blob; a future uploaded document / PDF is a blob too. The semantic
-  /// KIND lives in the record that groups blobs (`clip.frames`) and the
-  /// plugin that reads them — not in this type. A verification plugin pulls
-  /// the bytes via `bytes` (so they enter linear memory only at use); the
-  /// policy keeps the `blob-ref` in `state` to rehydrate the blob in a later
-  /// round. For camera frames: pristine bytes, no container, no inter-frame
-  /// compression that could mask the forensic signal.
+  /// One stored byte-blob — a host-owned lazy CONTENT handle (has `bytes`),
+  /// distinct from the opaque `-ref` capability handles above. The universal
+  /// unit of storage: 1 blob ↔ 1 `blob-hash` ↔ 1 sealed blob host-side. A
+  /// captured camera frame is a blob; a future uploaded document / PDF is a
+  /// blob too. The semantic KIND lives in the record that groups blobs
+  /// (`clip.frames`) and the plugin that reads them — not in this type. A
+  /// verification plugin pulls the bytes via `bytes` (so they enter linear
+  /// memory only at use); the policy keeps the `blob-hash` in `state` to
+  /// rehydrate the blob in a later round. For camera frames: pristine bytes,
+  /// no container, no inter-frame compression that could mask the forensic
+  /// signal.
   resource blob {
-    /// Pull this blob's bytes into the caller's linear memory. Bounded by
+    /// Rehydrate the blob with this content hash from the session's media
+    /// store. Own-session only (cross-session is cryptographically blocked).
+    /// Returns a COLD handle — no host IO yet; the bytes are pulled lazily on
+    /// the first `bytes()`. TRAPS on a miss (unknown / wrong-length hash): a
+    /// fabricated hash is never a legitimate outcome for a correct policy (it
+    /// only ever stashes hashes it got from a real `hash()`), so it fails loud
+    /// rather than handing the policy a recoverable branch. (A constructor is
+    /// possible precisely because there's no error result — only blob-or-trap.)
+    constructor(hash: blob-hash);
+    /// Pull this blob's bytes into the caller's linear memory. For a
+    /// rehydrated (constructed) blob this is the LAZY load point. Bounded by
     /// the component's memory limit.
     bytes: func() -> list<u8>;
-    /// This blob's content ref — stash in `state` to rehydrate it in a
-    /// later round.
-    blob-ref: func() -> blob-ref;
-    /// Rehydrate one stored blob by its ref. Own-session only
-    /// (cross-session is cryptographically blocked); `not-found` on an
-    /// unknown / wrong-length ref. The handle is minted into this round's
-    /// table and dropped with the Store, like a freshly-captured blob.
-    from-blob-ref: static func(ref: blob-ref) -> result<blob, load-error>;
+    /// This blob's content hash — stash in `state` to rehydrate the blob in
+    /// a later round via the constructor.
+    hash: func() -> blob-hash;
   }
 }
 

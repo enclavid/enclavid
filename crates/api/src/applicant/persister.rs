@@ -108,17 +108,25 @@ impl SessionListener for SessionPersister {
             // co-committed with the state (kept in a local so the `&dyn`
             // refs below outlive the write).
             let media_ops = self.build_media_ops(&change);
+            // Record this round's captured blob hashes into metadata — the
+            // TEE-side authoritative set the NEXT round's `from-blob-ref` gate
+            // reads. The host already knows these hashes (they are the plaintext
+            // keys of its own media writes), so carrying them sealed here leaks
+            // nothing new.
+            if let Some(media) = change.media {
+                metadata
+                    .captured_media
+                    .extend(media.blobs.iter().map(|(h, _)| h.to_vec()));
+            }
             let mut ops: Vec<&dyn WriteField> =
                 Vec::with_capacity(2 + appends.len() + media_ops.len());
             ops.push(&set_state);
 
-            // Only rewrite metadata when this commit emitted a
-            // disclosure — the common path is SetState-only, keeping the
-            // wire payload small. When present, `build_metadata_op`
-            // extends the running disclosure-hash chain so the host-
-            // served list can be integrity-checked at read time.
+            // Rewrite metadata when this commit emitted a disclosure (extends
+            // the disclosure-hash chain) OR captured media (appends to the gate
+            // set). Plain rounds stay SetState-only, keeping the payload small.
             let set_metadata_holder;
-            if !appends.is_empty() {
+            if !appends.is_empty() || !media_ops.is_empty() {
                 set_metadata_holder = self.build_metadata_op(&mut metadata, &appends);
                 ops.push(&set_metadata_holder);
             }
@@ -227,10 +235,12 @@ impl SessionPersister {
             .collect()
     }
 
-    /// Advance the disclosure bookkeeping (count + running hash chain)
-    /// and build the `SetMetadata` op carrying the updated metadata.
-    /// AuthN is closed inside broker-client by the AEAD-seal under
-    /// `tee_seal_key`. Only called when this commit emitted disclosures.
+    /// Advance the disclosure bookkeeping (count + running hash chain) and
+    /// build the `SetMetadata` op carrying the updated metadata (disclosure
+    /// chain AND the captured-media gate set, which the caller appended before
+    /// this). AuthN is closed inside broker-client by the AEAD-seal under
+    /// `tee_seal_key`. Called when this commit emitted disclosures or captured
+    /// media; `appends` may be empty on a media-only round.
     fn build_metadata_op<'m>(
         &self,
         metadata: &'m mut SessionMetadata,
@@ -253,7 +263,8 @@ impl SessionPersister {
                 .vouch_unchecked::<Covert, _>(reason!(
                     "sealed under tee_seal_key; caveat: ciphertext size + write-presence \
                      host-observable; policy influences whether/how much (≤log2 K bits/round, \
-                     K fuel-bounded); host-compromise-gated"
+                     K fuel-bounded); host-compromise-gated. The captured-media gate hashes it \
+                     now also carries are the host's OWN plaintext media-write keys — no new leak"
                 )),
         )
     }

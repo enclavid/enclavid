@@ -88,10 +88,9 @@ mod tests {
 
     #[test]
     fn parses_scalars() {
-        let parsed = parse_input(
-            br#"{"name":"Alex","age":30,"score":1.5,"active":true,"note":null}"#,
-        )
-        .unwrap();
+        let parsed =
+            parse_input(br#"{"name":"Alex","age":30,"score":1.5,"active":true,"note":null}"#)
+                .unwrap();
         let map: std::collections::HashMap<_, _> = parsed.into_iter().collect();
         assert!(matches!(map.get("name"), Some(Prop::String(s)) if s == "Alex"));
         assert!(matches!(map.get("age"), Some(Prop::Int(30))));

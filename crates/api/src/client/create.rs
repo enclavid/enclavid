@@ -352,6 +352,9 @@ async fn create(
         // compares against this field to detect host tampering.
         disclosure_hash: crate::disclosure_hash::init(&session_id),
         policy_key,
+        // No media captured yet — the `from-blob-ref` gate set starts empty and
+        // the persister appends each capture's hash as rounds run.
+        captured_media: Vec::new(),
     };
     // Always write metadata + status. Principal is optional: skip the
     // op entirely when the auth scheme didn't produce one (host stores

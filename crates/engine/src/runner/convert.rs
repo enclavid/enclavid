@@ -64,9 +64,12 @@ pub fn event_to_wit(
             for frame_bytes in result.clip.frames {
                 let hash: [u8; 32] = blake3::hash(&frame_bytes).into();
                 let arc = Arc::new(frame_bytes);
+                // Ingest blob: bytes are in hand from `/input`, so it's minted
+                // "warm" (`Some`) — no lazy pull needed. Only rehydrated
+                // (`from-blob-ref`) blobs start cold.
                 let handle = table.push(crate::media::BlobRep {
-                    bytes: arc.clone(),
-                    blob_ref: hash,
+                    bytes: Some(arc.clone()),
+                    content_hash: hash,
                 })?;
                 frames.push(handle);
                 blobs.push((hash, arc));

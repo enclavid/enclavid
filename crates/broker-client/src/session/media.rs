@@ -9,8 +9,10 @@
 //! Writes ride the same atomic `SessionStore::write` batch as the reducer
 //! `SetState` (co-committed under one version CAS). Reads are one-off per ref
 //! via [`SessionStore::load_media`](super::SessionStore::load_media), backing
-//! the policy's `frame::from-blob-ref` rehydrate — a miss returns `None`
-//! (surfaced as `load-error::not-found`).
+//! the policy's `blob::from-blob-ref` rehydrate — a miss returns `None`, which
+//! the engine turns into a TRAP (a fabricated ref is never a legitimate
+//! outcome). The api layer fronts this read with a pull-through cache + an
+//! in-TEE captured-hash gate, so most reads never reach the broker.
 
 use broker_protocol::{MediaWrite, Op};
 

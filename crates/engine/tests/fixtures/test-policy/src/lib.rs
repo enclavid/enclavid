@@ -31,9 +31,9 @@ wit_bindgen::generate!({
 
 use enclavid::host::embedded_i18n::localized as l10n;
 // The host `blob` resource + its content ref: on the passport round we stash
-// the frame blob's `blob-ref` in `state`, then rehydrate it on the selfie round
-// via `Blob::from_blob_ref` — proving cross-round reload from the host store.
-use enclavid::host::types::{BlobRef, Blob};
+// the frame blob's `blob-ref` (a hex string) in `state`, then rehydrate it on
+// the selfie round via `Blob::from_blob_ref` — proving cross-round reload.
+use enclavid::host::types::Blob;
 use enclavid::policy::types::{Action, Decision, Disclosure, Event, Prompt};
 // The well-known plugin (linked at /connect) supplies the capture specs
 // and the canonical KYC `display-field` helpers.
@@ -96,6 +96,17 @@ fn bloat_bytes() -> Option<usize> {
         })
 }
 
+/// Read the optional `skip_passport_read` prop. When set, the selfie round
+/// rehydrates the passport handle but does NOT read its `bytes()`, so a
+/// counting media store can prove `from-blob-ref` alone triggers no load (the
+/// pull is lazy, on `bytes()`). Absent on every real flow.
+fn skip_passport_read() -> bool {
+    use enclavid::host::types::Prop;
+    enclavid::host::session_context::props()
+        .into_iter()
+        .any(|(k, v)| k == "skip_passport_read" && matches!(v, Prop::Int(1)))
+}
+
 fn build_consent() -> Disclosure {
     Disclosure {
         // Canonical KYC fields built by the plugin: labels resolve from
@@ -150,8 +161,10 @@ impl Guest for TestPolicy {
                     Action::Finish(Decision::RejectedRetryable),
                 ),
                 Some(frame) => {
+                    // Stash the frame's content `hash` (a hex string) after the
+                    // step tag. Only the opaque token lives in state — never pixels.
                     let mut next = vec![STEP_AWAIT_SELFIE];
-                    next.extend_from_slice(&frame.blob_ref().hash);
+                    next.extend_from_slice(frame.hash().as_bytes());
                     (next, Action::Render(Prompt::Media(capture::selfie())))
                 }
             },
@@ -167,12 +180,16 @@ impl Guest for TestPolicy {
             // decode → detect → estimate plugin chain is what's exercised.
             (STEP_AWAIT_SELFIE, Event::Media(result)) => {
                 // Rehydrate the passport frame stashed last round from its
-                // `blob-ref` (the 32 bytes after the step tag) — proving a
-                // cross-round reload from the host blob store. A miss (empty /
-                // unknown ref) is retryable.
-                let passport = Blob::from_blob_ref(&BlobRef {
-                    hash: state[1..].to_vec(),
-                });
+                // `blob-ref` (the 32 bytes after the step tag). `from-blob-ref`
+                // returns a COLD handle (no load yet); reading `bytes()` is what
+                // triggers the LAZY pull — proving the cross-round reload — and a
+                // miss traps THERE. A legitimately-stashed ref always resolves,
+                // so there's no miss branch to handle.
+                let passport_hash = core::str::from_utf8(&state[1..]).unwrap_or_default();
+                let passport = Blob::new(passport_hash);
+                if !skip_passport_read() {
+                    let _passport_bytes = passport.bytes();
+                }
                 // Vision DAG on the SELFIE frame: preprocess decodes it into a
                 // plugin-owned `decoded-frame`, face-detect locates the `face`,
                 // face-age reads its crop and estimates. The policy threads the
@@ -182,12 +199,12 @@ impl Guest for TestPolicy {
                         face_detect::detect(&df).and_then(|face| face_age::estimate(&df, &face))
                     })
                 });
-                match (passport, age) {
-                    (Ok(_), Some(_)) => (
+                match age {
+                    Some(_) => (
                         state_at(STEP_AWAIT_CONSENT),
                         Action::Render(Prompt::ConsentDisclosure(build_consent())),
                     ),
-                    _ => (
+                    None => (
                         state_at(STEP_AWAIT_SELFIE),
                         Action::Finish(Decision::RejectedRetryable),
                     ),

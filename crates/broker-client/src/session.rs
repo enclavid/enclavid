@@ -197,8 +197,8 @@ impl SessionStore {
     }
 
     /// Read + double-open one sealed media blob by its content hash. Backs the
-    /// policy's `frame::from-blob-ref` rehydrate. `None` = no such blob in this
-    /// session (a miss → `load-error::not-found`). The plaintext comes back
+    /// policy's `blob::from-blob-ref` rehydrate. `None` = no such blob in this
+    /// session (the engine turns a miss into a TRAP). The plaintext comes back
     /// `Untrusted<_, (Replay,)>` — outer-AEAD-open closes AuthN (real crypto),
     /// inner-AEAD-open closes AuthZ (applicant-key possession authorises); only
     /// Replay remains for the caller (trivially closed: the blob is

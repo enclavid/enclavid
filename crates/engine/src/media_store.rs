@@ -15,11 +15,17 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// Loads one sealed blob's plaintext bytes by its content hash. `Ok(None)` = no
-/// such blob in this session (unknown / never-stored ref) — surfaced to the
-/// policy as `load-error::not-found`. `Err` = a genuine transport / decrypt
-/// failure, which traps the round.
+/// such blob in this session (unknown / never-stored ref) — the engine TRAPS the
+/// round on a `None` (`blob::from-blob-ref` has no recoverable miss branch).
+/// `Err` = a genuine transport / decrypt failure, also a trap.
+///
+/// Returns `Arc<Vec<u8>>` rather than `Vec<u8>` so a pull-through cache can hand
+/// the SAME allocation to the run's `BlobRep` with no host-side copy — the
+/// bytes are copied into wasm only at `bytes()`, which is the one unavoidable
+/// (sandbox-boundary) copy.
 ///
 /// Boxed future rather than `async fn` so the trait stays object-safe — engine
 /// holds `Arc<dyn MediaStore>` and dispatches dynamically. Error type is
@@ -29,5 +35,5 @@ pub trait MediaStore: Send + Sync {
     fn load<'a>(
         &'a self,
         blob_hash: &'a [u8; 32],
-    ) -> Pin<Box<dyn Future<Output = wasmtime::Result<Option<Vec<u8>>>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = wasmtime::Result<Option<Arc<Vec<u8>>>>> + Send + 'a>>;
 }

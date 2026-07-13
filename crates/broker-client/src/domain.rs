@@ -110,6 +110,14 @@ pub struct SessionMetadata {
     /// The policy artifact's decryption key. `None` (incl. older blobs) ⇒
     /// the artifact is not encrypted.
     pub policy_key: Option<Key>,
+    /// Content hashes (BLAKE3, 32 bytes each) of every applicant media blob
+    /// captured so far this session. The TEE-side authoritative set for the
+    /// `blob::from-blob-ref` gate: a rehydrate for a hash NOT in here is a
+    /// fabricated ref and is refused IN-TEE (no broker read), so a policy can't
+    /// use the read key as a covert channel. The host already knows these
+    /// hashes (they are the plaintext keys of its own media writes), so
+    /// carrying them in sealed metadata leaks nothing new.
+    pub captured_media: Vec<Vec<u8>>,
 }
 
 /// Internal session state for the policy reducer (`BlobField::State`).

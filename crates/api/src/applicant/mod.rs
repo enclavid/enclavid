@@ -32,7 +32,7 @@ mod attestation;
 mod auth;
 mod connect;
 mod input;
-mod media_store;
+pub(crate) mod media_store;
 mod persister;
 mod reset;
 mod shared;
