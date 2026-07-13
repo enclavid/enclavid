@@ -18,53 +18,98 @@
 //! could encode data into the key (32 B/call) or into the count/pattern of
 //! calls (Morse). The gate kills the arbitrary-key variant (only real captures
 //! ever reach the host — whose hashes it already logged at write). The cache
-//! bounds the count variant to **≤1 host read per distinct blob** (the first
-//! pull); repeats produce no IO. The irreducible residual — which of a few
-//! captures is pulled, and when — is fuel-bounded and host-compromise-gated,
-//! the same class as APSI query counts.
+//! bounds the count variant to **≤1 host read per distinct blob while it stays
+//! resident** (the first pull; repeats hit in-TEE). Cache eviction under the
+//! byte budget (or idle expiry) can drop a blob, so a later re-read re-pulls —
+//! but eviction is driven by aggregate cross-session load / elapsed time, not by
+//! the policy, so it hands the policy no controllable signal. The irreducible
+//! residual — which of a few captures is pulled, and when — is fuel-bounded and
+//! host-compromise-gated, the same class as APSI query counts.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
 
 use broker_client::{Replay, SessionStore, public_session_id, reason};
 use enclavid_engine::{MediaStore, RunError, RunResult};
+use moka::future::Cache;
 
-/// Per-session pull-through cache of rehydrated media blobs, shared across
-/// rounds via `AppState`. Populated on a `from-blob-ref` READ miss (never at
-/// write), so it holds only blobs the policy actually re-reads — rare in the
-/// current flow (media is processed at capture → verdict in state), so RAM
-/// stays small. It is host-side heap, so the wasm store memory limit does NOT
-/// bound it; its budget is explicit — purge on `/reset` and finalize today, an
-/// LRU is a scale follow-up.
-#[derive(Default)]
+/// Byte budget for the pull-through media cache — a hard RAM ceiling weighed by
+/// blob length (not entry count, since blobs vary in size). Blobs are cached only
+/// on a `from-blob-ref` READ (never at write) and re-reads are rare in the
+/// current flow, so the cache normally sits far below this — it is a backstop,
+/// not a working-set target.
+const MEDIA_CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Idle expiry: a session that is never reset or finalized (abandoned mid-flow)
+/// has its cached blobs dropped once untouched this long, so it can't pin RAM
+/// forever. Matches the applicant-session-token cache's 1h TTI — once that token
+/// idles out, a blob can no longer be re-pulled (it is the inner seal key), so a
+/// longer media TTI would be dead weight.
+const MEDIA_CACHE_TTI: Duration = Duration::from_secs(3600);
+
+/// Bounded pull-through cache of rehydrated media blobs, shared across rounds via
+/// `AppState`. A [`moka`] cache keyed GLOBALLY by `(session_id, blob_hash)`, so
+/// the [byte budget](MEDIA_CACHE_MAX_BYTES) and [idle expiry](MEDIA_CACHE_TTI)
+/// bound total host RAM no matter how many sessions are live — an abandoned
+/// session can no longer pin decrypted blobs without bound. Populated on a
+/// `from-blob-ref` READ miss (never at write), so it holds only blobs the policy
+/// actually re-reads. It is host-side heap, so the wasm store memory limit does
+/// NOT bound it — the budget/TTI plus the per-session `purge` on `/reset` +
+/// finalize are the budget. An evicted blob is simply re-pulled and re-cached on
+/// the next read; correctness is preserved (see the module-level covert note).
+/// moka is the api's established cache idiom (compiled policies + applicant
+/// tokens both use it, session-keyed, with `max_capacity` + `time_to_idle`).
 pub struct MediaCache {
-    map: Mutex<HashMap<String, HashMap<[u8; 32], Arc<Vec<u8>>>>>,
+    cache: Cache<(String, [u8; 32]), Arc<Vec<u8>>>,
 }
 
 impl MediaCache {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_budget(MEDIA_CACHE_MAX_BYTES, MEDIA_CACHE_TTI)
     }
 
-    fn get(&self, session_id: &str, hash: &[u8; 32]) -> Option<Arc<Vec<u8>>> {
-        self.map.lock().unwrap().get(session_id)?.get(hash).cloned()
+    fn with_budget(max_bytes: u64, tti: Duration) -> Self {
+        Self {
+            cache: Cache::builder()
+                // Weigh each entry by its byte length so `max_capacity` is a RAM
+                // budget, not an entry count. A blob past `u32::MAX` is clamped —
+                // it can't exist (state/upload limits are far smaller).
+                .weigher(|_key, bytes: &Arc<Vec<u8>>| bytes.len().try_into().unwrap_or(u32::MAX))
+                .max_capacity(max_bytes)
+                .time_to_idle(tti)
+                .build(),
+        }
     }
 
-    fn insert(&self, session_id: &str, hash: [u8; 32], bytes: Arc<Vec<u8>>) {
-        self.map
-            .lock()
-            .unwrap()
-            .entry(session_id.to_string())
-            .or_default()
-            .insert(hash, bytes);
+    async fn get(&self, session_id: &str, hash: &[u8; 32]) -> Option<Arc<Vec<u8>>> {
+        // `get` refreshes the entry's idle timer and access frequency, so an
+        // actively-reloaded blob outlives idle ones under eviction.
+        self.cache.get(&(session_id.to_string(), *hash)).await
+    }
+
+    async fn insert(&self, session_id: &str, hash: [u8; 32], bytes: Arc<Vec<u8>>) {
+        self.cache.insert((session_id.to_string(), hash), bytes).await;
     }
 
     /// Drop a session's cached blobs — called when its media is purged
-    /// (`/reset`, finalize).
-    pub fn purge(&self, session_id: &str) {
-        self.map.lock().unwrap().remove(session_id);
+    /// (`/reset`, finalize). Prompt per-key `invalidate` (mirrors the
+    /// applicant-session-token cache's `invalidate` on reset), so decrypted bytes
+    /// leave RAM at session end rather than only at the idle backstop. Removes
+    /// exactly this session's entries; other sessions' blobs are untouched.
+    /// O(live entries), which the budget bounds.
+    pub async fn purge(&self, session_id: &str) {
+        let stale: Vec<Arc<(String, [u8; 32])>> = self
+            .cache
+            .iter()
+            .filter(|(key, _)| key.0 == session_id)
+            .map(|(key, _)| key)
+            .collect();
+        for key in stale {
+            self.cache.invalidate(&*key).await;
+        }
     }
 }
 
@@ -88,17 +133,17 @@ impl MediaStore for BrokerMediaStore {
         &'a self,
         blob_hash: &'a [u8; 32],
     ) -> Pin<Box<dyn Future<Output = RunResult<Option<Arc<Vec<u8>>>>> + Send + 'a>> {
-        // 1. Cache hit — served in-TEE, no host IO.
-        if let Some(hit) = self.cache.get(&self.session_id, blob_hash) {
-            return Box::pin(async move { Ok(Some(hit)) });
-        }
-        // 2. Gate — an unknown hash is a fabricated ref: refuse in-TEE with no
-        //    broker read. The engine traps on the `None` (no miss branch).
-        if !self.captured.contains(blob_hash) {
-            return Box::pin(async { Ok(None) });
-        }
-        // 3. Pull-through — fetch the sealed blob, decrypt, cache, share.
         Box::pin(async move {
+            // 1. Cache hit — served in-TEE, no host IO.
+            if let Some(hit) = self.cache.get(&self.session_id, blob_hash).await {
+                return Ok(Some(hit));
+            }
+            // 2. Gate — an unknown hash is a fabricated ref: refuse in-TEE with no
+            //    broker read. The engine traps on the `None` (no miss branch).
+            if !self.captured.contains(blob_hash) {
+                return Ok(None);
+            }
+            // 3. Pull-through — fetch the sealed blob, decrypt, cache, share.
             let id = public_session_id(&self.session_id);
             let loaded = self
                 .session_store
@@ -110,11 +155,14 @@ impl MediaStore for BrokerMediaStore {
                      can only return identical bytes"
                 ))
                 .into_inner();
-            Ok(loaded.map(|vec| {
-                let arc = Arc::new(vec);
-                self.cache.insert(&self.session_id, *blob_hash, arc.clone());
-                arc
-            }))
+            let Some(vec) = loaded else {
+                return Ok(None);
+            };
+            let arc = Arc::new(vec);
+            self.cache
+                .insert(&self.session_id, *blob_hash, arc.clone())
+                .await;
+            Ok(Some(arc))
         })
     }
 }
@@ -123,27 +171,59 @@ impl MediaStore for BrokerMediaStore {
 mod tests {
     use super::*;
 
-    #[test]
-    fn media_cache_hit_isolation_and_purge() {
+    #[tokio::test]
+    async fn media_cache_hit_isolation_and_purge() {
         let cache = MediaCache::new();
         let (h1, h2) = ([1u8; 32], [2u8; 32]);
 
         // Miss on an empty cache.
-        assert!(cache.get("s1", &h1).is_none());
+        assert!(cache.get("s1", &h1).await.is_none());
 
         // Insert then hit — and the hit shares the SAME allocation (no copy).
         let bytes = Arc::new(vec![10u8, 20, 30]);
-        cache.insert("s1", h1, bytes.clone());
-        let hit = cache.get("s1", &h1).expect("hit");
+        cache.insert("s1", h1, bytes.clone()).await;
+        let hit = cache.get("s1", &h1).await.expect("hit");
         assert!(Arc::ptr_eq(&hit, &bytes), "cache serves the shared Arc");
 
         // Session isolation: same hash under a different session misses.
-        assert!(cache.get("s2", &h1).is_none());
+        assert!(cache.get("s2", &h1).await.is_none());
         // Unknown hash misses.
-        assert!(cache.get("s1", &h2).is_none());
+        assert!(cache.get("s1", &h2).await.is_none());
 
         // Purge drops the whole session.
-        cache.purge("s1");
-        assert!(cache.get("s1", &h1).is_none());
+        cache.purge("s1").await;
+        assert!(cache.get("s1", &h1).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn media_cache_purge_is_per_session() {
+        // Purge removes only the named session's blobs; a co-resident session's
+        // entries survive.
+        let cache = MediaCache::new();
+        let h = [7u8; 32];
+        cache.insert("keep", h, Arc::new(vec![1])).await;
+        cache.insert("drop", h, Arc::new(vec![2])).await;
+
+        cache.purge("drop").await;
+
+        assert!(cache.get("drop", &h).await.is_none(), "purged session gone");
+        assert!(cache.get("keep", &h).await.is_some(), "other session kept");
+    }
+
+    #[tokio::test]
+    async fn media_cache_bounds_total_bytes() {
+        // The byte budget is a RAM ceiling, not an entry count: inserting past it
+        // evicts, keeping the weighed size within cap. An evicted blob is simply
+        // re-pulled on the next read (correctness preserved).
+        let cache = MediaCache::with_budget(100, MEDIA_CACHE_TTI);
+        for i in 0..10u8 {
+            cache.insert("s", [i; 32], Arc::new(vec![0u8; 30])).await;
+        }
+        cache.cache.run_pending_tasks().await;
+        assert!(
+            cache.cache.weighted_size() <= 100,
+            "byte budget enforced, weighted_size = {}",
+            cache.cache.weighted_size()
+        );
     }
 }

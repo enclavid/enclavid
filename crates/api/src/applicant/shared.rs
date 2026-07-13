@@ -181,7 +181,7 @@ impl SessionRunCtx {
         // — the captures aren't needed post-completion (the consumer never
         // reads the media store; disclosures are a separate age-sealed channel).
         if matches!(status, RunStatus::Completed(_)) {
-            state.media_cache.purge(&session_id);
+            state.media_cache.purge(&session_id).await;
         }
         Ok(progress_from(status, &locale))
     }
