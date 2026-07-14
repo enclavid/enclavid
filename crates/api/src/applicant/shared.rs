@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicU64;
 use axum::extract::{FromRequestParts, Path};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretBox};
 use tokio::sync::Mutex;
 
 use enclavid_engine::{
@@ -131,6 +131,11 @@ pub(super) struct SessionRunCtx {
     /// Text-ref resolution happens server-side so the wire payload is
     /// a plain string per ref — frontend doesn't carry i18n logic.
     locale: Locale,
+    /// SOLE strong owner of the applicant token for this round. The persister
+    /// and media store hold only `Weak`s to it, so the plaintext token's
+    /// lifetime is exactly this context: it drops (and zeroizes) when the run
+    /// ends. MUST outlive `runner.run().await` — see [`SessionRunCtx::run`].
+    applicant_session_token: Arc<SecretBox<Vec<u8>>>,
     persister: Arc<SessionPersister>,
     props: Vec<(String, Prop)>,
     /// The fused policy component (policy + pinned plugins, wac
@@ -161,6 +166,13 @@ impl SessionRunCtx {
             state,
             session_id,
             locale,
+            // Bound (not dropped into `..`) ON PURPOSE: this is the sole strong
+            // ref to the applicant token, and the persister / media store hold
+            // only `Weak`s. It MUST stay alive across `runner.run().await` below
+            // so their `upgrade()`s succeed while the engine seals state / opens
+            // media. Dropping it early makes those upgrades return `None` and the
+            // round traps. It drops (and zeroizes) at the end of this fn.
+            applicant_session_token: _token_owner,
             persister,
             props,
             policy,
@@ -357,7 +369,8 @@ persist; same containment as above.
         let persister = Arc::new(SessionPersister {
             session_store: state.session_store.clone(),
             session_id: session_id.clone(),
-            applicant_session_token: applicant_session_token.expose_secret().to_vec(),
+            // Weak: the strong lives in the SessionRunCtx below (sole owner).
+            applicant_session_token: Arc::downgrade(&applicant_session_token),
             client_disclosure_pubkey: disclosure_pubkey,
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata.clone()),
@@ -376,7 +389,8 @@ persist; same containment as above.
         let media_store = Arc::new(BrokerMediaStore {
             session_store: state.session_store.clone(),
             session_id: session_id.clone(),
-            applicant_session_token: applicant_session_token.expose_secret().to_vec(),
+            // Weak: the strong lives in the SessionRunCtx below (sole owner).
+            applicant_session_token: Arc::downgrade(&applicant_session_token),
             cache: state.media_cache.clone(),
             captured,
         });
@@ -390,6 +404,9 @@ persist; same containment as above.
             session_id,
             session_state,
             locale,
+            // Move the sole strong ref in — the persister / media store above
+            // hold only `Weak`s downgraded from it.
+            applicant_session_token,
             persister,
             props,
             policy,

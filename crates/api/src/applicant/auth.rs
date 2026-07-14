@@ -30,9 +30,11 @@ use secrecy::SecretBox;
 
 use crate::state::ApplicantSessionToken;
 
-/// Applicant key attached to a request by `enforce`. Handlers extract
-/// this to encrypt/decrypt session state. `Arc` so it can be cloned
-/// cheaply between extension storage and `applicant_session_tokens` cache.
+/// Applicant key attached to a request by `enforce`. The `SessionRunCtx`
+/// extractor clones this `Arc` out of the request extensions to become the
+/// per-round SOLE strong owner of the token; the persister / media store hold
+/// only `Weak`s to it (see `SessionRunCtx`). `Arc` so that clone is cheap and
+/// the token lives in a single allocation.
 #[derive(Clone)]
 pub(super) struct CallerKey(pub Arc<ApplicantSessionToken>);
 

@@ -29,12 +29,13 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use broker_client::{Replay, SessionStore, public_session_id, reason};
 use enclavid_engine::{MediaStore, RunError, RunResult};
 use moka::future::Cache;
+use secrecy::{ExposeSecret, SecretBox};
 
 /// Byte budget for the pull-through media cache — a soft RAM ceiling (moka
 /// enforces `max_capacity` via background maintenance, so the weighed size can
@@ -124,9 +125,14 @@ impl MediaCache {
 pub(super) struct BrokerMediaStore {
     pub session_store: Arc<SessionStore>,
     pub session_id: String,
-    /// Applicant bearer token — the inner AEAD layer's key. A `/reset`
-    /// discards it, after which all this session's media is unreadable.
-    pub applicant_session_token: Vec<u8>,
+    /// WEAK handle to the applicant bearer — the inner AEAD layer's key,
+    /// needed to OPEN a sealed media blob on load. `Weak` (not owned): the
+    /// per-round `SessionRunCtx` is the sole strong owner, so this store
+    /// borrows the token in the moment (`upgrade` while the run is live) but
+    /// can never PIN the plaintext — its lifetime is exactly the round. A
+    /// `None` upgrade means the run outlived its context (a lifetime bug),
+    /// surfaced as a trap.
+    pub applicant_session_token: Weak<SecretBox<Vec<u8>>>,
     /// Pull-through cache (shared, cross-round). Repeat rehydrates hit here, so
     /// the host sees at most one broker read per distinct blob.
     pub cache: Arc<MediaCache>,
@@ -152,10 +158,17 @@ impl MediaStore for BrokerMediaStore {
                 return Ok(None);
             }
             // 3. Pull-through — fetch the sealed blob, decrypt, cache, share.
+            //    Borrow the token from the per-round owner for the moment of the
+            //    open. A `None` upgrade means the run outlived its context.
+            let token = self.applicant_session_token.upgrade().ok_or_else(|| {
+                RunError::msg(
+                    "media load: applicant token owner dropped (run outlived its context)",
+                )
+            })?;
             let id = public_session_id(&self.session_id);
             let loaded = self
                 .session_store
-                .load_media(id, blob_hash, &self.applicant_session_token)
+                .load_media(id, blob_hash, token.expose_secret())
                 .await
                 .map_err(|e| RunError::msg(format!("media load failed: {e}")))?
                 .trust_unchecked::<Replay, _>(reason!(

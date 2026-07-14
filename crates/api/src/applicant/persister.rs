@@ -32,12 +32,13 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 use tokio::sync::Mutex;
 
 use axum::http::StatusCode;
+use secrecy::{ExposeSecret, SecretBox};
 
 use broker_client::{
     AppendDisclosure, AuthN, AuthZ, Covert, Replay, SessionMetadata, SessionStatus, SessionStore,
@@ -55,7 +56,13 @@ use crate::shuffle::ShuffleKey;
 pub(super) struct SessionPersister {
     pub session_store: Arc<SessionStore>,
     pub session_id: String,
-    pub applicant_session_token: Vec<u8>,
+    /// WEAK handle to the applicant bearer — the inner AEAD layer's key,
+    /// needed to SEAL state + media on each write. `Weak` (not owned): the
+    /// per-round `SessionRunCtx` is the sole strong owner, so the persister
+    /// borrows the token for the moment of a seal but never PINS the
+    /// plaintext. Upgraded once per `on_session_change`; a `None` means the
+    /// run outlived its context (a lifetime bug) and traps the round.
+    pub applicant_session_token: Weak<SecretBox<Vec<u8>>>,
     /// Age recipient string (`age1...`) for disclosure entries.
     /// Pulled from session metadata at run start; provided by the
     /// platform consumer when creating the session, so the consumer
@@ -98,16 +105,27 @@ impl SessionListener for SessionPersister {
             let starting_index = self.metadata.lock().await.disclosure_count;
             let appends = self.seal_disclosures(&change, starting_index)?;
 
+            // Borrow the applicant token from the per-round owner once for this
+            // whole seal. The `SessionRunCtx` driving this run holds the sole
+            // strong ref (bound across `runner.run().await`), so it is alive
+            // here; a `None` means the run outlived its context — a lifetime bug
+            // that traps the round. `token` stays alive for the whole block, so
+            // the `&[u8]` the seal builders below borrow from it outlives them.
+            let token = self.applicant_session_token.upgrade().ok_or_else(|| {
+                RunError::msg("persist: applicant token owner dropped (run outlived its context)")
+            })?;
+            let token_bytes = token.expose_secret().as_slice();
+
             // Hold the metadata lock across the write: the state
             // mutation, the disclosure entry, and the captured media all land
             // in one atomic host transaction. Engine serializes hooks, so
             // contention is theoretical.
             let mut metadata = self.metadata.lock().await;
-            let set_state = self.build_state_op(&change)?;
+            let set_state = self.build_state_op(&change, token_bytes)?;
             // Seal every captured frame this round into the media store,
             // co-committed with the state (kept in a local so the `&dyn`
             // refs below outlive the write).
-            let media_ops = self.build_media_ops(&change);
+            let media_ops = self.build_media_ops(&change, token_bytes);
             // Record this round's captured blob hashes into metadata — the
             // TEE-side authoritative set the NEXT round's `from-blob-ref` gate
             // reads. The host already knows these hashes (they are the plaintext
@@ -183,7 +201,11 @@ impl SessionPersister {
     /// vouched here; Covert CLOSED here by `encode_padded`, which encodes the
     /// `SessionState` and pads it to a constant plaintext frame so the sealed
     /// ciphertext size is fixed. Fallible: an encoding over the frame traps.
-    fn build_state_op<'a>(&'a self, change: &SessionChange<'a>) -> RunResult<SetState<'a>> {
+    fn build_state_op<'a>(
+        &self,
+        change: &SessionChange<'_>,
+        token: &'a [u8],
+    ) -> RunResult<SetState<'a>> {
         Ok(SetState {
             state: boundary::outbound::to_untrusted(change.state)
                 .vouch_unchecked::<AuthZ, _>(reason!(
@@ -198,7 +220,7 @@ impl SessionPersister {
                     // controlled). Traps if the encoding exceeds the frame.
                     encode_padded(state).map_err(|e| RunError::msg(format!("state pad: {e}")))
                 })?,
-            applicant_session_token: &self.applicant_session_token,
+            applicant_session_token: token,
         })
     }
 
@@ -211,7 +233,11 @@ impl SessionPersister {
     /// padded (unlike state): the blob size is applicant-capture-driven and
     /// already host-observable via the `/input` body length, so it is not a
     /// new channel.
-    fn build_media_ops<'a>(&'a self, change: &SessionChange<'a>) -> Vec<SetMedia<'a>> {
+    fn build_media_ops<'a>(
+        &self,
+        change: &SessionChange<'_>,
+        token: &'a [u8],
+    ) -> Vec<SetMedia<'a>> {
         let Some(media) = change.media else {
             return Vec::new();
         };
@@ -230,7 +256,7 @@ impl SessionPersister {
                          /input body length, so not a NEW channel; every capture is stored \
                          unconditionally (always-store), so write-presence carries no policy bandwidth"
                     )),
-                applicant_session_token: &self.applicant_session_token,
+                applicant_session_token: token,
             })
             .collect()
     }
