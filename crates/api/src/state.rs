@@ -3,10 +3,10 @@ use std::sync::Arc;
 use secrecy::SecretBox;
 
 use enclavid_engine::Runner;
-use broker_client::{BrokerClient, KbsClient, RegistryClient, SessionStore};
+use broker_client::{BrokerClient, CacheStore, KbsClient, RegistryClient, SessionStore};
 
 use crate::applicant::media_store::MediaCache;
-use crate::runtime::SessionPolicyCache;
+use crate::runtime::PolicyCache;
 use crate::shuffle::ShuffleKey;
 
 /// Applicant key held in TEE memory for the duration of a request. Raw
@@ -22,10 +22,11 @@ pub struct AppState {
     /// lazily at first /connect for a session, then reuses the cached
     /// `Component` for subsequent /input rounds.
     pub runner: Arc<Runner>,
-    /// Per-session compiled components. Populated lazily by /connect
-    /// when first hit; cache miss triggers pull+compile from the
-    /// pinned policy ref in metadata.
-    pub policies: SessionPolicyCache,
+    /// Two-tier compiled-policy cache (L1 in-RAM + L2 broker-backed sealed
+    /// cwasm), keyed by composition hash. `lookup_policy` resolves through
+    /// its single `get_or_compute` ladder — L1 → L2 → cold pull+compile —
+    /// with request coalescing. See [`PolicyCache`](crate::runtime::PolicyCache).
+    pub policy_cache: PolicyCache,
     pub session_store: Arc<SessionStore>,
     /// Registry client used by /connect for the lazy policy pull.
     /// Same broker connection as the rest of broker-client.
@@ -51,15 +52,19 @@ impl AppState {
         session_store: Arc<SessionStore>,
         broker: BrokerClient,
         runner: Arc<Runner>,
-        policies: SessionPolicyCache,
         shuffle_key: Arc<ShuffleKey>,
+        tee_seal_key: &[u8; 32],
     ) -> Self {
-        // Registry + KBS share the same broker connection (cheap Clone:
-        // hyper Client is Arc-backed).
+        // Registry + KBS + cache share the same broker connection (cheap
+        // Clone: hyper Client is Arc-backed). The L2 cache seals under an
+        // HKDF subkey of the same `tee_seal_key` (domain-separated
+        // internally) and shares the process engine via `runner`.
         let kbs = KbsClient::new(broker.clone());
+        let cache_store = CacheStore::new(broker.clone(), tee_seal_key);
+        let policy_cache = PolicyCache::new(cache_store, runner.clone());
         Self {
             runner,
-            policies,
+            policy_cache,
             session_store,
             registry: RegistryClient::new(broker),
             kbs,
@@ -68,14 +73,15 @@ impl AppState {
         }
     }
 
-    /// Connect to broker-client and build state. The runner and policy
-    /// cache are passed in so they can be shared with the client API.
+    /// Connect to broker-client and build state. The runner is passed in
+    /// so it can be shared with the client API; the policy cache is built
+    /// here (applicant-only — the client API never compiles).
     pub async fn init(
         transport_out: &str,
         session_store: Arc<SessionStore>,
         runner: Arc<Runner>,
-        policies: SessionPolicyCache,
         shuffle_key: Arc<ShuffleKey>,
+        tee_seal_key: &[u8; 32],
     ) -> Self {
         let broker = BrokerClient::new(transport_out)
             .await
@@ -84,8 +90,8 @@ impl AppState {
             session_store,
             broker,
             runner,
-            policies,
             shuffle_key,
+            tee_seal_key,
         )
     }
 }

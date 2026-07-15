@@ -19,7 +19,9 @@ mod error;
 
 pub mod aead;
 pub mod age_seal;
+pub mod kdf;
 pub mod ocicrypt;
 
 pub use age_seal::seal_to_recipient;
 pub use error::CryptoError;
+pub use kdf::derive_key;

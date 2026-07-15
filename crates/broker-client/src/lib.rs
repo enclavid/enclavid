@@ -1,5 +1,6 @@
 mod auth;
 pub mod boundary;
+mod cache;
 mod error;
 mod kbs;
 mod registry;
@@ -11,6 +12,7 @@ mod transport;
 mod domain;
 
 pub use auth::{AuthClient, AuthVerdict, Principal};
+pub use cache::CacheStore;
 // Boundary-sentinel re-exports — Untrusted/Exposed/concern markers
 // live in `boundary::sentinel` after the untrusted-crate fold-in.
 // The old crate-root path is preserved so external consumers don't

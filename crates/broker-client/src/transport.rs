@@ -131,6 +131,13 @@ impl BrokerClient {
         self.request("DELETE", path, Vec::new()).await
     }
 
+    /// GET `path` (no body) — returns status + body bytes. Used by the
+    /// L2 cache read; non-2xx (404 miss) is not an error here, the
+    /// caller branches on `status`.
+    pub(crate) async fn get(&self, path: &str) -> Result<HttpResp, BridgeError> {
+        self.request("GET", path, Vec::new()).await
+    }
+
     /// HEAD `path` — returns just the status code.
     pub(crate) async fn head(&self, path: &str) -> Result<StatusCode, BridgeError> {
         Ok(self.request("HEAD", path, Vec::new()).await?.status)

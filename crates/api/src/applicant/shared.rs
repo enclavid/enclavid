@@ -11,24 +11,25 @@ use axum::extract::{FromRequestParts, Path};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use secrecy::{ExposeSecret, SecretBox};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use enclavid_engine::{
-    Component, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs, RunStatus,
-    SessionListener, SessionState,
+    Component, ComponentDecls, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs,
+    RunStatus, SessionListener, SessionState,
 };
 
 use super::media_store::BrokerMediaStore;
 use broker_client::{
-    AuthN, AuthZ, Event, Metadata, Replay, SessionMetadata, State as StateField, public_session_id,
-    reason,
+    AuthN, AuthZ, Client, Event, Key, Metadata, PluginPin, Replay, SessionMetadata,
+    State as StateField, public_session_id, reason,
 };
 
 use crate::error::ApiError;
 use crate::input::parse_input;
 use crate::locale::Locale;
 use crate::policy_pull;
-use crate::runtime::PolicyEntry;
+use crate::runtime::{ColdPolicy, PolicyEntry};
 use crate::state::AppState;
 
 use super::auth::CallerKey;
@@ -416,31 +417,56 @@ persist; same containment as above.
     }
 }
 
-/// Look up the compiled policy for a session, compiling lazily on
-/// cache miss. The first /connect for a session pays the
-/// pull+compile cost; subsequent calls and /input rounds hit the
-/// cache.
-///
-/// On cache miss the policy artifact is pulled from the registry by
-/// the pinned ref baked into metadata and compiled into a
-/// `Component`.
-///
-/// Errors map to HTTP statuses the handler can pass through directly:
-///   * 410 Gone — registry pull / compile failed (artifact has been
-///     removed or is malformed)
-///   * 5xx — transport / infra problems
+/// Look up the compiled policy for a session, compiling lazily on a full
+/// cache miss. Delegates the whole L1 → L2 → cold ladder (with request
+/// coalescing) to [`PolicyCache::get_or_compute`](crate::runtime::PolicyCache::get_or_compute);
+/// this fn only computes the composition key and supplies the cold loader.
+/// The first session to pin a composition pays the pull + compile; every
+/// later session / round / restart reuses it.
 async fn lookup_policy(
     state: &AppState,
     session_id: &str,
     metadata: &SessionMetadata,
 ) -> Result<Arc<PolicyEntry>, StatusCode> {
-    if let Some(e) = state.policies.get(session_id).await {
-        return Ok(e);
-    }
     let client = metadata.client.as_ref().ok_or_else(|| {
         eprintln!("lookup_policy: metadata.client missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+    // Key the compiled-component cache by the COMPOSITION (policy ref + plugin
+    // pins + access authority), NOT session_id: the fused `PolicyEntry` is a
+    // pure function of these (nothing session-specific), so every session
+    // pinning the same policy + plugins shares ONE pull + fuse + Cranelift
+    // compile instead of repeating it.
+    let composition_key = composition_key(
+        &metadata.policy_ref,
+        metadata.policy_key.as_ref(),
+        &client.registry_auth,
+        &client.plugins,
+    );
+    state
+        .policy_cache
+        .get_or_compute(composition_key, || {
+            cold_compile(state, session_id, metadata, client)
+        })
+        .await
+}
+
+/// Cold path: pull the policy + pinned plugins, fuse + compile them into
+/// one component, and build the composition-wide embedded registry. Runs
+/// only on a full cache miss (both tiers) — [`PolicyCache::get_or_compute`]
+/// handles L1/L2 population and coalescing around it. Returns the L1
+/// [`ColdPolicy::entry`] plus the per-component catalogs the L2 bundle
+/// stores alongside the cwasm.
+///
+/// Errors map to HTTP statuses the handler can pass through directly:
+///   * 410 Gone — registry pull / decrypt failed (artifact removed / malformed)
+///   * 5xx — composition / infra problems
+async fn cold_compile(
+    state: &AppState,
+    session_id: &str,
+    metadata: &SessionMetadata,
+    client: &Client,
+) -> Result<ColdPolicy, StatusCode> {
     // Look up the bearer for the policy registry by hostname. Same
     // lookup applies per plugin below. Missing entry collapses to an
     // empty slice ⇒ anonymous pull (host attaches no Authorization
@@ -547,14 +573,20 @@ async fn lookup_policy(
         );
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    // Build the composition-wide `EmbeddedRegistry`, keyed by each
-    // component's catalog content-hash. Policy first (composition order,
-    // which fixes the merged-path first-match order), then plugins in
-    // `plugin_instances` order (mirrors `client.plugins`).
-    let mut embedded_builder = EmbeddedRegistry::builder();
-    embedded_builder.add_component(policy_catalog.hash, policy_catalog.decls);
+    // Catalogs in composition order (policy first, which fixes the
+    // merged-path first-match order), then plugins in `plugin_instances`
+    // order (mirrors `client.plugins`). Collected once and fed to BOTH the
+    // registry builder AND the L2 cache bundle, so a cache hit rebuilds a
+    // byte-identical registry without re-parsing artifacts.
+    let mut catalogs: Vec<([u8; 32], ComponentDecls)> =
+        Vec::with_capacity(1 + plugin_catalogs.len());
+    catalogs.push((policy_catalog.hash, policy_catalog.decls));
     for catalog in plugin_catalogs {
-        embedded_builder.add_component(catalog.hash, catalog.decls);
+        catalogs.push((catalog.hash, catalog.decls));
+    }
+    let mut embedded_builder = EmbeddedRegistry::builder();
+    for (hash, decls) in &catalogs {
+        embedded_builder.add_component(*hash, decls.clone());
     }
     let embedded = Arc::new(embedded_builder.build());
     let entry = Arc::new(PolicyEntry {
@@ -562,9 +594,194 @@ async fn lookup_policy(
         embedded_imports,
         embedded,
     });
-    state
-        .policies
-        .insert(session_id.to_string(), entry.clone())
-        .await;
-    Ok(entry)
+    // Return the entry + catalogs; the cache facade persists to L2 and
+    // populates L1 (see `PolicyCache::get_or_compute`).
+    Ok(ColdPolicy { entry, catalogs })
+}
+
+/// Content-address of a fused composition: each artifact (policy + ORDERED
+/// plugins) as `(ref, ACCESS-AUTHORITY)`. The compiled [`PolicyEntry`] (fused
+/// `Component` + `EmbeddedRegistry` + import manifest) is a pure function of the
+/// pulled-and-decrypted artifact bytes and nothing session-specific, so it is
+/// the right cache key — two sessions pinning the same artifacts (and equally
+/// authorized to OBTAIN them) share one pull + fuse + Cranelift compile.
+///
+/// **Access authority is in the key, because a cache HIT bypasses the two gates
+/// a MISS goes through** (download, then decrypt) — it hands back the already
+/// pulled-and-decrypted component with no credential presented. Keying by
+/// artifact identity ALONE would let a consumer who could neither download nor
+/// decrypt an artifact obtain its compiled form via another consumer's entry. So
+/// per artifact we mix in BOTH gates:
+///   * **Download authority** — the per-hostname OCI bearer
+///     ([`policy_pull::bearer_for_ref`]). For a third-party LICENSED plugin this
+///     IS the license: the author grants pull only to licensed clients. Empty
+///     (anonymous / public) → all share; non-empty → `sha256(bearer)` so only
+///     credential-holders share and a non-holder misses → pulls → fails closed.
+///   * **Decrypt authority** — the [`Key`]: `None` (plaintext) shares; `Inline`
+///     (owner secret) mixes `sha256(bytes)`; `Kbs` a marker only. Encryption's
+///     job is secrecy from the PLATFORM (KBS releases only to the attested TEE),
+///     NOT per-client licensing — that's the download gate above — so `Kbs`
+///     needs no per-client credential here. (A future metered/licensed KBS model
+///     keeps its license token OUT of this key too: the KBS is consulted EVERY
+///     session as the license/metering gate, and a successful response is the
+///     precondition to REUSE the cached compile — the cache only ever skips the
+///     decrypt+compile, never the per-session license check.)
+/// Both secrets are HASHED, never embedded raw (the cache is TEE-only anyway).
+///
+/// Order matters (fusion order fixes merged first-match), so pins are hashed in
+/// `client.plugins` order; every field is length-prefixed against
+/// delimiter-collision. wasmtime version is excluded (in-process, one `Runner`
+/// engine; a restart empties the cache). Assumes refs are effectively immutable
+/// content-addresses (digest-pinned); a consumer pinning a MUTABLE tag could be
+/// served a stale compilation within the cache TTL — a freshness tradeoff.
+fn composition_key(
+    policy_ref: &str,
+    policy_key: Option<&Key>,
+    registry_auth: &HashMap<String, Vec<u8>>,
+    plugins: &[PluginPin],
+) -> String {
+    let mut h = Sha256::new();
+    hash_artifact(
+        &mut h,
+        policy_ref,
+        policy_key,
+        policy_pull::bearer_for_ref(registry_auth, policy_ref),
+    );
+    h.update((plugins.len() as u64).to_le_bytes());
+    for p in plugins {
+        h.update((p.package.len() as u64).to_le_bytes());
+        h.update(p.package.as_bytes());
+        hash_artifact(
+            &mut h,
+            &p.impl_ref,
+            p.key.as_ref(),
+            policy_pull::bearer_for_ref(registry_auth, &p.impl_ref),
+        );
+    }
+    hex::encode(h.finalize())
+}
+
+/// Feed one artifact's `(ref, download authority, decrypt authority)` into the
+/// composition hash. See [`composition_key`] for the rationale.
+fn hash_artifact(h: &mut Sha256, artifact_ref: &str, key: Option<&Key>, download_cred: &[u8]) {
+    h.update((artifact_ref.len() as u64).to_le_bytes());
+    h.update(artifact_ref.as_bytes());
+    // Download authority: empty (anonymous / public) shares; otherwise partition
+    // by sha256(bearer) so only credential-holders share (the license gate for
+    // a download-gated third-party artifact).
+    if download_cred.is_empty() {
+        h.update([0x00u8]);
+    } else {
+        h.update([0x01u8]);
+        let digest = Sha256::digest(download_cred);
+        h.update((digest.len() as u64).to_le_bytes());
+        h.update(digest);
+    }
+    // Decrypt authority.
+    match key {
+        None => h.update([0x00u8]),
+        Some(Key::Inline(bytes)) => {
+            h.update([0x01u8]);
+            let digest = Sha256::digest(bytes);
+            h.update((digest.len() as u64).to_le_bytes());
+            h.update(digest);
+        }
+        Some(Key::Kbs(_)) => h.update([0x02u8]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pin(package: &str, impl_ref: &str) -> PluginPin {
+        PluginPin {
+            package: package.into(),
+            impl_ref: impl_ref.into(),
+            key: None,
+        }
+    }
+
+    /// Empty registry-auth map = anonymous pull for every artifact.
+    fn no_auth() -> HashMap<String, Vec<u8>> {
+        HashMap::new()
+    }
+
+    #[test]
+    fn composition_key_deterministic_and_order_sensitive() {
+        let plugins = [pin("enclavid:well-known", "reg/wk@sha256:11"), pin("enclavid:face-age", "reg/fa@sha256:22")];
+        let key = composition_key("reg/policy@sha256:aa", None, &no_auth(), &plugins);
+
+        // Same composition → same key (the whole point: cross-session sharing).
+        assert_eq!(key, composition_key("reg/policy@sha256:aa", None, &no_auth(), &plugins));
+
+        // Plugin ORDER is significant (fusion order fixes merged first-match) →
+        // reversing must change the key.
+        let reversed = [plugins[1].clone(), plugins[0].clone()];
+        assert_ne!(key, composition_key("reg/policy@sha256:aa", None, &no_auth(), &reversed));
+
+        // Different policy ref → different key.
+        assert_ne!(key, composition_key("reg/policy@sha256:bb", None, &no_auth(), &plugins));
+
+        // Different plugin set (dropping one) → different key.
+        assert_ne!(key, composition_key("reg/policy@sha256:aa", None, &no_auth(), &plugins[..1]));
+    }
+
+    #[test]
+    fn composition_key_length_prefixed_no_delimiter_collision() {
+        // Without length-prefixing, field boundaries could be ambiguous: a
+        // policy ref "ab" + package "c" would concat-collide with ref "a" +
+        // package "bc". Length-prefixing must keep them distinct.
+        let a = composition_key("ab", None, &no_auth(), &[pin("c", "r")]);
+        let b = composition_key("a", None, &no_auth(), &[pin("bc", "r")]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn composition_key_partitions_by_decryption_authority() {
+        use broker_client::{KbsKey, Key};
+        let plugins = [pin("p", "r")];
+        let none = composition_key("policy", None, &no_auth(), &plugins);
+        let inline_a = composition_key("policy", Some(&Key::Inline(vec![1, 2, 3])), &no_auth(), &plugins);
+        let inline_b = composition_key("policy", Some(&Key::Inline(vec![9, 9, 9])), &no_auth(), &plugins);
+
+        // Plaintext (None) and encrypted (Inline) are distinct scopes, and two
+        // different Inline keys never share — a non-holder can't hit a holder's
+        // entry (the whole point: a cache hit must not bypass decrypt auth).
+        assert_ne!(none, inline_a);
+        assert_ne!(inline_a, inline_b);
+        // Same Inline key → same key: key-holders DO share.
+        assert_eq!(inline_a, composition_key("policy", Some(&Key::Inline(vec![1, 2, 3])), &no_auth(), &plugins));
+
+        // Kbs is attestation-gated (every TEE session equally authorized), so it
+        // does NOT partition by endpoint — that would only reduce sharing.
+        let kbs_a = composition_key("policy", Some(&Key::Kbs(KbsKey { endpoint: "a".into() })), &no_auth(), &plugins);
+        let kbs_b = composition_key("policy", Some(&Key::Kbs(KbsKey { endpoint: "b".into() })), &no_auth(), &plugins);
+        assert_eq!(kbs_a, kbs_b);
+    }
+
+    #[test]
+    fn composition_key_partitions_by_download_authority() {
+        // The OCI download bearer is the license for a download-gated third-party
+        // artifact: a cache HIT skips the pull, so a non-holder must not hit a
+        // holder's entry.
+        let pol = "reg.example.com/policy@sha256:aa";
+        let plugins = [pin("p", "reg.example.com/plug@sha256:11")];
+
+        let anon = composition_key(pol, None, &no_auth(), &plugins);
+
+        let mut auth_a = HashMap::new();
+        auth_a.insert("reg.example.com".to_string(), b"licensed-A".to_vec());
+        let holder_a = composition_key(pol, None, &auth_a, &plugins);
+        // A bearer-holder computes a DIFFERENT key than the anonymous non-holder.
+        assert_ne!(anon, holder_a);
+
+        // A different bearer → a different scope (different licenses don't share).
+        let mut auth_b = HashMap::new();
+        auth_b.insert("reg.example.com".to_string(), b"licensed-B".to_vec());
+        assert_ne!(holder_a, composition_key(pol, None, &auth_b, &plugins));
+
+        // Same bearer → same key (co-licensed clients share the compile).
+        assert_eq!(holder_a, composition_key(pol, None, &auth_a, &plugins));
+    }
 }

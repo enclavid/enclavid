@@ -439,6 +439,7 @@ dependencies = [
  "broker-protocol",
  "hex",
  "jsonwebtoken 9.3.1",
+ "object_store",
  "oci-client",
  "redis",
  "reqwest 0.12.28",
@@ -461,6 +462,7 @@ dependencies = [
  "bytes",
  "ciborium",
  "enclavid-crypto",
+ "hex",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -1388,6 +1390,7 @@ dependencies = [
  "base64ct",
  "broker-client",
  "broker-protocol",
+ "ciborium",
  "enclavid-attestation",
  "enclavid-crypto",
  "enclavid-engine",
@@ -1467,6 +1470,7 @@ dependencies = [
  "chacha20poly1305",
  "ctr",
  "hex",
+ "hkdf",
  "hmac",
  "rand_core 0.6.4",
  "serde",
@@ -2057,6 +2061,12 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "humantime"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
 
 [[package]]
 name = "hyper"
@@ -2910,6 +2920,30 @@ dependencies = [
  "hashbrown 0.17.0",
  "indexmap 2.14.0",
  "memchr",
+]
+
+[[package]]
+name = "object_store"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbfbfff40aeccab00ec8a910b57ca8ecf4319b335c542f2edcd19dd25a1e2a00"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "http",
+ "humantime",
+ "itertools 0.14.0",
+ "parking_lot",
+ "percent-encoding",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "walkdir",
+ "wasm-bindgen-futures",
+ "web-time",
 ]
 
 [[package]]

@@ -55,7 +55,7 @@ pub struct PluginInstance {
 /// The two applicant-facing embedded interfaces routed strictly
 /// per-component (i18n and icons). DF stays merged, so it is not one of
 /// these.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EmbeddedIface {
     I18n,
     Icons,
@@ -78,6 +78,11 @@ impl EmbeddedIface {
 /// per-component routing, so a plugin's i18n key never resolves to the
 /// policy's (or another plugin's) translation. Emitted only for i18n /
 /// icons; DF is merged and served first-match under its canonical name.
+///
+/// serde: part of the L2 cwasm-cache bundle — the import manifest is
+/// stored beside the cwasm so a cache hit reconstructs the host
+/// `Linker` registrations without re-fusing.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EmbeddedImport {
     pub instance_name: String,
     pub catalog_hash: [u8; 32],
@@ -120,6 +125,34 @@ impl Runner {
     /// Compile a policy component from its binary (wasm or wat).
     pub fn compile(&self, bytes: &[u8]) -> wasmtime::Result<Component> {
         Component::new(&self.engine, bytes)
+    }
+
+    /// Serialize a compiled component to `cwasm` bytes for the L2
+    /// compiled-artifact cache. Inverse of [`deserialize_component`].
+    /// The bytes are only valid on an engine built compatibly (same
+    /// wasmtime version / `Config` / target) — the cache seals them and
+    /// treats an incompatible load as a miss.
+    pub fn serialize_component(&self, component: &Component) -> wasmtime::Result<Vec<u8>> {
+        component.serialize()
+    }
+
+    /// Reconstruct a component from `cwasm` bytes produced by
+    /// [`serialize_component`]. Two facts make the `unsafe` deserialize
+    /// sound for the L2 cache:
+    ///
+    ///   * **Provenance** — the caller only feeds bytes it AEAD-opened
+    ///     under a TEE-only key, so the untrusted host cannot substitute
+    ///     crafted bytes for the deserializer to interpret.
+    ///   * **Version** — wasmtime embeds a compatibility fingerprint
+    ///     (version + `Config` + target) and this returns `Err` on
+    ///     mismatch instead of executing incompatible code, so a
+    ///     toolchain bump degrades to a cache miss, not undefined
+    ///     behaviour.
+    pub fn deserialize_component(&self, cwasm: &[u8]) -> wasmtime::Result<Component> {
+        // SAFETY: bytes are TEE-sealed (trusted provenance) and
+        // wasmtime's own header check rejects an incompatible build —
+        // see the doc comment above.
+        unsafe { Component::deserialize(&self.engine, cwasm) }
     }
 
     /// Fuse a policy with plugins into a self-contained component's
@@ -384,4 +417,35 @@ struct HasHost;
 
 impl wasmtime::component::HasData for HasHost {
     type Data<'a> = &'a mut HostState;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A compiled component serializes to `cwasm` and deserializes back
+    /// on the same engine — the L2 cache's compile-amortization path.
+    #[test]
+    fn serialize_deserialize_component_round_trips() {
+        let runner = Runner::new().unwrap();
+        // Minimal valid empty component.
+        let bytes = wasm_encoder::Component::new().finish();
+        let component = runner.compile(&bytes).unwrap();
+        let cwasm = runner.serialize_component(&component).unwrap();
+        assert!(!cwasm.is_empty(), "serialize produces cwasm bytes");
+        // Round-trips on the same engine; re-serialize proves the
+        // restored component is a live artifact, not a dangling handle.
+        let restored = runner.deserialize_component(&cwasm).unwrap();
+        runner.serialize_component(&restored).unwrap();
+    }
+
+    /// Garbage bytes are rejected, not interpreted — wasmtime's header
+    /// check turns a toolchain skew / host tamper into a clean `Err`
+    /// (which the cache treats as a miss), never undefined behaviour.
+    #[test]
+    fn deserialize_rejects_non_cwasm() {
+        let runner = Runner::new().unwrap();
+        assert!(runner.deserialize_component(b"definitely not cwasm").is_err());
+        assert!(runner.deserialize_component(&[]).is_err());
+    }
 }

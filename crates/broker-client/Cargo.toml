@@ -20,6 +20,8 @@ broker-protocol = { path = "../broker-protocol" }
 # codec as the wire envelope — zero protobuf in the project.
 serde = { version = "1", features = ["derive"] }
 ciborium = "0.2"
+# Hex encoding of the identity-hiding L2 cache blob name (HKDF label).
+hex = "0.4"
 # Crypto primitives (symmetric AEAD session seals + age recipient seals)
 # live in their own leaf crate.
 enclavid-crypto = { path = "../crypto" }

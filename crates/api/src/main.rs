@@ -1,6 +1,7 @@
 mod applicant;
 mod client;
 mod client_state;
+mod cwasm_cache;
 mod disclosure_hash;
 mod dto;
 mod error;
@@ -32,7 +33,6 @@ async fn main() {
     // the policy artifact via the pinned ref in metadata) and is
     // reused for subsequent /input rounds.
     let runner = runtime::new_runner();
-    let policies = runtime::new_policy_cache();
 
     // SessionStore is the broker-client HTTP-over-vsock client for
     // per-session typed-field storage. Shared between client API
@@ -76,8 +76,8 @@ async fn main() {
             &address_out,
             session_store,
             runner,
-            policies,
             shuffle_key,
+            &tee_seal_key,
         )
         .await,
     );

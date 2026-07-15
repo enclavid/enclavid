@@ -29,6 +29,10 @@ tokio = { version = "1", features = ["full"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# CBOR codec for the L2 cwasm-cache bundle (`crate::cwasm_cache`). Same
+# codec the broker wire DTOs use; deny_unknown_fields makes any bundle
+# schema drift a decode error (→ cache miss).
+ciborium = "0.2"
 base64ct = { version = "1", features = ["alloc"] }
 secrecy = "0.10"
 moka = { version = "0.12", features = ["future"] }

@@ -64,7 +64,10 @@ pub type IconStore = RefStore<Icon>;
 /// One `(language, text)` row inside a localized declaration. Engine
 /// stores every translation a component declared verbatim — locale
 /// picking is the consumer's call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// serde: part of the L2 cwasm-cache bundle — a component's parsed
+/// catalog is stored beside its cwasm so a cache hit rebuilds the
+/// embedded registry without re-pulling the artifact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Translation {
     pub language: String,
     pub text: String,
@@ -74,7 +77,7 @@ pub struct Translation {
 /// registry builder accepts per slot. Produced by
 /// [`load_embedded`](super::decls::load_embedded) from a wasm
 /// component's `enclavid:embedded.*` custom sections.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ComponentDecls {
     /// `enclavid:embedded.disclosure-fields.v1` — machine identifier
     /// list.
