@@ -1505,6 +1505,7 @@ dependencies = [
  "wasmparser 0.247.0",
  "wasmtime",
  "wit-component 0.247.0",
+ "xtask",
 ]
 
 [[package]]
@@ -5994,6 +5995,18 @@ dependencies = [
  "der",
  "spki",
  "tls_codec",
+]
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "enclavid-embedded",
+ "serde_json",
+ "wasm-encoder 0.247.0",
+ "wit-component 0.247.0",
 ]
 
 [[package]]

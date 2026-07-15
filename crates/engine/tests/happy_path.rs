@@ -13,7 +13,8 @@
 //!               Asserts the CONSENT GATE: zero disclosures sealed.
 //!   * APPROVE — passport → selfie → consent-disclosure(true)  → Approved.
 //!               Asserts the disclosure WAS sealed (exactly one, with the
-//!               six canonical fields the policy rendered).
+//!               seven fields the policy rendered — six canonical KYC fields
+//!               plus the face-age estimate).
 //!
 //! The policy and the plugin wasm are compiled on-demand (first test
 //! invocation) rather than via a build.rs — this keeps normal engine
@@ -22,7 +23,6 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -31,7 +31,6 @@ use enclavid_engine::{
     ConsentDisclosure, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs, RunResult,
     RunStatus, Runner, SessionChange, SessionListener,
 };
-use wit_component::ComponentEncoder;
 
 /// In-memory stand-in for the host blob store, shared with the
 /// [`RecordingListener`] (which populates it from each round's captured
@@ -208,18 +207,26 @@ async fn passport_selfie_consent_accept_seals_disclosure() {
         1,
         "CONSENT GATE: accept path must seal exactly one disclosure",
     );
-    // The six canonical KYC fields the policy rendered on the consent
-    // screen — show == seal.
+    // The seven fields the policy rendered on the consent screen — the six
+    // canonical KYC fields plus the face-age estimate — show == seal.
     assert_eq!(
         sealed[0].len(),
-        6,
-        "sealed disclosure must carry all six rendered fields",
+        7,
+        "sealed disclosure must carry all seven rendered fields",
     );
     // Values survive verbatim (the long address triggers the runtime's
     // sanitise path but is plain ASCII, so it round-trips unchanged).
     assert!(
         sealed[0].iter().any(|f| f.value == "Jane Q. Citizen"),
         "sealed fields must include the rendered full_name value",
+    );
+    // The face-age estimate reached the consent disclosure: it is the only
+    // field whose value is a bare integer (the canonical fields carry names /
+    // dashed dates / alphanumerics). Proves the plugin-computed age is
+    // disclosed through the consent gate, not auto-shared.
+    assert!(
+        sealed[0].iter().any(|f| f.value.parse::<i32>().is_ok()),
+        "sealed fields must include the face-age estimate (a numeric value)",
     );
 }
 
@@ -885,7 +892,10 @@ fn test_policy_component() -> &'static [u8] {
         .get_or_init(|| {
             let dir = policy_dir();
             let module = format!("{dir}/target/wasm32-unknown-unknown/release/test_policy.wasm");
-            embed_sections(build_componentized(&dir, &module), &dir)
+            xtask::embed_sections(
+                xtask::build_componentized(&dir, &module).expect("build_componentized"),
+                &dir,
+            )
         })
         .as_slice()
 }
@@ -898,7 +908,10 @@ fn well_known_component() -> &'static [u8] {
         .get_or_init(|| {
             let dir = well_known_dir();
             let module = format!("{dir}/target/wasm32-unknown-unknown/release/well_known.wasm");
-            embed_sections(build_componentized(&dir, &module), &dir)
+            xtask::embed_sections(
+                xtask::build_componentized(&dir, &module).expect("build_componentized"),
+                &dir,
+            )
         })
         .as_slice()
 }
@@ -911,7 +924,10 @@ fn extra_component() -> &'static [u8] {
         .get_or_init(|| {
             let dir = extra_dir();
             let module = format!("{dir}/target/wasm32-unknown-unknown/release/test_extra.wasm");
-            embed_sections(build_componentized(&dir, &module), &dir)
+            xtask::embed_sections(
+                xtask::build_componentized(&dir, &module).expect("build_componentized"),
+                &dir,
+            )
         })
         .as_slice()
 }
@@ -931,7 +947,10 @@ fn face_age_component() -> &'static [u8] {
                 "{}/../../plugins/target/wasm32-unknown-unknown/release/face_age.wasm",
                 env!("CARGO_MANIFEST_DIR"),
             );
-            embed_sections(build_componentized(&dir, &module), &dir)
+            xtask::embed_sections(
+                xtask::build_componentized(&dir, &module).expect("build_componentized"),
+                &dir,
+            )
         })
         .as_slice()
 }
@@ -948,7 +967,10 @@ fn preprocess_component() -> &'static [u8] {
                 "{}/../../plugins/target/wasm32-unknown-unknown/release/preprocess.wasm",
                 env!("CARGO_MANIFEST_DIR"),
             );
-            embed_sections(build_componentized(&dir, &module), &dir)
+            xtask::embed_sections(
+                xtask::build_componentized(&dir, &module).expect("build_componentized"),
+                &dir,
+            )
         })
         .as_slice()
 }
@@ -966,50 +988,15 @@ fn face_detect_component() -> &'static [u8] {
                 "{}/../../plugins/target/wasm32-unknown-unknown/release/face_detect.wasm",
                 env!("CARGO_MANIFEST_DIR"),
             );
-            embed_sections(build_componentized(&dir, &module), &dir)
+            xtask::embed_sections(
+                xtask::build_componentized(&dir, &module).expect("build_componentized"),
+                &dir,
+            )
         })
         .as_slice()
 }
 
-/// `cargo build --release` a wasm crate, then componentize its module.
-/// Cargo's own build lock serializes concurrent test invocations safely.
-fn build_componentized(crate_dir: &str, module_path: &str) -> Vec<u8> {
-    let status = Command::new("cargo")
-        .args(["build", "--release"])
-        .current_dir(crate_dir)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to invoke cargo for {crate_dir}: {e}"));
-    assert!(status.success(), "build failed: {crate_dir}");
-
-    let module = std::fs::read(module_path).expect("read wasm module");
-    ComponentEncoder::default()
-        .module(&module)
-        .expect("module missing wit-bindgen custom section")
-        .validate(true)
-        .encode()
-        .expect("componentize")
-}
-
-/// Append the fixture's embedded sections (author JSON, byte-for-byte)
-/// to a componentized wasm — exactly what `enclavid embed` does. A
-/// missing file produces no section (well-known ships no
-/// disclosure-fields.json, for instance).
-fn embed_sections(mut wasm: Vec<u8>, dir: &str) -> Vec<u8> {
-    use enclavid_embedded::{SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS};
-    use wasm_encoder::{ComponentSection, CustomSection};
-    let read = |name: &str| std::fs::read(format!("{dir}/{name}")).ok();
-    for (name, data) in [
-        (SECTION_DISCLOSURE_FIELDS, read("disclosure-fields.json")),
-        (SECTION_I18N, read("i18n.json")),
-        (SECTION_ICONS, read("icons.json")),
-    ] {
-        if let Some(bytes) = data {
-            CustomSection {
-                name: name.into(),
-                data: bytes.into(),
-            }
-            .append_to_component(&mut wasm);
-        }
-    }
-    wasm
-}
+// `build_componentized` + `embed_sections` moved to the shared `xtask`
+// crate so this test and the `xtask push-plugins` publish tool build
+// artifacts identically. Called as `xtask::build_componentized` /
+// `xtask::embed_sections` above.

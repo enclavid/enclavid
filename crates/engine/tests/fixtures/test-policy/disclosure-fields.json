@@ -4,5 +4,6 @@
   "nationality",
   "passport_number",
   "document_expiry",
-  "address"
+  "address",
+  "estimated_age"
 ]

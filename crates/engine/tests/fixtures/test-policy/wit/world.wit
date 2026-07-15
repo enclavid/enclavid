@@ -29,11 +29,14 @@ world policy {
     import enclavid:face-age/check@0.1.0;
 
     // Host interfaces. The policy resolves its own consent copy via
-    // embedded/i18n; static config comes from `context.props`. Capture and
-    // consent are driven by the `action` the policy returns from `handle`
-    // (`render(prompt::media)` / `render(prompt::consent-disclosure)`), not
-    // by suspending host imports.
+    // embedded/i18n and mints its OWN `disclosure-field-ref`s (for keys the
+    // well-known helpers don't cover, e.g. the face-age estimate) via
+    // embedded/disclosure-fields; static config comes from `context.props`.
+    // Capture and consent are driven by the `action` the policy returns from
+    // `handle` (`render(prompt::media)` / `render(prompt::consent-disclosure)`),
+    // not by suspending host imports.
     import enclavid:host/embedded-i18n@0.1.0;
+    import enclavid:host/embedded-disclosure-fields@0.1.0;
     import enclavid:host/session-context@0.1.0;
     export enclavid:policy/policy@0.1.0;
 }

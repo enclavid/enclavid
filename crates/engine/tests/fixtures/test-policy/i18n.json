@@ -2,6 +2,9 @@
   "consent_reason": {
     "en": "Identity verification for the test policy."
   },
+  "estimated_age_label": {
+    "en": "Estimated age"
+  },
   "passport_title": {
     "en": "POLICY-OWNED passport_title (must NOT leak into the plugin)"
   },

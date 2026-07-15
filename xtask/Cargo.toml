@@ -1,0 +1,27 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[lib]
+name = "xtask"
+path = "src/lib.rs"
+
+[dependencies]
+# Same componentize + section-embed libraries the engine's happy_path test
+# uses, so an artifact this tool publishes is byte-identical to the tested
+# in-process path.
+wit-component = "0.247"
+wasm-encoder = "0.247"
+enclavid-embedded = { path = "../crates/embedded" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"

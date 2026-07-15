@@ -48,3 +48,7 @@ enclavid-embedded = { path = "../embedded" }
 # in-sandbox decode → preprocess → inference pipeline has something to
 # decode (a placeholder clip of raw bytes wouldn't).
 jpeg-encoder = "0.6"
+# Shared build→componentize→embed pipeline — the SAME code the
+# `xtask push-plugins` publish tool uses, so tested and shipped artifacts
+# match. (build helpers only; xtask does not depend on the engine.)
+xtask = { path = "../../xtask" }

@@ -11,6 +11,7 @@ members = [
     "crates/crypto",
     "crates/embedded",
     "crates/kbs-client",
+    "xtask",
 ]
 
 [workspace.package]

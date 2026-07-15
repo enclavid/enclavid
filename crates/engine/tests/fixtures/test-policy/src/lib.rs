@@ -30,6 +30,11 @@ wit_bindgen::generate!({
 });
 
 use enclavid::host::embedded_i18n::localized as l10n;
+// Mints the policy's OWN `disclosure-field-ref` for a key the well-known
+// helpers don't cover (the face-age estimate), gated by this policy's
+// `disclosure-fields.json`.
+use enclavid::host::embedded_disclosure_fields::disclosure_field as dfref;
+use enclavid::shared_types::disclosure::DisplayField;
 // The host `blob` resource + its content ref: on the passport round we stash
 // the frame blob's `blob-ref` (a hex string) in `state`, then rehydrate it on
 // the selfie round via `Blob::from_blob_ref` — proving cross-round reload.
@@ -57,6 +62,10 @@ struct TestPolicy;
 // Every field label, capture instruction, guide and icon is owned by the
 // well-known plugin's embedded sections.
 const KEY_CONSENT_REASON: &str = "consent_reason";
+// The face-age estimate field: a policy-owned `display-field` key (declared
+// in this policy's `disclosure-fields.json`) + its i18n label.
+const KEY_ESTIMATED_AGE: &str = "estimated_age";
+const KEY_ESTIMATED_AGE_LABEL: &str = "estimated_age_label";
 
 // ~500-char value (held by the well-known `address` helper) — well past
 // the consent screen's 200-char collapse threshold, exercising the
@@ -107,7 +116,7 @@ fn skip_passport_read() -> bool {
         .any(|(k, v)| k == "skip_passport_read" && matches!(v, Prop::Int(1)))
 }
 
-fn build_consent() -> Disclosure {
+fn build_consent(age_years: i32) -> Disclosure {
     Disclosure {
         // Canonical KYC fields built by the plugin: labels resolve from
         // the plugin's i18n; the snake_case keys (full_name,
@@ -121,6 +130,18 @@ fn build_consent() -> Disclosure {
             wk::passport_number("X1234567"),
             wk::document_expiry("2030-01-01"),
             wk::address(LONG_ADDRESS),
+            // The face-age estimate, disclosed as a POLICY-owned field. Its
+            // key isn't a well-known helper, so the policy mints the
+            // `disclosure-field-ref` itself (against its own
+            // `disclosure-fields.json` gate) plus its own i18n label. Shown on
+            // the consent screen and sealed only on accept (show == seal) —
+            // the sanctioned path for a plugin-computed value to reach the
+            // consumer (never auto-shared).
+            DisplayField {
+                key: dfref(KEY_ESTIMATED_AGE),
+                label: l10n(KEY_ESTIMATED_AGE_LABEL),
+                value: age_years.to_string(),
+            },
         ],
         reason: l10n(KEY_CONSENT_REASON),
         // Requester ref comes from the EXTRA plugin (`tag::get()` →
@@ -200,9 +221,11 @@ impl Guest for TestPolicy {
                     })
                 });
                 match age {
-                    Some(_) => (
+                    Some(est) => (
                         state_at(STEP_AWAIT_CONSENT),
-                        Action::Render(Prompt::ConsentDisclosure(build_consent())),
+                        Action::Render(Prompt::ConsentDisclosure(build_consent(
+                            est.age.round() as i32,
+                        ))),
                     ),
                     None => (
                         state_at(STEP_AWAIT_SELFIE),
