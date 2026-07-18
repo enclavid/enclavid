@@ -1,10 +1,12 @@
 mod applicant;
 mod client;
 mod client_state;
+mod compiler;
 mod cwasm_cache;
 mod disclosure_hash;
 mod dto;
 mod error;
+mod executor;
 mod input;
 mod keyprovider;
 mod limits;

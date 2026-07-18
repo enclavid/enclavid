@@ -6,6 +6,8 @@ use enclavid_engine::Runner;
 use broker_client::{BrokerClient, CacheStore, KbsClient, RegistryClient, SessionStore};
 
 use crate::applicant::media_store::MediaCache;
+use crate::compiler::{Compiler, LocalCompiler};
+use crate::executor::{Executor, LocalExecutor};
 use crate::runtime::PolicyCache;
 use crate::shuffle::ShuffleKey;
 
@@ -18,10 +20,17 @@ use crate::shuffle::ShuffleKey;
 pub type ApplicantSessionToken = SecretBox<Vec<u8>>;
 
 pub struct AppState {
-    /// Shared with the client API state — the engine compiles policy
-    /// lazily at first /connect for a session, then reuses the cached
-    /// `Component` for subsequent /input rounds.
-    pub runner: Arc<Runner>,
+    /// The COMPILE boundary the cold path calls: fuse + compile pulled artifact
+    /// bytes into a `CompiledBundle`. In-process ([`LocalCompiler`]) today; a
+    /// compile-worker CVM behind the same `Arc<dyn Compiler>` later. See
+    /// [`crate::compiler`].
+    pub compiler: Arc<dyn Compiler>,
+    /// The EXECUTE boundary each reducer round drives: run the compiled policy
+    /// against the decrypted state + event. In-process ([`LocalExecutor`])
+    /// today; an execution-worker CVM behind the same `Arc<dyn Executor>` later.
+    /// See [`crate::executor`]. The orchestrator no longer holds a `Runner`
+    /// directly — it delegates compile + execute through these two boundaries.
+    pub executor: Arc<dyn Executor>,
     /// Two-tier compiled-policy cache (L1 in-RAM + L2 broker-backed sealed
     /// cwasm), keyed by composition hash. `lookup_policy` resolves through
     /// its single `get_or_compute` ladder — L1 → L2 → cold pull+compile —
@@ -62,8 +71,15 @@ impl AppState {
         let kbs = KbsClient::new(broker.clone());
         let cache_store = CacheStore::new(broker.clone(), tee_seal_key);
         let policy_cache = PolicyCache::new(cache_store, runner.clone());
+        // In-process compile + execute boundaries over the shared engine; each
+        // swaps to a Remote* (compile-worker / execution-worker CVM) behind the
+        // same trait with no caller change. The orchestrator holds no `Runner`
+        // directly after this — `runner` is consumed into the two boundaries.
+        let compiler: Arc<dyn Compiler> = Arc::new(LocalCompiler::new(runner.clone()));
+        let executor: Arc<dyn Executor> = Arc::new(LocalExecutor::new(runner));
         Self {
-            runner,
+            compiler,
+            executor,
             policy_cache,
             session_store,
             registry: RegistryClient::new(broker),

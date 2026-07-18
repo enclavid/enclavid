@@ -17,8 +17,9 @@ use axum::http::StatusCode;
 use moka::future::Cache;
 
 use broker_client::CacheStore;
-use enclavid_engine::{Component, ComponentDecls, EmbeddedImport, EmbeddedRegistry, Runner};
+use enclavid_engine::{Component, EmbeddedImport, EmbeddedRegistry, Runner};
 
+use crate::compiler::CompiledBundle;
 use crate::cwasm_cache;
 
 /// Per-session compiled policy artifact: the fused wasmtime
@@ -41,16 +42,6 @@ pub struct PolicyEntry {
     pub component: Arc<Component>,
     pub embedded_imports: Arc<Vec<EmbeddedImport>>,
     pub embedded: Arc<EmbeddedRegistry>,
-}
-
-/// A freshly cold-compiled composition returned by the loader passed to
-/// [`PolicyCache::get_or_compute`]: the L1 [`PolicyEntry`] plus the
-/// per-component catalogs the L2 bundle stores alongside the cwasm (so a
-/// later cache hit rebuilds the embedded registry without re-parsing the
-/// artifacts). `catalogs` is composition order (policy first).
-pub struct ColdPolicy {
-    pub entry: Arc<PolicyEntry>,
-    pub catalogs: Vec<([u8; 32], ComponentDecls)>,
 }
 
 /// Two-tier compiled-policy cache, keyed by COMPOSITION hash
@@ -106,7 +97,7 @@ impl PolicyCache {
     ) -> Result<Arc<PolicyEntry>, StatusCode>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<ColdPolicy, StatusCode>>,
+        Fut: Future<Output = Result<CompiledBundle, StatusCode>>,
     {
         self.l1
             .try_get_with(key.clone(), async move {
@@ -114,18 +105,14 @@ impl PolicyCache {
                 if let Some(entry) = cwasm_cache::try_load(&self.l2, &self.runner, &key).await {
                     return Ok(entry);
                 }
-                // Full miss: cold-compile, then persist to L2 for next time.
-                let cold = loader().await?;
-                cwasm_cache::store(
-                    &self.l2,
-                    &self.runner,
-                    &key,
-                    &cold.entry.component,
-                    &cold.entry.embedded_imports,
-                    &cold.catalogs,
-                )
-                .await;
-                Ok(cold.entry)
+                // Full miss: cold-compile to a bundle, persist it to L2, then
+                // reconstruct the L1 entry from it — the SAME path an L2 hit
+                // takes, so cold and warm paths can never diverge.
+                let bundle = loader().await?;
+                cwasm_cache::store(&self.l2, &key, &bundle).await;
+                bundle
+                    .to_entry(&self.runner)
+                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
             })
             .await
             // moka wraps the loader error in an Arc (shared with coalesced

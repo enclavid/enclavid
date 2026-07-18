@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use enclavid_engine::{
-    Component, ComponentDecls, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs,
-    RunStatus, SessionListener, SessionState,
+    Component, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs, RunStatus,
+    SessionListener, SessionState,
 };
 
 use super::media_store::BrokerMediaStore;
@@ -29,7 +29,8 @@ use crate::error::ApiError;
 use crate::input::parse_input;
 use crate::locale::Locale;
 use crate::policy_pull;
-use crate::runtime::{ColdPolicy, PolicyEntry};
+use crate::compiler::CompiledBundle;
+use crate::runtime::PolicyEntry;
 use crate::state::AppState;
 
 use super::auth::CallerKey;
@@ -182,8 +183,8 @@ impl SessionRunCtx {
             ..
         } = self;
         let (status, _session_state) = state
-            .runner
-            .run(&policy, &embedded_imports, session_state, event, props, run_inputs)
+            .executor
+            .execute(&policy, &embedded_imports, session_state, event, props, run_inputs)
             .await
             .map_err(|e| classify_run_error(&session_id, &e))?;
         // No-op while the run is still awaiting input; flips status to
@@ -451,12 +452,12 @@ async fn lookup_policy(
         .await
 }
 
-/// Cold path: pull the policy + pinned plugins, fuse + compile them into
-/// one component, and build the composition-wide embedded registry. Runs
-/// only on a full cache miss (both tiers) — [`PolicyCache::get_or_compute`]
-/// handles L1/L2 population and coalescing around it. Returns the L1
-/// [`ColdPolicy::entry`] plus the per-component catalogs the L2 bundle
-/// stores alongside the cwasm.
+/// Cold path: pull the policy + pinned plugins (the orchestrator owns OCI +
+/// registry auth), then hand the bytes to the [`Compiler`](crate::compiler::Compiler)
+/// boundary, which fuses + compiles + parses sections into a [`CompiledBundle`].
+/// Runs only on a full cache miss (both tiers) — [`PolicyCache::get_or_compute`]
+/// handles L1/L2 population and coalescing around it, and reconstructs the L1
+/// `PolicyEntry` from the returned bundle.
 ///
 /// Errors map to HTTP statuses the handler can pass through directly:
 ///   * 410 Gone — registry pull / decrypt failed (artifact removed / malformed)
@@ -466,7 +467,7 @@ async fn cold_compile(
     session_id: &str,
     metadata: &SessionMetadata,
     client: &Client,
-) -> Result<ColdPolicy, StatusCode> {
+) -> Result<CompiledBundle, StatusCode> {
     // Look up the bearer for the policy registry by hostname. Same
     // lookup applies per plugin below. Missing entry collapses to an
     // empty slice ⇒ anonymous pull (host attaches no Authorization
@@ -514,8 +515,6 @@ async fn cold_compile(
     })?;
 
     let mut plugin_instances: Vec<PluginInstance> = Vec::with_capacity(plugin_results.len());
-    let mut plugin_catalogs: Vec<enclavid_engine::EmbeddedCatalog> =
-        Vec::with_capacity(plugin_results.len());
     for res in plugin_results {
         let (package, art) = res.map_err(|e| {
             eprintln!(
@@ -523,80 +522,33 @@ async fn cold_compile(
             );
             StatusCode::GONE
         })?;
-        // Parse the plugin's embedded sections before the wasm bytes
-        // are moved into the `PluginInstance`. The catalog's
-        // content-hash keys its entries in the `EmbeddedRegistry` — the
-        // same hash the fuser routes this plugin's imports under, so
-        // strict per-component resolution lines up.
-        let catalog = enclavid_engine::load_embedded(&art.wasm_bytes).map_err(|e| {
-            eprintln!(
-                "lookup_policy: load_embedded failed for plugin {package} \
-                 (session {session_id}): {e}",
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-        // Keep the raw component bytes — fusion (`Runner::compose`)
-        // runs on bytes, not a pre-compiled `Component`.
+        // Keep the raw component bytes — the compiler fuses on bytes, not a
+        // pre-compiled `Component`, and parses each plugin's embedded catalog
+        // itself (content-hash keyed, so strict per-component resolution lines
+        // up). See `LocalCompiler::compile`.
         plugin_instances.push(PluginInstance {
             package,
             wasm: art.wasm_bytes,
         });
-        plugin_catalogs.push(catalog);
     }
 
-    // Fuse the policy with its pinned plugins into ONE component (wac
-    // single-store fusion) and compile it, along with the manifest of
-    // distinct per-catalog i18n/icons imports the host Linker must wire.
-    // With no plugins this is a plain compile of the policy bytes and an
-    // empty manifest.
-    let composition = state
-        .runner
-        .compose(&artifact.wasm_bytes, &plugin_instances)
+    // Hand the pulled bytes to the COMPILE boundary: fuse + compile + parse
+    // sections into a `CompiledBundle` (cwasm + i18n/icons import manifest +
+    // per-component catalogs, composition order). In-process today
+    // (`LocalCompiler`); a compile-worker CVM later, same trait.
+    // `PolicyCache::get_or_compute` persists the bundle to L2 and reconstructs
+    // the L1 `PolicyEntry` from it.
+    state
+        .compiler
+        .compile(artifact.wasm_bytes, plugin_instances)
+        .await
         .map_err(|e| {
             eprintln!(
-                "lookup_policy: policy+plugin composition failed for {session_id}: {e}",
+                "lookup_policy: compile failed for {session_id} (policy_ref {}): {e}",
+                metadata.policy_ref,
             );
             StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    let component = Arc::new(composition.component);
-    let embedded_imports = Arc::new(composition.embedded_imports);
-    // Parse the policy's embedded sections directly from the
-    // decrypted wasm component — both
-    // `enclavid:embedded.disclosure-fields.v1` and
-    // `enclavid:embedded.i18n.v1` custom sections are optional, and
-    // either / both / neither may be present.
-    let policy_catalog = enclavid_engine::load_embedded(&artifact.wasm_bytes).map_err(|e| {
-        eprintln!(
-            "lookup_policy: load_embedded failed for {session_id} \
-             (policy_ref {}): {e}",
-            metadata.policy_ref,
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    // Catalogs in composition order (policy first, which fixes the
-    // merged-path first-match order), then plugins in `plugin_instances`
-    // order (mirrors `client.plugins`). Collected once and fed to BOTH the
-    // registry builder AND the L2 cache bundle, so a cache hit rebuilds a
-    // byte-identical registry without re-parsing artifacts.
-    let mut catalogs: Vec<([u8; 32], ComponentDecls)> =
-        Vec::with_capacity(1 + plugin_catalogs.len());
-    catalogs.push((policy_catalog.hash, policy_catalog.decls));
-    for catalog in plugin_catalogs {
-        catalogs.push((catalog.hash, catalog.decls));
-    }
-    let mut embedded_builder = EmbeddedRegistry::builder();
-    for (hash, decls) in &catalogs {
-        embedded_builder.add_component(*hash, decls.clone());
-    }
-    let embedded = Arc::new(embedded_builder.build());
-    let entry = Arc::new(PolicyEntry {
-        component,
-        embedded_imports,
-        embedded,
-    });
-    // Return the entry + catalogs; the cache facade persists to L2 and
-    // populates L1 (see `PolicyCache::get_or_compute`).
-    Ok(ColdPolicy { entry, catalogs })
+        })
 }
 
 /// Content-address of a fused composition: each artifact (policy + ORDERED
