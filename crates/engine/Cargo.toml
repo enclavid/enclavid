@@ -14,19 +14,20 @@ enclavid-embedded = { path = "../embedded" }
 # original engine paths, so callers see no change.
 engine-types = { path = "../engine-types" }
 
-# Used by `runner::decls::load_embedded` to pull the embedded custom
-# sections (disclosure-fields, i18n) straight out of a compiled policy
-# component without having to round-trip through wasmtime instantiation.
-wasmparser = "0.247"
+# The COMPILE half — fusion + Cranelift codegen + section parsing. This
+# crate is the EXECUTE half plus a `Runner` facade that delegates compose /
+# serialize to a held `engine_compiler::Compiler`; the compiler crate owns
+# wac-graph + wasmparser (moved out of here). Cranelift reaches this build
+# only transitively through this dep — the next cut lifts the execute half
+# into a standalone `engine-executor` that drops it entirely.
+engine-compiler = { path = "../engine-compiler" }
 
-# Single-store composition: `runner::compose` fuses a policy with its
-# pinned plugins into ONE component (one wasmtime Store ⇒ native
-# cross-component resources) via wac's `plug`. wac 0.10 emits
-# wasm-tools 0.247 encoding, which wasmtime 46 loads.
-wac-graph = "0.10"
-
+# RUNTIME only (no cranelift API is called here — `Component::new` moved to
+# engine-compiler; this crate `deserialize`s + instantiates + runs). The
+# `cranelift` feature is intentionally absent from THIS list; it arrives
+# only via engine-compiler, and drops out for real when engine-executor
+# splits off.
 wasmtime = { version = "46", default-features = false, features = [
-    "cranelift",
     "component-model",
     "runtime",
     "std",

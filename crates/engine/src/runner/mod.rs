@@ -22,13 +22,14 @@
 //! accepted on the consent screen — "show == seal". On a `false` reply,
 //! or any other event, NOTHING is sealed.
 
-mod compose;
 mod convert;
 mod status;
 
 use broker_client::{Event, Prompt, SessionState};
 use wasmtime::component::{Component, Linker, Resource};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::Store;
+
+use engine_compiler::{Compiler, Composition};
 
 use crate::Host_ as GeneratedHost;
 use crate::embedded::{Icon, IconRef, Localized, LocalizedRef, undeclared_trap};
@@ -46,45 +47,39 @@ pub use status::RunStatus;
 /// as `runner::*` / `enclavid_engine::*`.
 pub use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstance};
 
-/// A fused policy component plus the manifest of distinct embedded
-/// imports its host `Linker` must register. Returned by
-/// [`Runner::compose`]; the caller caches both and hands the manifest
-/// back to [`Runner::run`].
-pub struct Composition {
-    pub component: Component,
-    pub embedded_imports: Vec<EmbeddedImport>,
-}
-
 /// Runs policy WASM against session state.
+///
+/// This is the fleet's EXECUTE half plus a thin compile facade: it holds
+/// an [`engine_compiler::Compiler`] it delegates fusion / codegen to, and
+/// runs (`deserialize` + instantiate + `handle`) on that compiler's SAME
+/// wasmtime engine — a component is only instantiable on the engine it was
+/// compiled on, so in-process the two share one engine. The cross-CVM
+/// split instead gives the compile-worker and execution-worker separate
+/// engines and bridges them with serialized `cwasm` (compose over there,
+/// `deserialize` + `run` over here).
 pub struct Runner {
-    engine: Engine,
+    compiler: Compiler,
 }
 
 impl Runner {
     pub fn new() -> wasmtime::Result<Self> {
-        let mut config = Config::new();
-        config.wasm_component_model(true);
-        // Enable fuel accounting so per-Store budgets actually trap out
-        // a runaway policy. Memory caps live on the Store via
-        // `Store::limiter` — set up in `run` alongside the fuel budget.
-        // Without both, a malicious policy could hang or OOM the enclave.
-        config.consume_fuel(true);
-        let engine = Engine::new(&config)?;
-        Ok(Self { engine })
+        Ok(Self {
+            compiler: Compiler::new()?,
+        })
     }
 
     /// Compile a policy component from its binary (wasm or wat).
+    /// Delegates to the held [`Compiler`] (Cranelift codegen).
     pub fn compile(&self, bytes: &[u8]) -> wasmtime::Result<Component> {
-        Component::new(&self.engine, bytes)
+        self.compiler.compile(bytes)
     }
 
     /// Serialize a compiled component to `cwasm` bytes for the L2
     /// compiled-artifact cache. Inverse of [`deserialize_component`].
-    /// The bytes are only valid on an engine built compatibly (same
-    /// wasmtime version / `Config` / target) — the cache seals them and
-    /// treats an incompatible load as a miss.
+    /// Delegates to the held [`Compiler`]; the bytes deserialize on THIS
+    /// runner's engine because both engines share [`engine_config`].
     pub fn serialize_component(&self, component: &Component) -> wasmtime::Result<Vec<u8>> {
-        component.serialize()
+        self.compiler.serialize_component(component)
     }
 
     /// Reconstruct a component from `cwasm` bytes produced by
@@ -103,70 +98,30 @@ impl Runner {
         // SAFETY: bytes are TEE-sealed (trusted provenance) and
         // wasmtime's own header check rejects an incompatible build —
         // see the doc comment above.
-        unsafe { Component::deserialize(&self.engine, cwasm) }
+        unsafe { Component::deserialize(self.compiler.engine(), cwasm) }
     }
 
-    /// Fuse a policy with plugins into a self-contained component's
-    /// BYTES — the strict-routed static artifact `enclavid link` would
-    /// publish. The embedded manifest is reconstructed from these bytes
-    /// at load time (see [`compose::reconstruct_strict_manifest`]), so
-    /// it isn't returned here.
+    /// Fuse a policy with plugins into a self-contained component's BYTES
+    /// (the strict-routed static artifact `enclavid link` would publish).
+    /// Delegates to the held [`Compiler`].
     pub fn fuse(&self, policy_wasm: &[u8], plugins: &[PluginInstance]) -> wasmtime::Result<Vec<u8>> {
-        let (bytes, _manifest) = compose::fuse(policy_wasm, plugins)?;
-        Ok(bytes)
+        self.compiler.fuse(policy_wasm, plugins)
     }
 
     /// Fuse a policy with its pinned plugins into ONE component and
-    /// compile it. `wac-graph` single-store fusion (see
-    /// [`compose::fuse`]) wires every plugin export into the policy's
-    /// imports; the result runs in one wasmtime `Store`, so
-    /// cross-component WIT resources are native handles. With no
-    /// plugins this is just [`compile`](Self::compile) on the policy
-    /// bytes.
-    ///
-    /// This is a build-time step: the caller compiles once per
-    /// `(policy, plugin-set)` and reuses the returned [`Composition`]
-    /// across every reducer round.
-    ///
-    /// Three shapes are handled:
-    ///
-    ///   * **Dynamic** — a non-fused policy plus runtime `plugins`:
-    ///     [`compose::fuse`] routes each component's i18n / icons import
-    ///     to a distinct per-catalog import (the manifest).
-    ///   * **Static** — a pre-fused policy artifact with no runtime
-    ///     plugins: compiled as-is; the manifest is reconstructed from
-    ///     the `embedded-slot:*` imports the artifact already carries
-    ///     (empty for a lone unfused policy, whose canonical embedded
-    ///     imports the host serves first-match).
-    ///   * **Hybrid** — a pre-fused core plus runtime `plugins`: fused
-    ///     again; the core's own routed imports bubble through and are
-    ///     re-emitted alongside the freshly routed runtime ones.
+    /// compile it — the build-time step run once per `(policy, plugin-set)`
+    /// and reused across every reducer round. Delegates to the held
+    /// [`Compiler`]; see [`Compiler::compose`] for the dynamic / static /
+    /// hybrid shapes. The returned [`Composition`]'s `component` is
+    /// compiled on the compiler's engine; the caller serializes it and
+    /// later [`deserialize_component`](Self::deserialize_component)s the
+    /// bytes on this runner's own engine to run.
     pub fn compose(
         &self,
         policy_wasm: &[u8],
         plugins: &[PluginInstance],
     ) -> wasmtime::Result<Composition> {
-        let (component, mut embedded_imports) = if plugins.is_empty() {
-            (
-                self.compile(policy_wasm)?,
-                compose::reconstruct_strict_manifest(policy_wasm)?,
-            )
-        } else {
-            let (fused, mut manifest) = compose::fuse(policy_wasm, plugins)?;
-            // Hybrid pass-through: the core's own `embedded-slot:*`
-            // imports came through fusion untouched — add their manifest
-            // entries. Empty for a non-fused dynamic policy.
-            manifest.extend(compose::reconstruct_strict_manifest(policy_wasm)?);
-            (Component::new(&self.engine, &fused)?, manifest)
-        };
-        // Dedup by instance name: a runtime plugin and a baked one can
-        // share a catalog (same slug) — register the host instance once.
-        let mut seen = std::collections::HashSet::new();
-        embedded_imports.retain(|e| seen.insert(e.instance_name.clone()));
-        Ok(Composition {
-            component,
-            embedded_imports,
-        })
+        self.compiler.compose(policy_wasm, plugins)
     }
 
     /// Drive one reducer round. `session` carries the policy's opaque
@@ -219,7 +174,7 @@ impl Runner {
         // away, so the canonical registrations sit unused, which is
         // harmless). Plugin↔policy interfaces are internal to the fused
         // component, so the Linker never sees them.
-        let mut linker: Linker<HostState> = Linker::new(&self.engine);
+        let mut linker: Linker<HostState> = Linker::new(self.compiler.engine());
         GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
         // Then the DISTINCT per-catalog i18n/icons instances the fusion
         // produced (`embedded-slot:<hash>/<iface>`), each resolving
@@ -229,7 +184,7 @@ impl Runner {
 
         // Instantiate the policy and call `handle` ONCE.
         let mut store = Store::new(
-            &self.engine,
+            self.compiler.engine(),
             HostState::new(props, embedded.clone(), media_store),
         );
         store.limiter(|s| &mut s.limits);

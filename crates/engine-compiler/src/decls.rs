@@ -26,11 +26,12 @@ use enclavid_embedded::{
 };
 use wasmparser::{Parser, Payload};
 
-use super::hash::catalog_hash;
-use super::registry::{ComponentDecls, Translation};
-use crate::limits::{
+use engine_types::embedded::{ComponentDecls, Translation};
+use engine_types::limits::{
     MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_ICONS, MAX_DECLARED_LOCALIZED,
 };
+
+use crate::hash::catalog_hash;
 
 /// WIT interface a component exports iff it is the POLICY (not a
 /// plugin). Matched by prefix so a version bump doesn't break policy

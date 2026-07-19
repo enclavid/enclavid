@@ -30,18 +30,23 @@ mod sanitize;
 mod state;
 
 pub use embedded::{
-    ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedCatalog, EmbeddedRegistry,
+    ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedRegistry,
     EmbeddedRegistryBuilder, Icon, IconStore, Localized, LocalizedStore, RefKind, RefStore,
-    Translation, catalog_hash, load_embedded, load_embedded_nested, slug, top_level_imports,
+    Translation,
+};
+// The COMPILE half (fusion + Cranelift + section parsing) lives in the
+// `engine-compiler` crate now; re-export its surface here so callers keep
+// reaching it through `enclavid_engine::*` unchanged.
+pub use engine_compiler::{
+    Composition, EmbeddedCatalog, catalog_hash, load_embedded, load_embedded_nested, slug,
+    top_level_imports,
 };
 pub use broker_client::{
     Action, Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
 };
 pub use listener::{CapturedMedia, ConsentDisclosure, SessionChange, SessionListener};
 pub use media_store::MediaStore;
-pub use runner::{
-    Composition, EmbeddedIface, EmbeddedImport, PluginInstance, RunStatus, Runner,
-};
+pub use runner::{EmbeddedIface, EmbeddedImport, PluginInstance, RunStatus, Runner};
 pub use state::RunInputs;
 /// The bindgen-generated `enclavid:host/types.prop` — the consumer's
 /// static-config value variant. Re-exported so the api crate can build

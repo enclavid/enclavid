@@ -1497,14 +1497,13 @@ dependencies = [
  "blake3",
  "broker-client",
  "enclavid-embedded",
+ "engine-compiler",
  "engine-types",
  "jpeg-encoder",
  "serde",
  "serde_json",
  "tokio",
- "wac-graph",
  "wasm-encoder 0.247.0",
- "wasmparser 0.247.0",
  "wasmtime",
  "wit-component 0.247.0",
  "xtask",
@@ -1539,6 +1538,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "engine-compiler"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "enclavid-embedded",
+ "engine-types",
+ "wac-graph",
+ "wasmparser 0.247.0",
+ "wasmtime",
 ]
 
 [[package]]

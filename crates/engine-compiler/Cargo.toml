@@ -1,0 +1,43 @@
+[package]
+name = "engine-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The COMPILE half of the engine fleet: fuse a policy + its pinned plugins
+# into one component and run Cranelift codegen, producing serializable
+# `cwasm`. This is the ONLY crate carrying the Cranelift toolchain — the
+# execution half (engine-executor) structurally does not depend on it, so
+# the CVM that runs untrusted wasm carries no compiler surface. Shares only
+# the plain-data engine-types leaf with the executor; the compiled cwasm
+# bytes are the sole artifact crossing between them.
+[dependencies]
+engine-types = { path = "../engine-types" }
+
+# Cranelift codegen + component fusion validation. Same feature set as the
+# executor's wasmtime so the `Config` (and hence the cwasm compatibility
+# header) matches bit-for-bit — a component serialized here must deserialize
+# on the executor's runtime-only engine.
+wasmtime = { version = "46", default-features = false, features = [
+    "cranelift",
+    "component-model",
+    "runtime",
+    "std",
+    "async",
+] }
+
+# Single-store fusion: `compose::fuse` wires each plugin's exports into the
+# policy's imports via wac's hand-built composition graph. wac 0.10 emits
+# wasm-tools 0.247 encoding, which wasmtime 46 loads.
+wac-graph = "0.10"
+
+# `decls::load_embedded` pulls the embedded custom sections (disclosure-
+# fields / i18n / icons) straight out of a compiled component without
+# round-tripping through wasmtime instantiation.
+wasmparser = "0.247"
+
+# Catalog content-hashing (`hash::catalog_hash`) + the section parsers /
+# cardinality caps the loader enforces.
+blake3 = "1"
+enclavid-embedded = { path = "../embedded" }

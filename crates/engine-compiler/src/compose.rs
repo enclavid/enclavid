@@ -24,10 +24,9 @@ use std::collections::HashMap;
 use wac_graph::types::{ItemKind, Package};
 use wac_graph::{CompositionGraph, EncodeOptions, NodeId, PackageId};
 
-use super::{EmbeddedIface, EmbeddedImport, PluginInstance};
-use crate::embedded::{
-    embedded_import_name, load_embedded, load_embedded_nested, top_level_imports,
-};
+use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstance};
+
+use crate::{embedded_import_name, load_embedded, load_embedded_nested, top_level_imports};
 
 /// Namespace prefix of a strict per-component embedded import that a
 /// pre-fused artifact already carries.

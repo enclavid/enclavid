@@ -81,8 +81,8 @@ pub fn slug(hash: &[u8; 32]) -> String {
 /// the canonical import's `@x.y.z` (empty for unversioned).
 ///
 /// The slug is hex (no `-`), so the first `-` in the package segment is
-/// the slug/version boundary — [`super::super::runner`] inverts this to
-/// recover `(iface, version)`. Round-trips for `x.y.z`; pre-release
+/// the slug/version boundary — `compose::slot_import_parts` inverts this
+/// to recover `(iface, version)`. Round-trips for `x.y.z`; pre-release
 /// versions (which contain `-`) are not used by these interfaces.
 pub fn embedded_import_name(hash: &[u8; 32], iface: &str, version: &str) -> String {
     if version.is_empty() {
