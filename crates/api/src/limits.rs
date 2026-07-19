@@ -2,7 +2,7 @@
 //! HTTP / multipart / external-input boundary enforces lives here.
 //!
 //! **These are compile-time constants by design.** Together with
-//! [`enclavid_engine::limits`] they form the enclave's full trust
+//! [`engine_executor::limits`] they form the enclave's full trust
 //! contract: a consumer attesting the enclave hash is implicitly
 //! attesting these values too. Routing them through env / config /
 //! runtime input would let an untrusted host:

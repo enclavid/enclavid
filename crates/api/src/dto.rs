@@ -134,7 +134,7 @@ pub fn consent_field_view_from_proto(f: &ProtoDisplayField, locale: &Locale) -> 
 /// carries no translation rows.
 pub fn pick_localized(localized: &Localized, locale: &Locale) -> String {
     match locale.pick(&localized.translations) {
-        Some(picked) => enclavid_engine::sanitize_text_value(picked),
+        Some(picked) => engine_executor::sanitize_text_value(picked),
         None => String::new(),
     }
 }

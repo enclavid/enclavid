@@ -68,7 +68,7 @@ fn classify_transport_error(e: broker_client::BridgeError) -> PullError {
 /// (`enclavid:embedded.disclosure-fields.v1`,
 /// `enclavid:embedded.i18n.v1`) live inside the wasm as component-
 /// level custom sections; the caller extracts them via
-/// `enclavid_engine::load_embedded`. No sidecar layer.
+/// `engine_compiler::load_embedded`. No sidecar layer.
 pub struct PolicyArtifact {
     /// Wasm bytes ready to compile with wasmtime.
     pub wasm_bytes: Vec<u8>,

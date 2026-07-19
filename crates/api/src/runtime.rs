@@ -17,7 +17,8 @@ use axum::http::StatusCode;
 use moka::future::Cache;
 
 use broker_client::CacheStore;
-use enclavid_engine::{Component, EmbeddedImport, EmbeddedRegistry, Runner};
+use engine_compiler::Compiler;
+use engine_executor::{Component, EmbeddedImport, EmbeddedRegistry, Executor};
 
 use runtime_protocol::CompiledBundle;
 
@@ -26,7 +27,7 @@ use crate::cwasm_cache;
 
 /// Per-session compiled policy artifact: the fused wasmtime
 /// `Component` (policy + its pinned plugins, wac single-store fused at
-/// /connect via [`Runner::compose`](enclavid_engine::Runner::compose)),
+/// /connect via [`Compiler::compose`](engine_compiler::Compiler::compose)),
 /// the manifest of distinct per-catalog i18n/icons imports the host
 /// `Linker` must register, and the composition-wide `EmbeddedRegistry`
 /// (policy first, then plugins in pinned `Client.plugins` order; holds
@@ -53,7 +54,7 @@ pub struct PolicyEntry {
 /// * **L1** — in-RAM moka `Cache<composition_key, Arc<PolicyEntry>>`,
 ///   shared across sessions. Bounded in size and TTL to release unused
 ///   entries. A process restart empties it (which is why the composition
-///   key need not include the wasmtime version — the same `Runner` engine
+///   key need not include the wasmtime version — the same executor engine
 ///   produced every live `Component`).
 /// * **L2** — broker-backed sealed cwasm ([`CacheStore`]), survives a TEE
 ///   / broker restart so a cold start reuses the compile.
@@ -65,20 +66,21 @@ pub struct PolicyEntry {
 pub struct PolicyCache {
     l1: Cache<String, Arc<PolicyEntry>>,
     l2: CacheStore,
-    /// Shares the process `Engine` with the caller's `Runner`; the L2
-    /// tier needs it to (de)serialize the compiled `Component`.
-    runner: Arc<Runner>,
+    /// The execute-side [`Executor`]; the L2 tier needs its engine to
+    /// `deserialize` a cached cwasm back into a live `Component`. (Serialize
+    /// is the compiler's job — the L2 store only ever reads here.)
+    executor: Arc<Executor>,
 }
 
 impl PolicyCache {
-    pub fn new(l2: CacheStore, runner: Arc<Runner>) -> Self {
+    pub fn new(l2: CacheStore, executor: Arc<Executor>) -> Self {
         let l1 = Cache::builder()
             // A hard ceiling on distinct compiled compositions — far above
             // the handful a deployment has.
             .max_capacity(10_000)
             .time_to_idle(Duration::from_secs(3600))
             .build();
-        Self { l1, l2, runner }
+        Self { l1, l2, executor }
     }
 
     /// Resolve the compiled entry for `key`, computing on a full miss.
@@ -104,7 +106,7 @@ impl PolicyCache {
         self.l1
             .try_get_with(key.clone(), async move {
                 // L1 miss (deduped). Try the restart-surviving L2 first.
-                if let Some(entry) = cwasm_cache::try_load(&self.l2, &self.runner, &key).await {
+                if let Some(entry) = cwasm_cache::try_load(&self.l2, &self.executor, &key).await {
                     return Ok(entry);
                 }
                 // Full miss: cold-compile to a bundle, persist it to L2, then
@@ -112,7 +114,7 @@ impl PolicyCache {
                 // takes, so cold and warm paths can never diverge.
                 let bundle = loader().await?;
                 cwasm_cache::store(&self.l2, &key, &bundle).await;
-                bundle_to_entry(&bundle, &self.runner).ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+                bundle_to_entry(&bundle, &self.executor).ok_or(StatusCode::INTERNAL_SERVER_ERROR)
             })
             .await
             // moka wraps the loader error in an Arc (shared with coalesced
@@ -121,9 +123,19 @@ impl PolicyCache {
     }
 }
 
-/// Construct the shared Runner. Wrapped in an Arc so both client and
-/// applicant states can hold references; the underlying `Engine` is
-/// thread-safe and intended for sharing.
-pub fn new_runner() -> Arc<Runner> {
-    Arc::new(Runner::new().expect("failed to create runner"))
+/// Construct the compile engine (Cranelift). Wrapped in an `Arc` so the
+/// [`LocalCompiler`](crate::compiler::LocalCompiler) can share it; the
+/// underlying `Engine` is thread-safe.
+pub fn new_compiler() -> Arc<Compiler> {
+    Arc::new(Compiler::new().expect("failed to create compiler"))
+}
+
+/// Construct the execute engine (runtime-only). Wrapped in an `Arc` so the
+/// [`LocalExecutor`](crate::executor::LocalExecutor) and the L2
+/// [`PolicyCache`] (which deserializes cached cwasm) share ONE executor.
+/// This is a DISTINCT engine from [`new_compiler`]'s — a cwasm compiled
+/// there deserializes here because both build from the same `engine_config`
+/// (the in-process proof of the cross-CVM compile→execute bridge).
+pub fn new_executor() -> Arc<Executor> {
+    Arc::new(Executor::new().expect("failed to create executor"))
 }

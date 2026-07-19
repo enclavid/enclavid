@@ -33,7 +33,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use broker_client::{Replay, SessionStore, public_session_id, reason};
-use enclavid_engine::{MediaStore, RunError, RunResult};
+use engine_executor::{MediaStore, RunError, RunResult};
 use moka::future::Cache;
 use secrecy::{ExposeSecret, SecretBox};
 

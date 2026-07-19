@@ -45,7 +45,7 @@ use broker_client::{
     SetMedia, SetMetadata, SetState, SetStatus, WriteField, boundary, encode_padded, reason,
 };
 use enclavid_crypto::seal_to_recipient;
-use enclavid_engine::{
+use engine_executor::{
     ConsentDisclosure, RunError, RunResult, RunStatus, SessionChange, SessionListener,
 };
 

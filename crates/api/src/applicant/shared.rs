@@ -14,7 +14,7 @@ use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
-use enclavid_engine::{
+use engine_executor::{
     Component, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs, RunStatus,
     SessionListener, SessionState,
 };
@@ -149,7 +149,7 @@ pub(super) struct SessionRunCtx {
     /// Manifest of distinct per-catalog i18n/icons imports the engine
     /// registers on the host `Linker` for this fused component. Shared
     /// by Arc with the cache entry.
-    embedded_imports: Arc<Vec<enclavid_engine::EmbeddedImport>>,
+    embedded_imports: Arc<Vec<engine_executor::EmbeddedImport>>,
     run_inputs: RunInputs,
 }
 
@@ -219,7 +219,7 @@ impl SessionRunCtx {
 /// degrades silently to 500. Acceptable trade-off given the
 /// alternative (typed error all the way through wasmtime trap →
 /// host fn → engine → applicant) is significantly more code.
-fn classify_run_error(session_id: &str, e: &enclavid_engine::RunError) -> ApiError {
+fn classify_run_error(session_id: &str, e: &engine_executor::RunError) -> ApiError {
     // `{e:#}` walks the anyhow chain — without this we only see the
     // top-level "wasm error / trap" line and miss the underlying
     // `ensure_registered` message buried below the wasm backtrace.

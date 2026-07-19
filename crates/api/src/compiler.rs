@@ -2,7 +2,8 @@
 //! [`CompiledBundle`], behind a [`Compiler`] trait so the compile step can move
 //! OUT of process (a compile-worker CVM) later without touching the caller.
 //!
-//! [`LocalCompiler`] runs the compile in-process on the shared [`Runner`] today.
+//! [`LocalCompiler`] runs the compile in-process on the shared
+//! [`Compiler`](engine_compiler::Compiler) today.
 //! A future `RemoteCompiler` implements the same trait over remoc's
 //! [`CompilerService`](runtime_protocol::CompilerService) — the orchestrator
 //! holds an `Arc<dyn Compiler>` and `deserialize`s the returned cwasm bytes via
@@ -18,7 +19,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use enclavid_engine::{EmbeddedRegistry, PluginInstance, Runner, load_embedded};
+use engine_compiler::{Compiler as EngineCompiler, load_embedded};
+use engine_executor::{EmbeddedRegistry, Executor as EngineExecutor, PluginInstance};
 use runtime_protocol::{CatalogEntry, CompileError, CompiledBundle};
 
 use crate::runtime::PolicyEntry;
@@ -30,8 +32,8 @@ use crate::runtime::PolicyEntry;
 /// toolchain skew / tampered cwasm — an L2 hit treats that as a miss; the cold
 /// path (which deserializes bytes it just serialized on the same engine) never
 /// hits it in practice.
-pub fn bundle_to_entry(bundle: &CompiledBundle, runner: &Runner) -> Option<Arc<PolicyEntry>> {
-    let component = runner.deserialize_component(&bundle.cwasm).ok()?;
+pub fn bundle_to_entry(bundle: &CompiledBundle, executor: &EngineExecutor) -> Option<Arc<PolicyEntry>> {
+    let component = executor.deserialize_component(&bundle.cwasm).ok()?;
     let mut builder = EmbeddedRegistry::builder();
     for c in &bundle.catalogs {
         builder.add_component(c.hash, c.decls.clone());
@@ -46,7 +48,7 @@ pub fn bundle_to_entry(bundle: &CompiledBundle, runner: &Runner) -> Option<Arc<P
 /// The COMPILE boundary. Given already-pulled artifact bytes (the orchestrator
 /// owns the OCI pull + registry auth), fuse + compile + parse-sections into a
 /// [`CompiledBundle`]. Object-safe boxed-future (mirrors
-/// [`MediaStore`](enclavid_engine::MediaStore)) so the impl can be swapped for
+/// [`MediaStore`](engine_executor::MediaStore)) so the impl can be swapped for
 /// an out-of-process `RemoteCompiler` (remoc client) behind an `Arc<dyn Compiler>`.
 pub trait Compiler: Send + Sync {
     fn compile<'a>(
@@ -56,16 +58,17 @@ pub trait Compiler: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<CompiledBundle, CompileError>> + Send + 'a>>;
 }
 
-/// In-process compiler: runs fusion + Cranelift on the shared process
-/// [`Runner`]. The compile is synchronous CPU work (as it is today); a later
-/// `RemoteCompiler` moves it to a compile-worker CVM over remoc.
+/// In-process compiler: runs fusion + Cranelift on the shared
+/// [`Compiler`](engine_compiler::Compiler). The compile is synchronous CPU
+/// work (as it is today); a later `RemoteCompiler` moves it to a
+/// compile-worker CVM over remoc.
 pub struct LocalCompiler {
-    runner: Arc<Runner>,
+    compiler: Arc<EngineCompiler>,
 }
 
 impl LocalCompiler {
-    pub fn new(runner: Arc<Runner>) -> Self {
-        Self { runner }
+    pub fn new(compiler: Arc<EngineCompiler>) -> Self {
+        Self { compiler }
     }
 }
 
@@ -75,11 +78,11 @@ impl Compiler for LocalCompiler {
         policy_wasm: Vec<u8>,
         plugins: Vec<PluginInstance>,
     ) -> Pin<Box<dyn Future<Output = Result<CompiledBundle, CompileError>> + Send + 'a>> {
-        let runner = self.runner.clone();
+        let compiler = self.compiler.clone();
         Box::pin(async move {
             // Parse each component's embedded sections (dropped by compile) in
             // composition order: policy first, then plugins in pinned order —
-            // fixes the merged-DF first-match order (mirrors `Runner::compose`).
+            // fixes the merged-DF first-match order (mirrors `Compiler::compose`).
             let policy_catalog =
                 load_embedded(&policy_wasm).map_err(|e| CompileError(e.to_string()))?;
             let mut catalogs = Vec::with_capacity(1 + plugins.len());
@@ -96,10 +99,10 @@ impl Compiler for LocalCompiler {
             }
             // Fuse + compile (blocking Cranelift), then serialize to cwasm — the
             // process-honest boundary output (bytes, not a live `Component`).
-            let composition = runner
+            let composition = compiler
                 .compose(&policy_wasm, &plugins)
                 .map_err(|e| CompileError(e.to_string()))?;
-            let cwasm = runner
+            let cwasm = compiler
                 .serialize_component(&composition.component)
                 .map_err(|e| CompileError(e.to_string()))?;
             Ok(CompiledBundle {

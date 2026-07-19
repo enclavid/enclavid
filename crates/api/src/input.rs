@@ -8,7 +8,7 @@
 
 use serde_json::Value;
 
-use enclavid_engine::Prop;
+use engine_executor::Prop;
 
 use crate::limits::MAX_MATCH_INPUT_SIZE;
 

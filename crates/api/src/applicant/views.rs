@@ -14,7 +14,7 @@
 
 use serde::Serialize;
 
-use enclavid_engine::{Decision, RunStatus};
+use engine_executor::{Decision, RunStatus};
 use broker_client::{
     CameraFacing, CaptureGuide, CaptureStep, MediaSpec, Prompt, PromptDisclosure, capture_guide,
 };

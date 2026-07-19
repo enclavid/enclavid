@@ -29,12 +29,14 @@ use crate::state::AppState;
 async fn main() {
     let address_out = std::env::var("ENCLAVID_ADDRESS_OUT").expect("ENCLAVID_ADDRESS_OUT not set");
 
-    // Single per-process wasmtime Engine + cache of compiled policy
-    // components, owned by the applicant `AppState`. Compilation
-    // happens lazily on the first /connect for each session (pulling
-    // the policy artifact via the pinned ref in metadata) and is
-    // reused for subsequent /input rounds.
-    let runner = runtime::new_runner();
+    // Per-process compile engine (Cranelift) + execute engine (runtime-only),
+    // owned by the applicant `AppState`. Distinct engines bridged by
+    // serialized cwasm (the in-process shape of the cross-CVM split).
+    // Compilation happens lazily on the first /connect for each session
+    // (pulling the policy artifact via the pinned ref) and the compiled
+    // component is cached + reused for subsequent /input rounds.
+    let compiler_engine = runtime::new_compiler();
+    let executor_engine = runtime::new_executor();
 
     // SessionStore is the broker-client HTTP-over-vsock client for
     // per-session typed-field storage. Shared between client API
@@ -77,7 +79,8 @@ async fn main() {
         AppState::init(
             &address_out,
             session_store,
-            runner,
+            compiler_engine,
+            executor_engine,
             shuffle_key,
             &tee_seal_key,
         )

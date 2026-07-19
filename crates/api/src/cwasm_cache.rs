@@ -8,7 +8,7 @@
 //! [`CompiledBundle`] the [`Compiler`](crate::compiler::Compiler) produces) can
 //! be stored once and reloaded on a later boot without re-pulling or
 //! re-compiling — the same bundle a cold compile yields, so both paths
-//! reconstruct via [`CompiledBundle::to_entry`].
+//! reconstruct via [`bundle_to_entry`](crate::compiler::bundle_to_entry).
 //!
 //! ## Compatibility / invalidation — three independent guards
 //!
@@ -22,8 +22,9 @@
 //!      [`CompiledBundle`] — even if the version bump is forgotten, ANY
 //!      struct-shape drift makes the CBOR decode error (missing OR extra field),
 //!      which this treats as a miss.
-//!   3. wasmtime's own compatibility header — [`Runner::deserialize_component`]
-//!      (via [`CompiledBundle::to_entry`]) returns `Err` on a toolchain skew, so
+//!   3. wasmtime's own compatibility header —
+//!      [`Executor::deserialize_component`](engine_executor::Executor::deserialize_component)
+//!      (via `bundle_to_entry`) returns `Err` on a toolchain skew, so
 //!      an incompatible cwasm is a miss, then re-stored fresh. (The semantic
 //!      case — same field shape, changed meaning — is caught only by guard 1, an
 //!      inherent limit of any serialization, named honestly.)
@@ -35,7 +36,7 @@
 use std::sync::Arc;
 
 use broker_client::CacheStore;
-use enclavid_engine::Runner;
+use engine_executor::Executor;
 
 use runtime_protocol::CompiledBundle;
 
@@ -60,7 +61,7 @@ fn cache_id(composition_key: &str) -> String {
 /// the caller falls through to the cold compile path.
 pub async fn try_load(
     cache: &CacheStore,
-    runner: &Runner,
+    executor: &Executor,
     composition_key: &str,
 ) -> Option<Arc<PolicyEntry>> {
     let id = cache_id(composition_key);
@@ -82,7 +83,7 @@ pub async fn try_load(
     };
     // Deserialize cwasm + rebuild registry via the same path the cold build
     // uses. `None` here = wasmtime toolchain skew / tamper → miss (guard 3).
-    match bundle_to_entry(&bundle, runner) {
+    match bundle_to_entry(&bundle, executor) {
         Some(entry) => Some(entry),
         None => {
             eprintln!("cwasm_cache: cwasm deserialize failed (cold path)");
