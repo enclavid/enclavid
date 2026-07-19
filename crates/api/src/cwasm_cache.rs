@@ -38,7 +38,7 @@ use std::sync::Arc;
 use broker_client::CacheStore;
 use engine_executor::Executor;
 
-use runtime_protocol::CompiledBundle;
+use rpc::CompiledBundle;
 
 use crate::compiler::bundle_to_entry;
 use crate::runtime::PolicyEntry;

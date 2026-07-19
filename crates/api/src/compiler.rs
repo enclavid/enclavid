@@ -5,12 +5,12 @@
 //! [`LocalCompiler`] runs the compile in-process on the shared
 //! [`Compiler`](engine_compiler::Compiler) today.
 //! A future `RemoteCompiler` implements the same trait over remoc's
-//! [`CompilerService`](runtime_protocol::CompilerService) — the orchestrator
+//! [`CompilerService`](rpc::CompilerService) — the orchestrator
 //! holds an `Arc<dyn Compiler>` and `deserialize`s the returned cwasm bytes via
 //! [`bundle_to_entry`], a boundary already PROCESS-HONEST (bytes in, bytes out,
 //! no live `Component` crosses it).
 //!
-//! The [`CompiledBundle`] wire type lives in `runtime-protocol` (it is both the
+//! The [`CompiledBundle`] wire type lives in the `rpc` crate (it is both the
 //! compile RPC return value and the L2 cache bundle, see [`crate::cwasm_cache`])
 //! so a cold compile and an L2 hit reconstruct a [`PolicyEntry`] through the one
 //! [`bundle_to_entry`] path.
@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use engine_compiler::{Compiler as EngineCompiler, load_embedded};
 use engine_executor::{EmbeddedRegistry, Executor as EngineExecutor, PluginInstance};
-use runtime_protocol::{CatalogEntry, CompileError, CompiledBundle};
+use rpc::{CatalogEntry, CompileError, CompiledBundle};
 
 use crate::runtime::PolicyEntry;
 

@@ -29,7 +29,7 @@ use crate::error::ApiError;
 use crate::input::parse_input;
 use crate::locale::Locale;
 use crate::policy_pull;
-use runtime_protocol::CompiledBundle;
+use rpc::CompiledBundle;
 
 use crate::runtime::PolicyEntry;
 use crate::state::AppState;

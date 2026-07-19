@@ -13,7 +13,7 @@ members = [
     "crates/crypto",
     "crates/embedded",
     "crates/kbs-client",
-    "crates/runtime-protocol",
+    "crates/rpc",
     "xtask",
 ]
 

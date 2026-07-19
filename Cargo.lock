@@ -1396,7 +1396,7 @@ dependencies = [
  "rand 0.8.6",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
- "runtime-protocol",
+ "rpc",
  "secrecy",
  "serde",
  "serde_json",
@@ -3867,6 +3867,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpc"
+version = "0.1.0"
+dependencies = [
+ "broker-client",
+ "ciborium",
+ "engine-types",
+ "remoc",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3884,18 +3896,6 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "runtime-protocol"
-version = "0.1.0"
-dependencies = [
- "broker-client",
- "ciborium",
- "engine-types",
- "remoc",
- "serde",
- "tokio",
 ]
 
 [[package]]

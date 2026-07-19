@@ -8,7 +8,7 @@
 //! is the executor's (and the api view layer's) ref→data projection. They
 //! are plain data (serde + `std` collections), so the client-only
 //! orchestrator can hold and project them without pulling the wasmtime
-//! runtime, and the `runtime-protocol` rpc contract can name them without
+//! runtime, and the `rpc` contract can name them without
 //! taking a runtime dependency. That wasmtime-freedom is load-bearing —
 //! see the fleet crate map.
 //!

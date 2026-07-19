@@ -20,7 +20,7 @@ use broker_client::CacheStore;
 use engine_compiler::Compiler;
 use engine_executor::{Component, EmbeddedImport, EmbeddedRegistry, Executor};
 
-use runtime_protocol::CompiledBundle;
+use rpc::CompiledBundle;
 
 use crate::compiler::bundle_to_entry;
 use crate::cwasm_cache;
