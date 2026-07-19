@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 // straddles). The engine crates re-export both, but naming the leaves directly
 // keeps this contract's dep graph runtime-free.
 use broker_client::{Event, SessionState};
-use engine_types::composition::EmbeddedImport;
+use engine_types::composition::{EmbeddedImport, PluginInstance};
 use engine_types::embedded::ComponentDecls;
 
 // ---------------------------------------------------------------------------
@@ -69,15 +69,6 @@ pub struct CatalogEntry {
     pub decls: ComponentDecls,
 }
 
-/// One pinned plugin on the compile wire: package id + raw component bytes. The
-/// wire form of the engine's `PluginInstance` (kept here so `runtime-protocol`
-/// does not force `PluginInstance` to derive serde); the worker converts back.
-#[derive(Serialize, Deserialize)]
-pub struct WirePlugin {
-    pub package: String,
-    pub wasm: Vec<u8>,
-}
-
 /// A compile failure — fusion / codegen / section-parse — or an RPC transport
 /// failure absorbed from [`remoc::rtc::CallError`]. Both surface to the
 /// orchestrator, which maps them to a 500 (a pure function of pinned config, no
@@ -112,7 +103,7 @@ pub trait CompilerService {
     async fn compile(
         &self,
         policy: Vec<u8>,
-        plugins: Vec<WirePlugin>,
+        plugins: Vec<PluginInstance>,
     ) -> Result<CompiledBundle, CompileError>;
 }
 
@@ -407,7 +398,7 @@ mod tests {
         async fn compile(
             &self,
             policy: Vec<u8>,
-            plugins: Vec<WirePlugin>,
+            plugins: Vec<PluginInstance>,
         ) -> Result<CompiledBundle, CompileError> {
             if policy == b"boom" {
                 return Err(CompileError("intentional".into()));
@@ -461,8 +452,8 @@ mod tests {
         // Success: args arrive, typed bundle returns (incl. embedded_imports +
         // catalogs, proving engine types cross the codec).
         let plugins = vec![
-            WirePlugin { package: "p1".into(), wasm: vec![0] },
-            WirePlugin { package: "p2".into(), wasm: vec![0] },
+            PluginInstance { package: "p1".into(), wasm: vec![0] },
+            PluginInstance { package: "p2".into(), wasm: vec![0] },
         ];
         let bundle = client.compile(b"hello".to_vec(), plugins).await.unwrap();
         assert_eq!(bundle.cwasm, vec![5u8, 2u8]); // policy_len=5, plugins=2

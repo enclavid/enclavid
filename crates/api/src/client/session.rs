@@ -9,17 +9,9 @@ use serde::Serialize;
 use broker_client::{Metadata, SessionStatus, public_session_id};
 
 use crate::client_state::ClientState;
-use crate::dto;
+use crate::dto::{self, ResolvedPolicyView};
 
 use super::auth::{Principal, SessionToken, trust_metadata};
-
-#[derive(Serialize)]
-pub struct ResolvedPolicyView {
-    /// Full pinned OCI reference from session metadata.
-    pub reference: String,
-    /// Convenience: digest substring extracted from `reference`.
-    pub digest: String,
-}
 
 #[derive(Serialize)]
 pub struct SessionView {

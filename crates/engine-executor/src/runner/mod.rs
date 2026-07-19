@@ -50,11 +50,10 @@ pub use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstanc
 ///
 /// Owns the RUNTIME wasmtime [`Engine`] (`deserialize` + instantiate +
 /// `handle`). A component is only instantiable on the engine it was
-/// compiled on, so in-process the `Runner` facade builds this executor from
-/// the SAME engine as its `Compiler` (via [`from_engine`](Self::from_engine)
-/// + `Engine::clone`, which share the underlying engine). The cross-CVM
-/// split instead gives the execution-worker its own engine and feeds it a
-/// serialized `cwasm` produced by a matching compiler engine.
+/// compiled on, so a cwasm compiled by a [`Compiler`](engine_compiler::Compiler)
+/// on a matching `engine_config` deserializes here — the bridge across the
+/// compile→execute seam (in-process the orchestrator holds one of each; the
+/// cross-CVM split gives each worker its own engine).
 pub struct Executor {
     engine: Engine,
 }
@@ -66,19 +65,6 @@ impl Executor {
         Ok(Self {
             engine: Engine::new(&engine_config())?,
         })
-    }
-
-    /// Build an executor sharing an existing engine — used by the in-process
-    /// `Runner` facade to run on the SAME engine its `Compiler` compiled on
-    /// (`Engine::clone` shares the underlying engine, so a component compiled
-    /// there is instantiable here).
-    pub fn from_engine(engine: Engine) -> Self {
-        Self { engine }
-    }
-
-    /// The runtime [`Engine`] this executor instantiates on.
-    pub fn engine(&self) -> &Engine {
-        &self.engine
     }
 
     /// Reconstruct a component from `cwasm` bytes produced by the compiler's

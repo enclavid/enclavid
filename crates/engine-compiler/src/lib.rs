@@ -51,16 +51,6 @@ impl Compiler {
         })
     }
 
-    /// The wasmtime [`Engine`] this compiler codegens on. Exposed so the
-    /// in-process `Runner` facade can run on the SAME engine (a component
-    /// is only instantiable on the engine it was compiled on). The
-    /// cross-CVM split instead bridges a fresh compiler engine to a fresh
-    /// executor engine via serialized `cwasm` — matching `engine_config`s
-    /// make that load compatible.
-    pub fn engine(&self) -> &Engine {
-        &self.engine
-    }
-
     /// Compile a policy component from its binary (wasm or wat).
     pub fn compile(&self, bytes: &[u8]) -> wasmtime::Result<Component> {
         Component::new(&self.engine, bytes)

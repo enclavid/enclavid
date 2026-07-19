@@ -10,12 +10,17 @@
 /// One plugin's component bytes bundled with the WIT package id it
 /// satisfies. The api crate constructs these from the client-supplied
 /// `PluginPin` list at session start (pull → bytes) and hands them to
-/// `Runner::compose`. `package` is the value the client passed in
+/// `Compiler::compose`. `package` is the value the client passed in
 /// `PluginPin.package` (e.g. `"vendor:plugin@0.1.0"`); it identifies
 /// which set of imports declared in the policy's WIT world this plugin
 /// is meant to satisfy and names the plugin in the composition graph.
 /// `wasm` is the raw component binary — fusion happens on bytes, so no
 /// pre-compiled `Component` is kept.
+///
+/// serde: rides the compile RPC directly (the `rpc::CompilerService::compile`
+/// argument) — no separate wire-mirror type is needed, mirroring how
+/// `EmbeddedImport` already crosses the wire.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PluginInstance {
     pub package: String,
     pub wasm: Vec<u8>,

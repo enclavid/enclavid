@@ -19,6 +19,7 @@ use broker_client::{
 };
 
 use crate::client_state::ClientState;
+use crate::dto::ResolvedPolicyView;
 use crate::limits::{
     CLIENT_SESSION_TOKEN_BYTES, MAX_CLIENT_REF_LEN, MAX_REGISTRY_AUTH_LEN,
     SESSION_ID_RANDOM_BYTES,
@@ -179,16 +180,6 @@ pub struct AttestationView {
     pub quote: String,
     /// Hex-encoded TEE measurement.
     pub measurement: String,
-}
-
-#[derive(Serialize)]
-pub struct ResolvedPolicyView {
-    /// Full pinned OCI reference echoed back from the request.
-    pub reference: String,
-    /// Convenience: just the `sha256:<hex>` digest, extracted from
-    /// `reference`. Same value the attestation quote binds in
-    /// `ReportData.policy_digest`.
-    pub digest: String,
 }
 
 #[derive(Serialize)]

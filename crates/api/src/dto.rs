@@ -27,6 +27,20 @@ use broker_client::{DisplayField as ProtoDisplayField, Localized, SessionStatus}
 
 use crate::locale::Locale;
 
+/// The pinned policy of a session, echoed to the consumer: the full OCI
+/// reference plus its `sha256:<hex>` digest substring (the same value the
+/// attestation quote binds in `ReportData.policy_digest`). Shared by the
+/// create response (`CreateSessionResponse`) and the read view
+/// (`SessionView`).
+#[derive(Serialize)]
+pub struct ResolvedPolicyView {
+    /// Full pinned OCI reference from session metadata / request.
+    pub reference: String,
+    /// Convenience: the `sha256:<hex>` digest substring extracted from
+    /// `reference`.
+    pub digest: String,
+}
+
 /// Serde "remote" definition for the proto-generated `SessionStatus`
 /// enum. Variants must mirror the foreign enum exactly; serde uses
 /// this shadow type only as a description of how to serialize the
