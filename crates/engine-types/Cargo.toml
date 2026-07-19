@@ -1,0 +1,16 @@
+[package]
+name = "engine-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Leaf domain types shared by the compile + execute halves of the engine
+# fleet. NO wasmtime, NO cranelift — that wasmtime-freedom is the whole
+# point: `runtime-protocol` (the rpc contract) and the client-only `api`
+# orchestrator can depend on these types without pulling the runtime.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# Owns the wire-format cardinality caps re-exported by `limits`; a leaf
+# (no wasmtime) so it does not compromise this crate's leaf-ness.
+enclavid-embedded = { path = "../embedded" }

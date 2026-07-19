@@ -8,6 +8,11 @@ repository.workspace = true
 [dependencies]
 broker-client = { path = "../broker-client" }
 enclavid-embedded = { path = "../embedded" }
+# Leaf domain types (limits, embedded registry/decls, composition) hoisted
+# out of this crate so the wasmtime-free halves of the fleet (rpc contract,
+# client-only orchestrator) can name them. Re-exported below at their
+# original engine paths, so callers see no change.
+engine-types = { path = "../engine-types" }
 
 # Used by `runner::decls::load_embedded` to pull the embedded custom
 # sections (disclosure-fields, i18n) straight out of a compiled policy

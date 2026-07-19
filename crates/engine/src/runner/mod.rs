@@ -38,62 +38,13 @@ use crate::state::{HostState, RunInputs};
 
 pub use status::RunStatus;
 
-/// One plugin's component bytes bundled with the WIT package id it
-/// satisfies. The api crate constructs these from the client-supplied
-/// `PluginPin` list at session start (pull → bytes) and hands them to
-/// [`Runner::compose`]. `package` is the value the client passed in
-/// `PluginPin.package` (e.g. `"vendor:plugin@0.1.0"`); it identifies
-/// which set of imports declared in the policy's WIT world this plugin
-/// is meant to satisfy and names the plugin in the composition graph.
-/// `wasm` is the raw component binary — fusion happens on bytes, so no
-/// pre-compiled `Component` is kept.
-pub struct PluginInstance {
-    pub package: String,
-    pub wasm: Vec<u8>,
-}
-
-/// The two applicant-facing embedded interfaces routed strictly
-/// per-component (i18n and icons). DF stays merged, so it is not one of
-/// these.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum EmbeddedIface {
-    I18n,
-    Icons,
-}
-
-impl EmbeddedIface {
-    /// Slug segment used in the distinct import name, and the tag by
-    /// which the host `Linker` picks the matching registry store.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            EmbeddedIface::I18n => "i18n",
-            EmbeddedIface::Icons => "icons",
-        }
-    }
-}
-
-/// One distinct per-component embedded import produced by fusion. The
-/// host `Linker` registers an instance named `instance_name` whose func
-/// resolves keys against the catalog with `catalog_hash` — strict
-/// per-component routing, so a plugin's i18n key never resolves to the
-/// policy's (or another plugin's) translation. Emitted only for i18n /
-/// icons; DF is merged and served first-match under its canonical name.
-///
-/// serde: part of the L2 cwasm-cache bundle — the import manifest is
-/// stored beside the cwasm so a cache hit reconstructs the host
-/// `Linker` registrations without re-fusing.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct EmbeddedImport {
-    pub instance_name: String,
-    pub catalog_hash: [u8; 32],
-    pub iface: EmbeddedIface,
-    /// Version of the routed interface — the canonical import's `@x.y.z`
-    /// (empty if unversioned). Baked into `instance_name` so a
-    /// same-catalog different-version import can't collide onto one twin;
-    /// also lets host registration be version-aware if interface
-    /// signatures ever diverge across versions.
-    pub version: String,
-}
+/// Composition domain types — the plugin fusion input (`PluginInstance`)
+/// and the embedded-import manifest (`EmbeddedImport` / `EmbeddedIface`)
+/// — are pure data and live in the [`engine_types::composition`] leaf, so
+/// the wasmtime-free halves of the fleet can name them. Re-exported here
+/// so engine code and [`Runner::compose`]'s callers keep addressing them
+/// as `runner::*` / `enclavid_engine::*`.
+pub use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstance};
 
 /// A fused policy component plus the manifest of distinct embedded
 /// imports its host `Linker` must register. Returned by
