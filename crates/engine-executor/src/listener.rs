@@ -62,7 +62,7 @@ pub struct SessionChange<'a> {
 /// Error type is `wasmtime::Result` because the call originates from
 /// inside a wasmtime host fn body and any failure has to surface as a
 /// trap to terminate the run cleanly. Re-exported as
-/// `enclavid_engine::RunResult` so listener implementers don't pull
+/// `engine_executor::RunResult` so listener implementers don't pull
 /// in wasmtime as a direct dependency.
 pub trait SessionListener: Send + Sync {
     fn on_session_change<'a>(

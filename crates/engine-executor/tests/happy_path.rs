@@ -27,10 +27,68 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use broker_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
-use enclavid_engine::{
-    Component, ConsentDisclosure, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs,
-    RunResult, RunStatus, Runner, SessionChange, SessionListener,
+use engine_compiler::Compiler;
+use engine_executor::{
+    Component, ConsentDisclosure, EmbeddedImport, EmbeddedRegistry, Executor, MediaStore,
+    PluginInstance, Prop, RunInputs, RunResult, RunStatus, SessionChange, SessionListener,
 };
+
+/// End-to-end test harness mirroring the old in-process `Runner` facade: a
+/// [`Compiler`] + [`Executor`] on SEPARATE engines, bridged by serialized
+/// cwasm — exactly the production path (compose over there, deserialize +
+/// run over here). Its `compose` round-trips the fused component through
+/// cwasm so the returned `component` is instantiable on the executor engine.
+struct TestRunner {
+    compiler: Compiler,
+    executor: Executor,
+}
+
+/// A composed policy landed on the executor engine (post round-trip), with
+/// the same field names the tests read off the old `Composition`.
+struct Fused {
+    component: Component,
+    embedded_imports: Vec<EmbeddedImport>,
+}
+
+impl TestRunner {
+    fn new() -> RunResult<Self> {
+        Ok(Self {
+            compiler: Compiler::new()?,
+            executor: Executor::new()?,
+        })
+    }
+
+    fn fuse(&self, policy_wasm: &[u8], plugins: &[PluginInstance]) -> RunResult<Vec<u8>> {
+        self.compiler.fuse(policy_wasm, plugins)
+    }
+
+    /// Compose on the compiler engine, then serialize → deserialize onto the
+    /// executor engine so the component is runnable here (the cross-engine
+    /// cwasm bridge the real fleet uses across CVMs).
+    fn compose(&self, policy_wasm: &[u8], plugins: &[PluginInstance]) -> RunResult<Fused> {
+        let composition = self.compiler.compose(policy_wasm, plugins)?;
+        let cwasm = self.compiler.serialize_component(&composition.component)?;
+        let component = self.executor.deserialize_component(&cwasm)?;
+        Ok(Fused {
+            component,
+            embedded_imports: composition.embedded_imports,
+        })
+    }
+
+    async fn run(
+        &self,
+        component: &Component,
+        embedded_imports: &[EmbeddedImport],
+        session: Session,
+        event: Event,
+        props: Vec<(String, Prop)>,
+        inputs: RunInputs,
+    ) -> RunResult<(RunStatus, Session)> {
+        self.executor
+            .run(component, embedded_imports, session, event, props, inputs)
+            .await
+    }
+}
 
 /// In-memory stand-in for the host blob store, shared with the
 /// [`RecordingListener`] (which populates it from each round's captured
@@ -430,7 +488,7 @@ async fn oversized_state_traps() {
     // Drive genesis with a consumer config that makes the policy return a
     // blob one byte over the cap — the runtime must trap the round rather
     // than seal an over-cap (clip-smuggling) state.
-    let over = enclavid_engine::limits::POLICY_MAX_STATE_BYTES as i64 + 1;
+    let over = engine_executor::limits::POLICY_MAX_STATE_BYTES as i64 + 1;
     let props = vec![("state_bloat".to_string(), Prop::Int(over))];
 
     let result = h
@@ -465,7 +523,7 @@ async fn oversized_state_traps() {
 /// strict (plugin i18n/icons) and merged (DF) refs through it.
 #[tokio::test]
 async fn static_fused_artifact_resolves_strictly() {
-    let runner = Runner::new().unwrap();
+    let runner = TestRunner::new().unwrap();
     let fused = runner.fuse(test_policy_component(), &all_plugins()).unwrap();
 
     // The twins survive as distinct `embedded-slot:*` imports (strict
@@ -474,7 +532,7 @@ async fn static_fused_artifact_resolves_strictly() {
     // elides its unused icons import; distinct twins are: policy (i18n) +
     // well-known (i18n+icons) + extra (i18n) = 4. face-age ships no
     // embedded catalog, so it adds no twin.
-    let imports = enclavid_engine::top_level_imports(&fused).unwrap();
+    let imports = engine_compiler::top_level_imports(&fused).unwrap();
     let slots: Vec<&String> = imports
         .iter()
         .filter(|n| n.starts_with("embedded-slot:"))
@@ -504,7 +562,7 @@ async fn static_fused_artifact_resolves_strictly() {
     );
 
     // Registry from the fused artifact's OWN nested catalogs, policy first.
-    let mut cats = enclavid_engine::load_embedded_nested(&fused).unwrap();
+    let mut cats = engine_compiler::load_embedded_nested(&fused).unwrap();
     assert!(
         cats.iter().filter(|c| c.is_policy).count() == 1,
         "exactly one nested policy catalog recovered, got {}",
@@ -613,7 +671,7 @@ async fn strict_routing_isolates_colliding_i18n_key() {
 /// would leak the policy's colliding `extra_tag`).
 #[tokio::test]
 async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
-    let runner = Runner::new().unwrap();
+    let runner = TestRunner::new().unwrap();
 
     // CORE: policy + well-known + preprocess + face-age baked. The policy
     // still imports extra/tag (unsatisfied — a runtime import of the core).
@@ -646,13 +704,13 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
 
     // Registry: policy + well-known recovered from the core's nested
     // catalogs (policy first), plus the runtime extra catalog.
-    let mut cats = enclavid_engine::load_embedded_nested(&core).unwrap();
+    let mut cats = engine_compiler::load_embedded_nested(&core).unwrap();
     cats.sort_by_key(|c| !c.is_policy);
     let mut builder = EmbeddedRegistry::builder();
     for c in cats {
         builder.add_component(c.hash, c.decls);
     }
-    let extra_cat = enclavid_engine::load_embedded(extra_component()).unwrap();
+    let extra_cat = engine_compiler::load_embedded(extra_component()).unwrap();
     builder.add_component(extra_cat.hash, extra_cat.decls);
     let embedded = Arc::new(builder.build());
     let listener = Arc::new(RecordingListener::default());
@@ -715,21 +773,21 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
 // ---------------------------------------------------------------------
 
 struct Harness {
-    runner: Runner,
+    runner: TestRunner,
     /// The fused policy+well-known component (wac single-store fusion),
     /// compiled once and driven through every reducer round.
     policy: Component,
     /// Distinct per-catalog i18n/icons imports the fusion produced —
     /// handed to `run` so the host Linker registers them.
-    embedded_imports: Vec<enclavid_engine::EmbeddedImport>,
+    embedded_imports: Vec<EmbeddedImport>,
     embedded: Arc<EmbeddedRegistry>,
 }
 
 impl Harness {
     fn new() -> Self {
-        let runner = Runner::new().unwrap();
+        let runner = TestRunner::new().unwrap();
         // Fuse the test policy with BOTH plugins into one component (the
-        // same path `Runner::compose` takes in prod). The fixtures carry
+        // same path `TestRunner::compose` takes in prod). The fixtures carry
         // their embedded sections (embedded verbatim from the author
         // JSON), so `compose` derives each catalog's content-hash from
         // the same bytes the registry keys on.
@@ -748,7 +806,7 @@ impl Harness {
             well_known_component(),
             extra_component(),
         ] {
-            let cat = enclavid_engine::load_embedded(wasm).expect("load embedded");
+            let cat = engine_compiler::load_embedded(wasm).expect("load embedded");
             builder.add_component(cat.hash, cat.decls);
         }
         let embedded = Arc::new(builder.build());

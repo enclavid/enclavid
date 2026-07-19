@@ -6,7 +6,6 @@ members = [
     "crates/broker",
     "crates/broker-protocol",
     "crates/cli",
-    "crates/engine",
     "crates/engine-compiler",
     "crates/engine-executor",
     "crates/engine-types",

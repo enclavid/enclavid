@@ -8,7 +8,7 @@
 //!            markers (DisclosureFields / Localized / Icon).
 //! ```
 //!
-//! The wasmtime-coupled pieces live in `enclavid-engine`: the bindgen ref
+//! The wasmtime-coupled pieces live in `engine-executor`: the bindgen ref
 //! resource reps (`LocalizedRef` / `IconRef` / `DisclosureFieldRef`) and
 //! the section parsers (`load_embedded`), which import these types.
 

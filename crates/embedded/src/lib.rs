@@ -48,7 +48,7 @@ use std::path::Path;
 // part of the schema definition itself, not a runtime concern — both
 // the author-time linter (CLI `validate` / `seal`) and the runtime
 // loader (engine `load_embedded`) consult them through this crate.
-// The engine re-exports them via `enclavid-engine::limits` so engine
+// The engine re-exports them via `engine-types::limits` so engine
 // callers can use one short path; bumps land here once.
 
 // Per-kind cap on declarations. Split per kind because the covert-

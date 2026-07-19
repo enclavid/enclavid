@@ -9,14 +9,14 @@
 //! `disclosure-field` return an opaque WIT `resource` handle it cannot
 //! forge (wasmtime owns the handle table). So the store carries no
 //! keyed-hash / reverse-index: membership is a plain `key → data`
-//! lookup, and the host (in `enclavid-engine`) mints a resource whose
+//! lookup, and the host (in `engine-executor`) mints a resource whose
 //! rep IS the resolved data (`LocalizedRef` / `IconRef` /
 //! `DisclosureFieldRef`). The engine dereferences that rep at the action
 //! boundary, so the resolved data is self-contained (no registry needed
 //! to render it later).
 //!
 //! Catalogs are identified by their **content-hash** (`catalog_hash`,
-//! in `enclavid-engine`), which survives wac fusion. `resolve_strict`
+//! in `engine-compiler`), which survives wac fusion. `resolve_strict`
 //! answers against ONE bound catalog (the strict per-component path —
 //! i18n / icons routed to a distinct twin); `resolve_first_match` walks
 //! catalogs in composition order (the merged path — disclosure-fields
@@ -65,7 +65,7 @@ impl RefKind for Icon {
 }
 
 /// Per-kind `key → data` store, keyed by catalog content-hash. Built
-/// once per `Runner::run` (in `enclavid-engine`) from every component's
+/// once per `Executor::run` (in `engine-executor`) from every component's
 /// declarations, then frozen.
 pub struct RefStore<K: RefKind> {
     /// Contributing catalog hashes in composition order (policy first) —

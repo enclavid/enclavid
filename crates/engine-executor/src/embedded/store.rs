@@ -14,7 +14,7 @@
 //! whose rep IS the resolved data — [`LocalizedRef`] / [`IconRef`] /
 //! [`DisclosureFieldRef`], defined below. These reps are the one
 //! wasmtime-coupled piece (bindgen's `with:` maps each WIT resource to
-//! the matching type here), so they stay in `enclavid-engine`; the engine
+//! the matching type here), so they stay in `engine-executor`; the engine
 //! dereferences a rep at the action boundary (`runner::convert`), so the
 //! resolved data is self-contained (no registry needed to render it
 //! later).

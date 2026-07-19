@@ -12,11 +12,12 @@
 //! taking a runtime dependency. That wasmtime-freedom is load-bearing —
 //! see the fleet crate map.
 //!
-//! The wasmtime-coupled pieces stay in `enclavid-engine`: the bindgen ref
-//! resource reps (`LocalizedRef` / `IconRef` / `DisclosureFieldRef`), the
-//! section parsers (`load_embedded`), and the `Runner` executor.
-//! `enclavid-engine` re-exports everything here at its original paths, so
-//! callers see one surface.
+//! The wasmtime-coupled pieces stay in the engine crates: the section
+//! parsers (`load_embedded`) + fusion + the `Compiler` live in
+//! `engine-compiler`; the bindgen ref resource reps (`LocalizedRef` /
+//! `IconRef` / `DisclosureFieldRef`) + the `Executor` live in
+//! `engine-executor`. Each re-exports the types here it needs at
+//! ergonomic paths.
 
 pub mod composition;
 pub mod embedded;

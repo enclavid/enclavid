@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 // Wire-referenced domain types, sourced WASMTIME-FREE: compile types from the
 // engine-types leaf, execute types from broker-client (the seam this contract
-// straddles). enclavid-engine re-exports both, but naming the leaves directly
+// straddles). The engine crates re-export both, but naming the leaves directly
 // keeps this contract's dep graph runtime-free.
 use broker_client::{Event, SessionState};
 use engine_types::composition::EmbeddedImport;

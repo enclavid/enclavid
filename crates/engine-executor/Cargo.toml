@@ -33,3 +33,16 @@ blake3 = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# happy_path.rs is the end-to-end integration test: it COMPOSES a policy +
+# plugins (engine-compiler), round-trips the cwasm onto this crate's engine,
+# and drives full reducer rounds against real fixtures.
+engine-compiler = { path = "../engine-compiler" }
+# Reads the fixture's source-side disclosure-fields.json / i18n.json via the
+# same helpers the CLI uses at seal time.
+enclavid-embedded = { path = "../embedded" }
+# fake_capture emits a real JPEG so the face-age plugin's in-sandbox
+# decode → preprocess → inference pipeline has something to decode.
+jpeg-encoder = "0.6"
+# Shared build→componentize→embed pipeline — the SAME code `xtask
+# push-plugins` uses, so tested and shipped artifacts match.
+xtask = { path = "../../xtask" }

@@ -41,3 +41,8 @@ wasmparser = "0.247"
 # cardinality caps the loader enforces.
 blake3 = "1"
 enclavid-embedded = { path = "../embedded" }
+
+[dev-dependencies]
+# embedded_nested.rs builds synthetic (nested) components to exercise
+# load_embedded_nested's recursion without cargo-building fixtures.
+wasm-encoder = "0.247"

@@ -18,7 +18,7 @@
 //! policy first). This mirrors what wac single-store fusion does to
 //! the imports: the per-component `enclavid:embedded/i18n` imports
 //! unify into one host impl, so the host resolves without knowing
-//! which component called. See the host resolvers in `enclavid-engine`
+//! which component called. See the host resolvers in `engine-executor`
 //! and `RefStore::resolve_first_match`.
 //!
 //! DF is not resolution-gated to the policy even though it reaches the
@@ -32,8 +32,8 @@
 //! RefStore) so the membership / get_token / lookup mechanics live in
 //! one place.
 //!
-//! The registry is **immutable per run**: built once in `Runner::run`
-//! (in `enclavid-engine`) from `load_embedded` output for every
+//! The registry is **immutable per run**: built once in `Executor::run`
+//! (in `engine-executor`) from `load_embedded` output for every
 //! component, frozen, then shared by `Arc` into the policy `HostState`.
 //! It is consulted only when the host MINTS a ref resource; the resource
 //! then carries the resolved data itself, so nothing downstream
@@ -74,7 +74,7 @@ pub struct Translation {
 
 /// Parsed embedded sections for a single component — the input the
 /// registry builder accepts per slot. Produced by `load_embedded` (in
-/// `enclavid-engine`) from a wasm component's `enclavid:embedded.*`
+/// `engine-compiler`) from a wasm component's `enclavid:embedded.*`
 /// custom sections.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ComponentDecls {
@@ -90,7 +90,7 @@ pub struct ComponentDecls {
 // ----- Top-level registry -----
 
 /// Composition-wide registry of `enclavid:embedded/*` declarations.
-/// One per `Runner::run` call; shared by `Arc` into every Store and into
+/// One per `Executor::run` call; shared by `Arc` into every Store and into
 /// the api view layer for ref-to-data projection.
 ///
 /// Three fields, one per interface. Consumers call the store

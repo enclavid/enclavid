@@ -37,8 +37,8 @@
 /// out into attested plugins (which get their own stores + caps).
 pub const POLICY_MAX_MEMORY: usize = 128 * 1024 * 1024;
 
-/// Fuel budget for one `Runner::run` / `Runner::extract_texts`
-/// call. Each WASM instruction consumes ~1 unit; out-of-fuel
+/// Fuel budget for one `Executor::run` call. Each WASM instruction
+/// consumes ~1 unit; out-of-fuel
 /// traps. Pairs with `POLICY_MAX_MEMORY` as the second leg of the
 /// "policy can't hang the enclave" guarantee — memory cap blocks
 /// allocation bombs, fuel cap blocks compute bombs / infinite
@@ -47,7 +47,7 @@ pub const POLICY_MAX_MEMORY: usize = 128 * 1024 * 1024;
 pub const POLICY_FUEL_BUDGET: u64 = 10_000_000_000;
 
 /// Hard cap on the policy's opaque `state` blob, enforced in
-/// `Runner::run` (in `enclavid-engine`) immediately after each `handle`
+/// `Executor::run` (in `engine-executor`) immediately after each `handle`
 /// round — a larger blob traps the round.
 ///
 /// The engine's data-minimization ceiling. The reducer model already lets a

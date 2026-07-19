@@ -1482,21 +1482,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enclavid-engine"
-version = "0.1.0"
-dependencies = [
- "broker-client",
- "enclavid-embedded",
- "engine-compiler",
- "engine-executor",
- "jpeg-encoder",
- "tokio",
- "wasm-encoder 0.247.0",
- "wit-component 0.247.0",
- "xtask",
-]
-
-[[package]]
 name = "enclavid-kbs-client"
 version = "0.1.0"
 dependencies = [
@@ -1535,6 +1520,7 @@ dependencies = [
  "enclavid-embedded",
  "engine-types",
  "wac-graph",
+ "wasm-encoder 0.247.0",
  "wasmparser 0.247.0",
  "wasmtime",
 ]
@@ -1545,9 +1531,13 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "broker-client",
+ "enclavid-embedded",
+ "engine-compiler",
  "engine-types",
+ "jpeg-encoder",
  "tokio",
  "wasmtime",
+ "xtask",
 ]
 
 [[package]]

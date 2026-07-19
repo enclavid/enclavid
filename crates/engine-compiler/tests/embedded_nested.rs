@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 
-use enclavid_engine::{catalog_hash, load_embedded, load_embedded_nested};
+use engine_compiler::{catalog_hash, load_embedded, load_embedded_nested};
 use enclavid_embedded::{SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS};
 use wasm_encoder::{Component, CustomSection, NestedComponentSection};
 

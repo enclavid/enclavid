@@ -43,7 +43,7 @@ pub use status::RunStatus;
 /// and the embedded-import manifest (`EmbeddedImport` / `EmbeddedIface`)
 /// — are pure data and live in the [`engine_types::composition`] leaf, so
 /// the wasmtime-free halves of the fleet can name them. Re-exported here
-/// so callers keep addressing them as `enclavid_engine::*`.
+/// so callers keep addressing them as `engine_executor::*`.
 pub use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstance};
 
 /// Runs a compiled policy component against session state.
@@ -323,8 +323,8 @@ mod tests {
     /// check turns a toolchain skew / host tamper into a clean `Err`
     /// (which the cache treats as a miss), never undefined behaviour.
     /// (The full compile→serialize→deserialize round-trip is exercised by
-    /// the `Runner` facade's tests in `enclavid-engine`, which holds both
-    /// halves.)
+    /// the `TestRunner` in this crate's `happy_path` integration test, which
+    /// holds both a `Compiler` and an `Executor`.)
     #[test]
     fn deserialize_rejects_non_cwasm() {
         let executor = Executor::new().unwrap();
