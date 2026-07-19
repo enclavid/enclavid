@@ -37,7 +37,9 @@ use std::sync::Arc;
 use broker_client::CacheStore;
 use enclavid_engine::Runner;
 
-use crate::compiler::CompiledBundle;
+use runtime_protocol::CompiledBundle;
+
+use crate::compiler::bundle_to_entry;
 use crate::runtime::PolicyEntry;
 
 /// Bumped whenever the [`CompiledBundle`] wire layout changes (a field
@@ -80,7 +82,7 @@ pub async fn try_load(
     };
     // Deserialize cwasm + rebuild registry via the same path the cold build
     // uses. `None` here = wasmtime toolchain skew / tamper → miss (guard 3).
-    match bundle.to_entry(runner) {
+    match bundle_to_entry(&bundle, runner) {
         Some(entry) => Some(entry),
         None => {
             eprintln!("cwasm_cache: cwasm deserialize failed (cold path)");

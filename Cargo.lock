@@ -1404,6 +1404,7 @@ dependencies = [
  "rand 0.8.6",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+ "runtime-protocol",
  "secrecy",
  "serde",
  "serde_json",
@@ -3725,6 +3726,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
+name = "remoc"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0491961ac4bc1ac4191743aa58a2ce778f4725693d29743fae957b2cf45f77f0"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "ciborium",
+ "futures",
+ "rand 0.9.4",
+ "remoc_macro",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "remoc_macro"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89479d9d87f65ef573faf0167dd0a9f40d3a63fd95e7a2935d662fa57dbc30d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3845,6 +3876,17 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "runtime-protocol"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "enclavid-engine",
+ "remoc",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

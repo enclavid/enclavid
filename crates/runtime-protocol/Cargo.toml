@@ -1,0 +1,24 @@
+[package]
+name = "runtime-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Intra-fleet RPC substrate. remoc = remote trait calls (rtc) over any
+# AsyncRead+AsyncWrite (vsock relay today, RA-TLS tunnel later), CBOR codec
+# (ciborium — same as broker-protocol, named-field schema evolution), no
+# OpenTelemetry. Minimal features: marginal footprint over the tree is one
+# runtime crate (remoc itself). See project_fleet_rpc_substrate memory.
+remoc = { version = "0.18", default-features = false, features = ["rtc", "codec-ciborium"] }
+serde = { version = "1", features = ["derive"] }
+# Shared domain types the compile wire contract references (EmbeddedImport,
+# ComponentDecls). engine is linked by every fleet role anyway, so this adds no
+# new binary; it keeps `CompiledBundle` typed on the wire instead of opaque bytes.
+enclavid-engine = { path = "../engine" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread"] }
+# Round-trip test encodes a sample bundle directly (independent of remoc's codec).
+ciborium = "0.2"

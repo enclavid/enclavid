@@ -19,7 +19,9 @@ use moka::future::Cache;
 use broker_client::CacheStore;
 use enclavid_engine::{Component, EmbeddedImport, EmbeddedRegistry, Runner};
 
-use crate::compiler::CompiledBundle;
+use runtime_protocol::CompiledBundle;
+
+use crate::compiler::bundle_to_entry;
 use crate::cwasm_cache;
 
 /// Per-session compiled policy artifact: the fused wasmtime
@@ -110,9 +112,7 @@ impl PolicyCache {
                 // takes, so cold and warm paths can never diverge.
                 let bundle = loader().await?;
                 cwasm_cache::store(&self.l2, &key, &bundle).await;
-                bundle
-                    .to_entry(&self.runner)
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+                bundle_to_entry(&bundle, &self.runner).ok_or(StatusCode::INTERNAL_SERVER_ERROR)
             })
             .await
             // moka wraps the loader error in an Arc (shared with coalesced
