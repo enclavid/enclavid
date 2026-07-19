@@ -22,7 +22,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use enclavid_engine::{ComponentDecls, EmbeddedImport, Event, SessionState};
+// Wire-referenced domain types, sourced WASMTIME-FREE: compile types from the
+// engine-types leaf, execute types from broker-client (the seam this contract
+// straddles). enclavid-engine re-exports both, but naming the leaves directly
+// keeps this contract's dep graph runtime-free.
+use broker_client::{Event, SessionState};
+use engine_types::composition::EmbeddedImport;
+use engine_types::embedded::ComponentDecls;
 
 // ---------------------------------------------------------------------------
 // Compile boundary — wire types + service
@@ -329,7 +335,7 @@ mod execute_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use enclavid_engine::EmbeddedIface;
+    use engine_types::composition::EmbeddedIface;
     use remoc::codec::Ciborium;
     use remoc::rtc::ServerShared;
     use std::sync::Arc;

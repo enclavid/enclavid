@@ -3891,8 +3891,9 @@ dependencies = [
 name = "runtime-protocol"
 version = "0.1.0"
 dependencies = [
+ "broker-client",
  "ciborium",
- "enclavid-engine",
+ "engine-types",
  "remoc",
  "serde",
  "tokio",

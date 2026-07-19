@@ -13,10 +13,14 @@ repository.workspace = true
 # runtime crate (remoc itself). See project_fleet_rpc_substrate memory.
 remoc = { version = "0.18", default-features = false, features = ["rtc", "codec-ciborium"] }
 serde = { version = "1", features = ["derive"] }
-# Shared domain types the compile wire contract references (EmbeddedImport,
-# ComponentDecls). engine is linked by every fleet role anyway, so this adds no
-# new binary; it keeps `CompiledBundle` typed on the wire instead of opaque bytes.
-enclavid-engine = { path = "../engine" }
+# Shared domain types the wire contract references — kept WASMTIME-FREE so this
+# rpc contract carries no runtime. Compile types (EmbeddedImport, ComponentDecls)
+# come from the engine-types leaf; execute types (Event, SessionState) from
+# broker-client. Both are plain-data crates, so `CompiledBundle` / `RunRequest`
+# stay typed on the wire without dragging wasmtime into the contract (or into any
+# role — e.g. compile-worker — that only needs one half). See the fleet crate map.
+engine-types = { path = "../engine-types" }
+broker-client = { path = "../broker-client" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread"] }
