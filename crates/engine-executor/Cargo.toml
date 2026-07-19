@@ -1,0 +1,35 @@
+[package]
+name = "engine-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The EXECUTE half of the engine fleet: deserialize a compiled `cwasm`,
+# instantiate it, and drive ONE pure-reducer round through the bindgen host
+# world (session-context, embedded resolvers, media blobs). This crate
+# runs the UNTRUSTED policy wasm and carries NO Cranelift — its wasmtime is
+# RUNTIME-only, so the execution-worker CVM has zero compiler surface. It
+# shares only the plain-data engine-types leaf with engine-compiler; a
+# serialized `cwasm` (produced there) is the sole input crossing in.
+[dependencies]
+engine-types = { path = "../engine-types" }
+broker-client = { path = "../broker-client" }
+
+# RUNTIME only — NO `cranelift`. `Component::deserialize` + instantiate +
+# run need the runtime; codegen (`Component::new`) lives in engine-compiler.
+# Same non-cranelift feature set otherwise so the `Config` (engine_config)
+# matches the compiler's and a compiler-produced cwasm loads here.
+wasmtime = { version = "46", default-features = false, features = [
+    "component-model",
+    "runtime",
+    "std",
+    "async",
+] }
+
+# Content-addresses each captured frame (`convert::event_to_wit`) so the
+# blob store keys blobs by BLAKE3 hash.
+blake3 = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

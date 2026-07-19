@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use broker_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use enclavid_engine::{
-    ConsentDisclosure, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs, RunResult,
-    RunStatus, Runner, SessionChange, SessionListener,
+    Component, ConsentDisclosure, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs,
+    RunResult, RunStatus, Runner, SessionChange, SessionListener,
 };
 
 /// In-memory stand-in for the host blob store, shared with the
@@ -143,7 +143,7 @@ impl SessionListener for RecordingListener {
     fn on_session_change<'a>(
         &'a self,
         change: SessionChange<'a>,
-    ) -> Pin<Box<dyn Future<Output = wasmtime::Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
         let rounds: Vec<Vec<broker_client::DisplayField>> = change
             .disclosures
             .iter()
@@ -718,7 +718,7 @@ struct Harness {
     runner: Runner,
     /// The fused policy+well-known component (wac single-store fusion),
     /// compiled once and driven through every reducer round.
-    policy: wasmtime::component::Component,
+    policy: Component,
     /// Distinct per-catalog i18n/icons imports the fusion produced —
     /// handed to `run` so the host Linker registers them.
     embedded_imports: Vec<enclavid_engine::EmbeddedImport>,

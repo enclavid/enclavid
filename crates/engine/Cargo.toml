@@ -5,56 +5,32 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Thin FACADE over the split engine fleet. Re-exports engine-compiler
+# (compile: fuse + Cranelift) and engine-executor (execute: deserialize +
+# run) at the original `enclavid_engine::*` paths, and offers a `Runner`
+# convenience that drives BOTH halves in-process on ONE shared wasmtime
+# engine (local / dev / single-CVM). In Plan-A the api orchestrator drops
+# this facade entirely — it talks to a RemoteCompiler / RemoteExecutor over
+# rpc, and each worker CVM builds only its own half (the execution worker
+# via engine-executor, which carries no Cranelift).
 [dependencies]
-broker-client = { path = "../broker-client" }
-enclavid-embedded = { path = "../embedded" }
-# Leaf domain types (limits, embedded registry/decls, composition) hoisted
-# out of this crate so the wasmtime-free halves of the fleet (rpc contract,
-# client-only orchestrator) can name them. Re-exported below at their
-# original engine paths, so callers see no change.
-engine-types = { path = "../engine-types" }
-
-# The COMPILE half — fusion + Cranelift codegen + section parsing. This
-# crate is the EXECUTE half plus a `Runner` facade that delegates compose /
-# serialize to a held `engine_compiler::Compiler`; the compiler crate owns
-# wac-graph + wasmparser (moved out of here). Cranelift reaches this build
-# only transitively through this dep — the next cut lifts the execute half
-# into a standalone `engine-executor` that drops it entirely.
 engine-compiler = { path = "../engine-compiler" }
-
-# RUNTIME only (no cranelift API is called here — `Component::new` moved to
-# engine-compiler; this crate `deserialize`s + instantiates + runs). The
-# `cranelift` feature is intentionally absent from THIS list; it arrives
-# only via engine-compiler, and drops out for real when engine-executor
-# splits off.
-wasmtime = { version = "46", default-features = false, features = [
-    "component-model",
-    "runtime",
-    "std",
-    "async",
-] }
-
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-bincode = "1"
-blake3 = "1"
+engine-executor = { path = "../engine-executor" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-wit-component = "0.247"
-# Builds synthetic (nested) components in embedded_nested.rs to exercise
-# `load_embedded_nested`'s recursion without cargo-building fixtures.
+# happy_path / embedded_nested drive the facade against real fixtures and
+# build synthetic components to exercise the run + nested-catalog paths.
 wasm-encoder = "0.247"
-# happy_path test reads the test-policy's source-side
-# disclosure-fields.json / i18n.json via the same helpers the CLI uses
-# at seal time; keeps the fixture's text-ref set in sync with what
-# would land in the embedded sections of a sealed wasm.
+wit-component = "0.247"
+# Tests read the fixture's source-side disclosure-fields.json / i18n.json
+# via the same helpers the CLI uses at seal time.
 enclavid-embedded = { path = "../embedded" }
-# happy_path's fake_capture emits a real JPEG so the face-age plugin's
-# in-sandbox decode → preprocess → inference pipeline has something to
-# decode (a placeholder clip of raw bytes wouldn't).
+# Domain types the tests build directly (SessionState/Event/Decision, …).
+broker-client = { path = "../broker-client" }
+# fake_capture emits a real JPEG so the face-age plugin's in-sandbox
+# decode → preprocess → inference pipeline has something to decode.
 jpeg-encoder = "0.6"
-# Shared build→componentize→embed pipeline — the SAME code the
-# `xtask push-plugins` publish tool uses, so tested and shipped artifacts
-# match. (build helpers only; xtask does not depend on the engine.)
+# Shared build→componentize→embed pipeline — the SAME code `xtask
+# push-plugins` uses, so tested and shipped artifacts match.
 xtask = { path = "../../xtask" }

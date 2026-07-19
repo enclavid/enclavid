@@ -1,8 +1,10 @@
-//! Top-level policy execution. [`Runner`] owns the wasmtime [`Engine`],
-//! compiles components, and drives ONE pure-reducer round
-//! (`enclavid:policy/policy.handle`) through to a [`RunStatus`].
+//! Top-level policy execution. [`Executor`] owns the RUNTIME wasmtime
+//! [`Engine`], deserializes a compiled `cwasm`, and drives ONE pure-reducer
+//! round (`enclavid:policy/policy.handle`) through to a [`RunStatus`]. It
+//! carries no Cranelift — codegen (fuse + `Component::new`) is
+//! engine-compiler's job; this crate only ever `deserialize`s + runs.
 //!
-//! No replay, no intercept, no compaction. The runner
+//! No replay, no intercept, no compaction. The executor
 //!   1. builds the inbound WIT `event` from the caller-supplied
 //!      [`Event`] (the runtime's mailbox);
 //!   2. calls `handle(state, event)` exactly once;
@@ -17,8 +19,8 @@
 //! The disclosure → consumer seal is runtime-driven, NOT a policy host
 //! call. When the inbound event is [`Event::ConsentDisclosure(true)`]
 //! AND the session's `current_prompt` prompt was a
-//! [`Prompt::ConsentDisclosure`], the runner fires the
-//! [`SessionListener`] with exactly the fields the applicant saw and
+//! [`Prompt::ConsentDisclosure`], the executor fires the
+//! `SessionListener` with exactly the fields the applicant saw and
 //! accepted on the consent screen — "show == seal". On a `false` reply,
 //! or any other event, NOTHING is sealed.
 
@@ -27,9 +29,7 @@ mod status;
 
 use broker_client::{Event, Prompt, SessionState};
 use wasmtime::component::{Component, Linker, Resource};
-use wasmtime::Store;
-
-use engine_compiler::{Compiler, Composition};
+use wasmtime::{Config, Engine, Store};
 
 use crate::Host_ as GeneratedHost;
 use crate::embedded::{Icon, IconRef, Localized, LocalizedRef, undeclared_trap};
@@ -43,47 +43,46 @@ pub use status::RunStatus;
 /// and the embedded-import manifest (`EmbeddedImport` / `EmbeddedIface`)
 /// — are pure data and live in the [`engine_types::composition`] leaf, so
 /// the wasmtime-free halves of the fleet can name them. Re-exported here
-/// so engine code and [`Runner::compose`]'s callers keep addressing them
-/// as `runner::*` / `enclavid_engine::*`.
+/// so callers keep addressing them as `enclavid_engine::*`.
 pub use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstance};
 
-/// Runs policy WASM against session state.
+/// Runs a compiled policy component against session state.
 ///
-/// This is the fleet's EXECUTE half plus a thin compile facade: it holds
-/// an [`engine_compiler::Compiler`] it delegates fusion / codegen to, and
-/// runs (`deserialize` + instantiate + `handle`) on that compiler's SAME
-/// wasmtime engine — a component is only instantiable on the engine it was
-/// compiled on, so in-process the two share one engine. The cross-CVM
-/// split instead gives the compile-worker and execution-worker separate
-/// engines and bridges them with serialized `cwasm` (compose over there,
-/// `deserialize` + `run` over here).
-pub struct Runner {
-    compiler: Compiler,
+/// Owns the RUNTIME wasmtime [`Engine`] (`deserialize` + instantiate +
+/// `handle`). A component is only instantiable on the engine it was
+/// compiled on, so in-process the `Runner` facade builds this executor from
+/// the SAME engine as its `Compiler` (via [`from_engine`](Self::from_engine)
+/// + `Engine::clone`, which share the underlying engine). The cross-CVM
+/// split instead gives the execution-worker its own engine and feeds it a
+/// serialized `cwasm` produced by a matching compiler engine.
+pub struct Executor {
+    engine: Engine,
 }
 
-impl Runner {
+impl Executor {
+    /// Build an executor with a fresh runtime engine — the execution-worker
+    /// entry point.
     pub fn new() -> wasmtime::Result<Self> {
         Ok(Self {
-            compiler: Compiler::new()?,
+            engine: Engine::new(&engine_config())?,
         })
     }
 
-    /// Compile a policy component from its binary (wasm or wat).
-    /// Delegates to the held [`Compiler`] (Cranelift codegen).
-    pub fn compile(&self, bytes: &[u8]) -> wasmtime::Result<Component> {
-        self.compiler.compile(bytes)
+    /// Build an executor sharing an existing engine — used by the in-process
+    /// `Runner` facade to run on the SAME engine its `Compiler` compiled on
+    /// (`Engine::clone` shares the underlying engine, so a component compiled
+    /// there is instantiable here).
+    pub fn from_engine(engine: Engine) -> Self {
+        Self { engine }
     }
 
-    /// Serialize a compiled component to `cwasm` bytes for the L2
-    /// compiled-artifact cache. Inverse of [`deserialize_component`].
-    /// Delegates to the held [`Compiler`]; the bytes deserialize on THIS
-    /// runner's engine because both engines share [`engine_config`].
-    pub fn serialize_component(&self, component: &Component) -> wasmtime::Result<Vec<u8>> {
-        self.compiler.serialize_component(component)
+    /// The runtime [`Engine`] this executor instantiates on.
+    pub fn engine(&self) -> &Engine {
+        &self.engine
     }
 
-    /// Reconstruct a component from `cwasm` bytes produced by
-    /// [`serialize_component`]. Two facts make the `unsafe` deserialize
+    /// Reconstruct a component from `cwasm` bytes produced by the compiler's
+    /// `serialize_component`. Two facts make the `unsafe` deserialize
     /// sound for the L2 cache:
     ///
     ///   * **Provenance** — the caller only feeds bytes it AEAD-opened
@@ -98,30 +97,7 @@ impl Runner {
         // SAFETY: bytes are TEE-sealed (trusted provenance) and
         // wasmtime's own header check rejects an incompatible build —
         // see the doc comment above.
-        unsafe { Component::deserialize(self.compiler.engine(), cwasm) }
-    }
-
-    /// Fuse a policy with plugins into a self-contained component's BYTES
-    /// (the strict-routed static artifact `enclavid link` would publish).
-    /// Delegates to the held [`Compiler`].
-    pub fn fuse(&self, policy_wasm: &[u8], plugins: &[PluginInstance]) -> wasmtime::Result<Vec<u8>> {
-        self.compiler.fuse(policy_wasm, plugins)
-    }
-
-    /// Fuse a policy with its pinned plugins into ONE component and
-    /// compile it — the build-time step run once per `(policy, plugin-set)`
-    /// and reused across every reducer round. Delegates to the held
-    /// [`Compiler`]; see [`Compiler::compose`] for the dynamic / static /
-    /// hybrid shapes. The returned [`Composition`]'s `component` is
-    /// compiled on the compiler's engine; the caller serializes it and
-    /// later [`deserialize_component`](Self::deserialize_component)s the
-    /// bytes on this runner's own engine to run.
-    pub fn compose(
-        &self,
-        policy_wasm: &[u8],
-        plugins: &[PluginInstance],
-    ) -> wasmtime::Result<Composition> {
-        self.compiler.compose(policy_wasm, plugins)
+        unsafe { Component::deserialize(&self.engine, cwasm) }
     }
 
     /// Drive one reducer round. `session` carries the policy's opaque
@@ -132,7 +108,7 @@ impl Runner {
     ///
     /// Returns the next [`RunStatus`] and the updated [`SessionState`]
     /// (new opaque `state` + new `current_prompt`). The
-    /// [`SessionListener`] is fired exactly once with the post-round
+    /// `SessionListener` is fired exactly once with the post-round
     /// state and — only on a consent-disclosure accept — the consented
     /// fields being sealed to the consumer.
     pub async fn run(
@@ -174,7 +150,7 @@ impl Runner {
         // away, so the canonical registrations sit unused, which is
         // harmless). Plugin↔policy interfaces are internal to the fused
         // component, so the Linker never sees them.
-        let mut linker: Linker<HostState> = Linker::new(self.compiler.engine());
+        let mut linker: Linker<HostState> = Linker::new(&self.engine);
         GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
         // Then the DISTINCT per-catalog i18n/icons instances the fusion
         // produced (`embedded-slot:<hash>/<iface>`), each resolving
@@ -184,7 +160,7 @@ impl Runner {
 
         // Instantiate the policy and call `handle` ONCE.
         let mut store = Store::new(
-            self.compiler.engine(),
+            &self.engine,
             HostState::new(props, embedded.clone(), media_store),
         );
         store.limiter(|s| &mut s.limits);
@@ -325,33 +301,34 @@ impl wasmtime::component::HasData for HasHost {
     type Data<'a> = &'a mut HostState;
 }
 
+/// The wasmtime [`Config`] this executor builds its runtime [`Engine`] from.
+/// It MUST match engine-compiler's `engine_config` verbatim: `consume_fuel`
+/// compiles fuel checks INTO the code, so a mismatch would make a
+/// compiler-produced `cwasm` fail this engine's compatibility-header check.
+/// Duplicated (not shared) because the two crates live in separate CVMs and
+/// cannot share a wasmtime-bearing dependency without one pulling the
+/// other's toolchain.
+fn engine_config() -> Config {
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    config.consume_fuel(true);
+    config
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A compiled component serializes to `cwasm` and deserializes back
-    /// on the same engine — the L2 cache's compile-amortization path.
-    #[test]
-    fn serialize_deserialize_component_round_trips() {
-        let runner = Runner::new().unwrap();
-        // Minimal valid empty component.
-        let bytes = wasm_encoder::Component::new().finish();
-        let component = runner.compile(&bytes).unwrap();
-        let cwasm = runner.serialize_component(&component).unwrap();
-        assert!(!cwasm.is_empty(), "serialize produces cwasm bytes");
-        // Round-trips on the same engine; re-serialize proves the
-        // restored component is a live artifact, not a dangling handle.
-        let restored = runner.deserialize_component(&cwasm).unwrap();
-        runner.serialize_component(&restored).unwrap();
-    }
-
     /// Garbage bytes are rejected, not interpreted — wasmtime's header
     /// check turns a toolchain skew / host tamper into a clean `Err`
     /// (which the cache treats as a miss), never undefined behaviour.
+    /// (The full compile→serialize→deserialize round-trip is exercised by
+    /// the `Runner` facade's tests in `enclavid-engine`, which holds both
+    /// halves.)
     #[test]
     fn deserialize_rejects_non_cwasm() {
-        let runner = Runner::new().unwrap();
-        assert!(runner.deserialize_component(b"definitely not cwasm").is_err());
-        assert!(runner.deserialize_component(&[]).is_err());
+        let executor = Executor::new().unwrap();
+        assert!(executor.deserialize_component(b"definitely not cwasm").is_err());
+        assert!(executor.deserialize_component(&[]).is_err());
     }
 }

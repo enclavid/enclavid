@@ -50,7 +50,7 @@ pub struct HostState {
 }
 
 /// Per-run inputs assembled by the api crate and handed to
-/// [`HostState::new`]. Carries the listener that ties this run to the
+/// `HostState::new`. Carries the listener that ties this run to the
 /// caller's persistence layer plus the composition-wide
 /// `EmbeddedRegistry` — constructed once at policy-cache build time from
 /// policy + plugin embedded sections and shared by `Arc` with every

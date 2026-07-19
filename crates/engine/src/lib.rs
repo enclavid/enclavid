@@ -1,102 +1,130 @@
-//! Engine: policy + plugin composition + execution.
+//! `enclavid-engine` — a thin FACADE over the split engine fleet.
 //!
-//! The policy is a PURE REDUCER. `enclavid:policy/policy.handle
-//! (state, event) -> (state, action)` is called ONCE per round; the engine
-//! owns the mailbox (builds the inbound `event` from `/input`), persistence
-//! (threads the opaque `state` blob), and effects (renders prompts, seals
-//! consented disclosures). No intercept / replay / compaction.
+//! The engine is split into two crates that share only the plain-data
+//! `engine-types` leaf and never a live wasmtime object:
 //!
-//! ```text
-//! runner/      ← top-level executor (Runner, RunStatus); WIT⇄domain
-//!                conversions + media/consent validation live here now
-//! embedded/    ← `enclavid:embedded/*` slice: section parsing
-//!                (load_embedded), per-component scoping registry
-//!                (EmbeddedRegistry), and the embedded host fn impls
-//!                (slot 0 via bindgen)
-//!   ↓ uses
-//! state/       ← Store<T> data layer (HostState, RunInputs)
-//! listener     ← outbound contract (SessionListener trait, SessionChange);
-//!                fired by the runner on a consent-disclosure accept
-//! limits, sanitize  ← leaf utilities
-//! ```
+//!   * [`engine_compiler`] — the COMPILE half: fuse a policy + plugins and
+//!     run Cranelift codegen to a serializable `cwasm`.
+//!   * [`engine_executor`] — the EXECUTE half: deserialize a `cwasm`,
+//!     instantiate it, and drive one pure-reducer round. Carries NO
+//!     Cranelift (the execution-worker CVM has zero compiler surface).
+//!
+//! This facade re-exports both at the original `enclavid_engine::*` paths
+//! so existing callers (api, tests) are unchanged, and offers [`Runner`] —
+//! an in-process convenience that runs BOTH halves on ONE shared wasmtime
+//! engine (local / dev / single-CVM). In Plan-A the api orchestrator drops
+//! this facade: it drives a RemoteCompiler / RemoteExecutor over rpc, and
+//! each worker builds only its own half.
 
-mod embedded;
-pub mod limits;
-mod listener;
-mod media;
-mod media_store;
-mod runner;
-mod sanitize;
-mod state;
-
-pub use embedded::{
-    ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedRegistry,
-    EmbeddedRegistryBuilder, Icon, IconStore, Localized, LocalizedStore, RefKind, RefStore,
-    Translation,
-};
-// The COMPILE half (fusion + Cranelift + section parsing) lives in the
-// `engine-compiler` crate now; re-export its surface here so callers keep
-// reaching it through `enclavid_engine::*` unchanged.
+// ---- COMPILE half (engine-compiler) ----
 pub use engine_compiler::{
-    Composition, EmbeddedCatalog, catalog_hash, load_embedded, load_embedded_nested, slug,
-    top_level_imports,
+    Compiler, Composition, EmbeddedCatalog, catalog_hash, load_embedded, load_embedded_nested,
+    slug, top_level_imports,
 };
-pub use broker_client::{
-    Action, Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
+
+// ---- EXECUTE half (engine-executor) ----
+pub use engine_executor::limits;
+pub use engine_executor::{
+    Action, CapturedMedia, Component, ComponentDecls, ConsentDisclosure, Decision, DisclosureFields,
+    DisclosureFieldsStore, EmbeddedIface, EmbeddedImport, EmbeddedRegistry, EmbeddedRegistryBuilder,
+    Event, Executor, Icon, IconStore, Localized, LocalizedStore, MediaResult, MediaStore,
+    PluginInstance, Prompt, Prop, RefKind, RefStore, RunError, RunInputs, RunResult, RunStatus,
+    SessionChange, SessionListener, SessionMetadata, SessionState, Translation, sanitize_text_value,
 };
-pub use listener::{CapturedMedia, ConsentDisclosure, SessionChange, SessionListener};
-pub use media_store::MediaStore;
-pub use runner::{EmbeddedIface, EmbeddedImport, PluginInstance, RunStatus, Runner};
-pub use state::RunInputs;
-/// The bindgen-generated `enclavid:host/types.prop` — the consumer's
-/// static-config value variant. Re-exported so the api crate can build
-/// the `props` list it hands to [`Runner::run`] without taking a direct
-/// bindgen dependency.
-pub use crate::enclavid::host::types::Prop;
-/// Re-exported for the api crate so it can apply the same
-/// control/BIDI/zero-width/Unicode-tag stripping to manifest
-/// translation values at resolve time (lazy validation strategy —
-/// see `runner::load_manifest` docs).
-pub use sanitize::sanitize_text_value;
-/// Re-exports for API callers so they can implement `SessionListener` and
-/// build futures with the right error type without depending on
-/// wasmtime directly. `RunError` is `anyhow::Error` under the hood.
-pub use wasmtime::{Error as RunError, Result as RunResult};
-// Re-exported so callers (api crate) can hold compiled components in
-// their session caches without taking a direct wasmtime dependency.
-pub use wasmtime::component::Component;
 
-wasmtime::component::bindgen!({
-    inline: r#"
-        package enclavid:engine@0.1.0;
+/// In-process convenience over both fleet halves: holds a [`Compiler`] and
+/// an [`Executor`] built on ONE shared wasmtime engine, so a component the
+/// compiler produces is directly runnable by the executor (a component is
+/// only instantiable on the engine it was compiled on — `Engine::clone`
+/// shares the underlying engine). This is the single-process path; the
+/// cross-CVM split replaces it with rpc clients whose engines are distinct
+/// and bridged only by serialized `cwasm`.
+pub struct Runner {
+    compiler: Compiler,
+    executor: Executor,
+}
 
-        world host {
-            import enclavid:host/types@0.1.0;
-            import enclavid:host/embedded-disclosure-fields@0.1.0;
-            import enclavid:host/embedded-i18n@0.1.0;
-            import enclavid:host/embedded-icons@0.1.0;
-            import enclavid:host/session-context@0.1.0;
-            export enclavid:policy/policy@0.1.0;
-        }
-    "#,
-    path: [
-        "../../wit/host",
-        "../../wit/shared-types",
-        "../../wit/policy",
-    ],
-    imports: { default: async | trappable },
-    exports: { default: async },
-    // The three embedded refs are host-owned resources; back each with
-    // the rep that carries its RESOLVED data (see `embedded::store`), so
-    // the action-boundary deref in `runner::convert` is self-contained.
-    // `blob` is likewise host-owned — its rep holds one stored blob's
-    // bytes + content ref (see `media`); the runtime mints a handle per
-    // captured frame into `event::media`'s `clip` record. `clip` itself is a
-    // plain policy-side record (no rep).
-    with: {
-        "enclavid:host/types.localized-ref": crate::embedded::LocalizedRef,
-        "enclavid:host/types.icon-ref": crate::embedded::IconRef,
-        "enclavid:host/types.disclosure-field-ref": crate::embedded::DisclosureFieldRef,
-        "enclavid:host/types.blob": crate::media::BlobRep,
-    },
-});
+impl Runner {
+    /// Build both halves on one shared engine (the compiler's).
+    pub fn new() -> RunResult<Self> {
+        let compiler = Compiler::new()?;
+        // Same underlying engine as the compiler, so compose output runs
+        // here without a serialize/deserialize round-trip.
+        let executor = Executor::from_engine(compiler.engine().clone());
+        Ok(Self { compiler, executor })
+    }
+
+    // ---- compile side → Compiler ----
+
+    /// Compile a policy component from its binary (wasm or wat).
+    pub fn compile(&self, bytes: &[u8]) -> RunResult<Component> {
+        self.compiler.compile(bytes)
+    }
+
+    /// Serialize a compiled component to `cwasm` for the L2 cache /
+    /// compile-boundary reply.
+    pub fn serialize_component(&self, component: &Component) -> RunResult<Vec<u8>> {
+        self.compiler.serialize_component(component)
+    }
+
+    /// Fuse a policy + plugins into a self-contained component's bytes.
+    pub fn fuse(&self, policy_wasm: &[u8], plugins: &[PluginInstance]) -> RunResult<Vec<u8>> {
+        self.compiler.fuse(policy_wasm, plugins)
+    }
+
+    /// Fuse + compile a policy with its pinned plugins into one
+    /// [`Composition`] — the once-per-`(policy, plugin-set)` build step.
+    pub fn compose(
+        &self,
+        policy_wasm: &[u8],
+        plugins: &[PluginInstance],
+    ) -> RunResult<Composition> {
+        self.compiler.compose(policy_wasm, plugins)
+    }
+
+    // ---- execute side → Executor (shares the compiler's engine) ----
+
+    /// Reconstruct a component from `cwasm` bytes. Runs on the shared
+    /// engine, so a component `serialize`d by this runner deserializes here.
+    pub fn deserialize_component(&self, cwasm: &[u8]) -> RunResult<Component> {
+        self.executor.deserialize_component(cwasm)
+    }
+
+    /// Drive one reducer round on the compiled `component`.
+    pub async fn run(
+        &self,
+        component: &Component,
+        embedded_imports: &[EmbeddedImport],
+        session: SessionState,
+        event: Event,
+        props: Vec<(String, Prop)>,
+        inputs: RunInputs,
+    ) -> RunResult<(RunStatus, SessionState)> {
+        self.executor
+            .run(component, embedded_imports, session, event, props, inputs)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The full compile→serialize→deserialize round-trip across the
+    /// Compiler/Executor split: `compile` codegens on the compiler engine,
+    /// `deserialize` reconstructs on the executor engine — which is a clone
+    /// of the SAME underlying engine, so the artifact is compatible. Proves
+    /// the shared-engine facade holds the two halves together correctly.
+    #[test]
+    fn serialize_deserialize_component_round_trips() {
+        let runner = Runner::new().unwrap();
+        // Minimal valid empty component.
+        let bytes = wasm_encoder::Component::new().finish();
+        let component = runner.compile(&bytes).unwrap();
+        let cwasm = runner.serialize_component(&component).unwrap();
+        assert!(!cwasm.is_empty(), "serialize produces cwasm bytes");
+        let restored = runner.deserialize_component(&cwasm).unwrap();
+        // Re-serialize proves the restored component is a live artifact.
+        runner.serialize_component(&restored).unwrap();
+    }
+}

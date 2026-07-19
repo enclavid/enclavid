@@ -373,15 +373,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
 
 [[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "bitfield"
 version = "0.19.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1493,18 +1484,13 @@ dependencies = [
 name = "enclavid-engine"
 version = "0.1.0"
 dependencies = [
- "bincode",
- "blake3",
  "broker-client",
  "enclavid-embedded",
  "engine-compiler",
- "engine-types",
+ "engine-executor",
  "jpeg-encoder",
- "serde",
- "serde_json",
  "tokio",
  "wasm-encoder 0.247.0",
- "wasmtime",
  "wit-component 0.247.0",
  "xtask",
 ]
@@ -1549,6 +1535,17 @@ dependencies = [
  "engine-types",
  "wac-graph",
  "wasmparser 0.247.0",
+ "wasmtime",
+]
+
+[[package]]
+name = "engine-executor"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "broker-client",
+ "engine-types",
+ "tokio",
  "wasmtime",
 ]
 
