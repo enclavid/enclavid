@@ -23,6 +23,7 @@ use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
 
 use engine_types::composition::{EmbeddedImport, PluginInstance};
+use engine_types::embedded::ComponentDecls;
 
 pub use decls::{EmbeddedCatalog, load_embedded, load_embedded_nested, top_level_imports};
 pub use hash::{catalog_hash, embedded_import_name, slug};
@@ -35,6 +36,20 @@ pub use hash::{catalog_hash, embedded_import_name, slug};
 pub struct Composition {
     pub component: Component,
     pub embedded_imports: Vec<EmbeddedImport>,
+}
+
+/// The serializable output of a compile, in engine-native types (NO rpc
+/// dep): the `cwasm` bytes, the per-catalog import manifest, and the parsed
+/// per-component catalogs. This is exactly what the wire `CompiledBundle`
+/// carries; the compile-worker bin (and api's `LocalCompiler`) wrap this
+/// into that wire type. Keeping it native lets the pure lib produce the
+/// whole compile output without depending on the `rpc` contract.
+pub struct BundleParts {
+    pub cwasm: Vec<u8>,
+    pub embedded_imports: Vec<EmbeddedImport>,
+    /// Per-component `(catalog content-hash, parsed decls)`, composition
+    /// order (policy first) — the registry-builder inputs.
+    pub catalogs: Vec<([u8; 32], ComponentDecls)>,
 }
 
 /// The compile engine: owns a wasmtime [`Engine`] configured for Cranelift
@@ -125,6 +140,32 @@ impl Compiler {
         Ok(Composition {
             component,
             embedded_imports,
+        })
+    }
+
+    /// The whole compile-boundary output as [`BundleParts`]: parse each
+    /// component's embedded catalog (composition order, policy first), fuse +
+    /// Cranelift-compile, and serialize to `cwasm`. The compile-worker bin and
+    /// api's `LocalCompiler` both call this, then wrap the result into the wire
+    /// `CompiledBundle` — so this orchestration lives ONCE, in the pure lib.
+    pub fn compile_to_parts(
+        &self,
+        policy_wasm: &[u8],
+        plugins: &[PluginInstance],
+    ) -> wasmtime::Result<BundleParts> {
+        let policy_catalog = load_embedded(policy_wasm)?;
+        let mut catalogs = Vec::with_capacity(1 + plugins.len());
+        catalogs.push((policy_catalog.hash, policy_catalog.decls));
+        for p in plugins {
+            let c = load_embedded(&p.wasm)?;
+            catalogs.push((c.hash, c.decls));
+        }
+        let composition = self.compose(policy_wasm, plugins)?;
+        let cwasm = self.serialize_component(&composition.component)?;
+        Ok(BundleParts {
+            cwasm,
+            embedded_imports: composition.embedded_imports,
+            catalogs,
         })
     }
 }

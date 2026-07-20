@@ -46,3 +46,16 @@ pub use compile::*;
 mod execute;
 #[cfg(feature = "execute")]
 pub use execute::*;
+
+/// The remoc connection config both fleet peers build from. Raises
+/// `max_data_size` from chmux's 512 KiB default: compiled `cwasm` bundles
+/// run ~10–15 MiB, so the default would reject a compile reply outright.
+/// Centralized so orchestrator + workers agree on the limits — part of the
+/// adversarial-peer hardening surface (see the crate doc). `remoc::Cfg` is a
+/// re-export of `chmux::Cfg`, so the field is flat.
+#[cfg(any(feature = "compile", feature = "execute"))]
+pub fn connection_cfg() -> remoc::Cfg {
+    let mut cfg = remoc::Cfg::default();
+    cfg.max_data_size = 64 * 1024 * 1024;
+    cfg
+}

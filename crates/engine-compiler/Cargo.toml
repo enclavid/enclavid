@@ -42,6 +42,31 @@ wasmparser = "0.247"
 blake3 = "1"
 enclavid-embedded = { path = "../embedded" }
 
+# --- compile-worker bin deps (optional) — pulled ONLY by the `worker`
+# feature, so the LIB stays rpc/remoc-free and api's `local-compile` gets a
+# pure engine-compiler lib. The worker BIN is the deployable compile-worker
+# CVM: it wraps this crate's Compiler in an rpc::CompilerService server. ---
+rpc = { path = "../rpc", default-features = false, features = ["compile"], optional = true }
+remoc = { version = "0.18", default-features = false, features = [
+    "rtc",
+    "codec-ciborium",
+], optional = true }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "io-std",
+    "io-util",
+], optional = true }
+
+[features]
+# Enables the `compile-worker` bin. api never enables it → api's local-compile
+# path links only the pure lib (no rpc/remoc).
+worker = ["dep:rpc", "dep:remoc", "dep:tokio"]
+
+[[bin]]
+name = "compile-worker"
+required-features = ["worker"]
+
 [dev-dependencies]
 # embedded_nested.rs builds synthetic (nested) components to exercise
 # load_embedded_nested's recursion without cargo-building fixtures.
