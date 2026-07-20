@@ -24,7 +24,7 @@ use axum::http::header::ACCEPT_LANGUAGE;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 
-use broker_client::Translation;
+use hatch_client::Translation;
 
 const DEFAULT_LOCALE: &str = "en";
 

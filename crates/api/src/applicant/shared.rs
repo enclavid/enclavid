@@ -14,7 +14,7 @@ use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
-use broker_client::{
+use hatch_client::{
     AuthN, AuthZ, Client, Event, Key, Metadata, PluginPin, Replay, SessionMetadata, SessionState,
     State as StateField, public_session_id, reason,
 };
@@ -33,7 +33,7 @@ use crate::state::AppState;
 
 use super::auth::CallerKey;
 use super::callbacks::CallbackServer;
-use super::media_store::BrokerMediaStore;
+use super::media_store::HatchMediaStore;
 use super::persister::SessionPersister;
 use super::views::{progress_from, SessionProgress};
 
@@ -123,7 +123,7 @@ pub(super) struct SessionRunCtx {
     /// The per-round media store — becomes the `media_load` half of the
     /// [`CallbackServer`] the keyless worker calls back into. Holds the seal key
     /// + a `Weak` to the applicant token.
-    media_store: Arc<BrokerMediaStore>,
+    media_store: Arc<HatchMediaStore>,
     props: Vec<(String, Prop)>,
     /// Composition cache key — names the fused component in the execution-worker's
     /// L1 cache, and (with the worker's `compat_token`) keys the orchestrator's
@@ -304,7 +304,7 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
                 // Surface it as 403 so the frontend offers `/reset`; everything
                 // else (transport, codec) is a real 500. An ABSENT state is
                 // `Ok(None)`, not an error, so a first `/connect` still proceeds.
-                if matches!(e, broker_client::BridgeError::Crypto(_)) {
+                if matches!(e, hatch_client::BridgeError::Crypto(_)) {
                     return StatusCode::FORBIDDEN;
                 }
                 eprintln!(
@@ -374,16 +374,16 @@ persist; same containment as above.
         });
         // The live host blob store: the worker's `blob::from-blob-ref` reads
         // sealed captures back through this (via the `media_load` callback) — a
-        // pull-through cache over the broker backing, gated by the session's
+        // pull-through cache over the hatch backing, gated by the session's
         // captured-hash set (from sealed metadata, prior rounds) so a fabricated
-        // ref is refused without a broker read. Same session keys as the
+        // ref is refused without a hatch read. Same session keys as the
         // persister that WROTE them.
         let captured: HashSet<[u8; 32]> = metadata
             .captured_media
             .iter()
             .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok())
             .collect();
-        let media_store = Arc::new(BrokerMediaStore {
+        let media_store = Arc::new(HatchMediaStore {
             session_store: state.session_store.clone(),
             session_id: session_id.clone(),
             // Weak: the strong lives in the SessionRunCtx below (sole owner).
@@ -485,7 +485,7 @@ async fn cold_compile(
     let policy_bearer =
         policy_pull::bearer_for_ref(&client.registry_auth, &metadata.policy_ref);
 
-    // Context for the `kbs` key path: the broker relay client that
+    // Context for the `kbs` key path: the hatch relay client that
     // couriers each RCAR leg. Shared by the policy and every plugin pull;
     // inline / plaintext artifacts ignore it.
     let kbs_ctx = crate::keyprovider::KbsContext { kbs: &state.kbs };
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn composition_key_partitions_by_decryption_authority() {
-        use broker_client::{KbsKey, Key};
+        use hatch_client::{KbsKey, Key};
         let plugins = [pin("p", "r")];
         let none = composition_key("policy", None, &no_auth(), &plugins);
         let inline_a = composition_key("policy", Some(&Key::Inline(vec![1, 2, 3])), &no_auth(), &plugins);

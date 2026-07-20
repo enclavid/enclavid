@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use wasmtime::component::{Resource, ResourceTable};
 
-use broker_client::{
+use hatch_client::{
     CameraFacing as DCameraFacing, CaptureGuide as DCaptureGuide, CaptureStep as DCaptureStep,
     Decision as DDecision, DisplayField as DDisplayField, Event, GuideNone, GuideOval, GuideRect,
     Localized as DLocalized, MediaSpec as DMediaSpec, Prompt, PromptDisclosure as DDisclosure,

@@ -1,7 +1,7 @@
 //! Execute boundary — run + mid-call callbacks (the bidirectional case).
 //!
 //! Gated behind the `execute` feature: an execution-worker built with only
-//! this feature links the executor + callback contract + `broker-client` +
+//! this feature links the executor + callback contract + `hatch-client` +
 //! `engine-types` (the run needs the composition catalogs), and NOT the
 //! compiler contract — least-knowledge for its measured image, and NO Cranelift.
 //!
@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use broker_client::{Decision, DisplayField, Event, Prompt, SessionState};
+use hatch_client::{Decision, DisplayField, Event, Prompt, SessionState};
 
 use crate::CompiledBundle;
 
@@ -38,7 +38,7 @@ pub enum Prop {
 }
 
 /// serde mirror of the engine's `RunStatus` — one round's outcome. Wraps the
-/// broker_client domain `Prompt`/`Decision` (already serde; both are sealed
+/// hatch_client domain `Prompt`/`Decision` (already serde; both are sealed
 /// into `SessionState`). The worker maps `engine_executor::RunStatus` into this
 /// at the boundary; the orchestrator projects it into the applicant view +
 /// finalize without pulling wasmtime.

@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 
-use broker_client::{Clip, Event, MediaResult, Prompt, SessionState};
+use hatch_client::{Clip, Event, MediaResult, Prompt, SessionState};
 
 use crate::error::ApiError;
 use crate::limits::APPLICANT_INPUT_BODY_LIMIT;

@@ -59,7 +59,7 @@ pub use embedded::{
     EmbeddedRegistryBuilder, Icon, IconStore, Localized, LocalizedStore, RefKind, RefStore,
     Translation,
 };
-pub use broker_client::{
+pub use hatch_client::{
     Action, Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
 };
 pub use listener::{CapturedMedia, ConsentDisclosure, SessionChange, SessionListener};

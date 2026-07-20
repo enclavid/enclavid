@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use enclavid_attestation::Attestor;
-use broker_client::{AuthClient, BrokerClient, SessionStore};
+use hatch_client::{AuthClient, HatchClient, SessionStore};
 
 pub struct ClientState {
     pub auth: AuthClient,
@@ -25,11 +25,11 @@ pub struct ClientState {
 impl ClientState {
     pub fn new(
         session_store: Arc<SessionStore>,
-        broker: BrokerClient,
+        hatch: HatchClient,
         attestor: Arc<dyn Attestor>,
     ) -> Self {
         Self {
-            auth: AuthClient::new(broker),
+            auth: AuthClient::new(hatch),
             session_store,
             attestor,
         }
@@ -40,9 +40,9 @@ impl ClientState {
         session_store: Arc<SessionStore>,
         attestor: Arc<dyn Attestor>,
     ) -> Self {
-        let broker = BrokerClient::new(transport_out)
+        let hatch = HatchClient::new(transport_out)
             .await
-            .expect("failed to connect to broker");
-        Self::new(session_store, broker, attestor)
+            .expect("failed to connect to hatch");
+        Self::new(session_store, hatch, attestor)
     }
 }

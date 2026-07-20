@@ -31,7 +31,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use base64ct::{Base64, Encoding};
 
-use broker_client::{
+use hatch_client::{
     AuthN, AuthVerdict, AuthZ, AuthorizeRequest, ClientOperation, Covert, Replay, SessionMetadata,
     Untrusted, boundary, reason,
 };
@@ -272,7 +272,7 @@ pub(super) async fn enforce(
         operation: op,
     })
     .vouch_unchecked::<AuthN, _>(reason!(
-        "client's own credential, released to its validating broker — not a TEE secret"
+        "client's own credential, released to its validating hatch — not a TEE secret"
     ))
     .vouch_unchecked::<AuthZ, _>(reason!("forwarding the credential to its validator IS the op"))
     .vouch_unchecked::<Covert, _>(reason!(

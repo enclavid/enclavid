@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{MethodRouter, delete};
 
-use broker_client::public_session_id;
+use hatch_client::public_session_id;
 
 use crate::state::AppState;
 
@@ -45,7 +45,7 @@ async fn reset(
         .delete(public_session_id(&session_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    // Drop the TEE-side pull-through cache for this session (the broker's
+    // Drop the TEE-side pull-through cache for this session (the hatch's
     // `delete` above already purged the sealed backing `session:{id}:media`).
     state.media_cache.purge(&session_id).await;
     Ok(StatusCode::NO_CONTENT)

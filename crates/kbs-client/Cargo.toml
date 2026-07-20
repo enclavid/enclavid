@@ -7,7 +7,7 @@ repository.workspace = true
 
 # TEE-side Trustee KBS RCAR client (protocol v0.4.0). Transport-free: it
 # builds each handshake leg's request and parses each response, the caller
-# drives the I/O (broker `/kbs/relay` in prod, direct HTTP in tests) —
+# drives the I/O (hatch `/kbs/relay` in prod, direct HTTP in tests) —
 # keeps the no-outbound boundary intact. See [[project-trustee-rcar-protocol]].
 
 [dependencies]

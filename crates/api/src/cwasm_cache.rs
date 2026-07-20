@@ -1,7 +1,7 @@
 //! L2 cwasm-cache: best-effort load / store of a [`CompiledBundle`].
 //!
 //! This is the fleet's DURABLE cache tier and the orchestrator's ONLY compiled
-//! artifact store — a broker-backed blob store ([`broker_client::CacheStore`],
+//! artifact store — a hatch-backed blob store ([`hatch_client::CacheStore`],
 //! AEAD-sealed under `tee_seal_key`) that survives a TEE restart. There is no
 //! api-side in-RAM component cache; the sole in-memory L1 lives on the
 //! execution-worker, which PULLS a bundle from here via `load_component` on an
@@ -33,7 +33,7 @@
 //! degrade to the cold compile path. The cache is a pure optimization;
 //! correctness never depends on it.
 
-use broker_client::CacheStore;
+use hatch_client::CacheStore;
 
 use rpc::CompiledBundle;
 

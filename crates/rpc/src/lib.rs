@@ -4,7 +4,7 @@
 //! [`Connect::io`](remoc::Connect::io) frames + multiplexes over the raw
 //! stream), so the same service definitions work at every stage of the CVM
 //! split. CBOR codec ([`remoc::codec::Ciborium`]) keeps the named-field schema
-//! evolution `broker-protocol` already relies on across independently-deployed
+//! evolution `hatch-protocol` already relies on across independently-deployed
 //! nodes.
 //!
 //! Chosen over a thin hand-rolled protocol and over tarpc — see the
@@ -23,7 +23,7 @@
 //!     Cranelift-compiles into a `CompiledBundle`.
 //!   * `execute` → `ExecutorService` + `CallbackService` + the execute wire
 //!     types (`RunRequest`, `RunReply`, `RunStatus`, `Prop`, `ExecError`,
-//!     `CallbackError`); pulls `broker-client`.
+//!     `CallbackError`); pulls `hatch-client`.
 //!
 //! The compiled artifact ([`CompiledBundle`] / [`CatalogEntry`]) is SHARED: it
 //! is the compile OUTPUT and the execute priming INPUT (and the api L2 cache

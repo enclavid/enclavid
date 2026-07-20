@@ -422,56 +422,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "broker"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "broker-protocol",
- "hex",
- "jsonwebtoken 9.3.1",
- "object_store",
- "oci-client",
- "redis",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
- "tokio",
- "tokio-vsock",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
-name = "broker-client"
-version = "0.1.0"
-dependencies = [
- "broker-protocol",
- "bytes",
- "ciborium",
- "enclavid-crypto",
- "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
- "serde",
- "tokio",
- "tokio-vsock",
- "tower-service",
-]
-
-[[package]]
-name = "broker-protocol"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "serde",
-]
-
-[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1379,14 +1329,14 @@ dependencies = [
  "age",
  "axum",
  "base64ct",
- "broker-client",
- "broker-protocol",
  "ciborium",
  "enclavid-attestation",
  "enclavid-crypto",
  "enclavid-kbs-client",
  "engine-types",
  "futures",
+ "hatch-client",
+ "hatch-protocol",
  "hex",
  "hkdf",
  "hyper",
@@ -1532,10 +1482,10 @@ name = "engine-executor"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "broker-client",
  "enclavid-embedded",
  "engine-compiler",
  "engine-types",
+ "hatch-client",
  "jpeg-encoder",
  "moka",
  "remoc",
@@ -1985,6 +1935,56 @@ dependencies = [
  "foldhash 0.2.0",
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "hatch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "hatch-protocol",
+ "hex",
+ "jsonwebtoken 9.3.1",
+ "object_store",
+ "oci-client",
+ "redis",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-vsock",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "hatch-client"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "ciborium",
+ "enclavid-crypto",
+ "hatch-protocol",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "tokio",
+ "tokio-vsock",
+ "tower-service",
+]
+
+[[package]]
+name = "hatch-protocol"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "serde",
 ]
 
 [[package]]
@@ -3875,9 +3875,9 @@ dependencies = [
 name = "rpc"
 version = "0.1.0"
 dependencies = [
- "broker-client",
  "ciborium",
  "engine-types",
+ "hatch-client",
  "remoc",
  "serde",
  "tokio",

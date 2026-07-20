@@ -23,7 +23,7 @@
 
 use serde::Serialize;
 
-use broker_client::{DisplayField as ProtoDisplayField, Localized, SessionStatus};
+use hatch_client::{DisplayField as ProtoDisplayField, Localized, SessionStatus};
 
 use crate::locale::Locale;
 
@@ -44,7 +44,7 @@ pub struct ResolvedPolicyView {
 /// Serde "remote" definition for the proto-generated `SessionStatus`
 /// enum. Variants must mirror the foreign enum exactly; serde uses
 /// this shadow type only as a description of how to serialize the
-/// real `SessionStatus` (declared in broker-client). Lets the JSON
+/// real `SessionStatus` (declared in hatch-client). Lets the JSON
 /// wire shape live in the api crate without an orphan-rule wrapper
 /// or a transport-layer serde-aware build.rs.
 ///

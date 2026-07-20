@@ -6,7 +6,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use broker_client::{Metadata, SessionStatus, public_session_id};
+use hatch_client::{Metadata, SessionStatus, public_session_id};
 
 use crate::client_state::ClientState;
 use crate::dto::{self, ResolvedPolicyView};

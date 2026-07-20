@@ -20,7 +20,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use broker_client::{DisplayField, SessionState};
+use hatch_client::{DisplayField, SessionState};
 
 /// Structured disclosure record the runtime seals when a
 /// consent-disclosure prompt is accepted. Engine emits structured

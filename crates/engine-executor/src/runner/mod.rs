@@ -11,7 +11,7 @@
 //!   3. performs the returned `action`: `render` persists the prompt as
 //!      [`SessionState::current_prompt`] and yields `AwaitingInput`;
 //!      `finish` yields `Completed`. (The sealed-state size covert channel is
-//!      closed at the seal boundary in broker-client — `SetState`'s Covert
+//!      closed at the seal boundary in hatch-client — `SetState`'s Covert
 //!      vouch pads the encoded `SessionState` to a constant — not here.)
 //!
 //! ## Consent gate (security-critical)
@@ -27,7 +27,7 @@
 mod convert;
 mod status;
 
-use broker_client::{Event, Prompt, SessionState};
+use hatch_client::{Event, Prompt, SessionState};
 use wasmtime::component::{Component, Linker, Resource};
 use wasmtime::{Config, Engine, Store};
 
@@ -165,7 +165,7 @@ impl Executor {
         // under POLICY_MAX_STATE_BYTES so raw media clips can't be
         // smuggled into the sealed mailbox. A breach traps the round. (The
         // ciphertext-size covert channel is closed separately by constant-size
-        // padding at the seal boundary — see broker-client `SetState`.)
+        // padding at the seal boundary — see hatch-client `SetState`.)
         if new_state.len() > POLICY_MAX_STATE_BYTES {
             return Err(wasmtime::Error::msg(format!(
                 "policy returned a {}-byte state blob, over the \

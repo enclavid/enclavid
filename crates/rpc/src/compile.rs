@@ -3,7 +3,7 @@
 //! Gated behind the `compile` feature: a compile-worker (or the
 //! orchestrator's compile client) built with only this feature links the
 //! compiler contract + `engine-types`, and NOT the executor contract or
-//! `broker-client` — least-knowledge for its measured image. The compiled
+//! `hatch-client` — least-knowledge for its measured image. The compiled
 //! artifact it returns ([`CompiledBundle`](crate::CompiledBundle)) is shared
 //! with the execute boundary (see `crate::bundle`).
 

@@ -1,7 +1,7 @@
 //! Error for crypto operations. Intentionally opaque (just a message):
 //! seal / open / recipient failures carry no domain meaning for callers
 //! (they all map to infra errors), and naming the failing step leaks
-//! nothing useful. Consumers convert into their own error — `broker-
+//! nothing useful. Consumers convert into their own error — `hatch-
 //! client`'s `BridgeError`, `api`'s `RunError`.
 
 use std::fmt;

@@ -8,7 +8,7 @@ repository.workspace = true
 # The intra-fleet RPC contract, split under two features so a single-role
 # worker links only its half. A compile-worker builds
 # `--no-default-features --features compile` (no executor contract, no
-# broker-client); an execution-worker uses `execute` (no compiler contract,
+# hatch-client); an execution-worker uses `execute` (no compiler contract,
 # no engine-types). `default` enables both so whole-workspace dev builds
 # compile + test the whole contract; per-CVM artifact builds narrow it.
 [features]
@@ -18,12 +18,12 @@ default = ["compile", "execute"]
 # embedded registry from at run time. The shared `CompiledBundle` needs it under
 # either. Neither pulls Cranelift.
 compile = ["dep:engine-types", "dep:remoc"]
-execute = ["dep:engine-types", "dep:broker-client", "dep:remoc"]
+execute = ["dep:engine-types", "dep:hatch-client", "dep:remoc"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 # remoc = remote trait calls (rtc) over any AsyncRead+AsyncWrite, CBOR codec
-# (ciborium — same as broker-protocol), no OpenTelemetry. Optional: only the
+# (ciborium — same as hatch-protocol), no OpenTelemetry. Optional: only the
 # rtc traits need it, so a features-less build is remoc-free. See
 # project_fleet_rpc_substrate.
 remoc = { version = "0.18", default-features = false, features = [
@@ -33,7 +33,7 @@ remoc = { version = "0.18", default-features = false, features = [
 # Compile-side wire types (EmbeddedImport, ComponentDecls, PluginInstance).
 engine-types = { path = "../engine-types", optional = true }
 # Execute-side wire types (Event, SessionState).
-broker-client = { path = "../broker-client", optional = true }
+hatch-client = { path = "../hatch-client", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread"] }

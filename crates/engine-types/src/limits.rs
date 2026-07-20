@@ -66,7 +66,7 @@ pub const POLICY_FUEL_BUDGET: u64 = 10_000_000_000;
 ///
 /// The host-observable ciphertext-size covert channel this blob would otherwise
 /// feed is NOT bounded here; it is CLOSED downstream by the seal-boundary
-/// constant-size padding (`broker_client::SEALED_STATE_PLAINTEXT_BYTES`), which
+/// constant-size padding (`hatch_client::SEALED_STATE_PLAINTEXT_BYTES`), which
 /// pads every sealed `SessionState` to a fixed size. This cap is therefore the
 /// data-min ceiling only — and because the padding frame must cover a max-cap
 /// state, raising this cap raises that frame (and hence the constant per-write

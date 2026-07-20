@@ -13,7 +13,7 @@ use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 
 use enclavid_attestation::ReportData;
-use broker_client::{
+use hatch_client::{
     AuthN, AuthZ, Client, ClientAccess, Covert, PluginPin, SessionMetadata, SessionStatus,
     SetMetadata, SetPrincipal, SetStatus, WriteField, boundary, reason,
 };
@@ -104,7 +104,7 @@ pub struct PluginRequest {
 /// (`"key": { "kbs": { endpoint } }`). The KBS resource URI naming the key
 /// lives in the artifact's digest-pinned `enc.keys.*` annotation, so the
 /// client supplies only which KBS to dial. Converted to the sealed
-/// [`broker_client::Key`] before persistence (the secrets then only ride
+/// [`hatch_client::Key`] before persistence (the secrets then only ride
 /// inside AEAD-sealed metadata).
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -117,15 +117,15 @@ pub enum KeyRequest {
 
 #[derive(Deserialize)]
 pub struct KbsKeyRequest {
-    /// KBS origin the broker dials, e.g. `https://kbs.vendor.com:8080`.
+    /// KBS origin the hatch dials, e.g. `https://kbs.vendor.com:8080`.
     pub endpoint: String,
 }
 
 impl KeyRequest {
     /// Convert to the sealed domain form, decoding base64 key material.
     /// `None` ⇒ not encrypted. Bad base64 ⇒ `Err(BAD_REQUEST)`.
-    fn into_domain(this: Option<Self>) -> Result<Option<broker_client::Key>, StatusCode> {
-        use broker_client::{KbsKey, Key};
+    fn into_domain(this: Option<Self>) -> Result<Option<hatch_client::Key>, StatusCode> {
+        use hatch_client::{KbsKey, Key};
         Ok(match this {
             None => None,
             Some(KeyRequest::Inline(key)) => {

@@ -14,12 +14,12 @@
 
 use serde::Serialize;
 
-use broker_client::{
+use hatch_client::{
     CameraFacing, CaptureGuide, CaptureStep, Decision, MediaSpec, Prompt, PromptDisclosure,
     capture_guide,
 };
 // The run outcome comes back from the execution-worker as the `rpc::RunStatus`
-// wire mirror (it wraps the same broker_client `Prompt` / `Decision`).
+// wire mirror (it wraps the same hatch_client `Prompt` / `Decision`).
 use rpc::RunStatus;
 
 use crate::dto;
@@ -138,7 +138,7 @@ pub enum CameraFacingView {
     Any,
 }
 
-/// Mirrors `broker_client::CaptureGuide` (proto oneof). Tagged
+/// Mirrors `hatch_client::CaptureGuide` (proto oneof). Tagged
 /// JSON enum so the frontend can dispatch via the `kind` field.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

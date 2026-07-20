@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use broker_client::{
+use hatch_client::{
     AuthN, AuthZ, Covert, Key, PullRequest, RegistryClient, Replay, boundary, reason,
 };
 use enclavid_crypto::ocicrypt;
@@ -52,13 +52,13 @@ pub enum PullError {
     Decrypt(String),
 }
 
-/// Map a bridge transport error to a `PullError`. The broker classifies
+/// Map a bridge transport error to a `PullError`. The hatch classifies
 /// OCI 404 / `MANIFEST_UNKNOWN` natively (it's the one talking OCI) and
 /// returns the typed `BridgeError::NotFound`, so we match on the variant
 /// instead of grepping a Debug string.
-fn classify_transport_error(e: broker_client::BridgeError) -> PullError {
+fn classify_transport_error(e: hatch_client::BridgeError) -> PullError {
     match e {
-        broker_client::BridgeError::NotFound => PullError::NotFound,
+        hatch_client::BridgeError::NotFound => PullError::NotFound,
         other => PullError::Transport(format!("{other:?}")),
     }
 }
@@ -334,7 +334,7 @@ fn extract_digest(policy_ref: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use broker_client::Key;
+    use hatch_client::Key;
 
     /// The full decrypt seam for an `inline`-keyed layer: ocicrypt-encrypt
     /// some bytes the way `enclavid oci push --encrypt inline` does, lay the

@@ -4,7 +4,7 @@
 //!
 //! [`Compiler`] wraps the `rpc::CompilerService` client. The worker is a
 //! separate process/CVM started by INFRASTRUCTURE (docker-compose / k8s), not
-//! by api — exactly like the broker. api [`connect`](connect_compile_worker)s
+//! by api — exactly like the hatch. api [`connect`](connect_compile_worker)s
 //! to it at a configured address (TCP in dev, a vsock-relay rendezvous under
 //! RA-TLS in Plan-A). The orchestrator holds the returned cwasm as BYTES via
 //! [`bundle_to_entry`] and never deserializes it — the live `Component` is

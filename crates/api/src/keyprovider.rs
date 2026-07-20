@@ -4,7 +4,7 @@
 //! ocicrypt [`PrivateLayerBlockCipherOptions`] the TEE decrypts the layer
 //! with. We run this dispatch ourselves rather than using ocicrypt's
 //! grpc/cmd/native keyprovider transports, because the TEE has no outbound
-//! network — the KBS handshake is relayed leg-by-leg through the broker.
+//! network — the KBS handshake is relayed leg-by-leg through the hatch.
 //!
 //! - [`Key::Inline`] → the client-supplied bytes ARE the private-opts JSON
 //!   (valid only when the session creator owns the artifact).
@@ -15,14 +15,14 @@
 
 use std::collections::HashMap;
 
-use broker_client::{
+use hatch_client::{
     AuthN, AuthZ, Covert, KbsClient, Key, Replay, Untrusted, boundary, reason,
 };
-use broker_protocol::{KbsRelayRequest, KbsRelayResponse};
+use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
 use enclavid_crypto::ocicrypt::{self, PrivateLayerBlockCipherOptions};
 use enclavid_kbs_client::{RcarSession, SampleEvidence, TeeKeyPair};
 
-/// Context the [`Key::Kbs`] path needs: the broker relay client that
+/// Context the [`Key::Kbs`] path needs: the hatch relay client that
 /// couriers each RCAR leg to the author's KBS.
 pub struct KbsContext<'a> {
     pub kbs: &'a KbsClient,
@@ -66,9 +66,9 @@ pub async fn obtain_priv_opts(
 /// Drive the 3-leg Trustee RCAR handshake to release the layer key.
 ///
 /// The TEE has no outbound network, so each leg is couriered through the
-/// broker `/kbs/relay`; the broker is a dumb forwarder threading the
+/// hatch `/kbs/relay`; the hatch is a dumb forwarder threading the
 /// `kbs-session-id` cookie's bytes only. The released resource is JWE-
-/// sealed to a per-pull ephemeral key minted here, so the broker never
+/// sealed to a per-pull ephemeral key minted here, so the hatch never
 /// sees the key material even though it carries every byte.
 async fn kbs_release(
     endpoint: &str,
@@ -163,9 +163,9 @@ async fn kbs_release(
     ocicrypt::privopts_from_json(&priv_json).map_err(|e| KeyError::msg(e.to_string()))
 }
 
-/// Vouch and relay one RCAR leg through the broker. The leg body is public
+/// Vouch and relay one RCAR leg through the hatch. The leg body is public
 /// RCAR material (our ephemeral pubkey, sample evidence, the session
-/// cookie); the broker forwards it verbatim and returns the KBS response
+/// cookie); the hatch forwards it verbatim and returns the KBS response
 /// `Untrusted` for the caller to peel per-leg.
 async fn relay(
     ctx: &KbsContext<'_>,
@@ -232,7 +232,7 @@ fn session_cookie(headers: &[(String, String)]) -> Result<String, KeyError> {
 /// Read the KBS resource URI (`kbs:///<repo>/<type>/<tag>`) from the
 /// artifact's `org.opencontainers.image.enc.keys.*` annotation. Author-
 /// written and covered by the manifest digest, so the pinned reference
-/// integrity-protects which resource the layer key comes from — the broker
+/// integrity-protects which resource the layer key comes from — the hatch
 /// / client cannot redirect the TEE to a different key.
 fn resource_uri(annotations: &HashMap<String, String>) -> Result<String, KeyError> {
     annotations

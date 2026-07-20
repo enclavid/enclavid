@@ -26,7 +26,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use broker_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
+use hatch_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use engine_compiler::Compiler;
 use engine_executor::{
     Component, ConsentDisclosure, EmbeddedImport, EmbeddedRegistry, Executor, MediaStore,
@@ -93,7 +93,7 @@ impl TestRunner {
 /// In-memory stand-in for the host blob store, shared with the
 /// [`RecordingListener`] (which populates it from each round's captured
 /// media) so a later `frame::from-blob-ref` rehydrate hits. Stage 3 swaps in
-/// the broker-backed store; this proves the engine seam.
+/// the hatch-backed store; this proves the engine seam.
 #[derive(Clone, Default)]
 struct MemMediaStore(Arc<Mutex<HashMap<[u8; 32], Arc<Vec<u8>>>>>);
 
@@ -181,7 +181,7 @@ fn all_plugins() -> Vec<PluginInstance> {
 /// accept seals exactly what was shown).
 #[derive(Default)]
 struct RecordingListener {
-    sealed: Mutex<Vec<Vec<broker_client::DisplayField>>>,
+    sealed: Mutex<Vec<Vec<hatch_client::DisplayField>>>,
     /// Backs the shared [`MemMediaStore`] — every captured frame the runtime
     /// stages this round is inserted here, simulating the atomic media+state
     /// commit, so a later rehydrate finds it. `Arc<Vec<u8>>` so the insert
@@ -202,7 +202,7 @@ impl SessionListener for RecordingListener {
         &'a self,
         change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
-        let rounds: Vec<Vec<broker_client::DisplayField>> = change
+        let rounds: Vec<Vec<hatch_client::DisplayField>> = change
             .disclosures
             .iter()
             .map(|d: &ConsentDisclosure| d.fields.clone())

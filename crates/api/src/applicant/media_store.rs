@@ -1,15 +1,15 @@
 //! Host media store the keyless execution-worker calls BACK for
 //! `blob::from-blob-ref` (via `CallbackService::media_load`) — a **pull-through
-//! cache** over the sealed broker backing store, with a **gate** on the read
+//! cache** over the sealed hatch backing store, with a **gate** on the read
 //! key. It runs orchestrator-side because it holds the seal key + applicant
 //! token the worker must never see.
 //!
 //! `blob::from-blob-ref` mints a COLD handle (no load); the worker calls
-//! [`load`](BrokerMediaStore::load) LAZILY on the first `bytes()` read of that
+//! [`load`](HatchMediaStore::load) LAZILY on the first `bytes()` read of that
 //! handle, which forwards to this callback. This:
 //!   1. serves a **cache hit** with no host IO;
 //!   2. **gates** an unknown hash — a ref not in the session's captured set is a
-//!      fabricated key, refused here with no broker read (the worker then traps,
+//!      fabricated key, refused here with no hatch read (the worker then traps,
 //!      since `from-blob-ref` has no miss branch);
 //!   3. **pulls** a real-but-uncached blob from the backing store
 //!      ([`SessionStore::load_media`]), decrypts, populates the cache, and
@@ -21,8 +21,8 @@
 //! the compile/execute split there are TWO host-observable surfaces, guarded in
 //! two different places:
 //!
-//!   * **Broker reads** (this store's `api→broker→Redis` pull). The [`MediaCache`]
-//!     bounds the count variant to **≤1 broker read per distinct blob while
+//!   * **Hatch reads** (this store's `api→hatch→Redis` pull). The [`MediaCache`]
+//!     bounds the count variant to **≤1 hatch read per distinct blob while
 //!     resident** (first pull; repeats hit in-TEE), and the captured-hash gate
 //!     below kills the arbitrary-key variant (only real captures ever pull —
 //!     whose hashes the host already logged at write).
@@ -34,7 +34,7 @@
 //!     per-run, so repeat reads of one blob emit ≤1 RPC — restoring the same
 //!     "≤1 host-observable read per distinct blob" property this cache gave when
 //!     the store was in-process. The gate still bounds the arbitrary-key variant
-//!     end-to-end: a fabricated hash returns `None` here (no broker read) and the
+//!     end-to-end: a fabricated hash returns `None` here (no hatch read) and the
 //!     worker's `bytes()` traps on the miss, so at most one `media_load(H_fake)`
 //!     RPC crosses per round before the round dies.
 //!
@@ -45,7 +45,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use broker_client::{Replay, SessionStore, public_session_id, reason};
+use hatch_client::{Replay, SessionStore, public_session_id, reason};
 use moka::future::Cache;
 use rpc::CallbackError;
 use secrecy::{ExposeSecret, SecretBox};
@@ -60,7 +60,7 @@ use secrecy::{ExposeSecret, SecretBox};
 const MEDIA_CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Idle expiry for a cached blob. The covert-channel defence the cache provides
-/// is collapsing REPEAT reads of the same blob into ≤1 host-observable broker
+/// is collapsing REPEAT reads of the same blob into ≤1 host-observable hatch
 /// read; the repeats a colluding policy can actually drive happen WITHIN one
 /// `handle` invocation — it has no clock and cannot sleep (WASI clocks are
 /// virt-baked, and fuel bounds execution) — i.e. sub-second, so any short idle
@@ -135,7 +135,7 @@ impl MediaCache {
     }
 }
 
-pub(super) struct BrokerMediaStore {
+pub(super) struct HatchMediaStore {
     pub session_store: Arc<SessionStore>,
     pub session_id: String,
     /// WEAK handle to the applicant bearer — the inner AEAD layer's key,
@@ -147,15 +147,15 @@ pub(super) struct BrokerMediaStore {
     /// surfaced as a trap.
     pub applicant_session_token: Weak<SecretBox<Vec<u8>>>,
     /// Pull-through cache (shared, cross-round). Repeat rehydrates hit here, so
-    /// the host sees at most one broker read per distinct blob.
+    /// the host sees at most one hatch read per distinct blob.
     pub cache: Arc<MediaCache>,
     /// GATE — the session's captured blob hashes (from sealed metadata, prior
     /// rounds). A rehydrate for a hash NOT in here is a fabricated ref, refused
-    /// in-TEE with no broker read, so the plaintext read key can't carry data.
+    /// in-TEE with no hatch read, so the plaintext read key can't carry data.
     pub captured: HashSet<[u8; 32]>,
 }
 
-impl BrokerMediaStore {
+impl HatchMediaStore {
     /// Rehydrate one stored blob by content hash — the api side of the keyless
     /// executor's `CallbackService::media_load`. Returns owned bytes for the
     /// wire (`None` = miss / gated), so the worker's `from-blob-ref` traps on a
@@ -170,7 +170,7 @@ impl BrokerMediaStore {
         if let Some(hit) = self.cache.get(&self.session_id, blob_hash).await {
             return Ok(Some(hit.as_ref().clone()));
         }
-        // 2. Gate — an unknown hash is a fabricated ref: refuse with no broker
+        // 2. Gate — an unknown hash is a fabricated ref: refuse with no hatch
         //    read. The worker traps on the `None` (from-blob-ref has no miss branch).
         if !self.captured.contains(blob_hash) {
             return Ok(None);

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 
-use broker_client::{Event, SessionState};
+use hatch_client::{Event, SessionState};
 
 use crate::error::ApiError;
 use crate::state::AppState;

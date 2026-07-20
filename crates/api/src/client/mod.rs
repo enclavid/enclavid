@@ -35,7 +35,7 @@ use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 
-use broker_client::ClientOperation;
+use hatch_client::ClientOperation;
 
 use crate::client_state::ClientState;
 

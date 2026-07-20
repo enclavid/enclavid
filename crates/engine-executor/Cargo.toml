@@ -14,7 +14,7 @@ repository.workspace = true
 # serialized `cwasm` (produced there) is the sole input crossing in.
 [dependencies]
 engine-types = { path = "../engine-types" }
-broker-client = { path = "../broker-client" }
+hatch-client = { path = "../hatch-client" }
 
 # RUNTIME only — NO `cranelift`. `Component::deserialize` + instantiate +
 # run need the runtime; codegen (`Component::new`) lives in engine-compiler.
@@ -56,7 +56,7 @@ moka = { version = "0.12", features = ["future"], optional = true }
 [features]
 # Enables the `execution-worker` bin. api never enables it → the api
 # orchestrator links only the pure lib types it re-points to engine-types /
-# broker-client, and NO wasmtime.
+# hatch-client, and NO wasmtime.
 worker = ["dep:rpc", "dep:remoc", "dep:tokio", "dep:moka"]
 
 [[bin]]

@@ -3,7 +3,7 @@
 //! Applicant uploads (camera frames today, documents/PDFs later) are stored
 //! host-side, content-addressed and AEAD-sealed, keyed by the 32-byte BLAKE3 of
 //! the blob. The engine holds only a handle to this trait — the runtime's I/O
-//! layer (the api crate) implements it against the broker session store and
+//! layer (the api crate) implements it against the hatch session store and
 //! owns the seal keys, so engine stays free of `SessionStore` / AEAD-key
 //! knowledge (mirrors [`SessionListener`](crate::listener::SessionListener)).
 //!

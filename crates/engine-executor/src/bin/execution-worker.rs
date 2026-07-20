@@ -1,7 +1,7 @@
 //! The `execution-worker` deployable: holds this crate's runtime [`Executor`]
 //! and serves `rpc::ExecutorService`. It LISTENS on an address; the orchestrator
 //! (api) connects to it. Started by INFRASTRUCTURE (docker-compose / k8s), not
-//! spawned by api — exactly like the broker and the compile-worker. Isolating
+//! spawned by api — exactly like the hatch and the compile-worker. Isolating
 //! the runtime that executes UNTRUSTED policy wasm in its own process/CVM is the
 //! execute side of the compile⊥execute split.
 //!
@@ -238,7 +238,7 @@ fn to_engine_prop(p: rpc::Prop) -> Prop {
 }
 
 /// Map the engine's `RunStatus` to the wire mirror (both wrap the same
-/// broker_client `Prompt` / `Decision`).
+/// hatch_client `Prompt` / `Decision`).
 fn to_wire_status(s: RunStatus) -> rpc::RunStatus {
     match s {
         RunStatus::AwaitingInput(p) => rpc::RunStatus::AwaitingInput(p),

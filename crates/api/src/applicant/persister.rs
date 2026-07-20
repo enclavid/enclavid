@@ -12,7 +12,7 @@
 //! next attempt re-runs from the last persisted state.
 //!
 //! Why encryption lives here, not in the executor: state and metadata are
-//! already sealed transparently inside broker-client (`SetState` /
+//! already sealed transparently inside hatch-client (`SetState` /
 //! `SetMetadata` AEAD with `tee_seal_key`/`applicant_session_token`). Disclosures use
 //! a different scheme (age to the consumer's `client_disclosure_pubkey`)
 //! but the architectural slot is the same — the orchestrator owns "I/O +
@@ -37,7 +37,7 @@ use tokio::sync::Mutex;
 use axum::http::StatusCode;
 use secrecy::{ExposeSecret, SecretBox};
 
-use broker_client::{
+use hatch_client::{
     AppendDisclosure, AuthN, AuthZ, Covert, Replay, SessionMetadata, SessionState, SessionStatus,
     SessionStore, SetMedia, SetMetadata, SetState, SetStatus, WriteField, boundary, encode_padded,
     reason,
@@ -199,7 +199,7 @@ impl SessionPersister {
     }
 
     /// Build the `SetState` op from the engine's opaque state blob.
-    /// AuthN is closed inside broker-client by the double AEAD-seal (inner
+    /// AuthN is closed inside hatch-client by the double AEAD-seal (inner
     /// under `applicant_session_token`, outer under `tee_seal_key`); AuthZ
     /// vouched here; Covert CLOSED here by `encode_padded`, which encodes the
     /// `SessionState` and pads it to a constant plaintext frame so the sealed
@@ -230,7 +230,7 @@ impl SessionPersister {
     /// Build a `SetMedia` op per frame the runtime captured this round. Every
     /// capture is sealed unconditionally — "always store" — so the media path
     /// is uniform and write-presence carries no policy bandwidth. AuthN is
-    /// closed inside broker-client by the double AEAD-seal (inner under
+    /// closed inside hatch-client by the double AEAD-seal (inner under
     /// `applicant_session_token`, outer under `tee_seal_key`, AAD =
     /// session_id||blob_hash); AuthZ + Covert vouched here. Covert is NOT
     /// padded (unlike state): the blob size is applicant-capture-driven and
@@ -263,7 +263,7 @@ impl SessionPersister {
     /// Advance the disclosure bookkeeping (count + running hash chain) and
     /// build the `SetMetadata` op carrying the updated metadata (disclosure
     /// chain AND the captured-media gate set, which the caller appended before
-    /// this). AuthN is closed inside broker-client by the AEAD-seal under
+    /// this). AuthN is closed inside hatch-client by the AEAD-seal under
     /// `tee_seal_key`. Called when this commit emitted disclosures or captured
     /// media; `appends` may be empty on a media-only round.
     fn build_metadata_op<'m>(

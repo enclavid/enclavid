@@ -4,7 +4,7 @@
 //!
 //! [`Executor`] wraps the `rpc::ExecutorService` client. The worker is a
 //! separate process/CVM started by INFRASTRUCTURE (docker-compose / k8s), not
-//! by api — exactly like the broker and the compile-worker. api
+//! by api — exactly like the hatch and the compile-worker. api
 //! [`connect`](connect_execution_worker)s to it at a configured address (TCP in
 //! dev, a vsock-relay rendezvous under RA-TLS in Plan-A).
 //!
@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use broker_client::{Event, SessionState};
+use hatch_client::{Event, SessionState};
 use remoc::codec::Ciborium;
 // `ServerShared` (the trait) is in scope so `CallbackServiceServerShared::new`
 // resolves — the per-run callback server we hand the worker.

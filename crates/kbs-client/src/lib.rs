@@ -2,7 +2,7 @@
 //!
 //! Transport-free by design: it builds each handshake leg's request body
 //! and parses each response, while the **caller** performs the I/O — the
-//! broker `/kbs/relay` in production (no outbound from the TEE), or direct
+//! hatch `/kbs/relay` in production (no outbound from the TEE), or direct
 //! HTTP in tests. The caller threads the `kbs-session-id` cookie. See
 //! `[[project-trustee-rcar-protocol]]`.
 //!

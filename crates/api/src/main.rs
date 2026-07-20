@@ -19,7 +19,7 @@ mod transport;
 use std::sync::Arc;
 
 use enclavid_attestation::{Attestor, SnpDevAttestor};
-use broker_client::{BrokerClient, SessionStore};
+use hatch_client::{HatchClient, SessionStore};
 
 use crate::client_state::ClientState;
 use crate::state::AppState;
@@ -28,12 +28,12 @@ use crate::state::AppState;
 async fn main() {
     let address_out = std::env::var("ENCLAVID_ADDRESS_OUT").expect("ENCLAVID_ADDRESS_OUT not set");
 
-    // SessionStore is the broker-client HTTP-over-vsock client for
+    // SessionStore is the hatch-client HTTP-over-vsock client for
     // per-session typed-field storage. Shared between client API
     // (writes metadata/status on /create and /init) and applicant API
     // (reads/writes state on /connect and /input). Wrapped in Arc so
     // the DisclosureStore facade and both state structs hold the same
-    // broker connection underneath.
+    // hatch connection underneath.
     //
     // TODO: derive `tee_seal_key` from attestation / KMS rather than env.
     // For Phase A we accept a 32-byte hex from `ENCLAVID_TEE_KEY` (set
@@ -45,10 +45,10 @@ async fn main() {
     // don't reuse the AEAD key directly for `DisplayField` shuffle
     // PRNG seeding — see `crate::shuffle` for the threat model.
     let shuffle_key = Arc::new(shuffle::ShuffleKey::from_tee_seal_key(&tee_seal_key));
-    let broker = BrokerClient::new(&address_out)
+    let hatch = HatchClient::new(&address_out)
         .await
-        .expect("failed to connect to broker");
-    let session_store = Arc::new(SessionStore::new(broker, tee_seal_key));
+        .expect("failed to connect to hatch");
+    let session_store = Arc::new(SessionStore::new(hatch, tee_seal_key));
 
     // Two listeners, two routers, one process. Topology rationale: TLS
     // terminates inside this TEE, so a host-side proxy can only route by

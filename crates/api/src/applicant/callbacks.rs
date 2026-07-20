@@ -5,7 +5,7 @@
 //! owns the only in-memory component cache; the orchestrator owns L2), `media_load`
 //! to rehydrate a stored blob, and `session_change` to seal + persist the
 //! post-round state + disclosures + captured media. [`CallbackServer`] wires
-//! those to the per-round [`SessionPersister`] + [`BrokerMediaStore`] (they hold
+//! those to the per-round [`SessionPersister`] + [`HatchMediaStore`] (they hold
 //! the seal key + applicant token) and to [`resolve_bundle`](super::shared::resolve_bundle)
 //! (L2 read, or cold compile on a miss). It implements `rpc::CallbackService`;
 //! the orchestrator stands one up per run and passes its client into
@@ -13,12 +13,12 @@
 
 use std::sync::Arc;
 
-use broker_client::{SessionMetadata, SessionState};
+use hatch_client::{SessionMetadata, SessionState};
 use rpc::{CallbackError, CallbackService, CompiledBundle, ConsentDisclosure, LoadError};
 
 use crate::state::AppState;
 
-use super::media_store::BrokerMediaStore;
+use super::media_store::HatchMediaStore;
 use super::persister::SessionPersister;
 
 /// Per-run callback target: delegates the callback methods to the seal-key-holding
@@ -27,8 +27,8 @@ use super::persister::SessionPersister;
 /// composition resolve).
 pub(super) struct CallbackServer {
     pub(super) persister: Arc<SessionPersister>,
-    pub(super) media_store: Arc<BrokerMediaStore>,
-    /// Shared orchestrator state — the L2 [`CacheStore`](broker_client::CacheStore),
+    pub(super) media_store: Arc<HatchMediaStore>,
+    /// Shared orchestrator state — the L2 [`CacheStore`](hatch_client::CacheStore),
     /// registry / KBS / compiler clients `resolve_bundle` needs on a cache miss.
     pub(super) state: Arc<AppState>,
     /// This session's metadata — the pinned `policy_ref` / plugins / registry

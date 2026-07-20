@@ -2,7 +2,7 @@
 //! [`Compiler`] and serves `rpc::CompilerService`. It LISTENS on an address;
 //! the orchestrator (api) connects to it. The worker is started by
 //! INFRASTRUCTURE (docker-compose / k8s), not spawned by api — exactly like
-//! the broker. Isolating the compiler in this separate process/CVM is the
+//! the hatch. Isolating the compiler in this separate process/CVM is the
 //! whole point of the compile⊥execute split: api links no Cranelift.
 //!
 //! Transport TODAY: a plain TCP listener (dev); each accepted connection is

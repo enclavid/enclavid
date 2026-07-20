@@ -6,7 +6,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use broker_client::{AuthZ, Metadata, Replay, SessionStatus, public_session_id, reason};
+use hatch_client::{AuthZ, Metadata, Replay, SessionStatus, public_session_id, reason};
 
 use crate::dto;
 use crate::state::AppState;
