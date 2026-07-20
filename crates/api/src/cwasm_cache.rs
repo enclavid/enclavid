@@ -35,7 +35,7 @@
 
 use hatch_client::CacheStore;
 
-use rpc::CompiledBundle;
+use engine_rpc::CompiledBundle;
 
 /// Bumped whenever the [`CompiledBundle`] wire layout changes (a field
 /// added / removed / retyped, or a nested serde type's shape changes). A bump

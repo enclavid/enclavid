@@ -2,7 +2,7 @@
 //! api NEVER runs wasm in-process — it always drives an execution-worker over
 //! rpc, so the api binary links NO wasmtime runtime (and no Cranelift).
 //!
-//! [`Executor`] wraps the `rpc::ExecutorService` client. The worker is a
+//! [`Executor`] wraps the `engine_rpc::ExecutorService` client. The worker is a
 //! separate process/CVM started by INFRASTRUCTURE (docker-compose / k8s), not
 //! by api — exactly like the hatch and the compile-worker. api
 //! [`connect`](connect_execution_worker)s to it at a configured address (TCP in
@@ -25,7 +25,7 @@ use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 // `CallbackService` / `ExecutorService` (the remoc traits) are in scope so the
 // generated client's `.run()` + the callback server resolve.
-use rpc::{
+use engine_rpc::{
     CallbackService, CallbackServiceServerShared, ExecError, ExecutorService,
     ExecutorServiceClient, Prop, RunReply, RunRequest, RunStatus,
 };
@@ -36,7 +36,7 @@ use rpc::{
 const CALLBACK_CONCURRENCY: usize = 4;
 
 /// The EXECUTE boundary: a client for an execution-worker's
-/// `rpc::ExecutorService`. A cheap remoc handle (`Send + Sync`); concurrent
+/// `engine_rpc::ExecutorService`. A cheap remoc handle (`Send + Sync`); concurrent
 /// rounds multiplex over the one connection.
 pub struct Executor {
     client: ExecutorServiceClient<Ciborium>,
@@ -100,7 +100,7 @@ pub async fn connect_execution_worker(addr: &str) -> Result<Executor, String> {
     let (read, write) = stream.into_split();
 
     let (conn, _tx, mut rx) =
-        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(rpc::connection_cfg(), read, write)
+        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
             .await
             .map_err(|e| format!("execution-worker remoc connect: {e}"))?;
     tokio::spawn(conn);

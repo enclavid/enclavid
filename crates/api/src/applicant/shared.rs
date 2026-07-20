@@ -21,7 +21,7 @@ use hatch_client::{
 use engine_types::composition::PluginInstance;
 // The run wire mirrors: props api builds + ships, the outcome + error it gets
 // back from the execution-worker.
-use rpc::{CompiledBundle, ExecError, Prop, RunStatus};
+use engine_rpc::{CompiledBundle, ExecError, Prop, RunStatus};
 
 use crate::cwasm_cache;
 use crate::error::ApiError;

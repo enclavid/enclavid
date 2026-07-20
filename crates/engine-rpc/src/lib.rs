@@ -1,11 +1,15 @@
-//! `rpc` — intra-fleet RPC substrate: remote trait calls (remoc `rtc`) over
-//! any `AsyncRead + AsyncWrite` byte stream — a host vsock relay today, an
-//! RA-TLS tunnel over that relay later. The transport is abstract (remoc's
+//! `engine-rpc` — the ENGINE fleet's compile/execute RPC contract: remote trait
+//! calls (remoc `rtc`) between the orchestrator and the compile/execution
+//! workers, over any `AsyncRead + AsyncWrite` byte stream — a host vsock relay
+//! today, an RA-TLS tunnel over that relay later. It is engine-only: the `hatch`
+//! (the untrusted, swappable host egress) deliberately keeps its OWN plain
+//! HTTP+CBOR protocol (`hatch-protocol`) so anyone can reimplement it in any
+//! language — remoc is reserved for the boundary where BOTH ends are our own
+//! attested Rust CVMs. The transport is abstract (remoc's
 //! [`Connect::io`](remoc::Connect::io) frames + multiplexes over the raw
 //! stream), so the same service definitions work at every stage of the CVM
 //! split. CBOR codec ([`remoc::codec::Ciborium`]) keeps the named-field schema
-//! evolution `hatch-protocol` already relies on across independently-deployed
-//! nodes.
+//! evolution the fleet relies on across independently-deployed nodes.
 //!
 //! Chosen over a thin hand-rolled protocol and over tarpc — see the
 //! `project_fleet_rpc_substrate` memory: remoc's marginal footprint over the

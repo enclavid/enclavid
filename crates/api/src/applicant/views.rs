@@ -18,9 +18,9 @@ use hatch_client::{
     CameraFacing, CaptureGuide, CaptureStep, Decision, MediaSpec, Prompt, PromptDisclosure,
     capture_guide,
 };
-// The run outcome comes back from the execution-worker as the `rpc::RunStatus`
+// The run outcome comes back from the execution-worker as the `engine_rpc::RunStatus`
 // wire mirror (it wraps the same hatch_client `Prompt` / `Decision`).
-use rpc::RunStatus;
+use engine_rpc::RunStatus;
 
 use crate::dto;
 use crate::locale::Locale;

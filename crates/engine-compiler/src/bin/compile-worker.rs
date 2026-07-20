@@ -1,5 +1,5 @@
 //! The `compile-worker` deployable: holds this crate's Cranelift-backed
-//! [`Compiler`] and serves `rpc::CompilerService`. It LISTENS on an address;
+//! [`Compiler`] and serves `engine_rpc::CompilerService`. It LISTENS on an address;
 //! the orchestrator (api) connects to it. The worker is started by
 //! INFRASTRUCTURE (docker-compose / k8s), not spawned by api — exactly like
 //! the hatch. Isolating the compiler in this separate process/CVM is the
@@ -18,12 +18,12 @@ use tokio::net::{TcpListener, TcpStream};
 
 use engine_compiler::Compiler;
 use engine_types::composition::PluginInstance;
-use rpc::{
+use engine_rpc::{
     CatalogEntry, CompileError, CompiledBundle, CompilerService, CompilerServiceClient,
     CompilerServiceServerShared,
 };
 
-/// The `rpc::CompilerService` impl: compile `(policy, plugins)` to native
+/// The `engine_rpc::CompilerService` impl: compile `(policy, plugins)` to native
 /// [`BundleParts`](engine_compiler::BundleParts), then wrap into the wire
 /// [`CompiledBundle`]. All the compile orchestration lives in the lib
 /// (`Compiler::compile_to_parts`); this is just the wire wrapper. Shared
@@ -98,7 +98,7 @@ async fn main() {
 async fn serve_conn(stream: TcpStream, svc: Arc<Service>) -> Result<(), String> {
     let (read, write) = stream.into_split();
     let (conn, mut tx, _rx) =
-        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(rpc::connection_cfg(), read, write)
+        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
             .await
             .map_err(|e| format!("remoc connect: {e}"))?;
     tokio::spawn(conn);

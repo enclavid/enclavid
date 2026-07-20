@@ -46,7 +46,7 @@ use enclavid_crypto::seal_to_recipient;
 // Owned wire types — the keyless execution-worker sends these back over the
 // `CallbackService`; `CallbackError` replaces the old wasmtime `RunError` as the
 // persist error, keeping api free of the runtime.
-use rpc::{CallbackError, ConsentDisclosure, RunStatus};
+use engine_rpc::{CallbackError, ConsentDisclosure, RunStatus};
 
 use crate::disclosure_hash;
 use crate::dto::{self, DisclosureEnvelope, ENVELOPE_VERSION};

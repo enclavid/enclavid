@@ -47,7 +47,7 @@ use std::time::Duration;
 
 use hatch_client::{Replay, SessionStore, public_session_id, reason};
 use moka::future::Cache;
-use rpc::CallbackError;
+use engine_rpc::CallbackError;
 use secrecy::{ExposeSecret, SecretBox};
 
 /// Byte budget for the pull-through media cache — a soft RAM ceiling (moka

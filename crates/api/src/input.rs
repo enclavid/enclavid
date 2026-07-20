@@ -10,7 +10,7 @@ use serde_json::Value;
 
 // The wire `Prop` mirror — api builds the props list here and ships it to the
 // execution-worker over rpc; the worker maps it back to the bindgen `Prop`.
-use rpc::Prop;
+use engine_rpc::Prop;
 
 use crate::limits::MAX_MATCH_INPUT_SIZE;
 

@@ -7,14 +7,14 @@
 //! post-round state + disclosures + captured media. [`CallbackServer`] wires
 //! those to the per-round [`SessionPersister`] + [`HatchMediaStore`] (they hold
 //! the seal key + applicant token) and to [`resolve_bundle`](super::shared::resolve_bundle)
-//! (L2 read, or cold compile on a miss). It implements `rpc::CallbackService`;
+//! (L2 read, or cold compile on a miss). It implements `engine_rpc::CallbackService`;
 //! the orchestrator stands one up per run and passes its client into
 //! `ExecutorService::run` (see [`crate::executor`]).
 
 use std::sync::Arc;
 
 use hatch_client::{SessionMetadata, SessionState};
-use rpc::{CallbackError, CallbackService, CompiledBundle, ConsentDisclosure, LoadError};
+use engine_rpc::{CallbackError, CallbackService, CompiledBundle, ConsentDisclosure, LoadError};
 
 use crate::state::AppState;
 

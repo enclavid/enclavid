@@ -2,7 +2,7 @@
 //! [`CompiledBundle`]. api NEVER compiles in-process — it always drives a
 //! compile-worker over rpc, so the api binary links NO Cranelift.
 //!
-//! [`Compiler`] wraps the `rpc::CompilerService` client. The worker is a
+//! [`Compiler`] wraps the `engine_rpc::CompilerService` client. The worker is a
 //! separate process/CVM started by INFRASTRUCTURE (docker-compose / k8s), not
 //! by api — exactly like the hatch. api [`connect`](connect_compile_worker)s
 //! to it at a configured address (TCP in dev, a vsock-relay rendezvous under
@@ -11,7 +11,7 @@
 //! materialized only on the execution-worker (the compile→execute seam is
 //! bytes-in, bytes-out both ends).
 //!
-//! The [`CompiledBundle`] wire type lives in the `rpc` crate (it is the compile
+//! The [`CompiledBundle`] wire type lives in the `engine-rpc` crate (it is the compile
 //! RPC return value, the L2 cache bundle — see [`crate::cwasm_cache`] — AND the
 //! execution-worker `load_component` payload) so a cold compile and an L2 hit
 //! resolve the same bundle the worker deserializes.
@@ -20,9 +20,9 @@ use engine_types::composition::PluginInstance;
 use remoc::codec::Ciborium;
 // `CompilerService` (the remoc trait) is in scope so the generated
 // `CompilerServiceClient`'s `.compile()` method resolves.
-use rpc::{CompileError, CompiledBundle, CompilerService, CompilerServiceClient};
+use engine_rpc::{CompileError, CompiledBundle, CompilerService, CompilerServiceClient};
 
-/// The COMPILE boundary: a client for a compile-worker's `rpc::CompilerService`.
+/// The COMPILE boundary: a client for a compile-worker's `engine_rpc::CompilerService`.
 /// Given already-pulled artifact bytes (the orchestrator owns the OCI pull +
 /// registry auth), the worker fuses + Cranelift-compiles + parses sections into
 /// a [`CompiledBundle`]. The client is a cheap remoc handle (`Send + Sync`);
@@ -61,7 +61,7 @@ pub async fn connect_compile_worker(addr: &str) -> Result<Compiler, String> {
     let (read, write) = stream.into_split();
 
     let (conn, _tx, mut rx) =
-        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(rpc::connection_cfg(), read, write)
+        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
             .await
             .map_err(|e| format!("compile-worker remoc connect: {e}"))?;
     tokio::spawn(conn);
@@ -86,7 +86,7 @@ mod tests {
     // `connect_compile_worker` is the thin, hand-reviewed piece).
     struct MockService;
 
-    impl rpc::CompilerService for MockService {
+    impl engine_rpc::CompilerService for MockService {
         async fn compile(
             &self,
             policy: Vec<u8>,
@@ -121,7 +121,7 @@ mod tests {
                     .unwrap();
             tokio::spawn(conn);
             let (srv, client) =
-                rpc::CompilerServiceServerShared::<_, Ciborium>::new(Arc::new(MockService), 4);
+                engine_rpc::CompilerServiceServerShared::<_, Ciborium>::new(Arc::new(MockService), 4);
             tx.send(client).await.unwrap();
             srv.serve(true).await.unwrap();
         });

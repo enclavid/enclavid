@@ -17,7 +17,7 @@
 /// `wasm` is the raw component binary — fusion happens on bytes, so no
 /// pre-compiled `Component` is kept.
 ///
-/// serde: rides the compile RPC directly (the `rpc::CompilerService::compile`
+/// serde: rides the compile RPC directly (the `engine_rpc::CompilerService::compile`
 /// argument) — no separate wire-mirror type is needed, mirroring how
 /// `EmbeddedImport` already crosses the wire.
 #[derive(serde::Serialize, serde::Deserialize)]

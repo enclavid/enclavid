@@ -34,11 +34,11 @@ blake3 = "1"
 # --- execution-worker bin deps (optional) — pulled ONLY by the `worker`
 # feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable
 # execution-worker CVM: it wraps this crate's Executor in an
-# `rpc::ExecutorService` server, caches deserialized components per composition,
+# `engine_rpc::ExecutorService` server, caches deserialized components per composition,
 # and proxies mid-run callbacks (media_load / session_change) back to the
 # orchestrator over the SAME remoc connection — KEYLESS (no tee_seal_key ever
 # crosses in). ---
-rpc = { path = "../rpc", default-features = false, features = ["execute"], optional = true }
+engine-rpc = { path = "../engine-rpc", default-features = false, features = ["execute"], optional = true }
 remoc = { version = "0.18", default-features = false, features = [
     "rtc",
     "codec-ciborium",
@@ -57,7 +57,7 @@ moka = { version = "0.12", features = ["future"], optional = true }
 # Enables the `execution-worker` bin. api never enables it → the api
 # orchestrator links only the pure lib types it re-points to engine-types /
 # hatch-client, and NO wasmtime.
-worker = ["dep:rpc", "dep:remoc", "dep:tokio", "dep:moka"]
+worker = ["dep:engine-rpc", "dep:remoc", "dep:tokio", "dep:moka"]
 
 [[bin]]
 name = "execution-worker"

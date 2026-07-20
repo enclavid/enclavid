@@ -34,7 +34,7 @@ remoc = { version = "0.18", default-features = false, features = [
 # bundle), and `execute` for the ExecutorService client + CallbackService server
 # + the run wire types (RunRequest / RunReply / RunStatus / Prop). Neither pulls
 # Cranelift or the wasmtime runtime.
-rpc = { path = "../rpc", default-features = false, features = [
+engine-rpc = { path = "../engine-rpc", default-features = false, features = [
     "compile",
     "execute",
 ] }

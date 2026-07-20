@@ -1,5 +1,5 @@
 //! The `execution-worker` deployable: holds this crate's runtime [`Executor`]
-//! and serves `rpc::ExecutorService`. It LISTENS on an address; the orchestrator
+//! and serves `engine_rpc::ExecutorService`. It LISTENS on an address; the orchestrator
 //! (api) connects to it. Started by INFRASTRUCTURE (docker-compose / k8s), not
 //! spawned by api — exactly like the hatch and the compile-worker. Isolating
 //! the runtime that executes UNTRUSTED policy wasm in its own process/CVM is the
@@ -20,7 +20,7 @@
 //! it from its L2 sealed-cwasm store, or compiles on an L2 miss). `try_get_with`
 //! coalesces concurrent misses for the same composition into ONE pull. The
 //! orchestrator holds no in-memory component cache; steady-state rounds carry
-//! only the key + session + event (see `rpc::execute`).
+//! only the key + session + event (see `engine_rpc::execute`).
 //!
 //! Transport TODAY: a plain TCP listener (dev); Plan-A swaps it for the host
 //! vsock-relay rendezvous + RA-TLS (both peers dial the relay, the host splices).
@@ -39,7 +39,7 @@ use engine_executor::{
     Component, EmbeddedImport, EmbeddedRegistry, Executor, MediaStore, Prop, RunError, RunInputs,
     RunResult, RunStatus, SessionChange, SessionListener, compat_token,
 };
-use rpc::{
+use engine_rpc::{
     CallbackService, CallbackServiceClient, CompiledBundle, ExecError, ExecutorService,
     ExecutorServiceClient, ExecutorServiceServerShared, RunReply, RunRequest,
 };
@@ -55,7 +55,7 @@ struct PrimedComposition {
     embedded_imports: Arc<Vec<EmbeddedImport>>,
 }
 
-/// The `rpc::ExecutorService` impl. Shared (`Arc`) across connections; the
+/// The `engine_rpc::ExecutorService` impl. Shared (`Arc`) across connections; the
 /// wasmtime engine runs rounds concurrently, and the component cache is shared.
 struct Service {
     executor: Arc<Executor>,
@@ -159,10 +159,10 @@ impl SessionListener for CallbackListener {
         change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
         let state = change.state.clone();
-        let disclosures: Vec<rpc::ConsentDisclosure> = change
+        let disclosures: Vec<engine_rpc::ConsentDisclosure> = change
             .disclosures
             .iter()
-            .map(|d| rpc::ConsentDisclosure { fields: d.fields.clone() })
+            .map(|d| engine_rpc::ConsentDisclosure { fields: d.fields.clone() })
             .collect();
         // Copy the captured frames out of their Arcs into owned wire bytes.
         let media: Vec<([u8; 32], Vec<u8>)> = change
@@ -227,22 +227,22 @@ impl MediaStore for CallbackMediaStore {
 }
 
 /// Map the wire `Prop` mirror to the bindgen `enclavid:host/types.prop`.
-fn to_engine_prop(p: rpc::Prop) -> Prop {
+fn to_engine_prop(p: engine_rpc::Prop) -> Prop {
     match p {
-        rpc::Prop::Null => Prop::Null,
-        rpc::Prop::Bool(b) => Prop::Bool(b),
-        rpc::Prop::Int(i) => Prop::Int(i),
-        rpc::Prop::Float(f) => Prop::Float(f),
-        rpc::Prop::String(s) => Prop::String(s),
+        engine_rpc::Prop::Null => Prop::Null,
+        engine_rpc::Prop::Bool(b) => Prop::Bool(b),
+        engine_rpc::Prop::Int(i) => Prop::Int(i),
+        engine_rpc::Prop::Float(f) => Prop::Float(f),
+        engine_rpc::Prop::String(s) => Prop::String(s),
     }
 }
 
 /// Map the engine's `RunStatus` to the wire mirror (both wrap the same
 /// hatch_client `Prompt` / `Decision`).
-fn to_wire_status(s: RunStatus) -> rpc::RunStatus {
+fn to_wire_status(s: RunStatus) -> engine_rpc::RunStatus {
     match s {
-        RunStatus::AwaitingInput(p) => rpc::RunStatus::AwaitingInput(p),
-        RunStatus::Completed(d) => rpc::RunStatus::Completed(d),
+        RunStatus::AwaitingInput(p) => engine_rpc::RunStatus::AwaitingInput(p),
+        RunStatus::Completed(d) => engine_rpc::RunStatus::Completed(d),
     }
 }
 
@@ -296,7 +296,7 @@ async fn main() {
 async fn serve_conn(stream: TcpStream, svc: Arc<Service>) -> Result<(), String> {
     let (read, write) = stream.into_split();
     let (conn, mut tx, _rx) =
-        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(rpc::connection_cfg(), read, write)
+        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
             .await
             .map_err(|e| format!("remoc connect: {e}"))?;
     tokio::spawn(conn);

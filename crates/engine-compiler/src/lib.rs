@@ -43,7 +43,7 @@ pub struct Composition {
 /// per-component catalogs. This is exactly what the wire `CompiledBundle`
 /// carries; the compile-worker bin (and api's `LocalCompiler`) wrap this
 /// into that wire type. Keeping it native lets the pure lib produce the
-/// whole compile output without depending on the `rpc` contract.
+/// whole compile output without depending on the `engine-rpc` contract.
 pub struct BundleParts {
     pub cwasm: Vec<u8>,
     pub embedded_imports: Vec<EmbeddedImport>,
