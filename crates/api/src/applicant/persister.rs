@@ -1,37 +1,34 @@
-//! `SessionListener` impl that seals + persists each reducer round's
-//! result to the host-side `SessionStore`. Engine fires
-//! `on_session_change` once per `handle` round; we age-encrypt any
-//! disclosure the runtime sealed that round (non-empty only when a
-//! consent-disclosure prompt was accepted) to the client recipient
-//! pubkey, then translate state + sealed disclosures into a single
-//! atomic Write RPC.
+//! Seals + persists each reducer round's result to the host-side
+//! `SessionStore`. The keyless execution-worker calls back once per `handle`
+//! round via `CallbackService::session_change` → [`SessionPersister::persist`];
+//! we age-encrypt any disclosure the runtime sealed that round (non-empty only
+//! when a consent-disclosure prompt was accepted) to the client recipient
+//! pubkey, then translate state + sealed disclosures into a single atomic Write
+//! RPC.
 //!
 //! Atomicity is the whole point: state mutation (consent accepted) and
 //! the disclosure entry that records what was shared land in one host
 //! transaction. A failed write fails the round under version-CAS; the
 //! next attempt re-runs from the last persisted state.
 //!
-//! Why encryption lives here, not in engine: state and metadata are
+//! Why encryption lives here, not in the executor: state and metadata are
 //! already sealed transparently inside broker-client (`SetState` /
 //! `SetMetadata` AEAD with `tee_seal_key`/`applicant_session_token`). Disclosures use
 //! a different scheme (age to the consumer's `client_disclosure_pubkey`)
-//! but the architectural slot is the same — the api layer owns "I/O +
-//! encryption keys", engine stays pure logic.
+//! but the architectural slot is the same — the orchestrator owns "I/O +
+//! encryption keys" and the worker never holds either, staying keyless.
 //!
 //! `client_disclosure_pubkey` is a public age recipient for outbound
 //! disclosure ciphertexts only — the consumer holds the matching
 //! secret. This persister is concerned with the disclosure flow; the
 //! policy artifact path is independent.
 //!
-//! Lifetime: one persister per `Runner::run` call. Owns session-id,
-//! the applicant key (state's inner AEAD layer), the client
-//! disclosure pubkey (disclosure age recipient), and a mutable copy
-//! of session metadata (so we can update `disclosure_count`
-//! atomically with each persist). Cheap to construct; engine drops
-//! it when the run finishes.
+//! Lifetime: one persister per run. Owns session-id, the applicant key (state's
+//! inner AEAD layer), the client disclosure pubkey (disclosure age recipient),
+//! and a mutable copy of session metadata (so we can update `disclosure_count`
+//! atomically with each persist). Cheap to construct; dropped when the round's
+//! `SessionRunCtx` finishes.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -41,13 +38,15 @@ use axum::http::StatusCode;
 use secrecy::{ExposeSecret, SecretBox};
 
 use broker_client::{
-    AppendDisclosure, AuthN, AuthZ, Covert, Replay, SessionMetadata, SessionStatus, SessionStore,
-    SetMedia, SetMetadata, SetState, SetStatus, WriteField, boundary, encode_padded, reason,
+    AppendDisclosure, AuthN, AuthZ, Covert, Replay, SessionMetadata, SessionState, SessionStatus,
+    SessionStore, SetMedia, SetMetadata, SetState, SetStatus, WriteField, boundary, encode_padded,
+    reason,
 };
 use enclavid_crypto::seal_to_recipient;
-use engine_executor::{
-    ConsentDisclosure, RunError, RunResult, RunStatus, SessionChange, SessionListener,
-};
+// Owned wire types — the keyless execution-worker sends these back over the
+// `CallbackService`; `CallbackError` replaces the old wasmtime `RunError` as the
+// persist error, keeping api free of the runtime.
+use rpc::{CallbackError, ConsentDisclosure, RunStatus};
 
 use crate::disclosure_hash;
 use crate::dto::{self, DisclosureEnvelope, ENVELOPE_VERSION};
@@ -60,8 +59,8 @@ pub(super) struct SessionPersister {
     /// needed to SEAL state + media on each write. `Weak` (not owned): the
     /// per-round `SessionRunCtx` is the sole strong owner, so the persister
     /// borrows the token for the moment of a seal but never PINS the
-    /// plaintext. Upgraded once per `on_session_change`; a `None` means the
-    /// run outlived its context (a lifetime bug) and traps the round.
+    /// plaintext. Upgraded once per `persist`; a `None` means the
+    /// run outlived its context (a lifetime bug) and fails the round.
     pub applicant_session_token: Weak<SecretBox<Vec<u8>>>,
     /// Age recipient string (`age1...`) for disclosure entries.
     /// Pulled from session metadata at run start; provided by the
@@ -92,71 +91,76 @@ pub(super) struct SessionPersister {
     pub shuffle_key: Arc<ShuffleKey>,
 }
 
-impl SessionListener for SessionPersister {
-    fn on_session_change<'a>(
-        &'a self,
-        change: SessionChange<'a>,
-    ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
-        Box::pin(async move {
-            // Seal the engine-emitted disclosures into append ops. The
-            // shuffle is seeded from the disclosure_count BEFORE this
-            // batch (a brief metadata lock to read it), so distinct
-            // envelopes get independent, replay-stable permutations.
-            let starting_index = self.metadata.lock().await.disclosure_count;
-            let appends = self.seal_disclosures(&change, starting_index)?;
-
-            // Borrow the applicant token from the per-round owner once for this
-            // whole seal. The `SessionRunCtx` driving this run holds the sole
-            // strong ref (bound across `runner.run().await`), so it is alive
-            // here; a `None` means the run outlived its context — a lifetime bug
-            // that traps the round. `token` stays alive for the whole block, so
-            // the `&[u8]` the seal builders below borrow from it outlives them.
-            let token = self.applicant_session_token.upgrade().ok_or_else(|| {
-                RunError::msg("persist: applicant token owner dropped (run outlived its context)")
-            })?;
-            let token_bytes = token.expose_secret().as_slice();
-
-            // Hold the metadata lock across the write: the state
-            // mutation, the disclosure entry, and the captured media all land
-            // in one atomic host transaction. Engine serializes hooks, so
-            // contention is theoretical.
-            let mut metadata = self.metadata.lock().await;
-            let set_state = self.build_state_op(&change, token_bytes)?;
-            // Seal every captured frame this round into the media store,
-            // co-committed with the state (kept in a local so the `&dyn`
-            // refs below outlive the write).
-            let media_ops = self.build_media_ops(&change, token_bytes);
-            // Record this round's captured blob hashes into metadata — the
-            // TEE-side authoritative set the NEXT round's `from-blob-ref` gate
-            // reads. The host already knows these hashes (they are the plaintext
-            // keys of its own media writes), so carrying them sealed here leaks
-            // nothing new.
-            if let Some(media) = change.media {
-                metadata
-                    .captured_media
-                    .extend(media.blobs.iter().map(|(h, _)| h.to_vec()));
-            }
-            let mut ops: Vec<&dyn WriteField> =
-                Vec::with_capacity(2 + appends.len() + media_ops.len());
-            ops.push(&set_state);
-
-            // Rewrite metadata when this commit emitted a disclosure (extends
-            // the disclosure-hash chain) OR captured media (appends to the gate
-            // set). Plain rounds stay SetState-only, keeping the payload small.
-            let set_metadata_holder;
-            if !appends.is_empty() || !media_ops.is_empty() {
-                set_metadata_holder = self.build_metadata_op(&mut metadata, &appends);
-                ops.push(&set_metadata_holder);
-            }
-            ops.extend(appends.iter().map(|a| a as &dyn WriteField));
-            ops.extend(media_ops.iter().map(|m| m as &dyn WriteField));
-
-            self.commit_ops(&ops).await
-        })
-    }
-}
-
 impl SessionPersister {
+    /// api side of the keyless executor's `CallbackService::session_change`:
+    /// seal + persist one round's post-`state`, plus any consented `disclosures`
+    /// (non-empty only on a consent-disclosure accept) and captured `media`
+    /// (present only on a media round), in ONE atomic host transaction. The
+    /// worker sent these over rpc as OWNED wire types, so — unlike the old
+    /// borrowed-`SessionChange` listener — nothing here borrows the run; the
+    /// seal key stays orchestrator-side. A failed write fails the round under
+    /// version-CAS; the next attempt re-runs from the last persisted state.
+    pub(super) async fn persist(
+        &self,
+        state: SessionState,
+        disclosures: Vec<ConsentDisclosure>,
+        media: Vec<([u8; 32], Vec<u8>)>,
+    ) -> Result<(), CallbackError> {
+        // Seal the consented disclosures into append ops. The shuffle is seeded
+        // from the disclosure_count BEFORE this batch (a brief metadata lock to
+        // read it), so distinct envelopes get independent, replay-stable
+        // permutations.
+        let starting_index = self.metadata.lock().await.disclosure_count;
+        let appends = self.seal_disclosures(&disclosures, starting_index)?;
+
+        // Borrow the applicant token from the per-round owner once for this
+        // whole seal. The `SessionRunCtx` driving this run holds the sole strong
+        // ref (bound across `executor.run().await`), so it is alive here; a
+        // `None` means the run outlived its context — a lifetime bug that fails
+        // the round. `token` stays alive for the whole block, so the `&[u8]` the
+        // seal builders below borrow from it outlives them.
+        let token = self.applicant_session_token.upgrade().ok_or_else(|| {
+            CallbackError("persist: applicant token owner dropped (run outlived its context)".into())
+        })?;
+        let token_bytes = token.expose_secret().as_slice();
+
+        // Hold the metadata lock across the write: the state mutation, the
+        // disclosure entry, and the captured media all land in one atomic host
+        // transaction. The run serializes callbacks, so contention is theoretical.
+        let mut metadata = self.metadata.lock().await;
+        let set_state = self.build_state_op(&state, token_bytes)?;
+        // Seal every captured frame this round into the media store,
+        // co-committed with the state (kept in a local so the `&dyn` refs below
+        // outlive the write). `media_ops` owns its bytes, so reading `media`
+        // again below is fine.
+        let media_ops = self.build_media_ops(&media, token_bytes);
+        // Record this round's captured blob hashes into metadata — the TEE-side
+        // authoritative set the NEXT round's `from-blob-ref` gate reads. The
+        // host already knows these hashes (they are the plaintext keys of its
+        // own media writes), so carrying them sealed here leaks nothing new.
+        if !media.is_empty() {
+            metadata
+                .captured_media
+                .extend(media.iter().map(|(h, _)| h.to_vec()));
+        }
+        let mut ops: Vec<&dyn WriteField> =
+            Vec::with_capacity(2 + appends.len() + media_ops.len());
+        ops.push(&set_state);
+
+        // Rewrite metadata when this commit emitted a disclosure (extends the
+        // disclosure-hash chain) OR captured media (appends to the gate set).
+        // Plain rounds stay SetState-only, keeping the payload small.
+        let set_metadata_holder;
+        if !appends.is_empty() || !media_ops.is_empty() {
+            set_metadata_holder = self.build_metadata_op(&mut metadata, &appends);
+            ops.push(&set_metadata_holder);
+        }
+        ops.extend(appends.iter().map(|a| a as &dyn WriteField));
+        ops.extend(media_ops.iter().map(|m| m as &dyn WriteField));
+
+        self.commit_ops(&ops).await
+    }
+
     /// Seal each engine-emitted disclosure into an append op: shuffle
     /// the envelope (Covert), consent-gate (AuthZ), age-seal to the
     /// consumer recipient (AuthN). `starting_index` seeds the per-
@@ -164,16 +168,15 @@ impl SessionPersister {
     /// stable permutations. Returns owned, fully-vouched append ops.
     fn seal_disclosures(
         &self,
-        change: &SessionChange<'_>,
+        disclosures: &[ConsentDisclosure],
         starting_index: u64,
-    ) -> RunResult<Vec<AppendDisclosure>> {
-        change
-            .disclosures
+    ) -> Result<Vec<AppendDisclosure>, CallbackError> {
+        disclosures
             .iter()
             .enumerate()
-            .map(|(i, d)| -> RunResult<AppendDisclosure> {
+            .map(|(i, d)| -> Result<AppendDisclosure, CallbackError> {
                 let sealed = boundary::outbound::to_untrusted(d)
-                    .vouch::<Covert, _, _, _, _>(|d| -> RunResult<Vec<u8>> {
+                    .vouch::<Covert, _, _, _, _>(|d| -> Result<Vec<u8>, CallbackError> {
                         shuffle_to_envelope_bytes(
                             d,
                             &self.session_id,
@@ -182,13 +185,13 @@ impl SessionPersister {
                         )
                     })?
                     .vouch_unchecked::<AuthZ, _>(reason!(
-                        "engine fires this disclosure only after an accepted consent-disclosure \
-                         prompt (show == seal, gated runtime-side); api only serializes the \
-                         post-consent record"
+                        "the runtime seals this disclosure only after an accepted \
+                         consent-disclosure prompt (show == seal, gated runtime-side); api only \
+                         serializes the post-consent record"
                     ))
-                    .vouch::<AuthN, _, _, _, _>(|bytes| -> RunResult<Vec<u8>> {
+                    .vouch::<AuthN, _, _, _, _>(|bytes| -> Result<Vec<u8>, CallbackError> {
                         seal_to_recipient(&bytes, &self.client_disclosure_pubkey)
-                            .map_err(|e| RunError::msg(format!("disclosure seal failed: {e}")))
+                            .map_err(|e| CallbackError(format!("disclosure seal failed: {e}")))
                     })?;
                 Ok(AppendDisclosure(sealed))
             })
@@ -203,22 +206,22 @@ impl SessionPersister {
     /// ciphertext size is fixed. Fallible: an encoding over the frame traps.
     fn build_state_op<'a>(
         &self,
-        change: &SessionChange<'_>,
+        state: &SessionState,
         token: &'a [u8],
-    ) -> RunResult<SetState<'a>> {
+    ) -> Result<SetState<'a>, CallbackError> {
         Ok(SetState {
-            state: boundary::outbound::to_untrusted(change.state)
+            state: boundary::outbound::to_untrusted(state)
                 .vouch_unchecked::<AuthZ, _>(reason!(
                     "inner-AEAD'd to applicant_session_token; receipt of ciphertext is not \
                      access — AuthZ implicit in key possession"
                 ))
-                .vouch::<Covert, _, _, _, _>(|state| -> RunResult<Vec<u8>> {
+                .vouch::<Covert, _, _, _, _>(|state| -> Result<Vec<u8>, CallbackError> {
                     // Close the size covert channel BY DOING it here: encode +
                     // pad the WHOLE SessionState to a constant plaintext frame,
                     // so the sealed ciphertext is fixed-size regardless of the
                     // `state` and `current_prompt` content (both policy-
-                    // controlled). Traps if the encoding exceeds the frame.
-                    encode_padded(state).map_err(|e| RunError::msg(format!("state pad: {e}")))
+                    // controlled). Errors if the encoding exceeds the frame.
+                    encode_padded(state).map_err(|e| CallbackError(format!("state pad: {e}")))
                 })?,
             applicant_session_token: token,
         })
@@ -235,18 +238,14 @@ impl SessionPersister {
     /// new channel.
     fn build_media_ops<'a>(
         &self,
-        change: &SessionChange<'_>,
+        media: &[([u8; 32], Vec<u8>)],
         token: &'a [u8],
     ) -> Vec<SetMedia<'a>> {
-        let Some(media) = change.media else {
-            return Vec::new();
-        };
         media
-            .blobs
             .iter()
             .map(|(hash, bytes)| SetMedia {
                 blob_hash: *hash,
-                bytes: boundary::outbound::to_untrusted(bytes.as_ref().clone())
+                bytes: boundary::outbound::to_untrusted(bytes.clone())
                     .vouch_unchecked::<AuthZ, _>(reason!(
                         "inner-AEAD'd to applicant_session_token; receipt of ciphertext is not \
                          access — AuthZ implicit in key possession"
@@ -300,7 +299,7 @@ impl SessionPersister {
     /// `current_version` on success. The version verdict is host-
     /// supplied (a CAS token only): a lying host self-limits to DoS / a
     /// stomped concurrent winner, with no data-leak path.
-    async fn commit_ops(&self, ops: &[&dyn WriteField]) -> RunResult<()> {
+    async fn commit_ops(&self, ops: &[&dyn WriteField]) -> Result<(), CallbackError> {
         let expected = self.current_version.load(Ordering::SeqCst);
         let (session_id, expected_version) =
             boundary::outbound::to_untrusted((self.session_id.as_str(), Some(expected)))
@@ -325,16 +324,16 @@ impl SessionPersister {
             .write(session_id, expected_version, ops)
             .await
             .map_err(|e| {
-                // eprintln before the error flows back through wasmtime:
-                // a listener-side write failure surfaces to the engine as
-                // a trap that aborts the round; the actual cause must show
-                // up in the logs before it is reduced to a 5xx.
+                // eprintln before the error flows back over the callback: a
+                // persist-side write failure surfaces to the worker as a failed
+                // `session_change`, which fails the run; the actual cause must
+                // show up in the logs before it is reduced to a 5xx.
                 eprintln!(
                     "persister.commit_ops: session_store.write failed for {} \
                      (expected version {expected}): {e}",
                     self.session_id,
                 );
-                RunError::msg(format!("persist failed: {e}"))
+                CallbackError(format!("persist failed: {e}"))
             })?
             .trust_unchecked::<AuthN, _>(reason!(
                 "version is a CAS token only; a lying host self-limits to DoS / stomp, no leak"
@@ -454,7 +453,7 @@ fn shuffle_to_envelope_bytes(
     session_id: &str,
     disclosure_index: u64,
     shuffle_key: &ShuffleKey,
-) -> RunResult<Vec<u8>> {
+) -> Result<Vec<u8>, CallbackError> {
     use rand::SeedableRng;
     use rand::seq::SliceRandom;
 
@@ -476,5 +475,6 @@ fn shuffle_to_envelope_bytes(
         session_id: session_id.to_string(),
         fields,
     };
-    serde_json::to_vec(&envelope).map_err(|e| RunError::msg(format!("disclosure JSON encode: {e}")))
+    serde_json::to_vec(&envelope)
+        .map_err(|e| CallbackError(format!("disclosure JSON encode: {e}")))
 }

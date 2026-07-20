@@ -2,14 +2,11 @@ use std::sync::Arc;
 
 use secrecy::SecretBox;
 
-use engine_compiler::Compiler as EngineCompiler;
-use engine_executor::Executor as EngineExecutor;
 use broker_client::{BrokerClient, CacheStore, KbsClient, RegistryClient, SessionStore};
 
 use crate::applicant::media_store::MediaCache;
-use crate::compiler::{Compiler, LocalCompiler};
-use crate::executor::{Executor, LocalExecutor};
-use crate::runtime::PolicyCache;
+use crate::compiler::{Compiler, connect_compile_worker};
+use crate::executor::{Executor, connect_execution_worker};
 use crate::shuffle::ShuffleKey;
 
 /// Applicant key held in TEE memory for the duration of a request. Raw
@@ -21,22 +18,27 @@ use crate::shuffle::ShuffleKey;
 pub type ApplicantSessionToken = SecretBox<Vec<u8>>;
 
 pub struct AppState {
-    /// The COMPILE boundary the cold path calls: fuse + compile pulled artifact
-    /// bytes into a `CompiledBundle`. In-process ([`LocalCompiler`]) today; a
-    /// compile-worker CVM behind the same `Arc<dyn Compiler>` later. See
-    /// [`crate::compiler`].
-    pub compiler: Arc<dyn Compiler>,
-    /// The EXECUTE boundary each reducer round drives: run the compiled policy
-    /// against the decrypted state + event. In-process ([`LocalExecutor`])
-    /// today; an execution-worker CVM behind the same `Arc<dyn Executor>` later.
-    /// See [`crate::executor`]. The orchestrator no longer holds a `Runner`
-    /// directly — it delegates compile + execute through these two boundaries.
-    pub executor: Arc<dyn Executor>,
-    /// Two-tier compiled-policy cache (L1 in-RAM + L2 broker-backed sealed
-    /// cwasm), keyed by composition hash. `lookup_policy` resolves through
-    /// its single `get_or_compute` ladder — L1 → L2 → cold pull+compile —
-    /// with request coalescing. See [`PolicyCache`](crate::runtime::PolicyCache).
-    pub policy_cache: PolicyCache,
+    /// The COMPILE boundary the cold path calls: hand pulled artifact bytes to a
+    /// compile-worker over rpc, get back a `CompiledBundle`. api NEVER compiles
+    /// in-process (no Cranelift); the worker is started by infrastructure and
+    /// api [`connect`](connect_compile_worker)s to it. See [`crate::compiler`].
+    pub compiler: Arc<Compiler>,
+    /// The EXECUTE boundary each reducer round drives: a client for the remote
+    /// execution-worker (started by infrastructure; api [`connect`s]
+    /// (connect_execution_worker) to it). api holds NO wasmtime — the round runs
+    /// on the worker, which calls back for media / state persistence via the
+    /// per-run CallbackService (api holds the seal key, the worker does not). See
+    /// [`crate::executor`]. The orchestrator delegates compile + execute through
+    /// these two client boundaries.
+    pub executor: Arc<Executor>,
+    /// L2 compiled-policy cache: broker-backed, AEAD-sealed cwasm bundles, keyed
+    /// by `(composition_key, compat_token)`. This is the orchestrator's ONLY
+    /// compiled-artifact store — there is NO api-side in-RAM L1; the sole
+    /// in-memory component cache lives on the execution-worker, which pulls a
+    /// bundle from here via `load_component` on a miss. `resolve_bundle`
+    /// (`applicant::shared`) is the L2-read-or-compile-and-store entry point the
+    /// `load_component` callback drives. See [`crate::cwasm_cache`].
+    pub cache_store: CacheStore,
     pub session_store: Arc<SessionStore>,
     /// Registry client used by /connect for the lazy policy pull.
     /// Same broker connection as the rest of broker-client.
@@ -61,30 +63,23 @@ impl AppState {
     pub fn new(
         session_store: Arc<SessionStore>,
         broker: BrokerClient,
-        compiler_engine: Arc<EngineCompiler>,
-        executor_engine: Arc<EngineExecutor>,
+        compiler: Arc<Compiler>,
+        executor: Arc<Executor>,
         shuffle_key: Arc<ShuffleKey>,
         tee_seal_key: &[u8; 32],
     ) -> Self {
         // Registry + KBS + cache share the same broker connection (cheap
         // Clone: hyper Client is Arc-backed). The L2 cache seals under an
-        // HKDF subkey of the same `tee_seal_key` (domain-separated internally);
-        // it holds the execute engine to deserialize cached cwasm.
+        // HKDF subkey of the same `tee_seal_key` (domain-separated internally)
+        // and holds only BYTES (the CompiledBundle) — no wasmtime engine.
         let kbs = KbsClient::new(broker.clone());
         let cache_store = CacheStore::new(broker.clone(), tee_seal_key);
-        let policy_cache = PolicyCache::new(cache_store, executor_engine.clone());
-        // In-process compile + execute boundaries; each swaps to a Remote*
-        // (compile-worker / execution-worker CVM) behind the same trait with no
-        // caller change. The compile engine (Cranelift) and execute engine
-        // (runtime-only) are DISTINCT — a cwasm compiled by the former
-        // deserializes on the latter (matching `engine_config`), the in-process
-        // proof of the cross-CVM bridge.
-        let compiler: Arc<dyn Compiler> = Arc::new(LocalCompiler::new(compiler_engine));
-        let executor: Arc<dyn Executor> = Arc::new(LocalExecutor::new(executor_engine));
+        // Both boundaries are remote clients connected by the caller (`init`):
+        // `compiler` → the compile-worker, `executor` → the execution-worker.
         Self {
             compiler,
             executor,
-            policy_cache,
+            cache_store,
             session_store,
             registry: RegistryClient::new(broker),
             kbs,
@@ -93,25 +88,46 @@ impl AppState {
         }
     }
 
-    /// Connect to broker-client and build state. The compile + execute
-    /// engines are passed in (owned by the applicant surface — the client API
-    /// never compiles or runs); the policy cache is built here.
+    /// Connect to broker-client + both engine workers and build state. BOTH the
+    /// COMPILE and EXECUTE boundaries are remote clients dialed here — the
+    /// workers are separate processes/CVMs started by infrastructure (like the
+    /// broker), NOT spawned by api. api itself links neither Cranelift nor the
+    /// wasmtime runtime.
     pub async fn init(
         transport_out: &str,
         session_store: Arc<SessionStore>,
-        compiler_engine: Arc<EngineCompiler>,
-        executor_engine: Arc<EngineExecutor>,
         shuffle_key: Arc<ShuffleKey>,
         tee_seal_key: &[u8; 32],
     ) -> Self {
         let broker = BrokerClient::new(transport_out)
             .await
             .expect("failed to connect to broker");
+        // Addresses are explicit config; fail loud if unset (minimal-defaults).
+        let compile_addr = std::env::var("ENCLAVID_COMPILE_WORKER_ADDR").expect(
+            "ENCLAVID_COMPILE_WORKER_ADDR not set (address of the compile-worker; start one \
+             with `cargo run -p engine-compiler --features worker --bin compile-worker` and \
+             point api at its listen address)",
+        );
+        let compiler = Arc::new(
+            connect_compile_worker(&compile_addr)
+                .await
+                .expect("failed to connect to compile-worker"),
+        );
+        let exec_addr = std::env::var("ENCLAVID_EXECUTION_WORKER_ADDR").expect(
+            "ENCLAVID_EXECUTION_WORKER_ADDR not set (address of the execution-worker; start one \
+             with `cargo run -p engine-executor --features worker --bin execution-worker` and \
+             point api at its listen address)",
+        );
+        let executor = Arc::new(
+            connect_execution_worker(&exec_addr)
+                .await
+                .expect("failed to connect to execution-worker"),
+        );
         Self::new(
             session_store,
             broker,
-            compiler_engine,
-            executor_engine,
+            compiler,
+            executor,
             shuffle_key,
             tee_seal_key,
         )

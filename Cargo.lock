@@ -1385,8 +1385,7 @@ dependencies = [
  "enclavid-attestation",
  "enclavid-crypto",
  "enclavid-kbs-client",
- "engine-compiler",
- "engine-executor",
+ "engine-types",
  "futures",
  "hex",
  "hkdf",
@@ -1396,6 +1395,7 @@ dependencies = [
  "rand 0.8.6",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+ "remoc",
  "rpc",
  "secrecy",
  "serde",
@@ -1407,7 +1407,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tower-service",
- "wasmparser 0.247.0",
 ]
 
 [[package]]
@@ -1538,6 +1537,9 @@ dependencies = [
  "engine-compiler",
  "engine-types",
  "jpeg-encoder",
+ "moka",
+ "remoc",
+ "rpc",
  "tokio",
  "wasmtime",
  "xtask",

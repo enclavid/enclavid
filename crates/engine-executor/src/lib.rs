@@ -26,6 +26,27 @@
 
 mod embedded;
 pub mod limits;
+
+/// This runtime's cwasm ABI identifier — the `compat_token` the execution-worker
+/// hands the orchestrator on an L1-miss `load_component` so the orchestrator keys
+/// L2 (and, later, routes compiles) by it. A cwasm is portable only across
+/// runtimes sharing `(wasmtime version + engine_config + target)`.
+///
+/// The wasmtime half is derived AUTOMATICALLY from wasmtime's own major version
+/// via [`ModuleVersionStrategy::WasmtimeVersion`](wasmtime::ModuleVersionStrategy) —
+/// the SAME string wasmtime embeds in every serialized cwasm and checks on
+/// `deserialize`, so it tracks the exact ABI boundary and needs no manual bump.
+/// (We can't use `Engine::precompile_compatibility_hash`, which folds in the full
+/// `Config` too, because it is `cfg(cranelift)` and this engine is runtime-only.)
+/// The `-cm-fuel` suffix marks our fixed `engine_config` (component-model +
+/// consume-fuel); bump it by hand only if `engine_config` ever changes without a
+/// wasmtime major bump.
+pub fn compat_token() -> String {
+    format!(
+        "wt{}-cm-fuel",
+        wasmtime::ModuleVersionStrategy::WasmtimeVersion.as_str()
+    )
+}
 mod listener;
 mod media;
 mod media_store;
@@ -62,6 +83,19 @@ pub use wasmtime::{Error as RunError, Result as RunResult};
 // Re-exported so callers (api crate) can hold compiled components in
 // their session caches without taking a direct wasmtime dependency.
 pub use wasmtime::component::Component;
+
+#[cfg(test)]
+mod compat_tests {
+    /// The token is DERIVED from wasmtime's own major version (not hardcoded), so
+    /// a wasmtime bump moves it automatically — proving the derivation without
+    /// pinning a version number this test would have to chase.
+    #[test]
+    fn compat_token_is_derived_from_wasmtime_version() {
+        let major = wasmtime::ModuleVersionStrategy::WasmtimeVersion.as_str();
+        assert!(!major.is_empty(), "wasmtime major version should be non-empty");
+        assert_eq!(super::compat_token(), format!("wt{major}-cm-fuel"));
+    }
+}
 
 wasmtime::component::bindgen!({
     inline: r#"

@@ -1,18 +1,20 @@
 //! The `compile-worker` deployable: holds this crate's Cranelift-backed
-//! [`Compiler`] and serves `rpc::CompilerService` over a byte stream. The
-//! orchestrator (api) spawns it and talks to it via a `RemoteCompiler`, so
-//! api links NO Cranelift — isolating the compiler here is the whole point
-//! of the compile⊥execute split.
+//! [`Compiler`] and serves `rpc::CompilerService`. It LISTENS on an address;
+//! the orchestrator (api) connects to it. The worker is started by
+//! INFRASTRUCTURE (docker-compose / k8s), not spawned by api — exactly like
+//! the broker. Isolating the compiler in this separate process/CVM is the
+//! whole point of the compile⊥execute split: api links no Cranelift.
 //!
-//! Transport TODAY: the parent spawns us with piped stdio and frames remoc
-//! over (our stdin = read, our stdout = write). ALL logging goes to STDERR
-//! so it never corrupts the remoc stream on stdout. Plan-A replaces this
-//! with the host vsock-relay rendezvous + RA-TLS.
+//! Transport TODAY: a plain TCP listener (dev); each accepted connection is
+//! framed with remoc and the worker sends its service client on the base
+//! channel. Plan-A swaps the TCP listener for the host vsock-relay rendezvous
+//! + RA-TLS (both peers dial the relay, the host splices).
 
 use std::sync::Arc;
 
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
+use tokio::net::{TcpListener, TcpStream};
 
 use engine_compiler::Compiler;
 use engine_types::composition::PluginInstance;
@@ -24,7 +26,8 @@ use rpc::{
 /// The `rpc::CompilerService` impl: compile `(policy, plugins)` to native
 /// [`BundleParts`](engine_compiler::BundleParts), then wrap into the wire
 /// [`CompiledBundle`]. All the compile orchestration lives in the lib
-/// (`Compiler::compile_to_parts`); this is just the wire wrapper.
+/// (`Compiler::compile_to_parts`); this is just the wire wrapper. Shared
+/// (`Arc`) across connections — the wasmtime engine compiles concurrently.
 struct Service {
     compiler: Compiler,
 }
@@ -57,24 +60,53 @@ type Cli = CompilerServiceClient<Ciborium>;
 
 #[tokio::main]
 async fn main() {
-    let compiler = Compiler::new().expect("compile-worker: create compiler engine");
-    let svc = Arc::new(Service { compiler });
+    // Listen address: first arg or ENCLAVID_COMPILE_WORKER_LISTEN. Fail loud if
+    // absent (per the minimal-defaults rule).
+    let addr = std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("ENCLAVID_COMPILE_WORKER_LISTEN").ok())
+        .expect(
+            "compile-worker: listen address required (arg1 or \
+             ENCLAVID_COMPILE_WORKER_LISTEN, e.g. 127.0.0.1:7001)",
+        );
 
-    let (conn, mut tx, _rx) = remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(
-        rpc::connection_cfg(),
-        tokio::io::stdin(),
-        tokio::io::stdout(),
-    )
-    .await
-    .expect("compile-worker: remoc connect over stdio");
+    let svc = Arc::new(Service {
+        compiler: Compiler::new().expect("compile-worker: create compiler engine"),
+    });
+
+    let listener = TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| panic!("compile-worker: bind {addr}: {e}"));
+    eprintln!("compile-worker: listening on {addr}");
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, peer)) => {
+                let svc = svc.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = serve_conn(stream, svc).await {
+                        eprintln!("compile-worker: connection from {peer} ended: {e}");
+                    }
+                });
+            }
+            Err(e) => eprintln!("compile-worker: accept failed: {e}"),
+        }
+    }
+}
+
+/// Frame one accepted connection with remoc and serve `CompilerService` on it.
+async fn serve_conn(stream: TcpStream, svc: Arc<Service>) -> Result<(), String> {
+    let (read, write) = stream.into_split();
+    let (conn, mut tx, _rx) =
+        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(rpc::connection_cfg(), read, write)
+            .await
+            .map_err(|e| format!("remoc connect: {e}"))?;
     tokio::spawn(conn);
 
     let (server, client) = CompilerServiceServerShared::<_, Ciborium>::new(svc, 4);
     tx.send(client)
         .await
-        .expect("compile-worker: send service client to orchestrator");
-
-    if let Err(e) = server.serve(true).await {
-        eprintln!("compile-worker: serve ended: {e}");
-    }
+        .map_err(|e| format!("send service client: {e}"))?;
+    server.serve(true).await.map_err(|e| format!("serve: {e}"))?;
+    Ok(())
 }

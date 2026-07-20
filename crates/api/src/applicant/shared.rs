@@ -14,27 +14,26 @@ use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
-use engine_executor::{
-    Component, EmbeddedRegistry, MediaStore, PluginInstance, Prop, RunInputs, RunStatus,
-    SessionListener, SessionState,
-};
-
-use super::media_store::BrokerMediaStore;
 use broker_client::{
-    AuthN, AuthZ, Client, Event, Key, Metadata, PluginPin, Replay, SessionMetadata,
+    AuthN, AuthZ, Client, Event, Key, Metadata, PluginPin, Replay, SessionMetadata, SessionState,
     State as StateField, public_session_id, reason,
 };
+use engine_types::composition::PluginInstance;
+// The run wire mirrors: props api builds + ships, the outcome + error it gets
+// back from the execution-worker.
+use rpc::{CompiledBundle, ExecError, Prop, RunStatus};
 
+use crate::cwasm_cache;
 use crate::error::ApiError;
 use crate::input::parse_input;
 use crate::locale::Locale;
 use crate::policy_pull;
-use rpc::CompiledBundle;
 
-use crate::runtime::PolicyEntry;
 use crate::state::AppState;
 
 use super::auth::CallerKey;
+use super::callbacks::CallbackServer;
+use super::media_store::BrokerMediaStore;
 use super::persister::SessionPersister;
 use super::views::{progress_from, SessionProgress};
 
@@ -91,25 +90,6 @@ pub(super) fn parse_props(
     })
 }
 
-/// Build per-run resources for the engine. Listener: side-effect
-/// channel — fires once per reducer round, seals + persists state and
-/// any consented disclosure atomically. Embedded registry: composition-
-/// wide `EmbeddedRegistry`, constructed once at policy-cache build
-/// time (see [`lookup_policy`]) and threaded into both engine (slot-
-/// bound resolve + use-site reverse-lookup) and api view-layer (ref →
-/// user-facing text) so all consumers agree on slot attribution.
-pub(super) fn build_run_inputs(
-    listener: Arc<dyn SessionListener>,
-    embedded: Arc<EmbeddedRegistry>,
-    media_store: Arc<dyn MediaStore>,
-) -> RunInputs {
-    RunInputs {
-        listener,
-        embedded,
-        media_store,
-    }
-}
-
 /// Pre-flight context shared by `/connect` and `/input`. The extractor
 /// fetches metadata, reads + integrity-trusts the previously-persisted
 /// session state under the caller's bearer key, looks up the compiled
@@ -137,20 +117,21 @@ pub(super) struct SessionRunCtx {
     /// SOLE strong owner of the applicant token for this round. The persister
     /// and media store hold only `Weak`s to it, so the plaintext token's
     /// lifetime is exactly this context: it drops (and zeroizes) when the run
-    /// ends. MUST outlive `runner.run().await` — see [`SessionRunCtx::run`].
+    /// ends. MUST outlive `executor.run().await` — see [`SessionRunCtx::run`].
     applicant_session_token: Arc<SecretBox<Vec<u8>>>,
     persister: Arc<SessionPersister>,
+    /// The per-round media store — becomes the `media_load` half of the
+    /// [`CallbackServer`] the keyless worker calls back into. Holds the seal key
+    /// + a `Weak` to the applicant token.
+    media_store: Arc<BrokerMediaStore>,
     props: Vec<(String, Prop)>,
-    /// The fused policy component (policy + pinned plugins, wac
-    /// single-store fused on first /connect — see [`lookup_policy`]).
-    /// Shared by Arc with the cache entry; immutable for the session's
-    /// lifetime.
-    policy: Arc<Component>,
-    /// Manifest of distinct per-catalog i18n/icons imports the engine
-    /// registers on the host `Linker` for this fused component. Shared
-    /// by Arc with the cache entry.
-    embedded_imports: Arc<Vec<engine_executor::EmbeddedImport>>,
-    run_inputs: RunInputs,
+    /// Composition cache key — names the fused component in the execution-worker's
+    /// L1 cache, and (with the worker's `compat_token`) keys the orchestrator's
+    /// L2. Passed to the worker on the run; echoed back in `load_component`.
+    composition_key: String,
+    /// This session's metadata — moved into the per-run [`CallbackServer`] so
+    /// `load_component` can cold-compile (OCI pull + fuse) on an L2 miss.
+    metadata: SessionMetadata,
 }
 
 impl SessionRunCtx {
@@ -171,21 +152,34 @@ impl SessionRunCtx {
             locale,
             // Bound (not dropped into `..`) ON PURPOSE: this is the sole strong
             // ref to the applicant token, and the persister / media store hold
-            // only `Weak`s. It MUST stay alive across `runner.run().await` below
-            // so their `upgrade()`s succeed while the engine seals state / opens
-            // media. Dropping it early makes those upgrades return `None` and the
-            // round traps. It drops (and zeroizes) at the end of this fn.
+            // only `Weak`s. It MUST stay alive across `executor.run().await`
+            // below so their `upgrade()`s succeed while the worker calls back to
+            // seal state / open media. Dropping it early makes those upgrades
+            // return `None` and the round fails. It drops (and zeroizes) at the
+            // end of this fn.
             applicant_session_token: _token_owner,
             persister,
+            media_store,
             props,
-            policy,
-            embedded_imports,
-            run_inputs,
+            composition_key,
+            metadata,
             ..
         } = self;
-        let (status, _session_state) = state
+        // The keyless execution-worker calls back into this per-round
+        // CallbackService for compiled-bundle resolution (`load_component`), blob
+        // rehydration (`media_load`) + state persistence (`session_change`); it
+        // holds the seal key + the token weak + the L2/compile context, so none
+        // of those ever cross to the worker.
+        let callbacks = Arc::new(CallbackServer {
+            persister: persister.clone(),
+            media_store,
+            state: state.clone(),
+            metadata,
+            session_id: session_id.clone(),
+        });
+        let status = state
             .executor
-            .execute(&policy, &embedded_imports, session_state, event, props, run_inputs)
+            .run(&composition_key, session_state, event, props, callbacks)
             .await
             .map_err(|e| classify_run_error(&session_id, &e))?;
         // No-op while the run is still awaiting input; flips status to
@@ -202,44 +196,49 @@ impl SessionRunCtx {
     }
 }
 
-/// Inspect a wasmtime/anyhow chain coming out of `runner.run`. Most
-/// failures are opaque to the API consumer — surface as 500. Two
-/// classes are well-known and worth turning into structured 422s:
+/// Classify the [`ExecError`] coming back from `executor.run` into an HTTP-facing
+/// status. Two kinds:
 ///
-///   * Unregistered text-ref — policy was pushed without the matching
-///     `manifest.json` manifest layer (or the manifest doesn't declare
-///     a ref the policy uses). Surface as 422 + missing-ref key, so
-///     frontend can show "policy X needs manifest entry Y" instead
-///     of a blank "internal error".
-///
-/// The detection is substring-based against the engine's
-/// `ensure_registered` message format ([`engine::sanitize`] →
-/// `"... text-ref '<key>' is not registered in prepare-localized-texts"`).
-/// Fragile by nature — if engine rewords the trap, this detection
-/// degrades silently to 500. Acceptable trade-off given the
-/// alternative (typed error all the way through wasmtime trap →
-/// host fn → engine → applicant) is significantly more code.
-fn classify_run_error(session_id: &str, e: &engine_executor::RunError) -> ApiError {
-    // `{e:#}` walks the anyhow chain — without this we only see the
-    // top-level "wasm error / trap" line and miss the underlying
-    // `ensure_registered` message buried below the wasm backtrace.
-    let chain = format!("{e:#}");
-    eprintln!("session_run_ctx: runner.run failed for {session_id}: {chain}");
-    if let Some(missing) = extract_unregistered_text_ref(&chain) {
-        return ApiError::with_body(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            serde_json::json!({
-                "error": "policy_uses_unregistered_text_ref",
-                "missing": missing,
-                "hint": "policy references a text-ref that isn't declared in its \
-                         manifest. Ensure `manifest.json` lists the ref under \
-                         `disclosure_fields` or `localized`, and that the manifest \
-                         was pushed (run `enclavid policy push` with `manifest.json` \
-                         next to the artifact, or `--manifest <path>`).",
-            }),
-        );
+///   * [`ExecError::Config`] — a config-resolution failure relayed from the
+///     worker's `load_component` (OCI pull / compile / digest). It is a pure
+///     function of the pinned config (no applicant input, no PII), so its HTTP
+///     `status` is surfaced VERBATIM — e.g. 410 GONE on a removed artifact — not
+///     flattened to 500. This is the fidelity the typed error channel preserves.
+///   * [`ExecError::Run`] — an opaque trap / host-fn / transport failure → 500,
+///     with ONE well-known exception worth a structured 422:
+///     * Unregistered text-ref — policy pushed without the matching
+///       `manifest.json` layer. Detected by substring against the engine's
+///       `ensure_registered` message (`"... text-ref '<key>' is not registered
+///       ..."`), which the worker relayed verbatim. Fragile by nature; if the
+///       engine rewords the trap this degrades silently to 500 — an accepted
+///       trade-off against typed-error plumbing all the way through the wasm trap.
+fn classify_run_error(session_id: &str, e: &ExecError) -> ApiError {
+    match e {
+        ExecError::Config { status, message } => {
+            eprintln!("session_run_ctx: config resolution failed for {session_id}: {message}");
+            ApiError::Status(
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            )
+        }
+        ExecError::Run(chain) => {
+            eprintln!("session_run_ctx: executor.run failed for {session_id}: {chain}");
+            if let Some(missing) = extract_unregistered_text_ref(chain) {
+                return ApiError::with_body(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    serde_json::json!({
+                        "error": "policy_uses_unregistered_text_ref",
+                        "missing": missing,
+                        "hint": "policy references a text-ref that isn't declared in its \
+                                 manifest. Ensure `manifest.json` lists the ref under \
+                                 `disclosure_fields` or `localized`, and that the manifest \
+                                 was pushed (run `enclavid policy push` with `manifest.json` \
+                                 next to the artifact, or `--manifest <path>`).",
+                    }),
+                );
+            }
+            ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
-    ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Pull `<key>` out of an `... text-ref '<key>' is not registered ...`
@@ -339,19 +338,13 @@ persist; same containment as above.
             "#))
             .into_inner();
 
-        // Resolve the policy and its registered text constants
-        // before the persister is built — the persister consults the
-        // embedded registry to project slot-tagged disclosure-field-
-        // refs back to their machine identifiers when sealing the
-        // envelope to the consumer SDK.
-        let policy_entry = lookup_policy(state, &session_id, &metadata).await?;
-        // PolicyEntry is reference-counted in the cache; cheap to
-        // unpack its inner Arcs into per-run fields.
-        let policy = policy_entry.component.clone();
-        let embedded_imports = policy_entry.embedded_imports.clone();
-        let embedded = policy_entry.embedded.clone();
+        // Compute the composition cache key — names the fused component in the
+        // worker's L1 and keys the orchestrator's L2. The pull + compile is LAZY:
+        // driven by the worker's `load_component` callback into `resolve_bundle`
+        // on an L1 miss, so nothing is compiled on the extractor path.
+        let composition_key = session_composition_key(&session_id, &metadata)?;
 
-        // Per-run persister: engine fires `on_session_change` once per
+        // Per-run persister: the worker calls `session_change` once per
         // reducer round, persister seals any consented disclosure to
         // the client recipient pubkey then writes (SetState +
         // AppendDisclosures) in one atomic SessionStore.write.
@@ -379,11 +372,12 @@ persist; same containment as above.
             metadata: Mutex::new(metadata.clone()),
             shuffle_key: state.shuffle_key.clone(),
         });
-        // The live host blob store: the engine's `blob::from-blob-ref` reads
-        // sealed captures back through this — a pull-through cache over the
-        // broker backing, gated by the session's captured-hash set (from sealed
-        // metadata, prior rounds) so a fabricated ref is refused in-TEE without
-        // a broker read. Same session keys as the persister that WROTE them.
+        // The live host blob store: the worker's `blob::from-blob-ref` reads
+        // sealed captures back through this (via the `media_load` callback) — a
+        // pull-through cache over the broker backing, gated by the session's
+        // captured-hash set (from sealed metadata, prior rounds) so a fabricated
+        // ref is refused without a broker read. Same session keys as the
+        // persister that WROTE them.
         let captured: HashSet<[u8; 32]> = metadata
             .captured_media
             .iter()
@@ -397,10 +391,6 @@ persist; same containment as above.
             cache: state.media_cache.clone(),
             captured,
         });
-        // Engine takes one strong ref via the listener; we keep our
-        // own so `finalize` lands on the same persister after the run
-        // completes (engine drops its ref when Store is consumed).
-        let run_inputs = build_run_inputs(persister.clone(), embedded.clone(), media_store);
 
         Ok(SessionRunCtx {
             state: state.clone(),
@@ -411,56 +401,75 @@ persist; same containment as above.
             // hold only `Weak`s downgraded from it.
             applicant_session_token,
             persister,
+            media_store,
             props,
-            policy,
-            embedded_imports,
-            run_inputs,
+            composition_key,
+            metadata,
         })
     }
 }
 
-/// Look up the compiled policy for a session, compiling lazily on a full
-/// cache miss. Delegates the whole L1 → L2 → cold ladder (with request
-/// coalescing) to [`PolicyCache::get_or_compute`](crate::runtime::PolicyCache::get_or_compute);
-/// this fn only computes the composition key and supplies the cold loader.
-/// The first session to pin a composition pays the pull + compile; every
-/// later session / round / restart reuses it.
-async fn lookup_policy(
-    state: &AppState,
+/// Compute the composition cache key for a session — `sha256(policy_ref ‖
+/// ordered plugin pins ‖ access authority)`. It is a pure function of the pinned
+/// artifacts (nothing session-specific), so it (a) names the fused component in
+/// the execution-worker's L1 cache — every session pinning the same policy +
+/// plugins shares ONE compile — and (b) keys the orchestrator's L2 (paired with
+/// the worker's `compat_token`). NO pull or compile happens here; that is lazy,
+/// driven by [`resolve_bundle`] when the worker's `load_component` callback fires
+/// on an L1 miss.
+fn session_composition_key(
     session_id: &str,
     metadata: &SessionMetadata,
-) -> Result<Arc<PolicyEntry>, StatusCode> {
+) -> Result<String, StatusCode> {
     let client = metadata.client.as_ref().ok_or_else(|| {
-        eprintln!("lookup_policy: metadata.client missing for {session_id}");
+        eprintln!("session_composition_key: metadata.client missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    // Key the compiled-component cache by the COMPOSITION (policy ref + plugin
-    // pins + access authority), NOT session_id: the fused `PolicyEntry` is a
-    // pure function of these (nothing session-specific), so every session
-    // pinning the same policy + plugins shares ONE pull + fuse + Cranelift
-    // compile instead of repeating it.
-    let composition_key = composition_key(
+    Ok(composition_key(
         &metadata.policy_ref,
         metadata.policy_key.as_ref(),
         &client.registry_auth,
         &client.plugins,
-    );
-    state
-        .policy_cache
-        .get_or_compute(composition_key, || {
-            cold_compile(state, session_id, metadata, client)
-        })
-        .await
+    ))
+}
+
+/// Resolve the compiled bundle for `(composition_key, compat_token)` — the api
+/// side of the worker's `load_component` pull. L2 hit → return the (unsealed)
+/// bundle; L2 miss → cold-compile (OCI pull + compile-worker), store to L2
+/// (best-effort), return. This is the ONE place a compile is now triggered — the
+/// orchestrator holds no in-memory component cache, so it recomputes from L2 (or
+/// compiles) each time the worker's L1 misses. Coalescing of concurrent misses
+/// happens on the WORKER side (its L1 `try_get_with`); a cross-worker race just
+/// re-reads L2 or double-compiles (idempotent write), acceptable and rare.
+pub(super) async fn resolve_bundle(
+    state: &AppState,
+    composition_key: &str,
+    compat_token: &str,
+    session_id: &str,
+    metadata: &SessionMetadata,
+) -> Result<CompiledBundle, StatusCode> {
+    if let Some(bundle) =
+        cwasm_cache::try_load(&state.cache_store, composition_key, compat_token).await
+    {
+        return Ok(bundle);
+    }
+    let client = metadata.client.as_ref().ok_or_else(|| {
+        eprintln!("resolve_bundle: metadata.client missing for {session_id}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let bundle = cold_compile(state, session_id, metadata, client).await?;
+    cwasm_cache::store(&state.cache_store, composition_key, compat_token, &bundle).await;
+    Ok(bundle)
 }
 
 /// Cold path: pull the policy + pinned plugins (the orchestrator owns OCI +
 /// registry auth), then hand the bytes to the [`Compiler`](crate::compiler::Compiler)
 /// boundary, which fuses + compiles + parses sections into a [`CompiledBundle`].
-/// Runs only on a full cache miss (both tiers) — [`PolicyCache::get_or_compute`]
-/// handles L1/L2 population and coalescing around it, and reconstructs the L1
-/// `PolicyEntry` from the returned bundle.
+/// Runs only on an L2 miss — [`resolve_bundle`] calls this, then stores the
+/// result to L2. The bundle then flows back to the worker via `load_component`.
 ///
-/// Errors map to HTTP statuses the handler can pass through directly:
+/// Errors map to HTTP-ish statuses (now surfaced by the worker as a run failure
+/// via `load_component` → `ExecError`, which `classify_run_error` maps):
 ///   * 410 Gone — registry pull / decrypt failed (artifact removed / malformed)
 ///   * 5xx — composition / infra problems
 async fn cold_compile(
@@ -526,17 +535,16 @@ async fn cold_compile(
         // Keep the raw component bytes — the compiler fuses on bytes, not a
         // pre-compiled `Component`, and parses each plugin's embedded catalog
         // itself (content-hash keyed, so strict per-component resolution lines
-        // up). See `LocalCompiler::compile`.
+        // up). The compile-worker does this in `Compiler::compile_to_parts`.
         plugin_instances.push(PluginInstance {
             package,
             wasm: art.wasm_bytes,
         });
     }
 
-    // Hand the pulled bytes to the COMPILE boundary: fuse + compile + parse
-    // sections into a `CompiledBundle` (cwasm + i18n/icons import manifest +
-    // per-component catalogs, composition order). In-process today
-    // (`LocalCompiler`); a compile-worker CVM later, same trait.
+    // Hand the pulled bytes to the COMPILE boundary: the compile-worker fuses +
+    // compiles + parses sections into a `CompiledBundle` (cwasm + i18n/icons
+    // import manifest + per-component catalogs, composition order) over rpc.
     // `PolicyCache::get_or_compute` persists the bundle to L2 and reconstructs
     // the L1 `PolicyEntry` from it.
     state

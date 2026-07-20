@@ -13,8 +13,12 @@ repository.workspace = true
 # compile + test the whole contract; per-CVM artifact builds narrow it.
 [features]
 default = ["compile", "execute"]
+# Both features pull engine-types: compile for PluginInstance, execute for the
+# composition catalogs (ComponentDecls / EmbeddedImport) it rebuilds the
+# embedded registry from at run time. The shared `CompiledBundle` needs it under
+# either. Neither pulls Cranelift.
 compile = ["dep:engine-types", "dep:remoc"]
-execute = ["dep:broker-client", "dep:remoc"]
+execute = ["dep:engine-types", "dep:broker-client", "dep:remoc"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

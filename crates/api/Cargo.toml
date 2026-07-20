@@ -13,19 +13,31 @@ default = []
 vsock = ["broker-client/vsock", "dep:tokio-vsock", "dep:hyper-util", "dep:hyper", "dep:tower-service"]
 
 [dependencies]
-# The engine fleet, split: compile half (Compiler + load_embedded +
-# Composition) and execute half (Executor + run + the execute/pure-type
-# surface). api uses both in-process today (LocalCompiler / LocalExecutor);
-# in Plan-A it drops engine-executor behind a feature and drives a remote
-# worker over rpc. Pure + execute types come via engine-executor's
-# re-exports; the compile bits from engine-compiler.
-engine-compiler = { path = "../engine-compiler" }
-engine-executor = { path = "../engine-executor" }
-# The rpc contract — api needs only the COMPILE half (CompiledBundle /
-# CatalogEntry / CompileError as the L2 cache bundle + LocalCompiler output).
-# `default-features = false, features = ["compile"]` keeps the executor
-# contract + broker-client-via-rpc out of a standalone api artifact.
-rpc = { path = "../rpc", default-features = false, features = ["compile"] }
+# The wasmtime-free engine leaf: the plain-data types the client-only
+# orchestrator holds + projects — composition (PluginInstance / EmbeddedImport),
+# the embedded registry (ref → data for the view/persister layers), limits, and
+# text sanitize. api has NO engine-compiler AND NO engine-executor dep — compile
+# runs on a separate compile-worker and execute on a separate execution-worker,
+# so api links NEITHER Cranelift NOR the wasmtime runtime, unconditionally.
+engine-types = { path = "../engine-types" }
+# remoc client for BOTH workers: the Compiler (compile-worker) and the Executor
+# (execution-worker), each over rpc; connection_cfg from rpc. api also SERVES
+# the per-round CallbackService back to the keyless executor over the same
+# connection (media_load / session_change — it holds the seal key, the worker
+# does not).
+remoc = { version = "0.18", default-features = false, features = [
+    "rtc",
+    "codec-ciborium",
+] }
+# The rpc contract — api needs BOTH halves: `compile` for the CompiledBundle /
+# CompileError / CompilerService client (compile-worker output + L2 cache
+# bundle), and `execute` for the ExecutorService client + CallbackService server
+# + the run wire types (RunRequest / RunReply / RunStatus / Prop). Neither pulls
+# Cranelift or the wasmtime runtime.
+rpc = { path = "../rpc", default-features = false, features = [
+    "compile",
+    "execute",
+] }
 broker-client = { path = "../broker-client" }
 broker-protocol = { path = "../broker-protocol" }
 enclavid-crypto = { path = "../crypto" }
@@ -62,11 +74,6 @@ hkdf = "0.12"
 rand = { version = "0.8", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
 thiserror = "1"
-
-# Direct dep so the manifest-extraction code path doesn't pin to
-# whichever wasmtime version happens to re-export wasmparser. Same
-# version wasmtime transitively pulls — keeps the dep tree single.
-wasmparser = "0.247"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = { version = "0.7", optional = true }

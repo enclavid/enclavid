@@ -1,16 +1,19 @@
-//! Host media store the engine calls for `blob::from-blob-ref` — a
-//! **pull-through cache** over the sealed broker backing store, with an in-TEE
-//! **gate** on the read key.
+//! Host media store the keyless execution-worker calls BACK for
+//! `blob::from-blob-ref` (via `CallbackService::media_load`) — a **pull-through
+//! cache** over the sealed broker backing store, with a **gate** on the read
+//! key. It runs orchestrator-side because it holds the seal key + applicant
+//! token the worker must never see.
 //!
-//! `blob::from-blob-ref` mints a COLD handle (no load); the engine calls
-//! [`MediaStore::load`] LAZILY on the first `bytes()` read of that handle. This:
+//! `blob::from-blob-ref` mints a COLD handle (no load); the worker calls
+//! [`load`](BrokerMediaStore::load) LAZILY on the first `bytes()` read of that
+//! handle, which forwards to this callback. This:
 //!   1. serves a **cache hit** with no host IO;
 //!   2. **gates** an unknown hash — a ref not in the session's captured set is a
-//!      fabricated key, refused IN-TEE with no broker read (the engine then
-//!      traps, since `from-blob-ref` has no miss branch);
+//!      fabricated key, refused here with no broker read (the worker then traps,
+//!      since `from-blob-ref` has no miss branch);
 //!   3. **pulls** a real-but-uncached blob from the backing store
 //!      ([`SessionStore::load_media`]), decrypts, populates the cache, and
-//!      returns the shared `Arc`.
+//!      returns the bytes.
 //!
 //! Covert-channel role (defence-in-depth; primary defence is attestation +
 //! consent-gate). The read KEY (`blob_hash`) goes to the host in plaintext, and
@@ -27,14 +30,12 @@
 //! host-compromise-gated, the same class as APSI query counts.
 
 use std::collections::HashSet;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use broker_client::{Replay, SessionStore, public_session_id, reason};
-use engine_executor::{MediaStore, RunError, RunResult};
 use moka::future::Cache;
+use rpc::CallbackError;
 use secrecy::{ExposeSecret, SecretBox};
 
 /// Byte budget for the pull-through media cache — a soft RAM ceiling (moka
@@ -142,49 +143,53 @@ pub(super) struct BrokerMediaStore {
     pub captured: HashSet<[u8; 32]>,
 }
 
-impl MediaStore for BrokerMediaStore {
-    fn load<'a>(
-        &'a self,
-        blob_hash: &'a [u8; 32],
-    ) -> Pin<Box<dyn Future<Output = RunResult<Option<Arc<Vec<u8>>>>> + Send + 'a>> {
-        Box::pin(async move {
-            // 1. Cache hit — served in-TEE, no host IO.
-            if let Some(hit) = self.cache.get(&self.session_id, blob_hash).await {
-                return Ok(Some(hit));
-            }
-            // 2. Gate — an unknown hash is a fabricated ref: refuse in-TEE with no
-            //    broker read. The engine traps on the `None` (no miss branch).
-            if !self.captured.contains(blob_hash) {
-                return Ok(None);
-            }
-            // 3. Pull-through — fetch the sealed blob, decrypt, cache, share.
-            //    Borrow the token from the per-round owner for the moment of the
-            //    open. A `None` upgrade means the run outlived its context.
-            let token = self.applicant_session_token.upgrade().ok_or_else(|| {
-                RunError::msg(
-                    "media load: applicant token owner dropped (run outlived its context)",
-                )
-            })?;
-            let id = public_session_id(&self.session_id);
-            let loaded = self
-                .session_store
-                .load_media(id, blob_hash, token.expose_secret())
-                .await
-                .map_err(|e| RunError::msg(format!("media load failed: {e}")))?
-                .trust_unchecked::<Replay, _>(reason!(
-                    "media blob is content-addressed by BLAKE3; a stale or reordered read \
-                     can only return identical bytes"
-                ))
-                .into_inner();
-            let Some(vec) = loaded else {
-                return Ok(None);
-            };
-            let arc = Arc::new(vec);
-            self.cache
-                .insert(&self.session_id, *blob_hash, arc.clone())
-                .await;
-            Ok(Some(arc))
-        })
+impl BrokerMediaStore {
+    /// Rehydrate one stored blob by content hash — the api side of the keyless
+    /// executor's `CallbackService::media_load`. Returns owned bytes for the
+    /// wire (`None` = miss / gated), so the worker's `from-blob-ref` traps on a
+    /// `None` exactly as the in-process store did. The seal key never leaves
+    /// this side — the worker only ever receives the decrypted bytes it asked
+    /// for by an already-captured hash.
+    pub(super) async fn load(
+        &self,
+        blob_hash: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, CallbackError> {
+        // 1. Cache hit — served here, no host IO. Clone the bytes for the wire.
+        if let Some(hit) = self.cache.get(&self.session_id, blob_hash).await {
+            return Ok(Some(hit.as_ref().clone()));
+        }
+        // 2. Gate — an unknown hash is a fabricated ref: refuse with no broker
+        //    read. The worker traps on the `None` (from-blob-ref has no miss branch).
+        if !self.captured.contains(blob_hash) {
+            return Ok(None);
+        }
+        // 3. Pull-through — fetch the sealed blob, decrypt, cache, return.
+        //    Borrow the token from the per-round owner for the moment of the
+        //    open. A `None` upgrade means the run outlived its context.
+        let token = self.applicant_session_token.upgrade().ok_or_else(|| {
+            CallbackError(
+                "media load: applicant token owner dropped (run outlived its context)".into(),
+            )
+        })?;
+        let id = public_session_id(&self.session_id);
+        let loaded = self
+            .session_store
+            .load_media(id, blob_hash, token.expose_secret())
+            .await
+            .map_err(|e| CallbackError(format!("media load failed: {e}")))?
+            .trust_unchecked::<Replay, _>(reason!(
+                "media blob is content-addressed by BLAKE3; a stale or reordered read \
+                 can only return identical bytes"
+            ))
+            .into_inner();
+        let Some(vec) = loaded else {
+            return Ok(None);
+        };
+        let arc = Arc::new(vec);
+        self.cache
+            .insert(&self.session_id, *blob_hash, arc.clone())
+            .await;
+        Ok(Some(arc.as_ref().clone()))
     }
 }
 

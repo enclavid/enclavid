@@ -30,6 +30,7 @@
 
 mod attestation;
 mod auth;
+mod callbacks;
 mod connect;
 mod input;
 pub(crate) mod media_store;

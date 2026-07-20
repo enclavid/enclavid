@@ -31,6 +31,38 @@ wasmtime = { version = "46", default-features = false, features = [
 # blob store keys blobs by BLAKE3 hash.
 blake3 = "1"
 
+# --- execution-worker bin deps (optional) — pulled ONLY by the `worker`
+# feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable
+# execution-worker CVM: it wraps this crate's Executor in an
+# `rpc::ExecutorService` server, caches deserialized components per composition,
+# and proxies mid-run callbacks (media_load / session_change) back to the
+# orchestrator over the SAME remoc connection — KEYLESS (no tee_seal_key ever
+# crosses in). ---
+rpc = { path = "../rpc", default-features = false, features = ["execute"], optional = true }
+remoc = { version = "0.18", default-features = false, features = [
+    "rtc",
+    "codec-ciborium",
+], optional = true }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+], optional = true }
+# Bounded per-composition cache of deserialized components (same idiom as the
+# orchestrator's L1 PolicyCache: max_capacity + time_to_idle).
+moka = { version = "0.12", features = ["future"], optional = true }
+
+[features]
+# Enables the `execution-worker` bin. api never enables it → the api
+# orchestrator links only the pure lib types it re-points to engine-types /
+# broker-client, and NO wasmtime.
+worker = ["dep:rpc", "dep:remoc", "dep:tokio", "dep:moka"]
+
+[[bin]]
+name = "execution-worker"
+required-features = ["worker"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # happy_path.rs is the end-to-end integration test: it COMPOSES a policy +

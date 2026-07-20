@@ -19,11 +19,18 @@
 //! The contract is split under two cargo features so a single-role worker
 //! links only its half (least-knowledge for its measured image):
 //!
-//!   * `compile` → `CompilerService` + the compile wire types (`CompiledBundle`,
-//!     `CatalogEntry`, `CompileError`); pulls `engine-types`.
+//!   * `compile` → `CompilerService` + `CompileError`; the worker fuses +
+//!     Cranelift-compiles into a `CompiledBundle`.
 //!   * `execute` → `ExecutorService` + `CallbackService` + the execute wire
-//!     types (`RunRequest`, `RunReply`, `ExecError`, `CallbackError`); pulls
-//!     `broker-client`.
+//!     types (`RunRequest`, `RunReply`, `RunStatus`, `Prop`, `ExecError`,
+//!     `CallbackError`); pulls `broker-client`.
+//!
+//! The compiled artifact ([`CompiledBundle`] / [`CatalogEntry`]) is SHARED: it
+//! is the compile OUTPUT and the execute priming INPUT (and the api L2 cache
+//! entry), so it lives ungated in `bundle` and both features name it. Both
+//! features pull `engine-types` — the compile side for `PluginInstance`, the
+//! execute side for the composition catalogs it rebuilds the embedded registry
+//! from. Neither pulls Cranelift.
 //!
 //! `remoc` (the rtc substrate) is pulled by either feature. A compile-worker
 //! (or the orchestrator's compile client) builds
@@ -36,6 +43,13 @@
 //! default for the compile boundary, cwasm bundles are ~10–15 MiB —
 //! `max_received_ports`, `connection_timeout`) plus per-service handler
 //! validation (hash-bound media loads, bounded session-change).
+
+// The compiled artifact — shared by BOTH boundaries (compile output, execute
+// prime input, api L2 cache entry).
+#[cfg(any(feature = "compile", feature = "execute"))]
+mod bundle;
+#[cfg(any(feature = "compile", feature = "execute"))]
+pub use bundle::*;
 
 #[cfg(feature = "compile")]
 mod compile;

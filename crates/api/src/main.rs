@@ -12,7 +12,6 @@ mod keyprovider;
 mod limits;
 mod locale;
 mod policy_pull;
-mod runtime;
 mod shuffle;
 mod state;
 mod transport;
@@ -28,15 +27,6 @@ use crate::state::AppState;
 #[tokio::main]
 async fn main() {
     let address_out = std::env::var("ENCLAVID_ADDRESS_OUT").expect("ENCLAVID_ADDRESS_OUT not set");
-
-    // Per-process compile engine (Cranelift) + execute engine (runtime-only),
-    // owned by the applicant `AppState`. Distinct engines bridged by
-    // serialized cwasm (the in-process shape of the cross-CVM split).
-    // Compilation happens lazily on the first /connect for each session
-    // (pulling the policy artifact via the pinned ref) and the compiled
-    // component is cached + reused for subsequent /input rounds.
-    let compiler_engine = runtime::new_compiler();
-    let executor_engine = runtime::new_executor();
 
     // SessionStore is the broker-client HTTP-over-vsock client for
     // per-session typed-field storage. Shared between client API
@@ -76,15 +66,7 @@ async fn main() {
         ClientState::init(&address_out, session_store.clone(), attestor).await,
     );
     let applicant_state = Arc::new(
-        AppState::init(
-            &address_out,
-            session_store,
-            compiler_engine,
-            executor_engine,
-            shuffle_key,
-            &tee_seal_key,
-        )
-        .await,
+        AppState::init(&address_out, session_store, shuffle_key, &tee_seal_key).await,
     );
 
     let client_app = client::router(client_state);

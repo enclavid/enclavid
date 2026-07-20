@@ -43,9 +43,10 @@ blake3 = "1"
 enclavid-embedded = { path = "../embedded" }
 
 # --- compile-worker bin deps (optional) — pulled ONLY by the `worker`
-# feature, so the LIB stays rpc/remoc-free and api's `local-compile` gets a
-# pure engine-compiler lib. The worker BIN is the deployable compile-worker
-# CVM: it wraps this crate's Compiler in an rpc::CompilerService server. ---
+# feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable
+# compile-worker CVM: it wraps this crate's Compiler in an rpc::CompilerService
+# server. api does not depend on this crate at all — it drives the worker over
+# rpc. ---
 rpc = { path = "../rpc", default-features = false, features = ["compile"], optional = true }
 remoc = { version = "0.18", default-features = false, features = [
     "rtc",
@@ -54,13 +55,13 @@ remoc = { version = "0.18", default-features = false, features = [
 tokio = { version = "1", features = [
     "macros",
     "rt-multi-thread",
-    "io-std",
+    "net",
     "io-util",
 ], optional = true }
 
 [features]
-# Enables the `compile-worker` bin. api never enables it → api's local-compile
-# path links only the pure lib (no rpc/remoc).
+# Enables the `compile-worker` bin. Only the worker build pulls rpc/remoc/tokio;
+# the pure lib (used by tests + engine-executor's dev-deps) stays free of them.
 worker = ["dep:rpc", "dep:remoc", "dep:tokio"]
 
 [[bin]]

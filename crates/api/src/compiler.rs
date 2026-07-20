@@ -1,115 +1,150 @@
 //! The COMPILE boundary: fuse + compile a policy + its pinned plugins into a
-//! [`CompiledBundle`], behind a [`Compiler`] trait so the compile step can move
-//! OUT of process (a compile-worker CVM) later without touching the caller.
+//! [`CompiledBundle`]. api NEVER compiles in-process — it always drives a
+//! compile-worker over rpc, so the api binary links NO Cranelift.
 //!
-//! [`LocalCompiler`] runs the compile in-process on the shared
-//! [`Compiler`](engine_compiler::Compiler) today.
-//! A future `RemoteCompiler` implements the same trait over remoc's
-//! [`CompilerService`](rpc::CompilerService) — the orchestrator
-//! holds an `Arc<dyn Compiler>` and `deserialize`s the returned cwasm bytes via
-//! [`bundle_to_entry`], a boundary already PROCESS-HONEST (bytes in, bytes out,
-//! no live `Component` crosses it).
+//! [`Compiler`] wraps the `rpc::CompilerService` client. The worker is a
+//! separate process/CVM started by INFRASTRUCTURE (docker-compose / k8s), not
+//! by api — exactly like the broker. api [`connect`](connect_compile_worker)s
+//! to it at a configured address (TCP in dev, a vsock-relay rendezvous under
+//! RA-TLS in Plan-A). The orchestrator holds the returned cwasm as BYTES via
+//! [`bundle_to_entry`] and never deserializes it — the live `Component` is
+//! materialized only on the execution-worker (the compile→execute seam is
+//! bytes-in, bytes-out both ends).
 //!
-//! The [`CompiledBundle`] wire type lives in the `rpc` crate (it is both the
-//! compile RPC return value and the L2 cache bundle, see [`crate::cwasm_cache`])
-//! so a cold compile and an L2 hit reconstruct a [`PolicyEntry`] through the one
-//! [`bundle_to_entry`] path.
+//! The [`CompiledBundle`] wire type lives in the `rpc` crate (it is the compile
+//! RPC return value, the L2 cache bundle — see [`crate::cwasm_cache`] — AND the
+//! execution-worker `load_component` payload) so a cold compile and an L2 hit
+//! resolve the same bundle the worker deserializes.
 
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
+use engine_types::composition::PluginInstance;
+use remoc::codec::Ciborium;
+// `CompilerService` (the remoc trait) is in scope so the generated
+// `CompilerServiceClient`'s `.compile()` method resolves.
+use rpc::{CompileError, CompiledBundle, CompilerService, CompilerServiceClient};
 
-use engine_compiler::{Compiler as EngineCompiler, load_embedded};
-use engine_executor::{EmbeddedRegistry, Executor as EngineExecutor, PluginInstance};
-use rpc::{CatalogEntry, CompileError, CompiledBundle};
-
-use crate::runtime::PolicyEntry;
-
-/// Reconstruct the in-RAM [`PolicyEntry`] from a serialized [`CompiledBundle`]:
-/// `deserialize` the cwasm into a live `Component` on `runner`'s engine and
-/// rebuild the embedded registry from the stored catalogs via the same builder
-/// the cold path uses (→ byte-identical registry). `None` on a wasmtime
-/// toolchain skew / tampered cwasm — an L2 hit treats that as a miss; the cold
-/// path (which deserializes bytes it just serialized on the same engine) never
-/// hits it in practice.
-pub fn bundle_to_entry(bundle: &CompiledBundle, executor: &EngineExecutor) -> Option<Arc<PolicyEntry>> {
-    let component = executor.deserialize_component(&bundle.cwasm).ok()?;
-    let mut builder = EmbeddedRegistry::builder();
-    for c in &bundle.catalogs {
-        builder.add_component(c.hash, c.decls.clone());
-    }
-    Some(Arc::new(PolicyEntry {
-        component: Arc::new(component),
-        embedded_imports: Arc::new(bundle.embedded_imports.clone()),
-        embedded: Arc::new(builder.build()),
-    }))
+/// The COMPILE boundary: a client for a compile-worker's `rpc::CompilerService`.
+/// Given already-pulled artifact bytes (the orchestrator owns the OCI pull +
+/// registry auth), the worker fuses + Cranelift-compiles + parses sections into
+/// a [`CompiledBundle`]. The client is a cheap remoc handle (`Send + Sync`);
+/// concurrent `/connect` compiles multiplex over the one connection.
+pub struct Compiler {
+    client: CompilerServiceClient<Ciborium>,
 }
 
-/// The COMPILE boundary. Given already-pulled artifact bytes (the orchestrator
-/// owns the OCI pull + registry auth), fuse + compile + parse-sections into a
-/// [`CompiledBundle`]. Object-safe boxed-future (mirrors
-/// [`MediaStore`](engine_executor::MediaStore)) so the impl can be swapped for
-/// an out-of-process `RemoteCompiler` (remoc client) behind an `Arc<dyn Compiler>`.
-pub trait Compiler: Send + Sync {
-    fn compile<'a>(
-        &'a self,
+impl Compiler {
+    pub fn new(client: CompilerServiceClient<Ciborium>) -> Self {
+        Self { client }
+    }
+
+    /// Compile `(policy, plugins)` on the worker. A transport failure surfaces
+    /// as `CompileError` via its `From<remoc::rtc::CallError>`.
+    pub async fn compile(
+        &self,
         policy_wasm: Vec<u8>,
         plugins: Vec<PluginInstance>,
-    ) -> Pin<Box<dyn Future<Output = Result<CompiledBundle, CompileError>> + Send + 'a>>;
-}
-
-/// In-process compiler: runs fusion + Cranelift on the shared
-/// [`Compiler`](engine_compiler::Compiler). The compile is synchronous CPU
-/// work (as it is today); a later `RemoteCompiler` moves it to a
-/// compile-worker CVM over remoc.
-pub struct LocalCompiler {
-    compiler: Arc<EngineCompiler>,
-}
-
-impl LocalCompiler {
-    pub fn new(compiler: Arc<EngineCompiler>) -> Self {
-        Self { compiler }
+    ) -> Result<CompiledBundle, CompileError> {
+        self.client.compile(policy_wasm, plugins).await
     }
 }
 
-impl Compiler for LocalCompiler {
-    fn compile<'a>(
-        &'a self,
-        policy_wasm: Vec<u8>,
-        plugins: Vec<PluginInstance>,
-    ) -> Pin<Box<dyn Future<Output = Result<CompiledBundle, CompileError>> + Send + 'a>> {
-        let compiler = self.compiler.clone();
-        Box::pin(async move {
-            // Parse each component's embedded sections (dropped by compile) in
-            // composition order: policy first, then plugins in pinned order —
-            // fixes the merged-DF first-match order (mirrors `Compiler::compose`).
-            let policy_catalog =
-                load_embedded(&policy_wasm).map_err(|e| CompileError(e.to_string()))?;
-            let mut catalogs = Vec::with_capacity(1 + plugins.len());
-            catalogs.push(CatalogEntry {
-                hash: policy_catalog.hash,
-                decls: policy_catalog.decls,
-            });
-            for p in &plugins {
-                let c = load_embedded(&p.wasm).map_err(|e| CompileError(e.to_string()))?;
-                catalogs.push(CatalogEntry {
-                    hash: c.hash,
-                    decls: c.decls,
-                });
+/// Connect to a compile-worker already listening at `addr` and hand back a
+/// [`Compiler`]. The worker is started by infrastructure, not api. Transport
+/// TODAY: a direct TCP dial (dev); Plan-A swaps this for the host vsock-relay
+/// rendezvous + RA-TLS (both peers dial the relay, the host splices). The
+/// worker sends us its service client on the base channel once connected.
+pub async fn connect_compile_worker(addr: &str) -> Result<Compiler, String> {
+    type Cli = CompilerServiceClient<Ciborium>;
+
+    let stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .map_err(|e| format!("connect compile-worker at `{addr}`: {e}"))?;
+    let (read, write) = stream.into_split();
+
+    let (conn, _tx, mut rx) =
+        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(rpc::connection_cfg(), read, write)
+            .await
+            .map_err(|e| format!("compile-worker remoc connect: {e}"))?;
+    tokio::spawn(conn);
+
+    let client = rx
+        .recv()
+        .await
+        .map_err(|e| format!("compile-worker recv client: {e}"))?
+        .ok_or("compile-worker closed before sending its service client")?;
+
+    Ok(Compiler::new(client))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use remoc::rtc::ServerShared;
+    use std::sync::Arc;
+
+    // A minimal in-process CompilerService server, so the Compiler client's rpc
+    // plumbing is exercised without a real worker (the transport factory
+    // `connect_compile_worker` is the thin, hand-reviewed piece).
+    struct MockService;
+
+    impl rpc::CompilerService for MockService {
+        async fn compile(
+            &self,
+            policy: Vec<u8>,
+            plugins: Vec<PluginInstance>,
+        ) -> Result<CompiledBundle, CompileError> {
+            if policy == b"boom" {
+                return Err(CompileError("intentional".into()));
             }
-            // Fuse + compile (blocking Cranelift), then serialize to cwasm — the
-            // process-honest boundary output (bytes, not a live `Component`).
-            let composition = compiler
-                .compose(&policy_wasm, &plugins)
-                .map_err(|e| CompileError(e.to_string()))?;
-            let cwasm = compiler
-                .serialize_component(&composition.component)
-                .map_err(|e| CompileError(e.to_string()))?;
             Ok(CompiledBundle {
-                cwasm,
-                embedded_imports: composition.embedded_imports,
-                catalogs,
+                cwasm: vec![policy.len() as u8, plugins.len() as u8],
+                embedded_imports: vec![],
+                catalogs: vec![],
             })
-        })
+        }
+    }
+
+    /// The Compiler client drives a CompilerService over an in-memory remoc
+    /// duplex: args cross, the typed bundle returns, and the error path
+    /// propagates.
+    #[tokio::test]
+    async fn compiler_round_trips() {
+        type Cli = CompilerServiceClient<Ciborium>;
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let (a_r, a_w) = tokio::io::split(a);
+        let (b_r, b_w) = tokio::io::split(b);
+
+        // Worker end: serve the mock service.
+        let server = tokio::spawn(async move {
+            let (conn, mut tx, _rx) =
+                remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(remoc::Cfg::default(), a_r, a_w)
+                    .await
+                    .unwrap();
+            tokio::spawn(conn);
+            let (srv, client) =
+                rpc::CompilerServiceServerShared::<_, Ciborium>::new(Arc::new(MockService), 4);
+            tx.send(client).await.unwrap();
+            srv.serve(true).await.unwrap();
+        });
+
+        // Orchestrator end: receive the client, wrap in Compiler.
+        let (conn, _tx, mut rx) =
+            remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(remoc::Cfg::default(), b_r, b_w)
+                .await
+                .unwrap();
+        tokio::spawn(conn);
+        let client = rx.recv().await.unwrap().unwrap();
+        let compiler = Compiler::new(client);
+
+        let plugins = vec![PluginInstance { package: "p".into(), wasm: vec![0] }];
+        let bundle = compiler.compile(b"hello".to_vec(), plugins).await.unwrap();
+        assert_eq!(bundle.cwasm, vec![5u8, 1u8]);
+
+        let err = match compiler.compile(b"boom".to_vec(), vec![]).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert!(format!("{err}").contains("intentional"), "got {err}");
+
+        server.abort();
     }
 }

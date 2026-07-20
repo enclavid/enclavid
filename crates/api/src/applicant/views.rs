@@ -14,10 +14,13 @@
 
 use serde::Serialize;
 
-use engine_executor::{Decision, RunStatus};
 use broker_client::{
-    CameraFacing, CaptureGuide, CaptureStep, MediaSpec, Prompt, PromptDisclosure, capture_guide,
+    CameraFacing, CaptureGuide, CaptureStep, Decision, MediaSpec, Prompt, PromptDisclosure,
+    capture_guide,
 };
+// The run outcome comes back from the execution-worker as the `rpc::RunStatus`
+// wire mirror (it wraps the same broker_client `Prompt` / `Decision`).
+use rpc::RunStatus;
 
 use crate::dto;
 use crate::locale::Locale;

@@ -22,3 +22,4 @@
 pub mod composition;
 pub mod embedded;
 pub mod limits;
+pub mod sanitize;
