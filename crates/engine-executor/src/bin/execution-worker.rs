@@ -97,7 +97,10 @@ impl ExecutorService for Service {
         // stays orchestrator-side.
         let listener: Arc<dyn SessionListener> =
             Arc::new(CallbackListener { callbacks: callbacks.clone() });
-        let media_store: Arc<dyn MediaStore> = Arc::new(CallbackMediaStore { callbacks });
+        let media_store: Arc<dyn MediaStore> = Arc::new(CallbackMediaStore {
+            callbacks,
+            memo: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
         let inputs = RunInputs {
             listener,
             embedded: primed.embedded.clone(),
@@ -181,6 +184,20 @@ impl SessionListener for CallbackListener {
 /// gate). `None` = miss, exactly as the in-process store returned.
 struct CallbackMediaStore {
     callbacks: CallbackServiceClient<Ciborium>,
+    /// Per-run memo of rehydrated blobs, keyed by content hash. Collapses REPEAT
+    /// `bytes()` reads of the SAME blob within a round to ONE `media_load` RPC.
+    ///
+    /// Covert-channel defence: the engine mints a fresh COLD handle per
+    /// `blob::from-blob-ref` (`media.rs` — `bytes: None`), so a policy looping
+    /// `blob::new(hex(H)).bytes()` would otherwise emit one host-observable
+    /// `media_load` per iteration — a fuel-bounded count channel (~log2(fuel)
+    /// bits/round) that even RA-TLS traffic-analysis on the relay can read (frame
+    /// COUNT, not content). Memoizing here restores the "≤1 host-observable read
+    /// per distinct blob" bound the api-side `MediaCache` gave when the store was
+    /// in-process — now that the store sits across the host-transiting wire.
+    /// Per-run (dropped when the run ends), so it holds no cross-session state and
+    /// only ever caches gate-approved captures (a miss traps the round).
+    memo: std::sync::Mutex<std::collections::HashMap<[u8; 32], Arc<Vec<u8>>>>,
 }
 
 impl MediaStore for CallbackMediaStore {
@@ -191,11 +208,20 @@ impl MediaStore for CallbackMediaStore {
         let hash = *blob_hash;
         let callbacks = self.callbacks.clone();
         Box::pin(async move {
-            let bytes = callbacks
+            // Repeat read → served from the per-run memo, no RPC crosses the
+            // (host-transiting) api<->worker wire.
+            if let Some(bytes) = self.memo.lock().unwrap().get(&hash).cloned() {
+                return Ok(Some(bytes));
+            }
+            let loaded = callbacks
                 .media_load(hash)
                 .await
                 .map_err(|e| RunError::msg(format!("media_load callback: {e}")))?;
-            Ok(bytes.map(Arc::new))
+            let arc = loaded.map(Arc::new);
+            if let Some(bytes) = &arc {
+                self.memo.lock().unwrap().insert(hash, bytes.clone());
+            }
+            Ok(arc)
         })
     }
 }

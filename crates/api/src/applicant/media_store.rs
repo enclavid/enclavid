@@ -16,18 +16,30 @@
 //!      returns the bytes.
 //!
 //! Covert-channel role (defence-in-depth; primary defence is attestation +
-//! consent-gate). The read KEY (`blob_hash`) goes to the host in plaintext, and
-//! each read is a host-observable event. Left unguarded, a colluding policy
-//! could encode data into the key (32 B/call) or into the count/pattern of
-//! calls (Morse). The gate kills the arbitrary-key variant (only real captures
-//! ever reach the host — whose hashes it already logged at write). The cache
-//! bounds the count variant to **≤1 host read per distinct blob while it stays
-//! resident** (the first pull; repeats hit in-TEE). Cache eviction under the
-//! byte budget (or idle expiry) can drop a blob, so a later re-read re-pulls —
-//! but eviction is driven by aggregate cross-session load / elapsed time, not by
-//! the policy, so it hands the policy no controllable signal. The irreducible
-//! residual — which of a few captures is pulled, and when — is fuel-bounded and
-//! host-compromise-gated, the same class as APSI query counts.
+//! consent-gate). A colluding policy could encode data into the read KEY
+//! (`blob_hash`, 32 B/call) or into the COUNT / pattern of reads (Morse). After
+//! the compile/execute split there are TWO host-observable surfaces, guarded in
+//! two different places:
+//!
+//!   * **Broker reads** (this store's `api→broker→Redis` pull). The [`MediaCache`]
+//!     bounds the count variant to **≤1 broker read per distinct blob while
+//!     resident** (first pull; repeats hit in-TEE), and the captured-hash gate
+//!     below kills the arbitrary-key variant (only real captures ever pull —
+//!     whose hashes the host already logged at write).
+//!   * **The api↔worker wire** (`media_load` RPC). This runs across the
+//!     host-transiting internal transport, so the CONTENT (hash + bytes) is
+//!     host-readable until RA-TLS lands, and the COUNT of RPCs is readable by
+//!     traffic-analysis *even with* RA-TLS. That count is bounded NOT here but on
+//!     the worker: `CallbackMediaStore` (execution-worker) memoizes each blob
+//!     per-run, so repeat reads of one blob emit ≤1 RPC — restoring the same
+//!     "≤1 host-observable read per distinct blob" property this cache gave when
+//!     the store was in-process. The gate still bounds the arbitrary-key variant
+//!     end-to-end: a fabricated hash returns `None` here (no broker read) and the
+//!     worker's `bytes()` traps on the miss, so at most one `media_load(H_fake)`
+//!     RPC crosses per round before the round dies.
+//!
+//! The irreducible residual — WHICH of a few captures is pulled, and when — is
+//! fuel-bounded and host-compromise-gated, the same class as APSI query counts.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Weak};
