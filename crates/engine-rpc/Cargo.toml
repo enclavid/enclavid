@@ -22,6 +22,10 @@ execute = ["dep:engine-types", "dep:hatch-client", "dep:remoc"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# Encode large byte fields (the ~7-15 MiB `cwasm`) as a CBOR BYTE STRING, not a
+# serde sequence — ciborium serializes `Vec<u8>` element-by-element otherwise,
+# ballooning the wire form + costing ~hundreds of ms per bundle transfer.
+serde_bytes = "0.11"
 # remoc = remote trait calls (rtc) over any AsyncRead+AsyncWrite, CBOR codec
 # (ciborium — same as hatch-protocol), no OpenTelemetry. Optional: only the
 # rtc traits need it, so a features-less build is remoc-free. See

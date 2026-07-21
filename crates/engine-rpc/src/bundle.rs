@@ -31,6 +31,10 @@ use engine_types::embedded::ComponentDecls;
 #[serde(deny_unknown_fields)]
 pub struct CompiledBundle {
     /// wasmtime-serialized fused component — the amortized Cranelift codegen.
+    /// `serde_bytes` so ciborium encodes it as one CBOR byte string, not a
+    /// 7M-element integer array (which cost ~hundreds of ms per transfer over the
+    /// api hop, the child hop, AND to seal into L2).
+    #[serde(with = "serde_bytes")]
     pub cwasm: Vec<u8>,
     /// Per-catalog i18n / icons import manifest (lost in compile; needed to
     /// register the host `Linker` instances at run time).

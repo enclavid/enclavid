@@ -23,6 +23,10 @@
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct PluginInstance {
     pub package: String,
+    /// `serde_bytes` so ciborium ships this as one CBOR byte string, not a
+    /// per-byte integer array (which balloons the compile request + costs
+    /// hundreds of ms for a multi-MiB plugin — see `engine_rpc::CompiledBundle::cwasm`).
+    #[serde(with = "serde_bytes")]
     pub wasm: Vec<u8>,
 }
 

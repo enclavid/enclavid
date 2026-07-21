@@ -11,6 +11,9 @@ repository.workspace = true
 # orchestrator can depend on these types without pulling the runtime.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# Encode the plugin `wasm` bytes as a CBOR byte string, not a per-byte integer
+# array (ciborium's default for `Vec<u8>`) — see the `wasm` field.
+serde_bytes = "0.11"
 # Owns the wire-format cardinality caps re-exported by `limits`; a leaf
 # (no wasmtime) so it does not compromise this crate's leaf-ness.
 enclavid-embedded = { path = "../embedded" }
