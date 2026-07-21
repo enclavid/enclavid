@@ -32,6 +32,7 @@ use wasmtime::component::{Component, Linker, Resource};
 use wasmtime::{Config, Engine, Store};
 
 use crate::Host_ as GeneratedHost;
+use crate::Host_Pre as GeneratedHostPre;
 use crate::embedded::{Icon, IconRef, Localized, LocalizedRef, undeclared_trap};
 use crate::limits::{POLICY_FUEL_BUDGET, POLICY_MAX_STATE_BYTES};
 use crate::listener::{ConsentDisclosure, SessionChange};
@@ -56,6 +57,22 @@ pub use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstanc
 /// cross-CVM split gives each worker its own engine).
 pub struct Executor {
     engine: Engine,
+}
+
+/// A composition primed for repeated instantiation. Holds the bindgen
+/// [`InstancePre`](wasmtime::component::InstancePre) wrapper (the Linker built +
+/// type-checked ONCE — [`add_to_linker`] plus the strict per-catalog embedded
+/// resolvers) and the composition-wide embedded registry the run reads at the
+/// action boundary. Built by [`Executor::prime`]; every [`Executor::run`] against
+/// it only mints a fresh `Store` + `instantiate_async`, so the link/type-check
+/// cost is paid once per composition, not once per round.
+///
+/// Under the per-round child-process model this is primed and run exactly once
+/// per child; the split still eliminates the previous per-round relink and is the
+/// exact shape a warm zygote reuses across many `instantiate_async` calls.
+pub struct PrimedComposition {
+    pre: GeneratedHostPre<HostState>,
+    embedded: std::sync::Arc<crate::embedded::EmbeddedRegistry>,
 }
 
 impl Executor {
@@ -86,11 +103,42 @@ impl Executor {
         unsafe { Component::deserialize(&self.engine, cwasm) }
     }
 
-    /// Drive one reducer round. `session` carries the policy's opaque
-    /// `state` blob and the `current_prompt` prompt from the previous
-    /// round; `event` is the inbound mailbox message the runtime built
-    /// from the applicant's `/input`. `props` is the static consumer
-    /// config the policy reads via `enclavid:host/session-context.props`.
+    /// Build a [`PrimedComposition`] from an already-deserialized `component`:
+    /// construct the host `Linker` for the imports fusion bubbled up and
+    /// type-check it into a reusable `InstancePre`, ONCE. `embedded_imports` names
+    /// the distinct per-catalog i18n/icons instances (`embedded-slot:<hash>/
+    /// <iface>`); `embedded` is the composition-wide registry those resolve
+    /// against (and that [`run`](Self::run) reads at the action boundary).
+    ///
+    /// bindgen wires the CANONICAL-named imports on `HostState`:
+    /// `session-context.props`, the merged
+    /// `enclavid:host/embedded-disclosure-fields` (first-match, option B), and the
+    /// canonical `enclavid:host/embedded-{i18n,icons}` (used only by a lone
+    /// unfused policy — a fused component routes those away, so the canonical
+    /// registrations sit unused, harmless). Plugin↔policy interfaces are internal
+    /// to the fused component, so the Linker never sees them. The strict
+    /// per-catalog resolvers (`embedded-slot:<hash>/<iface>`) — which bindgen
+    /// can't emit as dynamic names — are added on top.
+    pub fn prime(
+        &self,
+        component: &Component,
+        embedded_imports: &[EmbeddedImport],
+        embedded: std::sync::Arc<crate::embedded::EmbeddedRegistry>,
+    ) -> wasmtime::Result<PrimedComposition> {
+        let mut linker: Linker<HostState> = Linker::new(&self.engine);
+        GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
+        register_strict_embedded(&mut linker, embedded_imports, &embedded)?;
+        let pre = GeneratedHostPre::new(linker.instantiate_pre(component)?)?;
+        Ok(PrimedComposition { pre, embedded })
+    }
+
+    /// Drive one reducer round against a [`PrimedComposition`]. `session` carries
+    /// the policy's opaque `state` blob and the `current_prompt` prompt from the
+    /// previous round; `event` is the inbound mailbox message the runtime built
+    /// from the applicant's `/input`. `props` is the static consumer config the
+    /// policy reads via `enclavid:host/session-context.props`. `inputs` carries
+    /// the per-round `listener` + `media_store` (the composition-wide `embedded`
+    /// already lives in `primed`).
     ///
     /// Returns the next [`RunStatus`] and the updated [`SessionState`]
     /// (new opaque `state` + new `current_prompt`). The
@@ -99,16 +147,15 @@ impl Executor {
     /// fields being sealed to the consumer.
     pub async fn run(
         &self,
-        component: &Component,
-        embedded_imports: &[EmbeddedImport],
+        primed: &PrimedComposition,
         session: SessionState,
         event: Event,
         props: Vec<(String, crate::Prop)>,
         inputs: RunInputs,
     ) -> wasmtime::Result<(RunStatus, SessionState)> {
-        let embedded = inputs.embedded.clone();
-        let listener = inputs.listener.clone();
-        let media_store = inputs.media_store.clone();
+        let embedded = primed.embedded.clone();
+        let listener = inputs.listener;
+        let media_store = inputs.media_store;
 
         // CONSENT GATE — decide BEFORE calling the policy whether this
         // round seals a disclosure to the consumer. The seal fires iff
@@ -126,32 +173,16 @@ impl Executor {
             _ => None,
         };
 
-        // `component` is the already-fused policy (+plugins) from
-        // `Runner::compose`. Build the host `Linker` for the imports that
-        // bubbled up out of fusion. bindgen wires the CANONICAL-named
-        // imports on `HostState`: `session-context.props`, the merged
-        // `enclavid:host/embedded-disclosure-fields` (first-match, option B),
-        // and the canonical `enclavid:host/embedded-{i18n,icons}` (used only
-        // by a lone unfused policy — a fused component routes those
-        // away, so the canonical registrations sit unused, which is
-        // harmless). Plugin↔policy interfaces are internal to the fused
-        // component, so the Linker never sees them.
-        let mut linker: Linker<HostState> = Linker::new(&self.engine);
-        GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
-        // Then the DISTINCT per-catalog i18n/icons instances the fusion
-        // produced (`embedded-slot:<hash>/<iface>`), each resolving
-        // strictly against its own catalog — bindgen can't emit these
-        // dynamic names.
-        register_strict_embedded(&mut linker, embedded_imports, &embedded)?;
-
-        // Instantiate the policy and call `handle` ONCE.
+        // Instantiate the primed composition and call `handle` ONCE. The Linker
+        // (imports) was built + type-checked in `prime`; here we only mint a
+        // fresh `Store` (the per-round `HostState`) and instantiate against it.
         let mut store = Store::new(
             &self.engine,
             HostState::new(props, embedded.clone(), media_store),
         );
         store.limiter(|s| &mut s.limits);
         store.set_fuel(POLICY_FUEL_BUDGET)?;
-        let bindings = GeneratedHost::instantiate_async(&mut store, component, &linker).await?;
+        let bindings = primed.pre.instantiate_async(&mut store).await?;
 
         // Mint the frame handles for this round and stage the captured blobs
         // (media rounds only) for the listener to seal alongside the state.

@@ -39,6 +39,9 @@ blake3 = "1"
 # orchestrator over the SAME remoc connection — KEYLESS (no tee_seal_key ever
 # crosses in). ---
 engine-rpc = { path = "../engine-rpc", default-features = false, features = ["execute"], optional = true }
+# Shared disposable-child process-isolation plumbing (spawn + concurrency bound +
+# round deadline + reap); the compile-worker rides the same crate.
+engine-supervisor = { path = "../engine-supervisor", optional = true }
 remoc = { version = "0.18", default-features = false, features = [
     "rtc",
     "codec-ciborium",
@@ -48,6 +51,11 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "net",
     "io-util",
+    # `process` — the supervisor spawns per-round `session-child` processes;
+    # `sync` — the bounded-children `Semaphore`; `time` — the child-reap timeout.
+    "process",
+    "sync",
+    "time",
 ], optional = true }
 # Bounded per-composition cache of deserialized components (same idiom as the
 # orchestrator's L1 PolicyCache: max_capacity + time_to_idle).
@@ -57,14 +65,30 @@ moka = { version = "0.12", features = ["future"], optional = true }
 # Enables the `execution-worker` bin. api never enables it → the api
 # orchestrator links only the pure lib types it re-points to engine-types /
 # hatch-client, and NO wasmtime.
-worker = ["dep:engine-rpc", "dep:remoc", "dep:tokio", "dep:moka"]
+worker = ["dep:engine-rpc", "dep:engine-supervisor", "dep:remoc", "dep:tokio", "dep:moka"]
 
 [[bin]]
 name = "execution-worker"
 required-features = ["worker"]
 
+# The disposable per-round child the supervisor spawns. Same crate (same build →
+# same wasmtime ABI / compat_token as the supervisor), `worker`-gated so api never
+# links it. Untrusted policy wasm + `Component::deserialize` run ONLY here.
+[[bin]]
+name = "session-child"
+required-features = ["worker"]
+
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# `process`/`net`/`io-util`/`time` — the worker-gated `child_process` integration
+# test spawns the real `session-child` binary over a socketpair and drives it.
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "process",
+    "net",
+    "io-util",
+    "time",
+] }
 # happy_path.rs is the end-to-end integration test: it COMPOSES a policy +
 # plugins (engine-compiler), round-trips the cwasm onto this crate's engine,
 # and drives full reducer rounds against real fixtures.

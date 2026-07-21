@@ -49,16 +49,14 @@ pub struct HostState {
     pub limits: StoreLimits,
 }
 
-/// Per-run inputs assembled by the api crate and handed to
-/// `HostState::new`. Carries the listener that ties this run to the
-/// caller's persistence layer plus the composition-wide
-/// `EmbeddedRegistry` — constructed once at policy-cache build time from
-/// policy + plugin embedded sections and shared by `Arc` with every
-/// consumer (engine first-match resolve, engine use-site reverse-lookup,
-/// api view-layer ref resolution).
+/// Per-run inputs handed to [`Executor::run`](crate::Executor::run) once per
+/// round: the `listener` that ties this run to the caller's persistence layer
+/// and the `media_store` that rehydrates stored blobs. The composition-wide
+/// `EmbeddedRegistry` is NOT here — it is immutable across a composition's rounds,
+/// so it is built into the [`PrimedComposition`](crate::PrimedComposition) at
+/// [`prime`](crate::Executor::prime) time and read from there.
 pub struct RunInputs {
     pub listener: Arc<dyn SessionListener>,
-    pub embedded: Arc<EmbeddedRegistry>,
     pub media_store: Arc<dyn MediaStore>,
 }
 

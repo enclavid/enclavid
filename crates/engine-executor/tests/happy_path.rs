@@ -30,7 +30,8 @@ use hatch_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as S
 use engine_compiler::Compiler;
 use engine_executor::{
     Component, ConsentDisclosure, EmbeddedImport, EmbeddedRegistry, Executor, MediaStore,
-    PluginInstance, Prop, RunInputs, RunResult, RunStatus, SessionChange, SessionListener,
+    PluginInstance, PrimedComposition, Prop, RunInputs, RunResult, RunStatus, SessionChange,
+    SessionListener,
 };
 
 /// End-to-end test harness mirroring the old in-process `Runner` facade: a
@@ -75,18 +76,28 @@ impl TestRunner {
         })
     }
 
-    async fn run(
+    /// Build the reusable `InstancePre` once (the Linker + type-check), mirroring
+    /// the production `ChildService::prime`. Every [`run`](Self::run) drives a
+    /// fresh round against it — so a multi-round test exercises the real
+    /// prime-once / run-many path.
+    fn prime(
         &self,
         component: &Component,
         embedded_imports: &[EmbeddedImport],
+        embedded: Arc<EmbeddedRegistry>,
+    ) -> RunResult<PrimedComposition> {
+        self.executor.prime(component, embedded_imports, embedded)
+    }
+
+    async fn run(
+        &self,
+        primed: &PrimedComposition,
         session: Session,
         event: Event,
         props: Vec<(String, Prop)>,
         inputs: RunInputs,
     ) -> RunResult<(RunStatus, Session)> {
-        self.executor
-            .run(component, embedded_imports, session, event, props, inputs)
-            .await
+        self.executor.run(primed, session, event, props, inputs).await
     }
 }
 
@@ -341,19 +352,9 @@ async fn reload_by_ref_misses() {
     let empty_store: Arc<dyn MediaStore> = Arc::new(MemMediaStore::default());
     let inputs = || RunInputs {
         listener: listener.clone(),
-        embedded: h.embedded.clone(),
         media_store: empty_store.clone(),
     };
-    let round = |session, event| {
-        h.runner.run(
-            &h.policy,
-            &h.embedded_imports,
-            session,
-            event,
-            vec![],
-            inputs(),
-        )
-    };
+    let round = |session, event| h.runner.run(&h.primed, session, event, vec![], inputs());
 
     let (_s, session) = round(Session::default(), Event::Start).await.unwrap();
     let (_s, session) = round(session, Event::Media(fake_capture())).await.unwrap();
@@ -391,19 +392,10 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
         };
         let inputs = || RunInputs {
             listener: listener.clone(),
-            embedded: h.embedded.clone(),
             media_store: store.clone(),
         };
-        let round = |session, event| {
-            h.runner.run(
-                &h.policy,
-                &h.embedded_imports,
-                session,
-                event,
-                props.clone(),
-                inputs(),
-            )
-        };
+        let round =
+            |session, event| h.runner.run(&h.primed, session, event, props.clone(), inputs());
         let (_s, session) = round(Session::default(), Event::Start).await.unwrap();
         let (_s, session) = round(session, Event::Media(fake_capture())).await.unwrap();
         // Selfie round: rehydrates the passport by ref; reads bytes() iff `read_bytes`.
@@ -494,8 +486,7 @@ async fn oversized_state_traps() {
     let result = h
         .runner
         .run(
-            &h.policy,
-            &h.embedded_imports,
+            &h.primed,
             Session::default(),
             Event::Start,
             props,
@@ -580,23 +571,25 @@ async fn static_fused_artifact_resolves_strictly() {
     // Each media prompt resolves the plugin's i18n/icons strictly; the
     // consent screen resolves DF (merged) — all through the static
     // artifact with no runtime fusion.
+    let primed = runner
+        .prime(&composition.component, &composition.embedded_imports, embedded.clone())
+        .expect("prime static composition");
     let inputs = || RunInputs {
         listener: listener.clone(),
-        embedded: embedded.clone(),
         media_store: listener.media_store(),
     };
     let (status, session) = runner
-        .run(&composition.component, &composition.embedded_imports, Session::default(), Event::Start, vec![], inputs())
+        .run(&primed, Session::default(), Event::Start, vec![], inputs())
         .await
         .expect("static round 1");
     assert_media(&status, "static: round 1 (passport)");
     let (status, session) = runner
-        .run(&composition.component, &composition.embedded_imports, session, Event::Media(fake_capture()), vec![], inputs())
+        .run(&primed, session, Event::Media(fake_capture()), vec![], inputs())
         .await
         .expect("static round 2");
     assert_media(&status, "static: round 2 (selfie)");
     let (status, _session) = runner
-        .run(&composition.component, &composition.embedded_imports, session, Event::Media(fake_capture()), vec![], inputs())
+        .run(&primed, session, Event::Media(fake_capture()), vec![], inputs())
         .await
         .expect("static round 3");
     match &status {
@@ -715,24 +708,26 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let embedded = Arc::new(builder.build());
     let listener = Arc::new(RecordingListener::default());
 
+    let primed = runner
+        .prime(&composition.component, &composition.embedded_imports, embedded.clone())
+        .expect("prime hybrid composition");
     let inputs = || RunInputs {
         listener: listener.clone(),
-        embedded: embedded.clone(),
         media_store: listener.media_store(),
     };
     // start → media(passport) → media(selfie) → consent-disclosure.
     let (status, session) = runner
-        .run(&composition.component, &composition.embedded_imports, Session::default(), Event::Start, vec![], inputs())
+        .run(&primed, Session::default(), Event::Start, vec![], inputs())
         .await
         .expect("hybrid round 1");
     assert_media(&status, "hybrid: round 1 (passport)");
     let (status, session) = runner
-        .run(&composition.component, &composition.embedded_imports, session, Event::Media(fake_capture()), vec![], inputs())
+        .run(&primed, session, Event::Media(fake_capture()), vec![], inputs())
         .await
         .expect("hybrid round 2");
     assert_media(&status, "hybrid: round 2 (selfie)");
     let (status, _session) = runner
-        .run(&composition.component, &composition.embedded_imports, session, Event::Media(fake_capture()), vec![], inputs())
+        .run(&primed, session, Event::Media(fake_capture()), vec![], inputs())
         .await
         .expect("hybrid round 3");
     let disclosure = match status {
@@ -774,12 +769,12 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
 
 struct Harness {
     runner: TestRunner,
-    /// The fused policy+well-known component (wac single-store fusion),
-    /// compiled once and driven through every reducer round.
-    policy: Component,
-    /// Distinct per-catalog i18n/icons imports the fusion produced —
-    /// handed to `run` so the host Linker registers them.
-    embedded_imports: Vec<EmbeddedImport>,
+    /// The fused policy+well-known composition, primed ONCE (Linker +
+    /// `InstancePre`) and driven through every reducer round — the prime-once /
+    /// run-many path, same as production.
+    primed: PrimedComposition,
+    /// Kept for assertions that reach into the registry directly (declared
+    /// translations, collision checks).
     embedded: Arc<EmbeddedRegistry>,
 }
 
@@ -811,10 +806,17 @@ impl Harness {
         }
         let embedded = Arc::new(builder.build());
 
+        let primed = runner
+            .prime(
+                &composition.component,
+                &composition.embedded_imports,
+                embedded.clone(),
+            )
+            .expect("prime composition");
+
         Self {
             runner,
-            policy: composition.component,
-            embedded_imports: composition.embedded_imports,
+            primed,
             embedded,
         }
     }
@@ -822,7 +824,6 @@ impl Harness {
     fn inputs(&self, listener: &Arc<RecordingListener>) -> RunInputs {
         RunInputs {
             listener: listener.clone(),
-            embedded: self.embedded.clone(),
             media_store: listener.media_store(),
         }
     }
@@ -835,14 +836,7 @@ impl Harness {
         listener: &Arc<RecordingListener>,
     ) -> (RunStatus, Session) {
         self.runner
-            .run(
-                &self.policy,
-                &self.embedded_imports,
-                session,
-                event,
-                vec![],
-                self.inputs(listener),
-            )
+            .run(&self.primed, session, event, vec![], self.inputs(listener))
             .await
             .expect("reducer round")
     }
@@ -1058,3 +1052,186 @@ fn face_detect_component() -> &'static [u8] {
 // crate so this test and the `xtask push-plugins` publish tool build
 // artifacts identically. Called as `xtask::build_componentized` /
 // `xtask::embed_sections` above.
+
+// ---------------------------------------------------------------------
+// session-child PROCESS integration (worker feature)
+// ---------------------------------------------------------------------
+
+/// Drives the REAL `session-child` binary the way the supervisor does — the one
+/// path the in-process `happy_path` + the `engine-rpc` remoc test don't cover:
+/// spawn a disposable per-round PROCESS over a socketpair, `prime` it with a real
+/// (10-15 MiB) bundle, `run` one round, assert the child relayed its callbacks
+/// and then EXITED; plus the fail-safe paths (garbage cwasm, dead child).
+///
+/// Gated on `worker` so `CARGO_BIN_EXE_session-child` exists and `engine-rpc` /
+/// `remoc` are linked. Run with `--features worker`.
+#[cfg(feature = "worker")]
+mod child_process {
+    use std::os::fd::OwnedFd;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use engine_compiler::Compiler;
+    use hatch_client::{Event, SessionState};
+    use remoc::codec::Ciborium;
+    use remoc::rtc::ServerShared;
+
+    use engine_rpc::{
+        CallbackError, CatalogEntry, ChildCallbacks, ChildCallbacksServerShared, ChildService,
+        ChildServiceClient, CompiledBundle, ConsentDisclosure, ExecError, RunStatus,
+    };
+
+    use super::{all_plugins, test_policy_component};
+
+    /// The upstream the child's callbacks relay to — plays the supervisor's relay
+    /// (→ api). Records what the child called BACK during the run.
+    struct MockCallbacks {
+        session_changes: Mutex<u32>,
+        media_loads: Mutex<Vec<[u8; 32]>>,
+    }
+
+    impl ChildCallbacks for MockCallbacks {
+        async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError> {
+            self.media_loads.lock().unwrap().push(hash);
+            Ok(None)
+        }
+        async fn session_change(
+            &self,
+            _state: SessionState,
+            _disclosures: Vec<ConsentDisclosure>,
+            _media: Vec<([u8; 32], Vec<u8>)>,
+        ) -> Result<(), CallbackError> {
+            *self.session_changes.lock().unwrap() += 1;
+            Ok(())
+        }
+    }
+
+    /// Compile the test policy + all plugins into a real wire `CompiledBundle`
+    /// (the same shape the compile-worker returns), so `prime` deserializes a
+    /// genuine cwasm — exercising the 64 MiB `connection_cfg` on the child hop.
+    fn real_bundle() -> CompiledBundle {
+        let compiler = Compiler::new().expect("compiler");
+        let parts = compiler
+            .compile_to_parts(test_policy_component(), &all_plugins())
+            .expect("compile_to_parts");
+        CompiledBundle {
+            cwasm: parts.cwasm,
+            embedded_imports: parts.embedded_imports,
+            catalogs: parts
+                .catalogs
+                .into_iter()
+                .map(|(hash, decls)| CatalogEntry { hash, decls })
+                .collect(),
+        }
+    }
+
+    /// Spawn the real `session-child` over a socketpair (its fd 0), the way the
+    /// supervisor does, and return the child handle + its `ChildService` client.
+    async fn spawn_child() -> (tokio::process::Child, ChildServiceClient<Ciborium>) {
+        let (sup_end, child_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        sup_end.set_nonblocking(true).unwrap();
+        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_session-child"));
+        cmd.stdin(std::process::Stdio::from(OwnedFd::from(child_end)));
+        cmd.kill_on_drop(true);
+        let child = cmd.spawn().expect("spawn session-child");
+
+        let sup_end = tokio::net::UnixStream::from_std(sup_end).unwrap();
+        let (read, write) = sup_end.into_split();
+        type Cli = ChildServiceClient<Ciborium>;
+        let (conn, _tx, mut rx) = remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(
+            engine_rpc::connection_cfg(),
+            read,
+            write,
+        )
+        .await
+        .unwrap();
+        tokio::spawn(conn);
+        let client = rx.recv().await.unwrap().expect("child sent its service client");
+        (child, client)
+    }
+
+    /// Full happy path THROUGH the spawned process: prime a real bundle, run the
+    /// genesis round, assert a relayed `session_change`, then the child exits when
+    /// its client is dropped (disposable per-round process).
+    #[tokio::test]
+    async fn spawned_child_primes_runs_relays_then_exits() {
+        let bundle = real_bundle();
+        let (mut child, client) = spawn_child().await;
+
+        // Ships the real (multi-MiB) cwasm over the socketpair — proves the
+        // 64 MiB connection_cfg on the child hop (the remoc default would reject).
+        client.prime(bundle).await.expect("prime real bundle");
+
+        let cbs = Arc::new(MockCallbacks {
+            session_changes: Mutex::new(0),
+            media_loads: Mutex::new(Vec::new()),
+        });
+        let (server, cb_client) =
+            ChildCallbacksServerShared::<_, Ciborium>::new(cbs.clone(), 4);
+        tokio::spawn(async move {
+            let _ = server.serve(true).await;
+        });
+
+        // Genesis: the policy renders the passport media prompt and fires the
+        // listener once — relayed to the mock as ONE session_change.
+        let reply = client
+            .run(SessionState::default(), Event::Start, vec![], cb_client)
+            .await
+            .expect("run genesis round");
+        assert!(
+            matches!(reply.status, RunStatus::AwaitingInput(_)),
+            "genesis must render a prompt, got {:?}",
+            reply.status,
+        );
+        assert_eq!(
+            *cbs.session_changes.lock().unwrap(),
+            1,
+            "the child must relay exactly one session_change for the round",
+        );
+
+        // Dropping the client ends the child's serve loop → the PROCESS exits.
+        drop(client);
+        let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+            .await
+            .expect("child must exit promptly after its client is dropped")
+            .expect("wait for child");
+        assert!(status.success(), "child exits cleanly, got {status:?}");
+    }
+
+    /// Fail-safe: a tampered / toolchain-skewed cwasm fails `deserialize` in the
+    /// child and surfaces as `ExecError::Run` — not a panic, not a hang.
+    #[tokio::test]
+    async fn prime_with_garbage_cwasm_fails_safe() {
+        let (mut child, client) = spawn_child().await;
+        let bundle = CompiledBundle {
+            cwasm: b"definitely not a cwasm".to_vec(),
+            embedded_imports: vec![],
+            catalogs: vec![],
+        };
+        let err = tokio::time::timeout(Duration::from_secs(10), client.prime(bundle))
+            .await
+            .expect("prime must not hang")
+            .expect_err("garbage cwasm must fail prime");
+        assert!(matches!(err, ExecError::Run(_)), "expected ExecError::Run, got {err:?}");
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+    }
+
+    /// Fail-safe: a child that dies mid-flight makes the RPC ERROR (disconnect),
+    /// so the supervisor maps it to `ExecError` → api 5xx → applicant retries
+    /// against intact api-side state — it never hangs on a corpse.
+    #[tokio::test]
+    async fn dead_child_surfaces_error_not_hang() {
+        let (mut child, client) = spawn_child().await;
+        child.kill().await.expect("kill child");
+        let bundle = CompiledBundle {
+            cwasm: vec![],
+            embedded_imports: vec![],
+            catalogs: vec![],
+        };
+        let res = tokio::time::timeout(Duration::from_secs(10), client.prime(bundle))
+            .await
+            .expect("call to a dead child must resolve (error), not hang");
+        assert!(res.is_err(), "prime to a dead child must error, got {res:?}");
+    }
+}

@@ -225,6 +225,65 @@ pub trait ExecutorService {
     ) -> Result<RunReply, ExecError>;
 }
 
+/// The supervisor↔child seam (INTERNAL to the execution-worker host — remoc over
+/// a per-child socketpair, never over the api hop).
+///
+/// The execution-worker is a SUPERVISOR: it holds the bundle-byte L1 and runs NO
+/// wasm itself. Per reducer round it spawns a fresh [`ChildService`] PROCESS,
+/// [`prime`](ChildService::prime)s it once with the compiled bundle, drives
+/// exactly one [`run`](ChildService::run), and discards the child. Untrusted
+/// policy wasm — and the `Component::deserialize` unsafe sink — execute ONLY in
+/// that disposable per-round process, so a sandbox escape is confined to one
+/// round's plaintext (one applicant) behind an OS address-space boundary, with no
+/// cross-round persistence.
+#[remoc::rtc::remote]
+pub trait ChildService {
+    /// Deserialize the `cwasm` and build the reusable `InstancePre` (the
+    /// engine's `prime`). Ships the ~10-15 MiB bundle, so the child connection
+    /// MUST be built with [`connection_cfg`](crate::connection_cfg) (64 MiB
+    /// `max_data_size`) — the remoc default would reject it. A deserialize
+    /// failure (toolchain skew / tampered bytes) surfaces as [`ExecError::Run`].
+    async fn prime(&self, bundle: CompiledBundle) -> Result<(), ExecError>;
+
+    /// Drive one reducer round against the primed composition.
+    /// `session_state`/`event`/`props` are the round's already-decrypted inputs
+    /// (the seal key never reaches this process). `callbacks` points at the
+    /// SUPERVISOR's relay, which forwards `media_load` / `session_change` on to
+    /// api — so this keyless process rehydrates blobs + persists state without
+    /// the seal key and WITHOUT the `load_component` probe surface.
+    async fn run(
+        &self,
+        session_state: SessionState,
+        event: Event,
+        props: Vec<(String, Prop)>,
+        callbacks: ChildCallbacksClient<remoc::codec::Ciborium>,
+    ) -> Result<RunReply, ExecError>;
+}
+
+/// The supervisor-served callback boundary a per-round session-child calls BACK
+/// during a run. NARROWER than [`CallbackService`] — it omits `load_component`:
+/// the supervisor already resolved + primed the bundle before spawning the child,
+/// so the process running UNTRUSTED wasm is never handed the OCI-pull / compile
+/// probe surface (blast-radius minimization). The supervisor's relay implements
+/// this and forwards each call to its own upstream [`CallbackServiceClient`]
+/// (→ api, which holds the seal key). Method shapes mirror [`CallbackService`]'s
+/// `media_load` / `session_change` exactly so the relay is a straight forward.
+#[remoc::rtc::remote]
+pub trait ChildCallbacks {
+    /// Rehydrate a stored blob by content hash (api unseals). `None` = miss.
+    async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError>;
+
+    /// Seal + persist the post-round state, consented `disclosures`, and captured
+    /// `media` — relayed to api's `session_change`, committed under the seal key
+    /// this process never holds.
+    async fn session_change(
+        &self,
+        state: SessionState,
+        disclosures: Vec<ConsentDisclosure>,
+        media: Vec<([u8; 32], Vec<u8>)>,
+    ) -> Result<(), CallbackError>;
+}
+
 #[cfg(test)]
 mod execute_tests {
     use super::*;

@@ -64,7 +64,7 @@ pub use hatch_client::{
 };
 pub use listener::{CapturedMedia, ConsentDisclosure, SessionChange, SessionListener};
 pub use media_store::MediaStore;
-pub use runner::{EmbeddedIface, EmbeddedImport, Executor, PluginInstance, RunStatus};
+pub use runner::{EmbeddedIface, EmbeddedImport, Executor, PluginInstance, PrimedComposition, RunStatus};
 pub use state::RunInputs;
 /// The bindgen-generated `enclavid:host/types.prop` — the consumer's
 /// static-config value variant. Re-exported so the api crate can build
