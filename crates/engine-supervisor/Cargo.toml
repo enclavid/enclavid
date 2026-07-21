@@ -1,0 +1,31 @@
+[package]
+name = "engine-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Process-isolation plumbing shared by the engine fleet's WORKERS (execution +
+# compile). A worker SUPERVISOR spawns a fresh disposable CHILD PROCESS per
+# request, drives ONE typed remoc RPC in it under a concurrency bound + a
+# wall-clock deadline, and reaps it — so untrusted work (running wasm, or
+# Cranelift-compiling untrusted wasm) is confined to a throwaway per-request
+# process behind an OS address-space boundary. This crate owns the FIDDLY,
+# security-load-bearing bits (socketpair fd hygiene, the deadline that stops a
+# WEDGED child leaking its slot, kill+reap) so they are written + tested ONCE and
+# both workers ride them. A DOMAIN-AGNOSTIC leaf: it depends ONLY on tokio +
+# remoc, NOT on engine-rpc / engine-types, so the orchestrator (api) never links
+# it. The future fork-zygote (warm CoW start) lands HERE → both workers benefit.
+[dependencies]
+tokio = { version = "1", features = [
+    "rt",
+    "net",
+    "io-util",
+    "process",
+    "sync",
+    "time",
+] }
+remoc = { version = "0.18", default-features = false, features = [
+    "rtc",
+    "codec-ciborium",
+] }

@@ -1468,6 +1468,7 @@ dependencies = [
  "blake3",
  "enclavid-embedded",
  "engine-rpc",
+ "engine-supervisor",
  "engine-types",
  "remoc",
  "tokio",
@@ -1485,6 +1486,7 @@ dependencies = [
  "enclavid-embedded",
  "engine-compiler",
  "engine-rpc",
+ "engine-supervisor",
  "engine-types",
  "hatch-client",
  "jpeg-encoder",
@@ -1504,6 +1506,14 @@ dependencies = [
  "hatch-client",
  "remoc",
  "serde",
+ "tokio",
+]
+
+[[package]]
+name = "engine-supervisor"
+version = "0.1.0"
+dependencies = [
+ "remoc",
  "tokio",
 ]
 
