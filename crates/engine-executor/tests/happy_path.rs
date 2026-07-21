@@ -1234,4 +1234,119 @@ mod child_process {
             .expect("call to a dead child must resolve (error), not hang");
         assert!(res.is_err(), "prime to a dead child must error, got {res:?}");
     }
+
+    /// PERF GATE (not an assertion) — measures the per-round cost the zygote
+    /// would remove (`deserialize` + `prime`, CoW-inherited) vs a full fresh-exec
+    /// round, on a REAL bundle. Run:
+    ///   cargo test -p engine-executor --features worker --test happy_path -- \
+    ///     --ignored --nocapture child_process::measure
+    #[tokio::test]
+    #[ignore = "perf measurement; run with --ignored --nocapture"]
+    async fn measure_per_round_cost() {
+        use std::time::{Duration, Instant};
+
+        use engine_executor::{EmbeddedRegistry, Executor};
+
+        let bundle = real_bundle();
+        eprintln!(
+            "\n=== cwasm size: {} bytes ({:.2} MiB) ===",
+            bundle.cwasm.len(),
+            bundle.cwasm.len() as f64 / (1024.0 * 1024.0),
+        );
+
+        let avg = |v: &[Duration]| v.iter().sum::<Duration>() / v.len() as u32;
+
+        // Isolate Engine::new() (OS-agnostic wasmtime engine creation) — one of
+        // the three things baked into the `spawn` phase (the others, exec/dyld,
+        // are macOS-heavy on this dev box vs the Linux CVM target).
+        {
+            let _ = Executor::new().unwrap(); // warm
+            let mut en = Vec::new();
+            for _ in 0..10 {
+                let t = Instant::now();
+                let _e = Executor::new().unwrap();
+                en.push(t.elapsed());
+            }
+            eprintln!("Executor::new() [Engine::new]: avg {:?}", avg(&en));
+        }
+
+        let executor = Executor::new().unwrap();
+        let build_embedded = || {
+            let mut b = EmbeddedRegistry::builder();
+            for c in &bundle.catalogs {
+                b.add_component(c.hash, c.decls.clone());
+            }
+            std::sync::Arc::new(b.build())
+        };
+
+        // Warm up (page-cache, allocator).
+        {
+            let comp = executor.deserialize_component(&bundle.cwasm).unwrap();
+            let _ = executor.prime(&comp, &bundle.embedded_imports, build_embedded()).unwrap();
+        }
+
+        // (a)+(b): the two layers CoW-inheritance would remove, in-process.
+        let n = 20;
+        let (mut de, mut pr) = (Vec::new(), Vec::new());
+        for _ in 0..n {
+            let t = Instant::now();
+            let comp = executor.deserialize_component(&bundle.cwasm).unwrap();
+            de.push(t.elapsed());
+            let t = Instant::now();
+            let _primed =
+                executor.prime(&comp, &bundle.embedded_imports, build_embedded()).unwrap();
+            pr.push(t.elapsed());
+        }
+        eprintln!("deserialize_component:      avg {:?}", avg(&de));
+        eprintln!("prime (Linker+InstancePre): avg {:?}", avg(&pr));
+        eprintln!("  → zygote saves ~{:?}/round (CoW-inherited)", avg(&de) + avg(&pr));
+
+        // Full fresh-exec round, BROKEN DOWN — the zygote (fork from a warm,
+        // already-primed template) would replace `spawn`(exec+Engine::new) +
+        // `prime`(deserialize+InstancePre) with a cheap fork; only `run`
+        // (instantiate + the policy round) is inherent to every model.
+        let (mut sp, mut prm, mut rn) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..5 {
+            let bundle = real_bundle_cached();
+            let t = Instant::now();
+            let (mut child, client) = spawn_child().await;
+            sp.push(t.elapsed());
+
+            let t = Instant::now();
+            client.prime(bundle).await.expect("prime");
+            prm.push(t.elapsed());
+
+            let cbs = std::sync::Arc::new(MockCallbacks {
+                session_changes: std::sync::Mutex::new(0),
+                media_loads: std::sync::Mutex::new(Vec::new()),
+            });
+            let (server, cb_client) =
+                ChildCallbacksServerShared::<_, Ciborium>::new(cbs, 4);
+            tokio::spawn(async move {
+                let _ = server.serve(true).await;
+            });
+            let t = Instant::now();
+            client
+                .run(SessionState::default(), Event::Start, vec![], cb_client)
+                .await
+                .expect("run");
+            rn.push(t.elapsed());
+
+            drop(client);
+            let _ = tokio::time::timeout(Duration::from_secs(15), child.wait()).await;
+        }
+        eprintln!("--- full fresh-exec round, by phase ---");
+        eprintln!("  spawn (exec + child Engine::new + handshake): avg {:?}", avg(&sp));
+        eprintln!("  prime (ship cwasm + child deserialize+pre):   avg {:?}", avg(&prm));
+        eprintln!("  run   (instantiate + genesis policy round):   avg {:?}", avg(&rn));
+        eprintln!("  → zygote removes spawn+prime, keeps run: saves ~{:?}/round", avg(&sp) + avg(&prm));
+        eprintln!("=== end perf gate ===\n");
+    }
+
+    /// `real_bundle` recompiles each call (~seconds); cache one for the round loop.
+    fn real_bundle_cached() -> CompiledBundle {
+        use std::sync::OnceLock;
+        static B: OnceLock<CompiledBundle> = OnceLock::new();
+        B.get_or_init(real_bundle).clone()
+    }
 }
