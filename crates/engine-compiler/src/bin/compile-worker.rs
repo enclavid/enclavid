@@ -1,67 +1,110 @@
-//! The `compile-worker` deployable: holds this crate's Cranelift-backed
-//! [`Compiler`] and serves `engine_rpc::CompilerService`. It LISTENS on an address;
-//! the orchestrator (api) connects to it. The worker is started by
-//! INFRASTRUCTURE (docker-compose / k8s), not spawned by api — exactly like
-//! the hatch. Isolating the compiler in this separate process/CVM is the
-//! whole point of the compile⊥execute split: api links no Cranelift.
+//! The `compile-worker` deployable: the SUPERVISOR of the compile side.
 //!
-//! Transport TODAY: a plain TCP listener (dev); each accepted connection is
-//! framed with remoc and the worker sends its service client on the base
-//! channel. Plan-A swaps the TCP listener for the host vsock-relay rendezvous
-//! + RA-TLS (both peers dial the relay, the host splices).
+//! It LISTENS for the orchestrator (api) and serves `engine_rpc::CompilerService`
+//! — the same api-facing contract as before — but it runs NO Cranelift itself.
+//! Per compile it drives a fresh `compile-child` PROCESS (spawned + bounded +
+//! deadline-guarded + reaped by the shared [`engine_supervisor::ChildPool`]) and
+//! forwards the `(policy, plugins)` to it. Cranelift over UNTRUSTED wasm — a wide
+//! surface — runs ONLY in that disposable per-compile child, so a compiler-bug
+//! exploit is confined to one compile (no persistent implant that could poison a
+//! later tenant's cwasm). Started by INFRASTRUCTURE (docker-compose / k8s),
+//! exactly like the hatch and the execution-worker.
+//!
+//! **Keyless + cacheless.** The compile-worker holds no keys and no in-memory
+//! cache: compile RESULTS are cached in api's L2, so this is a pure forwarder.
+//! Compared to the execution-worker it is the SIMPLER consumer of the shared
+//! supervisor — no bundle L1, no callback relay — which is exactly why it also
+//! validates that the engine-supervisor boundary is clean (process plumbing only).
+//!
+//! The pool's per-compile wall-clock DEADLINE doubles as the compile-worker's
+//! availability guard: a malicious wasm can't hang Cranelift forever and wedge
+//! the worker (a real gap the direct-compile design had no bound for). A memory
+//! cap (RLIMIT_AS on the child) is a natural follow-up.
+//!
+//! Transport TODAY: a plain TCP listener (dev) to api; Plan-A swaps it for the
+//! host vsock-relay rendezvous + RA-TLS. The supervisor↔child hop is a private
+//! per-child socketpair (never leaves this host).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 use tokio::net::{TcpListener, TcpStream};
+use engine_supervisor::ChildPool;
 
-use engine_compiler::Compiler;
-use engine_types::composition::PluginInstance;
 use engine_rpc::{
-    CatalogEntry, CompileError, CompiledBundle, CompilerService, CompilerServiceClient,
+    CompileError, CompiledBundle, CompilerService, CompilerServiceClient,
     CompilerServiceServerShared,
 };
+use engine_types::composition::PluginInstance;
 
-/// The `engine_rpc::CompilerService` impl: compile `(policy, plugins)` to native
-/// [`BundleParts`](engine_compiler::BundleParts), then wrap into the wire
-/// [`CompiledBundle`]. All the compile orchestration lives in the lib
-/// (`Compiler::compile_to_parts`); this is just the wire wrapper. Shared
-/// (`Arc`) across connections — the wasmtime engine compiles concurrently.
-struct Service {
-    compiler: Compiler,
+/// Wall-clock ceiling on ONE compile in the child (tunable via
+/// `ENCLAVID_COMPILE_DEADLINE_SECS`; enforced by the [`ChildPool`]). Bounds a
+/// malicious wasm that would otherwise hang Cranelift and hold a child slot
+/// forever — the availability guard the direct-compile design lacked. Generous:
+/// a legitimate cold compile of a large fused component is seconds, not minutes.
+const DEFAULT_COMPILE_DEADLINE_SECS: u64 = 300;
+
+/// Default cap on concurrent compile children. Cranelift is CPU-bound, so this is
+/// modest by design (roughly a core budget); compiles are rare (only L2 misses).
+const DEFAULT_MAX_COMPILES: usize = 8;
+
+/// The `engine_rpc::CompilerService` impl served to api: forward each compile to
+/// a fresh disposable `compile-child` via the pool. Shared (`Arc`) across api
+/// connections.
+struct Supervisor {
+    pool: ChildPool,
 }
 
-impl CompilerService for Service {
+impl CompilerService for Supervisor {
     async fn compile(
         &self,
         policy: Vec<u8>,
         plugins: Vec<PluginInstance>,
     ) -> Result<CompiledBundle, CompileError> {
-        let parts = self
-            .compiler
-            .compile_to_parts(&policy, &plugins)
-            .map_err(|e| CompileError(e.to_string()))?;
-        Ok(CompiledBundle {
-            cwasm: parts.cwasm,
-            embedded_imports: parts.embedded_imports,
-            catalogs: parts
-                .catalogs
-                .into_iter()
-                .map(|(hash, decls)| CatalogEntry { hash, decls })
-                .collect(),
-        })
+        // Drive ONE compile in a fresh disposable child, under the pool's
+        // concurrency bound + wall-clock deadline (the pool kills + reaps a wedged
+        // child). The closure is the DOMAIN work: forward the compile.
+        let outcome = self
+            .pool
+            .run(move |client: CompilerServiceClient<Ciborium>| async move {
+                client.compile(policy, plugins).await
+            })
+            .await;
+
+        // The pool returns the closure's domain result verbatim on success; a
+        // pool-level failure (spawn error, or the deadline killing a wedged
+        // child) becomes a `CompileError` so api surfaces a config-resolution
+        // failure (compiles are a pure function of the pinned artifacts).
+        match outcome {
+            Ok(domain_result) => domain_result,
+            Err(pool_err) => Err(CompileError(format!("compile supervisor: {pool_err}"))),
+        }
     }
 }
 
-/// The base channel carries the `CompilerServiceClient` from us (server) to
-/// the orchestrator (client).
+/// Locate the `compile-child` binary: `ENCLAVID_COMPILE_CHILD_BIN` if set, else
+/// the sibling of this supervisor's own executable (they build + deploy
+/// together). Fails loud if neither resolves — per the minimal-defaults rule.
+fn child_exe() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("ENCLAVID_COMPILE_CHILD_BIN") {
+        return std::path::PathBuf::from(p);
+    }
+    let mut p = std::env::current_exe()
+        .expect("compile-worker: resolve current_exe for sibling compile-child path");
+    p.set_file_name("compile-child");
+    p
+}
+
+/// The base channel carries the `CompilerServiceClient` from us (server) to api
+/// (client).
 type Cli = CompilerServiceClient<Ciborium>;
 
 #[tokio::main]
 async fn main() {
-    // Listen address: first arg or ENCLAVID_COMPILE_WORKER_LISTEN. Fail loud if
-    // absent (per the minimal-defaults rule).
+    // api-facing listen address: first arg or ENCLAVID_COMPILE_WORKER_LISTEN.
+    // Fail loud if absent (per the minimal-defaults rule).
     let addr = std::env::args()
         .nth(1)
         .or_else(|| std::env::var("ENCLAVID_COMPILE_WORKER_LISTEN").ok())
@@ -70,14 +113,31 @@ async fn main() {
              ENCLAVID_COMPILE_WORKER_LISTEN, e.g. 127.0.0.1:7001)",
         );
 
-    let svc = Arc::new(Service {
-        compiler: Compiler::new().expect("compile-worker: create compiler engine"),
+    let max_compiles: usize = std::env::var("ENCLAVID_MAX_COMPILES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_MAX_COMPILES);
+    let deadline = Duration::from_secs(
+        std::env::var("ENCLAVID_COMPILE_DEADLINE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_COMPILE_DEADLINE_SECS),
+    );
+    let child_exe = child_exe();
+
+    let svc = Arc::new(Supervisor {
+        pool: ChildPool::new(child_exe.clone(), max_compiles, deadline),
     });
 
     let listener = TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("compile-worker: bind {addr}: {e}"));
-    eprintln!("compile-worker: listening on {addr}");
+    eprintln!(
+        "compile-worker (supervisor): listening on {addr}, compile-child={}, \
+         max_compiles={max_compiles}, deadline={}s",
+        child_exe.display(),
+        deadline.as_secs(),
+    );
 
     loop {
         match listener.accept().await {
@@ -94,8 +154,8 @@ async fn main() {
     }
 }
 
-/// Frame one accepted connection with remoc and serve `CompilerService` on it.
-async fn serve_conn(stream: TcpStream, svc: Arc<Service>) -> Result<(), String> {
+/// Frame one accepted api connection with remoc and serve `CompilerService`.
+async fn serve_conn(stream: TcpStream, svc: Arc<Supervisor>) -> Result<(), String> {
     let (read, write) = stream.into_split();
     let (conn, mut tx, _rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)

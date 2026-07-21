@@ -48,6 +48,10 @@ enclavid-embedded = { path = "../embedded" }
 # server. api does not depend on this crate at all — it drives the worker over
 # rpc. ---
 engine-rpc = { path = "../engine-rpc", default-features = false, features = ["compile"], optional = true }
+# Shared disposable-child process-isolation plumbing (spawn + concurrency bound +
+# compile deadline + reap); the execution-worker rides the same crate. The
+# compile-worker is its SIMPLER consumer — no cache, no callbacks.
+engine-supervisor = { path = "../engine-supervisor", optional = true }
 remoc = { version = "0.18", default-features = false, features = [
     "rtc",
     "codec-ciborium",
@@ -60,12 +64,19 @@ tokio = { version = "1", features = [
 ], optional = true }
 
 [features]
-# Enables the `compile-worker` bin. Only the worker build pulls rpc/remoc/tokio;
-# the pure lib (used by tests + engine-executor's dev-deps) stays free of them.
-worker = ["dep:engine-rpc", "dep:remoc", "dep:tokio"]
+# Enables the `compile-worker` (supervisor) + `compile-child` bins. Only the
+# worker build pulls rpc/remoc/tokio/harness; the pure lib (used by tests +
+# engine-executor's dev-deps) stays free of them.
+worker = ["dep:engine-rpc", "dep:engine-supervisor", "dep:remoc", "dep:tokio"]
 
 [[bin]]
 name = "compile-worker"
+required-features = ["worker"]
+
+# The disposable per-compile child the supervisor spawns. Runs Cranelift over
+# untrusted wasm in a throwaway process; keyless. worker-gated so api never links it.
+[[bin]]
+name = "compile-child"
 required-features = ["worker"]
 
 [dev-dependencies]
