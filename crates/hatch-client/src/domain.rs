@@ -147,7 +147,7 @@ pub struct SessionState {
 // Client bundle
 // ---------------------------------------------------------------------
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Client {
     pub access: Option<ClientAccess>,
@@ -155,6 +155,21 @@ pub struct Client {
     pub r#ref: String,
     pub registry_auth: std::collections::HashMap<String, Vec<u8>>,
     pub plugins: Vec<PluginPin>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `registry_auth` values are per-host bearer tokens — print only the
+        // hostnames (its keys), never the tokens. Everything else is non-secret
+        // (`plugins` carries `Key`, which redacts itself).
+        f.debug_struct("Client")
+            .field("access", &self.access)
+            .field("disclosure_pubkey", &self.disclosure_pubkey)
+            .field("ref", &self.r#ref)
+            .field("registry_auth", &self.registry_auth.keys().collect::<Vec<_>>())
+            .field("plugins", &self.plugins)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -171,7 +186,7 @@ pub struct PluginPin {
 /// releases it. Carries secrets (the inline key, the KBS token), so it
 /// only ever lives inside AEAD-sealed metadata — never plaintext to the
 /// host. Absence (`Option::None`) means the artifact is not encrypted.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Key {
     /// The symmetric layer key (ocicrypt private opts), supplied inline at
     /// POST /sessions. Valid only when the session creator is the artifact
@@ -181,6 +196,17 @@ pub enum Key {
     Inline(Vec<u8>),
     /// The key is released by an attestation-gated KBS.
     Kbs(KbsKey),
+}
+
+impl std::fmt::Debug for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the inline layer key. The KBS variant carries only a routing
+        // endpoint (non-secret), so it prints normally.
+        match self {
+            Key::Inline(_) => f.debug_tuple("Inline").field(&"[REDACTED]").finish(),
+            Key::Kbs(k) => f.debug_tuple("Kbs").field(k).finish(),
+        }
+    }
 }
 
 /// Parameters for a [`Key::Kbs`] reference. `endpoint` is an untrusted
