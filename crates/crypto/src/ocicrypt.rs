@@ -20,6 +20,7 @@
 //! here so they are exercised as a pair against the exact format.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use aes::Aes256;
 use base64ct::{Base64, Encoding};
@@ -28,6 +29,7 @@ use ctr::cipher::{KeyIvInit, StreamCipher};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 use crate::CryptoError;
 
@@ -62,9 +64,16 @@ pub struct PublicLayerBlockCipherOptions {
 }
 
 /// Private block-cipher options — secret. Wrapped per-recipient (or
-/// delivered to the TEE by its key_source). Holds the symmetric key, the
-/// CTR nonce, and the plaintext digest.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// delivered to the TEE by its key_source, e.g. a live KBS release). Holds
+/// the symmetric key, the CTR nonce, and the plaintext digest.
+///
+/// The `symmetric_key` is real per-artifact key material, so this type zeroizes
+/// it (and the nonce) on drop and redacts them from `Debug` — the same
+/// key-hygiene the `tee_seal_key`-derived keys get. It stays a plain `Vec<u8>`
+/// (not a `SecretBox`) because the ocicrypt format requires serializing it
+/// byte-exact; the manual `Drop` + `Debug` add the protection without breaking
+/// the wire format.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PrivateLayerBlockCipherOptions {
     #[serde(rename = "symkey", with = "b64vec")]
     pub symmetric_key: Vec<u8>,
@@ -72,6 +81,28 @@ pub struct PrivateLayerBlockCipherOptions {
     pub cipher_options: HashMap<String, Vec<u8>>,
     #[serde(default)]
     pub digest: String,
+}
+
+impl fmt::Debug for PrivateLayerBlockCipherOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never print the key or nonce — only the non-secret digest + option keys.
+        f.debug_struct("PrivateLayerBlockCipherOptions")
+            .field("symmetric_key", &"[REDACTED]")
+            .field("cipher_options", &"[REDACTED]")
+            .field("digest", &self.digest)
+            .finish()
+    }
+}
+
+impl Drop for PrivateLayerBlockCipherOptions {
+    fn drop(&mut self) {
+        // Zeroize the key + the CTR nonce (a `cipher_options` value) before the
+        // heap is freed, so a live KBS-released layer key doesn't linger in RAM.
+        self.symmetric_key.zeroize();
+        for v in self.cipher_options.values_mut() {
+            v.zeroize();
+        }
+    }
 }
 
 /// Encrypt `plaintext` under a fresh random key + nonce. Returns the

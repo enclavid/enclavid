@@ -30,3 +30,8 @@ hex = "0.4"
 
 # X25519 for the `age` recipient sealing path (see [`crate::age_seal`]).
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+# Zeroize the ocicrypt per-artifact `symmetric_key` (live KBS-released layer key)
+# on drop. It's a serde-serialized field, so it can't be a `SecretBox` — a manual
+# `Drop` + redacting `Debug` on `PrivateLayerBlockCipherOptions` instead.
+zeroize = "1"
