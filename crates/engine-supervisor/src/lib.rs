@@ -66,6 +66,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 fn connection_cfg() -> remoc::Cfg {
     let mut cfg = remoc::Cfg::default();
     cfg.max_data_size = 64 * 1024 * 1024;
+    // Flush immediately: chmux's default 20 ms `flush_delay` (a throughput
+    // coalescing timer) adds ~20 ms per SEND direction to our latency-bound
+    // request/response RPC — measured ~40 ms/round-trip. Each side flushes its own
+    // sends, so BOTH this (child-serve) side and the engine-rpc (api/supervisor)
+    // side must set it. Nothing to coalesce: our writes are whole RPC frames.
+    cfg.flush_delay = std::time::Duration::ZERO;
     cfg
 }
 

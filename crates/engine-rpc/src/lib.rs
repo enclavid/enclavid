@@ -72,8 +72,17 @@ pub use execute::*;
 /// adversarial-peer hardening surface (see the crate doc). `remoc::Cfg` is a
 /// re-export of `chmux::Cfg`, so the field is flat.
 #[cfg(any(feature = "compile", feature = "execute"))]
+// `remoc::Cfg` is `#[non_exhaustive]`, so it can't be built as a struct literal
+// from here — mutate-after-default is the only option.
+#[allow(clippy::field_reassign_with_default)]
 pub fn connection_cfg() -> remoc::Cfg {
     let mut cfg = remoc::Cfg::default();
     cfg.max_data_size = 64 * 1024 * 1024;
+    // chmux's default `flush_delay` is 20 ms — it waits that long to COALESCE
+    // sends (a throughput optimization) before flushing. For our latency-bound
+    // request/response RPC that adds ~20 ms per direction ≈ ~40 ms per round-trip
+    // (measured), on EVERY call across the fleet. Flush immediately instead — our
+    // messages are already whole RPC frames, so there is nothing to coalesce.
+    cfg.flush_delay = std::time::Duration::ZERO;
     cfg
 }
