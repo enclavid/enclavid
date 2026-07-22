@@ -2001,6 +2001,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "secrecy",
  "serde",
  "tokio",
  "tokio-vsock",

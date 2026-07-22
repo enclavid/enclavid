@@ -49,6 +49,8 @@ pub use status::{SetStatus, Status};
 
 use std::sync::Arc;
 
+use secrecy::{ExposeSecret, SecretBox};
+
 use hatch_protocol::{FieldSelector, Op, ReadRequest, Slot, WriteRequest};
 use hyper::StatusCode;
 
@@ -76,23 +78,26 @@ impl Ctx<'_> {
 #[derive(Clone)]
 pub struct SessionStore {
     hatch: HatchClient,
-    /// TEE-side AEAD key used for METADATA and as outer layer of STATE.
+    /// TEE-side AEAD master key used for METADATA and as the outer layer of
+    /// STATE — the hardware-rooted crown jewel every session seal derives from.
     /// Phase A: caller injects (random or env-supplied placeholder).
     /// Phase B: derived from attestation report / KMS-bound material.
-    /// `Arc` so cloning the store is cheap without copying 32 bytes.
-    tee_seal_key: Arc<[u8; 32]>,
+    /// `SecretBox` zeroizes it on drop and redacts it from any `Debug` — so the
+    /// master never lands in a log, matching how the applicant token is held; the
+    /// `Arc` keeps cloning the store cheap (the store derives `Clone`).
+    tee_seal_key: Arc<SecretBox<[u8; 32]>>,
 }
 
 impl SessionStore {
     pub fn new(hatch: HatchClient, tee_seal_key: [u8; 32]) -> Self {
         Self {
             hatch,
-            tee_seal_key: Arc::new(tee_seal_key),
+            tee_seal_key: Arc::new(SecretBox::new(Box::new(tee_seal_key))),
         }
     }
 
     pub(crate) fn tee_seal_key(&self) -> &[u8] {
-        self.tee_seal_key.as_slice()
+        self.tee_seal_key.expose_secret().as_slice()
     }
 
     /// Read typed session fields in one batch. Returns

@@ -27,7 +27,10 @@
 //! (`Ok(None)`), not an error — the compile is always re-derivable from
 //! the cold path. Only a genuine transport failure surfaces as `Err`.
 
+use std::sync::Arc;
+
 use hyper::StatusCode;
+use secrecy::{ExposeSecret, SecretBox};
 
 use enclavid_crypto::{aead, derive_key};
 
@@ -42,18 +45,19 @@ const SEAL_INFO: &[u8] = b"enclavid.cwasm-cache.seal.v1";
 const FILENAME_INFO: &[u8] = b"enclavid.cwasm-cache.filename.v1";
 
 /// The two derived subkeys plus the pure crypto/labelling logic — no
-/// transport, so it is unit-testable in isolation.
-#[derive(Clone, Copy)]
+/// transport, so it is unit-testable in isolation. Each subkey is a
+/// `SecretBox` (zeroize-on-drop, Debug-redacted); not `Clone`/`Copy` on
+/// purpose, so [`CacheStore`] shares one instance behind an `Arc`.
 struct CacheKeys {
-    seal_key: [u8; 32],
-    filename_key: [u8; 32],
+    seal_key: SecretBox<[u8; 32]>,
+    filename_key: SecretBox<[u8; 32]>,
 }
 
 impl CacheKeys {
     fn from_master(tee_seal_key: &[u8; 32]) -> Self {
         Self {
-            seal_key: derive_key(tee_seal_key, SEAL_INFO),
-            filename_key: derive_key(tee_seal_key, FILENAME_INFO),
+            seal_key: SecretBox::new(Box::new(derive_key(tee_seal_key, SEAL_INFO))),
+            filename_key: SecretBox::new(Box::new(derive_key(tee_seal_key, FILENAME_INFO))),
         }
     }
 
@@ -62,19 +66,19 @@ impl CacheKeys {
     /// and cannot invert it to the composition. Pure hex ⇒ the hatch's
     /// path-traversal guard accepts it.
     fn blob_name(&self, cache_id: &str) -> String {
-        hex::encode(derive_key(&self.filename_key, cache_id.as_bytes()))
+        hex::encode(derive_key(self.filename_key.expose_secret(), cache_id.as_bytes()))
     }
 
     /// AEAD-seal `bundle` under the seal subkey with `cache_id` as AAD.
     fn seal_bundle(&self, cache_id: &str, bundle: &[u8]) -> Result<Vec<u8>, BridgeError> {
-        aead::seal(bundle, &self.seal_key, cache_id.as_bytes()).map_err(Into::into)
+        aead::seal(bundle, self.seal_key.expose_secret(), cache_id.as_bytes()).map_err(Into::into)
     }
 
     /// AEAD-open `sealed` under the seal subkey with `cache_id` as AAD.
     /// `None` on any authentication failure — the caller treats that as a
     /// cache miss (foreign / stale / torn / tampered blob).
     fn open_bundle(&self, cache_id: &str, sealed: &[u8]) -> Option<Vec<u8>> {
-        aead::open(sealed, &self.seal_key, cache_id.as_bytes()).ok()
+        aead::open(sealed, self.seal_key.expose_secret(), cache_id.as_bytes()).ok()
     }
 }
 
@@ -83,14 +87,16 @@ impl CacheKeys {
 #[derive(Clone)]
 pub struct CacheStore {
     hatch: HatchClient,
-    keys: CacheKeys,
+    /// One shared `CacheKeys` behind an `Arc` — `SecretBox` is not `Clone`, so
+    /// cloning the store shares the keys rather than copying them.
+    keys: Arc<CacheKeys>,
 }
 
 impl CacheStore {
     pub fn new(hatch: HatchClient, tee_seal_key: &[u8; 32]) -> Self {
         Self {
             hatch,
-            keys: CacheKeys::from_master(tee_seal_key),
+            keys: Arc::new(CacheKeys::from_master(tee_seal_key)),
         }
     }
 
@@ -206,6 +212,6 @@ mod tests {
         // The public filename must not reveal the seal key: they are
         // separate HKDF labels off the master.
         let k = keys([5u8; 32]);
-        assert_ne!(k.seal_key, k.filename_key);
+        assert_ne!(k.seal_key.expose_secret(), k.filename_key.expose_secret());
     }
 }

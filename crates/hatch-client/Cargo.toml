@@ -25,6 +25,10 @@ hex = "0.4"
 # Crypto primitives (symmetric AEAD session seals + age recipient seals)
 # live in their own leaf crate.
 enclavid-crypto = { path = "../crypto" }
+# Wraps the raw `tee_seal_key` master + its HKDF subkeys: zeroize-on-drop and
+# Debug-redaction, with `expose_secret()` making every key use explicit. Same
+# version + idiom the api already uses for the applicant token.
+secrecy = "0.10"
 # Pooled HTTP/1.1 client (hyper-util `legacy::Client`) with a cfg-split
 # connector: built-in `HttpConnector` for TCP (dev), a custom vsock
 # connector for the attested build. Same client type both ways; only

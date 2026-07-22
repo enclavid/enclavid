@@ -35,14 +35,16 @@
 //! ```
 
 use hkdf::Hkdf;
+use secrecy::{ExposeSecret, SecretBox};
 use sha2::Sha256;
 
 /// Process-lifetime shuffle key. Loaded once at startup from
 /// `tee_seal_key`; lives behind an `Arc` in
 /// [`AppState`](crate::state::AppState) so both client and applicant
 /// routes can derive per-envelope seeds without re-running HKDF on
-/// the AEAD key.
-pub struct ShuffleKey([u8; 32]);
+/// the AEAD key. `SecretBox` zeroizes it on drop and keeps it out of any
+/// `Debug` — this is a `tee_seal_key`-derived subkey, held for the whole run.
+pub struct ShuffleKey(SecretBox<[u8; 32]>);
 
 impl ShuffleKey {
     /// Expand `tee_seal_key` once under a static info string so the
@@ -53,7 +55,7 @@ impl ShuffleKey {
         let mut out = [0u8; 32];
         hk.expand(b"enclavid.shuffle-key.v1", &mut out)
             .expect("32-byte OKM fits in one HKDF-SHA256 block");
-        Self(out)
+        Self(SecretBox::new(Box::new(out)))
     }
 
     /// Per-envelope seed. `disclosure_index` is the position of the
@@ -67,7 +69,7 @@ impl ShuffleKey {
         session_id: &str,
         disclosure_index: u64,
     ) -> [u8; 32] {
-        let hk = Hkdf::<Sha256>::new(None, &self.0);
+        let hk = Hkdf::<Sha256>::new(None, self.0.expose_secret());
         let mut seed = [0u8; 32];
         hk.expand_multi_info(
             &[
