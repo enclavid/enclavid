@@ -343,6 +343,12 @@ type Cli = ExecutorServiceClient<Ciborium>;
 
 #[tokio::main]
 async fn main() {
+    // Fail CLOSED if the kernel isn't hardened enough to keep one escaped child
+    // out of a sibling child's in-flight applicant memory (the per-round isolation
+    // rests on this). The real enforcement is the measured CVM image; this makes a
+    // regressed image crash here instead of silently losing the guarantee.
+    engine_supervisor::assert_ptrace_hardened();
+
     // api-facing listen address: first arg or ENCLAVID_EXECUTION_WORKER_LISTEN.
     // Fail loud if absent (per the minimal-defaults rule).
     let addr = std::env::args()

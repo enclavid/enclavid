@@ -105,6 +105,12 @@ type Cli = CompilerServiceClient<Ciborium>;
 
 #[tokio::main]
 async fn main() {
+    // Fail CLOSED if the kernel's ptrace hardening is too weak to isolate one
+    // escaped compile-child from a sibling's memory (see the shared assertion).
+    // The compile side is PII-free, but it rides the same disposable-child pool, so
+    // it asserts the same invariant — one fix, both workers.
+    engine_supervisor::assert_ptrace_hardened();
+
     // api-facing listen address: first arg or ENCLAVID_COMPILE_WORKER_LISTEN.
     // Fail loud if absent (per the minimal-defaults rule).
     let addr = std::env::args()

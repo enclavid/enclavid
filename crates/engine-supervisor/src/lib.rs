@@ -85,8 +85,63 @@ fn connection_cfg() -> remoc::Cfg {
     // sends, so BOTH this (child-serve) side and the engine-rpc (api/supervisor)
     // side must set it. Nothing to coalesce: our writes are whole RPC frames.
     cfg.flush_delay = std::time::Duration::ZERO;
+    // Pin the peer-driven port limits well below chmux's defaults (16384 ports /
+    // 128 received). The child is UNTRUSTED once its wasm/Cranelift is escaped, and
+    // it drives its own end of this socketpair — the default would let a compromised
+    // child open thousands of ports to exhaust supervisor memory. Our RPC uses only
+    // a handful of concurrent channels (base + prime/run + a few callbacks), so 256
+    // is generous headroom while bounding the exhaustion surface.
+    cfg.max_ports = 256;
+    cfg.max_received_ports = 64;
     cfg
 }
+
+/// Boot-time assertion that the kernel's Yama `ptrace_scope` is set strictly enough
+/// that a compromised child process CANNOT read a sibling child's memory
+/// (`ptrace` / `process_vm_readv` / `/proc/<pid>/mem`, all gated by
+/// `PTRACE_MODE_ATTACH`). This is the CODE bridge for the per-round isolation's
+/// "an escape reaches one applicant, not all concurrent ones": the real enforcement
+/// belongs in the measured CVM image (`kernel.yama.ptrace_scope`), but the workers
+/// assert it at boot so a regressed/mis-provisioned image FAILS CLOSED here instead
+/// of silently losing sibling isolation. The floor defaults to 2 (matches the
+/// hardened image; `scope=1` already blocks siblings — non-descendants — but 2 is
+/// the deployed target) and is overridable via `ENCLAVID_MIN_PTRACE_SCOPE` for a
+/// dev/CI Linux box. No-op off Linux (the workers only run under the Linux CVM;
+/// dev on macOS has no equivalent to check).
+#[cfg(target_os = "linux")]
+pub fn assert_ptrace_hardened() {
+    const DEFAULT_MIN: u32 = 2;
+    let min: u32 = std::env::var("ENCLAVID_MIN_PTRACE_SCOPE")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(DEFAULT_MIN);
+    let path = "/proc/sys/kernel/yama/ptrace_scope";
+    match std::fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<u32>().ok()) {
+        Some(v) if v >= min => {
+            eprintln!(
+                "engine-supervisor: yama ptrace_scope={v} (>= required {min}) — sibling-child \
+                 memory isolation active"
+            );
+        }
+        Some(v) => panic!(
+            "engine-supervisor: yama ptrace_scope={v} < required {min}: a compromised child \
+             could read a SIBLING child's in-flight applicant memory. Set \
+             kernel.yama.ptrace_scope={min} in the (measured) CVM image, or on a dev/CI box \
+             `sudo sysctl -w kernel.yama.ptrace_scope={min}` (lower the floor with \
+             ENCLAVID_MIN_PTRACE_SCOPE only if you understand the exposure)."
+        ),
+        None => panic!(
+            "engine-supervisor: cannot read {path} — the Yama LSM is not enabled, so ptrace is \
+             unrestricted and cross-sibling child memory reads are possible. Enable Yama and set \
+             ptrace_scope>={min} in the CVM image (override with ENCLAVID_MIN_PTRACE_SCOPE)."
+        ),
+    }
+}
+
+/// Off-Linux no-op: the disposable-child workers only run under the Linux SEV-SNP
+/// CVM; there is no equivalent knob to check on the macOS dev host.
+#[cfg(not(target_os = "linux"))]
+pub fn assert_ptrace_hardened() {}
 
 /// A failure of the SUPERVISOR itself — distinct from the domain call's own error
 /// (which the caller's closure returns and maps). Kept separate so a per-request
@@ -240,6 +295,16 @@ where
         .map_err(|e| format!("sup_end non-blocking: {e}"))?;
 
     let mut cmd = tokio::process::Command::new(exe);
+    // CODE-enforce the child's keylessness: start it with an EMPTY environment, then
+    // re-add only an explicit non-secret allowlist. The child needs nothing from the
+    // env (it receives all inputs over the socket), so a misconfigured deployment
+    // that put a secret — e.g. a seal key — in the worker's environment can't leak it
+    // into the untrusted child via `/proc/self/environ`. Keeps the "disposable child
+    // holds no secret" property a property of the CODE, not of deployment discipline.
+    cmd.env_clear();
+    if let Ok(v) = std::env::var("RUST_BACKTRACE") {
+        cmd.env("RUST_BACKTRACE", v); // panic-diagnostics only; not a secret
+    }
     // Hand the child its socketpair end on fd 0 (a socket is bidirectional, so
     // the child reads AND writes it). `Stdio::from` takes ownership of
     // `child_end` and CLOSES the supervisor's copy after spawn, so ONLY the child

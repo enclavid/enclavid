@@ -84,5 +84,11 @@ pub fn connection_cfg() -> remoc::Cfg {
     // (measured), on EVERY call across the fleet. Flush immediately instead — our
     // messages are already whole RPC frames, so there is nothing to coalesce.
     cfg.flush_delay = std::time::Duration::ZERO;
+    // Pin the peer-driven port limits below chmux's defaults (16384 / 128): the
+    // worker end of this hop is untrusted once its wasm/Cranelift is escaped, and a
+    // compromised peer could otherwise open thousands of ports to exhaust memory.
+    // Our RPC uses only a handful of concurrent channels, so 256 is ample headroom.
+    cfg.max_ports = 256;
+    cfg.max_received_ports = 64;
     cfg
 }
