@@ -1490,11 +1490,14 @@ dependencies = [
  "engine-types",
  "hatch-client",
  "jpeg-encoder",
+ "memfd",
  "moka",
  "remoc",
+ "tempfile",
  "tokio",
  "wasmtime",
  "xtask",
+ "zeroize",
 ]
 
 [[package]]
@@ -1514,6 +1517,7 @@ dependencies = [
 name = "engine-supervisor"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "remoc",
  "tokio",
 ]

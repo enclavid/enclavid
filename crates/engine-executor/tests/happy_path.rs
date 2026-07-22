@@ -1077,11 +1077,29 @@ mod child_process {
     use remoc::rtc::ServerShared;
 
     use engine_rpc::{
-        CallbackError, CatalogEntry, ChildCallbacks, ChildCallbacksServerShared, ChildService,
-        ChildServiceClient, CompiledBundle, ConsentDisclosure, ExecError, RunStatus,
+        BundleRef, CallbackError, CatalogEntry, ChildCallbacks, ChildCallbacksServerShared,
+        ChildService, ChildServiceClient, CompiledBundle, ConsentDisclosure, ExecError, RunStatus,
     };
 
     use super::{all_plugins, test_policy_component};
+
+    /// Unique suffix so concurrent tests don't collide on the cwasm temp file.
+    static TEST_CWASM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Write a bundle's cwasm to a temp file and build the mmap-delivery
+    /// [`BundleRef`] the child now expects (Stage A) — the supervisor does this per
+    /// composition; the test does it inline. The file leaks (ephemeral test tmp).
+    fn to_bundle_ref(bundle: &CompiledBundle) -> BundleRef {
+        let n = TEST_CWASM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir()
+            .join(format!("enclavid-test-cwasm-{}-{n}.bin", std::process::id()));
+        std::fs::write(&path, &bundle.cwasm).expect("write test cwasm file");
+        BundleRef {
+            cwasm_path: path.to_string_lossy().into_owned(),
+            embedded_imports: bundle.embedded_imports.clone(),
+            catalogs: bundle.catalogs.clone(),
+        }
+    }
 
     /// The upstream the child's callbacks relay to — plays the supervisor's relay
     /// (→ api). Records what the child called BACK during the run.
@@ -1158,9 +1176,9 @@ mod child_process {
         let bundle = real_bundle();
         let (mut child, client) = spawn_child().await;
 
-        // Ships the real (multi-MiB) cwasm over the socketpair — proves the
-        // 64 MiB connection_cfg on the child hop (the remoc default would reject).
-        client.prime(bundle).await.expect("prime real bundle");
+        // Prime via the mmap path: the child `deserialize_file`s a real
+        // (multi-MiB) cwasm written to a temp file — only the path crosses the hop.
+        client.prime(to_bundle_ref(&bundle)).await.expect("prime real bundle");
 
         let cbs = Arc::new(MockCallbacks {
             session_changes: Mutex::new(0),
@@ -1208,7 +1226,7 @@ mod child_process {
             embedded_imports: vec![],
             catalogs: vec![],
         };
-        let err = tokio::time::timeout(Duration::from_secs(10), client.prime(bundle))
+        let err = tokio::time::timeout(Duration::from_secs(10), client.prime(to_bundle_ref(&bundle)))
             .await
             .expect("prime must not hang")
             .expect_err("garbage cwasm must fail prime");
@@ -1229,7 +1247,7 @@ mod child_process {
             embedded_imports: vec![],
             catalogs: vec![],
         };
-        let res = tokio::time::timeout(Duration::from_secs(10), client.prime(bundle))
+        let res = tokio::time::timeout(Duration::from_secs(10), client.prime(to_bundle_ref(&bundle)))
             .await
             .expect("call to a dead child must resolve (error), not hang");
         assert!(res.is_err(), "prime to a dead child must error, got {res:?}");
@@ -1297,23 +1315,73 @@ mod child_process {
                 executor.prime(&comp, &bundle.embedded_imports, build_embedded()).unwrap();
             pr.push(t.elapsed());
         }
-        eprintln!("deserialize_component:      avg {:?}", avg(&de));
-        eprintln!("prime (Linker+InstancePre): avg {:?}", avg(&pr));
-        eprintln!("  → zygote saves ~{:?}/round (CoW-inherited)", avg(&de) + avg(&pr));
+        eprintln!("deserialize_component (bytes, warm):      avg {:?}", avg(&de));
+        eprintln!("prime (Linker+InstancePre):               avg {:?}", avg(&pr));
+
+        // deserialize_FILE (mmap) — COLD (fresh executor, like a fresh child) vs
+        // warm. Isolates whether the child's ~50 ms `prime` is deserialize COMPUTE
+        // (a FULL zygote inheriting the warm Component eliminates it; LIGHT does
+        // NOT) or transfer/remoc (neither zygote helps).
+        {
+            let n = TEST_CWASM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("enclavid-measure-cwasm-{n}.bin"));
+            std::fs::write(&path, &bundle.cwasm).unwrap();
+            let cold = Executor::new().unwrap();
+            let t = Instant::now();
+            let _c = cold.deserialize_component_file(&path).unwrap();
+            eprintln!("deserialize_file (mmap) COLD (fresh executor): {:?}", t.elapsed());
+            let mut df = Vec::new();
+            for _ in 0..10 {
+                let t = Instant::now();
+                let _c = executor.deserialize_component_file(&path).unwrap();
+                df.push(t.elapsed());
+            }
+            eprintln!("deserialize_file (mmap) warm:             avg {:?}", avg(&df));
+            let _ = std::fs::remove_file(&path);
+        }
+
+        // Scale of the catalogs (still shipped in BundleRef over remoc) — to tell
+        // whether the ~48 ms residual `prime` is catalog VOLUME or remoc RPC base
+        // latency.
+        {
+            let (mut ncat, mut nloc, mut ndf, mut nic) = (0usize, 0usize, 0usize, 0usize);
+            for c in &bundle.catalogs {
+                ncat += 1;
+                ndf += c.decls.disclosure_fields.len();
+                nic += c.decls.icons.len();
+                for (_, tr) in &c.decls.localized {
+                    nloc += tr.len();
+                }
+            }
+            eprintln!(
+                "catalogs shipped in BundleRef: {ncat} components, {nloc} translations, {ndf} DF, {nic} icons"
+            );
+        }
 
         // Full fresh-exec round, BROKEN DOWN — the zygote (fork from a warm,
         // already-primed template) would replace `spawn`(exec+Engine::new) +
         // `prime`(deserialize+InstancePre) with a cheap fork; only `run`
         // (instantiate + the policy round) is inherent to every model.
+        // Write the cwasm file ONCE (as the supervisor caches per composition); the
+        // per-round `prime` then MMAPs it (Stage A) — this is what drops prime cost.
+        let bundle_ref = to_bundle_ref(&real_bundle_cached());
+        // Warm the session-child binary back into the page cache (the fixture
+        // compilation above evicted it) so `sp` reflects STEADY-STATE spawn, not a
+        // cold first-load.
+        for _ in 0..3 {
+            let (mut c, cl) = spawn_child().await;
+            drop(cl);
+            let _ = tokio::time::timeout(Duration::from_secs(5), c.wait()).await;
+        }
         let (mut sp, mut prm, mut rn) = (Vec::new(), Vec::new(), Vec::new());
         for _ in 0..5 {
-            let bundle = real_bundle_cached();
             let t = Instant::now();
             let (mut child, client) = spawn_child().await;
             sp.push(t.elapsed());
 
             let t = Instant::now();
-            client.prime(bundle).await.expect("prime");
+            client.prime(bundle_ref.clone()).await.expect("prime");
             prm.push(t.elapsed());
 
             let cbs = std::sync::Arc::new(MockCallbacks {

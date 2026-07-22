@@ -18,20 +18,26 @@
 //!     kill + reap.
 //!   * [`spawn_and_connect`] — socketpair + `Command` + fd handoff on the child's
 //!     fd 0 + remoc handshake. `Stdio::from` closes the supervisor's copy of the
-//!     child end, so the child's death EOFs the socket promptly.
+//!     child end, so the child's death EOFs the socket promptly. It also installs
+//!     any caller-supplied fds at deterministic numbers ([`FIRST_INHERITED_FD`]..),
+//!     CLOEXEC-cleared so ONLY they survive exec — the capability-scoped handoff the
+//!     executor uses to give a child a read-only fd to just ITS cwasm memfd.
 //!   * [`adopt_fd0`] / [`serve_child`] — the child side: adopt the inherited
 //!     socket, remoc-serve one service, exit when the supervisor drops its client.
 //!
 //! The DOMAIN stays in each worker: which service the child serves, any mid-call
 //! callbacks (executor only), and any bundle cache. This crate is a domain-
-//! agnostic leaf — it depends on tokio + remoc ONLY, never on `engine-rpc` /
+//! agnostic leaf — it depends on tokio + remoc + libc ONLY, never on `engine-rpc` /
 //! `engine-types`, so the orchestrator (api) does not link it.
 //!
-//! The fork-zygote (warm CoW start) is intended to land in THIS crate later, so
-//! both workers gain it without touching their domain code.
+//! Fresh `exec` (not `fork`) per request is deliberate: it was measured at ~7.7 ms
+//! warm, and the round's real cost sat in transport tuning, not spawn — so a
+//! warm-CoW fork-zygote (with its `pidfd` / `close_range` / single-threaded-clone
+//! hazards) is not worth its unsafe here.
 
 use std::future::Future;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +46,13 @@ use remoc::RemoteSend;
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 use tokio::sync::Semaphore;
+
+/// The child fd number the FIRST caller-supplied inherited fd lands on. fds 0/1/2
+/// are the socketpair, stdout, and stderr; caller fds start at 3. The
+/// execution-worker hands the child its composition's cwasm `memfd` here — the
+/// child then `deserialize_file`s `/proc/self/fd/3` — while the compile-worker
+/// passes none. Callers that pass N fds get them at `3..3+N`.
+pub const FIRST_INHERITED_FD: RawFd = 3;
 
 /// How long to wait for a child to exit (after its client is dropped / it is
 /// killed) before giving up on the reap. `kill_on_drop` backstops it.
@@ -136,7 +149,17 @@ impl ChildPool {
     /// hung upstream callback) — is a [`SupervisorError`] the caller maps to its own
     /// fail-safe error. When `f`'s future finishes (or the deadline cancels it)
     /// the client it owns drops, ending the child's serve loop so it exits.
-    pub async fn run<Cli, F, Fut, T>(&self, f: F) -> Result<T, SupervisorError>
+    ///
+    /// `inherit_fds` are handed to the child at deterministic fd numbers
+    /// ([`FIRST_INHERITED_FD`]..) — the execution-worker passes its composition's
+    /// cwasm memfd; the compile-worker passes `&[]`. See [`spawn_and_connect`] for
+    /// the delivery + the isolation it buys. The borrows must outlive this call
+    /// (they are only read up to spawn); the caller keeps them alive.
+    pub async fn run<Cli, F, Fut, T>(
+        &self,
+        inherit_fds: &[BorrowedFd<'_>],
+        f: F,
+    ) -> Result<T, SupervisorError>
     where
         Cli: RemoteSend,
         F: FnOnce(Cli) -> Fut,
@@ -157,7 +180,7 @@ impl ChildPool {
         // dropped future's `child` is killed + reaped by kill_on_drop).
         let (mut child, client) = match tokio::time::timeout(
             CONNECT_TIMEOUT,
-            spawn_and_connect::<Cli>(&self.exe),
+            spawn_and_connect::<Cli>(&self.exe, inherit_fds),
         )
         .await
         {
@@ -192,9 +215,21 @@ impl ChildPool {
 /// Spawn `exe` as a fresh child with one end of a socketpair on its fd 0, frame
 /// the supervisor end with remoc (supervisor = client, child = server), and hand
 /// back the child handle (`kill_on_drop`) + its service client `Cli` (received on
-/// the base channel). Uses the 64 MiB [`connection_cfg`] — a `prime` ships a
-/// ~10-15 MiB cwasm.
-pub async fn spawn_and_connect<Cli>(exe: &Path) -> Result<(tokio::process::Child, Cli), String>
+/// the base channel). Uses the 64 MiB [`connection_cfg`] — a `prime` ships small
+/// metadata (the ~10-15 MiB cwasm is delivered out-of-band by fd, see below).
+///
+/// `inherit_fds` are installed at the child's [`FIRST_INHERITED_FD`].. via a
+/// post-fork `dup2`, which clears CLOEXEC so ONLY they — plus fd 0/1/2 — survive
+/// `exec`. Every other fd the supervisor holds is CLOEXEC (Rust sets it on all fds
+/// it opens, and so does `memfd_create`), so the child inherits NOTHING else: not
+/// other compositions' cwasm memfds, not sibling children's sockets. That is the
+/// capability-scoping the memfd cwasm delivery relies on — a child gets a readable
+/// handle to ITS composition's cwasm and to no other, closing the path-based reach
+/// (and TOCTOU) a named tmpfs file would have left open to any same-uid process.
+pub async fn spawn_and_connect<Cli>(
+    exe: &Path,
+    inherit_fds: &[BorrowedFd<'_>],
+) -> Result<(tokio::process::Child, Cli), String>
 where
     Cli: RemoteSend,
 {
@@ -212,6 +247,43 @@ where
     cmd.stdin(std::process::Stdio::from(OwnedFd::from(child_end)));
     // Backstop: an early return / cancelled request SIGKILLs + reaps the child.
     cmd.kill_on_drop(true);
+
+    // Install the caller's fds at 3.. in the child (see the fn doc). `dup2(src, dst)`
+    // duplicates `src` onto `dst` with CLOEXEC CLEARED, so it survives exec; if
+    // `src` already equals `dst` no dup happens and its flags are untouched, so we
+    // clear CLOEXEC directly. Targets 3.. are disjoint from the used 0/1/2, and the
+    // only caller today passes exactly one fd, so no source↔target overlap arises
+    // (an overlapping N-fd caller would need dup-to-scratch reordering first).
+    if !inherit_fds.is_empty() {
+        let mappings: Vec<(RawFd, RawFd)> = inherit_fds
+            .iter()
+            .enumerate()
+            .map(|(i, fd)| (fd.as_raw_fd(), FIRST_INHERITED_FD + i as RawFd))
+            .collect();
+        // SAFETY: the closure runs post-fork / pre-exec and calls ONLY async-signal-
+        // safe syscalls (dup2 / fcntl) over stack data (no allocation, no locks, no
+        // panics). The source fds are valid in the forked child (its fd table is a
+        // copy of ours at fork), and stay open because the caller keeps the backing
+        // objects alive across this call.
+        unsafe {
+            cmd.as_std_mut().pre_exec(move || {
+                for &(src, dst) in &mappings {
+                    if src == dst {
+                        let flags = libc::fcntl(dst, libc::F_GETFD);
+                        if flags < 0
+                            || libc::fcntl(dst, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                        {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    } else if libc::dup2(src, dst) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+
     let child = cmd.spawn().map_err(|e| format!("spawn {}: {e}", exe.display()))?;
 
     let sup_end =

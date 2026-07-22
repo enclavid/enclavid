@@ -57,15 +57,45 @@ tokio = { version = "1", features = [
     "sync",
     "time",
 ], optional = true }
-# Bounded per-composition cache of deserialized components (same idiom as the
-# orchestrator's L1 PolicyCache: max_capacity + time_to_idle).
+# Bounded per-composition L1 (same idiom as the orchestrator's L1 PolicyCache:
+# max_capacity + time_to_idle), now holding the cwasm memfd + registry metadata.
 moka = { version = "0.12", features = ["future"], optional = true }
+
+# Zeroize the transient wire `cwasm` `Vec` (possible embedded model weights) on
+# drop — the one plaintext copy we own before it is written into the memfd. (The
+# long-lived memfd is NOT scrubbed: it's legitimately cache-resident and SEV-SNP
+# blinds the host; scrubbing key material via `secrecy` is where zeroize pays.)
+zeroize = { version = "1", optional = true }
+
+# The supervisor materializes each composition's `cwasm` as an anonymous in-RAM
+# file the child MMAPs by fd. On the Linux CVM that is a sealed `memfd` (RAM-backed,
+# no filesystem name, write-sealed); `memfd` is already in our tree via wasmtime, so
+# this direct dep adds nothing to the binary. `worker`-gated.
+[target.'cfg(target_os = "linux")'.dependencies]
+memfd = { version = "0.6", optional = true }
+
+# Dev/test (macOS) fallback: an unlinked tmpfile gives the same anonymous, fd-only
+# lifetime as a memfd. Never compiled for the Linux CVM.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tempfile = { version = "3", optional = true }
 
 [features]
 # Enables the `execution-worker` bin. api never enables it → the api
 # orchestrator links only the pure lib types it re-points to engine-types /
 # hatch-client, and NO wasmtime.
-worker = ["dep:engine-rpc", "dep:engine-supervisor", "dep:remoc", "dep:tokio", "dep:moka"]
+worker = [
+    "dep:engine-rpc",
+    "dep:engine-supervisor",
+    "dep:remoc",
+    "dep:tokio",
+    "dep:moka",
+    # Platform-split cwasm backing (memfd on Linux, tmpfile in dev) — see the
+    # target-specific dependency tables. `dep:` on a target-gated optional dep is
+    # inert on the non-matching platform.
+    "dep:memfd",
+    "dep:tempfile",
+    "dep:zeroize",
+]
 
 [[bin]]
 name = "execution-worker"
@@ -76,6 +106,13 @@ required-features = ["worker"]
 # links it. Untrusted policy wasm + `Component::deserialize` run ONLY here.
 [[bin]]
 name = "session-child"
+required-features = ["worker"]
+
+# Micro-bench isolating the `spawn` phase (exec + dyld + Engine::new + handshake)
+# — the fork-zygote's only target. No fixtures/Cranelift, so it builds fast in a
+# Linux container to answer the Stage-B gate.
+[[bin]]
+name = "spawn-bench"
 required-features = ["worker"]
 
 [dev-dependencies]

@@ -36,7 +36,7 @@ use engine_executor::{
     RunInputs, RunResult, RunStatus, SessionChange, SessionListener, SessionState,
 };
 use engine_rpc::{
-    ChildCallbacks, ChildCallbacksClient, ChildService, ChildServiceServerShared, CompiledBundle,
+    BundleRef, ChildCallbacks, ChildCallbacksClient, ChildService, ChildServiceServerShared,
     ExecError, RunReply,
 };
 
@@ -49,13 +49,15 @@ struct Child {
 }
 
 impl ChildService for Child {
-    async fn prime(&self, bundle: CompiledBundle) -> Result<(), ExecError> {
-        // Deserialize the cwasm (the unsafe sink stays in THIS disposable
-        // process) and build the reusable InstancePre.
+    async fn prime(&self, bundle: BundleRef) -> Result<(), ExecError> {
+        // MMAP the cwasm via its inherited fd path (`/proc/self/fd/N`, an anonymous
+        // memfd the supervisor handed us at spawn) and build the reusable
+        // InstancePre. The unsafe deserialize sink stays in THIS disposable process;
+        // the 7 MiB never crossed the hop — only the fd-path did.
         let component: Component = self
             .executor
-            .deserialize_component(&bundle.cwasm)
-            .map_err(|e| ExecError::Run(format!("deserialize cwasm: {e}")))?;
+            .deserialize_component_file(&bundle.cwasm_path)
+            .map_err(|e| ExecError::Run(format!("deserialize cwasm file: {e}")))?;
         // Rebuild the composition-wide embedded registry from the bundle's
         // per-component catalogs (ref → data), same as the old in-worker prime.
         let mut builder = EmbeddedRegistry::builder();

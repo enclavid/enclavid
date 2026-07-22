@@ -29,3 +29,8 @@ remoc = { version = "0.18", default-features = false, features = [
     "rtc",
     "codec-ciborium",
 ] }
+# For the pre_exec fd handoff: dup2/fcntl to install a caller's fd at a
+# deterministic child fd number with CLOEXEC cleared (the memfd cwasm delivery).
+# Raw libc (not nix) because a pre_exec closure must be async-signal-safe — no
+# allocation, no panics — which the thin syscall wrappers here satisfy.
+libc = "0.2"

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use hatch_client::{Decision, DisplayField, Event, Prompt, SessionState};
 
-use crate::CompiledBundle;
+use crate::{BundleRef, CompiledBundle};
 
 /// serde mirror of the bindgen `enclavid:host/types.prop` — the consumer's
 /// static-config scalar the policy reads via `context.props`. api builds this
@@ -238,12 +238,12 @@ pub trait ExecutorService {
 /// cross-round persistence.
 #[remoc::rtc::remote]
 pub trait ChildService {
-    /// Deserialize the `cwasm` and build the reusable `InstancePre` (the
-    /// engine's `prime`). Ships the ~10-15 MiB bundle, so the child connection
-    /// MUST be built with [`connection_cfg`](crate::connection_cfg) (64 MiB
-    /// `max_data_size`) — the remoc default would reject it. A deserialize
-    /// failure (toolchain skew / tampered bytes) surfaces as [`ExecError::Run`].
-    async fn prime(&self, bundle: CompiledBundle) -> Result<(), ExecError>;
+    /// MMAP the cwasm (via `Component::deserialize_file` on `bundle.cwasm_path`)
+    /// and build the reusable `InstancePre` (the engine's `prime`). The 7-15 MiB
+    /// cwasm is NOT shipped — only the [`BundleRef`] path + small metadata cross
+    /// the hop — so the child hop stays tiny. A deserialize failure (toolchain
+    /// skew / tampered file) surfaces as [`ExecError::Run`].
+    async fn prime(&self, bundle: BundleRef) -> Result<(), ExecError>;
 
     /// Drive one reducer round against the primed composition.
     /// `session_state`/`event`/`props` are the round's already-decrypted inputs

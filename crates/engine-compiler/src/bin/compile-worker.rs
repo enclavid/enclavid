@@ -68,7 +68,9 @@ impl CompilerService for Supervisor {
         // child). The closure is the DOMAIN work: forward the compile.
         let outcome = self
             .pool
-            .run(move |client: CompilerServiceClient<Ciborium>| async move {
+            // No inherited fds: the compile-child receives its `(policy, plugins)`
+            // over the RPC, not by fd (only the executor hands a cwasm memfd down).
+            .run(&[], move |client: CompilerServiceClient<Ciborium>| async move {
                 client.compile(policy, plugins).await
             })
             .await;

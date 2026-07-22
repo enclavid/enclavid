@@ -52,6 +52,27 @@ pub struct CatalogEntry {
     pub decls: ComponentDecls,
 }
 
+/// The child-`prime` payload for the MMAP delivery path: the 7-15 MiB `cwasm` is
+/// NOT shipped over the child hop — the child MMAPs it via
+/// `Component::deserialize_file`, so `prime` carries only a host-local PATH to it
+/// plus the small metadata. `cwasm_path` names an inherited fd the supervisor
+/// installed before exec (`/proc/self/fd/N`, backed by an anonymous cwasm memfd);
+/// the child just treats it as a path. Keeps the big blob off remoc AND lets
+/// several children of the same composition share its read-only code pages.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleRef {
+    /// Host-local path the child feeds to `Component::deserialize_file` (mmap) —
+    /// its inherited cwasm fd, e.g. `/proc/self/fd/3`.
+    pub cwasm_path: String,
+    /// Per-catalog i18n/icons import manifest (needed to register the strict
+    /// host `Linker` instances) — same as [`CompiledBundle::embedded_imports`].
+    pub embedded_imports: Vec<EmbeddedImport>,
+    /// Per-component parsed catalogs (the registry-builder inputs) — same as
+    /// [`CompiledBundle::catalogs`].
+    pub catalogs: Vec<CatalogEntry>,
+}
+
 #[cfg(test)]
 pub(crate) fn sample_bundle() -> CompiledBundle {
     use engine_types::composition::EmbeddedIface;

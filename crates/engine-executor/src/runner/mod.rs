@@ -103,6 +103,23 @@ impl Executor {
         unsafe { Component::deserialize(&self.engine, cwasm) }
     }
 
+    /// Reconstruct a component by MMAP-ing a cwasm FILE (wasmtime
+    /// `Component::deserialize_file`) instead of copying a byte slice — the
+    /// Stage-A delivery path. The file holds the SAME TEE-sealed-then-opened
+    /// cwasm, so the same provenance + version-header safety argument as
+    /// [`deserialize_component`](Self::deserialize_component) applies. The mmap
+    /// means the ~7 MiB never crosses the child hop as a copy, and several
+    /// children mapping the same file share its read-only code pages.
+    pub fn deserialize_component_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> wasmtime::Result<Component> {
+        // SAFETY: same as `deserialize_component` — the mapped file is
+        // TEE-sealed provenance and wasmtime's header check rejects an
+        // incompatible build.
+        unsafe { Component::deserialize_file(&self.engine, path) }
+    }
+
     /// Build a [`PrimedComposition`] from an already-deserialized `component`:
     /// construct the host `Linker` for the imports fusion bubbled up and
     /// type-check it into a reusable `InstancePre`, ONCE. `embedded_imports` names
