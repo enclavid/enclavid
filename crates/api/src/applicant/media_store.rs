@@ -82,8 +82,10 @@ const MEDIA_CACHE_TTI: Duration = Duration::from_secs(60);
 /// NOT bound it — the budget/TTI plus the per-session `purge` on `/reset` +
 /// finalize are the budget. An evicted blob is simply re-pulled and re-cached on
 /// the next read; correctness is preserved (see the module-level covert note).
-/// moka is the api's established cache idiom (compiled policies + applicant
-/// tokens both use it, session-keyed, with `max_capacity` + `time_to_idle`).
+/// moka (`max_capacity` + `time_to_idle`, session-keyed) is the api's cache idiom;
+/// this MediaCache is the ONLY api-side cache — the compiled-cwasm L1 lives on the
+/// execution-worker, and applicant tokens are deliberately NOT cached (a wrong key
+/// is rejected cryptographically at the state read).
 pub struct MediaCache {
     cache: Cache<(String, [u8; 32]), Arc<Vec<u8>>>,
 }
@@ -117,10 +119,9 @@ impl MediaCache {
     }
 
     /// Drop a session's cached blobs — called when its media is purged
-    /// (`/reset`, finalize). Prompt per-key `invalidate` (mirrors the
-    /// applicant-session-token cache's `invalidate` on reset), so decrypted bytes
-    /// leave RAM at session end rather than only at the idle backstop. Removes
-    /// exactly this session's entries; other sessions' blobs are untouched.
+    /// (`/reset`, finalize). Prompt per-key `invalidate` so decrypted bytes leave
+    /// RAM at session end rather than only at the idle backstop. Removes exactly
+    /// this session's entries; other sessions' blobs are untouched.
     /// O(live entries), which the budget bounds.
     pub async fn purge(&self, session_id: &str) {
         let stale: Vec<Arc<(String, [u8; 32])>> = self
