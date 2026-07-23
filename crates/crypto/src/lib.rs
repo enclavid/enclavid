@@ -21,7 +21,9 @@ pub mod aead;
 pub mod age_seal;
 pub mod kdf;
 pub mod ocicrypt;
+pub mod secret_bytes;
 
 pub use age_seal::seal_to_recipient;
 pub use error::CryptoError;
 pub use kdf::derive_key;
+pub use secret_bytes::SecretBytes;

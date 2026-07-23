@@ -20,7 +20,6 @@
 //! here so they are exercised as a pair against the exact format.
 
 use std::collections::HashMap;
-use std::fmt;
 
 use aes::Aes256;
 use base64ct::{Base64, Encoding};
@@ -29,9 +28,8 @@ use ctr::cipher::{KeyIvInit, StreamCipher};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
 
-use crate::CryptoError;
+use crate::{CryptoError, SecretBytes};
 
 type Aes256Ctr = Ctr128BE<Aes256>;
 type HmacSha256 = Hmac<Sha256>;
@@ -67,42 +65,19 @@ pub struct PublicLayerBlockCipherOptions {
 /// delivered to the TEE by its key_source, e.g. a live KBS release). Holds
 /// the symmetric key, the CTR nonce, and the plaintext digest.
 ///
-/// The `symmetric_key` is real per-artifact key material, so this type zeroizes
-/// it (and the nonce) on drop and redacts them from `Debug` — the same
-/// key-hygiene the `tee_seal_key`-derived keys get. It stays a plain `Vec<u8>`
-/// (not a `SecretBox`) because the ocicrypt format requires serializing it
-/// byte-exact; the manual `Drop` + `Debug` add the protection without breaking
-/// the wire format.
-#[derive(Clone, Serialize, Deserialize)]
+/// The `symmetric_key` is real per-artifact key material that MUST ride the ocicrypt
+/// wire format, so it is a [`SecretBytes`] — "serializable secrecy": zeroize-on-drop +
+/// redacted `Debug` (like `secrecy::SecretBox`) but it DOES serialize (as base64), which
+/// `SecretBox` deliberately refuses. `cipher_options` (the CTR nonce) stays a plain map:
+/// a CTR IV is not a confidentiality secret, so it needs no scrubbing.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PrivateLayerBlockCipherOptions {
-    #[serde(rename = "symkey", with = "b64vec")]
-    pub symmetric_key: Vec<u8>,
+    #[serde(rename = "symkey")]
+    pub symmetric_key: SecretBytes,
     #[serde(rename = "cipheroptions", default, with = "b64map")]
     pub cipher_options: HashMap<String, Vec<u8>>,
     #[serde(default)]
     pub digest: String,
-}
-
-impl fmt::Debug for PrivateLayerBlockCipherOptions {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Never print the key or nonce — only the non-secret digest + option keys.
-        f.debug_struct("PrivateLayerBlockCipherOptions")
-            .field("symmetric_key", &"[REDACTED]")
-            .field("cipher_options", &"[REDACTED]")
-            .field("digest", &self.digest)
-            .finish()
-    }
-}
-
-impl Drop for PrivateLayerBlockCipherOptions {
-    fn drop(&mut self) {
-        // Zeroize the key + the CTR nonce (a `cipher_options` value) before the
-        // heap is freed, so a live KBS-released layer key doesn't linger in RAM.
-        self.symmetric_key.zeroize();
-        for v in self.cipher_options.values_mut() {
-            v.zeroize();
-        }
-    }
 }
 
 /// Encrypt `plaintext` under a fresh random key + nonce. Returns the
@@ -145,7 +120,7 @@ pub fn encrypt(
         hmac,
     };
     let private = PrivateLayerBlockCipherOptions {
-        symmetric_key,
+        symmetric_key: SecretBytes::from(symmetric_key),
         cipher_options: private_opts,
         digest,
     };
@@ -182,13 +157,13 @@ pub fn decrypt(
 
     // Verify HMAC over the ciphertext before touching plaintext.
     let mut mac =
-        HmacSha256::new_from_slice(&private.symmetric_key).expect("hmac accepts any key length");
+        HmacSha256::new_from_slice(private.symmetric_key.expose()).expect("hmac accepts any key length");
     mac.update(ciphertext);
     mac.verify_slice(&public.hmac)
         .map_err(|_| CryptoError::new("ocicrypt hmac verification failed"))?;
 
     let mut buf = ciphertext.to_vec();
-    let mut cipher = Aes256Ctr::new(private.symmetric_key.as_slice().into(), nonce.as_slice().into());
+    let mut cipher = Aes256Ctr::new(private.symmetric_key.expose().into(), nonce.as_slice().into());
     cipher.apply_keystream(&mut buf);
 
     if !private.digest.is_empty() {
@@ -314,7 +289,7 @@ mod tests {
     fn wrong_key_fails() {
         let (ct, public, _private) = encrypt(b"secret");
         let mut bad = PrivateLayerBlockCipherOptions {
-            symmetric_key: vec![0u8; KEY_SIZE],
+            symmetric_key: SecretBytes::from(vec![0u8; KEY_SIZE]),
             cipher_options: HashMap::new(),
             digest: String::new(),
         };
