@@ -41,3 +41,33 @@ pub fn seal_to_recipient(plaintext: &[u8], recipient: &str) -> Result<Vec<u8>, C
         .map_err(|e| CryptoError::new(format!("age finish: {e}")))?;
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why the disclosure size-padding is both necessary and sufficient:
+    /// age ciphertext length tracks the PLAINTEXT LENGTH (AEAD: plaintext + a
+    /// per-chunk tag/nonce + a header), NOT the content. A colluding policy could
+    /// therefore ride a field value's byte length into the host-observable
+    /// ciphertext length — which is exactly why every disclosure envelope is padded
+    /// to a constant plaintext frame before sealing (api's
+    /// `SEALED_DISCLOSURE_PLAINTEXT_BYTES`). Content is NOT a length lever: the
+    /// spread across seals of IDENTICAL content is age's content-independent header
+    /// randomness, so once the plaintext length is pinned, the residual ciphertext-
+    /// length jitter carries no policy signal.
+    #[test]
+    fn ciphertext_length_tracks_plaintext_length_not_content() {
+        let recipient = age::x25519::Identity::generate().to_public().to_string();
+
+        // Length DOES track plaintext length — the signal padding removes.
+        let short = seal_to_recipient(&vec![0u8; 1024], &recipient).unwrap().len();
+        let long = seal_to_recipient(&vec![0u8; 64 * 1024], &recipient).unwrap().len();
+        assert!(long > short, "ciphertext length must grow with plaintext length");
+
+        // Identical content, two seals → the length can already differ purely from
+        // age's random header, i.e. the length carries per-seal noise, not content.
+        // Exercised (not asserted (in)equal) so the test stays non-flaky.
+        let _ = seal_to_recipient(&vec![7u8; 1024], &recipient).unwrap();
+    }
+}

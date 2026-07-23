@@ -428,13 +428,14 @@ impl SessionPersister {
     }
 }
 
-/// Build the JSON envelope plaintext for one engine disclosure,
-/// with field order shuffled via a per-envelope HKDF'd ChaCha20
-/// permutation. This step alone closes the `Covert` concern in the
-/// outbound boundary chain — field order is the single covert
-/// channel where policy-encoded bits could otherwise reach the
-/// consumer. The subsequent `vouch::<AuthN>(seal_to_recipient)`
-/// closes confidentiality.
+/// Build the padded JSON envelope plaintext for one engine disclosure.
+/// Closes the `Covert` concern in the outbound boundary chain on BOTH of
+/// its axes: field ORDER is shuffled via a per-envelope HKDF'd ChaCha20
+/// permutation (so policy-encoded bits can't reach the consumer through
+/// ordering), and the envelope is padded to a constant SIZE
+/// ([`pad_envelope`]) so the host-observable age-ciphertext length can't
+/// relay the policy-controlled field byte-lengths. The subsequent
+/// `vouch::<AuthN>(seal_to_recipient)` closes confidentiality.
 ///
 /// `session_id` is embedded in the envelope as defense-in-depth:
 /// metadata-level `disclosure_hash` already binds the per-session
@@ -475,6 +476,91 @@ fn shuffle_to_envelope_bytes(
         session_id: session_id.to_string(),
         fields,
     };
-    serde_json::to_vec(&envelope)
-        .map_err(|e| CallbackError(format!("disclosure JSON encode: {e}")))
+    let mut bytes = serde_json::to_vec(&envelope)
+        .map_err(|e| CallbackError(format!("disclosure JSON encode: {e}")))?;
+    // Close the SIZE covert channel: pad to a constant plaintext frame so the
+    // plaintext handed to age is a fixed length regardless of the policy-controlled
+    // field values. An un-padded entry relays value byte-length ~1:1 into the
+    // ciphertext length a colluding host reads (surviving the visual consent
+    // audit); once the plaintext is pinned, the ciphertext length carries only
+    // age's content-independent per-seal jitter. Mirrors state's `encode_padded`.
+    pad_envelope(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Constant plaintext size every disclosure envelope is padded to before it is
+/// age-sealed. The sealed PLAINTEXT is then a fixed length regardless of the
+/// policy's field values, so the host-observable ciphertext length carries no
+/// policy content — age adds only content-independent per-seal header jitter on
+/// top (its ciphertext length tracks plaintext LENGTH, never content). The
+/// disclosure counterpart to state's `SEALED_STATE_PLAINTEXT_BYTES`. Must exceed
+/// the largest legitimate envelope: `MAX_CONSENT_FIELDS` (20) fields ×
+/// `MAX_VALUE_LENGTH` (4096-byte) values, JSON-escaped (~2× worst case for a value
+/// of quotes/backslashes; control chars are stripped upstream by `sanitize`), plus
+/// the machine keys and JSON structure — ≈166 KiB. 256 KiB is comfortable headroom.
+/// Raising the consent caps raises this frame (and each entry's seal cost) in
+/// lockstep, exactly like state; an envelope over the frame traps the seal
+/// (fail-safe).
+const SEALED_DISCLOSURE_PLAINTEXT_BYTES: usize = 256 * 1024;
+
+/// Pad a serialized disclosure envelope to [`SEALED_DISCLOSURE_PLAINTEXT_BYTES`]
+/// with trailing ASCII spaces. Trailing whitespace is ignored by every conformant
+/// JSON parser (RFC 8259: a JSON text is `ws value ws`), so the consumer decrypts
+/// and parses the envelope unchanged — no wire-format change, no envelope-schema
+/// field, no SDK change. Errors if the envelope already exceeds the frame.
+fn pad_envelope(bytes: &mut Vec<u8>) -> Result<(), CallbackError> {
+    if bytes.len() > SEALED_DISCLOSURE_PLAINTEXT_BYTES {
+        return Err(CallbackError(format!(
+            "disclosure envelope is {} bytes, over the {SEALED_DISCLOSURE_PLAINTEXT_BYTES}-byte \
+             sealed-disclosure frame",
+            bytes.len(),
+        )));
+    }
+    bytes.resize(SEALED_DISCLOSURE_PLAINTEXT_BYTES, b' ');
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hatch_client::DisplayField;
+
+    fn field(key: &str, value: &str) -> DisplayField {
+        DisplayField { key: key.into(), label: Default::default(), value: value.into() }
+    }
+
+    #[test]
+    fn envelope_is_padded_to_a_constant_frame_and_still_parses() {
+        let sk = ShuffleKey::from_tee_seal_key(&[7u8; 32]);
+        let small = ConsentDisclosure { fields: vec![field("first_name", "Al")] };
+        let big = ConsentDisclosure {
+            fields: vec![field("first_name", &"A".repeat(3000)), field("dob", "1990-01-01")],
+        };
+
+        let a = shuffle_to_envelope_bytes(&small, "sid", 0, &sk).unwrap();
+        let b = shuffle_to_envelope_bytes(&big, "sid", 1, &sk).unwrap();
+
+        // Constant size regardless of content → the host sees no per-entry size
+        // signal (the whole point of V10).
+        assert_eq!(a.len(), SEALED_DISCLOSURE_PLAINTEXT_BYTES);
+        assert_eq!(b.len(), SEALED_DISCLOSURE_PLAINTEXT_BYTES);
+
+        // Trailing-space padding is ignored by a conformant JSON parser, so the
+        // consumer parses the padded envelope with no SDK change.
+        let v: serde_json::Value = serde_json::from_slice(&a).unwrap();
+        assert_eq!(v["version"], ENVELOPE_VERSION);
+        assert_eq!(v["session_id"], "sid");
+        assert_eq!(v["fields"][0]["value"], "Al");
+    }
+
+    #[test]
+    fn envelope_over_the_frame_traps() {
+        // A pathological envelope past the frame fails the seal (fail-safe),
+        // rather than silently leaking size by emitting a larger ciphertext.
+        let sk = ShuffleKey::from_tee_seal_key(&[9u8; 32]);
+        let huge = ConsentDisclosure {
+            fields: vec![field("k", &"x".repeat(SEALED_DISCLOSURE_PLAINTEXT_BYTES))],
+        };
+        assert!(shuffle_to_envelope_bytes(&huge, "sid", 0, &sk).is_err());
+    }
 }
