@@ -15,6 +15,7 @@ members = [
     "crates/embedded",
     "crates/kbs-client",
     "crates/engine-rpc",
+    "crates/ra-tls",
     "xtask",
 ]
 

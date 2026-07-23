@@ -62,12 +62,17 @@ tokio = { version = "1", features = [
     "net",
     "io-util",
 ], optional = true }
+# Mutual RA-TLS on the api->worker hop (same as the execution-worker): the compile
+# listener wraps each accepted TCP stream in an attested TLS server. Dev-bypass = the
+# mock backend; prod flips `enclavid-ra-tls/sev-snp`.
+enclavid-ra-tls = { path = "../ra-tls", optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
 
 [features]
 # Enables the `compile-worker` (supervisor) + `compile-child` bins. Only the
 # worker build pulls rpc/remoc/tokio/harness; the pure lib (used by tests +
 # engine-executor's dev-deps) stays free of them.
-worker = ["dep:engine-rpc", "dep:engine-supervisor", "dep:remoc", "dep:tokio"]
+worker = ["dep:engine-rpc", "dep:engine-supervisor", "dep:remoc", "dep:tokio", "dep:enclavid-ra-tls", "dep:tokio-rustls"]
 
 [[bin]]
 name = "compile-worker"

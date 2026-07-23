@@ -61,6 +61,12 @@ tokio = { version = "1", features = [
 # max_capacity + time_to_idle), now holding the cwasm memfd + registry metadata.
 moka = { version = "0.12", features = ["future"], optional = true }
 
+# Mutual RA-TLS on the api->worker hop: the worker's listener wraps each accepted
+# TCP stream in an attested TLS server. Dev-bypass = the mock attestation backend
+# (default); flip to `enclavid-ra-tls/sev-snp` for prod.
+enclavid-ra-tls = { path = "../ra-tls", optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+
 # Zeroize the transient wire `cwasm` `Vec` (possible embedded model weights) on
 # drop — the one plaintext copy we own before it is written into the memfd. (The
 # long-lived memfd is NOT scrubbed: it's legitimately cache-resident and SEV-SNP
@@ -89,6 +95,8 @@ worker = [
     "dep:remoc",
     "dep:tokio",
     "dep:moka",
+    "dep:enclavid-ra-tls",
+    "dep:tokio-rustls",
     # Platform-split cwasm backing (memfd on Linux, tmpfile in dev) — see the
     # target-specific dependency tables. `dep:` on a target-gated optional dep is
     # inert on the non-matching platform.

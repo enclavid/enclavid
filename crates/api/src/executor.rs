@@ -94,10 +94,20 @@ impl Executor {
 pub async fn connect_execution_worker(addr: &str) -> Result<Executor, String> {
     type Cli = ExecutorServiceClient<Ciborium>;
 
-    let stream = tokio::net::TcpStream::connect(addr)
+    let tcp = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|e| format!("connect execution-worker at `{addr}`: {e}"))?;
-    let (read, write) = stream.into_split();
+    // Mutual RA-TLS over the dial: we attest the worker's cert (pinned measurement)
+    // and present our own attested cert. A completed handshake proves the peer is the
+    // pinned execution-worker measurement — no CA, no post-handshake window.
+    let config = enclavid_ra_tls::fleet_client_config()
+        .map_err(|e| format!("execution-worker RA-TLS client config: {e}"))?;
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+    let tls = connector
+        .connect(enclavid_ra_tls::server_name(), tcp)
+        .await
+        .map_err(|e| format!("execution-worker RA-TLS handshake: {e}"))?;
+    let (read, write) = tokio::io::split(tls);
 
     let (conn, _tx, mut rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)

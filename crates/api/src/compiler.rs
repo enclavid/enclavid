@@ -55,10 +55,19 @@ impl Compiler {
 pub async fn connect_compile_worker(addr: &str) -> Result<Compiler, String> {
     type Cli = CompilerServiceClient<Ciborium>;
 
-    let stream = tokio::net::TcpStream::connect(addr)
+    let tcp = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|e| format!("connect compile-worker at `{addr}`: {e}"))?;
-    let (read, write) = stream.into_split();
+    // Mutual RA-TLS over the dial (same as the execution-worker): attest the peer's
+    // pinned measurement + present our own attested cert.
+    let config = enclavid_ra_tls::fleet_client_config()
+        .map_err(|e| format!("compile-worker RA-TLS client config: {e}"))?;
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+    let tls = connector
+        .connect(enclavid_ra_tls::server_name(), tcp)
+        .await
+        .map_err(|e| format!("compile-worker RA-TLS handshake: {e}"))?;
+    let (read, write) = tokio::io::split(tls);
 
     let (conn, _tx, mut rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)

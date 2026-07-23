@@ -147,12 +147,20 @@ async fn main() {
         deadline.as_secs(),
     );
 
+    // Mutual RA-TLS acceptor (minted once at boot): every accepted api connection is
+    // wrapped in an attested TLS server that also requires an attested client cert.
+    let ratls = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
+        enclavid_ra_tls::fleet_server_config()
+            .unwrap_or_else(|e| panic!("compile-worker: RA-TLS server config: {e}")),
+    ));
+
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 let svc = svc.clone();
+                let ratls = ratls.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_conn(stream, svc).await {
+                    if let Err(e) = serve_conn(stream, ratls, svc).await {
                         eprintln!("compile-worker: connection from {peer} ended: {e}");
                     }
                 });
@@ -162,9 +170,14 @@ async fn main() {
     }
 }
 
-/// Frame one accepted api connection with remoc and serve `CompilerService`.
-async fn serve_conn(stream: TcpStream, svc: Arc<Supervisor>) -> Result<(), String> {
-    let (read, write) = stream.into_split();
+/// RA-TLS-accept one api connection, then frame it with remoc and serve `CompilerService`.
+async fn serve_conn(
+    stream: TcpStream,
+    ratls: tokio_rustls::TlsAcceptor,
+    svc: Arc<Supervisor>,
+) -> Result<(), String> {
+    let tls = ratls.accept(stream).await.map_err(|e| format!("RA-TLS accept: {e}"))?;
+    let (read, write) = tokio::io::split(tls);
     let (conn, mut tx, _rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
             .await

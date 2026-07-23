@@ -63,6 +63,12 @@ pub struct ReportData {
     /// key it wraps the secret to. `None` for ordinary session quotes —
     /// the hash is then bit-identical to the original two-field form.
     pub kbs_binding: Option<Vec<u8>>,
+    /// Optional binding for the intra-fleet RA-TLS leg: the DER
+    /// `SubjectPublicKeyInfo` of the ephemeral TLS cert the peer minted. When
+    /// `Some`, it is folded into `hash()` under its OWN domain tag, so the quote
+    /// authenticates "this measurement owns this TLS key" during the handshake.
+    /// `None` for session / KBS quotes (their hashes stay bit-identical).
+    pub ratls_binding: Option<Vec<u8>>,
 }
 
 impl ReportData {
@@ -72,6 +78,7 @@ impl ReportData {
             session_id,
             policy_digest,
             kbs_binding: None,
+            ratls_binding: None,
         }
     }
 
@@ -85,6 +92,21 @@ impl ReportData {
             session_id: String::new(),
             policy_digest: String::new(),
             kbs_binding: Some(ephemeral_pubkey),
+            ratls_binding: None,
+        }
+    }
+
+    /// Report data for an intra-fleet RA-TLS cert: binds the DER
+    /// `SubjectPublicKeyInfo` of the ephemeral TLS cert so the peer's quote
+    /// authenticates the TLS key it presents during the handshake. `session_id`/
+    /// `policy_digest` are empty — RA-TLS gates on measurement + the TLS key, not
+    /// session identity — so both ends recompute this from the cert alone.
+    pub fn for_ratls(spki_der: Vec<u8>) -> Self {
+        Self {
+            session_id: String::new(),
+            policy_digest: String::new(),
+            kbs_binding: None,
+            ratls_binding: Some(spki_der),
         }
     }
 
@@ -99,6 +121,12 @@ impl ReportData {
         if let Some(binding) = &self.kbs_binding {
             h.update(b"\x00");
             h.update(binding);
+        }
+        if let Some(spki) = &self.ratls_binding {
+            // OWN domain tag: a RA-TLS cert binding must never collide with a
+            // session or KBS quote (cross-protocol confusion defence).
+            h.update(b"\x00ratls-spki\x00");
+            h.update(spki);
         }
         h.finalize().into()
     }
