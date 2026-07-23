@@ -19,7 +19,7 @@ use hatch_protocol::{MediaWrite, Op};
 use crate::boundary::{AuthN, Exposed};
 use crate::error::BridgeError;
 
-use enclavid_crypto::aead;
+use enclavid_crypto::{aead, derive_key};
 
 use super::Ctx;
 use super::core::WriteField;
@@ -31,6 +31,32 @@ pub(super) fn media_aad(session_id: &str, blob_hash: &[u8; 32]) -> Vec<u8> {
     aad.extend_from_slice(session_id.as_bytes());
     aad.extend_from_slice(blob_hash);
     aad
+}
+
+/// HKDF info label for the identity-hiding media field name.
+const MEDIA_FIELD_INFO: &[u8] = b"enclavid.media-field.v1";
+
+/// The HOST-visible field name for a media blob inside `session:{id}:media`:
+/// `HKDF(tee_seal_key, "media-field.v1" || session_id || content_hash)`.
+///
+/// The blob VALUE is double-AEAD'd, but the raw content-hash must NOT be the field
+/// name: it is a deterministic function of the applicant's plaintext, so the
+/// untrusted host could compare it ACROSS sessions and link two sessions that
+/// captured byte-identical content (e.g. the same document re-uploaded). Keying the
+/// name under the per-session `tee_seal_key` PRF gives the host a pseudo-random,
+/// per-session name it cannot invert or compare — the same identity-hiding the L2
+/// cwasm cache uses for its blob names. It stays DETERMINISTIC within a session
+/// (same inputs → same name) so `from-blob-ref` recomputes it on read, and dedups
+/// identical captures; the raw content-hash never leaves the TEE. (The 32-byte hash
+/// is fixed-length and last, so the `session_id || hash` concatenation is
+/// unambiguous — no length-prefix needed.)
+pub(super) fn media_field_name(tee_seal_key: &[u8], session_id: &str, blob_hash: &[u8; 32]) -> Vec<u8> {
+    let mut info = Vec::with_capacity(MEDIA_FIELD_INFO.len() + session_id.len() + blob_hash.len());
+    info.extend_from_slice(MEDIA_FIELD_INFO);
+    info.extend_from_slice(session_id.as_bytes());
+    info.extend_from_slice(blob_hash);
+    let master: &[u8; 32] = tee_seal_key.try_into().expect("tee_seal_key is 32 bytes");
+    derive_key(master, &info).to_vec()
 }
 
 /// Write marker: seal one captured media blob into the per-session media hash,
@@ -54,7 +80,11 @@ impl WriteField for SetMedia<'_> {
         // its own random nonce; AAD = session_id||blob_hash identical on both,
         // so a cross-session (or cross-key-within-session) copy fails.
         let aad = media_aad(ctx.session_id, &self.blob_hash);
-        let blob_key = self.blob_hash.to_vec();
+        // Host-visible field name = the identity-hiding per-session HKDF of the
+        // content hash (NOT the raw hash — see `media_field_name`). The AAD above
+        // stays keyed by the raw content hash (TEE-internal binding), so the
+        // double-AEAD's cross-session / cross-key protection is unchanged.
+        let blob_key = media_field_name(ctx.tee_seal_key, ctx.session_id, &self.blob_hash);
         let sealed = self.bytes.clone().vouch::<AuthN, _, _, _, _>(
             |plaintext| -> Result<Vec<u8>, BridgeError> {
                 let inner = aead::seal(&plaintext, self.applicant_session_token, &aad)?;
@@ -96,7 +126,15 @@ mod tests {
         let op = set.build_op(&ctx).unwrap().into_inner();
         let sealed = match op {
             Op::MediaWrite(m) => {
-                assert_eq!(m.blob_key, hash.to_vec(), "keyed by the content hash");
+                // Host-visible field name is the identity-hiding HKDF name, NOT the
+                // raw content-hash (which would let the host link identical content
+                // across sessions).
+                assert_eq!(
+                    m.blob_key,
+                    media_field_name(ctx.tee_seal_key, ctx.session_id, &hash),
+                    "keyed by the per-session HKDF field name",
+                );
+                assert_ne!(m.blob_key, hash.to_vec(), "must NOT expose the raw content-hash");
                 m.value
             }
             _ => panic!("SetMedia must emit Op::MediaWrite"),
@@ -115,5 +153,27 @@ mod tests {
         // A different session id → different AAD → outer open fails.
         let cross_session = media_aad("ses_other", &hash);
         assert!(aead::open(&sealed, &tee_key, &cross_session).is_err());
+    }
+
+    #[test]
+    fn media_field_name_hides_content_identity_across_sessions() {
+        let key = [7u8; 32];
+        let hash = [3u8; 32];
+        let a1 = media_field_name(&key, "ses_a", &hash);
+        let a2 = media_field_name(&key, "ses_a", &hash);
+        let b = media_field_name(&key, "ses_b", &hash);
+        let other_content = media_field_name(&key, "ses_a", &[4u8; 32]);
+
+        // Deterministic within a session → from-blob-ref rehydrate recomputes it,
+        // and identical captures dedup to one field.
+        assert_eq!(a1, a2, "same (session, content) -> same field name");
+        // THE POINT: identical content in two sessions -> DIFFERENT host field name,
+        // so the untrusted host can't link the sessions by comparing field names.
+        assert_ne!(a1, b, "identical content in two sessions must not share a name");
+        // Different content in the same session -> different name.
+        assert_ne!(a1, other_content);
+        // Never the raw content hash (that is exactly what we are hiding).
+        assert_ne!(a1, hash.to_vec());
+        assert_eq!(a1.len(), 32);
     }
 }

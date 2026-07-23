@@ -114,9 +114,10 @@ pub struct SessionMetadata {
     /// captured so far this session. The TEE-side authoritative set for the
     /// `blob::from-blob-ref` gate: a rehydrate for a hash NOT in here is a
     /// fabricated ref and is refused IN-TEE (no hatch read), so a policy can't
-    /// use the read key as a covert channel. The host already knows these
-    /// hashes (they are the plaintext keys of its own media writes), so
-    /// carrying them in sealed metadata leaks nothing new.
+    /// use the read key as a covert channel. These raw content hashes are
+    /// TEE-ONLY — the host stores media under identity-hiding per-session HKDF
+    /// field names (`media::media_field_name`), never these hashes — so carrying
+    /// them in sealed metadata leaks nothing to the host.
     pub captured_media: Vec<Vec<u8>>,
 }
 

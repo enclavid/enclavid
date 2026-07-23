@@ -215,9 +215,13 @@ impl SessionStore {
         blob_hash: &[u8; 32],
         applicant_session_token: &[u8],
     ) -> Result<Untrusted<Option<Vec<u8>>, (Replay,)>, BridgeError> {
-        // Read the id for the AAD before `read_raw` releases it at the URL.
-        let aad = media::media_aad(*id.as_inner(), blob_hash);
-        let req = core::read_request(vec![FieldSelector::Media(blob_hash.to_vec())]);
+        // Read the id for the AAD + the host field name before `read_raw` releases
+        // it at the URL. The AAD binds to the raw content hash (TEE-internal), but
+        // the HOST field name is the identity-hiding per-session HKDF — recomputed
+        // here so it matches what `SetMedia` wrote.
+        let aad = media::media_aad(id.as_inner(), blob_hash);
+        let field = media::media_field_name(self.tee_seal_key(), id.as_inner(), blob_hash);
+        let req = core::read_request(vec![FieldSelector::Media(field)]);
         let (slots, _version) = self.read_raw(id, req).await?;
         let slot = slots
             .into_iter()
