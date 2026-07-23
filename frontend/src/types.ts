@@ -93,6 +93,13 @@ export type RequestView =
       /// (the receiving party) from the Enclavid platform (which
       /// runs the check but never reads the data).
       requester: string;
+      /// Host-minted digest of this exact disclosure screen. Echoed
+      /// back as `disclosure_hash` on the consent accept so the TEE
+      /// can verify it still matches the disclosure it is about to
+      /// seal — if the flow advanced since this screen was rendered
+      /// (e.g. a stale tab), the accept is refused instead of sealing
+      /// something the user never saw (show == seal).
+      disclosure_digest: string;
     }
   | { kind: "verification_set"; alternatives: MediaSpec[][] };
 

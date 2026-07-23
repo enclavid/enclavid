@@ -80,6 +80,14 @@ pub enum RequestView {
         /// screen header so the applicant sees exactly to whom the
         /// disclosure is being made.
         requester: String,
+        /// Host-minted digest of THIS exact disclosure screen. The
+        /// frontend echoes it back as `disclosure_hash` on the consent
+        /// accept; the input handler refuses an accept whose digest no
+        /// longer matches `current_prompt` (stale tab / concurrent
+        /// round), so the runtime never seals a disclosure the applicant
+        /// did not audit (show == seal). See
+        /// [`dto::consent_disclosure_digest`].
+        disclosure_digest: String,
         /// Covert-channel bandwidth of the `disclosure-fields`
         /// vocabulary — the only embedded kind whose keys reach the
         /// consumer envelope. Frontend renders `total_declared` vs
@@ -191,6 +199,9 @@ fn consent_view(d: &PromptDisclosure, locale: &Locale) -> RequestView {
             total_declared: d.total_declared,
             used_in_call: d.fields.len(),
         },
+        // Binds this rendered screen to the accept the applicant will send
+        // back (show == seal); recomputed + checked in `input::build_event`.
+        disclosure_digest: dto::consent_disclosure_digest(d),
     }
 }
 

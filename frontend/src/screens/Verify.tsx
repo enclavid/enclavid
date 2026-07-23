@@ -181,6 +181,10 @@ function RequestRenderer({
       try {
         const form = new FormData();
         form.append("accepted", accepted ? "true" : "false");
+        // Echo the digest of the exact disclosure screen shown, so the TEE
+        // seals only what the applicant audited (show == seal). If the flow
+        // advanced since this screen rendered, the TEE rejects the accept.
+        form.append("disclosure_hash", request.disclosure_digest);
         await onSubmit("consent", form);
       } catch (e) {
         setLocalError(

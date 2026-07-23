@@ -7,6 +7,7 @@ use axum::routing::{MethodRouter, post};
 
 use hatch_client::{Clip, Event, MediaResult, Prompt, SessionState};
 
+use crate::dto;
 use crate::error::ApiError;
 use crate::limits::APPLICANT_INPUT_BODY_LIMIT;
 use crate::state::AppState;
@@ -27,8 +28,10 @@ pub(super) fn post_input() -> MethodRouter<Arc<AppState>> {
 ///   * `media-N` — capture-step `N` of the current `Prompt::Media`'s
 ///     `captures` (multipart parts = JPEG frames, in order); builds an
 ///     [`Event::Media`].
-///   * `consent` — text part `accepted=true|false`; builds an
-///     [`Event::ConsentDisclosure`].
+///   * `consent` — text part `accepted=true|false` plus a `disclosure_hash`
+///     (the host-minted digest of the screen the applicant confirmed); builds
+///     an [`Event::ConsentDisclosure`]. On accept the digest must match the
+///     current disclosure or the round is refused (409) — show == seal.
 ///
 /// The `slot_id` must match the kind/shape of the prompt persisted as
 /// `current_prompt`. A mismatch returns 409 (kind/shape desync) or 400
@@ -97,10 +100,26 @@ async fn build_event(
 
     match slot_id {
         "consent" => {
-            let Prompt::ConsentDisclosure(_) = prompt else {
+            let Prompt::ConsentDisclosure(d) = prompt else {
                 return Err(StatusCode::CONFLICT);
             };
-            let accepted = read_consent(multipart).await?;
+            let (accepted, submitted_digest) = read_consent(multipart).await?;
+            // show == seal. The runtime seals a disclosure ONLY on accept, and it
+            // seals whatever `current_prompt` is right now. Bind that accept to the
+            // exact screen the applicant confirmed: the frontend echoes the
+            // host-minted digest of the disclosure it rendered; if `current_prompt`
+            // has since advanced (a stale second tab, a concurrent round), the
+            // echoed digest no longer matches and we refuse (409) instead of sealing
+            // a disclosure the applicant never audited. `current_prompt` here is the
+            // SAME object the worker seals — the run ctx loads state once and threads
+            // it through — so this check is authoritative. Enforced on ACCEPT only:
+            // a decline seals nothing, so a stale decline is harmless.
+            if accepted {
+                let expected = dto::consent_disclosure_digest(d);
+                if submitted_digest.as_deref() != Some(expected.as_str()) {
+                    return Err(StatusCode::CONFLICT);
+                }
+            }
             Ok(Event::ConsentDisclosure(accepted))
         }
         _ => Err(StatusCode::BAD_REQUEST),
@@ -129,18 +148,31 @@ async fn collect_frames(mut multipart: Multipart) -> Result<Vec<Vec<u8>>, Status
     Ok(frames)
 }
 
-/// Pull a single `accepted=true|false` text part from a consent
-/// multipart payload. Anything else is a malformed body.
-async fn read_consent(mut multipart: Multipart) -> Result<bool, StatusCode> {
+/// Pull the consent answer from a consent multipart payload: the required
+/// `accepted=true|false` flag and the optional `disclosure_hash` — the hex
+/// digest of the disclosure screen the applicant confirmed, echoed back so
+/// `build_event` can bind an ACCEPT to exactly that screen (show == seal).
+/// Returns `(accepted, disclosure_hash)`; a body with no `accepted` part is
+/// malformed (400).
+async fn read_consent(mut multipart: Multipart) -> Result<(bool, Option<String>), StatusCode> {
+    let mut accepted: Option<bool> = None;
+    let mut disclosure_hash: Option<String> = None;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?
     {
-        if field.name() == Some("accepted") {
-            let text = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
-            return Ok(matches!(text.as_str(), "true" | "1"));
+        match field.name() {
+            Some("accepted") => {
+                let text = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+                accepted = Some(matches!(text.as_str(), "true" | "1"));
+            }
+            Some("disclosure_hash") => {
+                disclosure_hash =
+                    Some(field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
+            }
+            _ => {}
         }
     }
-    Err(StatusCode::BAD_REQUEST)
+    Ok((accepted.ok_or(StatusCode::BAD_REQUEST)?, disclosure_hash))
 }

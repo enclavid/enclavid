@@ -22,8 +22,9 @@
 //!     `RequestView::Consent` for the applicant frontend.
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
-use hatch_client::{DisplayField as ProtoDisplayField, Localized, SessionStatus};
+use hatch_client::{DisplayField as ProtoDisplayField, Localized, PromptDisclosure, SessionStatus};
 
 use crate::locale::Locale;
 
@@ -150,5 +151,117 @@ pub fn pick_localized(localized: &Localized, locale: &Locale) -> String {
     match locale.pick(&localized.translations) {
         Some(picked) => engine_types::sanitize::sanitize_text_value(picked),
         None => String::new(),
+    }
+}
+
+/// Content digest of a consent-disclosure prompt — the binding between the
+/// screen the applicant AUDITED and the disclosure the runtime SEALS on accept.
+///
+/// The `/input` consent submit echoes this (host-minted) hex digest; the input
+/// handler recomputes it over the session's current `current_prompt` and refuses
+/// an ACCEPT whose digest doesn't match (409). That closes the show==seal TOCTOU:
+/// if `current_prompt` advanced between render and accept (a stale second tab, a
+/// concurrent round), the echoed digest is stale and the accept is rejected —
+/// rather than sealing a disclosure the applicant never saw.
+///
+/// Covers everything the applicant audits on the screen — the disclosed
+/// `(key, label, value)` fields in order, the reason, the requester, and the
+/// declared-vocabulary count — so any change to what would be sealed, or to whom
+/// / why, changes the digest. Locale-independent: the whole translation set is
+/// hashed, not the locale-picked string.
+pub fn consent_disclosure_digest(d: &PromptDisclosure) -> String {
+    // Just SHA-256 over the prompt's JSON. Deterministic because `Disclosure` is
+    // map/float-free (only Vec/String/usize), so equal values always serialize to
+    // identical bytes — and both call sites hash the SAME `current_prompt` value,
+    // so exact byte-canonicality isn't required, only that serialization is a pure
+    // function of the value. JSON's own delimiters keep field boundaries
+    // unambiguous. (If a `HashMap` field is ever added to this type, switch to an
+    // order-independent encoding.)
+    let json = serde_json::to_vec(d).expect("PromptDisclosure is always serializable");
+    hex::encode(Sha256::digest(json))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hatch_client::{PromptDisclosure, Translation};
+
+    fn loc(text: &str) -> Localized {
+        Localized {
+            translations: vec![Translation { language: "en".into(), text: text.into() }],
+        }
+    }
+
+    fn field(key: &str, value: &str) -> ProtoDisplayField {
+        ProtoDisplayField {
+            key: key.into(),
+            label: loc(&format!("{key} label")),
+            value: value.into(),
+        }
+    }
+
+    fn disclosure() -> PromptDisclosure {
+        PromptDisclosure {
+            fields: vec![field("first_name", "Alice"), field("dob", "1990-01-01")],
+            reason: loc("To open an account"),
+            requester: loc("Acme Trading"),
+            total_declared: 12,
+        }
+    }
+
+    #[test]
+    fn digest_is_deterministic_and_64_hex() {
+        let a = consent_disclosure_digest(&disclosure());
+        assert_eq!(a, consent_disclosure_digest(&disclosure()));
+        assert_eq!(a.len(), 64, "sha256 → 64 hex chars");
+    }
+
+    #[test]
+    fn digest_changes_with_sealed_content_or_recipient() {
+        let base = consent_disclosure_digest(&disclosure());
+
+        // A changed field VALUE (the data that leaks) — the core show==seal bind.
+        let mut d = disclosure();
+        d.fields[0].value = "Bob".into();
+        assert_ne!(base, consent_disclosure_digest(&d), "value change must move the digest");
+
+        // A changed field KEY.
+        let mut d = disclosure();
+        d.fields[1].key = "nationality".into();
+        assert_ne!(base, consent_disclosure_digest(&d), "key change must move the digest");
+
+        // An ADDED field (D1 ⊂ D2) — the classic "seal more than was shown".
+        let mut d = disclosure();
+        d.fields.push(field("passport_number", "X123"));
+        assert_ne!(base, consent_disclosure_digest(&d), "added field must move the digest");
+
+        // A changed requester (WHO it is disclosed to).
+        let mut d = disclosure();
+        d.requester = loc("Evil Corp");
+        assert_ne!(base, consent_disclosure_digest(&d), "requester change must move the digest");
+    }
+
+    #[test]
+    fn field_order_is_significant() {
+        let a = consent_disclosure_digest(&disclosure());
+        let mut d = disclosure();
+        d.fields.swap(0, 1);
+        assert_ne!(a, consent_disclosure_digest(&d), "reordered fields are a different screen");
+    }
+
+    #[test]
+    fn field_boundaries_do_not_collide() {
+        // With identical labels, ("ab", "") and ("a", "b") must not collide —
+        // JSON's own delimiters keep the key/value boundary unambiguous.
+        let lbl = loc("L");
+        let a = PromptDisclosure {
+            fields: vec![ProtoDisplayField { key: "ab".into(), label: lbl.clone(), value: String::new() }],
+            ..Default::default()
+        };
+        let b = PromptDisclosure {
+            fields: vec![ProtoDisplayField { key: "a".into(), label: lbl, value: "b".into() }],
+            ..Default::default()
+        };
+        assert_ne!(consent_disclosure_digest(&a), consent_disclosure_digest(&b));
     }
 }
