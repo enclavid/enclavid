@@ -32,7 +32,7 @@ async fn main() {
     // Warm the page cache / first-run outliers.
     for _ in 0..3 {
         let (mut child, client) =
-            spawn_and_connect::<ChildServiceClient<Ciborium>>(&exe, &[]).await.expect("spawn");
+            spawn_and_connect::<ChildServiceClient<Ciborium>>(&exe, &[], None).await.expect("spawn");
         drop(client);
         let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     }
@@ -41,7 +41,7 @@ async fn main() {
     for _ in 0..iters {
         let t = Instant::now();
         let (mut child, client) =
-            spawn_and_connect::<ChildServiceClient<Ciborium>>(&exe, &[]).await.expect("spawn");
+            spawn_and_connect::<ChildServiceClient<Ciborium>>(&exe, &[], None).await.expect("spawn");
         // spawn_and_connect returns after exec + the child's Engine::new + the
         // remoc handshake (it recv'd the child's service client) — exactly the
         // `spawn` phase the zygote's fork replaces.

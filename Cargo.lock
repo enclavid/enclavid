@@ -1599,6 +1599,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "remoc",
+ "seccompiler",
  "tokio",
 ]
 
@@ -4275,6 +4276,15 @@ dependencies = [
  "pkcs8",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "seccompiler"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "345a3e4dddf721a478089d4697b83c6c0a8f5bf16086f6c13397e4534eb6e2e5"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

@@ -34,3 +34,10 @@ remoc = { version = "0.18", default-features = false, features = [
 # Raw libc (not nix) because a pre_exec closure must be async-signal-safe — no
 # allocation, no panics — which the thin syscall wrappers here satisfy.
 libc = "0.2"
+
+# Build the child's egress seccomp BPF (deny socket-family syscalls) in the
+# PARENT; the filter is installed post-fork via a raw seccomp(2) syscall over the
+# pre-built program (async-signal-safe). Pure Rust — no libseccomp C dep. Linux-
+# only: the disposable-child workers run only under the SEV-SNP CVM.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.4"

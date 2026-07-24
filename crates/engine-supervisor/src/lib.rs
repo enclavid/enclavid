@@ -103,37 +103,41 @@ fn connection_cfg() -> remoc::Cfg {
 /// "an escape reaches one applicant, not all concurrent ones": the real enforcement
 /// belongs in the measured CVM image (`kernel.yama.ptrace_scope`), but the workers
 /// assert it at boot so a regressed/mis-provisioned image FAILS CLOSED here instead
-/// of silently losing sibling isolation. The floor defaults to 2 (matches the
-/// hardened image; `scope=1` already blocks siblings — non-descendants — but 2 is
-/// the deployed target) and is overridable via `ENCLAVID_MIN_PTRACE_SCOPE` for a
-/// dev/CI Linux box. No-op off Linux (the workers only run under the Linux CVM;
-/// dev on macOS has no equivalent to check).
+/// of silently losing sibling isolation.
+///
+/// The floor is a COMPILE-TIME constant of 2 — deliberately NOT env-overridable.
+/// This defends against the host, and the host provisions the CVM environment, so a
+/// host-tunable knob could lower the floor to make the check vacuous (the same
+/// reason the egress seccomp posture is compile-time, not env). It is 2, not 1,
+/// because at `scope=1` a child can `PR_SET_PTRACER_ANY` and let a cooperating
+/// SIBLING attach — so scope=1 does NOT block the cross-sibling read this guards. A
+/// dev/CI Linux box below 2 must raise the real sysctl
+/// (`sudo sysctl -w kernel.yama.ptrace_scope=2`) to match prod, not lower a software
+/// floor. No-op off Linux (the workers only run under the Linux CVM; dev on macOS
+/// has no equivalent to check).
 #[cfg(target_os = "linux")]
 pub fn assert_ptrace_hardened() {
-    const DEFAULT_MIN: u32 = 2;
-    let min: u32 = std::env::var("ENCLAVID_MIN_PTRACE_SCOPE")
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(DEFAULT_MIN);
+    // Fixed, measured floor — NOT env-tunable (see the fn doc). 2 because scope=1 is
+    // bypassable via PR_SET_PTRACER_ANY.
+    const MIN: u32 = 2;
     let path = "/proc/sys/kernel/yama/ptrace_scope";
     match std::fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<u32>().ok()) {
-        Some(v) if v >= min => {
+        Some(v) if v >= MIN => {
             eprintln!(
-                "engine-supervisor: yama ptrace_scope={v} (>= required {min}) — sibling-child \
+                "engine-supervisor: yama ptrace_scope={v} (>= required {MIN}) — sibling-child \
                  memory isolation active"
             );
         }
         Some(v) => panic!(
-            "engine-supervisor: yama ptrace_scope={v} < required {min}: a compromised child \
+            "engine-supervisor: yama ptrace_scope={v} < required {MIN}: a compromised child \
              could read a SIBLING child's in-flight applicant memory. Set \
-             kernel.yama.ptrace_scope={min} in the (measured) CVM image, or on a dev/CI box \
-             `sudo sysctl -w kernel.yama.ptrace_scope={min}` (lower the floor with \
-             ENCLAVID_MIN_PTRACE_SCOPE only if you understand the exposure)."
+             kernel.yama.ptrace_scope={MIN} in the (measured) CVM image, or on a dev/CI box \
+             `sudo sysctl -w kernel.yama.ptrace_scope={MIN}`."
         ),
         None => panic!(
             "engine-supervisor: cannot read {path} — the Yama LSM is not enabled, so ptrace is \
              unrestricted and cross-sibling child memory reads are possible. Enable Yama and set \
-             ptrace_scope>={min} in the CVM image (override with ENCLAVID_MIN_PTRACE_SCOPE)."
+             kernel.yama.ptrace_scope={MIN} in the CVM image."
         ),
     }
 }
@@ -172,6 +176,73 @@ impl std::fmt::Display for SupervisorError {
 }
 impl std::error::Error for SupervisorError {}
 
+/// Post-fork hardening applied to each disposable child. All fields take effect
+/// on Linux only (no-ops on the macOS dev host). Each worker constructs its own:
+/// the execution-worker (untrusted wasm) and the compile-worker (untrusted
+/// Cranelift) both enable `seccomp_egress`; only the compile side sets an
+/// `address_space` bound — the execute side caps wasm linear memory via wasmtime
+/// `StoreLimits`, and wasmtime reserves large VIRTUAL memory a hard `RLIMIT_AS`
+/// would break.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Hardening {
+    /// Install a seccomp filter denying socket-family egress (+ set
+    /// `no_new_privs`), so a child that an escape turns into native code cannot
+    /// dial the host (`AF_VSOCK`) or any network — it only ever talks over its
+    /// inherited socketpair. A TARGETED egress denylist, not a full syscall
+    /// allowlist: the primary containment stays keyless/disposable/ptrace
+    /// isolation; this shrinks the exfil surface an escape inherits.
+    pub seccomp_egress: bool,
+    /// `RLIMIT_AS` ceiling (bytes) for the child, or `None`. `Some` bounds a
+    /// runaway — a crafted input ballooning the compiler's arena hits the cap
+    /// (mmap fails → compile errors) instead of OOMing the host — on the compile
+    /// side; `None` on the execute side.
+    pub address_space: Option<u64>,
+}
+
+/// The child's egress seccomp BPF: allow by default, `EPERM` the socket-family
+/// creation / connect syscalls. Built ONCE (this allocates) in the PARENT and
+/// cached, so `pre_exec` only installs it via a raw `seccomp(2)` over the static
+/// program — async-signal-safe, no post-fork allocation. Installed while the
+/// forked child is single-threaded, so it applies to the process and is inherited
+/// by every thread the child spawns after `exec` (tokio's workers) without needing
+/// `SECCOMP_FILTER_FLAG_TSYNC`. The children talk ONLY over their inherited
+/// socketpair (fd 0) and never create a socket, so this is invisible in normal
+/// operation.
+#[cfg(target_os = "linux")]
+fn egress_seccomp_program() -> &'static seccompiler::BpfProgram {
+    use std::collections::BTreeMap;
+    use std::sync::OnceLock;
+
+    use seccompiler::{SeccompAction, SeccompFilter, SeccompRule, TargetArch};
+
+    static PROG: OnceLock<seccompiler::BpfProgram> = OnceLock::new();
+    PROG.get_or_init(|| {
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => TargetArch::x86_64,
+            "aarch64" => TargetArch::aarch64,
+            other => panic!("egress seccomp: unsupported target arch {other}"),
+        };
+        // Empty rule list on a syscall = match it unconditionally → `match_action`.
+        let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
+        for sys in [
+            libc::SYS_socket,
+            libc::SYS_connect,
+            libc::SYS_bind,
+            libc::SYS_socketpair,
+        ] {
+            rules.insert(sys as i64, Vec::new());
+        }
+        let filter = SeccompFilter::new(
+            rules,
+            SeccompAction::Allow,                     // syscalls not listed: allowed
+            SeccompAction::Errno(libc::EPERM as u32), // listed (blocked): EPERM
+            arch,
+        )
+        .expect("build egress seccomp filter");
+        filter.try_into().expect("compile egress seccomp filter to BPF")
+    })
+}
+
 /// Spawns a fresh disposable child process per request, bounds concurrency, and
 /// enforces a per-request wall-clock deadline. Cheap to clone-share (`Arc` the
 /// pool if serving concurrently); the semaphore is the only shared state.
@@ -179,17 +250,26 @@ pub struct ChildPool {
     exe: std::path::PathBuf,
     slots: Arc<Semaphore>,
     deadline: Duration,
+    hardening: Option<Hardening>,
 }
 
 impl ChildPool {
     /// `exe` is the child binary this pool spawns; `max_children` bounds
     /// concurrent live children (deployment envelope — one process each);
-    /// `deadline` is the per-request wall-clock ceiling.
-    pub fn new(exe: std::path::PathBuf, max_children: usize, deadline: Duration) -> Self {
+    /// `deadline` is the per-request wall-clock ceiling; `hardening` is the
+    /// post-fork sandbox posture applied to each child — `None` = none (dev /
+    /// bench / test) (see [`Hardening`]).
+    pub fn new(
+        exe: std::path::PathBuf,
+        max_children: usize,
+        deadline: Duration,
+        hardening: Option<Hardening>,
+    ) -> Self {
         Self {
             exe,
             slots: Arc::new(Semaphore::new(max_children)),
             deadline,
+            hardening,
         }
     }
 
@@ -235,7 +315,7 @@ impl ChildPool {
         // dropped future's `child` is killed + reaped by kill_on_drop).
         let (mut child, client) = match tokio::time::timeout(
             CONNECT_TIMEOUT,
-            spawn_and_connect::<Cli>(&self.exe, inherit_fds),
+            spawn_and_connect::<Cli>(&self.exe, inherit_fds, self.hardening),
         )
         .await
         {
@@ -281,9 +361,15 @@ impl ChildPool {
 /// capability-scoping the memfd cwasm delivery relies on — a child gets a readable
 /// handle to ITS composition's cwasm and to no other, closing the path-based reach
 /// (and TOCTOU) a named tmpfs file would have left open to any same-uid process.
+///
+/// `hardening` is the child's post-fork sandbox posture (Linux; see [`Hardening`]),
+/// or `None` for no hardening (dev / bench / test). stdout/stderr are nulled
+/// unconditionally either way; `no_new_privs` / `RLIMIT_AS` / the egress seccomp
+/// filter are applied per the `Some` posture.
 pub async fn spawn_and_connect<Cli>(
     exe: &Path,
     inherit_fds: &[BorrowedFd<'_>],
+    hardening: Option<Hardening>,
 ) -> Result<(tokio::process::Child, Cli), String>
 where
     Cli: RemoteSend,
@@ -310,43 +396,96 @@ where
     // `child_end` and CLOSES the supervisor's copy after spawn, so ONLY the child
     // holds that end — its death then EOFs `sup_end` promptly (no crash-path hang).
     cmd.stdin(std::process::Stdio::from(OwnedFd::from(child_end)));
+    // Null the child's stdout/stderr. It communicates ONLY over its socketpair
+    // (fd 0) so it needs neither, and a child that an escape turns into native code
+    // must not be able to write the round's plaintext to the worker's inherited
+    // stdio (→ the host). Child diagnostics are dropped by design; a failure still
+    // surfaces as the dropped connection / the pool's error.
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
     // Backstop: an early return / cancelled request SIGKILLs + reaps the child.
     cmd.kill_on_drop(true);
 
-    // Install the caller's fds at 3.. in the child (see the fn doc). `dup2(src, dst)`
-    // duplicates `src` onto `dst` with CLOEXEC CLEARED, so it survives exec; if
-    // `src` already equals `dst` no dup happens and its flags are untouched, so we
-    // clear CLOEXEC directly. Targets 3.. are disjoint from the used 0/1/2, and the
-    // only caller today passes exactly one fd, so no source↔target overlap arises
-    // (an overlapping N-fd caller would need dup-to-scratch reordering first).
-    if !inherit_fds.is_empty() {
-        let mappings: Vec<(RawFd, RawFd)> = inherit_fds
-            .iter()
-            .enumerate()
-            .map(|(i, fd)| (fd.as_raw_fd(), FIRST_INHERITED_FD + i as RawFd))
-            .collect();
-        // SAFETY: the closure runs post-fork / pre-exec and calls ONLY async-signal-
-        // safe syscalls (dup2 / fcntl) over stack data (no allocation, no locks, no
-        // panics). The source fds are valid in the forked child (its fd table is a
-        // copy of ours at fork), and stay open because the caller keeps the backing
-        // objects alive across this call.
-        unsafe {
-            cmd.as_std_mut().pre_exec(move || {
-                for &(src, dst) in &mappings {
-                    if src == dst {
-                        let flags = libc::fcntl(dst, libc::F_GETFD);
-                        if flags < 0
-                            || libc::fcntl(dst, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
-                        {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                    } else if libc::dup2(src, dst) < 0 {
+    // Prepare every pre_exec input in the PARENT so the closure allocates NOTHING.
+    // Caller fds land at [`FIRST_INHERITED_FD`]..: `dup2(src, dst)` clears CLOEXEC so
+    // they survive exec; if `src` already equals `dst` no dup happens and we clear
+    // CLOEXEC directly. Targets 3.. are disjoint from the used 0/1/2, and the only
+    // caller today passes exactly one fd, so no source↔target overlap arises (an
+    // overlapping N-fd caller would need dup-to-scratch reordering first).
+    let mappings: Vec<(RawFd, RawFd)> = inherit_fds
+        .iter()
+        .enumerate()
+        .map(|(i, fd)| (fd.as_raw_fd(), FIRST_INHERITED_FD + i as RawFd))
+        .collect();
+    #[cfg(target_os = "linux")]
+    let as_limit = hardening.and_then(|h| h.address_space);
+    #[cfg(target_os = "linux")]
+    let seccomp_prog: Option<&'static seccompiler::BpfProgram> = hardening
+        .is_some_and(|h| h.seccomp_egress)
+        .then(egress_seccomp_program);
+    #[cfg(target_os = "linux")]
+    let want_no_new_privs = hardening.is_some_and(|h| h.seccomp_egress);
+    #[cfg(not(target_os = "linux"))]
+    let _ = hardening; // no post-fork hardening off Linux
+
+    // SAFETY: the closure runs post-fork / pre-exec and calls ONLY async-signal-safe
+    // syscalls (prctl / setrlimit / seccomp / dup2 / fcntl) over stack data + a
+    // static BPF program built in the parent (no allocation, no locks, no panics).
+    // The source fds are valid in the forked child (its fd table is a copy of ours
+    // at fork) and stay open because the caller keeps the backing objects alive
+    // across this call.
+    unsafe {
+        cmd.as_std_mut().pre_exec(move || {
+            // ---- Linux post-fork hardening (no-op elsewhere) ----
+            #[cfg(target_os = "linux")]
+            {
+                // `no_new_privs` first: required to load a seccomp filter without
+                // privilege, and blocks setuid privilege gain on any later exec.
+                if want_no_new_privs
+                    && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // `RLIMIT_AS` ceiling (compile side).
+                if let Some(bytes) = as_limit {
+                    let lim = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
+                    if libc::setrlimit(libc::RLIMIT_AS, &lim) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                 }
-                Ok(())
-            });
-        }
+                // Egress seccomp: install the pre-built denylist over the static
+                // program. `SECCOMP_SET_MODE_FILTER` == 1, flags 0.
+                if let Some(prog) = seccomp_prog {
+                    let fprog = libc::sock_fprog {
+                        len: prog.len() as u16,
+                        filter: prog.as_ptr() as *mut libc::sock_filter,
+                    };
+                    if libc::syscall(
+                        libc::SYS_seccomp,
+                        1,
+                        0,
+                        &fprog as *const libc::sock_fprog,
+                    ) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+            }
+            // ---- caller fd installation (all platforms) ----
+            for &(src, dst) in &mappings {
+                if src == dst {
+                    let flags = libc::fcntl(dst, libc::F_GETFD);
+                    if flags < 0
+                        || libc::fcntl(dst, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                } else if libc::dup2(src, dst) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
     }
 
     let child = cmd.spawn().map_err(|e| format!("spawn {}: {e}", exe.display()))?;
@@ -408,4 +547,69 @@ where
         .map_err(|e| format!("send service client: {e}"))?;
     server.serve(true).await.map_err(|e| format!("serve: {e}"))?;
     Ok(())
+}
+
+// Runtime smoke-test for the egress seccomp filter. Linux-only (the filter is
+// Linux-only) and can't run on the macOS dev host, so it exists to run on a Linux
+// CI / the SEV-SNP CVM — the runtime coverage a cross-compile-check can't give.
+#[cfg(all(test, target_os = "linux"))]
+mod seccomp_tests {
+    use super::*;
+
+    /// The REAL [`egress_seccomp_program`] (the same program + raw install path
+    /// `spawn_and_connect` uses), installed in a forked child, must deny `socket()`
+    /// with `EPERM` while leaving other syscalls working. Exit codes carry the
+    /// verdict back: 42 = socket denied (filter works), 0 = socket SUCCEEDED (filter
+    /// not effective → fail), 7 = the environment forbids installing a seccomp filter
+    /// at all (restricted CI sandbox) → SKIP, 1 = any other error.
+    #[test]
+    fn egress_filter_denies_socket_but_stays_functional() {
+        // Init the OnceLock in the PARENT so the post-fork child only reads the
+        // static program (no allocation after fork in a multi-threaded harness).
+        let prog = egress_seccomp_program();
+
+        // SAFETY: the forked child calls ONLY async-signal-safe syscalls over the
+        // pre-built static program and always `_exit`s — it never returns into the
+        // test harness. The parent reaps it with `waitpid`.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+        if pid == 0 {
+            if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+                unsafe { libc::_exit(7) }; // can't set no_new_privs → skip
+            }
+            let fprog = libc::sock_fprog {
+                len: prog.len() as u16,
+                filter: prog.as_ptr() as *mut libc::sock_filter,
+            };
+            if unsafe {
+                libc::syscall(libc::SYS_seccomp, 1, 0, &fprog as *const libc::sock_fprog)
+            } != 0
+            {
+                unsafe { libc::_exit(7) }; // seccomp install refused by env → skip
+            }
+            // Filter is now live. A benign syscall must still work (allow-by-default);
+            // `getpid` can't return EPERM, so reaching here already shows non-denied
+            // syscalls run. Now the denied one:
+            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+            if fd >= 0 {
+                unsafe { libc::close(fd) };
+                unsafe { libc::_exit(0) }; // socket SUCCEEDED → filter not effective
+            }
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            unsafe { libc::_exit(if errno == libc::EPERM { 42 } else { 1 }) };
+        }
+
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert_eq!(waited, pid, "waitpid failed: {}", std::io::Error::last_os_error());
+        assert!(libc::WIFEXITED(status), "seccomp probe child did not exit normally");
+        match libc::WEXITSTATUS(status) {
+            42 => {} // socket() denied with EPERM — the filter works.
+            7 => eprintln!(
+                "egress_filter_denies_socket: seccomp install unsupported here — skipping"
+            ),
+            0 => panic!("socket() SUCCEEDED under the egress filter — seccomp not effective"),
+            other => panic!("seccomp probe child exited with unexpected code {other}"),
+        }
+    }
 }

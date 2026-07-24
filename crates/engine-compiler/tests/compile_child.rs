@@ -22,9 +22,13 @@ use engine_rpc::{CompileError, CompilerService, CompilerServiceClient};
 /// compile-worker supervisor does, and return the child + its service client.
 async fn spawn() -> (tokio::process::Child, CompilerServiceClient<Ciborium>) {
     let exe = env!("CARGO_BIN_EXE_compile-child");
-    engine_supervisor::spawn_and_connect::<CompilerServiceClient<Ciborium>>(Path::new(exe), &[])
-        .await
-        .expect("spawn compile-child")
+    engine_supervisor::spawn_and_connect::<CompilerServiceClient<Ciborium>>(
+        Path::new(exe),
+        &[],
+        None,
+    )
+    .await
+    .expect("spawn compile-child")
 }
 
 /// Fail-safe: a garbage / non-component policy makes the child's Cranelift compile

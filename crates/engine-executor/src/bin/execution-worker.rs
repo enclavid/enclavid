@@ -60,7 +60,7 @@ use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 use tokio::net::{TcpListener, TcpStream};
 use zeroize::Zeroizing;
-use engine_supervisor::ChildPool;
+use engine_supervisor::{ChildPool, Hardening};
 
 use engine_executor::{Event, SessionState, compat_token};
 use engine_rpc::{
@@ -393,6 +393,18 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_BUNDLE_CACHE_BYTES);
 
+    // Child sandbox posture: egress seccomp is ALWAYS ON. It is a CONFIDENTIALITY
+    // control and must not be disableable by the untrusted host, which provisions
+    // the CVM environment (same root as tee_seal_key-from-env); it rides the
+    // measured image, so disabling it is a rebuild + re-attest, not a runtime knob.
+    // No RLIMIT_AS on the execute side — wasm linear memory is capped by wasmtime
+    // `StoreLimits`, and wasmtime reserves large VIRTUAL memory a hard `RLIMIT_AS`
+    // would break.
+    let hardening = Hardening {
+        seccomp_egress: true,
+        address_space: None,
+    };
+
     let child_exe = child_exe();
 
     let svc = Arc::new(Supervisor {
@@ -406,7 +418,7 @@ async fn main() {
             .max_capacity(bundle_cache_bytes)
             .time_to_idle(Duration::from_secs(3600))
             .build(),
-        pool: ChildPool::new(child_exe.clone(), max_children, round_deadline),
+        pool: ChildPool::new(child_exe.clone(), max_children, round_deadline, Some(hardening)),
     });
 
     let listener = TcpListener::bind(&addr)

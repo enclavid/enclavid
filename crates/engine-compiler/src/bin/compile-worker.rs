@@ -31,7 +31,7 @@ use std::time::Duration;
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 use tokio::net::{TcpListener, TcpStream};
-use engine_supervisor::ChildPool;
+use engine_supervisor::{ChildPool, Hardening};
 
 use engine_rpc::{
     CompileError, CompiledBundle, CompilerService, CompilerServiceClient,
@@ -131,10 +131,28 @@ async fn main() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_COMPILE_DEADLINE_SECS),
     );
+    // Egress seccomp is ALWAYS ON in the build. It is a CONFIDENTIALITY control
+    // (keeps a child an escape turns into native code from dialing the host), so it
+    // must NOT be disableable by the untrusted host — which provisions the CVM's
+    // environment (the same root as the tee_seal_key-from-env gap). It rides the
+    // measured image; disabling it is a deliberate rebuild + re-attest, never a
+    // runtime knob. The AS limit, by contrast, is availability tuning (a lax value
+    // only lets the host OOM its OWN guest), so it stays env-configurable like
+    // max_compiles / deadline; `ENCLAVID_COMPILE_AS_LIMIT_BYTES=0` disables it
+    // (default 4 GiB — bounds a crafted input ballooning Cranelift's arena).
+    let as_bytes = std::env::var("ENCLAVID_COMPILE_AS_LIMIT_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(4 * 1024 * 1024 * 1024);
+    let hardening = Hardening {
+        seccomp_egress: true,
+        address_space: (as_bytes != 0).then_some(as_bytes),
+    };
+
     let child_exe = child_exe();
 
     let svc = Arc::new(Supervisor {
-        pool: ChildPool::new(child_exe.clone(), max_compiles, deadline),
+        pool: ChildPool::new(child_exe.clone(), max_compiles, deadline, Some(hardening)),
     });
 
     let listener = TcpListener::bind(&addr)
