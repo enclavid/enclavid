@@ -21,7 +21,7 @@ use hatch_client::{
 use engine_types::composition::PluginInstance;
 // The run wire mirrors: props api builds + ships, the outcome + error it gets
 // back from the execution-worker.
-use engine_rpc::{CompiledBundle, ExecError, Prop, RunStatus};
+use engine_rpc::{CompiledBundle, ExecError, Prop, RunOutcome, RunRequest, RunStatus};
 
 use crate::cwasm_cache;
 use crate::error::ApiError;
@@ -67,10 +67,17 @@ bearer-key auth layer at the route plus AEAD-binding on state
 under applicant_session_token.
         "#))
         .trust_unchecked::<Replay, _>(reason!(r#"
-Applicant flow uses metadata only for engine-resource fields
-(client_disclosure_pubkey, policy_digest, input). Their
-staleness has no security impact — these fields are stable
-across the session lifetime.
+Metadata is NOT static — the persister mutates it each disclosure/media
+round (captured_media, disclosure_count/hash, status) — so freshness is
+UNVERIFIABLE here, not guaranteed: a stateless TEE cannot detect a
+compromised host replaying an older (genuine, tee_seal_key-sealed,
+AAD=session_id) snapshot. Safe because BOUNDED: the mutations are monotonic,
+so a stale snapshot can only DROP entries — a later from-blob-ref then misses
+the dropped capture and traps (session-local DoS), and a rewound disclosure
+count surfaces as the consumer's own chain-verification failure. No leak
+(host replays blobs it cannot read), no forgery (AEAD). Same containment as
+the version vouch below (a lying host self-limits to DoS); full-coherent
+rollback is an accepted residual of the host-holds-all-state model.
         "#))
         .into_inner()
         .ok_or_else(|| {
@@ -165,23 +172,50 @@ impl SessionRunCtx {
             metadata,
             ..
         } = self;
-        // The keyless execution-worker calls back into this per-round
-        // CallbackService for compiled-bundle resolution (`load_component`), blob
-        // rehydration (`media_load`) + state persistence (`session_change`); it
-        // holds the seal key + the token weak + the L2/compile context, so none
-        // of those ever cross to the worker.
+        // Callbacks the keyless worker calls DURING a run: blob rehydration
+        // (`media_load`) + state persistence (`session_change`). Bundle resolution
+        // is NOT here — the orchestrator drives it itself on a cache miss (below),
+        // under the `composition_key` IT computed, so the worker never names which
+        // L2 slot a compile lands in.
         let callbacks = Arc::new(CallbackServer {
             persister: persister.clone(),
             media_store,
-            state: state.clone(),
-            metadata,
-            session_id: session_id.clone(),
         });
-        let status = state
+
+        // Phase 1: cache-only run. The worker serves the composition from its own
+        // L1, or reports a miss — no bundle crosses on this call.
+        let req = RunRequest {
+            composition_key: composition_key.clone(),
+            props: props.clone(),
+            session_state: session_state.clone(),
+            event: event.clone(),
+        };
+        let status = match state
             .executor
-            .run(&composition_key, session_state, event, props, callbacks)
+            .run(req, callbacks.clone())
             .await
-            .map_err(|e| classify_run_error(&session_id, &e))?;
+            .map_err(|e| classify_run_error(&session_id, &e))?
+        {
+            RunOutcome::Ran(status) => status,
+            RunOutcome::CacheMiss { compat_token } => {
+                // L1 miss: resolve the bundle OURSELVES, keyed by the
+                // `composition_key` WE computed — never one echoed by the worker —
+                // which is what closes the L2 cache-poisoning vector. A resolution
+                // failure (e.g. 410 GONE) is a pure function of the pinned config,
+                // surfaced to the consumer verbatim. Phase 2: re-drive WITH the
+                // bundle via `run_with_bundle`, which always runs (no second miss).
+                let bundle =
+                    resolve_bundle(&state, &composition_key, &compat_token, &session_id, &metadata)
+                        .await
+                        .map_err(ApiError::Status)?;
+                let req = RunRequest { composition_key, props, session_state, event };
+                state
+                    .executor
+                    .run_with_bundle(req, bundle, callbacks)
+                    .await
+                    .map_err(|e| classify_run_error(&session_id, &e))?
+            }
+        };
         // No-op while the run is still awaiting input; flips status to
         // Completed atomically (metadata + host-plaintext Status) when
         // the run terminated.
@@ -196,30 +230,18 @@ impl SessionRunCtx {
     }
 }
 
-/// Classify the [`ExecError`] coming back from `executor.run` into an HTTP-facing
-/// status. Two kinds:
-///
-///   * [`ExecError::Config`] — a config-resolution failure relayed from the
-///     worker's `load_component` (OCI pull / compile / digest). It is a pure
-///     function of the pinned config (no applicant input, no PII), so its HTTP
-///     `status` is surfaced VERBATIM — e.g. 410 GONE on a removed artifact — not
-///     flattened to 500. This is the fidelity the typed error channel preserves.
-///   * [`ExecError::Run`] — an opaque trap / host-fn / transport failure → 500,
-///     with ONE well-known exception worth a structured 422:
-///     * Unregistered text-ref — policy pushed without the matching
-///       `manifest.json` layer. Detected by substring against the engine's
-///       `ensure_registered` message (`"... text-ref '<key>' is not registered
-///       ..."`), which the worker relayed verbatim. Fragile by nature; if the
-///       engine rewords the trap this degrades silently to 500 — an accepted
-///       trade-off against typed-error plumbing all the way through the wasm trap.
+/// Classify the [`ExecError::Run`] coming back from `executor.run` into an
+/// HTTP-facing status → 500, with ONE well-known exception worth a structured 422:
+/// an unregistered text-ref — policy pushed without the matching `manifest.json`
+/// layer. Detected by substring against the engine's `ensure_registered` message
+/// (`"... text-ref '<key>' is not registered ..."`), relayed verbatim by the
+/// worker. Fragile by nature; if the engine rewords the trap this degrades silently
+/// to 500 — an accepted trade-off against typed-error plumbing through the wasm
+/// trap. (Config-resolution failures no longer reach here: the orchestrator
+/// resolves the bundle itself and maps a resolution status verbatim in
+/// `SessionRunCtx::run`.)
 fn classify_run_error(session_id: &str, e: &ExecError) -> ApiError {
     match e {
-        ExecError::Config { status, message } => {
-            eprintln!("session_run_ctx: config resolution failed for {session_id}: {message}");
-            ApiError::Status(
-                StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            )
-        }
         ExecError::Run(chain) => {
             eprintln!("session_run_ctx: executor.run failed for {session_id}: {chain}");
             if let Some(missing) = extract_unregistered_text_ref(chain) {

@@ -59,50 +59,21 @@ pub struct ConsentDisclosure {
     pub fields: Vec<DisplayField>,
 }
 
-/// A load_component failure — a CONFIG-resolution failure (OCI pull / compile /
-/// digest), which is a pure function of the pinned config (no applicant input,
-/// no PII), so it carries the HTTP `status` the orchestrator surfaces to the
-/// consumer VERBATIM (e.g. 410 GONE on a removed artifact). Distinct from
-/// [`CallbackError`] (opaque runtime callbacks) precisely so this status
-/// survives the round trip back to the orchestrator instead of flattening to 500.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct LoadError {
-    pub status: u16,
-    pub message: String,
-}
-
-impl std::fmt::Display for LoadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "load_component failed ({}): {}", self.status, self.message)
-    }
-}
-impl std::error::Error for LoadError {}
-impl From<remoc::rtc::CallError> for LoadError {
-    fn from(err: remoc::rtc::CallError) -> Self {
-        // A transport failure isn't a config verdict — surface as a generic 500.
-        LoadError { status: 500, message: format!("load_component rpc failed: {err}") }
-    }
-}
-
-/// A run failure. Two kinds so the orchestrator can classify without string-
-/// sniffing: [`Config`](ExecError::Config) — a config-resolution failure relayed
-/// from `load_component`, whose HTTP status is surfaced verbatim; [`Run`]
-/// (ExecError::Run) — an opaque trap / instantiate / host-fn / transport failure,
-/// mapped to 500 (with the text-ref 422 substring exception the orchestrator
-/// still applies).
+/// A run failure — an opaque trap / instantiate / host-fn / transport / bundle-
+/// materialize failure, mapped to 500 (with the text-ref 422 substring exception
+/// the orchestrator still applies). Bundle RESOLUTION no longer crosses this
+/// boundary: the orchestrator resolves the compiled bundle itself on a
+/// [`RunOutcome::CacheMiss`] and maps any config-resolution status (e.g. 410 GONE)
+/// verbatim on its own side, so there is no separate config-error wire variant.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ExecError {
     Run(String),
-    Config { status: u16, message: String },
 }
 
 impl std::fmt::Display for ExecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExecError::Run(m) => write!(f, "run failed: {m}"),
-            ExecError::Config { status, message } => {
-                write!(f, "config resolution failed ({status}): {message}")
-            }
         }
     }
 }
@@ -110,13 +81,6 @@ impl std::error::Error for ExecError {}
 impl From<remoc::rtc::CallError> for ExecError {
     fn from(err: remoc::rtc::CallError) -> Self {
         ExecError::Run(format!("run rpc failed: {err}"))
-    }
-}
-/// A config-resolution failure from a mid-run `load_component` bubbles up with
-/// its status intact.
-impl From<LoadError> for ExecError {
-    fn from(e: LoadError) -> Self {
-        ExecError::Config { status: e.status, message: e.message }
     }
 }
 
@@ -144,15 +108,14 @@ impl From<CallbackError> for ExecError {
     }
 }
 
-/// One reducer round's inputs on the wire. NO bundle — the worker owns the L1
-/// component cache and PULLS the compiled bundle via
-/// [`CallbackService::load_component`] only on a cache miss.
-/// `session_state`/`event`/`props` are the round's already-decrypted inputs
-/// (the seal key stays orchestrator-side).
+/// One reducer round's inputs on the wire. `session_state`/`event`/`props` are the
+/// round's already-decrypted inputs (the seal key stays orchestrator-side).
 #[derive(Serialize, Deserialize)]
 pub struct RunRequest {
-    /// Names the fused component in the worker's L1 cache; echoed back in
-    /// `load_component` on a miss so the orchestrator keys L2 identically.
+    /// Names the fused component in the worker's L1 cache. Computed by the
+    /// ORCHESTRATOR and authoritative end-to-end — the worker only ever caches /
+    /// serves under this key and never names a key back, so it cannot steer which
+    /// slot a compile lands in (L2 cache-poisoning defence).
     pub composition_key: String,
     /// Static consumer config the policy reads via `context.props`.
     pub props: Vec<(String, Prop)>,
@@ -171,28 +134,32 @@ pub struct RunReply {
     pub status: RunStatus,
 }
 
+/// The result of [`ExecutorService::run`] (the cache-only path): either the round
+/// ran from the worker's L1, or the composition is NOT cached. On
+/// [`CacheMiss`](RunOutcome::CacheMiss) the orchestrator resolves the compiled
+/// bundle under ITS OWN `composition_key` (L2 read or cold compile) and calls
+/// [`run_with_bundle`](ExecutorService::run_with_bundle). Because the orchestrator
+/// both computes the key AND supplies the bundle, the worker never names a cache
+/// slot — a compromised worker cannot poison another session's compiled-code cache.
+/// `compat_token` is the worker's cwasm ABI id, so the orchestrator resolves/keys L2
+/// for a cwasm THIS runtime can deserialize.
+#[derive(Serialize, Deserialize)]
+pub enum RunOutcome {
+    Ran(RunStatus),
+    CacheMiss { compat_token: String },
+}
+
 /// The orchestrator-served CALLBACK boundary the keyless execution-worker calls
-/// BACK during a run: the worker holds no seal key, so blob rehydration
-/// (`media_load`), state persistence (`session_change`), AND compiled-bundle
-/// resolution (`load_component`) all happen orchestrator-side. A
-/// [`CallbackServiceClient`] is passed to the worker as an argument to
-/// [`ExecutorService::run`] — remoc multiplexes the callback calls over the SAME
-/// connection as the in-flight run, so the key never crosses to the worker and
-/// there is no hand-rolled request-id duplex.
+/// BACK DURING a run: the worker holds no seal key, so blob rehydration
+/// (`media_load`) and state persistence (`session_change`) happen orchestrator-
+/// side. Bundle resolution is NOT here — the composition is known before the run,
+/// so the orchestrator resolves it UP FRONT (see [`RunOutcome::CacheMiss`]) under
+/// its own key, keeping the OCI-pull / compile probe surface off the worker
+/// entirely. A [`CallbackServiceClient`] is passed to the worker as an argument to
+/// [`ExecutorService::run`] — remoc multiplexes these callbacks over the SAME
+/// connection as the in-flight run, so the key never crosses to the worker.
 #[remoc::rtc::remote]
 pub trait CallbackService {
-    /// Resolve the compiled bundle for `composition_key` — the worker's L1-miss
-    /// pull. The orchestrator serves it from L2 (sealed cwasm, keyed by
-    /// `(composition_key, compat_token)`), or compiles on an L2 miss (OCI pull +
-    /// compile-worker), seals it into L2, and returns it. `compat_token` is the
-    /// worker's cwasm ABI id, so the orchestrator never hands back a cwasm an
-    /// incompatible runtime can't deserialize.
-    async fn load_component(
-        &self,
-        composition_key: String,
-        compat_token: String,
-    ) -> Result<CompiledBundle, LoadError>;
-
     /// Rehydrate a stored blob by content hash (orchestrator unseals). `None` =
     /// miss (unknown / never-stored ref) — the worker's `from-blob-ref` traps
     /// on it, same as the in-process gate.
@@ -212,15 +179,33 @@ pub trait CallbackService {
 }
 
 /// The execute boundary as a remote trait. The execution-worker serves it; the
-/// orchestrator calls [`run`](ExecutorService::run), passing a
-/// [`CallbackServiceClient`] pointing at its own callback server so the keyless
-/// worker can pull the bundle / rehydrate media / persist state mid-round
-/// without ever holding the seal key.
+/// orchestrator calls it with a [`CallbackServiceClient`] pointing at its own
+/// callback server so the keyless worker can rehydrate media / persist state
+/// mid-round without ever holding the seal key. Two methods split the cache paths
+/// cleanly:
+///
+///   * [`run`](ExecutorService::run) — the L1-cache path, NO bundle: `Ran` on a
+///     hit, [`RunOutcome::CacheMiss`] on a miss.
+///   * [`run_with_bundle`](ExecutorService::run_with_bundle) — the post-miss path:
+///     the orchestrator supplies the bundle it resolved under its OWN key; the
+///     worker files it in L1 and runs. Always runs, so it returns the [`RunReply`]
+///     directly (no cache-miss outcome).
+///
+/// The worker only ever caches / serves under the orchestrator's `composition_key`
+/// and never names one back, so a compromised worker cannot poison another
+/// session's cache slot.
 #[remoc::rtc::remote]
 pub trait ExecutorService {
     async fn run(
         &self,
         req: RunRequest,
+        callbacks: CallbackServiceClient<remoc::codec::Ciborium>,
+    ) -> Result<RunOutcome, ExecError>;
+
+    async fn run_with_bundle(
+        &self,
+        req: RunRequest,
+        bundle: CompiledBundle,
         callbacks: CallbackServiceClient<remoc::codec::Ciborium>,
     ) -> Result<RunReply, ExecError>;
 }
@@ -292,24 +277,15 @@ mod execute_tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::split;
 
-    /// Orchestrator-side callback target: records the calls it receives and
-    /// returns canned media + a canned bundle, so the test can assert the worker
-    /// called BACK with the right arguments mid-run.
+    /// Orchestrator-side callback target: records the media / state calls it
+    /// receives and returns canned media, so the test can assert the worker called
+    /// BACK with the right arguments mid-run.
     struct MockCallbacks {
-        load_calls: Mutex<Vec<(String, String)>>,
         media_calls: Mutex<Vec<[u8; 32]>>,
         state_calls: Mutex<u32>,
     }
 
     impl CallbackService for MockCallbacks {
-        async fn load_component(
-            &self,
-            composition_key: String,
-            compat_token: String,
-        ) -> Result<CompiledBundle, LoadError> {
-            self.load_calls.lock().unwrap().push((composition_key, compat_token));
-            Ok(crate::bundle::sample_bundle())
-        }
         async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError> {
             self.media_calls.lock().unwrap().push(hash);
             Ok(Some(vec![0xAB, 0xCD]))
@@ -325,25 +301,32 @@ mod execute_tests {
         }
     }
 
-    /// Worker-side executor: on a run it PULLS the bundle via `load_component`
-    /// (the L1-miss path), then calls the passed-in callback client (media_load +
-    /// session_change) BACK to the orchestrator, then replies.
+    /// Worker-side executor: `run` (cache-only) always MISSES in this mock (naming
+    /// only its ABI id, NEVER the composition_key); `run_with_bundle` runs — calling
+    /// the passed-in callback client (media_load + session_change) BACK — and replies.
     struct MockExecutor;
 
     impl ExecutorService for MockExecutor {
         async fn run(
             &self,
+            _req: RunRequest,
+            _callbacks: CallbackServiceClient<Ciborium>,
+        ) -> Result<RunOutcome, ExecError> {
+            // Cache-only path: always a miss in this mock (no L1). The worker returns
+            // its ABI id and NEVER names the composition_key.
+            Ok(RunOutcome::CacheMiss { compat_token: "test-token".into() })
+        }
+
+        async fn run_with_bundle(
+            &self,
             req: RunRequest,
+            bundle: CompiledBundle,
             callbacks: CallbackServiceClient<Ciborium>,
         ) -> Result<RunReply, ExecError> {
-            // L1-miss pull: fetch the compiled bundle from the orchestrator
-            // (`?` converts a LoadError into ExecError::Config, status intact).
-            let bundle = callbacks
-                .load_component(req.composition_key.clone(), "test-token".into())
-                .await?;
             if bundle.cwasm.is_empty() {
                 return Err(ExecError::Run("empty bundle".into()));
             }
+            // Bundle in hand: run, calling BACK for media + state persistence.
             let bytes = callbacks.media_load([9u8; 32]).await?;
             if bytes != Some(vec![0xAB, 0xCD]) {
                 return Err(ExecError::Run("callback returned wrong media".into()));
@@ -351,35 +334,21 @@ mod execute_tests {
             callbacks
                 .session_change(req.session_state.clone(), vec![], vec![])
                 .await?;
-            Ok(RunReply {
-                status: RunStatus::Completed(Decision::Approved),
-            })
-        }
-    }
-
-    /// A config-resolution failure (e.g. 410 GONE on a removed artifact) keeps
-    /// its HTTP status across `LoadError -> ExecError::Config`, so the
-    /// orchestrator surfaces it verbatim instead of flattening to 500.
-    #[test]
-    fn load_error_status_survives_into_exec_error() {
-        let e: ExecError = LoadError { status: 410, message: "artifact gone".into() }.into();
-        match e {
-            ExecError::Config { status, .. } => assert_eq!(status, 410),
-            other => panic!("expected Config, got {other:?}"),
+            Ok(RunReply { status: RunStatus::Completed(Decision::Approved) })
         }
     }
 
     type ExecCli = ExecutorServiceClient<Ciborium>;
 
-    /// The bidirectional gate: `run()` crosses to the worker WITH a callback
-    /// client argument; the keyless worker invokes `load_component` + `media_load`
-    /// + `session_change` BACK to the orchestrator mid-run, all multiplexed over
-    /// the ONE remoc connection. This is the pattern that removes the hand-rolled
-    /// duplex — and now the bundle is PULLED, not pushed.
+    /// `run()` crosses to the worker WITH a callback client; on an L1 miss the
+    /// worker returns `CacheMiss` (naming only its ABI id), the orchestrator
+    /// resolves the bundle under ITS OWN key and re-drives with `bundle = Some(..)`,
+    /// and only THEN does the keyless worker call `media_load` + `session_change`
+    /// BACK, multiplexed over the ONE remoc connection. The worker never names the
+    /// composition_key — the poison-a-foreign-slot vector is gone.
     #[tokio::test]
-    async fn execute_bidirectional_callbacks_over_remoc() {
+    async fn cache_miss_then_run_with_orchestrator_supplied_bundle() {
         let callbacks = Arc::new(MockCallbacks {
-            load_calls: Mutex::new(Vec::new()),
             media_calls: Mutex::new(Vec::new()),
             state_calls: Mutex::new(0),
         });
@@ -417,24 +386,26 @@ mod execute_tests {
             let _ = cb_server.serve(true).await;
         });
 
-        let reply = exec_client
-            .run(
-                RunRequest {
-                    composition_key: "k".into(),
-                    props: vec![("age".into(), Prop::Int(30))],
-                    session_state: SessionState::default(),
-                    event: Event::Start,
-                },
-                cb_client,
-            )
+        let mk_req = || RunRequest {
+            composition_key: "k".into(),
+            props: vec![("age".into(), Prop::Int(30))],
+            session_state: SessionState::default(),
+            event: Event::Start,
+        };
+
+        // Phase 1: cache-only run → miss, and NOTHING runs (no callbacks fire).
+        match exec_client.run(mk_req(), cb_client.clone()).await.unwrap() {
+            RunOutcome::CacheMiss { compat_token } => assert_eq!(compat_token, "test-token"),
+            RunOutcome::Ran(_) => panic!("expected CacheMiss on the cache-only run"),
+        }
+
+        // Phase 2: orchestrator resolved the bundle under ITS OWN composition_key
+        // and re-drives via run_with_bundle; now the round runs and calls back once.
+        let RunReply { status } = exec_client
+            .run_with_bundle(mk_req(), crate::bundle::sample_bundle(), cb_client)
             .await
             .unwrap();
-
-        assert!(matches!(reply.status, RunStatus::Completed(Decision::Approved)));
-        assert_eq!(
-            callbacks.load_calls.lock().unwrap().as_slice(),
-            &[("k".to_string(), "test-token".to_string())]
-        );
+        assert!(matches!(status, RunStatus::Completed(Decision::Approved)));
         assert_eq!(callbacks.media_calls.lock().unwrap().as_slice(), &[[9u8; 32]]);
         assert_eq!(*callbacks.state_calls.lock().unwrap(), 1);
 

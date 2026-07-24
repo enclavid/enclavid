@@ -11,16 +11,19 @@
 //! cross-round persistence and no cross-session bleed. Started by INFRASTRUCTURE
 //! (docker-compose / k8s), exactly like the hatch and the compile-worker.
 //!
-//! **Keyless.** The supervisor holds no `tee_seal_key` and no applicant token.
-//! Two hops carry the keyless callbacks:
+//! **Keyless.** The supervisor holds no `tee_seal_key` and no applicant token. Two
+//! hops carry the keyless callbacks — blob rehydration + state persistence, both
+//! seal-key-side. There is NO bundle-resolution callback: the orchestrator resolves
+//! the compiled bundle UP FRONT and hands it in on [`RunRequest::bundle`] (see
+//! [`RunOutcome::CacheMiss`]), so the OCI-pull / compile probe surface never touches
+//! the worker, and the worker never names a cache slot back (L2 cache-poisoning
+//! defence).
 //!   * api → supervisor: the orchestrator passes a `CallbackServiceClient` into
-//!     [`run`](ExecutorService::run) (bundle resolution + blob rehydration + state
-//!     persistence, all seal-key-side).
-//!   * supervisor → child: the supervisor stands up a [`RelayCallbacks`] (a
-//!     narrowed [`ChildCallbacks`], NO `load_component`) that forwards the child's
-//!     `media_load` / `session_change` on to the api client — so the untrusted-
-//!     wasm child gets blob + state I/O but never the seal key nor the OCI-pull /
-//!     compile probe surface.
+//!     [`run`](ExecutorService::run).
+//!   * supervisor → child: the supervisor stands up a [`RelayCallbacks`]
+//!     ([`ChildCallbacks`]) that forwards the child's `media_load` /
+//!     `session_change` on to the api client — so the untrusted-wasm child gets
+//!     blob + state I/O but never the seal key.
 //!
 //! **What is domain vs supervisor.** The generic process plumbing — spawn a
 //! disposable child over a socketpair, bound concurrency, enforce the per-round
@@ -33,13 +36,14 @@
 //! [`CompositionEntry`] per `composition_key`. The compiled `cwasm` lives there as
 //! a single anonymous in-RAM file — a sealed Linux `memfd` in prod, an unlinked
 //! tmpfile in dev — held by fd, NOT as heap bytes and NOT as a named file (the two
-//! earlier copies collapse into this one). On an L1 miss it PULLS the wire bundle
-//! from api via `load_component` (`try_get_with` coalesces concurrent misses into
-//! ONE pull), writes the `cwasm` into the memfd, and DROPS the wire `Vec`. Each
-//! per-round child then MMAPs it via a read-only fd the supervisor hands it — never
-//! a path — so no child can reach another composition's code. A live `Component`
-//! never crosses the process boundary; the `Component::deserialize` unsafe sink
-//! stays in the disposable child.
+//! earlier copies collapse into this one). On an L1 miss it returns
+//! [`RunOutcome::CacheMiss`]; the orchestrator resolves the bundle under its OWN
+//! `composition_key` and re-drives with `RunRequest::bundle = Some(..)`, which the
+//! supervisor writes into the memfd (`try_get_with` coalesces concurrent installs
+//! into ONE write) and DROPS the wire `Vec`. Each per-round child then MMAPs it via
+//! a read-only fd the supervisor hands it — never a path — so no child can reach
+//! another composition's code. A live `Component` never crosses the process
+//! boundary; the `Component::deserialize` unsafe sink stays in the disposable child.
 //!
 //! Transport TODAY: a plain TCP listener (dev) to api; Plan-A swaps it for the
 //! host vsock-relay rendezvous + RA-TLS. The supervisor↔child hop is a private
@@ -58,11 +62,11 @@ use tokio::net::{TcpListener, TcpStream};
 use zeroize::Zeroizing;
 use engine_supervisor::ChildPool;
 
-use engine_executor::{SessionState, compat_token};
+use engine_executor::{Event, SessionState, compat_token};
 use engine_rpc::{
     BundleRef, CallbackError, CallbackService, CallbackServiceClient, CatalogEntry, ChildCallbacks,
     ChildCallbacksServerShared, ChildService, ChildServiceClient, CompiledBundle, ConsentDisclosure,
-    ExecError, ExecutorService, ExecutorServiceClient, ExecutorServiceServerShared, LoadError,
+    ExecError, ExecutorService, ExecutorServiceClient, ExecutorServiceServerShared, Prop, RunOutcome,
     RunReply, RunRequest,
 };
 use engine_types::composition::EmbeddedImport;
@@ -92,16 +96,6 @@ struct CompositionEntry {
     embedded_imports: Vec<EmbeddedImport>,
     /// Per-component parsed catalogs (the registry-builder inputs) — also small.
     catalogs: Vec<CatalogEntry>,
-}
-
-/// Why resolving a composition into an L1 entry failed — kept typed so a config
-/// resolution status (surfaced to the consumer verbatim) is never confused with a
-/// local materialization failure (a fail-safe run error).
-enum CompositionInitError {
-    /// api's `load_component` returned a config-resolution status (e.g. 410 GONE).
-    Load(LoadError),
-    /// Writing/sealing the cwasm memfd failed (a local, transient host fault).
-    Materialize(String),
 }
 
 /// Materialize `bytes` as the anonymous in-RAM file the child MMAPs by fd. On the
@@ -191,26 +185,20 @@ struct Supervisor {
 }
 
 impl Supervisor {
-    /// Resolve the composition's L1 entry, PULLING from api on a miss and
-    /// materializing the cwasm into an anonymous fd (dropping the wire `Vec`).
-    /// `try_get_with` coalesces concurrent misses for the same key into ONE
-    /// `load_component` pull + ONE memfd write; errors aren't cached (a transient
-    /// failure retries). A config-resolution status (e.g. 410 GONE) is preserved as
-    /// [`ExecError::Config`] so api surfaces it verbatim. Runs supervisor-side,
-    /// BEFORE the child is spawned, so a config failure never spends a child slot.
-    async fn resolve_composition(
+    /// Materialize an ORCHESTRATOR-PROVIDED bundle into the L1 memfd cache under
+    /// `composition_key`, coalescing concurrent installs of the same key into ONE
+    /// memfd write (`try_get_with`); errors aren't cached (a transient failure
+    /// retries). The orchestrator both COMPUTED the key AND resolved the bundle, so
+    /// the worker only ever files bytes under the key it was handed — it cannot
+    /// choose a foreign slot (L2 cache-poisoning defence).
+    async fn install_bundle(
         &self,
         composition_key: &str,
-        callbacks: &CallbackServiceClient<Ciborium>,
+        bundle: CompiledBundle,
     ) -> Result<Arc<CompositionEntry>, ExecError> {
-        let cb = callbacks.clone();
         let key = composition_key.to_string();
         self.compositions
-            .try_get_with(key.clone(), async move {
-                let bundle = cb
-                    .load_component(key, compat_token())
-                    .await
-                    .map_err(CompositionInitError::Load)?;
+            .try_get_with(key, async move {
                 let CompiledBundle { cwasm, embedded_imports, catalogs } = bundle;
                 // Zeroize the transient wire copy on drop: it's plaintext (possible
                 // model weights) and, once written into the memfd, a needless second
@@ -219,9 +207,10 @@ impl Supervisor {
                 // host-side guarantee; this just removes the copy we own.)
                 let cwasm = Zeroizing::new(cwasm);
                 let size = cwasm.len() as u64;
-                let file = anon_cwasm(&cwasm).map_err(CompositionInitError::Materialize)?;
+                let file = anon_cwasm(&cwasm)
+                    .map_err(|m| ExecError::Run(format!("materialize cwasm: {m}")))?;
                 // The wire `Vec` drops here (zeroized) — the memfd is now the ONLY copy.
-                Ok::<_, CompositionInitError>(Arc::new(CompositionEntry {
+                Ok::<_, ExecError>(Arc::new(CompositionEntry {
                     cwasm: file,
                     size,
                     embedded_imports,
@@ -229,31 +218,24 @@ impl Supervisor {
                 }))
             })
             .await
-            .map_err(|arc: Arc<CompositionInitError>| match &*arc {
-                CompositionInitError::Load(e) => ExecError::Config {
-                    status: e.status,
-                    message: e.message.clone(),
-                },
-                CompositionInitError::Materialize(m) => {
-                    ExecError::Run(format!("materialize cwasm: {m}"))
-                }
-            })
+            .map_err(|arc: Arc<ExecError>| (*arc).clone())
     }
-}
 
-impl ExecutorService for Supervisor {
-    async fn run(
+    /// Spawn a fresh disposable child, prime it with `entry`'s cwasm memfd, drive
+    /// ONE round through the callback relay, and return the round's reply. Shared by
+    /// [`run`](ExecutorService::run) (L1 hit) and
+    /// [`run_with_bundle`](ExecutorService::run_with_bundle) (post-miss install).
+    /// `entry` (holding the memfd open) lives across the whole `pool.run().await`, so
+    /// the fd handed at fork/dup2 is valid; the child's own inherited fd then keeps
+    /// the memfd alive independently.
+    async fn run_in_child(
         &self,
-        req: RunRequest,
+        entry: Arc<CompositionEntry>,
+        session_state: SessionState,
+        event: Event,
+        props: Vec<(String, Prop)>,
         callbacks: CallbackServiceClient<Ciborium>,
     ) -> Result<RunReply, ExecError> {
-        // Resolve the L1 entry (pull from api + materialize the memfd on miss) —
-        // domain-side, before any child is spawned.
-        let entry = self.resolve_composition(&req.composition_key, &callbacks).await?;
-        // Borrow the composition's cwasm fd to hand the child at spawn. `entry`
-        // (holding the memfd open) lives across the whole `pool.run().await` below,
-        // so the fd is valid at fork/dup2 time; the child's own inherited fd then
-        // keeps the memfd alive independently.
         let cwasm_fd = entry.cwasm.as_fd();
         // The child re-opens its inherited fd (`/proc/self/fd/N`) and MMAPs it via
         // `deserialize_file`; the 7-15 MiB never crosses the child hop — only the
@@ -263,11 +245,10 @@ impl ExecutorService for Supervisor {
             embedded_imports: entry.embedded_imports.clone(),
             catalogs: entry.catalogs.clone(),
         };
-        let RunRequest { session_state, event, props, .. } = req;
 
-        // Drive ONE round in a fresh disposable child, under the pool's
-        // concurrency bound + wall-clock deadline (the pool kills + reaps a wedged
-        // child so it can't leak its slot). The pool installs the cwasm fd at
+        // Drive ONE round in a fresh disposable child, under the pool's concurrency
+        // bound + wall-clock deadline (the pool kills + reaps a wedged child so it
+        // can't leak its slot). The pool installs the cwasm fd at
         // `FIRST_INHERITED_FD` in the child; the closure is the DOMAIN work: prime
         // the child (MMAP the cwasm), stand up the callback relay, run.
         let outcome = self
@@ -278,8 +259,7 @@ impl ExecutorService for Supervisor {
                 client.prime(bundle_ref).await?;
 
                 // Relay: the child's media_load / session_change forward THROUGH
-                // here to api's callbacks (the seal-key holder). No `load_component`
-                // is exposed to the child.
+                // here to api's callbacks (the seal-key holder).
                 let relay = Arc::new(RelayCallbacks { upstream: callbacks });
                 let (relay_server, relay_client) =
                     ChildCallbacksServerShared::<_, Ciborium>::new(relay, CALLBACK_CONCURRENCY);
@@ -291,13 +271,50 @@ impl ExecutorService for Supervisor {
             })
             .await;
 
-        // The pool returns the closure's domain result verbatim on success; a
-        // pool-level failure (spawn error, or the deadline killing a wedged
-        // child) becomes a fail-safe `ExecError::Run` (api 5xx → applicant retry).
+        // The pool returns the closure's domain `Result<RunReply, ExecError>` on
+        // success; a pool-level failure (spawn error, or the deadline killing a
+        // wedged child) becomes a fail-safe `ExecError::Run` (api 5xx → applicant retry).
         match outcome {
             Ok(domain_result) => domain_result,
             Err(pool_err) => Err(ExecError::Run(format!("child supervisor: {pool_err}"))),
         }
+    }
+}
+
+impl ExecutorService for Supervisor {
+    /// The L1-cache path: run the composition if it is cached, else report the miss
+    /// so the orchestrator resolves the bundle (under ITS OWN key) and re-drives via
+    /// [`run_with_bundle`](Self::run_with_bundle). No bundle crosses on this call.
+    async fn run(
+        &self,
+        req: RunRequest,
+        callbacks: CallbackServiceClient<Ciborium>,
+    ) -> Result<RunOutcome, ExecError> {
+        let RunRequest { composition_key, props, session_state, event } = req;
+        match self.compositions.get(&composition_key).await {
+            Some(entry) => self
+                .run_in_child(entry, session_state, event, props, callbacks)
+                .await
+                .map(|RunReply { status }| RunOutcome::Ran(status)),
+            // Miss: the worker returns ONLY its ABI id — it never names the key.
+            None => Ok(RunOutcome::CacheMiss { compat_token: compat_token() }),
+        }
+    }
+
+    /// The post-miss path: the orchestrator supplies the bundle it resolved under
+    /// `req.composition_key`; file it in L1 under THAT key and run. Always runs (a
+    /// bundle is in hand), so it returns the [`RunReply`] directly. The worker files
+    /// bytes only under the orchestrator's key, so it cannot poison another
+    /// composition's slot.
+    async fn run_with_bundle(
+        &self,
+        req: RunRequest,
+        bundle: CompiledBundle,
+        callbacks: CallbackServiceClient<Ciborium>,
+    ) -> Result<RunReply, ExecError> {
+        let RunRequest { composition_key, props, session_state, event } = req;
+        let entry = self.install_bundle(&composition_key, bundle).await?;
+        self.run_in_child(entry, session_state, event, props, callbacks).await
     }
 }
 

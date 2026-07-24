@@ -18,7 +18,6 @@
 
 use std::sync::Arc;
 
-use hatch_client::{Event, SessionState};
 use remoc::codec::Ciborium;
 // `ServerShared` (the trait) is in scope so `CallbackServiceServerShared::new`
 // resolves — the per-run callback server we hand the worker.
@@ -26,8 +25,8 @@ use remoc::rtc::ServerShared;
 // `CallbackService` / `ExecutorService` (the remoc traits) are in scope so the
 // generated client's `.run()` + the callback server resolve.
 use engine_rpc::{
-    CallbackService, CallbackServiceServerShared, ExecError, ExecutorService,
-    ExecutorServiceClient, Prop, RunReply, RunRequest, RunStatus,
+    CallbackService, CallbackServiceClient, CallbackServiceServerShared, CompiledBundle, ExecError,
+    ExecutorService, ExecutorServiceClient, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 
 /// Concurrent callback invocations the per-run CallbackService server handles.
@@ -47,42 +46,55 @@ impl Executor {
         Self { client }
     }
 
-    /// Drive one reducer round on the worker. `callbacks` is the api-served
-    /// `CallbackService` the keyless worker calls back into — including
-    /// `load_component`, which the worker uses to pull the compiled bundle on an
-    /// L1 miss (so the run request carries no bundle). Returns the round's
-    /// [`RunStatus`]; state persistence already happened via the callback, so the
-    /// engine's returned state is discarded worker-side.
+    /// Cache-only attempt: try to run from the worker's L1. `Ran` on a hit;
+    /// [`RunOutcome::CacheMiss`] on a miss, at which point the caller resolves the
+    /// bundle under ITS OWN `composition_key` and calls
+    /// [`run_with_bundle`](Self::run_with_bundle). The two-phase loop lives in the
+    /// caller (`SessionRunCtx::run`), so bundle resolution stays with the
+    /// key-holding orchestrator, never the worker.
     pub async fn run<C>(
         &self,
-        composition_key: &str,
-        session_state: SessionState,
-        event: Event,
-        props: Vec<(String, Prop)>,
+        req: RunRequest,
+        callbacks: Arc<C>,
+    ) -> Result<RunOutcome, ExecError>
+    where
+        C: CallbackService + Send + Sync + 'static,
+    {
+        self.client.run(req, Self::callback_client(callbacks)).await
+    }
+
+    /// Post-miss attempt: hand the worker the `bundle` we resolved under
+    /// `req.composition_key`; it files it in L1 under that key and runs. Always runs
+    /// (a bundle is in hand), so this returns the round's `RunStatus` directly.
+    pub async fn run_with_bundle<C>(
+        &self,
+        req: RunRequest,
+        bundle: CompiledBundle,
         callbacks: Arc<C>,
     ) -> Result<RunStatus, ExecError>
     where
         C: CallbackService + Send + Sync + 'static,
     {
-        // Stand up the per-run callback server on the same connection. It
-        // self-terminates once the client we pass into `run` and our copy both
-        // drop (after this fn returns), so no task leaks per round.
+        self.client
+            .run_with_bundle(req, bundle, Self::callback_client(callbacks))
+            .await
+            .map(|RunReply { status }| status)
+    }
+
+    /// Stand up the per-call `CallbackService` server (media_load / session_change)
+    /// on the connection and hand back its client. It self-terminates once the
+    /// client we pass into the RPC and this copy both drop (after the call returns),
+    /// so no task leaks per attempt.
+    fn callback_client<C>(callbacks: Arc<C>) -> CallbackServiceClient<Ciborium>
+    where
+        C: CallbackService + Send + Sync + 'static,
+    {
         let (cb_server, cb_client) =
             CallbackServiceServerShared::<_, Ciborium>::new(callbacks, CALLBACK_CONCURRENCY);
         tokio::spawn(async move {
             let _ = cb_server.serve(true).await;
         });
-
-        let req = RunRequest {
-            composition_key: composition_key.to_string(),
-            props,
-            session_state,
-            event,
-        };
-        self.client
-            .run(req, cb_client)
-            .await
-            .map(|RunReply { status }| status)
+        cb_client
     }
 }
 

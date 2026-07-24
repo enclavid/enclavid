@@ -136,13 +136,16 @@ pub(super) fn trust_metadata(
             Ok(opt_md)
         })?
         .trust_unchecked::<Replay, _>(reason!(r#"
-Metadata fields (status, policy_ref, client.ref, ...) are stable
-across the session lifetime; a stale snapshot answers the same
-values the current snapshot would. AEAD-binding to session_id
-(AAD) prevents substitution with another session's metadata. For
-endpoints that pair this read with another list (e.g. disclosures),
-the freshness of that list is checked by its own AuthN trust gate
-against metadata's running hash.
+Metadata's ACCESS fields (client_session_token, principal) are immutable
+across the session, so the AuthZ gate above is unaffected by staleness. The
+mutable fields (status, disclosure_count/hash) CAN be stale — a stateless TEE
+cannot detect a compromised host replaying an older (genuine,
+tee_seal_key-sealed, AAD=session_id) snapshot — but the effect is benign or
+detected: a stale status just re-polls, and a paired disclosure list is
+freshness-checked by its own AuthN gate against metadata's running hash, so a
+stale hash surfaces as the consumer's chain-verification failure. AAD prevents
+substitution with another session. Full-coherent rollback is an accepted
+residual of the host-holds-all-state model.
         "#))
         .into_inner()
         .ok_or_else(|| {

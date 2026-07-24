@@ -1,65 +1,36 @@
 //! The api side of the keyless execution-worker's callback boundary.
 //!
-//! During a run the worker calls BACK over the same remoc connection:
-//! `load_component` to resolve the compiled bundle on an L1 miss (the worker
-//! owns the only in-memory component cache; the orchestrator owns L2), `media_load`
+//! During a run the worker calls BACK over the same remoc connection: `media_load`
 //! to rehydrate a stored blob, and `session_change` to seal + persist the
-//! post-round state + disclosures + captured media. [`CallbackServer`] wires
-//! those to the per-round [`SessionPersister`] + [`HatchMediaStore`] (they hold
-//! the seal key + applicant token) and to [`resolve_bundle`](super::shared::resolve_bundle)
-//! (L2 read, or cold compile on a miss). It implements `engine_rpc::CallbackService`;
-//! the orchestrator stands one up per run and passes its client into
+//! post-round state + disclosures + captured media. [`CallbackServer`] wires those
+//! to the per-round [`SessionPersister`] + [`HatchMediaStore`] (they hold the seal
+//! key + applicant token). It implements `engine_rpc::CallbackService`; the
+//! orchestrator stands one up per run and passes its client into
 //! `ExecutorService::run` (see [`crate::executor`]).
+//!
+//! Bundle resolution is deliberately NOT a callback here. The composition is known
+//! before the run, so the orchestrator resolves the compiled bundle UP FRONT (see
+//! `SessionRunCtx::run`, on a `RunOutcome::CacheMiss`) under the `composition_key`
+//! IT computed — the worker never names a cache slot, which closes the L2
+//! cache-poisoning vector and keeps the OCI-pull / compile probe surface off the
+//! worker entirely.
 
 use std::sync::Arc;
 
-use hatch_client::{SessionMetadata, SessionState};
-use engine_rpc::{CallbackError, CallbackService, CompiledBundle, ConsentDisclosure, LoadError};
-
-use crate::state::AppState;
+use hatch_client::SessionState;
+use engine_rpc::{CallbackError, CallbackService, ConsentDisclosure};
 
 use super::media_store::HatchMediaStore;
 use super::persister::SessionPersister;
 
 /// Per-run callback target: delegates the callback methods to the seal-key-holding
-/// persister + media store, and to the L2/compile bundle resolver. One per round
-/// (the persister + media store are per-round; the state + metadata drive the
-/// composition resolve).
+/// persister + media store. One per round (both are per-round).
 pub(super) struct CallbackServer {
     pub(super) persister: Arc<SessionPersister>,
     pub(super) media_store: Arc<HatchMediaStore>,
-    /// Shared orchestrator state — the L2 [`CacheStore`](hatch_client::CacheStore),
-    /// registry / KBS / compiler clients `resolve_bundle` needs on a cache miss.
-    pub(super) state: Arc<AppState>,
-    /// This session's metadata — the pinned `policy_ref` / plugins / registry
-    /// auth a cold compile pulls + fuses. Immutable for the session.
-    pub(super) metadata: SessionMetadata,
-    pub(super) session_id: String,
 }
 
 impl CallbackService for CallbackServer {
-    async fn load_component(
-        &self,
-        composition_key: String,
-        compat_token: String,
-    ) -> Result<CompiledBundle, LoadError> {
-        // A config-resolution status (410 GONE on a removed artifact, 500 on a
-        // compile/infra fault) is a pure function of the pinned config — carry it
-        // VERBATIM so the orchestrator surfaces it, not a flattened 500.
-        super::shared::resolve_bundle(
-            &self.state,
-            &composition_key,
-            &compat_token,
-            &self.session_id,
-            &self.metadata,
-        )
-        .await
-        .map_err(|status| LoadError {
-            status: status.as_u16(),
-            message: format!("resolve bundle failed for session {}", self.session_id),
-        })
-    }
-
     async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError> {
         self.media_store.load(&hash).await
     }
