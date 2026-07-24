@@ -14,6 +14,11 @@ serde = { version = "1", features = ["derive"] }
 # Encode the plugin `wasm` bytes as a CBOR byte string, not a per-byte integer
 # array (ciborium's default for `Vec<u8>`) — see the `wasm` field.
 serde_bytes = "0.11"
+# Unicode General_Category lookup for the consent / i18n text WHITELIST in
+# `sanitize`: only visible-content categories pass (default-deny), closing the
+# invisible-character covert channel robustly instead of via an ever-incomplete
+# blacklist. Small table-driven crate; leaf-safe (no wasmtime).
+unicode-general-category = "1"
 # Owns the wire-format cardinality caps re-exported by `limits`; a leaf
 # (no wasmtime) so it does not compromise this crate's leaf-ness.
 enclavid-embedded = { path = "../embedded" }

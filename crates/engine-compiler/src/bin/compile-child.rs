@@ -3,12 +3,20 @@
 //!
 //! Cranelift compiling attacker-crafted wasm is a wide, complex surface (parser /
 //! validator / codegen). Running each compile in a fresh throwaway process
-//! confines a compiler-bug exploit to that ONE compile — no persistent implant
-//! that could poison a LATER tenant's `cwasm`. **Keyless** and holds no user
-//! data: its memory is the attacker's own artifact + Cranelift internals, so the
-//! confidentiality blast radius is ~nil; the containment here is integrity
-//! (defense-in-depth) plus the pool's wall-clock deadline (a malicious wasm
-//! can't hang Cranelift forever and wedge the worker).
+//! confines a compiler-bug exploit to that ONE compile PROCESS — **keyless**,
+//! holding no user data (its memory is the attacker's own artifact + Cranelift
+//! internals), so the CONFIDENTIALITY blast radius is ~nil; the pool's wall-clock
+//! deadline stops a malicious wasm from wedging the worker.
+//!
+//! What process-disposal does NOT contain is the OUTPUT: the `cwasm` this child
+//! emits is trusted downstream and `deserialize`d as native code by the executor.
+//! A compiler-toolchain memory-safety escape could therefore emit a malicious cwasm
+//! for its OWN composition (the "unvalidated cwasm deserialize" residual). Its reach
+//! is bounded: the L2 seal AAD + OCI digest bind each cwasm to the pinned
+//! composition (a foreign one won't open), and the deserialize + execution happen in
+//! the disposable per-round `session-child` — so a malicious cwasm gets the SAME
+//! blast radius as a wasm sandbox escape (one round of one session pinning that same
+//! adversary-supplied composition), never a third party's.
 //!
 //! Lifecycle: adopt the socketpair on fd 0, serve ONE
 //! `engine_rpc::CompilerService::compile`, exit when the supervisor drops its
