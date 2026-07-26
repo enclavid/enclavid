@@ -135,7 +135,6 @@ pub struct SessionMetadata {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionState {
-    pub policy_hash: Vec<u8>,
     /// The policy's own opaque serialized state, threaded verbatim
     /// through `handle`. Empty on a fresh session (genesis `start`).
     pub state: Vec<u8>,

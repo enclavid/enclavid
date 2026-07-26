@@ -224,7 +224,6 @@ impl Executor {
 
         // Perform the action and assemble the next session record.
         let mut next_session = SessionState {
-            policy_hash: session.policy_hash,
             state: new_state,
             current_prompt: None,
         };
