@@ -37,55 +37,6 @@ use super::media_store::HatchMediaStore;
 use super::persister::SessionPersister;
 use super::views::{progress_from, SessionProgress};
 
-pub(super) async fn fetch_metadata(
-    state: &AppState,
-    session_id: &str,
-) -> Result<SessionMetadata, StatusCode> {
-    // Applicant flow has no per-session info to cross-check metadata
-    // against — security relies on the bearer-key auth layer plus
-    // AEAD-sealed metadata (`tee_seal_key`, AAD=session_id) so any
-    // host-side tampering breaks the seal at unwrap time. We accept
-    // the host's existence claim and content at face value here; the
-    // trust delegation is concentrated in `trust_unchecked` so callers
-    // don't have to repeat the analysis.
-    let ((metadata,), _version) = state
-        .session_store
-        .read(public_session_id(session_id), (Metadata,))
-        .await
-        .map_err(|e| {
-            eprintln!(
-                "fetch_metadata: session_store.read failed for {session_id}: {e}",
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    metadata
-        .trust_unchecked::<AuthZ, _>(reason!(r#"
-Applicant flow doesn't authenticate per-tenant, so we have
-no principal to cross-check here. Security relies on the
-bearer-key auth layer at the route plus AEAD-binding on state
-under applicant_session_token.
-        "#))
-        .trust_unchecked::<Replay, _>(reason!(r#"
-Metadata is NOT static — the persister mutates it each disclosure/media
-round (captured_media, disclosure_count/hash, status) — so freshness is
-UNVERIFIABLE here, not guaranteed: a stateless TEE cannot detect a
-compromised host replaying an older (genuine, tee_seal_key-sealed,
-AAD=session_id) snapshot. Safe because BOUNDED: the mutations are monotonic,
-so a stale snapshot can only DROP entries — a later from-blob-ref then misses
-the dropped capture and traps (session-local DoS), and a rewound disclosure
-count surfaces as the consumer's own chain-verification failure. No leak
-(host replays blobs it cannot read), no forgery (AEAD). Same containment as
-the version vouch below (a lying host self-limits to DoS); full-coherent
-rollback is an accepted residual of the host-holds-all-state model.
-        "#))
-        .into_inner()
-        .ok_or_else(|| {
-            eprintln!("fetch_metadata: metadata is None for {session_id}");
-            StatusCode::NOT_FOUND
-        })
-}
-
 /// Build the static `props` list the policy reads via
 /// `context.props`, from the consumer's config bytes in metadata.
 pub(super) fn parse_props(
@@ -303,37 +254,74 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
         // text-ref resolves to the user's preferred language.
         let locale = Locale::from_request_parts(parts, state).await?;
 
-        let metadata = fetch_metadata(state, &session_id).await?;
-        let props = parse_props(&metadata)?;
-
-        // Existence claim is host-controlled; content of Some is
-        // AEAD-integrity-verified at decode (AuthN cleared, AuthZ
-        // implicit by holding the right applicant_session_token). The version
-        // seeds the persister's per-call writes within this run.
-        let ((state_opt,), version) = state
+        // Read metadata AND the prior state in ONE batched snapshot. Both are
+        // always needed on /connect and /input, so batching saves a round-trip
+        // (one HTTP-over-vsock + one Redis fetch instead of two), and it yields
+        // ONE version coherent with both fields — the version that seeds the
+        // persister then matches the metadata it also writes back. Not a
+        // security property (the CAS is host-enforced); a consistency + latency
+        // win.
+        let ((metadata_untrusted, state_opt), version) = state
             .session_store
             .read(
                 public_session_id(&session_id),
-                (StateField {
-                    applicant_session_token: applicant_session_token.expose_secret(),
-                },),
+                (
+                    Metadata,
+                    StateField {
+                        applicant_session_token: applicant_session_token.expose_secret(),
+                    },
+                ),
             )
             .await
             .map_err(|e| {
                 // A state blob that won't open under this bearer is a wrong key /
                 // different-device claim (the inner AEAD layer is keyed by the
                 // applicant token) — the durable, cryptographic first-claim guard.
-                // Surface it as 403 so the frontend offers `/reset`; everything
-                // else (transport, codec) is a real 500. An ABSENT state is
-                // `Ok(None)`, not an error, so a first `/connect` still proceeds.
+                // Metadata is sealed under tee_seal_key (NOT the applicant token),
+                // so a Crypto error here is unambiguously the State field. Surface
+                // it as 403 so the frontend offers `/reset`; everything else
+                // (transport, codec) is a real 500. An ABSENT state is `Ok(None)`,
+                // not an error, so a first `/connect` still proceeds.
                 if matches!(e, hatch_client::BridgeError::Crypto(_)) {
                     return StatusCode::FORBIDDEN;
                 }
                 eprintln!(
-                    "session_run_ctx: session_store.read(State) failed for {session_id}: {e}",
+                    "session_run_ctx: session_store.read(Metadata, State) failed for {session_id}: {e}",
                 );
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
+
+        // Trust the metadata. Applicant flow has no per-tenant principal to
+        // cross-check; security rides on the bearer-key auth layer + AEAD-
+        // sealing under tee_seal_key/AAD=session_id (host tampering breaks the
+        // seal at decode).
+        let metadata = metadata_untrusted
+            .trust_unchecked::<AuthZ, _>(reason!(r#"
+Applicant flow doesn't authenticate per-tenant, so we have
+no principal to cross-check here. Security relies on the
+bearer-key auth layer at the route plus AEAD-binding on state
+under applicant_session_token.
+            "#))
+            .trust_unchecked::<Replay, _>(reason!(r#"
+Metadata is NOT static — the persister mutates it each disclosure/media
+round (captured_media, disclosure_count/hash, status) — so freshness is
+UNVERIFIABLE here, not guaranteed: a stateless TEE cannot detect a
+compromised host replaying an older (genuine, tee_seal_key-sealed,
+AAD=session_id) snapshot. Safe because BOUNDED: the mutations are monotonic,
+so a stale snapshot can only DROP entries — a later from-blob-ref then misses
+the dropped capture and traps (session-local DoS), and a rewound disclosure
+count surfaces as the consumer's own chain-verification failure. No leak
+(host replays blobs it cannot read), no forgery (AEAD). Same containment as
+the version vouch below (a lying host self-limits to DoS); full-coherent
+rollback is an accepted residual of the host-holds-all-state model.
+            "#))
+            .into_inner()
+            .ok_or_else(|| {
+                eprintln!("session_run_ctx: metadata is None for {session_id}");
+                StatusCode::NOT_FOUND
+            })?;
+
+        let props = parse_props(&metadata)?;
 
         let session_state = state_opt
             .trust_unchecked::<Replay, _>(reason!(r#"

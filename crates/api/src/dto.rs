@@ -30,9 +30,10 @@ use crate::locale::Locale;
 
 /// The pinned policy of a session, echoed to the consumer: the full OCI
 /// reference plus its `sha256:<hex>` digest substring (the same value the
-/// attestation quote binds in `ReportData.policy_digest`). Shared by the
-/// create response (`CreateSessionResponse`) and the read view
-/// (`SessionView`).
+/// attestation quote binds in `ReportData.policy_digest`), and every plugin
+/// fused alongside it. Shared by the create response (`CreateSessionResponse`)
+/// and the read view (`SessionView`). All refs are digest-pinned — the TEE
+/// only ever runs digest-pinned artifacts.
 #[derive(Serialize)]
 pub struct ResolvedPolicyView {
     /// Full pinned OCI reference from session metadata / request.
@@ -40,6 +41,35 @@ pub struct ResolvedPolicyView {
     /// Convenience: the `sha256:<hex>` digest substring extracted from
     /// `reference`.
     pub digest: String,
+    /// Every plugin fused into the session's composition, in pin order —
+    /// the complete set of artifact digests (with the policy above) that
+    /// build the cwasm the TEE runs.
+    pub plugins: Vec<PluginView>,
+}
+
+/// One plugin pinned into a session's composition, echoed to the consumer.
+#[derive(Serialize)]
+pub struct PluginView {
+    /// The WIT package the plugin satisfies (e.g. `enclavid:well-known`).
+    pub package: String,
+    /// Full pinned OCI reference of the plugin artifact.
+    pub reference: String,
+    /// `sha256:<hex>` digest substring extracted from `reference`.
+    pub digest: String,
+}
+
+impl PluginView {
+    /// Build a view from a sealed plugin pin, extracting the digest from its
+    /// pinned ref.
+    pub fn from_pin(pin: &hatch_client::PluginPin) -> Self {
+        Self {
+            package: pin.package.clone(),
+            reference: pin.impl_ref.clone(),
+            digest: crate::policy_pull::split_pinned_ref(&pin.impl_ref)
+                .map(|(_, d)| d.to_string())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// Serde "remote" definition for the proto-generated `SessionStatus`

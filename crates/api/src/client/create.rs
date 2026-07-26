@@ -19,7 +19,7 @@ use hatch_client::{
 };
 
 use crate::client_state::ClientState;
-use crate::dto::ResolvedPolicyView;
+use crate::dto::{PluginView, ResolvedPolicyView};
 use crate::limits::{
     CLIENT_SESSION_TOKEN_BYTES, MAX_CLIENT_REF_LEN, MAX_REGISTRY_AUTH_LEN,
     SESSION_ID_RANDOM_BYTES,
@@ -221,7 +221,9 @@ async fn create(
 ) -> Result<Json<CreateSessionResponse>, StatusCode> {
     // Validate the ref shape up-front — tag-form (no `@sha256:`) or
     // bad-algo refs trap here with a clean 400, instead of failing
-    // later inside policy_pull with an opaque error.
+    // later inside policy_pull with an opaque error. The TEE only ever
+    // runs digest-pinned artifacts; a consumer wanting `:latest`
+    // ergonomics resolves the tag to a digest in their own control plane.
     let policy_digest = policy_pull::split_pinned_ref(&body.policy)
         .map(|(_, d)| d.to_string())
         .ok_or(StatusCode::BAD_REQUEST)?;
@@ -279,6 +281,11 @@ async fn create(
             })
         })
         .collect::<Result<_, StatusCode>>()?;
+
+    // Snapshot the plugin set for the create response before the pins move into
+    // the sealed metadata below — the full set of digest-pinned artifacts that
+    // will build the cwasm, echoed to the consumer alongside the policy.
+    let plugin_views: Vec<PluginView> = plugins.iter().map(PluginView::from_pin).collect();
 
     let policy_key = KeyRequest::into_domain(body.policy_key)?;
 
@@ -414,6 +421,7 @@ async fn create(
         resolved_policy: ResolvedPolicyView {
             reference: policy_ref,
             digest: policy_digest,
+            plugins: plugin_views,
         },
         attestation: AttestationView {
             format: quote.format,

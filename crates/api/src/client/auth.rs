@@ -112,8 +112,8 @@ where
 /// `SessionStore::read`; this function operates purely on the trust
 /// machinery wrapping the decrypted value.)
 ///
-/// Mirrors `applicant/shared.rs::fetch_metadata` for the Client side:
-/// callers do the storage read themselves (so e.g. `/disclosures`
+/// Mirrors the applicant side's inline metadata trust for the Client
+/// side: callers do the storage read themselves (so e.g. `/disclosures`
 /// keeps its batched `(Metadata, Disclosure)` read), then hand the
 /// resulting `Untrusted` here for the auth peel.
 ///

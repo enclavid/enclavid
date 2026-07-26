@@ -95,6 +95,7 @@ async fn read(
     let digest = crate::policy_pull::split_pinned_ref(&metadata.policy_ref)
         .map(|(_, d)| d.to_string())
         .unwrap_or_default();
+    let plugins = client.plugins.iter().map(dto::PluginView::from_pin).collect();
 
     Ok(Json(SessionView {
         session_id,
@@ -102,6 +103,7 @@ async fn read(
         policy: ResolvedPolicyView {
             reference: metadata.policy_ref,
             digest,
+            plugins,
         },
         client_ref: if client.r#ref.is_empty() {
             None
