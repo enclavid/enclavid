@@ -29,15 +29,14 @@
 
 use std::sync::Arc;
 
-use hyper::StatusCode;
 use secrecy::{ExposeSecret, SecretBox};
 
 use enclavid_crypto::{aead, derive_key};
 
+use crate::backend::CacheBackend;
 use crate::boundary::{self, AuthN, AuthZ, Covert, Replay};
 use crate::error::BridgeError;
 use crate::reason;
-use crate::transport::HatchClient;
 
 /// HKDF info label for the AEAD seal subkey.
 const SEAL_INFO: &[u8] = b"enclavid.cwasm-cache.seal.v1";
@@ -82,20 +81,22 @@ impl CacheKeys {
     }
 }
 
-/// Hatch-backed L2 cache client. Cheap to clone (shares the hatch
-/// connection pool; keys are 64 bytes inline).
+/// L2 cache client. Cheap to clone (the backend + keys are Arc-shared).
 #[derive(Clone)]
 pub struct CacheStore {
-    hatch: HatchClient,
+    /// Transport seam (hatch `/cache/*` today, storage-CVM remoc tomorrow). All
+    /// crypto (seal/open + identity-hiding `blob_name`) stays HERE; the backend
+    /// moves opaque sealed blobs by the already-derived name.
+    backend: Arc<dyn CacheBackend>,
     /// One shared `CacheKeys` behind an `Arc` — `SecretBox` is not `Clone`, so
     /// cloning the store shares the keys rather than copying them.
     keys: Arc<CacheKeys>,
 }
 
 impl CacheStore {
-    pub fn new(hatch: HatchClient, tee_seal_key: &[u8; 32]) -> Self {
+    pub fn new(backend: Arc<dyn CacheBackend>, tee_seal_key: &[u8; 32]) -> Self {
         Self {
-            hatch,
+            backend,
             keys: Arc::new(CacheKeys::from_master(tee_seal_key)),
         }
     }
@@ -122,46 +123,40 @@ impl CacheStore {
                  its OCI pulls; it carries no applicant/covert data"
             ))
             .into_inner();
-        let path = format!("/cache/{}", self.keys.blob_name(cache_id));
-        let resp = self.hatch.post(&path, bytes).await?;
-        match resp.status {
-            StatusCode::OK => Ok(()),
-            s => Err(BridgeError::Transport(format!("cache store: status {s}"))),
-        }
+        self.backend
+            .store(&self.keys.blob_name(cache_id), bytes)
+            .await
     }
 
     /// Load and open the blob for `cache_id`. `Ok(None)` = miss (404 or a
     /// blob that won't open); `Err` only on genuine transport failure.
     pub async fn load(&self, cache_id: &str) -> Result<Option<Vec<u8>>, BridgeError> {
-        let path = format!("/cache/{}", self.keys.blob_name(cache_id));
-        let resp = self.hatch.get(&path).await?;
-        match resp.status {
-            StatusCode::OK => match self.keys.open_bundle(cache_id, &resp.body) {
-                Some(plain) => {
-                    // Inbound boundary: all three concerns closed here.
-                    let opened: Vec<u8> = boundary::inbound::from_untrusted(plain)
-                        .trust_unchecked::<AuthN, _>(reason!(
-                            "AEAD-open under the TEE-only cache seal key just \
-                             succeeded — cryptographic authentication that only bytes \
-                             this TEE sealed can open"
-                        ))
-                        .trust_unchecked::<AuthZ, _>(reason!(
-                            "cache is TEE-internal compile amortization; no \
-                             per-recipient authorization dimension"
-                        ))
-                        .trust_unchecked::<Replay, _>(reason!(
-                            "a stale/replayed blob under this content+format-addressed \
-                             key is a prior compile of the SAME composition (identical \
-                             meaning) or wasmtime-incompatible and rejected at \
-                             deserialize — never a different policy"
-                        ))
-                        .into_inner();
-                    Ok(Some(opened))
-                }
-                None => Ok(None),
-            },
-            StatusCode::NOT_FOUND => Ok(None),
-            s => Err(BridgeError::Transport(format!("cache load: status {s}"))),
+        let Some(sealed) = self.backend.load(&self.keys.blob_name(cache_id)).await? else {
+            return Ok(None);
+        };
+        match self.keys.open_bundle(cache_id, &sealed) {
+            Some(plain) => {
+                // Inbound boundary: all three concerns closed here.
+                let opened: Vec<u8> = boundary::inbound::from_untrusted(plain)
+                    .trust_unchecked::<AuthN, _>(reason!(
+                        "AEAD-open under the TEE-only cache seal key just \
+                         succeeded — cryptographic authentication that only bytes \
+                         this TEE sealed can open"
+                    ))
+                    .trust_unchecked::<AuthZ, _>(reason!(
+                        "cache is TEE-internal compile amortization; no \
+                         per-recipient authorization dimension"
+                    ))
+                    .trust_unchecked::<Replay, _>(reason!(
+                        "a stale/replayed blob under this content+format-addressed \
+                         key is a prior compile of the SAME composition (identical \
+                         meaning) or wasmtime-incompatible and rejected at \
+                         deserialize — never a different policy"
+                    ))
+                    .into_inner();
+                Ok(Some(opened))
+            }
+            None => Ok(None),
         }
     }
 }

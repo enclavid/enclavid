@@ -172,10 +172,14 @@ pub enum BlobField {
     Principal,
 }
 
-/// List fields — append-only ordered sequences per (session, field).
+/// List fields — a per-(session, field) collection of values. The disclosure
+/// field is an UNORDERED SET (see [`ListField::Disclosure`]); the store may
+/// return entries in any order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ListField {
-    /// Age-sealed disclosure entries (opaque ciphertext to the hatch).
+    /// Age-sealed disclosure entries (opaque ciphertext to the hatch), as an
+    /// UNORDERED SET — the TEE commits to the set, not the order, so order is
+    /// neither preserved nor meaningful.
     Disclosure,
 }
 
@@ -208,13 +212,13 @@ pub struct ReadResponse {
     pub version: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Slot {
     Scalar(ScalarSlot),
     List(ListSlot),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalarSlot {
     /// `None` = field absent; `Some(empty)` = present-but-empty. The
     /// distinction is load-bearing: a default-valued `SessionMetadata`
@@ -222,9 +226,10 @@ pub struct ScalarSlot {
     pub value: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListSlot {
-    /// All entries in append order. Empty when absent or never written.
+    /// All entries. Order is UNSPECIFIED (the disclosure field is a set);
+    /// consumers must not rely on position. Empty when absent or never written.
     pub items: Vec<Vec<u8>>,
 }
 

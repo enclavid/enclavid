@@ -138,7 +138,7 @@ pub(super) fn trust_metadata(
         .trust_unchecked::<Replay, _>(reason!(r#"
 Metadata's ACCESS fields (client_session_token, principal) are immutable
 across the session, so the AuthZ gate above is unaffected by staleness. The
-mutable fields (status, disclosure_count/hash) CAN be stale — a stateless TEE
+mutable fields (status, disclosure_count/entry_hashes) CAN be stale — a stateless TEE
 cannot detect a compromised host replaying an older (genuine,
 tee_seal_key-sealed, AAD=session_id) snapshot — but the effect is benign or
 detected: a stale status just re-polls, and a paired disclosure list is

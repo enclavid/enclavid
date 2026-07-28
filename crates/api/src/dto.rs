@@ -107,10 +107,10 @@ pub const ENVELOPE_VERSION: u32 = 1;
 /// covert channel for arbitrary outbound data.
 ///
 /// `session_id` is embedded as defense-in-depth: the per-session
-/// `metadata.disclosure_hash` chain already binds the list to its
-/// session, but a redundant in-envelope copy lets a consumer
-/// receiving a disclosure out-of-band (future webhook payloads)
-/// also verify the binding without round-tripping to the TEE.
+/// metadata set commitment already binds the list to its session,
+/// but a redundant in-envelope copy lets a consumer receiving a
+/// disclosure out-of-band (future webhook payloads) also verify the
+/// binding without round-tripping to the TEE.
 #[derive(Serialize)]
 pub struct DisclosureEnvelope {
     pub version: u32,

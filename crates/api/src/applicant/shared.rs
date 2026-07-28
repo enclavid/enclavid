@@ -21,7 +21,7 @@ use hatch_client::{
 use engine_types::composition::PluginInstance;
 // The run wire mirrors: props api builds + ships, the outcome + error it gets
 // back from the execution-worker.
-use engine_rpc::{CompiledBundle, ExecError, Prop, RunOutcome, RunRequest, RunStatus};
+use engine_rpc::{CompiledBundle, ExecError, Prop, RunOutcome, RunRequest};
 
 use crate::cwasm_cache;
 use crate::error::ApiError;
@@ -171,12 +171,6 @@ impl SessionRunCtx {
         // Completed atomically (metadata + host-plaintext Status) when
         // the run terminated.
         persister.finalize(&status).await?;
-        // On a terminal decision, drop this session's pull-through media cache
-        // — the captures aren't needed post-completion (the consumer never
-        // reads the media store; disclosures are a separate age-sealed channel).
-        if matches!(status, RunStatus::Completed(_)) {
-            state.media_cache.purge(&session_id).await;
-        }
         Ok(progress_from(status, &locale))
     }
 }
@@ -304,7 +298,7 @@ under applicant_session_token.
             "#))
             .trust_unchecked::<Replay, _>(reason!(r#"
 Metadata is NOT static — the persister mutates it each disclosure/media
-round (captured_media, disclosure_count/hash, status) — so freshness is
+round (captured_media, disclosure_count/entry_hashes, status) — so freshness is
 UNVERIFIABLE here, not guaranteed: a stateless TEE cannot detect a
 compromised host replaying an older (genuine, tee_seal_key-sealed,
 AAD=session_id) snapshot. Safe because BOUNDED: the mutations are monotonic,
@@ -398,7 +392,6 @@ persist; same containment as above.
             session_id: session_id.clone(),
             // Weak: the strong lives in the SessionRunCtx below (sole owner).
             applicant_session_token: Arc::downgrade(&applicant_session_token),
-            cache: state.media_cache.clone(),
             captured,
         });
 

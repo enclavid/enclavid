@@ -3,7 +3,7 @@ mod client;
 mod client_state;
 mod compiler;
 mod cwasm_cache;
-mod disclosure_hash;
+mod disclosure_commit;
 mod dto;
 mod error;
 mod executor;
@@ -14,12 +14,16 @@ mod locale;
 mod policy_pull;
 mod shuffle;
 mod state;
+mod storage;
 mod transport;
 
 use std::sync::Arc;
 
 use enclavid_attestation::{Attestor, SnpDevAttestor};
-use hatch_client::{HatchClient, SessionStore};
+use hatch_client::{
+    CacheBackend, CacheStore, HatchBackend, HatchCacheBackend, HatchClient, SessionBackend,
+    SessionStore,
+};
 
 use crate::client_state::ClientState;
 use crate::state::AppState;
@@ -45,10 +49,28 @@ async fn main() {
     // don't reuse the AEAD key directly for `DisplayField` shuffle
     // PRNG seeding — see `crate::shuffle` for the threat model.
     let shuffle_key = Arc::new(shuffle::ShuffleKey::from_tee_seal_key(&tee_seal_key));
-    let hatch = HatchClient::new(&address_out)
-        .await
-        .expect("failed to connect to hatch");
-    let session_store = Arc::new(SessionStore::new(hatch, tee_seal_key));
+
+    // Storage backends for the session KV + L2 cwasm cache. The trusted
+    // storage-CVM over RA-TLS when `ENCLAVID_STORAGE_BACKEND=storage-cvm`, else
+    // the legacy hatch path (host Redis + object_store cache). Selecting a
+    // backend swaps only the wire transport — all AEAD sealing stays TEE-side in
+    // `SessionStore` / `CacheStore`.
+    //
+    // ABSOLUTE session TTL (secs): the deadline is `created_at + ttl`, set once at
+    // create; the storage-CVM sweeper GCs the session at that cap (abandoned or
+    // completed-and-pulled). Defaults to 1 week — a generous window for the
+    // consumer to pull disclosures after completion — overridable via
+    // `ENCLAVID_SESSION_TTL_SECS` (availability tuning). The hatch backend ignores it.
+    const DEFAULT_SESSION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+    let ttl_secs = Some(
+        std::env::var("ENCLAVID_SESSION_TTL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_SESSION_TTL_SECS),
+    );
+    let (session_backend, cache_backend) = build_storage_backends(&address_out).await;
+    let session_store = Arc::new(SessionStore::new(session_backend, tee_seal_key, ttl_secs));
+    let cache_store = CacheStore::new(cache_backend, &tee_seal_key);
 
     // Two listeners, two routers, one process. Topology rationale: TLS
     // terminates inside this TEE, so a host-side proxy can only route by
@@ -66,7 +88,7 @@ async fn main() {
         ClientState::init(&address_out, session_store.clone(), attestor).await,
     );
     let applicant_state = Arc::new(
-        AppState::init(&address_out, session_store, shuffle_key, &tee_seal_key).await,
+        AppState::init(&address_out, session_store, cache_store, shuffle_key).await,
     );
 
     let client_app = client::router(client_state);
@@ -88,6 +110,47 @@ async fn main() {
     });
 
     let _ = tokio::join!(client_handle, applicant_handle);
+}
+
+/// Build the session + L2-cache storage backends per `ENCLAVID_STORAGE_BACKEND`.
+/// `storage-cvm` dials the trusted storage-CVM over RA-TLS (one connection, both
+/// services); anything else (the default) keeps the legacy hatch path — host
+/// Redis for sessions + host object_store for the L2 cache.
+async fn build_storage_backends(
+    address_out: &str,
+) -> (Arc<dyn SessionBackend>, Arc<dyn CacheBackend>) {
+    // A SET-but-unrecognized value fails loud (a `storage_cvm` typo must not
+    // silently downgrade to the untrusted-host path, losing RA-TLS + in-CVM TTL);
+    // only "hatch" or unset selects the legacy path. See `feedback_minimal_defaults`.
+    match std::env::var("ENCLAVID_STORAGE_BACKEND").as_deref() {
+        Ok("storage-cvm") => {
+            let addr = std::env::var("ENCLAVID_STORAGE_ADDR").expect(
+                "ENCLAVID_STORAGE_ADDR not set (address of the storage-CVM; start one with \
+                 `cargo run -p enclavid-storage --bin storage-cvm` and point api at its \
+                 listen address)",
+            );
+            let (session, cache) = storage::connect_storage(&addr)
+                .await
+                .expect("failed to connect to storage-CVM");
+            (Arc::new(session), Arc::new(cache))
+        }
+        // Explicit "hatch" or unset (Err = not present / not unicode): the legacy
+        // path — one hatch connection backs both the session store and the L2
+        // cache (cheap Clone — the hyper Client is Arc-backed).
+        Ok("hatch") | Err(_) => {
+            let hatch = HatchClient::new(address_out)
+                .await
+                .expect("failed to connect to hatch");
+            (
+                Arc::new(HatchBackend::new(hatch.clone())),
+                Arc::new(HatchCacheBackend::new(hatch)),
+            )
+        }
+        Ok(other) => panic!(
+            "ENCLAVID_STORAGE_BACKEND=\"{other}\" is not a recognized backend \
+             (valid: \"storage-cvm\" or \"hatch\"; unset defaults to \"hatch\")"
+        ),
+    }
 }
 
 /// Load the 32-byte TEE AEAD key. Phase A: from `ENCLAVID_TEE_KEY`

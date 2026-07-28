@@ -1,8 +1,9 @@
-//! `DISCLOSURE` session field. Append-only list of age-encrypted
+//! `DISCLOSURE` session field. An UNORDERED SET of age-encrypted
 //! consent records produced by the engine during a policy run. The
 //! TEE-side never decrypts — entries are forwarded to the client as
 //! opaque bytes (encryption is to the client's `client_disclosure_pubkey`,
-//! engine-side, before the entry is staged for commit).
+//! engine-side, before the entry is staged for commit). Order is neither
+//! preserved by the store nor relied upon — the api commits to the set.
 
 use hatch_protocol::{FieldSelector, ListAppend, ListField, Op, Slot};
 
@@ -13,11 +14,11 @@ use crate::error::BridgeError;
 use super::Ctx;
 use super::core::{ReadField, WriteField, unwrap_list};
 
-/// Read marker: per-session disclosure list. Output is
+/// Read marker: per-session disclosure set. Output is
 /// `Untrusted<Vec<Vec<u8>>, (AuthN, AuthZ, Replay)>` — hatch-client
 /// does no decryption work (items are sealed for the consumer), so
 /// **no** concern gets closed at this layer. The caller is expected
-/// to verify the per-session disclosure-hash chain (closes AuthN +
+/// to verify the per-session disclosure SET COMMITMENT (closes AuthN +
 /// Replay) and peel AuthZ with the rationale that fits its release
 /// channel (e.g. "TEE forwards opaque bytes; the consumer is the
 /// content consumer, not the TEE").

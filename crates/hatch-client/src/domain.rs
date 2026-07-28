@@ -106,7 +106,13 @@ pub struct SessionMetadata {
     pub status: SessionStatus,
     pub created_at: u64,
     pub disclosure_count: u64,
-    pub disclosure_hash: Vec<u8>,
+    /// Per-entry leaf hashes (SHA-256, 32 bytes each) of every disclosure
+    /// ciphertext emitted this session — the authoritative TEE-side source for
+    /// the order-INDEPENDENT set commitment the consumer-pull handler verifies
+    /// (see `enclavid-api::disclosure_commit`). The commitment is DERIVED from
+    /// this list on demand, never stored, so persister and verifier cannot
+    /// diverge. Order of this list is irrelevant (the commitment sorts).
+    pub disclosure_entry_hashes: Vec<[u8; 32]>,
     /// The policy artifact's decryption key. `None` (incl. older blobs) ⇒
     /// the artifact is not encrypted.
     pub policy_key: Option<Key>,

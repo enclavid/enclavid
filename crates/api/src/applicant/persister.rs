@@ -39,8 +39,7 @@ use secrecy::{ExposeSecret, SecretBox};
 
 use hatch_client::{
     AppendDisclosure, AuthN, AuthZ, Covert, Replay, SessionMetadata, SessionState, SessionStatus,
-    SessionStore, SetMedia, SetMetadata, SetState, SetStatus, WriteField, boundary, encode_padded,
-    reason,
+    SessionStore, SetMedia, SetMetadata, SetState, WriteField, boundary, encode_padded, reason,
 };
 use enclavid_crypto::seal_to_recipient;
 // Owned wire types — the keyless execution-worker sends these back over the
@@ -48,7 +47,7 @@ use enclavid_crypto::seal_to_recipient;
 // persist error, keeping api free of the runtime.
 use engine_rpc::{CallbackError, ConsentDisclosure, RunStatus};
 
-use crate::disclosure_hash;
+use crate::disclosure_commit;
 use crate::dto::{self, DisclosureEnvelope, ENVELOPE_VERSION};
 use crate::shuffle::ShuffleKey;
 
@@ -75,8 +74,8 @@ pub(super) struct SessionPersister {
     /// cleanly — replay from the latest persisted state on retry.
     pub current_version: AtomicU64,
     /// Mutable copy of session metadata. We update
-    /// `disclosure_count` and the running `disclosure_hash` chain
-    /// whenever the engine emits disclosures and rewrite metadata
+    /// `disclosure_count` and the `disclosure_entry_hashes` set-commitment
+    /// leaf list whenever the engine emits disclosures and rewrite metadata
     /// atomically alongside the state + append ops. Other metadata
     /// fields stay constant across the session lifetime; this is
     /// purely a bookkeeping wrapper.
@@ -274,10 +273,12 @@ impl SessionPersister {
         metadata.disclosure_count += appends.len() as u64;
         for a in appends {
             // `as_inner` is the borrow analog of `into_inner` — read the
-            // fully-vouched bytes to extend the integrity-chain hash
-            // before the same bytes get released to wire by `build_op`.
-            metadata.disclosure_hash =
-                disclosure_hash::append(&metadata.disclosure_hash, a.0.as_inner());
+            // fully-vouched ciphertext to append its per-entry leaf hash to the
+            // set-commitment leaf list before the same bytes get released to wire
+            // by `build_op`. Order of the list is irrelevant (commit() sorts).
+            metadata
+                .disclosure_entry_hashes
+                .push(disclosure_commit::entry_hash(a.0.as_inner()));
         }
         SetMetadata(
             boundary::outbound::to_untrusted(&*metadata)
@@ -287,9 +288,12 @@ impl SessionPersister {
                 ))
                 .vouch_unchecked::<Covert, _>(reason!(
                     "sealed under tee_seal_key; caveat: ciphertext size + write-presence \
-                     host-observable; policy influences whether/how much (≤log2 K bits/round, \
-                     K fuel-bounded); host-compromise-gated. The captured-media gate hashes it \
-                     now also carries are the host's OWN plaintext media-write keys — no new leak"
+                     host-observable. Metadata now grows 32 B per disclosure (one leaf hash) = \
+                     a deterministic function of the disclosure count M, which the host ALREADY \
+                     observes via each ListAppend — zero marginal covert bits, and the emission- \
+                     ORDER channel (log2 M!) is REMOVED (set commitment sorts). Residual write- \
+                     presence is host-compromise-gated, as before. The captured-media gate hashes \
+                     also carried are the host's OWN plaintext media-write keys — no new leak"
                 )),
         )
     }
@@ -364,8 +368,8 @@ impl SessionPersister {
     ///
     /// Failed / Expired transitions are intentionally NOT handled
     /// here. Engine errors stay as Running (operationally retried);
-    /// TTL is host-side via `BlobField::Status` plaintext, never
-    /// propagated to TEE-trusted metadata.
+    /// TTL is enforced inside the storage-CVM off the per-session
+    /// deadline (no host-visible status byte).
     pub(super) async fn finalize(&self, run_status: &RunStatus) -> Result<(), StatusCode> {
         if !matches!(run_status, RunStatus::Completed(_)) {
             return Ok(());
@@ -380,14 +384,6 @@ impl SessionPersister {
                     "finalize only flips status to a fixed enum; size delta deterministic per transition"
                 )),
         );
-        let set_status = SetStatus(
-            boundary::outbound::to_untrusted(SessionStatus::Completed)
-                .vouch_unchecked::<AuthN, _>(reason!(
-                    "by-design plaintext: host needs the byte for TTL; only the lifecycle marker is observable"
-                ))
-                .vouch_unchecked::<AuthZ, _>(reason!("lifecycle marker observable to host is the explicit contract"))
-                .vouch_unchecked::<Covert, _>(reason!("enum cardinality 5; ~1 status write per lifecycle transition")),
-        );
         let (session_id, expected_version) =
             boundary::outbound::to_untrusted((self.session_id.as_str(), Some(expected)))
                 .vouch_unchecked::<AuthN, _>(reason!(
@@ -398,13 +394,13 @@ impl SessionPersister {
                     "fixed-shape UUID + host's own counter — no policy bandwidth"
                 ))
                 .distribute();
-        let fields: [&dyn WriteField; 2] = [&set_metadata, &set_status];
+        let fields: [&dyn WriteField; 1] = [&set_metadata];
         let ops = boundary::outbound::to_untrusted(&fields[..])
             .vouch_unchecked::<AuthN, _>(reason!(
                 "recipe set; each field's content is sealed in its own build_op"
             ))
             .vouch_unchecked::<AuthZ, _>(reason!("each op writes its own session key"))
-            .vouch_unchecked::<Covert, _>(reason!("2 ops (metadata + status), fixed by finalize"));
+            .vouch_unchecked::<Covert, _>(reason!("1 op (sealed metadata), fixed by finalize"));
         let new_version = self
             .session_store
             .write(session_id, expected_version, ops)
@@ -438,7 +434,7 @@ impl SessionPersister {
 /// `vouch::<AuthN>(seal_to_recipient)` closes confidentiality.
 ///
 /// `session_id` is embedded in the envelope as defense-in-depth:
-/// metadata-level `disclosure_hash` already binds the per-session
+/// the metadata-level set commitment already binds the per-session
 /// list to its session, but a redundant in-envelope copy means a
 /// consumer that receives a disclosure out-of-band (e.g. via a
 /// future webhook payload) can also self-verify the binding.

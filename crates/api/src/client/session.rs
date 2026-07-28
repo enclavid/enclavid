@@ -55,7 +55,7 @@ async fn read(
     // can't substitute another session's blob. Everything we surface
     // here (status, policy, count, created_at) lives inside this
     // single pull — the persister keeps `disclosure_count` and the
-    // running `disclosure_hash` chain atomic with each AppendDisclosure
+    // set-commitment leaf list atomic with each AppendDisclosure
     // write, so we never need to pull the actual disclosure list
     // (entries can be tens of KB) just to compute a counter.
     let ((metadata_untrusted,), _version) = state

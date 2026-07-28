@@ -40,6 +40,14 @@ engine-rpc = { path = "../engine-rpc", default-features = false, features = [
 ] }
 hatch-client = { path = "../hatch-client" }
 hatch-protocol = { path = "../hatch-protocol" }
+# The storage-tier RPC contract — the remoc `SessionStoreService` / `CacheService`
+# clients api dials on the trusted storage-CVM (when
+# `ENCLAVID_STORAGE_BACKEND=storage-cvm`). Reuses the same RA-TLS/remoc stack as
+# the engine workers.
+storage-rpc = { path = "../storage-rpc" }
+# Object-safe async impls of the hatch-client `SessionBackend` / `CacheBackend`
+# seams for the storage-CVM clients.
+async-trait = "0.1"
 enclavid-crypto = { path = "../crypto" }
 enclavid-kbs-client = { path = "../kbs-client" }
 enclavid-attestation = { path = "../attestation", features = ["snp-dev"] }

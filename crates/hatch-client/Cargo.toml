@@ -16,6 +16,10 @@ vsock = ["dep:tokio-vsock", "dep:tower-service"]
 [dependencies]
 # Shared HTTP-over-vsock wire DTOs (CBOR-encoded).
 hatch-protocol = { path = "../hatch-protocol" }
+# Object-safe async seam under SessionStore / CacheStore so the wire transport
+# (hatch HTTP today, storage-CVM remoc tomorrow) swaps behind an `Arc<dyn _>`
+# without generics rippling through api's AppState.
+async-trait = "0.1"
 # Serde + CBOR for the sealed domain types (see src/domain.rs). Same
 # codec as the wire envelope — zero protobuf in the project.
 serde = { version = "1", features = ["derive"] }
@@ -43,3 +47,7 @@ tokio = { version = "1", features = ["net", "rt"] }
 tokio-vsock = { version = "0.7", optional = true }
 # `tower_service::Service<Uri>` impl for the vsock connector.
 tower-service = { version = "0.3", optional = true }
+
+[dev-dependencies]
+# `#[tokio::test]` for the async seam tests.
+tokio = { version = "1", features = ["macros", "rt"] }

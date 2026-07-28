@@ -1386,6 +1386,7 @@ name = "enclavid-api"
 version = "0.1.0"
 dependencies = [
  "age",
+ "async-trait",
  "axum",
  "base64ct",
  "ciborium",
@@ -1411,6 +1412,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "storage-rpc",
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls",
@@ -1520,6 +1522,22 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "x509-parser",
+]
+
+[[package]]
+name = "enclavid-storage"
+version = "0.1.0"
+dependencies = [
+ "enclavid-ra-tls",
+ "hatch-protocol",
+ "hex",
+ "object_store",
+ "redb",
+ "remoc",
+ "storage-rpc",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -2075,6 +2093,7 @@ dependencies = [
 name = "hatch-client"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "ciborium",
  "enclavid-crypto",
@@ -3751,6 +3770,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redb"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e925444704b5f17d32bf42f5b6e2df050bceebc3dcd6e71cc73dafe8092e839"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "redis"
 version = "0.27.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4684,6 +4712,16 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "storage-rpc"
+version = "0.1.0"
+dependencies = [
+ "hatch-protocol",
+ "remoc",
+ "serde",
+ "tokio",
+]
 
 [[package]]
 name = "strsim"

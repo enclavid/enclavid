@@ -1,140 +1,59 @@
 //! Host media store the keyless execution-worker calls BACK for
-//! `blob::from-blob-ref` (via `CallbackService::media_load`) — a **pull-through
-//! cache** over the sealed hatch backing store, with a **gate** on the read
-//! key. It runs orchestrator-side because it holds the seal key + applicant
-//! token the worker must never see.
+//! `blob::from-blob-ref` (via `CallbackService::media_load`) — a **pull** over
+//! the sealed hatch backing store, with a **gate** on the read key. It runs
+//! orchestrator-side because it holds the seal key + applicant token the worker
+//! must never see.
 //!
 //! `blob::from-blob-ref` mints a COLD handle (no load); the worker calls
 //! [`load`](HatchMediaStore::load) LAZILY on the first `bytes()` read of that
 //! handle, which forwards to this callback. This:
-//!   1. serves a **cache hit** with no host IO;
-//!   2. **gates** an unknown hash — a ref not in the session's captured set is a
+//!   1. **gates** an unknown hash — a ref not in the session's captured set is a
 //!      fabricated key, refused here with no hatch read (the worker then traps,
 //!      since `from-blob-ref` has no miss branch);
-//!   3. **pulls** a real-but-uncached blob from the backing store
-//!      ([`SessionStore::load_media`]), decrypts, populates the cache, and
-//!      returns the bytes.
+//!   2. **pulls** the sealed blob from the backing store
+//!      ([`SessionStore::load_media`]), decrypts, and returns the bytes. The
+//!      decrypted plaintext is a SINGLE transient handed to the caller — never
+//!      retained api-side, so no cross-session decrypted-PII pool accumulates in
+//!      the orchestrator heap.
+//!
+//! No api-side cache. An earlier cross-round pull-through `MediaCache` was
+//! removed. Its covert-defence value was illusory against the adversary it
+//! targeted: the host controls the L4 balancer, so a colluding host forces a
+//! cache MISS every round (route each round to a cold instance) — it even WANTS
+//! misses, since a hatch pull is the observable signal — while an honest host
+//! never decodes anything. Meanwhile it was the ONLY long-lived decrypted-
+//! biometric pool in the orchestrator (memory-hygiene finding M1). Removing it
+//! makes the api stateless-for-correctness and closes M1; the marginal
+//! cross-round re-pull it saved is bounded elsewhere (below). There is nothing
+//! to zeroize on this side once the cache is gone: the plaintext is a single
+//! moved transient, not a retained buffer.
 //!
 //! Covert-channel role (defence-in-depth; primary defence is attestation +
 //! consent-gate). A colluding policy could encode data into the read KEY
-//! (`blob_hash`, 32 B/call) or into the COUNT / pattern of reads (Morse). After
-//! the compile/execute split there are TWO host-observable surfaces, guarded in
-//! two different places:
+//! (`blob_hash`, 32 B/call) or into the COUNT / pattern of reads (Morse). Both
+//! are bounded TEE-side (host-routing-independent):
 //!
-//!   * **Hatch reads** (this store's `api→hatch→Redis` pull). The [`MediaCache`]
-//!     bounds the count variant to **≤1 hatch read per distinct blob while
-//!     resident** (first pull; repeats hit in-TEE), and the captured-hash gate
-//!     below kills the arbitrary-key variant (only real captures ever pull —
-//!     whose hashes the host already logged at write).
-//!   * **The api↔worker wire** (`media_load` RPC). This runs across the
-//!     host-transiting internal transport, so the CONTENT (hash + bytes) is
-//!     host-readable until RA-TLS lands, and the COUNT of RPCs is readable by
-//!     traffic-analysis *even with* RA-TLS. That count is bounded NOT here but on
-//!     the worker: `CallbackMediaStore` (execution-worker) memoizes each blob
-//!     per-run, so repeat reads of one blob emit ≤1 RPC — restoring the same
-//!     "≤1 host-observable read per distinct blob" property this cache gave when
-//!     the store was in-process. The gate still bounds the arbitrary-key variant
-//!     end-to-end: a fabricated hash returns `None` here (no hatch read) and the
-//!     worker's `bytes()` traps on the miss, so at most one `media_load(H_fake)`
-//!     RPC crosses per round before the round dies.
+//!   * **The read KEY** — killed by the captured-hash gate below: only real
+//!     captures ever pull, whose hashes the host already logged at write; a
+//!     fabricated hash returns `None` with no hatch read.
+//!   * **The read COUNT / pattern** — bounded WITHIN a round by the worker's
+//!     per-run memo (`RelayMediaStore` on the execution-worker: repeat reads of
+//!     one blob emit ≤1 RPC), and ACROSS rounds by the applicant-driven round
+//!     count — there is no policy `continue`, so each round needs an applicant
+//!     `/input`; the policy cannot inflate rounds, only drag the applicant via
+//!     retakes (UX-self-limiting). The practical residual is a few bytes,
+//!     collusion-gated, the same class as APSI query counts.
 //!
-//! The irreducible residual — WHICH of a few captures is pulled, and when — is
-//! fuel-bounded and host-compromise-gated, the same class as APSI query counts.
+//! Tighter covert bounds (an RA-TLS storage-CVM to hide the read key + access
+//! pattern from the host, then size-bucketing and traffic shaping) are a future
+//! transport/service-layer phase that does NOT touch this call-site.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Weak};
-use std::time::Duration;
 
 use hatch_client::{Replay, SessionStore, public_session_id, reason};
-use moka::future::Cache;
 use engine_rpc::CallbackError;
 use secrecy::{ExposeSecret, SecretBox};
-
-/// Byte budget for the pull-through media cache — a soft RAM ceiling (moka
-/// enforces `max_capacity` via background maintenance, so the weighed size can
-/// briefly overshoot under a burst before eviction catches up) weighed by blob
-/// length, not entry count, since blobs vary in size. Blobs are cached only on a
-/// `from-blob-ref` READ (never at write) and re-reads are rare in the current
-/// flow, so the cache normally sits far below this — it is a backstop, not a
-/// working-set target.
-const MEDIA_CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
-
-/// Idle expiry for a cached blob. The covert-channel defence the cache provides
-/// is collapsing REPEAT reads of the same blob into ≤1 host-observable hatch
-/// read; the repeats a colluding policy can actually drive happen WITHIN one
-/// `handle` invocation — it has no clock and cannot sleep (WASI clocks are
-/// virt-baked, and fuel bounds execution) — i.e. sub-second, so any short idle
-/// window preserves the defence. 1 minute is therefore ample: `time_to_idle`
-/// resets on each read, so a blob stays warm while actively used, and the
-/// decrypted biometric plaintext leaves host RAM ~1 minute after its last touch —
-/// tight data-minimization. It is NOT a session/token-tied boundary: a genuine
-/// re-read in a much-later round simply re-pulls once (benign; the cross-round
-/// gap is applicant-timed, not policy-controllable, so it is no covert lever).
-const MEDIA_CACHE_TTI: Duration = Duration::from_secs(60);
-
-/// Bounded pull-through cache of rehydrated media blobs, shared across rounds via
-/// `AppState`. A [`moka`] cache keyed GLOBALLY by `(session_id, blob_hash)`, so
-/// the [byte budget](MEDIA_CACHE_MAX_BYTES) and [idle expiry](MEDIA_CACHE_TTI)
-/// bound total host RAM no matter how many sessions are live — an abandoned
-/// session can no longer pin decrypted blobs without bound. Populated on a
-/// `from-blob-ref` READ miss (never at write), so it holds only blobs the policy
-/// actually re-reads. It is host-side heap, so the wasm store memory limit does
-/// NOT bound it — the budget/TTI plus the per-session `purge` on `/reset` +
-/// finalize are the budget. An evicted blob is simply re-pulled and re-cached on
-/// the next read; correctness is preserved (see the module-level covert note).
-/// moka (`max_capacity` + `time_to_idle`, session-keyed) is the api's cache idiom;
-/// this MediaCache is the ONLY api-side cache — the compiled-cwasm L1 lives on the
-/// execution-worker, and applicant tokens are deliberately NOT cached (a wrong key
-/// is rejected cryptographically at the state read).
-pub struct MediaCache {
-    cache: Cache<(String, [u8; 32]), Arc<Vec<u8>>>,
-}
-
-impl MediaCache {
-    pub fn new() -> Self {
-        Self::with_budget(MEDIA_CACHE_MAX_BYTES, MEDIA_CACHE_TTI)
-    }
-
-    fn with_budget(max_bytes: u64, tti: Duration) -> Self {
-        Self {
-            cache: Cache::builder()
-                // Weigh each entry by its byte length so `max_capacity` is a RAM
-                // budget, not an entry count. A blob past `u32::MAX` is clamped —
-                // it can't exist (state/upload limits are far smaller).
-                .weigher(|_key, bytes: &Arc<Vec<u8>>| bytes.len().try_into().unwrap_or(u32::MAX))
-                .max_capacity(max_bytes)
-                .time_to_idle(tti)
-                .build(),
-        }
-    }
-
-    async fn get(&self, session_id: &str, hash: &[u8; 32]) -> Option<Arc<Vec<u8>>> {
-        // `get` refreshes the entry's idle timer and access frequency, so an
-        // actively-reloaded blob outlives idle ones under eviction.
-        self.cache.get(&(session_id.to_string(), *hash)).await
-    }
-
-    async fn insert(&self, session_id: &str, hash: [u8; 32], bytes: Arc<Vec<u8>>) {
-        self.cache.insert((session_id.to_string(), hash), bytes).await;
-    }
-
-    /// Drop a session's cached blobs — called when its media is purged
-    /// (`/reset`, finalize). Prompt per-key `invalidate` so decrypted bytes leave
-    /// RAM at session end rather than only at the idle backstop. Removes exactly
-    /// this session's entries; other sessions' blobs are untouched.
-    /// O(live entries), which the budget bounds.
-    pub async fn purge(&self, session_id: &str) {
-        let stale: Vec<Arc<(String, [u8; 32])>> = self
-            .cache
-            .iter()
-            .filter(|(key, _)| key.0 == session_id)
-            .map(|(key, _)| key)
-            .collect();
-        for key in stale {
-            self.cache.invalidate(&*key).await;
-        }
-    }
-}
 
 pub(super) struct HatchMediaStore {
     pub session_store: Arc<SessionStore>,
@@ -147,9 +66,6 @@ pub(super) struct HatchMediaStore {
     /// `None` upgrade means the run outlived its context (a lifetime bug),
     /// surfaced as a trap.
     pub applicant_session_token: Weak<SecretBox<Vec<u8>>>,
-    /// Pull-through cache (shared, cross-round). Repeat rehydrates hit here, so
-    /// the host sees at most one hatch read per distinct blob.
-    pub cache: Arc<MediaCache>,
     /// GATE — the session's captured blob hashes (from sealed metadata, prior
     /// rounds). A rehydrate for a hash NOT in here is a fabricated ref, refused
     /// in-TEE with no hatch read, so the plaintext read key can't carry data.
@@ -162,23 +78,24 @@ impl HatchMediaStore {
     /// wire (`None` = miss / gated), so the worker's `from-blob-ref` traps on a
     /// `None` exactly as the in-process store did. The seal key never leaves
     /// this side — the worker only ever receives the decrypted bytes it asked
-    /// for by an already-captured hash.
+    /// for by an already-captured hash. No caching: the decrypted plaintext is a
+    /// single transient returned straight to the caller (no api-side pool → M1
+    /// closed).
     pub(super) async fn load(
         &self,
         blob_hash: &[u8; 32],
     ) -> Result<Option<Vec<u8>>, CallbackError> {
-        // 1. Cache hit — served here, no host IO. Clone the bytes for the wire.
-        if let Some(hit) = self.cache.get(&self.session_id, blob_hash).await {
-            return Ok(Some(hit.as_ref().clone()));
-        }
-        // 2. Gate — an unknown hash is a fabricated ref: refuse with no hatch
+        // 1. Gate — an unknown hash is a fabricated ref: refuse with no hatch
         //    read. The worker traps on the `None` (from-blob-ref has no miss branch).
         if !self.captured.contains(blob_hash) {
             return Ok(None);
         }
-        // 3. Pull-through — fetch the sealed blob, decrypt, cache, return.
-        //    Borrow the token from the per-round owner for the moment of the
-        //    open. A `None` upgrade means the run outlived its context.
+        // 2. Pull + decrypt on serve. Borrow the token from the per-round owner
+        //    for the moment of the open; a `None` upgrade means the run outlived
+        //    its context. Nothing is retained: the decrypted blob is returned
+        //    straight to the wire, so no decrypted-PII pool lives api-side.
+        //    Cross-round re-reads simply re-pull (the worker's per-run memo
+        //    dedups repeats within a round).
         let token = self.applicant_session_token.upgrade().ok_or_else(|| {
             CallbackError(
                 "media load: applicant token owner dropped (run outlived its context)".into(),
@@ -195,74 +112,6 @@ impl HatchMediaStore {
                  can only return identical bytes"
             ))
             .into_inner();
-        let Some(vec) = loaded else {
-            return Ok(None);
-        };
-        let arc = Arc::new(vec);
-        self.cache
-            .insert(&self.session_id, *blob_hash, arc.clone())
-            .await;
-        Ok(Some(arc.as_ref().clone()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn media_cache_hit_isolation_and_purge() {
-        let cache = MediaCache::new();
-        let (h1, h2) = ([1u8; 32], [2u8; 32]);
-
-        // Miss on an empty cache.
-        assert!(cache.get("s1", &h1).await.is_none());
-
-        // Insert then hit — and the hit shares the SAME allocation (no copy).
-        let bytes = Arc::new(vec![10u8, 20, 30]);
-        cache.insert("s1", h1, bytes.clone()).await;
-        let hit = cache.get("s1", &h1).await.expect("hit");
-        assert!(Arc::ptr_eq(&hit, &bytes), "cache serves the shared Arc");
-
-        // Session isolation: same hash under a different session misses.
-        assert!(cache.get("s2", &h1).await.is_none());
-        // Unknown hash misses.
-        assert!(cache.get("s1", &h2).await.is_none());
-
-        // Purge drops the whole session.
-        cache.purge("s1").await;
-        assert!(cache.get("s1", &h1).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn media_cache_purge_is_per_session() {
-        // Purge removes only the named session's blobs; a co-resident session's
-        // entries survive.
-        let cache = MediaCache::new();
-        let h = [7u8; 32];
-        cache.insert("keep", h, Arc::new(vec![1])).await;
-        cache.insert("drop", h, Arc::new(vec![2])).await;
-
-        cache.purge("drop").await;
-
-        assert!(cache.get("drop", &h).await.is_none(), "purged session gone");
-        assert!(cache.get("keep", &h).await.is_some(), "other session kept");
-    }
-
-    #[tokio::test]
-    async fn media_cache_bounds_total_bytes() {
-        // The byte budget is a RAM ceiling, not an entry count: inserting past it
-        // evicts, keeping the weighed size within cap. An evicted blob is simply
-        // re-pulled on the next read (correctness preserved).
-        let cache = MediaCache::with_budget(100, MEDIA_CACHE_TTI);
-        for i in 0..10u8 {
-            cache.insert("s", [i; 32], Arc::new(vec![0u8; 30])).await;
-        }
-        cache.cache.run_pending_tasks().await;
-        assert!(
-            cache.cache.weighted_size() <= 100,
-            "byte budget enforced, weighted_size = {}",
-            cache.cache.weighted_size()
-        );
+        Ok(loaded)
     }
 }

@@ -1,0 +1,30 @@
+[package]
+name = "storage-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The storage-tier RPC contract: remote trait calls (remoc `rtc`) between the
+# orchestrator (api) and the trusted storage-CVM, over an RA-TLS tunnel. Like
+# `engine-rpc`, remoc is reserved for the boundary where BOTH ends are our own
+# attested Rust CVMs; the `hatch` keeps its plain HTTP+CBOR protocol. A SEPARATE
+# crate from engine-rpc on purpose — the storage-CVM is a different fleet role
+# with its own measured image, and must not link the engine compile/execute
+# contract. Deps are hatch-protocol (the wire DTOs, reused verbatim) + remoc +
+# serde only — NOT hatch-client, so there is no dependency cycle.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# remoc = remote trait calls (rtc) over any AsyncRead+AsyncWrite, CBOR codec
+# (ciborium — same as hatch-protocol / engine-rpc), no OpenTelemetry.
+remoc = { version = "0.18", default-features = false, features = [
+    "rtc",
+    "codec-ciborium",
+] }
+# The session-store wire DTOs (ReadRequest/WriteRequest/Slot/Op/…) are reused
+# verbatim as the remoc method payloads.
+hatch-protocol = { path = "../hatch-protocol" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread"] }

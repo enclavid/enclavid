@@ -1,0 +1,52 @@
+[package]
+name = "enclavid-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The trusted storage-CVM: an attested, RA-TLS-fronted embedded KV that replaces
+# the untrusted host's Redis (session state) + object_store cache (L2 cwasm). It
+# is a BLIND ciphertext store — every payload arrives already AEAD-sealed under
+# `tee_seal_key` (TEE-side, in hatch-client), so the CVM never holds a key or
+# plaintext PII. Serves both `storage-rpc` services over one RA-TLS/remoc
+# connection; api is the sole client. The lib exposes the store cores so they are
+# unit-testable without remoc.
+
+[[bin]]
+name = "storage-cvm"
+path = "src/bin/storage-cvm.rs"
+
+[lib]
+name = "enclavid_storage"
+path = "src/lib.rs"
+
+[dependencies]
+storage-rpc = { path = "../storage-rpc" }
+hatch-protocol = { path = "../hatch-protocol" }
+enclavid-ra-tls = { path = "../ra-tls" }
+
+# Embedded, pure-Rust, ACID KV for the write-heavy per-session store. Single
+# writer ⇒ CAS is a plain serializable write txn (no Lua script). No native TTL —
+# a background sweeper enforces per-session deadlines.
+redb = "4"
+# L2 cwasm cache backend — same `ObjectStore` abstraction the hatch used, so a
+# fleet-shared cache can still swap to S3/GCS by config.
+object_store = "0.12"
+
+remoc = { version = "0.18", default-features = false, features = [
+    "rtc",
+    "codec-ciborium",
+] }
+tokio = { version = "1", features = ["full"] }
+# RA-TLS acceptor (ring provider, like the execution-worker).
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+] }
+# Path-traversal guard on cache keys (hex-only), mirroring the hatch.
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

@@ -4,7 +4,6 @@ use secrecy::SecretBox;
 
 use hatch_client::{HatchClient, CacheStore, KbsClient, RegistryClient, SessionStore};
 
-use crate::applicant::media_store::MediaCache;
 use crate::compiler::{Compiler, connect_compile_worker};
 use crate::executor::{Executor, connect_execution_worker};
 use crate::shuffle::ShuffleKey;
@@ -52,11 +51,6 @@ pub struct AppState {
     /// into `engine::RunInputs`. See [`crate::shuffle`] for the
     /// derivation contract and threat model.
     pub shuffle_key: Arc<ShuffleKey>,
-    /// Pull-through cache of rehydrated applicant media, shared across a
-    /// session's rounds. Serves repeat `blob::from-blob-ref` reads in-TEE so
-    /// the host sees ≤1 hatch read per distinct blob. See
-    /// [`media_store`](crate::applicant::media_store).
-    pub media_cache: Arc<MediaCache>,
 }
 
 impl AppState {
@@ -66,14 +60,14 @@ impl AppState {
         compiler: Arc<Compiler>,
         executor: Arc<Executor>,
         shuffle_key: Arc<ShuffleKey>,
-        tee_seal_key: &[u8; 32],
+        cache_store: CacheStore,
     ) -> Self {
-        // Registry + KBS + cache share the same hatch connection (cheap
-        // Clone: hyper Client is Arc-backed). The L2 cache seals under an
-        // HKDF subkey of the same `tee_seal_key` (domain-separated internally)
-        // and holds only BYTES (the CompiledBundle) — no wasmtime engine.
+        // Registry + KBS share the hatch connection (cheap Clone: hyper Client is
+        // Arc-backed) — these are EXTERNAL egress and stay on the hatch
+        // regardless of the storage backend. The L2 `cache_store` is built by the
+        // caller (`main`) on the selected cache backend (hatch object_store or the
+        // storage-CVM) and sealed under an HKDF subkey of `tee_seal_key`.
         let kbs = KbsClient::new(hatch.clone());
-        let cache_store = CacheStore::new(hatch.clone(), tee_seal_key);
         // Both boundaries are remote clients connected by the caller (`init`):
         // `compiler` → the compile-worker, `executor` → the execution-worker.
         Self {
@@ -84,7 +78,6 @@ impl AppState {
             registry: RegistryClient::new(hatch),
             kbs,
             shuffle_key,
-            media_cache: Arc::new(MediaCache::new()),
         }
     }
 
@@ -96,8 +89,8 @@ impl AppState {
     pub async fn init(
         transport_out: &str,
         session_store: Arc<SessionStore>,
+        cache_store: CacheStore,
         shuffle_key: Arc<ShuffleKey>,
-        tee_seal_key: &[u8; 32],
     ) -> Self {
         let hatch = HatchClient::new(transport_out)
             .await
@@ -129,7 +122,7 @@ impl AppState {
             compiler,
             executor,
             shuffle_key,
-            tee_seal_key,
+            cache_store,
         )
     }
 }

@@ -52,13 +52,12 @@ use std::sync::Arc;
 use secrecy::{ExposeSecret, SecretBox};
 
 use hatch_protocol::{FieldSelector, Op, ReadRequest, Slot, WriteRequest};
-use hyper::StatusCode;
 
 use enclavid_crypto::aead;
 
+use crate::backend::SessionBackend;
 use crate::boundary::{AuthN, AuthZ, Replay, Untrusted};
 use crate::error::BridgeError;
-use crate::transport::HatchClient;
 use crate::{Exposed, boundary};
 
 /// Per-call encryption context. Carries the TEE-side key plus the
@@ -77,7 +76,10 @@ impl Ctx<'_> {
 
 #[derive(Clone)]
 pub struct SessionStore {
-    hatch: HatchClient,
+    /// Transport seam (hatch HTTP today, storage-CVM remoc tomorrow). All crypto
+    /// stays HERE; the backend moves opaque DTOs. `Arc<dyn _>` keeps this store a
+    /// concrete type so `Arc<SessionStore>` doesn't ripple generics through api.
+    backend: Arc<dyn SessionBackend>,
     /// TEE-side AEAD master key used for METADATA and as the outer layer of
     /// STATE — the hardware-rooted crown jewel every session seal derives from.
     /// Phase A: caller injects (random or env-supplied placeholder).
@@ -86,18 +88,40 @@ pub struct SessionStore {
     /// master never lands in a log, matching how the applicant token is held; the
     /// `Arc` keeps cloning the store cheap (the store derives `Clone`).
     tee_seal_key: Arc<SecretBox<[u8; 32]>>,
+    /// ABSOLUTE session lifetime in seconds. `Some(t)` ⇒ the deadline is set ONCE
+    /// at create to `created_at + t` and never refreshed — a fixed cap after which
+    /// the storage-CVM sweeper GCs the session (abandoned or completed-and-pulled),
+    /// enforced INSIDE the trust boundary (the plaintext host STATUS byte is gone).
+    /// Sized so the consumer has time to pull disclosures post-completion. `None` =
+    /// no expiry (the legacy hatch/Redis backend ignores the deadline regardless).
+    ttl_secs: Option<u64>,
 }
 
 impl SessionStore {
-    pub fn new(hatch: HatchClient, tee_seal_key: [u8; 32]) -> Self {
+    pub fn new(backend: Arc<dyn SessionBackend>, tee_seal_key: [u8; 32], ttl_secs: Option<u64>) -> Self {
         Self {
-            hatch,
+            backend,
             tee_seal_key: Arc::new(SecretBox::new(Box::new(tee_seal_key))),
+            ttl_secs,
         }
     }
 
     pub(crate) fn tee_seal_key(&self) -> &[u8] {
         self.tee_seal_key.expose_secret().as_slice()
+    }
+
+    /// The absolute deadline (unix secs) for a session created NOW, or `None` when
+    /// no TTL is configured. Computed TEE-side and passed inside the RA-TLS channel
+    /// ONLY on the create write (see [`write`](Self::write)); subsequent writes
+    /// pass `None` so the deadline is never moved.
+    fn create_deadline(&self) -> Option<u64> {
+        self.ttl_secs.map(|ttl| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            now.saturating_add(ttl)
+        })
     }
 
     /// Read typed session fields in one batch. Returns
@@ -162,25 +186,21 @@ impl SessionStore {
             ops.push(f.build_op(&ctx)?);
         }
 
+        // Absolute TTL: set the deadline ONLY on the create write (`None` =
+        // must-not-exist); on every subsequent update pass `None` so the fixed
+        // `created_at + ttl` cap is never moved.
+        let deadline = if expected_version.as_inner().is_none() {
+            self.create_deadline()
+        } else {
+            None
+        };
         let ops: Exposed<Vec<Op>, ()> = ops.into();
         let req = ops.map(|ops| WriteRequest {
             ops,
             expected_version: expected_version.into_inner(),
         });
-        let bytes = hatch_protocol::encode(&req.into_inner())?;
-        let resp = self
-            .hatch
-            .post(&format!("/sessions/{id}/write"), bytes)
-            .await?;
-        
-        match resp.status {
-            StatusCode::OK => {
-                let r: hatch_protocol::WriteResponse = hatch_protocol::decode(&resp.body)?;
-                Ok(r.new_version.into())
-            }
-            StatusCode::PRECONDITION_FAILED => Err(BridgeError::VersionMismatch),
-            s => Err(BridgeError::Transport(format!("write: status {s}"))),
-        }
+        let new_version = self.backend.write(id, req.into_inner(), deadline).await?;
+        Ok(new_version.into())
     }
 
     /// Delete the session's state field. Today only used to drop session
@@ -191,14 +211,8 @@ impl SessionStore {
         id: Exposed<&str>,
     ) -> Result<Untrusted<u64, (AuthN, AuthZ, Replay)>, BridgeError> {
         let id = id.into_inner();
-        let resp = self.hatch.delete(&format!("/sessions/{id}/state")).await?;
-        match resp.status {
-            StatusCode::OK => {
-                let r: hatch_protocol::DeleteResponse = hatch_protocol::decode(&resp.body)?;
-                Ok(boundary::inbound::from_untrusted(r.deleted))
-            }
-            s => Err(BridgeError::Transport(format!("delete: status {s}"))),
-        }
+        let deleted = self.backend.delete(id).await?;
+        Ok(boundary::inbound::from_untrusted(deleted))
     }
 
     /// Read + double-open one sealed media blob by its content hash. Backs the
@@ -243,12 +257,7 @@ impl SessionStore {
         id: Exposed<&str>,
     ) -> Result<Untrusted<bool, (AuthN, AuthZ, Replay)>, BridgeError> {
         let id = id.into_inner();
-        let status = self.hatch.head(&format!("/sessions/{id}")).await?;
-        let exists = match status {
-            StatusCode::OK => true,
-            StatusCode::NOT_FOUND => false,
-            s => return Err(BridgeError::Transport(format!("exists: status {s}"))),
-        };
+        let exists = self.backend.exists(id).await?;
         Ok(boundary::inbound::from_untrusted(exists))
     }
 
@@ -266,22 +275,10 @@ impl SessionStore {
         // Both arrive vouched (id by the api caller, the selector request
         // by `fetch` which builds it) — we just release them at the wire.
         let id = id.into_inner();
-        let bytes = hatch_protocol::encode(&req.into_inner())?;
-        let resp = self
-            .hatch
-            .post(&format!("/sessions/{id}/read"), bytes)
-            .await?;
-        match resp.status {
-            StatusCode::OK => {
-                let r: hatch_protocol::ReadResponse = hatch_protocol::decode(&resp.body)?;
-                // Slots are returned in the same order as request
-                // selectors per the hatch contract; we trust that
-                // ordering here. Out-of-order or missing slots would be
-                // a hatch bug.
-                let version = boundary::inbound::from_untrusted(r.version);
-                Ok((r.slots, version))
-            }
-            s => Err(BridgeError::Transport(format!("read: status {s}"))),
-        }
+        // Slots are returned in the same order as request selectors per the
+        // backend contract; we trust that ordering here. Out-of-order or missing
+        // slots would be a backend bug.
+        let (slots, version) = self.backend.read_raw(id, req.into_inner()).await?;
+        Ok((slots, boundary::inbound::from_untrusted(version)))
     }
 }

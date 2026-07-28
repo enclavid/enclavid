@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use enclavid_attestation::ReportData;
 use hatch_client::{
     AuthN, AuthZ, Client, ClientAccess, Covert, PluginPin, SessionMetadata, SessionStatus,
-    SetMetadata, SetPrincipal, SetStatus, WriteField, boundary, reason,
+    SetMetadata, WriteField, boundary, reason,
 };
 
 use crate::client_state::ClientState;
@@ -317,11 +317,10 @@ async fn create(
         // Per-session access gate (defense-in-depth) — see
         // ClientAccess proto doc.
         access: Some(ClientAccess {
-            // Principal lives both here (crypto-pinned for the
-            // TEE-side cross-tenant check on reads) and as a separate
-            // plaintext `SetPrincipal` op below (host-visible for
-            // billing/revocation indexing). Same value, different
-            // consumers, different protection properties.
+            // Principal is crypto-pinned here for the TEE-side
+            // cross-tenant check on reads. There is NO plaintext host
+            // copy: the storage-CVM is blind, so host-side tenant
+            // indexing is gone (see the metadata-only write below).
             principal: principal.clone(),
             // SHA-256 of the bearer we returned to the client in the
             // POST /sessions response.
@@ -336,28 +335,29 @@ async fn create(
         policy_ref: policy_ref.clone(),
         input: Vec::new(),
         client: Some(client_block),
-        // Encrypted-status copy: TEE truth (vs the plaintext one in
-        // BlobField::Status which is only a host-facing TTL hint).
+        // TEE-trusted lifecycle status — the sole copy now (the plaintext
+        // host-facing BlobField::Status byte is no longer emitted).
         status: SessionStatus::Running,
         created_at,
         // Persister increments this atomically with each
         // AppendDisclosure write — see SessionPersister.
         disclosure_count: 0,
-        // Seed the running hash with the session-bound h_0 so the
-        // chain is always defined (no special "empty" state). The
-        // persister extends it on each AppendDisclosure; the
-        // disclosures handler folds the host-served list and
-        // compares against this field to detect host tampering.
-        disclosure_hash: crate::disclosure_hash::init(&session_id),
+        // Empty leaf list: the persister pushes a per-entry hash on each
+        // AppendDisclosure; the disclosures handler commits over this list and
+        // compares to the host-served set to detect tampering. The empty-set
+        // commitment is implicit (verify recomputes it), so no seed is needed.
+        disclosure_entry_hashes: Vec::new(),
         policy_key,
         // No media captured yet — the `from-blob-ref` gate set starts empty and
         // the persister appends each capture's hash as rounds run.
         captured_media: Vec::new(),
     };
-    // Always write metadata + status. Principal is optional: skip the
-    // op entirely when the auth scheme didn't produce one (host stores
-    // nothing under `principal` in that case — fine, host-side
-    // attribution features just won't have this session indexed).
+    // Write ONLY the sealed metadata. The plaintext STATUS byte and PRINCIPAL
+    // host hooks are gone: TTL is enforced inside the storage-CVM (its sweeper,
+    // fed the deadline over RA-TLS), and the TEE-trusted status + principal
+    // already live crypto-pinned in `metadata` (status / client.access.principal).
+    // A blind storage-CVM exposes no host query surface, so a plaintext copy would
+    // leak lifecycle + tenant identity for zero benefit.
     let set_metadata = SetMetadata(
         boundary::outbound::to_untrusted(&metadata)
             .vouch_unchecked::<AuthZ, _>(reason!(
@@ -367,30 +367,7 @@ async fn create(
                 "initial /create write before any policy runs; fields are client-controlled, not policy-controlled — zero covert bandwidth"
             )),
     );
-    let set_status = SetStatus(
-        boundary::outbound::to_untrusted(SessionStatus::Running)
-            .vouch_unchecked::<AuthN, _>(reason!(
-                "by-design plaintext: host needs the byte for TTL; only the lifecycle marker is observable"
-            ))
-            .vouch_unchecked::<AuthZ, _>(reason!("lifecycle marker observable to host is the explicit contract"))
-            .vouch_unchecked::<Covert, _>(reason!("enum cardinality 5; ~1 status write per lifecycle transition")),
-    );
-    let set_principal = principal.as_deref().map(|p| {
-        SetPrincipal(
-            boundary::outbound::to_untrusted(p)
-                .vouch_unchecked::<AuthN, _>(reason!(
-                    "by-design plaintext: host indexes sessions per tenant; TEE never reads it back"
-                ))
-                .vouch_unchecked::<AuthZ, _>(reason!("tenant id is the host's own operational data"))
-                .vouch_unchecked::<Covert, _>(reason!(
-                    "fixed-shape tenant id chosen at /create from client identity, not policy-produced"
-                )),
-        )
-    });
-    let mut ops: Vec<&dyn WriteField> = vec![&set_metadata, &set_status];
-    if let Some(op) = set_principal.as_ref() {
-        ops.push(op);
-    }
+    let ops: Vec<&dyn WriteField> = vec![&set_metadata];
     let (sid, expected_version) =
         boundary::outbound::to_untrusted((session_id.as_str(), None::<u64>))
             .vouch_unchecked::<AuthN, _>(reason!(
@@ -407,7 +384,7 @@ async fn create(
         ))
         .vouch_unchecked::<AuthZ, _>(reason!("each op writes its own session key"))
         .vouch_unchecked::<Covert, _>(reason!(
-            "no policy has run at /create — op count is client-determined (principal present?), not policy bandwidth"
+            "no policy has run at /create — the single metadata op is fixed, not policy bandwidth"
         ));
     state
         .session_store

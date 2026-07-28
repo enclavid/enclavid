@@ -1,4 +1,5 @@
 mod auth;
+mod backend;
 pub mod boundary;
 mod cache;
 mod error;
@@ -12,6 +13,7 @@ mod transport;
 mod domain;
 
 pub use auth::{AuthClient, AuthVerdict, Principal};
+pub use backend::{CacheBackend, HatchBackend, HatchCacheBackend, SessionBackend};
 pub use cache::CacheStore;
 // Boundary-sentinel re-exports — Untrusted/Exposed/concern markers
 // live in `boundary::sentinel` after the untrusted-crate fold-in.
