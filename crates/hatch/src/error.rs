@@ -2,9 +2,9 @@
 //!
 //! Control-flow-significant outcomes ride on status codes (the
 //! `hatch-client` branches on them): 401/403 for the auth deny path,
-//! 404 for absent session/manifest, 412 for a write CAS conflict. The
-//! response body, when present, is a UTF-8 diagnostic string — the
-//! success payloads are bincode-encoded DTOs (see `hatch_protocol`).
+//! 404 for an absent OCI manifest. The response body, when present, is
+//! a UTF-8 diagnostic string — the success payloads are bincode-encoded
+//! DTOs (see `hatch_protocol`).
 
 use axum::body::Bytes;
 use axum::http::StatusCode;
@@ -20,10 +20,8 @@ pub enum HatchError {
     Unauthorized,
     /// 403 — credential valid but not permitted (or no org binding).
     Forbidden,
-    /// 404 — session / manifest not found.
+    /// 404 — OCI manifest not found.
     NotFound,
-    /// 412 — write `expected_version` precondition failed (CAS).
-    VersionMismatch,
     /// 500 — internal / upstream failure.
     Internal(String),
 }
@@ -35,7 +33,6 @@ impl IntoResponse for HatchError {
             HatchError::Unauthorized => StatusCode::UNAUTHORIZED.into_response(),
             HatchError::Forbidden => StatusCode::FORBIDDEN.into_response(),
             HatchError::NotFound => StatusCode::NOT_FOUND.into_response(),
-            HatchError::VersionMismatch => StatusCode::PRECONDITION_FAILED.into_response(),
             HatchError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m).into_response(),
         }
     }

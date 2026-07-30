@@ -2,26 +2,19 @@
 //! [`CacheStore`](crate::CacheStore). Each store owns ALL crypto (`build_op` /
 //! per-field `decode` / `aead` seal-open, and — for the cache — the
 //! identity-hiding `blob_name` derivation) plus the `Exposed`/`Untrusted`
-//! boundary gate; the backend is a **dumb byte mover**, exactly as
-//! `HatchClient::post` was. Two implementations exist:
+//! boundary gate; the backend is a **dumb byte mover**.
 //!
-//!   * [`HatchBackend`] / [`HatchCacheBackend`] — the legacy HTTP-over-vsock path
-//!     to the untrusted host's Redis / object_store cache (mechanical lift of the
-//!     bodies that used to be inlined in the stores).
-//!   * `StorageCvmBackend` / `CacheCvmBackend` (in `api`) — remoc clients to the
-//!     trusted storage-CVM over RA-TLS.
+//! The concrete implementation is `SessionCvmBackend` / `CacheCvmBackend` (in
+//! `api`) — remoc clients to the trusted storage-CVM over RA-TLS. It lives in
+//! `api` (not here) so hatch-client stays remoc-free.
 //!
 //! The seam is boundary-UNAWARE on purpose: it never sees `Exposed`/`Untrusted`,
 //! so nothing here can bypass the egress gate — the stores cross the boundary
 //! before calling in.
 
-use hatch_protocol::{
-    DeleteResponse, ReadRequest, ReadResponse, Slot, WriteRequest, WriteResponse,
-};
-use hyper::StatusCode;
+use hatch_protocol::{ReadRequest, Slot, WriteRequest};
 
 use crate::error::BridgeError;
-use crate::transport::HatchClient;
 
 /// Transport for the per-session KV. Moves already-serialized `hatch-protocol`
 /// DTOs; the store above closes all trust concerns.
@@ -31,9 +24,9 @@ pub trait SessionBackend: Send + Sync {
     async fn read_raw(&self, id: &str, req: ReadRequest) -> Result<(Vec<Slot>, u64), BridgeError>;
 
     /// Atomic CAS write. `Ok(new_version)` | `Err(BridgeError::VersionMismatch)`.
-    /// `deadline_unix_secs` threads the TEE-side TTL INSIDE the channel — the
-    /// storage-CVM enforces it; the Redis-backed [`HatchBackend`] ignores it (no
-    /// host-side TTL — that was the plaintext STATUS byte, now dropped).
+    /// `deadline_unix_secs` threads the TEE-side absolute TTL INSIDE the channel
+    /// — the storage-CVM sweeper enforces it (set once at create; `None` on
+    /// updates so the deadline is never refreshed).
     async fn write(
         &self,
         id: &str,
@@ -55,104 +48,6 @@ pub trait CacheBackend: Send + Sync {
     async fn store(&self, blob_name: &str, bytes: Vec<u8>) -> Result<(), BridgeError>;
     /// `Ok(None)` = miss (absent blob).
     async fn load(&self, blob_name: &str) -> Result<Option<Vec<u8>>, BridgeError>;
-}
-
-// ---------------------------------------------------------------------------
-// Hatch (HTTP-over-vsock → host Redis / object_store) — the legacy path.
-// ---------------------------------------------------------------------------
-
-/// `SessionBackend` over the hatch `/sessions/*` HTTP endpoints (host Redis).
-pub struct HatchBackend {
-    hatch: HatchClient,
-}
-
-impl HatchBackend {
-    pub fn new(hatch: HatchClient) -> Self {
-        Self { hatch }
-    }
-}
-
-#[async_trait::async_trait]
-impl SessionBackend for HatchBackend {
-    async fn read_raw(&self, id: &str, req: ReadRequest) -> Result<(Vec<Slot>, u64), BridgeError> {
-        let bytes = hatch_protocol::encode(&req)?;
-        let resp = self.hatch.post(&format!("/sessions/{id}/read"), bytes).await?;
-        match resp.status {
-            StatusCode::OK => {
-                let r: ReadResponse = hatch_protocol::decode(&resp.body)?;
-                Ok((r.slots, r.version))
-            }
-            s => Err(BridgeError::Transport(format!("read: status {s}"))),
-        }
-    }
-
-    async fn write(
-        &self,
-        id: &str,
-        req: WriteRequest,
-        _deadline_unix_secs: Option<u64>,
-    ) -> Result<u64, BridgeError> {
-        let bytes = hatch_protocol::encode(&req)?;
-        let resp = self.hatch.post(&format!("/sessions/{id}/write"), bytes).await?;
-        match resp.status {
-            StatusCode::OK => {
-                let r: WriteResponse = hatch_protocol::decode(&resp.body)?;
-                Ok(r.new_version)
-            }
-            StatusCode::PRECONDITION_FAILED => Err(BridgeError::VersionMismatch),
-            s => Err(BridgeError::Transport(format!("write: status {s}"))),
-        }
-    }
-
-    async fn delete(&self, id: &str) -> Result<u64, BridgeError> {
-        let resp = self.hatch.delete(&format!("/sessions/{id}/state")).await?;
-        match resp.status {
-            StatusCode::OK => {
-                let r: DeleteResponse = hatch_protocol::decode(&resp.body)?;
-                Ok(r.deleted)
-            }
-            s => Err(BridgeError::Transport(format!("delete: status {s}"))),
-        }
-    }
-
-    async fn exists(&self, id: &str) -> Result<bool, BridgeError> {
-        match self.hatch.head(&format!("/sessions/{id}")).await? {
-            StatusCode::OK => Ok(true),
-            StatusCode::NOT_FOUND => Ok(false),
-            s => Err(BridgeError::Transport(format!("exists: status {s}"))),
-        }
-    }
-}
-
-/// `CacheBackend` over the hatch `/cache/{key}` blob endpoints (host object_store).
-pub struct HatchCacheBackend {
-    hatch: HatchClient,
-}
-
-impl HatchCacheBackend {
-    pub fn new(hatch: HatchClient) -> Self {
-        Self { hatch }
-    }
-}
-
-#[async_trait::async_trait]
-impl CacheBackend for HatchCacheBackend {
-    async fn store(&self, blob_name: &str, bytes: Vec<u8>) -> Result<(), BridgeError> {
-        let resp = self.hatch.post(&format!("/cache/{blob_name}"), bytes).await?;
-        match resp.status {
-            StatusCode::OK => Ok(()),
-            s => Err(BridgeError::Transport(format!("cache store: status {s}"))),
-        }
-    }
-
-    async fn load(&self, blob_name: &str) -> Result<Option<Vec<u8>>, BridgeError> {
-        let resp = self.hatch.get(&format!("/cache/{blob_name}")).await?;
-        match resp.status {
-            StatusCode::OK => Ok(Some(resp.body)),
-            StatusCode::NOT_FOUND => Ok(None),
-            s => Err(BridgeError::Transport(format!("cache load: status {s}"))),
-        }
-    }
 }
 
 #[cfg(test)]

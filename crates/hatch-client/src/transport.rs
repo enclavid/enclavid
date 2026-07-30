@@ -106,14 +106,15 @@ impl HatchClient {
         })
     }
 
-    // The wire verbs are `pub(crate)`, NOT `pub`: a `HatchClient` is an
-    // opaque handle external crates (`api`) may hold and pass into a
-    // typed client constructor, but they must NOT be able to push raw
-    // bytes onto the wire directly — that would bypass the
-    // `boundary::outbound` egress gate (the `Exposed<T, ()>` → bytes
-    // release). The only callers are this crate's typed clients
-    // (`SessionStore` / `AuthClient` / `RegistryClient`), each of which
-    // crosses the boundary before reaching here.
+    // `post` is `pub(crate)`, NOT `pub`: a `HatchClient` is an opaque
+    // handle external crates (`api`) may hold and pass into a typed
+    // client constructor, but they must NOT be able to push raw bytes
+    // onto the wire directly — that would bypass the `boundary::outbound`
+    // egress gate (the `Exposed<T, ()>` → bytes release). The only
+    // callers are this crate's typed EGRESS clients (`AuthClient` /
+    // `RegistryClient` / `KbsClient`), each of which crosses the boundary
+    // before reaching here. (Durable sealed state — sessions + L2 cache —
+    // no longer rides the hatch; it went to the storage-CVM seam.)
 
     /// POST raw bytes to `path`.
     ///
@@ -124,23 +125,6 @@ impl HatchClient {
     /// which are the only things that should feed this method.
     pub(crate) async fn post(&self, path: &str, body: Vec<u8>) -> Result<HttpResp, BridgeError> {
         self.request("POST", path, body).await
-    }
-
-    /// DELETE `path` (no body).
-    pub(crate) async fn delete(&self, path: &str) -> Result<HttpResp, BridgeError> {
-        self.request("DELETE", path, Vec::new()).await
-    }
-
-    /// GET `path` (no body) — returns status + body bytes. Used by the
-    /// L2 cache read; non-2xx (404 miss) is not an error here, the
-    /// caller branches on `status`.
-    pub(crate) async fn get(&self, path: &str) -> Result<HttpResp, BridgeError> {
-        self.request("GET", path, Vec::new()).await
-    }
-
-    /// HEAD `path` — returns just the status code.
-    pub(crate) async fn head(&self, path: &str) -> Result<StatusCode, BridgeError> {
-        Ok(self.request("HEAD", path, Vec::new()).await?.status)
     }
 
     async fn request(

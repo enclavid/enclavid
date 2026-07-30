@@ -47,9 +47,8 @@ pub async fn send(
 }
 
 /// Convert a non-2xx response into an anyhow error that includes the
-/// status code and the server's response body verbatim. Same shape
-/// `create-session.sh` prints on failure — easier debugging than
-/// `reqwest::Error: status code 422`.
+/// status code and the server's response body verbatim — easier
+/// debugging than a bare `reqwest::Error: status code 422`.
 pub async fn ensure_ok(response: Response, what: &str) -> Result<Response> {
     let status = response.status();
     if status.is_success() {

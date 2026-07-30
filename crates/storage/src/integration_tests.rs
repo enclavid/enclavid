@@ -1,7 +1,7 @@
 //! End-to-end remoc round-trip: serve BOTH `storage-rpc` services (backed by the
-//! real redb + object_store cores) over an in-process `tokio::io::duplex`, then
-//! drive them through the generated clients — exactly the api ↔ storage-CVM path
-//! minus RA-TLS. Mirrors `engine-rpc`'s execute duplex test.
+//! real per-session SQLite store + object_store cache) over an in-process
+//! `tokio::io::duplex`, then drive them through the generated clients — exactly
+//! the api ↔ storage-CVM path minus RA-TLS. Mirrors `engine-rpc`'s execute test.
 
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use storage_rpc::{
     SessionStoreServiceServerShared, StorageClients,
 };
 
-use crate::{CacheBlobs, StorageSvc, session};
+use crate::{CacheBlobs, SessionStore, StorageSvc};
 
 fn set_metadata(value: &[u8], expected: Option<u64>) -> WriteRequest {
     WriteRequest {
@@ -30,8 +30,8 @@ fn set_metadata(value: &[u8], expected: Option<u64>) -> WriteRequest {
 #[tokio::test]
 async fn remoc_roundtrip_both_services() {
     let dir = tempfile::tempdir().unwrap();
-    let db = Arc::new(session::open(dir.path().join("s.redb").to_str().unwrap()).unwrap());
-    let svc = Arc::new(StorageSvc::new(db, CacheBlobs::new(Arc::new(InMemory::new()))));
+    let sessions = Arc::new(SessionStore::open(dir.path().to_str().unwrap()).unwrap());
+    let svc = Arc::new(StorageSvc::new(sessions, CacheBlobs::new(Arc::new(InMemory::new()))));
 
     let (a, b) = tokio::io::duplex(1024 * 1024);
     let (a_r, a_w) = split(a);

@@ -1,23 +1,27 @@
-//! Wire DTOs shared between the TEE-side `hatch-client` and the
-//! host-side `hatch`. These are the request/response envelopes that
-//! cross the vsock HTTP boundary.
+//! Wire DTOs shared across two transports:
+//!   * the host-side `hatch` over HTTP-over-vsock — the EGRESS envelopes
+//!     (`AuthorizeRequest`, `PullRequest`, `KbsRelayRequest`);
+//!   * the trusted `storage-CVM` over RA-TLS/remoc — the session-store
+//!     DTOs (`ReadRequest` / `WriteRequest` / `Slot` / …), reused verbatim
+//!     as the `storage-rpc::SessionStoreService` payloads.
 //!
 //! They are NOT the sealed domain types: `SessionMetadata` /
 //! `SessionState` are CBOR-encoded TEE-side (see
-//! `hatch-client::domain`) then AEAD-sealed, and the hatch only ever
-//! sees the opaque `value` bytes carried inside these envelopes — it
-//! has zero knowledge of what the sealed bytes mean.
+//! `hatch-client::domain`) then AEAD-sealed, and neither the hatch nor
+//! the storage-CVM ever sees anything but the opaque `value` bytes
+//! carried inside these envelopes — both have zero knowledge of what the
+//! sealed bytes mean.
 //!
-//! Bodies are encoded with CBOR (see [`encode`]/[`decode`]) and carried
-//! as `application/octet-stream`. CBOR's named fields give schema
-//! evolution across independent hatch/hatch-client deploys. Control-
-//! flow outcomes (deny, version conflict, not-found) ride on HTTP status
-//! codes, not body fields:
+//! Bodies are encoded with CBOR (see [`encode`]/[`decode`]). CBOR's named
+//! fields give schema evolution across independent deploys. On the hatch
+//! HTTP path, control-flow outcomes ride status codes:
 //!   - 401 Unauthorized        — bad credential
 //!   - 403 Forbidden           — credential valid, operation not permitted
-//!   - 404 Not Found           — session/manifest absent
-//!   - 412 Precondition Failed — write `expected_version` mismatch (CAS)
+//!   - 404 Not Found           — OCI manifest absent
 //!   - 400 / 500               — malformed request / internal error
+//!
+//! On the storage-CVM path the same outcomes ride `storage-rpc`'s typed
+//! `SessionError` (e.g. `VersionMismatch` for a CAS conflict) instead.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -155,15 +159,20 @@ pub struct KbsRelayResponse {
 // enclavid-specific KBS DTOs cross this boundary.
 
 // ---------------------------------------------------------------------
-// Session store
-//   POST   /sessions/{id}/read   (ReadRequest  -> ReadResponse)
-//   POST   /sessions/{id}/write  (WriteRequest -> WriteResponse | 412)
-//   DELETE /sessions/{id}/state  (-> DeleteResponse)        [/reset]
-//   HEAD   /sessions/{id}        (-> 200 | 404)             [exists]
+// Session store — the `storage-rpc::SessionStoreService` payloads (remoc
+// to the storage-CVM over RA-TLS):
+//   read(id, ReadRequest)   -> ReadResponse
+//   write(id, WriteRequest, deadline) -> WriteResponse | SessionError::VersionMismatch
+//   delete(id)              -> DeleteResponse          [/reset]
+//   exists(id)              -> bool
+// (These were formerly the hatch `/sessions/*` HTTP routes; that path was
+// retired when durable state moved into the storage-CVM.)
 // ---------------------------------------------------------------------
 
-/// Scalar fields — one value per (session, field). STATUS + PRINCIPAL
-/// are plaintext/hatch-visible; METADATA + STATE are opaque ciphertext.
+/// Scalar fields — one value per (session, field). All four are opaque
+/// ciphertext to the storage-CVM. STATUS + PRINCIPAL are legacy markers
+/// no longer emitted (blind-CVM: host lifecycle hooks dropped); METADATA +
+/// STATE carry the AEAD-sealed session payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlobField {
     Status,

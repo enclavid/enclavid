@@ -1,16 +1,17 @@
 //! `enclavid-storage` — the trusted storage-CVM's core. Serves the two
 //! `storage-rpc` services against local backends:
 //!
-//!   * [`SessionStoreService`] → redb ([`session`]), write-heavy per-session
-//!     state / media / disclosures with real ACID CAS + a TTL sweeper.
+//!   * [`SessionStoreService`] → one SQLite file per session ([`session`]),
+//!     write-heavy per-session state / media / disclosures with ACID CAS + a
+//!     marker-based TTL sweeper.
 //!   * [`CacheService`] → `object_store` ([`cache`]), the write-once/read-mostly
 //!     L2 cwasm cache.
 //!
 //! Both share this one CVM (same *trust* tier — blind ciphertext KV, api the sole
 //! client) but stay distinct stores (their *load* profiles diverge), so a future
 //! split into two CVMs is a deploy step, not a rewrite. The store cores are plain
-//! functions/structs so they unit-test without remoc; [`StorageSvc`] adds the
-//! async remoc trait impls on top.
+//! structs so they unit-test without remoc; [`StorageSvc`] adds the async remoc
+//! trait impls on top.
 
 pub mod cache;
 pub mod session;
@@ -20,12 +21,11 @@ mod integration_tests;
 
 use std::sync::Arc;
 
-use redb::Database;
-
 use hatch_protocol::{DeleteResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse};
 use storage_rpc::{CacheError, CacheService, SessionError, SessionStoreService};
 
 pub use cache::CacheBlobs;
+pub use session::SessionStore;
 
 /// Current wall-clock unix seconds. The CVM's clock is host-controllable (no
 /// trusted time without a vTPM/roughtime upgrade), so a skewed clock only affects
@@ -38,27 +38,28 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// The served storage node: one redb database (sessions) + one object_store
+/// The served storage node: the per-session SQLite store + one object_store
 /// (L2 cache). Cloneable-cheap collaborators, held behind `Arc` for the remoc
 /// `ServerShared`.
 pub struct StorageSvc {
-    db: Arc<Database>,
+    sessions: Arc<SessionStore>,
     cache: CacheBlobs,
 }
 
 impl StorageSvc {
-    pub fn new(db: Arc<Database>, cache: CacheBlobs) -> Self {
-        Self { db, cache }
+    pub fn new(sessions: Arc<SessionStore>, cache: CacheBlobs) -> Self {
+        Self { sessions, cache }
     }
 
-    pub fn db(&self) -> Arc<Database> {
-        self.db.clone()
+    pub fn sessions(&self) -> Arc<SessionStore> {
+        self.sessions.clone()
     }
 }
 
-/// redb calls are blocking (a write fsyncs the blob); run them on the blocking
-/// pool so they never stall the async runtime. Only the SESSION store (redb) is
-/// blocking; the cache is async (`object_store`) and calls straight through.
+/// Session-store calls are blocking (SQLite opens a file + fsyncs on commit); run
+/// them on the blocking pool so they never stall the async runtime. Only the
+/// SESSION store is blocking; the cache is async (`object_store`) and calls
+/// straight through.
 async fn blocking<T, F>(f: F) -> Result<T, SessionError>
 where
     F: FnOnce() -> Result<T, SessionError> + Send + 'static,
@@ -71,8 +72,8 @@ where
 
 impl SessionStoreService for StorageSvc {
     async fn read(&self, id: String, req: ReadRequest) -> Result<ReadResponse, SessionError> {
-        let db = self.db.clone();
-        blocking(move || session::read(&db, &id, req)).await
+        let s = self.sessions.clone();
+        blocking(move || s.read(&id, req)).await
     }
 
     async fn write(
@@ -81,18 +82,18 @@ impl SessionStoreService for StorageSvc {
         req: WriteRequest,
         deadline_unix_secs: Option<u64>,
     ) -> Result<WriteResponse, SessionError> {
-        let db = self.db.clone();
-        blocking(move || session::write(&db, &id, req, deadline_unix_secs)).await
+        let s = self.sessions.clone();
+        blocking(move || s.write(&id, req, deadline_unix_secs)).await
     }
 
     async fn delete(&self, id: String) -> Result<DeleteResponse, SessionError> {
-        let db = self.db.clone();
-        blocking(move || session::delete(&db, &id)).await
+        let s = self.sessions.clone();
+        blocking(move || s.delete(&id)).await
     }
 
     async fn exists(&self, id: String) -> Result<bool, SessionError> {
-        let db = self.db.clone();
-        blocking(move || session::exists(&db, &id)).await
+        let s = self.sessions.clone();
+        blocking(move || s.exists(&id)).await
     }
 }
 

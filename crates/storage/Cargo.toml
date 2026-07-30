@@ -26,12 +26,18 @@ storage-rpc = { path = "../storage-rpc" }
 hatch-protocol = { path = "../hatch-protocol" }
 enclavid-ra-tls = { path = "../ra-tls" }
 
-# Embedded, pure-Rust, ACID KV for the write-heavy per-session store. Single
-# writer ⇒ CAS is a plain serializable write txn (no Lua script). No native TTL —
-# a background sweeper enforces per-session deadlines.
-redb = "4"
-# L2 cwasm cache backend — same `ObjectStore` abstraction the hatch used, so a
-# fleet-shared cache can still swap to S3/GCS by config.
+# Per-session store: one embedded SQLite database file per session (bundled so
+# the amalgamation is built into the measured image, no system libsqlite). ACID
+# CAS in one transaction; opens in ~tens of µs, so a fresh connection per op is
+# cheap. Page-chain blobs (no contiguity requirement) suit the ≤64 MiB media.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Identity-hiding session filename = hex(sha256(session_id)) — also a path-
+# traversal guard (see `crate::session`).
+sha2 = "0.10"
+# L2 cwasm cache backend — a backend-agnostic `ObjectStore` blob interface
+# (local filesystem today), separate from the session store. The cache is
+# per-instance: each blob is sealed under the writer's chip-bound `tee_seal_key`
+# (see `crate::cache`), so it is never fleet-shared.
 object_store = "0.12"
 
 remoc = { version = "0.18", default-features = false, features = [
