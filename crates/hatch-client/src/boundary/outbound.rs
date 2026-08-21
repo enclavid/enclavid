@@ -55,18 +55,30 @@ impl<T> From<T> for ToUntrusted<T> {
 }
 
 /// Mint the session id as a fully-vouched outbound value. The id is a
-/// public, host-assigned UUID — the host already holds it (it appears
-/// in the URL path and as per-blob AAD), so every outbound concern is
-/// closed by that single fact. Used by the lone-id store calls
+/// TEE-minted random UUID that acts as a bare storage locator: it
+/// authenticates nothing and authorizes nothing, so every outbound
+/// concern is closed on those grounds. Used by the lone-id store calls
 /// (`read` / `delete` / `exists`); `write` bundles its id into the
 /// `(id, version)` tuple instead. NOT a generic "public" mint — it is
 /// specific to the session id so the audited reason lives in one place
 /// (grep `public_session_id(` for every assertion of this fact).
+///
+/// The id is **not** host-known by construction, and nothing here may
+/// assume otherwise: it is generated in the TEE
+/// (`api::client::create::generate_session_id`), never crosses the wire
+/// in cleartext (client TLS terminates in the TEE), and is not sent to
+/// the hatch — `AuthorizeRequest` carries only the verbatim header and an
+/// operation enum. Exposure is to the store peer alone; against an
+/// untrusted store peer the id is a correlation handle, which is exactly
+/// what RA-TLS to the storage CVM hides ("access pattern + key", see
+/// `storage-rpc`).
 pub fn public_session_id(id: &str) -> Exposed<&str, ()> {
     to_untrusted(id)
         .vouch_unchecked::<AuthN, _>(reason!(
-            "session id: public host-assigned UUID, not a TEE secret"
+            "authenticates nothing; auth is the applicant token / principal"
         ))
-        .vouch_unchecked::<AuthZ, _>(reason!("the host assigned and already holds this id"))
+        .vouch_unchecked::<AuthZ, _>(reason!(
+            "locator into the store's keyspace; the store gates nothing on it"
+        ))
         .vouch_unchecked::<Covert, _>(reason!("fixed-shape random UUID, not policy-controlled"))
 }

@@ -135,8 +135,10 @@ impl SessionStore {
         id: Exposed<&str>,
         fields: T,
     ) -> Result<(T::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError> {
-        // Type gate: the caller vouches the session id (public,
-        // host-assigned). We thread the `Exposed` into `fetch`/`read_raw`
+        // Type gate: the caller vouches the session id — TEE-minted, NOT
+        // host-assigned (see `boundary::outbound::public_session_id`); a
+        // locator the store gates nothing on. We thread the `Exposed`
+        // into `fetch`/`read_raw`
         // (no early `into_inner`): the id is released at the wire (URL)
         // inside `read_raw`, and read back as AAD via `as_inner` in
         // `fetch` for decoding the result blobs.
@@ -158,8 +160,9 @@ impl SessionStore {
     /// the **caller** before `write` is reached, so the signature is the
     /// type-level guarantee that nothing un-vouched can be written:
     ///   * `id` / `expected_version` — `boundary::outbound::public(...)`
-    ///     (host-assigned UUID / the host's own counter; trivially public
-    ///     across all outbound concerns).
+    ///     (a TEE-minted locator — see `public_session_id`, which
+    ///     documents why it is NOT host-known — and the host's own
+    ///     counter; both vouched across all outbound concerns).
     ///   * `fields` — `boundary::outbound::batch(...)` carries only the
     ///     collection-level concern, cardinality (`Covert`), which the
     ///     caller peels with a count acknowledgement. Each member's
