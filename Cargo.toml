@@ -4,6 +4,7 @@ members = [
     "crates/api",
     "crates/attestation",
     "crates/host-hatch",
+    "crates/host-relay",
     "crates/hatch-protocol",
     "crates/cli",
     "crates/engine-compiler",

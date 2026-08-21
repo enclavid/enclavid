@@ -2176,6 +2176,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "host-relay"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "tempfile",
+ "tokio",
+ "tokio-vsock",
+]
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
