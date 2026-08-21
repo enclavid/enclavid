@@ -1,12 +1,12 @@
 [package]
-name = "hatch"
+name = "host-hatch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "hatch"
+name = "host-hatch"
 path = "src/main.rs"
 
 [features]

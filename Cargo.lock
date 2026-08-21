@@ -2096,28 +2096,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hatch"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "hatch-protocol",
- "hex",
- "jsonwebtoken 9.3.1",
- "oci-client",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
- "tokio",
- "tokio-vsock",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
 name = "hatch-client"
 version = "0.1.0"
 dependencies = [
@@ -2173,6 +2151,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
+]
+
+[[package]]
+name = "host-hatch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "hatch-protocol",
+ "hex",
+ "jsonwebtoken 9.3.1",
+ "oci-client",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-vsock",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
