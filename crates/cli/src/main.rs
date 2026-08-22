@@ -373,9 +373,7 @@ async fn main() -> Result<()> {
     let needs_discovery_strict = matches!(
         cli.command,
         Commands::Cloud {
-            command: CloudCommand::Login { .. }
-                | CloudCommand::Logout
-                | CloudCommand::Token,
+            command: CloudCommand::Login { .. } | CloudCommand::Logout | CloudCommand::Token,
         },
     );
     let needs_discovery_best_effort = matches!(
@@ -392,15 +390,11 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Cloud { command } => match command {
-            CloudCommand::Login { workspace } => {
-                commands::cloud::login::run(workspace).await
-            }
+            CloudCommand::Login { workspace } => commands::cloud::login::run(workspace).await,
             CloudCommand::Logout => commands::cloud::logout::run().await,
             CloudCommand::Token => commands::cloud::token::run().await,
             CloudCommand::Workspace { command } => match command {
-                None | Some(WorkspaceCommand::Show) => {
-                    commands::cloud::workspace::show().await
-                }
+                None | Some(WorkspaceCommand::Show) => commands::cloud::workspace::show().await,
                 Some(WorkspaceCommand::List) => commands::cloud::workspace::list().await,
                 Some(WorkspaceCommand::Use { id_or_name }) => {
                     commands::cloud::workspace::use_workspace(&id_or_name).await
@@ -445,10 +439,9 @@ async fn main() -> Result<()> {
                 commands::session::create::run(policy, from_file, disclosure_key, client_ref).await
             }
             SessionCommand::Get { id } => commands::session::get::run(&id).await,
-            SessionCommand::Disclosures {
-                id,
-                disclosure_key,
-            } => commands::session::disclosures::run(&id, disclosure_key).await,
+            SessionCommand::Disclosures { id, disclosure_key } => {
+                commands::session::disclosures::run(&id, disclosure_key).await
+            }
         },
     }
 }

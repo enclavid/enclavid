@@ -66,11 +66,7 @@ async fn read(
 
     // Discharge AuthZ (token + principal) and Replay scopes via the
     // shared helper; returns verified `SessionMetadata`.
-    let metadata = trust_metadata(
-        metadata_untrusted,
-        &presented_token,
-        &presented_principal,
-    )?;
+    let metadata = trust_metadata(metadata_untrusted, &presented_token, &presented_principal)?;
 
     // `metadata.client` is `Option<Client>` purely because of proto3
     // semantics: sub-messages are always presence-tracked at the
@@ -89,13 +85,17 @@ async fn read(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let status = SessionStatus::try_from(metadata.status)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let status =
+        SessionStatus::try_from(metadata.status).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let digest = crate::policy_pull::split_pinned_ref(&metadata.policy_ref)
         .map(|(_, d)| d.to_string())
         .unwrap_or_default();
-    let plugins = client.plugins.iter().map(dto::PluginView::from_pin).collect();
+    let plugins = client
+        .plugins
+        .iter()
+        .map(dto::PluginView::from_pin)
+        .collect();
 
     Ok(Json(SessionView {
         session_id,

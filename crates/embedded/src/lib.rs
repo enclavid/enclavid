@@ -182,8 +182,7 @@ pub fn read_disclosure_fields(path: &Path) -> Result<Option<DisclosureFieldsSect
     if !path.is_file() {
         return Ok(None);
     }
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let parsed: DisclosureFieldsSection = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing {} as JSON", path.display()))?;
     Ok(Some(parsed))
@@ -194,8 +193,7 @@ pub fn read_i18n(path: &Path) -> Result<Option<I18nSection>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let parsed: I18nSection = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing {} as JSON", path.display()))?;
     Ok(Some(parsed))
@@ -206,8 +204,7 @@ pub fn read_icons(path: &Path) -> Result<Option<IconsSection>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let parsed: IconsSection = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing {} as JSON", path.display()))?;
     Ok(Some(parsed))

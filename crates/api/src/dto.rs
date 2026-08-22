@@ -218,7 +218,10 @@ mod tests {
 
     fn loc(text: &str) -> Localized {
         Localized {
-            translations: vec![Translation { language: "en".into(), text: text.into() }],
+            translations: vec![Translation {
+                language: "en".into(),
+                text: text.into(),
+            }],
         }
     }
 
@@ -253,22 +256,38 @@ mod tests {
         // A changed field VALUE (the data that leaks) — the core show==seal bind.
         let mut d = disclosure();
         d.fields[0].value = "Bob".into();
-        assert_ne!(base, consent_disclosure_digest(&d), "value change must move the digest");
+        assert_ne!(
+            base,
+            consent_disclosure_digest(&d),
+            "value change must move the digest"
+        );
 
         // A changed field KEY.
         let mut d = disclosure();
         d.fields[1].key = "nationality".into();
-        assert_ne!(base, consent_disclosure_digest(&d), "key change must move the digest");
+        assert_ne!(
+            base,
+            consent_disclosure_digest(&d),
+            "key change must move the digest"
+        );
 
         // An ADDED field (D1 ⊂ D2) — the classic "seal more than was shown".
         let mut d = disclosure();
         d.fields.push(field("passport_number", "X123"));
-        assert_ne!(base, consent_disclosure_digest(&d), "added field must move the digest");
+        assert_ne!(
+            base,
+            consent_disclosure_digest(&d),
+            "added field must move the digest"
+        );
 
         // A changed requester (WHO it is disclosed to).
         let mut d = disclosure();
         d.requester = loc("Evil Corp");
-        assert_ne!(base, consent_disclosure_digest(&d), "requester change must move the digest");
+        assert_ne!(
+            base,
+            consent_disclosure_digest(&d),
+            "requester change must move the digest"
+        );
     }
 
     #[test]
@@ -276,7 +295,11 @@ mod tests {
         let a = consent_disclosure_digest(&disclosure());
         let mut d = disclosure();
         d.fields.swap(0, 1);
-        assert_ne!(a, consent_disclosure_digest(&d), "reordered fields are a different screen");
+        assert_ne!(
+            a,
+            consent_disclosure_digest(&d),
+            "reordered fields are a different screen"
+        );
     }
 
     #[test]
@@ -285,11 +308,19 @@ mod tests {
         // JSON's own delimiters keep the key/value boundary unambiguous.
         let lbl = loc("L");
         let a = PromptDisclosure {
-            fields: vec![ProtoDisplayField { key: "ab".into(), label: lbl.clone(), value: String::new() }],
+            fields: vec![ProtoDisplayField {
+                key: "ab".into(),
+                label: lbl.clone(),
+                value: String::new(),
+            }],
             ..Default::default()
         };
         let b = PromptDisclosure {
-            fields: vec![ProtoDisplayField { key: "a".into(), label: lbl, value: "b".into() }],
+            fields: vec![ProtoDisplayField {
+                key: "a".into(),
+                label: lbl,
+                value: "b".into(),
+            }],
             ..Default::default()
         };
         assert_ne!(consent_disclosure_digest(&a), consent_disclosure_digest(&b));

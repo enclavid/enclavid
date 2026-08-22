@@ -83,10 +83,24 @@ pub(crate) fn fuse(
     let mut manifest: Vec<EmbeddedImport> = Vec::new();
     let mut import_nodes: HashMap<String, NodeId> = HashMap::new();
     if !policy_prefused {
-        route_strict_embedded(&mut graph, policy_inst, policy_id, &policy_hash, &mut import_nodes, &mut manifest)?;
+        route_strict_embedded(
+            &mut graph,
+            policy_inst,
+            policy_id,
+            &policy_hash,
+            &mut import_nodes,
+            &mut manifest,
+        )?;
     }
     for (inst, id, hash) in &plugin_insts {
-        route_strict_embedded(&mut graph, *inst, *id, hash, &mut import_nodes, &mut manifest)?;
+        route_strict_embedded(
+            &mut graph,
+            *inst,
+            *id,
+            hash,
+            &mut import_nodes,
+            &mut manifest,
+        )?;
     }
 
     // Functional wiring: satisfy each import that names a PLUGIN interface
@@ -122,10 +136,14 @@ pub(crate) fn fuse(
             if let Some(inst) = source {
                 let export = graph
                     .alias_instance_export(inst, &import_name)
-                    .map_err(|e| wasmtime::Error::msg(format!("wac: alias export `{import_name}`: {e}")))?;
+                    .map_err(|e| {
+                        wasmtime::Error::msg(format!("wac: alias export `{import_name}`: {e}"))
+                    })?;
                 graph
                     .set_instantiation_argument(consumer_inst, &import_name, export)
-                    .map_err(|e| wasmtime::Error::msg(format!("wac: wire import `{import_name}`: {e}")))?;
+                    .map_err(|e| {
+                        wasmtime::Error::msg(format!("wac: wire import `{import_name}`: {e}"))
+                    })?;
             }
         }
     }
@@ -213,9 +231,11 @@ fn route_strict_embedded(
                 node
             }
         };
-        graph.set_instantiation_argument(inst, &import_name, node).map_err(|e| {
-            wasmtime::Error::msg(format!("wac: route embedded import `{import_name}`: {e}"))
-        })?;
+        graph
+            .set_instantiation_argument(inst, &import_name, node)
+            .map_err(|e| {
+                wasmtime::Error::msg(format!("wac: route embedded import `{import_name}`: {e}"))
+            })?;
     }
     Ok(())
 }
@@ -369,7 +389,9 @@ mod tests {
         assert!(is_host_reserved("enclavid:host/timer@0.1.0"));
         assert!(is_host_reserved("enclavid:host/embedded-i18n@0.1.0"));
         assert!(is_host_reserved("enclavid:host/embedded-icons@0.1.0"));
-        assert!(is_host_reserved("enclavid:host/embedded-disclosure-fields@0.1.0"));
+        assert!(is_host_reserved(
+            "enclavid:host/embedded-disclosure-fields@0.1.0"
+        ));
         // Synthetic per-catalog twins fusion derives from the embedded
         // imports (`embedded_import_name`): host-owned by construction.
         assert!(is_host_reserved("embedded-slot:h0123456789abcdef/i18n"));

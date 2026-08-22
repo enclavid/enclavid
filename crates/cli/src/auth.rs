@@ -107,8 +107,8 @@ pub fn active_workspace_id() -> Result<String> {
     {
         return Ok(v);
     }
-    let tokens = read_stored_tokens()?
-        .context("not authenticated — run `enclavid cloud login` first")?;
+    let tokens =
+        read_stored_tokens()?.context("not authenticated — run `enclavid cloud login` first")?;
     tokens.active_workspace_id.ok_or_else(|| {
         anyhow::anyhow!(
             "no active workspace — run `enclavid cloud login` to pick one, \
@@ -241,12 +241,8 @@ async fn refresh_access_token(refresh_token: &str) -> Result<StoredTokens> {
         access_token: response.access_token().secret().clone(),
         refresh_token: next_refresh,
         id_token: None, // caller preserves existing id_token from the stored record
-        expires_at: now_secs()
-            + response
-                .expires_in()
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        workspaces: Vec::new(), // caller preserves from stored record
+        expires_at: now_secs() + response.expires_in().map(|d| d.as_secs()).unwrap_or(0),
+        workspaces: Vec::new(),    // caller preserves from stored record
         active_workspace_id: None, // caller preserves from stored record
     })
 }

@@ -73,9 +73,9 @@ async fn dispatch(action: &str) -> anyhow::Result<()> {
             Ok(())
         }
         "list" => action_list().await,
-        other => anyhow::bail!(
-            "unknown action `{other}` — expected one of: get, store, erase, list"
-        ),
+        other => {
+            anyhow::bail!("unknown action `{other}` — expected one of: get, store, erase, list")
+        }
     }
 }
 

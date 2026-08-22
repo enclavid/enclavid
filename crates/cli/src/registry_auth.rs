@@ -33,12 +33,10 @@ const ENV_AUTH: &str = "ENCLAVID_REGISTRY_AUTH";
 /// `--auth` flag, if any.
 pub async fn resolve(registry: &str, override_auth: Option<&str>) -> Result<RegistryAuth> {
     if let Some(a) = override_auth {
-        return parse_authorization_header(a)
-            .context("parsing --auth value");
+        return parse_authorization_header(a).context("parsing --auth value");
     }
     if let Ok(v) = std::env::var(ENV_AUTH) {
-        return parse_authorization_header(&v)
-            .with_context(|| format!("parsing ${ENV_AUTH}"));
+        return parse_authorization_header(&v).with_context(|| format!("parsing ${ENV_AUTH}"));
     }
     if let Some(creds) = from_docker_config(registry)? {
         return Ok(creds);
@@ -87,9 +85,9 @@ fn from_docker_config(registry: &str) -> Result<Option<RegistryAuth>> {
     // 3b. Per-registry helper. Wins over the global store when both
     //     are configured (mirrors docker's own precedence).
     if let Some(helper) = cfg.cred_helpers.get(registry) {
-        return Ok(Some(invoke_helper(helper, registry).with_context(|| {
-            format!("invoking docker-credential-{helper}")
-        })?));
+        return Ok(Some(invoke_helper(helper, registry).with_context(
+            || format!("invoking docker-credential-{helper}"),
+        )?));
     }
 
     // 3c. Global store (e.g. macOS `osxkeychain`). Asked for every
@@ -110,9 +108,7 @@ fn from_docker_config(registry: &str) -> Result<Option<RegistryAuth>> {
 fn decode_basic(b64: &str) -> Result<RegistryAuth> {
     let raw = BASE64.decode(b64).context("base64 decode")?;
     let s = String::from_utf8(raw).context("utf8 decode")?;
-    let (user, pass) = s
-        .split_once(':')
-        .context("expected `username:password`")?;
+    let (user, pass) = s.split_once(':').context("expected `username:password`")?;
     Ok(RegistryAuth::Basic(user.to_string(), pass.to_string()))
 }
 

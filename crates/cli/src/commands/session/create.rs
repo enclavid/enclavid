@@ -90,13 +90,19 @@ pub async fn run(
         let secret = read_age_secret(&p.to_path_buf())
             .with_context(|| format!("reading disclosure key from {}", p.display()))?;
         let identity = Identity::from_str(&secret).map_err(|e| {
-            anyhow::anyhow!("disclosure key in {} is not a valid age identity: {e}", p.display())
+            anyhow::anyhow!(
+                "disclosure key in {} is not a valid age identity: {e}",
+                p.display()
+            )
         })?;
         obj.insert(
             "client_disclosure_pubkey".into(),
             identity.to_public().to_string().into(),
         );
-        DisclosureSource::Known { secret, label: "copied from --disclosure-key" }
+        DisclosureSource::Known {
+            secret,
+            label: "copied from --disclosure-key",
+        }
     } else if obj
         .get("client_disclosure_pubkey")
         .and_then(|v| v.as_str())
@@ -112,7 +118,10 @@ pub async fn run(
             "client_disclosure_pubkey".into(),
             identity.to_public().to_string().into(),
         );
-        DisclosureSource::Known { secret, label: "auto-generated" }
+        DisclosureSource::Known {
+            secret,
+            label: "auto-generated",
+        }
     };
 
     // 3. POST.
@@ -120,8 +129,7 @@ pub async fn run(
     let jwt = transport::fetch_jwt().await?;
     let url = format!("{}/api/v1/sessions", api_url().trim_end_matches('/'));
 
-    let response = transport::send(&client, Method::POST, &url, &jwt, None, Some(body))
-        .await?;
+    let response = transport::send(&client, Method::POST, &url, &jwt, None, Some(body)).await?;
     let response = transport::ensure_ok(response, "POST /api/v1/sessions").await?;
     let created: CreateResponse = response
         .json()
@@ -131,7 +139,8 @@ pub async fn run(
     // 4. Cache the session token always; cache the disclosure secret only
     //    when the CLI generated/read it (caller-supplied recipients keep
     //    their own secret).
-    let token_path = cache::store_session_token(&created.session_id, &created.client_session_token)?;
+    let token_path =
+        cache::store_session_token(&created.session_id, &created.client_session_token)?;
     let key_cache = match &disclosure {
         DisclosureSource::Known { secret, label } => {
             let path = cache::store_disclosure_key(&created.session_id, secret)?;
@@ -142,12 +151,16 @@ pub async fn run(
 
     println!("✓ Session created");
     println!("  session_id:       {}", created.session_id);
-    println!("  policy:           {} ({})", created.resolved_policy.reference, created.resolved_policy.digest);
+    println!(
+        "  policy:           {} ({})",
+        created.resolved_policy.reference, created.resolved_policy.digest
+    );
     println!("  attestation:      {}", created.attestation.format);
     if let Some(r) = client_ref.as_deref() {
         println!("  client_ref:       {r}");
     }
-    println!("  applicant URL:    {}/session/{}/",
+    println!(
+        "  applicant URL:    {}/session/{}/",
         applicant_url().trim_end_matches('/'),
         created.session_id,
     );
@@ -165,7 +178,11 @@ pub async fn run(
     }
     println!();
     println!("Next:");
-    println!("  open '{}/session/{}/'", applicant_url().trim_end_matches('/'), created.session_id);
+    println!(
+        "  open '{}/session/{}/'",
+        applicant_url().trim_end_matches('/'),
+        created.session_id
+    );
     println!("  enclavid session get {}", created.session_id);
     println!("  enclavid session disclosures {}", created.session_id);
 
@@ -176,8 +193,8 @@ pub async fn run(
 /// (lines starting with `#`) and blank lines are skipped, the first
 /// non-blank line is returned.
 fn read_age_secret(path: &PathBuf) -> Result<String> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("opening {}", path.display()))?;
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {

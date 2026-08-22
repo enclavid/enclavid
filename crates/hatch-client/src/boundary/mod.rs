@@ -49,8 +49,6 @@ pub mod inbound;
 pub mod outbound;
 pub mod sentinel;
 
-pub use sentinel::{
-    AuthN, AuthZ, Covert, Exposed, Reason, Remove, Replay, Untrusted,
-};
 pub use inbound::{FromUntrusted, from_untrusted};
 pub use outbound::{ToUntrusted, to_untrusted};
+pub use sentinel::{AuthN, AuthZ, Covert, Exposed, Reason, Remove, Replay, Untrusted};

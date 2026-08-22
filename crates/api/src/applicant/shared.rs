@@ -14,11 +14,11 @@ use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
+use engine_types::composition::PluginInstance;
 use hatch_client::{
     AuthN, AuthZ, Client, Event, Key, Metadata, PluginPin, Replay, SessionMetadata, SessionState,
     State as StateField, outbound_session_id, reason,
 };
-use engine_types::composition::PluginInstance;
 // The run wire mirrors: props api builds + ships, the outcome + error it gets
 // back from the execution-worker.
 use engine_rpc::{CompiledBundle, ExecError, Prop, RunOutcome, RunRequest};
@@ -35,13 +35,11 @@ use super::auth::CallerKey;
 use super::callbacks::CallbackServer;
 use super::media_store::HatchMediaStore;
 use super::persister::SessionPersister;
-use super::views::{progress_from, SessionProgress};
+use super::views::{SessionProgress, progress_from};
 
 /// Build the static `props` list the policy reads via
 /// `context.props`, from the consumer's config bytes in metadata.
-pub(super) fn parse_props(
-    metadata: &SessionMetadata,
-) -> Result<Vec<(String, Prop)>, StatusCode> {
+pub(super) fn parse_props(metadata: &SessionMetadata) -> Result<Vec<(String, Prop)>, StatusCode> {
     parse_input(&metadata.input).map_err(|e| {
         eprintln!("parse_props: parse_input failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -155,11 +153,21 @@ impl SessionRunCtx {
                 // failure (e.g. 410 GONE) is a pure function of the pinned config,
                 // surfaced to the consumer verbatim. Phase 2: re-drive WITH the
                 // bundle via `run_with_bundle`, which always runs (no second miss).
-                let bundle =
-                    resolve_bundle(&state, &composition_key, &compat_token, &session_id, &metadata)
-                        .await
-                        .map_err(ApiError::Status)?;
-                let req = RunRequest { composition_key, props, session_state, event };
+                let bundle = resolve_bundle(
+                    &state,
+                    &composition_key,
+                    &compat_token,
+                    &session_id,
+                    &metadata,
+                )
+                .await
+                .map_err(ApiError::Status)?;
+                let req = RunRequest {
+                    composition_key,
+                    props,
+                    session_state,
+                    event,
+                };
                 state
                     .executor
                     .run_with_bundle(req, bundle, callbacks)
@@ -233,14 +241,10 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
         // pull the `id` key. Lets the same extractor work for
         // /connect (`{id}` only) and /input/{slot_id} alike without
         // committing to a per-route Path tuple shape here.
-        let Path(params) =
-            Path::<HashMap<String, String>>::from_request_parts(parts, state)
-                .await
-                .map_err(|_| StatusCode::BAD_REQUEST)?;
-        let session_id = params
-            .get("id")
-            .cloned()
-            .ok_or(StatusCode::BAD_REQUEST)?;
+        let Path(params) = Path::<HashMap<String, String>>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let session_id = params.get("id").cloned().ok_or(StatusCode::BAD_REQUEST)?;
         let CallerKey(applicant_session_token) =
             CallerKey::from_request_parts(parts, state).await?;
         // Applicant locale from `Accept-Language` — captured once per
@@ -290,13 +294,16 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
         // sealing under tee_seal_key/AAD=session_id (host tampering breaks the
         // seal at decode).
         let metadata = metadata_untrusted
-            .trust_unchecked::<AuthZ, _>(reason!(r#"
+            .trust_unchecked::<AuthZ, _>(reason!(
+                r#"
 Applicant flow doesn't authenticate per-tenant, so we have
 no principal to cross-check here. Security relies on the
 bearer-key auth layer at the route plus AEAD-binding on state
 under applicant_session_token.
-            "#))
-            .trust_unchecked::<Replay, _>(reason!(r#"
+            "#
+            ))
+            .trust_unchecked::<Replay, _>(reason!(
+                r#"
 Metadata is NOT static — the persister mutates it each disclosure/media
 round (captured_media, disclosure_count/entry_hashes, status) — so freshness is
 UNVERIFIABLE here, not guaranteed: a stateless TEE cannot detect a
@@ -308,7 +315,8 @@ count surfaces as the consumer's own chain-verification failure. No leak
 (host replays blobs it cannot read), no forgery (AEAD). Same containment as
 the version vouch below (a lying host self-limits to DoS); full-coherent
 rollback is an accepted residual of the host-holds-all-state model.
-            "#))
+            "#
+            ))
             .into_inner()
             .ok_or_else(|| {
                 eprintln!("session_run_ctx: metadata is None for {session_id}");
@@ -318,28 +326,36 @@ rollback is an accepted residual of the host-holds-all-state model.
         let props = parse_props(&metadata)?;
 
         let session_state = state_opt
-            .trust_unchecked::<Replay, _>(reason!(r#"
+            .trust_unchecked::<Replay, _>(reason!(
+                r#"
 Stale state is bounded by per-call version-CAS during the run.
 The first write on a stale snapshot fails with VersionMismatch
 and the run aborts cleanly — replay from the latest persisted
 state on retry.
-            "#))
+            "#
+            ))
             .into_inner();
 
         let version = version
-            .trust_unchecked::<AuthN, _>(reason!(r#"
+            .trust_unchecked::<AuthN, _>(reason!(
+                r#"
 Version is a CAS token only. A lying host either fails our
 writes (DoS) or stomps a concurrent winner (UX regression). No
 data leak path.
-            "#))
-            .trust_unchecked::<AuthZ, _>(reason!(r#"
+            "#
+            ))
+            .trust_unchecked::<AuthZ, _>(reason!(
+                r#"
 Version counter is not an ownership signal — fed back as
 expected_version on the next write, no access decision hangs on it.
-            "#))
-            .trust_unchecked::<Replay, _>(reason!(r#"
+            "#
+            ))
+            .trust_unchecked::<Replay, _>(reason!(
+                r#"
 Staleness on the version manifests as CAS mismatch on first
 persist; same containment as above.
-            "#))
+            "#
+            ))
             .into_inner();
 
         // Compute the composition cache key — names the fused component in the
@@ -361,9 +377,7 @@ persist; same containment as above.
             .as_ref()
             .map(|c| c.disclosure_pubkey.clone())
             .ok_or_else(|| {
-                eprintln!(
-                    "session_run_ctx: metadata.client missing for {session_id}",
-                );
+                eprintln!("session_run_ctx: metadata.client missing for {session_id}",);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
         let persister = Arc::new(SessionPersister {
@@ -485,8 +499,7 @@ async fn cold_compile(
     // lookup applies per plugin below. Missing entry collapses to an
     // empty slice ⇒ anonymous pull (host attaches no Authorization
     // header).
-    let policy_bearer =
-        policy_pull::bearer_for_ref(&client.registry_auth, &metadata.policy_ref);
+    let policy_bearer = policy_pull::bearer_for_ref(&client.registry_auth, &metadata.policy_ref);
 
     // Context for the `kbs` key path: the hatch relay client that
     // couriers each RCAR leg. Shared by the policy and every plugin pull;
@@ -510,9 +523,15 @@ async fn cold_compile(
         let registry = &state.registry;
         let kbs_ctx = &kbs_ctx;
         async move {
-            policy_pull::pull_plugin(registry, &pin.impl_ref, bearer, pin.key.as_ref(), Some(kbs_ctx))
-                .await
-                .map(|art| (pin.package.clone(), art))
+            policy_pull::pull_plugin(
+                registry,
+                &pin.impl_ref,
+                bearer,
+                pin.key.as_ref(),
+                Some(kbs_ctx),
+            )
+            .await
+            .map(|art| (pin.package.clone(), art))
         }
     });
     let (policy_res, plugin_results) =
@@ -530,9 +549,7 @@ async fn cold_compile(
     let mut plugin_instances: Vec<PluginInstance> = Vec::with_capacity(plugin_results.len());
     for res in plugin_results {
         let (package, art) = res.map_err(|e| {
-            eprintln!(
-                "lookup_policy: pull_plugin failed for session {session_id}: {e}",
-            );
+            eprintln!("lookup_policy: pull_plugin failed for session {session_id}: {e}",);
             StatusCode::GONE
         })?;
         // Keep the raw component bytes — the compiler fuses on bytes, not a
@@ -673,22 +690,37 @@ mod tests {
 
     #[test]
     fn composition_key_deterministic_and_order_sensitive() {
-        let plugins = [pin("enclavid:well-known", "reg/wk@sha256:11"), pin("enclavid:face-age", "reg/fa@sha256:22")];
+        let plugins = [
+            pin("enclavid:well-known", "reg/wk@sha256:11"),
+            pin("enclavid:face-age", "reg/fa@sha256:22"),
+        ];
         let key = composition_key("reg/policy@sha256:aa", None, &no_auth(), &plugins);
 
         // Same composition → same key (the whole point: cross-session sharing).
-        assert_eq!(key, composition_key("reg/policy@sha256:aa", None, &no_auth(), &plugins));
+        assert_eq!(
+            key,
+            composition_key("reg/policy@sha256:aa", None, &no_auth(), &plugins)
+        );
 
         // Plugin ORDER is significant (fusion order fixes merged first-match) →
         // reversing must change the key.
         let reversed = [plugins[1].clone(), plugins[0].clone()];
-        assert_ne!(key, composition_key("reg/policy@sha256:aa", None, &no_auth(), &reversed));
+        assert_ne!(
+            key,
+            composition_key("reg/policy@sha256:aa", None, &no_auth(), &reversed)
+        );
 
         // Different policy ref → different key.
-        assert_ne!(key, composition_key("reg/policy@sha256:bb", None, &no_auth(), &plugins));
+        assert_ne!(
+            key,
+            composition_key("reg/policy@sha256:bb", None, &no_auth(), &plugins)
+        );
 
         // Different plugin set (dropping one) → different key.
-        assert_ne!(key, composition_key("reg/policy@sha256:aa", None, &no_auth(), &plugins[..1]));
+        assert_ne!(
+            key,
+            composition_key("reg/policy@sha256:aa", None, &no_auth(), &plugins[..1])
+        );
     }
 
     #[test]
@@ -706,8 +738,18 @@ mod tests {
         use hatch_client::{KbsKey, Key};
         let plugins = [pin("p", "r")];
         let none = composition_key("policy", None, &no_auth(), &plugins);
-        let inline_a = composition_key("policy", Some(&Key::Inline(vec![1, 2, 3])), &no_auth(), &plugins);
-        let inline_b = composition_key("policy", Some(&Key::Inline(vec![9, 9, 9])), &no_auth(), &plugins);
+        let inline_a = composition_key(
+            "policy",
+            Some(&Key::Inline(vec![1, 2, 3])),
+            &no_auth(),
+            &plugins,
+        );
+        let inline_b = composition_key(
+            "policy",
+            Some(&Key::Inline(vec![9, 9, 9])),
+            &no_auth(),
+            &plugins,
+        );
 
         // Plaintext (None) and encrypted (Inline) are distinct scopes, and two
         // different Inline keys never share — a non-holder can't hit a holder's
@@ -715,12 +757,34 @@ mod tests {
         assert_ne!(none, inline_a);
         assert_ne!(inline_a, inline_b);
         // Same Inline key → same key: key-holders DO share.
-        assert_eq!(inline_a, composition_key("policy", Some(&Key::Inline(vec![1, 2, 3])), &no_auth(), &plugins));
+        assert_eq!(
+            inline_a,
+            composition_key(
+                "policy",
+                Some(&Key::Inline(vec![1, 2, 3])),
+                &no_auth(),
+                &plugins
+            )
+        );
 
         // Kbs is attestation-gated (every TEE session equally authorized), so it
         // does NOT partition by endpoint — that would only reduce sharing.
-        let kbs_a = composition_key("policy", Some(&Key::Kbs(KbsKey { endpoint: "a".into() })), &no_auth(), &plugins);
-        let kbs_b = composition_key("policy", Some(&Key::Kbs(KbsKey { endpoint: "b".into() })), &no_auth(), &plugins);
+        let kbs_a = composition_key(
+            "policy",
+            Some(&Key::Kbs(KbsKey {
+                endpoint: "a".into(),
+            })),
+            &no_auth(),
+            &plugins,
+        );
+        let kbs_b = composition_key(
+            "policy",
+            Some(&Key::Kbs(KbsKey {
+                endpoint: "b".into(),
+            })),
+            &no_auth(),
+            &plugins,
+        );
         assert_eq!(kbs_a, kbs_b);
     }
 

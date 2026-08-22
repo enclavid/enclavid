@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use axum::extract::{FromRequestParts, Request};
-use axum::http::{header, request::Parts, StatusCode};
+use axum::http::{StatusCode, header, request::Parts};
 use axum::middleware::Next;
 use axum::response::Response;
 use base64ct::{Base64, Encoding};

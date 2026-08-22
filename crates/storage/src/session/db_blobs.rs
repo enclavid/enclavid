@@ -14,7 +14,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use sha2::{Digest, Sha256};
 
 use hatch_protocol::{
@@ -47,7 +49,9 @@ impl DbBlobs {
     /// absent. Idempotent.
     pub(super) fn open(dir: &Path) -> Result<DbBlobs, StoreErr> {
         std::fs::create_dir_all(dir)?;
-        Ok(DbBlobs { dir: dir.to_path_buf() })
+        Ok(DbBlobs {
+            dir: dir.to_path_buf(),
+        })
     }
 
     /// `<dir>/<sha256(id)>.sqlite`.
@@ -116,7 +120,9 @@ impl DbBlobs {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA)?;
         if tx
-            .query_row("SELECT version FROM meta WHERE k=1", [], |r| r.get::<_, u64>(0))
+            .query_row("SELECT version FROM meta WHERE k=1", [], |r| {
+                r.get::<_, u64>(0)
+            })
             .optional()?
             .is_some()
         {
@@ -142,8 +148,9 @@ impl DbBlobs {
         };
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA)?; // no-op if present; guards a crash-empty file
-        let current: Option<u64> =
-            tx.query_row("SELECT version FROM meta WHERE k=1", [], |r| r.get(0)).optional()?;
+        let current: Option<u64> = tx
+            .query_row("SELECT version FROM meta WHERE k=1", [], |r| r.get(0))
+            .optional()?;
         if current != Some(expected) {
             return Err(StoreErr::VersionMismatch);
         }
@@ -166,8 +173,10 @@ impl DbBlobs {
         };
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA)?; // no-op if present; guards a crash-empty file
-        let deleted =
-            tx.execute("DELETE FROM scalars WHERE tag=?1", [blob_tag(BlobField::State)])? as u64;
+        let deleted = tx.execute(
+            "DELETE FROM scalars WHERE tag=?1",
+            [blob_tag(BlobField::State)],
+        )? as u64;
         tx.execute("DELETE FROM media", [])?;
         tx.commit()?;
         Ok(DeleteResponse { deleted })
@@ -188,7 +197,10 @@ impl DbBlobs {
         if !schema_present(&conn)? {
             return Ok(false);
         }
-        Ok(conn.query_row("SELECT 1 FROM meta WHERE k=1", [], |_| Ok(())).optional()?.is_some())
+        Ok(conn
+            .query_row("SELECT 1 FROM meta WHERE k=1", [], |_| Ok(()))
+            .optional()?
+            .is_some())
     }
 
     /// Remove a session's on-disk SQLite file and any transient sidecars
@@ -268,7 +280,11 @@ fn write_pragmas(conn: &Connection) -> Result<(), StoreErr> {
 
 fn schema_present(conn: &Connection) -> Result<bool, StoreErr> {
     Ok(conn
-        .query_row("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'", [], |_| Ok(()))
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'",
+            [],
+            |_| Ok(()),
+        )
         .optional()?
         .is_some())
 }

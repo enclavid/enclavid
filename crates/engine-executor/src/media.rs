@@ -107,9 +107,11 @@ impl crate::enclavid::host::types::HostBlob for HostState {
         // Hex-encode the 32-byte content hash into the opaque string token the
         // policy stashes in `state`. String (not raw bytes) for cross-language
         // ergonomics; internally the hash stays `[u8;32]`, hex only at this seam.
-        Ok(blake3::Hash::from_bytes(self.table.get(&self_)?.content_hash)
-            .to_hex()
-            .to_string())
+        Ok(
+            blake3::Hash::from_bytes(self.table.get(&self_)?.content_hash)
+                .to_hex()
+                .to_string(),
+        )
     }
 
     async fn drop(&mut self, rep: Resource<BlobRep>) -> wasmtime::Result<()> {

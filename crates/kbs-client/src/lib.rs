@@ -88,7 +88,10 @@ impl TeeKeyPair {
         cipher
             .decrypt(
                 Nonce::from_slice(&response.iv),
-                Payload { msg: &ct, aad: &aad },
+                Payload {
+                    msg: &ct,
+                    aad: &aad,
+                },
             )
             .map_err(|_| KbsError::Jwe("gcm decrypt failed".to_string()))
     }
@@ -168,10 +171,7 @@ impl<E: EvidenceProvider> RcarSession<E> {
 
         let attestation = Attestation {
             init_data: None,
-            runtime_data: RuntimeData {
-                nonce,
-                tee_pubkey,
-            },
+            runtime_data: RuntimeData { nonce, tee_pubkey },
             tee_evidence: CompositeEvidence {
                 primary_evidence,
                 additional_evidence: String::new(),
@@ -183,8 +183,8 @@ impl<E: EvidenceProvider> RcarSession<E> {
     /// Parse a leg-3 resource `Response` (JWE) and return the plaintext —
     /// the released key bytes.
     pub fn unwrap_resource(&self, body: &[u8]) -> Result<Vec<u8>, KbsError> {
-        let response: Response = serde_json::from_slice(body)
-            .map_err(|e| KbsError::Decode(format!("response: {e}")))?;
+        let response: Response =
+            serde_json::from_slice(body).map_err(|e| KbsError::Decode(format!("response: {e}")))?;
         self.keypair.decrypt_response(&response)
     }
 }

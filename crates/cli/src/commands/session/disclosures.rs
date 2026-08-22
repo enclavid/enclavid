@@ -21,9 +21,9 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use super::api_url;
 use super::cache;
 use super::transport;
-use super::api_url;
 
 #[derive(Deserialize)]
 struct DisclosuresResponse {
@@ -46,10 +46,8 @@ pub async fn run(session_id: &str, disclosure_key_override: Option<PathBuf>) -> 
         session_id,
     );
 
-    let response =
-        transport::send(&client, Method::GET, &url, &jwt, Some(&token), None).await?;
-    let response =
-        transport::ensure_ok(response, "GET /api/v1/sessions/<id>/disclosures").await?;
+    let response = transport::send(&client, Method::GET, &url, &jwt, Some(&token), None).await?;
+    let response = transport::ensure_ok(response, "GET /api/v1/sessions/<id>/disclosures").await?;
     let body: DisclosuresResponse = response
         .json()
         .await
@@ -72,8 +70,8 @@ pub async fn run(session_id: &str, disclosure_key_override: Option<PathBuf>) -> 
         // bytes (raw binary disclosure), we'd fall back to base64 —
         // but no policy has been doing that, so keep the strict path
         // until that changes.
-        let parsed: serde_json::Value = serde_json::from_slice(&plaintext)
-            .with_context(|| format!("item {i}: not JSON"))?;
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&plaintext).with_context(|| format!("item {i}: not JSON"))?;
         decrypted.push(parsed);
     }
 

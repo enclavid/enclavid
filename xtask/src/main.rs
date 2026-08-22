@@ -112,7 +112,10 @@ fn push_plugins(selected: Option<Vec<String>>, registry: &str) -> Result<()> {
                     bail!("unknown plugin '{n}' (known: {})", plugin_names());
                 }
             }
-            PLUGINS.iter().filter(|p| names.iter().any(|n| n == p.name)).collect()
+            PLUGINS
+                .iter()
+                .filter(|p| names.iter().any(|n| n == p.name))
+                .collect()
         }
     };
 
@@ -122,7 +125,10 @@ fn push_plugins(selected: Option<Vec<String>>, registry: &str) -> Result<()> {
     let auth = format!("Bearer {}", cloud_token()?);
     let dist = root.join("target/xtask-dist");
     std::fs::create_dir_all(&dist).context("creating dist dir")?;
-    println!("registry={registry}  workspace={ws}  dist={}\n", dist.display());
+    println!(
+        "registry={registry}  workspace={ws}  dist={}\n",
+        dist.display()
+    );
 
     let mut pins: Vec<serde_json::Value> = Vec::new();
     for p in chosen {
@@ -140,7 +146,14 @@ fn push_plugins(selected: Option<Vec<String>>, registry: &str) -> Result<()> {
         let reference = format!("{registry}/enclavid/{ws}/policies/{}", p.name);
         let stdout = run_capture(
             "enclavid",
-            &["oci", "push", file.to_str().unwrap(), &reference, "--auth", &auth],
+            &[
+                "oci",
+                "push",
+                file.to_str().unwrap(),
+                &reference,
+                "--auth",
+                &auth,
+            ],
         )
         .with_context(|| format!("pushing {}", p.name))?;
         print!("{stdout}");
@@ -156,12 +169,19 @@ fn push_plugins(selected: Option<Vec<String>>, registry: &str) -> Result<()> {
     }
 
     println!("=== paste into spec.json  \"plugins\": ===");
-    println!("{}", serde_json::to_string_pretty(&serde_json::Value::Array(pins))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::Value::Array(pins))?
+    );
     Ok(())
 }
 
 fn plugin_names() -> String {
-    PLUGINS.iter().map(|p| p.name).collect::<Vec<_>>().join(", ")
+    PLUGINS
+        .iter()
+        .map(|p| p.name)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn abs(root: &Path, rel: &str) -> String {
@@ -180,7 +200,9 @@ fn active_workspace() -> Result<String> {
 
 /// Fresh registry bearer for the active workspace.
 fn cloud_token() -> Result<String> {
-    Ok(run_capture("enclavid", &["cloud", "token"])?.trim().to_string())
+    Ok(run_capture("enclavid", &["cloud", "token"])?
+        .trim()
+        .to_string())
 }
 
 /// Run a command, capture stdout, and fail loudly (with stderr) on a

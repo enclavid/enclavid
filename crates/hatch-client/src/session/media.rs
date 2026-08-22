@@ -50,7 +50,11 @@ const MEDIA_FIELD_INFO: &[u8] = b"enclavid.media-field.v1";
 /// identical captures; the raw content-hash never leaves the TEE. (The 32-byte hash
 /// is fixed-length and last, so the `session_id || hash` concatenation is
 /// unambiguous — no length-prefix needed.)
-pub(super) fn media_field_name(tee_seal_key: &[u8], session_id: &str, blob_hash: &[u8; 32]) -> Vec<u8> {
+pub(super) fn media_field_name(
+    tee_seal_key: &[u8],
+    session_id: &str,
+    blob_hash: &[u8; 32],
+) -> Vec<u8> {
     let mut info = Vec::with_capacity(MEDIA_FIELD_INFO.len() + session_id.len() + blob_hash.len());
     info.extend_from_slice(MEDIA_FIELD_INFO);
     info.extend_from_slice(session_id.as_bytes());
@@ -134,7 +138,11 @@ mod tests {
                     media_field_name(ctx.tee_seal_key, ctx.session_id, &hash),
                     "keyed by the per-session HKDF field name",
                 );
-                assert_ne!(m.blob_key, hash.to_vec(), "must NOT expose the raw content-hash");
+                assert_ne!(
+                    m.blob_key,
+                    hash.to_vec(),
+                    "must NOT expose the raw content-hash"
+                );
                 m.value
             }
             _ => panic!("SetMedia must emit Op::MediaWrite"),
@@ -169,7 +177,10 @@ mod tests {
         assert_eq!(a1, a2, "same (session, content) -> same field name");
         // THE POINT: identical content in two sessions -> DIFFERENT host field name,
         // so the untrusted host can't link the sessions by comparing field names.
-        assert_ne!(a1, b, "identical content in two sessions must not share a name");
+        assert_ne!(
+            a1, b,
+            "identical content in two sessions must not share a name"
+        );
         // Different content in the same session -> different name.
         assert_ne!(a1, other_content);
         // Never the raw content hash (that is exactly what we are hiding).

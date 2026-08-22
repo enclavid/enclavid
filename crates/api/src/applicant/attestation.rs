@@ -55,8 +55,7 @@ pub struct AttestationReference {
 // Phase A constants. Both measurement values match so the frontend
 // always sees a green "verified" pill. Real values flow in via
 // `Attestor` + build-time env in Phase B.
-const MOCK_MEASUREMENT: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+const MOCK_MEASUREMENT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MOCK_COMMIT_SHA: &str = "phase-a-mock";
 const MOCK_SOURCE_URL: &str = "https://github.com/enclavid/enclavid";
 

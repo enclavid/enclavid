@@ -56,7 +56,10 @@ impl CacheBlobs {
     /// bytes or a fresh compile replacing a stale one).
     pub async fn store(&self, key: &str, bytes: Vec<u8>) -> Result<(), CacheError> {
         let path = object_path(key)?;
-        self.store.put(&path, bytes.into()).await.map_err(internal)?;
+        self.store
+            .put(&path, bytes.into())
+            .await
+            .map_err(internal)?;
         Ok(())
     }
 
@@ -86,7 +89,10 @@ mod tests {
         let key = "deadbeef".repeat(8); // 64 hex chars
         assert_eq!(cache.load(&key).await.unwrap(), None);
         cache.store(&key, b"cwasm-bytes".to_vec()).await.unwrap();
-        assert_eq!(cache.load(&key).await.unwrap(), Some(b"cwasm-bytes".to_vec()));
+        assert_eq!(
+            cache.load(&key).await.unwrap(),
+            Some(b"cwasm-bytes".to_vec())
+        );
     }
 
     #[tokio::test]

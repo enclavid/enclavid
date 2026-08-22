@@ -51,8 +51,8 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 
-use hatch_client::{Replay, SessionStore, outbound_session_id, reason};
 use engine_rpc::CallbackError;
+use hatch_client::{Replay, SessionStore, outbound_session_id, reason};
 use secrecy::{ExposeSecret, SecretBox};
 
 pub(super) struct HatchMediaStore {

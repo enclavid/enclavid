@@ -85,14 +85,11 @@ pub async fn use_workspace(needle: &str) -> Result<()> {
 
     println!("✓ Switched to {chosen_name} ({chosen_id}).");
     if let Some(host) = discovery::try_get().and_then(|d| d.registry_host()) {
-        println!(
-            "  Push prefix: {host}/enclavid/{chosen_id}/policies/<name>:<tag>",
-        );
+        println!("  Push prefix: {host}/enclavid/{chosen_id}/policies/<name>:<tag>",);
     }
     Ok(())
 }
 
 fn require_login() -> Result<crate::auth::StoredTokens> {
-    read_stored_tokens()?
-        .context("not authenticated — run `enclavid cloud login` first")
+    read_stored_tokens()?.context("not authenticated — run `enclavid cloud login` first")
 }

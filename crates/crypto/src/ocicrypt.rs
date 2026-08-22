@@ -101,10 +101,7 @@ pub fn encrypt(
     let digest = format!("sha256:{}", hex::encode(Sha256::digest(plaintext)));
 
     let mut buf = plaintext.to_vec();
-    let mut cipher = Aes256Ctr::new(
-        symmetric_key.as_slice().into(),
-        nonce.as_slice().into(),
-    );
+    let mut cipher = Aes256Ctr::new(symmetric_key.as_slice().into(), nonce.as_slice().into());
     cipher.apply_keystream(&mut buf);
 
     let mut mac = HmacSha256::new_from_slice(&symmetric_key).expect("hmac accepts any key length");
@@ -156,14 +153,17 @@ pub fn decrypt(
     }
 
     // Verify HMAC over the ciphertext before touching plaintext.
-    let mut mac =
-        HmacSha256::new_from_slice(private.symmetric_key.expose()).expect("hmac accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(private.symmetric_key.expose())
+        .expect("hmac accepts any key length");
     mac.update(ciphertext);
     mac.verify_slice(&public.hmac)
         .map_err(|_| CryptoError::new("ocicrypt hmac verification failed"))?;
 
     let mut buf = ciphertext.to_vec();
-    let mut cipher = Aes256Ctr::new(private.symmetric_key.expose().into(), nonce.as_slice().into());
+    let mut cipher = Aes256Ctr::new(
+        private.symmetric_key.expose().into(),
+        nonce.as_slice().into(),
+    );
     cipher.apply_keystream(&mut buf);
 
     if !private.digest.is_empty() {
@@ -184,17 +184,13 @@ pub fn pubopts_to_annotation(
 }
 
 /// Decode the `enc.pubopts` layer annotation value into public opts.
-pub fn pubopts_from_annotation(
-    value: &str,
-) -> Result<PublicLayerBlockCipherOptions, CryptoError> {
+pub fn pubopts_from_annotation(value: &str) -> Result<PublicLayerBlockCipherOptions, CryptoError> {
     let json = Base64::decode_vec(value).map_err(|e| CryptoError::new(e.to_string()))?;
     serde_json::from_slice(&json).map_err(|e| CryptoError::new(e.to_string()))
 }
 
 /// Serialize private opts to JSON (the unwrapped form a key_source yields).
-pub fn privopts_to_json(
-    private: &PrivateLayerBlockCipherOptions,
-) -> Result<Vec<u8>, CryptoError> {
+pub fn privopts_to_json(private: &PrivateLayerBlockCipherOptions) -> Result<Vec<u8>, CryptoError> {
     serde_json::to_vec(private).map_err(|e| CryptoError::new(e.to_string()))
 }
 

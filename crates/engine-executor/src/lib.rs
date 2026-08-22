@@ -54,6 +54,11 @@ mod runner;
 mod sanitize;
 mod state;
 
+/// The bindgen-generated `enclavid:host/types.prop` — the consumer's
+/// static-config value variant. Re-exported so the api crate can build
+/// the `props` list it hands to [`Executor::run`] without taking a direct
+/// bindgen dependency.
+pub use crate::enclavid::host::types::Prop;
 pub use embedded::{
     ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedRegistry,
     EmbeddedRegistryBuilder, Icon, IconStore, Localized, LocalizedStore, RefKind, RefStore,
@@ -64,18 +69,15 @@ pub use hatch_client::{
 };
 pub use listener::{CapturedMedia, ConsentDisclosure, SessionChange, SessionListener};
 pub use media_store::MediaStore;
-pub use runner::{EmbeddedIface, EmbeddedImport, Executor, PluginInstance, PrimedComposition, RunStatus};
-pub use state::RunInputs;
-/// The bindgen-generated `enclavid:host/types.prop` — the consumer's
-/// static-config value variant. Re-exported so the api crate can build
-/// the `props` list it hands to [`Executor::run`] without taking a direct
-/// bindgen dependency.
-pub use crate::enclavid::host::types::Prop;
+pub use runner::{
+    EmbeddedIface, EmbeddedImport, Executor, PluginInstance, PrimedComposition, RunStatus,
+};
 /// Re-exported for the api crate so it can apply the same
 /// control/BIDI/zero-width/Unicode-tag stripping to manifest
 /// translation values at resolve time (lazy validation strategy —
 /// see `runner::load_manifest` docs).
 pub use sanitize::sanitize_text_value;
+pub use state::RunInputs;
 /// Re-exports for API callers so they can implement `SessionListener` and
 /// build futures with the right error type without depending on
 /// wasmtime directly. `RunError` is `anyhow::Error` under the hood.
@@ -92,7 +94,10 @@ mod compat_tests {
     #[test]
     fn compat_token_is_derived_from_wasmtime_version() {
         let major = wasmtime::ModuleVersionStrategy::WasmtimeVersion.as_str();
-        assert!(!major.is_empty(), "wasmtime major version should be non-empty");
+        assert!(
+            !major.is_empty(),
+            "wasmtime major version should be non-empty"
+        );
         assert_eq!(super::compat_token(), format!("wt{major}-cm-fuel"));
     }
 }

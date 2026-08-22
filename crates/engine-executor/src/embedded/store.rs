@@ -21,9 +21,7 @@
 
 use engine_types::embedded::registry::Translation;
 
-pub use engine_types::embedded::store::{
-    DisclosureFields, Icon, Localized, RefKind, RefStore,
-};
+pub use engine_types::embedded::store::{DisclosureFields, Icon, Localized, RefKind, RefStore};
 
 // ---------------------------------------------------------------------
 // Resource reps — the host-owned backing of each WIT ref resource. Carry

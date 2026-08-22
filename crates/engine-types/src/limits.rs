@@ -133,6 +133,6 @@ pub const MAX_TEXT_VALUE_SOFT_CHARS: usize = 1000;
 //     transparency UI in api views surfaces the actual declared
 //     counts to the user as a second-line defence.
 pub use enclavid_embedded::{
-    MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_ICONS, MAX_DECLARED_LOCALIZED,
-    MAX_KEY_LENGTH, MAX_LANGUAGE_LENGTH, MAX_TEXT_VALUE_HARD_BYTES,
+    MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_ICONS, MAX_DECLARED_LOCALIZED, MAX_KEY_LENGTH,
+    MAX_LANGUAGE_LENGTH, MAX_TEXT_VALUE_HARD_BYTES,
 };

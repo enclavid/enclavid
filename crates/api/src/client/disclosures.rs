@@ -65,11 +65,7 @@ async fn read(
     // Discharge AuthZ (token + principal) and Replay scopes on
     // metadata via the shared helper. Disclosures list AuthN is
     // checked separately below against the metadata set commitment.
-    let metadata = trust_metadata(
-        metadata_untrusted,
-        &presented_token,
-        &presented_principal,
-    )?;
+    let metadata = trust_metadata(metadata_untrusted, &presented_token, &presented_principal)?;
 
     // The TEE-truth commitment, derived from the AEAD-sealed leaf list.
     // Computed once (independent of the host-served items) and reused as the
@@ -91,14 +87,17 @@ async fn read(
                 Err(StatusCode::INTERNAL_SERVER_ERROR)
             }
         })?
-        .trust_unchecked::<AuthZ, _>(reason!(r#"
+        .trust_unchecked::<AuthZ, _>(reason!(
+            r#"
 TEE forwards opaque sealed bytes; only the holder of the consumer's
 disclosure private key can open them. This endpoint requires the
 client AuthN'd via the bearer middleware to match the
 metadata.client predicate (closed upstream), so the recipient is
 both authenticated and the correct decryption target.
-        "#))
-        .trust_unchecked::<Replay, _>(reason!(r#"
+        "#
+        ))
+        .trust_unchecked::<Replay, _>(reason!(
+            r#"
 Two replay angles to consider:
   * Stale list against current metadata's set commitment —
     caught by the commitment + count check above (mismatch → 500).
@@ -107,7 +106,8 @@ Two replay angles to consider:
     sees older state. Stateless-TEE limitation; requires an
     external freshness oracle (TPM monotonic counter /
     append-only log) to close.
-        "#))
+        "#
+        ))
         .into_inner();
 
     Ok(Json(DisclosuresResponse {

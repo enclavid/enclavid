@@ -72,7 +72,9 @@ impl Serialize for SecretBytes {
 impl<'de> Deserialize<'de> for SecretBytes {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
-        Base64::decode_vec(&s).map(Self).map_err(serde::de::Error::custom)
+        Base64::decode_vec(&s)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
     }
 }
 

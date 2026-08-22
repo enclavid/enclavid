@@ -69,7 +69,10 @@ mod tests {
     #[async_trait::async_trait]
     impl CacheBackend for MockCacheBackend {
         async fn store(&self, blob_name: &str, bytes: Vec<u8>) -> Result<(), BridgeError> {
-            self.blobs.lock().unwrap().insert(blob_name.to_string(), bytes);
+            self.blobs
+                .lock()
+                .unwrap()
+                .insert(blob_name.to_string(), bytes);
             Ok(())
         }
         async fn load(&self, blob_name: &str) -> Result<Option<Vec<u8>>, BridgeError> {
@@ -83,12 +86,25 @@ mod tests {
         let store = CacheStore::new(backend.clone(), &[7u8; 32]);
 
         // Round-trips the plaintext through seal → mock → open.
-        store.store("comp.v1", b"cwasm-bundle".to_vec()).await.unwrap();
-        assert_eq!(store.load("comp.v1").await.unwrap(), Some(b"cwasm-bundle".to_vec()));
+        store
+            .store("comp.v1", b"cwasm-bundle".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load("comp.v1").await.unwrap(),
+            Some(b"cwasm-bundle".to_vec())
+        );
         // Miss.
         assert_eq!(store.load("comp.v2").await.unwrap(), None);
         // The backend stored ciphertext, not the plaintext (seal ran TEE-side).
-        let stored = backend.blobs.lock().unwrap().values().next().unwrap().clone();
+        let stored = backend
+            .blobs
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .clone();
         assert_ne!(stored, b"cwasm-bundle".to_vec());
 
         // A store built on a DIFFERENT master key cannot open the blob → miss

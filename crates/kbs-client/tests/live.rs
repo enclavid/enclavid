@@ -23,7 +23,11 @@ fn send(req: ureq::Request, body: Option<&[u8]>) -> (u16, Vec<String>, Vec<u8>) 
         Err(e) => panic!("transport error: {e}"),
     };
     let status = resp.status();
-    let cookies: Vec<String> = resp.all("set-cookie").iter().map(|s| s.to_string()).collect();
+    let cookies: Vec<String> = resp
+        .all("set-cookie")
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let mut buf = Vec::new();
     use std::io::Read;
     resp.into_reader().read_to_end(&mut buf).unwrap();
@@ -69,9 +73,17 @@ fn rcar_round_trip_releases_resource() {
         ureq::get(&format!("{KBS}/kbs/v0/resource/default/test/secret")).set("Cookie", &cookie),
         None,
     );
-    assert_eq!(st, 200, "resource failed: {}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        st,
+        200,
+        "resource failed: {}",
+        String::from_utf8_lossy(&body)
+    );
 
     let plaintext = session.unwrap_resource(&body).unwrap();
     assert_eq!(plaintext, b"hello-from-kbs", "got: {plaintext:?}");
-    println!("RCAR ok: released resource = {:?}", String::from_utf8_lossy(&plaintext));
+    println!(
+        "RCAR ok: released resource = {:?}",
+        String::from_utf8_lossy(&plaintext)
+    );
 }

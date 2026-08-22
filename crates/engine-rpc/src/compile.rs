@@ -96,13 +96,14 @@ mod tests {
 
         // Worker end: serve the mock compiler.
         let server_task = tokio::spawn(async move {
-            let (conn, mut tx, _rx) = remoc::Connect::io::<_, _, CompilerCli, CompilerCli, Ciborium>(
-                remoc::Cfg::default(),
-                a_r,
-                a_w,
-            )
-            .await
-            .unwrap();
+            let (conn, mut tx, _rx) =
+                remoc::Connect::io::<_, _, CompilerCli, CompilerCli, Ciborium>(
+                    remoc::Cfg::default(),
+                    a_r,
+                    a_w,
+                )
+                .await
+                .unwrap();
             tokio::spawn(conn);
             let (server, client) =
                 CompilerServiceServerShared::<_, Ciborium>::new(Arc::new(MockCompiler), 4);
@@ -124,8 +125,14 @@ mod tests {
         // Success: args arrive, typed bundle returns (incl. embedded_imports +
         // catalogs, proving engine types cross the codec).
         let plugins = vec![
-            PluginInstance { package: "p1".into(), wasm: vec![0] },
-            PluginInstance { package: "p2".into(), wasm: vec![0] },
+            PluginInstance {
+                package: "p1".into(),
+                wasm: vec![0],
+            },
+            PluginInstance {
+                package: "p2".into(),
+                wasm: vec![0],
+            },
         ];
         let bundle = client.compile(b"hello".to_vec(), plugins).await.unwrap();
         assert_eq!(bundle.cwasm, vec![5u8, 2u8]); // policy_len=5, plugins=2

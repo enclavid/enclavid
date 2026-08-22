@@ -64,11 +64,7 @@ impl ShuffleKey {
     /// envelope is appended). Distinct envelopes within a session
     /// produce independent shuffles; the same envelope on replay
     /// reproduces the same shuffle bit-for-bit.
-    pub fn derive_envelope_seed(
-        &self,
-        session_id: &str,
-        disclosure_index: u64,
-    ) -> [u8; 32] {
+    pub fn derive_envelope_seed(&self, session_id: &str, disclosure_index: u64) -> [u8; 32] {
         let hk = Hkdf::<Sha256>::new(None, self.0.expose_secret());
         let mut seed = [0u8; 32];
         hk.expand_multi_info(

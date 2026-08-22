@@ -37,11 +37,11 @@ use tokio::sync::Mutex;
 use axum::http::StatusCode;
 use secrecy::{ExposeSecret, SecretBox};
 
+use enclavid_crypto::seal_to_recipient;
 use hatch_client::{
     AppendDisclosure, AuthN, AuthZ, Covert, Replay, SessionMetadata, SessionState, SessionStatus,
     SessionStore, SetMedia, SetMetadata, SetState, WriteField, boundary, encode_padded, reason,
 };
-use enclavid_crypto::seal_to_recipient;
 // Owned wire types — the keyless execution-worker sends these back over the
 // `CallbackService`; `CallbackError` replaces the old wasmtime `RunError` as the
 // persist error, keeping api free of the runtime.
@@ -119,7 +119,9 @@ impl SessionPersister {
         // the round. `token` stays alive for the whole block, so the `&[u8]` the
         // seal builders below borrow from it outlives them.
         let token = self.applicant_session_token.upgrade().ok_or_else(|| {
-            CallbackError("persist: applicant token owner dropped (run outlived its context)".into())
+            CallbackError(
+                "persist: applicant token owner dropped (run outlived its context)".into(),
+            )
         })?;
         let token_bytes = token.expose_secret().as_slice();
 
@@ -142,8 +144,7 @@ impl SessionPersister {
                 .captured_media
                 .extend(media.iter().map(|(h, _)| h.to_vec()));
         }
-        let mut ops: Vec<&dyn WriteField> =
-            Vec::with_capacity(2 + appends.len() + media_ops.len());
+        let mut ops: Vec<&dyn WriteField> = Vec::with_capacity(2 + appends.len() + media_ops.len());
         ops.push(&set_state);
 
         // Rewrite metadata when this commit emitted a disclosure (extends the
@@ -458,11 +459,7 @@ fn shuffle_to_envelope_bytes(
     // dispatches by the typed machine `key` (already resolved
     // engine-side); the label's translation set stays inside the TEE so
     // its non-user-locale variants never reach the consumer.
-    let mut fields: Vec<_> = d
-        .fields
-        .iter()
-        .map(dto::display_field_from_proto)
-        .collect();
+    let mut fields: Vec<_> = d.fields.iter().map(dto::display_field_from_proto).collect();
     let seed = shuffle_key.derive_envelope_seed(session_id, disclosure_index);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(seed);
     fields.shuffle(&mut rng);
@@ -522,15 +519,24 @@ mod tests {
     use hatch_client::DisplayField;
 
     fn field(key: &str, value: &str) -> DisplayField {
-        DisplayField { key: key.into(), label: Default::default(), value: value.into() }
+        DisplayField {
+            key: key.into(),
+            label: Default::default(),
+            value: value.into(),
+        }
     }
 
     #[test]
     fn envelope_is_padded_to_a_constant_frame_and_still_parses() {
         let sk = ShuffleKey::from_tee_seal_key(&[7u8; 32]);
-        let small = ConsentDisclosure { fields: vec![field("first_name", "Al")] };
+        let small = ConsentDisclosure {
+            fields: vec![field("first_name", "Al")],
+        };
         let big = ConsentDisclosure {
-            fields: vec![field("first_name", &"A".repeat(3000)), field("dob", "1990-01-01")],
+            fields: vec![
+                field("first_name", &"A".repeat(3000)),
+                field("dob", "1990-01-01"),
+            ],
         };
 
         let a = shuffle_to_envelope_bytes(&small, "sid", 0, &sk).unwrap();

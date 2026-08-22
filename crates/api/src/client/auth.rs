@@ -135,7 +135,8 @@ pub(super) fn trust_metadata(
             }
             Ok(opt_md)
         })?
-        .trust_unchecked::<Replay, _>(reason!(r#"
+        .trust_unchecked::<Replay, _>(reason!(
+            r#"
 Metadata's ACCESS fields (client_session_token, principal) are immutable
 across the session, so the AuthZ gate above is unaffected by staleness. The
 mutable fields (status, disclosure_count/entry_hashes) CAN be stale — a stateless TEE
@@ -146,7 +147,8 @@ freshness-checked by its own AuthN gate against metadata's running hash, so a
 stale hash surfaces as the consumer's chain-verification failure. AAD prevents
 substitution with another session. Full-coherent rollback is an accepted
 residual of the host-holds-all-state model.
-        "#))
+        "#
+        ))
         .into_inner()
         .ok_or_else(|| {
             // Predicate already rejected None via NOT_FOUND, so this
@@ -195,10 +197,7 @@ pub(super) fn check_client_access(
 /// SHA-256 the presented bytes and compare constant-time against the
 /// stored hash. Mismatch → 404 (uniform with other auth failures —
 /// don't leak which-session info to attacker probing random tokens).
-fn verify_session_token_hash(
-    presented: &[u8],
-    stored_hash: &[u8],
-) -> Result<(), StatusCode> {
+fn verify_session_token_hash(presented: &[u8], stored_hash: &[u8]) -> Result<(), StatusCode> {
     use sha2::{Digest, Sha256};
     let computed = Sha256::digest(presented);
     if computed.len() == stored_hash.len() && constant_time_eq(&computed, stored_hash) {
@@ -277,7 +276,9 @@ pub(super) async fn enforce(
     .vouch_unchecked::<AuthN, _>(reason!(
         "client's own credential, released to its validating hatch — not a TEE secret"
     ))
-    .vouch_unchecked::<AuthZ, _>(reason!("forwarding the credential to its validator IS the op"))
+    .vouch_unchecked::<AuthZ, _>(reason!(
+        "forwarding the credential to its validator IS the op"
+    ))
     .vouch_unchecked::<Covert, _>(reason!(
         "client-supplied header + fixed-enum op — no policy bandwidth"
     ));
@@ -286,22 +287,28 @@ pub(super) async fn enforce(
         .authorize(authorize_req)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .trust_unchecked::<AuthN, _>(reason!(r#"
+        .trust_unchecked::<AuthN, _>(reason!(
+            r#"
 TEE has nothing to verify a credential against — host parses
 tokens, TEE never sees them. A lying host can claim an invalid
 credential is valid or substitute a different principal. Bounded
 only by host-side rate-limit + audit log.
-        "#))
-        .trust_unchecked::<AuthZ, _>(reason!(r#"
+        "#
+        ))
+        .trust_unchecked::<AuthZ, _>(reason!(
+            r#"
 The AuthVerdict IS the authorisation answer for this request —
 there is no second access decision to gate on top of it.
-        "#))
-        .trust_unchecked::<Replay, _>(reason!(r#"
+        "#
+        ))
+        .trust_unchecked::<Replay, _>(reason!(
+            r#"
 Stale verdict (yesterday's answer for today's request — e.g.
 accepting a since-revoked credential) caps at host-side
 operational mitigations (rate-limit + audit log). Same residual
 risk as the AuthN trust gate above.
-        "#))
+        "#
+        ))
         .into_inner();
     let principal = match verdict {
         AuthVerdict::Allowed { principal } => principal.map(|p| p.0),

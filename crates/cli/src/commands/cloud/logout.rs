@@ -13,9 +13,7 @@ pub async fn run() -> Result<()> {
             Ok(true) => Some(host),
             Ok(false) => None,
             Err(e) => {
-                eprintln!(
-                    "warning: could not remove credential helper entry for {host}: {e}",
-                );
+                eprintln!("warning: could not remove credential helper entry for {host}: {e}",);
                 None
             }
         },

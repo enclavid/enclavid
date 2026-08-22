@@ -129,8 +129,10 @@ mod tests {
                     .await
                     .unwrap();
             tokio::spawn(conn);
-            let (srv, client) =
-                engine_rpc::CompilerServiceServerShared::<_, Ciborium>::new(Arc::new(MockService), 4);
+            let (srv, client) = engine_rpc::CompilerServiceServerShared::<_, Ciborium>::new(
+                Arc::new(MockService),
+                4,
+            );
             tx.send(client).await.unwrap();
             srv.serve(true).await.unwrap();
         });
@@ -144,7 +146,10 @@ mod tests {
         let client = rx.recv().await.unwrap().unwrap();
         let compiler = Compiler::new(client);
 
-        let plugins = vec![PluginInstance { package: "p".into(), wasm: vec![0] }];
+        let plugins = vec![PluginInstance {
+            package: "p".into(),
+            wasm: vec![0],
+        }];
         let bundle = compiler.compile(b"hello".to_vec(), plugins).await.unwrap();
         assert_eq!(bundle.cwasm, vec![5u8, 1u8]);
 

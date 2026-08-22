@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
-use hatch_client::SessionState;
 use engine_rpc::{CallbackError, CallbackService, ConsentDisclosure};
+use hatch_client::SessionState;
 
 use super::media_store::HatchMediaStore;
 use super::persister::SessionPersister;

@@ -154,7 +154,9 @@ pub enum CaptureGuideView {
     None,
     /// Width:height aspect ratio for the rectangular overlay
     /// (passport ≈ 1.42, ID-1 ≈ 1.585).
-    Rect { aspect: f32 },
+    Rect {
+        aspect: f32,
+    },
     Oval,
 }
 
@@ -206,8 +208,11 @@ fn consent_view(d: &PromptDisclosure, locale: &Locale) -> RequestView {
 }
 
 fn media_view(spec: &MediaSpec, locale: &Locale) -> RequestView {
-    let captures: Vec<CaptureStepView> =
-        spec.captures.iter().map(|c| capture_step_view(c, locale)).collect();
+    let captures: Vec<CaptureStepView> = spec
+        .captures
+        .iter()
+        .map(|c| capture_step_view(c, locale))
+        .collect();
     RequestView::Media {
         label: dto::pick_localized(&spec.label, locale),
         captures,

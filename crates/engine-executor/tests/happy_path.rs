@@ -26,13 +26,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use hatch_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use engine_compiler::Compiler;
 use engine_executor::{
     Component, ConsentDisclosure, EmbeddedImport, EmbeddedRegistry, Executor, MediaStore,
     PluginInstance, PrimedComposition, Prop, RunInputs, RunResult, RunStatus, SessionChange,
     SessionListener,
 };
+use hatch_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 
 /// End-to-end test harness mirroring the old in-process `Runner` facade: a
 /// [`Compiler`] + [`Executor`] on SEPARATE engines, bridged by serialized
@@ -97,7 +97,9 @@ impl TestRunner {
         props: Vec<(String, Prop)>,
         inputs: RunInputs,
     ) -> RunResult<(RunStatus, Session)> {
-        self.executor.run(primed, session, event, props, inputs).await
+        self.executor
+            .run(primed, session, event, props, inputs)
+            .await
     }
 }
 
@@ -326,7 +328,10 @@ async fn media_rounds_keep_state_minimal() {
     // (the REAL bytes, pre-seal) stays tiny — step tag + at most one ref —
     // never anywhere near a JPEG frame (KiB+), no matter how many media rounds
     // accumulate.
-    assert!(baseline <= 8, "policy step state should be tiny, got {baseline}");
+    assert!(
+        baseline <= 8,
+        "policy step state should be tiny, got {baseline}"
+    );
     // The passport round stashes the passport frame's ref (step + 64 hex chars).
     assert!(
         after_passport_len <= baseline + 64,
@@ -394,8 +399,10 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
             listener: listener.clone(),
             media_store: store.clone(),
         };
-        let round =
-            |session, event| h.runner.run(&h.primed, session, event, props.clone(), inputs());
+        let round = |session, event| {
+            h.runner
+                .run(&h.primed, session, event, props.clone(), inputs())
+        };
         let (_s, session) = round(Session::default(), Event::Start).await.unwrap();
         let (_s, session) = round(session, Event::Media(fake_capture())).await.unwrap();
         // Selfie round: rehydrates the passport by ref; reads bytes() iff `read_bytes`.
@@ -468,7 +475,9 @@ async fn empty_selfie_clip_is_retryable_via_plugin() {
     let (status, _session) = h.run(session, Event::Media(empty), &listener).await;
     match status {
         RunStatus::Completed(Decision::RejectedRetryable) => {}
-        _ => panic!("empty selfie clip must yield Completed(RejectedRetryable) via the face-age plugin"),
+        _ => panic!(
+            "empty selfie clip must yield Completed(RejectedRetryable) via the face-age plugin"
+        ),
     }
 }
 
@@ -515,7 +524,9 @@ async fn oversized_state_traps() {
 #[tokio::test]
 async fn static_fused_artifact_resolves_strictly() {
     let runner = TestRunner::new().unwrap();
-    let fused = runner.fuse(test_policy_component(), &all_plugins()).unwrap();
+    let fused = runner
+        .fuse(test_policy_component(), &all_plugins())
+        .unwrap();
 
     // The twins survive as distinct `embedded-slot:*` imports (strict
     // routing) — not collapsed to canonical. The policy calls only
@@ -572,7 +583,11 @@ async fn static_fused_artifact_resolves_strictly() {
     // consent screen resolves DF (merged) — all through the static
     // artifact with no runtime fusion.
     let primed = runner
-        .prime(&composition.component, &composition.embedded_imports, embedded.clone())
+        .prime(
+            &composition.component,
+            &composition.embedded_imports,
+            embedded.clone(),
+        )
         .expect("prime static composition");
     let inputs = || RunInputs {
         listener: listener.clone(),
@@ -584,12 +599,24 @@ async fn static_fused_artifact_resolves_strictly() {
         .expect("static round 1");
     assert_media(&status, "static: round 1 (passport)");
     let (status, session) = runner
-        .run(&primed, session, Event::Media(fake_capture()), vec![], inputs())
+        .run(
+            &primed,
+            session,
+            Event::Media(fake_capture()),
+            vec![],
+            inputs(),
+        )
         .await
         .expect("static round 2");
     assert_media(&status, "static: round 2 (selfie)");
     let (status, _session) = runner
-        .run(&primed, session, Event::Media(fake_capture()), vec![], inputs())
+        .run(
+            &primed,
+            session,
+            Event::Media(fake_capture()),
+            vec![],
+            inputs(),
+        )
         .await
         .expect("static round 3");
     match &status {
@@ -709,7 +736,11 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let listener = Arc::new(RecordingListener::default());
 
     let primed = runner
-        .prime(&composition.component, &composition.embedded_imports, embedded.clone())
+        .prime(
+            &composition.component,
+            &composition.embedded_imports,
+            embedded.clone(),
+        )
         .expect("prime hybrid composition");
     let inputs = || RunInputs {
         listener: listener.clone(),
@@ -722,12 +753,24 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
         .expect("hybrid round 1");
     assert_media(&status, "hybrid: round 1 (passport)");
     let (status, session) = runner
-        .run(&primed, session, Event::Media(fake_capture()), vec![], inputs())
+        .run(
+            &primed,
+            session,
+            Event::Media(fake_capture()),
+            vec![],
+            inputs(),
+        )
         .await
         .expect("hybrid round 2");
     assert_media(&status, "hybrid: round 2 (selfie)");
     let (status, _session) = runner
-        .run(&primed, session, Event::Media(fake_capture()), vec![], inputs())
+        .run(
+            &primed,
+            session,
+            Event::Media(fake_capture()),
+            vec![],
+            inputs(),
+        )
         .await
         .expect("hybrid round 3");
     let disclosure = match status {
@@ -786,7 +829,9 @@ impl Harness {
         // their embedded sections (embedded verbatim from the author
         // JSON), so `compose` derives each catalog's content-hash from
         // the same bytes the registry keys on.
-        let composition = runner.compose(test_policy_component(), &all_plugins()).unwrap();
+        let composition = runner
+            .compose(test_policy_component(), &all_plugins())
+            .unwrap();
 
         // Composition-wide `EmbeddedRegistry`, keyed by each component's
         // catalog content-hash — policy first, then the plugins in the
@@ -1091,8 +1136,10 @@ mod child_process {
     /// composition; the test does it inline. The file leaks (ephemeral test tmp).
     fn to_bundle_ref(bundle: &CompiledBundle) -> BundleRef {
         let n = TEST_CWASM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir()
-            .join(format!("enclavid-test-cwasm-{}-{n}.bin", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "enclavid-test-cwasm-{}-{n}.bin",
+            std::process::id()
+        ));
         std::fs::write(&path, &bundle.cwasm).expect("write test cwasm file");
         BundleRef {
             cwasm_path: path.to_string_lossy().into_owned(),
@@ -1164,7 +1211,11 @@ mod child_process {
         .await
         .unwrap();
         tokio::spawn(conn);
-        let client = rx.recv().await.unwrap().expect("child sent its service client");
+        let client = rx
+            .recv()
+            .await
+            .unwrap()
+            .expect("child sent its service client");
         (child, client)
     }
 
@@ -1178,14 +1229,16 @@ mod child_process {
 
         // Prime via the mmap path: the child `deserialize_file`s a real
         // (multi-MiB) cwasm written to a temp file — only the path crosses the hop.
-        client.prime(to_bundle_ref(&bundle)).await.expect("prime real bundle");
+        client
+            .prime(to_bundle_ref(&bundle))
+            .await
+            .expect("prime real bundle");
 
         let cbs = Arc::new(MockCallbacks {
             session_changes: Mutex::new(0),
             media_loads: Mutex::new(Vec::new()),
         });
-        let (server, cb_client) =
-            ChildCallbacksServerShared::<_, Ciborium>::new(cbs.clone(), 4);
+        let (server, cb_client) = ChildCallbacksServerShared::<_, Ciborium>::new(cbs.clone(), 4);
         tokio::spawn(async move {
             let _ = server.serve(true).await;
         });
@@ -1226,11 +1279,17 @@ mod child_process {
             embedded_imports: vec![],
             catalogs: vec![],
         };
-        let err = tokio::time::timeout(Duration::from_secs(10), client.prime(to_bundle_ref(&bundle)))
-            .await
-            .expect("prime must not hang")
-            .expect_err("garbage cwasm must fail prime");
-        assert!(matches!(err, ExecError::Run(_)), "expected ExecError::Run, got {err:?}");
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.prime(to_bundle_ref(&bundle)),
+        )
+        .await
+        .expect("prime must not hang")
+        .expect_err("garbage cwasm must fail prime");
+        assert!(
+            matches!(err, ExecError::Run(_)),
+            "expected ExecError::Run, got {err:?}"
+        );
         drop(client);
         let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
     }
@@ -1247,10 +1306,16 @@ mod child_process {
             embedded_imports: vec![],
             catalogs: vec![],
         };
-        let res = tokio::time::timeout(Duration::from_secs(10), client.prime(to_bundle_ref(&bundle)))
-            .await
-            .expect("call to a dead child must resolve (error), not hang");
-        assert!(res.is_err(), "prime to a dead child must error, got {res:?}");
+        let res = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.prime(to_bundle_ref(&bundle)),
+        )
+        .await
+        .expect("call to a dead child must resolve (error), not hang");
+        assert!(
+            res.is_err(),
+            "prime to a dead child must error, got {res:?}"
+        );
     }
 
     /// PERF GATE (not an assertion) — measures the per-round cost the zygote
@@ -1300,7 +1365,9 @@ mod child_process {
         // Warm up (page-cache, allocator).
         {
             let comp = executor.deserialize_component(&bundle.cwasm).unwrap();
-            let _ = executor.prime(&comp, &bundle.embedded_imports, build_embedded()).unwrap();
+            let _ = executor
+                .prime(&comp, &bundle.embedded_imports, build_embedded())
+                .unwrap();
         }
 
         // (a)+(b): the two layers CoW-inheritance would remove, in-process.
@@ -1311,12 +1378,19 @@ mod child_process {
             let comp = executor.deserialize_component(&bundle.cwasm).unwrap();
             de.push(t.elapsed());
             let t = Instant::now();
-            let _primed =
-                executor.prime(&comp, &bundle.embedded_imports, build_embedded()).unwrap();
+            let _primed = executor
+                .prime(&comp, &bundle.embedded_imports, build_embedded())
+                .unwrap();
             pr.push(t.elapsed());
         }
-        eprintln!("deserialize_component (bytes, warm):      avg {:?}", avg(&de));
-        eprintln!("prime (Linker+InstancePre):               avg {:?}", avg(&pr));
+        eprintln!(
+            "deserialize_component (bytes, warm):      avg {:?}",
+            avg(&de)
+        );
+        eprintln!(
+            "prime (Linker+InstancePre):               avg {:?}",
+            avg(&pr)
+        );
 
         // deserialize_FILE (mmap) — COLD (fresh executor, like a fresh child) vs
         // warm. Isolates whether the child's ~50 ms `prime` is deserialize COMPUTE
@@ -1324,20 +1398,25 @@ mod child_process {
         // NOT) or transfer/remoc (neither zygote helps).
         {
             let n = TEST_CWASM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("enclavid-measure-cwasm-{n}.bin"));
+            let path = std::env::temp_dir().join(format!("enclavid-measure-cwasm-{n}.bin"));
             std::fs::write(&path, &bundle.cwasm).unwrap();
             let cold = Executor::new().unwrap();
             let t = Instant::now();
             let _c = cold.deserialize_component_file(&path).unwrap();
-            eprintln!("deserialize_file (mmap) COLD (fresh executor): {:?}", t.elapsed());
+            eprintln!(
+                "deserialize_file (mmap) COLD (fresh executor): {:?}",
+                t.elapsed()
+            );
             let mut df = Vec::new();
             for _ in 0..10 {
                 let t = Instant::now();
                 let _c = executor.deserialize_component_file(&path).unwrap();
                 df.push(t.elapsed());
             }
-            eprintln!("deserialize_file (mmap) warm:             avg {:?}", avg(&df));
+            eprintln!(
+                "deserialize_file (mmap) warm:             avg {:?}",
+                avg(&df)
+            );
             let _ = std::fs::remove_file(&path);
         }
 
@@ -1388,8 +1467,7 @@ mod child_process {
                 session_changes: std::sync::Mutex::new(0),
                 media_loads: std::sync::Mutex::new(Vec::new()),
             });
-            let (server, cb_client) =
-                ChildCallbacksServerShared::<_, Ciborium>::new(cbs, 4);
+            let (server, cb_client) = ChildCallbacksServerShared::<_, Ciborium>::new(cbs, 4);
             tokio::spawn(async move {
                 let _ = server.serve(true).await;
             });
@@ -1404,10 +1482,22 @@ mod child_process {
             let _ = tokio::time::timeout(Duration::from_secs(15), child.wait()).await;
         }
         eprintln!("--- full fresh-exec round, by phase ---");
-        eprintln!("  spawn (exec + child Engine::new + handshake): avg {:?}", avg(&sp));
-        eprintln!("  prime (ship cwasm + child deserialize+pre):   avg {:?}", avg(&prm));
-        eprintln!("  run   (instantiate + genesis policy round):   avg {:?}", avg(&rn));
-        eprintln!("  → zygote removes spawn+prime, keeps run: saves ~{:?}/round", avg(&sp) + avg(&prm));
+        eprintln!(
+            "  spawn (exec + child Engine::new + handshake): avg {:?}",
+            avg(&sp)
+        );
+        eprintln!(
+            "  prime (ship cwasm + child deserialize+pre):   avg {:?}",
+            avg(&prm)
+        );
+        eprintln!(
+            "  run   (instantiate + genesis policy round):   avg {:?}",
+            avg(&rn)
+        );
+        eprintln!(
+            "  → zygote removes spawn+prime, keeps run: saves ~{:?}/round",
+            avg(&sp) + avg(&prm)
+        );
         eprintln!("=== end perf gate ===\n");
     }
 

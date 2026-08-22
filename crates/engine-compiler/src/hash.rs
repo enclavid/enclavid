@@ -88,7 +88,12 @@ pub fn embedded_import_name(hash: &[u8; 32], iface: &str, version: &str) -> Stri
     if version.is_empty() {
         format!("embedded-slot:{}/{}", slug(hash), iface)
     } else {
-        format!("embedded-slot:{}-{}/{}", slug(hash), version.replace('.', "-"), iface)
+        format!(
+            "embedded-slot:{}-{}/{}",
+            slug(hash),
+            version.replace('.', "-"),
+            iface
+        )
     }
 }
 

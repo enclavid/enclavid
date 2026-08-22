@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use enclavid_crypto::ocicrypt;
 use hatch_client::{
     AuthN, AuthZ, Covert, Key, PullRequest, RegistryClient, Replay, boundary, reason,
 };
-use enclavid_crypto::ocicrypt;
 
 use crate::keyprovider::{self, KbsContext};
 
@@ -229,20 +229,18 @@ async fn pull_wasm_layer(
             }
             return Ok(response.layers[idx].clone());
         }
-        if let Some(inner) = descriptor.media_type.strip_suffix(ocicrypt::ENCRYPTED_MEDIA_SUFFIX) {
+        if let Some(inner) = descriptor
+            .media_type
+            .strip_suffix(ocicrypt::ENCRYPTED_MEDIA_SUFFIX)
+        {
             if inner != WASM_LAYER {
                 continue;
             }
             let key = key.ok_or_else(|| {
                 PullError::Decrypt("layer is encrypted but no key was supplied".to_string())
             })?;
-            return decrypt_layer(
-                &response.layers[idx],
-                &descriptor.annotations,
-                key,
-                kbs_ctx,
-            )
-            .await;
+            return decrypt_layer(&response.layers[idx], &descriptor.annotations, key, kbs_ctx)
+                .await;
         }
     }
     Err(PullError::NoWasmLayer)

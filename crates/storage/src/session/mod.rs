@@ -161,7 +161,10 @@ mod tests {
 
     fn set_blob(field: BlobField, value: &[u8]) -> WriteRequest {
         WriteRequest {
-            ops: vec![Op::Blob(BlobWrite { field, value: value.to_vec() })],
+            ops: vec![Op::Blob(BlobWrite {
+                field,
+                value: value.to_vec(),
+            })],
             expected_version: None,
         }
     }
@@ -169,7 +172,9 @@ mod tests {
     #[test]
     fn cas_rejects_stale_and_must_not_exist() {
         let (_d, s) = tmp_store();
-        let v1 = s.write("s", set_blob(BlobField::Metadata, b"m1"), Some(100)).unwrap();
+        let v1 = s
+            .write("s", set_blob(BlobField::Metadata, b"m1"), Some(100))
+            .unwrap();
         assert_eq!(v1.new_version, 1);
         // second create at None → conflict
         assert!(matches!(
@@ -183,12 +188,25 @@ mod tests {
         // stale CAS at 1 → conflict, losing value not applied
         let mut stale = set_blob(BlobField::State, b"loser");
         stale.expected_version = Some(1);
-        assert!(matches!(s.write("s", stale, None), Err(SessionError::VersionMismatch)));
+        assert!(matches!(
+            s.write("s", stale, None),
+            Err(SessionError::VersionMismatch)
+        ));
         let got = s
-            .read("s", ReadRequest { fields: vec![FieldSelector::Blob(BlobField::State)] })
+            .read(
+                "s",
+                ReadRequest {
+                    fields: vec![FieldSelector::Blob(BlobField::State)],
+                },
+            )
             .unwrap();
         assert_eq!(got.version, 2);
-        assert_eq!(got.slots[0], Slot::Scalar(ScalarSlot { value: Some(b"st".to_vec()) }));
+        assert_eq!(
+            got.slots[0],
+            Slot::Scalar(ScalarSlot {
+                value: Some(b"st".to_vec())
+            })
+        );
     }
 
     #[test]
@@ -196,20 +214,33 @@ mod tests {
         let (_d, s) = tmp_store();
         let mut upd = set_blob(BlobField::State, b"x");
         upd.expected_version = Some(1);
-        assert!(matches!(s.write("nope", upd, None), Err(SessionError::VersionMismatch)));
+        assert!(matches!(
+            s.write("nope", upd, None),
+            Err(SessionError::VersionMismatch)
+        ));
     }
 
     #[test]
     fn empty_write_rejected_no_phantom_session() {
         let (_d, s) = tmp_store();
-        let empty = WriteRequest { ops: vec![], expected_version: None };
+        let empty = WriteRequest {
+            ops: vec![],
+            expected_version: None,
+        };
         assert!(s.write("s", empty, Some(100)).is_err());
         assert!(!s.exists("s").unwrap(), "no phantom session materialized");
         // An empty UPDATE is rejected too, version untouched.
-        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100)).unwrap();
-        let empty_upd = WriteRequest { ops: vec![], expected_version: Some(1) };
+        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100))
+            .unwrap();
+        let empty_upd = WriteRequest {
+            ops: vec![],
+            expected_version: Some(1),
+        };
         assert!(s.write("s", empty_upd, None).is_err());
-        assert_eq!(s.read("s", ReadRequest { fields: vec![] }).unwrap().version, 1);
+        assert_eq!(
+            s.read("s", ReadRequest { fields: vec![] }).unwrap().version,
+            1
+        );
     }
 
     #[test]
@@ -217,24 +248,46 @@ mod tests {
         let (_d, s) = tmp_store();
         // absent session → version 0, absent slot
         let got = s
-            .read("s", ReadRequest { fields: vec![FieldSelector::Blob(BlobField::State)] })
+            .read(
+                "s",
+                ReadRequest {
+                    fields: vec![FieldSelector::Blob(BlobField::State)],
+                },
+            )
             .unwrap();
         assert_eq!(got.version, 0);
         assert_eq!(got.slots[0], Slot::Scalar(ScalarSlot { value: None }));
         // present-but-empty must read back as Some(empty), not None
-        s.write("s", set_blob(BlobField::Metadata, b""), Some(100)).unwrap();
-        let got = s
-            .read("s", ReadRequest { fields: vec![FieldSelector::Blob(BlobField::Metadata)] })
+        s.write("s", set_blob(BlobField::Metadata, b""), Some(100))
             .unwrap();
-        assert_eq!(got.slots[0], Slot::Scalar(ScalarSlot { value: Some(vec![]) }));
+        let got = s
+            .read(
+                "s",
+                ReadRequest {
+                    fields: vec![FieldSelector::Blob(BlobField::Metadata)],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            got.slots[0],
+            Slot::Scalar(ScalarSlot {
+                value: Some(vec![])
+            })
+        );
     }
 
     #[test]
     fn read_media_absent_slot() {
         let (_d, s) = tmp_store();
-        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100)).unwrap();
+        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100))
+            .unwrap();
         let got = s
-            .read("s", ReadRequest { fields: vec![FieldSelector::Media(vec![7u8; 32])] })
+            .read(
+                "s",
+                ReadRequest {
+                    fields: vec![FieldSelector::Media(vec![7u8; 32])],
+                },
+            )
             .unwrap();
         assert_eq!(got.slots[0], Slot::Scalar(ScalarSlot { value: None }));
     }
@@ -242,7 +295,8 @@ mod tests {
     #[test]
     fn disclosure_set_membership_order_agnostic() {
         let (_d, s) = tmp_store();
-        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100)).unwrap();
+        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100))
+            .unwrap();
         for (i, val) in [b"c".as_slice(), b"a", b"b"].iter().enumerate() {
             let req = WriteRequest {
                 ops: vec![Op::ListAppend(ListAppend {
@@ -254,7 +308,12 @@ mod tests {
             s.write("s", req, None).unwrap();
         }
         let got = s
-            .read("s", ReadRequest { fields: vec![FieldSelector::List(ListField::Disclosure)] })
+            .read(
+                "s",
+                ReadRequest {
+                    fields: vec![FieldSelector::List(ListField::Disclosure)],
+                },
+            )
             .unwrap();
         let Slot::List(ListSlot { mut items }) = got.slots.into_iter().next().unwrap() else {
             panic!("expected a list slot");
@@ -268,8 +327,14 @@ mod tests {
         let (_d, s) = tmp_store();
         let req = WriteRequest {
             ops: vec![
-                Op::Blob(BlobWrite { field: BlobField::State, value: b"st".to_vec() }),
-                Op::MediaWrite(MediaWrite { blob_key: vec![1u8; 32], value: b"jpeg".to_vec() }),
+                Op::Blob(BlobWrite {
+                    field: BlobField::State,
+                    value: b"st".to_vec(),
+                }),
+                Op::MediaWrite(MediaWrite {
+                    blob_key: vec![1u8; 32],
+                    value: b"jpeg".to_vec(),
+                }),
             ],
             expected_version: None,
         };
@@ -295,8 +360,14 @@ mod tests {
     #[test]
     fn sweeper_purges_expired_only() {
         let (_d, s) = tmp_store();
-        s.write("s_old", set_blob(BlobField::Metadata, b"m"), Some(100)).unwrap();
-        s.write("s_new", set_blob(BlobField::Metadata, b"m"), Some(10_000_000)).unwrap();
+        s.write("s_old", set_blob(BlobField::Metadata, b"m"), Some(100))
+            .unwrap();
+        s.write(
+            "s_new",
+            set_blob(BlobField::Metadata, b"m"),
+            Some(10_000_000),
+        )
+        .unwrap();
         let purged = s.sweep_once(1_000, 1024).unwrap();
         assert_eq!(purged, 1);
         assert!(!s.exists("s_old").unwrap());
@@ -306,7 +377,8 @@ mod tests {
     #[test]
     fn sweep_removes_whole_session() {
         let (_d, s) = tmp_store();
-        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100)).unwrap();
+        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100))
+            .unwrap();
         let req = WriteRequest {
             ops: vec![Op::ListAppend(ListAppend {
                 field: ListField::Disclosure,
@@ -318,7 +390,12 @@ mod tests {
         assert_eq!(s.sweep_once(1_000, 1024).unwrap(), 1);
         assert!(!s.exists("s").unwrap());
         let got = s
-            .read("s", ReadRequest { fields: vec![FieldSelector::List(ListField::Disclosure)] })
+            .read(
+                "s",
+                ReadRequest {
+                    fields: vec![FieldSelector::List(ListField::Disclosure)],
+                },
+            )
             .unwrap();
         assert_eq!(got.slots[0], Slot::List(ListSlot { items: vec![] }));
         // Swept id is gone from the index too: re-sweep finds nothing.
@@ -328,9 +405,12 @@ mod tests {
     #[test]
     fn sweep_respects_max() {
         let (_d, s) = tmp_store();
-        s.write("a", set_blob(BlobField::Metadata, b"m"), Some(10)).unwrap();
-        s.write("b", set_blob(BlobField::Metadata, b"m"), Some(20)).unwrap();
-        s.write("c", set_blob(BlobField::Metadata, b"m"), Some(5_000)).unwrap(); // future
+        s.write("a", set_blob(BlobField::Metadata, b"m"), Some(10))
+            .unwrap();
+        s.write("b", set_blob(BlobField::Metadata, b"m"), Some(20))
+            .unwrap();
+        s.write("c", set_blob(BlobField::Metadata, b"m"), Some(5_000))
+            .unwrap(); // future
         assert_eq!(s.sweep_once(1_000, 1).unwrap(), 1);
         assert_eq!(s.sweep_once(1_000, 1024).unwrap(), 1);
         assert!(s.exists("c").unwrap());

@@ -10,10 +10,10 @@
 //! A fresh `Client` per pull: oci-client caches the first auth value it
 //! sees with no invalidation API, so per-pull clients keep auth correct.
 
+use axum::body::Bytes;
 use oci_client::Reference;
 use oci_client::client::{Client, ClientConfig, ClientProtocol};
 use oci_client::secrets::RegistryAuth;
-use axum::body::Bytes;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -82,7 +82,10 @@ fn build_auth(registry_auth: &[u8]) -> Result<RegistryAuth, HatchError> {
     let s = std::str::from_utf8(registry_auth)
         .map_err(|_| HatchError::BadRequest("registry_auth not utf-8".to_string()))?
         .trim();
-    if let Some(token) = s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")) {
+    if let Some(token) = s
+        .strip_prefix("Bearer ")
+        .or_else(|| s.strip_prefix("bearer "))
+    {
         return Ok(RegistryAuth::Bearer(token.to_string()));
     }
     Err(HatchError::BadRequest(

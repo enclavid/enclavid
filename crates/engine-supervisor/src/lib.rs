@@ -121,7 +121,10 @@ pub fn assert_ptrace_hardened() {
     // bypassable via PR_SET_PTRACER_ANY.
     const MIN: u32 = 2;
     let path = "/proc/sys/kernel/yama/ptrace_scope";
-    match std::fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<u32>().ok()) {
+    match std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+    {
         Some(v) if v >= MIN => {
             eprintln!(
                 "engine-supervisor: yama ptrace_scope={v} (>= required {MIN}) — sibling-child \
@@ -168,7 +171,11 @@ impl std::fmt::Display for SupervisorError {
         match self {
             SupervisorError::Spawn(m) => write!(f, "spawn child: {m}"),
             SupervisorError::Deadline(d) => {
-                write!(f, "child exceeded the {}s round deadline (killed)", d.as_secs())
+                write!(
+                    f,
+                    "child exceeded the {}s round deadline (killed)",
+                    d.as_secs()
+                )
             }
             SupervisorError::Saturated => write!(f, "child pool is shutting down"),
         }
@@ -234,12 +241,14 @@ fn egress_seccomp_program() -> &'static seccompiler::BpfProgram {
         }
         let filter = SeccompFilter::new(
             rules,
-            SeccompAction::Allow,                     // syscalls not listed: allowed
+            SeccompAction::Allow, // syscalls not listed: allowed
             SeccompAction::Errno(libc::EPERM as u32), // listed (blocked): EPERM
             arch,
         )
         .expect("build egress seccomp filter");
-        filter.try_into().expect("compile egress seccomp filter to BPF")
+        filter
+            .try_into()
+            .expect("compile egress seccomp filter to BPF")
     })
 }
 
@@ -441,14 +450,15 @@ where
             {
                 // `no_new_privs` first: required to load a seccomp filter without
                 // privilege, and blocks setuid privilege gain on any later exec.
-                if want_no_new_privs
-                    && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                {
+                if want_no_new_privs && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 // `RLIMIT_AS` ceiling (compile side).
                 if let Some(bytes) = as_limit {
-                    let lim = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
+                    let lim = libc::rlimit {
+                        rlim_cur: bytes,
+                        rlim_max: bytes,
+                    };
                     if libc::setrlimit(libc::RLIMIT_AS, &lim) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
@@ -460,12 +470,8 @@ where
                         len: prog.len() as u16,
                         filter: prog.as_ptr() as *mut libc::sock_filter,
                     };
-                    if libc::syscall(
-                        libc::SYS_seccomp,
-                        1,
-                        0,
-                        &fprog as *const libc::sock_fprog,
-                    ) != 0
+                    if libc::syscall(libc::SYS_seccomp, 1, 0, &fprog as *const libc::sock_fprog)
+                        != 0
                     {
                         return Err(std::io::Error::last_os_error());
                     }
@@ -475,9 +481,7 @@ where
             for &(src, dst) in &mappings {
                 if src == dst {
                     let flags = libc::fcntl(dst, libc::F_GETFD);
-                    if flags < 0
-                        || libc::fcntl(dst, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
-                    {
+                    if flags < 0 || libc::fcntl(dst, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                 } else if libc::dup2(src, dst) < 0 {
@@ -488,7 +492,9 @@ where
         });
     }
 
-    let child = cmd.spawn().map_err(|e| format!("spawn {}: {e}", exe.display()))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn {}: {e}", exe.display()))?;
 
     let sup_end =
         tokio::net::UnixStream::from_std(sup_end).map_err(|e| format!("adopt sup_end: {e}"))?;
@@ -545,7 +551,10 @@ where
     tx.send(client)
         .await
         .map_err(|e| format!("send service client: {e}"))?;
-    server.serve(true).await.map_err(|e| format!("serve: {e}"))?;
+    server
+        .serve(true)
+        .await
+        .map_err(|e| format!("serve: {e}"))?;
     Ok(())
 }
 
@@ -581,9 +590,8 @@ mod seccomp_tests {
                 len: prog.len() as u16,
                 filter: prog.as_ptr() as *mut libc::sock_filter,
             };
-            if unsafe {
-                libc::syscall(libc::SYS_seccomp, 1, 0, &fprog as *const libc::sock_fprog)
-            } != 0
+            if unsafe { libc::syscall(libc::SYS_seccomp, 1, 0, &fprog as *const libc::sock_fprog) }
+                != 0
             {
                 unsafe { libc::_exit(7) }; // seccomp install refused by env → skip
             }
@@ -601,8 +609,16 @@ mod seccomp_tests {
 
         let mut status = 0;
         let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
-        assert_eq!(waited, pid, "waitpid failed: {}", std::io::Error::last_os_error());
-        assert!(libc::WIFEXITED(status), "seccomp probe child did not exit normally");
+        assert_eq!(
+            waited,
+            pid,
+            "waitpid failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert!(
+            libc::WIFEXITED(status),
+            "seccomp probe child did not exit normally"
+        );
         match libc::WEXITSTATUS(status) {
             42 => {} // socket() denied with EPERM — the filter works.
             7 => eprintln!(

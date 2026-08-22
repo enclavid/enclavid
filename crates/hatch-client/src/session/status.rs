@@ -72,4 +72,3 @@ impl WriteField for SetStatus {
         }))
     }
 }
-

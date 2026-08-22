@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use remoc::codec::Ciborium;
 
 use engine_executor::{
-    Component, EmbeddedRegistry, Event, Executor, MediaStore, Prop, PrimedComposition, RunError,
+    Component, EmbeddedRegistry, Event, Executor, MediaStore, PrimedComposition, Prop, RunError,
     RunInputs, RunResult, RunStatus, SessionChange, SessionListener, SessionState,
 };
 use engine_rpc::{
@@ -88,19 +88,25 @@ impl ChildService for Child {
             .ok_or_else(|| ExecError::Run("session-child: run before prime".into()))?;
 
         // Map the wire `Prop` mirror to the bindgen `enclavid:host/types.prop`.
-        let props: Vec<(String, Prop)> =
-            props.into_iter().map(|(k, v)| (k, to_engine_prop(v))).collect();
+        let props: Vec<(String, Prop)> = props
+            .into_iter()
+            .map(|(k, v)| (k, to_engine_prop(v)))
+            .collect();
 
         // Keyless callback proxies: blob loads + state persistence forward to the
         // supervisor's relay over the SAME socketpair connection (→ api). The seal
         // key never enters this process.
-        let listener: Arc<dyn SessionListener> =
-            Arc::new(RelayListener { callbacks: callbacks.clone() });
+        let listener: Arc<dyn SessionListener> = Arc::new(RelayListener {
+            callbacks: callbacks.clone(),
+        });
         let media_store: Arc<dyn MediaStore> = Arc::new(RelayMediaStore {
             callbacks,
             memo: Mutex::new(HashMap::new()),
         });
-        let inputs = RunInputs { listener, media_store };
+        let inputs = RunInputs {
+            listener,
+            media_store,
+        };
 
         let (status, _next_state) = self
             .executor
@@ -110,7 +116,9 @@ impl ChildService for Child {
             // reaches the supervisor's log, not just the top wasm line.
             .map_err(|e| ExecError::Run(format!("{e:#}")))?;
 
-        Ok(RunReply { status: to_wire_status(status) })
+        Ok(RunReply {
+            status: to_wire_status(status),
+        })
     }
 }
 
@@ -131,12 +139,19 @@ impl SessionListener for RelayListener {
         let disclosures: Vec<engine_rpc::ConsentDisclosure> = change
             .disclosures
             .iter()
-            .map(|d| engine_rpc::ConsentDisclosure { fields: d.fields.clone() })
+            .map(|d| engine_rpc::ConsentDisclosure {
+                fields: d.fields.clone(),
+            })
             .collect();
         // Copy the captured frames out of their Arcs into owned wire bytes.
         let media: Vec<([u8; 32], Vec<u8>)> = change
             .media
-            .map(|m| m.blobs.iter().map(|(h, b)| (*h, b.as_ref().clone())).collect())
+            .map(|m| {
+                m.blobs
+                    .iter()
+                    .map(|(h, b)| (*h, b.as_ref().clone()))
+                    .collect()
+            })
             .unwrap_or_default();
         let callbacks = self.callbacks.clone();
         Box::pin(async move {
@@ -228,8 +243,10 @@ async fn main() {
     // client (round done) → we exit. Request buffer 1 — prime then run,
     // sequential, no cross-round concurrency. The 64 MiB connection_cfg (prime
     // ships the ~10-15 MiB cwasm) lives in engine-supervisor.
-    match engine_supervisor::serve_child::<Child, ChildServiceServerShared<Child, Ciborium>>(child, 1)
-        .await
+    match engine_supervisor::serve_child::<Child, ChildServiceServerShared<Child, Ciborium>>(
+        child, 1,
+    )
+    .await
     {
         Ok(()) => std::process::exit(0),
         Err(e) => {

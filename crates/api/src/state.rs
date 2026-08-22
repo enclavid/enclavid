@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use secrecy::SecretBox;
 
-use hatch_client::{HatchClient, CacheStore, KbsClient, RegistryClient, SessionStore};
+use hatch_client::{CacheStore, HatchClient, KbsClient, RegistryClient, SessionStore};
 
 use crate::compiler::{Compiler, connect_compile_worker};
 use crate::executor::{Executor, connect_execution_worker};

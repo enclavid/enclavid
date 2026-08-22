@@ -150,7 +150,10 @@ impl EmbeddedRegistryBuilder {
         for (hash, c) in self.components {
             df.push((
                 hash,
-                c.disclosure_fields.into_iter().map(|k| (k.clone(), k)).collect(),
+                c.disclosure_fields
+                    .into_iter()
+                    .map(|k| (k.clone(), k))
+                    .collect(),
             ));
             loc.push((hash, c.localized.into_iter().collect()));
             icons.push((hash, c.icons.into_iter().map(|n| (n.clone(), n)).collect()));
@@ -198,7 +201,11 @@ mod tests {
     #[test]
     fn empty_registry_resolve_misses() {
         let reg = EmbeddedRegistry::default();
-        assert!(reg.disclosure_fields.resolve_strict(&h(0), "anything").is_none());
+        assert!(
+            reg.disclosure_fields
+                .resolve_strict(&h(0), "anything")
+                .is_none()
+        );
         assert!(reg.localized.resolve_strict(&h(0), "anything").is_none());
     }
 
@@ -208,7 +215,9 @@ mod tests {
         b.add_component(h(0), decls(&["passport-number"], &[]));
         let reg = b.build();
         assert_eq!(
-            reg.disclosure_fields.resolve_strict(&h(0), "passport-number").map(String::as_str),
+            reg.disclosure_fields
+                .resolve_strict(&h(0), "passport-number")
+                .map(String::as_str),
             Some("passport-number"),
         );
     }
@@ -218,13 +227,28 @@ mod tests {
         let mut b = EmbeddedRegistry::builder();
         b.add_component(
             h(0),
-            decls(&[], &[("consent-reason", &[("en", "Verify identity"), ("ru", "Проверка")])]),
+            decls(
+                &[],
+                &[(
+                    "consent-reason",
+                    &[("en", "Verify identity"), ("ru", "Проверка")],
+                )],
+            ),
         );
         let reg = b.build();
-        let ts = reg.localized.resolve_strict(&h(0), "consent-reason").expect("resolves");
+        let ts = reg
+            .localized
+            .resolve_strict(&h(0), "consent-reason")
+            .expect("resolves");
         assert_eq!(ts.len(), 2);
-        assert!(ts.iter().any(|t| t.language == "en" && t.text == "Verify identity"));
-        assert!(ts.iter().any(|t| t.language == "ru" && t.text == "Проверка"));
+        assert!(
+            ts.iter()
+                .any(|t| t.language == "en" && t.text == "Verify identity")
+        );
+        assert!(
+            ts.iter()
+                .any(|t| t.language == "ru" && t.text == "Проверка")
+        );
     }
 
     #[test]
@@ -232,7 +256,11 @@ mod tests {
         let mut b = EmbeddedRegistry::builder();
         b.add_component(h(0), decls(&["a"], &[("b", &[("en", "x")])]));
         let reg = b.build();
-        assert!(reg.disclosure_fields.resolve_strict(&h(0), "missing").is_none());
+        assert!(
+            reg.disclosure_fields
+                .resolve_strict(&h(0), "missing")
+                .is_none()
+        );
         assert!(reg.localized.resolve_strict(&h(0), "missing").is_none());
     }
 
@@ -244,10 +272,26 @@ mod tests {
         b.add_component(h(0), decls(&["policy-only"], &[]));
         b.add_component(h(1), decls(&["plugin-only"], &[]));
         let reg = b.build();
-        assert!(reg.disclosure_fields.resolve_strict(&h(0), "plugin-only").is_none());
-        assert!(reg.disclosure_fields.resolve_strict(&h(1), "policy-only").is_none());
-        assert!(reg.disclosure_fields.resolve_strict(&h(0), "policy-only").is_some());
-        assert!(reg.disclosure_fields.resolve_strict(&h(1), "plugin-only").is_some());
+        assert!(
+            reg.disclosure_fields
+                .resolve_strict(&h(0), "plugin-only")
+                .is_none()
+        );
+        assert!(
+            reg.disclosure_fields
+                .resolve_strict(&h(1), "policy-only")
+                .is_none()
+        );
+        assert!(
+            reg.disclosure_fields
+                .resolve_strict(&h(0), "policy-only")
+                .is_some()
+        );
+        assert!(
+            reg.disclosure_fields
+                .resolve_strict(&h(1), "plugin-only")
+                .is_some()
+        );
     }
 
     #[test]
@@ -284,10 +328,15 @@ mod tests {
     fn first_match_resolves_from_any_catalog() {
         let mut b = EmbeddedRegistry::builder();
         b.add_component(h(0), ComponentDecls::default()); // policy, empty
-        b.add_component(h(1), decls(&["passport_number"], &[("plugin_label", &[("en", "hi")])]));
+        b.add_component(
+            h(1),
+            decls(&["passport_number"], &[("plugin_label", &[("en", "hi")])]),
+        );
         let reg = b.build();
         assert!(
-            reg.disclosure_fields.resolve_first_match("passport_number").is_some(),
+            reg.disclosure_fields
+                .resolve_first_match("passport_number")
+                .is_some(),
             "a DF key declared by the plugin resolves via first match"
         );
         assert!(
@@ -305,7 +354,10 @@ mod tests {
         b.add_component(h(1), decls(&[], &[("dup", &[("en", "plugin")])])); // plugin
         let reg = b.build();
         let ts = reg.localized.resolve_first_match("dup").expect("resolves");
-        assert_eq!(ts[0].text, "policy", "first match resolves to the earliest catalog");
+        assert_eq!(
+            ts[0].text, "policy",
+            "first match resolves to the earliest catalog"
+        );
     }
 
     /// A key no catalog declared misses under first match — the host fn
@@ -317,7 +369,9 @@ mod tests {
         b.add_component(h(1), ComponentDecls::default()); // plugin, empty
         let reg = b.build();
         assert!(
-            reg.disclosure_fields.resolve_first_match("forbidden_key").is_none(),
+            reg.disclosure_fields
+                .resolve_first_match("forbidden_key")
+                .is_none(),
             "an undeclared key misses across every merged catalog"
         );
     }

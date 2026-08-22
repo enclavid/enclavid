@@ -16,7 +16,7 @@
 //! IMPORTANT: never accept a `Quote { format: "snp-dev" }` in production —
 //! `format` is the discriminator.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey, SECRET_KEY_LENGTH};
+use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sev::firmware::guest::AttestationReport;

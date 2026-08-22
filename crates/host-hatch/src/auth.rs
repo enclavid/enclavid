@@ -173,7 +173,8 @@ impl OidcAuth {
 
     fn extract_bearer(authorization_header: &str) -> Option<&str> {
         let s = authorization_header.trim();
-        s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer "))
+        s.strip_prefix("Bearer ")
+            .or_else(|| s.strip_prefix("bearer "))
     }
 
     /// Verify the request's bearer token and return its principal.
@@ -203,7 +204,11 @@ impl OidcAuth {
                 }
                 self.ensure_jwks().await?;
                 let cache = self.jwks.read().await;
-                cache.keys.get(&kid).cloned().ok_or(HatchError::Unauthorized)?
+                cache
+                    .keys
+                    .get(&kid)
+                    .cloned()
+                    .ok_or(HatchError::Unauthorized)?
             }
         };
 
@@ -230,10 +235,7 @@ impl OidcAuth {
 }
 
 /// POST /authorize
-pub async fn authorize(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> Result<Vec<u8>, HatchError> {
+pub async fn authorize(State(state): State<AppState>, body: Bytes) -> Result<Vec<u8>, HatchError> {
     let req: AuthorizeRequest = decode_body(&body)?;
 
     // RBAC for MVP: any org-scoped token is allowed for any operation.

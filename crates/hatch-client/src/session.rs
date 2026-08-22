@@ -98,7 +98,11 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    pub fn new(backend: Arc<dyn SessionBackend>, tee_seal_key: [u8; 32], ttl_secs: Option<u64>) -> Self {
+    pub fn new(
+        backend: Arc<dyn SessionBackend>,
+        tee_seal_key: [u8; 32],
+        ttl_secs: Option<u64>,
+    ) -> Self {
         Self {
             backend,
             tee_seal_key: Arc::new(SecretBox::new(Box::new(tee_seal_key))),

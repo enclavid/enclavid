@@ -51,10 +51,11 @@ impl CompilerService for Child {
         // thread so the remoc reactor stays live (answers keepalives) — else a
         // multi-second compile could look like a dead transport to the supervisor.
         let compiler = self.compiler.clone();
-        let parts = tokio::task::spawn_blocking(move || compiler.compile_to_parts(&policy, &plugins))
-            .await
-            .map_err(|e| CompileError(format!("compile task join failed: {e}")))?
-            .map_err(|e| CompileError(e.to_string()))?;
+        let parts =
+            tokio::task::spawn_blocking(move || compiler.compile_to_parts(&policy, &plugins))
+                .await
+                .map_err(|e| CompileError(format!("compile task join failed: {e}")))?
+                .map_err(|e| CompileError(e.to_string()))?;
         Ok(CompiledBundle {
             cwasm: parts.cwasm,
             embedded_imports: parts.embedded_imports,

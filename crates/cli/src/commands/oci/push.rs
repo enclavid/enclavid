@@ -11,9 +11,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use oci_client::Reference;
 use oci_client::client::{Client, ClientConfig, ClientProtocol, Config, ImageLayer};
 use oci_client::manifest::OciImageManifest;
-use oci_client::Reference;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -54,8 +54,8 @@ pub async fn run(
     //   --auth flag → ENCLAVID_REGISTRY_AUTH → ~/.docker/config.json
     let auth_creds = registry_auth::resolve(&registry, auth_override.as_deref()).await?;
 
-    let bytes = std::fs::read(&artifact)
-        .with_context(|| format!("reading {}", artifact.display()))?;
+    let bytes =
+        std::fs::read(&artifact).with_context(|| format!("reading {}", artifact.display()))?;
 
     // Plaintext (default) or ocicrypt-encrypted layer per `--encrypt`.
     let (layer_bytes, layer_media_type, layer_annotations) =
@@ -93,16 +93,29 @@ pub async fn run(
         .await
         .context("fetching manifest digest from registry")?;
 
-    println!("Pushed: {} → {}/{}:{}", artifact.display(), registry, repository, tag);
+    println!(
+        "Pushed: {} → {}/{}:{}",
+        artifact.display(),
+        registry,
+        repository,
+        tag
+    );
     println!("Digest:     {digest}");
     println!("Pinned ref: {registry}/{repository}@{digest}");
     println!();
     println!("Use the pinned ref above as `policy` in POST /api/v1/sessions.");
 
     if tag != LATEST_TAG {
-        let latest_ref = Reference::with_tag(registry.clone(), repository.clone(), LATEST_TAG.to_string());
+        let latest_ref =
+            Reference::with_tag(registry.clone(), repository.clone(), LATEST_TAG.to_string());
         client
-            .push(&latest_ref, &layers, config_blob, &auth_creds, Some(manifest))
+            .push(
+                &latest_ref,
+                &layers,
+                config_blob,
+                &auth_creds,
+                Some(manifest),
+            )
             .await
             .context("retagging as :latest")?;
         println!("Also tagged: {}/{}:{}", registry, repository, LATEST_TAG);
@@ -163,7 +176,10 @@ fn build_layer(
             if kbs_resource.is_some() {
                 bail!("--kbs-resource is only valid with --encrypt kbs");
             }
-            println!("Encrypted (ocicrypt {})", ocicrypt::CIPHER_AES256CTR_HMAC_SHA256);
+            println!(
+                "Encrypted (ocicrypt {})",
+                ocicrypt::CIPHER_AES256CTR_HMAC_SHA256
+            );
             println!("Layer key (base64): {}", BASE64.encode(&priv_json));
             println!("  Pass it as  \"key\": \"<above>\"");
             println!("  in POST /api/v1/sessions (per policy / plugin). Keep it secret.");
@@ -187,7 +203,10 @@ fn build_layer(
                 resource.to_string(),
             );
             let priv_json_str = String::from_utf8_lossy(&priv_json);
-            println!("Encrypted (ocicrypt {})", ocicrypt::CIPHER_AES256CTR_HMAC_SHA256);
+            println!(
+                "Encrypted (ocicrypt {})",
+                ocicrypt::CIPHER_AES256CTR_HMAC_SHA256
+            );
             println!("Resource URI (in enc.keys annotation): {resource}");
             println!();
             println!("Register the layer key as that KBS resource (raw private-opts JSON):");
@@ -197,11 +216,16 @@ fn build_layer(
                  -H \"Authorization: Bearer <admin-token>\" --data-binary '{priv_json_str}'"
             );
             println!();
-            println!("Then the client passes  \"key\": {{ \"kbs\": {{ \"endpoint\": \"<kbs>\" }} }}");
+            println!(
+                "Then the client passes  \"key\": {{ \"kbs\": {{ \"endpoint\": \"<kbs>\" }} }}"
+            );
             println!("  in POST /api/v1/sessions (per policy / plugin).");
         }
     }
 
-    let media_type = format!("{WASM_LAYER_MEDIA_TYPE}{}", ocicrypt::ENCRYPTED_MEDIA_SUFFIX);
+    let media_type = format!(
+        "{WASM_LAYER_MEDIA_TYPE}{}",
+        ocicrypt::ENCRYPTED_MEDIA_SUFFIX
+    );
     Ok((ciphertext, media_type, Some(annotations)))
 }

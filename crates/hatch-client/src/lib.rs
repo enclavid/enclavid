@@ -19,29 +19,29 @@ pub use cache::CacheStore;
 // live in `boundary::sentinel` after the untrusted-crate fold-in.
 // The old crate-root path is preserved so external consumers don't
 // need to update import paths.
-pub use boundary::{AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted};
 pub use boundary::outbound::outbound_session_id;
+pub use boundary::{AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted};
 pub use error::BridgeError;
 pub use transport::HatchClient;
 // Wire DTO re-exports — the operation selector and the OCI pull
 // response now come from the shared `hatch-protocol` crate.
-pub use hatch_protocol::{AuthorizeRequest, ClientOperation, PullRequest};
-pub use hatch_protocol::PullResponse as RegistryPullResponse;
-pub use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
-pub use kbs::KbsClient;
-pub use registry::RegistryClient;
 pub use domain::{
     Action, CameraFacing, CaptureGuide, CaptureStep, Client, ClientAccess, Clip, Decision,
     DisplayField, Event, GuideNone, GuideOval, GuideRect, KbsKey, Key, Localized, MediaResult,
     MediaSpec, PluginPin, Prompt, SessionMetadata, SessionState, SessionStatus, Translation,
     capture_guide,
 };
+pub use hatch_protocol::PullResponse as RegistryPullResponse;
+pub use hatch_protocol::{AuthorizeRequest, ClientOperation, PullRequest};
+pub use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
+pub use kbs::KbsClient;
+pub use registry::RegistryClient;
 // Disclosure carried by `Prompt::ConsentDisclosure`. Re-exported under
 // a qualified name so it doesn't collide with the session-store
 // `session::Disclosure` wire type below.
 pub use domain::Disclosure as PromptDisclosure;
 pub use session::{
-    AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple, SEALED_STATE_PLAINTEXT_BYTES,
-    SessionStore, SetMedia, SetMetadata, SetPrincipal, SetState, SetStatus, State, Status,
-    WriteField, encode_padded,
+    AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple,
+    SEALED_STATE_PLAINTEXT_BYTES, SessionStore, SetMedia, SetMetadata, SetPrincipal, SetState,
+    SetStatus, State, Status, WriteField, encode_padded,
 };

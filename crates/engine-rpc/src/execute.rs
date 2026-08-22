@@ -314,7 +314,9 @@ mod execute_tests {
         ) -> Result<RunOutcome, ExecError> {
             // Cache-only path: always a miss in this mock (no L1). The worker returns
             // its ABI id and NEVER names the composition_key.
-            Ok(RunOutcome::CacheMiss { compat_token: "test-token".into() })
+            Ok(RunOutcome::CacheMiss {
+                compat_token: "test-token".into(),
+            })
         }
 
         async fn run_with_bundle(
@@ -334,7 +336,9 @@ mod execute_tests {
             callbacks
                 .session_change(req.session_state.clone(), vec![], vec![])
                 .await?;
-            Ok(RunReply { status: RunStatus::Completed(Decision::Approved) })
+            Ok(RunReply {
+                status: RunStatus::Completed(Decision::Approved),
+            })
         }
     }
 
@@ -359,10 +363,13 @@ mod execute_tests {
 
         // Worker end: serve the executor.
         let server_task = tokio::spawn(async move {
-            let (conn, mut tx, _rx) =
-                remoc::Connect::io::<_, _, ExecCli, ExecCli, Ciborium>(remoc::Cfg::default(), a_r, a_w)
-                    .await
-                    .unwrap();
+            let (conn, mut tx, _rx) = remoc::Connect::io::<_, _, ExecCli, ExecCli, Ciborium>(
+                remoc::Cfg::default(),
+                a_r,
+                a_w,
+            )
+            .await
+            .unwrap();
             tokio::spawn(conn);
             let (server, client) =
                 ExecutorServiceServerShared::<_, Ciborium>::new(Arc::new(MockExecutor), 4);
@@ -406,7 +413,10 @@ mod execute_tests {
             .await
             .unwrap();
         assert!(matches!(status, RunStatus::Completed(Decision::Approved)));
-        assert_eq!(callbacks.media_calls.lock().unwrap().as_slice(), &[[9u8; 32]]);
+        assert_eq!(
+            callbacks.media_calls.lock().unwrap().as_slice(),
+            &[[9u8; 32]]
+        );
         assert_eq!(*callbacks.state_calls.lock().unwrap(), 1);
 
         drop(exec_client);

@@ -93,7 +93,9 @@ impl MeasurementPolicy {
     fn check(&self, measurement: &str) -> Result<(), rustls::Error> {
         match self {
             MeasurementPolicy::AcceptAny => Ok(()),
-            MeasurementPolicy::Pinned(allowed) if allowed.iter().any(|m| m == measurement) => Ok(()),
+            MeasurementPolicy::Pinned(allowed) if allowed.iter().any(|m| m == measurement) => {
+                Ok(())
+            }
             MeasurementPolicy::Pinned(_) => Err(ratls_error(format!(
                 "peer measurement {measurement} is not pinned"
             ))),
@@ -110,7 +112,9 @@ fn ratls_error(msg: impl Into<String>) -> rustls::Error {
 /// Mint one ephemeral self-signed cert whose SPKI is bound into an attestation quote,
 /// with the quote CBOR-embedded in the [`RATLS_OID_ARCS`] extension. Returns the cert +
 /// its private key for a rustls config.
-fn mint_cert(attestor: &dyn Attestor) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), RaTlsError> {
+fn mint_cert(
+    attestor: &dyn Attestor,
+) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), RaTlsError> {
     let key_pair = rcgen::KeyPair::generate().map_err(|e| RaTlsError::Cert(e.to_string()))?;
     // The DER SubjectPublicKeyInfo the peer will parse out of the cert — the exact bytes
     // the quote binds. `verify_ratls_cert` recomputes the binding from the peer cert's
@@ -130,7 +134,10 @@ fn mint_cert(attestor: &dyn Attestor) -> Result<(CertificateDer<'static>, Privat
         .map_err(|e| RaTlsError::Cert(e.to_string()))?;
     params
         .custom_extensions
-        .push(rcgen::CustomExtension::from_oid_content(RATLS_OID_ARCS, quote_cbor));
+        .push(rcgen::CustomExtension::from_oid_content(
+            RATLS_OID_ARCS,
+            quote_cbor,
+        ));
     let cert = params
         .self_signed(&key_pair)
         .map_err(|e| RaTlsError::Cert(e.to_string()))?;
@@ -160,8 +167,8 @@ fn verify_ratls_cert(
         .iter()
         .find(|e| e.oid.to_id_string() == RATLS_OID_DOTTED)
         .ok_or_else(|| ratls_error("peer cert carries no attestation quote"))?;
-    let quote: Quote = ciborium::from_reader(ext.value)
-        .map_err(|e| ratls_error(format!("decode quote: {e}")))?;
+    let quote: Quote =
+        ciborium::from_reader(ext.value).map_err(|e| ratls_error(format!("decode quote: {e}")))?;
 
     // Recompute the binding from THE PEER CERT'S OWN SPKI (raw DER of the
     // SubjectPublicKeyInfo) — the same bytes `mint_cert` fed to `for_ratls`.
@@ -188,7 +195,9 @@ struct RaTlsVerifier {
 impl fmt::Debug for RaTlsVerifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // `dyn Attestor` isn't Debug; rustls requires the verifier be Debug.
-        f.debug_struct("RaTlsVerifier").field("policy", &self.policy).finish_non_exhaustive()
+        f.debug_struct("RaTlsVerifier")
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
     }
 }
 
@@ -222,7 +231,9 @@ impl RaTlsVerifier {
     }
 
     fn schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -312,7 +323,11 @@ pub fn server_config(
 ) -> Result<ServerConfig, RaTlsError> {
     let provider = ring_provider();
     let (cert, key) = mint_cert(&*attestor)?;
-    let verifier = Arc::new(RaTlsVerifier { attestor, policy, provider: provider.clone() });
+    let verifier = Arc::new(RaTlsVerifier {
+        attestor,
+        policy,
+        provider: provider.clone(),
+    });
     ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| RaTlsError::Config(e.to_string()))?
@@ -329,7 +344,11 @@ pub fn client_config(
 ) -> Result<ClientConfig, RaTlsError> {
     let provider = ring_provider();
     let (cert, key) = mint_cert(&*attestor)?;
-    let verifier = Arc::new(RaTlsVerifier { attestor, policy, provider: provider.clone() });
+    let verifier = Arc::new(RaTlsVerifier {
+        attestor,
+        policy,
+        provider: provider.clone(),
+    });
     ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| RaTlsError::Config(e.to_string()))?
@@ -349,7 +368,10 @@ pub fn server_name() -> ServerName<'static> {
 /// against real AMD attestation.
 #[cfg(feature = "mock")]
 pub fn default_attestor() -> Arc<dyn Attestor> {
-    Arc::new(enclavid_attestation::MockAttestor::from_seed(DEV_SEED, DEV_MEASUREMENT))
+    Arc::new(enclavid_attestation::MockAttestor::from_seed(
+        DEV_SEED,
+        DEV_MEASUREMENT,
+    ))
 }
 
 /// The feature-selected measurement policy. Under `mock`, pin the shared dev measurement
@@ -382,7 +404,8 @@ mod tests {
     /// report_data binding footgun) AND a mock quote that verifies against that SPKI.
     #[test]
     fn mint_binds_spki_and_verifies() {
-        let attestor: Arc<dyn Attestor> = Arc::new(MockAttestor::from_seed([5u8; 32], "0".repeat(64)));
+        let attestor: Arc<dyn Attestor> =
+            Arc::new(MockAttestor::from_seed([5u8; 32], "0".repeat(64)));
         let (cert, _key) = mint_cert(&*attestor).unwrap();
         // The shared verify path accepts the freshly minted cert.
         verify_ratls_cert(&cert, &*attestor, &MeasurementPolicy::AcceptAny).unwrap();
@@ -392,7 +415,8 @@ mod tests {
     /// swapping the quote onto another key is rejected at the binding check).
     #[test]
     fn swapped_quote_rejected() {
-        let attestor: Arc<dyn Attestor> = Arc::new(MockAttestor::from_seed([6u8; 32], "0".repeat(64)));
+        let attestor: Arc<dyn Attestor> =
+            Arc::new(MockAttestor::from_seed([6u8; 32], "0".repeat(64)));
         let (cert_a, _) = mint_cert(&*attestor).unwrap();
         let (cert_b, _) = mint_cert(&*attestor).unwrap();
         // Graft cert_a's extension (its quote, bound to A's SPKI) onto cert_b's bytes by
@@ -407,13 +431,17 @@ mod tests {
         let quote: Quote = ciborium::from_reader(ext.value).unwrap();
         let (_, b) = X509Certificate::from_der(cert_b.as_ref()).unwrap();
         let wrong = ReportData::for_ratls(b.public_key().raw.to_vec());
-        assert!(attestor.verify(&quote, &wrong).is_err(), "quote must not verify vs another SPKI");
+        assert!(
+            attestor.verify(&quote, &wrong).is_err(),
+            "quote must not verify vs another SPKI"
+        );
     }
 
     /// A measurement not in the pin set is rejected.
     #[test]
     fn unpinned_measurement_rejected() {
-        let attestor: Arc<dyn Attestor> = Arc::new(MockAttestor::from_seed([7u8; 32], "aa".repeat(32)));
+        let attestor: Arc<dyn Attestor> =
+            Arc::new(MockAttestor::from_seed([7u8; 32], "aa".repeat(32)));
         let (cert, _) = mint_cert(&*attestor).unwrap();
         let policy = MeasurementPolicy::Pinned(vec!["bb".repeat(32)]);
         assert!(verify_ratls_cert(&cert, &*attestor, &policy).is_err());

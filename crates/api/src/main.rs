@@ -81,12 +81,10 @@ async fn main() {
     // key-seed provisioning (so a verifier can pin them) lands with the
     // prod backend; `new_random` is fine while nothing verifies yet.
     let attestor: Arc<dyn Attestor> = Arc::new(SnpDevAttestor::new_random());
-    let client_state = Arc::new(
-        ClientState::init(&address_out, session_store.clone(), attestor).await,
-    );
-    let applicant_state = Arc::new(
-        AppState::init(&address_out, session_store, cache_store, shuffle_key).await,
-    );
+    let client_state =
+        Arc::new(ClientState::init(&address_out, session_store.clone(), attestor).await);
+    let applicant_state =
+        Arc::new(AppState::init(&address_out, session_store, cache_store, shuffle_key).await);
 
     let client_app = client::router(client_state);
     let applicant_app = applicant::router(applicant_state);
@@ -133,8 +131,8 @@ async fn build_storage_backends() -> (Arc<dyn SessionBackend>, Arc<dyn CacheBack
 /// KMS-bound material so a process restart with a fresh key cannot
 /// read prior session state.
 fn load_tee_seal_key() -> [u8; 32] {
-    let hex_str = std::env::var("ENCLAVID_TEE_KEY")
-        .expect("ENCLAVID_TEE_KEY not set (32-byte hex)");
+    let hex_str =
+        std::env::var("ENCLAVID_TEE_KEY").expect("ENCLAVID_TEE_KEY not set (32-byte hex)");
     let bytes = hex::decode(hex_str).expect("ENCLAVID_TEE_KEY: invalid hex");
     bytes
         .try_into()

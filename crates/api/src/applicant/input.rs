@@ -76,7 +76,10 @@ async fn build_event(
     slot_id: &str,
     multipart: Multipart,
 ) -> Result<Event, StatusCode> {
-    let prompt = session.current_prompt.as_ref().ok_or(StatusCode::CONFLICT)?;
+    let prompt = session
+        .current_prompt
+        .as_ref()
+        .ok_or(StatusCode::CONFLICT)?;
 
     if let Some(step) = parse_media_slot(slot_id) {
         let Prompt::Media(spec) = prompt else {
@@ -168,8 +171,7 @@ async fn read_consent(mut multipart: Multipart) -> Result<(bool, Option<String>)
                 accepted = Some(matches!(text.as_str(), "true" | "1"));
             }
             Some("disclosure_hash") => {
-                disclosure_hash =
-                    Some(field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
+                disclosure_hash = Some(field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
             }
             _ => {}
         }

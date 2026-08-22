@@ -22,7 +22,10 @@ use crate::{CacheBlobs, SessionStore, StorageSvc};
 
 fn set_metadata(value: &[u8], expected: Option<u64>) -> WriteRequest {
     WriteRequest {
-        ops: vec![Op::Blob(BlobWrite { field: BlobField::Metadata, value: value.to_vec() })],
+        ops: vec![Op::Blob(BlobWrite {
+            field: BlobField::Metadata,
+            value: value.to_vec(),
+        })],
         expected_version: expected,
     }
 }
@@ -31,7 +34,10 @@ fn set_metadata(value: &[u8], expected: Option<u64>) -> WriteRequest {
 async fn remoc_roundtrip_both_services() {
     let dir = tempfile::tempdir().unwrap();
     let sessions = Arc::new(SessionStore::open(dir.path().to_str().unwrap()).unwrap());
-    let svc = Arc::new(StorageSvc::new(sessions, CacheBlobs::new(Arc::new(InMemory::new()))));
+    let svc = Arc::new(StorageSvc::new(
+        sessions,
+        CacheBlobs::new(Arc::new(InMemory::new())),
+    ));
 
     let (a, b) = tokio::io::duplex(1024 * 1024);
     let (a_r, a_w) = split(a);
@@ -39,15 +45,17 @@ async fn remoc_roundtrip_both_services() {
 
     // Server end (the storage-CVM): serve both services, hand the clients over.
     let server = tokio::spawn(async move {
-        let (conn, mut tx, _rx) = remoc::Connect::io::<_, _, StorageClients, StorageClients, Ciborium>(
-            storage_rpc::connection_cfg(),
-            a_r,
-            a_w,
-        )
-        .await
-        .unwrap();
+        let (conn, mut tx, _rx) =
+            remoc::Connect::io::<_, _, StorageClients, StorageClients, Ciborium>(
+                storage_rpc::connection_cfg(),
+                a_r,
+                a_w,
+            )
+            .await
+            .unwrap();
         tokio::spawn(conn);
-        let (s_server, session) = SessionStoreServiceServerShared::<_, Ciborium>::new(svc.clone(), 4);
+        let (s_server, session) =
+            SessionStoreServiceServerShared::<_, Ciborium>::new(svc.clone(), 4);
         let (c_server, cache) = CacheServiceServerShared::<_, Ciborium>::new(svc.clone(), 4);
         if tx.send(StorageClients { session, cache }).await.is_err() {
             panic!("failed to send storage clients");
@@ -80,11 +88,21 @@ async fn remoc_roundtrip_both_services() {
     assert_eq!(v1.new_version, 1);
 
     let got = session_cli
-        .read(id.clone(), ReadRequest { fields: vec![FieldSelector::Blob(BlobField::Metadata)] })
+        .read(
+            id.clone(),
+            ReadRequest {
+                fields: vec![FieldSelector::Blob(BlobField::Metadata)],
+            },
+        )
         .await
         .unwrap();
     assert_eq!(got.version, 1);
-    assert_eq!(got.slots[0], Slot::Scalar(ScalarSlot { value: Some(b"m1".to_vec()) }));
+    assert_eq!(
+        got.slots[0],
+        Slot::Scalar(ScalarSlot {
+            value: Some(b"m1".to_vec())
+        })
+    );
 
     let v2 = session_cli
         .write(id.clone(), set_metadata(b"m2", Some(1)), None)
@@ -93,7 +111,9 @@ async fn remoc_roundtrip_both_services() {
     assert_eq!(v2.new_version, 2);
 
     // Stale CAS → VersionMismatch surfaces across the wire.
-    let stale = session_cli.write(id.clone(), set_metadata(b"x", Some(1)), None).await;
+    let stale = session_cli
+        .write(id.clone(), set_metadata(b"x", Some(1)), None)
+        .await;
     assert!(matches!(stale, Err(SessionError::VersionMismatch)));
 
     assert!(session_cli.exists(id.clone()).await.unwrap());
@@ -104,8 +124,14 @@ async fn remoc_roundtrip_both_services() {
     // --- cache: store → load → miss ---
     let key = "abcd".repeat(16); // 64 hex chars
     assert_eq!(cache_cli.load(key.clone()).await.unwrap(), None);
-    cache_cli.store(key.clone(), b"cwasm".to_vec()).await.unwrap();
-    assert_eq!(cache_cli.load(key.clone()).await.unwrap(), Some(b"cwasm".to_vec()));
+    cache_cli
+        .store(key.clone(), b"cwasm".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        cache_cli.load(key.clone()).await.unwrap(),
+        Some(b"cwasm".to_vec())
+    );
 
     server.abort();
 }

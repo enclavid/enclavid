@@ -15,12 +15,10 @@
 
 use std::collections::HashMap;
 
-use hatch_client::{
-    AuthN, AuthZ, Covert, KbsClient, Key, Replay, Untrusted, boundary, reason,
-};
-use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
 use enclavid_crypto::ocicrypt::{self, PrivateLayerBlockCipherOptions};
 use enclavid_kbs_client::{RcarSession, SampleEvidence, TeeKeyPair};
+use hatch_client::{AuthN, AuthZ, Covert, KbsClient, Key, Replay, Untrusted, boundary, reason};
+use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
 
 /// Context the [`Key::Kbs`] path needs: the hatch relay client that
 /// couriers each RCAR leg to the author's KBS.
@@ -91,20 +89,27 @@ async fn kbs_release(
     let auth_body = session
         .auth_body()
         .map_err(|e| KeyError::msg(e.to_string()))?;
-    let resp = relay(ctx, endpoint, "POST", "/kbs/v0/auth", json_headers(), auth_body)
-        .await?
-        .trust_unchecked::<AuthN, _>(reason!(
-            "RCAR handshake plumbing carries no secret; the only released secret is the \
+    let resp = relay(
+        ctx,
+        endpoint,
+        "POST",
+        "/kbs/v0/auth",
+        json_headers(),
+        auth_body,
+    )
+    .await?
+    .trust_unchecked::<AuthN, _>(reason!(
+        "RCAR handshake plumbing carries no secret; the only released secret is the \
              resource, JWE-sealed to our ephemeral key at leg 3 — tampered handshake bytes \
              only break that unwrap and fail closed"
-        ))
-        .trust_unchecked::<AuthZ, _>(reason!(
-            "the KBS, not the TEE, authorizes release (resource policy + token)"
-        ))
-        .trust_unchecked::<Replay, _>(reason!(
-            "a stale challenge only breaks the report_data binding and fails the leg-3 unwrap"
-        ))
-        .into_inner();
+    ))
+    .trust_unchecked::<AuthZ, _>(reason!(
+        "the KBS, not the TEE, authorizes release (resource policy + token)"
+    ))
+    .trust_unchecked::<Replay, _>(reason!(
+        "a stale challenge only breaks the report_data binding and fails the leg-3 unwrap"
+    ))
+    .into_inner();
     require_ok(&resp, "auth")?;
     let cookie = session_cookie(&resp.headers)?;
     session
@@ -117,19 +122,26 @@ async fn kbs_release(
         .map_err(|e| KeyError::msg(e.to_string()))?;
     let mut headers = json_headers();
     headers.push(("cookie".to_string(), cookie.clone()));
-    let resp = relay(ctx, endpoint, "POST", "/kbs/v0/attest", headers, attest_body)
-        .await?
-        .trust_unchecked::<AuthN, _>(reason!(
-            "handshake plumbing; release secrecy is enforced at the leg-3 JWE unwrap"
-        ))
-        .trust_unchecked::<AuthZ, _>(reason!(
-            "the KBS verifies the evidence and gates the token, not the TEE"
-        ))
-        .trust_unchecked::<Replay, _>(reason!(
-            "attestation binds this handshake's fresh nonce; a replayed token can't unwrap \
+    let resp = relay(
+        ctx,
+        endpoint,
+        "POST",
+        "/kbs/v0/attest",
+        headers,
+        attest_body,
+    )
+    .await?
+    .trust_unchecked::<AuthN, _>(reason!(
+        "handshake plumbing; release secrecy is enforced at the leg-3 JWE unwrap"
+    ))
+    .trust_unchecked::<AuthZ, _>(reason!(
+        "the KBS verifies the evidence and gates the token, not the TEE"
+    ))
+    .trust_unchecked::<Replay, _>(reason!(
+        "attestation binds this handshake's fresh nonce; a replayed token can't unwrap \
              the resource sealed to our per-pull ephemeral key"
-        ))
-        .into_inner();
+    ))
+    .into_inner();
     require_ok(&resp, "attest")?;
 
     // Leg 3 — GET the resource (cookie) → JWE = the layer's private-opts.
@@ -250,7 +262,9 @@ fn resource_path(resource: &str) -> Result<String, KeyError> {
         .ok_or_else(|| KeyError::msg("kbs resource must be kbs:///<repo>/<type>/<tag>"))?;
     let parts: Vec<&str> = rest.split('/').collect();
     if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
-        return Err(KeyError::msg("kbs resource must be kbs:///<repo>/<type>/<tag>"));
+        return Err(KeyError::msg(
+            "kbs resource must be kbs:///<repo>/<type>/<tag>",
+        ));
     }
     Ok(format!("/kbs/v0/resource/{rest}"))
 }
@@ -285,7 +299,12 @@ mod tests {
 
     #[test]
     fn resource_path_rejects_malformed() {
-        for bad in ["myrepo/key/1", "kbs:///two/parts", "kbs:///a/b/c/d", "kbs:///a//c"] {
+        for bad in [
+            "myrepo/key/1",
+            "kbs:///two/parts",
+            "kbs:///a/b/c/d",
+            "kbs:///a//c",
+        ] {
             assert!(resource_path(bad).is_err(), "should reject {bad}");
         }
     }

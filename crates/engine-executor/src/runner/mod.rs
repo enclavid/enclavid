@@ -284,9 +284,10 @@ fn register_strict_embedded(
         match imp.iface {
             EmbeddedIface::I18n => {
                 let embedded = embedded.clone();
-                linker.root().instance(&imp.instance_name)?.func_wrap_async(
-                    "localized",
-                    move |mut store, (key,): (String,)| {
+                linker
+                    .root()
+                    .instance(&imp.instance_name)?
+                    .func_wrap_async("localized", move |mut store, (key,): (String,)| {
                         let embedded = embedded.clone();
                         Box::new(async move {
                             let data = embedded
@@ -298,14 +299,14 @@ fn register_strict_embedded(
                                 store.data_mut().table.push(LocalizedRef(data))?;
                             Ok((res,))
                         })
-                    },
-                )?;
+                    })?;
             }
             EmbeddedIface::Icons => {
                 let embedded = embedded.clone();
-                linker.root().instance(&imp.instance_name)?.func_wrap_async(
-                    "icon",
-                    move |mut store, (name,): (String,)| {
+                linker
+                    .root()
+                    .instance(&imp.instance_name)?
+                    .func_wrap_async("icon", move |mut store, (name,): (String,)| {
                         let embedded = embedded.clone();
                         Box::new(async move {
                             let data = embedded
@@ -317,8 +318,7 @@ fn register_strict_embedded(
                                 store.data_mut().table.push(IconRef(data))?;
                             Ok((res,))
                         })
-                    },
-                )?;
+                    })?;
             }
         }
     }
@@ -361,7 +361,11 @@ mod tests {
     #[test]
     fn deserialize_rejects_non_cwasm() {
         let executor = Executor::new().unwrap();
-        assert!(executor.deserialize_component(b"definitely not cwasm").is_err());
+        assert!(
+            executor
+                .deserialize_component(b"definitely not cwasm")
+                .is_err()
+        );
         assert!(executor.deserialize_component(&[]).is_err());
     }
 }

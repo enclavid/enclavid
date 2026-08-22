@@ -24,11 +24,9 @@ pub async fn serve(app: Router, addr: &str) {
 
 #[cfg(feature = "vsock")]
 pub async fn serve(app: Router, addr: &str) {
-    use tokio_vsock::{VsockAddr, VsockListener, VMADDR_CID_ANY};
+    use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener};
 
-    let port: u32 = addr
-        .parse()
-        .expect("vsock address must be a u32 port");
+    let port: u32 = addr.parse().expect("vsock address must be a u32 port");
     let vsock_addr = VsockAddr::new(VMADDR_CID_ANY, port);
     let listener = VsockListener::bind(&vsock_addr).expect("failed to bind vsock listener");
     println!("listening on vsock://*:{port}");

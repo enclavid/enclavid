@@ -11,9 +11,7 @@ use reqwest::{Client, Method, Response, header};
 use crate::auth;
 
 pub fn http_client() -> Result<Client> {
-    Client::builder()
-        .build()
-        .context("building http client")
+    Client::builder().build().context("building http client")
 }
 
 pub async fn fetch_jwt() -> Result<String> {

@@ -35,7 +35,11 @@ pub struct SessionCvmBackend {
 #[async_trait::async_trait]
 impl SessionBackend for SessionCvmBackend {
     async fn read_raw(&self, id: &str, req: ReadRequest) -> Result<(Vec<Slot>, u64), BridgeError> {
-        let r = self.client.read(id.to_string(), req).await.map_err(to_bridge)?;
+        let r = self
+            .client
+            .read(id.to_string(), req)
+            .await
+            .map_err(to_bridge)?;
         Ok((r.slots, r.version))
     }
 
@@ -45,7 +49,11 @@ impl SessionBackend for SessionCvmBackend {
         req: WriteRequest,
         deadline_unix_secs: Option<u64>,
     ) -> Result<u64, BridgeError> {
-        match self.client.write(id.to_string(), req, deadline_unix_secs).await {
+        match self
+            .client
+            .write(id.to_string(), req, deadline_unix_secs)
+            .await
+        {
             Ok(r) => Ok(r.new_version),
             Err(SessionError::VersionMismatch) => Err(BridgeError::VersionMismatch),
             Err(e) => Err(to_bridge(e)),
@@ -53,7 +61,12 @@ impl SessionBackend for SessionCvmBackend {
     }
 
     async fn delete(&self, id: &str) -> Result<u64, BridgeError> {
-        Ok(self.client.delete(id.to_string()).await.map_err(to_bridge)?.deleted)
+        Ok(self
+            .client
+            .delete(id.to_string())
+            .await
+            .map_err(to_bridge)?
+            .deleted)
     }
 
     async fn exists(&self, id: &str) -> Result<bool, BridgeError> {
@@ -69,19 +82,23 @@ pub struct CacheCvmBackend {
 #[async_trait::async_trait]
 impl CacheBackend for CacheCvmBackend {
     async fn store(&self, blob_name: &str, bytes: Vec<u8>) -> Result<(), BridgeError> {
-        self.client.store(blob_name.to_string(), bytes).await.map_err(to_bridge)
+        self.client
+            .store(blob_name.to_string(), bytes)
+            .await
+            .map_err(to_bridge)
     }
 
     async fn load(&self, blob_name: &str) -> Result<Option<Vec<u8>>, BridgeError> {
-        self.client.load(blob_name.to_string()).await.map_err(to_bridge)
+        self.client
+            .load(blob_name.to_string())
+            .await
+            .map_err(to_bridge)
     }
 }
 
 /// Dial the storage-CVM at `addr`, RA-TLS-handshake + remoc-frame it, and receive
 /// BOTH service clients on the base channel. Mirrors `connect_execution_worker`.
-pub async fn connect_storage(
-    addr: &str,
-) -> Result<(SessionCvmBackend, CacheCvmBackend), String> {
+pub async fn connect_storage(addr: &str) -> Result<(SessionCvmBackend, CacheCvmBackend), String> {
     let tcp = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|e| format!("connect storage-CVM at `{addr}`: {e}"))?;
@@ -113,7 +130,11 @@ pub async fn connect_storage(
         .ok_or("storage-CVM closed before sending its service clients")?;
 
     Ok((
-        SessionCvmBackend { client: clients.session },
-        CacheCvmBackend { client: clients.cache },
+        SessionCvmBackend {
+            client: clients.session,
+        },
+        CacheCvmBackend {
+            client: clients.cache,
+        },
     ))
 }

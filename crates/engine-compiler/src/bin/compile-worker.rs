@@ -28,10 +28,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use engine_supervisor::{ChildPool, Hardening};
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 use tokio::net::{TcpListener, TcpStream};
-use engine_supervisor::{ChildPool, Hardening};
 
 use engine_rpc::{
     CompileError, CompiledBundle, CompilerService, CompilerServiceClient,
@@ -70,9 +70,12 @@ impl CompilerService for Supervisor {
             .pool
             // No inherited fds: the compile-child receives its `(policy, plugins)`
             // over the RPC, not by fd (only the executor hands a cwasm memfd down).
-            .run(&[], move |client: CompilerServiceClient<Ciborium>| async move {
-                client.compile(policy, plugins).await
-            })
+            .run(
+                &[],
+                move |client: CompilerServiceClient<Ciborium>| async move {
+                    client.compile(policy, plugins).await
+                },
+            )
             .await;
 
         // The pool returns the closure's domain result verbatim on success; a
@@ -194,7 +197,10 @@ async fn serve_conn(
     ratls: tokio_rustls::TlsAcceptor,
     svc: Arc<Supervisor>,
 ) -> Result<(), String> {
-    let tls = ratls.accept(stream).await.map_err(|e| format!("RA-TLS accept: {e}"))?;
+    let tls = ratls
+        .accept(stream)
+        .await
+        .map_err(|e| format!("RA-TLS accept: {e}"))?;
     let (read, write) = tokio::io::split(tls);
     let (conn, mut tx, _rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
@@ -206,6 +212,9 @@ async fn serve_conn(
     tx.send(client)
         .await
         .map_err(|e| format!("send service client: {e}"))?;
-    server.serve(true).await.map_err(|e| format!("serve: {e}"))?;
+    server
+        .serve(true)
+        .await
+        .map_err(|e| format!("serve: {e}"))?;
     Ok(())
 }

@@ -22,7 +22,10 @@ async fn mutual_ratls_handshake_and_data() {
     let server = tokio::spawn(async move {
         // `accept` completes only after the server has ATTESTED the client's cert too
         // (mutual): a plain TLS peer with no quote extension would be rejected here.
-        let mut tls = acceptor.accept(server_io).await.expect("server accept (mutual RA-TLS)");
+        let mut tls = acceptor
+            .accept(server_io)
+            .await
+            .expect("server accept (mutual RA-TLS)");
         let mut buf = [0u8; 5];
         tls.read_exact(&mut buf).await.expect("server read");
         assert_eq!(&buf, b"hello");
@@ -50,14 +53,20 @@ async fn wrong_measurement_pin_aborts_handshake() {
     let acceptor = TlsAcceptor::from(Arc::new(fleet_server_config().unwrap()));
     // Same shared dev attestor (so the quote signature is valid) but pin a measurement
     // the server's attested cert does NOT carry — the client's verifier must refuse.
-    let bad = client_config(default_attestor(), MeasurementPolicy::Pinned(vec!["ff".repeat(32)]))
-        .unwrap();
+    let bad = client_config(
+        default_attestor(),
+        MeasurementPolicy::Pinned(vec!["ff".repeat(32)]),
+    )
+    .unwrap();
     let connector = TlsConnector::from(Arc::new(bad));
 
     let server = tokio::spawn(async move {
         let _ = acceptor.accept(server_io).await; // will error when the client aborts
     });
     let res = connector.connect(server_name(), client_io).await;
-    assert!(res.is_err(), "handshake must fail when the server measurement isn't pinned");
+    assert!(
+        res.is_err(),
+        "handshake must fail when the server measurement isn't pinned"
+    );
     let _ = server.await;
 }

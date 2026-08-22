@@ -8,8 +8,8 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 use base64ct::{Base64, Encoding};
 use rand_core::{OsRng, RngCore};
-use serde::{Deserialize, Deserializer, Serialize};
 use secrecy::{ExposeSecret, SecretBox};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use enclavid_attestation::ReportData;
@@ -21,8 +21,7 @@ use hatch_client::{
 use crate::client_state::ClientState;
 use crate::dto::{PluginView, ResolvedPolicyView};
 use crate::limits::{
-    CLIENT_SESSION_TOKEN_BYTES, MAX_CLIENT_REF_LEN, MAX_REGISTRY_AUTH_LEN,
-    SESSION_ID_RANDOM_BYTES,
+    CLIENT_SESSION_TOKEN_BYTES, MAX_CLIENT_REF_LEN, MAX_REGISTRY_AUTH_LEN, SESSION_ID_RANDOM_BYTES,
 };
 use crate::policy_pull;
 
@@ -152,9 +151,7 @@ impl KeyRequest {
 /// The restricted charset avoids host-side key parsing surprises
 /// and disallows zero-width / RTL-override confusables that could
 /// spoof reconciliation on the consumer's dashboard.
-fn deserialize_external_ref<'de, D: Deserializer<'de>>(
-    d: D,
-) -> Result<Option<String>, D::Error> {
+fn deserialize_external_ref<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     let opt = <Option<String>>::deserialize(d)?;
     let Some(s) = opt else { return Ok(None) };
     if s.is_empty() {
@@ -244,8 +241,8 @@ async fn create(
             registry_auth.insert(host, bearer.into_bytes());
         }
     } else if let Some(hv) = headers.get(header::AUTHORIZATION) {
-        let policy_host = policy_pull::registry_hostname(&body.policy)
-            .ok_or(StatusCode::BAD_REQUEST)?;
+        let policy_host =
+            policy_pull::registry_hostname(&body.policy).ok_or(StatusCode::BAD_REQUEST)?;
         registry_auth.insert(policy_host.to_string(), hv.as_bytes().to_vec());
     }
     let total_bearer_bytes: usize = registry_auth.values().map(Vec::len).sum();
@@ -300,8 +297,7 @@ async fn create(
     // SecretBox so plaintext zeroizes on drop and is redacted from
     // Debug output.
     let client_session_token = generate_client_session_token();
-    let client_session_token_hash =
-        Sha256::digest(client_session_token.expose_secret()).to_vec();
+    let client_session_token_hash = Sha256::digest(client_session_token.expose_secret()).to_vec();
 
     let report_data = ReportData::session(session_id.clone(), policy_digest.clone());
     let quote = state
@@ -422,4 +418,3 @@ fn generate_client_session_token() -> SecretBox<Vec<u8>> {
     OsRng.fill_bytes(&mut bytes);
     SecretBox::new(Box::new(bytes))
 }
-

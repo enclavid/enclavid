@@ -60,4 +60,3 @@ pub const MAX_CLIENT_REF_LEN: usize = 128;
 /// growth in case a malicious consumer supplies a giant string.
 /// Enforced at session-create time, before any persistence.
 pub const MAX_REGISTRY_AUTH_LEN: usize = 8 * 1024;
-

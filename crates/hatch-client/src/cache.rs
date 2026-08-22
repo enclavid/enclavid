@@ -65,7 +65,10 @@ impl CacheKeys {
     /// and cannot invert it to the composition. Pure hex ⇒ the hatch's
     /// path-traversal guard accepts it.
     fn blob_name(&self, cache_id: &str) -> String {
-        hex::encode(derive_key(self.filename_key.expose_secret(), cache_id.as_bytes()))
+        hex::encode(derive_key(
+            self.filename_key.expose_secret(),
+            cache_id.as_bytes(),
+        ))
     }
 
     /// AEAD-seal `bundle` under the seal subkey with `cache_id` as AAD.

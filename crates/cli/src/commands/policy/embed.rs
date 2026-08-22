@@ -26,8 +26,7 @@ pub fn run(
     icons_path: PathBuf,
     output: Option<PathBuf>,
 ) -> Result<()> {
-    let wasm_bytes = std::fs::read(&wasm)
-        .with_context(|| format!("reading {}", wasm.display()))?;
+    let wasm_bytes = std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
 
     // Role gate: this component must export the `enclavid:policy/policy`
     // world. A plugin handed to `policy embed` is rejected here (with a
@@ -40,10 +39,10 @@ pub fn run(
     // an absent file, validation runs over whatever's present.
     let parsed_disclosure = read_disclosure_fields(&disclosure_fields_path)
         .with_context(|| format!("reading {}", disclosure_fields_path.display()))?;
-    let parsed_i18n = read_i18n(&i18n_path)
-        .with_context(|| format!("reading {}", i18n_path.display()))?;
-    let parsed_icons = read_icons(&icons_path)
-        .with_context(|| format!("reading {}", icons_path.display()))?;
+    let parsed_i18n =
+        read_i18n(&i18n_path).with_context(|| format!("reading {}", i18n_path.display()))?;
+    let parsed_icons =
+        read_icons(&icons_path).with_context(|| format!("reading {}", icons_path.display()))?;
     let report = validate(
         parsed_disclosure.as_ref(),
         parsed_i18n.as_ref(),

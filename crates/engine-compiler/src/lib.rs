@@ -85,7 +85,11 @@ impl Compiler {
     /// publish. The embedded manifest is reconstructed from these bytes
     /// at load time (see `compose::reconstruct_strict_manifest`), so
     /// it isn't returned here.
-    pub fn fuse(&self, policy_wasm: &[u8], plugins: &[PluginInstance]) -> wasmtime::Result<Vec<u8>> {
+    pub fn fuse(
+        &self,
+        policy_wasm: &[u8],
+        plugins: &[PluginInstance],
+    ) -> wasmtime::Result<Vec<u8>> {
         let (bytes, _manifest) = compose::fuse(policy_wasm, plugins)?;
         Ok(bytes)
     }

@@ -55,19 +55,19 @@ use std::os::fd::AsFd;
 use std::sync::Arc;
 use std::time::Duration;
 
+use engine_supervisor::{ChildPool, Hardening};
 use moka::future::Cache;
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 use tokio::net::{TcpListener, TcpStream};
 use zeroize::Zeroizing;
-use engine_supervisor::{ChildPool, Hardening};
 
 use engine_executor::{Event, SessionState, compat_token};
 use engine_rpc::{
     BundleRef, CallbackError, CallbackService, CallbackServiceClient, CatalogEntry, ChildCallbacks,
-    ChildCallbacksServerShared, ChildService, ChildServiceClient, CompiledBundle, ConsentDisclosure,
-    ExecError, ExecutorService, ExecutorServiceClient, ExecutorServiceServerShared, Prop, RunOutcome,
-    RunReply, RunRequest,
+    ChildCallbacksServerShared, ChildService, ChildServiceClient, CompiledBundle,
+    ConsentDisclosure, ExecError, ExecutorService, ExecutorServiceClient,
+    ExecutorServiceServerShared, Prop, RunOutcome, RunReply, RunRequest,
 };
 use engine_types::composition::EmbeddedImport;
 
@@ -113,7 +113,8 @@ fn anon_cwasm(bytes: &[u8]) -> Result<File, String> {
         .map_err(|e| format!("memfd_create: {e}"))?;
     {
         let mut w: &File = mfd.as_file();
-        w.write_all(bytes).map_err(|e| format!("write cwasm memfd: {e}"))?;
+        w.write_all(bytes)
+            .map_err(|e| format!("write cwasm memfd: {e}"))?;
     }
     mfd.add_seals(&[
         memfd::FileSeal::SealShrink,
@@ -131,7 +132,8 @@ fn anon_cwasm(bytes: &[u8]) -> Result<File, String> {
 #[cfg(not(target_os = "linux"))]
 fn anon_cwasm(bytes: &[u8]) -> Result<File, String> {
     let mut f = tempfile::tempfile().map_err(|e| format!("tempfile: {e}"))?;
-    f.write_all(bytes).map_err(|e| format!("write cwasm tmpfile: {e}"))?;
+    f.write_all(bytes)
+        .map_err(|e| format!("write cwasm tmpfile: {e}"))?;
     Ok(f)
 }
 
@@ -199,7 +201,11 @@ impl Supervisor {
         let key = composition_key.to_string();
         self.compositions
             .try_get_with(key, async move {
-                let CompiledBundle { cwasm, embedded_imports, catalogs } = bundle;
+                let CompiledBundle {
+                    cwasm,
+                    embedded_imports,
+                    catalogs,
+                } = bundle;
                 // Zeroize the transient wire copy on drop: it's plaintext (possible
                 // model weights) and, once written into the memfd, a needless second
                 // heap copy. (The remoc/ciborium receive buffers upstream stay
@@ -253,22 +259,27 @@ impl Supervisor {
         // the child (MMAP the cwasm), stand up the callback relay, run.
         let outcome = self
             .pool
-            .run(std::slice::from_ref(&cwasm_fd), move |client: ChildServiceClient<Ciborium>| async move {
-                // Prime: the child MMAPs the cwasm via `deserialize_file` on its
-                // inherited fd; only the fd-path + small metadata cross the hop.
-                client.prime(bundle_ref).await?;
+            .run(
+                std::slice::from_ref(&cwasm_fd),
+                move |client: ChildServiceClient<Ciborium>| async move {
+                    // Prime: the child MMAPs the cwasm via `deserialize_file` on its
+                    // inherited fd; only the fd-path + small metadata cross the hop.
+                    client.prime(bundle_ref).await?;
 
-                // Relay: the child's media_load / session_change forward THROUGH
-                // here to api's callbacks (the seal-key holder).
-                let relay = Arc::new(RelayCallbacks { upstream: callbacks });
-                let (relay_server, relay_client) =
-                    ChildCallbacksServerShared::<_, Ciborium>::new(relay, CALLBACK_CONCURRENCY);
-                tokio::spawn(async move {
-                    let _ = relay_server.serve(true).await;
-                });
+                    // Relay: the child's media_load / session_change forward THROUGH
+                    // here to api's callbacks (the seal-key holder).
+                    let relay = Arc::new(RelayCallbacks {
+                        upstream: callbacks,
+                    });
+                    let (relay_server, relay_client) =
+                        ChildCallbacksServerShared::<_, Ciborium>::new(relay, CALLBACK_CONCURRENCY);
+                    tokio::spawn(async move {
+                        let _ = relay_server.serve(true).await;
+                    });
 
-                client.run(session_state, event, props, relay_client).await
-            })
+                    client.run(session_state, event, props, relay_client).await
+                },
+            )
             .await;
 
         // The pool returns the closure's domain `Result<RunReply, ExecError>` on
@@ -290,14 +301,21 @@ impl ExecutorService for Supervisor {
         req: RunRequest,
         callbacks: CallbackServiceClient<Ciborium>,
     ) -> Result<RunOutcome, ExecError> {
-        let RunRequest { composition_key, props, session_state, event } = req;
+        let RunRequest {
+            composition_key,
+            props,
+            session_state,
+            event,
+        } = req;
         match self.compositions.get(&composition_key).await {
             Some(entry) => self
                 .run_in_child(entry, session_state, event, props, callbacks)
                 .await
                 .map(|RunReply { status }| RunOutcome::Ran(status)),
             // Miss: the worker returns ONLY its ABI id — it never names the key.
-            None => Ok(RunOutcome::CacheMiss { compat_token: compat_token() }),
+            None => Ok(RunOutcome::CacheMiss {
+                compat_token: compat_token(),
+            }),
         }
     }
 
@@ -312,9 +330,15 @@ impl ExecutorService for Supervisor {
         bundle: CompiledBundle,
         callbacks: CallbackServiceClient<Ciborium>,
     ) -> Result<RunReply, ExecError> {
-        let RunRequest { composition_key, props, session_state, event } = req;
+        let RunRequest {
+            composition_key,
+            props,
+            session_state,
+            event,
+        } = req;
         let entry = self.install_bundle(&composition_key, bundle).await?;
-        self.run_in_child(entry, session_state, event, props, callbacks).await
+        self.run_in_child(entry, session_state, event, props, callbacks)
+            .await
     }
 }
 
@@ -337,7 +361,9 @@ impl ChildCallbacks for RelayCallbacks {
         disclosures: Vec<ConsentDisclosure>,
         media: Vec<([u8; 32], Vec<u8>)>,
     ) -> Result<(), CallbackError> {
-        self.upstream.session_change(state, disclosures, media).await
+        self.upstream
+            .session_change(state, disclosures, media)
+            .await
     }
 }
 
@@ -418,7 +444,12 @@ async fn main() {
             .max_capacity(bundle_cache_bytes)
             .time_to_idle(Duration::from_secs(3600))
             .build(),
-        pool: ChildPool::new(child_exe.clone(), max_children, round_deadline, Some(hardening)),
+        pool: ChildPool::new(
+            child_exe.clone(),
+            max_children,
+            round_deadline,
+            Some(hardening),
+        ),
     });
 
     let listener = TcpListener::bind(&addr)
@@ -462,7 +493,10 @@ async fn serve_conn(
     ratls: tokio_rustls::TlsAcceptor,
     svc: Arc<Supervisor>,
 ) -> Result<(), String> {
-    let tls = ratls.accept(stream).await.map_err(|e| format!("RA-TLS accept: {e}"))?;
+    let tls = ratls
+        .accept(stream)
+        .await
+        .map_err(|e| format!("RA-TLS accept: {e}"))?;
     let (read, write) = tokio::io::split(tls);
     let (conn, mut tx, _rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
@@ -474,6 +508,9 @@ async fn serve_conn(
     tx.send(client)
         .await
         .map_err(|e| format!("send service client: {e}"))?;
-    server.serve(true).await.map_err(|e| format!("serve: {e}"))?;
+    server
+        .serve(true)
+        .await
+        .map_err(|e| format!("serve: {e}"))?;
     Ok(())
 }

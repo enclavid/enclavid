@@ -20,9 +20,9 @@
 //! projecting a localized ref's translation set to a single string.
 
 use axum::extract::FromRequestParts;
+use axum::http::StatusCode;
 use axum::http::header::ACCEPT_LANGUAGE;
 use axum::http::request::Parts;
-use axum::http::StatusCode;
 
 use hatch_client::Translation;
 
@@ -79,10 +79,7 @@ where
 {
     type Rejection = StatusCode;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
         let header = parts
             .headers
             .get(ACCEPT_LANGUAGE)

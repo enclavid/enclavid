@@ -27,8 +27,9 @@ use crate::error::CryptoError;
 pub fn seal_to_recipient(plaintext: &[u8], recipient: &str) -> Result<Vec<u8>, CryptoError> {
     let recipient = Recipient::from_str(recipient)
         .map_err(|e| CryptoError::new(format!("invalid age recipient: {e}")))?;
-    let encryptor = age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
-        .map_err(|e| CryptoError::new(format!("age encryptor: {e}")))?;
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+            .map_err(|e| CryptoError::new(format!("age encryptor: {e}")))?;
     let mut out = Vec::new();
     let mut writer = encryptor
         .wrap_output(&mut out)
@@ -61,9 +62,16 @@ mod tests {
         let recipient = age::x25519::Identity::generate().to_public().to_string();
 
         // Length DOES track plaintext length — the signal padding removes.
-        let short = seal_to_recipient(&vec![0u8; 1024], &recipient).unwrap().len();
-        let long = seal_to_recipient(&vec![0u8; 64 * 1024], &recipient).unwrap().len();
-        assert!(long > short, "ciphertext length must grow with plaintext length");
+        let short = seal_to_recipient(&vec![0u8; 1024], &recipient)
+            .unwrap()
+            .len();
+        let long = seal_to_recipient(&vec![0u8; 64 * 1024], &recipient)
+            .unwrap()
+            .len();
+        assert!(
+            long > short,
+            "ciphertext length must grow with plaintext length"
+        );
 
         // Identical content, two seals → the length can already differ purely from
         // age's random header, i.e. the length carries per-seal noise, not content.

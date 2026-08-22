@@ -36,7 +36,9 @@ impl DbMeta {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;")?;
         conn.execute_batch(SCHEMA)?;
-        Ok(DbMeta { conn: Mutex::new(conn) })
+        Ok(DbMeta {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Record the absolute deadline for `id` (its own durable commit).
@@ -78,6 +80,8 @@ impl DbMeta {
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreErr> {
-        self.conn.lock().map_err(|_| StoreErr::Internal("index mutex poisoned".into()))
+        self.conn
+            .lock()
+            .map_err(|_| StoreErr::Internal("index mutex poisoned".into()))
     }
 }

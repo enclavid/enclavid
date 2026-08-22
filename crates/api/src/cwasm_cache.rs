@@ -94,7 +94,10 @@ pub async fn store(
         eprintln!("cwasm_cache: bundle encode failed (skip store): {e}");
         return;
     }
-    if let Err(e) = cache.store(&cache_id(composition_key, compat_token), encoded).await {
+    if let Err(e) = cache
+        .store(&cache_id(composition_key, compat_token), encoded)
+        .await
+    {
         eprintln!("cwasm_cache: L2 store failed (non-fatal): {e}");
     }
 }
@@ -105,7 +108,10 @@ mod tests {
 
     #[test]
     fn cache_id_scopes_by_composition_token_and_format() {
-        assert_eq!(cache_id("abc", "tok"), format!("abc.tok.v{CACHE_FORMAT_VERSION}"));
+        assert_eq!(
+            cache_id("abc", "tok"),
+            format!("abc.tok.v{CACHE_FORMAT_VERSION}")
+        );
         // Composition, token, and format each partition the key.
         assert_ne!(cache_id("abc", "tok"), cache_id("abd", "tok"));
         assert_ne!(cache_id("abc", "tok"), cache_id("abc", "tok2"));

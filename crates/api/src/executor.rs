@@ -52,11 +52,7 @@ impl Executor {
     /// [`run_with_bundle`](Self::run_with_bundle). The two-phase loop lives in the
     /// caller (`SessionRunCtx::run`), so bundle resolution stays with the
     /// key-holding orchestrator, never the worker.
-    pub async fn run<C>(
-        &self,
-        req: RunRequest,
-        callbacks: Arc<C>,
-    ) -> Result<RunOutcome, ExecError>
+    pub async fn run<C>(&self, req: RunRequest, callbacks: Arc<C>) -> Result<RunOutcome, ExecError>
     where
         C: CallbackService + Send + Sync + 'static,
     {

@@ -68,8 +68,14 @@ async fn dead_compile_child_surfaces_error_not_hang() {
     let (mut child, client) = spawn().await;
     child.kill().await.expect("kill compile-child");
 
-    let res = tokio::time::timeout(Duration::from_secs(10), client.compile(b"x".to_vec(), vec![]))
-        .await
-        .expect("call to a dead child must resolve (error), not hang");
-    assert!(res.is_err(), "compile to a dead child must error, not return a bundle");
+    let res = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.compile(b"x".to_vec(), vec![]),
+    )
+    .await
+    .expect("call to a dead child must resolve (error), not hang");
+    assert!(
+        res.is_err(),
+        "compile to a dead child must error, not return a bundle"
+    );
 }

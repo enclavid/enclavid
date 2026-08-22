@@ -24,8 +24,8 @@ pub fn build_componentized(crate_dir: &str, module_path: &str) -> Result<Vec<u8>
     if !status.success() {
         bail!("cargo build failed in {crate_dir}");
     }
-    let module = std::fs::read(module_path)
-        .with_context(|| format!("reading wasm module {module_path}"))?;
+    let module =
+        std::fs::read(module_path).with_context(|| format!("reading wasm module {module_path}"))?;
     componentize(&module)
 }
 

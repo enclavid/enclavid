@@ -93,8 +93,12 @@ pub(super) fn unwrap_list(slot: Slot) -> Result<Vec<Vec<u8>>, BridgeError> {
 /// `Exposed<ReadRequest>` to `read_raw`.
 pub(super) fn read_request(selectors: Vec<FieldSelector>) -> Exposed<ReadRequest, ()> {
     boundary::outbound::to_untrusted(ReadRequest { fields: selectors })
-        .vouch_unchecked::<AuthN, _>(reason!("selectors are field-kind tags only — no TEE data leaves"))
-        .vouch_unchecked::<AuthZ, _>(reason!("a read releases no TEE data; it names fields to fetch"))
+        .vouch_unchecked::<AuthN, _>(reason!(
+            "selectors are field-kind tags only — no TEE data leaves"
+        ))
+        .vouch_unchecked::<AuthZ, _>(reason!(
+            "a read releases no TEE data; it names fields to fetch"
+        ))
         .vouch_unchecked::<Covert, _>(reason!("selector set bounded by field-enum cardinality"))
 }
 

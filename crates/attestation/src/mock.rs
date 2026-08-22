@@ -14,7 +14,7 @@
 //! IMPORTANT: never accept a `Quote { format: "mock-ed25519" }` in
 //! production code paths. The `format` field is the discriminator.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey, SECRET_KEY_LENGTH};
+use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 

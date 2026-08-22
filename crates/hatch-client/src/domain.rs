@@ -172,7 +172,10 @@ impl std::fmt::Debug for Client {
             .field("access", &self.access)
             .field("disclosure_pubkey", &self.disclosure_pubkey)
             .field("ref", &self.r#ref)
-            .field("registry_auth", &self.registry_auth.keys().collect::<Vec<_>>())
+            .field(
+                "registry_auth",
+                &self.registry_auth.keys().collect::<Vec<_>>(),
+            )
             .field("plugins", &self.plugins)
             .finish()
     }

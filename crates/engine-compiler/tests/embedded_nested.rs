@@ -8,8 +8,8 @@
 
 use std::borrow::Cow;
 
-use engine_compiler::{catalog_hash, load_embedded, load_embedded_nested};
 use enclavid_embedded::{SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS};
+use engine_compiler::{catalog_hash, load_embedded, load_embedded_nested};
 use wasm_encoder::{Component, CustomSection, NestedComponentSection};
 
 const DF: &[u8] = b"[\"passport_number\"]";
@@ -101,5 +101,8 @@ fn non_fused_component_yields_its_single_catalog() {
     let bytes = leaf(Some(DF), Some(I18N), Some(ICONS)).finish();
     let cats = load_embedded_nested(&bytes).expect("nested");
     assert_eq!(cats.len(), 1);
-    assert_eq!(cats[0].hash, catalog_hash(Some(DF), Some(I18N), Some(ICONS)));
+    assert_eq!(
+        cats[0].hash,
+        catalog_hash(Some(DF), Some(I18N), Some(ICONS))
+    );
 }

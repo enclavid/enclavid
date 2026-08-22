@@ -21,8 +21,8 @@
 use std::collections::{HashMap, HashSet};
 
 use enclavid_embedded::{
-    SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS,
-    parse_disclosure_fields, parse_i18n, parse_icons,
+    SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS, parse_disclosure_fields, parse_i18n,
+    parse_icons,
 };
 use wasmparser::{Parser, Payload};
 
@@ -71,7 +71,8 @@ pub fn load_embedded(wasm_bytes: &[u8]) -> wasmtime::Result<EmbeddedCatalog> {
     let mut frame = RawFrame::default();
     let mut depth = 0usize;
     for payload in Parser::new(0).parse_all(wasm_bytes) {
-        let payload = payload.map_err(|e| wasmtime::Error::msg(format!("wasm component parse: {e}")))?;
+        let payload =
+            payload.map_err(|e| wasmtime::Error::msg(format!("wasm component parse: {e}")))?;
         match &payload {
             Payload::ComponentSection { .. } | Payload::ModuleSection { .. } => depth += 1,
             Payload::End(_) => depth = depth.saturating_sub(1),
@@ -98,7 +99,8 @@ pub fn load_embedded_nested(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<EmbeddedC
     let mut out = Vec::new();
     let mut stack: Vec<RawFrame> = vec![RawFrame::default()];
     for payload in Parser::new(0).parse_all(wasm_bytes) {
-        let payload = payload.map_err(|e| wasmtime::Error::msg(format!("wasm component parse: {e}")))?;
+        let payload =
+            payload.map_err(|e| wasmtime::Error::msg(format!("wasm component parse: {e}")))?;
         match &payload {
             Payload::ComponentSection { .. } | Payload::ModuleSection { .. } => {
                 if stack.len() > MAX_NESTING {
@@ -139,7 +141,8 @@ pub fn top_level_imports(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<String>> {
     let mut out = Vec::new();
     let mut depth = 0usize;
     for payload in Parser::new(0).parse_all(wasm_bytes) {
-        let payload = payload.map_err(|e| wasmtime::Error::msg(format!("wasm component parse: {e}")))?;
+        let payload =
+            payload.map_err(|e| wasmtime::Error::msg(format!("wasm component parse: {e}")))?;
         match &payload {
             Payload::ComponentSection { .. } | Payload::ModuleSection { .. } => depth += 1,
             Payload::End(_) => depth = depth.saturating_sub(1),
@@ -237,17 +240,18 @@ fn build_decls(
                 "parsing custom section `{SECTION_DISCLOSURE_FIELDS}` as JSON: {e}",
             ))
         })?;
-    let i18n_section = i18n_bytes
-        .map(|b| parse_i18n(b))
-        .transpose()
-        .map_err(|e| {
-            wasmtime::Error::msg(format!("parsing custom section `{SECTION_I18N}` as JSON: {e}"))
-        })?;
+    let i18n_section = i18n_bytes.map(|b| parse_i18n(b)).transpose().map_err(|e| {
+        wasmtime::Error::msg(format!(
+            "parsing custom section `{SECTION_I18N}` as JSON: {e}"
+        ))
+    })?;
     let icons_section = icons_bytes
         .map(|b| parse_icons(b))
         .transpose()
         .map_err(|e| {
-            wasmtime::Error::msg(format!("parsing custom section `{SECTION_ICONS}` as JSON: {e}"))
+            wasmtime::Error::msg(format!(
+                "parsing custom section `{SECTION_ICONS}` as JSON: {e}"
+            ))
         })?;
 
     // Per-kind cardinality caps. Each kind has a different covert-
@@ -257,7 +261,10 @@ fn build_decls(
     // `enclavid-embedded`. Defence-in-depth alongside the seal-time
     // `validate` check; engine refuses to load anything that slipped
     // past the CLI validation gate.
-    let df_count = disclosure_section.as_ref().map(|d| d.fields.len()).unwrap_or(0);
+    let df_count = disclosure_section
+        .as_ref()
+        .map(|d| d.fields.len())
+        .unwrap_or(0);
     if df_count > MAX_DECLARED_DISCLOSURE_FIELDS {
         return Err(wasmtime::Error::msg(format!(
             "component declares {df_count} disclosure-fields, max is \

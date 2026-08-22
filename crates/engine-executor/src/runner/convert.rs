@@ -126,9 +126,9 @@ pub fn prompt_to_domain(
 ) -> wasmtime::Result<Prompt> {
     match prompt {
         wit_policy::Prompt::Media(spec) => Ok(Prompt::Media(media_spec_to_domain(spec, table)?)),
-        wit_policy::Prompt::ConsentDisclosure(d) => {
-            Ok(Prompt::ConsentDisclosure(disclosure_to_domain(d, table, embedded)?))
-        }
+        wit_policy::Prompt::ConsentDisclosure(d) => Ok(Prompt::ConsentDisclosure(
+            disclosure_to_domain(d, table, embedded)?,
+        )),
     }
 }
 
@@ -190,7 +190,9 @@ fn media_spec_to_domain(
     table: &ResourceTable,
 ) -> wasmtime::Result<DMediaSpec> {
     if spec.captures.is_empty() {
-        return Err(wasmtime::Error::msg("media render spec has no capture steps"));
+        return Err(wasmtime::Error::msg(
+            "media render spec has no capture steps",
+        ));
     }
     let label = localized(table, &spec.label)?;
     let captures = spec

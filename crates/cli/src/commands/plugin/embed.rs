@@ -22,18 +22,17 @@ pub fn run(
     icons_path: PathBuf,
     output: Option<PathBuf>,
 ) -> Result<()> {
-    let wasm_bytes = std::fs::read(&wasm)
-        .with_context(|| format!("reading {}", wasm.display()))?;
+    let wasm_bytes = std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
 
     // Role gate: this component must NOT be a policy (it must not export
     // `enclavid:policy/policy`). A policy handed to `plugin embed` is
     // rejected here with a pointer to `policy embed`.
     crate::wit_role::assert_plugin(&wasm_bytes)?;
 
-    let parsed_i18n = read_i18n(&i18n_path)
-        .with_context(|| format!("reading {}", i18n_path.display()))?;
-    let parsed_icons = read_icons(&icons_path)
-        .with_context(|| format!("reading {}", icons_path.display()))?;
+    let parsed_i18n =
+        read_i18n(&i18n_path).with_context(|| format!("reading {}", i18n_path.display()))?;
+    let parsed_icons =
+        read_icons(&icons_path).with_context(|| format!("reading {}", icons_path.display()))?;
     // No DF section for plugins — pass None to skip validation of
     // that kind.
     let report = validate(None, parsed_i18n.as_ref(), parsed_icons.as_ref());

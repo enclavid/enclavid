@@ -128,7 +128,10 @@ mod tests {
 
     #[test]
     fn strips_rtl_override() {
-        assert_eq!(sanitize_string("Confirmed \u{202E}reversed"), "Confirmed reversed");
+        assert_eq!(
+            sanitize_string("Confirmed \u{202E}reversed"),
+            "Confirmed reversed"
+        );
     }
 
     #[test]
@@ -155,7 +158,10 @@ mod tests {
     #[test]
     fn sanitize_truncates_long_value() {
         let long = "a".repeat(MAX_TEXT_VALUE_SOFT_CHARS + 100);
-        assert_eq!(sanitize_text_value(&long).chars().count(), MAX_TEXT_VALUE_SOFT_CHARS);
+        assert_eq!(
+            sanitize_text_value(&long).chars().count(),
+            MAX_TEXT_VALUE_SOFT_CHARS
+        );
     }
 
     // --- the invisibles the blacklist MISSED (the V3 gap) ---

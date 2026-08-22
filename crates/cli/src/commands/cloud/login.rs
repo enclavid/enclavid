@@ -6,7 +6,7 @@ use openidconnect::{ClientId, OAuth2TokenResponse, Scope};
 use std::io::IsTerminal;
 use std::time::Duration;
 
-use crate::auth::{Workspace, StoredTokens, store_tokens, workspaces_from_id_token};
+use crate::auth::{StoredTokens, Workspace, store_tokens, workspaces_from_id_token};
 use crate::{discovery, docker_config};
 
 /// `credHelpers` value docker writes to `~/.docker/config.json`. The
@@ -55,7 +55,10 @@ pub async fn run(workspace_pref: Option<String>) -> Result<()> {
         .unwrap_or_else(|| details.verification_uri().to_string());
 
     println!("To authenticate, visit:\n  {display_url}");
-    println!("Code (in case it's not auto-filled): {}", details.user_code().secret());
+    println!(
+        "Code (in case it's not auto-filled): {}",
+        details.user_code().secret()
+    );
     println!("\n(Opening browser automatically...)\n");
     let _ = open::that(&display_url);
 
@@ -113,9 +116,7 @@ pub async fn run(workspace_pref: Option<String>) -> Result<()> {
     // unusable session where every push fails 401 with no obvious cause.
     let initial = StoredTokens {
         access_token: String::new(),
-        refresh_token: token_response
-            .refresh_token()
-            .map(|t| t.secret().clone()),
+        refresh_token: token_response.refresh_token().map(|t| t.secret().clone()),
         id_token,
         expires_at: 0,
         workspaces: workspaces.clone(),
@@ -223,10 +224,7 @@ fn pick_interactive(workspaces: &[Workspace]) -> Result<&Workspace> {
 /// wins; otherwise case-insensitive substring match against name. On
 /// 0 matches: bail with full list. On >1 matches: bail with the
 /// ambiguous subset.
-pub fn match_workspace<'a>(
-    workspaces: &'a [Workspace],
-    needle: &str,
-) -> Result<&'a Workspace> {
+pub fn match_workspace<'a>(workspaces: &'a [Workspace], needle: &str) -> Result<&'a Workspace> {
     if let Some(w) = workspaces.iter().find(|w| w.id == needle) {
         return Ok(w);
     }
@@ -257,11 +255,7 @@ pub fn match_workspace<'a>(
 }
 
 pub fn display_name(w: &Workspace) -> &str {
-    if w.name.is_empty() {
-        &w.id
-    } else {
-        &w.name
-    }
+    if w.name.is_empty() { &w.id } else { &w.name }
 }
 
 async fn async_sleep(duration: Duration) {
