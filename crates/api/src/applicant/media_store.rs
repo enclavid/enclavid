@@ -51,7 +51,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 
-use hatch_client::{Replay, SessionStore, public_session_id, reason};
+use hatch_client::{Replay, SessionStore, outbound_session_id, reason};
 use engine_rpc::CallbackError;
 use secrecy::{ExposeSecret, SecretBox};
 
@@ -101,7 +101,7 @@ impl HatchMediaStore {
                 "media load: applicant token owner dropped (run outlived its context)".into(),
             )
         })?;
-        let id = public_session_id(&self.session_id);
+        let id = outbound_session_id(&self.session_id);
         let loaded = self
             .session_store
             .load_media(id, blob_hash, token.expose_secret())

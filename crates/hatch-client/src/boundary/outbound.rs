@@ -54,31 +54,36 @@ impl<T> From<T> for ToUntrusted<T> {
     }
 }
 
-/// Mint the session id as a fully-vouched outbound value. The id is a
-/// TEE-minted random UUID that acts as a bare storage locator: it
-/// authenticates nothing and authorizes nothing, so every outbound
-/// concern is closed on those grounds. Used by the lone-id store calls
-/// (`read` / `delete` / `exists`); `write` bundles its id into the
-/// `(id, version)` tuple instead. NOT a generic "public" mint — it is
-/// specific to the session id so the audited reason lives in one place
-/// (grep `public_session_id(` for every assertion of this fact).
+/// Mint the session id as a fully-vouched outbound value — the record address
+/// the store indexes by. Used by the lone-id store calls (`read` / `delete` /
+/// `exists`); `write` bundles its id into the `(id, version)` tuple instead.
+/// NOT a generic "anything goes" mint — it is specific to the session id so the
+/// audited reason lives in one place (grep `outbound_session_id(`).
 ///
-/// The id is **not** host-known by construction, and nothing here may
-/// assume otherwise: it is generated in the TEE
-/// (`api::client::create::generate_session_id`), never crosses the wire
-/// in cleartext (client TLS terminates in the TEE), and is not sent to
-/// the hatch — `AuthorizeRequest` carries only the verbatim header and an
-/// operation enum. Exposure is to the store peer alone; against an
-/// untrusted store peer the id is a correlation handle, which is exactly
-/// what RA-TLS to the storage CVM hides ("access pattern + key", see
-/// `storage-rpc`).
-pub fn public_session_id(id: &str) -> Exposed<&str, ()> {
+/// **The justification deliberately does not name the peer.** Whoever holds the
+/// record must index by this value, so no arrangement exists in which it could
+/// be hidden from them. That held when the store was host Redis, holds now that
+/// it is the attested storage-CVM behind RA-TLS, and will hold through the next
+/// move. The previous rationale reasoned from who was on the other end instead,
+/// and went stale the moment the storage tier moved — hence the rename from
+/// `public_session_id`.
+///
+/// Distribution is a separate fact, kept in this doc rather than in the name
+/// because it tracks deployment rather than the value's role: the id is **not**
+/// host-known. It is generated in the TEE
+/// (`api::client::create::generate_session_id`), never crosses the wire in
+/// cleartext (client TLS terminates in the TEE), is not sent to the hatch
+/// (`AuthorizeRequest` carries only the verbatim header and an operation enum),
+/// and reaches the storage-CVM inside RA-TLS. It IS handed to the applicant and
+/// the consumer, so it is not "private" either — see `api::applicant::reset`,
+/// where knowledge of it is the documented trust gate.
+pub fn outbound_session_id(id: &str) -> Exposed<&str, ()> {
     to_untrusted(id)
         .vouch_unchecked::<AuthN, _>(reason!(
-            "authenticates nothing; auth is the applicant token / principal"
+            "nothing to conceal from a peer that must index by it"
         ))
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "locator into the store's keyspace; the store gates nothing on it"
+        .vouch_unchecked::<AuthZ, _>(reason!("names a record; no release decision hangs on it"))
+        .vouch_unchecked::<Covert, _>(reason!(
+            "fixed-shape random id minted in the TEE, not policy-controlled"
         ))
-        .vouch_unchecked::<Covert, _>(reason!("fixed-shape random UUID, not policy-controlled"))
 }

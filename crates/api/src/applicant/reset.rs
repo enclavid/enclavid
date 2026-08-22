@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{MethodRouter, delete};
 
-use hatch_client::public_session_id;
+use hatch_client::outbound_session_id;
 
 use crate::state::AppState;
 
@@ -42,7 +42,7 @@ async fn reset(
     // explicit peeling — purely informational, no security gate.
     state
         .session_store
-        .delete(public_session_id(&session_id))
+        .delete(outbound_session_id(&session_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::NO_CONTENT)

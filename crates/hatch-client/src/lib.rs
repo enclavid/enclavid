@@ -20,7 +20,7 @@ pub use cache::CacheStore;
 // The old crate-root path is preserved so external consumers don't
 // need to update import paths.
 pub use boundary::{AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted};
-pub use boundary::outbound::public_session_id;
+pub use boundary::outbound::outbound_session_id;
 pub use error::BridgeError;
 pub use transport::HatchClient;
 // Wire DTO re-exports — the operation selector and the OCI pull

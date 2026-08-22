@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 
 use hatch_client::{
     AuthN, AuthZ, Client, Event, Key, Metadata, PluginPin, Replay, SessionMetadata, SessionState,
-    State as StateField, public_session_id, reason,
+    State as StateField, outbound_session_id, reason,
 };
 use engine_types::composition::PluginInstance;
 // The run wire mirrors: props api builds + ships, the outcome + error it gets
@@ -258,7 +258,7 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
         let ((metadata_untrusted, state_opt), version) = state
             .session_store
             .read(
-                public_session_id(&session_id),
+                outbound_session_id(&session_id),
                 (
                     Metadata,
                     StateField {

@@ -6,7 +6,7 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use hatch_client::{AuthZ, Metadata, Replay, SessionStatus, public_session_id, reason};
+use hatch_client::{AuthZ, Metadata, Replay, SessionStatus, outbound_session_id, reason};
 
 use crate::dto;
 use crate::state::AppState;
@@ -40,7 +40,7 @@ async fn status(
 ) -> Result<Json<StatusResponse>, StatusCode> {
     let ((metadata_opt,), _version) = state
         .session_store
-        .read(public_session_id(&session_id), (Metadata,))
+        .read(outbound_session_id(&session_id), (Metadata,))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

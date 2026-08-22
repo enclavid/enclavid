@@ -7,7 +7,7 @@ use axum::routing::{MethodRouter, get};
 use base64ct::{Base64, Encoding};
 use serde::Serialize;
 
-use hatch_client::{AuthN, AuthZ, Disclosure, Metadata, Replay, public_session_id, reason};
+use hatch_client::{AuthN, AuthZ, Disclosure, Metadata, Replay, outbound_session_id, reason};
 
 use crate::client_state::ClientState;
 use crate::disclosure_commit;
@@ -58,7 +58,7 @@ async fn read(
     // deliberately NOT detected (list order is meaningless now).
     let ((metadata_untrusted, disclosures), _version) = state
         .session_store
-        .read(public_session_id(&session_id), (Metadata, Disclosure))
+        .read(outbound_session_id(&session_id), (Metadata, Disclosure))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
