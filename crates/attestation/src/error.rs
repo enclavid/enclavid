@@ -17,6 +17,9 @@ pub enum AttestationError {
     #[error("report_data in quote does not match expected binding")]
     BindingMismatch,
 
+    #[error("report was signed but describes an unacceptable platform: {0}")]
+    PolicyRejected(String),
+
     #[error("measurement in quote does not match expected pin")]
     MeasurementMismatch,
 }

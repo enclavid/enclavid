@@ -16,9 +16,14 @@ mock = ["dep:ed25519-dalek", "dep:rand_core"]
 # under a test trust root instead of an AMD VCEK. Swap to `sev-snp` (prod)
 # with no caller change. No hardware needed.
 snp-dev = ["dep:sev", "dep:ed25519-dalek", "dep:rand_core"]
-# Prod SEV-SNP backend (later): firmware ioctl mint + AMD VCEK→ASK→ARK
-# chain verification.
-sev-snp = ["dep:sev"]
+# Prod SEV-SNP backend: `/dev/sev-guest` mint + AMD VCEK→ASK→ARK chain
+# verification against a compiled-in root.
+sev-snp = ["dep:sev", "dep:ciborium", "dep:serde_bytes"]
+
+# Hardware check for the prod backend — runs as PID 1's payload in a guest.
+[[example]]
+name = "snp_selftest"
+required-features = ["sev-snp"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -32,3 +37,8 @@ rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 # crypto backend). Only the report FORMAT is used by `snp-dev`; the prod
 # `sev-snp` backend will also use the firmware + cert-chain APIs.
 sev = { version = "8", default-features = false, features = ["snp", "crypto_nossl", "serde"], optional = true }
+# Quote envelope for the prod backend. CBOR because the quote rides inside an
+# X.509 extension on every RA-TLS handshake; `serde_bytes` so the report and
+# certificates encode as byte strings rather than per-byte integer arrays.
+ciborium = { version = "0.2", optional = true }
+serde_bytes = { version = "0.11", optional = true }

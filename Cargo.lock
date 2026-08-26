@@ -1346,10 +1346,12 @@ dependencies = [
 name = "enclavid-attestation"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "ed25519-dalek",
  "hex",
  "rand_core 0.6.4",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sev",
  "sha2",

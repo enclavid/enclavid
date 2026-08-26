@@ -43,10 +43,13 @@ pub struct Quote {
     pub format: String,
     /// Backend-defined signed payload. For mock: JSON-encoded
     /// `MockSignedReport` plus a 64-byte Ed25519 signature, base64 wrapped
-    /// at the outer envelope. For sev-snp: raw quote bytes (later).
+    /// at the outer envelope. For sev-snp: a CBOR envelope holding the
+    /// firmware's report bytes plus the VCEK and ASK that endorse them.
     pub quote_blob: Vec<u8>,
-    /// Hex-encoded sha256 of TEE measurement / launch digest. Clients pin
-    /// this in their config: only the platform releases they trust.
+    /// Hex-encoded TEE launch digest. Clients pin this in their config: only
+    /// the platform releases they trust. Backends that verify a real report
+    /// must confirm this matches the signed measurement inside `quote_blob` —
+    /// otherwise it is the sender's unauthenticated claim.
     /// In mock mode, set from a CI-provided value or zeroed.
     pub measurement: String,
 }
@@ -155,3 +158,12 @@ pub use mock::MockAttestor;
 mod snp_dev;
 #[cfg(feature = "snp-dev")]
 pub use snp_dev::SnpDevAttestor;
+
+#[cfg(feature = "sev-snp")]
+mod snp;
+/// Minting needs `/dev/sev-guest`; verification does not, so only this half is
+/// Linux-gated.
+#[cfg(all(feature = "sev-snp", target_os = "linux"))]
+pub use snp::SnpAttestor;
+#[cfg(feature = "sev-snp")]
+pub use snp::verify_quote;
