@@ -1,9 +1,9 @@
 //! `enclavid session disclosures <id>` — pull the disclosure list,
-//! decrypt each entry with the cached (or `--disclosure-key`)
-//! age secret, parse to JSON, pretty-print as an array.
+//! decrypt each entry with the cached (or `--disclosure-key`) X25519
+//! secret, parse to JSON, pretty-print as an array.
 //!
-//! Layout: server returns `{ items: [<base64-age-ciphertext>, ...] }`.
-//! Each item is an age stream sealed to `client_disclosure_pubkey`
+//! Layout: server returns `{ items: [<base64-sealed-box>, ...] }`.
+//! Each item is a libsodium sealed box to `client_disclosure_pubkey`
 //! (we picked the recipient at `session create` time). Order is the
 //! engine's append order; index = i-th disclosure emitted.
 //!
@@ -11,15 +11,12 @@
 //! the cached key doesn't match what the session was created with —
 //! signals user error / wrong session, not partial data).
 
-use age::x25519::Identity;
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use reqwest::Method;
 use serde::Deserialize;
-use std::io::Read;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use super::api_url;
 use super::cache;
@@ -36,7 +33,7 @@ pub async fn run(session_id: &str, disclosure_key_override: Option<PathBuf>) -> 
         Some(p) => p,
         None => cache::read_disclosure_key_path(session_id)?,
     };
-    let identity = load_identity(&key_path)?;
+    let secret = load_secret(&key_path)?;
 
     let jwt = transport::fetch_jwt().await?;
     let client = transport::http_client()?;
@@ -63,8 +60,8 @@ pub async fn run(session_id: &str, disclosure_key_override: Option<PathBuf>) -> 
         let ciphertext = BASE64
             .decode(b64)
             .with_context(|| format!("item {i}: base64 decode"))?;
-        let plaintext = age_decrypt(&ciphertext, &identity)
-            .with_context(|| format!("item {i}: age decrypt"))?;
+        let plaintext = enclavid_crypto::open_sealed(&ciphertext, &secret)
+            .with_context(|| format!("item {i}: sealed box open"))?;
         // Engine emits JSON payloads; surface as nested values so the
         // outer array stays valid JSON. If a policy emits non-JSON
         // bytes (raw binary disclosure), we'd fall back to base64 —
@@ -81,7 +78,7 @@ pub async fn run(session_id: &str, disclosure_key_override: Option<PathBuf>) -> 
     Ok(())
 }
 
-fn load_identity(path: &PathBuf) -> Result<Identity> {
+fn load_secret(path: &PathBuf) -> Result<String> {
     let content = std::fs::read_to_string(path).with_context(|| {
         format!(
             "reading disclosure secret {} — did `session create` for this session run?",
@@ -93,18 +90,7 @@ fn load_identity(path: &PathBuf) -> Result<Identity> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        return Identity::from_str(trimmed)
-            .map_err(|e| anyhow::anyhow!("invalid age identity in {}: {e}", path.display()));
+        return Ok(trimmed.to_string());
     }
-    anyhow::bail!("no AGE-SECRET-KEY-1 line in {}", path.display())
-}
-
-fn age_decrypt(ciphertext: &[u8], identity: &Identity) -> Result<Vec<u8>> {
-    let decryptor = age::Decryptor::new(ciphertext).context("age stream parse")?;
-    let mut reader = decryptor
-        .decrypt(std::iter::once(identity as &dyn age::Identity))
-        .context("age decrypt (wrong disclosure key?)")?;
-    let mut buf = Vec::new();
-    reader.read_to_end(&mut buf).context("reading plaintext")?;
-    Ok(buf)
+    anyhow::bail!("no disclosure secret line in {}", path.display())
 }

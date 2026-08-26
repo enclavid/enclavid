@@ -7,13 +7,10 @@
 //! disclosure secret on disk so subsequent `session get` /
 //! `session disclosures` work without re-passing anything.
 
-use age::secrecy::ExposeSecret;
-use age::x25519::Identity;
 use anyhow::{Context, Result};
 use reqwest::Method;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use super::cache;
 use super::transport;
@@ -87,18 +84,15 @@ pub async fn run(
         .as_object_mut()
         .expect("body is a JSON object (checked / constructed above)");
     let disclosure = if let Some(p) = disclosure_key_path.as_deref() {
-        let secret = read_age_secret(&p.to_path_buf())
+        let secret = read_disclosure_secret(&p.to_path_buf())
             .with_context(|| format!("reading disclosure key from {}", p.display()))?;
-        let identity = Identity::from_str(&secret).map_err(|e| {
+        let public = enclavid_crypto::public_from_secret(&secret).map_err(|e| {
             anyhow::anyhow!(
-                "disclosure key in {} is not a valid age identity: {e}",
+                "disclosure key in {} is not a valid X25519 secret: {e}",
                 p.display()
             )
         })?;
-        obj.insert(
-            "client_disclosure_pubkey".into(),
-            identity.to_public().to_string().into(),
-        );
+        obj.insert("client_disclosure_pubkey".into(), public.into());
         DisclosureSource::Known {
             secret,
             label: "copied from --disclosure-key",
@@ -112,12 +106,8 @@ pub async fn run(
         // the matching secret.
         DisclosureSource::Caller
     } else {
-        let identity = Identity::generate();
-        let secret = identity.to_string().expose_secret().to_string();
-        obj.insert(
-            "client_disclosure_pubkey".into(),
-            identity.to_public().to_string().into(),
-        );
+        let (secret, public) = enclavid_crypto::generate_recipient();
+        obj.insert("client_disclosure_pubkey".into(), public.into());
         DisclosureSource::Known {
             secret,
             label: "auto-generated",
@@ -192,7 +182,7 @@ pub async fn run(
 /// Pick out the AGE-SECRET-KEY-1… line from a key file: comments
 /// (lines starting with `#`) and blank lines are skipped, the first
 /// non-blank line is returned.
-fn read_age_secret(path: &PathBuf) -> Result<String> {
+fn read_disclosure_secret(path: &PathBuf) -> Result<String> {
     let content =
         std::fs::read_to_string(path).with_context(|| format!("opening {}", path.display()))?;
     for line in content.lines() {
@@ -202,5 +192,5 @@ fn read_age_secret(path: &PathBuf) -> Result<String> {
         }
         return Ok(trimmed.to_string());
     }
-    anyhow::bail!("no age secret-key line found in {}", path.display())
+    anyhow::bail!("no disclosure secret line found in {}", path.display())
 }

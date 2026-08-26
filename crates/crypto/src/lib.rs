@@ -3,8 +3,9 @@
 //! - [`aead`] — symmetric AEAD (ChaCha20-Poly1305) for session blobs the
 //!   TEE reads back, sealed under TEE-held keys (`tee_seal_key`,
 //!   `applicant_session_token`); AAD binds a ciphertext to its session.
-//! - [`age_seal`] — hybrid public-key sealing to an `age` recipient, for
-//!   blobs a downstream consumer reads (the TEE holds no private key).
+//! - [`sealed_box`] — anonymous public-key sealing (libsodium `crypto_box_seal`)
+//!   to a consumer's X25519 key, for blobs a downstream consumer reads. The
+//!   sender's keypair is ephemeral, so the TEE cannot reopen what it sealed.
 //! - [`ocicrypt`] — faithful ocicrypt layer encryption
 //!   (`AES_256_CTR_HMAC_SHA256`) for encrypted-OCI policy/plugin
 //!   artifacts; encrypt (CLI) + decrypt (TEE) as a tested pair. The layer
@@ -18,12 +19,12 @@
 mod error;
 
 pub mod aead;
-pub mod age_seal;
+pub mod sealed_box;
 pub mod kdf;
 pub mod ocicrypt;
 pub mod secret_bytes;
 
-pub use age_seal::seal_to_recipient;
+pub use sealed_box::{generate_recipient, open_sealed, public_from_secret, seal_to_recipient};
 pub use error::CryptoError;
 pub use kdf::derive_key;
 pub use secret_bytes::SecretBytes;

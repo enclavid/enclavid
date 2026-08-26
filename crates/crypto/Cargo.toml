@@ -10,9 +10,12 @@ repository.workspace = true
 # time without AES-NI assumptions, small dep tree.
 chacha20poly1305 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
-# Hybrid public-key sealing to `age` recipients (consumer-readable
-# blobs). `age1...` recipient strings; wire format matches stock age.
-age = "0.11"
+# Anonymous public-key sealing to the consumer's X25519 key. libsodium's
+# `crypto_box_seal` wire format, so a consumer decrypts with the libsodium
+# binding their language already has — no format-specific library, and no
+# CLI-shaped baggage (the `age` crate carried Fluent localisation and
+# passphrase support into the measured image for neither's benefit).
+crypto_box = { version = "0.9", features = ["seal"] }
 
 # ocicrypt layer cipher (AES-256-CTR + HMAC-SHA256, the ocicrypt
 # `AES_256_CTR_HMAC_SHA256` scheme). In-house, byte-exact to the ocicrypt
@@ -27,9 +30,6 @@ base64ct = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
-
-# X25519 for the `age` recipient sealing path (see [`crate::age_seal`]).
-x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 # Zeroize the ocicrypt per-artifact `symmetric_key` (live KBS-released layer key)
 # on drop. It's a serde-serialized field, so it can't be a `SecretBox` — a manual

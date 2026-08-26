@@ -11,7 +11,12 @@ repository.workspace = true
 # keeps the no-outbound boundary intact. See [[project-trustee-rcar-protocol]].
 
 [dependencies]
-kbs-types = "0.15"
+# `std` is the default feature and it pulls in `ear`, which verifies COSE
+# signatures through OpenSSL — a second crypto stack in a binary that does all
+# its cryptography with rustls + ring. We use only the RCAR wire types
+# (Attestation, Challenge, Request, Response, …), never attestation-results, so
+# the dependency is dropped rather than vendored into the measured image.
+kbs-types = { version = "0.15", default-features = false, features = ["alloc"] }
 # Ephemeral TEE keypair (RSA-OAEP-256) + JWE response unwrap.
 rsa = "0.9"
 aes-gcm = "0.10"
