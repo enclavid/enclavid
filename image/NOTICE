@@ -1,0 +1,11 @@
+The guest image aggregates software under several licenses.
+
+  Component   Version    License        Build recipe and configuration
+  ---------   --------   ------------   ------------------------------
+  Linux       6.12.105   GPL-2.0-only   image/kernel/
+  BusyBox     1.38.0     GPL-2.0-only   image/init/
+
+Neither is modified; the recipes above pin upstream sources by digest and select
+which parts are built. They also satisfy GPL-2.0 section 3.
+
+Enclavid's own components are Apache-2.0 — see ../LICENSE.
