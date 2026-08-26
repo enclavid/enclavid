@@ -28,7 +28,7 @@ pub async fn serve(app: Router, addr: &str) {
 
     let port: u32 = addr.parse().expect("vsock address must be a u32 port");
     let vsock_addr = VsockAddr::new(VMADDR_CID_ANY, port);
-    let listener = VsockListener::bind(&vsock_addr).expect("failed to bind vsock listener");
+    let listener = VsockListener::bind(vsock_addr).expect("failed to bind vsock listener");
     println!("listening on vsock://*:{port}");
     axum::serve(VsockServeListener(listener), app)
         .await

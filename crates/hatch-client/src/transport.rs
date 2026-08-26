@@ -215,7 +215,7 @@ mod vsock {
         fn call(&mut self, _uri: Uri) -> Self::Future {
             let addr = VsockAddr::new(self.cid, self.port);
             Box::pin(async move {
-                let stream = VsockStream::connect(&addr).await?;
+                let stream = VsockStream::connect(addr).await?;
                 Ok(VsockIo(TokioIo::new(stream)))
             })
         }
