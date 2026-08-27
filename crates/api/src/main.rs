@@ -2,6 +2,7 @@ mod applicant;
 mod client;
 mod client_state;
 mod compiler;
+mod config;
 mod cwasm_cache;
 mod disclosure_commit;
 mod dto;
@@ -28,7 +29,7 @@ use crate::state::AppState;
 
 #[tokio::main]
 async fn main() {
-    let address_out = std::env::var("ENCLAVID_ADDRESS_OUT").expect("ENCLAVID_ADDRESS_OUT not set");
+    let address_out = config::required("ENCLAVID_ADDRESS_OUT", "address of the hatch");
 
     // The attestation backend, chosen at compile time — see `endorsement`.
     // FIRST, ahead of the storage-CVM dial below and both listeners: under
@@ -69,8 +70,7 @@ async fn main() {
     // `ENCLAVID_SESSION_TTL_SECS` (availability tuning). The hatch backend ignores it.
     const DEFAULT_SESSION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
     let ttl_secs = Some(
-        std::env::var("ENCLAVID_SESSION_TTL_SECS")
-            .ok()
+        config::optional("ENCLAVID_SESSION_TTL_SECS")
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_SESSION_TTL_SECS),
     );
@@ -101,15 +101,13 @@ async fn main() {
     let applicant_app = applicant::router(applicant_state);
 
     let client_handle = tokio::spawn({
-        let addr = std::env::var("ENCLAVID_ADDRESS_IN_CLIENT")
-            .expect("ENCLAVID_ADDRESS_IN_CLIENT not set");
+        let addr = config::required("ENCLAVID_ADDRESS_IN_CLIENT", "client-facing listener");
         async move {
             transport::serve(client_app, &addr).await;
         }
     });
     let applicant_handle = tokio::spawn({
-        let addr = std::env::var("ENCLAVID_ADDRESS_IN_APPLICANT")
-            .expect("ENCLAVID_ADDRESS_IN_APPLICANT not set");
+        let addr = config::required("ENCLAVID_ADDRESS_IN_APPLICANT", "applicant-facing listener");
         async move {
             transport::serve(applicant_app, &addr).await;
         }
@@ -126,10 +124,10 @@ async fn main() {
 async fn build_storage_backends(
     attestor: Arc<dyn Attestor>,
 ) -> (Arc<dyn SessionBackend>, Arc<dyn CacheBackend>) {
-    let addr = std::env::var("ENCLAVID_STORAGE_ADDR").expect(
-        "ENCLAVID_STORAGE_ADDR not set (address of the storage-CVM; start one with \
-         `cargo run -p enclavid-storage --bin storage-cvm` and point api at its \
-         listen address)",
+    let addr = crate::config::required(
+        "ENCLAVID_STORAGE_ADDR",
+        "address of the storage-CVM; start one with `cargo run -p enclavid-storage \
+         --bin storage-cvm` and point api at its listen address",
     );
     let (session, cache) = storage::connect_storage(&addr, attestor)
         .await
@@ -139,13 +137,21 @@ async fn build_storage_backends(
     (session, cache)
 }
 
-/// Load the 32-byte TEE AEAD key. Phase A: from `ENCLAVID_TEE_KEY`
-/// (hex-encoded, 64 chars). Phase B: derive from attestation /
-/// KMS-bound material so a process restart with a fresh key cannot
-/// read prior session state.
+/// The 32-byte secret every sealed byte this process writes is sealed under.
+///
+/// Under `sev-snp` the chip derives it from a seed fused into the part, bound
+/// to this image's measurement — so it is never transported, never configured,
+/// and no other release can reproduce it. Everywhere else it is a hex value
+/// from the environment, which is a dev convenience and nothing more: a key
+/// that arrives from outside is a key whoever sent it also holds.
+#[cfg(feature = "sev-snp")]
 fn load_tee_seal_key() -> [u8; 32] {
-    let hex_str =
-        std::env::var("ENCLAVID_TEE_KEY").expect("ENCLAVID_TEE_KEY not set (32-byte hex)");
+    enclavid_attestation::derive_seal_key().expect("failed to derive the sealing key from the chip")
+}
+
+#[cfg(not(feature = "sev-snp"))]
+fn load_tee_seal_key() -> [u8; 32] {
+    let hex_str = config::required("ENCLAVID_TEE_KEY", "32-byte hex sealing key");
     let bytes = hex::decode(hex_str).expect("ENCLAVID_TEE_KEY: invalid hex");
     bytes
         .try_into()

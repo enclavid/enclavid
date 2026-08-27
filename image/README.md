@@ -26,6 +26,16 @@ rather than continuing in a corrupted state, and a panic ends the machine
 instead of leaving it running with a broken kernel. There is no in-place
 recovery in this design; a run that cannot continue should stop existing.
 
+The `enclavid.*` entries are the application's configuration. A guest has no
+environment — PID 1 runs `/bin/app` directly and sets nothing — so this is
+the only channel into it, and it is a measured one. That makes it the right
+place for values that say what this image *is*: the fixed vsock ports it
+speaks on, the host CID it reaches. It is the wrong place for anything that
+differs per machine, which would fragment the measurement into one per
+deployment, and the wrong place for a secret, which the command line does
+not keep. The sealing key is neither configured nor transported: under
+`sev-snp` the chip derives it, bound to this image's measurement.
+
 **`production` carries no `console=`.** Everything the kernel prints on a serial
 console is plaintext the host can capture, and a panic trace carries pointers
 and register values from whatever the guest was doing. Diagnostics are supposed

@@ -178,4 +178,4 @@ pub use snp::{MILAN_ASK, PRODUCT_LINE, verify_quote};
 /// Minting and reading one's own endorsement parameters need
 /// `/dev/sev-guest`; verification does not, so only this half is Linux-gated.
 #[cfg(all(feature = "sev-snp", target_os = "linux"))]
-pub use snp::{SnpAttestor, VcekIdentity, vcek_identity};
+pub use snp::{SnpAttestor, VcekIdentity, derive_seal_key, vcek_identity};

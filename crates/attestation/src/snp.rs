@@ -277,6 +277,62 @@ mod mint {
         })
     }
 
+    /// Ask the chip for a 32-byte secret bound to this launch.
+    ///
+    /// The secret is derived inside the AMD Secure Processor from a seed fused
+    /// into the part; nothing supplies it and nothing can be asked for it from
+    /// outside. Which is the point — a key handed in by the host is a key the
+    /// host has.
+    ///
+    /// What the derivation mixes in decides who else can reproduce it:
+    ///
+    ///   * MEASUREMENT ties the key to this exact image, so a different release
+    ///     derives a different key and cannot read what this one sealed. That
+    ///     costs continuity across releases and buys the property the whole
+    ///     design rests on — a compromised later version inherits no history.
+    ///   * GUEST_POLICY ties it to the launch posture, so the same image
+    ///     relaunched with debugging enabled derives a different key. The
+    ///     platform check already refuses to run that way; this makes the data
+    ///     unreadable even if it did.
+    ///
+    /// TCB_VERSION is deliberately NOT mixed. Platform firmware updates are
+    /// routine security hygiene, and binding to them would make every update
+    /// discard sealed state — a mechanism that punishes patching. The floor in
+    /// `check_report_policy` is what keeps old firmware out instead.
+    pub fn derive_seal_key() -> Result<[u8; 32], AttestationError> {
+        use sev::firmware::guest::{DerivedKey, GuestFieldSelect};
+
+        let mut firmware = Firmware::open()
+            .map_err(|e| AttestationError::Backend(format!("open /dev/sev-guest: {e}")))?;
+
+        // The mitigation vector in force at launch, which the firmware requires
+        // for this request and which the derivation then also binds.
+        let report_bytes = firmware
+            .get_report(None, Some([0u8; 64]), Some(REQUIRED_VMPL))
+            .map_err(|e| AttestationError::Backend(format!("guest report request: {e}")))?;
+        let report = AttestationReport::from_bytes(&report_bytes).map_err(|e| {
+            AttestationError::Backend(format!("firmware returned an unparsable report: {e}"))
+        })?;
+
+        let mut fields = GuestFieldSelect(0);
+        fields.set_measurement(true);
+        fields.set_guest_policy(true);
+
+        // Root key: the chip-derived VCEK, not the migration key — a migration
+        // key would let a migration agent reproduce this secret elsewhere.
+        let request = DerivedKey::new(
+            false,
+            fields,
+            REQUIRED_VMPL,
+            0,
+            0,
+            Some(report.launch_mit_vector.unwrap_or(0)),
+        );
+        firmware
+            .get_derived_key(None, request)
+            .map_err(|e| AttestationError::Backend(format!("derive sealing key: {e}")))
+    }
+
     /// Prod SEV-SNP attestor. Holds the guest device open for minting and the
     /// endorsement chain to attach to each quote; verifying uses none of its
     /// state.
@@ -387,7 +443,7 @@ mod mint {
 }
 
 #[cfg(target_os = "linux")]
-pub use mint::{SnpAttestor, VcekIdentity, vcek_identity};
+pub use mint::{SnpAttestor, VcekIdentity, derive_seal_key, vcek_identity};
 
 #[cfg(test)]
 mod tests {
