@@ -65,6 +65,9 @@ moka = { version = "0.12", features = ["future"], optional = true }
 # TCP stream in an attested TLS server. Dev-bypass = the mock attestation backend
 # (default); flip to `enclavid-ra-tls/sev-snp` for prod.
 enclavid-ra-tls = { path = "../ra-tls", optional = true }
+# The RA-TLS backend is chosen here, not by ra-tls: a software identity the whole
+# dev fleet shares. No hardware arm yet — this worker has no path to AMD.
+enclavid-attestation = { path = "../attestation", default-features = false, features = ["mock"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
 
 # Zeroize the transient wire `cwasm` `Vec` (possible embedded model weights) on
@@ -96,6 +99,7 @@ worker = [
     "dep:tokio",
     "dep:moka",
     "dep:enclavid-ra-tls",
+    "dep:enclavid-attestation",
     "dep:tokio-rustls",
     # Platform-split cwasm backing (memfd on Linux, tmpfile in dev) — see the
     # target-specific dependency tables. `dep:` on a target-gated optional dep is

@@ -19,12 +19,12 @@
 mod error;
 
 pub mod aead;
-pub mod sealed_box;
 pub mod kdf;
 pub mod ocicrypt;
+pub mod sealed_box;
 pub mod secret_bytes;
 
-pub use sealed_box::{generate_recipient, open_sealed, public_from_secret, seal_to_recipient};
 pub use error::CryptoError;
 pub use kdf::derive_key;
+pub use sealed_box::{generate_recipient, open_sealed, public_from_secret, seal_to_recipient};
 pub use secret_bytes::SecretBytes;

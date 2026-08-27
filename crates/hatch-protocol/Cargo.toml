@@ -7,6 +7,10 @@ repository.workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# Encode certificate bytes as a CBOR byte string rather than ciborium's
+# default per-byte integer array — measured at 2306 bytes for a 1351-byte
+# certificate before this. See `VcekResponse::certificate`.
+serde_bytes = "0.11"
 # CBOR wire codec for the HTTP-over-vsock envelope. Chosen over bincode
 # for schema evolution: named fields tolerate add/remove/reorder, so an
 # independently-deployed hatch and hatch-client (host binary vs CVM

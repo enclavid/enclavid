@@ -52,7 +52,10 @@ impl Compiler {
 /// TODAY: a direct TCP dial (dev); Plan-A swaps this for the host vsock-relay
 /// rendezvous + RA-TLS (both peers dial the relay, the host splices). The
 /// worker sends us its service client on the base channel once connected.
-pub async fn connect_compile_worker(addr: &str) -> Result<Compiler, String> {
+pub async fn connect_compile_worker(
+    addr: &str,
+    attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,
+) -> Result<Compiler, String> {
     type Cli = CompilerServiceClient<Ciborium>;
 
     let tcp = tokio::net::TcpStream::connect(addr)
@@ -60,7 +63,7 @@ pub async fn connect_compile_worker(addr: &str) -> Result<Compiler, String> {
         .map_err(|e| format!("connect compile-worker at `{addr}`: {e}"))?;
     // Mutual RA-TLS over the dial (same as the execution-worker): attest the peer's
     // pinned measurement + present our own attested cert.
-    let config = enclavid_ra_tls::fleet_client_config()
+    let config = crate::endorsement::fleet_client_config(attestor)
         .map_err(|e| format!("compile-worker RA-TLS client config: {e}"))?;
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
     let tls = connector

@@ -54,7 +54,10 @@ pub fn open_sealed(ciphertext: &[u8], secret_hex: &str) -> Result<Vec<u8>, Crypt
 pub fn generate_recipient() -> (String, String) {
     let secret = SecretKey::generate(&mut OsRng);
     let public = secret.public_key();
-    (hex::encode(secret.to_bytes()), hex::encode(public.as_bytes()))
+    (
+        hex::encode(secret.to_bytes()),
+        hex::encode(public.as_bytes()),
+    )
 }
 
 /// Recover the recipient's public key from its secret. Lets a caller that was

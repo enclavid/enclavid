@@ -10,16 +10,16 @@
 //! measurement). So a completed TLS session PROVES the peer runs a pinned measurement
 //! and owns the very TLS key it presented — no CA, no KMS, no post-handshake window.
 //!
-//! **Dev-bypass = the attestation backend, feature-gated.** Under `mock`/`snp-dev` the
-//! full RA-TLS path (mint → handshake → verify → binding) runs on a box with no SEV-SNP
-//! hardware — the dev bypass. Under `sev-snp` (prod) the dev backends are COMPILE-TIME
-//! excluded, so no bypass code ships. The mock backend verifies against its OWN key, so
-//! the whole dev fleet shares one baked dev keypair ([`default_attestor`]) to make mutual
-//! verification actually succeed; prod uses real AMD attestation and needs no shared key.
+//! **This crate holds no opinion about which backend attests.** [`server_config`] and
+//! [`client_config`] take an `Arc<dyn Attestor>` and a [`MeasurementPolicy`] as arguments,
+//! so which backend a leg trusts — and what it pins — is stated at the leg rather than
+//! resolved through a feature graph. It also means no dependency edge on this crate can
+//! pull a software signer into a binary that asked only for hardware attestation; this
+//! crate names no backend and has no attestation feature to enable.
 //!
-//! NOT here (deferred, the hard SNP tail): the real configfs-TSM extended-report read +
-//! `sev` chain verify (needs hardware), the host vsock rendezvous relay, and
-//! measurement-pin distribution.
+//! A software backend that verifies against its own key needs both ends to hold the same
+//! instance for mutual attestation to complete — see `MockAttestor::dev_fleet` in
+//! `enclavid-attestation`, which is where that shared dev identity lives.
 
 use std::fmt;
 use std::sync::Arc;
@@ -45,15 +45,6 @@ const RATLS_OID_DOTTED: &str = "1.3.6.1.4.1.58888.1.1";
 /// Server name presented on the client side. RA-TLS authenticates by ATTESTATION, not
 /// by DNS name — our verifier ignores it — but rustls requires *some* name.
 const RATLS_SERVER_NAME: &str = "ratls.enclavid.internal";
-
-/// Fixed DEV keypair seed + measurement shared across the whole fleet under `mock`, so
-/// each process's `MockAttestor` (which trusts its OWN key) accepts a peer's mock quote
-/// and mutual RA-TLS actually completes. DEV-ONLY: compiled only under `mock`, never in
-/// a `sev-snp` prod binary — it is a trust ANCHOR for local dev, not a production secret.
-#[cfg(feature = "mock")]
-const DEV_SEED: [u8; 32] = *b"enclavid-ra-tls-dev-seed-v1-!!!!";
-#[cfg(feature = "mock")]
-const DEV_MEASUREMENT: &str = "de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7d";
 
 /// What can go wrong minting or wiring an RA-TLS config (verify-time failures surface as
 /// `rustls::Error` inside the handshake, not here).
@@ -361,38 +352,6 @@ pub fn client_config(
 /// The fixed rustls `ServerName` an RA-TLS client presents (ignored by our verifier).
 pub fn server_name() -> ServerName<'static> {
     ServerName::try_from(RATLS_SERVER_NAME).expect("static RA-TLS server name is valid")
-}
-
-/// The feature-selected attestation backend for the fleet. Under `mock` this is a FIXED
-/// dev keypair shared fleet-wide so mutual RA-TLS verifies; prod (`sev-snp`) mints/verifies
-/// against real AMD attestation.
-#[cfg(feature = "mock")]
-pub fn default_attestor() -> Arc<dyn Attestor> {
-    Arc::new(enclavid_attestation::MockAttestor::from_seed(
-        DEV_SEED,
-        DEV_MEASUREMENT,
-    ))
-}
-
-/// The feature-selected measurement policy. Under `mock`, pin the shared dev measurement
-/// so the pin path is exercised end-to-end on a dev box.
-#[cfg(feature = "mock")]
-pub fn default_policy() -> MeasurementPolicy {
-    MeasurementPolicy::Pinned(vec![DEV_MEASUREMENT.to_string()])
-}
-
-/// Fleet RA-TLS server config from the feature-selected backend + policy — the one call
-/// a worker's listener makes.
-#[cfg(feature = "mock")]
-pub fn fleet_server_config() -> Result<ServerConfig, RaTlsError> {
-    server_config(default_attestor(), default_policy())
-}
-
-/// Fleet RA-TLS client config from the feature-selected backend + policy — the one call
-/// the api's dial-out makes.
-#[cfg(feature = "mock")]
-pub fn fleet_client_config() -> Result<ClientConfig, RaTlsError> {
-    client_config(default_attestor(), default_policy())
 }
 
 #[cfg(test)]

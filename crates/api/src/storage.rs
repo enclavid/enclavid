@@ -98,14 +98,17 @@ impl CacheBackend for CacheCvmBackend {
 
 /// Dial the storage-CVM at `addr`, RA-TLS-handshake + remoc-frame it, and receive
 /// BOTH service clients on the base channel. Mirrors `connect_execution_worker`.
-pub async fn connect_storage(addr: &str) -> Result<(SessionCvmBackend, CacheCvmBackend), String> {
+pub async fn connect_storage(
+    addr: &str,
+    attestor: Arc<dyn enclavid_attestation::Attestor>,
+) -> Result<(SessionCvmBackend, CacheCvmBackend), String> {
     let tcp = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|e| format!("connect storage-CVM at `{addr}`: {e}"))?;
     // Mutual RA-TLS: we attest the storage-CVM's cert (pinned measurement) and
     // present our own. A completed handshake proves the peer is the pinned
     // storage-CVM — no CA, no post-handshake window.
-    let config = enclavid_ra_tls::fleet_client_config()
+    let config = crate::endorsement::fleet_client_config(attestor)
         .map_err(|e| format!("storage-CVM RA-TLS client config: {e}"))?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let tls = connector

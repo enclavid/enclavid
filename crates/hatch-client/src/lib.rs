@@ -4,6 +4,7 @@ pub mod boundary;
 mod cache;
 mod error;
 mod kbs;
+mod kds;
 mod registry;
 mod session;
 mod transport;
@@ -34,7 +35,9 @@ pub use domain::{
 pub use hatch_protocol::PullResponse as RegistryPullResponse;
 pub use hatch_protocol::{AuthorizeRequest, ClientOperation, PullRequest};
 pub use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
+pub use hatch_protocol::{VcekRequest, VcekResponse};
 pub use kbs::KbsClient;
+pub use kds::KdsClient;
 pub use registry::RegistryClient;
 // Disclosure carried by `Prompt::ConsentDisclosure`. Re-exported under
 // a qualified name so it doesn't collide with the session-store

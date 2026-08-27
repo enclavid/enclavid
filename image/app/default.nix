@@ -29,7 +29,10 @@ let
       !(base == "target" || base == ".git" || base == "node_modules" || base == "result");
   };
 
-  mkApp = { pname, package, binary, features ? [ ] }:
+  # `noDefaultFeatures` is per role rather than blanket: `--no-default-features`
+  # applies to the selected package, so setting it where a package has no
+  # feature table changes nothing and only obscures which roles depend on it.
+  mkApp = { pname, package, binary, features ? [ ], noDefaultFeatures ? false }:
     static.rustPlatform.buildRustPackage {
       inherit pname src;
       version = "0.1.0";
@@ -38,6 +41,7 @@ let
 
       cargoBuildFlags = [ "-p" package ];
       buildFeatures = features;
+      buildNoDefaultFeatures = noDefaultFeatures;
 
       # The workspace has crates that do not belong in a guest image and do not
       # cross-compile cleanly (the CLI, host-side daemons). Build one package.
@@ -53,14 +57,22 @@ let
     };
 in
 {
-  # The api CVM: HTTP over vsock, session lifecycle. `vsock` is the production
-  # transport — without it the binary listens on TCP, which a guest with no IP
-  # stack cannot do.
+  # The api CVM: HTTP over vsock, session lifecycle.
+  #
+  # Both features are load-bearing and neither has a default that would supply
+  # it. `vsock` is the transport — without it the binary listens on TCP, which
+  # a guest with no IP stack cannot do. `sev-snp` is the attestation backend,
+  # and it is reached by turning the defaults OFF: cargo features are additive,
+  # so asking for `sev-snp` on top of the default `dev-attestation` would leave
+  # a software test key compiled in beside the real one. Taking defaults here
+  # is what produced an image whose quotes were signed by a key generated at
+  # each process start.
   api = mkApp {
     pname = "enclavid-app-api";
     package = "enclavid-api";
     binary = "enclavid-api";
-    features = [ "vsock" ];
+    noDefaultFeatures = true;
+    features = [ "sev-snp" "vsock" ];
   };
 
   # The storage CVM: the blind ciphertext store.

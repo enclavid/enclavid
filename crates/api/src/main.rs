@@ -5,6 +5,7 @@ mod compiler;
 mod cwasm_cache;
 mod disclosure_commit;
 mod dto;
+mod endorsement;
 mod error;
 mod executor;
 mod input;
@@ -19,7 +20,7 @@ mod transport;
 
 use std::sync::Arc;
 
-use enclavid_attestation::{Attestor, SnpDevAttestor};
+use enclavid_attestation::Attestor;
 use hatch_client::{CacheBackend, CacheStore, SessionBackend, SessionStore};
 
 use crate::client_state::ClientState;
@@ -28,6 +29,14 @@ use crate::state::AppState;
 #[tokio::main]
 async fn main() {
     let address_out = std::env::var("ENCLAVID_ADDRESS_OUT").expect("ENCLAVID_ADDRESS_OUT not set");
+
+    // The attestation backend, chosen at compile time — see `endorsement`.
+    // FIRST, ahead of the storage-CVM dial below and both listeners: under
+    // `sev-snp` this is where the guest establishes that it is running
+    // somewhere fit to serve and holds the endorsement that lets it prove so.
+    // A guest that answers no to either must reach nothing and serve nobody,
+    // so nothing that talks to anything may precede it.
+    let attestor: Arc<dyn Attestor> = endorsement::build_attestor(&address_out).await;
 
     // SessionStore is the hatch-client HTTP-over-vsock client for
     // per-session typed-field storage. Shared between client API
@@ -65,7 +74,7 @@ async fn main() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_SESSION_TTL_SECS),
     );
-    let (session_backend, cache_backend) = build_storage_backends().await;
+    let (session_backend, cache_backend) = build_storage_backends(attestor.clone()).await;
     let session_store = Arc::new(SessionStore::new(session_backend, tee_seal_key, ttl_secs));
     let cache_store = CacheStore::new(cache_backend, &tee_seal_key);
 
@@ -75,16 +84,18 @@ async fn main() {
     // certificate, port, optional mTLS posture, and rate-limit policy.
     // Each surface owns its route table — see `client::router` and
     // `applicant::router` for the endpoint inventory.
-    // Dev attestor: real SEV-SNP report FORMAT, signed by a software test
-    // key (test trust root). Swaps to the prod `sev-snp` backend
-    // (`/dev/sev-guest` + AMD chain) with no caller change. Measurement /
-    // key-seed provisioning (so a verifier can pin them) lands with the
-    // prod backend; `new_random` is fine while nothing verifies yet.
-    let attestor: Arc<dyn Attestor> = Arc::new(SnpDevAttestor::new_random());
     let client_state =
-        Arc::new(ClientState::init(&address_out, session_store.clone(), attestor).await);
-    let applicant_state =
-        Arc::new(AppState::init(&address_out, session_store, cache_store, shuffle_key).await);
+        Arc::new(ClientState::init(&address_out, session_store.clone(), attestor.clone()).await);
+    let applicant_state = Arc::new(
+        AppState::init(
+            &address_out,
+            session_store,
+            cache_store,
+            shuffle_key,
+            attestor,
+        )
+        .await,
+    );
 
     let client_app = client::router(client_state);
     let applicant_app = applicant::router(applicant_state);
@@ -112,13 +123,15 @@ async fn main() {
 /// backend — the legacy hatch/Redis + host object_store path was retired, so
 /// there is no runtime selector: `ENCLAVID_STORAGE_ADDR` is required (fail-loud,
 /// per `feedback_minimal_defaults`).
-async fn build_storage_backends() -> (Arc<dyn SessionBackend>, Arc<dyn CacheBackend>) {
+async fn build_storage_backends(
+    attestor: Arc<dyn Attestor>,
+) -> (Arc<dyn SessionBackend>, Arc<dyn CacheBackend>) {
     let addr = std::env::var("ENCLAVID_STORAGE_ADDR").expect(
         "ENCLAVID_STORAGE_ADDR not set (address of the storage-CVM; start one with \
          `cargo run -p enclavid-storage --bin storage-cvm` and point api at its \
          listen address)",
     );
-    let (session, cache) = storage::connect_storage(&addr)
+    let (session, cache) = storage::connect_storage(&addr, attestor)
         .await
         .expect("failed to connect to storage-CVM");
     let session: Arc<dyn SessionBackend> = Arc::new(session);

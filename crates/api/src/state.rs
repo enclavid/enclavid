@@ -91,6 +91,7 @@ impl AppState {
         session_store: Arc<SessionStore>,
         cache_store: CacheStore,
         shuffle_key: Arc<ShuffleKey>,
+        attestor: Arc<dyn enclavid_attestation::Attestor>,
     ) -> Self {
         let hatch = HatchClient::new(transport_out)
             .await
@@ -102,7 +103,7 @@ impl AppState {
              point api at its listen address)",
         );
         let compiler = Arc::new(
-            connect_compile_worker(&compile_addr)
+            connect_compile_worker(&compile_addr, attestor.clone())
                 .await
                 .expect("failed to connect to compile-worker"),
         );
@@ -112,7 +113,7 @@ impl AppState {
              point api at its listen address)",
         );
         let executor = Arc::new(
-            connect_execution_worker(&exec_addr)
+            connect_execution_worker(&exec_addr, attestor)
                 .await
                 .expect("failed to connect to execution-worker"),
         );

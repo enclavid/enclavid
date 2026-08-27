@@ -22,6 +22,17 @@ use crate::{AttestationError, Attestor, Quote, ReportData};
 
 const MOCK_FORMAT: &str = "mock-ed25519";
 
+/// The measurement every participant in a dev fleet claims and pins. Not a
+/// launch digest of anything — a stand-in that lets the pin path be exercised
+/// where no hardware measurement exists.
+pub const DEV_FLEET_MEASUREMENT: &str =
+    "de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7d";
+
+/// Seed behind [`MockAttestor::dev_fleet`]. A literal in a public source tree,
+/// which is precisely why it is confined to the `mock` backend: anything that
+/// compiles this can speak for any dev fleet participant.
+const DEV_FLEET_SEED: [u8; SECRET_KEY_LENGTH] = *b"enclavid-ra-tls-dev-seed-v1-!!!!";
+
 /// In-memory dev attestor. Generates a fresh keypair on each construction;
 /// pair the verifier with the same instance (or with the public key it
 /// produces) for round-trip tests. Real deployments will marshal the
@@ -49,6 +60,15 @@ impl MockAttestor {
             signing_key: SigningKey::from_bytes(&seed),
             measurement: measurement.into(),
         }
+    }
+
+    /// The one identity every participant in a dev fleet mints and verifies
+    /// with. `MockAttestor::verify` trusts its OWN key, so mutual attestation
+    /// between two processes only completes when both hold this same instance
+    /// — which is what makes a dev fleet work without hardware, and what makes
+    /// it prove nothing.
+    pub fn dev_fleet() -> Self {
+        Self::from_seed(DEV_FLEET_SEED, DEV_FLEET_MEASUREMENT)
     }
 
     /// Public key bytes, for shipping to the verifying side.

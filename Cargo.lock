@@ -1448,6 +1448,7 @@ dependencies = [
 name = "enclavid-storage"
 version = "0.1.0"
 dependencies = [
+ "enclavid-attestation",
  "enclavid-ra-tls",
  "hatch-protocol",
  "hex",
@@ -1481,6 +1482,7 @@ name = "engine-compiler"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "enclavid-attestation",
  "enclavid-embedded",
  "enclavid-ra-tls",
  "engine-rpc",
@@ -1500,6 +1502,7 @@ name = "engine-executor"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "enclavid-attestation",
  "enclavid-embedded",
  "enclavid-ra-tls",
  "engine-compiler",
@@ -1974,6 +1977,7 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "serde",
+ "serde_bytes",
 ]
 
 [[package]]

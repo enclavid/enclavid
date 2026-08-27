@@ -1,23 +1,37 @@
-//! End-to-end mutual RA-TLS handshake over an in-memory duplex, under the `mock`
-//! backend — the dev-bypass path that runs with NO SEV-SNP hardware. Proves the whole
-//! chain: mint attested certs → tokio-rustls mutual handshake → each side's custom
-//! verifier pulls the peer quote, rebinds the SPKI, and the shared dev attestor accepts
-//! it → data flows. Also proves a wrong measurement pin ABORTS the handshake.
+//! End-to-end mutual RA-TLS handshake over an in-memory duplex, on the software backend
+//! — the only one that runs with NO SEV-SNP hardware. Proves the whole chain: mint
+//! attested certs → tokio-rustls mutual handshake → each side's custom verifier pulls the
+//! peer quote, rebinds the SPKI, and the shared dev identity accepts it → data flows.
+//! Also proves a wrong measurement pin ABORTS the handshake.
 
 use std::sync::Arc;
 
-use enclavid_ra_tls::{
-    MeasurementPolicy, client_config, default_attestor, fleet_client_config, fleet_server_config,
-    server_name,
-};
+use enclavid_attestation::{Attestor, DEV_FLEET_MEASUREMENT, MockAttestor};
+use enclavid_ra_tls::{MeasurementPolicy, RaTlsError, client_config, server_config, server_name};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+fn dev_attestor() -> Arc<dyn Attestor> {
+    Arc::new(MockAttestor::dev_fleet())
+}
+
+fn dev_policy() -> MeasurementPolicy {
+    MeasurementPolicy::Pinned(vec![DEV_FLEET_MEASUREMENT.to_string()])
+}
+
+fn dev_server() -> Result<tokio_rustls::rustls::ServerConfig, RaTlsError> {
+    server_config(dev_attestor(), dev_policy())
+}
+
+fn dev_client() -> Result<tokio_rustls::rustls::ClientConfig, RaTlsError> {
+    client_config(dev_attestor(), dev_policy())
+}
 
 #[tokio::test]
 async fn mutual_ratls_handshake_and_data() {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-    let acceptor = TlsAcceptor::from(Arc::new(fleet_server_config().unwrap()));
-    let connector = TlsConnector::from(Arc::new(fleet_client_config().unwrap()));
+    let acceptor = TlsAcceptor::from(Arc::new(dev_server().unwrap()));
+    let connector = TlsConnector::from(Arc::new(dev_client().unwrap()));
 
     let server = tokio::spawn(async move {
         // `accept` completes only after the server has ATTESTED the client's cert too
@@ -50,11 +64,11 @@ async fn mutual_ratls_handshake_and_data() {
 #[tokio::test]
 async fn wrong_measurement_pin_aborts_handshake() {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-    let acceptor = TlsAcceptor::from(Arc::new(fleet_server_config().unwrap()));
-    // Same shared dev attestor (so the quote signature is valid) but pin a measurement
+    let acceptor = TlsAcceptor::from(Arc::new(dev_server().unwrap()));
+    // Same shared dev identity (so the quote signature is valid) but pin a measurement
     // the server's attested cert does NOT carry — the client's verifier must refuse.
     let bad = client_config(
-        default_attestor(),
+        dev_attestor(),
         MeasurementPolicy::Pinned(vec!["ff".repeat(32)]),
     )
     .unwrap();

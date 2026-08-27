@@ -20,11 +20,6 @@ snp-dev = ["dep:sev", "dep:ed25519-dalek", "dep:rand_core"]
 # verification against a compiled-in root.
 sev-snp = ["dep:sev", "dep:ciborium", "dep:serde_bytes"]
 
-# Hardware check for the prod backend — runs as PID 1's payload in a guest.
-[[example]]
-name = "snp_selftest"
-required-features = ["sev-snp"]
-
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

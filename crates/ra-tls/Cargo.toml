@@ -11,9 +11,10 @@ repository.workspace = true
 # the peer's quote DURING the handshake (custom verifier), so a valid TLS session
 # proves the peer runs the pinned measurement and owns the TLS key — no CA, no KMS.
 #
-# The attestation backend is feature-gated via `enclavid-attestation`: `mock`/`snp-dev`
-# run the FULL RA-TLS path on a dev box with no SEV-SNP hardware (the dev-bypass), while
-# `sev-snp` (prod) COMPILE-TIME excludes the dev backends so no bypass ships to prod.
+# The attestation backend is NOT selected here. This crate takes an `Arc<dyn Attestor>`
+# per config, so it names no backend and enables no feature on `enclavid-attestation` —
+# which is what stops an edge on this crate from arming a software signer inside a binary
+# built for hardware attestation.
 [dependencies]
 enclavid-attestation = { path = "../attestation", default-features = false }
 
@@ -31,15 +32,9 @@ x509-parser = "0.16"
 # CBOR-encode the `Quote` into the cert extension (project is CBOR-native).
 ciborium = "0.2"
 
-[features]
-# Dev default: software-mock Ed25519 attestation — runs the full RA-TLS path with no
-# SEV-SNP hardware. This is the dev-bypass.
-default = ["mock"]
-mock = ["enclavid-attestation/mock"]
-# Real `sev` report FORMAT signed by a test key (no hardware) — closer to prod shape.
-snp-dev = ["enclavid-attestation/snp-dev"]
-# Prod SEV-SNP backend — compile-time EXCLUDES the dev backends above.
-sev-snp = ["enclavid-attestation/sev-snp"]
-
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
+# The tests need SOME backend to exercise the handshake; the software one is the only
+# kind that runs without hardware. A dev-dependency, so it reaches the tests and nothing
+# that links this crate.
+enclavid-attestation = { path = "../attestation", features = ["mock"] }

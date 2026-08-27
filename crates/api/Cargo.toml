@@ -9,8 +9,22 @@ repository.workspace = true
 # Default: TCP listener + TCP HTTP connection to the hatch (development /
 # cross-provider). Enable `vsock` for the attested production build: vsock
 # listener + vsock connection to the hatch. Mutually exclusive at the binary level.
-default = []
+#
+# The attestation backend is a second, independent axis. Cargo features are
+# additive — enabling `sev-snp` alongside `dev-attestation` would leave the
+# software test key compiled into the measured image — so the dev backend is
+# the DEFAULT rather than unconditional, and the attested build turns it off:
+#   cargo build -p enclavid-api --no-default-features --features sev-snp,vsock
+default = ["dev-attestation"]
 vsock = ["hatch-client/vsock", "dep:tokio-vsock", "dep:hyper-util", "dep:hyper", "dep:tower-service"]
+# Software backends, no hardware. Two of them, for two different jobs: `snp-dev`
+# gives session quotes the real SEV-SNP report FORMAT so policy and KBS code sees
+# the fields it will in production, while `mock` supplies the ONE shared identity
+# a dev fleet needs — a software attestor verifies against its own key, so peers
+# that each generated their own could never attest each other.
+dev-attestation = ["enclavid-attestation/snp-dev", "enclavid-attestation/mock"]
+# Real hardware attestation: /dev/sev-guest mint + AMD chain verification.
+sev-snp = ["enclavid-attestation/sev-snp"]
 
 [dependencies]
 # The wasmtime-free engine leaf: the plain-data types the client-only
@@ -50,7 +64,7 @@ storage-rpc = { path = "../storage-rpc" }
 async-trait = "0.1"
 enclavid-crypto = { path = "../crypto" }
 enclavid-kbs-client = { path = "../kbs-client" }
-enclavid-attestation = { path = "../attestation", features = ["snp-dev"] }
+enclavid-attestation = { path = "../attestation", default-features = false }
 # Intra-fleet mutual RA-TLS on the api -> worker dials. Dev-bypass = the mock
 # attestation backend (default); flip to `enclavid-ra-tls/sev-snp` for prod. Separate
 # from the client-facing session quotes above (that stays snp-dev).

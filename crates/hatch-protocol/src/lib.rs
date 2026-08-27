@@ -1,6 +1,7 @@
 //! Wire DTOs shared across two transports:
 //!   * the host-side `hatch` over HTTP-over-vsock — the EGRESS envelopes
-//!     (`AuthorizeRequest`, `PullRequest`, `KbsRelayRequest`);
+//!     (`AuthorizeRequest`, `PullRequest`, `KbsRelayRequest`,
+//!     `VcekRequest`);
 //!   * the trusted `storage-CVM` over RA-TLS/remoc — the session-store
 //!     DTOs (`ReadRequest` / `WriteRequest` / `Slot` / …), reused verbatim
 //!     as the `storage-rpc::SessionStoreService` payloads.
@@ -157,6 +158,50 @@ pub struct KbsRelayResponse {
 // `kbs-types` crate and is driven TEE-side by `enclavid-kbs-client`. The
 // hatch only ever sees those opaque bytes inside a relay body — no
 // enclavid-specific KBS DTOs cross this boundary.
+
+// ---------------------------------------------------------------------
+// VCEK fetch  (POST /kds/vcek)
+//
+// A guest can mint an attestation report without any certificate, but a
+// third party cannot check the signature on one without the certificate
+// that endorses the signing key. AMD derives and signs that certificate
+// per (chip, platform TCB) on request, and the TEE has no outbound
+// network — so it names the certificate it needs and the hatch fetches it.
+//
+// Nothing is trusted about the answer. The certificate is public, and its
+// authenticity is settled TEE-side against the AMD root compiled into the
+// measured image; a substituted one simply fails to verify a report this
+// chip produced, and the guest refuses to start.
+// ---------------------------------------------------------------------
+
+/// Names one certificate at AMD's key service. Typed rather than a URL:
+/// the hatch owns the origin, so this cannot become a second general
+/// forwarder, and an enumerated product plus a hex-only chip identity
+/// leave nothing to inject into the path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcekRequest {
+    /// AMD product line, e.g. `Milan`. Pinned TEE-side alongside the root.
+    pub product_line: String,
+    /// Hex chip identity from the TEE's own attestation report.
+    pub chip_id: String,
+    /// Platform security version numbers of the TCB the signing key is
+    /// derived at, read from the same report.
+    pub bootloader_spl: u8,
+    pub tee_spl: u8,
+    pub snp_spl: u8,
+    pub microcode_spl: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcekResponse {
+    /// DER certificate bytes, opaque to the hatch. The TEE verifies the
+    /// AMD chain over them before they endorse anything.
+    ///
+    /// A CBOR byte string, not ciborium's default per-byte integer array:
+    /// measured, the array form carried a 1351-byte certificate in 2306.
+    #[serde(with = "serde_bytes")]
+    pub certificate: Vec<u8>,
+}
 
 // ---------------------------------------------------------------------
 // Session store — the `storage-rpc::SessionStoreService` payloads (remoc

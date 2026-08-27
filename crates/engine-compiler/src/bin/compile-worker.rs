@@ -170,9 +170,17 @@ async fn main() {
 
     // Mutual RA-TLS acceptor (minted once at boot): every accepted api connection is
     // wrapped in an attested TLS server that also requires an attested client cert.
+    // This build attests with a software identity the whole dev fleet shares, and
+    // pins that same identity: it proves the peer links this source tree, nothing
+    // about where the peer runs.
     let ratls = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
-        enclavid_ra_tls::fleet_server_config()
-            .unwrap_or_else(|e| panic!("compile-worker: RA-TLS server config: {e}")),
+        enclavid_ra_tls::server_config(
+            std::sync::Arc::new(enclavid_attestation::MockAttestor::dev_fleet()),
+            enclavid_ra_tls::MeasurementPolicy::Pinned(vec![
+                enclavid_attestation::DEV_FLEET_MEASUREMENT.to_string(),
+            ]),
+        )
+        .unwrap_or_else(|e| panic!("compile-worker: RA-TLS server config: {e}")),
     ));
 
     loop {

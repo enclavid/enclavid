@@ -149,10 +149,22 @@ pub trait Attestor: Send + Sync {
     fn verify(&self, quote: &Quote, expected: &ReportData) -> Result<(), AttestationError>;
 }
 
+// A build that signs with real hardware must not also carry a software signer.
+// Cargo features are additive and arrive through the whole dependency graph, so
+// a single edge that takes this crate with its defaults would re-arm one — which
+// is how `mock` stayed in a binary whose own manifest asked only for `sev-snp`.
+// Failing here catches it at any depth, not just at the manifest a reader
+// happens to be looking at.
+#[cfg(all(feature = "sev-snp", any(feature = "mock", feature = "snp-dev")))]
+compile_error!(
+    "a software attestation backend (`mock` / `snp-dev`) is enabled alongside `sev-snp` — \
+     some dependency edge is taking enclavid-attestation with default features"
+);
+
 #[cfg(feature = "mock")]
 mod mock;
 #[cfg(feature = "mock")]
-pub use mock::MockAttestor;
+pub use mock::{DEV_FLEET_MEASUREMENT, MockAttestor};
 
 #[cfg(feature = "snp-dev")]
 mod snp_dev;
@@ -161,9 +173,9 @@ pub use snp_dev::SnpDevAttestor;
 
 #[cfg(feature = "sev-snp")]
 mod snp;
-/// Minting needs `/dev/sev-guest`; verification does not, so only this half is
-/// Linux-gated.
-#[cfg(all(feature = "sev-snp", target_os = "linux"))]
-pub use snp::SnpAttestor;
 #[cfg(feature = "sev-snp")]
-pub use snp::verify_quote;
+pub use snp::{MILAN_ASK, PRODUCT_LINE, verify_quote};
+/// Minting and reading one's own endorsement parameters need
+/// `/dev/sev-guest`; verification does not, so only this half is Linux-gated.
+#[cfg(all(feature = "sev-snp", target_os = "linux"))]
+pub use snp::{SnpAttestor, VcekIdentity, vcek_identity};

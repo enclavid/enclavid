@@ -99,7 +99,10 @@ impl Executor {
 /// infra-started, not spawned by api; the transport is a direct TCP dial today,
 /// swapped for the host vsock-relay rendezvous + RA-TLS under Plan-A. The worker
 /// sends us its service client on the base channel once connected.
-pub async fn connect_execution_worker(addr: &str) -> Result<Executor, String> {
+pub async fn connect_execution_worker(
+    addr: &str,
+    attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,
+) -> Result<Executor, String> {
     type Cli = ExecutorServiceClient<Ciborium>;
 
     let tcp = tokio::net::TcpStream::connect(addr)
@@ -108,7 +111,7 @@ pub async fn connect_execution_worker(addr: &str) -> Result<Executor, String> {
     // Mutual RA-TLS over the dial: we attest the worker's cert (pinned measurement)
     // and present our own attested cert. A completed handshake proves the peer is the
     // pinned execution-worker measurement — no CA, no post-handshake window.
-    let config = enclavid_ra_tls::fleet_client_config()
+    let config = crate::endorsement::fleet_client_config(attestor)
         .map_err(|e| format!("execution-worker RA-TLS client config: {e}"))?;
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
     let tls = connector

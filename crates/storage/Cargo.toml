@@ -24,7 +24,11 @@ path = "src/lib.rs"
 [dependencies]
 storage-rpc = { path = "../storage-rpc" }
 hatch-protocol = { path = "../hatch-protocol" }
+# The RA-TLS backend is chosen here, not by ra-tls: this build attests with a
+# software identity the whole dev fleet shares. There is no hardware arm yet —
+# a blind CVM has no way to reach AMD for the certificate that would endorse it.
 enclavid-ra-tls = { path = "../ra-tls" }
+enclavid-attestation = { path = "../attestation", default-features = false, features = ["mock"] }
 
 # Per-session store: one embedded SQLite database file per session (bundled so
 # the amalgamation is built into the measured image, no system libsqlite). ACID

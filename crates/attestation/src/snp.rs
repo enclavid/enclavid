@@ -56,6 +56,16 @@ const MIN_TCB: TcbFloor = TcbFloor {
 /// *which machine* signed — so it is not accepted here.
 const SIGNING_KEY_VCEK: u32 = 0;
 
+/// The AMD product line whose root is pinned below. The two move together: a
+/// chain from another generation would not verify against this ARK anyway, and
+/// AMD's key service names its certificates by the same string.
+pub const PRODUCT_LINE: &str = "Milan";
+
+/// AMD's Milan intermediate, as shipped with the `sev` crate. Re-exported so a
+/// caller assembling an attestor needs no `sev` dependency of its own — only
+/// the VCEK varies per machine, and only it has to be obtained.
+pub const MILAN_ASK: &[u8] = builtin::milan::ASK;
+
 /// The four security version numbers that make up a platform TCB.
 struct TcbFloor {
     bootloader: u8,
@@ -123,14 +133,22 @@ fn check_report_policy(report: &AttestationReport) -> Result<(), AttestationErro
             report.key_info.signing_key()
         ));
     }
-    if !MIN_TCB.accepts(&report.reported_tcb) {
-        return reject(format!(
-            "platform TCB below floor: bl={} tee={} snp={} ucode={}",
-            report.reported_tcb.bootloader,
-            report.reported_tcb.tee,
-            report.reported_tcb.snp,
-            report.reported_tcb.microcode
-        ));
+    // Both TCBs, for different reasons. `reported_tcb` is the one the signing
+    // key is derived at — what the report says the platform is now. `launch_tcb`
+    // is what was in force when this guest was created, and therefore what
+    // established its memory encryption and its measurement. The host can raise
+    // the platform TCB under a guest that is already running, so checking only
+    // the former accepts an enclave that superseded firmware brought up.
+    for (which, tcb) in [
+        ("reported", &report.reported_tcb),
+        ("launch", &report.launch_tcb),
+    ] {
+        if !MIN_TCB.accepts(tcb) {
+            return reject(format!(
+                "{which} platform TCB below floor: bl={} tee={} snp={} ucode={}",
+                tcb.bootloader, tcb.tee, tcb.snp, tcb.microcode
+            ));
+        }
     }
     Ok(())
 }
@@ -198,8 +216,66 @@ mod mint {
     use sev::firmware::guest::{AttestationReport, Firmware};
     use sev::parser::ByteParser;
 
-    use super::{REQUIRED_VMPL, SNP_FORMAT, SnpEnvelope, verify_quote};
+    use super::{
+        PRODUCT_LINE, REQUIRED_VMPL, SNP_FORMAT, SnpEnvelope, check_report_policy, verify_quote,
+    };
     use crate::{AttestationError, Attestor, Quote, ReportData};
+
+    /// What AMD's key service needs in order to name the certificate that
+    /// endorses this chip: the product line, the chip identity, and the four
+    /// security version numbers of the TCB the signing key is derived at.
+    pub struct VcekIdentity {
+        pub product_line: &'static str,
+        pub chip_id: String,
+        pub bootloader_spl: u8,
+        pub tee_spl: u8,
+        pub snp_spl: u8,
+        pub microcode_spl: u8,
+    }
+
+    /// Read the endorsement parameters straight out of the firmware.
+    ///
+    /// This needs no certificate. The guest-request channel is authenticated
+    /// under a key the hypervisor does not hold, so a guest can read the report
+    /// *about itself* long before it has anything to prove to anyone else —
+    /// and the report is the only channel by which the hardware tells it the
+    /// conditions of its own launch.
+    ///
+    /// That is why the platform posture is checked here rather than later: a
+    /// guest launched in a configuration this build refuses stops now, instead
+    /// of after a round trip to a key service that would have succeeded.
+    pub fn vcek_identity() -> Result<VcekIdentity, AttestationError> {
+        let mut firmware = Firmware::open()
+            .map_err(|e| AttestationError::Backend(format!("open /dev/sev-guest: {e}")))?;
+        let report_bytes = firmware
+            .get_report(None, Some([0u8; 64]), Some(REQUIRED_VMPL))
+            .map_err(|e| AttestationError::Backend(format!("guest report request: {e}")))?;
+        let report = AttestationReport::from_bytes(&report_bytes).map_err(|e| {
+            AttestationError::Backend(format!("firmware returned an unparsable report: {e}"))
+        })?;
+
+        check_report_policy(&report)?;
+
+        // A platform running with MASK_CHIP_ID publishes no chip identity, so
+        // the certificate endorsing it cannot be named. Saying so here beats
+        // querying for 128 zero characters and reporting the not-found.
+        if report.chip_id == [0u8; 64] {
+            return Err(AttestationError::PolicyRejected(
+                "platform masks its chip identity, so its endorsement cannot be named".into(),
+            ));
+        }
+
+        Ok(VcekIdentity {
+            product_line: PRODUCT_LINE,
+            chip_id: hex::encode(report.chip_id),
+            // `reported_tcb`, not `current_tcb`: this is the TCB the signing
+            // key is derived at, and the one `check_report_policy` gates.
+            bootloader_spl: report.reported_tcb.bootloader,
+            tee_spl: report.reported_tcb.tee,
+            snp_spl: report.reported_tcb.snp,
+            microcode_spl: report.reported_tcb.microcode,
+        })
+    }
 
     /// Prod SEV-SNP attestor. Holds the guest device open for minting and the
     /// endorsement chain to attach to each quote; verifying uses none of its
@@ -208,6 +284,9 @@ mod mint {
         firmware: Mutex<Firmware>,
         ask_der: Vec<u8>,
         vcek_der: Vec<u8>,
+        /// The TCB the held endorsement covers, as `(bootloader, tee, snp,
+        /// microcode)`.
+        endorsed_tcb: (u8, u8, u8, u8),
     }
 
     impl SnpAttestor {
@@ -221,12 +300,19 @@ mod mint {
         /// returning, so a guest holding the wrong chip's endorsement — or none
         /// at all — fails at startup instead of at its first handshake.
         pub fn new(ask_der: &[u8], vcek_der: &[u8]) -> Result<Self, AttestationError> {
+            let identity = vcek_identity()?;
             let firmware = Firmware::open()
                 .map_err(|e| AttestationError::Backend(format!("open /dev/sev-guest: {e}")))?;
             let attestor = Self {
                 firmware: Mutex::new(firmware),
                 ask_der: normalise_cert(ask_der, "ASK")?,
                 vcek_der: normalise_cert(vcek_der, "VCEK")?,
+                endorsed_tcb: (
+                    identity.bootloader_spl,
+                    identity.tee_spl,
+                    identity.snp_spl,
+                    identity.microcode_spl,
+                ),
             };
 
             let probe = ReportData::session(String::new(), String::new());
@@ -265,6 +351,19 @@ mod mint {
                 AttestationError::Backend(format!("firmware returned an unparsable report: {e}"))
             })?;
 
+            // A platform firmware update changes the TCB the signing key is
+            // derived at, which retires the endorsement this process holds.
+            // Without this the guest keeps minting quotes carrying a superseded
+            // certificate and the only signal is a chain failure at the far end.
+            let tcb = &report.reported_tcb;
+            if (tcb.bootloader, tcb.tee, tcb.snp, tcb.microcode) != self.endorsed_tcb {
+                let (bl, tee, snp, ucode) = self.endorsed_tcb;
+                return Err(AttestationError::PolicyRejected(format!(
+                    "platform TCB moved under this process; the held endorsement covers \
+                     bl={bl} tee={tee} snp={snp} ucode={ucode}"
+                )));
+            }
+
             let envelope = SnpEnvelope {
                 report: report_bytes,
                 ask_der: self.ask_der.clone(),
@@ -288,7 +387,7 @@ mod mint {
 }
 
 #[cfg(target_os = "linux")]
-pub use mint::SnpAttestor;
+pub use mint::{SnpAttestor, VcekIdentity, vcek_identity};
 
 #[cfg(test)]
 mod tests {
@@ -313,6 +412,7 @@ mod tests {
         report.vmpl = REQUIRED_VMPL;
         report.policy.set_smt_allowed(true);
         report.reported_tcb = tcb(4, 0, 29, 222);
+        report.launch_tcb = tcb(4, 0, 29, 222);
         report.cpuid_fam_id = Some(25);
         report.cpuid_mod_id = Some(1);
         report.cpuid_step = Some(1);
@@ -348,6 +448,19 @@ mod tests {
     fn rejects_non_zero_vmpl() {
         let mut report = acceptable_report();
         report.vmpl = 1;
+        assert!(matches!(
+            check_report_policy(&report),
+            Err(AttestationError::PolicyRejected(_))
+        ));
+    }
+
+    /// A guest created under superseded firmware keeps reporting the platform's
+    /// current TCB after the host updates it, so the floor has to look at what
+    /// was in force at launch too.
+    #[test]
+    fn rejects_a_guest_launched_below_the_floor() {
+        let mut report = acceptable_report();
+        report.launch_tcb = tcb(4, 0, 28, 222);
         assert!(matches!(
             check_report_policy(&report),
             Err(AttestationError::PolicyRejected(_))

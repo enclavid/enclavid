@@ -9,17 +9,22 @@
 //!
 //! Durable sealed state (session KV + L2 `cwasm` cache) NO LONGER lives
 //! here: it moved into the trusted RA-TLS storage-CVM (`crates/storage`),
-//! so the hatch holds ZERO internal state and only fronts external
-//! egress. Replaces the former `enclavid-host` gRPC server.
+//! so the hatch holds no session state at all and only fronts external
+//! egress. What it does hold is public material it fetched on someone's
+//! behalf and can refetch at any time — the issuer's JWKS, and the AMD
+//! certificate endorsing this machine's chip. Replaces the former
+//! `enclavid-host` gRPC server.
 //!
 //! Endpoints:
 //!   POST   /authorize             (AuthorizeRequest -> AuthorizeResponse | 401/403)
 //!   POST   /oci/pull              (PullRequest -> PullResponse | 404)
 //!   POST   /kbs/relay             (KbsRelayRequest -> KbsRelayResponse)
+//!   POST   /kds/vcek              (VcekRequest -> VcekResponse | 404)
 
 mod auth;
 mod error;
 mod kbs;
+mod kds;
 mod oci;
 mod transport;
 
@@ -28,10 +33,11 @@ use axum::routing::post;
 
 use crate::auth::AuthState;
 
-/// Shared handler state. `Clone` is cheap: `AuthState` is Arc-backed.
+/// Shared handler state. `Clone` is cheap: both fields are Arc-backed.
 #[derive(Clone)]
 pub struct AppState {
     pub auth: AuthState,
+    pub vcek: kds::VcekCache,
 }
 
 #[tokio::main]
@@ -50,12 +56,16 @@ async fn main() -> anyhow::Result<()> {
     let auth = AuthState::from_env()?;
 
     // ---- state ----
-    let state = AppState { auth };
+    let state = AppState {
+        auth,
+        vcek: kds::VcekCache::default(),
+    };
 
     let app = Router::new()
         .route("/authorize", post(auth::authorize))
         .route("/oci/pull", post(oci::pull))
         .route("/kbs/relay", post(kbs::relay))
+        .route("/kds/vcek", post(kds::vcek))
         .with_state(state);
 
     tracing::info!(addr = %listen_addr, "starting hatch HTTP server");
