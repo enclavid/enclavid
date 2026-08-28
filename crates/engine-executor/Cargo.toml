@@ -66,6 +66,7 @@ moka = { version = "0.12", features = ["future"], optional = true }
 # (default); flip to `enclavid-ra-tls/sev-snp` for prod.
 enclavid-ra-tls = { path = "../ra-tls", optional = true }
 fleet-transport = { path = "../fleet-transport", optional = true }
+role-config = { path = "../role-config", optional = true }
 # The RA-TLS backend is chosen here, not by ra-tls: a software identity the whole
 # dev fleet shares. No hardware arm yet — this worker has no path to AMD.
 enclavid-attestation = { path = "../attestation", default-features = false, features = ["mock"], optional = true }
@@ -101,6 +102,7 @@ worker = [
     "dep:moka",
     "dep:enclavid-ra-tls",
     "dep:fleet-transport",
+    "dep:role-config",
     "dep:enclavid-attestation",
     "dep:tokio-rustls",
     # Platform-split cwasm backing (memfd on Linux, tmpfile in dev) — see the
@@ -114,7 +116,7 @@ worker = [
 # the per-round child isolation rests on.
 guest-hardening = ["worker", "engine-supervisor/guest-hardening"]
 # The attested build: reach api over vsock instead of TCP.
-vsock = ["worker", "fleet-transport/vsock"]
+vsock = ["worker", "fleet-transport/vsock", "role-config/guest"]
 
 [[bin]]
 name = "execution-worker"

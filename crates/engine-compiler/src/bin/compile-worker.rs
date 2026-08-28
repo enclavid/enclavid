@@ -92,7 +92,7 @@ impl CompilerService for Supervisor {
 /// the sibling of this supervisor's own executable (they build + deploy
 /// together). Fails loud if neither resolves — per the minimal-defaults rule.
 fn child_exe() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("ENCLAVID_COMPILE_CHILD_BIN") {
+    if let Some(p) = role_config::optional("ENCLAVID_COMPILE_CHILD_BIN") {
         return std::path::PathBuf::from(p);
     }
     let mut p = std::env::current_exe()
@@ -115,24 +115,20 @@ async fn main() {
 
     // api-facing listen address: first arg or ENCLAVID_COMPILE_WORKER_LISTEN.
     // Fail loud if absent (per the minimal-defaults rule).
-    let addr = std::env::args()
-        .nth(1)
-        .or_else(|| std::env::var("ENCLAVID_COMPILE_WORKER_LISTEN").ok())
-        .expect(
-            "compile-worker: listen address required (arg1 or \
-             ENCLAVID_COMPILE_WORKER_LISTEN, e.g. 127.0.0.1:7001)",
-        );
+    let addr = std::env::args().nth(1).unwrap_or_else(|| {
+        role_config::required(
+            "ENCLAVID_COMPILE_WORKER_LISTEN",
+            "listen address for the compile-worker, e.g. 127.0.0.1:7001; \
+                 also accepted as arg1",
+        )
+    });
 
-    let max_compiles: usize = std::env::var("ENCLAVID_MAX_COMPILES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_COMPILES);
-    let deadline = Duration::from_secs(
-        std::env::var("ENCLAVID_COMPILE_DEADLINE_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_COMPILE_DEADLINE_SECS),
-    );
+    let max_compiles: usize =
+        role_config::or_default("ENCLAVID_MAX_COMPILES", DEFAULT_MAX_COMPILES);
+    let deadline = Duration::from_secs(role_config::or_default(
+        "ENCLAVID_COMPILE_DEADLINE_SECS",
+        DEFAULT_COMPILE_DEADLINE_SECS,
+    ));
     // Egress seccomp is ALWAYS ON in the build. It is a CONFIDENTIALITY control
     // (keeps a child an escape turns into native code from dialing the host), so it
     // must NOT be disableable by the untrusted host — which provisions the CVM's
@@ -142,10 +138,8 @@ async fn main() {
     // only lets the host OOM its OWN guest), so it stays env-configurable like
     // max_compiles / deadline; `ENCLAVID_COMPILE_AS_LIMIT_BYTES=0` disables it
     // (default 4 GiB — bounds a crafted input ballooning Cranelift's arena).
-    let as_bytes = std::env::var("ENCLAVID_COMPILE_AS_LIMIT_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(4 * 1024 * 1024 * 1024);
+    let as_bytes: u64 =
+        role_config::or_default("ENCLAVID_COMPILE_AS_LIMIT_BYTES", 4 * 1024 * 1024 * 1024);
     let hardening = Hardening {
         seccomp_egress: true,
         address_space: (as_bytes != 0).then_some(as_bytes),

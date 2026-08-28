@@ -29,6 +29,7 @@ hatch-protocol = { path = "../hatch-protocol" }
 # a blind CVM has no way to reach AMD for the certificate that would endorse it.
 enclavid-ra-tls = { path = "../ra-tls" }
 fleet-transport = { path = "../fleet-transport" }
+role-config = { path = "../role-config" }
 enclavid-attestation = { path = "../attestation", default-features = false, features = ["mock"] }
 
 # Per-session store: one embedded SQLite database file per session (bundled so
@@ -65,4 +66,4 @@ tempfile = "3"
 [features]
 # The attested build: reach api over vsock instead of TCP. A measured guest
 # kernel has no IP stack, so this is not a preference.
-vsock = ["fleet-transport/vsock"]
+vsock = ["fleet-transport/vsock", "role-config/guest"]

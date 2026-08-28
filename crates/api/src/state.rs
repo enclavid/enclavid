@@ -97,7 +97,7 @@ impl AppState {
             .await
             .expect("failed to connect to hatch");
         // Addresses are explicit config; fail loud if unset (minimal-defaults).
-        let compile_addr = crate::config::required(
+        let compile_addr = role_config::required(
             "ENCLAVID_COMPILE_WORKER_ADDR",
             "address of the compile-worker; start one with `cargo run -p engine-compiler \
              --features worker --bin compile-worker` and point api at its listen address",
@@ -107,7 +107,7 @@ impl AppState {
                 .await
                 .expect("failed to connect to compile-worker"),
         );
-        let exec_addr = crate::config::required(
+        let exec_addr = role_config::required(
             "ENCLAVID_EXECUTION_WORKER_ADDR",
             "address of the execution-worker; start one with `cargo run -p engine-executor \
              --features worker --bin execution-worker` and point api at its listen address",

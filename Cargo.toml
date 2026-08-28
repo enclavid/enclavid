@@ -17,6 +17,7 @@ members = [
     "crates/kbs-client",
     "crates/engine-rpc",
     "crates/fleet-transport",
+    "crates/role-config",
     "crates/ra-tls",
     "crates/storage-rpc",
     "crates/storage",

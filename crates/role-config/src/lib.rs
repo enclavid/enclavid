@@ -1,13 +1,21 @@
-//! Where this process reads its configuration from.
+//! Where a role binary reads its configuration from.
 //!
-//! Two sources, chosen at compile time by the same feature that selects the
-//! guest transport, because they are the same fact about a build: a guest has
-//! no environment. PID 1 runs `/bin/app` directly and sets nothing, so the
-//! kernel command line is the only channel into it.
+//! Two sources, chosen at compile time, because they are the same fact about a
+//! build: in a guest nothing fills an environment. There is no shell and no
+//! service manager, and PID 1 runs the role binary straight from its inittab.
+//! The kernel command line is the only channel in.
+//!
+//! It could be read less directly: the kernel hands init any unrecognised
+//! `key=value` parameter as an environment variable, so a guest is not strictly
+//! environment-less. Reading `/proc/cmdline` here instead does not avoid the
+//! compile-time split or the name transposition — the kernel would deliver
+//! `enclavid.address_out`, not `ENCLAVID_ADDRESS_OUT`, so both are needed
+//! either way. What it does avoid is depending on PID 1 to pass its environment
+//! on, and on the kernel's cap of a few dozen such variables.
 //!
 //! That channel is MEASURED. Which makes it the right place for values that say
-//! what this image *is* — the fixed vsock ports it speaks on, the host CID it
-//! reaches — and the wrong place for anything that differs per machine, since a
+//! what an image *is* — the fixed ports it speaks on, the host CID it reaches —
+//! and the wrong place for anything that differs per machine, since a
 //! machine-specific value would fragment the measurement into one per
 //! deployment and end reproducibility. It is also the wrong place for a secret:
 //! the command line is not confidential, and a secret compiled into every
@@ -17,8 +25,9 @@
 //! from `enclavid.address_out=` on the command line. One name per value, so a
 //! reader looking at either source recognises the other.
 
-/// The command line, read once. `/proc` is mounted by PID 1 before `/bin/app`.
-#[cfg(feature = "vsock")]
+/// The command line, read once. `/proc` is mounted by PID 1 before the role
+/// binary runs.
+#[cfg(feature = "guest")]
 fn cmdline() -> &'static str {
     use std::sync::OnceLock;
     static CMDLINE: OnceLock<String> = OnceLock::new();
@@ -29,7 +38,7 @@ fn cmdline() -> &'static str {
 }
 
 /// `ENCLAVID_ADDRESS_OUT` → `enclavid.address_out`.
-#[cfg(feature = "vsock")]
+#[cfg(feature = "guest")]
 fn cmdline_key(env_key: &str) -> String {
     match env_key.split_once('_') {
         Some((prefix, rest)) => format!("{}.{}", prefix.to_lowercase(), rest.to_lowercase()),
@@ -38,7 +47,7 @@ fn cmdline_key(env_key: &str) -> String {
 }
 
 /// Look a value up without deciding what a missing one means.
-#[cfg(feature = "vsock")]
+#[cfg(feature = "guest")]
 pub fn optional(env_key: &str) -> Option<String> {
     let prefix = format!("{}=", cmdline_key(env_key));
     cmdline()
@@ -47,7 +56,7 @@ pub fn optional(env_key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-#[cfg(not(feature = "vsock"))]
+#[cfg(not(feature = "guest"))]
 pub fn optional(env_key: &str) -> Option<String> {
     std::env::var(env_key).ok()
 }
@@ -63,7 +72,16 @@ pub fn required(env_key: &str, what: &str) -> String {
     })
 }
 
-#[cfg(all(test, feature = "vsock"))]
+/// A value with a compiled-in fallback. Anything reached this way is absent
+/// from a guest's command line unless that image chooses to set it — which is
+/// what keeps availability tuning from fragmenting the measurement.
+pub fn or_default<T: std::str::FromStr>(env_key: &str, fallback: T) -> T {
+    optional(env_key)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(fallback)
+}
+
+#[cfg(all(test, feature = "guest"))]
 mod tests {
     use super::cmdline_key;
 

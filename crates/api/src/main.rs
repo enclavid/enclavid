@@ -2,7 +2,6 @@ mod applicant;
 mod client;
 mod client_state;
 mod compiler;
-mod config;
 mod cwasm_cache;
 mod disclosure_commit;
 mod dto;
@@ -29,7 +28,7 @@ use crate::state::AppState;
 
 #[tokio::main]
 async fn main() {
-    let address_out = config::required("ENCLAVID_ADDRESS_OUT", "address of the hatch");
+    let address_out = role_config::required("ENCLAVID_ADDRESS_OUT", "address of the hatch");
 
     // The attestation backend, chosen at compile time — see `endorsement`.
     // FIRST, ahead of the storage-CVM dial below and both listeners: under
@@ -70,7 +69,7 @@ async fn main() {
     // `ENCLAVID_SESSION_TTL_SECS` (availability tuning). The hatch backend ignores it.
     const DEFAULT_SESSION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
     let ttl_secs = Some(
-        config::optional("ENCLAVID_SESSION_TTL_SECS")
+        role_config::optional("ENCLAVID_SESSION_TTL_SECS")
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_SESSION_TTL_SECS),
     );
@@ -101,13 +100,14 @@ async fn main() {
     let applicant_app = applicant::router(applicant_state);
 
     let client_handle = tokio::spawn({
-        let addr = config::required("ENCLAVID_ADDRESS_IN_CLIENT", "client-facing listener");
+        let addr = role_config::required("ENCLAVID_ADDRESS_IN_CLIENT", "client-facing listener");
         async move {
             transport::serve(client_app, &addr).await;
         }
     });
     let applicant_handle = tokio::spawn({
-        let addr = config::required("ENCLAVID_ADDRESS_IN_APPLICANT", "applicant-facing listener");
+        let addr =
+            role_config::required("ENCLAVID_ADDRESS_IN_APPLICANT", "applicant-facing listener");
         async move {
             transport::serve(applicant_app, &addr).await;
         }
@@ -124,7 +124,7 @@ async fn main() {
 async fn build_storage_backends(
     attestor: Arc<dyn Attestor>,
 ) -> (Arc<dyn SessionBackend>, Arc<dyn CacheBackend>) {
-    let addr = crate::config::required(
+    let addr = role_config::required(
         "ENCLAVID_STORAGE_ADDR",
         "address of the storage-CVM; start one with `cargo run -p enclavid-storage \
          --bin storage-cvm` and point api at its listen address",
@@ -151,7 +151,7 @@ fn load_tee_seal_key() -> [u8; 32] {
 
 #[cfg(not(feature = "sev-snp"))]
 fn load_tee_seal_key() -> [u8; 32] {
-    let hex_str = config::required("ENCLAVID_TEE_KEY", "32-byte hex sealing key");
+    let hex_str = role_config::required("ENCLAVID_TEE_KEY", "32-byte hex sealing key");
     let bytes = hex::decode(hex_str).expect("ENCLAVID_TEE_KEY: invalid hex");
     bytes
         .try_into()
