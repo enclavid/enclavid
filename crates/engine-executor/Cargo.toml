@@ -108,6 +108,9 @@ worker = [
     "dep:tempfile",
     "dep:zeroize",
 ]
+# The posture a measured guest image builds with: enforce the kernel ptrace floor
+# the per-round child isolation rests on.
+guest-hardening = ["worker", "engine-supervisor/guest-hardening"]
 
 [[bin]]
 name = "execution-worker"

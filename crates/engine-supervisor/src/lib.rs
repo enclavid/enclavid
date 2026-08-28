@@ -105,21 +105,34 @@ fn connection_cfg() -> remoc::Cfg {
 /// assert it at boot so a regressed/mis-provisioned image FAILS CLOSED here instead
 /// of silently losing sibling isolation.
 ///
-/// The floor is a COMPILE-TIME constant of 2 — deliberately NOT env-overridable.
-/// This defends against the host, and the host provisions the CVM environment, so a
+/// The floor is a COMPILE-TIME constant — deliberately NOT env-overridable. This
+/// defends against the host, and the host provisions the CVM environment, so a
 /// host-tunable knob could lower the floor to make the check vacuous (the same
-/// reason the egress seccomp posture is compile-time, not env). It is 2, not 1,
-/// because at `scope=1` a child can `PR_SET_PTRACER_ANY` and let a cooperating
-/// SIBLING attach — so scope=1 does NOT block the cross-sibling read this guards. A
-/// dev/CI Linux box below 2 must raise the real sysctl
-/// (`sudo sysctl -w kernel.yama.ptrace_scope=2`) to match prod, not lower a software
-/// floor. No-op off Linux (the workers only run under the Linux CVM; dev on macOS
-/// has no equivalent to check).
-#[cfg(target_os = "linux")]
+/// reason the egress seccomp posture is compile-time, not env).
+///
+/// It is 3 — "no attach" — and the reason is what runs in the guest. `scope=1`
+/// leaves an opt-in: a child can `PR_SET_PTRACER_ANY` and let a cooperating sibling
+/// attach. `scope=2` restricts attaching to `CAP_SYS_PTRACE`, which sounds like a
+/// restriction and is not one here: PID 1 runs `/bin/app` as root, the disposable
+/// children inherit that, and [`spawn_and_connect`] changes neither uid nor
+/// capabilities — it sets `no_new_privs`, `RLIMIT_AS` and an egress seccomp filter
+/// whose default action is Allow, so `ptrace` is not among the syscalls it denies.
+/// A child that an escape turns into native code therefore HOLDS `CAP_SYS_PTRACE`,
+/// and "admin-only attach" admits it. Only `scope=3` denies everyone, `PTRACE_TRACEME`
+/// included, and it cannot be lowered again without a reboot — which in a disposable
+/// measured guest is a property rather than a cost.
+///
+/// Nothing in this workspace calls `ptrace`; the supervisor controls children by
+/// spawn, kill and reap. So the floor costs the guest nothing.
+///
+/// The floor is enforced only under `guest-hardening`, the feature a measured image
+/// builds with. `scope=3` is irreversible without a reboot, so it is not something a
+/// developer's machine can be asked to set; the axis is compile-time rather than a
+/// runtime bypass, exactly as with the attestation backend. No-op off Linux.
+#[cfg(all(target_os = "linux", feature = "guest-hardening"))]
 pub fn assert_ptrace_hardened() {
-    // Fixed, measured floor — NOT env-tunable (see the fn doc). 2 because scope=1 is
-    // bypassable via PR_SET_PTRACER_ANY.
-    const MIN: u32 = 2;
+    // Fixed, measured floor — NOT env-tunable (see the fn doc).
+    const MIN: u32 = 3;
     let path = "/proc/sys/kernel/yama/ptrace_scope";
     match std::fs::read_to_string(path)
         .ok()
@@ -133,9 +146,9 @@ pub fn assert_ptrace_hardened() {
         }
         Some(v) => panic!(
             "engine-supervisor: yama ptrace_scope={v} < required {MIN}: a compromised child \
-             could read a SIBLING child's in-flight applicant memory. Set \
-             kernel.yama.ptrace_scope={MIN} in the (measured) CVM image, or on a dev/CI box \
-             `sudo sysctl -w kernel.yama.ptrace_scope={MIN}`."
+             could read a SIBLING child's in-flight applicant memory. The measured image sets \
+             `sysctl.kernel.yama.ptrace_scope={MIN}` on its command line; a build that reaches \
+             here without it is mis-provisioned."
         ),
         None => panic!(
             "engine-supervisor: cannot read {path} — the Yama LSM is not enabled, so ptrace is \
@@ -145,9 +158,11 @@ pub fn assert_ptrace_hardened() {
     }
 }
 
-/// Off-Linux no-op: the disposable-child workers only run under the Linux SEV-SNP
-/// CVM; there is no equivalent knob to check on the macOS dev host.
-#[cfg(not(target_os = "linux"))]
+/// No-op: either this is not Linux — the disposable-child workers only enforce the
+/// floor under the guest kernel — or this build did not ask for the floor, which a
+/// developer's machine cannot be expected to satisfy because `scope=3` cannot be
+/// undone without a reboot.
+#[cfg(not(all(target_os = "linux", feature = "guest-hardening")))]
 pub fn assert_ptrace_hardened() {}
 
 /// A failure of the SUPERVISOR itself — distinct from the domain call's own error

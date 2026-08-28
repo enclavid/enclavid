@@ -41,3 +41,10 @@ libc = "0.2"
 # only: the disposable-child workers run only under the SEV-SNP CVM.
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = "0.4"
+
+[features]
+# Whether this build ENFORCES the ptrace floor — see `assert_ptrace_hardened`.
+# Off by default because the floor is `scope=3`, which a machine cannot undo
+# without rebooting; a measured guest image builds with it on. Same shape as the
+# attestation backend axis: a compile-time choice, never a runtime bypass.
+guest-hardening = []
