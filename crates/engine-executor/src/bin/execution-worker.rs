@@ -59,7 +59,6 @@ use engine_supervisor::{ChildPool, Hardening};
 use moka::future::Cache;
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
-use tokio::net::{TcpListener, TcpStream};
 use zeroize::Zeroizing;
 
 use engine_executor::{Event, SessionState, compat_token};
@@ -452,7 +451,7 @@ async fn main() {
         ),
     });
 
-    let listener = TcpListener::bind(&addr)
+    let mut listener = fleet_transport::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("execution-worker: bind {addr}: {e}"));
     eprintln!(
@@ -496,7 +495,7 @@ async fn main() {
 
 /// RA-TLS-accept one api connection, then frame it with remoc and serve `ExecutorService`.
 async fn serve_conn(
-    stream: TcpStream,
+    stream: fleet_transport::Stream,
     ratls: tokio_rustls::TlsAcceptor,
     svc: Arc<Supervisor>,
 ) -> Result<(), String> {

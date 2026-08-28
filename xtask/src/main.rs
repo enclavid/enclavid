@@ -84,9 +84,9 @@ const PLUGINS: &[Plugin] = &[
     },
     Plugin {
         name: "extra",
-        crate_dir: "crates/engine/tests/fixtures/test-extra",
-        module: "crates/engine/tests/fixtures/test-extra/target/wasm32-unknown-unknown/release/test_extra.wasm",
-        src: "crates/engine/tests/fixtures/test-extra",
+        crate_dir: "crates/engine-executor/tests/fixtures/test-extra",
+        module: "crates/engine-executor/tests/fixtures/test-extra/target/wasm32-unknown-unknown/release/test_extra.wasm",
+        src: "crates/engine-executor/tests/fixtures/test-extra",
     },
 ];
 

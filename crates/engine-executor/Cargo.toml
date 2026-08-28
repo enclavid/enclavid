@@ -65,6 +65,7 @@ moka = { version = "0.12", features = ["future"], optional = true }
 # TCP stream in an attested TLS server. Dev-bypass = the mock attestation backend
 # (default); flip to `enclavid-ra-tls/sev-snp` for prod.
 enclavid-ra-tls = { path = "../ra-tls", optional = true }
+fleet-transport = { path = "../fleet-transport", optional = true }
 # The RA-TLS backend is chosen here, not by ra-tls: a software identity the whole
 # dev fleet shares. No hardware arm yet — this worker has no path to AMD.
 enclavid-attestation = { path = "../attestation", default-features = false, features = ["mock"], optional = true }
@@ -99,6 +100,7 @@ worker = [
     "dep:tokio",
     "dep:moka",
     "dep:enclavid-ra-tls",
+    "dep:fleet-transport",
     "dep:enclavid-attestation",
     "dep:tokio-rustls",
     # Platform-split cwasm backing (memfd on Linux, tmpfile in dev) — see the
@@ -111,6 +113,8 @@ worker = [
 # The posture a measured guest image builds with: enforce the kernel ptrace floor
 # the per-round child isolation rests on.
 guest-hardening = ["worker", "engine-supervisor/guest-hardening"]
+# The attested build: reach api over vsock instead of TCP.
+vsock = ["worker", "fleet-transport/vsock"]
 
 [[bin]]
 name = "execution-worker"

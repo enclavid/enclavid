@@ -102,7 +102,7 @@ pub async fn connect_storage(
     addr: &str,
     attestor: Arc<dyn enclavid_attestation::Attestor>,
 ) -> Result<(SessionCvmBackend, CacheCvmBackend), String> {
-    let tcp = tokio::net::TcpStream::connect(addr)
+    let stream = fleet_transport::dial(addr)
         .await
         .map_err(|e| format!("connect storage-CVM at `{addr}`: {e}"))?;
     // Mutual RA-TLS: we attest the storage-CVM's cert (pinned measurement) and
@@ -112,7 +112,7 @@ pub async fn connect_storage(
         .map_err(|e| format!("storage-CVM RA-TLS client config: {e}"))?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let tls = connector
-        .connect(enclavid_ra_tls::server_name(), tcp)
+        .connect(enclavid_ra_tls::server_name(), stream)
         .await
         .map_err(|e| format!("storage-CVM RA-TLS handshake: {e}"))?;
     let (read, write) = tokio::io::split(tls);

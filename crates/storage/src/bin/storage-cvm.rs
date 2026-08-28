@@ -18,7 +18,6 @@ use std::time::Duration;
 use object_store::local::LocalFileSystem;
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
-use tokio::net::{TcpListener, TcpStream};
 
 use enclavid_storage::{CacheBlobs, SessionStore, StorageSvc, now_unix};
 use storage_rpc::{CacheServiceServerShared, SessionStoreServiceServerShared, StorageClients};
@@ -82,7 +81,7 @@ async fn main() {
         });
     }
 
-    let listener = TcpListener::bind(&listen)
+    let mut listener = fleet_transport::bind(&listen)
         .await
         .unwrap_or_else(|e| panic!("storage-cvm: bind {listen}: {e}"));
     eprintln!(
@@ -123,7 +122,7 @@ async fn main() {
 /// RA-TLS-accept one api connection, frame it with remoc, and serve BOTH services
 /// (their clients sent to the api on the base channel).
 async fn serve_conn(
-    stream: TcpStream,
+    stream: fleet_transport::Stream,
     ratls: tokio_rustls::TlsAcceptor,
     svc: Arc<StorageSvc>,
 ) -> Result<(), String> {

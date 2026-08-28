@@ -16,6 +16,7 @@ members = [
     "crates/embedded",
     "crates/kbs-client",
     "crates/engine-rpc",
+    "crates/fleet-transport",
     "crates/ra-tls",
     "crates/storage-rpc",
     "crates/storage",

@@ -31,7 +31,6 @@ use std::time::Duration;
 use engine_supervisor::{ChildPool, Hardening};
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
-use tokio::net::{TcpListener, TcpStream};
 
 use engine_rpc::{
     CompileError, CompiledBundle, CompilerService, CompilerServiceClient,
@@ -158,7 +157,7 @@ async fn main() {
         pool: ChildPool::new(child_exe.clone(), max_compiles, deadline, Some(hardening)),
     });
 
-    let listener = TcpListener::bind(&addr)
+    let mut listener = fleet_transport::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("compile-worker: bind {addr}: {e}"));
     eprintln!(
@@ -201,7 +200,7 @@ async fn main() {
 
 /// RA-TLS-accept one api connection, then frame it with remoc and serve `CompilerService`.
 async fn serve_conn(
-    stream: TcpStream,
+    stream: fleet_transport::Stream,
     ratls: tokio_rustls::TlsAcceptor,
     svc: Arc<Supervisor>,
 ) -> Result<(), String> {

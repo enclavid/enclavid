@@ -105,7 +105,7 @@ pub async fn connect_execution_worker(
 ) -> Result<Executor, String> {
     type Cli = ExecutorServiceClient<Ciborium>;
 
-    let tcp = tokio::net::TcpStream::connect(addr)
+    let stream = fleet_transport::dial(addr)
         .await
         .map_err(|e| format!("connect execution-worker at `{addr}`: {e}"))?;
     // Mutual RA-TLS over the dial: we attest the worker's cert (pinned measurement)
@@ -115,7 +115,7 @@ pub async fn connect_execution_worker(
         .map_err(|e| format!("execution-worker RA-TLS client config: {e}"))?;
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
     let tls = connector
-        .connect(enclavid_ra_tls::server_name(), tcp)
+        .connect(enclavid_ra_tls::server_name(), stream)
         .await
         .map_err(|e| format!("execution-worker RA-TLS handshake: {e}"))?;
     let (read, write) = tokio::io::split(tls);

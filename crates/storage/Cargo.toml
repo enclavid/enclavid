@@ -28,6 +28,7 @@ hatch-protocol = { path = "../hatch-protocol" }
 # software identity the whole dev fleet shares. There is no hardware arm yet —
 # a blind CVM has no way to reach AMD for the certificate that would endorse it.
 enclavid-ra-tls = { path = "../ra-tls" }
+fleet-transport = { path = "../fleet-transport" }
 enclavid-attestation = { path = "../attestation", default-features = false, features = ["mock"] }
 
 # Per-session store: one embedded SQLite database file per session (bundled so
@@ -60,3 +61,8 @@ hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+
+[features]
+# The attested build: reach api over vsock instead of TCP. A measured guest
+# kernel has no IP stack, so this is not a preference.
+vsock = ["fleet-transport/vsock"]
