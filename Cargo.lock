@@ -1316,6 +1316,7 @@ dependencies = [
  "enclavid-ra-tls",
  "engine-rpc",
  "engine-types",
+ "fleet-transport",
  "futures",
  "hatch-client",
  "hatch-protocol",
@@ -1450,6 +1451,7 @@ version = "0.1.0"
 dependencies = [
  "enclavid-attestation",
  "enclavid-ra-tls",
+ "fleet-transport",
  "hatch-protocol",
  "hex",
  "object_store",
@@ -1488,6 +1490,7 @@ dependencies = [
  "engine-rpc",
  "engine-supervisor",
  "engine-types",
+ "fleet-transport",
  "remoc",
  "tokio",
  "tokio-rustls",
@@ -1509,6 +1512,7 @@ dependencies = [
  "engine-rpc",
  "engine-supervisor",
  "engine-types",
+ "fleet-transport",
  "hatch-client",
  "jpeg-encoder",
  "memfd",
@@ -1652,6 +1656,14 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "fleet-transport"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tokio-vsock",
 ]
 
 [[package]]
