@@ -97,20 +97,20 @@ impl AppState {
             .await
             .expect("failed to connect to hatch");
         // Addresses are explicit config; fail loud if unset (minimal-defaults).
-        let compile_addr = role_config::required(
-            "ENCLAVID_COMPILE_WORKER_ADDR",
-            "address of the compile-worker; start one with `cargo run -p engine-compiler \
-             --features worker --bin compile-worker` and point api at its listen address",
+        let compile_addr = std::env::var("ENCLAVID_COMPILE_WORKER_ADDR").expect(
+            "ENCLAVID_COMPILE_WORKER_ADDR not set (address of the compile-worker; start one \
+             with `cargo run -p engine-compiler --features worker --bin compile-worker` and \
+             point api at its listen address)",
         );
         let compiler = Arc::new(
             connect_compile_worker(&compile_addr, attestor.clone())
                 .await
                 .expect("failed to connect to compile-worker"),
         );
-        let exec_addr = role_config::required(
-            "ENCLAVID_EXECUTION_WORKER_ADDR",
-            "address of the execution-worker; start one with `cargo run -p engine-executor \
-             --features worker --bin execution-worker` and point api at its listen address",
+        let exec_addr = std::env::var("ENCLAVID_EXECUTION_WORKER_ADDR").expect(
+            "ENCLAVID_EXECUTION_WORKER_ADDR not set (address of the execution-worker; start one \
+             with `cargo run -p engine-executor --features worker --bin execution-worker` and \
+             point api at its listen address)",
         );
         let executor = Arc::new(
             connect_execution_worker(&exec_addr, attestor)

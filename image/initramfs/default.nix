@@ -23,7 +23,12 @@
 # assembled by an unprivileged builder with plain cpio, no mknod and no
 # gen_init_cpio.
 { app
+, inittab
 , name ? "app"
+  # Directories the role needs that the pseudo-filesystems do not provide —
+  # a mount point for a persistent volume, say. Empty for a diskless role, so
+  # its image carries nothing it does not use.
+, dirs ? [ ]
 }:
 let
   nixpkgs = builtins.fetchTarball {
@@ -39,10 +44,11 @@ pkgs.runCommand "enclavid-initramfs-${name}"
   nativeBuildInputs = [ pkgs.cpio pkgs.gzip ];
 } ''
   mkdir -p root/bin root/etc root/proc root/sys root/dev root/tmp root/run
+  ${pkgs.lib.concatMapStringsSep "\n  " (d: "mkdir -p root/${d}") dirs}
 
   install -m 0755 ${init}/busybox root/init
   install -m 0755 ${init}/busybox root/bin/busybox
-  install -m 0644 ${init}/inittab root/etc/inittab
+  install -m 0644 ${inittab}      root/etc/inittab
   install -m 0755 ${app}          root/bin/app
 
   mkdir -p $out

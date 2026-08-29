@@ -5,6 +5,11 @@
 # else. Same shape as image/kernel: nixpkgs pinned by revision, source pinned by
 # digest, configuration expressed as a fragment over an upstream baseline.
 #
+# Produces the binary only. What PID 1 is TOLD to do differs per role — the
+# storage role mounts a disk, the diskless ones have none to mount — so the
+# inittab lives beside this in `inittab/<role>` and reaches the image through
+# `image/initramfs`, not through here.
+#
 #   nix-build image/init
 #   cat result/busybox.sha256
 #
@@ -85,7 +90,6 @@ musl.stdenv.mkDerivation {
     mkdir -p $out
     cp busybox $out/busybox
     cp .config $out/config
-    cp ${./inittab} $out/inittab
     (cd $out && sha256sum busybox > busybox.sha256)
     runHook postInstall
   '';

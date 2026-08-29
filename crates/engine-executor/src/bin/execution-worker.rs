@@ -370,7 +370,7 @@ impl ChildCallbacks for RelayCallbacks {
 /// the sibling of this supervisor's own executable (they build + deploy
 /// together). Fails loud if neither resolves — per the minimal-defaults rule.
 fn child_exe() -> std::path::PathBuf {
-    if let Some(p) = role_config::optional("ENCLAVID_SESSION_CHILD_BIN") {
+    if let Ok(p) = std::env::var("ENCLAVID_SESSION_CHILD_BIN") {
         return std::path::PathBuf::from(p);
     }
     let mut p = std::env::current_exe()
@@ -393,23 +393,30 @@ async fn main() {
 
     // api-facing listen address: first arg or ENCLAVID_EXECUTION_WORKER_LISTEN.
     // Fail loud if absent (per the minimal-defaults rule).
-    let addr = std::env::args().nth(1).unwrap_or_else(|| {
-        role_config::required(
-            "ENCLAVID_EXECUTION_WORKER_LISTEN",
-            "listen address for the execution-worker, e.g. 127.0.0.1:7002; \
-                 also accepted as arg1",
-        )
-    });
+    let addr = std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("ENCLAVID_EXECUTION_WORKER_LISTEN").ok())
+        .expect(
+            "execution-worker: listen address required (arg1 or \
+             ENCLAVID_EXECUTION_WORKER_LISTEN, e.g. 127.0.0.1:7002)",
+        );
 
     // Hard cap on concurrent per-round children (deployment envelope). Tunable;
     // a sane default keeps memory bounded (one process each).
-    let max_children: usize = role_config::or_default("ENCLAVID_MAX_CHILDREN", 64);
-    let round_deadline = Duration::from_secs(role_config::or_default(
-        "ENCLAVID_ROUND_DEADLINE_SECS",
-        DEFAULT_ROUND_DEADLINE_SECS,
-    ));
-    let bundle_cache_bytes: u64 =
-        role_config::or_default("ENCLAVID_BUNDLE_CACHE_BYTES", DEFAULT_BUNDLE_CACHE_BYTES);
+    let max_children: usize = std::env::var("ENCLAVID_MAX_CHILDREN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(64);
+    let round_deadline = Duration::from_secs(
+        std::env::var("ENCLAVID_ROUND_DEADLINE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_ROUND_DEADLINE_SECS),
+    );
+    let bundle_cache_bytes: u64 = std::env::var("ENCLAVID_BUNDLE_CACHE_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_BUNDLE_CACHE_BYTES);
 
     // Child sandbox posture: egress seccomp is ALWAYS ON. It is a CONFIDENTIALITY
     // control and must not be disableable by the untrusted host, which provisions

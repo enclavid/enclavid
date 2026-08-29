@@ -31,17 +31,19 @@ const CACHE_CONCURRENCY: usize = 8;
 #[tokio::main]
 async fn main() {
     // Explicit config; fail loud if unset (minimal-defaults).
-    let listen = role_config::required(
-        "ENCLAVID_STORAGE_LISTEN",
-        "listen address for the storage-CVM, e.g. 0.0.0.0:9100",
+    let listen = std::env::var("ENCLAVID_STORAGE_LISTEN").expect(
+        "ENCLAVID_STORAGE_LISTEN not set (listen address for the storage-CVM, e.g. 0.0.0.0:9100)",
     );
-    let sessions_dir = role_config::required(
-        "ENCLAVID_STORAGE_SESSIONS_DIR",
-        "directory for the session store: per-session SQLite files under blobs/ plus \
-         the deadline index meta.sqlite",
+    let sessions_dir = std::env::var("ENCLAVID_STORAGE_SESSIONS_DIR").expect(
+        "ENCLAVID_STORAGE_SESSIONS_DIR not set (directory for the session store: \
+         per-session SQLite files under blobs/ + the deadline index meta.sqlite)",
     );
-    let cache_dir = role_config::required("ENCLAVID_STORAGE_CACHE_DIR", "L2 cwasm cache directory");
-    let sweep_secs: u64 = role_config::or_default("ENCLAVID_STORAGE_SWEEP_SECS", 60);
+    let cache_dir = std::env::var("ENCLAVID_STORAGE_CACHE_DIR")
+        .expect("ENCLAVID_STORAGE_CACHE_DIR not set (L2 cwasm cache directory)");
+    let sweep_secs: u64 = std::env::var("ENCLAVID_STORAGE_SWEEP_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
 
     let sessions = Arc::new(
         SessionStore::open(&sessions_dir)

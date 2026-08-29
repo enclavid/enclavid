@@ -75,10 +75,14 @@ in
     features = [ "sev-snp" "vsock" ];
   };
 
-  # The storage CVM: the blind ciphertext store.
+  # The storage CVM: the blind ciphertext store. `vsock` for the same reason as
+  # api — a guest kernel with no IP stack cannot bind a TCP listener. It has no
+  # attestation axis to choose: the endorsement a hardware attestor needs would
+  # have to reach a role that, by design, dials nothing.
   storage = mkApp {
     pname = "enclavid-app-storage";
     package = "enclavid-storage";
     binary = "storage-cvm";
+    features = [ "vsock" ];
   };
 }

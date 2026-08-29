@@ -1,1 +1,0 @@
-console=ttyS0 earlyprintk=serial panic=-1 oops=panic sysctl.kernel.yama.ptrace_scope=3 enclavid.address_out=vsock://2:8000 enclavid.address_in_client=8443 enclavid.address_in_applicant=8444 enclavid.storage_addr=vsock://2:8001 enclavid.compile_worker_addr=vsock://2:8002 enclavid.execution_worker_addr=vsock://2:8003
