@@ -7,6 +7,7 @@
 #   /init          busybox
 #   /bin/busybox   the same binary, under the name its inittab calls
 #   /bin/app       the role's application — api, storage-cvm, …
+#   /bin/<sibling>  binaries the application execs, under the names it uses
 #   /etc/inittab   PID 1's whole program
 #
 # Usage, with an already-built static binary:
@@ -29,6 +30,11 @@
   # a mount point for a persistent volume, say. Empty for a diskless role, so
   # its image carries nothing it does not use.
 , dirs ? [ ]
+  # Binaries the application execs, keyed by the name it looks for. The workers
+  # spawn a fresh child per round and resolve it as a SIBLING of their own
+  # executable, so the name is what matters and `/bin/app` is not enough on its
+  # own. Empty for a role that spawns nothing.
+, siblings ? { }
 }:
 let
   nixpkgs = builtins.fetchTarball {
@@ -50,6 +56,9 @@ pkgs.runCommand "enclavid-initramfs-${name}"
   install -m 0755 ${init}/busybox root/bin/busybox
   install -m 0644 ${inittab}      root/etc/inittab
   install -m 0755 ${app}          root/bin/app
+  ${pkgs.lib.concatStringsSep "\n  " (
+    pkgs.lib.mapAttrsToList (n: path: "install -m 0755 ${path} root/bin/${n}") siblings
+  )}
 
   mkdir -p $out
 

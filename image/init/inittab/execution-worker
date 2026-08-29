@@ -1,0 +1,32 @@
+# PID 1's whole program. It is part of the initramfs and therefore part of the
+# measured launch, so it is meant to be read in full — there is nothing here
+# that is not on this page.
+#
+# busybox init execs these directly; none contain shell metacharacters, which
+# matters because the image has no shell to fall back on.
+
+# The pseudo-filesystems the runtime needs before /bin/app starts.
+#
+# /dev is not a formality: /dev/sev-guest is where attestation reports come
+# from, and engine-supervisor points each disposable child's stdout and stderr
+# at /dev/null so an escaped child cannot write a round's plaintext to a
+# descriptor it inherited.
+#
+# /tmp and /run are tmpfs because the CVM has no disk — every writable path is
+# encrypted RAM. Both are noexec: nothing here ever executes out of a writable
+# path, and refusing up front costs nothing.
+::sysinit:/bin/busybox mount -t proc -o nosuid,nodev,noexec proc /proc
+::sysinit:/bin/busybox mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
+::sysinit:/bin/busybox mount -t devtmpfs -o nosuid devtmpfs /dev
+::sysinit:/bin/busybox mount -t tmpfs -o nosuid,nodev,noexec tmpfs /tmp
+::sysinit:/bin/busybox mount -t tmpfs -o nosuid,nodev,noexec tmpfs /run
+
+# The application. Each role's initramfs provides its own binary under this one
+# name, so PID 1 needs no configuration and there is nothing to mis-set.
+::wait:/bin/app
+
+# When the application ends, the machine ends. This runs whether it exited
+# cleanly or died, which is the behaviour we want: there is no in-place
+# recovery, and a CVM with nothing left to do should stop existing rather than
+# sit idle holding a session's memory.
+::once:/bin/busybox poweroff -f

@@ -32,7 +32,11 @@ let
   # `noDefaultFeatures` is per role rather than blanket: `--no-default-features`
   # applies to the selected package, so setting it where a package has no
   # feature table changes nothing and only obscures which roles depend on it.
-  mkApp = { pname, package, binary, features ? [ ], noDefaultFeatures ? false }:
+  # `siblings` are the other [[bin]] targets of the same package that the role
+  # execs at runtime — the workers spawn a fresh child per round and look for it
+  # next to their own executable. They build together and must ship together, so
+  # they are one derivation rather than a dependency between two.
+  mkApp = { pname, package, binary, siblings ? [ ], features ? [ ], noDefaultFeatures ? false }:
     static.rustPlatform.buildRustPackage {
       inherit pname src;
       version = "0.1.0";
@@ -50,8 +54,10 @@ let
       installPhase = ''
         runHook preInstall
         mkdir -p $out
-        install -m 0755 "target/${static.stdenv.hostPlatform.rust.rustcTarget}/release/${binary}" $out/${binary}
-        (cd $out && sha256sum ${binary} > ${binary}.sha256)
+        for b in ${binary} ${builtins.concatStringsSep " " siblings}; do
+          install -m 0755 "target/${static.stdenv.hostPlatform.rust.rustcTarget}/release/$b" $out/$b
+          (cd $out && sha256sum "$b" > "$b.sha256")
+        done
         runHook postInstall
       '';
     };
@@ -84,5 +90,28 @@ in
     package = "enclavid-storage";
     binary = "storage-cvm";
     features = [ "vsock" ];
+  };
+
+  # The compile half of the engine: fuses a policy with its pinned plugins and
+  # Cranelift-compiles the result. Diskless — everything it produces goes back
+  # over the wire. `guest-hardening` is what makes the per-round child isolation
+  # its own containment rests on an enforced floor rather than an assumption.
+  compile-worker = mkApp {
+    pname = "enclavid-app-compile-worker";
+    package = "engine-compiler";
+    binary = "compile-worker";
+    siblings = [ "compile-child" ];
+    features = [ "vsock" "guest-hardening" ];
+  };
+
+  # The execute half: runs one reducer round per disposable child. This is the
+  # role that touches applicant data in the clear, and the only one that runs
+  # the consumer's own untrusted wasm.
+  execution-worker = mkApp {
+    pname = "enclavid-app-execution-worker";
+    package = "engine-executor";
+    binary = "execution-worker";
+    siblings = [ "session-child" ];
+    features = [ "vsock" "guest-hardening" ];
   };
 }
