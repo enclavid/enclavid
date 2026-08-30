@@ -1,0 +1,11 @@
+[package]
+name = "enclavid-boundary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The concern vocabulary for values crossing the TEE edge — `Untrusted`,
+# `Exposed`, the markers, and `reason!`. No dependencies, deliberately: it is
+# linked by the logger, which installs before anything else exists in a role.
+[dependencies]

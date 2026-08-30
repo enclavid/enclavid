@@ -68,13 +68,49 @@ command line, changing one changes the measurement.
 Each outbound port needs something on the host listening there and splicing
 onward to the peer guest; the guest neither knows nor can discover which one.
 
-**`production` carries no `console=`.** Everything the kernel prints on a serial
-console is plaintext the host can capture, and a panic trace carries pointers
-and register values from whatever the guest was doing. Diagnostics are supposed
-to leave over RA-TLS, not over a channel the host owns by construction.
+**`production` says `console=null`, and the token is load-bearing.** Omitting
+`console=` does NOT produce a silent kernel — it produces a kernel that enables
+the FIRST console to register. On an ordinary x86 build the VT console absorbs
+that; `CONFIG_VT` is off here, so the 8250 registers first, comes up enabled,
+and `CON_PRINTBUFFER` replays the whole buffered boot log. Measured: 25110
+bytes on the serial port from a command line with no `console=` at all, versus
+183 with `console=null`.
 
-The cost is that a failure before RA-TLS is up is silent. That is what `debug`
-is for — the same image with a console, and therefore a different measurement,
+Those remaining 183 are OVMF's screen-clearing escapes and one line from the
+EFI stub — firmware, before the kernel exists, constant on every boot. No
+kernel line survives, which is what matters: a panic trace carries pointers and
+register values from whatever the guest was doing, and `panic()` calls
+`console_verbose()`, so a log level cannot be trusted to hold it back. Only the
+absence of an enabled console can.
+
+Silencing the kernel does not silence the role. `ENCLAVID_LOG_DEVICE` names the
+same port, and the role opens it itself — see `crates/public-logger`. That is the
+whole difference: the port carries only lines a `log!` site wrote down a reason
+for, plus a panic report. Everything else in the process — a `println!` from any
+dependency, a panic payload, output from C underneath — keeps going to the
+discarding console it already went to.
+
+How much a panic report says is per role. Where the measured code is the only
+code, a panic names `file:line`, because aiming that choice at a secret means
+rewriting the role and so changing the measurement. The execution worker runs
+the consumer's policy — adversary-chosen wasm that executes inside the measured
+image without altering it — so there a panic says only that one happened.
+
+Below that sits a third tier, and it is the one the kernel switch governs.
+`debug!` in `crates/public-logger` writes to stderr — the discarding console —
+and needs no reason because nothing it says leaves the TEE. It is also not
+compiled at all without the `debug` cargo feature, which is why `app/` ships
+`<role>` and `<role>-debug`: were the tier gated only by `console=null`, one
+wrong line in `kernel/` or here would put every `debug!` in the tree, session
+ids and error chains included, in front of the host at once. Not building them
+means that mistake can leak only what dependencies print.
+
+The pair belongs together — a `-debug` app wants the `debug` command line.
+Mismatching is confusing and never unsafe: one way writes into `ttynull`, the
+other says nothing.
+
+What stays silent is a failure nobody annotated. That is what `debug` is for —
+the same image with a kernel console, and therefore a different measurement,
 which no consumer pins. Reaching for it is one file away, and it costs about
 190 ms of boot time.
 

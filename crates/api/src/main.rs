@@ -8,6 +8,7 @@ mod dto;
 mod endorsement;
 mod error;
 mod executor;
+mod fleet;
 mod input;
 mod keyprovider;
 mod limits;
@@ -22,12 +23,23 @@ use std::sync::Arc;
 
 use enclavid_attestation::Attestor;
 use hatch_client::{CacheBackend, CacheStore, SessionBackend, SessionStore};
+use public_logger::{log, reason};
 
 use crate::client_state::ClientState;
 use crate::state::AppState;
 
 #[tokio::main]
 async fn main() {
+    // First, so nothing can speak before the channel exists. Panic locations
+    // are on: this binary IS the measured code, so nothing that could aim a
+    // panic at a secret runs here without changing the measurement.
+    public_logger::install();
+    public_logger::install_panic(true);
+    log!(
+        reason!("a constant, emitted before this process holds anything at all"),
+        "api: alive"
+    );
+
     let address_out = std::env::var("ENCLAVID_ADDRESS_OUT").expect("ENCLAVID_ADDRESS_OUT not set");
 
     // The attestation backend, chosen at compile time — see `endorsement`.
@@ -37,6 +49,13 @@ async fn main() {
     // A guest that answers no to either must reach nothing and serve nobody,
     // so nothing that talks to anything may precede it.
     let attestor: Arc<dyn Attestor> = endorsement::build_attestor(&address_out).await;
+    log!(
+        reason!(
+            "a constant; reaching this line says only that the platform was \
+                 accepted and an endorsement was obtained"
+        ),
+        "api: attested"
+    );
 
     // SessionStore is the hatch-client HTTP-over-vsock client for
     // per-session typed-field storage. Shared between client API
@@ -75,6 +94,10 @@ async fn main() {
             .unwrap_or(DEFAULT_SESSION_TTL_SECS),
     );
     let (session_backend, cache_backend) = build_storage_backends(attestor.clone()).await;
+    log!(
+        reason!("a constant; the address it refers to is on the measured command line"),
+        "api: storage-CVM connected"
+    );
     let session_store = Arc::new(SessionStore::new(session_backend, tee_seal_key, ttl_secs));
     let cache_store = CacheStore::new(cache_backend, &tee_seal_key);
 
@@ -95,6 +118,12 @@ async fn main() {
             attestor,
         )
         .await,
+    );
+
+    // Every peer is up and both surfaces are about to open.
+    log!(
+        reason!("a constant, and the ports are on the measured command line"),
+        "api: serving"
     );
 
     let client_app = client::router(client_state);
@@ -131,9 +160,11 @@ async fn build_storage_backends(
          `cargo run -p enclavid-storage --bin storage-cvm` and point api at its \
          listen address)",
     );
-    let (session, cache) = storage::connect_storage(&addr, attestor)
-        .await
-        .expect("failed to connect to storage-CVM");
+    let (session, cache) = fleet::dial("storage-CVM", || {
+        storage::connect_storage(&addr, attestor.clone())
+    })
+    .await
+    .expect("failed to connect to storage-CVM");
     let session: Arc<dyn SessionBackend> = Arc::new(session);
     let cache: Arc<dyn CacheBackend> = Arc::new(cache);
     (session, cache)

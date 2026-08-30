@@ -7,6 +7,7 @@
 //! code elsewhere.
 
 use axum::Router;
+use public_logger::{log, reason};
 
 /// Binds the inbound listener at `addr` and runs the HTTP server.
 ///
@@ -18,7 +19,10 @@ pub async fn serve(app: Router, addr: &str) {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind TCP listener");
-    println!("listening on tcp://{addr}");
+    log!(
+        reason!("the address is on the measured command line"),
+        "api: listening on tcp://{addr}"
+    );
     axum::serve(listener, app).await.expect("server error");
 }
 
@@ -29,7 +33,10 @@ pub async fn serve(app: Router, addr: &str) {
     let port: u32 = addr.parse().expect("vsock address must be a u32 port");
     let vsock_addr = VsockAddr::new(VMADDR_CID_ANY, port);
     let listener = VsockListener::bind(vsock_addr).expect("failed to bind vsock listener");
-    println!("listening on vsock://*:{port}");
+    log!(
+        reason!("the port is on the measured command line"),
+        "api: listening on vsock://*:{port}"
+    );
     axum::serve(VsockServeListener(listener), app)
         .await
         .expect("server error");
@@ -50,7 +57,7 @@ impl axum::serve::Listener for VsockServeListener {
             match self.0.accept().await {
                 Ok(pair) => return pair,
                 Err(e) => {
-                    eprintln!("vsock accept error: {e}");
+                    public_logger::debug!("vsock accept error: {e}");
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
             }

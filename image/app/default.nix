@@ -7,6 +7,9 @@
 #   nix-build image/app -A api
 #   nix-build image/app -A storage
 #
+# Every role also has an `-A <role>-debug` twin, which differs by one feature
+# and belongs with `cmdline/<role>/debug`. See `withDebug` below.
+#
 # Static musl, because the initramfs carries no libc and no dynamic loader —
 # see image/initramfs.
 let
@@ -61,8 +64,32 @@ let
         runHook postInstall
       '';
     };
+
+  # Each role ships as two derivations, `<role>` and `<role>-debug`. They differ
+  # in one feature: `debug` compiles the `debug!` sites in. Without it those
+  # calls are not built at all, so a production binary carries no diagnostic
+  # that nobody wrote a reason for — see crates/public-logger.
+  #
+  # Why the app and not just the command line. `cmdline/<role>/debug` already
+  # opens a kernel console, and that alone would have been one switch instead of
+  # two. But then both tiers of output would hang off the same `console=null`:
+  # one wrong line in kernel/ or cmdline/ and every `debug!` in the tree — some
+  # carrying a session id and an error chain — reaches the host at once. Not
+  # compiling them decouples the tiers, so that mistake can only leak what
+  # dependencies print.
+  #
+  # The cost is that the pair must be kept together: a debug app wants a debug
+  # command line. Getting it wrong is confusing, never unsafe — the mismatches
+  # are "writes into ttynull" and "says nothing", in that order.
+  withDebug = name: args: {
+    "${name}" = mkApp args;
+    "${name}-debug" = mkApp (args // {
+      pname = args.pname + "-debug";
+      features = (args.features or [ ]) ++ [ "debug" ];
+    });
+  };
 in
-{
+builtins.foldl' (a: b: a // b) { } [
   # The api CVM: HTTP over vsock, session lifecycle.
   #
   # Both features are load-bearing and neither has a default that would supply
@@ -73,45 +100,45 @@ in
   # a software test key compiled in beside the real one. Taking defaults here
   # is what produced an image whose quotes were signed by a key generated at
   # each process start.
-  api = mkApp {
+  (withDebug "api" {
     pname = "enclavid-app-api";
     package = "enclavid-api";
     binary = "enclavid-api";
     noDefaultFeatures = true;
     features = [ "sev-snp" "vsock" ];
-  };
+  })
 
   # The storage CVM: the blind ciphertext store. `vsock` for the same reason as
   # api — a guest kernel with no IP stack cannot bind a TCP listener. It has no
   # attestation axis to choose: the endorsement a hardware attestor needs would
   # have to reach a role that, by design, dials nothing.
-  storage = mkApp {
+  (withDebug "storage" {
     pname = "enclavid-app-storage";
     package = "enclavid-storage";
     binary = "storage-cvm";
     features = [ "vsock" ];
-  };
+  })
 
   # The compile half of the engine: fuses a policy with its pinned plugins and
   # Cranelift-compiles the result. Diskless — everything it produces goes back
   # over the wire. `guest-hardening` is what makes the per-round child isolation
   # its own containment rests on an enforced floor rather than an assumption.
-  compile-worker = mkApp {
+  (withDebug "compile-worker" {
     pname = "enclavid-app-compile-worker";
     package = "engine-compiler";
     binary = "compile-worker";
     siblings = [ "compile-child" ];
     features = [ "vsock" "guest-hardening" ];
-  };
+  })
 
   # The execute half: runs one reducer round per disposable child. This is the
   # role that touches applicant data in the clear, and the only one that runs
   # the consumer's own untrusted wasm.
-  execution-worker = mkApp {
+  (withDebug "execution-worker" {
     pname = "enclavid-app-execution-worker";
     package = "engine-executor";
     binary = "execution-worker";
     siblings = [ "session-child" ];
     features = [ "vsock" "guest-hardening" ];
-  };
-}
+  })
+]

@@ -54,7 +54,7 @@ async fn input(
         // a precondition failure, consistent with the
         // wrong-prompt-shape branches in `build_event`. Log enough to
         // disambiguate either cause.
-        eprintln!(
+        public_logger::debug!(
             "/input/{slot_id}: session_state missing for {session_id} — \
              /connect either never ran or its persistence step did \
              not commit before this /input arrived",

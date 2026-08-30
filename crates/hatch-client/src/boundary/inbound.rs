@@ -46,9 +46,3 @@ pub type FromUntrusted<T> = Untrusted<T, (AuthN, AuthZ, Replay)>;
 pub fn from_untrusted<T>(value: T) -> FromUntrusted<T> {
     Untrusted::new(value)
 }
-
-impl<T> From<T> for FromUntrusted<T> {
-    fn from(value: T) -> Self {
-        from_untrusted(value)
-    }
-}

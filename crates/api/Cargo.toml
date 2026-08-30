@@ -25,6 +25,9 @@ vsock = ["hatch-client/vsock", "fleet-transport/vsock", "dep:tokio-vsock", "dep:
 dev-attestation = ["enclavid-attestation/snp-dev", "enclavid-attestation/mock"]
 # Real hardware attestation: /dev/sev-guest mint + AMD chain verification.
 sev-snp = ["enclavid-attestation/sev-snp"]
+# Compiles the `debug!` sites in. OFF in the measured build, so a production
+# binary holds no diagnostic that nobody wrote a reason for.
+debug = ["public-logger/debug"]
 
 [dependencies]
 # The wasmtime-free engine leaf: the plain-data types the client-only
@@ -56,6 +59,9 @@ hatch-client = { path = "../hatch-client" }
 hatch-protocol = { path = "../hatch-protocol" }
 # The intra-fleet byte stream (TCP or vsock, chosen with this crate's `vsock`).
 fleet-transport = { path = "../fleet-transport" }
+# The one channel this role may speak on, and the capture that keeps everything
+# else off it.
+public-logger = { path = "../public-logger" }
 # The storage-tier RPC contract — the remoc `SessionStoreService` / `CacheService`
 # clients api dials on the trusted storage-CVM (when
 # `ENCLAVID_STORAGE_BACKEND=storage-cvm`). Reuses the same RA-TLS/remoc stack as

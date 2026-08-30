@@ -1,1 +1,1 @@
-panic=-1 oops=panic sysctl.kernel.yama.ptrace_scope=3 ENCLAVID_STORAGE_LISTEN=8001 ENCLAVID_STORAGE_SESSIONS_DIR=/data/sessions ENCLAVID_STORAGE_CACHE_DIR=/data/cache
+console=null panic=-1 oops=panic sysctl.kernel.yama.ptrace_scope=3 ENCLAVID_STORAGE_LISTEN=8001 ENCLAVID_STORAGE_SESSIONS_DIR=/data/sessions ENCLAVID_STORAGE_CACHE_DIR=/data/cache ENCLAVID_LOG_DEVICE=/dev/ttyS0

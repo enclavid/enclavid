@@ -161,7 +161,13 @@ pub async fn build_attestor(address_out: &str) -> Arc<dyn Attestor> {
         match kds.vcek(exposed).await {
             Ok(response) => break response,
             Err(e) if attempt < RETRY_DELAYS.len() => {
-                eprintln!("endorsement fetch failed ({e}); retrying");
+                public_logger::warn!(
+                    reason!(
+                        "a transport error reaching our own endorsement, at startup, before \
+                         any policy or applicant input exists in this process"
+                    ),
+                    "api: endorsement fetch failed ({e}); retrying"
+                );
                 tokio::time::sleep(RETRY_DELAYS[attempt]).await;
                 attempt += 1;
             }

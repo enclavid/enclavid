@@ -76,7 +76,7 @@ pub async fn connect_compile_worker(
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
             .await
             .map_err(|e| format!("compile-worker remoc connect: {e}"))?;
-    tokio::spawn(conn);
+    crate::fleet::watch(conn, "compile-worker");
 
     let client = rx
         .recv()

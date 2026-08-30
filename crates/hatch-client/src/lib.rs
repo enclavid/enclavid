@@ -16,12 +16,11 @@ mod domain;
 pub use auth::{AuthClient, AuthVerdict, Principal};
 pub use backend::{CacheBackend, SessionBackend};
 pub use cache::CacheStore;
-// Boundary-sentinel re-exports — Untrusted/Exposed/concern markers
-// live in `boundary::sentinel` after the untrusted-crate fold-in.
-// The old crate-root path is preserved so external consumers don't
-// need to update import paths.
+// Boundary re-exports — Untrusted/Exposed/concern markers live in
+// the `enclavid-boundary` leaf crate, shared with `public-logger`.
+// The crate-root path is preserved so consumers keep their imports.
 pub use boundary::outbound::outbound_session_id;
-pub use boundary::{AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted};
+pub use boundary::{AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted, reason};
 pub use error::BridgeError;
 pub use transport::HatchClient;
 // Wire DTO re-exports — the operation selector and the OCI pull

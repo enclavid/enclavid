@@ -43,12 +43,22 @@
 //!     writer markers consume `Exposed<_, ()>` instead of raw
 //!     bytes.
 //!
-//! Combined, the two layers cover every byte that leaves the TEE.
+//! Combined, the two layers cover every byte that leaves the TEE on
+//! the wire. They are not every byte that leaves it: a role also
+//! speaks on the serial port, and that crossing is `public-logger`,
+//! which uses the same vocabulary from the same crate. Its release
+//! point is `public_logger::line` and its grep term is `log!`.
+//!
+//! The vocabulary itself — `Untrusted`, `Exposed`, the concern
+//! markers, `reason!` — lives in `enclavid-boundary`, below both
+//! channels. Re-exported here so this stays the path callers use.
 
 pub mod inbound;
 pub mod outbound;
-pub mod sentinel;
 
+pub use enclavid_boundary as sentinel;
+pub use enclavid_boundary::{
+    AuthN, AuthZ, Covert, Exposed, Reason, Remove, Replay, Untrusted, reason,
+};
 pub use inbound::{FromUntrusted, from_untrusted};
 pub use outbound::{ToUntrusted, to_untrusted};
-pub use sentinel::{AuthN, AuthZ, Covert, Exposed, Reason, Remove, Replay, Untrusted};

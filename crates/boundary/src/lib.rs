@@ -1,10 +1,16 @@
 //! Type-level wrappers for values crossing the TEE ↔ host trust
-//! boundary. Two dual markers, one per direction. Previously its
-//! own crate (`enclavid-untrusted`); folded into `hatch-client` as
-//! `boundary::sentinel` so the type definitions live in the same
-//! crate as the channel-specific [`inbound`](super::inbound) and
-//! [`outbound`](super::outbound) facades that own the construction
-//! sites — keeps "the perimeter" inspectable in one place.
+//! boundary. Two dual markers, one per direction.
+//!
+//! It has lived in two places. On its own as `enclavid-untrusted`,
+//! then folded into `hatch-client` so the definitions sat beside the
+//! `inbound` / `outbound` facades that construct them — one perimeter,
+//! one crate, inspectable together. Out again now, because the TEE
+//! grew a second way to speak: the serial port that `public-logger`
+//! writes to. Two channels with nothing in common but this vocabulary,
+//! so the vocabulary belongs below both. The facades did not move;
+//! `hatch-client` re-exports these types, and `public-logger` — which
+//! opens its channel before anything else in a role exists — can
+//! depend on them without depending on a wire client.
 //!
 //! `Untrusted<T, S>` — INBOUND. Carries a tuple-typed scope `S`
 //! listing the open trust concerns for the value (authenticity,
@@ -218,12 +224,11 @@ impl<T, S> Untrusted<T, S> {
     /// ZST and the reason text is discarded at compile time, so this
     /// is free at runtime.
     ///
-    /// `pub(crate)` by design: external callers route through
-    /// [`crate::boundary::inbound::from_untrusted`] so every wire crossing
-    /// is grep-anchored. Inside this crate, the boundary fn and a
-    /// handful of synthesis sites (absent-blob `None` wraps) are the
-    /// only direct callers.
-    pub(crate) fn new(value: T) -> Self {
+    /// `pub` because the facades that call it now live in other crates.
+    /// What keeps crossings grep-anchored is not this visibility but the
+    /// named entry points — `hatch_client::boundary::inbound::from_untrusted`
+    /// for the wire — and the rule that nothing else calls this directly.
+    pub fn new(value: T) -> Self {
         Self {
             value,
             _marker: PhantomData,
@@ -338,10 +343,11 @@ impl<T, S> Exposed<T, S> {
     /// **why** this particular scope (and not a wider or narrower
     /// one). Symmetric with `Untrusted::new`.
     ///
-    /// `pub(crate)` by design: external callers route through
-    /// [`crate::boundary::outbound::to_untrusted`] so every wire release
-    /// is grep-anchored.
-    pub(crate) fn new(value: T) -> Self {
+    /// `pub` because the facades that call it now live in other crates:
+    /// `hatch_client::boundary::outbound::to_untrusted` for the wire,
+    /// `public_logger::line` for the serial port. Those named entry points
+    /// are what a reviewer greps; nothing else calls this directly.
+    pub fn new(value: T) -> Self {
         Self {
             value,
             _marker: PhantomData,

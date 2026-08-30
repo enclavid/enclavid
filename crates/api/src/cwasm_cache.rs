@@ -64,7 +64,7 @@ pub async fn try_load(
         Ok(Some(b)) => b,
         Ok(None) => return None, // clean miss (404 / unopenable blob)
         Err(e) => {
-            eprintln!("cwasm_cache: L2 load transport error (cold path): {e}");
+            public_logger::debug!("cwasm_cache: L2 load transport error (cold path): {e}");
             return None;
         }
     };
@@ -72,7 +72,7 @@ pub async fn try_load(
         Ok(b) => Some(b),
         Err(e) => {
             // Format drift / corruption → miss (guard 2); recompiled + re-stored.
-            eprintln!("cwasm_cache: bundle decode failed (cold path): {e}");
+            public_logger::debug!("cwasm_cache: bundle decode failed (cold path): {e}");
             None
         }
     }
@@ -91,14 +91,14 @@ pub async fn store(
 ) {
     let mut encoded = Vec::new();
     if let Err(e) = ciborium::into_writer(bundle, &mut encoded) {
-        eprintln!("cwasm_cache: bundle encode failed (skip store): {e}");
+        public_logger::debug!("cwasm_cache: bundle encode failed (skip store): {e}");
         return;
     }
     if let Err(e) = cache
         .store(&cache_id(composition_key, compat_token), encoded)
         .await
     {
-        eprintln!("cwasm_cache: L2 store failed (non-fatal): {e}");
+        public_logger::debug!("cwasm_cache: L2 store failed (non-fatal): {e}");
     }
 }
 

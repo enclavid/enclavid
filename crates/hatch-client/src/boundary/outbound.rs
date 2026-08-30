@@ -48,12 +48,6 @@ pub fn to_untrusted<T>(value: T) -> ToUntrusted<T> {
     Exposed::new(value)
 }
 
-impl<T> From<T> for ToUntrusted<T> {
-    fn from(value: T) -> Self {
-        to_untrusted(value)
-    }
-}
-
 /// Mint the session id as a fully-vouched outbound value — the record address
 /// the store indexes by. Used by the lone-id store calls (`read` / `delete` /
 /// `exists`); `write` bundles its id into the `(id, version)` tuple instead.

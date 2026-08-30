@@ -124,7 +124,7 @@ pub async fn connect_storage(
     )
     .await
     .map_err(|e| format!("storage-CVM remoc connect: {e}"))?;
-    tokio::spawn(conn);
+    crate::fleet::watch(conn, "storage-CVM");
 
     let clients = rx
         .recv()

@@ -103,9 +103,11 @@ impl AppState {
              point api at its listen address)",
         );
         let compiler = Arc::new(
-            connect_compile_worker(&compile_addr, attestor.clone())
-                .await
-                .expect("failed to connect to compile-worker"),
+            crate::fleet::dial("compile-worker", || {
+                connect_compile_worker(&compile_addr, attestor.clone())
+            })
+            .await
+            .expect("failed to connect to compile-worker"),
         );
         let exec_addr = std::env::var("ENCLAVID_EXECUTION_WORKER_ADDR").expect(
             "ENCLAVID_EXECUTION_WORKER_ADDR not set (address of the execution-worker; start one \
@@ -113,9 +115,11 @@ impl AppState {
              point api at its listen address)",
         );
         let executor = Arc::new(
-            connect_execution_worker(&exec_addr, attestor)
-                .await
-                .expect("failed to connect to execution-worker"),
+            crate::fleet::dial("execution-worker", || {
+                connect_execution_worker(&exec_addr, attestor.clone())
+            })
+            .await
+            .expect("failed to connect to execution-worker"),
         );
         Self::new(
             session_store,

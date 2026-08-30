@@ -1325,6 +1325,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "moka",
+ "public-logger",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1358,6 +1359,10 @@ dependencies = [
  "sha2",
  "thiserror 1.0.69",
 ]
+
+[[package]]
+name = "enclavid-boundary"
+version = "0.1.0"
 
 [[package]]
 name = "enclavid-cli"
@@ -1970,6 +1975,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "ciborium",
+ "enclavid-boundary",
  "enclavid-crypto",
  "hatch-protocol",
  "hex",
@@ -3289,6 +3295,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "public-logger"
+version = "0.1.0"
+dependencies = [
+ "enclavid-boundary",
+ "libc",
 ]
 
 [[package]]

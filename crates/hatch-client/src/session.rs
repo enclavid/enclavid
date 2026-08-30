@@ -208,7 +208,7 @@ impl SessionStore {
             expected_version: expected_version.into_inner(),
         });
         let new_version = self.backend.write(id, req.into_inner(), deadline).await?;
-        Ok(new_version.into())
+        Ok(boundary::from_untrusted(new_version))
     }
 
     /// Delete the session's state field. Today only used to drop session
