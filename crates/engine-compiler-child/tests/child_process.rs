@@ -21,6 +21,7 @@ use std::time::Duration;
 use remoc::codec::Ciborium;
 
 use engine_rpc::{CompileError, CompilerService, CompilerServiceClient};
+use engine_types::composition::PluginInstance;
 
 /// Spawn the real `engine-compiler-child` over a socketpair (via engine-supervisor) the way the
 /// compile-worker supervisor does, and return the child + its service client.
@@ -84,6 +85,60 @@ async fn dead_child_surfaces_error_not_hang() {
         res.is_err(),
         "compile to a dead child must error, not return a bundle"
     );
+}
+
+/// A REAL compile, all the way through the spawned child: the fixture policy
+/// fused with its plugins, Cranelift codegen, and a multi-MiB `cwasm` returned
+/// over the socketpair.
+///
+/// Every other test here feeds the child garbage, which fails in the validator
+/// long before codegen. So until this existed, no test had ever run Cranelift's
+/// success path inside a spawned, hardened child — the single most syscall-hungry
+/// thing the fleet does, and the path a sandbox has to survive for the product to
+/// work at all. It is also what the child's syscall allowlist was measured
+/// against; without it the allowlist would have been built from the error path.
+///
+/// Slow (a full compile of the real fixture), so the deadline is generous.
+#[tokio::test]
+async fn a_real_policy_compiles_through_the_spawned_child() {
+    let plugins: Vec<PluginInstance> = xtask::fixtures::all_plugins()
+        .into_iter()
+        .map(|(package, wasm)| PluginInstance {
+            package: package.to_string(),
+            wasm: wasm.to_vec(),
+        })
+        .collect();
+
+    let hardening = engine_supervisor::Hardening {
+        seccomp_egress: true,
+        address_space: None,
+    };
+    let (mut child, client) = spawn_with(Some(hardening)).await;
+
+    let bundle = tokio::time::timeout(
+        Duration::from_secs(300),
+        client.compile(xtask::fixtures::test_policy().to_vec(), plugins),
+    )
+    .await
+    .expect("a real compile must not hang")
+    .unwrap_or_else(|CompileError(m)| panic!("the fixture policy must compile: {m}"));
+
+    assert!(
+        bundle.cwasm.len() > 1_000_000,
+        "a real composition's cwasm should be multi-MiB, got {} bytes",
+        bundle.cwasm.len(),
+    );
+    assert!(
+        !bundle.catalogs.is_empty(),
+        "the composition's embedded catalogs must come back with it",
+    );
+
+    drop(client);
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+        .await
+        .expect("child must exit after its client is dropped")
+        .expect("wait for child");
+    assert!(status.success(), "child exits cleanly, got {status:?}");
 }
 
 /// The production hardening must not stop a child from working.
