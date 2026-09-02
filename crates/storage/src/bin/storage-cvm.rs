@@ -20,6 +20,8 @@ use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 
 use enclavid_storage::{CacheBlobs, SessionStore, StorageSvc, now_unix};
+use fleet_transport::LegFailure;
+use safe_logger::{debug, info, reason, safe, warn};
 use storage_rpc::{CacheServiceServerShared, SessionStoreServiceServerShared, StorageClients};
 
 /// How many expired sessions the sweeper purges per tick (bounds one sweep pass).
@@ -30,31 +32,64 @@ const CACHE_CONCURRENCY: usize = 8;
 
 #[tokio::main]
 async fn main() {
+    // First, so nothing can speak before the channel exists. Panic locations are
+    // on: this binary IS the measured code, and it holds only ciphertext.
+    safe_logger::install();
+    safe_logger::install_panic(true);
+
     // Explicit config; fail loud if unset (minimal-defaults).
-    let listen = std::env::var("ENCLAVID_STORAGE_LISTEN").expect(
-        "ENCLAVID_STORAGE_LISTEN not set (listen address for the storage-CVM, e.g. 0.0.0.0:9100)",
-    );
-    let sessions_dir = std::env::var("ENCLAVID_STORAGE_SESSIONS_DIR").expect(
-        "ENCLAVID_STORAGE_SESSIONS_DIR not set (directory for the session store: \
-         per-session SQLite files under blobs/ + the deadline index meta.sqlite)",
-    );
-    let cache_dir = std::env::var("ENCLAVID_STORAGE_CACHE_DIR")
-        .expect("ENCLAVID_STORAGE_CACHE_DIR not set (L2 cwasm cache directory)");
+    let listen = std::env::var("ENCLAVID_STORAGE_LISTEN").unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "storage-cvm: ENCLAVID_STORAGE_LISTEN is not set. Stopping.",
+            reason!("a constant naming a configuration key the host itself supplied")
+        )
+    });
+    let sessions_dir = std::env::var("ENCLAVID_STORAGE_SESSIONS_DIR").unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "storage-cvm: ENCLAVID_STORAGE_SESSIONS_DIR is not set. Stopping.",
+            reason!("a constant naming a configuration key the host itself supplied")
+        )
+    });
+    let cache_dir = std::env::var("ENCLAVID_STORAGE_CACHE_DIR").unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "storage-cvm: ENCLAVID_STORAGE_CACHE_DIR is not set. Stopping.",
+            reason!("a constant naming a configuration key the host itself supplied")
+        )
+    });
     let sweep_secs: u64 = std::env::var("ENCLAVID_STORAGE_SWEEP_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(60);
 
-    let sessions = Arc::new(
-        SessionStore::open(&sessions_dir)
-            .unwrap_or_else(|e| panic!("storage-cvm: open session store {sessions_dir}: {e}")),
-    );
+    let sessions = Arc::new(SessionStore::open(&sessions_dir).unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "storage-cvm: cannot open the session store at {}. Stopping.",
+            safe(&sessions_dir, reason!("on the measured command line")),
+            reason!("a constant; the path is the host's own configuration")
+        )
+    }));
 
-    std::fs::create_dir_all(&cache_dir)
-        .unwrap_or_else(|e| panic!("storage-cvm: create cache dir {cache_dir}: {e}"));
+    std::fs::create_dir_all(&cache_dir).unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "storage-cvm: cannot create the cache directory at {}. Stopping.",
+            safe(&cache_dir, reason!("on the measured command line")),
+            reason!("a constant; the path is the host's own configuration")
+        )
+    });
     let store = Arc::new(
-        LocalFileSystem::new_with_prefix(&cache_dir)
-            .unwrap_or_else(|e| panic!("storage-cvm: object_store at {cache_dir}: {e}")),
+        LocalFileSystem::new_with_prefix(&cache_dir).unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "storage-cvm: cannot open the cache store at {}. Stopping.",
+                safe(&cache_dir, reason!("on the measured command line")),
+                reason!("a constant; the path is the host's own configuration")
+            )
+        }),
     );
     let svc = Arc::new(StorageSvc::new(sessions.clone(), CacheBlobs::new(store)));
 
@@ -72,20 +107,62 @@ async fn main() {
                 })
                 .await
                 {
-                    Ok(Ok(n)) if n > 0 => eprintln!("storage-cvm: swept {n} expired session(s)"),
+                    Ok(Ok(n)) if n > 0 => info!(
+                        "storage-cvm: swept {} expired session(s)",
+                        safe(
+                            &n,
+                            reason!(
+                                "a count of expired index rows on a volume the host \
+                                 provisions unencrypted and reads itself"
+                            )
+                        ),
+                        reason!("a sweep ran; the sweeper is on a fixed timer")
+                    ),
                     Ok(Ok(_)) => {}
-                    Ok(Err(e)) => eprintln!("storage-cvm: sweep error: {e}"),
-                    Err(e) => eprintln!("storage-cvm: sweep join error: {e}"),
+                    Ok(Err(e)) => {
+                        warn!("storage-cvm: sweep failed", reason!("a constant"));
+                        debug!("  cause: {e}");
+                    }
+                    Err(e) => {
+                        warn!(
+                            "storage-cvm: sweep did not finish, {}",
+                            safe(
+                                &if e.is_panic() {
+                                    "panicked"
+                                } else {
+                                    "cancelled"
+                                },
+                                reason!("one of two fixed words")
+                            ),
+                            reason!("constant text")
+                        );
+                        // NOT vouched: a JoinError's Display forwards the panic
+                        // payload verbatim.
+                        debug!("  cause: {e}");
+                    }
                 }
             }
         });
     }
 
-    let mut listener = fleet_transport::bind(&listen)
-        .await
-        .unwrap_or_else(|e| panic!("storage-cvm: bind {listen}: {e}"));
-    eprintln!(
-        "storage-cvm: listening on {listen}, sessions={sessions_dir}, cache={cache_dir}, sweep={sweep_secs}s"
+    let mut listener = fleet_transport::bind(&listen).await.unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "storage-cvm: cannot bind {}. Stopping.",
+            safe(&listen, reason!("on the measured command line")),
+            reason!("a constant; the address is the host's own configuration")
+        )
+    });
+    info!(
+        "storage-cvm: listening on {}, sessions={}, cache={}, sweep={}s",
+        safe(&listen, reason!("on the measured command line")),
+        safe(&sessions_dir, reason!("on the measured command line")),
+        safe(&cache_dir, reason!("on the measured command line")),
+        safe(
+            &sweep_secs,
+            reason!("off the measured command line, or this build's default when absent")
+        ),
+        reason!("a constant, emitted once at boot")
     );
 
     // Mutual RA-TLS acceptor (minted once at boot): every accepted api connection
@@ -100,7 +177,13 @@ async fn main() {
                 enclavid_attestation::DEV_FLEET_MEASUREMENT.to_string(),
             ]),
         )
-        .unwrap_or_else(|e| panic!("storage-cvm: RA-TLS server config: {e}")),
+        .unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "storage-cvm: cannot build the RA-TLS server config. Stopping.",
+                reason!("a constant reporting a platform state the host provisioned")
+            )
+        }),
     ));
 
     loop {
@@ -110,11 +193,22 @@ async fn main() {
                 let ratls = ratls.clone();
                 tokio::spawn(async move {
                     if let Err(e) = serve_conn(stream, ratls, svc).await {
-                        eprintln!("storage-cvm: connection from {peer} ended: {e}");
+                        warn!(
+                            "storage-cvm: connection from {} ended ({})",
+                            safe(&peer, reason!("an address the host routed itself")),
+                            e,
+                            reason!(
+                                "constant text; a connection closing is already visible to \
+                                 whoever carries it"
+                            )
+                        );
                     }
                 });
             }
-            Err(e) => eprintln!("storage-cvm: accept failed: {e}"),
+            Err(e) => {
+                warn!("storage-cvm: accept failed", reason!("a constant"));
+                debug!("  cause: {e}");
+            }
         }
     }
 }
@@ -125,11 +219,11 @@ async fn serve_conn(
     stream: fleet_transport::Stream,
     ratls: tokio_rustls::TlsAcceptor,
     svc: Arc<StorageSvc>,
-) -> Result<(), String> {
-    let tls = ratls
-        .accept(stream)
-        .await
-        .map_err(|e| format!("RA-TLS accept: {e}"))?;
+) -> Result<(), LegFailure> {
+    let tls = ratls.accept(stream).await.map_err(|e| {
+        debug!("ra-tls accept: {e}");
+        LegFailure::Attest
+    })?;
     let (read, write) = tokio::io::split(tls);
     let (conn, mut tx, _rx) = remoc::Connect::io::<_, _, StorageClients, StorageClients, Ciborium>(
         storage_rpc::connection_cfg(),
@@ -137,7 +231,10 @@ async fn serve_conn(
         write,
     )
     .await
-    .map_err(|e| format!("remoc connect: {e}"))?;
+    .map_err(|e| {
+        debug!("rpc connect: {e}");
+        LegFailure::Rpc
+    })?;
     tokio::spawn(conn);
 
     let (session_server, session) =
@@ -146,16 +243,19 @@ async fn serve_conn(
         CacheServiceServerShared::<_, Ciborium>::new(svc.clone(), CACHE_CONCURRENCY);
     tx.send(StorageClients { session, cache })
         .await
-        .map_err(|e| format!("send service clients: {e}"))?;
+        .map_err(|e| {
+            debug!("send service client: {e}");
+            LegFailure::Clients
+        })?;
 
     // Both services run for the lifetime of the connection; drive one on a task
     // and await the other.
     tokio::spawn(async move {
         let _ = session_server.serve(true).await;
     });
-    cache_server
-        .serve(true)
-        .await
-        .map_err(|e| format!("serve: {e}"))?;
+    cache_server.serve(true).await.map_err(|e| {
+        debug!("serve: {e}");
+        LegFailure::Serve
+    })?;
     Ok(())
 }

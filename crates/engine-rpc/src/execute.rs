@@ -245,7 +245,7 @@ pub trait ChildService {
     ) -> Result<RunReply, ExecError>;
 }
 
-/// The supervisor-served callback boundary a per-round session-child calls BACK
+/// The supervisor-served callback boundary a per-round engine-executor-child calls BACK
 /// during a run. NARROWER than [`CallbackService`] — it omits `load_component`:
 /// the supervisor already resolved + primed the bundle before spawning the child,
 /// so the process running UNTRUSTED wasm is never handed the OCI-pull / compile

@@ -1,4 +1,4 @@
-//! The `session-child` deployable: the disposable PER-ROUND process the
+//! The `engine-executor-child` deployable: the disposable PER-ROUND process the
 //! `execution-worker` supervisor spawns to run UNTRUSTED policy wasm behind an
 //! OS address-space boundary.
 //!
@@ -71,7 +71,7 @@ impl ChildService for Child {
             .map_err(|e| ExecError::Run(format!("prime composition: {e}")))?;
         self.primed
             .set(primed)
-            .map_err(|_| ExecError::Run("session-child: prime called twice".into()))?;
+            .map_err(|_| ExecError::Run("engine-executor-child: prime called twice".into()))?;
         Ok(())
     }
 
@@ -85,7 +85,7 @@ impl ChildService for Child {
         let primed = self
             .primed
             .get()
-            .ok_or_else(|| ExecError::Run("session-child: run before prime".into()))?;
+            .ok_or_else(|| ExecError::Run("engine-executor-child: run before prime".into()))?;
 
         // Map the wire `Prop` mirror to the bindgen `enclavid:host/types.prop`.
         let props: Vec<(String, Prop)> = props
@@ -233,16 +233,23 @@ fn to_wire_status(s: RunStatus) -> engine_rpc::RunStatus {
 // epochs), forward-compatible with a fork-from-zygote.
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    // The contained posture, and the choice is the point: this process holds the
+    // round's applicant plaintext in the one address space where the consumer's
+    // wasm runs, so it may not speak to the host at all. `info!`/`warn!`/`error!`
+    // are dropped here; `debug!` reaches whoever ran the binary by hand and, when
+    // the supervisor spawned it, the `/dev/null` it was given.
+    safe_logger::install_contained();
+
     let child = Arc::new(Child {
-        executor: Arc::new(Executor::new().expect("session-child: create executor engine")),
+        executor: Arc::new(Executor::new().expect("engine-executor-child: create executor engine")),
         primed: OnceLock::new(),
     });
 
     // The supervisor placed one end of a socketpair on our fd 0; engine-supervisor
     // adopts it, serves `ChildService`, and returns when the supervisor drops its
     // client (round done) → we exit. Request buffer 1 — prime then run,
-    // sequential, no cross-round concurrency. The 64 MiB connection_cfg (prime
-    // ships the ~10-15 MiB cwasm) lives in engine-supervisor.
+    // sequential, no cross-round concurrency. The cwasm itself never crosses this
+    // socket: `prime` carries the path of an inherited fd, which we mmap.
     match engine_supervisor::serve_child::<Child, ChildServiceServerShared<Child, Ciborium>>(
         child, 1,
     )
@@ -250,7 +257,12 @@ async fn main() {
     {
         Ok(()) => std::process::exit(0),
         Err(e) => {
-            eprintln!("session-child: {e}");
+            // The supervisor nulls this child's stdout and stderr, and the
+            // log device is opened O_CLOEXEC so a child never inherits it —
+            // this reaches a developer running the child by hand and nobody
+            // else. `debug!` on top of that keeps it out of the measured build
+            // entirely, so the belt does not depend on the braces.
+            safe_logger::debug!("engine-executor-child: {e}");
             std::process::exit(1);
         }
     }

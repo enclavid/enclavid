@@ -1,0 +1,83 @@
+[package]
+name = "engine-executor-child"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The disposable per-round CHILD the execution-worker spawns: deserialize the
+# compiled bundle, run ONE reducer round of UNTRUSTED policy wasm, exit. The one
+# address space in the fleet that holds an applicant's plaintext WHILE the
+# consumer's own code executes.
+#
+# Its own package rather than a `[[bin]]` of engine-executor, because a package
+# is the unit a dependency graph is built from. The parent needs a log device, a
+# process spawner, a TLS listener and a component cache; the child needs none of
+# them, and while the two shared a manifest there was no way to SAY so — a
+# `[[bin]]` inherits every dependency its siblings declare. Here the manifest is
+# the statement: what is not listed below cannot be named from this binary's
+# source, and the reviewer's question ("what can the process that runs the
+# attacker's wasm reach?") is answered by a file this short.
+#
+# That only holds when this package is built on its own (`cargo build -p …`,
+# which is what image/app does). Cargo unifies features across whatever is in
+# ONE invocation, so a whole-workspace build hands this package whatever the
+# workers turned on. Loud where it matters and lax where it doesn't: the image
+# build is the strict one.
+[dependencies]
+# The runtime half — `Executor`, the bindgen host world, the embedded registry.
+# NOT the `worker` feature: no rpc server, no cache, no transport.
+#
+# This edge is also what keeps the cwasm ABI honest. The worker reports a
+# `compat_token` on an L1 miss and the orchestrator keys L2 by it, so the token
+# must describe the runtime that will actually `deserialize`. It does: both the
+# worker's `compat_token()` and this child's `Executor` come from THIS crate, at
+# the one version the workspace lock pins. Sharing a package used to be the
+# reason; sharing the library is the reason now, and it is the tighter one.
+engine-executor = { path = "../engine-executor" }
+# `adopt_fd0` + `serve_child`: the socketpair on fd 0 and the one-RPC serve loop.
+# `default-features = false` drops the parent half — no spawn, no seccomp
+# builder, no ptrace assertion, and (the reason it is a feature at all) no
+# `tokio/process`, so this runtime starts no signal driver.
+engine-supervisor = { path = "../engine-supervisor", default-features = false }
+# `execute` only: the compiler contract is not this child's business.
+engine-rpc = { path = "../engine-rpc", default-features = false, features = [
+    "execute",
+] }
+remoc = { version = "0.18", default-features = false, features = [
+    "rtc",
+    "codec-ciborium",
+] }
+# Single-threaded: one round, no cross-round concurrency to exploit, and
+# forward-compatible with a fork-from-zygote. See `main`.
+tokio = { version = "1", features = ["macros", "rt"] }
+# Contained posture only — this process says nothing outward. See `main`.
+safe-logger = { path = "../safe-logger" }
+
+[features]
+# Compiles the `debug!` sites in. OFF in the measured build.
+debug = ["safe-logger/debug"]
+
+[[bin]]
+name = "engine-executor-child"
+path = "src/main.rs"
+
+[dev-dependencies]
+# The child-process integration test drives this binary the way the supervisor
+# does, so it needs the parent-side spawn helpers and a REAL bundle to prime
+# with — which means the compiler and the shared fixture pipeline.
+engine-compiler = { path = "../engine-compiler" }
+xtask = { path = "../../xtask" }
+# The test plays the supervisor, so IT needs the parent half. That is also why
+# the test does NOT spawn this package's own `CARGO_BIN_EXE` binary: this
+# dev-dependency unifies `parent` into it. `xtask::child_binary` runs the
+# separate invocation the image runs instead.
+engine-supervisor = { path = "../engine-supervisor", features = ["parent"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "process",
+    "net",
+    "io-util",
+    "time",
+] }

@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use enclavid_attestation::Attestor;
 use hatch_client::{CacheBackend, CacheStore, SessionBackend, SessionStore};
-use public_logger::{log, reason};
+use safe_logger::{debug, info, reason};
 
 use crate::client_state::ClientState;
 use crate::state::AppState;
@@ -33,14 +33,20 @@ async fn main() {
     // First, so nothing can speak before the channel exists. Panic locations
     // are on: this binary IS the measured code, so nothing that could aim a
     // panic at a secret runs here without changing the measurement.
-    public_logger::install();
-    public_logger::install_panic(true);
-    log!(
-        reason!("a constant, emitted before this process holds anything at all"),
-        "api: alive"
+    safe_logger::install();
+    safe_logger::install_panic(true);
+    info!(
+        "api: alive",
+        reason!("a constant, emitted before this process holds anything at all")
     );
 
-    let address_out = std::env::var("ENCLAVID_ADDRESS_OUT").expect("ENCLAVID_ADDRESS_OUT not set");
+    let address_out = std::env::var("ENCLAVID_ADDRESS_OUT").unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "api: ENCLAVID_ADDRESS_OUT is not set. Stopping.",
+            reason!("a constant naming a configuration key the host itself supplied")
+        )
+    });
 
     // The attestation backend, chosen at compile time — see `endorsement`.
     // FIRST, ahead of the storage-CVM dial below and both listeners: under
@@ -49,12 +55,12 @@ async fn main() {
     // A guest that answers no to either must reach nothing and serve nobody,
     // so nothing that talks to anything may precede it.
     let attestor: Arc<dyn Attestor> = endorsement::build_attestor(&address_out).await;
-    log!(
+    info!(
+        "api: attested",
         reason!(
             "a constant; reaching this line says only that the platform was \
                  accepted and an endorsement was obtained"
-        ),
-        "api: attested"
+        )
     );
 
     // SessionStore is the hatch-client HTTP-over-vsock client for
@@ -94,9 +100,9 @@ async fn main() {
             .unwrap_or(DEFAULT_SESSION_TTL_SECS),
     );
     let (session_backend, cache_backend) = build_storage_backends(attestor.clone()).await;
-    log!(
-        reason!("a constant; the address it refers to is on the measured command line"),
-        "api: storage-CVM connected"
+    info!(
+        "api: storage-CVM connected",
+        reason!("a constant; the address it refers to is on the measured command line")
     );
     let session_store = Arc::new(SessionStore::new(session_backend, tee_seal_key, ttl_secs));
     let cache_store = CacheStore::new(cache_backend, &tee_seal_key);
@@ -121,24 +127,34 @@ async fn main() {
     );
 
     // Every peer is up and both surfaces are about to open.
-    log!(
-        reason!("a constant, and the ports are on the measured command line"),
-        "api: serving"
+    info!(
+        "api: serving",
+        reason!("a constant, and the ports are on the measured command line")
     );
 
     let client_app = client::router(client_state);
     let applicant_app = applicant::router(applicant_state);
 
     let client_handle = tokio::spawn({
-        let addr = std::env::var("ENCLAVID_ADDRESS_IN_CLIENT")
-            .expect("ENCLAVID_ADDRESS_IN_CLIENT not set");
+        let addr = std::env::var("ENCLAVID_ADDRESS_IN_CLIENT").unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "api: ENCLAVID_ADDRESS_IN_CLIENT is not set. Stopping.",
+                reason!("a constant naming a configuration key the host itself supplied")
+            )
+        });
         async move {
             transport::serve(client_app, &addr).await;
         }
     });
     let applicant_handle = tokio::spawn({
-        let addr = std::env::var("ENCLAVID_ADDRESS_IN_APPLICANT")
-            .expect("ENCLAVID_ADDRESS_IN_APPLICANT not set");
+        let addr = std::env::var("ENCLAVID_ADDRESS_IN_APPLICANT").unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "api: ENCLAVID_ADDRESS_IN_APPLICANT is not set. Stopping.",
+                reason!("a constant naming a configuration key the host itself supplied")
+            )
+        });
         async move {
             transport::serve(applicant_app, &addr).await;
         }
@@ -155,16 +171,28 @@ async fn main() {
 async fn build_storage_backends(
     attestor: Arc<dyn Attestor>,
 ) -> (Arc<dyn SessionBackend>, Arc<dyn CacheBackend>) {
-    let addr = std::env::var("ENCLAVID_STORAGE_ADDR").expect(
-        "ENCLAVID_STORAGE_ADDR not set (address of the storage-CVM; start one with \
-         `cargo run -p enclavid-storage --bin storage-cvm` and point api at its \
-         listen address)",
-    );
+    let addr = std::env::var("ENCLAVID_STORAGE_ADDR").unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "api: ENCLAVID_STORAGE_ADDR is not set — the storage-CVM address comes from the \
+             measured command line. Stopping.",
+            reason!("a constant naming a configuration key the host itself supplied")
+        )
+    });
     let (session, cache) = fleet::dial("storage-CVM", || {
         storage::connect_storage(&addr, attestor.clone())
     })
     .await
-    .expect("failed to connect to storage-CVM");
+    .unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "api: the storage-CVM never answered. Stopping.",
+            reason!(
+                "a constant; that a fleet leg never came up is already visible to whoever \
+                 routes it"
+            )
+        )
+    });
     let session: Arc<dyn SessionBackend> = Arc::new(session);
     let cache: Arc<dyn CacheBackend> = Arc::new(cache);
     (session, cache)
@@ -179,7 +207,13 @@ async fn build_storage_backends(
 /// that arrives from outside is a key whoever sent it also holds.
 #[cfg(feature = "sev-snp")]
 fn load_tee_seal_key() -> [u8; 32] {
-    enclavid_attestation::derive_seal_key().expect("failed to derive the sealing key from the chip")
+    enclavid_attestation::derive_seal_key().unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "api: the chip did not return a sealing key. Stopping.",
+            reason!("a constant reporting a platform state the host provisioned")
+        )
+    })
 }
 
 #[cfg(not(feature = "sev-snp"))]

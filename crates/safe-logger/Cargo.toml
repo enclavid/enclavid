@@ -1,0 +1,73 @@
+[package]
+name = "safe-logger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Everything written here is read by the host. See src/lib.rs — the shape is the
+# point, not the code.
+
+# Two axes, and they are not the same question. `device` is WHETHER this binary
+# may speak to the host at all; `debug` is what a developer sees on the tier that
+# never leaves the TEE. Both off by default, both opted into in writing.
+[features]
+
+# OFF in the measured build, so `debug!` is not compiled and its strings are not
+# in the binary. Off by default rather than on-and-disabled: forgetting it costs
+# a developer their local output, which they notice at once, where the inverse
+# would quietly carry dead diagnostics into a production image.
+#
+# It does TWO things, and the second is easy to miss. It compiles `debug!` and
+# `trace!` — and it also decides who holds the global `log` slot: a no-op that
+# drops every record in a production build, the private stderr sink in this one.
+# So turning it on opens the `log` facade to the whole dependency tree; `rustls`
+# and `wasmtime` start printing. That is the point of the debug image, and
+# ENCLAVID_LOG_LEVEL is the tap — but it is a firehose, not a nicety.
+debug = []
+
+# The OUTWARD half: the descriptor, the sink that writes to it, `install`,
+# `install_panic`, and the `info!`/`warn!`/`error!`/`error_and_panic!` macros. A
+# package that does not name this feature cannot write a line the host will read
+# — not by discipline, by name resolution.
+#
+# Off by default, and that direction is chosen rather than inherited. A package
+# that needs the channel finds out at compile time, because it wrote an `info!`
+# that no longer resolves; a package that does not need it stays silent without
+# anyone remembering to say so. The inverse default would make forgetting a
+# `default-features = false` into a binary that can speak — the failure that
+# does not announce itself.
+#
+# It holds per cargo INVOCATION. Each guest binary is built by its own
+# `cargo build -p`, which is where this is load-bearing; a whole-workspace build
+# turns it on for everything, because api asks for it.
+device = ["dep:libc"]
+
+# rustdoc needs the outward half to resolve the `[`info!`]` links the crate docs
+# are written around; without it `cargo doc -p safe-logger` warns on every one.
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+# `Reason` and `reason!`, the same ones the wire perimeter takes: one word for
+# "someone wrote down why this may leave", whichever way it leaves. Only those
+# two — the vouch model here is its own (`Safe`/`SafeToLog`), not the perimeter's
+# `Exposed`/`Covert` peeling.
+enclavid-boundary = { path = "../boundary" }
+# The facade. Used for three things and not as a facade: its `Log` trait and
+# `Level` as the shape everyone already knows, and — the load-bearing one —
+# `set_logger`, which succeeds exactly once. Claiming that slot with a no-op is
+# what makes every dependency's logging permanently dead. See src/lib.rs.
+log = "0.4"
+# The timestamp, and nothing else. `Timestamp::now()` is plain UTC: no timezone
+# database, nothing read from the filesystem, nothing that can block — hence
+# defaults off, which drops `tz-system` and three bundled tzdb features. Already
+# compiled either way: it is what `env_logger` used for the same job before both
+# tiers were rendered here directly.
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+
+# `open` and `write` on the device, and nothing else. Optional, so a build
+# without the outward half has no syscall wrapper for a descriptor it does not
+# have. `dep:` on a target-gated optional dependency is inert off Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", optional = true }

@@ -1,4 +1,4 @@
-//! The `compile-child` deployable: the disposable PER-COMPILE process the
+//! The `engine-compiler-child` deployable: the disposable PER-COMPILE process the
 //! `compile-worker` supervisor spawns to run Cranelift over UNTRUSTED wasm.
 //!
 //! Cranelift compiling attacker-crafted wasm is a wide, complex surface (parser /
@@ -14,7 +14,7 @@
 //! for its OWN composition (the "unvalidated cwasm deserialize" residual). Its reach
 //! is bounded: the L2 seal AAD + OCI digest bind each cwasm to the pinned
 //! composition (a foreign one won't open), and the deserialize + execution happen in
-//! the disposable per-round `session-child` — so a malicious cwasm gets the SAME
+//! the disposable per-round `engine-executor-child` — so a malicious cwasm gets the SAME
 //! blast radius as a wasm sandbox escape (one round of one session pinning that same
 //! adversary-supplied composition), never a third party's.
 //!
@@ -23,7 +23,7 @@
 //! client. Multi-threaded runtime + `spawn_blocking` because `compile_to_parts`
 //! is a SYNCHRONOUS, CPU-bound, multi-second call — offloading it keeps the remoc
 //! reactor answering keepalives so the supervisor's connection survives the
-//! compile (unlike the executor's `session-child`, whose run path is already
+//! compile (unlike the executor's `engine-executor-child`, whose run path is already
 //! async).
 
 use std::sync::Arc;
@@ -70,8 +70,13 @@ impl CompilerService for Child {
 
 #[tokio::main]
 async fn main() {
+    // The contained posture — see `engine-executor-child` for the reasoning. This child
+    // holds the consumer's policy bytes rather than an applicant's, but the
+    // containment is the same and so is the answer: nothing outward.
+    safe_logger::install_contained();
+
     let child = Arc::new(Child {
-        compiler: Arc::new(Compiler::new().expect("compile-child: create compiler engine")),
+        compiler: Arc::new(Compiler::new().expect("engine-compiler-child: create compiler engine")),
     });
 
     // The supervisor placed one end of a socketpair on our fd 0; engine-supervisor
@@ -84,7 +89,12 @@ async fn main() {
     {
         Ok(()) => std::process::exit(0),
         Err(e) => {
-            eprintln!("compile-child: {e}");
+            // The supervisor nulls this child's stdout and stderr, and the
+            // log device is opened O_CLOEXEC so a child never inherits it —
+            // this reaches a developer running the child by hand and nobody
+            // else. `debug!` on top of that keeps it out of the measured build
+            // entirely, so the belt does not depend on the braces.
+            safe_logger::debug!("engine-compiler-child: {e}");
             std::process::exit(1);
         }
     }

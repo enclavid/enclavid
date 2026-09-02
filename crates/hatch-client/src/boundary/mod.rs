@@ -45,9 +45,9 @@
 //!
 //! Combined, the two layers cover every byte that leaves the TEE on
 //! the wire. They are not every byte that leaves it: a role also
-//! speaks on the serial port, and that crossing is `public-logger`,
+//! speaks on the serial port, and that crossing is `safe-logger`,
 //! which uses the same vocabulary from the same crate. Its release
-//! point is `public_logger::line` and its grep term is `log!`.
+//! point is `safe_logger::line` and its grep term is `log!`.
 //!
 //! The vocabulary itself — `Untrusted`, `Exposed`, the concern
 //! markers, `reason!` — lives in `enclavid-boundary`, below both

@@ -10,7 +10,9 @@
 # /dev is not a formality: /dev/sev-guest is where attestation reports come
 # from, and engine-supervisor points each disposable child's stdout and stderr
 # at /dev/null so an escaped child cannot write a round's plaintext to a
-# descriptor it inherited.
+# descriptor it inherited. Inheritance is not the only route, though — every
+# node here has a name, so the same child's seccomp filter also refuses to open
+# anything for writing.
 #
 # /tmp and /run are tmpfs because the CVM has no disk — every writable path is
 # encrypted RAM. Both are noexec: nothing here ever executes out of a writable

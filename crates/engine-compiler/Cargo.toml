@@ -13,6 +13,14 @@ repository.workspace = true
 # the plain-data engine-types leaf with the executor; the compiled cwasm
 # bytes are the sole artifact crossing between them.
 [dependencies]
+# The guest's one channel to the host: `info!`/`warn!`/`error!` carry a written
+# reason and reach the port; `debug!` needs none and is not built in production.
+#
+# WITHOUT the `device` feature here — the worker adds it below. The library uses
+# none of this crate; only the worker bin does. Leaving it off means the child
+# package, which depends on this library and is built by its own cargo
+# invocation, gets no outward half through this edge either.
+safe-logger = { path = "../safe-logger" }
 engine-types = { path = "../engine-types" }
 
 # Cranelift codegen + component fusion validation. Same feature set as the
@@ -44,9 +52,10 @@ enclavid-embedded = { path = "../embedded" }
 
 # --- compile-worker bin deps (optional) — pulled ONLY by the `worker`
 # feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable
-# compile-worker CVM: it wraps this crate's Compiler in an engine_rpc::CompilerService
-# server. api does not depend on this crate at all — it drives the worker over
-# rpc. ---
+# compile-worker CVM: it serves `engine_rpc::CompilerService` and forwards each
+# compile to a disposable child — this crate's `Compiler` runs in that CHILD
+# (engine-compiler-child), not here. api does not depend on this crate at all; it
+# drives the worker over rpc. ---
 engine-rpc = { path = "../engine-rpc", default-features = false, features = ["compile"], optional = true }
 # Shared disposable-child process-isolation plumbing (spawn + concurrency bound +
 # compile deadline + reap); the execution-worker rides the same crate. The
@@ -73,24 +82,34 @@ enclavid-attestation = { path = "../attestation", default-features = false, feat
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
 
 [features]
-# Enables the `compile-worker` (supervisor) + `compile-child` bins. Only the
-# worker build pulls rpc/remoc/tokio/harness; the pure lib (used by tests +
-# engine-executor's dev-deps) stays free of them.
-worker = ["dep:engine-rpc", "dep:engine-supervisor", "dep:remoc", "dep:tokio", "dep:enclavid-ra-tls", "dep:enclavid-attestation", "dep:tokio-rustls", "dep:fleet-transport"]
+# Enables the `compile-worker` (supervisor) bin. Only the worker build pulls
+# rpc/remoc/tokio/harness; the pure lib (used by tests, engine-compiler-child
+# and engine-executor's dev-deps) stays free of them.
+worker = [
+    # The supervisor is the half that speaks to the host: it reports its
+    # configuration at boot and says why it is stopping. The child does not, so
+    # this rides the worker feature rather than the dependency.
+    "safe-logger/device",
+    "dep:engine-rpc",
+    "dep:engine-supervisor",
+    "dep:remoc",
+    "dep:tokio",
+    "dep:enclavid-ra-tls",
+    "dep:enclavid-attestation",
+    "dep:tokio-rustls",
+    "dep:fleet-transport",
+]
 # The posture a measured guest image builds with: enforce the kernel ptrace floor
 # the per-round child isolation rests on.
 guest-hardening = ["worker", "engine-supervisor/guest-hardening"]
 # The attested build: reach api over vsock instead of TCP.
 vsock = ["worker", "fleet-transport/vsock"]
+# Compiles the `debug!` sites in. OFF in the measured build, so a production
+# binary holds no diagnostic that nobody wrote a reason for.
+debug = ["safe-logger/debug"]
 
 [[bin]]
 name = "compile-worker"
-required-features = ["worker"]
-
-# The disposable per-compile child the supervisor spawns. Runs Cranelift over
-# untrusted wasm in a throwaway process; keyless. worker-gated so api never links it.
-[[bin]]
-name = "compile-child"
 required-features = ["worker"]
 
 [dev-dependencies]

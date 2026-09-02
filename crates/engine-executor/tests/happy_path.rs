@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use engine_compiler::Compiler;
 use engine_executor::{
@@ -33,6 +33,7 @@ use engine_executor::{
     SessionListener,
 };
 use hatch_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
+use xtask::fixtures;
 
 /// End-to-end test harness mirroring the old in-process `Runner` facade: a
 /// [`Compiler`] + [`Executor`] on SEPARATE engines, bridged by serialized
@@ -139,54 +140,18 @@ impl MediaStore for CountingMediaStore {
     }
 }
 
-/// WIT package id the policy imports its capture / disclosure-field
-/// helpers from; used as the plugin descriptor label at compose time.
-const WELL_KNOWN_PACKAGE: &str = "enclavid:well-known@0.1.0";
-/// Package id of the minimal second plugin the policy imports (its
-/// `tag::get()` supplies the consent requester). Linked alongside
-/// well-known in the dynamic path, and at runtime over a pre-fused core
-/// in the hybrid test.
-const EXTRA_PACKAGE: &str = "enclavid:extra@0.1.0";
-/// Package id of the face-age plugin the policy calls on the selfie
-/// round. Ships no embedded catalog (no i18n/icons/DF), so it adds no
-/// strict-routing twin.
-const FACE_AGE_PACKAGE: &str = "enclavid:face-age@0.1.0";
-/// Package id of the preprocess plugin — decodes the selfie `clip` into the
-/// plugin-owned `decoded-frame` the policy threads to face-age. Ships no
-/// embedded catalog, so it adds no strict-routing twin.
-const PREPROCESS_PACKAGE: &str = "enclavid:preprocess@0.1.0";
-/// Package id of the face-detect plugin — locates the `face` in the
-/// decoded-frame, which the policy threads to face-age. Ships no embedded
-/// catalog, so it adds no strict-routing twin.
-const FACE_DETECT_PACKAGE: &str = "enclavid:face-detect@0.1.0";
-
-/// The plugins the policy imports — well-known + extra + face-age. All
-/// must be present in every composition, since the policy calls into
-/// each (well-known for specs/DF, extra for the requester tag, face-age
-/// on the selfie round).
+/// The plugins the policy imports — well-known + extra + the vision trio. All
+/// must be present in every composition, since the policy calls into each.
+/// Built by [`xtask::fixtures`], shared with `engine-executor-child`'s
+/// child-process test.
 fn all_plugins() -> Vec<PluginInstance> {
-    vec![
-        PluginInstance {
-            package: WELL_KNOWN_PACKAGE.to_string(),
-            wasm: well_known_component().to_vec(),
-        },
-        PluginInstance {
-            package: EXTRA_PACKAGE.to_string(),
-            wasm: extra_component().to_vec(),
-        },
-        PluginInstance {
-            package: PREPROCESS_PACKAGE.to_string(),
-            wasm: preprocess_component().to_vec(),
-        },
-        PluginInstance {
-            package: FACE_DETECT_PACKAGE.to_string(),
-            wasm: face_detect_component().to_vec(),
-        },
-        PluginInstance {
-            package: FACE_AGE_PACKAGE.to_string(),
-            wasm: face_age_component().to_vec(),
-        },
-    ]
+    fixtures::all_plugins()
+        .into_iter()
+        .map(|(package, wasm)| PluginInstance {
+            package: package.to_string(),
+            wasm: wasm.to_vec(),
+        })
+        .collect()
 }
 
 /// Recording listener: captures every sealed disclosure the runtime
@@ -525,7 +490,7 @@ async fn oversized_state_traps() {
 async fn static_fused_artifact_resolves_strictly() {
     let runner = TestRunner::new().unwrap();
     let fused = runner
-        .fuse(test_policy_component(), &all_plugins())
+        .fuse(fixtures::test_policy(), &all_plugins())
         .unwrap();
 
     // The twins survive as distinct `embedded-slot:*` imports (strict
@@ -697,28 +662,28 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     // still imports extra/tag (unsatisfied — a runtime import of the core).
     let baked = vec![
         PluginInstance {
-            package: WELL_KNOWN_PACKAGE.to_string(),
-            wasm: well_known_component().to_vec(),
+            package: fixtures::WELL_KNOWN_PACKAGE.to_string(),
+            wasm: fixtures::well_known().to_vec(),
         },
         PluginInstance {
-            package: PREPROCESS_PACKAGE.to_string(),
-            wasm: preprocess_component().to_vec(),
+            package: fixtures::PREPROCESS_PACKAGE.to_string(),
+            wasm: fixtures::preprocess().to_vec(),
         },
         PluginInstance {
-            package: FACE_DETECT_PACKAGE.to_string(),
-            wasm: face_detect_component().to_vec(),
+            package: fixtures::FACE_DETECT_PACKAGE.to_string(),
+            wasm: fixtures::face_detect().to_vec(),
         },
         PluginInstance {
-            package: FACE_AGE_PACKAGE.to_string(),
-            wasm: face_age_component().to_vec(),
+            package: fixtures::FACE_AGE_PACKAGE.to_string(),
+            wasm: fixtures::face_age().to_vec(),
         },
     ];
-    let core = runner.fuse(test_policy_component(), &baked).unwrap();
+    let core = runner.fuse(fixtures::test_policy(), &baked).unwrap();
 
     // HYBRID: link extra at runtime over the pre-fused core.
     let runtime = vec![PluginInstance {
-        package: EXTRA_PACKAGE.to_string(),
-        wasm: extra_component().to_vec(),
+        package: fixtures::EXTRA_PACKAGE.to_string(),
+        wasm: fixtures::extra().to_vec(),
     }];
     let composition = runner.compose(&core, &runtime).unwrap();
 
@@ -730,7 +695,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     for c in cats {
         builder.add_component(c.hash, c.decls);
     }
-    let extra_cat = engine_compiler::load_embedded(extra_component()).unwrap();
+    let extra_cat = engine_compiler::load_embedded(fixtures::extra()).unwrap();
     builder.add_component(extra_cat.hash, extra_cat.decls);
     let embedded = Arc::new(builder.build());
     let listener = Arc::new(RecordingListener::default());
@@ -830,7 +795,7 @@ impl Harness {
         // JSON), so `compose` derives each catalog's content-hash from
         // the same bytes the registry keys on.
         let composition = runner
-            .compose(test_policy_component(), &all_plugins())
+            .compose(fixtures::test_policy(), &all_plugins())
             .unwrap();
 
         // Composition-wide `EmbeddedRegistry`, keyed by each component's
@@ -842,9 +807,9 @@ impl Harness {
         // `tee_seal_key + policy_ref`.
         let mut builder = EmbeddedRegistry::builder();
         for wasm in [
-            test_policy_component(),
-            well_known_component(),
-            extra_component(),
+            fixtures::test_policy(),
+            fixtures::well_known(),
+            fixtures::extra(),
         ] {
             let cat = engine_compiler::load_embedded(wasm).expect("load embedded");
             builder.add_component(cat.hash, cat.decls);
@@ -950,561 +915,4 @@ fn jpeg_frame() -> Vec<u8> {
         .encode(&rgb, W, H, ColorType::Rgb)
         .expect("encode test jpeg");
     buf
-}
-
-// ---------------------------------------------------------------------
-// Component build + embedded-section loading
-// ---------------------------------------------------------------------
-
-fn policy_dir() -> String {
-    format!("{}/tests/fixtures/test-policy", env!("CARGO_MANIFEST_DIR"))
-}
-
-fn well_known_dir() -> String {
-    format!("{}/../../plugins/well-known", env!("CARGO_MANIFEST_DIR"))
-}
-
-fn extra_dir() -> String {
-    format!("{}/tests/fixtures/test-extra", env!("CARGO_MANIFEST_DIR"))
-}
-
-fn face_age_dir() -> String {
-    format!("{}/../../plugins/face-age", env!("CARGO_MANIFEST_DIR"))
-}
-
-fn preprocess_dir() -> String {
-    format!("{}/../../plugins/preprocess", env!("CARGO_MANIFEST_DIR"))
-}
-
-fn face_detect_dir() -> String {
-    format!("{}/../../plugins/face-detect", env!("CARGO_MANIFEST_DIR"))
-}
-
-/// Build the `test-policy` fixture (cached), componentize it, and embed
-/// its author JSON as `enclavid:embedded.*` custom sections — a sealed
-/// component, exactly the shape the engine sees in production.
-fn test_policy_component() -> &'static [u8] {
-    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-    COMPONENT
-        .get_or_init(|| {
-            let dir = policy_dir();
-            let module = format!("{dir}/target/wasm32-unknown-unknown/release/test_policy.wasm");
-            xtask::embed_sections(
-                xtask::build_componentized(&dir, &module).expect("build_componentized"),
-                &dir,
-            )
-        })
-        .as_slice()
-}
-
-/// Build the `enclavid:well-known` plugin (cached), componentize it, and
-/// embed its author JSON as custom sections.
-fn well_known_component() -> &'static [u8] {
-    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-    COMPONENT
-        .get_or_init(|| {
-            let dir = well_known_dir();
-            let module = format!("{dir}/target/wasm32-unknown-unknown/release/well_known.wasm");
-            xtask::embed_sections(
-                xtask::build_componentized(&dir, &module).expect("build_componentized"),
-                &dir,
-            )
-        })
-        .as_slice()
-}
-
-/// Build the minimal `enclavid:extra` plugin (cached), componentize it,
-/// and embed its `i18n.json` as a custom section.
-fn extra_component() -> &'static [u8] {
-    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-    COMPONENT
-        .get_or_init(|| {
-            let dir = extra_dir();
-            let module = format!("{dir}/target/wasm32-unknown-unknown/release/test_extra.wasm");
-            xtask::embed_sections(
-                xtask::build_componentized(&dir, &module).expect("build_componentized"),
-                &dir,
-            )
-        })
-        .as_slice()
-}
-
-/// Build the `enclavid:face-age` plugin (cached) and componentize it. It
-/// ships no embedded JSON, so `embed_sections` appends nothing — the
-/// artifact carries only its `check` export + the `enclavid:vision/types`
-/// import (the `decoded-frame` it reads crops from).
-fn face_age_component() -> &'static [u8] {
-    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-    COMPONENT
-        .get_or_init(|| {
-            let dir = face_age_dir();
-            // face-age is a member of the `plugins/` workspace, so its wasm
-            // lands in the SHARED workspace target, not the crate dir.
-            let module = format!(
-                "{}/../../plugins/target/wasm32-unknown-unknown/release/face_age.wasm",
-                env!("CARGO_MANIFEST_DIR"),
-            );
-            xtask::embed_sections(
-                xtask::build_componentized(&dir, &module).expect("build_componentized"),
-                &dir,
-            )
-        })
-        .as_slice()
-}
-
-/// Build the `enclavid:preprocess` plugin (cached) and componentize it. It
-/// OWNS the `decoded-frame` resource (exports `enclavid:vision/types`) and
-/// imports the host `clip`; no embedded JSON.
-fn preprocess_component() -> &'static [u8] {
-    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-    COMPONENT
-        .get_or_init(|| {
-            let dir = preprocess_dir();
-            let module = format!(
-                "{}/../../plugins/target/wasm32-unknown-unknown/release/preprocess.wasm",
-                env!("CARGO_MANIFEST_DIR"),
-            );
-            xtask::embed_sections(
-                xtask::build_componentized(&dir, &module).expect("build_componentized"),
-                &dir,
-            )
-        })
-        .as_slice()
-}
-
-/// Build the `enclavid:face-detect` plugin (cached) and componentize it. It
-/// imports `enclavid:vision/types` (reads the preprocess-owned
-/// `decoded-frame`) and exports `detect`; no embedded JSON. Default build =
-/// the weightless placeholder (whole frame as the face).
-fn face_detect_component() -> &'static [u8] {
-    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-    COMPONENT
-        .get_or_init(|| {
-            let dir = face_detect_dir();
-            let module = format!(
-                "{}/../../plugins/target/wasm32-unknown-unknown/release/face_detect.wasm",
-                env!("CARGO_MANIFEST_DIR"),
-            );
-            xtask::embed_sections(
-                xtask::build_componentized(&dir, &module).expect("build_componentized"),
-                &dir,
-            )
-        })
-        .as_slice()
-}
-
-// `build_componentized` + `embed_sections` moved to the shared `xtask`
-// crate so this test and the `xtask push-plugins` publish tool build
-// artifacts identically. Called as `xtask::build_componentized` /
-// `xtask::embed_sections` above.
-
-// ---------------------------------------------------------------------
-// session-child PROCESS integration (worker feature)
-// ---------------------------------------------------------------------
-
-/// Drives the REAL `session-child` binary the way the supervisor does — the one
-/// path the in-process `happy_path` + the `engine-rpc` remoc test don't cover:
-/// spawn a disposable per-round PROCESS over a socketpair, `prime` it with a real
-/// (10-15 MiB) bundle, `run` one round, assert the child relayed its callbacks
-/// and then EXITED; plus the fail-safe paths (garbage cwasm, dead child).
-///
-/// Gated on `worker` so `CARGO_BIN_EXE_session-child` exists and `engine-rpc` /
-/// `remoc` are linked. Run with `--features worker`.
-#[cfg(feature = "worker")]
-mod child_process {
-    use std::os::fd::OwnedFd;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
-    use engine_compiler::Compiler;
-    use hatch_client::{Event, SessionState};
-    use remoc::codec::Ciborium;
-    use remoc::rtc::ServerShared;
-
-    use engine_rpc::{
-        BundleRef, CallbackError, CatalogEntry, ChildCallbacks, ChildCallbacksServerShared,
-        ChildService, ChildServiceClient, CompiledBundle, ConsentDisclosure, ExecError, RunStatus,
-    };
-
-    use super::{all_plugins, test_policy_component};
-
-    /// Unique suffix so concurrent tests don't collide on the cwasm temp file.
-    static TEST_CWASM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    /// Write a bundle's cwasm to a temp file and build the mmap-delivery
-    /// [`BundleRef`] the child now expects (Stage A) — the supervisor does this per
-    /// composition; the test does it inline. The file leaks (ephemeral test tmp).
-    fn to_bundle_ref(bundle: &CompiledBundle) -> BundleRef {
-        let n = TEST_CWASM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "enclavid-test-cwasm-{}-{n}.bin",
-            std::process::id()
-        ));
-        std::fs::write(&path, &bundle.cwasm).expect("write test cwasm file");
-        BundleRef {
-            cwasm_path: path.to_string_lossy().into_owned(),
-            embedded_imports: bundle.embedded_imports.clone(),
-            catalogs: bundle.catalogs.clone(),
-        }
-    }
-
-    /// The upstream the child's callbacks relay to — plays the supervisor's relay
-    /// (→ api). Records what the child called BACK during the run.
-    struct MockCallbacks {
-        session_changes: Mutex<u32>,
-        media_loads: Mutex<Vec<[u8; 32]>>,
-    }
-
-    impl ChildCallbacks for MockCallbacks {
-        async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError> {
-            self.media_loads.lock().unwrap().push(hash);
-            Ok(None)
-        }
-        async fn session_change(
-            &self,
-            _state: SessionState,
-            _disclosures: Vec<ConsentDisclosure>,
-            _media: Vec<([u8; 32], Vec<u8>)>,
-        ) -> Result<(), CallbackError> {
-            *self.session_changes.lock().unwrap() += 1;
-            Ok(())
-        }
-    }
-
-    /// Compile the test policy + all plugins into a real wire `CompiledBundle`
-    /// (the same shape the compile-worker returns), so `prime` deserializes a
-    /// genuine cwasm — exercising the 64 MiB `connection_cfg` on the child hop.
-    fn real_bundle() -> CompiledBundle {
-        let compiler = Compiler::new().expect("compiler");
-        let parts = compiler
-            .compile_to_parts(test_policy_component(), &all_plugins())
-            .expect("compile_to_parts");
-        CompiledBundle {
-            cwasm: parts.cwasm,
-            embedded_imports: parts.embedded_imports,
-            catalogs: parts
-                .catalogs
-                .into_iter()
-                .map(|(hash, decls)| CatalogEntry { hash, decls })
-                .collect(),
-        }
-    }
-
-    /// Spawn the real `session-child` over a socketpair (its fd 0), the way the
-    /// supervisor does, and return the child handle + its `ChildService` client.
-    async fn spawn_child() -> (tokio::process::Child, ChildServiceClient<Ciborium>) {
-        let (sup_end, child_end) = std::os::unix::net::UnixStream::pair().unwrap();
-        sup_end.set_nonblocking(true).unwrap();
-        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_session-child"));
-        cmd.stdin(std::process::Stdio::from(OwnedFd::from(child_end)));
-        cmd.kill_on_drop(true);
-        let child = cmd.spawn().expect("spawn session-child");
-
-        let sup_end = tokio::net::UnixStream::from_std(sup_end).unwrap();
-        let (read, write) = sup_end.into_split();
-        type Cli = ChildServiceClient<Ciborium>;
-        let (conn, _tx, mut rx) = remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(
-            engine_rpc::connection_cfg(),
-            read,
-            write,
-        )
-        .await
-        .unwrap();
-        tokio::spawn(conn);
-        let client = rx
-            .recv()
-            .await
-            .unwrap()
-            .expect("child sent its service client");
-        (child, client)
-    }
-
-    /// Full happy path THROUGH the spawned process: prime a real bundle, run the
-    /// genesis round, assert a relayed `session_change`, then the child exits when
-    /// its client is dropped (disposable per-round process).
-    #[tokio::test]
-    async fn spawned_child_primes_runs_relays_then_exits() {
-        let bundle = real_bundle();
-        let (mut child, client) = spawn_child().await;
-
-        // Prime via the mmap path: the child `deserialize_file`s a real
-        // (multi-MiB) cwasm written to a temp file — only the path crosses the hop.
-        client
-            .prime(to_bundle_ref(&bundle))
-            .await
-            .expect("prime real bundle");
-
-        let cbs = Arc::new(MockCallbacks {
-            session_changes: Mutex::new(0),
-            media_loads: Mutex::new(Vec::new()),
-        });
-        let (server, cb_client) = ChildCallbacksServerShared::<_, Ciborium>::new(cbs.clone(), 4);
-        tokio::spawn(async move {
-            let _ = server.serve(true).await;
-        });
-
-        // Genesis: the policy renders the passport media prompt and fires the
-        // listener once — relayed to the mock as ONE session_change.
-        let reply = client
-            .run(SessionState::default(), Event::Start, vec![], cb_client)
-            .await
-            .expect("run genesis round");
-        assert!(
-            matches!(reply.status, RunStatus::AwaitingInput(_)),
-            "genesis must render a prompt, got {:?}",
-            reply.status,
-        );
-        assert_eq!(
-            *cbs.session_changes.lock().unwrap(),
-            1,
-            "the child must relay exactly one session_change for the round",
-        );
-
-        // Dropping the client ends the child's serve loop → the PROCESS exits.
-        drop(client);
-        let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
-            .await
-            .expect("child must exit promptly after its client is dropped")
-            .expect("wait for child");
-        assert!(status.success(), "child exits cleanly, got {status:?}");
-    }
-
-    /// Fail-safe: a tampered / toolchain-skewed cwasm fails `deserialize` in the
-    /// child and surfaces as `ExecError::Run` — not a panic, not a hang.
-    #[tokio::test]
-    async fn prime_with_garbage_cwasm_fails_safe() {
-        let (mut child, client) = spawn_child().await;
-        let bundle = CompiledBundle {
-            cwasm: b"definitely not a cwasm".to_vec(),
-            embedded_imports: vec![],
-            catalogs: vec![],
-        };
-        let err = tokio::time::timeout(
-            Duration::from_secs(10),
-            client.prime(to_bundle_ref(&bundle)),
-        )
-        .await
-        .expect("prime must not hang")
-        .expect_err("garbage cwasm must fail prime");
-        assert!(
-            matches!(err, ExecError::Run(_)),
-            "expected ExecError::Run, got {err:?}"
-        );
-        drop(client);
-        let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
-    }
-
-    /// Fail-safe: a child that dies mid-flight makes the RPC ERROR (disconnect),
-    /// so the supervisor maps it to `ExecError` → api 5xx → applicant retries
-    /// against intact api-side state — it never hangs on a corpse.
-    #[tokio::test]
-    async fn dead_child_surfaces_error_not_hang() {
-        let (mut child, client) = spawn_child().await;
-        child.kill().await.expect("kill child");
-        let bundle = CompiledBundle {
-            cwasm: vec![],
-            embedded_imports: vec![],
-            catalogs: vec![],
-        };
-        let res = tokio::time::timeout(
-            Duration::from_secs(10),
-            client.prime(to_bundle_ref(&bundle)),
-        )
-        .await
-        .expect("call to a dead child must resolve (error), not hang");
-        assert!(
-            res.is_err(),
-            "prime to a dead child must error, got {res:?}"
-        );
-    }
-
-    /// PERF GATE (not an assertion) — measures the per-round cost the zygote
-    /// would remove (`deserialize` + `prime`, CoW-inherited) vs a full fresh-exec
-    /// round, on a REAL bundle. Run:
-    ///   cargo test -p engine-executor --features worker --test happy_path -- \
-    ///     --ignored --nocapture child_process::measure
-    #[tokio::test]
-    #[ignore = "perf measurement; run with --ignored --nocapture"]
-    async fn measure_per_round_cost() {
-        use std::time::{Duration, Instant};
-
-        use engine_executor::{EmbeddedRegistry, Executor};
-
-        let bundle = real_bundle();
-        eprintln!(
-            "\n=== cwasm size: {} bytes ({:.2} MiB) ===",
-            bundle.cwasm.len(),
-            bundle.cwasm.len() as f64 / (1024.0 * 1024.0),
-        );
-
-        let avg = |v: &[Duration]| v.iter().sum::<Duration>() / v.len() as u32;
-
-        // Isolate Engine::new() (OS-agnostic wasmtime engine creation) — one of
-        // the three things baked into the `spawn` phase (the others, exec/dyld,
-        // are macOS-heavy on this dev box vs the Linux CVM target).
-        {
-            let _ = Executor::new().unwrap(); // warm
-            let mut en = Vec::new();
-            for _ in 0..10 {
-                let t = Instant::now();
-                let _e = Executor::new().unwrap();
-                en.push(t.elapsed());
-            }
-            eprintln!("Executor::new() [Engine::new]: avg {:?}", avg(&en));
-        }
-
-        let executor = Executor::new().unwrap();
-        let build_embedded = || {
-            let mut b = EmbeddedRegistry::builder();
-            for c in &bundle.catalogs {
-                b.add_component(c.hash, c.decls.clone());
-            }
-            std::sync::Arc::new(b.build())
-        };
-
-        // Warm up (page-cache, allocator).
-        {
-            let comp = executor.deserialize_component(&bundle.cwasm).unwrap();
-            let _ = executor
-                .prime(&comp, &bundle.embedded_imports, build_embedded())
-                .unwrap();
-        }
-
-        // (a)+(b): the two layers CoW-inheritance would remove, in-process.
-        let n = 20;
-        let (mut de, mut pr) = (Vec::new(), Vec::new());
-        for _ in 0..n {
-            let t = Instant::now();
-            let comp = executor.deserialize_component(&bundle.cwasm).unwrap();
-            de.push(t.elapsed());
-            let t = Instant::now();
-            let _primed = executor
-                .prime(&comp, &bundle.embedded_imports, build_embedded())
-                .unwrap();
-            pr.push(t.elapsed());
-        }
-        eprintln!(
-            "deserialize_component (bytes, warm):      avg {:?}",
-            avg(&de)
-        );
-        eprintln!(
-            "prime (Linker+InstancePre):               avg {:?}",
-            avg(&pr)
-        );
-
-        // deserialize_FILE (mmap) — COLD (fresh executor, like a fresh child) vs
-        // warm. Isolates whether the child's ~50 ms `prime` is deserialize COMPUTE
-        // (a FULL zygote inheriting the warm Component eliminates it; LIGHT does
-        // NOT) or transfer/remoc (neither zygote helps).
-        {
-            let n = TEST_CWASM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("enclavid-measure-cwasm-{n}.bin"));
-            std::fs::write(&path, &bundle.cwasm).unwrap();
-            let cold = Executor::new().unwrap();
-            let t = Instant::now();
-            let _c = cold.deserialize_component_file(&path).unwrap();
-            eprintln!(
-                "deserialize_file (mmap) COLD (fresh executor): {:?}",
-                t.elapsed()
-            );
-            let mut df = Vec::new();
-            for _ in 0..10 {
-                let t = Instant::now();
-                let _c = executor.deserialize_component_file(&path).unwrap();
-                df.push(t.elapsed());
-            }
-            eprintln!(
-                "deserialize_file (mmap) warm:             avg {:?}",
-                avg(&df)
-            );
-            let _ = std::fs::remove_file(&path);
-        }
-
-        // Scale of the catalogs (still shipped in BundleRef over remoc) — to tell
-        // whether the ~48 ms residual `prime` is catalog VOLUME or remoc RPC base
-        // latency.
-        {
-            let (mut ncat, mut nloc, mut ndf, mut nic) = (0usize, 0usize, 0usize, 0usize);
-            for c in &bundle.catalogs {
-                ncat += 1;
-                ndf += c.decls.disclosure_fields.len();
-                nic += c.decls.icons.len();
-                for (_, tr) in &c.decls.localized {
-                    nloc += tr.len();
-                }
-            }
-            eprintln!(
-                "catalogs shipped in BundleRef: {ncat} components, {nloc} translations, {ndf} DF, {nic} icons"
-            );
-        }
-
-        // Full fresh-exec round, BROKEN DOWN — the zygote (fork from a warm,
-        // already-primed template) would replace `spawn`(exec+Engine::new) +
-        // `prime`(deserialize+InstancePre) with a cheap fork; only `run`
-        // (instantiate + the policy round) is inherent to every model.
-        // Write the cwasm file ONCE (as the supervisor caches per composition); the
-        // per-round `prime` then MMAPs it (Stage A) — this is what drops prime cost.
-        let bundle_ref = to_bundle_ref(&real_bundle_cached());
-        // Warm the session-child binary back into the page cache (the fixture
-        // compilation above evicted it) so `sp` reflects STEADY-STATE spawn, not a
-        // cold first-load.
-        for _ in 0..3 {
-            let (mut c, cl) = spawn_child().await;
-            drop(cl);
-            let _ = tokio::time::timeout(Duration::from_secs(5), c.wait()).await;
-        }
-        let (mut sp, mut prm, mut rn) = (Vec::new(), Vec::new(), Vec::new());
-        for _ in 0..5 {
-            let t = Instant::now();
-            let (mut child, client) = spawn_child().await;
-            sp.push(t.elapsed());
-
-            let t = Instant::now();
-            client.prime(bundle_ref.clone()).await.expect("prime");
-            prm.push(t.elapsed());
-
-            let cbs = std::sync::Arc::new(MockCallbacks {
-                session_changes: std::sync::Mutex::new(0),
-                media_loads: std::sync::Mutex::new(Vec::new()),
-            });
-            let (server, cb_client) = ChildCallbacksServerShared::<_, Ciborium>::new(cbs, 4);
-            tokio::spawn(async move {
-                let _ = server.serve(true).await;
-            });
-            let t = Instant::now();
-            client
-                .run(SessionState::default(), Event::Start, vec![], cb_client)
-                .await
-                .expect("run");
-            rn.push(t.elapsed());
-
-            drop(client);
-            let _ = tokio::time::timeout(Duration::from_secs(15), child.wait()).await;
-        }
-        eprintln!("--- full fresh-exec round, by phase ---");
-        eprintln!(
-            "  spawn (exec + child Engine::new + handshake): avg {:?}",
-            avg(&sp)
-        );
-        eprintln!(
-            "  prime (ship cwasm + child deserialize+pre):   avg {:?}",
-            avg(&prm)
-        );
-        eprintln!(
-            "  run   (instantiate + genesis policy round):   avg {:?}",
-            avg(&rn)
-        );
-        eprintln!(
-            "  → zygote removes spawn+prime, keeps run: saves ~{:?}/round",
-            avg(&sp) + avg(&prm)
-        );
-        eprintln!("=== end perf gate ===\n");
-    }
-
-    /// `real_bundle` recompiles each call (~seconds); cache one for the round loop.
-    fn real_bundle_cached() -> CompiledBundle {
-        use std::sync::OnceLock;
-        static B: OnceLock<CompiledBundle> = OnceLock::new();
-        B.get_or_init(real_bundle).clone()
-    }
 }

@@ -13,6 +13,15 @@ repository.workspace = true
 # shares only the plain-data engine-types leaf with engine-compiler; a
 # serialized `cwasm` (produced there) is the sole input crossing in.
 [dependencies]
+# The guest's one channel to the host. This role withholds the panic LOCATION
+# outside a debug build (`install_panic(cfg!(feature = "debug"))`): it runs the
+# consumer's wasm, so a panic site reached is a site that code could have chosen.
+#
+# WITHOUT the `device` feature here — the worker adds it below. The library uses
+# none of this crate; only the worker bin does. Leaving it off means the child
+# package, which depends on this library and is built by its own cargo
+# invocation, gets no outward half through this edge either.
+safe-logger = { path = "../safe-logger" }
 engine-types = { path = "../engine-types" }
 hatch-client = { path = "../hatch-client" }
 
@@ -33,9 +42,10 @@ blake3 = "1"
 
 # --- execution-worker bin deps (optional) — pulled ONLY by the `worker`
 # feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable
-# execution-worker CVM: it wraps this crate's Executor in an
-# `engine_rpc::ExecutorService` server, caches deserialized components per composition,
-# and proxies mid-run callbacks (media_load / session_change) back to the
+# execution-worker CVM: it serves `engine_rpc::ExecutorService`, caches each
+# composition's cwasm, and drives one disposable child per round — this crate's
+# `Executor` runs in that CHILD (engine-executor-child), not here. It also proxies
+# the child's mid-run callbacks (media_load / session_change) on to the
 # orchestrator over the SAME remoc connection — KEYLESS (no tee_seal_key ever
 # crosses in). ---
 engine-rpc = { path = "../engine-rpc", default-features = false, features = ["execute"], optional = true }
@@ -51,7 +61,7 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "net",
     "io-util",
-    # `process` — the supervisor spawns per-round `session-child` processes;
+    # `process` — the supervisor spawns per-round `engine-executor-child` processes;
     # `sync` — the bounded-children `Semaphore`; `time` — the child-reap timeout.
     "process",
     "sync",
@@ -94,6 +104,10 @@ tempfile = { version = "3", optional = true }
 # orchestrator links only the pure lib types it re-points to engine-types /
 # hatch-client, and NO wasmtime.
 worker = [
+    # The supervisor is the half that speaks to the host: it reports its
+    # configuration at boot and says why it is stopping. The child does not, so
+    # this rides the worker feature rather than the dependency.
+    "safe-logger/device",
     "dep:engine-rpc",
     "dep:engine-supervisor",
     "dep:remoc",
@@ -115,16 +129,12 @@ worker = [
 guest-hardening = ["worker", "engine-supervisor/guest-hardening"]
 # The attested build: reach api over vsock instead of TCP.
 vsock = ["worker", "fleet-transport/vsock"]
+# Compiles the `debug!` sites in. OFF in the measured build, so a production
+# binary holds no diagnostic that nobody wrote a reason for.
+debug = ["safe-logger/debug"]
 
 [[bin]]
 name = "execution-worker"
-required-features = ["worker"]
-
-# The disposable per-round child the supervisor spawns. Same crate (same build →
-# same wasmtime ABI / compat_token as the supervisor), `worker`-gated so api never
-# links it. Untrusted policy wasm + `Component::deserialize` run ONLY here.
-[[bin]]
-name = "session-child"
 required-features = ["worker"]
 
 # Micro-bench isolating the `spawn` phase (exec + dyld + Engine::new + handshake)
@@ -135,26 +145,17 @@ name = "spawn-bench"
 required-features = ["worker"]
 
 [dev-dependencies]
-# `process`/`net`/`io-util`/`time` — the worker-gated `child_process` integration
-# test spawns the real `session-child` binary over a socketpair and drives it.
-tokio = { version = "1", features = [
-    "macros",
-    "rt-multi-thread",
-    "process",
-    "net",
-    "io-util",
-    "time",
-] }
+# happy_path.rs drives rounds in-process; the one that spawns the real child
+# process moved out with the binary, and the tokio features it needed
+# (process/net/io-util/time) went with it.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # happy_path.rs is the end-to-end integration test: it COMPOSES a policy +
 # plugins (engine-compiler), round-trips the cwasm onto this crate's engine,
 # and drives full reducer rounds against real fixtures.
 engine-compiler = { path = "../engine-compiler" }
-# Reads the fixture's source-side disclosure-fields.json / i18n.json via the
-# same helpers the CLI uses at seal time.
-enclavid-embedded = { path = "../embedded" }
 # fake_capture emits a real JPEG so the face-age plugin's in-sandbox
 # decode → preprocess → inference pipeline has something to decode.
 jpeg-encoder = "0.6"
-# Shared build→componentize→embed pipeline — the SAME code `xtask
-# push-plugins` uses, so tested and shipped artifacts match.
+# The fixture catalog + the shared build→componentize→embed pipeline — the SAME
+# code `xtask push-plugins` uses, so tested and shipped artifacts match.
 xtask = { path = "../../xtask" }

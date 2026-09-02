@@ -2,13 +2,13 @@
 //!
 //! It LISTENS for the orchestrator (api) and serves `engine_rpc::CompilerService`
 //! — the same api-facing contract as before — but it runs NO Cranelift itself.
-//! Per compile it drives a fresh `compile-child` PROCESS (spawned + bounded +
+//! Per compile it drives a fresh `engine-compiler-child` PROCESS (spawned + bounded +
 //! deadline-guarded + reaped by the shared [`engine_supervisor::ChildPool`]) and
 //! forwards the `(policy, plugins)` to it. Cranelift over UNTRUSTED wasm — a wide
 //! surface — runs ONLY in that disposable per-compile child, so a compiler-bug
 //! exploit is confined to one compile (no persistent implant that could poison a
-//! later tenant's cwasm). Started by INFRASTRUCTURE (docker-compose / k8s),
-//! exactly like the hatch and the execution-worker.
+//! later tenant's cwasm). It is started for api, not by it — one instance per
+//! guest, brought up at boot.
 //!
 //! **Keyless + cacheless.** The compile-worker holds no keys and no in-memory
 //! cache: compile RESULTS are cached in api's L2, so this is a pure forwarder.
@@ -37,6 +37,8 @@ use engine_rpc::{
     CompilerServiceServerShared,
 };
 use engine_types::composition::PluginInstance;
+use fleet_transport::LegFailure;
+use safe_logger::{debug, info, reason, safe, warn};
 
 /// Wall-clock ceiling on ONE compile in the child (tunable via
 /// `ENCLAVID_COMPILE_DEADLINE_SECS`; enforced by the [`ChildPool`]). Bounds a
@@ -50,7 +52,7 @@ const DEFAULT_COMPILE_DEADLINE_SECS: u64 = 300;
 const DEFAULT_MAX_COMPILES: usize = 8;
 
 /// The `engine_rpc::CompilerService` impl served to api: forward each compile to
-/// a fresh disposable `compile-child` via the pool. Shared (`Arc`) across api
+/// a fresh disposable `engine-compiler-child` via the pool. Shared (`Arc`) across api
 /// connections.
 struct Supervisor {
     pool: ChildPool,
@@ -67,7 +69,7 @@ impl CompilerService for Supervisor {
         // child). The closure is the DOMAIN work: forward the compile.
         let outcome = self
             .pool
-            // No inherited fds: the compile-child receives its `(policy, plugins)`
+            // No inherited fds: the engine-compiler-child receives its `(policy, plugins)`
             // over the RPC, not by fd (only the executor hands a cwasm memfd down).
             .run(
                 &[],
@@ -88,16 +90,25 @@ impl CompilerService for Supervisor {
     }
 }
 
-/// Locate the `compile-child` binary: `ENCLAVID_COMPILE_CHILD_BIN` if set, else
-/// the sibling of this supervisor's own executable (they build + deploy
-/// together). Fails loud if neither resolves — per the minimal-defaults rule.
+/// Locate the `engine-compiler-child` binary: `ENCLAVID_COMPILER_CHILD_BIN` if set, else
+/// the sibling of this supervisor's own executable. They SHIP together — the
+/// image installs both into `/bin` — but they are built apart, each package by
+/// its own cargo invocation, which is what keeps `engine-compiler-child`'s
+/// dependency graph the short one its manifest declares. Fails loud if neither
+/// resolves — per the minimal-defaults rule.
 fn child_exe() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("ENCLAVID_COMPILE_CHILD_BIN") {
+    if let Ok(p) = std::env::var("ENCLAVID_COMPILER_CHILD_BIN") {
         return std::path::PathBuf::from(p);
     }
-    let mut p = std::env::current_exe()
-        .expect("compile-worker: resolve current_exe for sibling compile-child path");
-    p.set_file_name("compile-child");
+    let mut p = std::env::current_exe().unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "compile-worker: cannot resolve this binary's own path, so the sibling \
+             engine-compiler-child cannot be located. Stopping.",
+            reason!("a constant about this image's own layout, which the host built")
+        )
+    });
+    p.set_file_name("engine-compiler-child");
     p
 }
 
@@ -107,8 +118,14 @@ type Cli = CompilerServiceClient<Ciborium>;
 
 #[tokio::main]
 async fn main() {
+    // First, so nothing can speak before the channel exists. Panic locations are
+    // on: this binary IS the measured code, and the compile side never sees
+    // applicant data.
+    safe_logger::install();
+    safe_logger::install_panic(true);
+
     // Fail CLOSED if the kernel's ptrace hardening is too weak to isolate one
-    // escaped compile-child from a sibling's memory (see the shared assertion).
+    // escaped engine-compiler-child from a sibling's memory (see the shared assertion).
     // The compile side is PII-free, but it rides the same disposable-child pool, so
     // it asserts the same invariant — one fix, both workers.
     engine_supervisor::assert_ptrace_hardened();
@@ -118,10 +135,13 @@ async fn main() {
     let addr = std::env::args()
         .nth(1)
         .or_else(|| std::env::var("ENCLAVID_COMPILE_WORKER_LISTEN").ok())
-        .expect(
-            "compile-worker: listen address required (arg1 or \
-             ENCLAVID_COMPILE_WORKER_LISTEN, e.g. 127.0.0.1:7001)",
-        );
+        .unwrap_or_else(|| {
+            safe_logger::error_and_panic!(
+                "compile-worker: no listen address — pass one as the first argument or set \
+                 ENCLAVID_COMPILE_WORKER_LISTEN. Stopping.",
+                reason!("a constant naming a configuration key the host itself supplied")
+            )
+        });
 
     let max_compiles: usize = std::env::var("ENCLAVID_MAX_COMPILES")
         .ok()
@@ -157,14 +177,28 @@ async fn main() {
         pool: ChildPool::new(child_exe.clone(), max_compiles, deadline, Some(hardening)),
     });
 
-    let mut listener = fleet_transport::bind(&addr)
-        .await
-        .unwrap_or_else(|e| panic!("compile-worker: bind {addr}: {e}"));
-    eprintln!(
-        "compile-worker (supervisor): listening on {addr}, compile-child={}, \
-         max_compiles={max_compiles}, deadline={}s",
-        child_exe.display(),
-        deadline.as_secs(),
+    let mut listener = fleet_transport::bind(&addr).await.unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "compile-worker: cannot bind {}. Stopping.",
+            safe(&addr, reason!("on the measured command line")),
+            reason!("a constant; the address is the host's own configuration")
+        )
+    });
+    info!(
+        "compile-worker (supervisor): listening on {}, engine-compiler-child={}, \
+         max_compiles={}, deadline={}s",
+        safe(&addr, reason!("on the measured command line")),
+        safe(
+            &child_exe.display(),
+            reason!("a location inside the measured image")
+        ),
+        safe(&max_compiles, reason!("a constant of the measured build")),
+        safe(
+            &deadline.as_secs(),
+            reason!("a constant of the measured build")
+        ),
+        reason!("a constant, emitted at boot before any policy has been composed")
     );
 
     // Mutual RA-TLS acceptor (minted once at boot): every accepted api connection is
@@ -179,7 +213,13 @@ async fn main() {
                 enclavid_attestation::DEV_FLEET_MEASUREMENT.to_string(),
             ]),
         )
-        .unwrap_or_else(|e| panic!("compile-worker: RA-TLS server config: {e}")),
+        .unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "compile-worker: cannot build the RA-TLS server config. Stopping.",
+                reason!("a constant reporting a platform state the host provisioned")
+            )
+        }),
     ));
 
     loop {
@@ -189,11 +229,22 @@ async fn main() {
                 let ratls = ratls.clone();
                 tokio::spawn(async move {
                     if let Err(e) = serve_conn(stream, ratls, svc).await {
-                        eprintln!("compile-worker: connection from {peer} ended: {e}");
+                        warn!(
+                            "compile-worker: connection from {} ended ({})",
+                            safe(&peer, reason!("an address the host routed itself")),
+                            e,
+                            reason!(
+                                "constant text; a connection closing is already visible to \
+                                 whoever carries it"
+                            )
+                        );
                     }
                 });
             }
-            Err(e) => eprintln!("compile-worker: accept failed: {e}"),
+            Err(e) => {
+                warn!("compile-worker: accept failed", reason!("a constant"));
+                debug!("  cause: {e}");
+            }
         }
     }
 }
@@ -203,25 +254,29 @@ async fn serve_conn(
     stream: fleet_transport::Stream,
     ratls: tokio_rustls::TlsAcceptor,
     svc: Arc<Supervisor>,
-) -> Result<(), String> {
-    let tls = ratls
-        .accept(stream)
-        .await
-        .map_err(|e| format!("RA-TLS accept: {e}"))?;
+) -> Result<(), LegFailure> {
+    let tls = ratls.accept(stream).await.map_err(|e| {
+        debug!("ra-tls accept: {e}");
+        LegFailure::Attest
+    })?;
     let (read, write) = tokio::io::split(tls);
     let (conn, mut tx, _rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
             .await
-            .map_err(|e| format!("remoc connect: {e}"))?;
+            .map_err(|e| {
+                debug!("rpc connect: {e}");
+                LegFailure::Rpc
+            })?;
     tokio::spawn(conn);
 
     let (server, client) = CompilerServiceServerShared::<_, Ciborium>::new(svc, 4);
-    tx.send(client)
-        .await
-        .map_err(|e| format!("send service client: {e}"))?;
-    server
-        .serve(true)
-        .await
-        .map_err(|e| format!("serve: {e}"))?;
+    tx.send(client).await.map_err(|e| {
+        debug!("send service client: {e}");
+        LegFailure::Clients
+    })?;
+    server.serve(true).await.map_err(|e| {
+        debug!("serve: {e}");
+        LegFailure::Serve
+    })?;
     Ok(())
 }

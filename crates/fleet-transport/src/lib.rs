@@ -21,6 +21,58 @@ compile_error!(
      without it for non-Linux dev environments."
 );
 
+/// Why a fleet leg failed, in terms that carry nothing out of a message.
+///
+/// Every field is a closed enum or nothing at all — there is no `String` here,
+/// and that is the whole design. A `String` inside an error is the same
+/// unbounded content as a `String` in a log line: it can hold what a foreign
+/// `Display` chose to say, and no one re-reads those on a dependency bump.
+/// Without one, [`safe_logger::SafeToLog`] below is true of the TYPE, so a log
+/// site needs no judgement and no reason of its own.
+///
+/// What is given up is the underlying message. It is not lost — the conversion
+/// site sends it to `debug!`, which never leaves the TEE — but production sees
+/// the stage and the kind, not the text. That is the trade: a stage and an
+/// `ErrorKind` are worth having in front of an operator, and a sentence from
+/// rustls or remoc is worth having only in front of a developer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LegFailure {
+    /// Nothing answered, or the connection died before TLS. The kind is
+    /// `std::io::ErrorKind`, a fieldless enum whose `Debug` is its own name.
+    Connect(std::io::ErrorKind),
+    /// The RA-TLS handshake did not complete — either peer refusing the other's
+    /// attestation, or an ordinary TLS failure.
+    Attest,
+    /// remoc could not bring the multiplexed connection up over the stream.
+    Rpc,
+    /// The connection came up but the service clients did not cross it.
+    Clients,
+    /// The peer closed before sending its service clients.
+    Closed,
+    /// An established connection stopped being served.
+    Serve,
+}
+
+impl std::fmt::Display for LegFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LegFailure::Connect(kind) => write!(f, "connect: {kind:?}"),
+            LegFailure::Attest => f.write_str("attest"),
+            LegFailure::Rpc => f.write_str("rpc"),
+            LegFailure::Clients => f.write_str("clients"),
+            LegFailure::Closed => f.write_str("closed before sending clients"),
+            LegFailure::Serve => f.write_str("serve"),
+        }
+    }
+}
+
+impl std::error::Error for LegFailure {}
+
+// The vouch, made once, next to the `Display` a reviewer has to read anyway:
+// every arm above writes a literal or the name of a fieldless variant, so there
+// is nothing here that a message could have put in.
+impl safe_logger::SafeToLog for LegFailure {}
+
 /// The connected stream, whichever transport carries it.
 #[cfg(not(feature = "vsock"))]
 pub type Stream = tokio::net::TcpStream;

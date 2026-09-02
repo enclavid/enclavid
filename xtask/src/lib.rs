@@ -6,6 +6,19 @@
 //! these, so a published artifact is byte-identical to the one the test
 //! exercises in-process (same `wit_component::ComponentEncoder`, same
 //! section bytes) — no drift between "what we test" and "what we ship".
+//!
+//! [`fixtures`] builds on that: the catalog of policy + plugin artifacts the
+//! engine tests compose, shared now that the executor and its child are
+//! separate packages that both need them.
+
+//! [`child_binary`] is the same idea applied to a Rust binary rather than a wasm
+//! one: build a disposable child in ITS OWN cargo invocation, so a test spawns
+//! the artifact the image ships and not a near-miss of it.
+
+mod child;
+pub mod fixtures;
+
+pub use child::child_binary;
 
 use std::process::Command;
 

@@ -3,10 +3,9 @@
 //! compile-worker over rpc, so the api binary links NO Cranelift.
 //!
 //! [`Compiler`] wraps the `engine_rpc::CompilerService` client. The worker is a
-//! separate process/CVM started by INFRASTRUCTURE (docker-compose / k8s), not
-//! by api — exactly like the hatch. api [`connect`](connect_compile_worker)s
-//! to it at a configured address (TCP in dev, a vsock-relay rendezvous under
-//! RA-TLS in Plan-A). The orchestrator holds the returned cwasm as BYTES via
+//! separate CVM, brought up at boot rather than by api.
+//! api [`connect`](connect_compile_worker)s to it at a configured address, under
+//! mutual RA-TLS; the transport is TCP by default and vsock under that feature. The orchestrator holds the returned cwasm as BYTES via
 //! [`bundle_to_entry`] and never deserializes it — the live `Component` is
 //! materialized only on the execution-worker (the compile→execute seam is
 //! bytes-in, bytes-out both ends).
@@ -21,6 +20,8 @@ use remoc::codec::Ciborium;
 // `CompilerService` (the remoc trait) is in scope so the generated
 // `CompilerServiceClient`'s `.compile()` method resolves.
 use engine_rpc::{CompileError, CompiledBundle, CompilerService, CompilerServiceClient};
+use fleet_transport::LegFailure;
+use safe_logger::debug;
 
 /// The COMPILE boundary: a client for a compile-worker's `engine_rpc::CompilerService`.
 /// Given already-pulled artifact bytes (the orchestrator owns the OCI pull +
@@ -55,34 +56,46 @@ impl Compiler {
 pub async fn connect_compile_worker(
     addr: &str,
     attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,
-) -> Result<Compiler, String> {
+) -> Result<Compiler, LegFailure> {
     type Cli = CompilerServiceClient<Ciborium>;
 
-    let stream = fleet_transport::dial(addr)
-        .await
-        .map_err(|e| format!("connect compile-worker at `{addr}`: {e}"))?;
+    let stream = fleet_transport::dial(addr).await.map_err(|e| {
+        debug!("connect {addr}: {e}");
+        LegFailure::Connect(e.kind())
+    })?;
     // Mutual RA-TLS over the dial (same as the execution-worker): attest the peer's
     // pinned measurement + present our own attested cert.
-    let config = crate::endorsement::fleet_client_config(attestor)
-        .map_err(|e| format!("compile-worker RA-TLS client config: {e}"))?;
+    let config = crate::endorsement::fleet_client_config(attestor).map_err(|e| {
+        debug!("ra-tls: {e}");
+        LegFailure::Attest
+    })?;
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
     let tls = connector
         .connect(enclavid_ra_tls::server_name(), stream)
         .await
-        .map_err(|e| format!("compile-worker RA-TLS handshake: {e}"))?;
+        .map_err(|e| {
+            debug!("ra-tls: {e}");
+            LegFailure::Attest
+        })?;
     let (read, write) = tokio::io::split(tls);
 
     let (conn, _tx, mut rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
             .await
-            .map_err(|e| format!("compile-worker remoc connect: {e}"))?;
+            .map_err(|e| {
+                debug!("rpc connect: {e}");
+                LegFailure::Rpc
+            })?;
     crate::fleet::watch(conn, "compile-worker");
 
     let client = rx
         .recv()
         .await
-        .map_err(|e| format!("compile-worker recv client: {e}"))?
-        .ok_or("compile-worker closed before sending its service client")?;
+        .map_err(|e| {
+            debug!("recv clients: {e}");
+            LegFailure::Clients
+        })?
+        .ok_or(LegFailure::Closed)?;
 
     Ok(Compiler::new(client))
 }

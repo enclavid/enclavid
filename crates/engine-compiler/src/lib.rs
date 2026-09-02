@@ -41,9 +41,10 @@ pub struct Composition {
 /// The serializable output of a compile, in engine-native types (NO rpc
 /// dep): the `cwasm` bytes, the per-catalog import manifest, and the parsed
 /// per-component catalogs. This is exactly what the wire `CompiledBundle`
-/// carries; the compile-worker bin (and api's `LocalCompiler`) wrap this
-/// into that wire type. Keeping it native lets the pure lib produce the
-/// whole compile output without depending on the `engine-rpc` contract.
+/// carries; `engine-compiler-child`, the disposable process that runs the
+/// compile, wraps this into that wire type. Keeping it native lets the pure lib
+/// produce the whole compile output without depending on the `engine-rpc`
+/// contract.
 pub struct BundleParts {
     pub cwasm: Vec<u8>,
     pub embedded_imports: Vec<EmbeddedImport>,
@@ -149,9 +150,10 @@ impl Compiler {
 
     /// The whole compile-boundary output as [`BundleParts`]: parse each
     /// component's embedded catalog (composition order, policy first), fuse +
-    /// Cranelift-compile, and serialize to `cwasm`. The compile-worker bin and
-    /// api's `LocalCompiler` both call this, then wrap the result into the wire
-    /// `CompiledBundle` — so this orchestration lives ONCE, in the pure lib.
+    /// Cranelift-compile, and serialize to `cwasm`. Called by
+    /// `engine-compiler-child` — the process the compile-worker spawns — which
+    /// wraps the result into the wire `CompiledBundle`, so this orchestration
+    /// lives ONCE, in the pure lib.
     pub fn compile_to_parts(
         &self,
         policy_wasm: &[u8],

@@ -5,10 +5,10 @@
 //! then folded into `hatch-client` so the definitions sat beside the
 //! `inbound` / `outbound` facades that construct them — one perimeter,
 //! one crate, inspectable together. Out again now, because the TEE
-//! grew a second way to speak: the serial port that `public-logger`
+//! grew a second way to speak: the serial port that `safe-logger`
 //! writes to. Two channels with nothing in common but this vocabulary,
 //! so the vocabulary belongs below both. The facades did not move;
-//! `hatch-client` re-exports these types, and `public-logger` — which
+//! `hatch-client` re-exports these types, and `safe-logger` — which
 //! opens its channel before anything else in a role exists — can
 //! depend on them without depending on a wire client.
 //!
@@ -345,7 +345,7 @@ impl<T, S> Exposed<T, S> {
     ///
     /// `pub` because the facades that call it now live in other crates:
     /// `hatch_client::boundary::outbound::to_untrusted` for the wire,
-    /// `public_logger::line` for the serial port. Those named entry points
+    /// `safe_logger::line` for the serial port. Those named entry points
     /// are what a reviewer greps; nothing else calls this directly.
     pub fn new(value: T) -> Self {
         Self {

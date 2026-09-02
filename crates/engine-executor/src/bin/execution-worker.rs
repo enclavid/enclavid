@@ -2,14 +2,14 @@
 //!
 //! It LISTENS for the orchestrator (api) and serves `engine_rpc::ExecutorService`
 //! — the same api-facing contract as before — but it runs NO wasm itself. Per
-//! reducer round it drives a fresh `session-child` PROCESS (spawned + bounded +
+//! reducer round it drives a fresh `engine-executor-child` PROCESS (spawned + bounded +
 //! deadline-guarded + reaped by the shared [`engine_supervisor::ChildPool`]), primes
 //! it with the compiled bundle, drives exactly one round in it, and discards it.
 //! Untrusted policy wasm and `Component::deserialize` execute ONLY in that
 //! disposable per-round child, behind an OS address-space boundary — so a wasmtime
 //! sandbox escape is confined to one round's plaintext (one applicant), with no
-//! cross-round persistence and no cross-session bleed. Started by INFRASTRUCTURE
-//! (docker-compose / k8s), exactly like the hatch and the compile-worker.
+//! cross-round persistence and no cross-session bleed. It is started for it, not
+//! by api — one instance per guest, brought up at boot.
 //!
 //! **Keyless.** The supervisor holds no `tee_seal_key` and no applicant token. Two
 //! hops carry the keyless callbacks — blob rehydration + state persistence, both
@@ -69,6 +69,8 @@ use engine_rpc::{
     ExecutorServiceServerShared, Prop, RunOutcome, RunReply, RunRequest,
 };
 use engine_types::composition::EmbeddedImport;
+use fleet_transport::LegFailure;
+use safe_logger::{debug, info, reason, safe, warn};
 
 /// One composition's compiled artifact, resolved + cached SUPERVISOR-side and the
 /// L1's value. The cwasm is a single anonymous in-RAM file held by fd — a sealed
@@ -366,16 +368,25 @@ impl ChildCallbacks for RelayCallbacks {
     }
 }
 
-/// Locate the `session-child` binary: `ENCLAVID_SESSION_CHILD_BIN` if set, else
-/// the sibling of this supervisor's own executable (they build + deploy
-/// together). Fails loud if neither resolves — per the minimal-defaults rule.
+/// Locate the `engine-executor-child` binary: `ENCLAVID_EXECUTOR_CHILD_BIN` if set, else
+/// the sibling of this supervisor's own executable. They SHIP together — the
+/// image installs both into `/bin` — but they are built apart, each package by
+/// its own cargo invocation, which is what keeps `engine-executor-child`'s
+/// dependency graph the short one its manifest declares. Fails loud if neither
+/// resolves — per the minimal-defaults rule.
 fn child_exe() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("ENCLAVID_SESSION_CHILD_BIN") {
+    if let Ok(p) = std::env::var("ENCLAVID_EXECUTOR_CHILD_BIN") {
         return std::path::PathBuf::from(p);
     }
-    let mut p = std::env::current_exe()
-        .expect("execution-worker: resolve current_exe for sibling session-child path");
-    p.set_file_name("session-child");
+    let mut p = std::env::current_exe().unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "execution-worker: cannot resolve this binary's own path, so the sibling \
+             engine-executor-child cannot be located. Stopping.",
+            reason!("a constant about this image's own layout, which the host built")
+        )
+    });
+    p.set_file_name("engine-executor-child");
     p
 }
 
@@ -385,6 +396,18 @@ type Cli = ExecutorServiceClient<Ciborium>;
 
 #[tokio::main]
 async fn main() {
+    // First, so nothing can speak before the channel exists.
+    //
+    // Panic locations are off in the measured build and on in a debug one. This
+    // role runs the consumer's wasm, so in production a panic site reached is a
+    // site adversary-chosen code could have steered to, and the report says only
+    // that one happened. A debug image is a different measurement no consumer
+    // pins, and it already puts the whole kernel log and every `debug!` on the
+    // same port — withholding a source location there costs diagnosis and
+    // protects nothing.
+    safe_logger::install();
+    safe_logger::install_panic(cfg!(feature = "debug"));
+
     // Fail CLOSED if the kernel isn't hardened enough to keep one escaped child
     // out of a sibling child's in-flight applicant memory (the per-round isolation
     // rests on this). The real enforcement is the measured CVM image; this makes a
@@ -396,10 +419,13 @@ async fn main() {
     let addr = std::env::args()
         .nth(1)
         .or_else(|| std::env::var("ENCLAVID_EXECUTION_WORKER_LISTEN").ok())
-        .expect(
-            "execution-worker: listen address required (arg1 or \
-             ENCLAVID_EXECUTION_WORKER_LISTEN, e.g. 127.0.0.1:7002)",
-        );
+        .unwrap_or_else(|| {
+            safe_logger::error_and_panic!(
+                "execution-worker: no listen address — pass one as the first argument or set \
+                 ENCLAVID_EXECUTION_WORKER_LISTEN. Stopping.",
+                reason!("a constant naming a configuration key the host itself supplied")
+            )
+        });
 
     // Hard cap on concurrent per-round children (deployment envelope). Tunable;
     // a sane default keeps memory bounded (one process each).
@@ -451,15 +477,36 @@ async fn main() {
         ),
     });
 
-    let mut listener = fleet_transport::bind(&addr)
-        .await
-        .unwrap_or_else(|e| panic!("execution-worker: bind {addr}: {e}"));
-    eprintln!(
-        "execution-worker (supervisor): listening on {addr}, session-child={}, \
-         max_children={max_children}, round_deadline={}s, bundle_cache={} MiB",
-        child_exe.display(),
-        round_deadline.as_secs(),
-        bundle_cache_bytes / (1024 * 1024),
+    let mut listener = fleet_transport::bind(&addr).await.unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "execution-worker: cannot bind {}. Stopping.",
+            safe(&addr, reason!("on the measured command line")),
+            reason!("a constant; the address is the host's own configuration")
+        )
+    });
+    info!(
+        "execution-worker (supervisor): listening on {}, engine-executor-child={}, \
+         max_children={}, round_deadline={}s, bundle_cache={} MiB",
+        safe(&addr, reason!("on the measured command line")),
+        safe(
+            &child_exe.display(),
+            reason!("a location inside the measured image")
+        ),
+        safe(&max_children, reason!("a constant of the measured build")),
+        safe(
+            &round_deadline.as_secs(),
+            reason!("a constant of the measured build")
+        ),
+        safe(
+            &(bundle_cache_bytes / (1024 * 1024)),
+            reason!("a constant of the measured build")
+        ),
+        reason!(
+            "the listen address is on the measured command line; the limits and the \
+             child path are constants of the measured image. Emitted at boot, before \
+             any policy has been composed, let alone run"
+        )
     );
 
     // Mutual RA-TLS acceptor (minted once at boot): every accepted api connection is
@@ -474,7 +521,13 @@ async fn main() {
                 enclavid_attestation::DEV_FLEET_MEASUREMENT.to_string(),
             ]),
         )
-        .unwrap_or_else(|e| panic!("execution-worker: RA-TLS server config: {e}")),
+        .unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "execution-worker: cannot build the RA-TLS server config. Stopping.",
+                reason!("a constant reporting a platform state the host provisioned")
+            )
+        }),
     ));
 
     loop {
@@ -484,11 +537,22 @@ async fn main() {
                 let ratls = ratls.clone();
                 tokio::spawn(async move {
                     if let Err(e) = serve_conn(stream, ratls, svc).await {
-                        eprintln!("execution-worker: connection from {peer} ended: {e}");
+                        warn!(
+                            "execution-worker: connection from {} ended ({})",
+                            safe(&peer, reason!("an address the host routed itself")),
+                            e,
+                            reason!(
+                                "constant text; a connection closing is already visible to \
+                                 whoever carries it"
+                            )
+                        );
                     }
                 });
             }
-            Err(e) => eprintln!("execution-worker: accept failed: {e}"),
+            Err(e) => {
+                warn!("execution-worker: accept failed", reason!("a constant"));
+                debug!("  cause: {e}");
+            }
         }
     }
 }
@@ -498,25 +562,29 @@ async fn serve_conn(
     stream: fleet_transport::Stream,
     ratls: tokio_rustls::TlsAcceptor,
     svc: Arc<Supervisor>,
-) -> Result<(), String> {
-    let tls = ratls
-        .accept(stream)
-        .await
-        .map_err(|e| format!("RA-TLS accept: {e}"))?;
+) -> Result<(), LegFailure> {
+    let tls = ratls.accept(stream).await.map_err(|e| {
+        debug!("ra-tls accept: {e}");
+        LegFailure::Attest
+    })?;
     let (read, write) = tokio::io::split(tls);
     let (conn, mut tx, _rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
             .await
-            .map_err(|e| format!("remoc connect: {e}"))?;
+            .map_err(|e| {
+                debug!("rpc connect: {e}");
+                LegFailure::Rpc
+            })?;
     tokio::spawn(conn);
 
     let (server, client) = ExecutorServiceServerShared::<_, Ciborium>::new(svc, 4);
-    tx.send(client)
-        .await
-        .map_err(|e| format!("send service client: {e}"))?;
-    server
-        .serve(true)
-        .await
-        .map_err(|e| format!("serve: {e}"))?;
+    tx.send(client).await.map_err(|e| {
+        debug!("send service client: {e}");
+        LegFailure::Clients
+    })?;
+    server.serve(true).await.map_err(|e| {
+        debug!("serve: {e}");
+        LegFailure::Serve
+    })?;
     Ok(())
 }

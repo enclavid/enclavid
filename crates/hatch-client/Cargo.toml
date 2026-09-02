@@ -30,7 +30,7 @@ hex = "0.4"
 # live in their own leaf crate.
 enclavid-crypto = { path = "../crypto" }
 # The concern vocabulary the `boundary` facades are built from. A leaf crate
-# because `public-logger` needs the same words for the serial-port crossing and
+# because `safe-logger` needs the same words for the serial-port crossing and
 # must not pull a wire client in to get them.
 enclavid-boundary = { path = "../boundary" }
 # Wraps the raw `tee_seal_key` master + its HKDF subkeys: zeroize-on-drop and

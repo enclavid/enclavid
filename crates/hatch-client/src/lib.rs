@@ -17,7 +17,7 @@ pub use auth::{AuthClient, AuthVerdict, Principal};
 pub use backend::{CacheBackend, SessionBackend};
 pub use cache::CacheStore;
 // Boundary re-exports — Untrusted/Exposed/concern markers live in
-// the `enclavid-boundary` leaf crate, shared with `public-logger`.
+// the `enclavid-boundary` leaf crate, shared with `safe-logger`.
 // The crate-root path is preserved so consumers keep their imports.
 pub use boundary::outbound::outbound_session_id;
 pub use boundary::{AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted, reason};

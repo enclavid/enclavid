@@ -3,10 +3,9 @@
 //! rpc, so the api binary links NO wasmtime runtime (and no Cranelift).
 //!
 //! [`Executor`] wraps the `engine_rpc::ExecutorService` client. The worker is a
-//! separate process/CVM started by INFRASTRUCTURE (docker-compose / k8s), not
-//! by api — exactly like the hatch and the compile-worker. api
-//! [`connect`](connect_execution_worker)s to it at a configured address (TCP in
-//! dev, a vsock-relay rendezvous under RA-TLS in Plan-A).
+//! separate CVM, brought up at boot rather than by api. api
+//! [`connect`](connect_execution_worker)s to it at a configured address, under
+//! mutual RA-TLS; the transport is TCP by default and vsock under that feature.
 //!
 //! Per round api stands up a `CallbackService` server (`load_component` /
 //! `media_load` / `session_change`) on the SAME connection and passes its client
@@ -21,7 +20,9 @@ use std::sync::Arc;
 use remoc::codec::Ciborium;
 // `ServerShared` (the trait) is in scope so `CallbackServiceServerShared::new`
 // resolves — the per-run callback server we hand the worker.
+use fleet_transport::LegFailure;
 use remoc::rtc::ServerShared;
+use safe_logger::debug;
 // `CallbackService` / `ExecutorService` (the remoc traits) are in scope so the
 // generated client's `.run()` + the callback server resolve.
 use engine_rpc::{
@@ -102,35 +103,47 @@ impl Executor {
 pub async fn connect_execution_worker(
     addr: &str,
     attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,
-) -> Result<Executor, String> {
+) -> Result<Executor, LegFailure> {
     type Cli = ExecutorServiceClient<Ciborium>;
 
-    let stream = fleet_transport::dial(addr)
-        .await
-        .map_err(|e| format!("connect execution-worker at `{addr}`: {e}"))?;
+    let stream = fleet_transport::dial(addr).await.map_err(|e| {
+        debug!("connect {addr}: {e}");
+        LegFailure::Connect(e.kind())
+    })?;
     // Mutual RA-TLS over the dial: we attest the worker's cert (pinned measurement)
     // and present our own attested cert. A completed handshake proves the peer is the
     // pinned execution-worker measurement — no CA, no post-handshake window.
-    let config = crate::endorsement::fleet_client_config(attestor)
-        .map_err(|e| format!("execution-worker RA-TLS client config: {e}"))?;
+    let config = crate::endorsement::fleet_client_config(attestor).map_err(|e| {
+        debug!("ra-tls: {e}");
+        LegFailure::Attest
+    })?;
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
     let tls = connector
         .connect(enclavid_ra_tls::server_name(), stream)
         .await
-        .map_err(|e| format!("execution-worker RA-TLS handshake: {e}"))?;
+        .map_err(|e| {
+            debug!("ra-tls: {e}");
+            LegFailure::Attest
+        })?;
     let (read, write) = tokio::io::split(tls);
 
     let (conn, _tx, mut rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
             .await
-            .map_err(|e| format!("execution-worker remoc connect: {e}"))?;
+            .map_err(|e| {
+                debug!("rpc connect: {e}");
+                LegFailure::Rpc
+            })?;
     crate::fleet::watch(conn, "execution-worker");
 
     let client = rx
         .recv()
         .await
-        .map_err(|e| format!("execution-worker recv client: {e}"))?
-        .ok_or("execution-worker closed before sending its service client")?;
+        .map_err(|e| {
+            debug!("recv clients: {e}");
+            LegFailure::Clients
+        })?
+        .ok_or(LegFailure::Closed)?;
 
     Ok(Executor::new(client))
 }

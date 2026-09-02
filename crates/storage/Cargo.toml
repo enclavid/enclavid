@@ -22,6 +22,9 @@ name = "enclavid_storage"
 path = "src/lib.rs"
 
 [dependencies]
+# The guest's one channel to the host: `info!`/`warn!`/`error!` carry a written
+# reason and reach the port; `debug!` needs none and is not built in production.
+safe-logger = { path = "../safe-logger", features = ["device"] }
 storage-rpc = { path = "../storage-rpc" }
 hatch-protocol = { path = "../hatch-protocol" }
 # The RA-TLS backend is chosen here, not by ra-tls: this build attests with a
@@ -66,3 +69,6 @@ tempfile = "3"
 # The attested build: reach api over vsock instead of TCP. A measured guest
 # kernel has no IP stack, so this is not a preference.
 vsock = ["fleet-transport/vsock"]
+# Compiles the `debug!` sites in. OFF in the measured build, so a production
+# binary holds no diagnostic that nobody wrote a reason for.
+debug = ["safe-logger/debug"]

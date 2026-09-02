@@ -78,7 +78,7 @@ async fn read(
     // of panicking; aborts at this layer would corrupt the HTTP
     // response and add noise to logs without operational benefit.
     let client = metadata.client.ok_or_else(|| {
-        public_logger::debug!(
+        safe_logger::debug!(
             "client/session: metadata.client unexpectedly None for {session_id} \
              — TEE invariant violation (always populated at create)",
         );

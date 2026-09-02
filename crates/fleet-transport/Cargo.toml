@@ -9,6 +9,9 @@ repository.workspace = true
 # TCP/vsock split so the four participants do not each grow their own copy.
 [dependencies]
 tokio = { version = "1", features = ["net"] }
+# For `impl SafeToLog for LegFailure` — the vouch belongs on the type, and the
+# type lives here.
+safe-logger = { path = "../safe-logger" }
 
 # Linux-only: AF_VSOCK exists in no other kernel. Optional on top of that, so a
 # dev build carries no vsock code at all.

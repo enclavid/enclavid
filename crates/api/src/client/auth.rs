@@ -153,7 +153,7 @@ residual of the host-holds-all-state model.
         .ok_or_else(|| {
             // Predicate already rejected None via NOT_FOUND, so this
             // arm is defensive against future-edit drift only.
-            public_logger::debug!("trust_metadata: metadata unexpectedly None");
+            safe_logger::debug!("trust_metadata: metadata unexpectedly None");
             StatusCode::INTERNAL_SERVER_ERROR
         })
 }

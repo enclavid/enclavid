@@ -12,8 +12,10 @@ use std::sync::Arc;
 
 use remoc::codec::Ciborium;
 
+use fleet_transport::LegFailure;
 use hatch_client::{BridgeError, CacheBackend, SessionBackend};
 use hatch_protocol::{ReadRequest, Slot, WriteRequest};
+use safe_logger::debug;
 use storage_rpc::{
     CacheService, CacheServiceClient, SessionError, SessionStoreService, SessionStoreServiceClient,
     StorageClients,
@@ -101,20 +103,26 @@ impl CacheBackend for CacheCvmBackend {
 pub async fn connect_storage(
     addr: &str,
     attestor: Arc<dyn enclavid_attestation::Attestor>,
-) -> Result<(SessionCvmBackend, CacheCvmBackend), String> {
-    let stream = fleet_transport::dial(addr)
-        .await
-        .map_err(|e| format!("connect storage-CVM at `{addr}`: {e}"))?;
+) -> Result<(SessionCvmBackend, CacheCvmBackend), LegFailure> {
+    let stream = fleet_transport::dial(addr).await.map_err(|e| {
+        debug!("connect {addr}: {e}");
+        LegFailure::Connect(e.kind())
+    })?;
     // Mutual RA-TLS: we attest the storage-CVM's cert (pinned measurement) and
     // present our own. A completed handshake proves the peer is the pinned
     // storage-CVM — no CA, no post-handshake window.
-    let config = crate::endorsement::fleet_client_config(attestor)
-        .map_err(|e| format!("storage-CVM RA-TLS client config: {e}"))?;
+    let config = crate::endorsement::fleet_client_config(attestor).map_err(|e| {
+        debug!("ra-tls: {e}");
+        LegFailure::Attest
+    })?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let tls = connector
         .connect(enclavid_ra_tls::server_name(), stream)
         .await
-        .map_err(|e| format!("storage-CVM RA-TLS handshake: {e}"))?;
+        .map_err(|e| {
+            debug!("ra-tls: {e}");
+            LegFailure::Attest
+        })?;
     let (read, write) = tokio::io::split(tls);
 
     let (conn, _tx, mut rx) = remoc::Connect::io::<_, _, StorageClients, StorageClients, Ciborium>(
@@ -123,14 +131,20 @@ pub async fn connect_storage(
         write,
     )
     .await
-    .map_err(|e| format!("storage-CVM remoc connect: {e}"))?;
+    .map_err(|e| {
+        debug!("rpc connect: {e}");
+        LegFailure::Rpc
+    })?;
     crate::fleet::watch(conn, "storage-CVM");
 
     let clients = rx
         .recv()
         .await
-        .map_err(|e| format!("storage-CVM recv clients: {e}"))?
-        .ok_or("storage-CVM closed before sending its service clients")?;
+        .map_err(|e| {
+            debug!("recv clients: {e}");
+            LegFailure::Clients
+        })?
+        .ok_or(LegFailure::Closed)?;
 
     Ok((
         SessionCvmBackend {

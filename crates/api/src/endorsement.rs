@@ -110,6 +110,21 @@ const RETRY_DELAYS: [std::time::Duration; 5] = [
     std::time::Duration::from_secs(30),
 ];
 
+/// What a hatch failure is called on the public log. Exhaustive on purpose: a
+/// new `BridgeError` variant will not compile until someone names it, which is
+/// the point — the label is what the host sees, and nothing else does.
+#[cfg(feature = "sev-snp")]
+fn bridge_stage(e: &hatch_client::BridgeError) -> &'static str {
+    use hatch_client::BridgeError as B;
+    match e {
+        B::Transport(_) => "transport",
+        B::Codec(_) => "codec",
+        B::Crypto(_) => "crypto",
+        B::VersionMismatch => "version",
+        B::NotFound => "not-found",
+    }
+}
+
 #[cfg(feature = "sev-snp")]
 pub async fn build_attestor(address_out: &str) -> Arc<dyn Attestor> {
     use enclavid_attestation::{MILAN_ASK, SnpAttestor, vcek_identity};
@@ -161,13 +176,12 @@ pub async fn build_attestor(address_out: &str) -> Arc<dyn Attestor> {
         match kds.vcek(exposed).await {
             Ok(response) => break response,
             Err(e) if attempt < RETRY_DELAYS.len() => {
-                public_logger::warn!(
-                    reason!(
-                        "a transport error reaching our own endorsement, at startup, before \
-                         any policy or applicant input exists in this process"
-                    ),
-                    "api: endorsement fetch failed ({e}); retrying"
+                safe_logger::warn!(
+                    "api: endorsement fetch failed at {}; retrying",
+                    safe_logger::safe(&bridge_stage(&e), reason!("one of five fixed labels")),
+                    reason!("a constant, at startup before any session exists")
                 );
+                safe_logger::debug!("  cause: {e}");
                 tokio::time::sleep(RETRY_DELAYS[attempt]).await;
                 attempt += 1;
             }

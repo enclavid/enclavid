@@ -7,10 +7,13 @@
 
 # The pseudo-filesystems the runtime needs before /bin/app starts.
 #
-# /dev is not a formality: /dev/sev-guest is where attestation reports come
-# from, and engine-supervisor points each disposable child's stdout and stderr
-# at /dev/null so an escaped child cannot write a round's plaintext to a
-# descriptor it inherited.
+# /dev is a formality here in one respect and not in another. This role attests
+# with the software identity the dev fleet shares, so it opens no
+# /dev/sev-guest — but /dev/vda below is a real node, and devtmpfs is what
+# supplies it.
+#
+# It spawns no children of its own; the paragraph about disposable-child
+# isolation belongs to the two engine roles, not here.
 #
 # /tmp and /run are tmpfs. Both are noexec: nothing here ever executes out of a
 # writable path, and refusing up front costs nothing.

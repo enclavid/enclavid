@@ -27,7 +27,7 @@ dev-attestation = ["enclavid-attestation/snp-dev", "enclavid-attestation/mock"]
 sev-snp = ["enclavid-attestation/sev-snp"]
 # Compiles the `debug!` sites in. OFF in the measured build, so a production
 # binary holds no diagnostic that nobody wrote a reason for.
-debug = ["public-logger/debug"]
+debug = ["safe-logger/debug"]
 
 [dependencies]
 # The wasmtime-free engine leaf: the plain-data types the client-only
@@ -61,7 +61,7 @@ hatch-protocol = { path = "../hatch-protocol" }
 fleet-transport = { path = "../fleet-transport" }
 # The one channel this role may speak on, and the capture that keeps everything
 # else off it.
-public-logger = { path = "../public-logger" }
+safe-logger = { path = "../safe-logger", features = ["device"] }
 # The storage-tier RPC contract — the remoc `SessionStoreService` / `CacheService`
 # clients api dials on the trusted storage-CVM (when
 # `ENCLAVID_STORAGE_BACKEND=storage-cvm`). Reuses the same RA-TLS/remoc stack as

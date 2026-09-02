@@ -329,11 +329,11 @@ impl SessionPersister {
             .write(session_id, expected_version, ops)
             .await
             .map_err(|e| {
-                // eprintln before the error flows back over the callback: a
-                // persist-side write failure surfaces to the worker as a failed
-                // `session_change`, which fails the run; the actual cause must
-                // show up in the logs before it is reduced to a 5xx.
-                public_logger::debug!(
+                // The cause, on the inward tier, before the error flows back over
+                // the callback: a persist-side write failure surfaces to the
+                // worker as a failed `session_change`, which fails the run, and
+                // what actually went wrong would otherwise be reduced to a 5xx.
+                safe_logger::debug!(
                     "persister.commit_ops: session_store.write failed for {} \
                      (expected version {expected}): {e}",
                     self.session_id,
@@ -407,7 +407,7 @@ impl SessionPersister {
             .write(session_id, expected_version, ops)
             .await
             .map_err(|e| {
-                public_logger::debug!(
+                safe_logger::debug!(
                     "persister.finalize: session_store.write failed for {} \
                      (expected version {expected}): {e}",
                     self.session_id,

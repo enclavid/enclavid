@@ -24,7 +24,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use public_logger::{error, reason, warn};
+use safe_logger::{error, reason, safe, warn};
 
 /// Waits between dial attempts. Roughly a minute in total, which is far longer
 /// than a peer takes to bind and far shorter than a human waits before assuming
@@ -46,18 +46,18 @@ pub async fn dial<T, E, F, Fut>(peer: &str, mut attempt: F) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
-    E: std::fmt::Display,
+    E: std::fmt::Display + safe_logger::SafeToLog,
 {
     for delay in RETRY_DELAYS {
         match attempt().await {
             Ok(value) => return Ok(value),
             Err(e) => {
                 warn!(
-                    reason!(
-                        "a peer name and a transport error against an address on the measured \
-                         command line, at dial time — no session exists yet"
-                    ),
-                    "api: {peer} not reachable yet ({e}); retrying in {delay:?}"
+                    "api: {} not reachable yet ({}); retrying in {:?}",
+                    safe(&peer, reason!("a name fixed in this image")),
+                    e,
+                    safe(&delay, reason!("one of a fixed ladder of delays")),
+                    reason!("boot only, before either listener binds")
                 );
                 tokio::time::sleep(delay).await;
             }
@@ -77,12 +77,13 @@ where
     tokio::spawn(async move {
         let _ = driver.await;
         error!(
+            "api: {} connection ended; every client on it is dead. Stopping so a fresh \
+             instance dials again rather than serving requests that cannot succeed.",
+            safe(&peer, reason!("a name fixed in this image")),
             reason!(
-                "constant text plus a peer name fixed in this image; that a fleet link \
-                 dropped is already visible to whoever carries it"
-            ),
-            "api: {peer} connection ended; every client on it is dead. Stopping so a fresh \
-             instance dials again rather than serving requests that cannot succeed."
+                "constant text; that a fleet link dropped is already visible to \
+                     whoever carries it"
+            )
         );
         std::process::exit(1);
     });

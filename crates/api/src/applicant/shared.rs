@@ -41,7 +41,7 @@ use super::views::{SessionProgress, progress_from};
 /// `context.props`, from the consumer's config bytes in metadata.
 pub(super) fn parse_props(metadata: &SessionMetadata) -> Result<Vec<(String, Prop)>, StatusCode> {
     parse_input(&metadata.input).map_err(|e| {
-        public_logger::debug!("parse_props: parse_input failed: {e}");
+        safe_logger::debug!("parse_props: parse_input failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })
 }
@@ -196,7 +196,7 @@ impl SessionRunCtx {
 fn classify_run_error(session_id: &str, e: &ExecError) -> ApiError {
     match e {
         ExecError::Run(chain) => {
-            public_logger::debug!("session_run_ctx: executor.run failed for {session_id}: {chain}");
+            safe_logger::debug!("session_run_ctx: executor.run failed for {session_id}: {chain}");
             if let Some(missing) = extract_unregistered_text_ref(chain) {
                 return ApiError::with_body(
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -283,7 +283,7 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
                 if matches!(e, hatch_client::BridgeError::Crypto(_)) {
                     return StatusCode::FORBIDDEN;
                 }
-                public_logger::debug!(
+                safe_logger::debug!(
                     "session_run_ctx: session_store.read(Metadata, State) failed for {session_id}: {e}",
                 );
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -319,7 +319,7 @@ rollback is an accepted residual of the host-holds-all-state model.
             ))
             .into_inner()
             .ok_or_else(|| {
-                public_logger::debug!("session_run_ctx: metadata is None for {session_id}");
+                safe_logger::debug!("session_run_ctx: metadata is None for {session_id}");
                 StatusCode::NOT_FOUND
             })?;
 
@@ -377,7 +377,7 @@ persist; same containment as above.
             .as_ref()
             .map(|c| c.disclosure_pubkey.clone())
             .ok_or_else(|| {
-                public_logger::debug!("session_run_ctx: metadata.client missing for {session_id}",);
+                safe_logger::debug!("session_run_ctx: metadata.client missing for {session_id}",);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
         let persister = Arc::new(SessionPersister {
@@ -439,7 +439,7 @@ fn session_composition_key(
     metadata: &SessionMetadata,
 ) -> Result<String, StatusCode> {
     let client = metadata.client.as_ref().ok_or_else(|| {
-        public_logger::debug!("session_composition_key: metadata.client missing for {session_id}");
+        safe_logger::debug!("session_composition_key: metadata.client missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     Ok(composition_key(
@@ -471,7 +471,7 @@ pub(super) async fn resolve_bundle(
         return Ok(bundle);
     }
     let client = metadata.client.as_ref().ok_or_else(|| {
-        public_logger::debug!("resolve_bundle: metadata.client missing for {session_id}");
+        safe_logger::debug!("resolve_bundle: metadata.client missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let bundle = cold_compile(state, session_id, metadata, client).await?;
@@ -538,7 +538,7 @@ async fn cold_compile(
         futures::future::join(policy_fut, futures::future::join_all(plugin_futs)).await;
 
     let artifact = policy_res.map_err(|e| {
-        public_logger::debug!(
+        safe_logger::debug!(
             "lookup_policy: pull_and_decrypt failed for session {session_id} \
              (policy_ref={}): {e}",
             metadata.policy_ref,
@@ -549,9 +549,7 @@ async fn cold_compile(
     let mut plugin_instances: Vec<PluginInstance> = Vec::with_capacity(plugin_results.len());
     for res in plugin_results {
         let (package, art) = res.map_err(|e| {
-            public_logger::debug!(
-                "lookup_policy: pull_plugin failed for session {session_id}: {e}",
-            );
+            safe_logger::debug!("lookup_policy: pull_plugin failed for session {session_id}: {e}",);
             StatusCode::GONE
         })?;
         // Keep the raw component bytes — the compiler fuses on bytes, not a
@@ -574,7 +572,7 @@ async fn cold_compile(
         .compile(artifact.wasm_bytes, plugin_instances)
         .await
         .map_err(|e| {
-            public_logger::debug!(
+            safe_logger::debug!(
                 "lookup_policy: compile failed for {session_id} (policy_ref {}): {e}",
                 metadata.policy_ref,
             );

@@ -83,22 +83,40 @@ register values from whatever the guest was doing, and `panic()` calls
 `console_verbose()`, so a log level cannot be trusted to hold it back. Only the
 absence of an enabled console can.
 
+What `console=null` governs is the KERNEL. What the APPLICATION's fds 1 and 2
+end up pointing at is a separate question, and it is not fully settled: this
+initramfs carries no `/dev/console` node, and the `devtmpfs` that supplies one
+is mounted by a `::sysinit:` line — which runs before `::wait:/bin/app`, so the
+node does exist by then, but whether busybox init hands the application that
+console or a descriptor it settled on before the mount depends on when busybox
+opens it. Either way the production image is silent: the null console discards,
+and init's fallback descriptor returns `EBADF`, which Rust's stdio reports as
+success.
+
+The open question is the `debug` variant, whose command line puts a real
+console on the port. If the application inherits a pre-`devtmpfs` descriptor,
+`debug!` is invisible there and the `-debug` app twin buys nothing. Needs a
+boot.
+
 Silencing the kernel does not silence the role. `ENCLAVID_LOG_DEVICE` names the
-same port, and the role opens it itself — see `crates/public-logger`. That is the
-whole difference: the port carries only lines a `log!` site wrote down a reason
+same port, and the role opens it itself — see `crates/safe-logger`. That is the
+whole difference: the port carries only lines an `info!` site wrote down a reason
 for, plus a panic report. Everything else in the process — a `println!` from any
-dependency, a panic payload, output from C underneath — keeps going to the
-discarding console it already went to.
+dependency, a panic payload, output from C underneath — keeps going to fds 1
+and 2, which discard.
 
 How much a panic report says is per role. Where the measured code is the only
 code, a panic names `file:line`, because aiming that choice at a secret means
 rewriting the role and so changing the measurement. The execution worker runs
 the consumer's policy — adversary-chosen wasm that executes inside the measured
-image without altering it — so there a panic says only that one happened.
+image without altering it — so in its production build a panic says only that
+one happened. Its `-debug` build names the location like the rest: that image
+is already putting the whole kernel log on this port, and it is a measurement
+no consumer pins.
 
 Below that sits a third tier, and it is the one the kernel switch governs.
-`debug!` in `crates/public-logger` writes to stderr — the discarding console —
-and needs no reason because nothing it says leaves the TEE. It is also not
+`debug!` in `crates/safe-logger` writes to stderr, which discards, and needs
+no reason because nothing it says leaves the TEE in production. It is also not
 compiled at all without the `debug` cargo feature, which is why `app/` ships
 `<role>` and `<role>-debug`: were the tier gated only by `console=null`, one
 wrong line in `kernel/` or here would put every `debug!` in the tree, session
@@ -106,8 +124,8 @@ ids and error chains included, in front of the host at once. Not building them
 means that mistake can leak only what dependencies print.
 
 The pair belongs together — a `-debug` app wants the `debug` command line.
-Mismatching is confusing and never unsafe: one way writes into `ttynull`, the
-other says nothing.
+Mismatching is confusing and never unsafe: one way writes into a descriptor
+that discards, the other says nothing.
 
 What stays silent is a failure nobody annotated. That is what `debug` is for —
 the same image with a kernel console, and therefore a different measurement,

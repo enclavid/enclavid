@@ -32,14 +32,12 @@ let
       !(base == "target" || base == ".git" || base == "node_modules" || base == "result");
   };
 
-  # `noDefaultFeatures` is per role rather than blanket: `--no-default-features`
+  # ONE cargo invocation over ONE package, and the binaries to keep from it.
+  #
+  # `noDefaultFeatures` is per part rather than blanket: `--no-default-features`
   # applies to the selected package, so setting it where a package has no
   # feature table changes nothing and only obscures which roles depend on it.
-  # `siblings` are the other [[bin]] targets of the same package that the role
-  # execs at runtime — the workers spawn a fresh child per round and look for it
-  # next to their own executable. They build together and must ship together, so
-  # they are one derivation rather than a dependency between two.
-  mkApp = { pname, package, binary, siblings ? [ ], features ? [ ], noDefaultFeatures ? false }:
+  mkPart = { pname, package, binaries, features ? [ ], noDefaultFeatures ? false }:
     static.rustPlatform.buildRustPackage {
       inherit pname src;
       version = "0.1.0";
@@ -57,7 +55,7 @@ let
       installPhase = ''
         runHook preInstall
         mkdir -p $out
-        for b in ${binary} ${builtins.concatStringsSep " " siblings}; do
+        for b in ${builtins.concatStringsSep " " binaries}; do
           install -m 0755 "target/${static.stdenv.hostPlatform.rust.rustcTarget}/release/$b" $out/$b
           (cd $out && sha256sum "$b" > "$b.sha256")
         done
@@ -65,10 +63,35 @@ let
       '';
     };
 
+  # A role's binaries, each part built by its OWN cargo invocation, merged into
+  # one output. The workers exec a fresh child per request and look for it next
+  # to their own executable, so the two must ship together — but they must not
+  # BUILD together.
+  #
+  # That is the whole reason a role is a list. Cargo unifies features across
+  # everything in one invocation, so compiling a worker beside its child would
+  # hand the child every feature the worker asked for. The child's manifest is
+  # deliberately short — it is how the image says what the process that runs
+  # untrusted wasm can reach — and a shared invocation would quietly make it say
+  # nothing. One build per package keeps each dependency graph its own.
+  #
+  # The cost is real: the shared libraries below the split (wasmtime, above all)
+  # compile once per part. Paid on purpose.
+  mkApp = { pname, parts, features ? [ ] }:
+    pkgs.symlinkJoin {
+      name = pname;
+      paths = map
+        (part: mkPart (part // {
+          pname = "${pname}-${part.package}";
+          features = (part.features or [ ]) ++ features;
+        }))
+        parts;
+    };
+
   # Each role ships as two derivations, `<role>` and `<role>-debug`. They differ
   # in one feature: `debug` compiles the `debug!` sites in. Without it those
   # calls are not built at all, so a production binary carries no diagnostic
-  # that nobody wrote a reason for — see crates/public-logger.
+  # that nobody wrote a reason for — see crates/safe-logger.
   #
   # Why the app and not just the command line. `cmdline/<role>/debug` already
   # opens a kernel console, and that alone would have been one switch instead of
@@ -102,10 +125,12 @@ builtins.foldl' (a: b: a // b) { } [
   # each process start.
   (withDebug "api" {
     pname = "enclavid-app-api";
-    package = "enclavid-api";
-    binary = "enclavid-api";
-    noDefaultFeatures = true;
-    features = [ "sev-snp" "vsock" ];
+    parts = [{
+      package = "enclavid-api";
+      binaries = [ "enclavid-api" ];
+      noDefaultFeatures = true;
+      features = [ "sev-snp" "vsock" ];
+    }];
   })
 
   # The storage CVM: the blind ciphertext store. `vsock` for the same reason as
@@ -114,9 +139,11 @@ builtins.foldl' (a: b: a // b) { } [
   # have to reach a role that, by design, dials nothing.
   (withDebug "storage" {
     pname = "enclavid-app-storage";
-    package = "enclavid-storage";
-    binary = "storage-cvm";
-    features = [ "vsock" ];
+    parts = [{
+      package = "enclavid-storage";
+      binaries = [ "storage-cvm" ];
+      features = [ "vsock" ];
+    }];
   })
 
   # The compile half of the engine: fuses a policy with its pinned plugins and
@@ -125,10 +152,20 @@ builtins.foldl' (a: b: a // b) { } [
   # its own containment rests on an enforced floor rather than an assumption.
   (withDebug "compile-worker" {
     pname = "enclavid-app-compile-worker";
-    package = "engine-compiler";
-    binary = "compile-worker";
-    siblings = [ "compile-child" ];
-    features = [ "vsock" "guest-hardening" ];
+    parts = [
+      {
+        package = "engine-compiler";
+        binaries = [ "compile-worker" ];
+        features = [ "vsock" "guest-hardening" ];
+      }
+      # The child takes neither: it has no transport of its own (its one
+      # connection is the socketpair the supervisor hands it on fd 0), and the
+      # ptrace floor is asserted by the parent, before any child exists.
+      {
+        package = "engine-compiler-child";
+        binaries = [ "engine-compiler-child" ];
+      }
+    ];
   })
 
   # The execute half: runs one reducer round per disposable child. This is the
@@ -136,9 +173,19 @@ builtins.foldl' (a: b: a // b) { } [
   # the consumer's own untrusted wasm.
   (withDebug "execution-worker" {
     pname = "enclavid-app-execution-worker";
-    package = "engine-executor";
-    binary = "execution-worker";
-    siblings = [ "session-child" ];
-    features = [ "vsock" "guest-hardening" ];
+    parts = [
+      {
+        package = "engine-executor";
+        binaries = [ "execution-worker" ];
+        features = [ "vsock" "guest-hardening" ];
+      }
+      # The child takes neither: it has no transport of its own (its one
+      # connection is the socketpair the supervisor hands it on fd 0), and the
+      # ptrace floor is asserted by the parent, before any child exists.
+      {
+        package = "engine-executor-child";
+        binaries = [ "engine-executor-child" ];
+      }
+    ];
   })
 ]

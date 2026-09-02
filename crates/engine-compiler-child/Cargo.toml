@@ -1,0 +1,70 @@
+[package]
+name = "engine-compiler-child"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The disposable per-compile CHILD the compile-worker spawns: run Cranelift over
+# UNTRUSTED wasm in a throwaway keyless process, serve ONE compile, exit.
+#
+# Its own package rather than a `[[bin]]` of engine-compiler, because a package
+# is the unit a dependency graph is built from. The parent needs a log device, a
+# process spawner and a TLS listener; the child needs none of them, and while
+# the two shared a manifest there was no way to SAY so — a `[[bin]]` inherits
+# every dependency its siblings declare. Here the manifest is the statement:
+# what is not listed below cannot be named from this binary's source, and the
+# reviewer's question ("what can the process that runs the attacker's wasm
+# reach?") is answered by a file this short.
+#
+# That only holds when this package is built on its own (`cargo build -p …`,
+# which is what image/app does). Cargo unifies features across whatever is in
+# ONE invocation, so a whole-workspace build hands this package whatever the
+# workers turned on. Loud where it matters and lax where it doesn't: the image
+# build is the strict one.
+[dependencies]
+# Cranelift + component fusion — the half this process exists to run.
+engine-compiler = { path = "../engine-compiler" }
+# `adopt_fd0` + `serve_child`: the socketpair on fd 0 and the one-RPC serve loop.
+# `default-features = false` drops the parent half — no spawn, no seccomp
+# builder, no ptrace assertion, and (the reason it is a feature at all) no
+# `tokio/process`, so this runtime starts no signal driver.
+engine-supervisor = { path = "../engine-supervisor", default-features = false }
+engine-types = { path = "../engine-types" }
+# `compile` only: the executor contract is not this child's business.
+engine-rpc = { path = "../engine-rpc", default-features = false, features = [
+    "compile",
+] }
+remoc = { version = "0.18", default-features = false, features = [
+    "rtc",
+    "codec-ciborium",
+] }
+# Multi-threaded: `compile_to_parts` is a synchronous multi-second call that
+# `spawn_blocking` offloads, so the remoc reactor keeps answering keepalives.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Contained posture only — this process says nothing outward. See `main`.
+safe-logger = { path = "../safe-logger" }
+
+[features]
+# Compiles the `debug!` sites in. OFF in the measured build.
+debug = ["safe-logger/debug"]
+
+[[bin]]
+name = "engine-compiler-child"
+path = "src/main.rs"
+
+[dev-dependencies]
+# The test plays the supervisor, so IT needs the parent half. That is also why
+# the test does NOT spawn this package's own `CARGO_BIN_EXE` binary: this
+# dev-dependency unifies `parent` into it. `xtask::child_binary` runs the
+# separate invocation the image runs instead.
+engine-supervisor = { path = "../engine-supervisor", features = ["parent"] }
+xtask = { path = "../../xtask" }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "process",
+    "net",
+    "io-util",
+    "time",
+] }
