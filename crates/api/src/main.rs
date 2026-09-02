@@ -63,17 +63,17 @@ async fn main() {
         )
     );
 
-    // SessionStore is the hatch-client HTTP-over-vsock client for
-    // per-session typed-field storage. Shared between client API
-    // (writes metadata/status on /create and /init) and applicant API
-    // (reads/writes state on /connect and /input). Wrapped in Arc so
-    // the DisclosureStore facade and both state structs hold the same
-    // hatch connection underneath.
+    // SessionStore is hatch-client's per-session typed-field store. It is
+    // transport-agnostic — it holds an `Arc<dyn SessionBackend>`, and the
+    // backend built above dials the storage-CVM over RA-TLS. Shared between
+    // the client API (writes metadata/status on /create and /init) and the
+    // applicant API (reads/writes state on /connect and /input), so the Arc
+    // is what gives both state structs the same connection underneath.
     //
-    // TODO: derive `tee_seal_key` from attestation / KMS rather than env.
-    // For Phase A we accept a 32-byte hex from `ENCLAVID_TEE_KEY` (set
-    // to a random value per deployment). When attestation-bound key
-    // material lands, this becomes derive-on-startup.
+    // The seal key comes from the chip: under `sev-snp`, `load_tee_seal_key`
+    // calls `enclavid_attestation::derive_seal_key`, so it is bound to the
+    // measurement and never leaves the enclave. The env-var path below it is
+    // the dev build only, and is compiled out of the measured image.
     let tee_seal_key = load_tee_seal_key();
     // Derive the process-lifetime shuffle key from the same TEE
     // secret. Domain-separated under a distinct info string so we

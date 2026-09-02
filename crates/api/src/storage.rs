@@ -2,10 +2,11 @@
 //! implemented over remoc clients to the trusted storage-CVM, dialed under mutual
 //! RA-TLS exactly like the compile/execution workers (see [`crate::executor`]).
 //!
-//! Selected at boot by `ENCLAVID_STORAGE_BACKEND=storage-cvm` (else api keeps the
-//! legacy hatch/Redis + host object_store cache). The backends live HERE (not in
-//! hatch-client) so hatch-client stays remoc-free; api already links remoc +
-//! RA-TLS for the workers. All crypto stays in hatch-client's `SessionStore` /
+//! Not selected by anything: these are the backends api dials at boot, full
+//! stop. There is no runtime switch and no second implementation to switch to —
+//! `main::build_storage_backends` constructs them unconditionally. The backends
+//! live HERE (not in hatch-client) so hatch-client stays remoc-free; api already
+//! links remoc + RA-TLS for the workers. All crypto stays in hatch-client's `SessionStore` /
 //! `CacheStore` — these move opaque sealed DTOs only.
 
 use std::sync::Arc;

@@ -10,12 +10,17 @@
 //! The execution-worker owns the ONLY in-memory L1 (deserialized components,
 //! keyed by `composition_key`). The orchestrator owns L2 (sealed cwasm files;
 //! it holds `tee_seal_key`, the keyless worker cannot). On an L1 miss the worker
-//! PULLS the compiled bundle from the orchestrator via the
-//! [`CallbackService::load_component`] callback — the orchestrator serves it
-//! from L2, or compiles on an L2 miss (OCI pull + compile-worker), seals it into
-//! L2, and returns it. No bundle is ever pushed on the run itself. `compat_token`
-//! (the worker's cwasm ABI id) keys L2 so a fleet version bump repartitions the
-//! cache instead of feeding a stale cwasm to an incompatible runtime.
+//! does not pull anything: it ANSWERS, returning
+//! [`RunOutcome::CacheMiss`] with its `compat_token` and running nothing. The
+//! orchestrator then resolves the bundle under its own key — from L2, or by
+//! compiling on an L2 miss (OCI pull + compile-worker) and sealing the result
+//! into L2 — and calls [`ExecutorService::run_with_bundle`].
+//!
+//! The direction is the point. A callback the worker could call to ask for a
+//! composition would be a probe surface on the key-holding side, driven by the
+//! keyless one; a return value is not. `compat_token` keys L2, so a fleet
+//! version bump repartitions the cache instead of feeding a stale cwasm to an
+//! incompatible runtime.
 
 use serde::{Deserialize, Serialize};
 
@@ -235,7 +240,7 @@ pub trait ChildService {
     /// (the seal key never reaches this process). `callbacks` points at the
     /// SUPERVISOR's relay, which forwards `media_load` / `session_change` on to
     /// api — so this keyless process rehydrates blobs + persists state without
-    /// the seal key and WITHOUT the `load_component` probe surface.
+    /// the seal key, and with no way to ask for a composition at all.
     async fn run(
         &self,
         session_state: SessionState,
@@ -246,13 +251,13 @@ pub trait ChildService {
 }
 
 /// The supervisor-served callback boundary a per-round engine-executor-child calls BACK
-/// during a run. NARROWER than [`CallbackService`] — it omits `load_component`:
-/// the supervisor already resolved + primed the bundle before spawning the child,
-/// so the process running UNTRUSTED wasm is never handed the OCI-pull / compile
-/// probe surface (blast-radius minimization). The supervisor's relay implements
-/// this and forwards each call to its own upstream [`CallbackServiceClient`]
-/// (→ api, which holds the seal key). Method shapes mirror [`CallbackService`]'s
-/// `media_load` / `session_change` exactly so the relay is a straight forward.
+/// during a run. The supervisor already resolved and primed the bundle before
+/// spawning the child, so the process running UNTRUSTED wasm has nothing to ask
+/// for and is handed no way to ask — blast-radius minimization. The supervisor's
+/// relay implements this and forwards each call to its own upstream
+/// [`CallbackServiceClient`] (→ api, which holds the seal key). The two traits
+/// carry the same pair of methods, `media_load` / `session_change`, so the relay
+/// is a straight forward.
 #[remoc::rtc::remote]
 pub trait ChildCallbacks {
     /// Rehydrate a stored blob by content hash (api unseals). `None` = miss.

@@ -1,0 +1,28 @@
+{
+  "policy": "localhost:5050/enclavid/jo394wne8zdb/policies/kyc-test-new@sha256:2cb224f2364f7a85e578b76f1b7f245e13e2c19c45bb08a1c365fafb923d2c2a",
+  "plugins": [
+    {
+      "impl_ref": "localhost:5050/enclavid/jo394wne8zdb/policies/well-known@sha256:774c0e06b08edcfaa1174533da183f3c142c40953c149c07971f6dc76714a91f",
+      "package": "enclavid:well-known@0.1.0"
+    },
+    {
+      "impl_ref": "localhost:5050/enclavid/jo394wne8zdb/policies/preprocess@sha256:e429e3d27120d430deeac352dc72d56e7fe9502616869fdfbc7179dfa9f01b60",
+      "package": "enclavid:preprocess@0.1.0"
+    },
+    {
+      "impl_ref": "localhost:5050/enclavid/jo394wne8zdb/policies/face-detect@sha256:f81c0981fbc6cae2cf576397132899c631445083fe35f364afc9e7da3c271baf",
+      "package": "enclavid:face-detect@0.1.0"
+    },
+    {
+      "impl_ref": "localhost:5050/enclavid/jo394wne8zdb/policies/face-age@sha256:f2a56ffa22f945679d5b3699d1d6ed3909dc515f148740fad5d807f2d67c5027",
+      "package": "enclavid:face-age@0.1.0"
+    },
+    {
+      "impl_ref": "localhost:5050/enclavid/jo394wne8zdb/policies/extra@sha256:b5f0091990fb154e310656edad9af885962a87f5776693cf2b3d7f543ba212db",
+      "package": "enclavid:extra@0.1.0"
+    }
+  ],
+  "registry_auth": {
+    "localhost:5050": "Bearer eyJhbGciOiJFUzM4NCIsInR5cCI6ImF0K2p3dCIsImtpZCI6IlFVWnlSLTgzS2hkVGpqbXdRelR1MWZBb2VVTmszSUloYWF4dDVObWZ3dGMifQ.eyJvcmdhbml6YXRpb25faWQiOiJqbzM5NHduZTh6ZGIiLCJqdGkiOiJuV1RENzN3UEk2NmxEMG9laUNUb2UiLCJzdWIiOiJuOHZ6MXBocHVlcDIiLCJpYXQiOjE3ODQxODc2NjEsImV4cCI6MTc4NDE5MTI2MSwic2NvcGUiOiJyZWdpc3RyeTpyZWFkIHJlZ2lzdHJ5OnB1c2giLCJjbGllbnRfaWQiOiJiMWtyYWx4YTI5eHM1OWs4aXRwbzIiLCJpc3MiOiJodHRwOi8vbG9jYWxob3N0OjMwMDEvb2lkYyIsImF1ZCI6Imh0dHA6Ly9sb2NhbGhvc3Q6NTA1MCJ9.sW1pciUChNMPvrZft4ElX9mcfU87IGV5is1rslsctVE17qE9_WeHfJFteJCSjRuqvLsOG1s0VL2nYVC04UbhPq63AvSHAe4Dy2Hzjp58qAEwOOhi4Y9mh-Ts-S9vnuqM"
+  }
+}

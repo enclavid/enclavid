@@ -28,8 +28,8 @@ mod embedded;
 pub mod limits;
 
 /// This runtime's cwasm ABI identifier — the `compat_token` the execution-worker
-/// hands the orchestrator on an L1-miss `load_component` so the orchestrator keys
-/// L2 (and, later, routes compiles) by it. A cwasm is portable only across
+/// returns to the orchestrator on an L1 miss (`RunOutcome::CacheMiss`) so the
+/// orchestrator keys L2 (and, later, routes compiles) by it. A cwasm is portable only across
 /// runtimes sharing `(wasmtime version + engine_config + target)`.
 ///
 /// The wasmtime half is derived AUTOMATICALLY from wasmtime's own major version

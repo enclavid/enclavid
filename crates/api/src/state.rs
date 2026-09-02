@@ -33,10 +33,10 @@ pub struct AppState {
     /// L2 compiled-policy cache: hatch-backed, AEAD-sealed cwasm bundles, keyed
     /// by `(composition_key, compat_token)`. This is the orchestrator's ONLY
     /// compiled-artifact store — there is NO api-side in-RAM L1; the sole
-    /// in-memory component cache lives on the execution-worker, which pulls a
-    /// bundle from here via `load_component` on a miss. `resolve_bundle`
-    /// (`applicant::shared`) is the L2-read-or-compile-and-store entry point the
-    /// `load_component` callback drives. See [`crate::cwasm_cache`].
+    /// in-memory component cache lives on the execution-worker, which reports a
+    /// miss rather than filling it itself. `resolve_bundle` (`applicant::shared`)
+    /// is the L2-read-or-compile-and-store entry point that miss drives. See
+    /// [`crate::cwasm_cache`].
     pub cache_store: CacheStore,
     pub session_store: Arc<SessionStore>,
     /// Registry client used by /connect for the lazy policy pull.

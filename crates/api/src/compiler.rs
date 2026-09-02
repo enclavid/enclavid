@@ -11,8 +11,8 @@
 //! bytes-in, bytes-out both ends).
 //!
 //! The [`CompiledBundle`] wire type lives in the `engine-rpc` crate (it is the compile
-//! RPC return value, the L2 cache bundle — see [`crate::cwasm_cache`] — AND the
-//! execution-worker `load_component` payload) so a cold compile and an L2 hit
+//! RPC return value, the L2 cache bundle — see [`crate::cwasm_cache`] — AND what
+//! api hands the worker on `run_with_bundle`) so a cold compile and an L2 hit
 //! resolve the same bundle the worker deserializes.
 
 use engine_types::composition::PluginInstance;
@@ -49,10 +49,9 @@ impl Compiler {
 }
 
 /// Connect to a compile-worker already listening at `addr` and hand back a
-/// [`Compiler`]. The worker is started by infrastructure, not api. Transport
-/// TODAY: a direct TCP dial (dev); Plan-A swaps this for the host vsock-relay
-/// rendezvous + RA-TLS (both peers dial the relay, the host splices). The
-/// worker sends us its service client on the base channel once connected.
+/// [`Compiler`]. The worker is brought up at boot, not by api. The dial is
+/// mutual RA-TLS — TCP by default, vsock under that feature — and the worker
+/// sends us its service client on the base channel once connected.
 pub async fn connect_compile_worker(
     addr: &str,
     attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,

@@ -13,11 +13,12 @@
 //!
 //! **Keyless.** The supervisor holds no `tee_seal_key` and no applicant token. Two
 //! hops carry the keyless callbacks — blob rehydration + state persistence, both
-//! seal-key-side. There is NO bundle-resolution callback: the orchestrator resolves
-//! the compiled bundle UP FRONT and hands it in on [`RunRequest::bundle`] (see
-//! [`RunOutcome::CacheMiss`]), so the OCI-pull / compile probe surface never touches
-//! the worker, and the worker never names a cache slot back (L2 cache-poisoning
-//! defence).
+//! seal-key-side. There is NO bundle-resolution callback: on an L1 miss this
+//! worker answers [`RunOutcome::CacheMiss`] and runs nothing, and the
+//! orchestrator resolves the bundle under its own key and comes back on
+//! [`run_with_bundle`](ExecutorService::run_with_bundle). So the OCI-pull /
+//! compile probe surface never touches the worker, and the worker never names a
+//! cache slot back (L2 cache-poisoning defence).
 //!   * api → supervisor: the orchestrator passes a `CallbackServiceClient` into
 //!     [`run`](ExecutorService::run).
 //!   * supervisor → child: the supervisor stands up a [`RelayCallbacks`]
@@ -45,9 +46,10 @@
 //! another composition's code. A live `Component` never crosses the process
 //! boundary; the `Component::deserialize` unsafe sink stays in the disposable child.
 //!
-//! Transport TODAY: a plain TCP listener (dev) to api; Plan-A swaps it for the
-//! host vsock-relay rendezvous + RA-TLS. The supervisor↔child hop is a private
-//! per-child socketpair (never leaves this host).
+//! Transport to api: a listener under mutual RA-TLS — TCP by default, vsock
+//! under that feature, which is what the measured image builds. The
+//! supervisor↔child hop is a private per-child socketpair (never leaves this
+//! host).
 
 use std::fs::File;
 use std::io::Write;

@@ -7,13 +7,17 @@
 //! [`connect`](connect_execution_worker)s to it at a configured address, under
 //! mutual RA-TLS; the transport is TCP by default and vsock under that feature.
 //!
-//! Per round api stands up a `CallbackService` server (`load_component` /
-//! `media_load` / `session_change`) on the SAME connection and passes its client
-//! into [`run`](Executor::run), so the KEYLESS worker calls back for compiled-
-//! bundle resolution + blob rehydration + state persistence without ever holding
-//! the seal key (remoc multiplexes the callbacks over the in-flight run — no
-//! hand-rolled duplex). The worker owns the in-memory L1 of components and PULLS
-//! the bundle via `load_component` on a miss; the run request carries no bundle.
+//! Per round api stands up a `CallbackService` server (`media_load` /
+//! `session_change`) on the SAME connection and passes its client into
+//! [`run`](Executor::run), so the KEYLESS worker rehydrates blobs and persists
+//! state without ever holding the seal key (remoc multiplexes the callbacks over
+//! the in-flight run — no hand-rolled duplex).
+//!
+//! Bundle resolution is NOT among them. The worker owns the in-memory L1 of
+//! components; on a miss it returns `RunOutcome::CacheMiss` and runs nothing,
+//! and api resolves the bundle under its own key before calling
+//! [`run_with_bundle`](Executor::run_with_bundle). The keyless side never asks
+//! the key-holding side for a composition.
 
 use std::sync::Arc;
 

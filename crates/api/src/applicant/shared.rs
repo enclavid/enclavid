@@ -83,10 +83,10 @@ pub(super) struct SessionRunCtx {
     props: Vec<(String, Prop)>,
     /// Composition cache key — names the fused component in the execution-worker's
     /// L1 cache, and (with the worker's `compat_token`) keys the orchestrator's
-    /// L2. Passed to the worker on the run; echoed back in `load_component`.
+    /// L2. Passed to the worker on the run; named back in its cache-miss reply.
     composition_key: String,
-    /// This session's metadata — moved into the per-run [`CallbackServer`] so
-    /// `load_component` can cold-compile (OCI pull + fuse) on an L2 miss.
+    /// This session's metadata — kept for the round so `resolve_bundle` can
+    /// cold-compile (OCI pull + fuse) on an L2 miss.
     metadata: SessionMetadata,
 }
 
@@ -360,8 +360,9 @@ persist; same containment as above.
 
         // Compute the composition cache key — names the fused component in the
         // worker's L1 and keys the orchestrator's L2. The pull + compile is LAZY:
-        // driven by the worker's `load_component` callback into `resolve_bundle`
-        // on an L1 miss, so nothing is compiled on the extractor path.
+        // a worker L1 miss comes back as `RunOutcome::CacheMiss` and sends this
+        // side into `resolve_bundle`, so nothing is compiled on the extractor
+        // path.
         let composition_key = session_composition_key(&session_id, &metadata)?;
 
         // Per-run persister: the worker calls `session_change` once per
@@ -432,8 +433,7 @@ persist; same containment as above.
 /// the execution-worker's L1 cache — every session pinning the same policy +
 /// plugins shares ONE compile — and (b) keys the orchestrator's L2 (paired with
 /// the worker's `compat_token`). NO pull or compile happens here; that is lazy,
-/// driven by [`resolve_bundle`] when the worker's `load_component` callback fires
-/// on an L1 miss.
+/// driven by [`resolve_bundle`] when the worker reports an L1 miss.
 fn session_composition_key(
     session_id: &str,
     metadata: &SessionMetadata,
@@ -450,8 +450,8 @@ fn session_composition_key(
     ))
 }
 
-/// Resolve the compiled bundle for `(composition_key, compat_token)` — the api
-/// side of the worker's `load_component` pull. L2 hit → return the (unsealed)
+/// Resolve the compiled bundle for `(composition_key, compat_token)` — what api
+/// does with a worker's cache miss. L2 hit → return the (unsealed)
 /// bundle; L2 miss → cold-compile (OCI pull + compile-worker), store to L2
 /// (best-effort), return. This is the ONE place a compile is now triggered — the
 /// orchestrator holds no in-memory component cache, so it recomputes from L2 (or
@@ -483,10 +483,10 @@ pub(super) async fn resolve_bundle(
 /// registry auth), then hand the bytes to the [`Compiler`](crate::compiler::Compiler)
 /// boundary, which fuses + compiles + parses sections into a [`CompiledBundle`].
 /// Runs only on an L2 miss — [`resolve_bundle`] calls this, then stores the
-/// result to L2. The bundle then flows back to the worker via `load_component`.
+/// result to L2. The bundle then goes to the worker on `run_with_bundle`.
 ///
-/// Errors map to HTTP-ish statuses (now surfaced by the worker as a run failure
-/// via `load_component` → `ExecError`, which `classify_run_error` maps):
+/// Errors map to HTTP-ish statuses (surfaced as a run failure once the retry
+/// with a bundle fails, which `classify_run_error` maps):
 ///   * 410 Gone — registry pull / decrypt failed (artifact removed / malformed)
 ///   * 5xx — composition / infra problems
 async fn cold_compile(

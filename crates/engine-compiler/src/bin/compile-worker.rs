@@ -21,9 +21,10 @@
 //! the worker (a real gap the direct-compile design had no bound for). A memory
 //! cap (RLIMIT_AS on the child) is a natural follow-up.
 //!
-//! Transport TODAY: a plain TCP listener (dev) to api; Plan-A swaps it for the
-//! host vsock-relay rendezvous + RA-TLS. The supervisor↔child hop is a private
-//! per-child socketpair (never leaves this host).
+//! Transport to api: a listener under mutual RA-TLS — TCP by default, vsock
+//! under that feature, which is what the measured image builds. The
+//! supervisor↔child hop is a private per-child socketpair (never leaves this
+//! host).
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,13 +1,14 @@
 //! L2 cwasm-cache: best-effort load / store of a [`CompiledBundle`].
 //!
 //! This is the fleet's DURABLE cache tier and the orchestrator's ONLY compiled
-//! artifact store — a hatch-backed blob store ([`hatch_client::CacheStore`],
-//! AEAD-sealed under `tee_seal_key`) that survives a TEE restart. There is no
+//! artifact store — [`hatch_client::CacheStore`], AEAD-sealed under
+//! `tee_seal_key`, over the storage-CVM backend api dials at boot. It survives a
+//! TEE restart. There is no
 //! api-side in-RAM component cache; the sole in-memory L1 lives on the
-//! execution-worker, which PULLS a bundle from here via `load_component` on an
-//! L1 miss. A [`CompiledBundle`] is a pure function of the pinned artifacts, so
-//! a cold compile stores it once and every later boot / worker-pull reloads it
-//! without re-pulling or re-compiling.
+//! execution-worker, which on a miss says so (`RunOutcome::CacheMiss`) and lets
+//! api load from here. A [`CompiledBundle`] is a pure function of the pinned
+//! artifacts, so a cold compile stores it once and every later boot or worker
+//! miss reloads it without re-pulling or re-compiling.
 //!
 //! ## Compatibility / invalidation — guards
 //!

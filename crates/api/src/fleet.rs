@@ -26,9 +26,9 @@ use std::time::Duration;
 
 use safe_logger::{error, reason, safe, warn};
 
-/// Waits between dial attempts. Roughly a minute in total, which is far longer
-/// than a peer takes to bind and far shorter than a human waits before assuming
-/// something is wrong.
+/// Waits between dial attempts, 18.75 s in total — far longer than a peer takes
+/// to bind, and short enough that a peer which is genuinely absent is reported
+/// rather than waited on.
 const RETRY_DELAYS: [Duration; 6] = [
     Duration::from_millis(250),
     Duration::from_millis(500),

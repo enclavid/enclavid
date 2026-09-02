@@ -16,9 +16,10 @@
 //! Blob rehydration ([`media_load`](engine_rpc::ChildCallbacks::media_load)) and
 //! state persistence ([`session_change`](engine_rpc::ChildCallbacks::session_change))
 //! forward over the socketpair to the SUPERVISOR's relay, which forwards them on
-//! to api (the seal-key holder). The narrowed [`ChildCallbacks`] boundary omits
-//! `load_component`, so this untrusted-wasm process is never handed the OCI-pull /
-//! compile probe surface.
+//! to api (the seal-key holder). Those two calls are the whole of the
+//! [`ChildCallbacks`] boundary: the supervisor primed this process with its
+//! bundle before starting it, so there is nothing here that can ask for a
+//! composition, and no OCI-pull or compile surface to ask with.
 //!
 //! Single-threaded runtime: one round, no cross-round concurrency to exploit, and
 //! forward-compatible with a future fork-from-zygote (which needs a single-

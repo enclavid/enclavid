@@ -6,14 +6,19 @@ each reproduces byte for byte:
 | input | where | verify |
 |---|---|---|
 | firmware | distribution `ovmf-amdsev` package | package version + digest |
-| kernel | `kernel/` | `nix-build image/kernel -A <role> --check` |
+| kernel | `kernel/` | `nix-build image/kernel -A diskless\|storage --check` |
 | PID 1 | `init/` (binary) + `init/inittab/<role>` | `nix-build image/init --check` |
 | initramfs | `initramfs/` | `nix-build image/initramfs --check` |
 | cmdline | `cmdline/<role>/<variant>` | the file is the value |
 
-`app/` builds the role binary the initramfs wraps. Roles differ in every input
-except the firmware, so each carries its own measurement — that is a property of
-the launch, not a packaging choice.
+`app/` builds the role binary the initramfs wraps.
+
+Two of the five are shared rather than per-role. The firmware is one image for
+everyone. The kernel is two: `diskless` for api, the executor, the compiler and
+the gateway, and `storage` for the one role that owns a disk — which is the only
+axis those configs differ on, so a third would be a copy. Everything else — PID
+1's inittab, the initramfs that carries the role binary, and the command line —
+is the role's own, and that is enough to give each its own measurement.
 
 ## The command line
 

@@ -82,8 +82,11 @@ pub struct SessionStore {
     backend: Arc<dyn SessionBackend>,
     /// TEE-side AEAD master key used for METADATA and as the outer layer of
     /// STATE — the hardware-rooted crown jewel every session seal derives from.
-    /// Phase A: caller injects (random or env-supplied placeholder).
-    /// Phase B: derived from attestation report / KMS-bound material.
+    /// The caller injects it, and where the caller gets it is the caller's
+    /// business: api derives it from the chip under `sev-snp`
+    /// (`enclavid_attestation::derive_seal_key`), so in the measured image it is
+    /// bound to the measurement and never leaves the enclave. A dev build takes
+    /// it from the environment instead.
     /// `SecretBox` zeroizes it on drop and redacts it from any `Debug` — so the
     /// master never lands in a log, matching how the applicant token is held; the
     /// `Arc` keeps cloning the store cheap (the store derives `Clone`).

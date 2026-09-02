@@ -100,9 +100,9 @@ memfd = { version = "0.6", optional = true }
 tempfile = { version = "3", optional = true }
 
 [features]
-# Enables the `execution-worker` bin. api never enables it → the api
-# orchestrator links only the pure lib types it re-points to engine-types /
-# hatch-client, and NO wasmtime.
+# Enables the `execution-worker` bin. api does not depend on this crate at all —
+# it drives the worker over rpc — so nothing here reaches the orchestrator, with
+# or without this feature.
 worker = [
     # The supervisor is the half that speaks to the host: it reports its
     # configuration at boot and says why it is stopping. The child does not, so
