@@ -15,6 +15,8 @@
 //! Nothing above this cares which arm is compiled: both hand back a stream that
 //! satisfies what RA-TLS and remoc want of it.
 
+pub mod health;
+
 #[cfg(all(feature = "vsock", not(target_os = "linux")))]
 compile_error!(
     "feature `vsock` requires Linux — AF_VSOCK exists only in the Linux kernel. Build \
@@ -138,6 +140,22 @@ impl Listener {
     pub async fn accept(&mut self) -> std::io::Result<(Stream, String)> {
         let (stream, peer) = self.inner.accept().await?;
         Ok((stream, format!("{peer:?}")))
+    }
+
+    /// The address this listener actually bound, as a string a [`dial`] would
+    /// accept on the same arm. Its one caller is a test that binds port 0 and
+    /// needs to know what the OS chose; a role never asks, because a role was
+    /// told its address by the measured command line.
+    pub fn local_addr(&self) -> std::io::Result<String> {
+        #[cfg(not(feature = "vsock"))]
+        {
+            Ok(self.inner.local_addr()?.to_string())
+        }
+        #[cfg(feature = "vsock")]
+        {
+            let addr = self.inner.local_addr()?;
+            Ok(format!("vsock://{}:{}", addr.cid(), addr.port()))
+        }
     }
 }
 

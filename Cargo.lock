@@ -1736,6 +1736,8 @@ name = "fleet-transport"
 version = "0.1.0"
 dependencies = [
  "safe-logger",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-vsock",
 ]

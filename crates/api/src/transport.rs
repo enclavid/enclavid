@@ -14,8 +14,14 @@ use safe_logger::{info, reason, safe};
 /// `addr` format is per-transport:
 /// - default (TCP): `host:port` — e.g. `0.0.0.0:3000`
 /// - `vsock` feature: bare u32 port — e.g. `3000` (bound to `VMADDR_CID_ANY`)
+///
+/// `bound` fires once the listener exists and before the first accept. It is
+/// what lets `main` set the health port's `healthy` field on the same terms a
+/// leaf sets its own — after the bind, not after the spawn. Dropped without a
+/// send only if this function panics, which is the bind failing, which ends the
+/// process.
 #[cfg(not(feature = "vsock"))]
-pub async fn serve(app: Router, addr: &str) {
+pub async fn serve(app: Router, addr: &str, bound: tokio::sync::oneshot::Sender<()>) {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind TCP listener");
@@ -27,11 +33,12 @@ pub async fn serve(app: Router, addr: &str) {
         ),
         reason!("a constant, emitted once at boot before any session exists")
     );
+    let _ = bound.send(());
     axum::serve(listener, app).await.expect("server error");
 }
 
 #[cfg(feature = "vsock")]
-pub async fn serve(app: Router, addr: &str) {
+pub async fn serve(app: Router, addr: &str, bound: tokio::sync::oneshot::Sender<()>) {
     use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener};
 
     let port: u32 = addr.parse().expect("vsock address must be a u32 port");
@@ -42,6 +49,7 @@ pub async fn serve(app: Router, addr: &str) {
         safe(&port, reason!("on the measured command line")),
         reason!("a constant, emitted once at boot before any session exists")
     );
+    let _ = bound.send(());
     axum::serve(VsockServeListener(listener), app)
         .await
         .expect("server error");

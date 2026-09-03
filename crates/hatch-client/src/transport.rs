@@ -17,6 +17,8 @@ compile_error!(
      non-Linux dev environments, or run the build inside a Linux container."
 );
 
+use std::time::Duration;
+
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::header::CONTENT_TYPE;
@@ -116,15 +118,54 @@ impl HatchClient {
     // before reaching here. (Durable sealed state — sessions + L2 cache —
     // no longer rides the hatch; it went to the storage-CVM seam.)
 
-    /// POST raw bytes to `path`.
+    /// POST raw bytes to `path`, giving up after `deadline`.
     ///
     /// The transport is a dumb byte mover — it is intentionally unaware
     /// of the boundary `Exposed` wrapper and the CBOR codec. The egress
     /// gate (a fully-vouched `Exposed<T, ()>`, released to bytes via
     /// `into_inner` + encode) lives one level up in the typed clients,
     /// which are the only things that should feed this method.
-    pub(crate) async fn post(&self, path: &str, body: Vec<u8>) -> Result<HttpResp, BridgeError> {
-        self.request("POST", path, body).await
+    ///
+    /// `deadline` is an argument rather than a constant in here for two
+    /// reasons. The four callers have honestly different budgets — each is
+    /// backed by different work on the far side, some of it leaving the
+    /// machine — and a required argument cannot be forgotten the way a
+    /// default can. Each caller states its own next to the call, where a
+    /// reader can judge it against the work it is buying. Where the hatch
+    /// bounds that work itself, the deadline here is set to clear that bound
+    /// rather than to compete with it.
+    pub(crate) async fn post(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<HttpResp, BridgeError> {
+        self.request("POST", path, body, deadline).await
+    }
+
+    /// Ask the hatch whether it is there. Carries nothing, returns nothing but
+    /// the fact of an answer.
+    ///
+    /// `pub`, unlike [`Self::post`], and the rule above does not apply because
+    /// there is nothing here for the egress gate to guard: the path is a
+    /// literal, the body is empty, the answer is discarded. Nothing crosses the
+    /// boundary in either direction, so there is no vouch to make about it.
+    ///
+    /// What a success proves is narrow and worth stating: this guest's vsock
+    /// path to the hatch works and the hatch's own server answered. It says
+    /// nothing about the issuer, the registry, the key broker or AMD — those
+    /// are other people's uptime, and the endpoint deliberately does not touch
+    /// them.
+    pub async fn probe(&self, deadline: Duration) -> Result<(), BridgeError> {
+        let resp = self.request("GET", "/health", Vec::new(), deadline).await?;
+        if resp.status.is_success() {
+            Ok(())
+        } else {
+            Err(BridgeError::Transport(format!(
+                "hatch health: status {}",
+                resp.status
+            )))
+        }
     }
 
     async fn request(
@@ -132,6 +173,7 @@ impl HatchClient {
         method: &str,
         path: &str,
         body: Vec<u8>,
+        deadline: Duration,
     ) -> Result<HttpResp, BridgeError> {
         let uri = format!("{}{}", self.base, path);
         let req = Request::builder()
@@ -141,21 +183,45 @@ impl HatchClient {
             .body(Full::new(Bytes::from(body)))
             .map_err(|e| BridgeError::Transport(format!("build request: {e}")))?;
 
-        let resp = self
-            .client
-            .request(req)
-            .await
-            .map_err(|e| BridgeError::Transport(format!("request: {e}")))?;
-        let status = resp.status();
-        let collected = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| BridgeError::Transport(format!("body: {e}")))?;
-        Ok(HttpResp {
-            status,
-            body: collected.to_bytes().to_vec(),
-        })
+        // One clock over the WHOLE exchange — connect, status line and body.
+        //
+        // Wrapping only the response future would leave the hole open: this hop
+        // has no TLS, no keepalive and no multiplexer under it, so a host that
+        // answers with headers and then stops sending stalls the `collect`
+        // below for ever, and nothing beneath this line would ever notice. The
+        // fleet legs are bounded by chmux's own idle detection; this one has
+        // nothing but this.
+        //
+        // That matters most where it is least visible: `/oci/pull` and
+        // `/kbs/relay` are reached from `cold_compile`, which runs INSIDE an
+        // applicant round, so an unbounded wait here parks a round that is
+        // holding that round's captures.
+        let exchange = async move {
+            let resp = self
+                .client
+                .request(req)
+                .await
+                .map_err(|e| BridgeError::Transport(format!("request: {e}")))?;
+            let status = resp.status();
+            let collected = resp
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| BridgeError::Transport(format!("body: {e}")))?;
+            Ok(HttpResp {
+                status,
+                body: collected.to_bytes().to_vec(),
+            })
+        };
+
+        // The path is a literal chosen by the caller, so naming it here adds a
+        // stage without adding content.
+        match tokio::time::timeout(deadline, exchange).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(BridgeError::Transport(format!(
+                "{path}: the hatch did not answer within the deadline"
+            ))),
+        }
     }
 }
 

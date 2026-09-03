@@ -18,6 +18,17 @@ use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
 use crate::transport::HatchClient;
 
+/// How long the hatch has to answer a certificate request.
+///
+/// This one runs at BOOT, under `endorsement`'s own ladder of retries — and the
+/// ladder is the reason the deadline has to exist rather than a reason it could
+/// be skipped: without it the first attempt parks for ever and the remaining
+/// rungs are never reached, which is the same hole `fleet::dial` closed with
+/// its `ATTEMPT_TIMEOUT`. Generous because the fetch behind it may leave the
+/// machine and AMD's service rate-limits; the cache in front of it is the
+/// hatch's, not ours.
+const VCEK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Client for the hatch `/kds/vcek` endpoint over the shared hatch connection.
 #[derive(Clone)]
 pub struct KdsClient {
@@ -37,7 +48,7 @@ impl KdsClient {
         req: Exposed<VcekRequest>,
     ) -> Result<Untrusted<VcekResponse, (AuthN, AuthZ, Replay)>, BridgeError> {
         let bytes = hatch_protocol::encode(&req.into_inner())?;
-        let resp = self.hatch.post("/kds/vcek", bytes).await?;
+        let resp = self.hatch.post("/kds/vcek", bytes, VCEK_DEADLINE).await?;
 
         match resp.status {
             StatusCode::OK => {

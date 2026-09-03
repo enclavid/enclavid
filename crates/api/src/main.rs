@@ -9,6 +9,7 @@ mod endorsement;
 mod error;
 mod executor;
 mod fleet;
+mod health;
 mod input;
 mod keyprovider;
 mod limits;
@@ -28,6 +29,22 @@ use safe_logger::{debug, info, reason};
 use crate::client_state::ClientState;
 use crate::state::AppState;
 
+/// How often api asks the hatch whether this guest can still reach it.
+///
+/// A clock, not a reaction: it runs at this rate whether or not anyone is being
+/// verified, which is exactly what keeps the bit from reporting session
+/// activity. Ten seconds because it is the same order as chmux's own keepalive
+/// on the fleet legs, so every field of the answer ages at one rate and a host
+/// polling it needs one cadence in mind rather than three.
+const HATCH_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long one probe waits before calling it a miss.
+///
+/// Shorter than the interval on purpose, so a stalled hatch cannot make probes
+/// overlap: at most one is ever in flight, and the bit is never older than one
+/// interval plus this.
+const HATCH_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[tokio::main]
 async fn main() {
     // First, so nothing can speak before the channel exists. Panic locations
@@ -39,6 +56,36 @@ async fn main() {
         "api: alive",
         reason!("a constant, emitted before this process holds anything at all")
     );
+
+    // The health port, up before everything: before attestation, before the
+    // dials, before either serving listener. api is the one role whose progress
+    // is invisible from outside — a guest waiting for the storage-CVM looks
+    // exactly like one that is serving — and this is the port that closes that
+    // gap. Every field answers false for the whole of the wait, and the host's
+    // cue to start routing is the whole answer coming back true, not any one
+    // field of it. See `health` for why api draws that conclusion for nobody.
+    //
+    // It is also what makes `fleet::dial` waiting for ever the right behaviour
+    // rather than a hang: the guest says what it is doing, so nobody has to
+    // infer it from silence.
+    let api_health = health::ApiHealth::new();
+    {
+        let health_addr = std::env::var("ENCLAVID_ADDRESS_IN_HEALTH").unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "api: ENCLAVID_ADDRESS_IN_HEALTH is not set. Stopping.",
+                reason!("a constant naming a configuration key the host itself supplied")
+            )
+        });
+        // Bound HERE, on this task, and only the answering loop is spawned:
+        // binding inside the spawn would turn a failure into one dead task and
+        // a guest that serves with no health port. See `health::bind`.
+        let listener = fleet_transport::health::bind(&health_addr).await;
+        let api_health = api_health.clone();
+        tokio::spawn(async move {
+            fleet_transport::health::serve(listener, move || api_health.body()).await
+        });
+    }
 
     let address_out = std::env::var("ENCLAVID_ADDRESS_OUT").unwrap_or_else(|e| {
         debug!("{e}");
@@ -62,6 +109,58 @@ async fn main() {
                  accepted and an endorsement was obtained"
         )
     );
+
+    // The hatch bit, on a clock of its own.
+    //
+    // Fixed cadence is the whole design, not an implementation choice. A bit set
+    // from the outcome of REAL calls would flip only when an applicant-driven
+    // call failed — and since the host is the far end of this hop, it is the
+    // party that failed it, so polling that bit would tell it when a session was
+    // active. A ticker says the same thing about the hop while saying nothing
+    // about who is using it.
+    //
+    // It reports the LEG, not the hatch. Whether that process is up is something
+    // whatever supervises it knows better than any probe here; whether this
+    // guest can reach it is a fact only this guest holds.
+    //
+    // A failure changes nothing but the bit. The hatch is on the cold-start path
+    // (`/authorize` for the consumer surface, `/oci/pull` and `/kbs/relay` from
+    // `cold_compile`), and an applicant round on a warm composition never
+    // touches it — so withdrawing this guest over a hatch fault would end
+    // sessions that are running correctly. What to do about it is the host's
+    // call, made from the whole answer.
+    //
+    // AFTER the attestation above, and not for convenience: the rule stated
+    // there is that nothing which talks to anything may precede it, and a
+    // ticker that starts earlier would be exactly such a thing. The bit answers
+    // false until the first pass, which is what every other field does too.
+    {
+        let probe = hatch_client::HatchClient::new(&address_out)
+            .await
+            .unwrap_or_else(|e| {
+                debug!("{e}");
+                safe_logger::error_and_panic!(
+                    "api: ENCLAVID_ADDRESS_OUT is not a hatch address this build can dial. \
+                     Stopping.",
+                    reason!("a constant naming a configuration key the host itself supplied")
+                )
+            });
+        let api_health = api_health.clone();
+        tokio::spawn(async move {
+            // `interval` fires once immediately, so the first probe runs now
+            // rather than one period from now. `Delay` on a missed tick because
+            // the cadence is what carries the meaning: catching up on skipped
+            // ticks would bunch probes together and turn a clock into a
+            // reaction.
+            let mut tick = tokio::time::interval(HATCH_PROBE_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let up = probe.probe(HATCH_PROBE_DEADLINE).await.is_ok();
+                api_health.set_hatch(up);
+            }
+        });
+    }
 
     // SessionStore is hatch-client's per-session typed-field store. It is
     // transport-agnostic — it holds an `Arc<dyn SessionBackend>`, and the
@@ -99,7 +198,8 @@ async fn main() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_SESSION_TTL_SECS),
     );
-    let (session_backend, cache_backend) = build_storage_backends(attestor.clone()).await;
+    let (session_backend, cache_backend) =
+        build_storage_backends(attestor.clone(), api_health.clone()).await;
     info!(
         "api: storage-CVM connected",
         reason!("a constant; the address it refers to is on the measured command line")
@@ -122,18 +222,19 @@ async fn main() {
             cache_store,
             shuffle_key,
             attestor,
+            api_health.clone(),
         )
         .await,
     );
 
-    // Every peer is up and both surfaces are about to open.
-    info!(
-        "api: serving",
-        reason!("a constant, and the ports are on the measured command line")
-    );
-
     let client_app = client::router(client_state);
     let applicant_app = applicant::router(applicant_state);
+
+    // Each surface reports when its listener is BOUND, not when its task is
+    // spawned — `healthy` says "I am listening", and a field that fires a few
+    // microseconds before the bind would be saying it on trust.
+    let (client_bound, client_is_bound) = tokio::sync::oneshot::channel();
+    let (applicant_bound, applicant_is_bound) = tokio::sync::oneshot::channel();
 
     let client_handle = tokio::spawn({
         let addr = std::env::var("ENCLAVID_ADDRESS_IN_CLIENT").unwrap_or_else(|e| {
@@ -144,7 +245,7 @@ async fn main() {
             )
         });
         async move {
-            transport::serve(client_app, &addr).await;
+            transport::serve(client_app, &addr, client_bound).await;
         }
     });
     let applicant_handle = tokio::spawn({
@@ -156,9 +257,36 @@ async fn main() {
             )
         });
         async move {
-            transport::serve(applicant_app, &addr).await;
+            transport::serve(applicant_app, &addr, applicant_bound).await;
         }
     });
+
+    // `healthy` goes true HERE, and this is the only place it can: both
+    // surfaces are bound, which is the same claim a leaf's bool makes before
+    // its accept loop. It is also the last field the host is waiting on before
+    // it concludes ready — the peers went true as each leg came up, and the
+    // hatch bit on the ticker's first pass.
+    //
+    // A bind that fails panics the task above, and that panic does NOT end this
+    // process: nothing sets `panic = "abort"`, and `install_panic` only adds a
+    // hook that logs and returns, so the unwind stops at the task boundary and
+    // `main` is never told. What actually happens is that the task dies holding
+    // the sender, the sender drops, and the receive below yields an error —
+    // which is what the check exists for. Neither branch reaches
+    // `declare_serving`, so there is no path on which this guest claims to be
+    // listening and is not.
+    let (client_bind, applicant_bind) = tokio::join!(client_is_bound, applicant_is_bound);
+    if client_bind.is_err() || applicant_bind.is_err() {
+        safe_logger::error_and_panic!(
+            "api: a serving listener ended before it reported itself bound. Stopping.",
+            reason!("constant text about ports on the measured command line")
+        )
+    }
+    api_health.declare_serving();
+    info!(
+        "api: serving",
+        reason!("a constant, and the ports are on the measured command line")
+    );
 
     let _ = tokio::join!(client_handle, applicant_handle);
 }
@@ -170,6 +298,7 @@ async fn main() {
 /// per `feedback_minimal_defaults`).
 async fn build_storage_backends(
     attestor: Arc<dyn Attestor>,
+    api_health: Arc<health::ApiHealth>,
 ) -> (Arc<dyn SessionBackend>, Arc<dyn CacheBackend>) {
     let addr = std::env::var("ENCLAVID_STORAGE_ADDR").unwrap_or_else(|e| {
         debug!("{e}");
@@ -179,22 +308,39 @@ async fn build_storage_backends(
             reason!("a constant naming a configuration key the host itself supplied")
         )
     });
-    let (session, cache) = fleet::dial("storage-CVM", || {
-        storage::connect_storage(&addr, attestor.clone())
-    })
-    .await
-    .unwrap_or_else(|e| {
-        debug!("{e}");
-        safe_logger::error_and_panic!(
-            "api: the storage-CVM never answered. Stopping.",
-            reason!(
-                "a constant; that a fleet leg never came up is already visible to whoever \
-                 routes it"
-            )
+
+    // Two clients, one connection: they go up and down together, so one
+    // supervisor installs into both legs.
+    let session_leg = fleet::Leg::new();
+    let cache_leg = fleet::Leg::new();
+    {
+        let (session_leg, cache_leg) = (session_leg.clone(), cache_leg.clone());
+        let addr = addr.clone();
+        let attestor = attestor.clone();
+        fleet::supervise(
+            health::Peer::Storage,
+            addr.clone(),
+            api_health,
+            move || {
+                let (addr, attestor) = (addr.clone(), attestor.clone());
+                async move { storage::connect_storage(&addr, attestor).await }
+            },
+            move |clients| match clients {
+                Some(c) => {
+                    session_leg.set(Some(c.session));
+                    cache_leg.set(Some(c.cache));
+                }
+                None => {
+                    session_leg.set(None);
+                    cache_leg.set(None);
+                }
+            },
         )
-    });
-    let session: Arc<dyn SessionBackend> = Arc::new(session);
-    let cache: Arc<dyn CacheBackend> = Arc::new(cache);
+        .await;
+    }
+
+    let session: Arc<dyn SessionBackend> = Arc::new(storage::SessionCvmBackend::new(session_leg));
+    let cache: Arc<dyn CacheBackend> = Arc::new(storage::CacheCvmBackend::new(cache_leg));
     (session, cache)
 }
 

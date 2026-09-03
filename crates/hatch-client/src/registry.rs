@@ -21,6 +21,16 @@ use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
 use crate::transport::HatchClient;
 
+/// How long the hatch has to answer a pull.
+///
+/// The most generous of the four, because it is the only one whose work is
+/// unbounded from here: the hatch fetches megabytes from a registry this
+/// process cannot see, cannot reach and does not choose. Still bounded, and the
+/// reason is where it runs — `cold_compile` is on the applicant round path, so
+/// a pull that never returns parks a round holding that round's captures, with
+/// nothing beneath it to notice.
+const PULL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Client for the hatch `/oci/pull` endpoint over the shared hatch
 /// connection.
 #[derive(Clone)]
@@ -53,7 +63,7 @@ impl RegistryClient {
         // forwarding the consumer's bearer to the registry is the
         // producer's call, not ours to self-approve; we just release it.
         let bytes = hatch_protocol::encode(&req.into_inner())?;
-        let resp = self.hatch.post("/oci/pull", bytes).await?;
+        let resp = self.hatch.post("/oci/pull", bytes, PULL_DEADLINE).await?;
 
         match resp.status {
             StatusCode::OK => {

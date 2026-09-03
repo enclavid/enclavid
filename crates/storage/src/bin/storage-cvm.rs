@@ -37,6 +37,33 @@ async fn main() {
     safe_logger::install();
     safe_logger::install_panic(true);
 
+    // The health port, up before anything that can be slow. The host polls it to
+    // learn when this role has finished coming up — which is what lets it bring
+    // the fleet up in order instead of racing it, and what replaced the old
+    // "give up after a fixed budget so that silence means broken".
+    //
+    // Bound FIRST on purpose: everything below can take time (opening stores,
+    // minting an attestation), and a port that only appears afterwards cannot
+    // report the interval it exists to describe.
+    let health = fleet_transport::health::Health::new();
+    {
+        let health_addr = std::env::var("ENCLAVID_STORAGE_HEALTH_LISTEN").unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "storage-cvm: ENCLAVID_STORAGE_HEALTH_LISTEN is not set. Stopping.",
+                reason!("a constant naming a configuration key the host itself supplied")
+            )
+        });
+        // Bound HERE, on this task, and only the answering loop is spawned:
+        // binding inside the spawn would turn a failure into one dead task and
+        // a guest that serves with no health port. See `health::bind`.
+        let listener = fleet_transport::health::bind(&health_addr).await;
+        let health = health.clone();
+        tokio::spawn(async move {
+            fleet_transport::health::serve(listener, move || health.body()).await
+        });
+    }
+
     // Explicit config; fail loud if unset (minimal-defaults).
     let listen = std::env::var("ENCLAVID_STORAGE_LISTEN").unwrap_or_else(|e| {
         debug!("{e}");
@@ -186,6 +213,11 @@ async fn main() {
         }),
     ));
 
+    // Everything that could fail has succeeded: the stores are open, the listener
+    // is bound and the attestation acceptor is minted. From here the host's probe
+    // answers healthy — whether that means READY is the host's conclusion to draw,
+    // not this role's to claim. See `fleet_transport::health`.
+    health.declare_healthy();
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {

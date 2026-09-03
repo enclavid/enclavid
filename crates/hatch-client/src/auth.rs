@@ -56,6 +56,27 @@ pub enum AuthVerdict {
     PermissionDenied,
 }
 
+/// How long the hatch has to answer an authorization request.
+///
+/// It is tempting to make this the shortest of the four, on the theory that
+/// checking a token against a held key set is the cheapest thing in the set.
+/// That is what the ordinary path costs — a cache hit, microseconds — but it is
+/// not what the call can cost. On a cold or expired key set the hatch fetches
+/// one from the issuer before it can check anything, and the rotation branch
+/// can do that twice in a row, so the worst case is two round trips to a
+/// service outside this machine.
+///
+/// The hatch bounds each of those fetches itself (`REQUEST_TIMEOUT` in
+/// `host-hatch`'s auth), which is what makes a number here meaningful: this has
+/// to clear twice that bound plus the vsock hop, so that the deadline never cuts
+/// a legitimate answer short. Under it, a slow issuer becomes a 500 on a
+/// credential that was valid — and one that does not clear, because a fetch cut
+/// short leaves the cache unpopulated and the next request repeats it.
+///
+/// So this is a backstop against a host that stops answering, not a latency
+/// budget. Same relationship `VCEK_DEADLINE` has to the bounds in `kds`.
+const AUTHORIZE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
+
 /// Client for the hatch `/authorize` endpoint over the shared hatch
 /// connection.
 #[derive(Clone)]
@@ -81,7 +102,10 @@ impl AuthClient {
         // own credential to its validating hatch is the producer's call,
         // not ours to self-approve; we just release it.
         let bytes = hatch_protocol::encode(&req.into_inner())?;
-        let resp = self.hatch.post("/authorize", bytes).await?;
+        let resp = self
+            .hatch
+            .post("/authorize", bytes, AUTHORIZE_DEADLINE)
+            .await?;
 
         let verdict = match resp.status {
             StatusCode::OK => {

@@ -29,12 +29,12 @@ use safe_logger::debug;
 /// a [`CompiledBundle`]. The client is a cheap remoc handle (`Send + Sync`);
 /// concurrent `/connect` compiles multiplex over the one connection.
 pub struct Compiler {
-    client: CompilerServiceClient<Ciborium>,
+    leg: std::sync::Arc<crate::fleet::Leg<CompilerServiceClient<Ciborium>>>,
 }
 
 impl Compiler {
-    pub fn new(client: CompilerServiceClient<Ciborium>) -> Self {
-        Self { client }
+    pub fn new(leg: std::sync::Arc<crate::fleet::Leg<CompilerServiceClient<Ciborium>>>) -> Self {
+        Self { leg }
     }
 
     /// Compile `(policy, plugins)` on the worker. A transport failure surfaces
@@ -44,7 +44,10 @@ impl Compiler {
         policy_wasm: Vec<u8>,
         plugins: Vec<PluginInstance>,
     ) -> Result<CompiledBundle, CompileError> {
-        self.client.compile(policy_wasm, plugins).await
+        let client = self.leg.get().ok_or_else(|| {
+            CompileError("the compile-worker leg is down; api is reporting it".into())
+        })?;
+        client.compile(policy_wasm, plugins).await
     }
 }
 
@@ -55,7 +58,7 @@ impl Compiler {
 pub async fn connect_compile_worker(
     addr: &str,
     attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,
-) -> Result<Compiler, LegFailure> {
+) -> Result<(CompilerServiceClient<Ciborium>, tokio::task::JoinHandle<()>), LegFailure> {
     type Cli = CompilerServiceClient<Ciborium>;
 
     let stream = fleet_transport::dial(addr).await.map_err(|e| {
@@ -85,7 +88,9 @@ pub async fn connect_compile_worker(
                 debug!("rpc connect: {e}");
                 LegFailure::Rpc
             })?;
-    crate::fleet::watch(conn, "compile-worker");
+    let driver = tokio::spawn(async move {
+        let _ = conn.await;
+    });
 
     let client = rx
         .recv()
@@ -96,7 +101,7 @@ pub async fn connect_compile_worker(
         })?
         .ok_or(LegFailure::Closed)?;
 
-    Ok(Compiler::new(client))
+    Ok((client, driver))
 }
 
 #[cfg(test)]
@@ -159,7 +164,9 @@ mod tests {
                 .unwrap();
         tokio::spawn(conn);
         let client = rx.recv().await.unwrap().unwrap();
-        let compiler = Compiler::new(client);
+        let leg = crate::fleet::Leg::new();
+        leg.set(Some(client.clone()));
+        let compiler = Compiler::new(leg.clone());
 
         let plugins = vec![PluginInstance {
             package: "p".into(),
@@ -167,6 +174,17 @@ mod tests {
         }];
         let bundle = compiler.compile(b"hello".to_vec(), plugins).await.unwrap();
         assert_eq!(bundle.cwasm, vec![5u8, 1u8]);
+
+        // A down leg fails the call rather than waiting: how long to wait for a
+        // peer is the host's decision, and the health port is already telling it.
+        leg.set(None);
+        // `CompiledBundle` is deliberately not `Debug` (it holds megabytes of
+        // cwasm), so match the outcome rather than unwrapping it.
+        match compiler.compile(b"hello".to_vec(), vec![]).await {
+            Err(CompileError(m)) => assert!(m.contains("leg is down"), "{m}"),
+            Ok(_) => panic!("a call on a down leg must fail"),
+        }
+        leg.set(Some(client));
 
         let err = match compiler.compile(b"boom".to_vec(), vec![]).await {
             Err(e) => e,

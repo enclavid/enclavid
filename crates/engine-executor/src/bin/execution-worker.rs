@@ -410,6 +410,35 @@ async fn main() {
     safe_logger::install();
     safe_logger::install_panic(cfg!(feature = "debug"));
 
+    // The health port, up before anything that can be slow. The host polls it to
+    // learn when this role has finished coming up — which is what lets it bring
+    // the fleet up in order instead of racing it, and what replaced the old
+    // "give up after a fixed budget so that silence means broken".
+    //
+    // Bound FIRST on purpose: everything below can take time (opening stores,
+    // minting an attestation), and a port that only appears afterwards cannot
+    // report the interval it exists to describe.
+    let health = fleet_transport::health::Health::new();
+    {
+        let health_addr =
+            std::env::var("ENCLAVID_EXECUTION_WORKER_HEALTH_LISTEN").unwrap_or_else(|e| {
+                debug!("{e}");
+                safe_logger::error_and_panic!(
+                    "execution-worker: ENCLAVID_EXECUTION_WORKER_HEALTH_LISTEN is not set. \
+                     Stopping.",
+                    reason!("a constant naming a configuration key the host itself supplied")
+                )
+            });
+        // Bound HERE, on this task, and only the answering loop is spawned:
+        // binding inside the spawn would turn a failure into one dead task and
+        // a guest that serves with no health port. See `health::bind`.
+        let listener = fleet_transport::health::bind(&health_addr).await;
+        let health = health.clone();
+        tokio::spawn(async move {
+            fleet_transport::health::serve(listener, move || health.body()).await
+        });
+    }
+
     // Fail CLOSED if the kernel isn't hardened enough to keep one escaped child
     // out of a sibling child's in-flight applicant memory (the per-round isolation
     // rests on this). The real enforcement is the measured CVM image; this makes a
@@ -532,6 +561,11 @@ async fn main() {
         }),
     ));
 
+    // Everything that could fail has succeeded: the stores are open, the listener
+    // is bound and the attestation acceptor is minted. From here the host's probe
+    // answers healthy — whether that means READY is the host's conclusion to draw,
+    // not this role's to claim. See `fleet_transport::health`.
+    health.declare_healthy();
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {

@@ -8,10 +8,13 @@ repository.workspace = true
 # The byte stream the intra-fleet legs run RA-TLS over — one place for the
 # TCP/vsock split so the four participants do not each grow their own copy.
 [dependencies]
-tokio = { version = "1", features = ["net"] }
+# `io-util` for the health port's one write; nothing here reads a socket.
+tokio = { version = "1", features = ["net", "io-util"] }
 # For `impl SafeToLog for LegFailure` — the vouch belongs on the type, and the
-# type lives here.
-safe-logger = { path = "../safe-logger" }
+# type lives here — and for the health port's boot line, which is outward and so
+# needs `device`. A no-op in practice: the only crates that depend on this one
+# are the four roles, and each enables `device` on its own account already.
+safe-logger = { path = "../safe-logger", features = ["device"] }
 
 # Linux-only: AF_VSOCK exists in no other kernel. Optional on top of that, so a
 # dev build carries no vsock code at all.
@@ -25,4 +28,9 @@ tokio-vsock = { version = "0.7", optional = true }
 vsock = ["dep:tokio-vsock"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
+# Only to prove the health literals are what a real serializer renders — see
+# `health::tests`. Dev-only on purpose: no measured binary carries a JSON
+# serializer to emit fifteen constant bytes.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

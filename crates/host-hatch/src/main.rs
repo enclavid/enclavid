@@ -16,6 +16,7 @@
 //! `enclavid-host` gRPC server.
 //!
 //! Endpoints:
+//!   GET    /health                (liveness only — see the route table)
 //!   POST   /authorize             (AuthorizeRequest -> AuthorizeResponse | 401/403)
 //!   POST   /oci/pull              (PullRequest -> PullResponse | 404)
 //!   POST   /kbs/relay             (KbsRelayRequest -> KbsRelayResponse)
@@ -29,7 +30,7 @@ mod oci;
 mod transport;
 
 use axum::Router;
-use axum::routing::post;
+use axum::routing::{get, post};
 
 use crate::auth::AuthState;
 
@@ -62,6 +63,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = Router::new()
+        // Liveness, and deliberately nothing beyond it. What a 200 here tells
+        // the asking guest is that its vsock path to this process works and
+        // this process answered — and the first half is the part only the guest
+        // can observe, since whatever supervises this process already knows the
+        // second half better than any probe could report it.
+        //
+        // It must stay free of the issuer, the registry, the key broker and
+        // AMD. Those are other people's uptime; reaching them from here would
+        // turn a fact about one hop into a claim about theirs, and would make a
+        // guest's fixed-cadence probe into fixed-cadence traffic to third
+        // parties.
+        .route("/health", get(health))
         .route("/authorize", post(auth::authorize))
         .route("/oci/pull", post(oci::pull))
         .route("/kbs/relay", post(kbs::relay))
@@ -71,6 +84,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %listen_addr, "starting hatch HTTP server");
     transport::serve(app, &listen_addr).await;
     Ok(())
+}
+
+/// See the route table for what this does and does not claim. A literal: there
+/// is nothing here to compute and nothing it could depend on.
+async fn health() -> &'static str {
+    "ok\n"
 }
 
 pub(crate) fn required_env(name: &str) -> anyhow::Result<String> {

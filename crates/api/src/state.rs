@@ -92,6 +92,7 @@ impl AppState {
         cache_store: CacheStore,
         shuffle_key: Arc<ShuffleKey>,
         attestor: Arc<dyn enclavid_attestation::Attestor>,
+        api_health: Arc<crate::health::ApiHealth>,
     ) -> Self {
         let hatch = HatchClient::new(transport_out)
             .await
@@ -102,25 +103,47 @@ impl AppState {
              with `cargo run -p engine-compiler --features worker --bin compile-worker` and \
              point api at its listen address)",
         );
-        let compiler = Arc::new(
-            crate::fleet::dial("compile-worker", || {
-                connect_compile_worker(&compile_addr, attestor.clone())
-            })
-            .await
-            .expect("failed to connect to compile-worker"),
-        );
+        let compile_leg = crate::fleet::Leg::new();
+        {
+            let leg = compile_leg.clone();
+            let addr = compile_addr.clone();
+            let attestor = attestor.clone();
+            crate::fleet::supervise(
+                crate::health::Peer::CompileWorker,
+                compile_addr.clone(),
+                api_health.clone(),
+                move || {
+                    let (addr, attestor) = (addr.clone(), attestor.clone());
+                    async move { connect_compile_worker(&addr, attestor).await }
+                },
+                move |client| leg.set(client),
+            )
+            .await;
+        }
+        let compiler = Arc::new(Compiler::new(compile_leg));
         let exec_addr = std::env::var("ENCLAVID_EXECUTION_WORKER_ADDR").expect(
             "ENCLAVID_EXECUTION_WORKER_ADDR not set (address of the execution-worker; start one \
              with `cargo run -p engine-executor --features worker --bin execution-worker` and \
              point api at its listen address)",
         );
-        let executor = Arc::new(
-            crate::fleet::dial("execution-worker", || {
-                connect_execution_worker(&exec_addr, attestor.clone())
-            })
-            .await
-            .expect("failed to connect to execution-worker"),
-        );
+        let execute_leg = crate::fleet::Leg::new();
+        {
+            let leg = execute_leg.clone();
+            let addr = exec_addr.clone();
+            let attestor = attestor.clone();
+            crate::fleet::supervise(
+                crate::health::Peer::ExecutionWorker,
+                exec_addr.clone(),
+                api_health,
+                move || {
+                    let (addr, attestor) = (addr.clone(), attestor.clone());
+                    async move { connect_execution_worker(&addr, attestor).await }
+                },
+                move |client| leg.set(client),
+            )
+            .await;
+        }
+        let executor = Arc::new(Executor::new(execute_leg));
         Self::new(
             session_store,
             hatch,

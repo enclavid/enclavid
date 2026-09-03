@@ -43,12 +43,21 @@ const CALLBACK_CONCURRENCY: usize = 4;
 /// `engine_rpc::ExecutorService`. A cheap remoc handle (`Send + Sync`); concurrent
 /// rounds multiplex over the one connection.
 pub struct Executor {
-    client: ExecutorServiceClient<Ciborium>,
+    leg: std::sync::Arc<crate::fleet::Leg<ExecutorServiceClient<Ciborium>>>,
 }
 
 impl Executor {
-    pub fn new(client: ExecutorServiceClient<Ciborium>) -> Self {
-        Self { client }
+    pub fn new(leg: std::sync::Arc<crate::fleet::Leg<ExecutorServiceClient<Ciborium>>>) -> Self {
+        Self { leg }
+    }
+
+    /// The client, or the leg's own failure. A request arriving during an outage
+    /// fails rather than waits: how long to wait for a peer is the host's
+    /// decision, and the health port is already telling it which leg is down.
+    fn client(&self) -> Result<ExecutorServiceClient<Ciborium>, ExecError> {
+        self.leg.get().ok_or_else(|| {
+            ExecError::Run("the execution-worker leg is down; api is reporting it".into())
+        })
     }
 
     /// Cache-only attempt: try to run from the worker's L1. `Ran` on a hit;
@@ -61,7 +70,9 @@ impl Executor {
     where
         C: CallbackService + Send + Sync + 'static,
     {
-        self.client.run(req, Self::callback_client(callbacks)).await
+        self.client()?
+            .run(req, Self::callback_client(callbacks))
+            .await
     }
 
     /// Post-miss attempt: hand the worker the `bundle` we resolved under
@@ -76,7 +87,7 @@ impl Executor {
     where
         C: CallbackService + Send + Sync + 'static,
     {
-        self.client
+        self.client()?
             .run_with_bundle(req, bundle, Self::callback_client(callbacks))
             .await
             .map(|RunReply { status }| status)
@@ -107,7 +118,7 @@ impl Executor {
 pub async fn connect_execution_worker(
     addr: &str,
     attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,
-) -> Result<Executor, LegFailure> {
+) -> Result<(ExecutorServiceClient<Ciborium>, tokio::task::JoinHandle<()>), LegFailure> {
     type Cli = ExecutorServiceClient<Ciborium>;
 
     let stream = fleet_transport::dial(addr).await.map_err(|e| {
@@ -138,7 +149,9 @@ pub async fn connect_execution_worker(
                 debug!("rpc connect: {e}");
                 LegFailure::Rpc
             })?;
-    crate::fleet::watch(conn, "execution-worker");
+    let driver = tokio::spawn(async move {
+        let _ = conn.await;
+    });
 
     let client = rx
         .recv()
@@ -149,5 +162,5 @@ pub async fn connect_execution_worker(
         })?
         .ok_or(LegFailure::Closed)?;
 
-    Ok(Executor::new(client))
+    Ok((client, driver))
 }

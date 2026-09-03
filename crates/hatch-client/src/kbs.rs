@@ -22,6 +22,14 @@ use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
 use crate::transport::HatchClient;
 
+/// How long the hatch has to answer ONE relayed leg.
+///
+/// Per leg, not per handshake: a full RCAR exchange is three of these, so the
+/// worst case a caller can wait is three times this. Bounded because a relay is
+/// reached from `cold_compile`, which runs inside an applicant round — an
+/// unbounded wait here parks a round that is holding that round's captures.
+const RELAY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Client for the hatch `/kbs/relay` endpoint over the shared hatch
 /// connection.
 #[derive(Clone)]
@@ -44,7 +52,7 @@ impl KbsClient {
         req: Exposed<KbsRelayRequest>,
     ) -> Result<Untrusted<KbsRelayResponse, (AuthN, AuthZ, Replay)>, BridgeError> {
         let bytes = hatch_protocol::encode(&req.into_inner())?;
-        let resp = self.hatch.post("/kbs/relay", bytes).await?;
+        let resp = self.hatch.post("/kbs/relay", bytes, RELAY_DEADLINE).await?;
 
         match resp.status {
             StatusCode::OK => {

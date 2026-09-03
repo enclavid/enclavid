@@ -32,14 +32,29 @@ fn to_bridge(e: impl std::fmt::Display) -> BridgeError {
 
 /// `SessionBackend` over the storage-CVM's `SessionStoreService`.
 pub struct SessionCvmBackend {
-    client: SessionStoreServiceClient<Ciborium>,
+    leg: Arc<crate::fleet::Leg<SessionStoreServiceClient<Ciborium>>>,
+}
+
+impl SessionCvmBackend {
+    pub fn new(leg: Arc<crate::fleet::Leg<SessionStoreServiceClient<Ciborium>>>) -> Self {
+        Self { leg }
+    }
+
+    /// The client, or the leg's own failure. A request during an outage fails
+    /// rather than waits — the health port is already saying which leg is down,
+    /// and how long to wait for it is the host's call.
+    fn client(&self) -> Result<SessionStoreServiceClient<Ciborium>, BridgeError> {
+        self.leg
+            .get()
+            .ok_or_else(|| BridgeError::Transport("storage-cvm: the leg is down".into()))
+    }
 }
 
 #[async_trait::async_trait]
 impl SessionBackend for SessionCvmBackend {
     async fn read_raw(&self, id: &str, req: ReadRequest) -> Result<(Vec<Slot>, u64), BridgeError> {
         let r = self
-            .client
+            .client()?
             .read(id.to_string(), req)
             .await
             .map_err(to_bridge)?;
@@ -53,7 +68,7 @@ impl SessionBackend for SessionCvmBackend {
         deadline_unix_secs: Option<u64>,
     ) -> Result<u64, BridgeError> {
         match self
-            .client
+            .client()?
             .write(id.to_string(), req, deadline_unix_secs)
             .await
         {
@@ -65,7 +80,7 @@ impl SessionBackend for SessionCvmBackend {
 
     async fn delete(&self, id: &str) -> Result<u64, BridgeError> {
         Ok(self
-            .client
+            .client()?
             .delete(id.to_string())
             .await
             .map_err(to_bridge)?
@@ -73,26 +88,41 @@ impl SessionBackend for SessionCvmBackend {
     }
 
     async fn exists(&self, id: &str) -> Result<bool, BridgeError> {
-        self.client.exists(id.to_string()).await.map_err(to_bridge)
+        self.client()?
+            .exists(id.to_string())
+            .await
+            .map_err(to_bridge)
     }
 }
 
 /// `CacheBackend` over the storage-CVM's `CacheService`.
 pub struct CacheCvmBackend {
-    client: CacheServiceClient<Ciborium>,
+    leg: Arc<crate::fleet::Leg<CacheServiceClient<Ciborium>>>,
+}
+
+impl CacheCvmBackend {
+    pub fn new(leg: Arc<crate::fleet::Leg<CacheServiceClient<Ciborium>>>) -> Self {
+        Self { leg }
+    }
+
+    fn client(&self) -> Result<CacheServiceClient<Ciborium>, BridgeError> {
+        self.leg
+            .get()
+            .ok_or_else(|| BridgeError::Transport("storage-cvm: the leg is down".into()))
+    }
 }
 
 #[async_trait::async_trait]
 impl CacheBackend for CacheCvmBackend {
     async fn store(&self, blob_name: &str, bytes: Vec<u8>) -> Result<(), BridgeError> {
-        self.client
+        self.client()?
             .store(blob_name.to_string(), bytes)
             .await
             .map_err(to_bridge)
     }
 
     async fn load(&self, blob_name: &str) -> Result<Option<Vec<u8>>, BridgeError> {
-        self.client
+        self.client()?
             .load(blob_name.to_string())
             .await
             .map_err(to_bridge)
@@ -104,7 +134,7 @@ impl CacheBackend for CacheCvmBackend {
 pub async fn connect_storage(
     addr: &str,
     attestor: Arc<dyn enclavid_attestation::Attestor>,
-) -> Result<(SessionCvmBackend, CacheCvmBackend), LegFailure> {
+) -> Result<(StorageClients, tokio::task::JoinHandle<()>), LegFailure> {
     let stream = fleet_transport::dial(addr).await.map_err(|e| {
         debug!("connect {addr}: {e}");
         LegFailure::Connect(e.kind())
@@ -136,7 +166,9 @@ pub async fn connect_storage(
         debug!("rpc connect: {e}");
         LegFailure::Rpc
     })?;
-    crate::fleet::watch(conn, "storage-CVM");
+    let driver = tokio::spawn(async move {
+        let _ = conn.await;
+    });
 
     let clients = rx
         .recv()
@@ -147,12 +179,5 @@ pub async fn connect_storage(
         })?
         .ok_or(LegFailure::Closed)?;
 
-    Ok((
-        SessionCvmBackend {
-            client: clients.session,
-        },
-        CacheCvmBackend {
-            client: clients.cache,
-        },
-    ))
+    Ok((clients, driver))
 }

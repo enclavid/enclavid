@@ -88,6 +88,28 @@ pub fn connection_cfg() -> remoc::Cfg {
     // worker end of this hop is untrusted once its wasm/Cranelift is escaped, and a
     // compromised peer could otherwise open thousands of ports to exhaust memory.
     // Our RPC uses only a handful of concurrent channels, so 256 is ample headroom.
+    // How long a leg may go silent before it is treated as gone. chmux pings at
+    // HALF this whenever there is nothing else to send, and gives up when nothing
+    // has arrived within it — so this one number sets both the ping rate and the
+    // patience, and there is no separate knob for them (`chmux::Cfg` has no
+    // `ping_interval`; see mux.rs, where `send_task` takes
+    // `remote_cfg.connection_timeout / 2` and `recv_task` takes
+    // `local_cfg.connection_timeout`).
+    //
+    // 20 s rather than the 60 s default: it is what bounds the window in which
+    // api is alive, listening, and failing every request that touches a dead
+    // peer. Lowering it only became cheap once a dead leg stopped ending the
+    // process — a false positive now costs a leg flap and a redial, where before
+    // it would have powered the guest off.
+    //
+    // Not lower than that, because the margin is exactly one ping: the ratio is
+    // fixed at 2, so a ping that arrives late by more than its own interval times
+    // the link out. Bytes are not lost on this hop — vsock through a splicing
+    // relay is a reliable stream — so "late" means the sender's runtime did not
+    // schedule the send task for 10 s, which the roles that hand their work to
+    // child processes should never do. 10 s would halve that margin for a
+    // detection window nobody has asked for.
+    cfg.connection_timeout = Some(std::time::Duration::from_secs(20));
     cfg.max_ports = 256;
     cfg.max_received_ports = 64;
     cfg

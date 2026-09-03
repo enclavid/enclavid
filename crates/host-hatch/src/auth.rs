@@ -42,6 +42,19 @@ use crate::required_env;
 /// JWKS cache TTL. Logto rotates rarely; on cache miss we refetch.
 const JWKS_CACHE_SECS: u64 = 600;
 
+/// Bounds on the key-set fetch. Mirrors the pair in `kds`, and for a sharper
+/// reason: a guest's `/authorize` blocks on this, and the guest puts a deadline
+/// of its own over the whole exchange. Left unbounded here, that guest deadline
+/// would be the only clock over somebody else's service — so a slow issuer would
+/// surface as the TEE failing rather than as a fetch that did not finish.
+///
+/// `timeout` covers the whole request including connect, so one fetch costs at
+/// most `REQUEST_TIMEOUT`. `verify` can fetch TWICE in the rotation branch
+/// below, which puts the worst case at twice this — and that total is what the
+/// guest's own deadline has to clear.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Auth verification mode, selected by `HATCH_AUTH`.
 #[derive(Clone)]
 pub enum AuthState {
@@ -128,7 +141,11 @@ impl OidcAuth {
             issuer,
             audience,
             jwks: Arc::new(RwLock::new(JwksCache::default())),
-            http: reqwest::Client::builder().build().expect("reqwest client"),
+            http: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .expect("reqwest client"),
         }
     }
 
