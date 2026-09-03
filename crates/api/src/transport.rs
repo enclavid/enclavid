@@ -66,13 +66,20 @@ impl axum::serve::Listener for VsockServeListener {
     type Addr = tokio_vsock::VsockAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        // The loop exists because `axum::serve::Listener::accept` returns no
+        // `Result` — its own doc says an impl "must take care of logging and
+        // retrying". So the retry policy is this adapter's to supply, and it is
+        // the same one the roles' own accept loops run.
+        //
+        // It comes from `fleet_transport` rather than being written again here.
+        // What cannot be shared is the loop: `accept_forever` never returns and
+        // consumes each connection through a callback, where this has to hand
+        // ONE back per call. The decision is shareable, and the decision is the
+        // part that was being duplicated.
         loop {
             match self.0.accept().await {
                 Ok(pair) => return pair,
-                Err(e) => {
-                    safe_logger::debug!("vsock accept error: {e}");
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
+                Err(e) => fleet_transport::after_accept_error(&e).await,
             }
         }
     }

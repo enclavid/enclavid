@@ -508,7 +508,7 @@ async fn main() {
         ),
     });
 
-    let mut listener = fleet_transport::bind(&addr).await.unwrap_or_else(|e| {
+    let listener = fleet_transport::bind(&addr).await.unwrap_or_else(|e| {
         debug!("{e}");
         safe_logger::error_and_panic!(
             "execution-worker: cannot bind {}. Stopping.",
@@ -566,31 +566,31 @@ async fn main() {
     // answers healthy — whether that means READY is the host's conclusion to draw,
     // not this role's to claim. See `fleet_transport::health`.
     health.declare_healthy();
-    loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                let svc = svc.clone();
-                let ratls = ratls.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = serve_conn(stream, ratls, svc).await {
-                        warn!(
-                            "execution-worker: connection from {} ended ({})",
-                            safe(&peer, reason!("an address the host routed itself")),
-                            e,
-                            reason!(
-                                "constant text; a connection closing is already visible to \
-                                 whoever carries it"
-                            )
-                        );
-                    }
-                });
-            }
-            Err(e) => {
-                warn!("execution-worker: accept failed", reason!("a constant"));
-                debug!("  cause: {e}");
-            }
+    // The loop, the delay after a failed accept and the split between an error
+    // that clears itself and one that does not all live in `accept_forever` —
+    // four roles wrote that loop four ways and all four omitted the delay.
+    fleet_transport::accept_forever(listener, move |stream, peer| {
+        let svc = svc.clone();
+        let ratls = ratls.clone();
+        // Returns as soon as the connection is handed to its own task, so the
+        // next accept is not held up behind this one's whole session.
+        async move {
+            tokio::spawn(async move {
+                if let Err(e) = serve_conn(stream, ratls, svc).await {
+                    warn!(
+                        "execution-worker: connection from {} ended ({})",
+                        safe(&peer, reason!("an address the host routed itself")),
+                        e,
+                        reason!(
+                            "constant text; a connection closing is already visible to \
+                             whoever carries it"
+                        )
+                    );
+                }
+            });
         }
-    }
+    })
+    .await
 }
 
 /// RA-TLS-accept one api connection, then frame it with remoc and serve `ExecutorService`.

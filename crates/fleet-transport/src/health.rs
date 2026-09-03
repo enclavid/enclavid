@@ -164,6 +164,14 @@ impl Health {
 ///
 /// Bind EARLY — before the work whose progress the port reports — or it is
 /// unreachable during exactly the window it exists to describe.
+///
+/// Every failure is fatal without looking at which one, and that is deliberate
+/// rather than unexamined. The address is a bare port from the measured command
+/// line, bound once, by the only process this machine runs, moments after it
+/// booted: an address already in use would mean a second process that cannot
+/// exist here, and anything else means the port cannot be had at all. Neither is
+/// a state a retry reaches the other side of. Every role's serving listener
+/// treats its own bind the same way.
 pub async fn bind(addr: &str) -> crate::Listener {
     let listener = crate::bind(addr).await.unwrap_or_else(|e| {
         debug!("{e}");
@@ -190,29 +198,43 @@ pub async fn bind(addr: &str) -> crate::Listener {
 /// needs to hear about. `body` is called per connection, so the answer is
 /// current rather than one captured at bind time.
 ///
-/// Accept errors are not fatal, and are not reported outward either: a refused
-/// or reset probe is the host's own connection failing, which the host can see
-/// from its end.
-pub async fn serve<F>(mut listener: crate::Listener, body: F) -> !
+/// What to do about an accept that fails is not decided here. That belongs to
+/// [`crate::accept_forever`], which is the same decision for every listener in
+/// this workspace and is documented there — including why a probe that merely
+/// went away is passed over in silence while a listener that cannot accept at
+/// all is not.
+pub async fn serve<F>(listener: crate::Listener, body: F) -> !
 where
     F: Fn() -> Vec<u8>,
 {
-    loop {
-        let (mut stream, _peer) = match listener.accept().await {
-            Ok(pair) => pair,
-            Err(e) => {
-                debug!("health accept: {e}");
-                continue;
-            }
-        };
+    crate::accept_forever(listener, move |mut stream, _peer| {
         // Write, then drop. `read` is never called on `stream` — see the module
         // docs. Nothing inspects the peer either: the answer holds only what the
         // host already knows, so who asked does not change it.
         let answer = body();
-        if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut stream, &answer).await {
-            debug!("health write: {e}");
+        // Answered inline rather than from a spawned task, and that is the
+        // choice worth stating: the answer is under a hundred bytes, so it fits
+        // a fresh connection's buffer and the write cannot park. Spawning would
+        // buy nothing and would let a host that opens connections faster than
+        // this loop retires them turn a burst of probes into a burst of tasks —
+        // on the one port whose job is to keep working when the guest is short
+        // of resources.
+        //
+        // The write error is not classified the way the accept above it is, and
+        // the reason is that no branch would differ: whatever went wrong, the
+        // answer is to drop this stream and take the next connection. The
+        // ordinary case is the prober that spoke first and had its own answer
+        // reset away — the invariant being visible from outside, as the module
+        // docs put it. And the case that would be worth reporting, this guest
+        // running short of something, reaches `accept` too, where it IS
+        // reported.
+        async move {
+            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut stream, &answer).await {
+                debug!("health write: {e}");
+            }
         }
-    }
+    })
+    .await
 }
 
 #[cfg(test)]

@@ -8,8 +8,10 @@ repository.workspace = true
 # The byte stream the intra-fleet legs run RA-TLS over — one place for the
 # TCP/vsock split so the four participants do not each grow their own copy.
 [dependencies]
-# `io-util` for the health port's one write; nothing here reads a socket.
-tokio = { version = "1", features = ["net", "io-util"] }
+# `io-util` for the health port's one write; nothing here reads a socket. `time`
+# for the one delay in `accept_forever`, which is what keeps a listener that
+# cannot accept from spinning.
+tokio = { version = "1", features = ["net", "io-util", "time"] }
 # For `impl SafeToLog for LegFailure` — the vouch belongs on the type, and the
 # type lives here — and for the health port's boot line, which is outward and so
 # needs `device`. A no-op in practice: the only crates that depend on this one

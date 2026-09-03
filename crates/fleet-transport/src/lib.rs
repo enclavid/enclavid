@@ -159,6 +159,100 @@ impl Listener {
     }
 }
 
+/// How long to wait before accepting again, after an accept that failed for a
+/// reason which will not clear on its own.
+///
+/// A second, which is what axum uses for its own listeners and hyper before it.
+/// The exact value barely matters — anything nonzero turns a spin into a poll —
+/// but the argument for a long one is what these errors ARE: a process out of
+/// descriptors starts accepting again when something else releases one, and
+/// asking ten times a second does not make that happen sooner.
+const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What to do after an accept failed. The whole policy, in one place.
+///
+/// Separate from [`accept_forever`] and public because not every accept loop
+/// here can BE `accept_forever`: the `axum::serve::Listener` adapters have to
+/// hand one connection back per call, which a loop that never returns cannot
+/// do. They share this instead — and this, rather than the loop, is what was
+/// actually being written out once per call site and getting it wrong.
+///
+/// # Two kinds of error, wanting opposite treatment
+///
+/// A connection-level one means the peer went away between its connect and the
+/// accept. The queued entry went with it, so the next accept finds the queue
+/// shorter and parks normally — return at once and try again. Nothing is
+/// reported outward either: every listener that calls this has the host at the
+/// far end, so a connection that died on the way is something the host can
+/// already see from its own side.
+///
+/// Anything else means the accept could not be performed at all — descriptors,
+/// memory — and the connection is STILL queued. The listener therefore stays
+/// readable, `accept` returns the same error immediately, and a bare retry is a
+/// spin: on a role whose `debug!` is compiled out, a silent one. It is also the
+/// only accept failure the host cannot observe from its end, which is why this
+/// one goes outward where the connection errors do not.
+///
+/// The line names no role. Each runs in its own guest with its own log device,
+/// so which one is speaking is already settled by where the line arrived.
+pub async fn after_accept_error(e: &std::io::Error) {
+    if is_connection_error(e) {
+        safe_logger::debug!("accept: one connection went away: {e}");
+        return;
+    }
+    safe_logger::warn!(
+        "accept failed ({:?}); this guest is taking no connections until it clears. \
+         Retrying.",
+        safe_logger::safe(
+            &e.kind(),
+            safe_logger::reason!(
+                "`std::io::ErrorKind` is a fieldless enum whose `Debug` is its own name"
+            )
+        ),
+        safe_logger::reason!(
+            "constant text plus a kind; a guest that cannot accept at all is a state the \
+             host has no other way to learn"
+        )
+    );
+    safe_logger::debug!("  cause: {e}");
+    tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+}
+
+/// Accept for ever, handing each connection to `on_conn`.
+///
+/// This loop was written four times — once per role and once for the health
+/// port — so it is written here instead. What each of those four got wrong was
+/// not the loop but the error arm; that lives in [`after_accept_error`], which
+/// is also what the listeners that cannot use this loop call.
+///
+/// `on_conn` is awaited, which means it holds up the next accept: a handler
+/// doing real work must spawn and return. The health port deliberately does
+/// not, and its comment says why — staying serial is what keeps a burst of
+/// probes from becoming a burst of tasks.
+pub async fn accept_forever<F, Fut>(mut listener: Listener, mut on_conn: F) -> !
+where
+    F: FnMut(Stream, String) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    loop {
+        match listener.accept().await {
+            Ok((stream, peer)) => on_conn(stream, peer).await,
+            Err(e) => after_accept_error(&e).await,
+        }
+    }
+}
+
+/// Errors that say one peer went away, not that this listener is in trouble.
+/// The same set axum treats this way.
+fn is_connection_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    )
+}
+
 /// `vsock://CID:PORT`.
 #[cfg(feature = "vsock")]
 fn parse_vsock(addr: &str) -> std::io::Result<(u32, u32)> {
@@ -178,6 +272,36 @@ fn parse_vsock(addr: &str) -> std::io::Result<(u32, u32)> {
         cid.parse().map_err(|_| invalid("invalid CID"))?,
         port.parse().map_err(|_| invalid("invalid port"))?,
     ))
+}
+
+#[cfg(test)]
+mod accept_tests {
+    use super::is_connection_error;
+    use std::io::{Error, ErrorKind};
+
+    /// The classification is what decides whether an accept failure is retried
+    /// silently or reported and slept on, so the set is pinned rather than left
+    /// to whoever edits the `matches!` next. The second half is the one that
+    /// matters: an `EMFILE`-class error read as a connection error would spin.
+    #[test]
+    fn only_a_departed_peer_counts_as_a_connection_error() {
+        for kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+        ] {
+            assert!(is_connection_error(&Error::from(kind)), "{kind:?}");
+        }
+        // `EMFILE` and `ENFILE` have no stable `ErrorKind` on every toolchain,
+        // so they are built from the raw errno the kernel actually returns.
+        for raw in [24 /* EMFILE */, 23 /* ENFILE */] {
+            let e = Error::from_raw_os_error(raw);
+            assert!(!is_connection_error(&e), "raw {raw} ({:?})", e.kind());
+        }
+        for kind in [ErrorKind::OutOfMemory, ErrorKind::Other] {
+            assert!(!is_connection_error(&Error::from(kind)), "{kind:?}");
+        }
+    }
 }
 
 #[cfg(all(test, feature = "vsock"))]

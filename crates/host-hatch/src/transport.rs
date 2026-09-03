@@ -46,10 +46,7 @@ impl axum::serve::Listener for VsockServeListener {
         loop {
             match self.0.accept().await {
                 Ok(pair) => return pair,
-                Err(e) => {
-                    eprintln!("vsock accept error: {e}");
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
+                Err(e) => handle_accept_error(e).await,
             }
         }
     }
@@ -57,4 +54,35 @@ impl axum::serve::Listener for VsockServeListener {
     fn local_addr(&self) -> std::io::Result<Self::Addr> {
         self.0.local_addr()
     }
+}
+
+/// What axum does for the listener types it ships an impl for, applied to the
+/// one it does not.
+///
+/// A copy rather than a shared function, and the reason is which side of the
+/// machine this runs on: the guests keep the same policy in `fleet-transport`,
+/// but depending on that crate from here would pull their logger in with its
+/// outward tier switched on — an edge a host binary has no use for and should
+/// not grow. Upstream is the thing to stay in step with here, not the TEE.
+#[cfg(feature = "vsock")]
+async fn handle_accept_error(e: std::io::Error) {
+    use std::io::ErrorKind;
+
+    // The peer went away between its connect and this accept. The queued entry
+    // went with it, so the next accept finds the queue shorter and parks
+    // normally: try again at once, and say nothing — the far end is a guest
+    // whose connection died, which it sees for itself.
+    if matches!(
+        e.kind(),
+        ErrorKind::ConnectionRefused | ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
+    ) {
+        return;
+    }
+    // Descriptors or memory: the accept could not be performed at all and the
+    // connection is STILL queued, so the listener stays readable and the next
+    // attempt fails identically and immediately. Without this delay that is a
+    // spin, and the guests on the other side of it see only a hatch that has
+    // stopped answering.
+    tracing::error!(err = %e, "vsock accept failed; retrying");
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 }
