@@ -49,6 +49,19 @@ safe-logger = { path = "../safe-logger" }
 # Compiles the `debug!` sites in. OFF in the measured build.
 debug = ["safe-logger/debug"]
 
+# Compile the posture assertion — see `assert_contained!` in the binary.
+#
+# Off by default, and the reason is the assertion's own subject: it says "this
+# build does not carry safe-logger's outward half", which is true of the build
+# the image makes (one `cargo build -p`, nothing else in it) and deliberately
+# NOT true of a whole-workspace build, where api asks for that half and cargo
+# unifies it across everything. Compiled unconditionally, the check would turn
+# `cargo build --workspace` into an error about a binary that nobody ships.
+#
+# Two things pass it, and they are the two that build this the way it ships:
+# image/app/default.nix, and `xtask::child_binary` for the tests that spawn it.
+contained = []
+
 [[bin]]
 name = "engine-compiler-child"
 path = "src/main.rs"

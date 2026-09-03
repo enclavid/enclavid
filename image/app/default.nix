@@ -158,12 +158,16 @@ builtins.foldl' (a: b: a // b) { } [
         binaries = [ "compile-worker" ];
         features = [ "vsock" "guest-hardening" ];
       }
-      # The child takes neither: it has no transport of its own (its one
-      # connection is the socketpair the supervisor hands it on fd 0), and the
-      # ptrace floor is asserted by the parent, before any child exists.
+      # The child takes neither `vsock` nor `guest-hardening`: it has no
+      # transport of its own (its one connection is the socketpair the supervisor
+      # hands it on fd 0), and the ptrace floor is asserted by the parent, before
+      # any child exists. It takes `contained`, which compiles its assertion that
+      # this build carries no outward log tier — true here because this is one
+      # `cargo build -p` and nothing in it asks for one.
       {
         package = "engine-compiler-child";
         binaries = [ "engine-compiler-child" ];
+        features = [ "contained" ];
       }
     ];
   })
@@ -179,12 +183,16 @@ builtins.foldl' (a: b: a // b) { } [
         binaries = [ "execution-worker" ];
         features = [ "vsock" "guest-hardening" ];
       }
-      # The child takes neither: it has no transport of its own (its one
-      # connection is the socketpair the supervisor hands it on fd 0), and the
-      # ptrace floor is asserted by the parent, before any child exists.
+      # The child takes neither `vsock` nor `guest-hardening`: it has no
+      # transport of its own (its one connection is the socketpair the supervisor
+      # hands it on fd 0), and the ptrace floor is asserted by the parent, before
+      # any child exists. It takes `contained`, which compiles its assertion that
+      # this build carries no outward log tier — true here because this is one
+      # `cargo build -p` and nothing in it asks for one.
       {
         package = "engine-executor-child";
         binaries = [ "engine-executor-child" ];
+        features = [ "contained" ];
       }
     ];
   })

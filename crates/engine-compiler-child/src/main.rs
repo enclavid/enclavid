@@ -26,6 +26,16 @@
 //! compile (unlike the executor's `engine-executor-child`, whose run path is already
 //! async).
 
+// The contained posture, stated where the compiler can check it. The manifest
+// not asking for `safe-logger/device` is the intent; this stops a dependency
+// edge from undoing it silently.
+//
+// Behind a feature because the claim is about ONE cargo invocation — see the
+// `contained` feature in this package's manifest for why a whole-workspace build
+// is not that, and which two builds pass it.
+#[cfg(feature = "contained")]
+safe_logger::assert_contained!();
+
 use std::sync::Arc;
 
 use remoc::codec::Ciborium;

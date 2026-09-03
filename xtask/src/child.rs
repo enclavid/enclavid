@@ -80,6 +80,10 @@ fn build(package: &str) -> Result<PathBuf> {
     let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     cmd.arg("build")
         .args(["-p", package])
+        // The image builds with this, so this does too: it is what compiles the
+        // child's assertion that it carries no outward log tier, and a build
+        // that skipped it would not be the shape under test.
+        .args(["--features", "contained"])
         .arg("--target-dir")
         .arg(&target_dir)
         .current_dir(&root);

@@ -196,6 +196,52 @@ mod vouch;
 pub use enclavid_boundary::{Reason, reason};
 
 pub use contained::install_contained;
+
+/// Whether this build of the crate carries the outward half.
+///
+/// The `device` feature is what a package asks for when it may speak to the
+/// host, and not asking is how the disposable children stay silent. But cargo
+/// features UNIFY across an invocation, so the answer is a property of the whole
+/// build rather than of one manifest: a dependency edge nobody looked at can
+/// turn it on for everything, and the child that was supposed to be silent
+/// quietly gains an [`info!`].
+///
+/// This is that answer, readable from the caller's own source — see
+/// [`assert_contained!`], which is how a child states its posture as something
+/// the compiler checks rather than something its manifest implies.
+pub const OUTWARD_TIER: bool = cfg!(feature = "device");
+
+/// Refuse to compile if this build carries the outward half.
+///
+/// For the disposable children. Their manifests do not ask for `device`, and
+/// that is the intent; this is what makes it a guarantee. Feature unification
+/// means the intent can be defeated from a distance — some dependency, or a
+/// dependency of a dependency, asking for the outward half on its own account —
+/// and the failure would be silent, because nothing breaks when a binary merely
+/// GAINS the ability to write to the log device. It breaks later, when someone
+/// writes an `info!` in a process that holds a round's applicant plaintext in
+/// the one address space where adversary-chosen code runs.
+///
+/// Put it at module scope, beside the `install_contained` call it corroborates.
+///
+/// ```ignore
+/// safe_logger::assert_contained!();
+/// ```
+///
+/// When it fires, `cargo tree -e features -i safe-logger` names the edge that
+/// turned the feature on.
+#[macro_export]
+macro_rules! assert_contained {
+    () => {
+        const _: () = assert!(
+            !$crate::OUTWARD_TIER,
+            "this build of safe-logger carries the outward half, and this binary is one \
+             that must not: something in its dependency graph asked for the `device` \
+             feature, and cargo unified it in. Find the edge with \
+             `cargo tree -e features -i safe-logger`."
+        );
+    };
+}
 pub use logger::{LEVEL_KEY, Level};
 pub use vouch::{Safe, SafeToLog, safe};
 
