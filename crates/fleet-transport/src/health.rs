@@ -265,6 +265,14 @@ mod tests {
     /// correct and which one happens is the kernel's business) but that a silent
     /// prober AFTERWARDS is still served promptly. That can only hold if nothing
     /// waited for input.
+    ///
+    /// Compiled only on the TCP arm, because the address below is a TCP one and
+    /// `bind` on the vsock arm takes a bare port. Nothing is lost by that: what
+    /// this proves is a property of the PROTOCOL — a port that answers without
+    /// ever reading behaves the same over either transport — and the vsock arm
+    /// carrying real bytes is `tests/vsock_loopback.rs`, which is `#[ignore]`d
+    /// because it needs a kernel module rather than because it is uninteresting.
+    #[cfg(not(feature = "vsock"))]
     #[tokio::test]
     async fn it_answers_the_silent_and_is_not_wedged_by_the_talkative() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
