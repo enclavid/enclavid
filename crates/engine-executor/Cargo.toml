@@ -78,7 +78,7 @@ enclavid-ra-tls = { path = "../ra-tls", optional = true }
 fleet-transport = { path = "../fleet-transport", optional = true }
 # The RA-TLS backend is chosen here, not by ra-tls: a software identity the whole
 # dev fleet shares. No hardware arm yet — this worker has no path to AMD.
-enclavid-attestation = { path = "../attestation", default-features = false, features = ["mock"], optional = true }
+enclavid-attestation = { path = "../attestation", default-features = false, optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
 
 # Zeroize the transient wire `cwasm` `Vec` (possible embedded model weights) on
@@ -124,6 +124,22 @@ worker = [
     "dep:tempfile",
     "dep:zeroize",
 ]
+# The attestation backend, and it is a choice rather than an addition. Cargo
+# features are additive, so `sev-snp` on top of the default would leave the
+# software identity compiled in beside the real one — and that identity is a
+# seed literal in this repository, which anyone can hold.
+#
+# `enclavid-attestation?/…` rather than `…/…`: the weak form turns the backend on
+# only if something else already pulled the dependency in, which `worker` does.
+# Written strongly, the default would drag the whole worker half — rpc, remoc,
+# tokio — into a plain library build, which the `worker` comment above exists to
+# prevent.
+default = ["dev-attestation"]
+dev-attestation = ["enclavid-attestation?/mock"]
+# Real hardware attestation. Mints through `/dev/sev-guest` and carries NO
+# endorsement, because this guest has no egress to fetch one — api supplies it
+# from its own copy of the same chip's. See `SnpAttestor::mint_only`.
+sev-snp = ["enclavid-attestation?/sev-snp"]
 # The posture a measured guest image builds with: enforce the kernel ptrace floor
 # the per-round child isolation rests on.
 guest-hardening = ["worker", "engine-supervisor/guest-hardening"]

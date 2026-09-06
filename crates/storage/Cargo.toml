@@ -27,12 +27,13 @@ path = "src/lib.rs"
 safe-logger = { path = "../safe-logger", features = ["device"] }
 storage-rpc = { path = "../storage-rpc" }
 hatch-protocol = { path = "../hatch-protocol" }
-# The RA-TLS backend is chosen here, not by ra-tls: this build attests with a
-# software identity the whole dev fleet shares. There is no hardware arm yet —
-# a blind CVM has no way to reach AMD for the certificate that would endorse it.
+# The RA-TLS backend is chosen here, not by ra-tls — see the `[features]` axis.
+# The hardware arm exists now: a blind CVM still cannot reach AMD for the
+# certificate that would endorse it, so it mints without one and api, which can
+# reach AMD, verifies against its own copy of the same chip's.
 enclavid-ra-tls = { path = "../ra-tls" }
 fleet-transport = { path = "../fleet-transport" }
-enclavid-attestation = { path = "../attestation", default-features = false, features = ["mock"] }
+enclavid-attestation = { path = "../attestation", default-features = false }
 
 # Per-session store: one embedded SQLite database file per session (bundled so
 # the amalgamation is built into the measured image, no system libsqlite). ACID
@@ -66,6 +67,21 @@ hex = "0.4"
 tempfile = "3"
 
 [features]
+# The attestation backend, and it is a choice rather than an addition. Cargo
+# features are additive, so `sev-snp` on top of the default would leave the
+# software identity compiled in beside the real one — and that identity is a
+# seed literal in this repository, which anyone can hold. The attested build
+# therefore turns the default OFF:
+#   cargo build -p enclavid-storage --no-default-features --features sev-snp,vsock
+default = ["dev-attestation"]
+# The ONE shared identity a dev fleet needs: a software attestor verifies
+# against its own key, so peers that each generated their own could never
+# attest each other.
+dev-attestation = ["enclavid-attestation/mock"]
+# Real hardware attestation. Mints through `/dev/sev-guest` and carries NO
+# endorsement, because this guest has no egress to fetch one — api supplies it
+# from its own copy of the same chip's. See `SnpAttestor::mint_only`.
+sev-snp = ["enclavid-attestation/sev-snp"]
 # The attested build: reach api over vsock instead of TCP. A measured guest
 # kernel has no IP stack, so this is not a preference.
 vsock = ["fleet-transport/vsock"]

@@ -128,10 +128,12 @@ pub async fn connect_execution_worker(
     // Mutual RA-TLS over the dial: we attest the worker's cert (pinned measurement)
     // and present our own attested cert. A completed handshake proves the peer is the
     // pinned execution-worker measurement — no CA, no post-handshake window.
-    let config = crate::endorsement::fleet_client_config(attestor).map_err(|e| {
-        debug!("ra-tls: {e}");
-        LegFailure::Attest
-    })?;
+    let config =
+        crate::endorsement::fleet_client_config(attestor, crate::health::Peer::ExecutionWorker)
+            .map_err(|e| {
+                debug!("ra-tls: {e}");
+                LegFailure::Attest
+            })?;
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
     let tls = connector
         .connect(enclavid_ra_tls::server_name(), stream)

@@ -68,8 +68,11 @@ fn fleet_attestor(_process: Arc<dyn Attestor>) -> Arc<dyn Attestor> {
     Arc::new(enclavid_attestation::MockAttestor::dev_fleet())
 }
 
+/// The dev fleet shares one stand-in measurement, so every leg pins the same
+/// value and the `peer` is unused. The signature still takes it, because the
+/// thing being exercised in dev is the same code path production runs.
 #[cfg(feature = "dev-attestation")]
-fn fleet_policy() -> MeasurementPolicy {
+fn fleet_policy(_peer: crate::health::Peer) -> MeasurementPolicy {
     MeasurementPolicy::Pinned(vec![
         enclavid_attestation::DEV_FLEET_MEASUREMENT.to_string(),
     ])
@@ -81,20 +84,89 @@ fn fleet_attestor(process: Arc<dyn Attestor>) -> Arc<dyn Attestor> {
     process
 }
 
-/// Accepts any measurement, so a completed handshake proves the peer is a genuine
-/// SEV-SNP guest at VMPL 0, non-debug, without a migration agent, on platform firmware
-/// at or above this build's floor — that is, not an ordinary host process. It does not
-/// prove WHICH software the peer runs, because a measurement is a function of an image's
-/// contents and no image here carries another's.
+/// The launch digest of each peer this build is willing to talk to, baked in at
+/// compile time.
+///
+/// A measurement is a function of an image's contents, so it cannot be
+/// configured: a value that arrived from outside is a value the sender chose,
+/// and the whole point is to trust only what this build was compiled against.
+/// `env!` therefore, not `std::env::var` — and `env!` rather than a literal
+/// because the value is produced by building the peer, which happens before
+/// this and cannot be known while writing this file.
+///
+/// **Absent means the build fails**, which is deliberate and is what `env!`
+/// buys over `option_env!`. The alternative — compiling and then refusing every
+/// peer at runtime — spends a boot, a launch and an operator's afternoon to
+/// report something the compiler had in front of it. It also makes the ordering
+/// impossible to get wrong silently: api cannot be built before the peers it
+/// pins, because the values do not exist yet.
+///
+/// See `image/RUNNING.md` for how the digests are computed and what they depend
+/// on. The short version: a peer's measurement moves when its kernel, its
+/// initramfs, its command line, its firmware or its vCPU topology moves, and
+/// every one of those forces api to be rebuilt with it.
 #[cfg(feature = "sev-snp")]
-fn fleet_policy() -> MeasurementPolicy {
-    MeasurementPolicy::AcceptAny
+mod pinned {
+    /// A launch digest is SHA-384 rendered by `hex::encode` on the verifying
+    /// side, and the comparison is plain string equality — so 96 lowercase hex
+    /// characters, and a stray newline or an upper-case digit is a pin that can
+    /// never match anything. Checked here rather than discovered as a fleet
+    /// that waits for ever.
+    const fn checked(hex: &'static str) -> &'static str {
+        let bytes = hex.as_bytes();
+        assert!(
+            bytes.len() == 96,
+            "a pinned measurement must be 96 hex characters (SHA-384)"
+        );
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            assert!(
+                (b'0' <= b && b <= b'9') || (b'a' <= b && b <= b'f'),
+                "a pinned measurement must be lowercase hex"
+            );
+            i += 1;
+        }
+        hex
+    }
+
+    pub const STORAGE: &str = checked(env!("ENCLAVID_MEASUREMENT_STORAGE"));
+    pub const COMPILE_WORKER: &str = checked(env!("ENCLAVID_MEASUREMENT_COMPILE_WORKER"));
+    pub const EXECUTION_WORKER: &str = checked(env!("ENCLAVID_MEASUREMENT_EXECUTION_WORKER"));
+}
+
+/// One measurement per leg, and never a set.
+///
+/// A single pinned set across all three would be a set-union: the storage-CVM's
+/// digest would satisfy a dial to the execution-worker, because the verifier
+/// only asks whether the presented measurement is in the list. That matters
+/// most on exactly the leg where it would be cheapest to abuse —
+/// `engine_rpc::RunRequest` carries the applicant's state and captures in the
+/// clear, so a peer that is genuinely one of ours but is the WRONG one of ours
+/// still receives them.
+///
+/// It also stops being possible to accidentally widen: this returns a one-element
+/// list, and adding a second means naming which peer is allowed to be two things.
+#[cfg(feature = "sev-snp")]
+fn fleet_policy(peer: crate::health::Peer) -> MeasurementPolicy {
+    let measurement = match peer {
+        crate::health::Peer::Storage => pinned::STORAGE,
+        crate::health::Peer::CompileWorker => pinned::COMPILE_WORKER,
+        crate::health::Peer::ExecutionWorker => pinned::EXECUTION_WORKER,
+    };
+    MeasurementPolicy::Pinned(vec![measurement.to_string()])
 }
 
 /// The RA-TLS client config for a dial to a fleet peer. One place so the identity api
 /// presents and the policy it applies are decided together rather than per call site.
-pub fn fleet_client_config(attestor: Arc<dyn Attestor>) -> Result<ClientConfig, RaTlsError> {
-    enclavid_ra_tls::client_config(fleet_attestor(attestor), fleet_policy())
+///
+/// `peer` selects the policy, so a caller cannot dial one peer under another's
+/// pin without saying so.
+pub fn fleet_client_config(
+    attestor: Arc<dyn Attestor>,
+    peer: crate::health::Peer,
+) -> Result<ClientConfig, RaTlsError> {
+    enclavid_ra_tls::client_config(fleet_attestor(attestor), fleet_policy(peer))
 }
 
 /// Waits between fetch attempts. The certificate is the one thing this guest

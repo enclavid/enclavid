@@ -34,9 +34,10 @@ compile_error!(
 ///
 /// What is given up is the underlying message. It is not lost — the conversion
 /// site sends it to `debug!`, which never leaves the TEE — but production sees
-/// the stage and the kind, not the text. That is the trade: a stage and an
-/// `ErrorKind` are worth having in front of an operator, and a sentence from
-/// rustls or remoc is worth having only in front of a developer.
+/// this type's own account of what happened and an `ErrorKind`, not the text.
+/// That is the trade: which of six things went wrong is worth having in front of
+/// an operator, and a sentence from rustls or remoc is worth having only in
+/// front of a developer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LegFailure {
     /// Nothing answered, or the connection died before TLS. The kind is
@@ -55,15 +56,35 @@ pub enum LegFailure {
     Serve,
 }
 
+/// Says what happened, not which stage it happened at.
+///
+/// It used to name the stage — `attest`, `rpc` — and the one line that renders
+/// this then had to supply the meaning itself. That line said "not reachable
+/// yet" for every variant, which is the one thing certainly untrue of the half
+/// of them where the peer answered and the two sides failed to agree. Naming
+/// the stage and leaving the meaning to the caller is what let those drift
+/// apart; the meaning belongs on the type that knows it.
+///
+/// The stages are not degrees of one thing. "Nothing answered" and "answered
+/// and was refused" call for opposite actions, and that only sharpens as the
+/// fleet pins measurements: `Attest` stops being a transport hiccup and becomes
+/// how a peer-that-is-the-wrong-image reports itself.
 impl std::fmt::Display for LegFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LegFailure::Connect(kind) => write!(f, "connect: {kind:?}"),
-            LegFailure::Attest => f.write_str("attest"),
-            LegFailure::Rpc => f.write_str("rpc"),
-            LegFailure::Clients => f.write_str("clients"),
-            LegFailure::Closed => f.write_str("closed before sending clients"),
-            LegFailure::Serve => f.write_str("serve"),
+            LegFailure::Connect(kind) => write!(f, "nothing answered at that address ({kind:?})"),
+            LegFailure::Attest => f.write_str(
+                "answered, but the attested handshake did not complete — one side refused \
+                 the other",
+            ),
+            LegFailure::Rpc => {
+                f.write_str("attested, but the multiplexed connection did not come up")
+            }
+            LegFailure::Clients => f.write_str("connected, but the service clients did not cross"),
+            LegFailure::Closed => {
+                f.write_str("connected, then closed before sending its service clients")
+            }
+            LegFailure::Serve => f.write_str("had been connected, and stopped being served"),
         }
     }
 }

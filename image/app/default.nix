@@ -134,15 +134,27 @@ builtins.foldl' (a: b: a // b) { } [
   })
 
   # The storage CVM: the blind ciphertext store. `vsock` for the same reason as
-  # api — a guest kernel with no IP stack cannot bind a TCP listener. It has no
-  # attestation axis to choose: the endorsement a hardware attestor needs would
-  # have to reach a role that, by design, dials nothing.
+  # api — a guest kernel with no IP stack cannot bind a TCP listener.
+  #
+  # `sev-snp` off the defaults, for the same reason api does it: cargo features
+  # are additive, so asking for the hardware backend on top of the default would
+  # leave the dev fleet's shared software identity compiled in beside it. That
+  # identity is a seed literal in this repository — anyone who can read the
+  # source can be this role — which is what made shipping it in a measured image
+  # the thing to fix.
+  #
+  # This used to say the role had no attestation axis to choose, because the
+  # endorsement a hardware attestor needs would have to reach a guest that by
+  # design dials nothing. True of fetching one; not true of needing one. The
+  # chip signs the report either way, and api — which does reach AMD — verifies
+  # it against its own copy of the same chip's certificate.
   (withDebug "storage" {
     pname = "enclavid-app-storage";
     parts = [{
       package = "enclavid-storage";
       binaries = [ "storage-cvm" ];
-      features = [ "vsock" ];
+      noDefaultFeatures = true;
+      features = [ "vsock" "sev-snp" ];
     }];
   })
 
@@ -156,7 +168,10 @@ builtins.foldl' (a: b: a // b) { } [
       {
         package = "engine-compiler";
         binaries = [ "compile-worker" ];
-        features = [ "vsock" "guest-hardening" ];
+        # `sev-snp` off the defaults — see the storage part above for why the
+        # software identity must not come along with it.
+        noDefaultFeatures = true;
+        features = [ "vsock" "guest-hardening" "sev-snp" ];
       }
       # The child takes neither `vsock` nor `guest-hardening`: it has no
       # transport of its own (its one connection is the socketpair the supervisor
@@ -181,7 +196,10 @@ builtins.foldl' (a: b: a // b) { } [
       {
         package = "engine-executor";
         binaries = [ "execution-worker" ];
-        features = [ "vsock" "guest-hardening" ];
+        # `sev-snp` off the defaults — see the storage part above for why the
+        # software identity must not come along with it.
+        noDefaultFeatures = true;
+        features = [ "vsock" "guest-hardening" "sev-snp" ];
       }
       # The child takes neither `vsock` nor `guest-hardening`: it has no
       # transport of its own (its one connection is the socketpair the supervisor

@@ -30,6 +30,72 @@ const SWEEP_BATCH: usize = 1024;
 const SESSION_CONCURRENCY: usize = 16;
 const CACHE_CONCURRENCY: usize = 8;
 
+// The two attestation backends are a choice, not an addition — see `[features]`.
+#[cfg(all(feature = "sev-snp", feature = "dev-attestation"))]
+compile_error!(
+    "both attestation backends selected: `sev-snp` needs `--no-default-features`, \
+     otherwise the default `dev-attestation` comes along with it"
+);
+
+#[cfg(all(feature = "sev-snp", not(target_os = "linux")))]
+compile_error!(
+    "feature `sev-snp` needs /dev/sev-guest, which exists only inside a Linux guest. \
+     Build without it for non-Linux dev environments."
+);
+
+/// The identity this role presents on a fleet leg, and what it asks of api.
+///
+/// **Asymmetric on purpose, and the direction is load-bearing.** api pins which
+/// image this is; this end does not pin api back. It cannot: pinning api's
+/// measurement would require knowing it before api is built, and api's is a
+/// function of the three measurements it pins. Leaves first, api last, no cycle.
+///
+/// So `AcceptAny` here is not an absence of attestation. `verify_quote` runs
+/// whole — a genuine AMD part, VMPL 0, debug off, no migration agent, platform
+/// TCB above this build's floor, and the quote bound to the very TLS key in
+/// front of it. The single thing not checked is WHICH image is on the other
+/// end, and what that costs is enumerated per role rather than assumed.
+///
+/// Minting is `mint_only`: this guest has no egress, so it cannot fetch the
+/// certificate that would endorse its own report. It sends the report bare and
+/// api, which reaches AMD through the hatch, verifies it against its own copy of
+/// the same chip's — which proves more than a self-endorsed quote would, not
+/// less.
+#[cfg(feature = "sev-snp")]
+fn fleet_identity() -> (
+    std::sync::Arc<dyn enclavid_attestation::Attestor>,
+    enclavid_ra_tls::MeasurementPolicy,
+) {
+    let attestor = enclavid_attestation::SnpAttestor::mint_only().unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "storage-cvm: the chip would not mint an attestation report, so this guest cannot \
+             prove what it is. Stopping.",
+            reason!("a constant reporting a platform state the host provisioned")
+        )
+    });
+    (
+        std::sync::Arc::new(attestor),
+        enclavid_ra_tls::MeasurementPolicy::AcceptAny,
+    )
+}
+
+/// The dev fleet's one shared software identity, pinned to itself. It proves
+/// the peer links this source tree and nothing about where it runs — which is
+/// all a fleet without hardware can say.
+#[cfg(feature = "dev-attestation")]
+fn fleet_identity() -> (
+    std::sync::Arc<dyn enclavid_attestation::Attestor>,
+    enclavid_ra_tls::MeasurementPolicy,
+) {
+    (
+        std::sync::Arc::new(enclavid_attestation::MockAttestor::dev_fleet()),
+        enclavid_ra_tls::MeasurementPolicy::Pinned(vec![
+            enclavid_attestation::DEV_FLEET_MEASUREMENT.to_string(),
+        ]),
+    )
+}
+
 #[tokio::main]
 async fn main() {
     // First, so nothing can speak before the channel exists. Panic locations are
@@ -197,14 +263,9 @@ async fn main() {
     // This build attests with a software identity the whole dev fleet shares, and
     // pins that same identity: it proves the peer links this source tree, nothing
     // about where the peer runs.
+    let (attestor, policy) = fleet_identity();
     let ratls = tokio_rustls::TlsAcceptor::from(Arc::new(
-        enclavid_ra_tls::server_config(
-            Arc::new(enclavid_attestation::MockAttestor::dev_fleet()),
-            enclavid_ra_tls::MeasurementPolicy::Pinned(vec![
-                enclavid_attestation::DEV_FLEET_MEASUREMENT.to_string(),
-            ]),
-        )
-        .unwrap_or_else(|e| {
+        enclavid_ra_tls::server_config(attestor, policy).unwrap_or_else(|e| {
             debug!("{e}");
             safe_logger::error_and_panic!(
                 "storage-cvm: cannot build the RA-TLS server config. Stopping.",

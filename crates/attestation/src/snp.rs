@@ -6,17 +6,25 @@
 //! firmware floor — a build accepts is itself part of what that build's
 //! measurement attests.
 //!
-//! A quote carries the firmware's report bytes verbatim plus the leaf (VCEK)
-//! and intermediate (ASK) certificates the attestor was built with. Only the
-//! ARK is pinned: an ASK is legitimate exactly when the pinned ARK signs it, so
-//! carrying it in the quote costs nothing and survives an AMD intermediate
-//! rotation without a rebuild. The same reasoning is why the endorsement chain
-//! may travel any path at all — these are public certificates, and a forged one
-//! fails against the root the verifier already holds.
+//! A quote carries the firmware's report bytes verbatim, and — when the minter
+//! holds them — the leaf (VCEK) and intermediate (ASK) certificates that endorse
+//! it. Only the ARK is pinned: an ASK is legitimate exactly when the pinned ARK
+//! signs it, so carrying it in the quote costs nothing and survives an AMD
+//! intermediate rotation without a rebuild. The same reasoning is why the
+//! endorsement chain may travel any path at all — these are public
+//! certificates, and a forged one fails against the root the verifier holds.
 //!
-//! `verify_quote` is a free function: verification needs no local hardware, so
-//! a verifier outside a guest uses it without opening a device. Minting lives
-//! in the `mint` module below, which exists only where the guest device does.
+//! A minter that holds neither sends neither, and the verifier supplies them
+//! from its own copy. That is not a lesser quote: it can only verify if the peer
+//! ran on the same chip at the same TCB. See [`SnpEnvelope`] and [`Endorsement`]
+//! for why the two shapes exclude each other rather than one falling back to the
+//! other.
+//!
+//! `verify_quote` is a free function for the self-contained shape: verification
+//! needs no local hardware, so a verifier outside a guest uses it without
+//! opening a device. Supplying an endorsement needs one to have been obtained,
+//! so that path is a method on the attestor holding it. Minting lives in the
+//! `mint` module below, which exists only where the guest device does.
 
 use serde::{Deserialize, Serialize};
 use sev::certs::snp::{Certificate, Chain, Verifiable, builtin, ca};
@@ -85,9 +93,23 @@ impl TcbFloor {
     }
 }
 
-/// Quote payload for `format: "sev-snp"`. `report` is what the firmware
-/// returned, byte for byte — re-encoding it would change the bytes the VCEK
-/// signature covers.
+/// Quote payload for `format: "sev-snp"`: the firmware's report, and — when the
+/// minter has one — the two certificates that endorse it.
+///
+/// `report` is what the firmware returned, byte for byte; re-encoding it would
+/// change the bytes the VCEK signature covers.
+///
+/// **Both certificates are empty when the minter holds no endorsement.** That is
+/// not a degraded quote, it is a different and stronger one. A VCEK is derived
+/// per (chip, TCB), so a report that verifies under a certificate the VERIFIER
+/// already holds was produced by that same chip at that same TCB — where a
+/// self-endorsed quote proves only "some AMD part somewhere".
+///
+/// It exists because a guest with no egress cannot fetch its own VCEK, and the
+/// three fleet leaves are exactly that by design. They mint certless; api, which
+/// reaches AMD's key service through the hatch, supplies the endorsement from
+/// its own copy. Same host, same chip, so the copy is the right one — and if it
+/// is not, the signature simply does not verify, which is the answer we want.
 #[derive(Serialize, Deserialize)]
 struct SnpEnvelope {
     #[serde(with = "serde_bytes")]
@@ -96,6 +118,30 @@ struct SnpEnvelope {
     ask_der: Vec<u8>,
     #[serde(with = "serde_bytes")]
     vcek_der: Vec<u8>,
+}
+
+/// The certificates a verifier will use, and where they had to come from.
+///
+/// Which one applies is not a preference and not a fallback — it is fixed by
+/// what the verifier holds, and each REJECTS the other's shape. That matters:
+/// a verifier that accepted either would be offering the weaker proof as an
+/// option, and an option is what an attacker picks. A peer that sends its own
+/// certificates to api is refused even if they are genuine, because api can
+/// prove something better about anyone entitled to talk to it.
+enum Endorsement<'a> {
+    /// The verifier holds none, so the quote must carry its own. What this
+    /// proves is that the peer is a genuine SNP guest on some AMD part.
+    /// The leaves verify api this way: they have no endorsement of their own,
+    /// and the ARK they check the chain against is compiled in, so it needs
+    /// nothing from outside.
+    Carried,
+    /// The verifier holds one and the quote must carry none. What this proves
+    /// is that the peer ran on THIS chip at THIS TCB — because a report signed
+    /// by another chip's key does not verify under ours.
+    Supplied {
+        ask_der: &'a [u8],
+        vcek_der: &'a [u8],
+    },
 }
 
 /// The trust root: AMD's Milan root key, compiled in from the `sev` crate's
@@ -158,6 +204,14 @@ fn check_report_policy(report: &AttestationReport) -> Result<(), AttestationErro
 ///
 /// Needs no hardware — a verifier outside a guest calls this directly.
 pub fn verify_quote(quote: &Quote, expected: &ReportData) -> Result<(), AttestationError> {
+    verify_quote_endorsed(quote, expected, Endorsement::Carried)
+}
+
+fn verify_quote_endorsed(
+    quote: &Quote,
+    expected: &ReportData,
+    endorsement: Endorsement<'_>,
+) -> Result<(), AttestationError> {
     if quote.format != SNP_FORMAT {
         return Err(AttestationError::UnsupportedFormat(quote.format.clone()));
     }
@@ -166,15 +220,39 @@ pub fn verify_quote(quote: &Quote, expected: &ReportData) -> Result<(), Attestat
     let report = AttestationReport::from_bytes(&envelope.report)
         .map_err(|e| AttestationError::InvalidQuote(format!("report bytes: {e}")))?;
 
-    // Authenticate before reading anything the report says. The ARK is ours;
-    // only the two certificates below it come from the peer.
+    // Which certificates authenticate this report, and the refusal of the shape
+    // that does not belong. Rejecting rather than tolerating is the point: see
+    // `Endorsement`.
+    let (ask_der, vcek_der) = match endorsement {
+        Endorsement::Carried => {
+            if envelope.ask_der.is_empty() || envelope.vcek_der.is_empty() {
+                return Err(AttestationError::InvalidQuote(
+                    "quote carries no endorsement and this verifier holds none to supply".into(),
+                ));
+            }
+            (envelope.ask_der.as_slice(), envelope.vcek_der.as_slice())
+        }
+        Endorsement::Supplied { ask_der, vcek_der } => {
+            if !envelope.ask_der.is_empty() || !envelope.vcek_der.is_empty() {
+                return Err(AttestationError::InvalidQuote(
+                    "quote carries its own endorsement where this verifier requires the \
+                     chip it holds"
+                        .into(),
+                ));
+            }
+            (ask_der, vcek_der)
+        }
+    };
+
+    // Authenticate before reading anything the report says. The ARK is ours; a
+    // carried ASK/VCEK is the peer's, a supplied one is ours again.
     let chain = Chain {
         ca: ca::Chain {
             ark: pinned_ark()?,
-            ask: Certificate::from_der(&envelope.ask_der)
+            ask: Certificate::from_der(ask_der)
                 .map_err(|e| AttestationError::InvalidQuote(format!("ASK: {e}")))?,
         },
-        vek: Certificate::from_der(&envelope.vcek_der)
+        vek: Certificate::from_der(vcek_der)
             .map_err(|e| AttestationError::InvalidQuote(format!("VCEK: {e}")))?,
     };
     let vcek = (&chain)
@@ -217,7 +295,8 @@ mod mint {
     use sev::parser::ByteParser;
 
     use super::{
-        PRODUCT_LINE, REQUIRED_VMPL, SNP_FORMAT, SnpEnvelope, check_report_policy, verify_quote,
+        Endorsement, PRODUCT_LINE, REQUIRED_VMPL, SNP_FORMAT, SnpEnvelope, check_report_policy,
+        verify_quote, verify_quote_endorsed,
     };
     use crate::{AttestationError, Attestor, Quote, ReportData};
 
@@ -338,10 +417,19 @@ mod mint {
     /// state.
     pub struct SnpAttestor {
         firmware: Mutex<Firmware>,
+        /// `None` on a guest that cannot fetch its own certificate — see
+        /// [`SnpAttestor::mint_only`]. One field decides two things, and they
+        /// are the same thing: a process that holds an endorsement attaches it
+        /// to what it mints and supplies it for what it verifies; a process
+        /// that holds none does neither.
+        held: Option<Held>,
+    }
+
+    /// The certificates this process attaches to its own quotes, and the TCB
+    /// they cover as `(bootloader, tee, snp, microcode)`.
+    struct Held {
         ask_der: Vec<u8>,
         vcek_der: Vec<u8>,
-        /// The TCB the held endorsement covers, as `(bootloader, tee, snp,
-        /// microcode)`.
         endorsed_tcb: (u8, u8, u8, u8),
     }
 
@@ -361,20 +449,53 @@ mod mint {
                 .map_err(|e| AttestationError::Backend(format!("open /dev/sev-guest: {e}")))?;
             let attestor = Self {
                 firmware: Mutex::new(firmware),
-                ask_der: normalise_cert(ask_der, "ASK")?,
-                vcek_der: normalise_cert(vcek_der, "VCEK")?,
-                endorsed_tcb: (
-                    identity.bootloader_spl,
-                    identity.tee_spl,
-                    identity.snp_spl,
-                    identity.microcode_spl,
-                ),
+                held: Some(Held {
+                    ask_der: normalise_cert(ask_der, "ASK")?,
+                    vcek_der: normalise_cert(vcek_der, "VCEK")?,
+                    endorsed_tcb: (
+                        identity.bootloader_spl,
+                        identity.tee_spl,
+                        identity.snp_spl,
+                        identity.microcode_spl,
+                    ),
+                }),
             };
 
             let probe = ReportData::session(String::new(), String::new());
             let quote = attestor.mint(&probe)?;
             verify_quote(&quote, &probe)?;
             Ok(attestor)
+        }
+
+        /// For a guest that holds no endorsement and cannot obtain one.
+        ///
+        /// The three fleet leaves are that guest: they have no egress by
+        /// design, so AMD's key service is unreachable to them, and putting a
+        /// certificate in the image or on the command line would make the
+        /// measurement differ per machine — which is the one thing that channel
+        /// is not for.
+        ///
+        /// So they mint certless and api supplies the endorsement from its own
+        /// copy of the same chip's. Nothing is weakened by it: what api can then
+        /// prove is that the peer ran on THIS chip, where a self-endorsed quote
+        /// would have proved only that it ran on an AMD one.
+        ///
+        /// What it costs is the startup probe. [`SnpAttestor::new`] mints and
+        /// then verifies one throwaway quote, so a guest holding the wrong
+        /// endorsement fails at boot rather than at its first handshake; with no
+        /// endorsement there is nothing to check a signature against. What
+        /// survives is the half that matters more — `vcek_identity` mints a
+        /// report and runs the platform checks on it, so a guest launched at the
+        /// wrong VMPL, with debug enabled, or under a TCB below the floor still
+        /// stops here.
+        pub fn mint_only() -> Result<Self, AttestationError> {
+            vcek_identity()?;
+            let firmware = Firmware::open()
+                .map_err(|e| AttestationError::Backend(format!("open /dev/sev-guest: {e}")))?;
+            Ok(Self {
+                firmware: Mutex::new(firmware),
+                held: None,
+            })
         }
     }
 
@@ -411,19 +532,34 @@ mod mint {
             // derived at, which retires the endorsement this process holds.
             // Without this the guest keeps minting quotes carrying a superseded
             // certificate and the only signal is a chain failure at the far end.
-            let tcb = &report.reported_tcb;
-            if (tcb.bootloader, tcb.tee, tcb.snp, tcb.microcode) != self.endorsed_tcb {
-                let (bl, tee, snp, ucode) = self.endorsed_tcb;
-                return Err(AttestationError::PolicyRejected(format!(
-                    "platform TCB moved under this process; the held endorsement covers \
-                     bl={bl} tee={tee} snp={snp} ucode={ucode}"
-                )));
+            //
+            // Nothing to retire when none is held: the same drift then shows up
+            // at the verifier, whose own copy stops matching, which is the same
+            // signal one hop later.
+            if let Some(held) = &self.held {
+                let tcb = &report.reported_tcb;
+                if (tcb.bootloader, tcb.tee, tcb.snp, tcb.microcode) != held.endorsed_tcb {
+                    let (bl, tee, snp, ucode) = held.endorsed_tcb;
+                    return Err(AttestationError::PolicyRejected(format!(
+                        "platform TCB moved under this process; the held endorsement covers \
+                         bl={bl} tee={tee} snp={snp} ucode={ucode}"
+                    )));
+                }
             }
 
+            // Empty certificates when none is held — see `SnpEnvelope`.
             let envelope = SnpEnvelope {
                 report: report_bytes,
-                ask_der: self.ask_der.clone(),
-                vcek_der: self.vcek_der.clone(),
+                ask_der: self
+                    .held
+                    .as_ref()
+                    .map(|h| h.ask_der.clone())
+                    .unwrap_or_default(),
+                vcek_der: self
+                    .held
+                    .as_ref()
+                    .map(|h| h.vcek_der.clone())
+                    .unwrap_or_default(),
             };
             let mut quote_blob = Vec::new();
             ciborium::into_writer(&envelope, &mut quote_blob)
@@ -436,8 +572,25 @@ mod mint {
             })
         }
 
+        /// Symmetric with what this process mints, and for one reason: it can
+        /// supply an endorsement exactly when it has one. Holding a certificate
+        /// means demanding peers arrive without theirs, so that what verifies
+        /// is the chip we are on; holding none means requiring theirs, because
+        /// there is nothing else to check a signature against. Neither is a
+        /// preference — see [`Endorsement`] for why accepting both shapes would
+        /// hand the choice to whoever is being verified.
         fn verify(&self, quote: &Quote, expected: &ReportData) -> Result<(), AttestationError> {
-            verify_quote(quote, expected)
+            match &self.held {
+                Some(held) => verify_quote_endorsed(
+                    quote,
+                    expected,
+                    Endorsement::Supplied {
+                        ask_der: &held.ask_der,
+                        vcek_der: &held.vcek_der,
+                    },
+                ),
+                None => verify_quote_endorsed(quote, expected, Endorsement::Carried),
+            }
         }
     }
 }

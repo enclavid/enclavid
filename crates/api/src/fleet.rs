@@ -80,19 +80,30 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Dial a fleet peer, waiting however long it takes.
 ///
-/// `attempt` is retried rather than its result inspected, because at this stage
-/// every failure means the same thing: nothing is listening yet. There is no
-/// error return — this does not give up, so there is nothing to hand back.
+/// Every failure is retried, but they are not all the same failure, and the log
+/// line says which — `fleet_transport::LegFailure` renders itself. It used to
+/// say "not reachable yet" whatever had gone wrong, on the argument that at this
+/// stage nothing else was possible. That argument rested on `dial` running only
+/// at boot, which stopped being true when [`supervise`] began calling it on
+/// every loss; and it gets worse as the fleet pins measurements, because then
+/// the commonest reason to be here is a peer that answered perfectly well and
+/// was refused. "Not reachable" is the one thing certainly untrue of it.
+///
+/// There is no error return — this does not give up, so there is nothing to
+/// hand back.
+///
+/// Concrete in `LegFailure` rather than generic over an error, because the
+/// generic bought nothing (all three legs fail this one way) and cost the only
+/// thing worth having: knowing enough about the failure to describe it.
 ///
 /// `addr` is only for the log line, and it belongs there: a peer that never
 /// answers and a peer whose address is wrong look identical from here, and the
 /// address is the one thing that tells them apart. It is safe to name because
 /// the measured command line is where it came from.
-pub async fn dial<T, E, F, Fut>(peer: &str, addr: &str, mut attempt: F) -> T
+pub async fn dial<T, F, Fut>(peer: &str, addr: &str, mut attempt: F) -> T
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, E>>,
-    E: std::fmt::Display + safe_logger::SafeToLog,
+    Fut: Future<Output = Result<T, fleet_transport::LegFailure>>,
 {
     let mut delays = RETRY_DELAYS.iter().copied();
     // The ladder's last rung, repeated once it runs out.
@@ -104,16 +115,16 @@ where
                 let delay = delays.next().unwrap_or(ceiling);
                 ceiling = delay;
                 warn!(
-                    "api: {} at {} not reachable yet ({}); retrying in {:?}",
+                    "api: {} at {}: {}; retrying in {:?}",
                     safe(&peer, reason!("a name fixed in this image")),
                     safe(&addr, reason!("an address from the measured command line")),
                     e,
                     safe(&delay, reason!("one of a fixed ladder of delays")),
                     reason!(
                         "a peer name fixed in this image, an address from the measured \
-                         command line, a closed-enum failure and one of a fixed ladder of \
-                         delays — nothing a session can reach. Not boot-only: `supervise` \
-                         dials again on every loss"
+                         command line, a closed-enum failure that renders itself, and one of \
+                         a fixed ladder of delays — nothing a session can reach. Not \
+                         boot-only: `supervise` dials again on every loss"
                     )
                 );
                 tokio::time::sleep(delay).await;
@@ -194,7 +205,7 @@ impl<C: Clone> Leg<C> {
 /// verdict rather than silence, because chmux pings at half its
 /// `connection_timeout` whenever the link is idle, so "no traffic" and "no peer"
 /// are already distinct one layer down.
-pub async fn supervise<C, F, Fut, E, I>(
+pub async fn supervise<C, F, Fut, I>(
     peer: crate::health::Peer,
     addr: String,
     health: std::sync::Arc<crate::health::ApiHealth>,
@@ -203,8 +214,8 @@ pub async fn supervise<C, F, Fut, E, I>(
 ) where
     C: Send + 'static,
     F: FnMut() -> Fut + Send + 'static,
-    Fut: Future<Output = Result<(C, tokio::task::JoinHandle<()>), E>> + Send,
-    E: std::fmt::Display + safe_logger::SafeToLog + Send,
+    Fut: Future<Output = Result<(C, tokio::task::JoinHandle<()>), fleet_transport::LegFailure>>
+        + Send,
     I: Fn(Option<C>) + Send + 'static,
 {
     let (clients, driver) = dial(peer.as_str(), &addr, &mut connect).await;
