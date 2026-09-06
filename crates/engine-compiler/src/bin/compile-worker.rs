@@ -117,6 +117,12 @@ fn child_exe() -> std::path::PathBuf {
 /// (client).
 type Cli = CompilerServiceClient<Ciborium>;
 
+#[cfg(not(any(feature = "dev-attestation", feature = "sev-snp")))]
+compile_error!(
+    "no attestation backend selected: build with `dev-attestation` (the default, a \
+     software test key) or `sev-snp` (real hardware attestation)"
+);
+
 // The two attestation backends are a choice, not an addition — see `[features]`.
 #[cfg(all(feature = "sev-snp", feature = "dev-attestation"))]
 compile_error!(
@@ -140,8 +146,13 @@ compile_error!(
 /// So `AcceptAny` here is not an absence of attestation. `verify_quote` runs
 /// whole — a genuine AMD part, VMPL 0, debug off, no migration agent, platform
 /// TCB above this build's floor, and the quote bound to the very TLS key in
-/// front of it. The single thing not checked is WHICH image is on the other
-/// end, and what that costs is enumerated per role rather than assumed.
+/// front of it. What it does not check is WHICH image is on the other end —
+/// nor, because a verifier holding no endorsement reads the chain out of the
+/// peer's own quote, which machine. The peer is a genuine SNP guest on some
+/// Milan part, and that is the whole of it.
+///
+/// What that costs here: there is nothing here to reach: this role holds no cache and no state between calls. That is the property to keep whole, since it
+/// is the one carrying the weight the pin would have carried.
 ///
 /// Minting is `mint_only`: this guest has no egress, so it cannot fetch the
 /// certificate that would endorse its own report. It sends the report bare and
@@ -156,8 +167,9 @@ fn fleet_identity() -> (
     let attestor = enclavid_attestation::SnpAttestor::mint_only().unwrap_or_else(|e| {
         debug!("{e}");
         safe_logger::error_and_panic!(
-            "compile-worker: the chip would not mint an attestation report, so this guest cannot \
-             prove what it is. Stopping.",
+            "compile-worker: cannot present an attested identity — /dev/sev-guest is absent, or this \
+             guest was launched in a posture this build refuses (VMPL, debug, migration \
+             agent, TCB floor). Stopping.",
             reason!("a constant reporting a platform state the host provisioned")
         )
     });

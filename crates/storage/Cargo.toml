@@ -10,8 +10,9 @@ repository.workspace = true
 # is a BLIND ciphertext store — every payload arrives already AEAD-sealed under
 # `tee_seal_key` (TEE-side, in hatch-client), so the CVM never holds a key or
 # plaintext PII. Serves both `storage-rpc` services over one RA-TLS/remoc
-# connection; api is the sole client. The lib exposes the store cores so they are
-# unit-testable without remoc.
+# connection. It accepts any attested guest and partitions records by the digest
+# the peer proved, rather than trusting that only api calls (`crate::scope`). The
+# lib exposes the store cores so they are unit-testable without remoc.
 
 [[bin]]
 name = "storage-cvm"
@@ -84,8 +85,17 @@ dev-attestation = ["enclavid-attestation/mock"]
 # endorsement, because this guest has no egress to fetch one — api supplies it
 # from its own copy of the same chip's. See `SnpAttestor::mint_only`.
 sev-snp = ["enclavid-attestation/sev-snp"]
-# The attested build: reach api over vsock instead of TCP. A measured guest
-# kernel has no IP stack, so this is not a preference.
+# The attested build: reach api over vsock instead of TCP.
+#
+# Unlike the two workers, this role has no `guest-hardening` — it runs no
+# untrusted wasm and asserts no kernel floor — so there is no feature here that
+# means "this build is the one that ships" and could therefore refuse to carry
+# the software identity beside the hardware one. What keeps the dev key out of a
+# measured storage image is `image/app`, which asks for `sev-snp` off the
+# defaults explicitly, plus the backend guards in `storage-cvm.rs`. Naming the
+# gap rather than inventing a marker feature to close it.
+#
+# A measured guest kernel has no IP stack, so vsock is not a preference.
 vsock = ["fleet-transport/vsock"]
 # Compiles the `debug!` sites in. OFF in the measured build, so a production
 # binary holds no diagnostic that nobody wrote a reason for.

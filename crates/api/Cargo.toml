@@ -73,7 +73,8 @@ enclavid-crypto = { path = "../crypto" }
 enclavid-kbs-client = { path = "../kbs-client" }
 enclavid-attestation = { path = "../attestation", default-features = false }
 # Intra-fleet mutual RA-TLS on the api -> worker dials. Dev-bypass = the mock
-# attestation backend (default); flip to `enclavid-ra-tls/sev-snp` for prod. Separate
+# attestation backend (default); the prod flip is this crate's own `sev-snp`, off
+# the defaults — `enclavid-ra-tls` names no backend and has no features. Separate
 # from the client-facing session quotes above (that stays snp-dev).
 enclavid-ra-tls = { path = "../ra-tls" }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }

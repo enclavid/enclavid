@@ -7,8 +7,8 @@
 //!   * [`CacheService`] → `object_store` ([`cache`]), the write-once/read-mostly
 //!     L2 cwasm cache.
 //!
-//! Both share this one CVM (same *trust* tier — blind ciphertext KV, api the sole
-//! client) but stay distinct stores (their *load* profiles diverge), so a future
+//! Both share this one CVM (same *trust* tier — blind ciphertext KV, one
+//! orchestrator in practice) but stay distinct stores (their *load* profiles diverge), so a future
 //! split into two CVMs is a deploy step, not a rewrite. The store cores are plain
 //! structs so they unit-test without remoc; [`StorageSvc`] holds them and
 //! [`Caller`] — one per connection, carrying the peer's launch digest — adds the
@@ -46,9 +46,11 @@ pub fn now_unix() -> u64 {
 /// object_store (L2 cache). Cloneable-cheap collaborators, shared by every
 /// connection behind an `Arc`.
 ///
-/// It serves nobody by itself. The RPC services are implemented by [`Caller`],
-/// which is the only thing in this crate that can name a record — so a call that
-/// does not say who is asking is not a call this node knows how to make.
+/// It serves nobody by itself: the RPC services are implemented by [`Caller`],
+/// which is where a wire name becomes a record name. The backends underneath
+/// take a plain `&str` and will store whatever they are given; the crate-private
+/// `scope` module says which half of that is enforced by a type and which by
+/// there being one implementor.
 pub struct StorageSvc {
     sessions: Arc<SessionStore>,
     cache: CacheBlobs,
@@ -73,9 +75,11 @@ pub struct Caller {
 
 impl Caller {
     /// `measurement` is the peer's launch digest, read from its verified
-    /// certificate — see `enclavid_ra_tls::peer_measurement` for why that is
-    /// trustworthy only after the handshake, which is the only place a `Caller`
-    /// is built.
+    /// certificate — see `enclavid_ra_tls::peer_measurement`, which refuses to
+    /// answer before the handshake completes. This constructor takes the string
+    /// on trust; what makes it a digest rather than anything else is that
+    /// `storage-cvm` builds a `Caller` at exactly one place, from the connection
+    /// it just accepted.
     pub fn new(svc: Arc<StorageSvc>, measurement: String) -> Caller {
         Caller {
             svc,

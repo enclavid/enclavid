@@ -9,15 +9,15 @@
 //!
 //! [`SessionStore`] is the facade over both: it owns the name → path mapping
 //! (hashed — hides which record a file is on a volume the host provisions and
-//! reads, and guards path traversal) and the create ordering + sweep that tie the two tiers
-//! together. One file per session gives isolation, wholesale delete (`rm` returns
+//! reads, and guards path traversal) and the create ordering + sweep that tie the
+//! two tiers together. One file per session gives isolation, wholesale delete (`rm` returns
 //! space to the OS — no compaction), atomic rounds, and cross-session write
 //! parallelism (the hot update path touches neither the index nor any global
 //! lock).
 //!
 //! **`name`, not `session_id`.** This tier is a KV over opaque strings and knows
 //! nothing about sessions or callers. What it receives is a record name that
-//! [`crate::scope`] derived from the calling peer's launch digest and the
+//! the crate-private `scope` module derived from the calling peer's digest and the
 //! session id it asked for, which is what keeps two callers out of each other's
 //! records; here it is simply the key.
 

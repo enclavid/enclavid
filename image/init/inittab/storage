@@ -7,10 +7,8 @@
 
 # The pseudo-filesystems the runtime needs before /bin/app starts.
 #
-# /dev is a formality here in one respect and not in another. This role attests
-# with the software identity the dev fleet shares, so it opens no
-# /dev/sev-guest — but /dev/vda below is a real node, and devtmpfs is what
-# supplies it.
+# devtmpfs supplies both nodes this role opens: /dev/sev-guest, which it mints
+# its attestation report through, and /dev/vda, the data volume mounted below.
 #
 # It spawns no children of its own; the paragraph about disposable-child
 # isolation belongs to the two engine roles, not here.

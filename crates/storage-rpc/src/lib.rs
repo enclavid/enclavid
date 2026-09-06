@@ -1,12 +1,12 @@
 //! `storage-rpc` — the storage-tier RPC contract: remote trait calls (remoc
 //! `rtc`) between the orchestrator (api) and the trusted **storage-CVM**, over an
 //! RA-TLS tunnel. Two services live behind one connection because they share the
-//! same *trust* tier (both blind ciphertext KV, api the sole client) even though
+//! same *trust* tier (both blind ciphertext KV, one orchestrator) even though
 //! their load profiles diverge:
 //!
 //!   * [`SessionStoreService`] — per-session state / media / disclosures, backed
-//!     by redb (write-heavy, CAS, TTL). Replaces the hatch `/sessions/*` +
-//!     Redis path.
+//!     by one SQLite file per record (write-heavy, CAS, TTL). Replaces the
+//!     hatch `/sessions/*` + Redis path.
 //!   * [`CacheService`] — the L2 compiled-artifact (cwasm) cache, backed by
 //!     `object_store` (write-once, read-mostly). Replaces the hatch `/cache/*`
 //!     path.
@@ -31,7 +31,7 @@ use hatch_protocol::{DeleteResponse, ReadRequest, ReadResponse, WriteRequest, Wr
 /// session's stored version did not match `expected_version`, or a must-not-exist
 /// create found an existing session) — the api client maps it back to
 /// `BridgeError::VersionMismatch` (the same 412 the hatch path produced).
-/// `Internal` is an opaque redb / transport failure. This is the SESSION error:
+/// `Internal` is an opaque store / transport failure. This is the SESSION error:
 /// the L2 cache has no CAS, so `VersionMismatch` lives only here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionError {
@@ -106,7 +106,9 @@ pub trait SessionStoreService {
 
 /// L2 compiled-artifact (cwasm) cache — a blind opaque-blob KV keyed by the
 /// identity-hiding `blob_name` the api derives (`hex(HKDF(filename_key,
-/// cache_id))`). The CVM never sees the composition, only pseudo-random hex.
+/// cache_id))`), which the CVM re-derives under the calling peer's own scope
+/// before it touches a blob. It never sees the composition, only pseudo-random
+/// hex.
 /// Sealed bytes ride the wire; a miss is `Ok(None)` (not an error) so the
 /// orchestrator recompiles.
 #[remoc::rtc::remote]

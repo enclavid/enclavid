@@ -1,8 +1,8 @@
 //! The L2 compiled-artifact (cwasm) cache, backed by `object_store`. A blind
 //! opaque-blob KV keyed by the identity-hiding `blob_name` the api derives
 //! (`hex(HKDF(filename_key, cache_id))`), re-derived here against the calling
-//! peer's launch digest ([`crate::scope`]) — the CVM sees only pseudo-random hex,
-//! never the composition. Sealed bytes ride the wire; a miss is `Ok(None)` (not
+//! peer's launch digest (the crate-private `scope` module) — the CVM sees only
+//! pseudo-random hex, never the composition. Sealed bytes ride the wire; a miss is `Ok(None)` (not
 //! an error) so the orchestrator recompiles. Kept on `object_store` (not redb) to
 //! keep multi-MiB cwasm blobs off the session B-tree behind a backend-agnostic
 //! blob interface (local filesystem today). The blobs are sealed under the

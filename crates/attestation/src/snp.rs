@@ -412,9 +412,12 @@ mod mint {
             .map_err(|e| AttestationError::Backend(format!("derive sealing key: {e}")))
     }
 
-    /// Prod SEV-SNP attestor. Holds the guest device open for minting and the
-    /// endorsement chain to attach to each quote; verifying uses none of its
-    /// state.
+    /// Prod SEV-SNP attestor. Holds the guest device open for minting, and
+    /// OPTIONALLY the endorsement chain — which is what decides both what this
+    /// process attaches to the quotes it mints and what it demands of the quotes
+    /// it verifies. A guest with no egress cannot fetch the certificate that
+    /// would endorse it, so it holds none; see [`SnpAttestor::mint_only`] and
+    /// [`Endorsement`].
     pub struct SnpAttestor {
         firmware: Mutex<Firmware>,
         /// `None` on a guest that cannot fetch its own certificate — see
@@ -533,9 +536,13 @@ mod mint {
             // Without this the guest keeps minting quotes carrying a superseded
             // certificate and the only signal is a chain failure at the far end.
             //
-            // Nothing to retire when none is held: the same drift then shows up
-            // at the verifier, whose own copy stops matching, which is the same
-            // signal one hop later.
+            // Nothing to retire when none is held, and no equivalent check to
+            // run: a certless minter has no TCB of its own to compare against.
+            // The drift still stops the connection — the verifier's copy no
+            // longer matches, so the chain fails — but it arrives as a bare
+            // signature failure at the far end, indistinguishable from a forged
+            // quote or a peer on another chip. Fail-closed either way; only this
+            // side can say why.
             if let Some(held) = &self.held {
                 let tcb = &report.reported_tcb;
                 if (tcb.bootloader, tcb.tee, tcb.snp, tcb.microcode) != held.endorsed_tcb {
@@ -626,6 +633,70 @@ mod tests {
         report.cpuid_mod_id = Some(1);
         report.cpuid_step = Some(1);
         report
+    }
+
+    /// A quote whose envelope carries `certs`. The report inside is well-formed
+    /// and otherwise acceptable — it has to be, since the envelope is parsed
+    /// before the shape is judged — so what the two cases below fail on is the
+    /// endorsement shape alone, and not on a signature they never reach.
+    fn quote_with(certs: Option<(&[u8], &[u8])>) -> Quote {
+        let (ask_der, vcek_der) = match certs {
+            Some((a, v)) => (a.to_vec(), v.to_vec()),
+            None => (Vec::new(), Vec::new()),
+        };
+        let envelope = SnpEnvelope {
+            report: acceptable_report().to_bytes().unwrap().to_vec(),
+            ask_der,
+            vcek_der,
+        };
+        let mut quote_blob = Vec::new();
+        ciborium::into_writer(&envelope, &mut quote_blob).unwrap();
+        Quote {
+            format: SNP_FORMAT.to_string(),
+            quote_blob,
+            measurement: hex::encode([0u8; 48]),
+        }
+    }
+
+    /// The leaves' direction. A verifier holding nothing cannot authenticate a
+    /// bare report, and must say so rather than fall back to something weaker.
+    #[test]
+    fn carried_refuses_a_quote_that_brings_no_endorsement() {
+        let err = verify_quote_endorsed(
+            &quote_with(None),
+            &ReportData::for_ratls(vec![1, 2, 3]),
+            Endorsement::Carried,
+        )
+        .unwrap_err();
+        match err {
+            AttestationError::InvalidQuote(m) => {
+                assert!(m.contains("carries no endorsement"), "{m}");
+            }
+            other => panic!("expected InvalidQuote, got {other:?}"),
+        }
+    }
+
+    /// api's direction, and the half that is a real defence rather than a
+    /// diagnostic: a peer that supplies its own certificates is refused even if
+    /// they are genuine. Tolerating them would make the weaker proof an option,
+    /// and an option is what an attacker picks.
+    #[test]
+    fn supplied_refuses_a_quote_that_brings_its_own_endorsement() {
+        let err = verify_quote_endorsed(
+            &quote_with(Some((b"peer-ask", b"peer-vcek"))),
+            &ReportData::for_ratls(vec![1, 2, 3]),
+            Endorsement::Supplied {
+                ask_der: b"our-ask",
+                vcek_der: b"our-vcek",
+            },
+        )
+        .unwrap_err();
+        match err {
+            AttestationError::InvalidQuote(m) => {
+                assert!(m.contains("carries its own endorsement"), "{m}");
+            }
+            other => panic!("expected InvalidQuote, got {other:?}"),
+        }
     }
 
     #[test]

@@ -69,12 +69,24 @@ impl fmt::Display for RaTlsError {
 }
 impl std::error::Error for RaTlsError {}
 
-/// Which measurements the verifier accepts. `Pinned` is the only prod-safe choice — the
-/// point of attestation is to trust ONLY the platform releases you pin. `AcceptAny` runs
-/// the full path but pins nothing; use it only in dev when the measurement is a stand-in.
+/// Which measurements the verifier accepts, and the ONLY thing either variant
+/// decides. Everything else runs identically: a genuine part, the platform
+/// posture floor, and the quote bound to the very key in front of it.
+///
+/// `Pinned` is what you want wherever you can have it — the point of attestation
+/// is to trust only the releases you name. `AcceptAny` is not its dev-only
+/// counterpart; it is the correct choice on a leg where pinning back would be
+/// circular, which is why the fleet leaves use it in the measured build (their
+/// `fleet_identity`, e.g. `storage-cvm`, carries the argument: api's digest is a
+/// function of the three it pins, so the leaves are built first and cannot know
+/// it). What it costs on such a leg is that the peer's image is unchecked — and,
+/// where the verifier holds no endorsement of its own, its machine as well,
+/// since the chain then comes from the peer's own quote. Anything that would
+/// have rested on the peer's identity has to rest elsewhere.
 #[derive(Clone, Debug)]
 pub enum MeasurementPolicy {
-    /// Accept any measurement (dev only — pins nothing).
+    /// Accept any measurement. The measurement is still real and still checked
+    /// against the report signature — it is simply not compared to a list.
     AcceptAny,
     /// Accept only these hex measurements.
     Pinned(Vec<String>),
