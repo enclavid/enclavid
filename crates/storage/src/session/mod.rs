@@ -1,19 +1,25 @@
 //! The per-session store, split into two tiers:
 //!
-//!   * [`db_blobs`] — one SQLite file per session (`blobs/<sha256(id)>.sqlite`):
+//!   * [`db_blobs`] — one SQLite file per session (`blobs/<sha256(name)>.sqlite`):
 //!     the actual session data (state / metadata / version / media / disclosure),
 //!     a round committing atomically in one transaction.
 //!   * [`db_meta`] — the global cross-session index (`meta.sqlite`), the
 //!     "metadata" tier: today the absolute TTL deadline, extensible to any future
 //!     globally-queryable per-session metadata.
 //!
-//! [`SessionStore`] is the facade over both: it owns `session_id` → path mapping
-//! (hashed — hides which session a file is under the CVM's dm-crypt disk, and
-//! guards path traversal) and the create ordering + sweep that tie the two tiers
+//! [`SessionStore`] is the facade over both: it owns the name → path mapping
+//! (hashed — hides which record a file is on a volume the host provisions and
+//! reads, and guards path traversal) and the create ordering + sweep that tie the two tiers
 //! together. One file per session gives isolation, wholesale delete (`rm` returns
 //! space to the OS — no compaction), atomic rounds, and cross-session write
 //! parallelism (the hot update path touches neither the index nor any global
 //! lock).
+//!
+//! **`name`, not `session_id`.** This tier is a KV over opaque strings and knows
+//! nothing about sessions or callers. What it receives is a record name that
+//! [`crate::scope`] derived from the calling peer's launch digest and the
+//! session id it asked for, which is what keeps two callers out of each other's
+//! records; here it is simply the key.
 
 mod db_blobs;
 mod db_meta;
@@ -79,8 +85,8 @@ impl SessionStore {
     }
 
     /// Batched typed read (see [`DbBlobs::read`]).
-    pub fn read(&self, id: &str, req: ReadRequest) -> Result<ReadResponse, SessionError> {
-        self.blobs.read(id, req).map_err(SessionError::from)
+    pub fn read(&self, name: &str, req: ReadRequest) -> Result<ReadResponse, SessionError> {
+        self.blobs.read(name, req).map_err(SessionError::from)
     }
 
     /// Atomic CAS write. `expected_version == None` dispatches to a create,
@@ -92,7 +98,7 @@ impl SessionStore {
     /// `req.ops` must be non-empty.
     pub fn write(
         &self,
-        id: &str,
+        name: &str,
         req: WriteRequest,
         deadline: Option<u64>,
     ) -> Result<WriteResponse, SessionError> {
@@ -102,28 +108,28 @@ impl SessionStore {
             }
             match req.expected_version {
                 None => {
-                    if self.blobs.committed_exists(id)? {
+                    if self.blobs.committed_exists(name)? {
                         return Err(StoreErr::VersionMismatch);
                     }
                     if let Some(dl) = deadline {
-                        self.meta.put_deadline(id, dl)?;
+                        self.meta.put_deadline(name, dl)?;
                     }
-                    self.blobs.create(id, req.ops)
+                    self.blobs.create(name, req.ops)
                 }
-                Some(expected) => self.blobs.update(id, req.ops, expected),
+                Some(expected) => self.blobs.update(name, req.ops, expected),
             }
         })()
         .map_err(SessionError::from)
     }
 
     /// `/reset`: drop STATE + media, keep the session (see [`DbBlobs::delete`]).
-    pub fn delete(&self, id: &str) -> Result<DeleteResponse, SessionError> {
-        self.blobs.delete(id).map_err(SessionError::from)
+    pub fn delete(&self, name: &str) -> Result<DeleteResponse, SessionError> {
+        self.blobs.delete(name).map_err(SessionError::from)
     }
 
     /// Existence probe (see [`DbBlobs::exists`]).
-    pub fn exists(&self, id: &str) -> Result<bool, SessionError> {
-        self.blobs.exists(id).map_err(SessionError::from)
+    pub fn exists(&self, name: &str) -> Result<bool, SessionError> {
+        self.blobs.exists(name).map_err(SessionError::from)
     }
 
     /// Delete every session whose deadline is `<= now`, up to `max` per call:
@@ -131,14 +137,18 @@ impl SessionStore {
     /// opens), `rm` each session file, then drop the index rows. Self-healing —
     /// a crash mid-sweep re-selects leftover rows; a row whose file is already
     /// gone just `rm`s a missing file.
+    ///
+    /// Deliberately unscoped: a TTL is a TTL, and every caller's records expire
+    /// on the same terms. The names it sweeps are opaque to it, so it needs to
+    /// know nothing about whose they are.
     pub fn sweep_once(&self, now: u64, max: usize) -> Result<usize, SessionError> {
         (|| -> Result<usize, StoreErr> {
-            let ids = self.meta.expired(now, max)?;
-            for id in &ids {
-                self.blobs.remove_files(id);
+            let names = self.meta.expired(now, max)?;
+            for name in &names {
+                self.blobs.remove_files(name);
             }
-            self.meta.remove(&ids)?;
-            Ok(ids.len())
+            self.meta.remove(&names)?;
+            Ok(names.len())
         })()
         .map_err(SessionError::from)
     }

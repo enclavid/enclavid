@@ -1,12 +1,17 @@
 //! The per-session data tier: **one SQLite database file per session** under a
-//! `blobs/` directory. [`DbBlobs`] owns that directory and the `session_id` →
+//! `blobs/` directory. [`DbBlobs`] owns that directory and the record name →
 //! path mapping; the facade ([`super::SessionStore`]) holds one `DbBlobs` and
 //! delegates. A blind ciphertext KV — every value is already AEAD-sealed
 //! TEE-side, so this tier never interprets bytes.
 //!
-//! The file is `<dir>/<sha256(id)>.sqlite` — hashing the id both hides which
-//! session a file is (defense-in-depth under the CVM's dm-crypt disk) and guards
-//! path traversal. A round's ops (state + metadata + version + media + disclosure)
+//! The file is `<dir>/<sha256(name)>.sqlite` — hashing the name both hides which
+//! record a file is and guards path traversal, which is what lets this tier take
+//! any string at all. The volume underneath is plain ext4 that the host
+//! provisions and can read, so the hash is not a second layer over an encrypted
+//! disk: content is ciphertext by the time it arrives, and a host that mounts
+//! the volume learns how many records exist, when each appeared and how big it
+//! is regardless. What the hash withholds is which record is which. A round's
+//! ops (state + metadata + version + media + disclosure)
 //! commit in ONE transaction, so a committed state never references media that
 //! isn't durable. Connections are opened per operation (SQLite opens in ~tens of
 //! µs) — no pool, no persistent handle.
@@ -54,9 +59,9 @@ impl DbBlobs {
         })
     }
 
-    /// `<dir>/<sha256(id)>.sqlite`.
-    fn path(&self, id: &str) -> PathBuf {
-        let sh = hex::encode(Sha256::digest(id.as_bytes()));
+    /// `<dir>/<sha256(name)>.sqlite`.
+    fn path(&self, name: &str) -> PathBuf {
+        let sh = hex::encode(Sha256::digest(name.as_bytes()));
         self.dir.join(format!("{sh}.sqlite"))
     }
 
@@ -64,8 +69,8 @@ impl DbBlobs {
     /// order, each variant matching its selector; `None` (absent) vs `Some(empty)`
     /// preserved. Empty `req.fields` is a version probe. Absent (or crash-empty)
     /// file ⇒ `version == 0` with absent slots.
-    pub(super) fn read(&self, id: &str, req: ReadRequest) -> Result<ReadResponse, StoreErr> {
-        let conn = match open_ro(&self.path(id))? {
+    pub(super) fn read(&self, name: &str, req: ReadRequest) -> Result<ReadResponse, StoreErr> {
+        let conn = match open_ro(&self.path(name))? {
             Some(c) => c,
             None => return Ok(absent_response(&req)),
         };
@@ -115,8 +120,8 @@ impl DbBlobs {
     /// pre-check + deadline write; this does the atomic in-txn must-not-exist
     /// guard + `version=1` + the round's ops, all in ONE fsync (schema
     /// materialised inside the txn).
-    pub(super) fn create(&self, id: &str, ops: Vec<Op>) -> Result<WriteResponse, StoreErr> {
-        let mut conn = open_create(&self.path(id))?;
+    pub(super) fn create(&self, name: &str, ops: Vec<Op>) -> Result<WriteResponse, StoreErr> {
+        let mut conn = open_create(&self.path(name))?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA)?;
         if tx
@@ -138,11 +143,11 @@ impl DbBlobs {
     /// the deadline (absolute, fixed at create).
     pub(super) fn update(
         &self,
-        id: &str,
+        name: &str,
         ops: Vec<Op>,
         expected: u64,
     ) -> Result<WriteResponse, StoreErr> {
-        let mut conn = match open_rw(&self.path(id))? {
+        let mut conn = match open_rw(&self.path(name))? {
             Some(c) => c,
             None => return Err(StoreErr::VersionMismatch),
         };
@@ -166,8 +171,8 @@ impl DbBlobs {
 
     /// The `/reset` path: drop the STATE scalar + all media, keeping the session.
     /// Returns the state-field delete count (0 or 1). Absent file ⇒ 0.
-    pub(super) fn delete(&self, id: &str) -> Result<DeleteResponse, StoreErr> {
-        let mut conn = match open_rw(&self.path(id))? {
+    pub(super) fn delete(&self, name: &str) -> Result<DeleteResponse, StoreErr> {
+        let mut conn = match open_rw(&self.path(name))? {
             Some(c) => c,
             None => return Ok(DeleteResponse { deleted: 0 }),
         };
@@ -183,14 +188,14 @@ impl DbBlobs {
     }
 
     /// Existence probe: file present with a committed version row.
-    pub(super) fn exists(&self, id: &str) -> Result<bool, StoreErr> {
-        self.committed_exists(id)
+    pub(super) fn exists(&self, name: &str) -> Result<bool, StoreErr> {
+        self.committed_exists(name)
     }
 
     /// Whether a real (committed-meta) session file exists. Absent or crash-empty
     /// ⇒ `false`.
-    pub(super) fn committed_exists(&self, id: &str) -> Result<bool, StoreErr> {
-        let conn = match open_ro(&self.path(id))? {
+    pub(super) fn committed_exists(&self, name: &str) -> Result<bool, StoreErr> {
+        let conn = match open_ro(&self.path(name))? {
             Some(c) => c,
             None => return Ok(false),
         };
@@ -210,8 +215,8 @@ impl DbBlobs {
     /// Unix, unlinking a file that happens to be open succeeds: the open
     /// connection keeps working on the inode until it closes, then the space is
     /// freed; a later open by path sees it absent.
-    pub(super) fn remove_files(&self, id: &str) {
-        let base = self.path(id);
+    pub(super) fn remove_files(&self, name: &str) {
+        let base = self.path(name);
         for suffix in ["", "-journal", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", base.display()));
         }

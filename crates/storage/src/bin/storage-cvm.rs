@@ -5,9 +5,12 @@
 //! like the hatch and the engine workers.
 //!
 //! **Blind.** It holds no `tee_seal_key` and no applicant token; every payload is
-//! already AEAD-sealed TEE-side. RA-TLS proves the peer is the attested api and
+//! already AEAD-sealed TEE-side. RA-TLS proves the peer is an attested guest and
 //! hides the access pattern + key from the untrusted host; the sealed payload
-//! means even a storage-CVM compromise leaks only ciphertext.
+//! means even a storage-CVM compromise leaks only ciphertext. WHICH attested
+//! guest it is, this node cannot demand — so it partitions its records by the
+//! digest the peer proved instead of trusting that only api calls
+//! (`enclavid_storage::scope`).
 //!
 //! Transport TODAY: a plain TCP listener (dev) wrapped in RA-TLS; Plan-A swaps
 //! the TCP dial for the host vsock-relay rendezvous (shared fleet item, not here).
@@ -19,7 +22,7 @@ use object_store::local::LocalFileSystem;
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 
-use enclavid_storage::{CacheBlobs, SessionStore, StorageSvc, now_unix};
+use enclavid_storage::{CacheBlobs, Caller, SessionStore, StorageSvc, now_unix};
 use fleet_transport::LegFailure;
 use safe_logger::{debug, info, reason, safe, warn};
 use storage_rpc::{CacheServiceServerShared, SessionStoreServiceServerShared, StorageClients};
@@ -258,11 +261,12 @@ async fn main() {
         reason!("a constant, emitted once at boot")
     );
 
-    // Mutual RA-TLS acceptor (minted once at boot): every accepted api connection
-    // is an attested TLS server that also REQUIRES the api's attested cert.
-    // This build attests with a software identity the whole dev fleet shares, and
-    // pins that same identity: it proves the peer links this source tree, nothing
-    // about where the peer runs.
+    // Mutual RA-TLS acceptor, minted once at boot: every accepted connection is
+    // an attested TLS server that also REQUIRES an attested client certificate.
+    // WHOSE it is depends on the build, and `fleet_identity` above says what
+    // each arm gives up — the measured one accepts any attested guest, which is
+    // why records are partitioned by the digest the peer proved rather than by
+    // an assumption about who called.
     let (attestor, policy) = fleet_identity();
     let ratls = tokio_rustls::TlsAcceptor::from(Arc::new(
         enclavid_ra_tls::server_config(attestor, policy).unwrap_or_else(|e| {
@@ -317,6 +321,25 @@ async fn serve_conn(
         debug!("ra-tls accept: {e}");
         LegFailure::Attest
     })?;
+
+    // Read the peer's digest HERE, before the stream is split — the connection
+    // object is what carries it, and splitting consumes it. `peer_measurement`
+    // enforces the other half of the timing itself: it refuses while the
+    // connection is still handshaking, so this cannot be moved somewhere the
+    // value would not yet have been verified. See `enclavid_storage::Caller` for
+    // what it partitions and why nobody can claim someone else's.
+    //
+    // A successful RA-TLS handshake cannot leave this absent: the verifier
+    // refuses a peer with no certificate and a certificate with no quote. The
+    // fallible path is therefore unreachable, and it is written as a refusal
+    // rather than a default because the alternative to a digest is not "some
+    // other digest" but "every caller in one partition", which is the state this
+    // exists to prevent.
+    let measurement = enclavid_ra_tls::peer_measurement(tls.get_ref().1).ok_or_else(|| {
+        debug!("attested peer carries no readable measurement");
+        LegFailure::Attest
+    })?;
+
     let (read, write) = tokio::io::split(tls);
     let (conn, mut tx, _rx) = remoc::Connect::io::<_, _, StorageClients, StorageClients, Ciborium>(
         storage_rpc::connection_cfg(),
@@ -330,10 +353,14 @@ async fn serve_conn(
     })?;
     tokio::spawn(conn);
 
+    // The services are per-connection so they can carry who is calling; the
+    // backends they delegate to stay shared, which is what keeps this one node
+    // rather than one node per peer.
+    let caller = Arc::new(Caller::new(svc, measurement));
     let (session_server, session) =
-        SessionStoreServiceServerShared::<_, Ciborium>::new(svc.clone(), SESSION_CONCURRENCY);
+        SessionStoreServiceServerShared::<_, Ciborium>::new(caller.clone(), SESSION_CONCURRENCY);
     let (cache_server, cache) =
-        CacheServiceServerShared::<_, Ciborium>::new(svc.clone(), CACHE_CONCURRENCY);
+        CacheServiceServerShared::<_, Ciborium>::new(caller, CACHE_CONCURRENCY);
     tx.send(StorageClients { session, cache })
         .await
         .map_err(|e| {

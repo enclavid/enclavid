@@ -1,6 +1,7 @@
 //! The L2 compiled-artifact (cwasm) cache, backed by `object_store`. A blind
 //! opaque-blob KV keyed by the identity-hiding `blob_name` the api derives
-//! (`hex(HKDF(filename_key, cache_id))`) — the CVM sees only pseudo-random hex,
+//! (`hex(HKDF(filename_key, cache_id))`), re-derived here against the calling
+//! peer's launch digest ([`crate::scope`]) — the CVM sees only pseudo-random hex,
 //! never the composition. Sealed bytes ride the wire; a miss is `Ok(None)` (not
 //! an error) so the orchestrator recompiles. Kept on `object_store` (not redb) to
 //! keep multi-MiB cwasm blobs off the session B-tree behind a backend-agnostic
@@ -25,9 +26,10 @@ const MAX_KEY_LEN: usize = 128;
 
 /// Validate `key` is non-empty bounded hex and map it to an object path. The
 /// alphabet excludes `/`, `.`, `\`, so the location cannot traverse out of the
-/// store prefix. Mirrors the hatch's guard: the api always emits lowercase hex,
-/// but the CVM re-validates (defence-in-depth — never trust a wire-supplied path
-/// segment even from an attested peer).
+/// store prefix. Nothing on the served path can fail this any more — a key
+/// reaches this store only as a [`crate::scope::Name`], which is hex by
+/// construction — but the store is a plain type that will take any string, and
+/// this is the check that makes that safe.
 fn object_path(key: &str) -> Result<ObjPath, CacheError> {
     if key.is_empty() || key.len() > MAX_KEY_LEN {
         return Err(CacheError("cache key length".to_string()));

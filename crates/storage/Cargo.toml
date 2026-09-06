@@ -40,8 +40,10 @@ enclavid-attestation = { path = "../attestation", default-features = false }
 # CAS in one transaction; opens in ~tens of µs, so a fresh connection per op is
 # cheap. Page-chain blobs (no contiguity requirement) suit the ≤64 MiB media.
 rusqlite = { version = "0.32", features = ["bundled"] }
-# Identity-hiding session filename = hex(sha256(session_id)) — also a path-
-# traversal guard (see `crate::session`).
+# Two hashes, both SHA-256. The record name a call may reach is derived from the
+# calling peer's launch digest (see `crate::scope`), and the file that name lands
+# in is hex(sha256(name)) — identity-hiding, and a path-traversal guard (see
+# `crate::session`).
 sha2 = "0.10"
 # L2 cwasm cache backend — a backend-agnostic `ObjectStore` blob interface
 # (local filesystem today), separate from the session store. The cache is
