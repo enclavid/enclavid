@@ -94,6 +94,52 @@ impl MeasurementPolicy {
     }
 }
 
+/// The launch digest of the peer, once the handshake that verified it is over.
+///
+/// The value lives in a field of the quote that the SENDER writes, so on its own
+/// it is a claim rather than a fact. What makes it a fact is that
+/// [`verify_ratls_cert`] refused this connection unless the field equalled the
+/// measurement inside the firmware-signed report, and unless that report was
+/// bound to this certificate's own key. Read off an unverified certificate, it
+/// is whatever the sender typed.
+///
+/// So the precondition is not "trust the peer" — the hardware has already
+/// spoken — it is "the verification has HAPPENED". That is a fact about time,
+/// and a comment is a poor place to keep one. Hence the argument: a
+/// `CommonState`, asked whether it is [`still handshaking`](
+/// rustls::CommonState::is_handshaking), rather than certificate bytes that
+/// could have come from anywhere. Called too early, this returns `None` instead
+/// of a plausible-looking string, and it cannot be pointed at a certificate that
+/// was never checked at all.
+///
+/// Also `None` when there is no peer certificate or it carries no quote —
+/// unreachable after a successful RA-TLS handshake, which refuses both.
+///
+/// One function for both roles: `ServerConnection` and `ClientConnection` each
+/// deref to `CommonState`, and the RA-TLS check is the same either way.
+///
+/// # What it is for
+///
+/// Partitioning, not authorisation. A verifier that has already decided whether
+/// to accept the peer can use this to keep one peer's state out of another's,
+/// while deciding nothing about who may connect. The digest cannot be claimed by
+/// anything not running that image — replaying another peer's report needs the
+/// ephemeral private key it was bound to — so distinct peers land in distinct
+/// partitions whatever the measurement policy is, including `AcceptAny`.
+pub fn peer_measurement(conn: &rustls::CommonState) -> Option<String> {
+    if conn.is_handshaking() {
+        return None;
+    }
+    let cert = conn.peer_certificates()?.first()?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(cert).ok()?;
+    let ext = parsed
+        .extensions()
+        .iter()
+        .find(|e| e.oid.to_id_string() == RATLS_OID_DOTTED)?;
+    let quote: Quote = ciborium::from_reader(ext.value).ok()?;
+    Some(quote.measurement)
+}
+
 /// Build a `rustls::Error` for an RA-TLS verification failure (surfaces to the peer as a
 /// TLS handshake abort).
 fn ratls_error(msg: impl Into<String>) -> rustls::Error {

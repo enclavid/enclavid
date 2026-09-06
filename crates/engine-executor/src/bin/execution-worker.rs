@@ -34,10 +34,15 @@
 //! memfd-backed L1 and the callback relay.
 //!
 //! **L1.** The supervisor owns the fleet's ONLY in-memory L1, one
-//! [`CompositionEntry`] per `composition_key`. The compiled `cwasm` lives there as
-//! a single anonymous in-RAM file — a sealed Linux `memfd` in prod, an unlinked
-//! tmpfile in dev — held by fd, NOT as heap bytes and NOT as a named file (the two
-//! earlier copies collapse into this one). On an L1 miss it returns
+//! [`CompositionEntry`] per `(caller measurement, composition_key)` — the caller
+//! is in the key because entries are written by whoever calls and read by
+//! whoever asks, and only the digest keeps one peer's bytes out of another's.
+//! See [`Caller`].
+//!
+//! The compiled `cwasm` lives there as a single anonymous in-RAM file — a sealed
+//! Linux `memfd` in prod, an unlinked tmpfile in dev — held by fd, NOT as heap
+//! bytes and NOT as a named file (the two earlier copies collapse into this
+//! one). On an L1 miss it returns
 //! [`RunOutcome::CacheMiss`]; the orchestrator resolves the bundle under its OWN
 //! `composition_key` and re-drives with `RunRequest::bundle = Some(..)`, which the
 //! supervisor writes into the memfd (`try_get_with` coalesces concurrent installs
@@ -183,27 +188,30 @@ struct Supervisor {
     /// rounds; the expensive layer (OCI pull + compile + api round-trip) is what
     /// this saves. Replaces the former split byte-cache + tmpfs-file cache: the
     /// cwasm lives ONCE here, delivered to each child by fd.
-    compositions: Cache<String, Arc<CompositionEntry>>,
+    compositions: Cache<(String, String), Arc<CompositionEntry>>,
     /// The disposable per-round child pool (spawn + concurrency bound + round
     /// deadline + reap), shared with the compile-worker.
     pool: ChildPool,
 }
 
 impl Supervisor {
-    /// Materialize an ORCHESTRATOR-PROVIDED bundle into the L1 memfd cache under
-    /// `composition_key`, coalescing concurrent installs of the same key into ONE
-    /// memfd write (`try_get_with`); errors aren't cached (a transient failure
-    /// retries). The orchestrator both COMPUTED the key AND resolved the bundle, so
-    /// the worker only ever files bytes under the key it was handed — it cannot
-    /// choose a foreign slot (L2 cache-poisoning defence).
+    /// Materialize a CALLER-PROVIDED bundle into the L1 memfd cache under `slot`,
+    /// coalescing concurrent installs of the same slot into ONE memfd write
+    /// (`try_get_with`); errors aren't cached (a transient failure retries).
+    ///
+    /// `slot` is `(caller measurement, composition_key)` and is built by
+    /// [`Caller`], never here — the composition half is the caller's to choose,
+    /// the measurement half is not the caller's at all. That is what bounds the
+    /// damage: a caller can occupy any slot it likes inside its own partition and
+    /// none outside it. This used to rest on the caller BEING the orchestrator,
+    /// which nothing checked; see [`Caller`] for what went wrong with that.
     async fn install_bundle(
         &self,
-        composition_key: &str,
+        slot: (String, String),
         bundle: CompiledBundle,
     ) -> Result<Arc<CompositionEntry>, ExecError> {
-        let key = composition_key.to_string();
         self.compositions
-            .try_get_with(key, async move {
+            .try_get_with(slot, async move {
                 let CompiledBundle {
                     cwasm,
                     embedded_imports,
@@ -295,7 +303,52 @@ impl Supervisor {
     }
 }
 
-impl ExecutorService for Supervisor {
+/// One caller's view of the supervisor: the shared machinery, plus WHICH peer is
+/// asking.
+///
+/// The L1 cache is the reason this type exists. It is process-wide — one moka
+/// map behind one `Supervisor`, shared by every connection — and its entries are
+/// written by whoever calls `run_with_bundle`, under a key that same caller
+/// chose. The comment on `install_bundle` used to carry the whole safety
+/// argument: "the orchestrator both COMPUTED the key AND resolved the bundle".
+/// That is a claim about WHO IS ON THE OTHER END, and nothing enforced it — the
+/// leaves accept any attested guest, because they cannot pin api's measurement
+/// without a cycle.
+///
+/// Unenforced, it fails like this: a guest the host launched calls
+/// `run_with_bundle` with the key api will use next and native code of its own.
+/// api's later cache-only `run` finds the slot filled, and the attacker's code
+/// executes inside a real round, holding that applicant's decrypted state and
+/// captures. api sees a cache hit — the fast, ordinary path — and never resolves
+/// the real bundle at all.
+///
+/// So the premise stops being assumed and becomes structural: entries are
+/// partitioned by the CALLER's measurement, and a caller cannot choose that. It
+/// comes from a report the AMD Secure Processor signed, bound to the very TLS
+/// key the caller proved it holds — replaying api's report needs api's ephemeral
+/// private key, which never leaves api's encrypted memory and does not outlive
+/// one connection. So a foreign caller lands under its own digest, always, and
+/// api's partition is reachable only by something running api's image, which is
+/// api.
+///
+/// Note what this is NOT: it decides nothing about who may call. `AcceptAny`
+/// stays. It only stops callers reaching each other — the same move the child
+/// sandbox makes, where untrusted wasm is contained rather than identified.
+struct Caller {
+    sup: Arc<Supervisor>,
+    /// The peer's launch digest, read from its verified certificate — see
+    /// `enclavid_ra_tls::peer_measurement` for why that is trustworthy only
+    /// after the handshake, which is the only place this is built.
+    measurement: String,
+}
+
+impl Caller {
+    fn slot(&self, composition_key: &str) -> (String, String) {
+        (self.measurement.clone(), composition_key.to_string())
+    }
+}
+
+impl ExecutorService for Caller {
     /// The L1-cache path: run the composition if it is cached, else report the miss
     /// so the orchestrator resolves the bundle (under ITS OWN key) and re-drives via
     /// [`run_with_bundle`](Self::run_with_bundle). No bundle crosses on this call.
@@ -310,8 +363,14 @@ impl ExecutorService for Supervisor {
             session_state,
             event,
         } = req;
-        match self.compositions.get(&composition_key).await {
+        match self
+            .sup
+            .compositions
+            .get(&self.slot(&composition_key))
+            .await
+        {
             Some(entry) => self
+                .sup
                 .run_in_child(entry, session_state, event, props, callbacks)
                 .await
                 .map(|RunReply { status }| RunOutcome::Ran(status)),
@@ -325,8 +384,8 @@ impl ExecutorService for Supervisor {
     /// The post-miss path: the orchestrator supplies the bundle it resolved under
     /// `req.composition_key`; file it in L1 under THAT key and run. Always runs (a
     /// bundle is in hand), so it returns the [`RunReply`] directly. The worker files
-    /// bytes only under the orchestrator's key, so it cannot poison another
-    /// composition's slot.
+    /// bytes only under the caller's own key IN THE CALLER'S OWN PARTITION, so it
+    /// can poison neither another composition's slot nor another peer's.
     async fn run_with_bundle(
         &self,
         req: RunRequest,
@@ -339,8 +398,12 @@ impl ExecutorService for Supervisor {
             session_state,
             event,
         } = req;
-        let entry = self.install_bundle(&composition_key, bundle).await?;
-        self.run_in_child(entry, session_state, event, props, callbacks)
+        let entry = self
+            .sup
+            .install_bundle(self.slot(&composition_key), bundle)
+            .await?;
+        self.sup
+            .run_in_child(entry, session_state, event, props, callbacks)
             .await
     }
 }
@@ -664,6 +727,25 @@ async fn serve_conn(
         debug!("ra-tls accept: {e}");
         LegFailure::Attest
     })?;
+
+    // Read the peer's digest HERE, before the stream is split — the connection
+    // object is what carries it, and splitting consumes it. `peer_measurement`
+    // enforces the other half of the timing itself: it refuses while the
+    // connection is still handshaking, so this cannot be moved somewhere the
+    // value would not yet have been verified. See `Caller` for what it
+    // partitions and why nobody can claim someone else's.
+    //
+    // A successful RA-TLS handshake cannot leave this absent: the verifier
+    // refuses a peer with no certificate and a certificate with no quote. The
+    // fallible path is therefore unreachable, and it is written as a refusal
+    // rather than a default because the alternative to a digest is not "some
+    // other digest" but "every caller in one partition", which is the state
+    // this exists to prevent.
+    let measurement = enclavid_ra_tls::peer_measurement(tls.get_ref().1).ok_or_else(|| {
+        debug!("attested peer carries no readable measurement");
+        LegFailure::Attest
+    })?;
+
     let (read, write) = tokio::io::split(tls);
     let (conn, mut tx, _rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
@@ -674,7 +756,14 @@ async fn serve_conn(
             })?;
     tokio::spawn(conn);
 
-    let (server, client) = ExecutorServiceServerShared::<_, Ciborium>::new(svc, 4);
+    // The service is per-connection so it can carry who is calling; the machinery
+    // it delegates to — the L1 map and the child pool — stays shared, which is
+    // what makes the pool ONE concurrency budget rather than one per caller.
+    let caller = Arc::new(Caller {
+        sup: svc,
+        measurement,
+    });
+    let (server, client) = ExecutorServiceServerShared::<_, Ciborium>::new(caller, 4);
     tx.send(client).await.map_err(|e| {
         debug!("send service client: {e}");
         LegFailure::Clients
