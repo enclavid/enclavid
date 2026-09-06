@@ -145,7 +145,7 @@ pub async fn connect_storage(
     let config = crate::endorsement::fleet_client_config(attestor, crate::health::Peer::Storage)
         .map_err(|e| {
             debug!("ra-tls: {e}");
-            LegFailure::Attest
+            LegFailure::Mint
         })?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let tls = connector

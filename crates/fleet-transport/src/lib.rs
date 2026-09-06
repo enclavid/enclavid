@@ -35,7 +35,7 @@ compile_error!(
 /// What is given up is the underlying message. It is not lost — the conversion
 /// site sends it to `debug!`, which never leaves the TEE — but production sees
 /// this type's own account of what happened and an `ErrorKind`, not the text.
-/// That is the trade: which of six things went wrong is worth having in front of
+/// That is the trade: which of the seven went wrong is worth having in front of
 /// an operator, and a sentence from rustls or remoc is worth having only in
 /// front of a developer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +43,13 @@ pub enum LegFailure {
     /// Nothing answered, or the connection died before TLS. The kind is
     /// `std::io::ErrorKind`, a fieldless enum whose `Debug` is its own name.
     Connect(std::io::ErrorKind),
+    /// This end could not produce its own attested identity, so no handshake was
+    /// attempted. Separate from [`LegFailure::Attest`] because the actions are
+    /// opposite: nobody was contacted and nobody refused anything, so the fault
+    /// is here — a chip that will not mint, a platform TCB that moved out from
+    /// under a held endorsement. Folding it into `Attest` sent an operator to
+    /// restart a healthy peer.
+    Mint,
     /// The RA-TLS handshake did not complete — either peer refusing the other's
     /// attestation, or an ordinary TLS failure.
     Attest,
@@ -73,6 +80,10 @@ impl std::fmt::Display for LegFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LegFailure::Connect(kind) => write!(f, "nothing answered at that address ({kind:?})"),
+            LegFailure::Mint => f.write_str(
+                "could not attest ITSELF, so nothing was dialled — this end cannot prove \
+                 what it is",
+            ),
             LegFailure::Attest => f.write_str(
                 "answered, but the attested handshake did not complete — one side refused \
                  the other",

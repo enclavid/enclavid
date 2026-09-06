@@ -132,7 +132,7 @@ pub async fn connect_execution_worker(
         crate::endorsement::fleet_client_config(attestor, crate::health::Peer::ExecutionWorker)
             .map_err(|e| {
                 debug!("ra-tls: {e}");
-                LegFailure::Attest
+                LegFailure::Mint
             })?;
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
     let tls = connector
