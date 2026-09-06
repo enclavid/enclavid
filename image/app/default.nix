@@ -12,6 +12,12 @@
 #
 # Static musl, because the initramfs carries no libc and no dynamic loader —
 # see image/initramfs.
+#
+# `measurements` is the three leaves' launch digests, and only api's part reads
+# them. It is an argument rather than something computed here because computing
+# them needs the leaves' images, which need this file — `image/default.nix` owns
+# that ordering and is where a complete build starts.
+{ measurements ? null }:
 let
   nixpkgs = builtins.fetchTarball {
     # nixos-26.05 @ 2026-08-23 — same pin as the rest of image/.
@@ -37,9 +43,10 @@ let
   # `noDefaultFeatures` is per part rather than blanket: `--no-default-features`
   # applies to the selected package, so setting it where a package has no
   # feature table changes nothing and only obscures which roles depend on it.
-  mkPart = { pname, package, binaries, features ? [ ], noDefaultFeatures ? false }:
+  mkPart = { pname, package, binaries, features ? [ ], noDefaultFeatures ? false
+           , preBuild ? "" }:
     static.rustPlatform.buildRustPackage {
-      inherit pname src;
+      inherit pname src preBuild;
       version = "0.1.0";
 
       cargoLock.lockFile = ../../Cargo.lock;
@@ -123,14 +130,43 @@ builtins.foldl' (a: b: a // b) { } [
   # a software test key compiled in beside the real one. Taking defaults here
   # is what produced an image whose quotes were signed by a key generated at
   # each process start.
-  (withDebug "api" {
-    pname = "enclavid-app-api";
-    parts = [{
+  #
+  # api is also the one role written out per variant rather than through
+  # `withDebug`, because the two differ by more than a feature: each pins the
+  # three leaf images of ITS OWN variant. A production api that pinned debug
+  # leaves would refuse every peer it was given, correctly and confusingly.
+  (let
+    apiPart = variant: {
       package = "enclavid-api";
       binaries = [ "enclavid-api" ];
       noDefaultFeatures = true;
       features = [ "sev-snp" "vsock" ];
-    }];
+      # Exported into the build environment rather than substituted into the
+      # source, because that is what `env!` reads. Each file holds one digest and
+      # no newline — `endorsement.rs` checks for exactly 96 lowercase hex
+      # characters, so `$(cat …)` has to be the whole of it.
+      preBuild =
+        let m = measurements.${variant} or (throw
+          "image/app: api is built from the three leaf measurements, and none were \
+           given. Build it through `image/default.nix`, which measures the leaves \
+           first — `nix-build image -A images.api`.");
+        in ''
+          export ENCLAVID_MEASUREMENT_STORAGE=$(cat ${m.storage})
+          export ENCLAVID_MEASUREMENT_COMPILE_WORKER=$(cat ${m.compile-worker})
+          export ENCLAVID_MEASUREMENT_EXECUTION_WORKER=$(cat ${m.execution-worker})
+        '';
+    };
+  in
+  {
+    api = mkApp {
+      pname = "enclavid-app-api";
+      parts = [ (apiPart "production") ];
+    };
+    api-debug = mkApp {
+      pname = "enclavid-app-api-debug";
+      parts = [ (apiPart "debug") ];
+      features = [ "debug" ];
+    };
   })
 
   # The storage CVM: the blind ciphertext store. `vsock` for the same reason as

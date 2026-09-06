@@ -15,30 +15,29 @@ this directory rather than observed, that is marked too.
 
 | | what | why it is not here |
 |---|---|---|
-| firmware | `ovmf-amdsev`, a distribution package | not in the pinned nixpkgs; see below |
 | VMM | QEMU with SEV-SNP support | built from source on the host |
-| the launch parameters | vCPU count and type, guest policy, `kernel-hashes` | had no home in the tree until this file |
-| the measuring tool | `sev-snp-measure` | IS in the pinned nixpkgs as `sev-snp-measure`, unused so far |
 
-The first three are the gap. A measurement is a function of all of them, so a
-digest computed against a different firmware build, a different vCPU count or a
-launch that forgot `kernel-hashes=on` is a digest of a different machine — and
-nothing today would notice.
+That is the whole of it now. The firmware, the launch parameters and the
+measuring tool were on this list and are not any more: `image/ovmf` builds the
+AmdSev firmware from the pinned edk2, `image/default.nix` holds the launch
+parameters and calls `sev-snp-measure` from the pinned nixpkgs.
+
+QEMU stays outside because it does not enter the digest — it constructs the
+VMSA, but what it constructs is a function of the parameters, not of its own
+version. It matters to whether the guest boots at all: `sev-snp-guest`,
+`kernel-hashes` and `vhost-vsock-pci` all have to be present. Observed: 10.2.4,
+built from source.
 
 ### Firmware
 
-Observed: `ovmf-amdsev_2025.11-3ubuntu8_all.deb`, unpacked, yielding a single
-combined flash image. There is no separate variables file and none is measured.
+`nix-build image/ovmf` — the AmdSev package of edk2 202602 out of the pinned
+nixpkgs, one combined flash image, no separate variables file and none measured.
+See that file for why it is built rather than fetched, and for the one build
+quirk (an empty `grub.efi`) that both this and the distro's own package need.
 
-```text
-OVMF.amdsev.fd
-sha256  6f5c36ddf2eb56052df7adbb0fd32bd7997cc2a706573e33fbd8a4d7918d438d
-```
-
-`README.md` says the firmware is verified by "package version + digest". That
-line is now true of this file and of nothing else in the tree: until the
-firmware becomes a pinned derivation, the digest above is the only thing
-standing between a rebuild and a silently different measurement.
+The distro binary this replaces was `ovmf-amdsev_2025.11-3ubuntu8`, sha256
+`6f5c36dd…438d`. Recorded because every measurement taken before this change was
+taken against it, and none of them carry over.
 
 ### VMM
 
@@ -49,7 +48,9 @@ present.
 
 ## Building the images
 
-Three derivations, one per measurement input that this repository does own.
+`nix-build image -A images.<role>` does all of the below and gets the ordering
+right. What follows is the individual pieces, for when one of them is what you
+are working on.
 
 ```sh
 nix-build image/kernel -A diskless        # api, both workers
@@ -154,9 +155,10 @@ host-relay --listen vsock:8003 --to vsock:$EXEC_CID:8003
 HATCH_LISTEN_ADDR=8000 HATCH_AUTH=none HATCH_AUTH_PRINCIPAL=guest host-hatch
 ```
 
-`HATCH_AUTH=none` is the dev posture. A dev api additionally needs
-`ENCLAVID_TEE_KEY=<64 hex chars>` appended to its command line, because outside
-`sev-snp` the sealing key is not derived from the chip.
+`HATCH_AUTH=none` is the dev posture. Outside `sev-snp` a dev api also needs
+`ENCLAVID_TEE_KEY=<64 hex chars>`, because the sealing key is then not derived
+from the chip — but it has to be IN the cmdline file, not appended at launch, or
+the guest's measurement stops matching what was computed for it.
 
 ### The health ports
 
@@ -176,26 +178,47 @@ peers and the hatch alongside its own bool; a leaf's is the bool alone. Whether
 any of that means *ready* is the reader's conclusion, not the guest's claim —
 `crates/fleet-transport/src/health.rs` argues the split.
 
-## What cannot be booted yet
+## Building and booting a fleet
 
-A `production` fleet does not come up, and the reason is in the crates rather
-than in anything here. The three leaves build their RA-TLS acceptor with
-`MockAttestor::dev_fleet()` unconditionally — their manifests take
-`enclavid-attestation` with `default-features = false, features = ["mock"]`, and
-none of the three has a `sev-snp` feature to enable. api built with `sev-snp`
-mints a real report, and the mock backend rejects anything whose format is not
-its own, before a measurement is ever compared.
+    nix-build image -A images.storage          # kernel + initramfs + cmdline + qemu-args
+    nix-build image -A measurements.storage    # the launch digest of exactly that
+    nix-build image -A images.api              # api, pinned to the three leaves
 
-So the fleet handshake fails in both directions, and it fails on the format
-discriminator rather than on any policy. Two things follow for anyone running
-this: `cmdline/<role>/production` is only half a production posture today, and
-the `debug` path is the one that works end to end.
+`image/default.nix` is where a build starts. It owns the ordering api's
+`endorsement.rs` depends on — the three leaves are built and measured, then api
+is built from their digests — and it generates the launch flags and the digest
+from ONE set of parameters, so the two cannot disagree.
 
-It also means the leaves' identity is currently a signing key that is a literal
-in this repository, and that they accept anyone holding it. That is fine for a
-dev fleet and is why the key is confined to a backend named `mock` — but the
-image builds ship that backend, so the confinement does not currently hold where
-it matters.
+Each image carries a `qemu-args` file with the flags the measurement covers.
+Splice it in verbatim and add only what the digest does not describe: memory,
+the vsock CID, any drive, where the serial goes.
+
+    I=$(nix-build image -A images.storage-debug --no-out-link)
+    qemu-system-x86_64 -enable-kvm $(cat $I/qemu-args | tr '\n' ' ') \
+      -m 2G -object memory-backend-memfd,id=ram0,size=2G,share=true,prealloc=false \
+      -device vhost-vsock-pci,guest-cid=4 \
+      -drive file=storage.img,if=virtio,format=raw \
+      -kernel $I/bzImage -initrd $I/initramfs.cpio.gz -append "$(cat $I/cmdline)" \
+      -nographic -no-reboot -display none -serial file:/tmp/storage.log
+
+**`-append` must be the cmdline file and nothing else.** The command line is
+measured byte for byte. Appending one variable at launch — the bench scripts used
+to add `ENCLAVID_TEE_KEY` — produces a guest whose measurement nothing pins, and
+the only symptom is api refusing every peer. Under `sev-snp` the seal key comes
+from the chip, so that variable is not needed and must not be added.
+
+Production and debug are separate fleets end to end: `api-debug` pins the three
+`*-debug` leaves, `api` pins the three production ones. Mixing them is a refused
+handshake, correctly.
+
+## What this has been shown to do
+
+On a Milan bench, the four debug images built by the expressions above boot on
+the self-built firmware, and api's log says `storage-CVM connected` with no
+`not pinned` line — meaning the digest nix computed equals the one the AMD
+Secure Processor put in the guest's report. The same run with `ENCLAVID_TEE_KEY`
+appended to `-append` refuses, which is what makes the first result mean
+something.
 
 ## Computing a measurement
 
