@@ -296,11 +296,13 @@ async fn main() {
         reason!("a constant, emitted at boot before any policy has been composed")
     );
 
-    // Mutual RA-TLS acceptor (minted once at boot): every accepted api connection is
-    // wrapped in an attested TLS server that also requires an attested client cert.
-    // This build attests with a software identity the whole dev fleet shares, and
-    // pins that same identity: it proves the peer links this source tree, nothing
-    // about where the peer runs.
+    // Mutual RA-TLS acceptor, minted once at boot: every accepted connection is
+    // wrapped in an attested TLS server that also requires an attested client
+    // certificate. WHOSE it is depends on the build, and `fleet_identity` above
+    // says what each arm gives up — the measured one accepts any attested guest.
+    // Nothing here is partitioned by caller, because nothing here is retained:
+    // this role holds no cache and no state between calls, so one caller's
+    // request cannot reach another's (see the header).
     let (attestor, policy) = fleet_identity();
     let ratls = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
         enclavid_ra_tls::server_config(attestor, policy).unwrap_or_else(|e| {
