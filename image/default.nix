@@ -18,6 +18,18 @@
 # It is a fact of the trust direction, not a build-system detail — api pins which
 # image each peer is, and no leaf pins api back, because api's own digest is a
 # function of the three it pins.
+#
+# `idKeys` is a directory holding `id.pem` and `author.pem`, both EC P-384:
+#
+#   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out id.pem
+#   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out author.pem
+#
+# Given them, `qemu-args` carries an ID block asserting the digest this build
+# computed, and a launch that does not match it is refused by the firmware
+# rather than starting as some other machine. Without them the launch line
+# carries no such assertion — see `image/idblock` for what that does and, just
+# as importantly, what it does not.
+{ idKeys ? null }:
 let
   nixpkgs = builtins.fetchTarball {
     # nixos-26.05 @ 2026-08-23 — same pin as the rest of image/.
@@ -125,8 +137,18 @@ let
   # the launch sets `kernel-hashes=on`: with it off, QEMU measures that region as
   # zeroes and this tool would compute a number describing a machine nobody
   # boots. The two are set from the same `launch` set for exactly that reason.
+  #
+  # It takes the three measured files directly rather than the assembled image,
+  # and that is load-bearing rather than tidiness: `imageFor` also writes the
+  # launch line, the launch line carries the ID block, and the ID block is this
+  # digest. Reading them out of the image would make the digest depend on a
+  # derivation that depends on the digest. Naming only what is actually measured
+  # breaks that, and says what the number is a function of.
   measure = role: variant:
-    let img = imageFor role variant; in
+    let
+      spec = roles.${role};
+      irfs = initramfsFor (appsFor role variant) role variant;
+    in
     pkgs.runCommand "enclavid-measurement-${role}-${variant}"
       { nativeBuildInputs = [ pkgs.sev-snp-measure ]; } ''
       sev-snp-measure --mode snp \
@@ -134,15 +156,44 @@ let
         --vcpu-type ${launch.vcpuType} \
         --guest-features ${launch.guestFeatures} \
         --ovmf ${firmware} \
-        --kernel ${img}/bzImage \
-        --initrd ${img}/initramfs.cpio.gz \
-        --append "$(cat ${img}/cmdline)" \
+        --kernel ${spec.kernel}/bzImage \
+        --initrd ${irfs}/initramfs.cpio.gz \
+        --append "$(cat ${cmdlineFor role variant})" \
       | tr -d '\n' > $out
     '';
 
   # One role's whole boot: the three files QEMU is pointed at, plus the argument
   # list that points at them. Collected into one derivation so that what is
   # measured and what is launched cannot be assembled from different places.
+  # The ID block for a role, or "" when no keys were given. Built from the same
+  # `measure` output the launch line is generated beside, so the number asserted
+  # and the number computed are the same expression rather than two.
+  idBlockProps = role: variant:
+    if idKeys == null then
+      throw ''
+        image/default.nix needs `idKeys` to write a launch line.
+
+        A launch assembled without an ID block starts whatever it is pointed at.
+        The digest this build computes is then a claim about a machine nobody
+        checked was the one that booted — which is the failure this file was
+        written to prevent, moved one step later. So the keys are not optional
+        for anything that produces `qemu-args`.
+
+            nix-build image -A images.storage --arg idKeys /path/to/keys
+
+        The directory holds `id.pem` and `author.pem`, both EC P-384:
+
+            openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out id.pem
+            openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out author.pem
+
+        They are not a trust root and do not need custody: the firmware compares
+        the block's LD against the digest whoever signed it. See image/idblock.
+
+        `measurements.<role>` does not need them and still builds without.
+      ''
+    else
+      ",$(cat ${import ./idblock { inherit pkgs; keys = idKeys; } (measure role variant)}/props),author-key-enabled=true";
+
   imageFor = role: variant:
     let
       spec = roles.${role};
@@ -158,11 +209,17 @@ let
       # The flags the digest depends on, ready to splice into a launch. What is
       # NOT here is what the measurement does not cover and the operator has to
       # choose: memory size, the vsock CID, any drive, where the serial goes.
-      cat > $out/qemu-args <<'ARGS'
+      #
+      # The `sev-snp-guest` object also carries the ID block when this build was
+      # given keys. That is not a flag the digest depends on — it is the digest,
+      # asserted back at the firmware, so that a launch assembled from anything
+      # other than this file is refused instead of quietly being a different
+      # machine. Without keys the line is the same minus that assertion.
+      cat > $out/qemu-args <<ARGS
       -cpu ${launch.vcpuType}
       -smp ${toString launch.vcpus}
       -machine q35,confidential-guest-support=sev0,memory-backend=ram0
-      -object sev-snp-guest,id=sev0,cbitpos=${toString launch.cbitpos},reduced-phys-bits=${toString launch.reducedPhysBits},kernel-hashes=on,policy=${launch.policy}
+      -object sev-snp-guest,id=sev0,cbitpos=${toString launch.cbitpos},reduced-phys-bits=${toString launch.reducedPhysBits},kernel-hashes=on,policy=${launch.policy}${idBlockProps role variant}
       -bios ${firmware}
       ARGS
       sed -i 's/^      //' $out/qemu-args
