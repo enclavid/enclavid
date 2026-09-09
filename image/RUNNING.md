@@ -30,10 +30,11 @@ built from source.
 
 ### Firmware
 
-`nix-build image/ovmf` — the AmdSev package of edk2 202602 out of the pinned
-nixpkgs, one combined flash image, no separate variables file and none measured.
-See that file for why it is built rather than fetched, and for the one build
-quirk (an empty `grub.efi`) that both this and the distro's own package need.
+`nix-build image/ovmf` — our own edk2 platform, built from AmdSevX64 out of the
+pinned nixpkgs: one combined flash image, no separate variables file, the loader
+replaced and 43 modules left out. `image/ovmf/README.md` says what was taken
+away and why, and it is worth reading before touching this — two of the removals
+are the only thing stopping a host running its own code under our digest.
 
 The distro binary this replaces was `ovmf-amdsev_2025.11-3ubuntu8`, sha256
 `6f5c36dd…438d`. Recorded because every measurement taken before this change was
@@ -98,19 +99,25 @@ cargo features across a worker and the child that runs untrusted wasm.
 
 ## The launch
 
-Transcribed from a launcher that boots the whole fleet:
+Every flag the measurement depends on comes out of the image, and none of them
+is written here. That is the point: this file used to transcribe them, and a
+transcription is a second copy of something that has to agree with the first.
 
 ```sh
-qemu-system-x86_64 \
-  -enable-kvm -cpu EPYC-Milan-v2 -smp 2 -m $MEM \
-  -machine q35,confidential-guest-support=sev0,memory-backend=ram0 \
-  -object memory-backend-memfd,id=ram0,size=$MEM,share=true,prealloc=false \
-  -object sev-snp-guest,id=sev0,cbitpos=51,reduced-phys-bits=1,kernel-hashes=on,policy=0x30000 \
+I=$(nix-build image -A images.$ROLE --arg idKeys $KEYS --no-out-link)
+
+qemu-system-x86_64 -enable-kvm \
+  $(cat $I/qemu-args | tr '\n' ' ') \
+  -kernel $I/bzImage -initrd $I/initramfs.cpio.gz -append "$(cat $I/cmdline)" \
+  -m $MEM -object memory-backend-memfd,id=ram0,size=$MEM,share=true,prealloc=false \
   -device vhost-vsock-pci,guest-cid=$CID \
-  -bios /path/to/OVMF.amdsev.fd \
-  -kernel $BZIMAGE -initrd $INITRAMFS -append "$(cat image/cmdline/$ROLE/$VARIANT)" \
   -nographic -no-reboot -display none -serial file:$LOG
 ```
+
+`qemu-args` holds `-cpu`, `-smp`, `-machine`, `-bios` and the `sev-snp-guest`
+object — including the ID block, which is why `idKeys` is not optional. The
+second line is what the digest does not cover and an operator has to choose:
+memory size, the vsock CID, any drive, where the serial goes.
 
 What each measurement-relevant part is doing:
 
@@ -180,9 +187,13 @@ any of that means *ready* is the reader's conclusion, not the guest's claim —
 
 ## Building and booting a fleet
 
-    nix-build image -A images.storage          # kernel + initramfs + cmdline + qemu-args
-    nix-build image -A measurements.storage    # the launch digest of exactly that
-    nix-build image -A images.api              # api, pinned to the three leaves
+    nix-build image -A measurements.storage    # the launch digest, needs no keys
+    nix-build image -A images.storage --arg idKeys $KEYS   # + cmdline + qemu-args
+    nix-build image -A images.api    --arg idKeys $KEYS    # pinned to the three leaves
+
+`idKeys` is a directory of `id.pem` and `author.pem` (EC P-384). Anything that
+writes a launch line needs them, because the line carries an ID block asserting
+its own digest; `measurements.*` does not.
 
 `image/default.nix` is where a build starts. It owns the ordering api's
 `endorsement.rs` depends on — the three leaves are built and measured, then api
@@ -225,10 +236,14 @@ something.
 ```sh
 sev-snp-measure --mode snp \
   --vcpus $N --vcpu-type EPYC-Milan-v2 \
-  --ovmf  /path/to/OVMF.amdsev.fd \
-  --kernel $BZIMAGE --initrd $INITRAMFS \
-  --append "$(cat image/cmdline/$ROLE/$VARIANT)"
+  --ovmf   $(nix-build image -A ovmf --no-out-link)/FV/OVMF.fd \
+  --kernel $I/bzImage --initrd $I/initramfs.cpio.gz \
+  --append "$(cat $I/cmdline)"
 ```
+
+Shown for reading rather than for running: `measurements.<role>` does exactly
+this from the same expression the launch line comes from, which is the only way
+the two are known to agree.
 
 Every argument must match the launch exactly, and `--append` especially: the
 command line is taken verbatim, so a stray space is a different machine.

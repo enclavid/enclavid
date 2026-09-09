@@ -62,14 +62,24 @@ pkgs.runCommand "enclavid-initramfs-${name}"
 
   mkdir -p $out
 
-  # Three separate sources of nondeterminism, all of them silent:
+  # Four separate sources of nondeterminism, all of them silent, and one of them
+  # was being attributed to a flag that does not address it:
   #   - directory iteration order, hence the sort;
-  #   - the builder's uid/gid recorded per entry, hence --reproducible, which
-  #     also zeroes the timestamps;
+  #   - device and inode numbers, which is what --reproducible zeroes;
+  #   - the builder's uid/gid, hence --owner: --reproducible leaves them, and
+  #     they were going in as 1000:100;
+  #   - per-entry mtime, hence the touch: --reproducible leaves that too, and it
+  #     is what actually made two builds of this differ.
   #   - gzip's own header timestamp and filename, hence -n.
+  #
+  # The archive is the measured artefact, so a field nobody reads still changes
+  # the launch digest. A build that does not reproduce cannot be checked by
+  # anyone who did not run it, which is most of the point of publishing one.
+  find root -exec touch -h -d @0 {} +
+
   ( cd root
     find . | LC_ALL=C sort \
-      | cpio --quiet --create --format=newc --reproducible \
+      | cpio --quiet --create --format=newc --reproducible --owner=0:0 \
       | gzip -9n > $out/initramfs.cpio.gz )
 
   ( cd $out && sha256sum initramfs.cpio.gz > initramfs.cpio.gz.sha256 )
