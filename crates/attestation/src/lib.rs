@@ -168,10 +168,21 @@ pub trait Attestor: Send + Sync {
 // is how `mock` stayed in a binary whose own manifest asked only for `sev-snp`.
 // Failing here catches it at any depth, not just at the manifest a reader
 // happens to be looking at.
+//
+// This crate is a leaf, so it is also the FIRST thing to fail, ahead of the same
+// check written in each binary. That makes its wording the one a reader acts on,
+// and the common cause is not the graph at all: a role whose own manifest says
+// `default = ["dev-attestation"]` brings it along unless the build says
+// otherwise. `--features guest-hardening` reaches here that way. Naming the
+// likely cause first is the difference between reading a command line and
+// searching a dependency tree that has nothing wrong with it.
 #[cfg(all(feature = "sev-snp", any(feature = "mock", feature = "snp-dev")))]
 compile_error!(
-    "a software attestation backend (`mock` / `snp-dev`) is enabled alongside `sev-snp` — \
-     some dependency edge is taking enclavid-attestation with default features"
+    "a software attestation backend (`mock` / `snp-dev`) is enabled alongside `sev-snp`. \
+     Usually the build kept the role's own defaults: `sev-snp` needs \
+     `--no-default-features`, or `default = [\"dev-attestation\"]` arrives with it. \
+     If the build already says that, then some dependency edge is taking \
+     enclavid-attestation with default features instead"
 );
 
 #[cfg(feature = "mock")]

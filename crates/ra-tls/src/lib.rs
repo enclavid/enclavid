@@ -92,6 +92,44 @@ pub enum MeasurementPolicy {
     Pinned(Vec<String>),
 }
 
+/// A peer that attested, to something this end does not pin.
+///
+/// Carried out of the handshake as a TYPE rather than as text. The check runs
+/// inside rustls and can only fail with a `rustls::Error`, and every other way a
+/// handshake fails arrives the same way — so a caller that wanted to tell "wrong
+/// image" from "TLS went wrong" had to read a message, and a message is exactly
+/// what a production log will not carry. One field, and it is a digest from a
+/// chip-signed report, so a caller can log it without deciding whether some
+/// string is safe.
+#[derive(Debug, Clone)]
+pub struct PinMismatch {
+    /// What the peer attested to, lowercase hex.
+    pub presented: String,
+}
+
+impl fmt::Display for PinMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "peer measurement {} is not pinned", self.presented)
+    }
+}
+
+impl std::error::Error for PinMismatch {}
+
+/// Recover a [`PinMismatch`] from the error a TLS connect returns, if that is
+/// what it was.
+///
+/// The unwrapping — `io::Error` to `rustls::Error` to the boxed cause — belongs
+/// here beside the type that was boxed, not at each of the three call sites that
+/// dial a peer.
+pub fn pin_mismatch(err: &std::io::Error) -> Option<PinMismatch> {
+    let rustls_err = err.get_ref()?.downcast_ref::<rustls::Error>()?;
+    let rustls::Error::InvalidCertificate(rustls::CertificateError::Other(other)) = rustls_err
+    else {
+        return None;
+    };
+    other.0.downcast_ref::<PinMismatch>().cloned()
+}
+
 impl MeasurementPolicy {
     fn check(&self, measurement: &str) -> Result<(), rustls::Error> {
         match self {
@@ -99,9 +137,11 @@ impl MeasurementPolicy {
             MeasurementPolicy::Pinned(allowed) if allowed.iter().any(|m| m == measurement) => {
                 Ok(())
             }
-            MeasurementPolicy::Pinned(_) => Err(ratls_error(format!(
-                "peer measurement {measurement} is not pinned"
-            ))),
+            MeasurementPolicy::Pinned(_) => Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Other(rustls::OtherError(Arc::new(PinMismatch {
+                    presented: measurement.to_string(),
+                }))),
+            )),
         }
     }
 }
@@ -462,5 +502,48 @@ mod tests {
         let (cert, _) = mint_cert(&*attestor).unwrap();
         let policy = MeasurementPolicy::Pinned(vec!["bb".repeat(32)]);
         assert!(verify_ratls_cert(&cert, &*attestor, &policy).is_err());
+    }
+
+    /// The refusal has to arrive as a TYPE, not as a sentence.
+    ///
+    /// A caller three crates away decides between "the peer is the wrong image"
+    /// and "TLS went wrong" on this, and it can only do that by downcasting.
+    /// Wrapping the same failure in `Error::General` would still fail the
+    /// handshake and still read correctly to a human — and would silently take
+    /// the digest back out of every production log.
+    #[test]
+    fn a_refused_pin_carries_the_measurement_it_saw() {
+        let attestor: Arc<dyn Attestor> =
+            Arc::new(MockAttestor::from_seed([7u8; 32], "aa".repeat(32)));
+        let (cert, _) = mint_cert(&*attestor).unwrap();
+        let policy = MeasurementPolicy::Pinned(vec!["bb".repeat(32)]);
+
+        let err = verify_ratls_cert(&cert, &*attestor, &policy).unwrap_err();
+        let rustls::Error::InvalidCertificate(rustls::CertificateError::Other(other)) = err else {
+            panic!("a refused pin must be a certificate error carrying a cause");
+        };
+        let mismatch = other
+            .0
+            .downcast_ref::<PinMismatch>()
+            .expect("the cause must be a PinMismatch");
+        assert_eq!(mismatch.presented, "aa".repeat(32));
+    }
+
+    /// `pin_mismatch` is what the dial sites call, and it unwraps two layers it
+    /// does not own: the `io::Error` tokio-rustls returns and the `rustls::Error`
+    /// inside it. Either could change shape on a dependency bump without any
+    /// caller failing to compile.
+    #[test]
+    fn a_pin_mismatch_survives_the_io_error_it_is_wrapped_in() {
+        let inner = rustls::Error::InvalidCertificate(rustls::CertificateError::Other(
+            rustls::OtherError(Arc::new(PinMismatch {
+                presented: "cc".repeat(32),
+            })),
+        ));
+        let io = std::io::Error::new(std::io::ErrorKind::InvalidData, inner);
+        assert_eq!(pin_mismatch(&io).unwrap().presented, "cc".repeat(32));
+
+        let unrelated = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(pin_mismatch(&unrelated).is_none());
     }
 }

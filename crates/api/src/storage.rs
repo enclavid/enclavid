@@ -153,7 +153,14 @@ pub async fn connect_storage(
         .await
         .map_err(|e| {
             debug!("ra-tls: {e}");
-            LegFailure::Attest
+            // A peer that attested to the wrong image is the failure this fleet
+            // is most likely to see, and the one `Attest` said least about.
+            match enclavid_ra_tls::pin_mismatch(&e)
+                .and_then(|p| fleet_transport::Measurement::parse(&p.presented))
+            {
+                Some(m) => LegFailure::Pin(m),
+                None => LegFailure::Attest,
+            }
         })?;
     let (read, write) = tokio::io::split(tls);
 

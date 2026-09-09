@@ -149,12 +149,37 @@ mod pinned {
 /// list, and adding a second means naming which peer is allowed to be two things.
 #[cfg(feature = "sev-snp")]
 fn fleet_policy(peer: crate::health::Peer) -> MeasurementPolicy {
-    let measurement = match peer {
-        crate::health::Peer::Storage => pinned::STORAGE,
-        crate::health::Peer::CompileWorker => pinned::COMPILE_WORKER,
-        crate::health::Peer::ExecutionWorker => pinned::EXECUTION_WORKER,
-    };
-    MeasurementPolicy::Pinned(vec![measurement.to_string()])
+    MeasurementPolicy::Pinned(vec![pinned_for(peer).expect("sev-snp pins").to_string()])
+}
+
+/// What this build expects a peer to measure to, or `None` where it does not pin.
+///
+/// The policy above answers "may this peer in", which is all the handshake needs.
+/// A leg that failed needs the other question — WHICH digest was wanted — and it
+/// cannot get it from the handshake: the check runs inside rustls and comes back
+/// as a `rustls::Error` that becomes a fieldless `LegFailure::Attest`, with the
+/// text going to a `debug!` that a measured build does not compile. So the value
+/// is read here instead, at the point that writes the log line.
+///
+/// Safe to print. It is compiled into this image from the build that produced
+/// the peer's, so anyone holding that build already has it; and it says nothing
+/// about any session. What it is NOT is a claim about why a leg failed — an
+/// ordinary TLS error arrives as the same variant, so the line states what was
+/// pinned, never that the pin is what refused.
+pub fn pinned_for(peer: crate::health::Peer) -> Option<&'static str> {
+    #[cfg(feature = "sev-snp")]
+    {
+        Some(match peer {
+            crate::health::Peer::Storage => pinned::STORAGE,
+            crate::health::Peer::CompileWorker => pinned::COMPILE_WORKER,
+            crate::health::Peer::ExecutionWorker => pinned::EXECUTION_WORKER,
+        })
+    }
+    #[cfg(not(feature = "sev-snp"))]
+    {
+        let _ = peer;
+        None
+    }
 }
 
 /// The RA-TLS client config for a dial to a fleet peer. One place so the identity api

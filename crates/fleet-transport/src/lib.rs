@@ -25,12 +25,16 @@ compile_error!(
 
 /// Why a fleet leg failed, in terms that carry nothing out of a message.
 ///
-/// Every field is a closed enum or nothing at all — there is no `String` here,
-/// and that is the whole design. A `String` inside an error is the same
-/// unbounded content as a `String` in a log line: it can hold what a foreign
-/// `Display` chose to say, and no one re-reads those on a dependency bump.
-/// Without one, [`safe_logger::SafeToLog`] below is true of the TYPE, so a log
-/// site needs no judgement and no reason of its own.
+/// Every field is a closed enum, a [`Measurement`], or nothing at all — there is
+/// no `String` here, and that is the whole design. A `String` inside an error is
+/// the same unbounded content as a `String` in a log line: it can hold what a
+/// foreign `Display` chose to say, and no one re-reads those on a dependency
+/// bump. Without one, [`safe_logger::SafeToLog`] below is true of the TYPE, so a
+/// log site needs no judgement and no reason of its own.
+///
+/// `Measurement` is the one field carrying a value a peer chose, and it is a
+/// newtype for that reason: it can hold 96 hex characters and nothing else, so
+/// admitting it costs none of the property above.
 ///
 /// What is given up is the underlying message. It is not lost — the conversion
 /// site sends it to `debug!`, which never leaves the TEE — but production sees
@@ -50,9 +54,22 @@ pub enum LegFailure {
     /// under a held endorsement. Folding it into `Attest` sent an operator to
     /// restart a healthy peer.
     Mint,
-    /// The RA-TLS handshake did not complete — either peer refusing the other's
-    /// attestation, or an ordinary TLS failure.
+    /// The RA-TLS handshake did not complete for a reason this end could not
+    /// name — an ordinary TLS failure, or a peer refusing US.
+    ///
+    /// It used to cover [`LegFailure::Pin`] as well. That put the fleet's most
+    /// likely failure and its least interesting one behind one word, and the
+    /// operator actions are opposite: rebuild and re-pin, versus look at the
+    /// network.
     Attest,
+    /// The peer attested, to a measurement this end does not pin.
+    ///
+    /// Carries what it presented, because the whole difficulty was that nothing
+    /// did: the check happens inside rustls, comes back as a `rustls::Error`,
+    /// and the text was going to a `debug!` that a measured build does not
+    /// compile. A [`Measurement`] rather than a `String` so this enum stays
+    /// something a log line can print without asking where the bytes came from.
+    Pin(Measurement),
     /// remoc could not bring the multiplexed connection up over the stream.
     Rpc,
     /// The connection came up but the service clients did not cross it.
@@ -61,6 +78,38 @@ pub enum LegFailure {
     Closed,
     /// An established connection stopped being served.
     Serve,
+}
+
+/// A launch measurement, as it may appear in a log line.
+///
+/// The point of the newtype is what it refuses. [`LegFailure`] is otherwise made
+/// of fieldless variants and one `std::io::ErrorKind`, so rendering it can never
+/// print something a peer chose; a `String` variant would end that, and the
+/// first thing to reach for it would be the message from a failed handshake.
+/// Ninety-six lowercase hex characters is the whole vocabulary.
+///
+/// The value is not trusted, and does not need to be. It comes from a
+/// chip-signed report, and it names an image the HOST chose to launch — so a
+/// log the host reads is being told something it already decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Measurement(String);
+
+impl Measurement {
+    /// `None` for anything that is not 96 lowercase hex characters, which leaves
+    /// the caller with [`LegFailure::Attest`] — a less precise answer rather
+    /// than an unbounded one.
+    pub fn parse(s: &str) -> Option<Self> {
+        let ok = s.len() == 96
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        ok.then(|| Measurement(s.to_string()))
+    }
+}
+
+impl std::fmt::Display for Measurement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Says what happened, not which stage it happened at.
@@ -88,6 +137,11 @@ impl std::fmt::Display for LegFailure {
                 "answered, but the attested handshake did not complete — one side refused \
                  the other",
             ),
+            LegFailure::Pin(m) => write!(
+                f,
+                "attested to {m}, which this end does not pin — the peer is running an \
+                 image this one was not built against"
+            ),
             LegFailure::Rpc => {
                 f.write_str("attested, but the multiplexed connection did not come up")
             }
@@ -103,8 +157,10 @@ impl std::fmt::Display for LegFailure {
 impl std::error::Error for LegFailure {}
 
 // The vouch, made once, next to the `Display` a reviewer has to read anyway:
-// every arm above writes a literal or the name of a fieldless variant, so there
-// is nothing here that a message could have put in.
+// every arm above writes a literal, the name of a fieldless variant, or a
+// `Measurement` — which is 96 hex characters by construction and names an image
+// the host itself launched. What none of them can write is a message, because
+// there is no type in this enum that could hold one.
 impl safe_logger::SafeToLog for LegFailure {}
 
 /// The connected stream, whichever transport carries it.

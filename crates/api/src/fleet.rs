@@ -100,11 +100,16 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 /// answers and a peer whose address is wrong look identical from here, and the
 /// address is the one thing that tells them apart. It is safe to name because
 /// the measured command line is where it came from.
-pub async fn dial<T, F, Fut>(peer: &str, addr: &str, mut attempt: F) -> T
+///
+/// Takes the `Peer` rather than its name because it needs both the name and the
+/// digest pinned for it, and two arguments that have to agree is the shape this
+/// image already got wrong once elsewhere.
+pub async fn dial<T, F, Fut>(peer: crate::health::Peer, addr: &str, mut attempt: F) -> T
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, fleet_transport::LegFailure>>,
 {
+    let name = peer.as_str();
     let mut delays = RETRY_DELAYS.iter().copied();
     // The ladder's last rung, repeated once it runs out.
     let mut ceiling = RETRY_DELAYS[RETRY_DELAYS.len() - 1];
@@ -114,17 +119,41 @@ where
             Ok(Err(e)) => {
                 let delay = delays.next().unwrap_or(ceiling);
                 ceiling = delay;
+                // `LegFailure::Pin` names what the peer attested to; the other
+                // half of the comparison lives here, because the pin is this
+                // image's and the transport crate has no idea it exists.
+                // Together they are the whole diagnosis: two digests, and the
+                // next move is to rebuild whichever image is the stale one.
+                //
+                // Only on that variant. Hung on `Attest` it would be noise at
+                // best — that variant is an ordinary TLS failure or a peer
+                // refusing US, neither of which this digest explains.
+                let pinned = match (&e, crate::endorsement::pinned_for(peer)) {
+                    (fleet_transport::LegFailure::Pin(_), Some(m)) => {
+                        format!("; this end pinned {m}")
+                    }
+                    _ => String::new(),
+                };
                 warn!(
-                    "api: {} at {}: {}; retrying in {:?}",
-                    safe(&peer, reason!("a name fixed in this image")),
+                    "api: {} at {}: {}{}; retrying in {:?}",
+                    safe(&name, reason!("a name fixed in this image")),
                     safe(&addr, reason!("an address from the measured command line")),
                     e,
+                    safe(
+                        &pinned,
+                        reason!(
+                            "a digest compiled into this image from the build that produced \
+                             the peer's — anyone holding that build already has it, and it \
+                             names no session"
+                        )
+                    ),
                     safe(&delay, reason!("one of a fixed ladder of delays")),
                     reason!(
                         "a peer name fixed in this image, an address from the measured \
-                         command line, a closed-enum failure that renders itself, and one of \
-                         a fixed ladder of delays — nothing a session can reach. Not \
-                         boot-only: `supervise` dials again on every loss"
+                         command line, a closed-enum failure that renders itself, a pinned \
+                         digest from this build, and one of a fixed ladder of delays — \
+                         nothing a session can reach. Not boot-only: `supervise` dials \
+                         again on every loss"
                     )
                 );
                 tokio::time::sleep(delay).await;
@@ -134,7 +163,7 @@ where
                 ceiling = delay;
                 warn!(
                     "api: {} at {} accepted nothing within {:?}; retrying in {:?}",
-                    safe(&peer, reason!("a name fixed in this image")),
+                    safe(&name, reason!("a name fixed in this image")),
                     safe(&addr, reason!("an address from the measured command line")),
                     safe(
                         &ATTEMPT_TIMEOUT,
@@ -218,7 +247,7 @@ pub async fn supervise<C, F, Fut, I>(
         + Send,
     I: Fn(Option<C>) + Send + 'static,
 {
-    let (clients, driver) = dial(peer.as_str(), &addr, &mut connect).await;
+    let (clients, driver) = dial(peer, &addr, &mut connect).await;
     install(Some(clients));
     health.set_peer(peer, true);
 
@@ -238,7 +267,7 @@ pub async fn supervise<C, F, Fut, I>(
                 )
             );
 
-            let (clients, next) = dial(peer.as_str(), &addr, &mut connect).await;
+            let (clients, next) = dial(peer, &addr, &mut connect).await;
             install(Some(clients));
             health.set_peer(peer, true);
             info!(
