@@ -115,6 +115,10 @@ impl Attestor for MockAttestor {
             format: MOCK_FORMAT.to_string(),
             quote_blob,
             measurement: self.measurement.clone(),
+            // A software backend signs for no part. Empty rather than invented,
+            // so a chip-bound verifier refuses it instead of matching a
+            // plausible-looking constant.
+            chip_id: String::new(),
         })
     }
 

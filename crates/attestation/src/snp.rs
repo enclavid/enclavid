@@ -280,7 +280,34 @@ fn verify_quote_endorsed(
     if quote.measurement != hex::encode(report.measurement) {
         return Err(AttestationError::MeasurementMismatch);
     }
+    // Same treatment for the part. Unchecked, `Quote::chip_id` would be a field
+    // the sender fills in, and a verifier binding to it would be binding to a
+    // string the peer chose.
+    if quote.chip_id != hex::encode(report.chip_id) {
+        return Err(AttestationError::PolicyRejected(
+            "quote advertises a chip the signed report does not carry".into(),
+        ));
+    }
     Ok(())
+}
+
+/// Refuse a peer that attested on another part.
+///
+/// `own` is `None` where the verifier holds an endorsement of its own: the
+/// signature is then checked against a chip-specific VCEK, so a foreign part
+/// already fails earlier and this would be a second answer to a settled
+/// question.
+///
+/// Split out of [`Attestor::verify`] because that method needs `/dev/sev-guest`
+/// to exist and this comparison does not — and a rule that can only run on the
+/// machine it protects is a rule with no test.
+fn same_part(own: Option<&str>, quote: &Quote) -> Result<(), AttestationError> {
+    match own {
+        Some(own) if quote.chip_id != own => Err(AttestationError::PolicyRejected(
+            "peer attested on a different part".into(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Minting talks to the AMD Secure Processor through `/dev/sev-guest`, which
@@ -426,6 +453,13 @@ mod mint {
         /// to what it mints and supplies it for what it verifies; a process
         /// that holds none does neither.
         held: Option<Held>,
+        /// The part this guest runs on, when the verifier has to supply that
+        /// fact itself. `None` where the endorsement already carries it: a
+        /// process holding its own VCEK checks peer signatures against it, and a
+        /// VCEK is chip-specific, so a report from another machine fails at the
+        /// signature and never reaches a comparison. Setting it there would be a
+        /// second check of something already established.
+        chip: Option<String>,
     }
 
     /// The certificates this process attaches to its own quotes, and the TCB
@@ -452,6 +486,9 @@ mod mint {
                 .map_err(|e| AttestationError::Backend(format!("open /dev/sev-guest: {e}")))?;
             let attestor = Self {
                 firmware: Mutex::new(firmware),
+                // See the field: the endorsement this branch holds is itself
+                // chip-specific, so the comparison would be redundant.
+                chip: None,
                 held: Some(Held {
                     ask_der: normalise_cert(ask_der, "ASK")?,
                     vcek_der: normalise_cert(vcek_der, "VCEK")?,
@@ -492,12 +529,23 @@ mod mint {
         /// wrong VMPL, with debug enabled, or under a TCB below the floor still
         /// stops here.
         pub fn mint_only() -> Result<Self, AttestationError> {
-            vcek_identity()?;
+            // The identity was already being read here and thrown away. Kept, it
+            // is what closes the gap this constructor otherwise leaves: with no
+            // endorsement of its own, `verify` reads the chain out of the peer's
+            // quote, so it establishes that SOME genuine part signed. Any SNP
+            // guest on any part of the same generation passes that. Holding our
+            // own chip turns it into the part THIS guest is on.
+            //
+            // Not the same as pinning an image, and not a substitute for it: a
+            // different image on this machine still passes. It removes the
+            // machine axis, which was the wider of the two.
+            let own = vcek_identity()?;
             let firmware = Firmware::open()
                 .map_err(|e| AttestationError::Backend(format!("open /dev/sev-guest: {e}")))?;
             Ok(Self {
                 firmware: Mutex::new(firmware),
                 held: None,
+                chip: Some(own.chip_id),
             })
         }
     }
@@ -576,6 +624,7 @@ mod mint {
                 format: SNP_FORMAT.to_string(),
                 quote_blob,
                 measurement: hex::encode(report.measurement),
+                chip_id: hex::encode(report.chip_id),
             })
         }
 
@@ -587,6 +636,12 @@ mod mint {
         /// preference — see [`Endorsement`] for why accepting both shapes would
         /// hand the choice to whoever is being verified.
         fn verify(&self, quote: &Quote, expected: &ReportData) -> Result<(), AttestationError> {
+            // Before the signature, because it costs nothing and because the
+            // answer does not depend on it: a peer on another part is refused
+            // whether or not its chain checks out. `verify_quote_endorsed`
+            // confirms this field against the signed report, so a quote that
+            // gets past both said the truth about which part signed it.
+            super::same_part(self.chip.as_deref(), quote)?;
             match &self.held {
                 Some(held) => verify_quote_endorsed(
                     quote,
@@ -655,7 +710,30 @@ mod tests {
             format: SNP_FORMAT.to_string(),
             quote_blob,
             measurement: hex::encode([0u8; 48]),
+            chip_id: hex::encode([0u8; 64]),
         }
+    }
+
+    /// The binding a leaf gains by holding its own part.
+    ///
+    /// Not a measurement check and not a substitute for one: the same image on
+    /// another machine is refused, a different image on this one is not.
+    #[test]
+    fn a_peer_on_another_part_is_refused_and_one_on_ours_is_not() {
+        let mut quote = quote_with(None);
+        quote.chip_id = hex::encode([1u8; 64]);
+
+        let ours = hex::encode([1u8; 64]);
+        assert!(same_part(Some(&ours), &quote).is_ok());
+
+        let theirs = hex::encode([2u8; 64]);
+        assert!(matches!(
+            same_part(Some(&theirs), &quote),
+            Err(AttestationError::PolicyRejected(_))
+        ));
+
+        // A verifier that holds an endorsement compares nothing here.
+        assert!(same_part(None, &quote).is_ok());
     }
 
     /// The leaves' direction. A verifier holding nothing cannot authenticate a
@@ -763,6 +841,7 @@ mod tests {
             format: "snp-dev".into(),
             quote_blob: Vec::new(),
             measurement: String::new(),
+            chip_id: String::new(),
         };
         assert!(matches!(
             verify_quote(&quote, &ReportData::for_kbs(vec![0u8; 32])),
@@ -785,6 +864,7 @@ mod tests {
             format: SNP_FORMAT.into(),
             quote_blob,
             measurement: hex::encode([0u8; 48]),
+            chip_id: hex::encode([0u8; 64]),
         };
         assert!(matches!(
             verify_quote(&quote, &ReportData::for_kbs(vec![0u8; 32])),

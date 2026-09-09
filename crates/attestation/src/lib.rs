@@ -52,6 +52,19 @@ pub struct Quote {
     /// otherwise it is the sender's unauthenticated claim.
     /// In mock mode, set from a CI-provided value or zeroed.
     pub measurement: String,
+    /// Hex-encoded identifier of the PART that signed the report — which machine,
+    /// where `measurement` says which image.
+    ///
+    /// Carried for the same reason and with the same caveat as `measurement`: a
+    /// backend verifying a real report must confirm it matches the signed value
+    /// inside `quote_blob`, or it is the sender's unauthenticated claim. It
+    /// exists because a verifier holding no endorsement of its own reads the
+    /// certificate chain out of the peer's quote, and a chain is only evidence
+    /// that SOME genuine part signed — a peer on another machine passes every
+    /// other check. A verifier that holds an endorsement never needed this: the
+    /// signature is checked against ITS OWN VCEK, which is chip-specific, so a
+    /// foreign part fails at the signature.
+    pub chip_id: String,
 }
 
 /// Bound fields a quote attests to. Matches the protocol's `report_data`
