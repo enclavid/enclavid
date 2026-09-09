@@ -26,15 +26,24 @@
 
 // ----- Wasmtime resource caps -----
 
-/// Maximum linear memory the policy component is allowed to grow
-/// to. Enforced via `Store::limiter` on every `memory.grow`. Bounds
-/// the worst-case memory pressure inside the TEE from a malicious
-/// or buggy policy; tight enough to keep the enclave responsive,
-/// generous enough that ML-bearing policies (decoded JPEG frames,
-/// ONNX intermediates) don't trip on legitimate work.
+/// Maximum linear memory a session may hold across EVERY component in
+/// its store — policy and pinned plugins together, not each.
 ///
-/// Tighten once plugin separation lands and heavy lifting moves
-/// out into attested plugins (which get their own stores + caps).
+/// Enforced by `engine_executor::state::host::AggregateMemory`, which
+/// charges each grow's increment to one running total. It used to be
+/// `StoreLimitsBuilder::memory_size`, which reads the same and is not:
+/// wasmtime asks the limiter once per linear memory and ignores what
+/// the others hold, so every memory reached this number on its own.
+/// A fused component is one memory per part — measured at 1, 2 and 6
+/// for zero, one and five plugins — and the plugin set is the
+/// consumer's to pin, so the ceiling was theirs to multiply.
+///
+/// Generous enough that ML-bearing work (decoded JPEG frames, ONNX
+/// intermediates) does not trip on it: the end-to-end test runs a
+/// policy with five plugins inside this budget. That measurement is
+/// against the placeholder models the fixtures build, so production
+/// weights are the thing to re-measure against, not this number's
+/// history.
 pub const POLICY_MAX_MEMORY: usize = 128 * 1024 * 1024;
 
 /// Fuel budget for one `Executor::run` call. Each WASM instruction
@@ -120,10 +129,10 @@ pub const MAX_TEXT_VALUE_SOFT_CHARS: usize = 1000;
 //   * `MAX_TEXT_VALUE_HARD_BYTES` — hard cap on the raw byte length
 //     of a `translation.value` before sanitisation. Refuses the
 //     whole policy load if any single entry exceeds this. Second-
-//     line guard behind `POLICY_MAX_MEMORY` — wasmtime caps total
-//     linear memory, this caps per-entry size so a million 1-byte
-//     entries can't slip under the memory wire by spreading the
-//     payload.
+//     line guard behind `POLICY_MAX_MEMORY`, which bounds the store's
+//     total linear memory; this caps per-entry size so a million
+//     1-byte entries can't slip under the memory wire by spreading
+//     the payload.
 //   * `MAX_DECLARED_DISCLOSURE_FIELDS` / `MAX_DECLARED_LOCALIZED` /
 //     `MAX_DECLARED_ICONS` — per-kind cardinality caps on a single
 //     component's embedded declarations. Split per kind because the
