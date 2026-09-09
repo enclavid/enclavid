@@ -1,0 +1,354 @@
+## @file
+#  The flash image this fleet launches: AmdSevX64's, with the loader replaced
+#  and the modules a guest with no NIC, no USB, no display, no keyboard and no
+#  firmware-visible disk would never reach left out. 95 modules become 52.
+#
+#  A COPY of OvmfPkg/AmdSev/AmdSevX64.fdf (edk2-stable202602), not an include:
+#  neither DSC nor FDF has a directive that removes an entry, so leaving a
+#  module out means owning the list. The shared fragments this still `!include`s
+#  -- the flash layout, the variable store, MEMFD -- stay upstream, which is
+#  where the parts that are risky to hand-merge live. `git diff` against the
+#  upstream file is the review.
+#
+#  WHY, given that none of the removed drivers is on the path from reset to the
+#  measured kernel: the devices a guest is started with are chosen by the host
+#  and are not part of the launch measurement. Every driver present is code a
+#  host could reach by attaching the matching device, should anything ever
+#  connect it. Leaving them out does not depend on that reasoning holding.
+#
+#  TWO THAT LOOK REMOVABLE AND ARE NOT, both found by trying:
+#    CapsuleRuntimeDxe  -- without it the guest takes #UD at RIP 0x1000 during
+#                          BDS and never reaches the kernel.
+#    HiiDatabaseDxe     -- too much of what stays expects it.
+#  Neither failure is a build failure, which is why this list was arrived at by
+#  removing a category at a time and booting after each.
+#
+#  Copyright (c) 2006 - 2019, Intel Corporation. All rights reserved.<BR>
+#  (C) Copyright 2016 Hewlett Packard Enterprise Development LP<BR>
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+#
+##
+
+################################################################################
+
+[Defines]
+!include OvmfPkg/Include/Fdf/OvmfPkgDefines.fdf.inc
+
+#
+# Build the variable store and the firmware code as one unified flash device
+# image.
+#
+[FD.OVMF]
+BaseAddress   = $(FW_BASE_ADDRESS)
+Size          = $(FW_SIZE)
+ErasePolarity = 1
+BlockSize     = $(BLOCK_SIZE)
+NumBlocks     = $(FW_BLOCKS)
+
+!include OvmfPkg/Include/Fdf/VarStore.fdf.inc
+
+$(VARS_SIZE)|$(FVMAIN_SIZE)
+FV = FVMAIN_COMPACT
+
+$(SECFV_OFFSET)|$(SECFV_SIZE)
+FV = SECFV
+
+################################################################################
+
+!include OvmfPkg/Include/Fdf/MemFd.fdf.inc
+
+################################################################################
+
+[FV.SECFV]
+FvNameGuid         = 763BED0D-DE9F-48F5-81F1-3E90E1B1A015
+BlockSize          = 0x1000
+FvAlignment        = 16
+ERASE_POLARITY     = 1
+MEMORY_MAPPED      = TRUE
+STICKY_WRITE       = TRUE
+LOCK_CAP           = TRUE
+LOCK_STATUS        = TRUE
+WRITE_DISABLED_CAP = TRUE
+WRITE_ENABLED_CAP  = TRUE
+WRITE_STATUS       = TRUE
+WRITE_LOCK_CAP     = TRUE
+WRITE_LOCK_STATUS  = TRUE
+READ_DISABLED_CAP  = TRUE
+READ_ENABLED_CAP   = TRUE
+READ_STATUS        = TRUE
+READ_LOCK_CAP      = TRUE
+READ_LOCK_STATUS   = TRUE
+
+#
+# SEC Phase modules
+#
+# The code in this FV handles the initial firmware startup, and
+# decompresses the PEI and DXE FVs which handles the rest of the boot sequence.
+#
+INF  OvmfPkg/Sec/SecMain.inf
+
+INF  RuleOverride=RESET_VECTOR OvmfPkg/ResetVector/ResetVector.inf
+
+################################################################################
+[FV.PEIFV]
+FvNameGuid         = 6938079B-B503-4E3D-9D24-B28337A25806
+BlockSize          = 0x10000
+FvAlignment        = 16
+ERASE_POLARITY     = 1
+MEMORY_MAPPED      = TRUE
+STICKY_WRITE       = TRUE
+LOCK_CAP           = TRUE
+LOCK_STATUS        = TRUE
+WRITE_DISABLED_CAP = TRUE
+WRITE_ENABLED_CAP  = TRUE
+WRITE_STATUS       = TRUE
+WRITE_LOCK_CAP     = TRUE
+WRITE_LOCK_STATUS  = TRUE
+READ_DISABLED_CAP  = TRUE
+READ_ENABLED_CAP   = TRUE
+READ_STATUS        = TRUE
+READ_LOCK_CAP      = TRUE
+READ_LOCK_STATUS   = TRUE
+
+APRIORI PEI {
+  INF  MdeModulePkg/Universal/PCD/Pei/Pcd.inf
+}
+
+#
+#  PEI Phase modules
+#
+!if $(DEBUG_TO_MEM)
+!endif
+INF  MdeModulePkg/Core/Pei/PeiMain.inf
+INF  MdeModulePkg/Universal/PCD/Pei/Pcd.inf
+INF  MdeModulePkg/Universal/ReportStatusCodeRouter/Pei/ReportStatusCodeRouterPei.inf
+INF  MdeModulePkg/Universal/StatusCodeHandler/Pei/StatusCodeHandlerPei.inf
+INF  OvmfPkg/PlatformPei/PlatformPei.inf
+INF  MdeModulePkg/Core/DxeIplPeim/DxeIpl.inf
+INF  UefiCpuPkg/CpuMpPei/CpuMpPei.inf
+INF  OvmfPkg/AmdSev/SecretPei/SecretPei.inf
+
+!include OvmfPkg/Include/Fdf/OvmfTpmPei.fdf.inc
+
+################################################################################
+
+[FV.DXEFV]
+FvForceRebase      = FALSE
+FvNameGuid         = 7CB8BDC9-F8EB-4F34-AAEA-3EE4AF6516A1
+BlockSize          = 0x10000
+FvAlignment        = 16
+ERASE_POLARITY     = 1
+MEMORY_MAPPED      = TRUE
+STICKY_WRITE       = TRUE
+LOCK_CAP           = TRUE
+LOCK_STATUS        = TRUE
+WRITE_DISABLED_CAP = TRUE
+WRITE_ENABLED_CAP  = TRUE
+WRITE_STATUS       = TRUE
+WRITE_LOCK_CAP     = TRUE
+WRITE_LOCK_STATUS  = TRUE
+READ_DISABLED_CAP  = TRUE
+READ_ENABLED_CAP   = TRUE
+READ_STATUS        = TRUE
+READ_LOCK_CAP      = TRUE
+READ_LOCK_STATUS   = TRUE
+
+APRIORI DXE {
+  INF  MdeModulePkg/Universal/DevicePathDxe/DevicePathDxe.inf
+  INF  MdeModulePkg/Universal/PCD/Dxe/Pcd.inf
+  INF  OvmfPkg/AmdSevDxe/AmdSevDxe.inf
+  INF  OvmfPkg/QemuFlashFvbServicesRuntimeDxe/FvbServicesRuntimeDxe.inf
+}
+
+#
+# DXE Phase modules
+#
+INF  MdeModulePkg/Core/Dxe/DxeMain.inf
+
+INF  MdeModulePkg/Universal/ReportStatusCodeRouter/RuntimeDxe/ReportStatusCodeRouterRuntimeDxe.inf
+INF  MdeModulePkg/Universal/StatusCodeHandler/RuntimeDxe/StatusCodeHandlerRuntimeDxe.inf
+INF  MdeModulePkg/Universal/PCD/Dxe/Pcd.inf
+
+INF  MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
+INF  MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
+INF  UefiCpuPkg/CpuIo2Dxe/CpuIo2Dxe.inf
+INF  UefiCpuPkg/CpuDxe/CpuDxe.inf
+INF  OvmfPkg/LocalApicTimerDxe/LocalApicTimerDxe.inf
+INF  OvmfPkg/IncompatiblePciDeviceSupportDxe/IncompatiblePciDeviceSupport.inf
+INF  MdeModulePkg/Bus/Pci/PciHostBridgeDxe/PciHostBridgeDxe.inf
+INF  MdeModulePkg/Bus/Pci/PciBusDxe/PciBusDxe.inf
+INF  MdeModulePkg/Universal/ResetSystemRuntimeDxe/ResetSystemRuntimeDxe.inf
+INF  MdeModulePkg/Universal/Metronome/Metronome.inf
+INF  PcAtChipsetPkg/PcatRealTimeClockRuntimeDxe/PcatRealTimeClockRuntimeDxe.inf
+
+
+INF  MdeModulePkg/Universal/WatchdogTimerDxe/WatchdogTimer.inf
+INF  MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
+INF  MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
+INF  MdeModulePkg/Universal/Console/ConPlatformDxe/ConPlatformDxe.inf
+INF  MdeModulePkg/Universal/Console/ConSplitterDxe/ConSplitterDxe.inf
+INF  MdeModulePkg/Universal/Console/TerminalDxe/TerminalDxe.inf
+INF  MdeModulePkg/Universal/BdsDxe/BdsDxe.inf
+INF  EnclavidFwPkg/Driver/QemuLoaderFs/QemuLoaderFs.inf
+INF  MdeModulePkg/Universal/DevicePathDxe/DevicePathDxe.inf
+INF  MdeModulePkg/Universal/Disk/UnicodeCollation/EnglishDxe/EnglishDxe.inf
+INF  MdeModulePkg/Universal/HiiDatabaseDxe/HiiDatabaseDxe.inf
+
+!if $(SOURCE_DEBUG_ENABLE) == FALSE
+INF  MdeModulePkg/Bus/Pci/PciSioSerialDxe/PciSioSerialDxe.inf
+!endif
+
+
+INF  MdeModulePkg/Universal/Acpi/AcpiTableDxe/AcpiTableDxe.inf
+INF  OvmfPkg/AcpiPlatformDxe/AcpiPlatformDxe.inf
+
+
+INF OvmfPkg/AmdSev/SecretDxe/SecretDxe.inf
+
+
+#
+# Usb Support
+#
+
+
+INF  OvmfPkg/PlatformDxe/Platform.inf
+INF  OvmfPkg/AmdSevDxe/AmdSevDxe.inf
+INF  OvmfPkg/IoMmuDxe/IoMmuDxe.inf
+
+
+#
+# Variable driver stack (non-SMM)
+#
+INF  OvmfPkg/QemuFlashFvbServicesRuntimeDxe/FvbServicesRuntimeDxe.inf
+INF  OvmfPkg/EmuVariableFvbRuntimeDxe/Fvb.inf
+INF  MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf
+INF  MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf
+
+#
+# TPM support
+#
+!include OvmfPkg/Include/Fdf/OvmfTpmDxe.fdf.inc
+
+!include OvmfPkg/Include/Fdf/ShellDxe.fdf.inc
+!include OvmfPkg/Include/Fdf/OvmfRngDxe.fdf.inc
+!include OvmfPkg/Include/Fdf/OvmfOptHw.fdf.inc
+
+################################################################################
+
+[FV.FVMAIN_COMPACT]
+FvNameGuid         = 48DB5E17-707C-472D-91CD-1613E7EF51B0
+FvAlignment        = 16
+ERASE_POLARITY     = 1
+MEMORY_MAPPED      = TRUE
+STICKY_WRITE       = TRUE
+LOCK_CAP           = TRUE
+LOCK_STATUS        = TRUE
+WRITE_DISABLED_CAP = TRUE
+WRITE_ENABLED_CAP  = TRUE
+WRITE_STATUS       = TRUE
+WRITE_LOCK_CAP     = TRUE
+WRITE_LOCK_STATUS  = TRUE
+READ_DISABLED_CAP  = TRUE
+READ_ENABLED_CAP   = TRUE
+READ_STATUS        = TRUE
+READ_LOCK_CAP      = TRUE
+READ_LOCK_STATUS   = TRUE
+
+FILE FV_IMAGE = 9E21FD93-9C72-4c15-8C4B-E77F1DB2D792 {
+   SECTION GUIDED EE4E5898-3914-4259-9D6E-DC7BD79403CF PROCESSING_REQUIRED = TRUE {
+     #
+     # These firmware volumes will have files placed in them uncompressed,
+     # and then both firmware volumes will be compressed in a single
+     # compression operation in order to achieve better overall compression.
+     #
+     SECTION FV_IMAGE = PEIFV
+     SECTION FV_IMAGE = DXEFV
+   }
+ }
+
+!include OvmfPkg/Include/Fdf/FvmainCompactScratchEnd.fdf.inc
+
+################################################################################
+
+[Rule.Common.SEC]
+  FILE SEC = $(NAMED_GUID) {
+    PE32     PE32           $(INF_OUTPUT)/$(MODULE_NAME).efi
+    UI       STRING ="$(MODULE_NAME)" Optional
+    VERSION  STRING ="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
+  }
+
+[Rule.Common.PEI_CORE]
+  FILE PEI_CORE = $(NAMED_GUID) {
+    PE32     PE32   Align=Auto    $(INF_OUTPUT)/$(MODULE_NAME).efi
+    UI       STRING ="$(MODULE_NAME)" Optional
+    VERSION  STRING ="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
+  }
+
+[Rule.Common.PEIM]
+  FILE PEIM = $(NAMED_GUID) {
+     PEI_DEPEX PEI_DEPEX Optional        $(INF_OUTPUT)/$(MODULE_NAME).depex
+     PE32      PE32   Align=Auto         $(INF_OUTPUT)/$(MODULE_NAME).efi
+     UI       STRING="$(MODULE_NAME)" Optional
+     VERSION  STRING="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
+  }
+
+[Rule.Common.DXE_CORE]
+  FILE DXE_CORE = $(NAMED_GUID) {
+    PE32     PE32           $(INF_OUTPUT)/$(MODULE_NAME).efi
+    UI       STRING="$(MODULE_NAME)" Optional
+    VERSION  STRING="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
+  }
+
+[Rule.Common.DXE_DRIVER]
+  FILE DRIVER = $(NAMED_GUID) {
+    DXE_DEPEX    DXE_DEPEX Optional      $(INF_OUTPUT)/$(MODULE_NAME).depex
+    PE32     PE32                    $(INF_OUTPUT)/$(MODULE_NAME).efi
+    UI       STRING="$(MODULE_NAME)" Optional
+    VERSION  STRING="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
+    RAW ACPI  Optional               |.acpi
+    RAW ASL   Optional               |.aml
+  }
+
+[Rule.Common.DXE_RUNTIME_DRIVER]
+  FILE DRIVER = $(NAMED_GUID) {
+    DXE_DEPEX    DXE_DEPEX Optional      $(INF_OUTPUT)/$(MODULE_NAME).depex
+    PE32     PE32                    $(INF_OUTPUT)/$(MODULE_NAME).efi
+    UI       STRING="$(MODULE_NAME)" Optional
+    VERSION  STRING="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
+  }
+
+[Rule.Common.UEFI_DRIVER]
+  FILE DRIVER = $(NAMED_GUID) {
+    DXE_DEPEX    DXE_DEPEX Optional      $(INF_OUTPUT)/$(MODULE_NAME).depex
+    PE32     PE32                    $(INF_OUTPUT)/$(MODULE_NAME).efi
+    UI       STRING="$(MODULE_NAME)" Optional
+    VERSION  STRING="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
+  }
+
+[Rule.Common.UEFI_DRIVER.BINARY]
+  FILE DRIVER = $(NAMED_GUID) {
+    DXE_DEPEX DXE_DEPEX Optional      |.depex
+    PE32      PE32                    |.efi
+    UI        STRING="$(MODULE_NAME)" Optional
+    VERSION   STRING="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
+  }
+
+[Rule.Common.UEFI_APPLICATION]
+  FILE APPLICATION = $(NAMED_GUID) {
+    PE32     PE32                    $(INF_OUTPUT)/$(MODULE_NAME).efi
+    UI       STRING="$(MODULE_NAME)" Optional
+    VERSION  STRING="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
+  }
+
+[Rule.Common.UEFI_APPLICATION.BINARY]
+  FILE APPLICATION = $(NAMED_GUID) {
+    PE32      PE32                    |.efi
+    UI        STRING="$(MODULE_NAME)" Optional
+    VERSION   STRING="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
+  }
+
+[Rule.Common.USER_DEFINED.RESET_VECTOR]
+  FILE RAW = $(NAMED_GUID) {
+    RAW BIN   Align = 16   |.bin
+  }

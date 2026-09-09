@@ -5,7 +5,7 @@ each reproduces byte for byte:
 
 | input | where | verify |
 |---|---|---|
-| firmware | distribution `ovmf-amdsev` package | package version + digest |
+| firmware | `ovmf/` — our own edk2 platform, see its README | `nix-build image/ovmf --check` |
 | kernel | `kernel/` | `nix-build image/kernel -A diskless\|storage --check` |
 | PID 1 | `init/` (binary) + `init/inittab/<role>` | `nix-build image/init --check` |
 | initramfs | `initramfs/` | `nix-build image/initramfs --check` |

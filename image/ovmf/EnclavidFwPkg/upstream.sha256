@@ -1,0 +1,33 @@
+# The upstream files this platform is a function of, at edk2-stable202602.
+#
+# `image/ovmf/default.nix` runs `sha256sum -c` on this from the edk2 source root
+# and refuses to build on a mismatch. The point is the direction a bump breaks
+# things in: our derived copies are static text, so if edk2 moves underneath them
+# the build would otherwise succeed and quietly keep serving the old logic --
+# including through a security fix. A hash makes that loud.
+#
+# Two kinds of file are listed, for two different reasons:
+#
+#   DERIVED FROM -- Library/NoShimQemuLoadImageLib and Driver/QemuLoaderFs are
+#   copies of the first four with small, documented edits. If the original
+#   changes, the edit has to be re-applied to the new text, not left behind.
+#
+#   INHERITED    -- EnclavidFw.dsc `!include`s AmdSevX64.dsc, and EnclavidFw.fdf
+#   is a copy of AmdSevX64.fdf. Changes to the DSC arrive automatically, which
+#   is exactly why they should be read: the commit that introduced the shim path
+#   this platform removes did not touch either of these files, so a diff that
+#   looks empty here is not permission to skip reviewing the modules.
+#
+# WHEN THIS FAILS: read the upstream diff, re-run the generators, review THEIR
+# diff, then update the hash here. The failure is the review request; updating
+# the number without reading is how the review stops happening.
+#
+# The four modules whose behaviour this image depends on, in the order they
+# matter, are named in `image/ovmf/default.nix`.
+
+93be32aeb93fef4e4f2590aa7dbcc8230f73be0d87e2b4b4016012fbe7e9103a  OvmfPkg/Library/GenericQemuLoadImageLib/GenericQemuLoadImageLib.c
+eb99548311454ca22ae3f90b95837f038bb8fe76318e4f198117ff760c0a172f  OvmfPkg/Library/GenericQemuLoadImageLib/GenericQemuLoadImageLib.inf
+1e248ea2a41487b8432eb86465db9feda3c02146fc56269661e16bc495cd2e87  OvmfPkg/QemuKernelLoaderFsDxe/QemuKernelLoaderFsDxe.c
+2d084505ef2b3e6f828cd88e1143029a3acaba3222ad86377d6de0d967134944  OvmfPkg/QemuKernelLoaderFsDxe/QemuKernelLoaderFsDxe.inf
+6bc8df16452293c3c3a042426e322a1c01a048524c521887a22eaf62614251a7  OvmfPkg/AmdSev/AmdSevX64.fdf
+eb570caf3ad416f42de8f9f2b950838b9ff80751a03ba77bfe74fcf79e23313d  OvmfPkg/AmdSev/AmdSevX64.dsc

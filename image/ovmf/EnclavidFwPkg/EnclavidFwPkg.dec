@@ -1,0 +1,18 @@
+## @file
+#  Declaration for the package holding this fleet's firmware platform.
+#
+#  It carries no GUIDs, protocols or PCDs of its own: everything it names comes
+#  from OvmfPkg, MdePkg and MdeModulePkg. It exists so that edk2's build can
+#  resolve `EnclavidFwPkg/...` paths through PACKAGES_PATH without the sources
+#  living inside the edk2 tree.
+#
+#  Copyright (c) 2026, Enclavid<BR>
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  DEC_SPECIFICATION              = 0x00010005
+  PACKAGE_NAME                   = EnclavidFwPkg
+  PACKAGE_GUID                   = 6f1c1e94-8f2b-4a37-9a56-1a3b5c7d9e02
+  PACKAGE_VERSION                = 0.1
