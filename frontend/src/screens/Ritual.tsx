@@ -6,11 +6,9 @@ import { EntropyMeter } from "@/components/EntropyMeter";
 import { KeyFingerprint } from "@/components/KeyFingerprint";
 import { EntropyAccumulator, storeKey } from "@/lib/key";
 import { cn } from "@/lib/utils";
-import type { AttestationResult } from "@/lib/attestation";
 
 type Props = {
   sessionId: string;
-  attestation: AttestationResult | null;
   /// Fired once the entropy ritual finished and the applicant key
   /// has been finalized + stashed in localStorage. App handles the
   /// `/connect` call on the next state transition — no key needs to
@@ -18,7 +16,7 @@ type Props = {
   onReady: () => void;
 };
 
-export function Ritual({ sessionId, attestation, onReady }: Props) {
+export function Ritual({ sessionId, onReady }: Props) {
   const accumulatorRef = useRef(new EntropyAccumulator());
   const [progress, setProgress] = useState(0);
   const [finalKey, setFinalKey] = useState<Uint8Array | null>(null);
@@ -53,7 +51,7 @@ export function Ritual({ sessionId, attestation, onReady }: Props) {
   // Continue waits for the full reveal animation to play. Without
   // this gate, the button would unlock at 100% draw progress and
   // the user might tap through before seeing the fingerprint.
-  const continueDisabled = !revealed || !finalKey || !attestation?.ok;
+  const continueDisabled = !revealed || !finalKey;
   const ritualComplete = progress >= 1;
 
   const onContinue = () => {
@@ -116,7 +114,7 @@ export function Ritual({ sessionId, attestation, onReady }: Props) {
         Continue
       </Button>
 
-      <AppFooter result={attestation} />
+      <AppFooter />
     </main>
   );
 }

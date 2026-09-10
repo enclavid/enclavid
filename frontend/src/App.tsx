@@ -10,7 +10,6 @@ import { Terminated } from "@/screens/Terminated";
 import { getSessionId } from "@/lib/session";
 import { loadKey } from "@/lib/key";
 import { connect, getStatus, submitInput, ApiError } from "@/lib/api";
-import { verifyAttestation, type AttestationResult } from "@/lib/attestation";
 import type { Decision, SessionProgress } from "@/types";
 
 // Routing model. The browser URL is the source of truth for which
@@ -29,9 +28,6 @@ export function App() {
   const [terminationReason, setTerminationReason] = useState<
     string | undefined
   >(undefined);
-  const [attestation, setAttestation] = useState<AttestationResult | null>(
-    null,
-  );
   const [progress, setProgress] = useState<SessionProgress | null>(null);
   const [completedDecision, setCompletedDecision] = useState<
     Decision | undefined
@@ -42,24 +38,11 @@ export function App() {
   // request, but a single visit to /verify only triggers one /connect.
   const connectFiredRef = useRef(false);
 
-  // Attestation runs in parallel with status — independent concerns,
-  // result feeds the footer badge and Welcome's inline animation.
-  // ref guard makes this strict-mode safe in dev: React replays
-  // mount→unmount→mount, but we only want one network fetch.
-  const attestationFiredRef = useRef(false);
-  useEffect(() => {
-    if (attestationFiredRef.current) return;
-    attestationFiredRef.current = true;
-    void (async () => {
-      const result = await verifyAttestation();
-      setAttestation(result);
-    })();
-  }, []);
-
   // Status fetch + initial route normalization. Runs once per
   // session_id. Terminal statuses bypass the URL entirely; for a
   // running session we pin location to a valid sub-path.
-  // ref guard for strict-mode (see attestation comment above).
+  // ref guard makes this strict-mode safe in dev: React replays
+  // mount→unmount→mount, but we only want one network fetch.
   const statusFiredRef = useRef(false);
   useEffect(() => {
     if (!sessionId) return;
@@ -220,14 +203,12 @@ export function App() {
     <Switch>
       <Route path={`/session/${sid}/start`}>
         <Welcome
-          attestation={attestation}
           onBegin={() => setLocation(`/session/${sid}/keygen`)}
         />
       </Route>
       <Route path={`/session/${sid}/keygen`}>
         <Ritual
           sessionId={sid}
-          attestation={attestation}
           onReady={() => setLocation(`/session/${sid}/verify`)}
         />
       </Route>

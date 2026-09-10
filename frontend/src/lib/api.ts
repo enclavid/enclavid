@@ -8,7 +8,6 @@
 
 import { base64Encode } from "./key";
 import type {
-  AttestationManifest,
   SessionProgress,
   StatusResponse,
 } from "@/types";
@@ -83,11 +82,6 @@ export async function resetState(sessionId: string): Promise<void> {
   if (!res.ok) {
     throw new ApiError(res.status, `HTTP ${res.status}`);
   }
-}
-
-export async function getAttestation(): Promise<AttestationManifest> {
-  const res = await fetch("/.well-known/attestation");
-  return parseOrThrow(res);
 }
 
 function bearer(key: Uint8Array): Record<string, string> {

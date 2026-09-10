@@ -115,16 +115,3 @@ export type SessionProgress =
   | { status: "completed"; decision: Decision }
   | { status: "awaiting_input"; request: RequestView };
 
-// --- Attestation (mirror AttestationManifest) ---
-
-export type AttestationReference = {
-  source_url: string;
-  commit_sha: string;
-  expected_measurement: string;
-};
-
-export type AttestationManifest = {
-  format: string;
-  measurement: string;
-  reference: AttestationReference;
-};

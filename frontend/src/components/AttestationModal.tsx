@@ -1,18 +1,21 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { cn } from "@/lib/utils";
-import { shortCommit, type AttestationResult } from "@/lib/attestation";
 
 type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  result: AttestationResult | null;
 };
 
-/// Detail modal opened by tapping the Verified Enclave badge in the
-/// footer. Explains what attestation actually proves, lists the live
-/// values (commit, measurement) when verified, and links to the
-/// public source for independent audit.
-export function AttestationModal({ open, onOpenChange, result }: Props) {
+/// Detail modal opened from the footer. Describes where the session runs
+/// and says plainly what this page has and has not checked.
+///
+/// It states no verification result, because the page performs none: a
+/// browser cannot read the certificate of its own TLS connection, so the
+/// binding between an attestation quote and this channel is not something
+/// in-page JavaScript can confirm. Anything shown here that looked like a
+/// verdict would be decoration, and a reader who takes a decoration for a
+/// check stops looking for the real one.
+export function AttestationModal({ open, onOpenChange }: Props) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -35,10 +38,11 @@ export function AttestationModal({ open, onOpenChange, result }: Props) {
         >
           <header className="flex flex-col gap-2">
             <Dialog.Title className="text-lg font-semibold">
-              Verified Enclave
+              Where this runs
             </Dialog.Title>
             <Dialog.Description className="text-sm text-muted-foreground">
-              What this badge proves, in plain terms.
+              How your scans are protected, and what this page can and
+              cannot check.
             </Dialog.Description>
           </header>
 
@@ -51,13 +55,12 @@ export function AttestationModal({ open, onOpenChange, result }: Props) {
               or even our own server processes outside the enclave.
             </p>
             <p>
-              At session start the enclave produced a cryptographic{" "}
-              <span className="font-medium text-foreground">attestation quote</span>
-              {" "}signed by AMD. The quote contains a measurement (a hash of
-              the exact code currently running). We compare that measurement
-              to the measurement of our published source code: if they match,
-              you know the running code is exactly what you can audit on
-              GitHub.
+              What runs inside is fixed when the enclave starts, and the
+              hardware hashes it into a{" "}
+              <span className="font-medium text-foreground">measurement</span>{" "}
+              it will sign on request. That is what makes it possible to check
+              which code handled your scans, rather than being asked to take
+              our word for it.
             </p>
             <p>
               Before any data leaves the enclave, you'll see exactly what's
@@ -65,40 +68,21 @@ export function AttestationModal({ open, onOpenChange, result }: Props) {
               raw scans, intermediate values, or processing metadata —
               ever exits.
             </p>
-            {result?.ok && (
-              <dl className="grid gap-2 rounded-xl border border-border bg-card p-3 text-xs">
-                <div className="flex items-baseline justify-between gap-3">
-                  <dt className="text-muted-foreground">Format</dt>
-                  <dd className="font-mono">{result.manifest.format}</dd>
-                </div>
-                <div className="flex items-baseline justify-between gap-3">
-                  <dt className="text-muted-foreground">Commit</dt>
-                  <dd className="font-mono">
-                    {shortCommit(result.manifest.reference.commit_sha)}
-                  </dd>
-                </div>
-                <div className="flex items-baseline justify-between gap-3 break-all">
-                  <dt className="shrink-0 text-muted-foreground">Measurement</dt>
-                  <dd className="text-right font-mono">
-                    {shortHex(result.manifest.measurement)}
-                  </dd>
-                </div>
-              </dl>
-            )}
             <p className="text-muted-foreground">
-              You don't have to take our word for it — anyone can re-run this
-              check independently with the source URL below.
+              This page does not perform that check, and shows no result for
+              it. A browser cannot see the certificate of its own connection,
+              so it cannot tell whether a measurement it was handed belongs to
+              the enclave it is actually talking to. Checking that takes a tool
+              running outside the browser.
             </p>
-            {result?.ok && (
-              <a
-                href={result.manifest.reference.source_url}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-sm font-medium underline underline-offset-2"
-              >
-                View source on GitHub →
-              </a>
-            )}
+            <a
+              href="https://github.com/enclavid/enclavid"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-sm font-medium underline underline-offset-2"
+            >
+              View source on GitHub →
+            </a>
           </section>
 
           <Dialog.Close
@@ -114,9 +98,4 @@ export function AttestationModal({ open, onOpenChange, result }: Props) {
       </Dialog.Portal>
     </Dialog.Root>
   );
-}
-
-function shortHex(hex: string): string {
-  if (hex.length <= 16) return hex;
-  return `${hex.slice(0, 8)}…${hex.slice(-8)}`;
 }

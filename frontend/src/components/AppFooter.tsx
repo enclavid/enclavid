@@ -1,22 +1,21 @@
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { AttestationModal } from "@/components/AttestationModal";
-import { LockGlyph, Spinner } from "@/components/icons";
-import type { AttestationResult } from "@/lib/attestation";
 
 type Props = {
-  result: AttestationResult | null;
   className?: string;
 };
 
-/// Persistent footer for post-attestation screens. Renders a single
-/// status line: "Powered by AMD SEV-SNP · [Verified Enclave]". The
-/// badge is always present; its glyph reflects the live attestation
-/// state — spinner while the request is in flight, green lock once
-/// verified, red dot on failure. Tapping opens the explanation modal.
-export function AppFooter({ result, className }: Props) {
+/// Persistent footer. One line naming where the session runs, tapping it
+/// opens the explanation.
+///
+/// It carries no status glyph. A badge has exactly one job — to say whether
+/// something was checked — and nothing here checks anything, so a green
+/// indicator would be reporting a verification that did not happen. The
+/// footer states a fact about the platform and hands the reader somewhere to
+/// find out what that does and does not buy them.
+export function AppFooter({ className }: Props) {
   const [open, setOpen] = useState(false);
-  const state = result === null ? "loading" : result.ok ? "ok" : "fail";
 
   return (
     <>
@@ -39,24 +38,10 @@ export function AppFooter({ result, className }: Props) {
           className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2 py-0.5 text-[11px] font-medium leading-tight transition-colors hover:bg-muted"
           aria-haspopup="dialog"
         >
-          {state === "ok" && (
-            <LockGlyph className="size-3 text-emerald-500" />
-          )}
-          {state === "loading" && (
-            <Spinner className="size-3 text-muted-foreground" />
-          )}
-          {state === "fail" && (
-            <span
-              aria-hidden
-              className="size-1.5 rounded-full bg-destructive"
-            />
-          )}
-          <span>
-            {state === "fail" ? "Attestation failed" : "Verified Enclave"}
-          </span>
+          <span>Where this runs</span>
         </button>
       </footer>
-      <AttestationModal open={open} onOpenChange={setOpen} result={result} />
+      <AttestationModal open={open} onOpenChange={setOpen} />
     </>
   );
 }

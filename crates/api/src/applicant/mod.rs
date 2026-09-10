@@ -28,7 +28,6 @@
 //! deployment the env var IS required; otherwise visitors landing on
 //! `/session/<id>/` get a 404.
 
-mod attestation;
 mod auth;
 mod callbacks;
 mod connect;
@@ -66,10 +65,6 @@ pub fn router(state: Arc<AppState>) -> Router {
     // by the ServeDir fallback below; only the JSON endpoints under
     // it are versioned/plural.
     let routes = Router::new()
-        // Public per-instance attestation manifest. Mounted ahead of
-        // the SPA fallback so `/.well-known/...` paths don't get
-        // swallowed by ServeDir.
-        .route("/.well-known/attestation", attestation::get_attestation())
         .route("/api/v1/sessions/{id}/status", status::get_status())
         .route("/api/v1/sessions/{id}/state", reset::delete_state())
         .route(
