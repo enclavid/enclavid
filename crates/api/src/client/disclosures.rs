@@ -7,7 +7,9 @@ use axum::routing::{MethodRouter, get};
 use base64ct::{Base64, Encoding};
 use serde::Serialize;
 
-use hatch_client::{AuthN, AuthZ, Disclosure, Metadata, Replay, outbound_session_id, reason};
+use hatch_client::{
+    AuthN, AuthZ, Disclosure, Metadata, Replay, SessionStatus, outbound_session_id, reason,
+};
 
 use crate::client_state::ClientState;
 use crate::disclosure_commit;
@@ -66,6 +68,20 @@ async fn read(
     // metadata via the shared helper. Disclosures list AuthN is
     // checked separately below against the metadata set commitment.
     let metadata = trust_metadata(metadata_untrusted, &presented_token, &presented_principal)?;
+
+    // Nothing is served before the session is done, and that is what makes
+    // `/reset` able to delete a chain instead of leaving one behind: a reset can
+    // only reach a session that is still running, so at the moment it deletes,
+    // no entry here has ever been read. Serving mid-session would trade that for
+    // a chain the next applicant appends to — one session id carrying two
+    // people's consented data, with a commitment that still verifies.
+    //
+    // `Failed` is excluded with `Running`: an infrastructure error is not a
+    // verification, and half of one is not a smaller result but a different
+    // claim about a person.
+    if metadata.status != SessionStatus::Completed {
+        return Err(StatusCode::CONFLICT);
+    }
 
     // The TEE-truth commitment, derived from the AEAD-sealed leaf list.
     // Computed once (independent of the host-served items) and reused as the

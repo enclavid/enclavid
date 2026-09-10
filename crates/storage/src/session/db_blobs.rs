@@ -169,8 +169,19 @@ impl DbBlobs {
         Ok(WriteResponse { new_version })
     }
 
-    /// The `/reset` path: drop the STATE scalar + all media, keeping the session.
-    /// Returns the state-field delete count (0 or 1). Absent file ⇒ 0.
+    /// The `/reset` path: drop the STATE scalar, all media and every disclosure,
+    /// keeping the session. Returns the state-field delete count (0 or 1).
+    /// Absent file ⇒ 0.
+    ///
+    /// Disclosures go for the same reason the state does. A reset hands the
+    /// session to whoever asks next, so anything left behind is something the
+    /// next applicant's entries would be appended to — and the consumer reads a
+    /// session's disclosures as one person's, because that is what a session is.
+    /// Leaving them would let a reset splice two people into one record with a
+    /// chain that still verifies. They are safe to drop only because nothing
+    /// served them: the read waits for a completed session and a completed
+    /// session cannot be reset (`enclavid-api::client::disclosures`,
+    /// `enclavid-api::applicant::reset`).
     pub(super) fn delete(&self, name: &str) -> Result<DeleteResponse, StoreErr> {
         let mut conn = match open_rw(&self.path(name))? {
             Some(c) => c,
@@ -183,6 +194,7 @@ impl DbBlobs {
             [blob_tag(BlobField::State)],
         )? as u64;
         tx.execute("DELETE FROM media", [])?;
+        tx.execute("DELETE FROM disclosure", [])?;
         tx.commit()?;
         Ok(DeleteResponse { deleted })
     }

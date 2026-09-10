@@ -122,7 +122,8 @@ impl SessionStore {
         .map_err(SessionError::from)
     }
 
-    /// `/reset`: drop STATE + media, keep the session (see [`DbBlobs::delete`]).
+    /// `/reset`: drop STATE + media + disclosures, keep the session (see
+    /// [`DbBlobs::delete`]).
     pub fn delete(&self, name: &str) -> Result<DeleteResponse, SessionError> {
         self.blobs.delete(name).map_err(SessionError::from)
     }
@@ -332,8 +333,12 @@ mod tests {
         assert_eq!(items, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
     }
 
+    /// Everything one applicant put here goes, and the session stays claimable.
+    /// The disclosure assertion is the load-bearing one: an entry surviving a
+    /// reset is an entry the next applicant's would be appended to, under a
+    /// session id the consumer reads as one person.
     #[test]
-    fn delete_purges_media_keeps_session() {
+    fn delete_purges_media_and_disclosures_keeps_session() {
         let (_d, s) = tmp_store();
         let req = WriteRequest {
             ops: vec![
@@ -344,6 +349,10 @@ mod tests {
                 Op::MediaWrite(MediaWrite {
                     blob_key: vec![1u8; 32],
                     value: b"jpeg".to_vec(),
+                }),
+                Op::ListAppend(ListAppend {
+                    field: ListField::Disclosure,
+                    value: b"consented".to_vec(),
                 }),
             ],
             expected_version: None,
@@ -359,12 +368,14 @@ mod tests {
                     fields: vec![
                         FieldSelector::Blob(BlobField::State),
                         FieldSelector::Media(vec![1u8; 32]),
+                        FieldSelector::List(ListField::Disclosure),
                     ],
                 },
             )
             .unwrap();
         assert_eq!(got.slots[0], Slot::Scalar(ScalarSlot { value: None }));
         assert_eq!(got.slots[1], Slot::Scalar(ScalarSlot { value: None }));
+        assert_eq!(got.slots[2], Slot::List(ListSlot { items: vec![] }));
     }
 
     #[test]
