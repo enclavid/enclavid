@@ -31,6 +31,7 @@ use sev::certs::snp::{Certificate, Chain, Verifiable, builtin, ca};
 use sev::firmware::guest::AttestationReport;
 use sev::firmware::host::TcbVersion;
 use sev::parser::ByteParser;
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::{AttestationError, Quote, ReportData};
 
@@ -262,6 +263,16 @@ fn verify_quote_endorsed(
         .verify()
         .map_err(|_| AttestationError::BadSignature)?;
 
+    // Now that the certificate is authentic and signed this report, the part it
+    // was issued to is a fact rather than a claim — and it has to agree with the
+    // part the report names. Applies to both endorsement shapes: carried, it is
+    // what stops an extracted key speaking for a chip it was never issued for;
+    // supplied, it states cryptographically what that shape only implied, that
+    // a certificate of ours verifies a report only from the chip we are on.
+    if endorsed_chip(vcek_der)? != report.chip_id {
+        return Err(AttestationError::ChipMismatch);
+    }
+
     check_report_policy(&report)?;
 
     if report.report_data[..32] != expected.hash() {
@@ -289,6 +300,51 @@ fn verify_quote_endorsed(
         ));
     }
     Ok(())
+}
+
+/// AMD's HWID extension: the chip a VCEK was issued for.
+///
+/// Under `1.3.6.1.4.1.3704.1.4` AMD writes 64 bytes — the same width, and for a
+/// genuine pair the same value, as [`AttestationReport::chip_id`].
+const HWID_OID: &str = "1.3.6.1.4.1.3704.1.4";
+
+/// The part AMD issued this certificate to.
+///
+/// The chain establishes that AMD issued the certificate and the signature
+/// establishes that it signed the report — neither says the two belong
+/// together. `chip_id` is a field *inside* the report, and a report is whatever
+/// the holder of a VCEK private key writes: an extracted key from any part of
+/// this generation signs a report naming any part at all, and every check that
+/// reads `chip_id` from the report alone then agrees with it. What AMD signed
+/// is in the certificate, so this is the only chip identity in a quote that its
+/// sender did not choose.
+///
+/// `sev` verifies the chain and never reads this field, which is why it is
+/// parsed here rather than taken from there.
+fn endorsed_chip(vcek_der: &[u8]) -> Result<[u8; 64], AttestationError> {
+    let (_, cert) = X509Certificate::from_der(vcek_der)
+        .map_err(|e| AttestationError::InvalidQuote(format!("VCEK: {e}")))?;
+    let hwid = cert
+        .extensions()
+        .iter()
+        .find(|ext| ext.oid.to_id_string() == HWID_OID)
+        .ok_or_else(|| {
+            AttestationError::InvalidQuote(
+                "VCEK carries no HWID extension, so it endorses no particular part".into(),
+            )
+        })?;
+    // A 64-byte OCTET STRING has one DER encoding: tag, short-form length,
+    // payload. Matching those two bytes rather than parsing is what refuses the
+    // re-encodings — a long-form length, a nested wrapper — that would let the
+    // same value arrive in a shape this comparison had not considered.
+    match hwid.value {
+        [0x04, 0x40, chip @ ..] if chip.len() == 64 => {
+            Ok(chip.try_into().expect("64 bytes, just matched"))
+        }
+        _ => Err(AttestationError::InvalidQuote(
+            "VCEK HWID extension is not a 64-byte octet string".into(),
+        )),
+    }
 }
 
 /// Refuse a peer that attested on another part.
@@ -734,6 +790,75 @@ mod tests {
 
         // A verifier that holds an endorsement compares nothing here.
         assert!(same_part(None, &quote).is_ok());
+    }
+
+    /// A certificate carrying AMD's HWID extension over `content`. Self-signed
+    /// and otherwise empty: one extension's contents is all that is read here,
+    /// and the chain that makes a real VCEK worth reading is verified before
+    /// this is reached.
+    fn cert_with_hwid_content(content: Vec<u8>) -> Vec<u8> {
+        let mut params = rcgen::CertificateParams::default();
+        params
+            .custom_extensions
+            .push(rcgen::CustomExtension::from_oid_content(
+                &[1, 3, 6, 1, 4, 1, 3704, 1, 4],
+                content,
+            ));
+        let key = rcgen::KeyPair::generate().unwrap();
+        params.self_signed(&key).unwrap().der().to_vec()
+    }
+
+    fn cert_endorsing(chip: [u8; 64]) -> Vec<u8> {
+        let mut content = vec![0x04, 0x40];
+        content.extend_from_slice(&chip);
+        cert_with_hwid_content(content)
+    }
+
+    #[test]
+    fn the_chip_read_from_a_certificate_is_the_one_amd_put_there() {
+        let chip = [7u8; 64];
+        assert_eq!(endorsed_chip(&cert_endorsing(chip)).unwrap(), chip);
+    }
+
+    /// The comparison exists to contradict a `chip_id` that was chosen. A
+    /// certificate naming no part cannot contradict one, so it is refused
+    /// rather than read as agreement.
+    #[test]
+    fn a_certificate_without_the_extension_endorses_no_part() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let der = rcgen::CertificateParams::default()
+            .self_signed(&key)
+            .unwrap()
+            .der()
+            .to_vec();
+        assert!(matches!(
+            endorsed_chip(&der),
+            Err(AttestationError::InvalidQuote(_))
+        ));
+    }
+
+    /// One value, one encoding. The long-form case is the one that matters: it
+    /// carries the right sixty-four bytes and is still refused, because a field
+    /// that can arrive in two shapes is a field two verifiers can disagree on.
+    #[test]
+    fn an_extension_that_is_not_a_sixty_four_byte_octet_string_is_refused() {
+        let long_form = {
+            let mut v = vec![0x04, 0x81, 0x40];
+            v.extend_from_slice(&[7u8; 64]);
+            v
+        };
+        let bare_payload = [7u8; 64].to_vec();
+        let wrong_width = {
+            let mut v = vec![0x04, 0x20];
+            v.extend_from_slice(&[7u8; 32]);
+            v
+        };
+        for content in [long_form, bare_payload, wrong_width] {
+            assert!(matches!(
+                endorsed_chip(&cert_with_hwid_content(content)),
+                Err(AttestationError::InvalidQuote(_))
+            ));
+        }
     }
 
     /// The leaves' direction. A verifier holding nothing cannot authenticate a

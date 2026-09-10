@@ -22,4 +22,7 @@ pub enum AttestationError {
 
     #[error("measurement in quote does not match expected pin")]
     MeasurementMismatch,
+
+    #[error("the certificate endorsing this report was issued for a different chip")]
+    ChipMismatch,
 }

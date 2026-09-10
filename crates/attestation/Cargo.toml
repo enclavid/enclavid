@@ -18,7 +18,7 @@ mock = ["dep:ed25519-dalek", "dep:rand_core"]
 snp-dev = ["dep:sev", "dep:ed25519-dalek", "dep:rand_core"]
 # Prod SEV-SNP backend: `/dev/sev-guest` mint + AMD VCEK→ASK→ARK chain
 # verification against a compiled-in root.
-sev-snp = ["dep:sev", "dep:ciborium", "dep:serde_bytes"]
+sev-snp = ["dep:sev", "dep:ciborium", "dep:serde_bytes", "dep:x509-parser"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -37,3 +37,13 @@ sev = { version = "8", default-features = false, features = ["snp", "crypto_noss
 # certificates encode as byte strings rather than per-byte integer arrays.
 ciborium = { version = "0.2", optional = true }
 serde_bytes = { version = "0.11", optional = true }
+# The chip a VCEK was issued for rides in an X.509 extension AMD signs. `sev`
+# verifies the chain but never reads that field, so binding a certificate to
+# the report it signs needs a general parser. Already in the lock via
+# `enclavid-ra-tls`, so this is an edge rather than a new dependency.
+x509-parser = { version = "0.16", optional = true }
+
+[dev-dependencies]
+# Builds a certificate carrying the HWID extension, so what is read out of one
+# can be tested without a VCEK from AMD.
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
