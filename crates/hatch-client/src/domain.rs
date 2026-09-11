@@ -133,11 +133,12 @@ pub struct SessionMetadata {
 /// Pure-reducer model. `state` is the policy's OWN opaque
 /// serialized blob (the engine never inspects it); the engine threads
 /// it verbatim through `policy.handle(state, event)`. `current_prompt` is
-/// the prompt the runtime last rendered to the applicant and is waiting
-/// on — the runtime uses it to (a) build the matching inbound `Event`
-/// from `/input`, and (b) gate the consent-disclosure seal: a disclosure
-/// only seals to the consumer when the `current_prompt` is a
-/// `Prompt::ConsentDisclosure` and it is accepted.
+/// the prompt last rendered to the applicant and awaiting an answer — the
+/// orchestrator uses it to (a) build the matching inbound `Event` from
+/// `/input`, and (b) decide the consent-disclosure seal: fields seal to the
+/// consumer only when this is a `Prompt::ConsentDisclosure` and it was
+/// accepted. Both readings happen orchestrator-side; the runtime that WROTE
+/// this value gets no say in either.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionState {
@@ -258,8 +259,9 @@ pub enum Decision {
 
 /// What the runtime renders to the applicant — the sealed mirror of the
 /// WIT `prompt` variant. Stored as [`SessionState::current_prompt`] so the
-/// next `/input` round can build the matching [`Event`] and so the
-/// consent gate has the disclosure to seal on accept.
+/// next `/input` round can build the matching [`Event`], and so the
+/// orchestrator has the fields to seal on an accept without asking the
+/// runtime what they were.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Prompt {
     /// Capture one artifact; reply arrives as [`Event::Media`].

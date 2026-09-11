@@ -187,7 +187,7 @@ fn prompt_view(prompt: &Prompt, locale: &Locale) -> RequestView {
     }
 }
 
-fn consent_view(d: &PromptDisclosure, locale: &Locale) -> RequestView {
+pub(super) fn consent_view(d: &PromptDisclosure, locale: &Locale) -> RequestView {
     RequestView::Consent {
         fields: d
             .fields

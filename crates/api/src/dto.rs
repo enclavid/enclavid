@@ -15,9 +15,9 @@
 //!     foreign type evolution.
 //!
 //! Used by:
-//!   * `applicant::persister` — wraps engine's structured
-//!     `ConsentDisclosure` records into `DisclosureEnvelope`, JSON-
-//!     encodes, age-seals to the consumer recipient.
+//!   * `applicant::persister` — wraps the round's consented
+//!     `DisplayField`s into `DisclosureEnvelope`, JSON-encodes,
+//!     age-seals to the consumer recipient.
 //!   * `applicant::views` — converts a `Prompt::ConsentDisclosure` into
 //!     `RequestView::Consent` for the applicant frontend.
 
@@ -185,12 +185,20 @@ pub fn pick_localized(localized: &Localized, locale: &Locale) -> String {
 }
 
 /// Content digest of a consent-disclosure prompt — the binding between the
-/// screen the applicant AUDITED and the disclosure the runtime SEALS on accept.
+/// screen the applicant AUDITED and the fields api SEALS on accept.
 ///
-/// The `/input` consent submit echoes this (host-minted) hex digest; the input
-/// handler recomputes it over the session's current `current_prompt` and refuses
-/// an ACCEPT whose digest doesn't match (409). That closes the show==seal TOCTOU:
-/// if `current_prompt` advanced between render and accept (a stale second tab, a
+/// This is what authorizes a seal at all, and the only place the applicant
+/// enters the chain. The `/input` consent submit echoes this (host-minted) hex
+/// digest; the handler recomputes it over the session's own `current_prompt` and
+/// refuses an ACCEPT that does not match (409). Since the sole mint site is
+/// `views::consent_view` over the value it rendered, a match means shown and
+/// sealed are the same bytes — which matters because `current_prompt` was
+/// authored by the execution-worker, the one process here that runs
+/// adversary-supplied code. Without this equality api would be sealing whatever
+/// that process last wrote.
+///
+/// It also closes the show==seal TOCTOU it was first written for: if
+/// `current_prompt` advanced between render and accept (a stale second tab, a
 /// concurrent round), the echoed digest is stale and the accept is rejected —
 /// rather than sealing a disclosure the applicant never saw.
 ///

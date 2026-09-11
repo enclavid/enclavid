@@ -29,8 +29,8 @@ pub struct Disclosure;
 /// so the state update + disclosure entries commit atomically.
 ///
 /// Payload is `Exposed<Vec<u8>, ()>` — fully vouched at the api crate
-/// boundary (see `api::boundary::outbound::disclosure_envelope` and
-/// the vouch chain in the api persister). The bytes are already
+/// boundary (the vouch chain in `api::applicant::persister`). The bytes are
+/// already
 /// age-sealed to the consumer's `client_disclosure_pubkey`, with
 /// field order HKDF'd-shuffle'd inside the envelope; hatch-client
 /// does no further sealing work — `build_op` just rewraps as a typed
@@ -56,10 +56,10 @@ impl ReadField for Disclosure {
 
 impl WriteField for AppendDisclosure {
     fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, BridgeError> {
-        // Bytes arrived pre-vouched from `api::boundary::outbound::
-        // disclosure_envelope` (Covert → HKDF'd shuffle, AuthZ →
-        // consent-gate rationale, AuthN → age-seal to client
-        // disclosure pubkey). Host-bridge does no further sealing
+        // Bytes arrived pre-vouched from `api::applicant::persister`
+        // (Covert → HKDF'd shuffle, AuthZ → the applicant accepted this
+        // screen, AuthN → age-seal to client disclosure pubkey).
+        // Host-bridge does no further sealing
         // — just rewrap as a typed ListAppend op for the wire.
         // Clone because `&self` forbids moving the Exposed out;
         // disclosure entries are typically small (<1 KB).

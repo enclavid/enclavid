@@ -35,8 +35,8 @@
 //!     principal/version/disclosure list). Migration target for
 //!     readers/writers in `stores/session/*.rs`.
 //!   * `api::boundary` (separate crate) — engine-emitted data that
-//!     first becomes wire-bound inside the api persister. Carries
-//!     `ConsentDisclosure` and other types the hatch-client layer
+//!     first becomes wire-bound inside the api persister. Carries the
+//!     consented `DisplayField`s and other types the hatch-client layer
 //!     never sees in typed form, sealing them through the api side
 //!     before handing pre-vouched bytes down to hatch-client's
 //!     writers. Once api crate's boundary lands, hatch-client's

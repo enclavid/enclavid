@@ -1,17 +1,18 @@
-//! Hook fired once per `handle` round, after the policy reducer
-//! returns, carrying the new session state plus any disclosure the
-//! runtime sealed this round (non-empty only when a consent-disclosure
-//! prompt was accepted).
+//! Hook fired once per `handle` round, after the policy reducer returns,
+//! carrying the new session state and any media the round captured.
+//!
+//! It reports NOTHING about what the round disclosed. That decision belongs to
+//! the orchestrator, which makes it from the prompt it rendered and the event it
+//! built — this process runs the policy, so anything it claimed about an
+//! applicant's consent would have to be re-derived there anyway.
 //!
 //! The runtime's I/O layer (typically the api crate) implements
-//! `SessionListener` to persist the new state plus any side-effect
-//! outputs (disclosure records). Persist is the caller's job — engine
+//! `SessionListener` to persist the round. Persist is the caller's job — engine
 //! treats this as a neutral session-changed notification and stays free
 //! of `SessionStore` / AEAD-key knowledge.
 //!
-//! Atomicity: state and disclosures for the same round are delivered
-//! together in one hook invocation, so a sane listener commits them in
-//! one transaction.
+//! Atomicity: state and media for the same round are delivered together in one
+//! hook invocation, so a sane listener commits them in one transaction.
 //!
 //! Returning Err aborts the run; engine surfaces the error to its
 //! caller (api), which maps to 5xx.
@@ -20,17 +21,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use hatch_client::{DisplayField, SessionState};
-
-/// Structured disclosure record the runtime seals when a
-/// consent-disclosure prompt is accepted. Engine emits structured
-/// fields; the listener (api crate) is responsible for converting to
-/// its public JSON wire format and sealing to the consumer recipient.
-/// Keeping the engine output structured (not pre-serialized) firewalls
-/// the engine from public API shape decisions.
-pub struct ConsentDisclosure {
-    pub fields: Vec<DisplayField>,
-}
+use hatch_client::SessionState;
 
 /// The applicant media captured THIS round (present only on a media
 /// round), staged for the listener to seal into the host blob store. Every
@@ -44,14 +35,16 @@ pub struct CapturedMedia {
 }
 
 /// Bundle delivered to the listener once per `handle` round. `state` is
-/// the post-round snapshot; `disclosures` is non-empty only when this
-/// round accepted a consent-disclosure prompt — the consented fields
-/// the runtime is sealing to the consumer; `media` is present only on a
-/// media round — the captured frames to seal into the blob store. Bundled
-/// together because a sane listener commits them in one atomic transaction.
+/// the post-round snapshot; `media` is present only on a media round — the
+/// captured frames to seal into the blob store. Bundled together because a sane
+/// listener commits them in one atomic transaction.
+///
+/// What the round disclosed is NOT here, deliberately. The orchestrator decides
+/// that from the prompt it rendered and the event it built, before this side
+/// runs — this process executes adversary-supplied code, so anything it asserted
+/// about an applicant's consent would have to be re-derived there anyway.
 pub struct SessionChange<'a> {
     pub state: &'a SessionState,
-    pub disclosures: &'a [ConsentDisclosure],
     pub media: Option<&'a CapturedMedia>,
 }
 

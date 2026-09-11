@@ -147,13 +147,6 @@ impl SessionListener for RelayListener {
         change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
         let state = change.state.clone();
-        let disclosures: Vec<engine_rpc::ConsentDisclosure> = change
-            .disclosures
-            .iter()
-            .map(|d| engine_rpc::ConsentDisclosure {
-                fields: d.fields.clone(),
-            })
-            .collect();
         // Copy the captured frames out of their Arcs into owned wire bytes.
         let media: Vec<([u8; 32], Vec<u8>)> = change
             .media
@@ -167,7 +160,7 @@ impl SessionListener for RelayListener {
         let callbacks = self.callbacks.clone();
         Box::pin(async move {
             callbacks
-                .session_change(state, disclosures, media)
+                .session_change(state, media)
                 .await
                 .map_err(|e| RunError::msg(format!("session_change callback: {e}")))
         })

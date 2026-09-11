@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use hatch_client::{Decision, DisplayField, Event, Prompt, SessionState};
+use hatch_client::{Decision, Event, Prompt, SessionState};
 
 use crate::{BundleRef, CompiledBundle};
 
@@ -53,15 +53,6 @@ pub enum RunStatus {
     AwaitingInput(Prompt),
     /// Policy finished with a terminal decision.
     Completed(Decision),
-}
-
-/// serde mirror of the engine's `ConsentDisclosure` — the consented fields the
-/// runtime sealed this round (non-empty only on a consent-disclosure accept),
-/// carried on [`CallbackService::session_change`] for the orchestrator to
-/// age-seal to the consumer.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ConsentDisclosure {
-    pub fields: Vec<DisplayField>,
 }
 
 /// A run failure — an opaque trap / instantiate / host-fn / transport / bundle-
@@ -170,15 +161,18 @@ pub trait CallbackService {
     /// on it, same as the in-process gate.
     async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError>;
 
-    /// Seal + persist the post-round session state, plus any consented
-    /// `disclosures` (non-empty only on a consent-disclosure accept) and
-    /// captured `media` blobs (present only on a media round) — the owned form
-    /// of the engine's borrowed `SessionChange`. The orchestrator commits them
-    /// in ONE atomic transaction under the seal key the worker never holds.
+    /// Seal + persist the post-round session state and the captured `media`
+    /// blobs (present only on a media round) — the owned form of the engine's
+    /// borrowed `SessionChange`. The orchestrator commits them in ONE atomic
+    /// transaction under the seal key the worker never holds.
+    ///
+    /// What a round discloses does NOT travel here. The orchestrator derives it
+    /// from the prompt it rendered and the event it built, before this side runs;
+    /// a disclosure asserted by the process that executes adversary-supplied code
+    /// would be no evidence that an applicant accepted anything.
     async fn session_change(
         &self,
         state: SessionState,
-        disclosures: Vec<ConsentDisclosure>,
         media: Vec<([u8; 32], Vec<u8>)>,
     ) -> Result<(), CallbackError>;
 }
@@ -263,13 +257,13 @@ pub trait ChildCallbacks {
     /// Rehydrate a stored blob by content hash (api unseals). `None` = miss.
     async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError>;
 
-    /// Seal + persist the post-round state, consented `disclosures`, and captured
-    /// `media` — relayed to api's `session_change`, committed under the seal key
-    /// this process never holds.
+    /// Seal + persist the post-round state and captured `media` — relayed to
+    /// api's `session_change`, committed under the seal key this process never
+    /// holds. What the round disclosed is not carried; see
+    /// [`CallbackService::session_change`].
     async fn session_change(
         &self,
         state: SessionState,
-        disclosures: Vec<ConsentDisclosure>,
         media: Vec<([u8; 32], Vec<u8>)>,
     ) -> Result<(), CallbackError>;
 }
@@ -298,7 +292,6 @@ mod execute_tests {
         async fn session_change(
             &self,
             _state: SessionState,
-            _disclosures: Vec<ConsentDisclosure>,
             _media: Vec<([u8; 32], Vec<u8>)>,
         ) -> Result<(), CallbackError> {
             *self.state_calls.lock().unwrap() += 1;
@@ -339,7 +332,7 @@ mod execute_tests {
                 return Err(ExecError::Run("callback returned wrong media".into()));
             }
             callbacks
-                .session_change(req.session_state.clone(), vec![], vec![])
+                .session_change(req.session_state.clone(), vec![])
                 .await?;
             Ok(RunReply {
                 status: RunStatus::Completed(Decision::Approved),

@@ -2,7 +2,8 @@
 //!
 //! During a run the worker calls BACK over the same remoc connection: `media_load`
 //! to rehydrate a stored blob, and `session_change` to seal + persist the
-//! post-round state + disclosures + captured media. [`CallbackServer`] wires those
+//! post-round state and captured media. What the round disclosed does not
+//! arrive here — the orchestrator decided that before the worker ran. [`CallbackServer`] wires those
 //! to the per-round [`SessionPersister`] + [`HatchMediaStore`] (they hold the seal
 //! key + applicant token). It implements `engine_rpc::CallbackService`; the
 //! orchestrator stands one up per run and passes its client into
@@ -17,7 +18,7 @@
 
 use std::sync::Arc;
 
-use engine_rpc::{CallbackError, CallbackService, ConsentDisclosure};
+use engine_rpc::{CallbackError, CallbackService};
 use hatch_client::SessionState;
 
 use super::media_store::HatchMediaStore;
@@ -38,9 +39,8 @@ impl CallbackService for CallbackServer {
     async fn session_change(
         &self,
         state: SessionState,
-        disclosures: Vec<ConsentDisclosure>,
         media: Vec<([u8; 32], Vec<u8>)>,
     ) -> Result<(), CallbackError> {
-        self.persister.persist(state, disclosures, media).await
+        self.persister.persist(state, media).await
     }
 }

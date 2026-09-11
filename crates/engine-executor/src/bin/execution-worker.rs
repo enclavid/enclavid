@@ -71,9 +71,9 @@ use zeroize::Zeroizing;
 use engine_executor::{Event, SessionState, compat_token};
 use engine_rpc::{
     BundleRef, CallbackError, CallbackService, CallbackServiceClient, CatalogEntry, ChildCallbacks,
-    ChildCallbacksServerShared, ChildService, ChildServiceClient, CompiledBundle,
-    ConsentDisclosure, ExecError, ExecutorService, ExecutorServiceClient,
-    ExecutorServiceServerShared, Prop, RunOutcome, RunReply, RunRequest,
+    ChildCallbacksServerShared, ChildService, ChildServiceClient, CompiledBundle, ExecError,
+    ExecutorService, ExecutorServiceClient, ExecutorServiceServerShared, Prop, RunOutcome,
+    RunReply, RunRequest,
 };
 use engine_types::composition::EmbeddedImport;
 use fleet_transport::LegFailure;
@@ -424,12 +424,9 @@ impl ChildCallbacks for RelayCallbacks {
     async fn session_change(
         &self,
         state: SessionState,
-        disclosures: Vec<ConsentDisclosure>,
         media: Vec<([u8; 32], Vec<u8>)>,
     ) -> Result<(), CallbackError> {
-        self.upstream
-            .session_change(state, disclosures, media)
-            .await
+        self.upstream.session_change(state, media).await
     }
 }
 

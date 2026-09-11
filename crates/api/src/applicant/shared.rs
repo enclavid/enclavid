@@ -5,19 +5,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use axum::extract::{FromRequestParts, Path};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
 
 use engine_types::composition::PluginInstance;
 use hatch_client::{
-    AuthN, AuthZ, Client, Event, Key, Metadata, PluginPin, Replay, SessionMetadata, SessionState,
-    State as StateField, outbound_session_id, reason,
+    AuthN, AuthZ, Client, DisplayField, Event, Key, Metadata, PluginPin, Prompt, Replay,
+    SessionMetadata, SessionState, State as StateField, outbound_session_id, reason,
 };
 // The run wire mirrors: props api builds + ships, the outcome + error it gets
 // back from the execution-worker.
@@ -44,6 +42,35 @@ pub(super) fn parse_props(metadata: &SessionMetadata) -> Result<Vec<(String, Pro
         safe_logger::debug!("parse_props: parse_input failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })
+}
+
+/// What this round is allowed to disclose to the consumer, if anything.
+///
+/// The whole consent decision, in one expression: a round seals exactly when the
+/// applicant accepted, the screen they were answering was a consent screen, and
+/// the fields sealed are the ones that screen carried. "show == seal" is this
+/// function.
+///
+/// It runs on THIS side and only here. The execution-worker sees the same event
+/// and the same prompt, but it is the process that executes adversary-supplied
+/// code, so a disclosure computed there would be worth exactly as much as that
+/// process is — and the callback it drives no longer carries one to be tempted
+/// by. Both inputs are ours and both are already bound to the applicant:
+/// `/input` built the event from their request, and refused the accept unless
+/// the digest they echoed matched this same `current_prompt`.
+///
+/// A free function rather than a method because the rule is worth testing and
+/// the round it belongs to needs a live worker, a store and a token to exist.
+pub(super) fn consent_for_round(
+    event: &Event,
+    current_prompt: &Option<Prompt>,
+) -> Option<Vec<DisplayField>> {
+    match (event, current_prompt) {
+        (Event::ConsentDisclosure(true), Some(Prompt::ConsentDisclosure(d))) => {
+            Some(d.fields.clone())
+        }
+        _ => None,
+    }
 }
 
 /// Pre-flight context shared by `/connect` and `/input`. The extractor
@@ -75,7 +102,13 @@ pub(super) struct SessionRunCtx {
     /// lifetime is exactly this context: it drops (and zeroizes) when the run
     /// ends. MUST outlive `executor.run().await` — see [`SessionRunCtx::run`].
     applicant_session_token: Arc<SecretBox<Vec<u8>>>,
-    persister: Arc<SessionPersister>,
+    /// Age recipient the round's disclosure seals to, lifted out of metadata on
+    /// the extractor path so `run` can build the persister once it knows what
+    /// the round consented to.
+    disclosure_pubkey: String,
+    /// Session version the state read returned — the persister's opening CAS
+    /// token.
+    version: u64,
     /// The per-round media store — becomes the `media_load` half of the
     /// [`CallbackServer`] the keyless worker calls back into. Holds the seal key
     /// + a `Weak` to the applicant token.
@@ -113,14 +146,35 @@ impl SessionRunCtx {
             // seal state / open media. Dropping it early makes those upgrades
             // return `None` and the round fails. It drops (and zeroizes) at the
             // end of this fn.
-            applicant_session_token: _token_owner,
-            persister,
+            applicant_session_token: token_owner,
+            disclosure_pubkey,
+            version,
             media_store,
             props,
             composition_key,
             metadata,
             ..
         } = self;
+        // The persister derives what this round may seal from the event and the
+        // pre-round prompt, both of which are ours — see
+        // [`SessionPersister::for_round`]. So the round's one seal is settled
+        // before the request leaves this process, and the binding that makes it
+        // evidence was already checked in `input`, whose digest gate is what
+        // authorizes a seal at all.
+        let persister = SessionPersister::for_round(
+            state.session_store.clone(),
+            session_id.clone(),
+            // Weak: `token_owner` below is the sole strong ref, and it must
+            // outlive the worker's callbacks.
+            Arc::downgrade(&token_owner),
+            disclosure_pubkey,
+            version,
+            metadata.clone(),
+            &event,
+            &session_state.current_prompt,
+            state.shuffle_key.clone(),
+        );
+
         // Callbacks the keyless worker calls DURING a run: blob rehydration
         // (`media_load`) + state persistence (`session_change`). Bundle resolution
         // is NOT here — the orchestrator drives it itself on a cache miss (below),
@@ -365,14 +419,10 @@ persist; same containment as above.
         // path.
         let composition_key = session_composition_key(&session_id, &metadata)?;
 
-        // Per-run persister: the worker calls `session_change` once per
-        // reducer round, persister seals any consented disclosure to
-        // the client recipient pubkey then writes (SetState +
-        // AppendDisclosures) in one atomic SessionStore.write.
-        // Concurrent /input or /connect for the same
-        // session bumps the version past us; our next write fails
-        // with VersionMismatch and the run aborts cleanly — replay
-        // from latest persisted state on retry.
+        // The recipient every disclosure this session seals to. Lifted here
+        // because the extractor is where metadata is in hand; the persister that
+        // uses it is built in `run`, which is the first point that knows what
+        // the round consented to.
         let disclosure_pubkey = metadata
             .client
             .as_ref()
@@ -381,16 +431,6 @@ persist; same containment as above.
                 safe_logger::debug!("session_run_ctx: metadata.client missing for {session_id}",);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
-        let persister = Arc::new(SessionPersister {
-            session_store: state.session_store.clone(),
-            session_id: session_id.clone(),
-            // Weak: the strong lives in the SessionRunCtx below (sole owner).
-            applicant_session_token: Arc::downgrade(&applicant_session_token),
-            client_disclosure_pubkey: disclosure_pubkey,
-            current_version: AtomicU64::new(version),
-            metadata: Mutex::new(metadata.clone()),
-            shuffle_key: state.shuffle_key.clone(),
-        });
         // The live host blob store: the worker's `blob::from-blob-ref` reads
         // sealed captures back through this (via the `media_load` callback) — a
         // pull-through cache over the hatch backing, gated by the session's
@@ -415,10 +455,11 @@ persist; same containment as above.
             session_id,
             session_state,
             locale,
-            // Move the sole strong ref in — the persister / media store above
-            // hold only `Weak`s downgraded from it.
+            // Move the sole strong ref in — the media store above holds only a
+            // `Weak` downgraded from it, and so will the persister `run` builds.
             applicant_session_token,
-            persister,
+            disclosure_pubkey,
+            version,
             media_store,
             props,
             composition_key,
@@ -674,6 +715,53 @@ fn hash_artifact(h: &mut Sha256, artifact_ref: &str, key: Option<&Key>, download
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hatch_client::{MediaSpec, PromptDisclosure};
+
+    fn consent_prompt(key: &str) -> Prompt {
+        Prompt::ConsentDisclosure(PromptDisclosure {
+            fields: vec![DisplayField {
+                key: key.into(),
+                label: Default::default(),
+                value: "v".into(),
+            }],
+            ..Default::default()
+        })
+    }
+
+    /// The only shape that seals, and it seals the screen's own fields.
+    #[test]
+    fn an_accepted_consent_seals_exactly_the_screen_it_answered() {
+        let fields = consent_for_round(
+            &Event::ConsentDisclosure(true),
+            &Some(consent_prompt("dob")),
+        )
+        .expect("an accepted consent seals");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].key, "dob");
+    }
+
+    /// A decline is a first-class answer, and it shares nothing.
+    #[test]
+    fn a_declined_consent_seals_nothing() {
+        assert!(
+            consent_for_round(
+                &Event::ConsentDisclosure(false),
+                &Some(consent_prompt("dob")),
+            )
+            .is_none()
+        );
+    }
+
+    /// The accept has to be answering a consent screen. Every other round —
+    /// a capture, the genesis round, a session that has rendered nothing —
+    /// seals nothing, whatever else happens during it.
+    #[test]
+    fn no_consent_screen_means_no_seal() {
+        for prompt in [None, Some(Prompt::Media(MediaSpec::default()))] {
+            assert!(consent_for_round(&Event::ConsentDisclosure(true), &prompt).is_none());
+        }
+        assert!(consent_for_round(&Event::Start, &Some(consent_prompt("dob"))).is_none());
+    }
 
     fn pin(package: &str, impl_ref: &str) -> PluginPin {
         PluginPin {

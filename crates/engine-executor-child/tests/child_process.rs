@@ -26,7 +26,7 @@ use remoc::rtc::ServerShared;
 
 use engine_rpc::{
     BundleRef, CallbackError, CatalogEntry, ChildCallbacks, ChildCallbacksServerShared,
-    ChildService, ChildServiceClient, CompiledBundle, ConsentDisclosure, ExecError, RunStatus,
+    ChildService, ChildServiceClient, CompiledBundle, ExecError, RunStatus,
 };
 
 /// The plugins the policy imports, from the shared fixture catalog — the same
@@ -77,7 +77,6 @@ impl ChildCallbacks for MockCallbacks {
     async fn session_change(
         &self,
         _state: SessionState,
-        _disclosures: Vec<ConsentDisclosure>,
         _media: Vec<([u8; 32], Vec<u8>)>,
     ) -> Result<(), CallbackError> {
         *self.session_changes.lock().unwrap() += 1;

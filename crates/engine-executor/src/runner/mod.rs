@@ -14,20 +14,18 @@
 //!      closed at the seal boundary in hatch-client — `SetState`'s Covert
 //!      vouch pads the encoded `SessionState` to a constant — not here.)
 //!
-//! ## Consent gate (security-critical)
+//! ## Consent is decided elsewhere (security-critical)
 //!
-//! The disclosure → consumer seal is runtime-driven, NOT a policy host
-//! call. When the inbound event is [`Event::ConsentDisclosure(true)`]
-//! AND the session's `current_prompt` prompt was a
-//! [`Prompt::ConsentDisclosure`], the executor fires the
-//! `SessionListener` with exactly the fields the applicant saw and
-//! accepted on the consent screen — "show == seal". On a `false` reply,
-//! or any other event, NOTHING is sealed.
+//! The disclosure → consumer seal is not a policy host call, and it is not
+//! this process's call either. The orchestrator derives what a round seals
+//! from the prompt it rendered and the event it built — the same two values
+//! this runner sees, held on the side that did not execute the policy. Nothing
+//! about consent is reported from here; see `SessionChange`.
 
 mod convert;
 mod status;
 
-use hatch_client::{Event, Prompt, SessionState};
+use hatch_client::{Event, SessionState};
 use wasmtime::component::{Component, Linker, Resource};
 use wasmtime::{Config, Engine, Store};
 
@@ -35,7 +33,7 @@ use crate::Host_ as GeneratedHost;
 use crate::Host_Pre as GeneratedHostPre;
 use crate::embedded::{Icon, IconRef, Localized, LocalizedRef, undeclared_trap};
 use crate::limits::{POLICY_FUEL_BUDGET, POLICY_MAX_STATE_BYTES};
-use crate::listener::{ConsentDisclosure, SessionChange};
+use crate::listener::SessionChange;
 use crate::state::{HostState, RunInputs};
 
 pub use status::RunStatus;
@@ -158,10 +156,10 @@ impl Executor {
     /// already lives in `primed`).
     ///
     /// Returns the next [`RunStatus`] and the updated [`SessionState`]
-    /// (new opaque `state` + new `current_prompt`). The
-    /// `SessionListener` is fired exactly once with the post-round
-    /// state and — only on a consent-disclosure accept — the consented
-    /// fields being sealed to the consumer.
+    /// (new opaque `state` + new `current_prompt`). The `SessionListener` is
+    /// fired exactly once, with the post-round state and whatever media the
+    /// round captured — never with a disclosure, which this side does not
+    /// decide.
     pub async fn run(
         &self,
         primed: &PrimedComposition,
@@ -173,22 +171,6 @@ impl Executor {
         let embedded = primed.embedded.clone();
         let listener = inputs.listener;
         let media_store = inputs.media_store;
-
-        // CONSENT GATE — decide BEFORE calling the policy whether this
-        // round seals a disclosure to the consumer. The seal fires iff
-        // the applicant accepted a consent-disclosure prompt the runtime
-        // had current_prompt; the sealed fields are EXACTLY what was on the
-        // screen they accepted (show == seal). Computed here, off the
-        // session's own record of what it last rendered — never trusting
-        // a fresh policy-supplied list this round.
-        let sealed_disclosure: Option<ConsentDisclosure> = match (&event, &session.current_prompt) {
-            (Event::ConsentDisclosure(true), Some(Prompt::ConsentDisclosure(d))) => {
-                Some(ConsentDisclosure {
-                    fields: d.fields.clone(),
-                })
-            }
-            _ => None,
-        };
 
         // Instantiate the primed composition and call `handle` ONCE. The Linker
         // (imports) was built + type-checked in `prime`; here we only mint a
@@ -245,15 +227,19 @@ impl Executor {
             }
         };
 
-        // Single listener fire for the round: post-round state, the consented
-        // disclosure (only on a consent-disclosure accept), and the captured
-        // media to seal into the blob store (only on a media round). All
-        // committed in one transaction by the listener.
-        let disclosures: Vec<ConsentDisclosure> = sealed_disclosure.into_iter().collect();
+        // Single listener fire for the round: post-round state plus the captured
+        // media to seal into the blob store (only on a media round), committed in
+        // one transaction by the listener.
+        //
+        // The consent gate that used to sit here — accept + a consent
+        // `current_prompt` ⇒ seal those exact fields — now runs in the
+        // orchestrator instead, over its own copy of the same two values. It
+        // could not stay in both places: this process runs the policy, so a
+        // disclosure computed here is only ever as trustworthy as this process
+        // is, and the orchestrator would have to re-derive it regardless.
         listener
             .on_session_change(SessionChange {
                 state: &next_session,
-                disclosures: &disclosures,
                 media: captured.as_ref(),
             })
             .await?;

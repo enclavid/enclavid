@@ -10,11 +10,15 @@
 //!
 //! Two flows are driven:
 //!   * REJECT  — passport → selfie → consent-disclosure(false) → Rejected.
-//!               Asserts the CONSENT GATE: zero disclosures sealed.
-//!   * APPROVE — passport → selfie → consent-disclosure(true)  → Approved.
-//!               Asserts the disclosure WAS sealed (exactly one, with the
-//!               seven fields the policy rendered — six canonical KYC fields
-//!               plus the face-age estimate).
+//!   * APPROVE — passport → selfie → consent-disclosure(true)  → Approved,
+//!               with the seven fields the policy rendered on the consent
+//!               screen — six canonical KYC fields plus the face-age estimate.
+//!
+//! What a round DISCLOSES is not asserted here and cannot be: the runtime no
+//! longer decides it. The orchestrator derives it from the prompt it rendered
+//! and the event it built, and tests it there (`applicant::shared`). What this
+//! file still owns is the half that produces the screen — that the fused
+//! composition renders those fields with those values.
 //!
 //! The policy and the plugin wasm are compiled on-demand (first test
 //! invocation) rather than via a build.rs — this keeps normal engine
@@ -28,9 +32,8 @@ use std::sync::{Arc, Mutex};
 
 use engine_compiler::Compiler;
 use engine_executor::{
-    Component, ConsentDisclosure, EmbeddedImport, EmbeddedRegistry, Executor, MediaStore,
-    PluginInstance, PrimedComposition, Prop, RunInputs, RunResult, RunStatus, SessionChange,
-    SessionListener,
+    Component, EmbeddedImport, EmbeddedRegistry, Executor, MediaStore, PluginInstance,
+    PrimedComposition, Prop, RunInputs, RunResult, RunStatus, SessionChange, SessionListener,
 };
 use hatch_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use xtask::fixtures;
@@ -105,7 +108,7 @@ impl TestRunner {
 }
 
 /// In-memory stand-in for the host blob store, shared with the
-/// [`RecordingListener`] (which populates it from each round's captured
+/// [`PersistListener`] (which populates it from each round's captured
 /// media) so a later `frame::from-blob-ref` rehydrate hits. Stage 3 swaps in
 /// the hatch-backed store; this proves the engine seam.
 #[derive(Clone, Default)]
@@ -154,20 +157,25 @@ fn all_plugins() -> Vec<PluginInstance> {
         .collect()
 }
 
-/// Recording listener: captures every sealed disclosure the runtime
-/// fires, so the test can assert the consent gate (reject seals nothing,
-/// accept seals exactly what was shown).
+/// Stands in for the orchestrator's persister: absorbs each round's captured
+/// media, and counts the fires so a test can assert that a round which trapped
+/// persisted nothing at all.
+///
+/// It records no disclosure because none is reported any more — what a round
+/// discloses is the orchestrator's decision now, made from the prompt it
+/// rendered and the event it built (`enclavid-api`, `applicant::shared`).
 #[derive(Default)]
-struct RecordingListener {
-    sealed: Mutex<Vec<Vec<hatch_client::DisplayField>>>,
+struct PersistListener {
     /// Backs the shared [`MemMediaStore`] — every captured frame the runtime
     /// stages this round is inserted here, simulating the atomic media+state
     /// commit, so a later rehydrate finds it. `Arc<Vec<u8>>` so the insert
     /// shares the runtime's allocation (no deep copy).
     media: Arc<Mutex<HashMap<[u8; 32], Arc<Vec<u8>>>>>,
+    /// How many times the round fired. A trapped round must not persist.
+    fires: Mutex<u32>,
 }
 
-impl RecordingListener {
+impl PersistListener {
     /// A media store sharing this listener's blob map (write via the listener,
     /// read via `frame::from-blob-ref`).
     fn media_store(&self) -> Arc<dyn MediaStore> {
@@ -175,36 +183,32 @@ impl RecordingListener {
     }
 }
 
-impl SessionListener for RecordingListener {
+impl SessionListener for PersistListener {
     fn on_session_change<'a>(
         &'a self,
         change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
-        let rounds: Vec<Vec<hatch_client::DisplayField>> = change
-            .disclosures
-            .iter()
-            .map(|d: &ConsentDisclosure| d.fields.clone())
-            .collect();
         let blobs: Vec<([u8; 32], Arc<Vec<u8>>)> = change
             .media
             .map(|m| m.blobs.iter().map(|(h, b)| (*h, b.clone())).collect())
             .unwrap_or_default();
         Box::pin(async move {
-            self.sealed.lock().unwrap().extend(rounds);
             self.media.lock().unwrap().extend(blobs);
+            *self.fires.lock().unwrap() += 1;
             Ok(())
         })
     }
 }
 
 #[tokio::test]
-async fn passport_selfie_consent_reject_seals_nothing() {
+async fn passport_selfie_consent_reject_reaches_rejected() {
     let h = Harness::new();
-    let listener = Arc::new(RecordingListener::default());
+    let listener = Arc::new(PersistListener::default());
 
     let session = h.drive_to_consent(&listener).await;
 
-    // Reject the consent screen → Completed(Rejected), NOTHING sealed.
+    // Reject the consent screen → the policy branches to Rejected. A decline is
+    // a first-class answer, not a failure.
     let (status, _session) = h
         .run(session, Event::ConsentDisclosure(false), &listener)
         .await;
@@ -212,23 +216,45 @@ async fn passport_selfie_consent_reject_seals_nothing() {
         RunStatus::Completed(Decision::Rejected) => {}
         _ => panic!("reject round expected Completed(Rejected)"),
     }
-
-    let sealed = listener.sealed.lock().unwrap();
-    assert!(
-        sealed.is_empty(),
-        "CONSENT GATE: reject path must seal zero disclosures, got {}",
-        sealed.len(),
-    );
 }
 
 #[tokio::test]
-async fn passport_selfie_consent_accept_seals_disclosure() {
+async fn passport_selfie_consent_accept_reaches_approved_over_the_rendered_fields() {
     let h = Harness::new();
-    let listener = Arc::new(RecordingListener::default());
+    let listener = Arc::new(PersistListener::default());
 
     let session = h.drive_to_consent(&listener).await;
 
-    // Accept the consent screen → Completed(Approved), disclosure sealed.
+    // The screen the applicant is about to answer. This is the value the
+    // orchestrator seals from on an accept, so asserting it here is asserting
+    // what would be disclosed — without this side deciding it.
+    let Some(Prompt::ConsentDisclosure(screen)) = session.current_prompt.clone() else {
+        panic!("drive_to_consent must leave a consent screen as current_prompt");
+    };
+
+    // The seven fields the policy rendered — the six canonical KYC fields plus
+    // the face-age estimate.
+    assert_eq!(
+        screen.fields.len(),
+        7,
+        "the consent screen must carry all seven rendered fields",
+    );
+    // Values survive verbatim (the long address triggers the runtime's
+    // sanitise path but is plain ASCII, so it round-trips unchanged).
+    assert!(
+        screen.fields.iter().any(|f| f.value == "Jane Q. Citizen"),
+        "rendered fields must include the full_name value",
+    );
+    // The face-age estimate reached the consent screen: it is the only field
+    // whose value is a bare integer (the canonical fields carry names / dashed
+    // dates / alphanumerics). Proves the plugin-computed age is disclosed
+    // through the consent screen, not auto-shared.
+    assert!(
+        screen.fields.iter().any(|f| f.value.parse::<i32>().is_ok()),
+        "rendered fields must include the face-age estimate (a numeric value)",
+    );
+
+    // Accept → the policy branches to Approved.
     let (status, _session) = h
         .run(session, Event::ConsentDisclosure(true), &listener)
         .await;
@@ -236,40 +262,12 @@ async fn passport_selfie_consent_accept_seals_disclosure() {
         RunStatus::Completed(Decision::Approved) => {}
         _ => panic!("accept round expected Completed(Approved)"),
     }
-
-    let sealed = listener.sealed.lock().unwrap();
-    assert_eq!(
-        sealed.len(),
-        1,
-        "CONSENT GATE: accept path must seal exactly one disclosure",
-    );
-    // The seven fields the policy rendered on the consent screen — the six
-    // canonical KYC fields plus the face-age estimate — show == seal.
-    assert_eq!(
-        sealed[0].len(),
-        7,
-        "sealed disclosure must carry all seven rendered fields",
-    );
-    // Values survive verbatim (the long address triggers the runtime's
-    // sanitise path but is plain ASCII, so it round-trips unchanged).
-    assert!(
-        sealed[0].iter().any(|f| f.value == "Jane Q. Citizen"),
-        "sealed fields must include the rendered full_name value",
-    );
-    // The face-age estimate reached the consent disclosure: it is the only
-    // field whose value is a bare integer (the canonical fields carry names /
-    // dashed dates / alphanumerics). Proves the plugin-computed age is
-    // disclosed through the consent gate, not auto-shared.
-    assert!(
-        sealed[0].iter().any(|f| f.value.parse::<i32>().is_ok()),
-        "sealed fields must include the face-age estimate (a numeric value)",
-    );
 }
 
 #[tokio::test]
 async fn media_rounds_keep_state_minimal() {
     let h = Harness::new();
-    let listener = Arc::new(RecordingListener::default());
+    let listener = Arc::new(PersistListener::default());
 
     // genesis → render media(passport)
     let (_s0, after_genesis) = h.run(Session::default(), Event::Start, &listener).await;
@@ -316,7 +314,7 @@ async fn media_rounds_keep_state_minimal() {
 #[tokio::test]
 async fn reload_by_ref_misses() {
     let h = Harness::new();
-    let listener = Arc::new(RecordingListener::default());
+    let listener = Arc::new(PersistListener::default());
     // An empty store, NOT the listener's map — so captured blobs never land in
     // what `from-blob-ref` reads, forcing a miss on the selfie round.
     let empty_store: Arc<dyn MediaStore> = Arc::new(MemMediaStore::default());
@@ -347,7 +345,7 @@ async fn reload_by_ref_misses() {
 async fn from_blob_ref_is_lazy_load_on_bytes() {
     async fn passport_loads(read_bytes: bool) -> usize {
         let h = Harness::new();
-        let listener = Arc::new(RecordingListener::default());
+        let listener = Arc::new(PersistListener::default());
         let loads = Arc::new(AtomicUsize::new(0));
         // The counting store shares the listener's captured-blob map, so the
         // passport reload finds the frame the passport round stored.
@@ -391,7 +389,7 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
 #[tokio::test]
 async fn empty_passport_clip_is_retryable() {
     let h = Harness::new();
-    let listener = Arc::new(RecordingListener::default());
+    let listener = Arc::new(PersistListener::default());
 
     // genesis → render media(passport)
     let (status, session) = h.run(Session::default(), Event::Start, &listener).await;
@@ -416,7 +414,7 @@ async fn empty_passport_clip_is_retryable() {
 #[tokio::test]
 async fn empty_selfie_clip_is_retryable_via_plugin() {
     let h = Harness::new();
-    let listener = Arc::new(RecordingListener::default());
+    let listener = Arc::new(PersistListener::default());
 
     // genesis → passport prompt
     let (status, session) = h.run(Session::default(), Event::Start, &listener).await;
@@ -449,7 +447,7 @@ async fn empty_selfie_clip_is_retryable_via_plugin() {
 #[tokio::test]
 async fn oversized_state_traps() {
     let h = Harness::new();
-    let listener = Arc::new(RecordingListener::default());
+    let listener = Arc::new(PersistListener::default());
 
     // Drive genesis with a consumer config that makes the policy return a
     // blob one byte over the cap — the runtime must trap the round rather
@@ -473,10 +471,12 @@ async fn oversized_state_traps() {
         "a state blob over POLICY_MAX_STATE_BYTES must trap the round",
     );
 
-    // Nothing sealed on a trapped round.
-    assert!(
-        listener.sealed.lock().unwrap().is_empty(),
-        "a trapped over-cap round must seal nothing",
+    // And it trapped BEFORE the listener fired, so nothing about the round was
+    // persisted — the cap is a backstop, not a filter applied after the fact.
+    assert_eq!(
+        *listener.fires.lock().unwrap(),
+        0,
+        "a trapped over-cap round must persist nothing",
     );
 }
 
@@ -541,7 +541,7 @@ async fn static_fused_artifact_resolves_strictly() {
         builder.add_component(c.hash, c.decls);
     }
     let embedded = Arc::new(builder.build());
-    let listener = Arc::new(RecordingListener::default());
+    let listener = Arc::new(PersistListener::default());
 
     // start → media(passport) → media(selfie) → consent-disclosure.
     // Each media prompt resolves the plugin's i18n/icons strictly; the
@@ -603,7 +603,7 @@ async fn static_fused_artifact_resolves_strictly() {
 #[tokio::test]
 async fn strict_routing_isolates_colliding_i18n_key() {
     let h = Harness::new();
-    let listener = Arc::new(RecordingListener::default());
+    let listener = Arc::new(PersistListener::default());
 
     // Round 1: start → render media(passport). The spec's `label_ref` is
     // the token well-known produced from `localized("passport_title")`.
@@ -698,7 +698,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let extra_cat = engine_compiler::load_embedded(fixtures::extra()).unwrap();
     builder.add_component(extra_cat.hash, extra_cat.decls);
     let embedded = Arc::new(builder.build());
-    let listener = Arc::new(RecordingListener::default());
+    let listener = Arc::new(PersistListener::default());
 
     let primed = runner
         .prime(
@@ -831,7 +831,7 @@ impl Harness {
         }
     }
 
-    fn inputs(&self, listener: &Arc<RecordingListener>) -> RunInputs {
+    fn inputs(&self, listener: &Arc<PersistListener>) -> RunInputs {
         RunInputs {
             listener: listener.clone(),
             media_store: listener.media_store(),
@@ -843,7 +843,7 @@ impl Harness {
         &self,
         session: Session,
         event: Event,
-        listener: &Arc<RecordingListener>,
+        listener: &Arc<PersistListener>,
     ) -> (RunStatus, Session) {
         self.runner
             .run(&self.primed, session, event, vec![], self.inputs(listener))
@@ -853,7 +853,7 @@ impl Harness {
 
     /// Drive the common prefix: start → passport → selfie, leaving the
     /// session sitting on the consent-disclosure prompt.
-    async fn drive_to_consent(&self, listener: &Arc<RecordingListener>) -> Session {
+    async fn drive_to_consent(&self, listener: &Arc<PersistListener>) -> Session {
         // Round 1: start → render media(passport).
         let (status, session) = self.run(Session::default(), Event::Start, listener).await;
         assert_media(&status, "round 1 (passport)");

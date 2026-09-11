@@ -1,10 +1,11 @@
 //! Seals + persists each reducer round's result to the host-side
 //! `SessionStore`. The keyless execution-worker calls back once per `handle`
 //! round via `CallbackService::session_change` → [`SessionPersister::persist`];
-//! we age-encrypt any disclosure the runtime sealed that round (non-empty only
+//! we age-encrypt the disclosure THIS side recorded for the round (present only
 //! when a consent-disclosure prompt was accepted) to the client recipient
-//! pubkey, then translate state + sealed disclosures into a single atomic Write
-//! RPC.
+//! pubkey, then translate state + sealed disclosure into a single atomic Write
+//! RPC. The worker reports nothing about consent — see
+//! [`SessionPersister::consented`].
 //!
 //! Atomicity is the whole point: state mutation (consent accepted) and
 //! the disclosure entry that records what was shared land in one host
@@ -23,11 +24,14 @@
 //! secret. This persister is concerned with the disclosure flow; the
 //! policy artifact path is independent.
 //!
-//! Lifetime: one persister per run. Owns session-id, the applicant key (state's
+//! Lifetime: one persister per round, built inside `SessionRunCtx::run` once
+//! the round's consent is known. Owns session-id, the applicant key (state's
 //! inner AEAD layer), the client disclosure pubkey (disclosure age recipient),
-//! and a mutable copy of session metadata (so we can update `disclosure_count`
-//! atomically with each persist). Cheap to construct; dropped when the round's
-//! `SessionRunCtx` finishes.
+//! a mutable copy of session metadata (so we can update `disclosure_count`
+//! atomically with each persist), and the round's consent. How long the
+//! PERSISTER survives is partly the WORKER's choice — the callback client it was
+//! handed carries an `Arc` — so the consent is tied to the round instead, by
+//! [`RoundPersister`], whose `Drop` runs on `run`'s stack and nowhere else.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -39,13 +43,14 @@ use secrecy::{ExposeSecret, SecretBox};
 
 use enclavid_crypto::seal_to_recipient;
 use hatch_client::{
-    AppendDisclosure, AuthN, AuthZ, Covert, Replay, SessionMetadata, SessionState, SessionStatus,
-    SessionStore, SetMedia, SetMetadata, SetState, WriteField, boundary, encode_padded, reason,
+    AppendDisclosure, AuthN, AuthZ, Covert, DisplayField, Event, Prompt, Replay, SessionMetadata,
+    SessionState, SessionStatus, SessionStore, SetMedia, SetMetadata, SetState, WriteField,
+    boundary, encode_padded, reason,
 };
 // Owned wire types — the keyless execution-worker sends these back over the
 // `CallbackService`; `CallbackError` replaces the old wasmtime `RunError` as the
 // persist error, keeping api free of the runtime.
-use engine_rpc::{CallbackError, ConsentDisclosure, RunStatus};
+use engine_rpc::{CallbackError, RunStatus};
 
 use crate::disclosure_commit;
 use crate::dto::{self, DisclosureEnvelope, ENVELOPE_VERSION};
@@ -75,11 +80,29 @@ pub(super) struct SessionPersister {
     pub current_version: AtomicU64,
     /// Mutable copy of session metadata. We update
     /// `disclosure_count` and the `disclosure_entry_hashes` set-commitment
-    /// leaf list whenever the engine emits disclosures and rewrite metadata
+    /// leaf list whenever a round seals a disclosure and rewrite metadata
     /// atomically alongside the state + append ops. Other metadata
     /// fields stay constant across the session lifetime; this is
     /// purely a bookkeeping wrapper.
     pub metadata: Mutex<SessionMetadata>,
+    /// The fields this round may seal, decided by THIS side before the worker
+    /// ran — from the pre-round `current_prompt` and the accepted event, the
+    /// same pair `/input` already bound the applicant's echoed digest to.
+    /// `None` on every round that is not an accepted consent.
+    ///
+    /// A constructor argument, not something a caller remembers to set: the
+    /// value is the whole point of the persister existing, and a field that can
+    /// be left unset is a product that silently stops disclosing.
+    ///
+    /// Claimed by a `persist` and spent only if that persist commits (see
+    /// [`ConsentClaim`]), so a round seals at most once however many times the
+    /// worker fires the callback and a failed write does not consume the
+    /// acceptance. Cleared outright by [`RoundPersister`] when the round's frame
+    /// unwinds.
+    ///
+    /// A `std` mutex, deliberately: it is only ever held for a single statement,
+    /// and that is what lets the guard clear it from `Drop`, which cannot await.
+    consented: std::sync::Mutex<Option<Vec<DisplayField>>>,
     /// Process-lifetime shuffle key, used to permute `DisplayField`
     /// order inside disclosure envelopes before they're sealed to
     /// the consumer. Lives here (and not in engine) because the
@@ -90,27 +113,172 @@ pub(super) struct SessionPersister {
     pub shuffle_key: Arc<ShuffleKey>,
 }
 
+/// A [`SessionPersister`] that ends its round's consent when it goes out of
+/// scope. The only way to get one, so the cleanup is not a line anyone has to
+/// remember to write.
+///
+/// Whichever way the round leaves — a committed write, a `?` on a worker that
+/// died, a panic — unwinding drops this, and the applicant's plaintext fields go
+/// with it.
+///
+/// It cannot be `Drop for SessionPersister` itself: `run` hands the worker a
+/// callback client carrying an `Arc` of the persister, so the persister's own
+/// lifetime is partly the worker's to choose. This value's is not — it lives on
+/// `run`'s stack and nowhere else. Deref hands out the `Arc` for the callback
+/// server; cloning that shares the persister, never the round.
+///
+/// `#[must_use]` because binding it to `_` — or reaching straight through the
+/// deref for the `Arc` — drops the guard at that semicolon and disarms the round
+/// while the persister lives on.
+#[must_use]
+pub(super) struct RoundPersister(Arc<SessionPersister>);
+
+impl std::ops::Deref for RoundPersister {
+    type Target = Arc<SessionPersister>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for RoundPersister {
+    fn drop(&mut self) {
+        self.0.forget_consent();
+    }
+}
+
+/// The round's acceptance, held while one persist tries to commit it.
+///
+/// Taking it is what stops a second callback in the same round from sealing a
+/// second time; putting it back when the persist does NOT commit is what stops a
+/// failure from spending it. Both matter against the same worker: one that fires
+/// a callback it knows will fail, then a clean one, would otherwise finish the
+/// session with the applicant told "approved" and an empty chain behind them.
+struct ConsentClaim<'a> {
+    persister: &'a SessionPersister,
+    fields: Option<Vec<DisplayField>>,
+    spent: bool,
+}
+
+impl<'a> ConsentClaim<'a> {
+    fn take(persister: &'a SessionPersister) -> Self {
+        let fields = persister
+            .consented
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        Self {
+            persister,
+            fields,
+            spent: false,
+        }
+    }
+
+    fn fields(&self) -> &[Vec<DisplayField>] {
+        self.fields.as_slice()
+    }
+
+    /// The write committed; the acceptance is now in the chain and must not be
+    /// handed back.
+    fn spend(mut self) {
+        self.spent = true;
+    }
+}
+
+impl Drop for ConsentClaim<'_> {
+    fn drop(&mut self) {
+        if !self.spent {
+            *self
+                .persister
+                .consented
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.fields.take();
+        }
+    }
+}
+
 impl SessionPersister {
+    /// One persister per round, handed out as a [`RoundPersister`] so the
+    /// round's consent cannot outlive the round — which is also why this is not
+    /// a `new`: there is deliberately no way to obtain the bare persister.
+    ///
+    /// Takes the round's `event` and pre-round `current_prompt` rather than the
+    /// consent itself, so what this round may seal is decided in one place that
+    /// has a test — see [`super::shared::consent_for_round`] and the field.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn for_round(
+        session_store: Arc<SessionStore>,
+        session_id: String,
+        applicant_session_token: Weak<SecretBox<Vec<u8>>>,
+        client_disclosure_pubkey: String,
+        version: u64,
+        metadata: SessionMetadata,
+        event: &Event,
+        current_prompt: &Option<Prompt>,
+        shuffle_key: Arc<ShuffleKey>,
+    ) -> RoundPersister {
+        // Derived HERE, from the round's own inputs, rather than accepted as a
+        // ready-made value. A caller that can hand over the answer is a caller
+        // that can hand over the wrong one — and a `None` passed by mistake is a
+        // product that silently stops disclosing, which no type would catch and
+        // no test short of a full round would either.
+        let consented = super::shared::consent_for_round(event, current_prompt);
+        RoundPersister(Arc::new(Self {
+            session_store,
+            session_id,
+            applicant_session_token,
+            client_disclosure_pubkey,
+            current_version: AtomicU64::new(version),
+            metadata: Mutex::new(metadata),
+            consented: std::sync::Mutex::new(consented),
+            shuffle_key,
+        }))
+    }
+
+    /// Drop the round's consent. Only [`RoundPersister::drop`] calls this — a
+    /// cleanup someone has to remember is a cleanup that gets skipped on the
+    /// error path, which is the path it exists for.
+    fn forget_consent(&self) {
+        *self
+            .consented
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
     /// api side of the keyless executor's `CallbackService::session_change`:
-    /// seal + persist one round's post-`state`, plus any consented `disclosures`
-    /// (non-empty only on a consent-disclosure accept) and captured `media`
-    /// (present only on a media round), in ONE atomic host transaction. The
-    /// worker sent these over rpc as OWNED wire types, so — unlike the old
-    /// borrowed-`SessionChange` listener — nothing here borrows the run; the
-    /// seal key stays orchestrator-side. A failed write fails the round under
-    /// version-CAS; the next attempt re-runs from the last persisted state.
+    /// seal + persist one round's post-`state`, the consent THIS side recorded
+    /// for the round (if any), and the captured `media` (present only on a media
+    /// round), in ONE atomic host transaction. State and media arrive over rpc as
+    /// OWNED wire types, so — unlike the old borrowed-`SessionChange` listener —
+    /// nothing here borrows the run; the seal key stays orchestrator-side. A
+    /// failed write fails the round under version-CAS; the next attempt re-runs
+    /// from the last persisted state.
+    ///
+    /// What the round consented to is NOT a parameter: see
+    /// [`SessionPersister::consented`].
     pub(super) async fn persist(
         &self,
         state: SessionState,
-        disclosures: Vec<ConsentDisclosure>,
         media: Vec<([u8; 32], Vec<u8>)>,
     ) -> Result<(), CallbackError> {
-        // Seal the consented disclosures into append ops. The shuffle is seeded
-        // from the disclosure_count BEFORE this batch (a brief metadata lock to
-        // read it), so distinct envelopes get independent, replay-stable
-        // permutations.
-        let starting_index = self.metadata.lock().await.disclosure_count;
-        let appends = self.seal_disclosures(&disclosures, starting_index)?;
+        // Serialize the whole critical section on the metadata guard, taken
+        // before the acceptance is claimed: a second callback in the same round
+        // waits here rather than interleaving with this one.
+        let mut metadata = self.metadata.lock().await;
+
+        // What gets sealed is what THIS side derived before the round. The
+        // worker is the one process here that executes adversary-supplied code,
+        // so a disclosure it asserted would be no evidence that an applicant ever
+        // accepted a screen — which is why it no longer carries one. Ours is
+        // evidence: `/input` refused the accept unless the applicant's echoed
+        // digest matched this same `current_prompt`.
+        let claim = ConsentClaim::take(self);
+        let to_seal: &[Vec<DisplayField>] = claim.fields();
+
+        // The shuffle is seeded from the disclosure_count BEFORE this batch, so
+        // distinct envelopes get independent, replay-stable permutations.
+        let starting_index = metadata.disclosure_count;
+        let appends = self.seal_disclosures(to_seal, starting_index)?;
 
         // Borrow the applicant token from the per-round owner once for this
         // whole seal. The `SessionRunCtx` driving this run holds the sole strong
@@ -125,50 +293,65 @@ impl SessionPersister {
         })?;
         let token_bytes = token.expose_secret().as_slice();
 
-        // Hold the metadata lock across the write: the state mutation, the
-        // disclosure entry, and the captured media all land in one atomic host
-        // transaction. The run serializes callbacks, so contention is theoretical.
-        let mut metadata = self.metadata.lock().await;
-        let set_state = self.build_state_op(&state, token_bytes)?;
-        // Seal every captured frame this round into the media store,
-        // co-committed with the state (kept in a local so the `&dyn` refs below
-        // outlive the write). `media_ops` owns its bytes, so reading `media`
-        // again below is fine.
-        let media_ops = self.build_media_ops(&media, token_bytes);
-        // Record this round's captured blob hashes into metadata — the TEE-side
-        // authoritative set the NEXT round's `from-blob-ref` gate reads. The
-        // host already knows these hashes (they are the plaintext keys of its
-        // own media writes), so carrying them sealed here leaks nothing new.
-        if !media.is_empty() {
-            metadata
-                .captured_media
-                .extend(media.iter().map(|(h, _)| h.to_vec()));
-        }
-        let mut ops: Vec<&dyn WriteField> = Vec::with_capacity(2 + appends.len() + media_ops.len());
-        ops.push(&set_state);
+        // Everything below advances a WORKING COPY. This side's own metadata is
+        // republished only once the host has the write, so a failure leaves us
+        // exactly as the host is — nothing counted, no leaf hash for an entry
+        // that was never appended. Counting on the way in meant a failed persist
+        // and a later successful one in the same round left the chain short of
+        // its own count, and the consumer's pull 500s on that mismatch forever.
+        let mut working = metadata.clone();
+        let commit = {
+            let set_state = self.build_state_op(&state, token_bytes)?;
+            // Seal every captured frame this round into the media store,
+            // co-committed with the state (kept in a local so the `&dyn` refs
+            // below outlive the write). `media_ops` owns its bytes, so reading
+            // `media` again below is fine.
+            let media_ops = self.build_media_ops(&media, token_bytes);
+            // Record this round's captured blob hashes — the TEE-side
+            // authoritative set the NEXT round's `from-blob-ref` gate reads. The
+            // host already knows these hashes (they are the plaintext keys of its
+            // own media writes), so carrying them sealed here leaks nothing new.
+            if !media.is_empty() {
+                working
+                    .captured_media
+                    .extend(media.iter().map(|(h, _)| h.to_vec()));
+            }
+            let mut ops: Vec<&dyn WriteField> =
+                Vec::with_capacity(2 + appends.len() + media_ops.len());
+            ops.push(&set_state);
 
-        // Rewrite metadata when this commit emitted a disclosure (extends the
-        // disclosure-hash chain) OR captured media (appends to the gate set).
-        // Plain rounds stay SetState-only, keeping the payload small.
-        let set_metadata_holder;
-        if !appends.is_empty() || !media_ops.is_empty() {
-            set_metadata_holder = self.build_metadata_op(&mut metadata, &appends);
-            ops.push(&set_metadata_holder);
-        }
-        ops.extend(appends.iter().map(|a| a as &dyn WriteField));
-        ops.extend(media_ops.iter().map(|m| m as &dyn WriteField));
+            // Rewrite metadata when this commit emitted a disclosure (extends the
+            // disclosure-hash chain) OR captured media (appends to the gate set).
+            // Plain rounds stay SetState-only, keeping the payload small.
+            let set_metadata_holder;
+            if !appends.is_empty() || !media_ops.is_empty() {
+                set_metadata_holder = self.build_metadata_op(&mut working, &appends);
+                ops.push(&set_metadata_holder);
+            }
+            ops.extend(appends.iter().map(|a| a as &dyn WriteField));
+            ops.extend(media_ops.iter().map(|m| m as &dyn WriteField));
 
-        self.commit_ops(&ops).await
+            self.commit_ops(&ops).await
+        };
+        commit?;
+
+        // The host has it. Now, and only now, spend the acceptance and publish
+        // the bookkeeping that describes what was written.
+        *metadata = working;
+        claim.spend();
+        Ok(())
     }
 
-    /// Seal each engine-emitted disclosure into an append op: shuffle
-    /// the envelope (Covert), consent-gate (AuthZ), age-seal to the
-    /// consumer recipient (AuthN). `starting_index` seeds the per-
-    /// envelope shuffle so distinct envelopes get independent, replay-
-    /// stable permutations. Returns owned, fully-vouched append ops.
+    /// Seal the round's consented fields into an append op: shuffle the
+    /// envelope (Covert), the applicant's own acceptance (AuthZ), age-seal to
+    /// the consumer recipient (AuthN). `starting_index` seeds the per-envelope
+    /// shuffle so distinct envelopes get independent, replay-stable
+    /// permutations. Returns owned, fully-vouched append ops. At most one entry
+    /// today — a round accepts at most one consent — but it stays a slice so the
+    /// index arithmetic keeps working if that changes.
     fn seal_disclosures(
         &self,
-        disclosures: &[ConsentDisclosure],
+        disclosures: &[Vec<DisplayField>],
         starting_index: u64,
     ) -> Result<Vec<AppendDisclosure>, CallbackError> {
         disclosures
@@ -185,9 +368,13 @@ impl SessionPersister {
                         )
                     })?
                     .vouch_unchecked::<AuthZ, _>(reason!(
-                        "the runtime seals this disclosure only after an accepted \
-                         consent-disclosure prompt (show == seal, gated runtime-side); api only \
-                         serializes the post-consent record"
+                        "this side derived the envelope from the pre-round current_prompt on an \
+                         accepted consent event, and /input had already refused that accept \
+                         unless the applicant's echoed digest matched the same prompt — so this \
+                         is the SET of fields the applicant was shown and accepted. Their \
+                         CONTENTS are only as audited as they are legible: sanitize_string runs \
+                         in the execution-worker, so a value can still carry what the screen did \
+                         not render"
                     ))
                     .vouch::<AuthN, _, _, _, _>(|bytes| -> Result<Vec<u8>, CallbackError> {
                         seal_to_recipient(&bytes, &self.client_disclosure_pubkey)
@@ -447,7 +634,7 @@ impl SessionPersister {
 /// audits before consenting) renders in policy order separately
 /// and is not a leak surface.
 fn shuffle_to_envelope_bytes(
-    d: &ConsentDisclosure,
+    fields: &[DisplayField],
     session_id: &str,
     disclosure_index: u64,
     shuffle_key: &ShuffleKey,
@@ -459,7 +646,7 @@ fn shuffle_to_envelope_bytes(
     // dispatches by the typed machine `key` (already resolved
     // engine-side); the label's translation set stays inside the TEE so
     // its non-user-locale variants never reach the consumer.
-    let mut fields: Vec<_> = d.fields.iter().map(dto::display_field_from_proto).collect();
+    let mut fields: Vec<_> = fields.iter().map(dto::display_field_from_proto).collect();
     let seed = shuffle_key.derive_envelope_seed(session_id, disclosure_index);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(seed);
     fields.shuffle(&mut rng);
@@ -529,15 +716,11 @@ mod tests {
     #[test]
     fn envelope_is_padded_to_a_constant_frame_and_still_parses() {
         let sk = ShuffleKey::from_tee_seal_key(&[7u8; 32]);
-        let small = ConsentDisclosure {
-            fields: vec![field("first_name", "Al")],
-        };
-        let big = ConsentDisclosure {
-            fields: vec![
-                field("first_name", &"A".repeat(3000)),
-                field("dob", "1990-01-01"),
-            ],
-        };
+        let small = vec![field("first_name", "Al")];
+        let big = vec![
+            field("first_name", &"A".repeat(3000)),
+            field("dob", "1990-01-01"),
+        ];
 
         let a = shuffle_to_envelope_bytes(&small, "sid", 0, &sk).unwrap();
         let b = shuffle_to_envelope_bytes(&big, "sid", 1, &sk).unwrap();
@@ -560,9 +743,7 @@ mod tests {
         // A pathological envelope past the frame fails the seal (fail-safe),
         // rather than silently leaking size by emitting a larger ciphertext.
         let sk = ShuffleKey::from_tee_seal_key(&[9u8; 32]);
-        let huge = ConsentDisclosure {
-            fields: vec![field("k", &"x".repeat(SEALED_DISCLOSURE_PLAINTEXT_BYTES))],
-        };
+        let huge = vec![field("k", &"x".repeat(SEALED_DISCLOSURE_PLAINTEXT_BYTES))];
         assert!(shuffle_to_envelope_bytes(&huge, "sid", 0, &sk).is_err());
     }
 }

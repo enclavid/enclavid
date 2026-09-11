@@ -7,8 +7,9 @@
 //! NO Cranelift — codegen lives in `engine-compiler`, and a serialized
 //! `cwasm` is the only input crossing in. The engine owns the mailbox
 //! (builds the inbound `event` from `/input`), persistence (threads the
-//! opaque `state` blob), and effects (renders prompts, seals consented
-//! disclosures). No intercept / replay / compaction.
+//! opaque `state` blob), and effects (renders prompts). What a round
+//! DISCLOSES it neither decides nor reports — see `listener`. No intercept /
+//! replay / compaction.
 //!
 //! ```text
 //! runner/      ← Executor + RunStatus; WIT⇄domain conversions +
@@ -20,7 +21,7 @@
 //!   ↓ uses
 //! state/       ← Store<T> data layer (HostState, RunInputs)
 //! listener     ← outbound contract (SessionListener trait, SessionChange);
-//!                fired on a consent-disclosure accept
+//!                fired once per round, carrying state + captured media
 //! limits, sanitize  ← leaf utilities
 //! ```
 
@@ -67,7 +68,7 @@ pub use embedded::{
 pub use hatch_client::{
     Action, Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
 };
-pub use listener::{CapturedMedia, ConsentDisclosure, SessionChange, SessionListener};
+pub use listener::{CapturedMedia, SessionChange, SessionListener};
 pub use media_store::MediaStore;
 pub use runner::{
     EmbeddedIface, EmbeddedImport, Executor, PluginInstance, PrimedComposition, RunStatus,
