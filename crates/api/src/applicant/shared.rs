@@ -32,7 +32,7 @@ use crate::state::AppState;
 use super::auth::CallerKey;
 use super::callbacks::CallbackServer;
 use super::media_store::HatchMediaStore;
-use super::persister::SessionPersister;
+use super::persister::{self, SessionPersister};
 use super::views::{SessionProgress, progress_from};
 
 /// Build the static `props` list the policy reads via
@@ -161,6 +161,11 @@ impl SessionRunCtx {
         // before the request leaves this process, and the binding that makes it
         // evidence was already checked in `input`, whose digest gate is what
         // authorizes a seal at all.
+        // Sole strong hold on what this round may disclose. The persister borrows
+        // it as a `Weak`, exactly as it does the applicant token, so the
+        // applicant's plaintext fields live exactly as long as this frame —
+        // however the frame ends.
+        let consent = persister::round_consent(&event, &session_state.current_prompt);
         let persister = SessionPersister::for_round(
             state.session_store.clone(),
             session_id.clone(),
@@ -170,10 +175,13 @@ impl SessionRunCtx {
             disclosure_pubkey,
             version,
             metadata.clone(),
-            &event,
-            &session_state.current_prompt,
+            &consent,
             state.shuffle_key.clone(),
         );
+        // Bound, like `token_owner` above and for the same reason: it is the sole
+        // strong hold on the applicant's consented fields, the persister has only
+        // a `Weak`, and it must outlive `executor.run().await` so a callback can
+        // still seal. It drops at the end of this fn, whichever way the fn ends.
 
         // Callbacks the keyless worker calls DURING a run: blob rehydration
         // (`media_load`) + state persistence (`session_change`). Bundle resolution

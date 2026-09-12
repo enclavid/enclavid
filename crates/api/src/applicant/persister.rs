@@ -31,7 +31,8 @@
 //! atomically with each persist), and the round's consent. How long the
 //! PERSISTER survives is partly the WORKER's choice — the callback client it was
 //! handed carries an `Arc` — so the consent is tied to the round instead, by
-//! [`RoundPersister`], whose `Drop` runs on `run`'s stack and nowhere else.
+//! a [`RoundConsent`] the round's own frame owns, of which this holds a `Weak` —
+//! the same arrangement as the applicant token beside it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -94,15 +95,16 @@ pub(super) struct SessionPersister {
     /// value is the whole point of the persister existing, and a field that can
     /// be left unset is a product that silently stops disclosing.
     ///
-    /// Claimed by a `persist` and spent only if that persist commits (see
-    /// [`ConsentClaim`]), so a round seals at most once however many times the
-    /// worker fires the callback and a failed write does not consume the
-    /// acceptance. Cleared outright by [`RoundPersister`] when the round's frame
-    /// unwinds.
+    /// WEAK handle to what this round may seal — the same shape, and for the
+    /// same reason, as `applicant_session_token` above: the round's frame is the
+    /// sole strong owner, so these plaintext fields live exactly as long as the
+    /// round and this side never pins them. A `None` from `upgrade` means the
+    /// round is over and this callback is late.
     ///
-    /// A `std` mutex, deliberately: it is only ever held for a single statement,
-    /// and that is what lets the guard clear it from `Drop`, which cannot await.
-    consented: std::sync::Mutex<Option<Vec<DisplayField>>>,
+    /// Held across a whole `persist` and cleared only once the write commits, so
+    /// a second callback in the same round seals nothing, and a write that fails
+    /// does not consume an acceptance the applicant already gave.
+    consented: Weak<Mutex<Option<Vec<DisplayField>>>>,
     /// Process-lifetime shuffle key, used to permute `DisplayField`
     /// order inside disclosure envelopes before they're sealed to
     /// the consumer. Lives here (and not in engine) because the
@@ -113,88 +115,28 @@ pub(super) struct SessionPersister {
     pub shuffle_key: Arc<ShuffleKey>,
 }
 
-/// A [`SessionPersister`] that ends its round's consent when it goes out of
-/// scope. The only way to get one, so the cleanup is not a line anyone has to
-/// remember to write.
+/// The round's sole strong hold on what it may disclose. `run` binds one for the
+/// life of the round; the persister keeps only a `Weak`, exactly as it does for
+/// the applicant token.
 ///
-/// Whichever way the round leaves — a committed write, a `?` on a worker that
-/// died, a panic — unwinding drops this, and the applicant's plaintext fields go
-/// with it.
+/// Dropping it frees the applicant's plaintext fields on every exit the frame
+/// has — the `?` paths and a panic included — with no destructor to write and no
+/// call to remember. How long the PERSISTER lives is partly the worker's choice,
+/// since the callback client it was handed carries an `Arc`; how long this lives
+/// is not.
+pub(super) type RoundConsent = Arc<Mutex<Option<Vec<DisplayField>>>>;
+
+/// What this round may seal, decided from the round's own inputs.
 ///
-/// It cannot be `Drop for SessionPersister` itself: `run` hands the worker a
-/// callback client carrying an `Arc` of the persister, so the persister's own
-/// lifetime is partly the worker's to choose. This value's is not — it lives on
-/// `run`'s stack and nowhere else. Deref hands out the `Arc` for the callback
-/// server; cloning that shares the persister, never the round.
-///
-/// `#[must_use]` because binding it to `_` — or reaching straight through the
-/// deref for the `Arc` — drops the guard at that semicolon and disarms the round
-/// while the persister lives on.
-#[must_use]
-pub(super) struct RoundPersister(Arc<SessionPersister>);
-
-impl std::ops::Deref for RoundPersister {
-    type Target = Arc<SessionPersister>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Drop for RoundPersister {
-    fn drop(&mut self) {
-        self.0.forget_consent();
-    }
-}
-
-/// The round's acceptance, held while one persist tries to commit it.
-///
-/// Taking it is what stops a second callback in the same round from sealing a
-/// second time; putting it back when the persist does NOT commit is what stops a
-/// failure from spending it. Both matter against the same worker: one that fires
-/// a callback it knows will fail, then a clean one, would otherwise finish the
-/// session with the applicant told "approved" and an empty chain behind them.
-struct ConsentClaim<'a> {
-    persister: &'a SessionPersister,
-    fields: Option<Vec<DisplayField>>,
-    spent: bool,
-}
-
-impl<'a> ConsentClaim<'a> {
-    fn take(persister: &'a SessionPersister) -> Self {
-        let fields = persister
-            .consented
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        Self {
-            persister,
-            fields,
-            spent: false,
-        }
-    }
-
-    fn fields(&self) -> &[Vec<DisplayField>] {
-        self.fields.as_slice()
-    }
-
-    /// The write committed; the acceptance is now in the chain and must not be
-    /// handed back.
-    fn spend(mut self) {
-        self.spent = true;
-    }
-}
-
-impl Drop for ConsentClaim<'_> {
-    fn drop(&mut self) {
-        if !self.spent {
-            *self
-                .persister
-                .consented
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.fields.take();
-        }
-    }
+/// Derived here rather than accepted ready-made: a caller that can hand over the
+/// answer is a caller that can hand over the wrong one, and a `None` passed by
+/// mistake is a product that silently stops disclosing — which no type catches
+/// and no test short of a full round would either.
+pub(super) fn round_consent(event: &Event, current_prompt: &Option<Prompt>) -> RoundConsent {
+    Arc::new(Mutex::new(super::shared::consent_for_round(
+        event,
+        current_prompt,
+    )))
 }
 
 impl SessionPersister {
@@ -202,9 +144,10 @@ impl SessionPersister {
     /// round's consent cannot outlive the round — which is also why this is not
     /// a `new`: there is deliberately no way to obtain the bare persister.
     ///
-    /// Takes the round's `event` and pre-round `current_prompt` rather than the
-    /// consent itself, so what this round may seal is decided in one place that
-    /// has a test — see [`super::shared::consent_for_round`] and the field.
+    /// Borrows the round's [`RoundConsent`] rather than owning it: the caller's
+    /// frame is the lifetime, this side keeps a `Weak`. Taking it by reference is
+    /// also what makes the owner impossible to bind to `_` and lose — see the
+    /// field.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn for_round(
         session_store: Arc<SessionStore>,
@@ -213,36 +156,19 @@ impl SessionPersister {
         client_disclosure_pubkey: String,
         version: u64,
         metadata: SessionMetadata,
-        event: &Event,
-        current_prompt: &Option<Prompt>,
+        consent: &RoundConsent,
         shuffle_key: Arc<ShuffleKey>,
-    ) -> RoundPersister {
-        // Derived HERE, from the round's own inputs, rather than accepted as a
-        // ready-made value. A caller that can hand over the answer is a caller
-        // that can hand over the wrong one — and a `None` passed by mistake is a
-        // product that silently stops disclosing, which no type would catch and
-        // no test short of a full round would either.
-        let consented = super::shared::consent_for_round(event, current_prompt);
-        RoundPersister(Arc::new(Self {
+    ) -> Arc<Self> {
+        Arc::new(Self {
             session_store,
             session_id,
             applicant_session_token,
             client_disclosure_pubkey,
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata),
-            consented: std::sync::Mutex::new(consented),
+            consented: Arc::downgrade(consent),
             shuffle_key,
-        }))
-    }
-
-    /// Drop the round's consent. Only [`RoundPersister::drop`] calls this — a
-    /// cleanup someone has to remember is a cleanup that gets skipped on the
-    /// error path, which is the path it exists for.
-    fn forget_consent(&self) {
-        *self
-            .consented
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        })
     }
 
     /// api side of the keyless executor's `CallbackService::session_change`:
@@ -272,8 +198,13 @@ impl SessionPersister {
         // accepted a screen — which is why it no longer carries one. Ours is
         // evidence: `/input` refused the accept unless the applicant's echoed
         // digest matched this same `current_prompt`.
-        let claim = ConsentClaim::take(self);
-        let to_seal: &[Vec<DisplayField>] = claim.fields();
+        // Both round-scoped and owned by the same frame, so they expire together:
+        // a `None` from either means this callback outlived its round.
+        let consent = self.consented.upgrade().ok_or_else(|| {
+            CallbackError("persist: the round's consent outlived its context".into())
+        })?;
+        let mut consented = consent.lock().await;
+        let to_seal: &[Vec<DisplayField>] = consented.as_slice();
 
         // The shuffle is seeded from the disclosure_count BEFORE this batch, so
         // distinct envelopes get independent, replay-stable permutations.
@@ -338,7 +269,7 @@ impl SessionPersister {
         // The host has it. Now, and only now, spend the acceptance and publish
         // the bookkeeping that describes what was written.
         *metadata = working;
-        claim.spend();
+        *consented = None;
         Ok(())
     }
 
