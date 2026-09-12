@@ -20,7 +20,7 @@ pub use cache::CacheStore;
 // the `enclavid-boundary` leaf crate, shared with `safe-logger`.
 // The crate-root path is preserved so consumers keep their imports.
 pub use boundary::outbound::outbound_session_id;
-pub use boundary::{AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted, reason};
+pub use boundary::{Asserted, AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted, reason};
 pub use error::BridgeError;
 pub use transport::HatchClient;
 // Wire DTO re-exports — the operation selector and the OCI pull

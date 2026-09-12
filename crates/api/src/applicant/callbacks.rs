@@ -33,7 +33,9 @@ pub(super) struct CallbackServer {
 
 impl CallbackService for CallbackServer {
     async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError> {
-        self.media_store.load(&hash).await
+        self.media_store
+            .load(crate::boundary::from_worker(hash))
+            .await
     }
 
     async fn session_change(

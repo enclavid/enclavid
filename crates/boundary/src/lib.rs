@@ -120,6 +120,34 @@ pub struct AuthZ;
 /// leak.
 pub struct Replay;
 
+/// Provenance concern: the value was produced by code executing
+/// adversary-supplied input, and is therefore the peer's own word rather
+/// than a function of anything this side or the applicant established.
+///
+/// Nothing here is forged — the peer is our own measured image, reached
+/// over mutual RA-TLS against a pinned measurement. Nothing here is
+/// derived from anything we know, either. That is the whole axis: the
+/// other four ask who sent it, whether they may, whether it is fresh and
+/// whether it leaks outward; none asks what it is a function of.
+///
+/// Cleared by demonstrating exactly ONE of:
+///   1. RE-DERIVED — this side computes the value from inputs it holds.
+///   2. BOUND — checked against something a DIFFERENT party established
+///      (the applicant's echoed digest; bytes this side pulled and
+///      digest-verified).
+///   3. BOUNDED — the entire range is harmless (a fixed-cardinality enum).
+///   4. CONTAINED — re-exposed only to the party whose own code authored
+///      it, or to the applicant, who is its sole auditor.
+///
+/// "The peer is attested" is NOT a discharge. It is true of every value
+/// on this axis, and it is the reasoning four separate 2026-09 defects
+/// were made of. A reason that names none of the four kinds above is a
+/// finding, not a matter of taste.
+///
+/// Inbound-only: releasing TO such a peer is a release decision, which
+/// [`Exposed`] already names.
+pub struct Asserted;
+
 /// Covert-channel concern: outbound data might carry policy-controlled
 /// bandwidth disguised as legitimate structure (field order, count,
 /// content). Cleared by sanitisation passes (shuffle, fixed-order,

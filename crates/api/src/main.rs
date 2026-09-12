@@ -1,4 +1,5 @@
 mod applicant;
+mod boundary;
 mod client;
 mod client_state;
 mod compiler;

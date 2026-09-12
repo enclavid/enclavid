@@ -58,7 +58,7 @@ pub mod outbound;
 
 pub use enclavid_boundary as sentinel;
 pub use enclavid_boundary::{
-    AuthN, AuthZ, Covert, Exposed, Reason, Remove, Replay, Untrusted, reason,
+    Asserted, AuthN, AuthZ, Covert, Exposed, Reason, Remove, Replay, Untrusted, reason,
 };
 pub use inbound::{FromUntrusted, from_untrusted};
 pub use outbound::{ToUntrusted, to_untrusted};

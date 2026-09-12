@@ -52,7 +52,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 
 use engine_rpc::CallbackError;
-use hatch_client::{Replay, SessionStore, outbound_session_id, reason};
+use hatch_client::{Asserted, Replay, SessionStore, outbound_session_id, reason};
+
+use crate::boundary::FromWorker;
 use secrecy::{ExposeSecret, SecretBox};
 
 pub(super) struct HatchMediaStore {
@@ -83,13 +85,41 @@ impl HatchMediaStore {
     /// closed).
     pub(super) async fn load(
         &self,
-        blob_hash: &[u8; 32],
+        blob_hash: FromWorker<[u8; 32]>,
     ) -> Result<Option<Vec<u8>>, CallbackError> {
         // 1. Gate — an unknown hash is a fabricated ref: refuse with no hatch
         //    read. The worker traps on the `None` (from-blob-ref has no miss branch).
-        if !self.captured.contains(blob_hash) {
+        //
+        //    CONTAINED, and the gate is written AS the discharge rather than
+        //    beside it. That buys legibility, not a guarantee: `trust` forces a
+        //    closure over the value with a failure arm, so a reviewer reads the
+        //    predicate instead of a sentence about it — but `|h| Ok(h)` would
+        //    still type-check. Making the gate load-bearing needs the shape
+        //    `storage::scope::Name` uses: a type whose only constructor is the
+        //    check. `captured` is a snapshot taken
+        //    in the extractor before this round, and this round's own frames are
+        //    minted warm engine-side and never come back through here — so what
+        //    this serves is always an EARLIER round's blob of THIS session.
+        //
+        //    Two mechanisms contain it, and neither is "the peer is attested":
+        //    the set admits only what this session already stored, and the blob
+        //    opens only under this round's applicant token with AAD
+        //    `session_id‖blob_hash`, so a hash that collides across sessions
+        //    still yields nothing.
+        //
+        //    What the set is worth is a question for where it is WRITTEN:
+        //    `persister::persist` extends it from media the worker reports and
+        //    does not re-derive it, so the gate is the worker's own ledger.
+        let Ok(blob_hash) = blob_hash.trust::<Asserted, _, _, _, ()>(|hash| {
+            if self.captured.contains(&hash) {
+                Ok(hash)
+            } else {
+                Err(())
+            }
+        }) else {
             return Ok(None);
-        }
+        };
+        let blob_hash = blob_hash.into_inner();
         // 2. Pull + decrypt on serve. Borrow the token from the per-round owner
         //    for the moment of the open; a `None` upgrade means the run outlived
         //    its context. Nothing is retained: the decrypted blob is returned
@@ -104,12 +134,14 @@ impl HatchMediaStore {
         let id = outbound_session_id(&self.session_id);
         let loaded = self
             .session_store
-            .load_media(id, blob_hash, token.expose_secret())
+            .load_media(id, &blob_hash, token.expose_secret())
             .await
             .map_err(|e| CallbackError(format!("media load failed: {e}")))?
             .trust_unchecked::<Replay, _>(reason!(
-                "media blob is content-addressed by BLAKE3; a stale or reordered read \
-                 can only return identical bytes"
+                "a stale or reordered read returns an earlier blob stored under the \
+                 same key in this same session, and every one of them was already \
+                 served to this peer — content-addressing would say more, but the \
+                 key is the worker's word, not a hash this side computed"
             ))
             .into_inner();
         Ok(loaded)
