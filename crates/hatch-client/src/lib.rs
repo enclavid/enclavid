@@ -16,11 +16,10 @@ mod domain;
 pub use auth::{AuthClient, AuthVerdict, Principal};
 pub use backend::{CacheBackend, SessionBackend};
 pub use cache::CacheStore;
-// Boundary re-exports — Untrusted/Exposed/concern markers live in
-// the `enclavid-boundary` leaf crate, shared with `safe-logger`.
-// The crate-root path is preserved so consumers keep their imports.
+// The hatch's own outbound mint. The VOCABULARY it is written in is not
+// re-exported: `Untrusted`/`Exposed`/the markers/`reason!` come from
+// `enclavid-boundary` directly, so one word has one path.
 pub use boundary::outbound::outbound_session_id;
-pub use boundary::{Asserted, AuthN, AuthZ, Covert, Exposed, Reason, Replay, Untrusted, reason};
 pub use error::BridgeError;
 pub use transport::HatchClient;
 // Wire DTO re-exports — the operation selector and the OCI pull

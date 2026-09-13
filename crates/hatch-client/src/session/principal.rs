@@ -16,8 +16,8 @@
 
 use hatch_protocol::{BlobField, BlobWrite, Op};
 
-use crate::boundary::Exposed;
 use crate::error::BridgeError;
+use enclavid_boundary::Exposed;
 
 use super::Ctx;
 use super::core::WriteField;

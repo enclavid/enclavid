@@ -4,7 +4,7 @@
 
 use hatch_protocol::{BlobField, BlobWrite, FieldSelector, Op, Slot};
 
-use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
+use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 use crate::boundary;
 use crate::domain::SessionStatus;

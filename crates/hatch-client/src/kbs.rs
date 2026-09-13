@@ -18,9 +18,9 @@ use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
 use hyper::StatusCode;
 
 use crate::boundary;
-use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
 use crate::transport::HatchClient;
+use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 /// How long the hatch has to answer ONE relayed leg.
 ///

@@ -225,9 +225,8 @@ fn bridge_stage(e: &hatch_client::BridgeError) -> &'static str {
 #[cfg(feature = "sev-snp")]
 pub async fn build_attestor(address_out: &str) -> Arc<dyn Attestor> {
     use enclavid_attestation::{MILAN_ASK, SnpAttestor, vcek_identity};
-    use hatch_client::{
-        AuthN, AuthZ, Covert, HatchClient, KdsClient, Replay, VcekRequest, boundary, reason,
-    };
+    use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
+    use hatch_client::{HatchClient, KdsClient, VcekRequest, boundary};
 
     // Steps 1 and 2: what the hardware says about this launch, and whether this
     // build is willing to run here at all.

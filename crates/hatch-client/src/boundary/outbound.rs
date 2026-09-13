@@ -27,8 +27,8 @@
 //! cardinality" call out in code with the rationale right where the
 //! data is released.
 
-use crate::boundary::{AuthN, AuthZ, Covert, Exposed};
-use crate::reason;
+use enclavid_boundary::reason;
+use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed};
 
 /// Maximally-open outbound scope: every TEE → wire release has all
 /// three outbound concerns open until the use site addresses each.

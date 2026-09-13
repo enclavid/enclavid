@@ -11,9 +11,9 @@
 use hatch_protocol::{BlobField, BlobWrite, FieldSelector, Op, Slot};
 
 use crate::boundary;
-use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::domain::{self, SessionState};
 use crate::error::BridgeError;
+use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 use enclavid_crypto::aead;
 

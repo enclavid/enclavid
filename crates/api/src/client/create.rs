@@ -13,9 +13,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use enclavid_attestation::ReportData;
+use enclavid_boundary::{AuthN, AuthZ, Covert, reason};
 use hatch_client::{
-    AuthN, AuthZ, Client, ClientAccess, Covert, PluginPin, SessionMetadata, SessionStatus,
-    SetMetadata, WriteField, boundary, reason,
+    Client, ClientAccess, PluginPin, SessionMetadata, SessionStatus, SetMetadata, WriteField,
+    boundary,
 };
 
 use crate::client_state::ClientState;

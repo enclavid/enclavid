@@ -15,9 +15,9 @@ use hatch_protocol::{AuthorizeRequest, AuthorizeResponse};
 use hyper::StatusCode;
 
 use crate::boundary;
-use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
 use crate::transport::HatchClient;
+use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 /// Principal identifier returned by the hatch. Opaque string from the
 /// TEE's perspective — the hatch is authoritative on identity; the TEE

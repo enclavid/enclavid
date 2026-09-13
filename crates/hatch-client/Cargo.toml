@@ -23,6 +23,10 @@ async-trait = "0.1"
 # Serde + CBOR for the sealed domain types (see src/domain.rs). Same
 # codec as the wire envelope — zero protobuf in the project.
 serde = { version = "1", features = ["derive"] }
+# One CBOR byte string for the policy's opaque state blob, not an array of
+# integers — see `SessionState::state`, where the difference decides whether a
+# legal max-cap state fits its constant frame at all.
+serde_bytes = "0.11"
 ciborium = "0.2"
 # Hex encoding of the identity-hiding L2 cache blob name (HKDF label).
 hex = "0.4"

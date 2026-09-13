@@ -27,7 +27,7 @@
 //! N/A" / "AuthN closed by AEAD-open" call out in code with the
 //! rationale right where the data is consumed.
 
-use crate::boundary::{AuthN, AuthZ, Replay, Untrusted};
+use enclavid_boundary::{AuthN, AuthZ, Replay, Untrusted};
 
 /// Maximally-open inbound scope: host-supplied data has all three
 /// inbound concerns open until the use site addresses each.

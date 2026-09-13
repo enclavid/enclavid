@@ -31,10 +31,8 @@ use axum::middleware::Next;
 use axum::response::Response;
 use base64ct::{Base64, Encoding};
 
-use hatch_client::{
-    AuthN, AuthVerdict, AuthZ, AuthorizeRequest, ClientOperation, Covert, Replay, SessionMetadata,
-    Untrusted, boundary, reason,
-};
+use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, Untrusted, reason};
+use hatch_client::{AuthVerdict, AuthorizeRequest, ClientOperation, SessionMetadata, boundary};
 
 use crate::client_state::ClientState;
 

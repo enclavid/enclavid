@@ -56,9 +56,10 @@ use hatch_protocol::{FieldSelector, Op, ReadRequest, Slot, WriteRequest};
 use enclavid_crypto::aead;
 
 use crate::backend::SessionBackend;
-use crate::boundary::{AuthN, AuthZ, Replay, Untrusted};
+use crate::boundary;
 use crate::error::BridgeError;
-use crate::{Exposed, boundary};
+use enclavid_boundary::Exposed;
+use enclavid_boundary::{AuthN, AuthZ, Replay, Untrusted};
 
 /// Per-call encryption context. Carries the TEE-side key plus the
 /// session_id used as AAD, so a ciphertext copied between sessions

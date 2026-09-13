@@ -6,9 +6,9 @@
 use hatch_protocol::{FieldSelector, Op, ReadRequest, Slot};
 
 use crate::boundary;
-use crate::boundary::{AuthN, AuthZ, Covert, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
-use crate::reason;
+use enclavid_boundary::reason;
+use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed, Replay, Untrusted};
 
 use super::Ctx;
 use super::SessionStore;

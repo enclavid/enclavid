@@ -16,8 +16,8 @@
 
 use hatch_protocol::{MediaWrite, Op};
 
-use crate::boundary::{AuthN, Exposed};
 use crate::error::BridgeError;
+use enclavid_boundary::{AuthN, Exposed};
 
 use enclavid_crypto::{aead, derive_key};
 
@@ -103,12 +103,12 @@ impl WriteField for SetMedia<'_> {
 mod tests {
     use super::*;
     use crate::boundary;
-    use crate::reason;
+    use enclavid_boundary::reason;
 
     fn exposed_bytes(bytes: Vec<u8>) -> Exposed<Vec<u8>, (AuthN,)> {
         boundary::outbound::to_untrusted(bytes)
-            .vouch_unchecked::<crate::boundary::AuthZ, _>(reason!("test"))
-            .vouch_unchecked::<crate::boundary::Covert, _>(reason!("test"))
+            .vouch_unchecked::<enclavid_boundary::AuthZ, _>(reason!("test"))
+            .vouch_unchecked::<enclavid_boundary::Covert, _>(reason!("test"))
     }
 
     #[test]

@@ -7,9 +7,8 @@ use axum::routing::{MethodRouter, get};
 use base64ct::{Base64, Encoding};
 use serde::Serialize;
 
-use hatch_client::{
-    AuthN, AuthZ, Disclosure, Metadata, Replay, SessionStatus, outbound_session_id, reason,
-};
+use enclavid_boundary::{AuthN, AuthZ, Replay, reason};
+use hatch_client::{Disclosure, Metadata, SessionStatus, outbound_session_id};
 
 use crate::client_state::ClientState;
 use crate::disclosure_commit;

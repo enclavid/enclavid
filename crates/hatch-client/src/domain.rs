@@ -144,6 +144,14 @@ pub struct SessionMetadata {
 pub struct SessionState {
     /// The policy's own opaque serialized state, threaded verbatim
     /// through `handle`. Empty on a fresh session (genesis `start`).
+    ///
+    /// `serde_bytes` so ciborium encodes this as ONE CBOR byte string. Without
+    /// it a `Vec<u8>` serialises element-by-element — two bytes for every byte
+    /// over 0x17 — so near-uniform binary state (a re-encoded image, which is
+    /// what `POLICY_MAX_STATE_BYTES` was sized for) cost ~1.9x its length. That
+    /// is not only wire and seal cost: it put a legal max-cap state OVER the
+    /// constant frame it has to fit, at rest and on the worker hop alike.
+    #[serde(with = "serde_bytes")]
     pub state: Vec<u8>,
     /// The prompt the runtime is currently awaiting input for, if any.
     /// `None` before the first render and after a `finish`.

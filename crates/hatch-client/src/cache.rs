@@ -34,9 +34,10 @@ use secrecy::{ExposeSecret, SecretBox};
 use enclavid_crypto::{aead, derive_key};
 
 use crate::backend::CacheBackend;
-use crate::boundary::{self, AuthN, AuthZ, Covert, Replay};
+use crate::boundary;
 use crate::error::BridgeError;
-use crate::reason;
+use enclavid_boundary::reason;
+use enclavid_boundary::{AuthN, AuthZ, Covert, Replay};
 
 /// HKDF info label for the AEAD seal subkey.
 const SEAL_INFO: &[u8] = b"enclavid.cwasm-cache.seal.v1";

@@ -9,10 +9,9 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
 use enclavid_crypto::ocicrypt;
-use hatch_client::{
-    AuthN, AuthZ, Covert, Key, PullRequest, RegistryClient, Replay, boundary, reason,
-};
+use hatch_client::{Key, PullRequest, RegistryClient, boundary};
 
 use crate::keyprovider::{self, KbsContext};
 

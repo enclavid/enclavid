@@ -8,8 +8,8 @@
 use hatch_protocol::{FieldSelector, ListAppend, ListField, Op, Slot};
 
 use crate::boundary;
-use crate::boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 use crate::error::BridgeError;
+use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 use super::Ctx;
 use super::core::{ReadField, WriteField, unwrap_list};

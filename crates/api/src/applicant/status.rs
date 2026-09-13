@@ -6,7 +6,8 @@ use axum::response::Json;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use hatch_client::{AuthZ, Metadata, Replay, SessionStatus, outbound_session_id, reason};
+use enclavid_boundary::{AuthZ, Replay, reason};
+use hatch_client::{Metadata, SessionStatus, outbound_session_id};
 
 use crate::dto;
 use crate::state::AppState;

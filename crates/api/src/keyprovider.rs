@@ -15,9 +15,10 @@
 
 use std::collections::HashMap;
 
+use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, Untrusted, reason};
 use enclavid_crypto::ocicrypt::{self, PrivateLayerBlockCipherOptions};
 use enclavid_kbs_client::{RcarSession, SampleEvidence, TeeKeyPair};
-use hatch_client::{AuthN, AuthZ, Covert, KbsClient, Key, Replay, Untrusted, boundary, reason};
+use hatch_client::{KbsClient, Key, boundary};
 use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
 
 /// Context the [`Key::Kbs`] path needs: the hatch relay client that
