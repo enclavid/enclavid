@@ -12,10 +12,12 @@ use axum::http::request::Parts;
 use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 
+use enclavid_boundary::Asserted;
+use enclavid_boundary::{AuthN, AuthZ, Replay, reason};
 use engine_types::composition::PluginInstance;
 use hatch_client::{
-    AuthN, AuthZ, Client, DisplayField, Event, Key, Metadata, PluginPin, Prompt, Replay,
-    SessionMetadata, SessionState, State as StateField, outbound_session_id, reason,
+    Client, DisplayField, Event, Key, Metadata, PluginPin, Prompt, SessionMetadata, SessionState,
+    State as StateField, outbound_session_id,
 };
 // The run wire mirrors: props api builds + ships, the outcome + error it gets
 // back from the execution-worker.
@@ -166,6 +168,9 @@ impl SessionRunCtx {
         // applicant's plaintext fields live exactly as long as this frame —
         // however the frame ends.
         let consent = persister::round_consent(&event, &session_state.current_prompt);
+        // The applicant's own frames, content-addressed here. Sent to the worker
+        // in the event below and never taken back from it.
+        let captures = persister::round_captures(&event);
         let persister = SessionPersister::for_round(
             state.session_store.clone(),
             session_id.clone(),
@@ -176,6 +181,7 @@ impl SessionRunCtx {
             version,
             metadata.clone(),
             &consent,
+            &captures,
             state.shuffle_key.clone(),
         );
         // Bound, like `token_owner` above and for the same reason: it is the sole
@@ -188,26 +194,49 @@ impl SessionRunCtx {
         // is NOT here — the orchestrator drives it itself on a cache miss (below),
         // under the `composition_key` IT computed, so the worker never names which
         // L2 slot a compile lands in.
-        let callbacks = Arc::new(CallbackServer {
+        // Handed over as the UNTRUSTED view — there is no other kind to hand over.
+        // The raw callback server is not engine-rpc's to export, so this side has
+        // no unwrapped contract available to implement by accident.
+        let callbacks = CallbackServer {
             persister: persister.clone(),
             media_store,
-        });
+        };
+
+        // Framed ONCE for both phases: the peel that closes `Covert` produces the
+        // wire value, so the retry below re-sends the same constant-size frame
+        // rather than re-encoding an identical one.
+        let session_state = crate::executor::outbound_round_state(&session_state)
+            .map_err(|e| classify_run_error(&session_id, &e))?;
 
         // Phase 1: cache-only run. The worker serves the composition from its own
         // L1, or reports a miss — no bundle crosses on this call.
-        let req = RunRequest {
+        //
+        // `map` carries the scope through: the concerns were answered about the
+        // state, and assembling the request around it addresses none of them and
+        // reopens none, so the receipt the door demands is the one the mint wrote.
+        let req = session_state.clone().map(|session_state| RunRequest {
             composition_key: composition_key.clone(),
             props: props.clone(),
-            session_state: session_state.clone(),
+            session_state,
             event: event.clone(),
-        };
+        });
+        // The reply is the worker's word as much as anything it pushes back, so it
+        // arrives under the same scope and has to be judged before it is used.
         let status = match state
             .executor
             .run(req, callbacks.clone())
             .await
             .map_err(|e| classify_run_error(&session_id, &e))?
+            .trust_unchecked::<Asserted, _>(reason!(
+                "bounded: a cache miss can only name a slot inside the composition \
+                 namespace api itself computed, so a fabricated token costs a \
+                 recompile and never yields another composition's code"
+            ))
+            .into_inner()
         {
-            RunOutcome::Ran(status) => status,
+            RunOutcome::Ran(status) => status
+                .open()
+                .map_err(|e| classify_run_error(&session_id, &e.into()))?,
             RunOutcome::CacheMiss { compat_token } => {
                 // L1 miss: resolve the bundle OURSELVES, keyed by the
                 // `composition_key` WE computed — never one echoed by the worker —
@@ -224,17 +253,23 @@ impl SessionRunCtx {
                 )
                 .await
                 .map_err(ApiError::Status)?;
-                let req = RunRequest {
+                let req = session_state.map(|session_state| RunRequest {
                     composition_key,
                     props,
                     session_state,
                     event,
-                };
+                });
                 state
                     .executor
                     .run_with_bundle(req, bundle, callbacks)
                     .await
                     .map_err(|e| classify_run_error(&session_id, &e))?
+                    .trust_unchecked::<Asserted, _>(reason!(
+                        "contained: shown to the applicant, who is the sole auditor \
+                         of what they see, and nothing api seals derives from it — \
+                         the round's disclosure comes from api's own copy"
+                    ))
+                    .into_inner()
             }
         };
         // No-op while the run is still awaiting input; flips status to

@@ -19,42 +19,72 @@
 //! [`run_with_bundle`](Executor::run_with_bundle). The keyless side never asks
 //! the key-holding side for a composition.
 
-use std::sync::Arc;
-
-use remoc::codec::Ciborium;
-// `ServerShared` (the trait) is in scope so `CallbackServiceServerShared::new`
-// resolves — the per-run callback server we hand the worker.
-use fleet_transport::LegFailure;
-use remoc::rtc::ServerShared;
-use safe_logger::debug;
-// `CallbackService` / `ExecutorService` (the remoc traits) are in scope so the
-// generated client's `.run()` + the callback server resolve.
+use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
 use engine_rpc::{
-    CallbackService, CallbackServiceClient, CallbackServiceServerShared, CompiledBundle, ExecError,
-    ExecutorService, ExecutorServiceClient, RunOutcome, RunReply, RunRequest, RunStatus,
+    CallbackServiceUntrusted, CompiledBundle, ExecError, ExecutorLeg, Padded, RunOutcome,
+    RunRequest, RunStatus,
 };
+use fleet_transport::LegFailure;
+use hatch_client::SessionState;
+use safe_logger::debug;
 
-/// Concurrent callback invocations the per-run CallbackService server handles.
-/// `media_load` / `session_change` are serialized by the run in practice (one
-/// round at a time), so a small pool is ample.
-const CALLBACK_CONCURRENCY: usize = 4;
+/// What is still open on a value api is about to release to a worker CVM.
+///
+/// Declared here rather than taken from `hatch_client::boundary::outbound`: that
+/// facade is the TEE↔host wire perimeter and owns the answers that crossing
+/// raises. A scope is a property of the CHANNEL, so this leg names its own.
+type ToWorker<T> = Exposed<T, (AuthN, AuthZ, Covert)>;
+
+/// Mint the round's prior state as a fully-vouched, constant-size frame — the
+/// only way a `SessionState` reaches an execution-worker.
+///
+/// NOT a generic "anything crossing to a worker" mint, on the same reasoning as
+/// `outbound_session_id`: it is specific to this value so the audited answers live
+/// in one place (grep `outbound_round_state(`) instead of being restated at each
+/// call, where they would be the same two sentences forever.
+///
+/// `AuthN` and `AuthZ` are closed HERE because on this leg they are closed once,
+/// at the handshake, identically for every value that ever crosses — the dial
+/// pins ONE measurement, so there is no per-call recipient decision to make.
+/// `Covert` is the only axis that differs per value, and it is discharged by
+/// doing the work: the peel's codomain IS the wire type, so a caller cannot get a
+/// `RunRequest` field out of this without the padding having happened.
+///
+/// The wrapper is RETURNED rather than unwrapped here, and that is what keeps it
+/// from being decoration. `ExecutorLeg::run` demands `Exposed<RunRequest, ()>`,
+/// and that type cannot be constructed — only arrived at, by peeling every
+/// concern this mint opened — so the receipt has to survive across the crate line
+/// to the door.
+pub(crate) fn outbound_round_state(
+    state: &SessionState,
+) -> Result<Exposed<Padded<SessionState>, ()>, ExecError> {
+    let framed: ToWorker<&SessionState> = Exposed::new(state);
+    Ok(framed
+        .vouch_unchecked::<AuthN, _>(reason!(
+            "the round's own prior state, returning to the peer that authored it"
+        ))
+        .vouch_unchecked::<AuthZ, _>(reason!(
+            "one pinned measurement per leg; no per-call recipient choice exists"
+        ))
+        .vouch::<Covert, _, _, _, _>(Padded::seal)?)
+}
 
 /// The EXECUTE boundary: a client for an execution-worker's
 /// `engine_rpc::ExecutorService`. A cheap remoc handle (`Send + Sync`); concurrent
 /// rounds multiplex over the one connection.
 pub struct Executor {
-    leg: std::sync::Arc<crate::fleet::Leg<ExecutorServiceClient<Ciborium>>>,
+    leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<ExecutorLeg>>>,
 }
 
 impl Executor {
-    pub fn new(leg: std::sync::Arc<crate::fleet::Leg<ExecutorServiceClient<Ciborium>>>) -> Self {
+    pub fn new(leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<ExecutorLeg>>>) -> Self {
         Self { leg }
     }
 
     /// The client, or the leg's own failure. A request arriving during an outage
     /// fails rather than waits: how long to wait for a peer is the host's
     /// decision, and the health port is already telling it which leg is down.
-    fn client(&self) -> Result<ExecutorServiceClient<Ciborium>, ExecError> {
+    fn client(&self) -> Result<std::sync::Arc<ExecutorLeg>, ExecError> {
         self.leg.get().ok_or_else(|| {
             ExecError::Run("the execution-worker leg is down; api is reporting it".into())
         })
@@ -66,13 +96,16 @@ impl Executor {
     /// [`run_with_bundle`](Self::run_with_bundle). The two-phase loop lives in the
     /// caller (`SessionRunCtx::run`), so bundle resolution stays with the
     /// key-holding orchestrator, never the worker.
-    pub async fn run<C>(&self, req: RunRequest, callbacks: Arc<C>) -> Result<RunOutcome, ExecError>
+    pub async fn run<C>(
+        &self,
+        req: Exposed<RunRequest, ()>,
+        callbacks: C,
+    ) -> Result<Untrusted<RunOutcome, C::Scope>, ExecError>
     where
-        C: CallbackService + Send + Sync + 'static,
+        C: CallbackServiceUntrusted + Send + Sync + 'static,
+        C::Scope: Send,
     {
-        self.client()?
-            .run(req, Self::callback_client(callbacks))
-            .await
+        self.client()?.run(req, callbacks).await
     }
 
     /// Post-miss attempt: hand the worker the `bundle` we resolved under
@@ -80,33 +113,15 @@ impl Executor {
     /// (a bundle is in hand), so this returns the round's `RunStatus` directly.
     pub async fn run_with_bundle<C>(
         &self,
-        req: RunRequest,
+        req: Exposed<RunRequest, ()>,
         bundle: CompiledBundle,
-        callbacks: Arc<C>,
-    ) -> Result<RunStatus, ExecError>
+        callbacks: C,
+    ) -> Result<Untrusted<RunStatus, C::Scope>, ExecError>
     where
-        C: CallbackService + Send + Sync + 'static,
+        C: CallbackServiceUntrusted + Send + Sync + 'static,
+        C::Scope: Send,
     {
-        self.client()?
-            .run_with_bundle(req, bundle, Self::callback_client(callbacks))
-            .await
-            .map(|RunReply { status }| status)
-    }
-
-    /// Stand up the per-call `CallbackService` server (media_load / session_change)
-    /// on the connection and hand back its client. It self-terminates once the
-    /// client we pass into the RPC and this copy both drop (after the call returns),
-    /// so no task leaks per attempt.
-    fn callback_client<C>(callbacks: Arc<C>) -> CallbackServiceClient<Ciborium>
-    where
-        C: CallbackService + Send + Sync + 'static,
-    {
-        let (cb_server, cb_client) =
-            CallbackServiceServerShared::<_, Ciborium>::new(callbacks, CALLBACK_CONCURRENCY);
-        tokio::spawn(async move {
-            let _ = cb_server.serve(true).await;
-        });
-        cb_client
+        self.client()?.run_with_bundle(req, bundle, callbacks).await
     }
 }
 
@@ -118,9 +133,7 @@ impl Executor {
 pub async fn connect_execution_worker(
     addr: &str,
     attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,
-) -> Result<(ExecutorServiceClient<Ciborium>, tokio::task::JoinHandle<()>), LegFailure> {
-    type Cli = ExecutorServiceClient<Ciborium>;
-
+) -> Result<(std::sync::Arc<ExecutorLeg>, tokio::task::JoinHandle<()>), LegFailure> {
     let stream = fleet_transport::dial(addr).await.map_err(|e| {
         debug!("connect {addr}: {e}");
         LegFailure::Connect(e.kind())
@@ -151,25 +164,19 @@ pub async fn connect_execution_worker(
         })?;
     let (read, write) = tokio::io::split(tls);
 
-    let (conn, _tx, mut rx) =
-        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
-            .await
-            .map_err(|e| {
-                debug!("rpc connect: {e}");
-                LegFailure::Rpc
-            })?;
-    let driver = tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let client = rx
-        .recv()
+    // Everything above this line is WHO — the dial, the pins, what a refusal
+    // means. Everything below is WHAT MAY CROSS, and that is engine-rpc's: it
+    // brings the hop up and keeps the generated client, which api has no name for.
+    let (leg, driver) = engine_rpc::connect_executor(read, write)
         .await
         .map_err(|e| {
-            debug!("recv clients: {e}");
-            LegFailure::Clients
-        })?
-        .ok_or(LegFailure::Closed)?;
+            debug!("execute leg: {e}");
+            match e {
+                engine_rpc::LegError::Rpc => LegFailure::Rpc,
+                engine_rpc::LegError::Clients | engine_rpc::LegError::Serve => LegFailure::Clients,
+                engine_rpc::LegError::Closed => LegFailure::Closed,
+            }
+        })?;
 
-    Ok((client, driver))
+    Ok((std::sync::Arc::new(leg), driver))
 }

@@ -72,8 +72,7 @@ use engine_executor::{Event, SessionState, compat_token};
 use engine_rpc::{
     BundleRef, CallbackError, CallbackService, CallbackServiceClient, CatalogEntry, ChildCallbacks,
     ChildCallbacksServerShared, ChildService, ChildServiceClient, CompiledBundle, ExecError,
-    ExecutorService, ExecutorServiceClient, ExecutorServiceServerShared, Prop, RunOutcome,
-    RunReply, RunRequest,
+    ExecutorService, Padded, Prop, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 use engine_types::composition::EmbeddedImport;
 use fleet_transport::LegFailure;
@@ -252,7 +251,7 @@ impl Supervisor {
         event: Event,
         props: Vec<(String, Prop)>,
         callbacks: CallbackServiceClient<Ciborium>,
-    ) -> Result<RunReply, ExecError> {
+    ) -> Result<RunStatus, ExecError> {
         let cwasm_fd = entry.cwasm.as_fd();
         // The child re-opens its inherited fd (`/proc/self/fd/N`) and MMAPs it via
         // `deserialize_file`; the 7-15 MiB never crosses the child hop — only the
@@ -293,7 +292,7 @@ impl Supervisor {
             )
             .await;
 
-        // The pool returns the closure's domain `Result<RunReply, ExecError>` on
+        // The pool returns the closure's domain `Result<RunStatus, ExecError>` on
         // success; a pool-level failure (spawn error, or the deadline killing a
         // wedged child) becomes a fail-safe `ExecError::Run` (api 5xx → applicant retry).
         match outcome {
@@ -369,11 +368,13 @@ impl ExecutorService for Caller {
             .get(&self.slot(&composition_key))
             .await
         {
+            // The frame comes off HERE, at the api hop, and goes back on below:
+            // everything between is inside this CVM, where no host counts bytes.
             Some(entry) => self
                 .sup
-                .run_in_child(entry, session_state, event, props, callbacks)
+                .run_in_child(entry, session_state.open()?, event, props, callbacks)
                 .await
-                .map(|RunReply { status }| RunOutcome::Ran(status)),
+                .and_then(|status| Ok(RunOutcome::Ran(Padded::seal(&status)?))),
             // Miss: the worker returns ONLY its ABI id — it never names the key.
             None => Ok(RunOutcome::CacheMiss {
                 compat_token: compat_token(),
@@ -402,9 +403,13 @@ impl ExecutorService for Caller {
             .sup
             .install_bundle(self.slot(&composition_key), bundle)
             .await?;
-        self.sup
-            .run_in_child(entry, session_state, event, props, callbacks)
-            .await
+        let status = self
+            .sup
+            .run_in_child(entry, session_state.open()?, event, props, callbacks)
+            .await?;
+        Ok(RunReply {
+            status: Padded::seal(&status)?,
+        })
     }
 }
 
@@ -421,12 +426,15 @@ impl ChildCallbacks for RelayCallbacks {
         self.upstream.media_load(hash).await
     }
 
-    async fn session_change(
-        &self,
-        state: SessionState,
-        media: Vec<([u8; 32], Vec<u8>)>,
-    ) -> Result<(), CallbackError> {
-        self.upstream.session_change(state, media).await
+    /// The child seam behind this call is a socketpair inside this CVM — no host
+    /// on it — so the frame goes on HERE, at the hop the host splices, and not one
+    /// layer earlier where it would be a megabyte of memcpy per round against no
+    /// observer. This is our own measured code performing a protocol step, not a
+    /// discharge written by the party a marker distrusts: `Covert` is a property
+    /// of the encoding at a hop, and this process is the one holding the bytes at
+    /// it.
+    async fn session_change(&self, state: SessionState) -> Result<(), CallbackError> {
+        self.upstream.session_change(Padded::seal(&state)?).await
     }
 }
 
@@ -451,10 +459,6 @@ fn child_exe() -> std::path::PathBuf {
     p.set_file_name("engine-executor-child");
     p
 }
-
-/// The base channel carries the `ExecutorServiceClient` from us (server) to api
-/// (client).
-type Cli = ExecutorServiceClient<Ciborium>;
 
 #[cfg(not(any(feature = "dev-attestation", feature = "sev-snp")))]
 compile_error!(
@@ -757,14 +761,6 @@ async fn serve_conn(
     })?;
 
     let (read, write) = tokio::io::split(tls);
-    let (conn, mut tx, _rx) =
-        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
-            .await
-            .map_err(|e| {
-                debug!("rpc connect: {e}");
-                LegFailure::Rpc
-            })?;
-    tokio::spawn(conn);
 
     // The service is per-connection so it can carry who is calling; the machinery
     // it delegates to — the L1 map and the child pool — stays shared, which is
@@ -773,14 +769,17 @@ async fn serve_conn(
         sup: svc,
         measurement,
     });
-    let (server, client) = ExecutorServiceServerShared::<_, Ciborium>::new(caller, 4);
-    tx.send(client).await.map_err(|e| {
-        debug!("send service client: {e}");
-        LegFailure::Clients
-    })?;
-    server.serve(true).await.map_err(|e| {
-        debug!("serve: {e}");
-        LegFailure::Serve
-    })?;
-    Ok(())
+    // Bringing the hop up means naming the generated client, and that is the one
+    // thing no crate outside engine-rpc may do — so the remoc half lives there for
+    // this end too, and this one keeps what it is actually about: who connected.
+    engine_rpc::serve_executor(read, write, caller, 4)
+        .await
+        .map_err(|e| {
+            debug!("execute leg: {e}");
+            match e {
+                engine_rpc::LegError::Rpc => LegFailure::Rpc,
+                engine_rpc::LegError::Clients | engine_rpc::LegError::Closed => LegFailure::Clients,
+                engine_rpc::LegError::Serve => LegFailure::Serve,
+            }
+        })
 }
