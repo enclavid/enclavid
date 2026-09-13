@@ -19,7 +19,7 @@
 //! adversary-supplied composition), never a third party's.
 //!
 //! Lifecycle: adopt the socketpair on fd 0, serve ONE
-//! `engine_rpc::CompilerService::compile`, exit when the supervisor drops its
+//! `engine_compiler::CompileChildService::compile`, exit when the supervisor drops its
 //! client. Multi-threaded runtime + `spawn_blocking` because `compile_to_parts`
 //! is a SYNCHRONOUS, CPU-bound, multi-second call — offloading it keeps the remoc
 //! reactor answering keepalives so the supervisor's connection survives the
@@ -40,23 +40,17 @@ use std::sync::Arc;
 
 use remoc::codec::Ciborium;
 
-use engine_compiler::Compiler;
-use engine_rpc::{
-    CatalogEntry, CompileError, CompiledBundle, CompilerService, CompilerServiceServerShared,
-};
-use engine_types::composition::PluginInstance;
+use engine_compiler::{CompileChildService, CompileChildServiceServerShared, Compiler};
+use engine_rpc::{CatalogEntry, CompileError, CompileRequest, CompiledBundle};
 
 /// Holds this process's Cranelift [`Compiler`]; serves ONE compile then exits.
 struct Child {
     compiler: Arc<Compiler>,
 }
 
-impl CompilerService for Child {
-    async fn compile(
-        &self,
-        policy: Vec<u8>,
-        plugins: Vec<PluginInstance>,
-    ) -> Result<CompiledBundle, CompileError> {
+impl CompileChildService for Child {
+    async fn compile(&self, req: CompileRequest) -> Result<CompiledBundle, CompileError> {
+        let CompileRequest { policy, plugins } = req;
         // Offload the synchronous, CPU-bound Cranelift compile to a blocking
         // thread so the remoc reactor stays live (answers keepalives) — else a
         // multi-second compile could look like a dead transport to the supervisor.
@@ -90,9 +84,9 @@ async fn main() {
     });
 
     // The supervisor placed one end of a socketpair on our fd 0; engine-supervisor
-    // adopts it, serves `CompilerService`, and returns when the supervisor drops
+    // adopts it, serves `CompileChildService`, and returns when the supervisor drops
     // its client (compile done) → we exit. Request buffer 1 — one compile.
-    match engine_supervisor::serve_child::<Child, CompilerServiceServerShared<Child, Ciborium>>(
+    match engine_supervisor::serve_child::<Child, CompileChildServiceServerShared<Child, Ciborium>>(
         child, 1,
     )
     .await

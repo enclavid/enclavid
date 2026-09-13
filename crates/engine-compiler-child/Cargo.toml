@@ -23,8 +23,12 @@ repository.workspace = true
 # workers turned on. Loud where it matters and lax where it doesn't: the image
 # build is the strict one.
 [dependencies]
-# Cranelift + component fusion — the half this process exists to run.
-engine-compiler = { path = "../engine-compiler" }
+# Cranelift + component fusion — the half this process exists to run. Plus
+# `child-seam`, the supervisor hop this process serves: it belongs to the role
+# that owns both ends of it, not to the fleet contract, so it is reached through
+# this crate rather than through `engine-rpc`. NOT `worker` — the supervisor half
+# (log device, listener, attestation) is deliberately out of reach here.
+engine-compiler = { path = "../engine-compiler", features = ["child-seam"] }
 # `adopt_fd0` + `serve_child`: the socketpair on fd 0 and the one-RPC serve loop.
 # `default-features = false` drops the parent half — no spawn, no seccomp
 # builder, no ptrace assertion, and (the reason it is a feature at all) no

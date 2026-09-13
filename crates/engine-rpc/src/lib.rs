@@ -36,11 +36,18 @@
 //! execute side for the composition catalogs it rebuilds the embedded registry
 //! from. Neither pulls Cranelift.
 //!
-//! `remoc` (the rtc substrate) is pulled by either feature. A compile-worker
+//! `remoc` (the rtc substrate) and `enclavid-boundary` (the concern vocabulary
+//! the doors are written in) are pulled by either feature. A compile-worker
 //! (or the orchestrator's compile client) builds
 //! `--no-default-features --features compile`; an execution-worker uses
 //! `execute`. `default = [compile, execute]` keeps both halves compiled +
 //! tested in whole-workspace builds (unification there is harmless).
+//!
+//! The vocabulary is deliberately NOT a third axis. It was one, and the axis
+//! bought nothing: the crate is a dependency-free leaf already linked by every
+//! image through the logger, so the only thing selecting it decided was whether
+//! a leg had a door at all — and a door that can be compiled away is not one.
+//! What a hop may carry, and the words that say so, arrive together.
 //!
 //! Adversarial-peer hardening lives in the connection [`remoc::Cfg`] (pin
 //! `chmux::Cfg` limits: `max_ports`, `max_data_size` — RAISE from the 512 KiB
@@ -57,13 +64,55 @@ pub use bundle::*;
 
 #[cfg(feature = "compile")]
 mod compile;
+// EXPLICIT, not a glob, for the same reason the execute half is: neither
+// `CompilerServiceClient` nor its server half is re-exported, so no crate outside
+// this one can name the generated client for the api hop — let alone call it — and
+// none can serve the RAW contract either. Both ends reach the hop through `leg`.
 #[cfg(feature = "compile")]
-pub use compile::*;
+pub use compile::{CompileError, CompileRequest};
+
+// The compile contract as its SERVER sees it.
+#[cfg(feature = "compile")]
+mod untrusted_compile;
+#[cfg(feature = "compile")]
+pub use untrusted_compile::CompilerServiceUntrusted;
 
 #[cfg(feature = "execute")]
 mod execute;
+// EXPLICIT, not a glob, and that is the point — in BOTH directions. Outbound,
+// `ExecutorServiceClient` and its server half are absent, so no crate outside
+// this one can name the generated client for this hop, let alone call it.
+// Inbound, `CallbackServiceServerShared` is absent too, so nobody outside can
+// serve the RAW callback contract: the only way to answer these callbacks is to
+// implement the untrusted view and hand it to the door. A wrapper a caller opts
+// into is a habit; a wrapper with no unwrapped alternative is a boundary.
 #[cfg(feature = "execute")]
-pub use execute::*;
+pub use execute::{
+    CallbackError, CallbackService, CallbackServiceClient, ChildCallbacks, ChildCallbacksClient,
+    ChildCallbacksServerShared, ChildService, ChildServiceClient, ChildServiceServerShared,
+    ExecError, ExecutorService, Prop, RunOutcome, RunReply, RunRequest, RunStatus,
+};
+
+// Both ends of the execute hop, and the doors on the calling end.
+#[cfg(any(feature = "compile", feature = "execute"))]
+mod leg;
+#[cfg(any(feature = "compile", feature = "execute"))]
+pub use leg::LegError;
+#[cfg(feature = "compile")]
+pub use leg::{CompilerLeg, connect_compiler, serve_compiler};
+#[cfg(feature = "execute")]
+pub use leg::{ExecutorLeg, connect_executor, serve_executor};
+
+// Constant-size framing for the execute leg's policy-controlled lengths.
+#[cfg(feature = "execute")]
+mod padded;
+#[cfg(feature = "execute")]
+pub use padded::{FrameError, Framed, Padded};
+
+#[cfg(feature = "execute")]
+mod untrusted;
+#[cfg(feature = "execute")]
+pub use untrusted::*;
 
 /// The remoc connection config both fleet peers build from. Raises
 /// `max_data_size` from chmux's 512 KiB default: compiled `cwasm` bundles

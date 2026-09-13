@@ -31,13 +31,10 @@ use std::time::Duration;
 
 use engine_supervisor::{ChildPool, Hardening};
 use remoc::codec::Ciborium;
-use remoc::rtc::ServerShared;
 
-use engine_rpc::{
-    CompileError, CompiledBundle, CompilerService, CompilerServiceClient,
-    CompilerServiceServerShared,
-};
-use engine_types::composition::PluginInstance;
+use enclavid_boundary::{AuthN, Untrusted};
+use engine_compiler::{CompileChildService, CompileChildServiceClient};
+use engine_rpc::{CompileError, CompileRequest, CompiledBundle, CompilerServiceUntrusted};
 use fleet_transport::LegFailure;
 use safe_logger::{debug, info, reason, safe, warn};
 
@@ -59,12 +56,47 @@ struct Supervisor {
     pool: ChildPool,
 }
 
-impl CompilerService for Supervisor {
+impl CompilerServiceUntrusted for Supervisor {
+    /// What this role does not know about its caller.
+    ///
+    /// `AuthN` and nothing else. The listener runs `AcceptAny` — it cannot pin api
+    /// without a cycle — so a completed handshake proves a genuine SNP guest on this
+    /// part and NOT that it is api. That is the one question open here, and it is
+    /// open in a way it never is on api's side of the same wire.
+    ///
+    /// Not `AuthZ`: this role holds no resource a caller could reach past another's,
+    /// and what a caller can spend is compute, answered by the deadline, the
+    /// address-space rlimit and the pool rather than by a judgement. Not `Replay`:
+    /// no request outlives its own call, so there is no version for one to be stale
+    /// from — and whether the peer invented it is `Asserted`'s question, which only a
+    /// receiver of this role's OUTPUT can ask.
+    type Scope = (AuthN,);
+
     async fn compile(
         &self,
-        policy: Vec<u8>,
-        plugins: Vec<PluginInstance>,
+        req: Untrusted<CompileRequest, Self::Scope>,
     ) -> Result<CompiledBundle, CompileError> {
+        // INDIFFERENT, and it is a property of the position rather than of the
+        // bytes: nothing DERIVED FROM a request outlives its call, so one caller's
+        // input cannot reach another's compile, and the result goes back only to
+        // whoever asked. Hostile input costs that caller its own compile.
+        //
+        // What IS shared is a concurrency budget — the pool's slots, one semaphore
+        // across every connection — so a caller can make others WAIT. That is
+        // availability, not a leak, and the deadline plus the address-space rlimit
+        // are what answer it; a judgement about the bytes would not.
+        //
+        // The data-side statelessness is load-bearing, not incidental: it carries
+        // the weight the measurement pin would have carried if this end could pin
+        // api back. A cache added here would end that, and would need the executor's
+        // per-caller partitioning before it could.
+        let CompileRequest { policy, plugins } = req
+            .trust_unchecked::<AuthN, _>(enclavid_boundary::reason!(
+                "indifferent: nothing derived from a request outlives its call, so \
+                 hostile input reaches only its own compile and its own caller; the \
+                 shared pool slots are availability, capped elsewhere"
+            ))
+            .into_inner();
         // Drive ONE compile in a fresh disposable child, under the pool's
         // concurrency bound + wall-clock deadline (the pool kills + reaps a wedged
         // child). The closure is the DOMAIN work: forward the compile.
@@ -74,8 +106,8 @@ impl CompilerService for Supervisor {
             // over the RPC, not by fd (only the executor hands a cwasm memfd down).
             .run(
                 &[],
-                move |client: CompilerServiceClient<Ciborium>| async move {
-                    client.compile(policy, plugins).await
+                move |client: CompileChildServiceClient<Ciborium>| async move {
+                    client.compile(CompileRequest { policy, plugins }).await
                 },
             )
             .await;
@@ -112,10 +144,6 @@ fn child_exe() -> std::path::PathBuf {
     p.set_file_name("engine-compiler-child");
     p
 }
-
-/// The base channel carries the `CompilerServiceClient` from us (server) to api
-/// (client).
-type Cli = CompilerServiceClient<Ciborium>;
 
 #[cfg(not(any(feature = "dev-attestation", feature = "sev-snp")))]
 compile_error!(
@@ -358,7 +386,7 @@ async fn main() {
     .await
 }
 
-/// RA-TLS-accept one api connection, then frame it with remoc and serve `CompilerService`.
+/// RA-TLS-accept one api connection, then hand it to the contract's own serve half.
 async fn serve_conn(
     stream: fleet_transport::Stream,
     ratls: tokio_rustls::TlsAcceptor,
@@ -369,23 +397,18 @@ async fn serve_conn(
         LegFailure::Attest
     })?;
     let (read, write) = tokio::io::split(tls);
-    let (conn, mut tx, _rx) =
-        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
-            .await
-            .map_err(|e| {
-                debug!("rpc connect: {e}");
-                LegFailure::Rpc
-            })?;
-    tokio::spawn(conn);
 
-    let (server, client) = CompilerServiceServerShared::<_, Ciborium>::new(svc, 4);
-    tx.send(client).await.map_err(|e| {
-        debug!("send service client: {e}");
-        LegFailure::Clients
-    })?;
-    server.serve(true).await.map_err(|e| {
-        debug!("serve: {e}");
-        LegFailure::Serve
-    })?;
-    Ok(())
+    // Above this line is WHO connected; below is WHAT MAY CROSS, which belongs to
+    // the contract. Bringing the hop up means naming the generated client, and that
+    // is what no crate outside engine-rpc may do.
+    engine_rpc::serve_compiler(read, write, svc, 4)
+        .await
+        .map_err(|e| {
+            debug!("compile leg: {e}");
+            match e {
+                engine_rpc::LegError::Rpc => LegFailure::Rpc,
+                engine_rpc::LegError::Clients | engine_rpc::LegError::Closed => LegFailure::Clients,
+                engine_rpc::LegError::Serve => LegFailure::Serve,
+            }
+        })
 }

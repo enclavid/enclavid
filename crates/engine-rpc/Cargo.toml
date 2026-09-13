@@ -17,8 +17,8 @@ default = ["compile", "execute"]
 # composition catalogs (ComponentDecls / EmbeddedImport) it rebuilds the
 # embedded registry from at run time. The shared `CompiledBundle` needs it under
 # either. Neither pulls Cranelift.
-compile = ["dep:engine-types", "dep:remoc"]
-execute = ["dep:engine-types", "dep:hatch-client", "dep:remoc"]
+compile = ["dep:engine-types", "dep:remoc", "dep:enclavid-boundary"]
+execute = ["dep:engine-types", "dep:hatch-client", "dep:remoc", "dep:enclavid-boundary"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -26,6 +26,15 @@ serde = { version = "1", features = ["derive"] }
 # serde sequence — ciborium serializes `Vec<u8>` element-by-element otherwise,
 # ballooning the wire form + costing ~hundreds of ms per bundle transfer.
 serde_bytes = "0.11"
+# The hop's own remoc setup lives here (`leg`), so this crate names the AsyncRead /
+# AsyncWrite the connection is built over and spawns its driver. No transport and
+# no attestation: which peer, and whether it may be talked to, stays with the
+# caller.
+tokio = { version = "1", default-features = false, features = ["rt"] }
+# The codec `Padded` frames against. Same one remoc carries, but named directly:
+# the frame is encoded and size-checked by this crate itself, not by whatever
+# codec a connection happens to be configured with.
+ciborium = "0.2"
 # remoc = remote trait calls (rtc) over any AsyncRead+AsyncWrite, CBOR codec
 # (ciborium — same as hatch-protocol), no OpenTelemetry. Optional: only the
 # rtc traits need it, so a features-less build is remoc-free. See
@@ -38,6 +47,13 @@ remoc = { version = "0.18", default-features = false, features = [
 engine-types = { path = "../engine-types", optional = true }
 # Execute-side wire types (Event, SessionState).
 hatch-client = { path = "../hatch-client", optional = true }
+# The concern vocabulary. Not optional-by-consumer: a contract that says what may
+# cross a hop is not separable from the words it says it in, and BOTH ends need
+# them — the caller to close its concerns before a door will take a value, the
+# server to receive its arguments already named. The crate is a dependency-free
+# leaf and is in every image anyway (the logger links it), so the axis bought
+# nothing and cost a configuration in which a leg had no boundary.
+enclavid-boundary = { path = "../boundary", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread"] }

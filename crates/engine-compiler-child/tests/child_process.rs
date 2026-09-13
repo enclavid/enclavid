@@ -1,7 +1,7 @@
 //! Integration: the compile-worker's disposable per-compile CHILD process.
 //!
 //! Proves the compiler's use of the shared `engine-supervisor` — spawn a REAL
-//! `engine-compiler-child`, serve one `CompilerService::compile`, fail safe, exit. The
+//! `engine-compiler-child`, serve one `CompileChildService::compile`, fail safe, exit. The
 //! happy-path compile itself is covered by engine-compiler's own tests of the
 //! pieces `compile_to_parts` calls, and a real multi-MiB cwasm reaching a spawned
 //! child is covered by the executor child's
@@ -20,22 +20,27 @@ use std::time::Duration;
 
 use remoc::codec::Ciborium;
 
-use engine_rpc::{CompileError, CompilerService, CompilerServiceClient};
+use engine_compiler::{CompileChildService, CompileChildServiceClient};
+use engine_rpc::{CompileError, CompileRequest};
 use engine_types::composition::PluginInstance;
 
 /// Spawn the real `engine-compiler-child` over a socketpair (via engine-supervisor) the way the
 /// compile-worker supervisor does, and return the child + its service client.
-async fn spawn() -> (tokio::process::Child, CompilerServiceClient<Ciborium>) {
+async fn spawn() -> (tokio::process::Child, CompileChildServiceClient<Ciborium>) {
     spawn_with(None).await
 }
 
 async fn spawn_with(
     hardening: Option<engine_supervisor::Hardening>,
-) -> (tokio::process::Child, CompilerServiceClient<Ciborium>) {
+) -> (tokio::process::Child, CompileChildServiceClient<Ciborium>) {
     let exe = xtask::child_binary("engine-compiler-child");
-    engine_supervisor::spawn_and_connect::<CompilerServiceClient<Ciborium>>(&exe, &[], hardening)
-        .await
-        .expect("spawn engine-compiler-child")
+    engine_supervisor::spawn_and_connect::<CompileChildServiceClient<Ciborium>>(
+        &exe,
+        &[],
+        hardening,
+    )
+    .await
+    .expect("spawn engine-compiler-child")
 }
 
 /// Fail-safe: a garbage / non-component policy makes the child's Cranelift compile
@@ -49,7 +54,10 @@ async fn garbage_policy_fails_safe_then_child_exits() {
     // megabytes of cwasm), so match the outcome explicitly.
     let outcome = tokio::time::timeout(
         Duration::from_secs(30),
-        client.compile(b"not a wasm component".to_vec(), vec![]),
+        client.compile(CompileRequest {
+            policy: b"not a wasm component".to_vec(),
+            plugins: vec![],
+        }),
     )
     .await
     .expect("compile must not hang");
@@ -77,7 +85,10 @@ async fn dead_child_surfaces_error_not_hang() {
 
     let res = tokio::time::timeout(
         Duration::from_secs(10),
-        client.compile(b"x".to_vec(), vec![]),
+        client.compile(CompileRequest {
+            policy: b"x".to_vec(),
+            plugins: vec![],
+        }),
     )
     .await
     .expect("call to a dead child must resolve (error), not hang");
@@ -117,7 +128,10 @@ async fn a_real_policy_compiles_through_the_spawned_child() {
 
     let bundle = tokio::time::timeout(
         Duration::from_secs(300),
-        client.compile(xtask::fixtures::test_policy().to_vec(), plugins),
+        client.compile(CompileRequest {
+            policy: xtask::fixtures::test_policy().to_vec(),
+            plugins,
+        }),
     )
     .await
     .expect("a real compile must not hang")
@@ -167,7 +181,10 @@ async fn a_child_starts_and_serves_under_the_production_filter() {
     // the input.
     let outcome = tokio::time::timeout(
         Duration::from_secs(30),
-        client.compile(b"not a wasm component".to_vec(), vec![]),
+        client.compile(CompileRequest {
+            policy: b"not a wasm component".to_vec(),
+            plugins: vec![],
+        }),
     )
     .await
     .expect("a hardened child must not hang");

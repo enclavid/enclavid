@@ -19,6 +19,14 @@ mod compose;
 mod decls;
 mod hash;
 
+// This role's own supervisor↔child hop. Behind a feature because the pure library
+// — used by tests and by the child — stays free of rpc/remoc, and because a crate
+// that only wants the Cranelift half should not link a contract it never speaks.
+#[cfg(feature = "child-seam")]
+mod seam;
+#[cfg(feature = "child-seam")]
+pub use seam::{CompileChildService, CompileChildServiceClient, CompileChildServiceServerShared};
+
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
 

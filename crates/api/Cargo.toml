@@ -37,6 +37,11 @@ debug = ["safe-logger/debug"]
 # runs on a separate compile-worker and execute on a separate execution-worker,
 # so api links NEITHER Cranelift NOR the wasmtime runtime, unconditionally.
 engine-types = { path = "../engine-types" }
+# Content hashes for the applicant's captured frames. api computes them itself
+# rather than taking the execution-worker's word: the worker derives the very
+# same hashes from the very same bytes api sent it (`runner::convert`), so there
+# is nothing here to accept on trust — only something to recompute.
+blake3 = "1"
 # remoc client for BOTH workers: the Compiler (compile-worker) and the Executor
 # (execution-worker), each over rpc; connection_cfg from rpc. api also SERVES
 # the per-round CallbackService back to the keyless executor over the same
@@ -51,10 +56,19 @@ remoc = { version = "0.18", default-features = false, features = [
 # bundle), and `execute` for the ExecutorService client + CallbackService server
 # + the run wire types (RunRequest / RunReply / RunStatus / Prop). Neither pulls
 # Cranelift or the wasmtime runtime.
+# What makes this leg a boundary is not a feature api asks for — it is that the
+# generated client is absent from the crate's surface and `Exposed<_, ()>` cannot
+# be conjured. api gets the doors by taking the contract at all.
 engine-rpc = { path = "../engine-rpc", default-features = false, features = [
     "compile",
     "execute",
 ] }
+# The boundary vocabulary itself, taken from the leaf crate rather than through
+# a re-export: `Asserted` is how api judges its WORKER legs, and the hatch client
+# has no business carrying a marker for a channel it does not own. The markers
+# hatch-client's own boundary functions clear (`AuthN`/`Replay`/…) still come
+# through it, where the crossing that closes them lives.
+enclavid-boundary = { path = "../boundary" }
 hatch-client = { path = "../hatch-client" }
 hatch-protocol = { path = "../hatch-protocol" }
 # The intra-fleet byte stream (TCP or vsock, chosen with this crate's `vsock`).

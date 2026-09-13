@@ -15,11 +15,9 @@
 //! api hands the worker on `run_with_bundle`) so a cold compile and an L2 hit
 //! resolve the same bundle the worker deserializes.
 
+use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
+use engine_rpc::{CompileError, CompileRequest, CompiledBundle, CompilerLeg};
 use engine_types::composition::PluginInstance;
-use remoc::codec::Ciborium;
-// `CompilerService` (the remoc trait) is in scope so the generated
-// `CompilerServiceClient`'s `.compile()` method resolves.
-use engine_rpc::{CompileError, CompiledBundle, CompilerService, CompilerServiceClient};
 use fleet_transport::LegFailure;
 use safe_logger::debug;
 
@@ -28,12 +26,49 @@ use safe_logger::debug;
 /// registry auth), the worker fuses + Cranelift-compiles + parses sections into
 /// a [`CompiledBundle`]. The client is a cheap remoc handle (`Send + Sync`);
 /// concurrent `/connect` compiles multiplex over the one connection.
+/// How api judges the compile hop's answers — see [`Compiler::compile`].
+pub type CompileScope = (Asserted,);
+
+/// What is still open on a value api is about to release to the compile-worker.
+///
+/// Its own alias rather than hatch-client's: that facade is the TEE↔host wire
+/// perimeter, and a scope is a property of the CHANNEL, so this leg names its own.
+type ToCompiler<T> = Exposed<T, (AuthN, AuthZ, Covert)>;
+
+/// Mint one compile's inputs as a fully-vouched request — the only way artifacts
+/// reach a compile-worker.
+///
+/// Specific to this value rather than a generic "anything crossing" mint, on the
+/// `outbound_session_id` precedent: the audited answers live in one place (grep
+/// `outbound_compile_request(`) instead of being restated at each call, where they
+/// would be the same three sentences forever.
+fn outbound_compile_request(
+    policy: Vec<u8>,
+    plugins: Vec<PluginInstance>,
+) -> Exposed<CompileRequest, ()> {
+    let open: ToCompiler<CompileRequest> = Exposed::new(CompileRequest { policy, plugins });
+    open.vouch_unchecked::<AuthN, _>(reason!(
+        "identified: this leg dials ONE compile-time-pinned measurement, and the \
+         handshake fails before a byte moves if the peer is not it"
+    ))
+    .vouch_unchecked::<AuthZ, _>(reason!(
+        "no-secret: the consumer's own artifacts, going to the code that exists to \
+         compile them; the recipient is handed nothing it is not being asked to read"
+    ))
+    .vouch_unchecked::<Covert, _>(reason!(
+        "already-held: the HOST performed the OCI pull that produced these bytes, so \
+         their length is a quantity it measured itself"
+    ))
+}
+
 pub struct Compiler {
-    leg: std::sync::Arc<crate::fleet::Leg<CompilerServiceClient<Ciborium>>>,
+    leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileScope>>>>,
 }
 
 impl Compiler {
-    pub fn new(leg: std::sync::Arc<crate::fleet::Leg<CompilerServiceClient<Ciborium>>>) -> Self {
+    pub fn new(
+        leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileScope>>>>,
+    ) -> Self {
         Self { leg }
     }
 
@@ -47,20 +82,53 @@ impl Compiler {
         let client = self.leg.get().ok_or_else(|| {
             CompileError("the compile-worker leg is down; api is reporting it".into())
         })?;
-        client.compile(policy_wasm, plugins).await
+        let bundle: Untrusted<CompiledBundle, CompileScope> = client
+            .compile(outbound_compile_request(policy_wasm, plugins))
+            .await?;
+        // CONTAINED, and the honest form of it: there is NO check available here.
+        //
+        // Read the axis carefully, because the obvious reading is the wrong one.
+        // This is not about the peer having been substituted — that is `AuthN`, and
+        // it IS closed: mutual RA-TLS against one compile-time-pinned measurement.
+        // An unsubstituted, correctly-measured compiler still PICKS this value. Its
+        // content is whatever Cranelift produced running over the CONSUMER's wasm,
+        // so the adversary-supplied input on this leg is that wasm, not the peer,
+        // and a toolchain escape it provokes survives a perfect pin with the
+        // handshake succeeding throughout.
+        //
+        // What bounds a wrong bundle is all downstream: the executor files it in
+        // api's own caller partition and deserializes it in a disposable per-round
+        // child. NOT the L2 seal's AAD — api performs that seal, so it binds the
+        // bytes to the slot they were filed under, never to the question that was
+        // asked. It is a tamper-evident bag: proof nobody opened it afterwards, and
+        // no evidence at all about what went in.
+        Ok(bundle
+            .trust_unchecked::<Asserted, _>(reason!(
+                "NO KIND FITS — an accepted risk, not a discharge. Not re-derived \
+                 (this side carries no Cranelift), not bound (a digest the compiler \
+                 also chose is its word twice), not bounded (the range is arbitrary \
+                 native code), not contained (the audience is the executor, which \
+                 did not author it). Carried because no check exists and the fleet \
+                 needs a compiler; what limits the damage is downstream containment"
+            ))
+            .into_inner())
     }
 }
 
-/// Connect to a compile-worker already listening at `addr` and hand back a
-/// [`Compiler`]. The worker is brought up at boot, not by api. The dial is
-/// mutual RA-TLS — TCP by default, vsock under that feature — and the worker
-/// sends us its service client on the base channel once connected.
+/// Connect to a compile-worker already listening at `addr` and hand back the leg.
+/// The worker is brought up at boot, not by api. The dial is mutual RA-TLS — TCP by
+/// default, vsock under that feature — and `engine_rpc::connect_compiler` takes the
+/// attested stream from there, keeping the generated client this side cannot name.
 pub async fn connect_compile_worker(
     addr: &str,
     attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,
-) -> Result<(CompilerServiceClient<Ciborium>, tokio::task::JoinHandle<()>), LegFailure> {
-    type Cli = CompilerServiceClient<Ciborium>;
-
+) -> Result<
+    (
+        std::sync::Arc<CompilerLeg<CompileScope>>,
+        tokio::task::JoinHandle<()>,
+    ),
+    LegFailure,
+> {
     let stream = fleet_transport::dial(addr).await.map_err(|e| {
         debug!("connect {addr}: {e}");
         LegFailure::Connect(e.kind())
@@ -90,46 +158,47 @@ pub async fn connect_compile_worker(
         })?;
     let (read, write) = tokio::io::split(tls);
 
-    let (conn, _tx, mut rx) =
-        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
-            .await
-            .map_err(|e| {
-                debug!("rpc connect: {e}");
-                LegFailure::Rpc
-            })?;
-    let driver = tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let client = rx
-        .recv()
+    // Everything above this line is WHO — the dial, the pins, what a refusal means.
+    // Everything below is WHAT MAY CROSS, and that belongs to engine-rpc: it brings
+    // the hop up and keeps the generated client, which api has no name for.
+    let (leg, driver) = engine_rpc::connect_compiler(read, write)
         .await
         .map_err(|e| {
-            debug!("recv clients: {e}");
-            LegFailure::Clients
-        })?
-        .ok_or(LegFailure::Closed)?;
+            debug!("compile leg: {e}");
+            match e {
+                engine_rpc::LegError::Rpc => LegFailure::Rpc,
+                engine_rpc::LegError::Clients | engine_rpc::LegError::Serve => LegFailure::Clients,
+                engine_rpc::LegError::Closed => LegFailure::Closed,
+            }
+        })?;
 
-    Ok((client, driver))
+    Ok((std::sync::Arc::new(leg), driver))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use remoc::rtc::ServerShared;
-    use std::sync::Arc;
+    use enclavid_boundary::AuthN;
 
-    // A minimal in-process CompilerService server, so the Compiler client's rpc
-    // plumbing is exercised without a real worker (the transport factory
+    // A minimal in-process server, so the Compiler client's rpc plumbing is
+    // exercised without a real worker (the transport factory
     // `connect_compile_worker` is the thin, hand-reviewed piece).
+    //
+    // It implements the UNTRUSTED view because that is the only implementable
+    // shape: engine-rpc exports no raw server, so a test cannot serve this
+    // contract by a route production code could not take either.
     struct MockService;
 
-    impl engine_rpc::CompilerService for MockService {
+    impl engine_rpc::CompilerServiceUntrusted for MockService {
+        type Scope = (AuthN,);
+
         async fn compile(
             &self,
-            policy: Vec<u8>,
-            plugins: Vec<PluginInstance>,
+            req: Untrusted<CompileRequest, Self::Scope>,
         ) -> Result<CompiledBundle, CompileError> {
+            let CompileRequest { policy, plugins } = req
+                .trust_unchecked::<AuthN, _>(reason!("test fixture"))
+                .into_inner();
             if policy == b"boom" {
                 return Err(CompileError("intentional".into()));
             }
@@ -146,33 +215,20 @@ mod tests {
     /// propagates.
     #[tokio::test]
     async fn compiler_round_trips() {
-        type Cli = CompilerServiceClient<Ciborium>;
         let (a, b) = tokio::io::duplex(64 * 1024);
         let (a_r, a_w) = tokio::io::split(a);
         let (b_r, b_w) = tokio::io::split(b);
 
-        // Worker end: serve the mock service.
+        // Worker end: serve the mock through the contract's own serve half.
         let server = tokio::spawn(async move {
-            let (conn, mut tx, _rx) =
-                remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(remoc::Cfg::default(), a_r, a_w)
-                    .await
-                    .unwrap();
-            tokio::spawn(conn);
-            let (srv, client) = engine_rpc::CompilerServiceServerShared::<_, Ciborium>::new(
-                Arc::new(MockService),
-                4,
-            );
-            tx.send(client).await.unwrap();
-            srv.serve(true).await.unwrap();
+            let _ = engine_rpc::serve_compiler(a_r, a_w, MockService, 4).await;
         });
 
-        // Orchestrator end: receive the client, wrap in Compiler.
-        let (conn, _tx, mut rx) =
-            remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(remoc::Cfg::default(), b_r, b_w)
-                .await
-                .unwrap();
-        tokio::spawn(conn);
-        let client = rx.recv().await.unwrap().unwrap();
+        // Orchestrator end: take the leg, wrap in Compiler.
+        let (leg_client, _driver) = engine_rpc::connect_compiler::<CompileScope, _, _>(b_r, b_w)
+            .await
+            .expect("connect");
+        let client = std::sync::Arc::new(leg_client);
         let leg = crate::fleet::Leg::new();
         leg.set(Some(client.clone()));
         let compiler = Compiler::new(leg.clone());

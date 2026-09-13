@@ -33,23 +33,41 @@ impl From<remoc::rtc::CallError> for CompileError {
     }
 }
 
+/// One compile's inputs on the wire: the consumer's own artifacts, already pulled
+/// and digest-verified by the orchestrator against the pinned refs.
+///
+/// One struct rather than two arguments because that is what a scope can be carried
+/// on — `Exposed` wraps a value, and the concerns this crossing raises are raised
+/// about the request, not about each field of it. The execute leg's `RunRequest` has
+/// the same shape for the same reason.
+///
+/// `deny_unknown_fields` for the reason `CompiledBundle` carries it: an unknown
+/// field means the peer is speaking a contract this image does not have, and
+/// failing the decode is the fail-closed answer.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompileRequest {
+    /// The policy component, as pulled.
+    #[serde(with = "serde_bytes")]
+    pub policy: Vec<u8>,
+    /// The pinned plugin components, in composition order.
+    pub plugins: Vec<PluginInstance>,
+}
+
 /// The compile boundary as a remote trait. The worker (compile-worker CVM)
-/// serves it over an `Arc<dyn CompilerService>`-equivalent target; the
-/// orchestrator holds the generated `CompilerServiceClient` and calls
-/// [`compile`](CompilerService::compile) as if local. Given already-pulled
-/// artifact bytes (the orchestrator owns the OCI pull + registry auth), the
-/// worker fuses + compiles + parses sections into a
+/// serves it; the orchestrator reaches it through
+/// [`CompilerLeg`](crate::CompilerLeg), never through the generated client, which
+/// this crate does not export.
+///
+/// Given already-pulled artifact bytes (the orchestrator owns the OCI pull +
+/// registry auth), the worker fuses + compiles + parses sections into a
 /// [`CompiledBundle`](crate::CompiledBundle).
 ///
 /// `&self` so the client is clonable and the server can run compiles in
 /// parallel (`CompilerServiceServerShared`).
 #[remoc::rtc::remote]
 pub trait CompilerService {
-    async fn compile(
-        &self,
-        policy: Vec<u8>,
-        plugins: Vec<PluginInstance>,
-    ) -> Result<CompiledBundle, CompileError>;
+    async fn compile(&self, req: CompileRequest) -> Result<CompiledBundle, CompileError>;
 }
 
 #[cfg(test)]
@@ -67,18 +85,14 @@ mod tests {
     struct MockCompiler;
 
     impl CompilerService for MockCompiler {
-        async fn compile(
-            &self,
-            policy: Vec<u8>,
-            plugins: Vec<PluginInstance>,
-        ) -> Result<CompiledBundle, CompileError> {
-            if policy == b"boom" {
+        async fn compile(&self, req: CompileRequest) -> Result<CompiledBundle, CompileError> {
+            if req.policy == b"boom" {
                 return Err(CompileError("intentional".into()));
             }
             let mut bundle = sample_bundle();
             // Echo (policy_len, plugin_count) so the caller can assert the args
             // arrived.
-            bundle.cwasm = vec![policy.len() as u8, plugins.len() as u8];
+            bundle.cwasm = vec![req.policy.len() as u8, req.plugins.len() as u8];
             Ok(bundle)
         }
     }
@@ -134,13 +148,25 @@ mod tests {
                 wasm: vec![0],
             },
         ];
-        let bundle = client.compile(b"hello".to_vec(), plugins).await.unwrap();
+        let bundle = client
+            .compile(CompileRequest {
+                policy: b"hello".to_vec(),
+                plugins,
+            })
+            .await
+            .unwrap();
         assert_eq!(bundle.cwasm, vec![5u8, 2u8]); // policy_len=5, plugins=2
         assert_eq!(bundle.embedded_imports.len(), 1);
         assert_eq!(bundle.catalogs[0].hash, [9u8; 32]);
 
         // Error path crosses too (match, not unwrap_err — the bundle isn't Debug).
-        let err = match client.compile(b"boom".to_vec(), vec![]).await {
+        let err = match client
+            .compile(CompileRequest {
+                policy: b"boom".to_vec(),
+                plugins: vec![],
+            })
+            .await
+        {
             Err(e) => e,
             Ok(_) => panic!("expected compile error"),
         };

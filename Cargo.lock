@@ -1346,8 +1346,10 @@ dependencies = [
  "async-trait",
  "axum",
  "base64ct",
+ "blake3",
  "ciborium",
  "enclavid-attestation",
+ "enclavid-boundary",
  "enclavid-crypto",
  "enclavid-kbs-client",
  "enclavid-ra-tls",
@@ -1530,6 +1532,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "enclavid-attestation",
+ "enclavid-boundary",
  "enclavid-embedded",
  "enclavid-ra-tls",
  "engine-rpc",
@@ -1605,6 +1608,7 @@ name = "engine-rpc"
 version = "0.1.0"
 dependencies = [
  "ciborium",
+ "enclavid-boundary",
  "engine-types",
  "hatch-client",
  "remoc",
@@ -2057,6 +2061,7 @@ dependencies = [
  "hyper-util",
  "secrecy",
  "serde",
+ "serde_bytes",
  "tokio",
  "tokio-vsock",
  "tower-service",
