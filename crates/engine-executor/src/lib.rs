@@ -68,7 +68,7 @@ pub use embedded::{
 pub use hatch_client::{
     Action, Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
 };
-pub use listener::{CapturedMedia, SessionChange, SessionListener};
+pub use listener::{SessionChange, SessionListener};
 pub use media_store::MediaStore;
 pub use runner::{
     EmbeddedIface, EmbeddedImport, Executor, PluginInstance, PrimedComposition, RunStatus,

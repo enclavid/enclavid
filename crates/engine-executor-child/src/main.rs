@@ -48,7 +48,7 @@ use engine_executor::{
 };
 use engine_rpc::{
     BundleRef, ChildCallbacks, ChildCallbacksClient, ChildService, ChildServiceServerShared,
-    ExecError, RunReply,
+    ExecError,
 };
 
 /// The `engine_rpc::ChildService` impl. `prime` is called once (stores the
@@ -92,7 +92,7 @@ impl ChildService for Child {
         event: Event,
         props: Vec<(String, engine_rpc::Prop)>,
         callbacks: ChildCallbacksClient<Ciborium>,
-    ) -> Result<RunReply, ExecError> {
+    ) -> Result<engine_rpc::RunStatus, ExecError> {
         let primed = self
             .primed
             .get()
@@ -127,9 +127,7 @@ impl ChildService for Child {
             // reaches the supervisor's log, not just the top wasm line.
             .map_err(|e| ExecError::Run(format!("{e:#}")))?;
 
-        Ok(RunReply {
-            status: to_wire_status(status),
-        })
+        Ok(to_wire_status(status))
     }
 }
 
@@ -147,20 +145,10 @@ impl SessionListener for RelayListener {
         change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
         let state = change.state.clone();
-        // Copy the captured frames out of their Arcs into owned wire bytes.
-        let media: Vec<([u8; 32], Vec<u8>)> = change
-            .media
-            .map(|m| {
-                m.blobs
-                    .iter()
-                    .map(|(h, b)| (*h, b.as_ref().clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
         let callbacks = self.callbacks.clone();
         Box::pin(async move {
             callbacks
-                .session_change(state, media)
+                .session_change(state)
                 .await
                 .map_err(|e| RunError::msg(format!("session_change callback: {e}")))
         })

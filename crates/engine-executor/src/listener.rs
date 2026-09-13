@@ -19,33 +19,20 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use hatch_client::SessionState;
 
-/// The applicant media captured THIS round (present only on a media
-/// round), staged for the listener to seal into the host blob store. Every
-/// captured frame is stored unconditionally — "always store" — so the
-/// listener commits these blobs in the SAME transaction as the reducer
-/// `state`. Each entry is `(blob_hash, bytes)`: the 32-byte BLAKE3 content
-/// key and the raw frame; `bytes` is `Arc`-shared with the run's frame
-/// resources so nothing is copied to reach the seal.
-pub struct CapturedMedia {
-    pub blobs: Vec<([u8; 32], Arc<Vec<u8>>)>,
-}
-
-/// Bundle delivered to the listener once per `handle` round. `state` is
-/// the post-round snapshot; `media` is present only on a media round — the
-/// captured frames to seal into the blob store. Bundled together because a sane
-/// listener commits them in one atomic transaction.
+/// Delivered to the listener once per `handle` round: the post-round state
+/// snapshot, and nothing else.
 ///
-/// What the round disclosed is NOT here, deliberately. The orchestrator decides
-/// that from the prompt it rendered and the event it built, before this side
-/// runs — this process executes adversary-supplied code, so anything it asserted
-/// about an applicant's consent would have to be re-derived there anyway.
+/// Neither the round's disclosure nor its captures are here, deliberately. The
+/// orchestrator holds both already — it derives the disclosure from the prompt it
+/// rendered and the event it built, and the captured frames are the ones it read
+/// off `/input` and sent this side. This process executes adversary-supplied
+/// code, so anything it reported about either would have to be re-derived there,
+/// which makes reporting it worse than useless: it invites being believed.
 pub struct SessionChange<'a> {
     pub state: &'a SessionState,
-    pub media: Option<&'a CapturedMedia>,
 }
 
 /// Trait fired once per `handle` round. Returns a boxed future

@@ -10,9 +10,11 @@
 //!   2. calls `handle(state, event)` exactly once;
 //!   3. performs the returned `action`: `render` persists the prompt as
 //!      [`SessionState::current_prompt`] and yields `AwaitingInput`;
-//!      `finish` yields `Completed`. (The sealed-state size covert channel is
-//!      closed at the seal boundary in hatch-client — `SetState`'s Covert
-//!      vouch pads the encoded `SessionState` to a constant — not here.)
+//!      `finish` yields `Completed`. (The size covert channel both carry is
+//!      closed where the bytes are observable, not here: `SetState`'s Covert
+//!      vouch at the seal boundary, and `engine_rpc::Padded` on the api hop the
+//!      supervisor frames at. This process is behind a socketpair inside the
+//!      CVM, so nothing here is padded.)
 //!
 //! ## Consent is decided elsewhere (security-critical)
 //!
@@ -157,9 +159,9 @@ impl Executor {
     ///
     /// Returns the next [`RunStatus`] and the updated [`SessionState`]
     /// (new opaque `state` + new `current_prompt`). The `SessionListener` is
-    /// fired exactly once, with the post-round state and whatever media the
-    /// round captured — never with a disclosure, which this side does not
-    /// decide.
+    /// fired exactly once, with the post-round state and nothing else — neither
+    /// the round's disclosure nor its captures, both of which the orchestrator
+    /// already holds.
     pub async fn run(
         &self,
         primed: &PrimedComposition,
@@ -183,9 +185,9 @@ impl Executor {
         store.set_fuel(POLICY_FUEL_BUDGET)?;
         let bindings = primed.pre.instantiate_async(&mut store).await?;
 
-        // Mint the frame handles for this round and stage the captured blobs
-        // (media rounds only) for the listener to seal alongside the state.
-        let (wit_event, captured) = convert::event_to_wit(&mut store.data_mut().table, event)?;
+        // Mint the frame handles for this round. Nothing is staged for the
+        // listener: the orchestrator sent these frames and keeps them.
+        let wit_event = convert::event_to_wit(&mut store.data_mut().table, event)?;
         let (new_state, wit_action) = bindings
             .enclavid_policy_policy()
             .call_handle(&mut store, &session.state, &wit_event)
@@ -194,8 +196,9 @@ impl Executor {
         // Data-minimization backstop: the policy's opaque blob must stay
         // under POLICY_MAX_STATE_BYTES so raw media clips can't be
         // smuggled into the sealed mailbox. A breach traps the round. (The
-        // ciphertext-size covert channel is closed separately by constant-size
-        // padding at the seal boundary — see hatch-client `SetState`.)
+        // size covert channel is closed separately by constant-size padding
+        // wherever the bytes are observable — hatch-client `SetState` at rest,
+        // `engine_rpc::Padded` on the api hop.)
         if new_state.len() > POLICY_MAX_STATE_BYTES {
             return Err(wasmtime::Error::msg(format!(
                 "policy returned a {}-byte state blob, over the \
@@ -227,9 +230,8 @@ impl Executor {
             }
         };
 
-        // Single listener fire for the round: post-round state plus the captured
-        // media to seal into the blob store (only on a media round), committed in
-        // one transaction by the listener.
+        // Single listener fire for the round, carrying the post-round state and
+        // nothing else.
         //
         // The consent gate that used to sit here — accept + a consent
         // `current_prompt` ⇒ seal those exact fields — now runs in the
@@ -240,7 +242,6 @@ impl Executor {
         listener
             .on_session_change(SessionChange {
                 state: &next_session,
-                media: captured.as_ref(),
             })
             .await?;
 

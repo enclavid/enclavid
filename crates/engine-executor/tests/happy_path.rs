@@ -108,8 +108,8 @@ impl TestRunner {
 }
 
 /// In-memory stand-in for the host blob store, shared with the
-/// [`PersistListener`] (which populates it from each round's captured
-/// media) so a later `frame::from-blob-ref` rehydrate hits. Stage 3 swaps in
+/// [`PersistListener`] (which populates it from each round's event, as api
+/// does) so a later `frame::from-blob-ref` rehydrate hits. Stage 3 swaps in
 /// the hatch-backed store; this proves the engine seam.
 #[derive(Clone, Default)]
 struct MemMediaStore(Arc<Mutex<HashMap<[u8; 32], Arc<Vec<u8>>>>>);
@@ -157,29 +157,43 @@ fn all_plugins() -> Vec<PluginInstance> {
         .collect()
 }
 
-/// Stands in for the orchestrator's persister: absorbs each round's captured
-/// media, and counts the fires so a test can assert that a round which trapped
-/// persisted nothing at all.
+/// Stands in for the orchestrator: keeps the blob store the applicant's frames
+/// go into, and counts the round fires so a test can assert that a round which
+/// trapped persisted nothing at all.
 ///
-/// It records no disclosure because none is reported any more — what a round
-/// discloses is the orchestrator's decision now, made from the prompt it
-/// rendered and the event it built (`enclavid-api`, `applicant::shared`).
+/// It records neither the round's disclosure nor its captures, because neither is
+/// reported any more. The orchestrator holds both: it derives the disclosure from
+/// the prompt it rendered and the event it built, and it content-addresses the
+/// frames it read off `/input` before sending them (`enclavid-api`,
+/// `applicant::shared` and `applicant::persister`). `capture` below mirrors that
+/// second half.
 #[derive(Default)]
 struct PersistListener {
-    /// Backs the shared [`MemMediaStore`] — every captured frame the runtime
-    /// stages this round is inserted here, simulating the atomic media+state
-    /// commit, so a later rehydrate finds it. `Arc<Vec<u8>>` so the insert
-    /// shares the runtime's allocation (no deep copy).
+    /// Backs the shared [`MemMediaStore`]. Filled by [`Self::capture`] from the
+    /// same event that is handed to the round, exactly as api fills it from the
+    /// event it built, so a later rehydrate finds the frame.
     media: Arc<Mutex<HashMap<[u8; 32], Arc<Vec<u8>>>>>,
     /// How many times the round fired. A trapped round must not persist.
     fires: Mutex<u32>,
 }
 
 impl PersistListener {
-    /// A media store sharing this listener's blob map (write via the listener,
+    /// A media store sharing this listener's blob map (write via [`Self::capture`],
     /// read via `frame::from-blob-ref`).
     fn media_store(&self) -> Arc<dyn MediaStore> {
         Arc::new(MemMediaStore(self.media.clone()))
+    }
+
+    /// Content-address the event's frames and store them — what api does before
+    /// the round, over the bytes it is about to send.
+    fn capture(&self, event: &Event) {
+        let Event::Media(result) = event else {
+            return;
+        };
+        let mut store = self.media.lock().unwrap();
+        for frame in &result.clip.frames {
+            store.insert(blake3::hash(frame).into(), Arc::new(frame.clone()));
+        }
     }
 }
 
@@ -188,12 +202,8 @@ impl SessionListener for PersistListener {
         &'a self,
         change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
-        let blobs: Vec<([u8; 32], Arc<Vec<u8>>)> = change
-            .media
-            .map(|m| m.blobs.iter().map(|(h, b)| (*h, b.clone())).collect())
-            .unwrap_or_default();
+        let _ = change;
         Box::pin(async move {
-            self.media.lock().unwrap().extend(blobs);
             *self.fires.lock().unwrap() += 1;
             Ok(())
         })
@@ -322,7 +332,10 @@ async fn reload_by_ref_misses() {
         listener: listener.clone(),
         media_store: empty_store.clone(),
     };
-    let round = |session, event| h.runner.run(&h.primed, session, event, vec![], inputs());
+    let round = |session, event: Event| {
+        listener.capture(&event);
+        h.runner.run(&h.primed, session, event, vec![], inputs())
+    };
 
     let (_s, session) = round(Session::default(), Event::Start).await.unwrap();
     let (_s, session) = round(session, Event::Media(fake_capture())).await.unwrap();
@@ -362,7 +375,8 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
             listener: listener.clone(),
             media_store: store.clone(),
         };
-        let round = |session, event| {
+        let round = |session, event: Event| {
+            listener.capture(&event);
             h.runner
                 .run(&h.primed, session, event, props.clone(), inputs())
         };
@@ -558,30 +572,19 @@ async fn static_fused_artifact_resolves_strictly() {
         listener: listener.clone(),
         media_store: listener.media_store(),
     };
-    let (status, session) = runner
-        .run(&primed, Session::default(), Event::Start, vec![], inputs())
+    let round = |session, event: Event| {
+        listener.capture(&event);
+        runner.run(&primed, session, event, vec![], inputs())
+    };
+    let (status, session) = round(Session::default(), Event::Start)
         .await
         .expect("static round 1");
     assert_media(&status, "static: round 1 (passport)");
-    let (status, session) = runner
-        .run(
-            &primed,
-            session,
-            Event::Media(fake_capture()),
-            vec![],
-            inputs(),
-        )
+    let (status, session) = round(session, Event::Media(fake_capture()))
         .await
         .expect("static round 2");
     assert_media(&status, "static: round 2 (selfie)");
-    let (status, _session) = runner
-        .run(
-            &primed,
-            session,
-            Event::Media(fake_capture()),
-            vec![],
-            inputs(),
-        )
+    let (status, _session) = round(session, Event::Media(fake_capture()))
         .await
         .expect("static round 3");
     match &status {
@@ -712,30 +715,19 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
         media_store: listener.media_store(),
     };
     // start → media(passport) → media(selfie) → consent-disclosure.
-    let (status, session) = runner
-        .run(&primed, Session::default(), Event::Start, vec![], inputs())
+    let round = |session, event: Event| {
+        listener.capture(&event);
+        runner.run(&primed, session, event, vec![], inputs())
+    };
+    let (status, session) = round(Session::default(), Event::Start)
         .await
         .expect("hybrid round 1");
     assert_media(&status, "hybrid: round 1 (passport)");
-    let (status, session) = runner
-        .run(
-            &primed,
-            session,
-            Event::Media(fake_capture()),
-            vec![],
-            inputs(),
-        )
+    let (status, session) = round(session, Event::Media(fake_capture()))
         .await
         .expect("hybrid round 2");
     assert_media(&status, "hybrid: round 2 (selfie)");
-    let (status, _session) = runner
-        .run(
-            &primed,
-            session,
-            Event::Media(fake_capture()),
-            vec![],
-            inputs(),
-        )
+    let (status, _session) = round(session, Event::Media(fake_capture()))
         .await
         .expect("hybrid round 3");
     let disclosure = match status {
@@ -845,6 +837,9 @@ impl Harness {
         event: Event,
         listener: &Arc<PersistListener>,
     ) -> (RunStatus, Session) {
+        // Store the frames BEFORE the round, over the bytes about to be sent —
+        // the orchestrator's order, and the reason it needs nothing back.
+        listener.capture(&event);
         self.runner
             .run(&self.primed, session, event, vec![], self.inputs(listener))
             .await

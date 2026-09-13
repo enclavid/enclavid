@@ -74,11 +74,7 @@ impl ChildCallbacks for MockCallbacks {
         self.media_loads.lock().unwrap().push(hash);
         Ok(None)
     }
-    async fn session_change(
-        &self,
-        _state: SessionState,
-        _media: Vec<([u8; 32], Vec<u8>)>,
-    ) -> Result<(), CallbackError> {
+    async fn session_change(&self, _state: SessionState) -> Result<(), CallbackError> {
         *self.session_changes.lock().unwrap() += 1;
         Ok(())
     }
@@ -155,14 +151,13 @@ async fn spawned_child_primes_runs_relays_then_exits() {
 
     // Genesis: the policy renders the passport media prompt and fires the
     // listener once — relayed to the mock as ONE session_change.
-    let reply = client
+    let status = client
         .run(SessionState::default(), Event::Start, vec![], cb_client)
         .await
         .expect("run genesis round");
     assert!(
-        matches!(reply.status, RunStatus::AwaitingInput(_)),
-        "genesis must render a prompt, got {:?}",
-        reply.status,
+        matches!(status, RunStatus::AwaitingInput(_)),
+        "genesis must render a prompt, got {status:?}",
     );
     assert_eq!(
         *cbs.session_changes.lock().unwrap(),
@@ -225,14 +220,13 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
         let _ = server.serve(true).await;
     });
 
-    let reply = client
+    let status = client
         .run(SessionState::default(), Event::Start, vec![], cb_client)
         .await
         .expect("a hardened child must still run a round");
     assert!(
-        matches!(reply.status, RunStatus::AwaitingInput(_)),
-        "genesis must render a prompt, got {:?}",
-        reply.status,
+        matches!(status, RunStatus::AwaitingInput(_)),
+        "genesis must render a prompt, got {status:?}",
     );
 
     drop(client);

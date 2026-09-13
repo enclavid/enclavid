@@ -42,11 +42,11 @@ use tokio::sync::Mutex;
 use axum::http::StatusCode;
 use secrecy::{ExposeSecret, SecretBox};
 
+use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
 use enclavid_crypto::seal_to_recipient;
 use hatch_client::{
-    AppendDisclosure, AuthN, AuthZ, Covert, DisplayField, Event, Prompt, Replay, SessionMetadata,
-    SessionState, SessionStatus, SessionStore, SetMedia, SetMetadata, SetState, WriteField,
-    boundary, encode_padded, reason,
+    AppendDisclosure, DisplayField, Event, Prompt, SessionMetadata, SessionState, SessionStatus,
+    SessionStore, SetMedia, SetMetadata, SetState, WriteField, boundary, encode_padded,
 };
 // Owned wire types — the keyless execution-worker sends these back over the
 // `CallbackService`; `CallbackError` replaces the old wasmtime `RunError` as the
@@ -105,6 +105,13 @@ pub(super) struct SessionPersister {
     /// a second callback in the same round seals nothing, and a write that fails
     /// does not consume an acceptance the applicant already gave.
     consented: Weak<Mutex<Option<Vec<DisplayField>>>>,
+    /// WEAK handle to the frames this round captured, on the same terms as
+    /// `consented` above: the round's frame owns them, this side never pins
+    /// them. No lock, unlike the consent, because nothing consumes it — sealing
+    /// the same frame twice writes identical bytes under an identical content
+    /// key. The gate-set extend below is the part that is NOT idempotent, and it
+    /// dedups for that reason.
+    captures: Weak<Vec<([u8; 32], Vec<u8>)>>,
     /// Process-lifetime shuffle key, used to permute `DisplayField`
     /// order inside disclosure envelopes before they're sealed to
     /// the consumer. Lives here (and not in engine) because the
@@ -125,6 +132,29 @@ pub(super) struct SessionPersister {
 /// since the callback client it was handed carries an `Arc`; how long this lives
 /// is not.
 pub(super) type RoundConsent = Arc<Mutex<Option<Vec<DisplayField>>>>;
+
+/// The round's sole strong hold on the frames it captured, held by the round's
+/// own frame exactly as [`RoundConsent`] is.
+pub(super) type RoundCaptures = Arc<Vec<([u8; 32], Vec<u8>)>>;
+
+/// The frames this round captured, content-addressed on THIS side.
+///
+/// They are the applicant's own bytes, read off `/input` and sent to the worker
+/// in this very event; the worker derives the same BLAKE3 over the same bytes
+/// (`engine-executor`'s `runner::convert`). So there is nothing here to accept
+/// from it — only something to recompute, which is the cheaper of the two and
+/// the only one that means anything.
+pub(super) fn round_captures(event: &Event) -> RoundCaptures {
+    Arc::new(match event {
+        Event::Media(result) => result
+            .clip
+            .frames
+            .iter()
+            .map(|frame| (blake3::hash(frame).into(), frame.clone()))
+            .collect(),
+        _ => Vec::new(),
+    })
+}
 
 /// What this round may seal, decided from the round's own inputs.
 ///
@@ -157,6 +187,7 @@ impl SessionPersister {
         version: u64,
         metadata: SessionMetadata,
         consent: &RoundConsent,
+        captures: &RoundCaptures,
         shuffle_key: Arc<ShuffleKey>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -167,26 +198,23 @@ impl SessionPersister {
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata),
             consented: Arc::downgrade(consent),
+            captures: Arc::downgrade(captures),
             shuffle_key,
         })
     }
 
     /// api side of the keyless executor's `CallbackService::session_change`:
-    /// seal + persist one round's post-`state`, the consent THIS side recorded
-    /// for the round (if any), and the captured `media` (present only on a media
-    /// round), in ONE atomic host transaction. State and media arrive over rpc as
-    /// OWNED wire types, so — unlike the old borrowed-`SessionChange` listener —
-    /// nothing here borrows the run; the seal key stays orchestrator-side. A
-    /// failed write fails the round under version-CAS; the next attempt re-runs
-    /// from the last persisted state.
+    /// seal + persist one round's post-`state`, together with the consent and the
+    /// captures THIS side recorded for the round, in ONE atomic host transaction.
+    /// Only `state` arrives over rpc; the other two are `Weak` upgrades of values
+    /// the round's own frame owns, because the worker has nothing to say about
+    /// either. The seal key stays orchestrator-side. A failed write fails the
+    /// round under version-CAS; the next attempt re-runs from the last persisted
+    /// state.
     ///
     /// What the round consented to is NOT a parameter: see
     /// [`SessionPersister::consented`].
-    pub(super) async fn persist(
-        &self,
-        state: SessionState,
-        media: Vec<([u8; 32], Vec<u8>)>,
-    ) -> Result<(), CallbackError> {
+    pub(super) async fn persist(&self, state: SessionState) -> Result<(), CallbackError> {
         // Serialize the whole critical section on the metadata guard, taken
         // before the acceptance is claimed: a second callback in the same round
         // waits here rather than interleaving with this one.
@@ -202,6 +230,9 @@ impl SessionPersister {
         // a `None` from either means this callback outlived its round.
         let consent = self.consented.upgrade().ok_or_else(|| {
             CallbackError("persist: the round's consent outlived its context".into())
+        })?;
+        let media = self.captures.upgrade().ok_or_else(|| {
+            CallbackError("persist: the round's captures outlived their context".into())
         })?;
         let mut consented = consent.lock().await;
         let to_seal: &[Vec<DisplayField>] = consented.as_slice();
@@ -239,13 +270,24 @@ impl SessionPersister {
             // `media` again below is fine.
             let media_ops = self.build_media_ops(&media, token_bytes);
             // Record this round's captured blob hashes — the TEE-side
-            // authoritative set the NEXT round's `from-blob-ref` gate reads. The
-            // host already knows these hashes (they are the plaintext keys of its
-            // own media writes), so carrying them sealed here leaks nothing new.
-            if !media.is_empty() {
-                working
-                    .captured_media
-                    .extend(media.iter().map(|(h, _)| h.to_vec()));
+            // authoritative set the NEXT round's `from-blob-ref` gate reads, and
+            // now api's own: `round_captures` computed them over the applicant's
+            // frames, so a hash that later passes the gate is the hash of a frame
+            // of this session.
+            //
+            // The host does NOT see these hashes: a media write is keyed by
+            // `media_field_name`, an HKDF of `tee_seal_key` whose whole purpose is
+            // that the raw content hash never leaves the TEE. What carrying them
+            // in metadata costs the host is 32 B of growth per blob — the same
+            // count it reads off the `SetMedia` ops in this very batch.
+            //
+            // Deduped: unlike a `SetMedia`, which upserts the same bytes under the
+            // same key, extending this set twice would double-count a frame.
+            for (hash, _) in media.iter() {
+                let hash = hash.to_vec();
+                if !working.captured_media.contains(&hash) {
+                    working.captured_media.push(hash);
+                }
             }
             let mut ops: Vec<&dyn WriteField> =
                 Vec::with_capacity(2 + appends.len() + media_ops.len());
@@ -345,15 +387,16 @@ impl SessionPersister {
         })
     }
 
-    /// Build a `SetMedia` op per frame the runtime captured this round. Every
-    /// capture is sealed unconditionally — "always store" — so the media path
-    /// is uniform and write-presence carries no policy bandwidth. AuthN is
-    /// closed inside hatch-client by the double AEAD-seal (inner under
-    /// `applicant_session_token`, outer under `tee_seal_key`, AAD =
-    /// session_id||blob_hash); AuthZ + Covert vouched here. Covert is NOT
-    /// padded (unlike state): the blob size is applicant-capture-driven and
-    /// already host-observable via the `/input` body length, so it is not a
-    /// new channel.
+    /// Build a `SetMedia` op per frame the APPLICANT captured this round and api
+    /// recorded — every one of them, unconditionally ("always store"), so
+    /// write-presence carries no policy bandwidth. That used to rest on the
+    /// runtime reporting its captures honestly; the set is now api's own, so it
+    /// rests on nothing. AuthN is closed inside hatch-client by the double
+    /// AEAD-seal (inner under `applicant_session_token`, outer under
+    /// `tee_seal_key`, AAD = session_id||blob_hash); AuthZ + Covert vouched here.
+    /// Covert is NOT padded (unlike state): what a frame's length reveals is the
+    /// applicant's own upload, partitioned, and there is no policy-controlled
+    /// quantity left to pad.
     fn build_media_ops<'a>(
         &self,
         media: &[([u8; 32], Vec<u8>)],
@@ -369,9 +412,13 @@ impl SessionPersister {
                          access — AuthZ implicit in key possession"
                     ))
                     .vouch_unchecked::<Covert, _>(reason!(
-                        "blob size is applicant-capture-driven — already host-observable at the \
-                         /input body length, so not a NEW channel; every capture is stored \
-                         unconditionally (always-store), so write-presence carries no policy bandwidth"
+                        "each op is one frame api itself read off /input and content-addressed \
+                         here, so op COUNT and each op's LENGTH are functions of the applicant's \
+                         upload alone — the per-frame partition of a body the host already \
+                         watched arrive encrypted. The worker supplies no byte, no hash and no \
+                         member, and a non-media round emits zero ops. Unpadded unlike state \
+                         because no policy-controlled quantity is left to pad; residual is that \
+                         the worker still chooses whether to call session_change at all"
                     )),
                 applicant_session_token: token,
             })
@@ -412,7 +459,10 @@ impl SessionPersister {
                      observes via each ListAppend — zero marginal covert bits, and the emission- \
                      ORDER channel (log2 M!) is REMOVED (set commitment sorts). Residual write- \
                      presence is host-compromise-gated, as before. The captured-media gate hashes \
-                     also carried are the host's OWN plaintext media-write keys — no new leak"
+                     also carried are NOT host-visible — a media write is keyed by an HKDF of \
+                     tee_seal_key so the raw hash never leaves the TEE — but they grow this blob \
+                     by 32 B per frame, a count the host reads off the SetMedia ops in this same \
+                     batch anyway"
                 )),
         )
     }
@@ -634,7 +684,55 @@ fn pad_envelope(bytes: &mut Vec<u8>) -> Result<(), CallbackError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hatch_client::DisplayField;
+    use hatch_client::{Clip, DisplayField, MediaResult};
+
+    fn media_round(frames: Vec<&[u8]>) -> Event {
+        Event::Media(MediaResult {
+            slot: 0,
+            clip: Clip {
+                frames: frames.into_iter().map(<[u8]>::to_vec).collect(),
+            },
+        })
+    }
+
+    /// The whole point of the change: the pairs are a function of the applicant's
+    /// own bytes, computed here. Nothing is accepted from the worker, so nothing
+    /// is checked — but the derivation itself has to be right, because a later
+    /// `from-blob-ref` resolves against exactly these hashes and the worker
+    /// derives its own copy independently.
+    #[test]
+    fn captures_are_this_side_s_blake3_over_the_applicants_frames() {
+        let frames: Vec<&[u8]> = vec![b"passport-frame-1", b"passport-frame-2"];
+        let captured = round_captures(&media_round(frames.clone()));
+
+        assert_eq!(captured.len(), 2, "every frame is recorded, in order");
+        for (i, (hash, bytes)) in captured.iter().enumerate() {
+            assert_eq!(bytes.as_slice(), frames[i], "the applicant's own bytes");
+            assert_eq!(
+                hash,
+                blake3::hash(frames[i]).as_bytes(),
+                "the content address the engine will independently derive",
+            );
+        }
+    }
+
+    /// A repeated frame keeps both entries: the seal upserts the same bytes under
+    /// the same key, and the gate-set extend dedups on the way in.
+    #[test]
+    fn a_repeated_frame_is_recorded_twice_under_one_address() {
+        let captured = round_captures(&media_round(vec![b"same", b"same"]));
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].0, captured[1].0);
+    }
+
+    /// Rounds that carry no capture seal no media — a consent accept must not
+    /// write blobs, and the genesis round has none to write.
+    #[test]
+    fn a_round_without_a_capture_records_nothing() {
+        assert!(round_captures(&Event::Start).is_empty());
+        assert!(round_captures(&Event::ConsentDisclosure(true)).is_empty());
+        assert!(round_captures(&media_round(vec![])).is_empty());
+    }
 
     fn field(key: &str, value: &str) -> DisplayField {
         DisplayField {

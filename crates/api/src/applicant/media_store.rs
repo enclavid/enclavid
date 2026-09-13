@@ -34,8 +34,11 @@
 //! are bounded TEE-side (host-routing-independent):
 //!
 //!   * **The read KEY** — killed by the captured-hash gate below: only real
-//!     captures ever pull, whose hashes the host already logged at write; a
-//!     fabricated hash returns `None` with no hatch read.
+//!     captures ever pull, and "real" now means api computed the hash itself over
+//!     an applicant frame, not that the worker named it. A fabricated hash
+//!     returns `None` with no hatch read. (The host never sees these hashes: a
+//!     media write is keyed by an HKDF of `tee_seal_key`, so the raw content
+//!     address stays in the TEE.)
 //!   * **The read COUNT / pattern** — bounded WITHIN a round by the worker's
 //!     per-run memo (`RelayMediaStore` on the execution-worker: repeat reads of
 //!     one blob emit ≤1 RPC), and ACROSS rounds by the applicant-driven round
@@ -51,10 +54,12 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 
+use enclavid_boundary::Asserted;
+use enclavid_boundary::{Replay, reason};
 use engine_rpc::CallbackError;
-use hatch_client::{Asserted, Replay, SessionStore, outbound_session_id, reason};
+use hatch_client::{SessionStore, outbound_session_id};
 
-use crate::boundary::FromWorker;
+use super::callbacks::FromWorker;
 use secrecy::{ExposeSecret, SecretBox};
 
 pub(super) struct HatchMediaStore {
@@ -107,9 +112,13 @@ impl HatchMediaStore {
         //    `session_id‖blob_hash`, so a hash that collides across sessions
         //    still yields nothing.
         //
-        //    What the set is worth is a question for where it is WRITTEN:
-        //    `persister::persist` extends it from media the worker reports and
-        //    does not re-derive it, so the gate is the worker's own ledger.
+        //    What the set is worth is settled where it is WRITTEN, and it is no
+        //    longer the worker's ledger: `persister::persist` extends it from
+        //    `round_captures` — blake3 over the frames api itself read off
+        //    `/input` — and `session_change` has no parameter left to report
+        //    through. So a hash that passes here is the hash of an applicant
+        //    frame of THIS session, and CONTAINED means what it says rather than
+        //    "given a ledger the peer wrote".
         let Ok(blob_hash) = blob_hash.trust::<Asserted, _, _, _, ()>(|hash| {
             if self.captured.contains(&hash) {
                 Ok(hash)
@@ -138,10 +147,12 @@ impl HatchMediaStore {
             .await
             .map_err(|e| CallbackError(format!("media load failed: {e}")))?
             .trust_unchecked::<Replay, _>(reason!(
-                "a stale or reordered read returns an earlier blob stored under the \
-                 same key in this same session, and every one of them was already \
-                 served to this peer — content-addressing would say more, but the \
-                 key is the worker's word, not a hash this side computed"
+                "api is the only writer here and writes bytes only under their own \
+                 blake3, so a stale or reordered read returns the one plaintext that \
+                 hashes to this key — the applicant's frame itself; the AAD \
+                 session_id||blob_hash stops the host relabelling another blob under \
+                 it. Recomputing blake3 over what came back would make this a check \
+                 rather than a sentence, and is now both cheap and meaningful"
             ))
             .into_inner();
         Ok(loaded)
