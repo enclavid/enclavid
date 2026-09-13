@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use hatch_client::{Decision, Event, Prompt, SessionState};
 
+use crate::padded::Padded;
 use crate::{BundleRef, CompiledBundle};
 
 /// serde mirror of the bindgen `enclavid:host/types.prop` — the consumer's
@@ -115,19 +116,29 @@ pub struct RunRequest {
     pub composition_key: String,
     /// Static consumer config the policy reads via `context.props`.
     pub props: Vec<(String, Prop)>,
-    pub session_state: SessionState,
+    /// FRAMED: `state` and `current_prompt` are both policy-chosen lengths, and a
+    /// host process splices this hop byte-for-byte. See [`Padded`].
+    pub session_state: Padded<SessionState>,
     pub event: Event,
 }
 
-/// One reducer round's result on the wire: the next [`RunStatus`].
+/// One reducer round's result on the API hop: the next [`RunStatus`], framed.
 ///
 /// State is NOT returned — it is persisted mid-run via
 /// [`CallbackService::session_change`] (the orchestrator holds the seal key),
 /// and the orchestrator discards the engine's vestigial returned copy, exactly
 /// as the in-process path did.
+///
+/// The envelope exists for this hop alone. [`ChildService::run`] returns a bare
+/// [`RunStatus`], because the seam behind it is a socketpair inside the
+/// execution-worker with no host on it — framing there would be a megabyte of
+/// memcpy per round against no observer.
 #[derive(Serialize, Deserialize)]
 pub struct RunReply {
-    pub status: RunStatus,
+    /// FRAMED: the resolved prompt is policy-chosen in length, and the VARIANT is
+    /// legible by size too — a terminal `Completed` is a few bytes where an
+    /// `AwaitingInput` is a whole screen.
+    pub status: Padded<RunStatus>,
 }
 
 /// The result of [`ExecutorService::run`] (the cache-only path): either the round
@@ -141,7 +152,7 @@ pub struct RunReply {
 /// for a cwasm THIS runtime can deserialize.
 #[derive(Serialize, Deserialize)]
 pub enum RunOutcome {
-    Ran(RunStatus),
+    Ran(Padded<RunStatus>),
     CacheMiss { compat_token: String },
 }
 
@@ -161,20 +172,20 @@ pub trait CallbackService {
     /// on it, same as the in-process gate.
     async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError>;
 
-    /// Seal + persist the post-round session state and the captured `media`
-    /// blobs (present only on a media round) — the owned form of the engine's
-    /// borrowed `SessionChange`. The orchestrator commits them in ONE atomic
-    /// transaction under the seal key the worker never holds.
+    /// Seal + persist the post-round session state — the owned form of the
+    /// engine's borrowed `SessionChange`, committed under the seal key the worker
+    /// never holds.
     ///
-    /// What a round discloses does NOT travel here. The orchestrator derives it
-    /// from the prompt it rendered and the event it built, before this side runs;
-    /// a disclosure asserted by the process that executes adversary-supplied code
-    /// would be no evidence that an applicant accepted anything.
-    async fn session_change(
-        &self,
-        state: SessionState,
-        media: Vec<([u8; 32], Vec<u8>)>,
-    ) -> Result<(), CallbackError>;
+    /// Neither what a round DISCLOSED nor what it CAPTURED travels here. The
+    /// orchestrator holds both already: the disclosure it derives from the prompt
+    /// it rendered and the event it built, the captures it read off `/input` and
+    /// sent this side in that same event. Taking either back would be accepting,
+    /// from the process that executes adversary-supplied code, a copy of
+    /// something already in hand.
+    /// FRAMED for the same reason the outbound copy is: this is the same value
+    /// coming back over the same host-spliced hop, and `Covert` cannot be asked
+    /// about it from api's side — api is the receiver here.
+    async fn session_change(&self, state: Padded<SessionState>) -> Result<(), CallbackError>;
 }
 
 /// The execute boundary as a remote trait. The execution-worker serves it; the
@@ -235,13 +246,18 @@ pub trait ChildService {
     /// SUPERVISOR's relay, which forwards `media_load` / `session_change` on to
     /// api — so this keyless process rehydrates blobs + persists state without
     /// the seal key, and with no way to ask for a composition at all.
+    ///
+    /// Nothing on this seam is framed, and the status comes back bare rather than
+    /// in a [`RunReply`]: the hop is a socketpair between two processes inside one
+    /// CVM, so the host that counts bytes on the api hop is not on it. The
+    /// supervisor frames at the hop it actually reaches.
     async fn run(
         &self,
         session_state: SessionState,
         event: Event,
         props: Vec<(String, Prop)>,
         callbacks: ChildCallbacksClient<remoc::codec::Ciborium>,
-    ) -> Result<RunReply, ExecError>;
+    ) -> Result<RunStatus, ExecError>;
 }
 
 /// The supervisor-served callback boundary a per-round engine-executor-child calls BACK
@@ -257,15 +273,11 @@ pub trait ChildCallbacks {
     /// Rehydrate a stored blob by content hash (api unseals). `None` = miss.
     async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError>;
 
-    /// Seal + persist the post-round state and captured `media` — relayed to
-    /// api's `session_change`, committed under the seal key this process never
-    /// holds. What the round disclosed is not carried; see
+    /// Seal + persist the post-round state — relayed to api's `session_change`,
+    /// committed under the seal key this process never holds. Neither the round's
+    /// disclosure nor its captures are carried; see
     /// [`CallbackService::session_change`].
-    async fn session_change(
-        &self,
-        state: SessionState,
-        media: Vec<([u8; 32], Vec<u8>)>,
-    ) -> Result<(), CallbackError>;
+    async fn session_change(&self, state: SessionState) -> Result<(), CallbackError>;
 }
 
 #[cfg(test)]
@@ -289,11 +301,7 @@ mod execute_tests {
             self.media_calls.lock().unwrap().push(hash);
             Ok(Some(vec![0xAB, 0xCD]))
         }
-        async fn session_change(
-            &self,
-            _state: SessionState,
-            _media: Vec<([u8; 32], Vec<u8>)>,
-        ) -> Result<(), CallbackError> {
+        async fn session_change(&self, _state: Padded<SessionState>) -> Result<(), CallbackError> {
             *self.state_calls.lock().unwrap() += 1;
             Ok(())
         }
@@ -331,11 +339,10 @@ mod execute_tests {
             if bytes != Some(vec![0xAB, 0xCD]) {
                 return Err(ExecError::Run("callback returned wrong media".into()));
             }
-            callbacks
-                .session_change(req.session_state.clone(), vec![])
-                .await?;
+            callbacks.session_change(req.session_state.clone()).await?;
             Ok(RunReply {
-                status: RunStatus::Completed(Decision::Approved),
+                status: Padded::seal(&RunStatus::Completed(Decision::Approved))
+                    .map_err(|e| ExecError::Run(e.to_string()))?,
             })
         }
     }
@@ -394,7 +401,7 @@ mod execute_tests {
         let mk_req = || RunRequest {
             composition_key: "k".into(),
             props: vec![("age".into(), Prop::Int(30))],
-            session_state: SessionState::default(),
+            session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Start,
         };
 
@@ -410,7 +417,10 @@ mod execute_tests {
             .run_with_bundle(mk_req(), crate::bundle::sample_bundle(), cb_client)
             .await
             .unwrap();
-        assert!(matches!(status, RunStatus::Completed(Decision::Approved)));
+        assert!(matches!(
+            status.open().expect("the reply's frame decodes"),
+            RunStatus::Completed(Decision::Approved)
+        ));
         assert_eq!(
             callbacks.media_calls.lock().unwrap().as_slice(),
             &[[9u8; 32]]

@@ -73,13 +73,15 @@ pub const POLICY_FUEL_BUDGET: u64 = 10_000_000_000;
 /// blob-refs, MRZ text, face embeddings, screening verdicts — is a rounding
 /// error against it.
 ///
-/// The host-observable ciphertext-size covert channel this blob would otherwise
-/// feed is NOT bounded here; it is CLOSED downstream by the seal-boundary
-/// constant-size padding (`hatch_client::SEALED_STATE_PLAINTEXT_BYTES`), which
-/// pads every sealed `SessionState` to a fixed size. This cap is therefore the
-/// data-min ceiling only — and because the padding frame must cover a max-cap
-/// state, raising this cap raises that frame (and hence the constant per-write
-/// seal cost) in lockstep.
+/// The host-observable size covert channel this blob would otherwise feed is NOT
+/// bounded here; it is CLOSED by constant-size padding to
+/// `hatch_client::SEALED_STATE_PLAINTEXT_BYTES` at BOTH places the host can count
+/// bytes — the seal boundary, where every sealed `SessionState` is a fixed-size
+/// ciphertext, and the api↔execution-worker hop, where `engine_rpc::Padded` frames
+/// the same value in both directions. This cap is therefore the data-min ceiling
+/// only — and because the frame must cover a max-cap state, raising this cap
+/// raises it (and hence the constant per-write seal cost and per-round wire cost)
+/// in lockstep.
 pub const POLICY_MAX_STATE_BYTES: usize = 1024 * 1024;
 
 // ----- text-ref validation -----
