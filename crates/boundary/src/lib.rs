@@ -13,8 +13,9 @@
 //! depend on them without depending on a wire client.
 //!
 //! `Untrusted<T, S>` — INBOUND. Carries a tuple-typed scope `S`
-//! listing the open trust concerns for the value (authenticity,
-//! authorization, replay-resistance). The inner `T` cannot be
+//! listing the open trust concerns for the value; what each one asks
+//! is written on the marker itself ([`AuthN`], [`AuthZ`], [`Replay`],
+//! [`Asserted`], [`Covert`]) and nowhere else. The inner `T` cannot be
 //! inspected until the caller addresses every concern via
 //! `trust_unchecked::<X>()` (blanket-accept) or
 //! `trust::<X>(predicate)` (verify), each peeling one concern off
@@ -25,9 +26,7 @@
 //!
 //! `Exposed<T, S>` — OUTBOUND. Mirror of `Untrusted`: tuple-typed
 //! scope `S` lists the open concerns for a value being released to
-//! the host (cryptographic confidentiality to the intended
-//! recipient, application-level authorization to release, hidden-
-//! bandwidth closure). The inner `T` is reachable only via
+//! the host. The inner `T` is reachable only via
 //! `into_inner` after every concern has been peeled with
 //! `vouch_unchecked::<X>()` / `vouch::<X>(predicate)`. Both wrappers
 //! share the [`Remove`] machinery and the `reason!` macro — the
@@ -91,75 +90,12 @@ macro_rules! reason {
 }
 
 // =====================================================================
-// Concern markers — three axes that any TEE-ingested value can be
-// untrusted on. Add a new marker here when introducing a fourth axis.
+// Concern markers — what a scope is made of. One file, because the
+// question each one asks is the only thing here that is not machinery.
 // =====================================================================
 
-/// Authenticity concern: bytes might have been fabricated or
-/// substituted by an untrusted source. Cleared by cryptographic
-/// verification (AEAD decrypt under a TEE-side key, signature check,
-/// digest match against an expected value, etc.) — or explicitly
-/// blanket-accepted via `trust_unchecked::<AuthN>()`.
-pub struct AuthN;
-
-/// Authorization concern: the principal who made this request might
-/// not be allowed to access this resource. Cleared by an
-/// application-level predicate (e.g., principal match against the
-/// authenticated caller). Not a cryptographic property — it is
-/// always handled at the application layer.
-pub struct AuthZ;
-
-/// Replay-resistance concern: bytes are authentic but might be a
-/// stale snapshot the source served instead of the latest version.
-/// Crypto-authenticated payloads have this open by default unless
-/// freshness is established separately (e.g., a monotonic counter or
-/// CAS guard). Often blanket-accepted via
-/// `accept_replay`-style call where the application path (e.g., an
-/// idempotent retry on /init or a CAS guard at write time) bounds
-/// the practical impact to DoS / UX regression rather than data
-/// leak.
-pub struct Replay;
-
-/// Provenance concern: the value was produced by code executing
-/// adversary-supplied input, and is therefore the peer's own word rather
-/// than a function of anything this side or the applicant established.
-///
-/// Nothing here is forged — the peer is our own measured image, reached
-/// over mutual RA-TLS against a pinned measurement. Nothing here is
-/// derived from anything we know, either. That is the whole axis: the
-/// other four ask who sent it, whether they may, whether it is fresh and
-/// whether it leaks outward; none asks what it is a function of.
-///
-/// Cleared by demonstrating exactly ONE of:
-///   1. RE-DERIVED — this side computes the value from inputs it holds.
-///   2. BOUND — checked against something a DIFFERENT party established
-///      (the applicant's echoed digest; bytes this side pulled and
-///      digest-verified).
-///   3. BOUNDED — the entire range is harmless (a fixed-cardinality enum).
-///   4. CONTAINED — re-exposed only to the party whose own code authored
-///      it, or to the applicant, who is its sole auditor.
-///
-/// "The peer is attested" is NOT a discharge. It is true of every value
-/// on this axis, and it is the reasoning four separate 2026-09 defects
-/// were made of. A reason that names none of the four kinds above is a
-/// finding, not a matter of taste.
-///
-/// Inbound-only: releasing TO such a peer is a release decision, which
-/// [`Exposed`] already names.
-pub struct Asserted;
-
-/// Covert-channel concern: outbound data might carry policy-controlled
-/// bandwidth disguised as legitimate structure (field order, count,
-/// content). Cleared by sanitisation passes (shuffle, fixed-order,
-/// cardinality cap, value scrubbing) — or explicitly blanket-vouched
-/// via `vouch_unchecked::<Covert>()` when the data is sealed under a
-/// key the host can't read (so the bandwidth never reaches a leak
-/// destination) or has bounded cardinality by construction.
-///
-/// Outbound-only axis: inbound data isn't a covert-channel concern
-/// because we're not on the encoding side. `Exposed<T, S>` is where
-/// `Covert` appears in `S`.
-pub struct Covert;
+mod markers;
+pub use markers::{Asserted, AuthN, AuthZ, Covert, Replay};
 
 // =====================================================================
 // Position markers — used to disambiguate `Remove<X, I>` impls when
@@ -225,6 +161,89 @@ impl<A, B, C, X> Remove<X, P3> for (A, B, C, X) {
 }
 
 // =====================================================================
+// Open — a scope with something still to answer.
+// =====================================================================
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A scope with at least one concern still open.
+///
+/// Implemented for every non-empty marker tuple and NEVER for `()`, which is the
+/// whole point. `Untrusted<T, ()>` and `Exposed<T, ()>` mean "every concern was
+/// answered", and both release their inner value on that basis — so a constructor
+/// able to produce one directly would let a caller assert the answer without ever
+/// having given it. A door that demands `Exposed<_, ()>` is only worth something
+/// if `()` cannot be conjured, and this bound is what makes that true:
+/// `Exposed::new(req)` where `Exposed<Req, ()>` is wanted stops compiling.
+///
+/// It restricts WHAT a mint may produce, not WHO may mint. Whoever calls a
+/// constructor still chooses the scope, which is right — the concerns a crossing
+/// raises are the caller's to name — but they cannot choose to name none.
+/// DECLARING a fully-answered wrapper is a type error, in both directions — `new`
+/// cannot mint at `()`, so an empty scope is somewhere you arrive:
+///
+/// ```compile_fail
+/// use enclavid_boundary::Exposed;
+/// let _: Exposed<u32, ()> = Exposed::new(7);
+/// ```
+///
+/// ```compile_fail
+/// use enclavid_boundary::Untrusted;
+/// let _: Untrusted<u32, ()> = Untrusted::new(7);
+/// ```
+///
+/// And a non-empty scope still constructs, so the bound narrows what a mint may
+/// produce without restricting who may mint:
+///
+/// ```
+/// use enclavid_boundary::{Covert, Exposed};
+/// let _: Exposed<u32, (Covert,)> = Exposed::new(7);
+/// ```
+///
+/// **What this bound does NOT give you**, and the doors should not be read as if it
+/// did. Two routes reach `()` without a peel, and both are deliberate features that
+/// happen to compose badly:
+///
+///   * the `Vec` transpose joins a batch at its elements' scope, and an EMPTY batch
+///     satisfies "every element addressed `S`" vacuously, for any `S`;
+///   * [`Exposed::map`] carries a scope onto a different value.
+///
+/// Chained, they mint `Exposed<Anything, ()>` from nothing, and a third soft spot
+/// sits beside them: `((),)` is a non-empty tuple, so it is `Open`, and its single
+/// "marker" is the unit type — nothing prevents a scope that asks nothing.
+///
+/// None of that is an argument for removing the bound, and none of it is an
+/// argument for chasing the rest. What it settles is what the bound is FOR. The
+/// accident it catches is the quiet one: at a call site whose signature wants
+/// `Exposed<_, ()>`, with a bare value in hand, `Exposed::new(v)` is the natural
+/// thing to type and would otherwise compile in silence, skipping the mint with no
+/// signal at all. The routes above are the loud ones — an empty-batch transpose or
+/// a discarding `map` is conspicuous in a diff in a way one constructor call is not.
+///
+/// So: a scope of `()` is evidence that the mint was walked, not proof that it was.
+/// The guard lives in the same repository as what it guards, which is true of every
+/// private field and every `pub(crate)` here; it stops a wrong turn, not an author
+/// who means it.
+pub trait Open: sealed::Sealed {}
+
+macro_rules! impl_open {
+    ($($T:ident),+) => {
+        impl<$($T),+> sealed::Sealed for ($($T,)+) {}
+        impl<$($T),+> Open for ($($T,)+) {}
+    };
+}
+impl_open!(T0);
+impl_open!(T0, T1);
+impl_open!(T0, T1, T2);
+impl_open!(T0, T1, T2, T3);
+impl_open!(T0, T1, T2, T3, T4);
+impl_open!(T0, T1, T2, T3, T4, T5);
+impl_open!(T0, T1, T2, T3, T4, T5, T6);
+impl_open!(T0, T1, T2, T3, T4, T5, T6, T7);
+
+// =====================================================================
 // Untrusted<T, S> — inbound wrapper.
 // =====================================================================
 
@@ -244,19 +263,21 @@ impl<T, S> Untrusted<T, S> {
     /// `(AuthN, Replay)` open; an AEAD-decrypted field starts with
     /// `(AuthZ, Replay)`).
     ///
-    /// Requires a [`Reason`] token built via [`reason!`] explaining
-    /// **why** this particular scope (and not a wider or narrower
-    /// one). Symmetric with `trust_unchecked` — the construction
-    /// site is where scope is set, the peel site is where scope
-    /// shrinks; both warrant explicit documentation. The token is a
-    /// ZST and the reason text is discarded at compile time, so this
-    /// is free at runtime.
+    /// `S: Open`, so the scope cannot be `()`: a wrapper with nothing left to
+    /// answer is something a peel produces, never something a caller declares.
     ///
-    /// `pub` because the facades that call it now live in other crates.
-    /// What keeps crossings grep-anchored is not this visibility but the
-    /// named entry points — `hatch_client::boundary::inbound::from_untrusted`
-    /// for the wire — and the rule that nothing else calls this directly.
-    pub fn new(value: T) -> Self {
+    /// `pub` and `doc(hidden)`. It has to be public — the facades that call it
+    /// live in other crates, and this one is a dependency-free leaf, so there is
+    /// no `pub(crate)` that could span them. Hidden because nothing outside those
+    /// facades should ever find it: the guard here is against a wrong turn, not
+    /// against someone with commit access, and the named entry points —
+    /// `hatch_client::boundary::inbound::from_untrusted` for the wire — are what a
+    /// reviewer greps.
+    #[doc(hidden)]
+    pub fn new(value: T) -> Self
+    where
+        S: Open,
+    {
         Self {
             value,
             _marker: PhantomData,
@@ -367,15 +388,17 @@ impl<T, S> Exposed<T, S> {
     /// Covert)` too but each gets peeled with a "by design observable
     /// to host" rationale).
     ///
-    /// Requires a [`Reason`] token built via [`reason!`] explaining
-    /// **why** this particular scope (and not a wider or narrower
-    /// one). Symmetric with `Untrusted::new`.
+    /// `S: Open`, so the scope cannot be `()`. That is what makes a door demanding
+    /// `Exposed<_, ()>` mean anything: the only way to that type is to peel every
+    /// concern the mint opened, so the receipt records answers actually given
+    /// rather than an assertion that none were needed.
     ///
-    /// `pub` because the facades that call it now live in other crates:
-    /// `hatch_client::boundary::outbound::to_untrusted` for the wire,
-    /// `safe_logger::line` for the serial port. Those named entry points
-    /// are what a reviewer greps; nothing else calls this directly.
-    pub fn new(value: T) -> Self {
+    /// `pub` and `doc(hidden)`, for the reason given on `Untrusted::new`.
+    #[doc(hidden)]
+    pub fn new(value: T) -> Self
+    where
+        S: Open,
+    {
         Self {
             value,
             _marker: PhantomData,
@@ -429,6 +452,12 @@ impl<T, S> Exposed<T, S> {
     /// Project the inner value while preserving the scope. Use when
     /// you need to transform `T` to `U` (e.g., wrap sealed bytes
     /// into a typed `Op`) without addressing any concerns.
+    ///
+    /// It carries the scope onto a DIFFERENT value, and at `S = ()` that means
+    /// carrying a completed receipt. Sound where the closure embeds its input, which
+    /// is every use here; a closure that discarded it would leave a receipt
+    /// describing something no longer present. Nothing in the type system separates
+    /// the two — see [`Open`] for what that costs and what it does not.
     pub fn map<U, F>(self, f: F) -> Exposed<U, S>
     where
         F: FnOnce(T) -> U,
@@ -619,13 +648,18 @@ mod tests {
         assert_eq!(v, 7);
     }
 
+    /// An empty scope is somewhere you ARRIVE, never somewhere you start.
+    /// `Untrusted::new` requires `S: Open`, so the only route to `into_inner` is
+    /// through a peel per concern — which is what lets a signature demanding
+    /// `Untrusted<_, ()>` mean the answers were given rather than skipped.
     #[test]
-    fn empty_scope_constructs_directly_into_inner() {
-        // For values where no concerns apply (rare, but possible at
-        // boundaries we generate ourselves), `Untrusted<T, ()>` is
-        // directly consumable.
-        let u: Untrusted<u32, ()> = Untrusted::new(99);
-        assert_eq!(u.into_inner(), 99);
+    fn empty_scope_is_reached_by_peeling_not_by_declaring() {
+        let u: Untrusted<u32, (AuthN,)> = Untrusted::new(99);
+        assert_eq!(
+            u.trust_unchecked::<AuthN, _>(reason!("test fixture"))
+                .into_inner(),
+            99
+        );
     }
 
     #[test]
@@ -635,10 +669,17 @@ mod tests {
         assert_eq!(std::mem::size_of::<Reason>(), 0);
     }
 
+    /// The outbound mirror of the rule above: a door that demands
+    /// `Exposed<_, ()>` is worth something only because that type cannot be
+    /// conjured, so reaching it is evidence rather than assertion.
     #[test]
-    fn exposed_round_trips_empty_scope() {
-        let e: Exposed<Vec<u8>, ()> = Exposed::new(vec![1u8, 2, 3]);
-        assert_eq!(e.into_inner(), vec![1, 2, 3]);
+    fn exposed_reaches_empty_scope_only_by_vouching() {
+        let e: Exposed<Vec<u8>, (Covert,)> = Exposed::new(vec![1u8, 2, 3]);
+        assert_eq!(
+            e.vouch_unchecked::<Covert, _>(reason!("test fixture"))
+                .into_inner(),
+            vec![1, 2, 3]
+        );
     }
 
     #[test]
