@@ -5,7 +5,10 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 
-use hatch_client::{Clip, Event, MediaResult, Prompt, PromptDisclosure, SessionState};
+use hatch_client::{
+    Clip, Event, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MediaResult, Prompt, PromptDisclosure,
+    SessionState,
+};
 
 use crate::dto;
 use crate::error::ApiError;
@@ -161,14 +164,40 @@ fn parse_media_slot(slot_id: &str) -> Option<u32> {
 /// Drain a multipart stream into a flat list of byte buffers, one per
 /// part. Order is preserved — used for clip frames where the per-
 /// part name is irrelevant (HTML's repeated `name="frame"` convention).
+///
+/// The same two bounds the worker's `Clip` decoder enforces, applied here as
+/// well, and the duplication is the point rather than an oversight. This side can
+/// answer the applicant's browser with a 413; the worker can only refuse the
+/// round, which reaches the applicant as a failed session. So the cap belongs
+/// where the good error is, and it belongs at the worker too because the worker
+/// accepts any attested guest and cannot assume its caller ran this code.
+///
+/// The COUNT bound is the load-bearing one. `APPLICANT_INPUT_BODY_LIMIT` says
+/// almost nothing about it: an empty multipart part costs only its framing, so a
+/// legal 16 MiB body is hundreds of thousands of frames.
+///
+/// The aggregate is redundant today, and knowingly. The body limit counts framing
+/// too, so the payload bytes it admits are strictly fewer than the body it caps,
+/// and `crate::limits` asserts at compile time that the body cap does not exceed
+/// the clip budget — together those make the branch below unreachable. It stays
+/// because it does not depend on this route keeping its `DefaultBodyLimit` layer,
+/// and because the worker's decoder enforces the same pair regardless.
 async fn collect_frames(mut multipart: Multipart) -> Result<Vec<Vec<u8>>, StatusCode> {
-    let mut frames = Vec::new();
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+    let mut total = 0usize;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?
     {
+        if frames.len() == MAX_CLIP_FRAMES {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
         let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+        total = total.saturating_add(bytes.len());
+        if total > MAX_CLIP_BYTES {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
         frames.push(bytes.to_vec());
     }
     Ok(frames)

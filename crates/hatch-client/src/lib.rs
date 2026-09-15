@@ -26,9 +26,9 @@ pub use transport::HatchClient;
 // response now come from the shared `hatch-protocol` crate.
 pub use domain::{
     Action, CameraFacing, CaptureGuide, CaptureStep, Client, ClientAccess, Clip, Decision,
-    DisplayField, Event, GuideNone, GuideOval, GuideRect, KbsKey, Key, Localized, MediaResult,
-    MediaSpec, PluginPin, Prompt, SessionMetadata, SessionState, SessionStatus, Translation,
-    capture_guide,
+    DisplayField, Event, GuideNone, GuideOval, GuideRect, KbsKey, Key, Localized, MAX_CLIP_BYTES,
+    MAX_CLIP_FRAMES, MediaResult, MediaSpec, PluginPin, Prompt, SessionMetadata, SessionState,
+    SessionStatus, Translation, capture_guide,
 };
 pub use hatch_protocol::PullResponse as RegistryPullResponse;
 pub use hatch_protocol::{AuthorizeRequest, ClientOperation, PullRequest};

@@ -1,7 +1,7 @@
 //! The compile contract as its SERVER sees it: arguments wrapped in the scope the
 //! serving role declares.
 //!
-//! The mirror of [`crate::untrusted`] on the other leg, and the reason it exists is
+//! The mirror of [`crate::untrusted_execute`] on the other leg, and the reason it exists is
 //! sharper here. api pins the workers' measurements, so on api's side every concern
 //! is about a peer it has authenticated. The leaves cannot pin back — api's
 //! measurement is a function of theirs, leaves first, api last, no cycle — so they
@@ -31,6 +31,7 @@ use std::future::Future;
 
 use enclavid_boundary::{Open, Untrusted};
 
+use crate::adapter::Untrusting;
 use crate::bundle::CompiledBundle;
 use crate::compile::{CompileError, CompileRequest, CompilerService};
 
@@ -51,7 +52,7 @@ pub trait CompilerServiceUntrusted {
     type Scope: Open;
 
     /// Fuse, compile, and parse the embedded sections. See
-    /// [`CompilerService::compile`].
+    /// the raw `CompilerService::compile`.
     fn compile(
         &self,
         req: Untrusted<CompileRequest, Self::Scope>,
@@ -76,14 +77,9 @@ where
 }
 
 /// Serves a [`CompilerServiceUntrusted`] as a [`CompilerService`], wrapping the
-/// argument on the way in.
-///
-/// `pub(crate)` because no caller should have to reach for it: the door applies it,
-/// and the raw server type is not exported, so there is no unwrapped path to pick
-/// instead.
-pub(crate) struct Judging<T>(pub T);
-
-impl<T> CompilerService for Judging<T>
+/// argument on the way in — the same [`Untrusting`] both execute-leg views use,
+/// because there is one idea here and it is the same on every hop.
+impl<T> CompilerService for Untrusting<T>
 where
     T: CompilerServiceUntrusted + Send + Sync + 'static,
     T::Scope: Send,

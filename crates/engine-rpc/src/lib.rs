@@ -77,6 +77,13 @@ mod untrusted_compile;
 #[cfg(feature = "compile")]
 pub use untrusted_compile::CompilerServiceUntrusted;
 
+// The two names a cache slot is addressed by, as types that carry their own
+// shape check. Execute-side: both cross that hop and nothing else names them.
+#[cfg(feature = "execute")]
+mod keys;
+#[cfg(feature = "execute")]
+pub use keys::{CompatToken, CompositionKey, KeyError};
+
 #[cfg(feature = "execute")]
 mod execute;
 // EXPLICIT, not a glob, and that is the point — in BOTH directions. Outbound,
@@ -90,7 +97,7 @@ mod execute;
 pub use execute::{
     CallbackError, CallbackService, CallbackServiceClient, ChildCallbacks, ChildCallbacksClient,
     ChildCallbacksServerShared, ChildService, ChildServiceClient, ChildServiceServerShared,
-    ExecError, ExecutorService, Prop, RunOutcome, RunReply, RunRequest, RunStatus,
+    ExecError, Prop, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 
 // Both ends of the execute hop, and the doors on the calling end.
@@ -109,10 +116,18 @@ mod padded;
 #[cfg(feature = "execute")]
 pub use padded::{FrameError, Framed, Padded};
 
+// The execute contract as each of its two servers sees it. EXPLICIT, like every
+// list above: the raw `ExecutorService` and `CallbackService` server halves stay
+// unexported, so a role that serves this hop has the untrusted view and nothing
+// else to implement.
 #[cfg(feature = "execute")]
-mod untrusted;
+mod untrusted_execute;
 #[cfg(feature = "execute")]
-pub use untrusted::*;
+pub use untrusted_execute::{CallbackServiceUntrusted, ExecutorServiceUntrusted};
+
+// The one adapter both legs' doors apply — never exported; see the module doc.
+#[cfg(any(feature = "compile", feature = "execute"))]
+mod adapter;
 
 /// The remoc connection config both fleet peers build from. Raises
 /// `max_data_size` from chmux's 512 KiB default: compiled `cwasm` bundles

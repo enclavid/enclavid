@@ -44,6 +44,36 @@ pub struct CompiledBundle {
     pub catalogs: Vec<CatalogEntry>,
 }
 
+impl CompiledBundle {
+    /// Roughly what a cache keeping this bundle pays for it, in bytes.
+    ///
+    /// Every field, not just the cwasm, and that is the whole point. The
+    /// execution-worker's L1 weighed `cwasm.len()` alone while each entry also
+    /// retained `embedded_imports` and `catalogs` — taken verbatim from a caller
+    /// that no leaf can identify, and bounded by nothing on decode. So a budget
+    /// that looked like a RAM ceiling was a cwasm ceiling, and a caller sending a
+    /// minimal header with megabytes of catalog was charged almost nothing for
+    /// memory it kept for the cache's idle window.
+    ///
+    /// Approximate and biased HIGH, for the reason
+    /// `ComponentDecls::retained_bytes` gives: under-charging is the failure mode,
+    /// over-charging costs a little capacity.
+    pub fn retained_bytes(&self) -> u64 {
+        const PER_IMPORT_OVERHEAD: usize = 64;
+        let imports: usize = self
+            .embedded_imports
+            .iter()
+            .map(|i| i.instance_name.len() + i.version.len() + PER_IMPORT_OVERHEAD)
+            .sum();
+        let catalogs: usize = self
+            .catalogs
+            .iter()
+            .map(|c| c.decls.retained_bytes() + PER_IMPORT_OVERHEAD)
+            .sum();
+        (self.cwasm.len() + imports + catalogs) as u64
+    }
+}
+
 /// One component's `(content_hash, parsed catalog)` — a registry-builder input.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,6 +144,43 @@ mod tests {
         assert_eq!(back.embedded_imports[0].catalog_hash, [7u8; 32]);
         assert_eq!(back.catalogs.len(), 1);
         assert!(back.catalogs[0].decls.disclosure_fields.contains("dob"));
+    }
+
+    /// The weight a cache charges follows every field, not just the cwasm.
+    ///
+    /// This is the shape the execution-worker's L1 was blind to: a minimal cwasm
+    /// that passes the header check, carrying megabytes of catalog, was charged
+    /// almost nothing for what it kept.
+    #[test]
+    fn a_bundle_is_charged_for_what_it_retains_not_just_its_cwasm() {
+        let mut decls = ComponentDecls::default();
+        for i in 0..4_000 {
+            decls.icons.insert(format!("icon-{i}-{}", "x".repeat(200)));
+        }
+        let heavy = CompiledBundle {
+            // A plausible header and nothing else — what a caller sends when the
+            // payload it cares about is somewhere other than the cwasm.
+            cwasm: vec![0u8; 64],
+            embedded_imports: Vec::new(),
+            catalogs: vec![CatalogEntry {
+                hash: [0u8; 32],
+                decls,
+            }],
+        };
+        assert!(
+            heavy.retained_bytes() > 1024 * 1024,
+            "a bundle retaining ~1 MiB of catalog was charged {}",
+            heavy.retained_bytes()
+        );
+        // And an ordinary bundle is still charged about its cwasm, so the budget
+        // keeps meaning what it says for every entry that matters.
+        let ordinary = CompiledBundle {
+            cwasm: vec![0u8; 8 * 1024 * 1024],
+            ..sample_bundle()
+        };
+        let cwasm_len = ordinary.cwasm.len() as u64;
+        assert!(ordinary.retained_bytes() >= cwasm_len);
+        assert!(ordinary.retained_bytes() < cwasm_len + 4096);
     }
 
     /// L2 guard: an EXTRA field (bundle written by a newer binary) must fail to

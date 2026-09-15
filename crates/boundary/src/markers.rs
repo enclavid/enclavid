@@ -28,6 +28,16 @@
 //! Every non-discharge below was taken from a defect this repository actually
 //! shipped, not invented as an illustration.
 //!
+//! **A reason may also name NO kind, and say so.** That is the honest answer when
+//! a value genuinely has no discharge available on an axis, and it applies to
+//! every marker here — [`Asserted`] carries the worked example because that is
+//! where the case first arose, but nothing about it is particular to that one.
+//! Such a site is a standing ACCEPTED RISK: it should surface on every audit,
+//! because it is still open. What is never allowed is inventing a kind to close
+//! it, and the reason is the same each time — the sentence that would do it ("the
+//! damage is bounded", "the peer is attested") fits every value ever shipped, so
+//! admitting it hollows out the list for all the values it does not fit.
+//!
 //! Direction is part of a marker's meaning. `Covert` is outbound-only because
 //! this side is not the encoder on the way in; `Asserted` is inbound-only because
 //! releasing TO such a peer is a release decision the outbound wrapper already

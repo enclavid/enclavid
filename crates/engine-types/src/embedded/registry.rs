@@ -87,6 +87,42 @@ pub struct ComponentDecls {
     pub icons: HashSet<String>,
 }
 
+/// Per-entry overhead charged on top of an entry's own bytes: a `String`'s own
+/// header plus a hash-table slot, rounded up. Deliberately generous — this feeds a
+/// cache BUDGET, where under-charging is the failure and over-charging costs a
+/// little cache capacity.
+const RETAINED_ENTRY_OVERHEAD: usize = 64;
+
+impl ComponentDecls {
+    /// Roughly what this catalog costs the process that keeps it, for a cache
+    /// budgeting by bytes.
+    ///
+    /// Approximate on purpose, and biased HIGH. What matters is that a caller
+    /// cannot make a catalog cost far more than it is charged, because a cache
+    /// whose budget misses most of what its entries retain is not a budget — which
+    /// is the shape the execution-worker's L1 had when it weighed the cwasm alone.
+    pub fn retained_bytes(&self) -> usize {
+        let keys: usize = self
+            .disclosure_fields
+            .iter()
+            .chain(self.icons.iter())
+            .map(|k| k.len() + RETAINED_ENTRY_OVERHEAD)
+            .sum();
+        let localized: usize = self
+            .localized
+            .iter()
+            .map(|(k, v)| {
+                k.len()
+                    + RETAINED_ENTRY_OVERHEAD
+                    + v.iter()
+                        .map(|t| t.language.len() + t.text.len() + RETAINED_ENTRY_OVERHEAD)
+                        .sum::<usize>()
+            })
+            .sum();
+        keys + localized
+    }
+}
+
 // ----- Top-level registry -----
 
 /// Composition-wide registry of `enclavid:embedded/*` declarations.

@@ -30,13 +30,26 @@
 //!      ABI. (The semantic case — same field shape, changed meaning — is caught
 //!      only by guard 1.)
 //!
+//! ## What the seal bounds, and what it does not
+//!
+//! The AEAD binds a stored bundle to its `cache_id` under a key the host cannot
+//! hold, so the host cannot substitute one composition's cwasm for another's or
+//! forge an entry. That is the whole of it.
+//!
+//! It says nothing about whether the bytes are the right compilation of the
+//! pinned artifacts, because api performs the seal — over whatever the
+//! compile-worker returned. The binding runs from api's key to api's name, and a
+//! compiler that returned something else would have that sealed just as faithfully.
+//! Nothing on the compile leg closes that (see `crate::compiler`, where the
+//! accepted risk is written); the store is not where it could be closed.
+//!
 //! Load/store are BEST-EFFORT: a miss, transport failure, or decode error all
 //! degrade to the cold compile path. The cache is a pure optimization;
 //! correctness never depends on it.
 
 use hatch_client::CacheStore;
 
-use engine_rpc::CompiledBundle;
+use engine_rpc::{CompatToken, CompiledBundle, CompositionKey};
 
 /// Bumped whenever the [`CompiledBundle`] wire layout changes (a field
 /// added / removed / retyped, or a nested serde type's shape changes). A bump
@@ -48,7 +61,12 @@ const CACHE_FORMAT_VERSION: u32 = 1;
 /// (`compat_token`) and the bundle-format epoch. [`CacheStore`] uses it as both
 /// the AEAD AAD and the filename-label input, so a runtime bump OR a format bump
 /// invalidates cleanly.
-fn cache_id(composition_key: &str, compat_token: &str) -> String {
+///
+/// Both halves are types rather than strings, which is what makes the join
+/// unambiguous: the first is 64 hex characters and the second cannot be empty, so
+/// no two distinct pairs render to one id. As bare strings the second half was a
+/// worker-chosen value of any length going straight into a name.
+fn cache_id(composition_key: &CompositionKey, compat_token: &CompatToken) -> String {
     format!("{composition_key}.{compat_token}.v{CACHE_FORMAT_VERSION}")
 }
 
@@ -57,8 +75,8 @@ fn cache_id(composition_key: &str, compat_token: &str) -> String {
 /// caller falls through to the cold compile path.
 pub async fn try_load(
     cache: &CacheStore,
-    composition_key: &str,
-    compat_token: &str,
+    composition_key: &CompositionKey,
+    compat_token: &CompatToken,
 ) -> Option<CompiledBundle> {
     let id = cache_id(composition_key, compat_token);
     let bytes = match cache.load(&id).await {
@@ -86,8 +104,8 @@ pub async fn try_load(
 /// swallowed; a broken cache never breaks a session.
 pub async fn store(
     cache: &CacheStore,
-    composition_key: &str,
-    compat_token: &str,
+    composition_key: &CompositionKey,
+    compat_token: &CompatToken,
     bundle: &CompiledBundle,
 ) {
     let mut encoded = Vec::new();
@@ -107,14 +125,43 @@ pub async fn store(
 mod tests {
     use super::*;
 
+    fn key(byte: u8) -> CompositionKey {
+        CompositionKey::from_digest([byte; 32])
+    }
+
+    fn token(s: &str) -> CompatToken {
+        CompatToken::parse(s).expect("a legal token shape")
+    }
+
     #[test]
     fn cache_id_scopes_by_composition_token_and_format() {
         assert_eq!(
-            cache_id("abc", "tok"),
-            format!("abc.tok.v{CACHE_FORMAT_VERSION}")
+            cache_id(&key(0xAB), &token("tok")),
+            format!("{}.tok.v{CACHE_FORMAT_VERSION}", key(0xAB))
         );
         // Composition, token, and format each partition the key.
-        assert_ne!(cache_id("abc", "tok"), cache_id("abd", "tok"));
-        assert_ne!(cache_id("abc", "tok"), cache_id("abc", "tok2"));
+        assert_ne!(
+            cache_id(&key(0xAB), &token("tok")),
+            cache_id(&key(0xAC), &token("tok"))
+        );
+        assert_ne!(
+            cache_id(&key(0xAB), &token("tok")),
+            cache_id(&key(0xAB), &token("tok2"))
+        );
+    }
+
+    /// The two halves cannot be made to render as one another's: the first is a
+    /// fixed 64 characters, so no token can push the boundary and land a pair on
+    /// another pair's id. As bare strings that argument rested on the shapes
+    /// nobody was checking.
+    #[test]
+    fn no_token_can_forge_another_pairs_id() {
+        let honest = cache_id(&key(0xAB), &token("wt46-cm-fuel"));
+        for forged in ["a", "a.b", &format!("x.{}", key(0xAC))] {
+            let Ok(t) = CompatToken::parse(forged) else {
+                continue;
+            };
+            assert_ne!(cache_id(&key(0xAC), &t), honest);
+        }
     }
 }

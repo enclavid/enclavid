@@ -49,15 +49,29 @@
 //! Decoding enforces the frame as well as encoding does, so a peer that sends a
 //! short frame is refused by the codec rather than merely noticed.
 //!
-//! ## What this does NOT close
+//! ## The failure path beside it, and how it is closed instead
 //!
-//! The FAILURE path beside it. [`ExecError::Run`] is a `String` the child builds
-//! as `format!("{e:#}")` over the whole trap chain, and that chain interpolates
-//! wasm-supplied text, so a policy sets the reply's byte count directly. A round
-//! that traps therefore carries on this same hop exactly the channel the frames
-//! close on the round that succeeds, and a policy can trap deliberately and
-//! retry. Framing or bucketing the error types is the fix and is not done here;
-//! nothing below should be read as saying the hop is closed.
+//! Framing is not the only way to make an encoding independent of its content,
+//! and on the failure path it is the wrong one. [`ExecError`] used to be
+//! `Run(String)` built as `format!("{e:#}")` over the whole trap chain — and that
+//! chain interpolates wasm-supplied text, so a policy set the reply's byte count
+//! directly. A round that trapped carried on this same hop exactly the channel the
+//! frames close on the round that succeeds, and a policy can trap deliberately and
+//! retry.
+//!
+//! That is now closed by CARDINALITY rather than by a frame, and it needed no
+//! frame in the end. [`ExecError`](crate::ExecError) is a fixed enum in which NO
+//! variant carries a free value: two values, so a policy choosing which failure to
+//! provoke moves the reply between two fixed sizes — about half a bit on top of the
+//! one it already has by choosing whether to fail at all — and there is no length
+//! anywhere for it to set.
+//!
+//! One variant nearly did carry one — the key of an undeclared embedded ref, which
+//! api wanted for a 422. A cap on it would NOT have been enough (1..=128 bytes is
+//! seven bits a round on this same hop) and a frame would have worked; the value
+//! was dropped instead, because wasm picks that key and it could be a function of
+//! the applicant's data. See the variant for why a field safe from one reader is
+//! worse than an absent one.
 //!
 //! `media_load`'s reply is likewise unframed, and the policy chooses which blob
 //! it asks for — though there the length is an applicant capture's, already
@@ -67,6 +81,41 @@
 //! request plus a multi-megabyte bundle transfer, so "this composition was cold"
 //! stays legible, and `composition_key` is a stable per-consumer pseudonym. That
 //! is a separate channel; padding values does not touch it.
+//!
+//! ## TIMING, which dwarfs every byte counted above
+//!
+//! The residuals named so far are half a bit here and seven bits there, and it
+//! would be easy to read this module as though those were the scale of what is
+//! left. They are not. The host splices this hop, so it TIMESTAMPS both ends of
+//! every round, and how long a round takes is the policy's to choose: it holds a
+//! ten-billion-instruction fuel budget and a 120-second deadline and may spend any
+//! part of either. That is a clock the policy writes to directly, at whatever
+//! resolution the host's own clock reads, and it carries orders of magnitude more
+//! than every length this module frames.
+//!
+//! It is not closed here, and it is not closable at this layer. Making it go away
+//! means making every round take the same wall-clock time, which means making every
+//! round take the deadline — the product does not survive that. Nothing in this
+//! tree bounds it today.
+//!
+//! So the reason to close the LENGTH channels is not that they are the biggest.
+//! It is that they close STRUCTURALLY and permanently, at zero runtime cost: a type
+//! with a private field makes an unpadded value unexpressible, and it stays that way
+//! without anyone maintaining it. Timing cannot be bought on those terms at any
+//! price. Both facts belong in the same place, because a reader who finds only the
+//! first will conclude this hop is shut.
+//!
+//! ## Who the observer is, and why this exists even so
+//!
+//! Every channel above is POLICY → HOST, and every one of them needs the policy to
+//! encode. The policy's author is the consumer, who already receives — legitimately,
+//! through consent — what the applicant agreed to share, so the recorded position is
+//! that policy/host collusion has no motive and is out of scope.
+//!
+//! This module is not a bet against that position. It is what lets the platform's
+//! claim be "provably cannot learn" rather than "no consumer would want to", which
+//! is the same move as a guest with no NIC instead of a firewall rule: the property
+//! holds without anyone having to be trusted for it to.
 
 use std::marker::PhantomData;
 
@@ -93,14 +142,24 @@ impl std::fmt::Display for FrameError {
 }
 impl std::error::Error for FrameError {}
 
+/// The frame's own message does NOT travel: it names a length, and a length is the
+/// one thing the frame exists to keep off this hop. It stays in the guest's log,
+/// where [`FrameError`]'s own doc already puts it.
+///
+/// `Unknown` is the conservative default, because this conversion cannot see which
+/// side built the frame. A site where the POLICY sized the value — a resolved
+/// prompt that will not fit — says so at the site instead of leaning on this.
 impl From<FrameError> for ExecError {
-    fn from(err: FrameError) -> Self {
-        ExecError::Run(err.0)
+    fn from(_: FrameError) -> Self {
+        ExecError::Unknown
     }
 }
+/// The message is dropped here too, and here it was the sharpest case: a frame
+/// error names a LENGTH, and this conversion used to hand that length straight to
+/// the party whose policy chose it.
 impl From<FrameError> for CallbackError {
-    fn from(err: FrameError) -> Self {
-        CallbackError(err.0)
+    fn from(_: FrameError) -> Self {
+        CallbackError
     }
 }
 

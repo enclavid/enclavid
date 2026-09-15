@@ -28,6 +28,8 @@
 //!     CLOEXEC-cleared so ONLY they survive exec — the capability-scoped handoff the
 //!     executor uses to give a child a read-only fd to just ITS cwasm memfd.
 //!   * [`assert_ptrace_hardened`] — the boot-time floor under sibling isolation.
+//!   * [`assert_fd_budget`] — the boot-time floor under the caps a supervisor's
+//!     own bounds are counted in.
 //!
 //! Unfeatured — the child side:
 //!   * [`adopt_fd0`] / [`serve_child`] — adopt the inherited socket, remoc-serve
@@ -63,7 +65,8 @@ mod parent;
 pub use parent::spawn_and_connect;
 #[cfg(feature = "parent")]
 pub use parent::{
-    ChildPool, FIRST_INHERITED_FD, Hardening, SupervisorError, assert_ptrace_hardened,
+    ChildPool, FIRST_INHERITED_FD, Hardening, SupervisorError, assert_fd_budget,
+    assert_ptrace_hardened,
 };
 
 /// The remoc connection config the child hop uses. Raises `max_data_size` from

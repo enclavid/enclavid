@@ -336,11 +336,99 @@ pub struct MediaResult {
 // Capture / media
 // ---------------------------------------------------------------------
 
+/// Frames one [`Clip`] may carry.
+///
+/// Derived from what api will accept at ingress, not chosen: the applicant's
+/// multipart body is capped at `enclavid_api::limits::APPLICANT_INPUT_BODY_LIMIT`
+/// and sized there for roughly a dozen JPEG frames. A body of that size made
+/// entirely of empty parts would otherwise yield hundreds of thousands of frames,
+/// each one a separate blob write and a separate WIT resource in the round.
+///
+/// It is restated here, away from api, because the party that must enforce it is
+/// the execution-worker, which accepts any attested guest: "api already capped
+/// the body" is a claim about a peer the worker cannot identify.
+pub const MAX_CLIP_FRAMES: usize = 64;
+
+/// Bytes one clip may carry in total — the same ingress limit, counted the way it
+/// is counted at ingress. A per-FRAME cap is deliberately not a second number:
+/// api admits a body of this size whatever shape it has, so a tighter per-frame
+/// rule would be one this side invented and the other side does not enforce.
+pub const MAX_CLIP_BYTES: usize = 16 * 1024 * 1024;
+
 /// One captured artifact — a sequence of JPEG frames over ~1s.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Clip {
+    /// Encoded as one CBOR byte string PER FRAME, and bounded on the way back in.
+    ///
+    /// Both halves are the same field's business and neither is optional. A bare
+    /// `Vec<Vec<u8>>` serialises element-by-element — two bytes for every byte
+    /// over 0x17 — so a full capture cost about 1.9x its length on each of the two
+    /// hops it crosses; the same mistake has now been paid for on `cwasm`,
+    /// `PluginInstance::wasm` and `SessionState::state`. And a `Vec` decoded with
+    /// no bound is a peer's choice of how much this side allocates.
+    #[serde(
+        serialize_with = "frames::serialize",
+        deserialize_with = "frames::deserialize"
+    )]
     pub frames: Vec<Vec<u8>>,
+}
+
+/// The codec for [`Clip::frames`]: byte strings out, bounded byte strings in.
+mod frames {
+    use super::{MAX_CLIP_BYTES, MAX_CLIP_FRAMES};
+    use serde::de::{self, SeqAccess, Visitor};
+    use serde::ser::SerializeSeq;
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        frames: &[Vec<u8>],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(frames.len()))?;
+        for f in frames {
+            seq.serialize_element(serde_bytes::Bytes::new(f))?;
+        }
+        seq.end()
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Vec<Vec<u8>>, D::Error> {
+        struct Frames;
+
+        impl<'de> Visitor<'de> for Frames {
+            type Value = Vec<Vec<u8>>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "at most {MAX_CLIP_FRAMES} capture frames")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                // NOT `with_capacity(seq.size_hint())`: the hint is the sender's
+                // claim, and reserving against it is the allocation this bound
+                // exists to refuse. It grows into what actually arrives.
+                let mut out: Vec<Vec<u8>> = Vec::new();
+                let mut total = 0usize;
+                while let Some(frame) = seq.next_element::<serde_bytes::ByteBuf>()? {
+                    if out.len() == MAX_CLIP_FRAMES {
+                        return Err(de::Error::custom(format!(
+                            "more than {MAX_CLIP_FRAMES} capture frames"
+                        )));
+                    }
+                    total = total.saturating_add(frame.len());
+                    if total > MAX_CLIP_BYTES {
+                        return Err(de::Error::custom(format!(
+                            "a clip over {MAX_CLIP_BYTES} bytes"
+                        )));
+                    }
+                    out.push(frame.into_vec());
+                }
+                Ok(out)
+            }
+        }
+
+        d.deserialize_seq(Frames)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -427,4 +515,68 @@ pub struct Localized {
 pub struct Translation {
     pub language: String,
     pub text: String,
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+
+    fn clip(frames: Vec<Vec<u8>>) -> Vec<u8> {
+        encode(&Clip { frames }).expect("a clip encodes")
+    }
+
+    /// The ordinary shape survives the codec unchanged — frames keep their order
+    /// and their bytes.
+    #[test]
+    fn a_capture_round_trips() {
+        let frames = vec![vec![0xFF, 0xD8, 0xFF], vec![], vec![1, 2, 3, 4]];
+        let back: Clip = decode(&clip(frames.clone())).expect("a clip decodes");
+        assert_eq!(back.frames, frames);
+    }
+
+    /// Each frame crosses as ONE CBOR byte string, so a capture costs its own
+    /// length rather than about twice it. Asserted as a size bound rather than by
+    /// reading the encoding: 1 KiB of frames in ~1 KiB of CBOR can only be byte
+    /// strings, and the integer-array form this replaced could not fit.
+    #[test]
+    fn a_frame_costs_its_own_length_on_the_wire() {
+        let frames = vec![vec![0x80u8; 1024]];
+        let encoded = clip(frames);
+        assert!(
+            encoded.len() < 1024 + 64,
+            "a 1 KiB frame encoded to {} bytes — not a byte string",
+            encoded.len()
+        );
+    }
+
+    /// The count bound, refused at the decoder rather than trusted upstream.
+    #[test]
+    fn more_frames_than_a_capture_can_hold_are_refused() {
+        let frames = vec![vec![7u8]; MAX_CLIP_FRAMES + 1];
+        assert!(decode::<Clip>(&clip(frames)).is_err());
+        // And the boundary itself still decodes, so the cap is a ceiling and not
+        // an off-by-one.
+        let frames = vec![vec![7u8]; MAX_CLIP_FRAMES];
+        assert!(decode::<Clip>(&clip(frames)).is_ok());
+    }
+
+    /// The aggregate bound. Split across several frames, because a sender that
+    /// wants the allocation will not put it in one.
+    #[test]
+    fn a_clip_over_the_ingress_budget_is_refused() {
+        let chunk = MAX_CLIP_BYTES / 4;
+        let frames = vec![vec![0u8; chunk]; 5];
+        assert!(decode::<Clip>(&clip(frames)).is_err());
+    }
+
+    /// An absent field is still an empty clip — the `serde(default)` discipline
+    /// the at-rest blobs rely on is not broken by taking over the codec.
+    #[test]
+    fn an_absent_frames_field_decodes_to_none() {
+        #[derive(Serialize)]
+        struct Empty {}
+        let bytes = encode(&Empty {}).expect("an empty map encodes");
+        let back: Clip = decode(&bytes).expect("an absent field defaults");
+        assert!(back.frames.is_empty());
+    }
 }

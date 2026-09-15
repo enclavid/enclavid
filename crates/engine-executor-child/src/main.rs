@@ -50,6 +50,10 @@ use engine_rpc::{
     BundleRef, ChildCallbacks, ChildCallbacksClient, ChildService, ChildServiceServerShared,
     ExecError,
 };
+// The inward tier only. This package deliberately does not carry safe-logger's
+// outward half — see `assert_contained!` above — so what a failure says stays in
+// a debug build's private sink and never reaches the host through this process.
+use safe_logger::debug;
 
 /// The `engine_rpc::ChildService` impl. `prime` is called once (stores the
 /// primed composition); `run` reads it. Under per-round each is called exactly
@@ -68,7 +72,10 @@ impl ChildService for Child {
         let component: Component = self
             .executor
             .deserialize_component_file(&bundle.cwasm_path)
-            .map_err(|e| ExecError::Run(format!("deserialize cwasm file: {e}")))?;
+            .map_err(|e| {
+                debug!("deserialize cwasm file: {e}");
+                ExecError::Unknown
+            })?;
         // Rebuild the composition-wide embedded registry from the bundle's
         // per-component catalogs (ref → data), same as the old in-worker prime.
         let mut builder = EmbeddedRegistry::builder();
@@ -79,10 +86,14 @@ impl ChildService for Child {
         let primed = self
             .executor
             .prime(&component, &bundle.embedded_imports, embedded)
-            .map_err(|e| ExecError::Run(format!("prime composition: {e}")))?;
-        self.primed
-            .set(primed)
-            .map_err(|_| ExecError::Run("engine-executor-child: prime called twice".into()))?;
+            .map_err(|e| {
+                debug!("prime composition: {e}");
+                ExecError::Unknown
+            })?;
+        self.primed.set(primed).map_err(|_| {
+            debug!("engine-executor-child: prime called twice");
+            ExecError::Unknown
+        })?;
         Ok(())
     }
 
@@ -93,10 +104,10 @@ impl ChildService for Child {
         props: Vec<(String, engine_rpc::Prop)>,
         callbacks: ChildCallbacksClient<Ciborium>,
     ) -> Result<engine_rpc::RunStatus, ExecError> {
-        let primed = self
-            .primed
-            .get()
-            .ok_or_else(|| ExecError::Run("engine-executor-child: run before prime".into()))?;
+        let primed = self.primed.get().ok_or_else(|| {
+            debug!("engine-executor-child: run before prime");
+            ExecError::Unknown
+        })?;
 
         // Map the wire `Prop` mirror to the bindgen `enclavid:host/types.prop`.
         let props: Vec<(String, Prop)> = props
@@ -123,12 +134,60 @@ impl ChildService for Child {
             .executor
             .run(primed, session_state, event, props, inputs)
             .await
-            // `{e:#}` walks the anyhow chain so a buried host-fn / trap cause
-            // reaches the supervisor's log, not just the top wasm line.
-            .map_err(|e| ExecError::Run(format!("{e:#}")))?;
+            .map_err(round_failure)?;
 
         Ok(to_wire_status(status))
     }
+}
+
+/// Marks a failure of the leg back to api, so the chain can be told apart from a
+/// policy trap after it has unwound the running wasm.
+///
+/// It has to unwind AS a `wasmtime::Error` — that is how a host function aborts
+/// the guest — and by the time it reaches [`round_failure`] the two are the same
+/// anyhow chain. Without this, the seal-key holder's own store being down reached
+/// api as the consumer's policy misbehaving, and the applicant was told so.
+///
+/// The upstream message is deliberately NOT carried: it is built on api's side,
+/// where the sizes it names are the policy's own state and disclosure lengths, and
+/// relaying it would put those byte counts back on a hop the host splices.
+#[derive(Debug)]
+struct CallbackFailed;
+
+impl std::fmt::Display for CallbackFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a callback to the orchestrator failed")
+    }
+}
+impl std::error::Error for CallbackFailed {}
+
+/// Turn a round's anyhow chain into the one bit api acts on: was it the POLICY.
+///
+/// The chain itself never crosses, because it interpolates text the policy
+/// supplied — a trap message carries the very key wasm passed to a host function.
+/// The round that traps would otherwise carry exactly the channel `Padded` closes
+/// on the round that succeeds, and a policy can trap deliberately and retry.
+///
+/// Almost everything reaching here IS the policy: a trap, out of fuel, out of
+/// memory, a host function refusing a key no catalog declared. The exception is a
+/// failed callback to api — the seal-key holder's own leg went away, and saying
+/// "the policy failed" about that would be attributing our outage to the consumer.
+/// It is recovered as a VALUE by `downcast`, never by reading a rendering, because
+/// by the time it arrives here it has unwound as an ordinary `wasmtime::Error`.
+///
+/// The rendering goes to `debug!`, and in the SHIPPED image that is nowhere: the
+/// child is built without the `debug` feature, so the site compiles out, and its
+/// stderr is `/dev/null` besides. That is the cost of not carrying it — and the
+/// alternative is not a `warn!` on this side either, since a per-round line on the
+/// outward tier is a channel to the host, who may be the policy's author too.
+fn round_failure(e: RunError) -> ExecError {
+    debug!("round failed: {e:#}");
+    if e.chain()
+        .any(|cause| cause.downcast_ref::<CallbackFailed>().is_some())
+    {
+        return ExecError::Unknown;
+    }
+    ExecError::Policy
 }
 
 /// `SessionListener` that forwards each round's `on_session_change` to the
@@ -147,10 +206,10 @@ impl SessionListener for RelayListener {
         let state = change.state.clone();
         let callbacks = self.callbacks.clone();
         Box::pin(async move {
-            callbacks
-                .session_change(state)
-                .await
-                .map_err(|e| RunError::msg(format!("session_change callback: {e}")))
+            callbacks.session_change(state).await.map_err(|e| {
+                debug!("session_change callback: {e}");
+                RunError::new(CallbackFailed)
+            })
         })
     }
 }
@@ -188,10 +247,10 @@ impl MediaStore for RelayMediaStore {
             if let Some(bytes) = self.memo.lock().unwrap().get(&hash).cloned() {
                 return Ok(Some(bytes));
             }
-            let loaded = callbacks
-                .media_load(hash)
-                .await
-                .map_err(|e| RunError::msg(format!("media_load callback: {e}")))?;
+            let loaded = callbacks.media_load(hash).await.map_err(|e| {
+                debug!("media_load callback: {e}");
+                RunError::new(CallbackFailed)
+            })?;
             let arc = loaded.map(Arc::new);
             if let Some(bytes) = &arc {
                 self.memo.lock().unwrap().insert(hash, bytes.clone());
@@ -257,5 +316,51 @@ async fn main() {
             safe_logger::debug!("engine-executor-child: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// The mapping that replaced a substring search.
+#[cfg(test)]
+mod round_failure_tests {
+    use super::*;
+
+    /// Whatever the policy did, and whatever string it chose while doing it, the
+    /// hop carries the same value. That is the property — not that the mapping is
+    /// right about the cause, but that the cause cannot steer what crosses.
+    #[test]
+    fn nothing_a_policy_chose_changes_what_crosses() {
+        let chosen = [
+            "all fuel consumed",
+            "embedded localized: no component declared key 'consent_reason' ...",
+            "embedded icon: no component declared key '<script>alert(1)</script>' ...",
+            "x' is not registered '",
+            "secret=MRZ<<DOE<<JOHN",
+            "",
+        ];
+        for text in chosen {
+            assert_eq!(
+                round_failure(RunError::msg(text)),
+                ExecError::Policy,
+                "{text:?} changed what crossed the hop"
+            );
+        }
+        // And a chain of any depth is still one value — the rendering never
+        // reaches the wire, so its length cannot either.
+        let deep = RunError::msg("innermost")
+            .context("resolving a localized ref")
+            .context("error while executing at wasm backtrace: 0x1234");
+        assert_eq!(round_failure(deep), ExecError::Policy);
+    }
+
+    /// api's own leg failing is NOT the policy misbehaving, and that is the one
+    /// distinction this mapping makes. It has to be recovered by `downcast`: a
+    /// callback failure unwinds as an ordinary `wasmtime::Error`, because that is
+    /// how a host function aborts the guest, so by here it is indistinguishable
+    /// from a trap by any other means.
+    #[test]
+    fn a_failed_callback_is_not_attributed_to_the_policy() {
+        let unwound = RunError::new(CallbackFailed)
+            .context("error while executing at wasm backtrace: 0x1234");
+        assert_eq!(round_failure(unwound), ExecError::Unknown);
     }
 }

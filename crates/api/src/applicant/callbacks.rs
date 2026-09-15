@@ -48,7 +48,7 @@
 
 use std::sync::Arc;
 
-use enclavid_boundary::{Asserted, Untrusted, reason};
+use enclavid_boundary::{Asserted, Exposed, Untrusted, reason};
 use engine_rpc::{CallbackError, CallbackServiceUntrusted, Padded};
 use hatch_client::SessionState;
 
@@ -74,10 +74,14 @@ pub(super) struct CallbackServer {
 impl CallbackServiceUntrusted for CallbackServer {
     type Scope = WorkerScope;
 
+    /// The hash arrives judged and the blob leaves vouched — this method is a
+    /// crossing in BOTH directions, which is why the media store owns both halves:
+    /// the gate that answers for the hash is the same predicate that makes the
+    /// reply's `AuthZ` true.
     async fn media_load(
         &self,
         hash: Untrusted<[u8; 32], Self::Scope>,
-    ) -> Result<Option<Vec<u8>>, CallbackError> {
+    ) -> Result<Exposed<Option<Vec<u8>>, ()>, CallbackError> {
         self.media_store.load(hash).await
     }
 

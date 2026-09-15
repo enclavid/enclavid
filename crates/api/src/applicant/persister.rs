@@ -229,10 +229,12 @@ impl SessionPersister {
         // Both round-scoped and owned by the same frame, so they expire together:
         // a `None` from either means this callback outlived its round.
         let consent = self.consented.upgrade().ok_or_else(|| {
-            CallbackError("persist: the round's consent outlived its context".into())
+            safe_logger::debug!("persist: the round's consent outlived its context");
+            CallbackError
         })?;
         let media = self.captures.upgrade().ok_or_else(|| {
-            CallbackError("persist: the round's captures outlived their context".into())
+            safe_logger::debug!("persist: the round's captures outlived their context");
+            CallbackError
         })?;
         let mut consented = consent.lock().await;
         let to_seal: &[Vec<DisplayField>] = consented.as_slice();
@@ -249,9 +251,10 @@ impl SessionPersister {
         // the round. `token` stays alive for the whole block, so the `&[u8]` the
         // seal builders below borrow from it outlives them.
         let token = self.applicant_session_token.upgrade().ok_or_else(|| {
-            CallbackError(
-                "persist: applicant token owner dropped (run outlived its context)".into(),
-            )
+            safe_logger::debug!(
+                "persist: applicant token owner dropped (run outlived its context)"
+            );
+            CallbackError
         })?;
         let token_bytes = token.expose_secret().as_slice();
 
@@ -350,8 +353,10 @@ impl SessionPersister {
                          not render"
                     ))
                     .vouch::<AuthN, _, _, _, _>(|bytes| -> Result<Vec<u8>, CallbackError> {
-                        seal_to_recipient(&bytes, &self.client_disclosure_pubkey)
-                            .map_err(|e| CallbackError(format!("disclosure seal failed: {e}")))
+                        seal_to_recipient(&bytes, &self.client_disclosure_pubkey).map_err(|e| {
+                            safe_logger::debug!("disclosure seal failed: {e}");
+                            CallbackError
+                        })
                     })?;
                 Ok(AppendDisclosure(sealed))
             })
@@ -381,7 +386,15 @@ impl SessionPersister {
                     // so the sealed ciphertext is fixed-size regardless of the
                     // `state` and `current_prompt` content (both policy-
                     // controlled). Errors if the encoding exceeds the frame.
-                    encode_padded(state).map_err(|e| CallbackError(format!("state pad: {e}")))
+                    //
+                    // That error NAMES the state's true byte count, which is the
+                    // one number this padding exists to hide — so it stays here
+                    // and `CallbackError` carries none of it back to the party
+                    // whose policy chose the size.
+                    encode_padded(state).map_err(|e| {
+                        safe_logger::debug!("state pad: {e}");
+                        CallbackError
+                    })
                 })?,
             applicant_session_token: token,
         })
@@ -506,7 +519,7 @@ impl SessionPersister {
                      (expected version {expected}): {e}",
                     self.session_id,
                 );
-                CallbackError(format!("persist failed: {e}"))
+                CallbackError
             })?
             .trust_unchecked::<AuthN, _>(reason!(
                 "version is a CAS token only; a lying host self-limits to DoS / stomp, no leak"
@@ -637,8 +650,10 @@ fn shuffle_to_envelope_bytes(
         session_id: session_id.to_string(),
         fields,
     };
-    let mut bytes = serde_json::to_vec(&envelope)
-        .map_err(|e| CallbackError(format!("disclosure JSON encode: {e}")))?;
+    let mut bytes = serde_json::to_vec(&envelope).map_err(|e| {
+        safe_logger::debug!("disclosure JSON encode: {e}");
+        CallbackError
+    })?;
     // Close the SIZE covert channel: pad to a constant plaintext frame so the
     // plaintext handed to age is a fixed length regardless of the policy-controlled
     // field values. An un-padded entry relays value byte-length ~1:1 into the
@@ -669,13 +684,18 @@ const SEALED_DISCLOSURE_PLAINTEXT_BYTES: usize = 256 * 1024;
 /// JSON parser (RFC 8259: a JSON text is `ws value ws`), so the consumer decrypts
 /// and parses the envelope unchanged — no wire-format change, no envelope-schema
 /// field, no SDK change. Errors if the envelope already exceeds the frame.
+///
+/// The overflow's own size goes to the inward log and no further. It is the number
+/// this padding exists to hide, and the party that would read it back off a failed
+/// callback is the party whose policy chose it.
 fn pad_envelope(bytes: &mut Vec<u8>) -> Result<(), CallbackError> {
     if bytes.len() > SEALED_DISCLOSURE_PLAINTEXT_BYTES {
-        return Err(CallbackError(format!(
+        safe_logger::debug!(
             "disclosure envelope is {} bytes, over the {SEALED_DISCLOSURE_PLAINTEXT_BYTES}-byte \
              sealed-disclosure frame",
             bytes.len(),
-        )));
+        );
+        return Err(CallbackError);
     }
     bytes.resize(SEALED_DISCLOSURE_PLAINTEXT_BYTES, b' ');
     Ok(())

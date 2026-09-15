@@ -23,8 +23,10 @@
 //! listener     ← outbound contract (SessionListener trait, SessionChange);
 //!                fired once per round, carrying state + captured media
 //! limits, sanitize  ← leaf utilities
+//! admission    ← what the supervisor's L1 may admit, and what a slot costs
 //! ```
 
+pub mod admission;
 mod embedded;
 pub mod limits;
 

@@ -60,3 +60,49 @@ pub const MAX_CLIENT_REF_LEN: usize = 128;
 /// growth in case a malicious consumer supplies a giant string.
 /// Enforced at session-create time, before any persistence.
 pub const MAX_REGISTRY_AUTH_LEN: usize = 8 * 1024;
+
+// ----- The derivations the worker's own bounds rest on -----
+//
+// The execution-worker enforces its own bounds on what arrives, because it
+// accepts any attested guest and cannot assume its caller ran this crate. Those
+// bounds were DERIVED from the caps above, and a derivation nobody checks drifts.
+// This is where the check belongs: the only place both numbers are visible.
+//
+// The direction matters. The worker's bound must be the LOOSER one — if this side
+// ever admits more than the worker will, the overrun stops being a 4xx the
+// applicant can act on and becomes a failed round.
+//
+// Written as const assertions rather than tests: a trust-contract derivation that
+// stopped holding should not compile, and both sides of every comparison are
+// constants, so there is nothing to run.
+
+/// Bytes the smallest possible JSON entry costs. What turns the config's byte cap
+/// into an entry count.
+///
+/// The MARGINAL cost of an entry is six (`,"k":0`); five is that minus the comma
+/// the last entry does not pay, so dividing by five can only over-count entries —
+/// which is the safe direction for a bound the worker's cap must cover.
+const MIN_JSON_BYTES_PER_ENTRY: usize = 5;
+
+const _: () = assert!(
+    MAX_MATCH_INPUT_SIZE / MIN_JSON_BYTES_PER_ENTRY <= engine_types::limits::MAX_PROPS,
+    "the config cap can yield more props entries than the worker will accept"
+);
+const _: () = assert!(
+    MAX_MATCH_INPUT_SIZE <= engine_types::limits::MAX_PROPS_BYTES,
+    "the config cap can yield more props bytes than the worker will accept"
+);
+const _: () = assert!(
+    APPLICANT_INPUT_BODY_LIMIT <= hatch_client::MAX_CLIP_BYTES,
+    "a legal applicant body can exceed the clip budget the worker will accept"
+);
+// The frame COUNT has no derivation to check, which is the gap it exists to close:
+// an empty multipart part costs only its framing, so a legal body admits frames by
+// the hundred thousand. This asserts the opposite direction from the three above —
+// that the cap still BINDS, i.e. is well below what a legal body could carry at
+// some tens of bytes a part. A count raised past that would be decoration.
+const _: () = assert!(
+    hatch_client::MAX_CLIP_FRAMES > 0
+        && hatch_client::MAX_CLIP_FRAMES * 32 < APPLICANT_INPUT_BODY_LIMIT,
+    "the frame count cap no longer binds — a legal body cannot reach it"
+);

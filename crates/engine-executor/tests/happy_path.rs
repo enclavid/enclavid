@@ -73,6 +73,14 @@ impl TestRunner {
     fn compose(&self, policy_wasm: &[u8], plugins: &[PluginInstance]) -> RunResult<Fused> {
         let composition = self.compiler.compose(policy_wasm, plugins)?;
         let cwasm = self.compiler.serialize_component(&composition.component)?;
+        // The POSITIVE case for the supervisor's L1 admission check, asserted
+        // against a real artifact where one already exists. Its own unit tests can
+        // only show what is refused; writing an accepted header by hand would test
+        // this tree's guess at wasmtime's format rather than wasmtime's.
+        assert!(
+            engine_executor::admission::is_precompiled_component(&cwasm),
+            "a freshly serialized composition must pass L1 admission"
+        );
         let component = self.executor.deserialize_component(&cwasm)?;
         Ok(Fused {
             component,

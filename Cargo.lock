@@ -1569,6 +1569,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "enclavid-attestation",
+ "enclavid-boundary",
  "enclavid-ra-tls",
  "engine-compiler",
  "engine-rpc",

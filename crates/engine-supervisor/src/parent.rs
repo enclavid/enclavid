@@ -144,6 +144,96 @@ pub fn assert_ptrace_hardened() {
 #[cfg(not(all(target_os = "linux", feature = "guest-hardening")))]
 pub fn assert_ptrace_hardened() {}
 
+/// Boot-time assertion that this process can actually open the `needed`
+/// descriptors its own bounds are written against, raising the soft limit toward
+/// the hard one to get there.
+///
+/// A supervisor's two caps — how many children may run at once, and how many
+/// cached artifacts it may hold open — are counts of DESCRIPTORS, and a cap the
+/// descriptor table cannot back is not a cap: the worker reaches its own
+/// configured peak and starts failing `accept`, `socketpair` and `memfd_create`
+/// instead of reaching it. That failure is whole-worker and indiscriminate, which
+/// is precisely the blast radius the per-request child split exists to bound, so
+/// it is worth refusing to boot over rather than discovering under load.
+///
+/// Unlike [`assert_ptrace_hardened`] this is enforced in every build. The ptrace
+/// floor is a kernel posture a developer's machine cannot be asked to adopt; a
+/// descriptor limit is per-process, raisable by the process itself, and a
+/// developer's machine is exactly where an undersized one shows up first — macOS
+/// ships a 256 soft limit against a hard limit in the thousands.
+///
+/// Raising the SOFT limit is this process configuring itself, not weakening
+/// anything: the hard limit is the administrator's ceiling and is never touched.
+/// If the hard limit is genuinely below `needed`, the caps this build was compiled
+/// with cannot be honoured on this machine and it stops.
+///
+/// Both outcomes go to the log device for the same reason the ptrace floor's do —
+/// on a guest, stderr is `/dev/null` and a panic payload never leaves. Both numbers
+/// are safe to disclose because the host supplied what they are made of: the limit
+/// is the one it provisioned, and `needed` is this build's constants plus a term
+/// the caller derived from the host's own child bound.
+pub fn assert_fd_budget(needed: u64) {
+    use safe_logger::{error, info, reason, safe};
+
+    // SAFETY: `getrlimit`/`setrlimit` over a stack-local `rlimit`, the standard
+    // POSIX shape. No pointers outlive the call and neither can fail in a way that
+    // leaves the struct partially written — a non-zero return means untouched.
+    let mut lim = unsafe {
+        let mut lim: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            let e = std::io::Error::last_os_error();
+            error!(
+                "engine-supervisor: cannot read RLIMIT_NOFILE, so the descriptor budget this \
+                 build's caps are written against cannot be checked. Stopping.",
+                reason!("a constant, emitted once at boot before any request exists"),
+            );
+            panic!("engine-supervisor: getrlimit(RLIMIT_NOFILE): {e}");
+        }
+        lim
+    };
+
+    // Raise the soft limit toward the hard one only when it is short — an
+    // already-adequate limit is left exactly as the host set it.
+    if (lim.rlim_cur as u64) < needed && lim.rlim_cur < lim.rlim_max {
+        let want = std::cmp::min(needed as libc::rlim_t, lim.rlim_max);
+        let raised = libc::rlimit {
+            rlim_cur: want,
+            rlim_max: lim.rlim_max,
+        };
+        // SAFETY: as above — a stack-local `rlimit` passed by pointer for the
+        // duration of the call.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
+            lim.rlim_cur = want;
+        }
+    }
+
+    let available = lim.rlim_cur as u64;
+    if available < needed {
+        error!(
+            "engine-supervisor: {} file descriptors available, {} needed for this build's \
+             cache and child bounds — the worker would fail to accept connections and spawn \
+             children at its own configured peak. Raise the host's RLIMIT_NOFILE hard limit. \
+             Stopping.",
+            safe(&available, reason!("a limit the host itself provisioned")),
+            safe(
+                &needed,
+                reason!(
+                    "this build's constants plus a term derived from the child bound \
+                     the host itself set"
+                )
+            ),
+            reason!("a constant, emitted once at boot before any request exists"),
+        );
+        panic!("engine-supervisor: RLIMIT_NOFILE {available} < required {needed}");
+    }
+    info!(
+        "engine-supervisor: {} file descriptors available (>= required {})",
+        safe(&available, reason!("a limit the host itself provisioned")),
+        safe(&needed, reason!("a constant of the measured build")),
+        reason!("a constant, emitted once at boot before any request exists"),
+    );
+}
+
 /// A failure of the SUPERVISOR itself — distinct from the domain call's own error
 /// (which the caller's closure returns and maps). Kept separate so a per-request
 /// wall-clock deadline (a real availability control) is never confused with a

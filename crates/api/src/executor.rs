@@ -43,12 +43,16 @@ type ToWorker<T> = Exposed<T, (AuthN, AuthZ, Covert)>;
 /// in one place (grep `outbound_round_state(`) instead of being restated at each
 /// call, where they would be the same two sentences forever.
 ///
-/// `AuthN` and `AuthZ` are closed HERE because on this leg they are closed once,
-/// at the handshake, identically for every value that ever crosses — the dial
-/// pins ONE measurement, so there is no per-call recipient decision to make.
-/// `Covert` is the only axis that differs per value, and it is discharged by
-/// doing the work: the peel's codomain IS the wire type, so a caller cannot get a
-/// `RunRequest` field out of this without the padding having happened.
+/// `AuthN` is IDENTIFIED and `AuthZ` is NO-SECRET, and the two rest on different
+/// facts even though both are settled once for the whole leg. `AuthN`'s is the
+/// dial: one compile-time-pinned measurement, checked at the handshake. `AuthZ`'s
+/// is what this VALUE is — the peer's own prior output, which it wrote on the
+/// previous round's `session_change` and is now being handed back.
+///
+/// `Covert` is the only axis that differs per value, and it is the only one
+/// discharged by doing the work rather than by naming a fact: the peel's codomain
+/// IS the wire type, so a caller cannot get a `RunRequest` field out of this
+/// without the padding having happened.
 ///
 /// The wrapper is RETURNED rather than unwrapped here, and that is what keeps it
 /// from being decoration. `ExecutorLeg::run` demands `Exposed<RunRequest, ()>`,
@@ -61,10 +65,13 @@ pub(crate) fn outbound_round_state(
     let framed: ToWorker<&SessionState> = Exposed::new(state);
     Ok(framed
         .vouch_unchecked::<AuthN, _>(reason!(
-            "the round's own prior state, returning to the peer that authored it"
+            "identified: this leg dials ONE compile-time-pinned measurement, and the \
+             handshake fails before a byte moves if the peer is not it"
         ))
         .vouch_unchecked::<AuthZ, _>(reason!(
-            "one pinned measurement per leg; no per-call recipient choice exists"
+            "no-secret: this is the peer's OWN prior output coming back — it authored \
+             these bytes on the previous round's session_change, so the release \
+             hands it nothing it did not already hold"
         ))
         .vouch::<Covert, _, _, _, _>(Padded::seal)?)
 }
@@ -85,9 +92,10 @@ impl Executor {
     /// fails rather than waits: how long to wait for a peer is the host's
     /// decision, and the health port is already telling it which leg is down.
     fn client(&self) -> Result<std::sync::Arc<ExecutorLeg>, ExecError> {
-        self.leg.get().ok_or_else(|| {
-            ExecError::Run("the execution-worker leg is down; api is reporting it".into())
-        })
+        // api's OWN error, built here and never crossing the wire — which is why
+        // the contract needs no variant for it. Whatever this side must tell apart
+        // it can tell apart at the point it knows.
+        self.leg.get().ok_or(ExecError::Unknown)
     }
 
     /// Cache-only attempt: try to run from the worker's L1. `Ran` on a hit;

@@ -49,6 +49,10 @@ blake3 = "1"
 # orchestrator over the SAME remoc connection — KEYLESS (no tee_seal_key ever
 # crosses in). ---
 engine-rpc = { path = "../engine-rpc", default-features = false, features = ["execute"], optional = true }
+# The concern vocabulary. The supervisor names its own scope on what api sends it
+# — it accepts any attested guest, so it has something open to say — and reaches
+# the words directly rather than through whoever happens to re-export them.
+enclavid-boundary = { path = "../boundary", optional = true }
 # Shared disposable-child process-isolation plumbing (spawn + concurrency bound +
 # round deadline + reap); the compile-worker rides the same crate.
 engine-supervisor = { path = "../engine-supervisor", optional = true }
@@ -112,6 +116,7 @@ worker = [
     # this rides the worker feature rather than the dependency.
     "safe-logger/device",
     "dep:engine-rpc",
+    "dep:enclavid-boundary",
     "dep:engine-supervisor",
     "dep:remoc",
     "dep:tokio",

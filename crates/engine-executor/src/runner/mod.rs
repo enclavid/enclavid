@@ -84,39 +84,57 @@ impl Executor {
         })
     }
 
-    /// Reconstruct a component from `cwasm` bytes produced by the compiler's
-    /// `serialize_component`. Two facts make the `unsafe` deserialize
-    /// sound for the L2 cache:
+    /// Reconstruct a component from `cwasm` bytes in memory.
     ///
-    ///   * **Provenance** — the caller only feeds bytes it AEAD-opened
-    ///     under a TEE-only key, so the untrusted host cannot substitute
-    ///     crafted bytes for the deserializer to interpret.
-    ///   * **Version** — wasmtime embeds a compatibility fingerprint
-    ///     (version + `Config` + target) and this returns `Err` on
-    ///     mismatch instead of executing incompatible code, so a
-    ///     toolchain bump degrades to a cache miss, not undefined
-    ///     behaviour.
+    /// TEST-ONLY in this tree — the shipped path is
+    /// [`deserialize_component_file`](Self::deserialize_component_file), because a
+    /// child MMAPs an inherited fd rather than receiving the bytes. The safety
+    /// argument is that one's; see it.
     pub fn deserialize_component(&self, cwasm: &[u8]) -> wasmtime::Result<Component> {
-        // SAFETY: bytes are TEE-sealed (trusted provenance) and
-        // wasmtime's own header check rejects an incompatible build —
-        // see the doc comment above.
+        // SAFETY: see `deserialize_component_file`. Reached only from tests, which
+        // feed bytes this workspace just compiled.
         unsafe { Component::deserialize(&self.engine, cwasm) }
     }
 
     /// Reconstruct a component by MMAP-ing a cwasm FILE (wasmtime
-    /// `Component::deserialize_file`) instead of copying a byte slice — the
-    /// Stage-A delivery path. The file holds the SAME TEE-sealed-then-opened
-    /// cwasm, so the same provenance + version-header safety argument as
-    /// [`deserialize_component`](Self::deserialize_component) applies. The mmap
+    /// `Component::deserialize_file`) instead of copying a byte slice. The mmap
     /// means the ~7 MiB never crosses the child hop as a copy, and several
     /// children mapping the same file share its read-only code pages.
+    ///
+    /// ## What makes the `unsafe` acceptable, and what it does not
+    ///
+    /// Not provenance. This used to read "the caller only feeds bytes it
+    /// AEAD-opened under a TEE-only key", which is a claim about WHO the caller is
+    /// — and nothing establishes it. The bytes arrive on the execute leg from a
+    /// peer the listener accepts under `AcceptAny`: a genuine SNP guest, not
+    /// identifiably api. No seal is opened on this side at all.
+    ///
+    /// What is true, in the order it applies:
+    ///
+    ///   * **Shape** — the supervisor refuses a bundle whose header is not a
+    ///     wasmtime-serialized component before it ever becomes a file
+    ///     (`engine_executor::admission`).
+    ///   * **Stability** — the file is a write-sealed `memfd` the supervisor
+    ///     created and no child can grow, shrink or write, so what is verified is
+    ///     what stays mapped.
+    ///   * **Version** — wasmtime embeds a compatibility fingerprint (version +
+    ///     `Config` + target) and returns `Err` on a mismatch rather than
+    ///     executing incompatible code.
+    ///   * **Containment** — this runs in a disposable per-round child behind an
+    ///     address-space boundary, an egress seccomp filter and a wall-clock
+    ///     deadline, so undefined behaviour here reaches one round's plaintext and
+    ///     no further.
+    ///
+    /// None of that verifies the body. A caller that can put bytes past the header
+    /// check gets them deserialized, and the containment above is what bounds that
+    /// — an accepted risk named where it is taken, not one argued away.
     pub fn deserialize_component_file(
         &self,
         path: impl AsRef<std::path::Path>,
     ) -> wasmtime::Result<Component> {
-        // SAFETY: same as `deserialize_component` — the mapped file is
-        // TEE-sealed provenance and wasmtime's header check rejects an
-        // incompatible build.
+        // SAFETY: shape-checked at admission, mapped from a write-sealed memfd,
+        // version-checked by wasmtime, and contained in a disposable child — see
+        // the doc comment above, which says plainly what is NOT checked.
         unsafe { Component::deserialize_file(&self.engine, path) }
     }
 

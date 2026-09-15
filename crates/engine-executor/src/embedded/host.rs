@@ -98,6 +98,12 @@ impl crate::enclavid::host::types::HostDisclosureFieldRef for HostState {
 /// Trap for a key no catalog (merged) or the bound catalog (strict)
 /// declared under this kind. Shared by the merged host funcs above and
 /// the strict twins in `runner`.
+///
+/// The `key` is interpolated, and it stays in THIS process: wasm chose that
+/// string, so it could be a function of the applicant's data, and nothing carries
+/// this message off the guest. `engine_rpc::ExecError` has one value for every way
+/// a policy can fail, precisely so that no part of this sentence reaches a hop the
+/// host counts.
 pub fn undeclared_trap<K: RefKind>(key: &str) -> wasmtime::Error {
     wasmtime::Error::msg(format!(
         "embedded {kind}: no component declared key '{key}' \

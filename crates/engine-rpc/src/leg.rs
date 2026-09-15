@@ -49,9 +49,7 @@ use remoc::rtc::ServerShared;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[cfg(feature = "execute")]
-use crate::execute::{
-    ExecutorService, ExecutorServiceClient, ExecutorServiceServerShared, RunOutcome,
-};
+use crate::execute::{ExecutorServiceClient, ExecutorServiceServerShared, RunOutcome};
 
 /// Concurrent callback invocations one run's server handles. `media_load` /
 /// `session_change` are serialized by the round in practice (one round at a
@@ -99,15 +97,21 @@ impl std::error::Error for LegError {}
 /// connection up at all, and naming it is exactly what no crate outside this one
 /// may do any more. `service` is per-connection, so a caller that wants to know
 /// who is asking builds one per accept and passes it in.
+///
+/// Takes the UNTRUSTED view, never the raw trait — the same demand
+/// [`serve_compiler`] makes, and for the same reason. This end runs `AcceptAny`,
+/// so what arrives arrives from a genuine SNP guest and not identifiably from api;
+/// a role serving it has something open to name whether or not it feels like it.
 #[cfg(feature = "execute")]
 pub async fn serve_executor<S, R, W>(
     read: R,
     write: W,
-    service: Arc<S>,
+    service: S,
     concurrency: usize,
 ) -> Result<(), LegError>
 where
-    S: ExecutorService + Send + Sync + 'static,
+    S: crate::untrusted_execute::ExecutorServiceUntrusted + Send + Sync + 'static,
+    S::Scope: Send,
     R: AsyncRead + Send + Sync + Unpin + 'static,
     W: AsyncWrite + Send + Sync + Unpin + 'static,
 {
@@ -119,7 +123,10 @@ where
             .map_err(|_| LegError::Rpc)?;
     tokio::spawn(conn);
 
-    let (server, client) = ExecutorServiceServerShared::<_, Ciborium>::new(service, concurrency);
+    let (server, client) = ExecutorServiceServerShared::<_, Ciborium>::new(
+        Arc::new(crate::adapter::Untrusting(service)),
+        concurrency,
+    );
     tx.send(client).await.map_err(|_| LegError::Clients)?;
     server.serve(true).await.map_err(|_| LegError::Serve)?;
     Ok(())
@@ -178,11 +185,12 @@ mod doors {
     use std::sync::Arc;
 
     use super::{CALLBACK_CONCURRENCY, ExecutorLeg, RunOutcome};
+    use crate::adapter::Untrusting;
     use crate::execute::{
         CallbackServiceClient, CallbackServiceServerShared, ExecError, ExecutorService, RunReply,
         RunRequest, RunStatus,
     };
-    use crate::untrusted::{CallbackServiceUntrusted, Untrusting};
+    use crate::untrusted_execute::CallbackServiceUntrusted;
     use enclavid_boundary::{Exposed, Untrusted};
     use remoc::codec::Ciborium;
     use remoc::rtc::ServerShared;
@@ -246,9 +254,15 @@ mod doors {
         /// The post-miss attempt, with the bundle the caller resolved under its own
         /// key. Unframes the reply, so the caller never handles a raw frame.
         ///
-        /// `bundle` is deliberately bare. Its `cwasm` is the one value on this hop
-        /// with no honest discharge available — nobody inspects those bytes — and
-        /// wrapping it would invite a written answer where there is none.
+        /// `bundle` is deliberately bare ON THIS SIDE. The caller resolved it under
+        /// its own key, so releasing it raises no question the round's own mint has
+        /// not already answered for the leg.
+        ///
+        /// The RECEIVING side is where it earns a wrapper, and it has one: the
+        /// worker takes `Untrusted<CompiledBundle, _>` separately from the request,
+        /// because the bytes it is about to file and later MMAP are the one value on
+        /// this hop for which no discharge kind fits. That answer belongs to the
+        /// side that acts on them, not to the side that forwards them.
         pub async fn run_with_bundle<C>(
             &self,
             req: Exposed<RunRequest, ()>,
@@ -303,7 +317,7 @@ where
     tokio::spawn(conn);
 
     let (server, client) = CompilerServiceServerShared::<_, Ciborium>::new(
-        Arc::new(crate::untrusted_compile::Judging(service)),
+        Arc::new(crate::adapter::Untrusting(service)),
         concurrency,
     );
     tx.send(client).await.map_err(|_| LegError::Clients)?;

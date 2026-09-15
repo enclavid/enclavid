@@ -21,7 +21,9 @@ use hatch_client::{
 };
 // The run wire mirrors: props api builds + ships, the outcome + error it gets
 // back from the execution-worker.
-use engine_rpc::{CompiledBundle, ExecError, Prop, RunOutcome, RunRequest};
+use engine_rpc::{
+    CompatToken, CompiledBundle, CompositionKey, ExecError, Prop, RunOutcome, RunRequest,
+};
 
 use crate::cwasm_cache;
 use crate::error::ApiError;
@@ -119,7 +121,7 @@ pub(super) struct SessionRunCtx {
     /// Composition cache key — names the fused component in the execution-worker's
     /// L1 cache, and (with the worker's `compat_token`) keys the orchestrator's
     /// L2. Passed to the worker on the run; named back in its cache-miss reply.
-    composition_key: String,
+    composition_key: CompositionKey,
     /// This session's metadata — kept for the round so `resolve_bundle` can
     /// cold-compile (OCI pull + fuse) on an L2 miss.
     metadata: SessionMetadata,
@@ -227,10 +229,19 @@ impl SessionRunCtx {
             .run(req, callbacks.clone())
             .await
             .map_err(|e| classify_run_error(&session_id, &e))?
+            // CONTAINED, and the reason has to cover BOTH arms — an earlier version
+            // spoke only about the miss, while the hit arm carried a whole
+            // policy-authored prompt through the same peel. A cache miss and a
+            // cache hit differ in whether the worker's L1 happened to hold the
+            // composition, which is no reason for two different judgements.
             .trust_unchecked::<Asserted, _>(reason!(
-                "bounded: a cache miss can only name a slot inside the composition \
-                 namespace api itself computed, so a fabricated token costs a \
-                 recompile and never yields another composition's code"
+                "contained: a miss names only a slot inside the composition namespace \
+                 api itself computed, so a fabricated token costs a recompile and \
+                 never yields another composition's code; a hit carries a prompt that \
+                 is shown to the applicant, its sole auditor. The one thing api seals \
+                 from it is the session's terminal status, and finalize reads only \
+                 the discriminant — a fixed enum, one bit. The round's DISCLOSURE \
+                 comes from api's own copy, never from this"
             ))
             .into_inner()
         {
@@ -266,8 +277,10 @@ impl SessionRunCtx {
                     .map_err(|e| classify_run_error(&session_id, &e))?
                     .trust_unchecked::<Asserted, _>(reason!(
                         "contained: shown to the applicant, who is the sole auditor \
-                         of what they see, and nothing api seals derives from it — \
-                         the round's disclosure comes from api's own copy"
+                         of what they see. The one thing api seals from it is the \
+                         session's terminal status, and finalize reads only the \
+                         discriminant — a fixed enum, one bit. The round's DISCLOSURE \
+                         comes from api's own copy, never from this"
                     ))
                     .into_inner()
             }
@@ -280,51 +293,45 @@ impl SessionRunCtx {
     }
 }
 
-/// Classify the [`ExecError::Run`] coming back from `executor.run` into an
-/// HTTP-facing status → 500, with ONE well-known exception worth a structured 422:
-/// an unregistered text-ref — policy pushed without the matching `manifest.json`
-/// layer. Detected by substring against the engine's `ensure_registered` message
-/// (`"... text-ref '<key>' is not registered ..."`), relayed verbatim by the
-/// worker. Fragile by nature; if the engine rewords the trap this degrades silently
-/// to 500 — an accepted trade-off against typed-error plumbing through the wasm
-/// trap. (Config-resolution failures no longer reach here: the orchestrator
-/// resolves the bundle itself and maps a resolution status verbatim in
-/// `SessionRunCtx::run`.)
+/// Map a worker's [`ExecError`] to an HTTP-facing answer — a two-way branch over a
+/// two-value enum.
+///
+/// It used to be a SUBSTRING SEARCH. The error was a `String` built with
+/// `format!("{e:#}")` over the trap chain; this function looked for
+/// "is not registered" and took whatever sat between the last two quotes before
+/// it, then put that in a 422 body. Its own doc called it "fragile by nature" —
+/// and it was worse than fragile: no engine error said "is not registered" (the
+/// only producer was deleted in `7ccdbd9` and the search was left behind), so an
+/// honest failure matched nothing, and the one input that DID match was a policy
+/// putting the marker and quotes inside its own key. A scraper nobody could reach
+/// except by injecting into it.
+///
+/// What the applicant is told, and why it is only this much. A 4xx says the fault
+/// is not theirs — they can stop retrying and report it — and that is the whole of
+/// what this side is willing to attribute. WHAT the policy did is authored by the
+/// consumer's own wasm, so a field carrying it would be the policy choosing bytes
+/// on a wire; WHICH ref it failed to declare is a string wasm picked and could be
+/// a function of the applicant's own data.
+///
+/// The consumer, who could act on a diagnosis, deliberately gets none of this
+/// here: a failure reason routed to them is an applicant-derived value reaching
+/// the party that must not receive one outside a consent screen. That is its own
+/// design and not a rider on an error mapping.
 fn classify_run_error(session_id: &str, e: &ExecError) -> ApiError {
+    safe_logger::debug!("session_run_ctx: executor.run failed for {session_id}: {e}");
     match e {
-        ExecError::Run(chain) => {
-            safe_logger::debug!("session_run_ctx: executor.run failed for {session_id}: {chain}");
-            if let Some(missing) = extract_unregistered_text_ref(chain) {
-                return ApiError::with_body(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    serde_json::json!({
-                        "error": "policy_uses_unregistered_text_ref",
-                        "missing": missing,
-                        "hint": "policy references a text-ref that isn't declared in its \
-                                 manifest. Ensure `manifest.json` lists the ref under \
-                                 `disclosure_fields` or `localized`, and that the manifest \
-                                 was pushed (run `enclavid policy push` with `manifest.json` \
-                                 next to the artifact, or `--manifest <path>`).",
-                    }),
-                );
-            }
-            ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR)
-        }
+        // A fixed body. Nothing in it varies, so nothing in it is a channel.
+        ExecError::Policy => ApiError::with_body(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({
+                "error": "policy_failed",
+                "hint": "this session's verification policy failed during a round. \
+                         Nothing the applicant did caused it, and retrying will not \
+                         clear it; the policy's author has to fix and re-push it.",
+            }),
+        ),
+        ExecError::Unknown => ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR),
     }
-}
-
-/// Pull `<key>` out of an `... text-ref '<key>' is not registered ...`
-/// message embedded anywhere in the error chain. Walks the marker
-/// substring; isolates the most-recent `'<key>'` pair preceding it.
-/// Returns None when the marker isn't present — caller falls back to
-/// generic 500.
-fn extract_unregistered_text_ref(msg: &str) -> Option<String> {
-    let marker_pos = msg.find("is not registered")?;
-    let prefix = &msg[..marker_pos];
-    let close = prefix.rfind('\'')?;
-    let before = &prefix[..close];
-    let open = before.rfind('\'')?;
-    Some(prefix[open + 1..close].to_string())
 }
 
 impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
@@ -521,7 +528,7 @@ persist; same containment as above.
 fn session_composition_key(
     session_id: &str,
     metadata: &SessionMetadata,
-) -> Result<String, StatusCode> {
+) -> Result<CompositionKey, StatusCode> {
     let client = metadata.client.as_ref().ok_or_else(|| {
         safe_logger::debug!("session_composition_key: metadata.client missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -544,8 +551,8 @@ fn session_composition_key(
 /// re-reads L2 or double-compiles (idempotent write), acceptable and rare.
 pub(super) async fn resolve_bundle(
     state: &AppState,
-    composition_key: &str,
-    compat_token: &str,
+    composition_key: &CompositionKey,
+    compat_token: &CompatToken,
     session_id: &str,
     metadata: &SessionMetadata,
 ) -> Result<CompiledBundle, StatusCode> {
@@ -704,7 +711,7 @@ fn composition_key(
     policy_key: Option<&Key>,
     registry_auth: &HashMap<String, Vec<u8>>,
     plugins: &[PluginPin],
-) -> String {
+) -> CompositionKey {
     let mut h = Sha256::new();
     hash_artifact(
         &mut h,
@@ -723,7 +730,10 @@ fn composition_key(
             policy_pull::bearer_for_ref(registry_auth, &p.impl_ref),
         );
     }
-    hex::encode(h.finalize())
+    // Handed to the type as a DIGEST, not as a rendering of one. There is no
+    // fallible constructor to get this wrong with: what leaves here has the shape
+    // the worker's decoder demands because it could not have had another.
+    CompositionKey::from_digest(h.finalize().into())
 }
 
 /// Feed one artifact's `(ref, download authority, decrypt authority)` into the

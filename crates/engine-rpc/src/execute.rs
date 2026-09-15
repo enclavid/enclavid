@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use hatch_client::{Decision, Event, Prompt, SessionState};
 
+use crate::keys::{CompatToken, CompositionKey};
 use crate::padded::Padded;
 use crate::{BundleRef, CompiledBundle};
 
@@ -56,70 +57,219 @@ pub enum RunStatus {
     Completed(Decision),
 }
 
-/// A run failure — an opaque trap / instantiate / host-fn / transport / bundle-
-/// materialize failure, mapped to 500 (with the text-ref 422 substring exception
-/// the orchestrator still applies). Bundle RESOLUTION no longer crosses this
-/// boundary: the orchestrator resolves the compiled bundle itself on a
-/// [`RunOutcome::CacheMiss`] and maps any config-resolution status (e.g. 410 GONE)
-/// verbatim on its own side, so there is no separate config-error wire variant.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A run failure, in the ONE distinction the applicant's screen turns on.
+///
+/// It used to be `Run(String)`, built as `format!("{e:#}")` over the entire anyhow
+/// chain. That chain interpolates text adversary-authored wasm supplied — a policy
+/// calling `i18n::get(k)` with an undeclared `k` put `k` verbatim into the message
+/// — so the POLICY chose the reply's byte count, on a hop a host process splices
+/// and counts. The framing that closes that channel on a round which SUCCEEDS did
+/// not cover the round that traps, and a policy can trap deliberately and retry.
+///
+/// Two values, and the number is the design rather than an accident of how many
+/// things can go wrong. Every additional variant is a value the policy can SELECT
+/// by choosing how to fail, so the cardinality here should be exactly what the
+/// receiving side acts on — and api acts on one thing: whether to tell the
+/// applicant that the fault is not theirs.
+///
+/// **The bit is CHEAP, and an earlier draft of this doc said otherwise.** It
+/// claimed "trapping yields `Policy` and hanging yields `Unknown`, so the channel
+/// runs at a bit per two minutes". A policy reaches `Unknown` without hanging: an
+/// oversized resolved prompt overflows the state frame during `session_change`,
+/// which fires BEFORE the reply is built, and a failed callback is `Unknown` by
+/// design. So a policy picks either value in one ordinary round.
+///
+/// What that costs, stated properly: a policy already chooses whether a round
+/// fails at all, which is one bit nothing can take away. This variant makes the
+/// failing case two-valued, so the round carries `log2(3)` rather than `log2(2)` —
+/// about half a bit more. It is bought deliberately, and what it buys is the
+/// applicant being told the fault is not theirs instead of staring at a 500.
+///
+/// Deliberately carries NO diagnostic detail, in either variant, and that is a
+/// real cost rather than a free win. What went wrong is authored by the consumer's
+/// own wasm, and the roles that could describe it speak only INWARD — a worker's
+/// per-round `warn!` would be a channel to the host, which is the same party as
+/// the policy's author when they are the same party. Boot-time reporting is not:
+/// it names constants of the measured image, before any applicant exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecError {
-    Run(String),
+    /// The CONSUMER's policy failed where this side can SEE that it was the
+    /// policy: it trapped, exhausted its fuel or memory, or asked the host for
+    /// something it never declared.
+    ///
+    /// api turns this into a 4xx so the applicant is told the fault is not theirs
+    /// and can report it. Attributing it is safe in the direction that matters:
+    /// this side does not say WHAT the policy did, only that the policy is what
+    /// failed.
+    Policy,
+    /// Something else failed and this side cannot attribute it: a bundle that
+    /// would not load, a spawn that did not happen, a leg that went away, a frame
+    /// that did not fit.
+    ///
+    /// It is the honest answer for several failures a policy CAN cause — hanging
+    /// past the round deadline, and overflowing a frame with an oversized prompt —
+    /// because the mechanism that catches each of those catches ours the same way
+    /// and this side cannot tell them apart. Attributing them to the policy would
+    /// be a guess, and a guess that reads as an accusation on the applicant's
+    /// screen. Capping the resolved prompt where the policy PRODUCES it would move
+    /// that case into [`Policy`](ExecError::Policy) honestly; it is not done.
+    ///
+    /// Named for what it is rather than for a cause it does not know. api answers
+    /// 5xx.
+    Unknown,
 }
 
 impl std::fmt::Display for ExecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExecError::Run(m) => write!(f, "run failed: {m}"),
+            ExecError::Policy => write!(f, "the policy failed"),
+            ExecError::Unknown => write!(f, "the round failed"),
         }
     }
 }
 impl std::error::Error for ExecError {}
 impl From<remoc::rtc::CallError> for ExecError {
-    fn from(err: remoc::rtc::CallError) -> Self {
-        ExecError::Run(format!("run rpc failed: {err}"))
+    fn from(_: remoc::rtc::CallError) -> Self {
+        ExecError::Unknown
     }
 }
 
-/// A callback failure or an absorbed RPC transport error.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CallbackError(pub String);
+/// A callback failed. That is the whole of it, and the absence of a payload is the
+/// design.
+///
+/// It used to be `CallbackError(pub String)`, and it travelled api → worker over
+/// the same multiplexed connection the run does — so the same host process spliced
+/// and counted it. api's producers interpolated SIZES into that string:
+/// `persister`'s pad failure named the encoded `SessionState`'s actual byte count,
+/// and its envelope failure named the disclosure's. Those are the very numbers
+/// [`Padded`] and the seal padding exist to keep off a wire. A policy that could
+/// make a `session_change` fail therefore read its own state's true length back out
+/// of the traffic — the channel reopened on the failure path, exactly as it had on
+/// the round-reply path before [`ExecError`] was fixed.
+///
+/// Carries nothing now, for the same reason that one carries two values: the
+/// cardinality of a wire error should be what the RECEIVER acts on, and here that
+/// is nothing at all. Both of the child's relays map any callback failure to the
+/// same thing (see `round_failure` in `engine-executor-child`), so every byte of
+/// the old string was a byte no reader used and a host could count.
+///
+/// The detail stays with the producer, on its own inward log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallbackError;
 
 impl std::fmt::Display for CallbackError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "callback failed: {}", self.0)
+        f.write_str("the callback failed")
     }
 }
 impl std::error::Error for CallbackError {}
 impl From<remoc::rtc::CallError> for CallbackError {
-    fn from(err: remoc::rtc::CallError) -> Self {
-        CallbackError(format!("callback rpc failed: {err}"))
+    fn from(_: remoc::rtc::CallError) -> Self {
+        CallbackError
     }
 }
 
-/// A callback failure surfacing inside a run bubbles up as an opaque run failure
-/// — the worker's `?` on a mid-run media/state callback converts here.
+/// A callback failure, as this contract's own error.
+///
+/// `Unknown` and not `Policy`: what failed is the leg back to the seal-key holder,
+/// so the policy is not what this side would be attributing it to. The callback's
+/// own text is dropped rather than relayed — a string built on the far side of a
+/// keyless process has no business setting this reply's byte count, and api's
+/// producers put SIZES in it.
+///
+/// The SHIPPED path does not come through here. A child's relay turns a
+/// `CallbackError` into a `wasmtime::Error` so it unwinds the running policy, and
+/// the child's own mapping is what picks the variant — see `round_failure` there.
+/// This impl serves the in-crate test mock, and states which variant a callback
+/// failure is, which that mapping matches.
 impl From<CallbackError> for ExecError {
-    fn from(err: CallbackError) -> Self {
-        ExecError::Run(format!("callback during run: {}", err.0))
+    fn from(_: CallbackError) -> Self {
+        ExecError::Unknown
     }
 }
 
 /// One reducer round's inputs on the wire. `session_state`/`event`/`props` are the
 /// round's already-decrypted inputs (the seal key stays orchestrator-side).
+///
+/// `deny_unknown_fields`, for the reason [`CompiledBundle`] carries it: the two
+/// ends of this hop are the same binary version, so a field one side does not
+/// know is version skew and must fail closed rather than be silently dropped into
+/// a round that then runs on a partial request.
+///
+/// Every field is bounded by its own decoder — the key by its shape, the props by
+/// count and bytes, the state by its exact frame, the event's frames by the
+/// ingress budget. That is what lets the serving role write a discharge that names
+/// a check instead of naming its caller.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunRequest {
     /// Names the fused component in the worker's L1 cache. Computed by the
     /// ORCHESTRATOR and authoritative end-to-end — the worker only ever caches /
     /// serves under this key and never names a key back, so it cannot steer which
     /// slot a compile lands in (L2 cache-poisoning defence).
-    pub composition_key: String,
-    /// Static consumer config the policy reads via `context.props`.
+    pub composition_key: CompositionKey,
+    /// Static consumer config the policy reads via `context.props`. Bounded on
+    /// decode — see the `props` module below.
+    #[serde(deserialize_with = "props::deserialize")]
     pub props: Vec<(String, Prop)>,
     /// FRAMED: `state` and `current_prompt` are both policy-chosen lengths, and a
     /// host process splices this hop byte-for-byte. See [`Padded`].
     pub session_state: Padded<SessionState>,
     pub event: Event,
+}
+
+/// The bound on [`RunRequest::props`], applied where the value is decoded.
+///
+/// It exists on this side because the worker cannot see api's ingress cap and must
+/// not assume its caller is api: the leaves accept any attested guest. The numbers
+/// are `engine_types::limits`' restatement of api's `MAX_MATCH_INPUT_SIZE`, and
+/// the derivation is written there.
+mod props {
+    use super::Prop;
+    use engine_types::limits::{MAX_PROPS, MAX_PROPS_BYTES};
+    use serde::de::{self, SeqAccess, Visitor};
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Vec<(String, Prop)>, D::Error> {
+        struct Props;
+
+        impl<'de> Visitor<'de> for Props {
+            type Value = Vec<(String, Prop)>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "at most {MAX_PROPS} static config entries")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                // No `with_capacity` off the size hint: the hint is the sender's
+                // claim about how much this side should allocate, which is the
+                // thing being bounded.
+                let mut out: Vec<(String, Prop)> = Vec::new();
+                let mut bytes = 0usize;
+                while let Some((k, v)) = seq.next_element::<(String, Prop)>()? {
+                    if out.len() == MAX_PROPS {
+                        return Err(de::Error::custom(format!(
+                            "more than {MAX_PROPS} static config entries"
+                        )));
+                    }
+                    bytes = bytes.saturating_add(k.len());
+                    if let Prop::String(s) = &v {
+                        bytes = bytes.saturating_add(s.len());
+                    }
+                    if bytes > MAX_PROPS_BYTES {
+                        return Err(de::Error::custom(format!(
+                            "static config over {MAX_PROPS_BYTES} bytes"
+                        )));
+                    }
+                    out.push((k, v));
+                }
+                Ok(out)
+            }
+        }
+
+        d.deserialize_seq(Props)
+    }
 }
 
 /// One reducer round's result on the API hop: the next [`RunStatus`], framed.
@@ -134,6 +284,7 @@ pub struct RunRequest {
 /// execution-worker with no host on it — framing there would be a megabyte of
 /// memcpy per round against no observer.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunReply {
     /// FRAMED: the resolved prompt is policy-chosen in length, and the VARIANT is
     /// legible by size too — a terminal `Completed` is a few bytes where an
@@ -141,11 +292,11 @@ pub struct RunReply {
     pub status: Padded<RunStatus>,
 }
 
-/// The result of [`ExecutorService::run`] (the cache-only path): either the round
+/// The result of `ExecutorService::run` (the cache-only path): either the round
 /// ran from the worker's L1, or the composition is NOT cached. On
 /// [`CacheMiss`](RunOutcome::CacheMiss) the orchestrator resolves the compiled
 /// bundle under ITS OWN `composition_key` (L2 read or cold compile) and calls
-/// [`run_with_bundle`](ExecutorService::run_with_bundle). Because the orchestrator
+/// `run_with_bundle`. Because the orchestrator
 /// both computes the key AND supplies the bundle, the worker never names a cache
 /// slot — a compromised worker cannot poison another session's compiled-code cache.
 /// `compat_token` is the worker's cwasm ABI id, so the orchestrator resolves/keys L2
@@ -153,7 +304,12 @@ pub struct RunReply {
 #[derive(Serialize, Deserialize)]
 pub enum RunOutcome {
     Ran(Padded<RunStatus>),
-    CacheMiss { compat_token: String },
+    CacheMiss {
+        /// A [`CompatToken`] rather than a `String` because this is the one field
+        /// on the hop that travels the OTHER way and ends up in a NAME: api joins
+        /// it with the key it computed to address an L2 blob. See the type.
+        compat_token: CompatToken,
+    },
 }
 
 /// The orchestrator-served CALLBACK boundary the keyless execution-worker calls
@@ -163,7 +319,7 @@ pub enum RunOutcome {
 /// so the orchestrator resolves it UP FRONT (see [`RunOutcome::CacheMiss`]) under
 /// its own key, keeping the OCI-pull / compile probe surface off the worker
 /// entirely. A [`CallbackServiceClient`] is passed to the worker as an argument to
-/// [`ExecutorService::run`] — remoc multiplexes these callbacks over the SAME
+/// `ExecutorService::run` — remoc multiplexes these callbacks over the SAME
 /// connection as the in-flight run, so the key never crosses to the worker.
 #[remoc::rtc::remote]
 pub trait CallbackService {
@@ -237,7 +393,8 @@ pub trait ChildService {
     /// and build the reusable `InstancePre` (the engine's `prime`). The 7-15 MiB
     /// cwasm is NOT shipped — only the [`BundleRef`] path + small metadata cross
     /// the hop — so the child hop stays tiny. A deserialize failure (toolchain
-    /// skew / tampered file) surfaces as [`ExecError::Run`].
+    /// skew / tampered file) surfaces as [`ExecError::Unknown`] — the bundle is
+    /// not the policy, so it is not attributed to one.
     async fn prime(&self, bundle: BundleRef) -> Result<(), ExecError>;
 
     /// Drive one reducer round against the primed composition.
@@ -321,7 +478,7 @@ mod execute_tests {
             // Cache-only path: always a miss in this mock (no L1). The worker returns
             // its ABI id and NEVER names the composition_key.
             Ok(RunOutcome::CacheMiss {
-                compat_token: "test-token".into(),
+                compat_token: CompatToken::parse("test-token").expect("a legal token shape"),
             })
         }
 
@@ -332,17 +489,17 @@ mod execute_tests {
             callbacks: CallbackServiceClient<Ciborium>,
         ) -> Result<RunReply, ExecError> {
             if bundle.cwasm.is_empty() {
-                return Err(ExecError::Run("empty bundle".into()));
+                return Err(ExecError::Unknown);
             }
             // Bundle in hand: run, calling BACK for media + state persistence.
             let bytes = callbacks.media_load([9u8; 32]).await?;
             if bytes != Some(vec![0xAB, 0xCD]) {
-                return Err(ExecError::Run("callback returned wrong media".into()));
+                return Err(ExecError::Unknown);
             }
             callbacks.session_change(req.session_state.clone()).await?;
             Ok(RunReply {
                 status: Padded::seal(&RunStatus::Completed(Decision::Approved))
-                    .map_err(|e| ExecError::Run(e.to_string()))?,
+                    .map_err(ExecError::from)?,
             })
         }
     }
@@ -399,7 +556,7 @@ mod execute_tests {
         });
 
         let mk_req = || RunRequest {
-            composition_key: "k".into(),
+            composition_key: CompositionKey::from_digest([0x11; 32]),
             props: vec![("age".into(), Prop::Int(30))],
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Start,
@@ -407,7 +564,9 @@ mod execute_tests {
 
         // Phase 1: cache-only run → miss, and NOTHING runs (no callbacks fire).
         match exec_client.run(mk_req(), cb_client.clone()).await.unwrap() {
-            RunOutcome::CacheMiss { compat_token } => assert_eq!(compat_token, "test-token"),
+            RunOutcome::CacheMiss { compat_token } => {
+                assert_eq!(compat_token.as_str(), "test-token")
+            }
             RunOutcome::Ran(_) => panic!("expected CacheMiss on the cache-only run"),
         }
 
@@ -429,5 +588,218 @@ mod execute_tests {
 
         drop(exec_client);
         server_task.abort();
+    }
+}
+
+/// What a `RunRequest` decoder refuses.
+///
+/// Every one of these is a value some peer could put on the wire, and every one
+/// of them is what a serving role's discharge NAMES. A cap nobody tests is a
+/// sentence in a doc comment.
+#[cfg(test)]
+mod request_bound_tests {
+    use super::*;
+    use engine_types::limits::{MAX_PROPS, MAX_PROPS_BYTES};
+    use hatch_client::{Clip, MAX_CLIP_FRAMES, MediaResult};
+    use serde::Serialize;
+
+    /// A stand-in with the same field names and no bounds, so a test can put on
+    /// the wire what the real type will not produce.
+    #[derive(Serialize)]
+    struct LooseRequest<'a> {
+        composition_key: &'a str,
+        props: &'a [(String, Prop)],
+        session_state: Padded<SessionState>,
+        event: Event,
+    }
+
+    fn frame() -> Padded<SessionState> {
+        Padded::seal(&SessionState::default()).expect("the default state fits its frame")
+    }
+
+    fn decode(req: &LooseRequest<'_>) -> Result<RunRequest, ()> {
+        let mut b = Vec::new();
+        ciborium::into_writer(req, &mut b).expect("the loose shape encodes");
+        ciborium::from_reader(&b[..]).map_err(|_| ())
+    }
+
+    fn loose<'a>(key: &'a str, props: &'a [(String, Prop)], event: Event) -> LooseRequest<'a> {
+        LooseRequest {
+            composition_key: key,
+            props,
+            session_state: frame(),
+            event,
+        }
+    }
+
+    fn a_key() -> String {
+        CompositionKey::from_digest([0x5A; 32]).as_str().to_string()
+    }
+
+    #[test]
+    fn the_ordinary_round_decodes() {
+        let key = a_key();
+        let props = [("age".to_string(), Prop::Int(30))];
+        let req = decode(&loose(&key, &props, Event::Start)).expect("a legal round decodes");
+        assert_eq!(req.composition_key.as_str(), key);
+        assert_eq!(req.props.len(), 1);
+    }
+
+    #[test]
+    fn a_key_that_is_not_a_digest_rendering_is_refused() {
+        let props: [(String, Prop); 0] = [];
+        assert!(decode(&loose("whatever-i-like", &props, Event::Start)).is_err());
+    }
+
+    #[test]
+    fn more_props_than_the_config_can_yield_are_refused() {
+        let props: Vec<(String, Prop)> = (0..=MAX_PROPS)
+            .map(|i| (format!("k{i}"), Prop::Null))
+            .collect();
+        assert!(decode(&loose(&a_key(), &props, Event::Start)).is_err());
+    }
+
+    /// Few entries, each enormous — the shape a count bound alone would admit.
+    #[test]
+    fn props_over_the_byte_bound_are_refused() {
+        let props = vec![
+            (
+                "k".to_string(),
+                Prop::String("x".repeat(MAX_PROPS_BYTES / 2)),
+            ),
+            (
+                "k".to_string(),
+                Prop::String("x".repeat(MAX_PROPS_BYTES / 2)),
+            ),
+            (
+                "k".to_string(),
+                Prop::String("x".repeat(MAX_PROPS_BYTES / 2)),
+            ),
+        ];
+        assert!(decode(&loose(&a_key(), &props, Event::Start)).is_err());
+    }
+
+    /// The event's frames are bounded by their own type, and the request decoder
+    /// inherits that rather than restating it.
+    #[test]
+    fn an_event_over_the_capture_bound_is_refused() {
+        let props: [(String, Prop); 0] = [];
+        let event = Event::Media(MediaResult {
+            slot: 0,
+            clip: Clip {
+                frames: vec![vec![1u8]; MAX_CLIP_FRAMES + 1],
+            },
+        });
+        assert!(decode(&loose(&a_key(), &props, event)).is_err());
+    }
+
+    /// Version skew fails closed rather than running a round on a request this
+    /// build only partly understood.
+    #[test]
+    fn an_unknown_field_is_refused() {
+        #[derive(Serialize)]
+        struct Plus<'a> {
+            composition_key: &'a str,
+            props: &'a [(String, Prop)],
+            session_state: Padded<SessionState>,
+            event: Event,
+            future_field: u32,
+        }
+        let key = a_key();
+        let props: [(String, Prop); 0] = [];
+        let mut b = Vec::new();
+        ciborium::into_writer(
+            &Plus {
+                composition_key: &key,
+                props: &props,
+                session_state: frame(),
+                event: Event::Start,
+                future_field: 1,
+            },
+            &mut b,
+        )
+        .expect("the loose shape encodes");
+        assert!(ciborium::from_reader::<RunRequest, _>(&b[..]).is_err());
+    }
+}
+
+/// What the two-value shape refuses.
+#[cfg(test)]
+mod exec_error_tests {
+    use super::*;
+    use serde::Serialize;
+
+    /// Stand-ins for shapes this contract deliberately does not have, so a test
+    /// can put them on the wire and watch them be refused.
+    #[derive(Serialize)]
+    enum LooseError {
+        /// The variant that carried a key. It went away because wasm picks that
+        /// string and it could be a function of the applicant's data.
+        UndeclaredRef { kind: String, key: String },
+        /// A variant from a build this one does not know.
+        SomethingNewer(u32),
+    }
+
+    fn encode<T: Serialize>(v: &T) -> Vec<u8> {
+        let mut b = Vec::new();
+        ciborium::into_writer(v, &mut b).expect("the value encodes");
+        b
+    }
+
+    #[test]
+    fn both_values_round_trip() {
+        for e in [ExecError::Policy, ExecError::Unknown] {
+            assert_eq!(
+                ciborium::from_reader::<ExecError, _>(&encode(&e)[..]).unwrap(),
+                e
+            );
+        }
+    }
+
+    /// THE property the shape exists for. Every failure encodes to one of two
+    /// fixed sizes, so what a host counts on this hop carries one bit — and that
+    /// bit costs a policy the round deadline to send, since the way to pick
+    /// `Unknown` is to hang rather than to trap.
+    #[test]
+    fn a_failure_reply_has_no_length_a_policy_can_set() {
+        let sizes: Vec<usize> = [ExecError::Policy, ExecError::Unknown]
+            .iter()
+            .map(|e| encode(e).len())
+            .collect();
+        assert!(
+            sizes.iter().all(|&n| n < 16),
+            "a failure encoded to {sizes:?} bytes — something carries a payload"
+        );
+    }
+
+    /// A peer sending the shape that was removed is refused. `UndeclaredRef` is no
+    /// longer a VARIANT at all, so serde's externally-tagged representation refuses
+    /// it as an unknown one — there is no struct variant left for a stray field to
+    /// be dropped from, which is also why this enum carries no
+    /// `deny_unknown_fields` (it reaches only struct variants, and would be inert).
+    #[test]
+    fn the_shape_that_carried_a_key_no_longer_decodes() {
+        for key in [
+            "consent_reason",
+            "<script>alert(1)</script>",
+            "x' is not registered '",
+        ] {
+            let bytes = encode(&LooseError::UndeclaredRef {
+                kind: "localized".to_string(),
+                key: key.to_string(),
+            });
+            assert!(
+                ciborium::from_reader::<ExecError, _>(&bytes[..]).is_err(),
+                "a reply carrying {key:?} decoded"
+            );
+        }
+    }
+
+    /// Version skew fails closed — serde's externally-tagged representation is
+    /// what refuses an unknown variant.
+    #[test]
+    fn an_unknown_variant_is_refused() {
+        let bytes = encode(&LooseError::SomethingNewer(1));
+        assert!(ciborium::from_reader::<ExecError, _>(&bytes[..]).is_err());
     }
 }

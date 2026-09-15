@@ -238,7 +238,9 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
 }
 
 /// Fail-safe: a tampered / toolchain-skewed cwasm fails `deserialize` in the
-/// child and surfaces as `ExecError::Run` — not a panic, not a hang.
+/// child and surfaces as `ExecError::Unknown` — not a panic, not a hang. Not
+/// `Policy` either: a bundle that will not load is not the consumer's policy
+/// misbehaving, and the applicant should not be told it is.
 #[tokio::test]
 async fn prime_with_garbage_cwasm_fails_safe() {
     let (mut child, client) = spawn_child().await;
@@ -254,9 +256,10 @@ async fn prime_with_garbage_cwasm_fails_safe() {
     .await
     .expect("prime must not hang")
     .expect_err("garbage cwasm must fail prime");
-    assert!(
-        matches!(err, ExecError::Run(_)),
-        "expected ExecError::Run, got {err:?}"
+    assert_eq!(
+        err,
+        ExecError::Unknown,
+        "a bundle that will not load is not attributed to the policy"
     );
     drop(client);
     let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
