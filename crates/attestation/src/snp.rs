@@ -346,10 +346,12 @@ fn endorsed_chip(vcek_der: &[u8]) -> Result<[u8; 64], AttestationError> {
 
 /// Refuse a peer that attested on another part.
 ///
-/// `own` is `None` where the verifier holds an endorsement of its own: the
-/// signature is then checked against a chip-specific VCEK, so a foreign part
+/// `own` is `None` in two cases. Where the verifier holds an endorsement of its
+/// own, the signature is checked against a chip-specific VCEK, so a foreign part
 /// already fails earlier and this would be a second answer to a settled
-/// question.
+/// question. Where it verifies ACROSS parts on purpose — a role whose peers run
+/// on other machines — there is nothing to compare against and nothing that
+/// should be; see [`SnpAttestor::mint_only_across_parts`] for what that costs.
 ///
 /// Split out of [`Attestor::verify`] because that method needs `/dev/sev-guest`
 /// to exist and this comparison does not — and a rule that can only run on the
@@ -602,6 +604,37 @@ mod mint {
             })
         }
 
+        /// As [`SnpAttestor::mint_only`], for a guest whose peers are NOT on its
+        /// own part.
+        ///
+        /// The gateway is that guest: it fronts api instances on other machines,
+        /// so a peer being elsewhere is the normal case rather than the thing to
+        /// refuse. It still runs the platform checks on itself at start-up, and
+        /// still demands of a peer everything except the part: AMD's chain to the
+        /// compiled-in root, a VCEK issued to the chip the report names, VMPL 0,
+        /// debug off, no migration agent, a platform TCB above this build's
+        /// floor, and the quote bound to the very TLS key in front of it.
+        ///
+        /// **What it gives up, stated plainly.** `same_part` is the only defence
+        /// against a VCEK private key extracted from some other machine of this
+        /// generation: a holder of one writes every report field it likes, so
+        /// neither the measurement nor an author key constrains it — only the
+        /// chip, which the certificate binds. Refusing foreign parts narrowed
+        /// that to "a key extracted from THIS machine". Verifying across parts
+        /// widens it to any part of the generation. The measurement check that
+        /// follows is what a HONEST peer is held to; this is the cost of a
+        /// gateway that fronts more than one machine, and it closes with the
+        /// generation whose attestation is not forgeable.
+        pub fn mint_only_across_parts() -> Result<Self, AttestationError> {
+            vcek_identity()?;
+            let firmware = Firmware::open()
+                .map_err(|e| AttestationError::Backend(format!("open /dev/sev-guest: {e}")))?;
+            Ok(Self {
+                firmware: Mutex::new(firmware),
+                held: None,
+                chip: None,
+            })
+        }
     }
 
     /// AMD's key service serves DER while other sources carry PEM. Normalising
