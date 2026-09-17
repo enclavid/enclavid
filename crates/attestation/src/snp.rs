@@ -333,18 +333,15 @@ fn endorsed_chip(vcek_der: &[u8]) -> Result<[u8; 64], AttestationError> {
                 "VCEK carries no HWID extension, so it endorses no particular part".into(),
             )
         })?;
-    // A 64-byte OCTET STRING has one DER encoding: tag, short-form length,
-    // payload. Matching those two bytes rather than parsing is what refuses the
-    // re-encodings — a long-form length, a nested wrapper — that would let the
-    // same value arrive in a shape this comparison had not considered.
-    match hwid.value {
-        [0x04, 0x40, chip @ ..] if chip.len() == 64 => {
-            Ok(chip.try_into().expect("64 bytes, just matched"))
-        }
-        _ => Err(AttestationError::InvalidQuote(
-            "VCEK HWID extension is not a 64-byte octet string".into(),
-        )),
-    }
+    // The extension's value is the chip itself: 64 bytes, with no DER inside
+    // it. That is what AMD's key service issues for this generation — read off
+    // a genuine Milan VCEK, whose extnValue OCTET STRING is 64 bytes long. Only
+    // that shape is accepted, so a nested wrapper around the same 64 bytes is
+    // refused rather than being a second encoding two verifiers could disagree
+    // on.
+    <[u8; 64]>::try_from(hwid.value).map_err(|_| {
+        AttestationError::InvalidQuote("VCEK HWID extension is not exactly 64 bytes".into())
+    })
 }
 
 /// Refuse a peer that attested on another part.
@@ -604,6 +601,7 @@ mod mint {
                 chip: Some(own.chip_id),
             })
         }
+
     }
 
     /// AMD's key service serves DER while other sources carry PEM. Normalising
@@ -808,10 +806,10 @@ mod tests {
         params.self_signed(&key).unwrap().der().to_vec()
     }
 
+    /// The shape AMD issues: the extension's value is the 64 bytes and nothing
+    /// else.
     fn cert_endorsing(chip: [u8; 64]) -> Vec<u8> {
-        let mut content = vec![0x04, 0x40];
-        content.extend_from_slice(&chip);
-        cert_with_hwid_content(content)
+        cert_with_hwid_content(chip.to_vec())
     }
 
     #[test]
@@ -837,23 +835,24 @@ mod tests {
         ));
     }
 
-    /// One value, one encoding. The long-form case is the one that matters: it
-    /// carries the right sixty-four bytes and is still refused, because a field
+    /// One value, one encoding. The wrapped cases are the ones that matter: they
+    /// carry the right sixty-four bytes and are still refused, because a field
     /// that can arrive in two shapes is a field two verifiers can disagree on.
     #[test]
-    fn an_extension_that_is_not_a_sixty_four_byte_octet_string_is_refused() {
+    fn an_extension_that_is_not_exactly_the_sixty_four_bytes_is_refused() {
+        let wrapped = {
+            let mut v = vec![0x04, 0x40];
+            v.extend_from_slice(&[7u8; 64]);
+            v
+        };
         let long_form = {
             let mut v = vec![0x04, 0x81, 0x40];
             v.extend_from_slice(&[7u8; 64]);
             v
         };
-        let bare_payload = [7u8; 64].to_vec();
-        let wrong_width = {
-            let mut v = vec![0x04, 0x20];
-            v.extend_from_slice(&[7u8; 32]);
-            v
-        };
-        for content in [long_form, bare_payload, wrong_width] {
+        let too_short = [7u8; 32].to_vec();
+        let too_long = [7u8; 65].to_vec();
+        for content in [wrapped, long_form, too_short, too_long] {
             assert!(matches!(
                 endorsed_chip(&cert_with_hwid_content(content)),
                 Err(AttestationError::InvalidQuote(_))
