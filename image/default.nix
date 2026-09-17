@@ -19,6 +19,9 @@
 # image each peer is, and no leaf pins api back, because api's own digest is a
 # function of the three it pins.
 #
+# The gateway is outside that ordering: it pins nothing, so it is built from
+# source alone and api moves under it freely.
+#
 # `idKeys` is a directory holding `id.pem` and `author.pem`, both EC P-384:
 #
 #   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out id.pem
@@ -96,6 +99,17 @@ let
       kernel = kernel.diskless;
       binary = "execution-worker";
       siblings = [ "engine-executor-child" ];
+    };
+    # Terminates client TLS and dials api over RA-TLS — but pins NOTHING, so it
+    # is built like a leaf, from source alone.
+    #
+    # Which api build a caller is served by is named by that caller and proved at
+    # the handshake, not decided here. So this role sits outside the
+    # leaves-then-api ordering entirely rather than one step past it, and api can
+    # be rebuilt under it without rebuilding it.
+    gateway = {
+      kernel = kernel.diskless;
+      binary = "gateway";
     };
   };
 

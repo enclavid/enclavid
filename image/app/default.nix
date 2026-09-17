@@ -14,9 +14,10 @@
 # see image/initramfs.
 #
 # `measurements` is the three leaves' launch digests, and only api's part reads
-# them. It is an argument rather than something computed here because computing
-# them needs the leaves' images, which need this file — `image/default.nix` owns
-# that ordering and is where a complete build starts.
+# them — the gateway pins nothing, so it needs none. It is an argument rather
+# than something computed here because computing them needs the leaves' images,
+# which need this file; `image/default.nix` owns that ordering and is where a
+# complete build starts.
 { measurements ? null }:
 let
   nixpkgs = builtins.fetchTarball {
@@ -29,13 +30,17 @@ let
 
   # The workspace, minus everything that is an output rather than a source.
   # Filtering matters for more than build time: an unfiltered `target/` would
-  # put the previous build's artefacts into this build's input hash.
+  # put the previous build's artefacts into this build's input hash. The same
+  # holds for `result-2`, `result-3`, … — what `nix-build -o result` names its
+  # links when given several attributes — which would otherwise move every
+  # measurement the next build computes.
   src = builtins.path {
     name = "enclavid-src";
     path = ../..;
     filter = path: type:
       let base = baseNameOf path; in
-      !(base == "target" || base == ".git" || base == "node_modules" || base == "result");
+      !(base == "target" || base == ".git" || base == "node_modules" || base == "result"
+        || builtins.substring 0 7 base == "result-");
   };
 
   # ONE cargo invocation over ONE package, and the binaries to keep from it.
@@ -250,5 +255,31 @@ builtins.foldl' (a: b: a // b) { } [
         features = [ "contained" ];
       }
     ];
+  })
+
+  # The role that terminates client TLS. `vsock` for the same reason as every
+  # other role, and it applies to the PUBLIC listener too: a guest kernel with
+  # no IP stack cannot bind a TCP socket, so the host carries the public
+  # connection in over vsock WITHOUT terminating it, and the TLS session begins
+  # inside this measurement.
+  #
+  # `sev-snp` off the defaults, like every other attested part — cargo features
+  # are additive, so asking for the hardware backend on top of the default would
+  # leave the dev fleet's shared software identity compiled in beside it.
+  #
+  # No `preBuild` and no measurement, unlike api. This role pins nothing: which
+  # api build a caller is served by is named by the caller, per request, and
+  # proved at the handshake. So the gateway is built from source alone and its
+  # digest does not move when api's does — which is what lets api be upgraded
+  # under it, and what keeps a certificate sealed to this measurement alive
+  # across an api release.
+  (withDebug "gateway" {
+    pname = "enclavid-app-gateway";
+    parts = [{
+      package = "enclavid-gateway";
+      binaries = [ "gateway" ];
+      noDefaultFeatures = true;
+      features = [ "sev-snp" "vsock" ];
+    }];
   })
 ]

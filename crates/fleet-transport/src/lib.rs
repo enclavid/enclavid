@@ -186,6 +186,31 @@ pub async fn dial(addr: &str) -> std::io::Result<Stream> {
     tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(cid, port)).await
 }
 
+/// Refuse an address [`dial`] could not use, without dialing it.
+///
+/// For a caller that is handed addresses long before it dials them, so a
+/// malformed one is refused where it was declared rather than failing every
+/// request that later reaches it.
+///
+/// The TCP arm is stricter than [`dial`]: an IP and a port, no host name,
+/// because accepting a name would make this check a DNS lookup.
+#[cfg(not(feature = "vsock"))]
+pub fn check_dial_addr(addr: &str) -> std::io::Result<()> {
+    addr.parse::<std::net::SocketAddr>()
+        .map(|_| ())
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("expected IP:PORT, got `{addr}`"),
+            )
+        })
+}
+
+#[cfg(feature = "vsock")]
+pub fn check_dial_addr(addr: &str) -> std::io::Result<()> {
+    parse_vsock(addr).map(|_| ())
+}
+
 /// A bound fleet listener.
 pub struct Listener {
     #[cfg(not(feature = "vsock"))]
@@ -388,6 +413,34 @@ mod accept_tests {
         }
         for kind in [ErrorKind::OutOfMemory, ErrorKind::Other] {
             assert!(!is_connection_error(&Error::from(kind)), "{kind:?}");
+        }
+    }
+}
+
+#[cfg(all(test, not(feature = "vsock")))]
+mod tcp_tests {
+    use super::check_dial_addr;
+
+    #[test]
+    fn a_socket_address_is_dialable() {
+        for good in ["127.0.0.1:8443", "[::1]:80"] {
+            assert!(check_dial_addr(good).is_ok(), "refused `{good}`");
+        }
+    }
+
+    /// A name is refused too, although `dial` would resolve one: checking it
+    /// would mean resolving it.
+    #[test]
+    fn anything_else_is_refused() {
+        for bad in [
+            "8443",
+            ":8443",
+            "127.0.0.1:",
+            "127.0.0.1:99999",
+            "localhost:8443",
+            "vsock://2:8001",
+        ] {
+            assert!(check_dial_addr(bad).is_err(), "accepted `{bad}`");
         }
     }
 }

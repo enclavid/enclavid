@@ -283,7 +283,5 @@ Whichever matches is the rule. Write the answer here.
   catches — and it has already happened.
 - `initramfs/default.nix` says "the Rust build is not yet expressed in Nix".
   It is: that is what `app/default.nix` does.
-- `README.md` lists a gateway among the roles using the diskless kernel. There
-  is no gateway — no cmdline, no inittab, no attribute.
 - Images built before the disposable-child crates were split carry a
   `session-child` sibling. A worker initramfs holding that name is stale.
