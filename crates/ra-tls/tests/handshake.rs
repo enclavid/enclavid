@@ -7,7 +7,10 @@
 use std::sync::Arc;
 
 use enclavid_attestation::{Attestor, DEV_FLEET_MEASUREMENT, MockAttestor};
-use enclavid_ra_tls::{MeasurementPolicy, RaTlsError, client_config, server_config, server_name};
+use enclavid_ra_tls::{
+    MeasurementPolicy, RaTlsError, client_config, public_client_config, public_server_config,
+    server_config, server_name,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
@@ -52,6 +55,50 @@ async fn mutual_ratls_handshake_and_data() {
         .connect(server_name(), client_io)
         .await
         .expect("client connect (mutual RA-TLS)");
+    tls.write_all(b"hello").await.expect("client write");
+    tls.flush().await.unwrap();
+    let mut buf = [0u8; 5];
+    tls.read_exact(&mut buf).await.expect("client read");
+    assert_eq!(&buf, b"world");
+
+    server.await.unwrap();
+}
+
+/// The public surface's posture: the server proves what it is, and asks the
+/// caller for nothing.
+///
+/// The client here presents NO certificate at all, which is the case the surface
+/// exists for — a browser, or a consumer's own integration, has no attestation
+/// to offer. It still verifies the server, so the one direction that is
+/// available is the one that runs.
+#[tokio::test]
+async fn a_public_server_proves_itself_and_demands_nothing() {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let acceptor = TlsAcceptor::from(Arc::new(public_server_config(dev_attestor()).unwrap()));
+
+    // The paired client: it presents nothing, and still pins the server's
+    // measurement. `client_config` would carry a certificate, which is the
+    // opposite of what this asserts.
+    let connector = TlsConnector::from(Arc::new(
+        public_client_config(dev_attestor(), dev_policy()).unwrap(),
+    ));
+
+    let server = tokio::spawn(async move {
+        let mut tls = acceptor
+            .accept(server_io)
+            .await
+            .expect("server accept without asking for a client certificate");
+        let mut buf = [0u8; 5];
+        tls.read_exact(&mut buf).await.expect("server read");
+        assert_eq!(&buf, b"hello");
+        tls.write_all(b"world").await.expect("server write");
+        tls.flush().await.unwrap();
+    });
+
+    let mut tls = connector
+        .connect(server_name(), client_io)
+        .await
+        .expect("client connect having presented nothing");
     tls.write_all(b"hello").await.expect("client write");
     tls.flush().await.unwrap();
     let mut buf = [0u8; 5];

@@ -404,8 +404,11 @@ fn ring_provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-/// A rustls [`ServerConfig`] for an RA-TLS server (worker): presents an ephemeral
+/// A rustls [`ServerConfig`] for a server on a FLEET leg: presents an ephemeral
 /// attested cert and REQUIRES the client to present one it attests too (mutual).
+///
+/// For a leg whose callers are all ours. See [`public_server_config`] for the
+/// other kind, and for why they are different functions rather than a flag.
 pub fn server_config(
     attestor: Arc<dyn Attestor>,
     policy: MeasurementPolicy,
@@ -423,6 +426,61 @@ pub fn server_config(
         .with_client_cert_verifier(verifier)
         .with_single_cert(vec![cert], key)
         .map_err(|e| RaTlsError::Config(e.to_string()))
+}
+
+/// A rustls [`ServerConfig`] for a PUBLIC surface: presents an ephemeral attested
+/// cert and asks the client for nothing.
+///
+/// The difference from [`server_config`] is the kind of surface, not a degree of
+/// strictness. A fleet leg has a closed set of callers, all of them ours, so
+/// demanding an attestation costs nothing and excludes everyone else. A public
+/// surface is reached by browsers and by consumers' own integrations, none of
+/// which can attest anything — demanding a certificate there would refuse every
+/// caller the surface exists for.
+///
+/// What the public surface therefore gets is one direction: the caller learns it
+/// reached an attested enclave, and is free to check which one. Who the CALLER
+/// is stays where it already was — in credentials the serving process checks
+/// itself, per request, which is the only place it was ever settled.
+///
+/// Two functions rather than one with a flag, because the choice follows from
+/// what a surface IS. A flag invites picking the weaker one for a leg where the
+/// stronger applies, and reads at the call site as a preference rather than as a
+/// fact about who is on the other end.
+pub fn public_server_config(attestor: Arc<dyn Attestor>) -> Result<ServerConfig, RaTlsError> {
+    let provider = ring_provider();
+    let (cert, key) = mint_cert(&*attestor)?;
+    ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| RaTlsError::Config(e.to_string()))?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key)
+        .map_err(|e| RaTlsError::Config(e.to_string()))
+}
+
+/// A rustls [`ClientConfig`] for a caller ON a public surface: verifies the
+/// server by attestation and presents nothing.
+///
+/// The other end of [`public_server_config`]. A caller there is not asked for a
+/// certificate, so carrying one is not strictness but noise — it costs a quote
+/// at boot to offer something that is never requested, and it reads at the call
+/// site as though the far end might check it.
+pub fn public_client_config(
+    attestor: Arc<dyn Attestor>,
+    policy: MeasurementPolicy,
+) -> Result<ClientConfig, RaTlsError> {
+    let provider = ring_provider();
+    let verifier = Arc::new(RaTlsVerifier {
+        attestor,
+        policy,
+        provider: provider.clone(),
+    });
+    Ok(ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| RaTlsError::Config(e.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth())
 }
 
 /// A rustls [`ClientConfig`] for an RA-TLS client (api): presents an ephemeral attested
