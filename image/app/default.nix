@@ -154,6 +154,7 @@ builtins.foldl' (a: b: a // b) { } [
           export ENCLAVID_MEASUREMENT_STORAGE=$(cat ${m.storage})
           export ENCLAVID_MEASUREMENT_COMPILE_WORKER=$(cat ${m.compile-worker})
           export ENCLAVID_MEASUREMENT_EXECUTION_WORKER=$(cat ${m.execution-worker})
+          export ENCLAVID_FRONTEND_DIST=${import ../../frontend { inherit pkgs; }}
         '';
     };
   in

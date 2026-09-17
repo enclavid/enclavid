@@ -1,4 +1,5 @@
 mod applicant;
+mod assets;
 mod client;
 mod client_state;
 mod compiler;
@@ -213,6 +214,11 @@ async fn main() {
     // certificate, port, optional mTLS posture, and rate-limit policy.
     // Each surface owns its route table — see `client::router` and
     // `applicant::router` for the endpoint inventory.
+    // Minted ONCE and cloned into both surfaces. `server_config` mints a fresh
+    // certificate on every call, so one per surface would give this process two
+    // identities and two quotes, for no reason a peer could make sense of.
+    let acceptor = transport::acceptor(attestor.clone());
+
     let client_state =
         Arc::new(ClientState::init(&address_out, session_store.clone(), attestor.clone()).await);
     let applicant_state = Arc::new(
@@ -244,8 +250,9 @@ async fn main() {
                 reason!("a constant naming a configuration key the host itself supplied")
             )
         });
+        let acceptor = acceptor.clone();
         async move {
-            transport::serve(client_app, &addr, client_bound).await;
+            transport::serve(client_app, &addr, client_bound, acceptor).await;
         }
     });
     let applicant_handle = tokio::spawn({
@@ -257,7 +264,7 @@ async fn main() {
             )
         });
         async move {
-            transport::serve(applicant_app, &addr, applicant_bound).await;
+            transport::serve(applicant_app, &addr, applicant_bound, acceptor).await;
         }
     });
 

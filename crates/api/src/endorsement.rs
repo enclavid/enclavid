@@ -194,6 +194,37 @@ pub fn fleet_client_config(
     enclavid_ra_tls::client_config(fleet_attestor(attestor), fleet_policy(peer))
 }
 
+/// The RA-TLS server config for api's own two serving surfaces.
+///
+/// **One direction, and that is a property of the surface rather than a
+/// concession.** These two ports are where the outside arrives: a browser, a
+/// consumer's own integration, our CLI. None of them can present an attestation,
+/// so asking for one would refuse every caller the surface exists for. What a
+/// caller gets instead is the half that is available — it can establish that it
+/// reached an attested enclave, and check which one.
+///
+/// The gateway in front of these ports changes none of that. It terminates the
+/// public session and opens another one here, but it is a layer on a public
+/// surface, not a fleet leg: api's inbound was reachable from outside before the
+/// gateway existed and still is.
+///
+/// This is where it differs from the three legs api DIALS. Those have a closed
+/// set of peers, all of them ours, so [`fleet_client_config`] both proves and
+/// demands. Here there is no such set, and pinning is doubly unavailable anyway:
+/// the gateway's digest is a function of api's, so api cannot hold it.
+///
+/// Who the caller is stays where it always was — in credentials this process
+/// checks per request. A session's sealed state opens only under the bearer it
+/// was sealed with, and the consumer surface checks its own token. A party that
+/// opens a connection here and has neither can do nothing with it, which was
+/// true before any of this was attested.
+#[cfg(feature = "vsock")]
+pub fn inbound_server_config(
+    attestor: Arc<dyn Attestor>,
+) -> Result<tokio_rustls::rustls::ServerConfig, RaTlsError> {
+    enclavid_ra_tls::public_server_config(fleet_attestor(attestor))
+}
+
 /// Waits between fetch attempts. The certificate is the one thing this guest
 /// cannot serve without, so a briefly unreachable key service should not cost a
 /// restart — but the wait is bounded, because past that point the platform is

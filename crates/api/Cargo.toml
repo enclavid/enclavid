@@ -16,7 +16,11 @@ repository.workspace = true
 # the DEFAULT rather than unconditional, and the attested build turns it off:
 #   cargo build -p enclavid-api --no-default-features --features sev-snp,vsock
 default = ["dev-attestation"]
-vsock = ["hatch-client/vsock", "fleet-transport/vsock", "dep:tokio-vsock", "dep:hyper-util", "dep:hyper", "dep:tower-service"]
+# The attested build. Besides the transport, this is the axis that decides
+# whether the two serving surfaces terminate RA-TLS: a developer box has no host
+# between the caller and this process, an attested launch does. See
+# `crate::transport`.
+vsock = ["hatch-client/vsock", "fleet-transport/vsock", "dep:hyper-util", "dep:hyper"]
 # Software backends, no hardware. Two of them, for two different jobs: `snp-dev`
 # gives session quotes the real SEV-SNP report FORMAT so policy and KBS code sees
 # the fields it will in production, while `mock` supplies the ONE shared identity
@@ -92,9 +96,14 @@ enclavid-attestation = { path = "../attestation", default-features = false }
 # from the client-facing session quotes above (that stays snp-dev).
 enclavid-ra-tls = { path = "../ra-tls" }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
-axum = { version = "0.8", features = ["multipart"] }
+# `http2` because the gateway reaches api over HTTP/2 — see `crate::transport`.
+# The attested build serves through its own driver, which already speaks both;
+# this is what lets the developer build's `axum::serve` answer the same way.
+axum = { version = "0.8", features = ["multipart", "http2"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "catch-panic", "sensitive-headers"] }
+# No `fs`: the page is compiled in rather than read from a directory, so nothing
+# here serves a filesystem. See `crate::assets`.
+tower-http = { version = "0.6", features = ["catch-panic", "sensitive-headers"] }
 tokio = { version = "1", features = ["full"] }
 # `join` / `join_all` for fanning out plugin pulls alongside the
 # policy pull inside `applicant::shared::lookup_policy`. Only the
@@ -122,7 +131,8 @@ rand_chacha = { version = "0.3", default-features = false }
 thiserror = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-tokio-vsock = { version = "0.7", optional = true }
-hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "http2"], optional = true }
+# The per-connection server the attested build drives itself, because
+# `axum::serve` cannot hold a TLS listener without serialising every handshake —
+# see `crate::transport`. `service` is what bridges the axum `Router` into it.
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "service", "http1", "http2"], optional = true }
 hyper = { version = "1", features = ["server", "http1", "http2"], optional = true }
-tower-service = { version = "0.3", optional = true }
