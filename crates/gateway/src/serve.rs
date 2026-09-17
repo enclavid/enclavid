@@ -27,6 +27,7 @@ use safe_logger::debug;
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
+use crate::attest;
 use crate::upstream::{Legs, NoRoute, Upstreams};
 
 /// How long a peer has to finish the handshake before its task is dropped.
@@ -111,6 +112,7 @@ impl<B: hyper::body::Body + Unpin> hyper::body::Body for Counted<B> {
 pub async fn connection(
     acceptor: TlsAcceptor,
     upstreams: watch::Receiver<Arc<Upstreams>>,
+    proof: attest::Proof,
     stream: fleet_transport::Stream,
     peer: String,
 ) {
@@ -163,10 +165,11 @@ pub async fn connection(
         let upstreams = upstreams.borrow().clone();
         let legs = legs.clone();
         let server_name = server_name.clone();
+        let proof = proof.clone();
         begun.fetch_add(1, Ordering::Relaxed);
         let counted = InFlight::begin(in_flight.clone());
         async move {
-            let answer = proxy(&upstreams, &legs, server_name.as_deref(), req).await;
+            let answer = proxy(&upstreams, &legs, &proof, server_name.as_deref(), req).await;
             Ok::<_, Infallible>(answer.map(|inner| Counted {
                 inner,
                 _counted: counted,
@@ -240,9 +243,17 @@ const MEASUREMENT: &str = "x-enclavid-api-measurement";
 async fn proxy(
     upstreams: &Upstreams,
     legs: &Legs,
+    proof: &attest::Proof,
     server_name: Option<&str>,
     mut req: Request<Incoming>,
 ) -> Response<Answer> {
+    // This role's own path, answered before anything is routed and without
+    // reaching api at all. It is the one path this build knows: what a request
+    // for anything else means is the host's configuration, never this file's.
+    if req.uri().path() == attest::PATH {
+        return attestation(proof, req.method());
+    }
+
     // Named once or not at all. `remove` would take every value and return the
     // first, so two values would route by whichever happened to come first —
     // a choice made for the caller, which this header exists to prevent.
@@ -338,6 +349,29 @@ async fn forward(mut leg: SendRequest<Incoming>, req: Request<Incoming>) -> Resp
     }
 }
 
+/// Hand back what this build can prove about itself.
+///
+/// Read-only and the same for every caller, so `HEAD` answers like `GET` with
+/// the body dropped by the protocol, and anything else is refused rather than
+/// treated as a request to change something that cannot change.
+fn attestation(proof: &attest::Proof, method: &hyper::Method) -> Response<Answer> {
+    if method != hyper::Method::GET && method != hyper::Method::HEAD {
+        return fixed(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "this is something to read\n",
+        );
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, attest::CONTENT_TYPE)
+        // A quote is checked, not cached: a caller that keeps one and compares
+        // it to a certificate from a later connection is checking a binding
+        // that was true elsewhere.
+        .header(hyper::header::CACHE_CONTROL, "no-store")
+        .body(Either::Right(Full::new(proof.clone())))
+        .expect("a response over constant headers builds")
+}
+
 /// The answer for anything that went wrong behind this role.
 ///
 /// 502 says the failure is behind this role rather than in the request. It
@@ -412,12 +446,14 @@ mod tests {
     }
 
     /// This role on a loopback listener, with `api` as the one build declared.
-    async fn gateway(api: &str) -> String {
+    /// Returns its address and the SPKI its quote is supposed to bind.
+    async fn gateway(api: &str) -> (String, Vec<u8>) {
         let listener = fleet_transport::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let acceptor = TlsAcceptor::from(Arc::new(
-            crate::tls::server_config(&["verify.example.com", "api.example.com"]).unwrap(),
-        ));
+        let (config, spki) =
+            crate::tls::server_config(&["verify.example.com", "api.example.com"]).unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let proof = attest::proof(spki.clone(), &crate::identity::attestor()).unwrap();
         let table = Upstreams::empty("verify.example.com".into(), "api.example.com".into())
             .replaced(vec![crate::config::Upstream {
                 measurement: M.into(),
@@ -429,13 +465,14 @@ mod tests {
             fleet_transport::accept_forever(listener, move |stream, peer| {
                 let acceptor = acceptor.clone();
                 let current = current.clone();
+                let proof = proof.clone();
                 async move {
-                    tokio::spawn(connection(acceptor, current, stream, peer));
+                    tokio::spawn(connection(acceptor, current, proof, stream, peer));
                 }
             })
             .await
         });
-        addr
+        (addr, spki)
     }
 
     /// Accepts any certificate: what is under test is how this role carries
@@ -527,7 +564,7 @@ mod tests {
     /// it stops. Owned per public connection, it fills only the attacker's own.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_caller_that_stops_reading_does_not_stall_another() {
-        let gateway = gateway(&api().await).await;
+        let (gateway, _) = gateway(&api().await).await;
 
         let mut attacker = caller(&gateway, 65_535).await;
         let mut unread = Vec::new();
@@ -563,7 +600,7 @@ mod tests {
     /// slowly it reads.
     #[tokio::test]
     async fn a_connection_that_asks_nothing_is_closed() {
-        let gateway = gateway(&api().await).await;
+        let (gateway, _) = gateway(&api().await).await;
         let caller = caller(&gateway, 4 << 20).await;
         tokio::time::timeout(Duration::from_secs(5), async {
             while !caller.is_closed() {
@@ -574,10 +611,50 @@ mod tests {
         .expect("a connection that asks for nothing must not be kept");
     }
 
+    /// The quote this role serves binds the key it is serving it over, and is
+    /// answered without an api behind it or a measurement named.
+    #[tokio::test]
+    async fn the_attestation_binds_the_serving_certificate() {
+        let (gateway, spki) = gateway(&api().await).await;
+        let mut caller = caller(&gateway, 4 << 20).await;
+        caller.ready().await.unwrap();
+        let response = caller
+            .send_request(
+                Request::get(format!("https://verify.example.com{}", attest::PATH))
+                    .body(Empty::new())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[hyper::header::CONTENT_TYPE],
+            attest::CONTENT_TYPE
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let quote: enclavid_attestation::Quote = ciborium::from_reader(body.as_ref()).unwrap();
+        crate::identity::attestor()
+            .verify(
+                &quote,
+                &enclavid_attestation::ReportData::for_ratls(spki.clone()),
+            )
+            .expect("the quote binds the certificate this role serves it over");
+
+        // And a quote bound to some OTHER key does not pass the same check,
+        // which is what makes the assertion above worth making.
+        let (_, other) = crate::tls::server_config(&["verify.example.com"]).unwrap();
+        assert!(
+            crate::identity::attestor()
+                .verify(&quote, &enclavid_attestation::ReportData::for_ratls(other))
+                .is_err()
+        );
+    }
+
     /// Two measurements are refused rather than resolved to whichever came first.
     #[tokio::test]
     async fn a_measurement_named_twice_is_refused() {
-        let gateway = gateway(&api().await).await;
+        let (gateway, _) = gateway(&api().await).await;
         let mut caller = caller(&gateway, 4 << 20).await;
         caller.ready().await.unwrap();
         let response = caller

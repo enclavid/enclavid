@@ -52,10 +52,8 @@
 //! ever. That is the standing defence against a runtime exploit, which changes
 //! behaviour without changing a measurement.
 
+mod attest;
 mod config;
-/// Only the attested build has a peer to prove anything to — a developer build
-/// dials plain HTTP — so the identity exists exactly where it is used.
-#[cfg(feature = "vsock")]
 mod identity;
 mod push;
 mod serve;
@@ -152,15 +150,27 @@ async fn main() {
     // takes the port. The key is generated here and never leaves this guest's
     // encrypted memory — which is the only reason terminating here is worth
     // anything, and the reason this cannot be done on the host.
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
-        tls::server_config(&[&applicant_name, &client_name]).unwrap_or_else(|e| {
+    let (server_config, spki) = tls::server_config(&[&applicant_name, &client_name])
+        .unwrap_or_else(|e| {
             debug!("{e}");
             safe_logger::error_and_panic!(
                 "gateway: cannot mint a serving certificate for the configured names. Stopping.",
                 reason!("a constant; the names are the host's own configuration")
             )
-        }),
-    ));
+        });
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+
+    // The proof that goes with that certificate, minted once and before the
+    // bind for the same reason: a caller is asked to delegate its choice of api
+    // build to this role, and a role that cannot say what it is has nothing to
+    // delegate to. See `crate::attest`.
+    let proof = attest::proof(spki, &identity::attestor()).unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "gateway: cannot prove what this build is, so nothing could check it. Stopping.",
+            reason!("a constant reporting a platform state the host provisioned")
+        )
+    });
 
     // Every api this role may forward to, as the host last pushed it. Empty
     // until the first push, and never read from the command line — see
@@ -236,13 +246,14 @@ async fn main() {
     let public = fleet_transport::accept_forever(listener, move |stream, peer| {
         let acceptor = acceptor.clone();
         let current = current.clone();
+        let proof = proof.clone();
         let slots = slots.clone();
         async move {
             let Ok(slot) = slots.acquire_owned().await else {
                 return;
             };
             tokio::spawn(async move {
-                serve::connection(acceptor, current, stream, peer).await;
+                serve::connection(acceptor, current, proof, stream, peer).await;
                 drop(slot);
             });
         }

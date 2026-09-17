@@ -45,7 +45,11 @@ const ALPN: [&[u8]; 2] = [b"h2", b"http/1.1"];
 ///
 /// Which name a connection settled on still matters, and is read back off the
 /// finished handshake — see `crate::upstream`, where it selects the audience.
-pub fn server_config(public_names: &[&str]) -> Result<ServerConfig, String> {
+///
+/// Returns the certificate's `SubjectPublicKeyInfo` alongside the config. That
+/// is the value a quote binds, and binding it is what turns a certificate no
+/// store vouches for into something a caller can check — see `crate::attest`.
+pub fn server_config(public_names: &[&str]) -> Result<(ServerConfig, Vec<u8>), String> {
     if public_names.is_empty() {
         return Err("a serving certificate needs at least one name".into());
     }
@@ -95,7 +99,9 @@ pub fn server_config(public_names: &[&str]) -> Result<ServerConfig, String> {
         )
         .map_err(|e| format!("build the server config: {e}"))?;
     config.alpn_protocols = ALPN.iter().map(|p| p.to_vec()).collect();
-    Ok(config)
+    // The DER a caller parses out of the certificate it validated, which is what
+    // makes comparing it to the quote's binding mean anything.
+    Ok((config, key_pair.public_key_der()))
 }
 
 #[cfg(test)]
@@ -109,12 +115,15 @@ mod tests {
     /// is a guest that panicked during boot, reported over a serial port.
     #[test]
     fn a_config_is_built_and_offers_both_protocols() {
-        let config =
+        let (config, spki) =
             server_config(&["verify.example.com", "api.example.com"]).expect("a config is built");
         assert_eq!(
             config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()]
         );
+        // The bytes a quote binds. Empty, and the endpoint that serves the quote
+        // would bind nothing while still looking like it proved something.
+        assert!(!spki.is_empty(), "the certificate's SPKI comes back");
     }
 
     /// The check that rcgen does not do. Written after discovering that

@@ -1464,6 +1464,7 @@ name = "enclavid-gateway"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "ciborium",
  "enclavid-attestation",
  "enclavid-ra-tls",
  "fleet-transport",
