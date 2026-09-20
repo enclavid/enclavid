@@ -117,7 +117,7 @@ where
 
     // The reason is the sender's to read and is not logged: it can quote the
     // push, and the push is the host's, which already has it.
-    let declared = match crate::config::parse(&body) {
+    let declared = match crate::config::ValidatedConfig::parse(&body) {
         Ok(declared) => declared,
         Err(reason) => return answer(StatusCode::BAD_REQUEST, format!("{reason}\n")),
     };
@@ -168,7 +168,8 @@ mod tests {
 
     fn valid() -> String {
         format!(
-            r#"{{"upstreams":[{{"measurement":"{A}","applicant":"127.0.0.1:1","client":"127.0.0.1:2"}}]}}"#
+            r#"{{"upstreams":[{{"node":"one","measurement":"{A}","applicant":"127.0.0.1:1","client":"127.0.0.1:2","health":"127.0.0.1:3"}}],"affinity":{{"key":"{}","ttl_seconds":600}}}}"#,
+            "0".repeat(64)
         )
     }
 
@@ -188,7 +189,7 @@ mod tests {
         assert_eq!(rx.borrow().len(), 1);
         assert!(
             rx.borrow()
-                .route(Some("verify.example.com"), Some(A))
+                .at_node(crate::upstream::Surface::Applicant, "one")
                 .is_ok()
         );
     }

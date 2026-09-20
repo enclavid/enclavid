@@ -65,9 +65,18 @@ enclavid-attestation = { path = "../attestation", default-features = false }
 # Both already in the measured api image.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The affinity key arrives written as hex. Already in the measured api image,
+# and this is the decoder the rest of the workspace reads digests with.
+hex = { version = "0.4", features = ["serde"] }
 # The quote this role serves about itself, in the same encoding an RA-TLS
 # certificate carries it in, so one verifier reads both — see `crate::attest`.
 ciborium = "0.2"
+# The affinity token: an HS256 JWT assembled by hand from these three, rather
+# than a JWT library, which would add a parser, PEM and ASN.1 to a measured
+# image to check thirty-two bytes of HMAC — see `crate::affinity`.
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
 
 [features]
 # Default: TCP, and a plain HTTP leg to api. That is a developer box, where

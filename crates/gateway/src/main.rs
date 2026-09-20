@@ -52,9 +52,11 @@
 //! ever. That is the standing defence against a runtime exploit, which changes
 //! behaviour without changing a measurement.
 
+mod affinity;
 mod attest;
 mod config;
 mod identity;
+mod probe;
 mod push;
 mod serve;
 mod tls;
@@ -210,6 +212,12 @@ async fn main() {
         never = &mut pushes => never,
     }
 
+    // Asking each api what it knows about itself, on this task for the same
+    // reason the push loop is: a role that stopped asking would keep placing new
+    // sessions on what it last believed.
+    let probes = probe::poll_forever(current.clone());
+    tokio::pin!(probes);
+
     let listener = fleet_transport::bind(&public_addr)
         .await
         .unwrap_or_else(|e| {
@@ -262,5 +270,6 @@ async fn main() {
     tokio::select! {
         never = public => never,
         never = &mut pushes => never,
+        never = &mut probes => never,
     }
 }

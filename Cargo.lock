@@ -1463,11 +1463,14 @@ dependencies = [
 name = "enclavid-gateway"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "ciborium",
  "enclavid-attestation",
  "enclavid-ra-tls",
  "fleet-transport",
+ "hex",
+ "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -1475,6 +1478,7 @@ dependencies = [
  "safe-logger",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-rustls",
 ]
@@ -2106,6 +2110,9 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "hkdf"

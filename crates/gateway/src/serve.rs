@@ -20,6 +20,7 @@ use bytes::Bytes;
 use http_body_util::{Either, Full};
 use hyper::body::Incoming;
 use hyper::client::conn::http2::SendRequest;
+use hyper::header::HeaderValue;
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
@@ -27,8 +28,9 @@ use safe_logger::debug;
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
+use crate::affinity;
 use crate::attest;
-use crate::upstream::{Legs, NoRoute, Upstreams};
+use crate::upstream::{Legs, NoRoute, Surface, Target, Upstreams};
 
 /// How long a peer has to finish the handshake before its task is dropped.
 ///
@@ -254,47 +256,52 @@ async fn proxy(
         return attestation(proof, req.method());
     }
 
-    // Named once or not at all. `remove` would take every value and return the
-    // first, so two values would route by whichever happened to come first —
-    // a choice made for the caller, which this header exists to prevent.
-    if req.headers().get_all(MEASUREMENT).iter().nth(1).is_some() {
-        return fixed(
-            StatusCode::BAD_REQUEST,
-            "name exactly one api measurement\n",
-        );
-    }
-    // Taken, not copied: it named a choice this hop makes, and api has no use
-    // for it.
-    let wanted = req
-        .headers_mut()
-        .remove(MEASUREMENT)
-        .and_then(|v| v.to_str().ok().map(str::to_owned));
-
-    let target = match upstreams.route(server_name, wanted.as_deref()) {
-        Ok(target) => target,
+    let surface = match upstreams.surface(server_name) {
+        Ok(surface) => surface,
         // 421 rather than 404: the request is well-formed and this role simply
         // is not the server for the name it was sent to.
-        Err(NoRoute::UnknownName) => {
+        Err(_) => {
             return fixed(
                 StatusCode::MISDIRECTED_REQUEST,
                 "this name is not served here\n",
             );
         }
-        // 400, because the request is missing something only the caller can
-        // supply. Naming a build is not a formality here — it is the whole of
-        // what this role checks on the caller's behalf.
+    };
+
+    // Which machine, and — on the consumer surface — a token to hand back so
+    // the next request of this session comes to the same one.
+    let placed = match surface {
+        Surface::Applicant => match applicant_node(&mut req) {
+            Some(node) => upstreams
+                .at_node(surface, &node)
+                .map(|target| (target, None)),
+            // The link this role writes always carries a machine. One without
+            // is not a session's link, and there is nothing to guess from.
+            None => {
+                return fixed(StatusCode::BAD_REQUEST, "this link is incomplete\n");
+            }
+        },
+        Surface::Consumer => consumer_node(upstreams, &mut req),
+    };
+
+    let (target, minted) = match placed {
+        Ok(placed) => placed,
         Err(NoRoute::Unspecified) => {
+            // 400, because the request is missing something only the caller can
+            // supply. Naming a build is not a formality here — it is the whole
+            // of what this role checks on the caller's behalf.
             return fixed(
                 StatusCode::BAD_REQUEST,
                 "name the api measurement you require\n",
             );
         }
         // 502, and deliberately the same answer as an upstream that would not
-        // talk: which builds are reachable is the host's business and changes
-        // under it, so distinguishing "no such build here" from "it would not
-        // answer" would report the fleet's shape to whoever asked.
-        Err(NoRoute::NoSuchBuild) => return unavailable(),
+        // talk: which machines exist, which builds they run and which can take
+        // work is the host's business and changes under it, so telling those
+        // apart would report the fleet's shape to whoever asked.
+        Err(_) => return unavailable(),
     };
+    let node = target.node.to_owned();
 
     let leg = match legs.get(target, upstreams.tls()).await {
         Ok(leg) => leg,
@@ -304,7 +311,95 @@ async fn proxy(
         }
     };
 
-    forward(leg, req).await
+    let mut answer = forward(leg, req).await;
+    if let Some(token) = minted {
+        // Said on the way back, on every consumer answer: the machine this
+        // request went to, and a token that returns the next one there. Sliding
+        // rather than issued once, so a session outliving one token keeps its
+        // machine — see `crate::affinity`.
+        for (header, value) in [
+            (affinity::NODE_HEADER, node),
+            (affinity::TOKEN_HEADER, token),
+        ] {
+            match HeaderValue::from_str(&value) {
+                Ok(value) => {
+                    answer.headers_mut().insert(header, value);
+                }
+                Err(e) => debug!("could not write {header}: {e}"),
+            }
+        }
+    }
+    answer
+}
+
+/// The machine an applicant's link names: the first path segment, removed on
+/// the way through so api sees the path it published.
+fn applicant_node(req: &mut Request<Incoming>) -> Option<String> {
+    let path = req.uri().path();
+    let rest = path.strip_prefix('/')?;
+    let (node, rest) = rest.split_once('/').unwrap_or((rest, ""));
+    if node.is_empty() {
+        return None;
+    }
+    let node = node.to_owned();
+
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    let stripped = format!("/{rest}{query}");
+    match Uri::builder().path_and_query(stripped).build() {
+        Ok(uri) => {
+            *req.uri_mut() = uri;
+            Some(node)
+        }
+        Err(e) => {
+            debug!("could not strip the node from the path: {e}");
+            None
+        }
+    }
+}
+
+/// Where a consumer's request goes: back to the machine its token names, or —
+/// having none — to one this role picks among those running the build it asked
+/// for, with a token to come back by.
+fn consumer_node<'a>(
+    upstreams: &'a Upstreams,
+    req: &mut Request<Incoming>,
+) -> Result<(Target<'a>, Option<String>), NoRoute> {
+    let keys = upstreams.affinity().ok_or(NoRoute::NoSuchBuild)?;
+    let token = req
+        .headers_mut()
+        .remove(affinity::TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok().map(str::to_owned));
+    let now = std::time::SystemTime::now();
+
+    // A token that does not check out is treated as absent rather than refused:
+    // it is this role's own bookkeeping, and the caller cannot do anything
+    // about a key that rotated twice or a clock that moved.
+    if let Some(node) = token.as_deref().and_then(|token| keys.node_of(token, now)) {
+        let target = upstreams.at_node(Surface::Consumer, &node)?;
+        return Ok((target, Some(keys.mint(&node, now))));
+    }
+
+    // Named once or not at all. `remove` would take every value and return the
+    // first, so two values would route by whichever happened to come first —
+    // a choice made for the caller, which this header exists to prevent.
+    if req.headers().get_all(MEASUREMENT).iter().nth(1).is_some() {
+        return Err(NoRoute::Unspecified);
+    }
+    // Taken, not copied: it named a choice this hop makes, and api has no use
+    // for it.
+    let wanted = req
+        .headers_mut()
+        .remove(MEASUREMENT)
+        .and_then(|value| value.to_str().ok().map(str::to_owned))
+        .ok_or(NoRoute::Unspecified)?;
+
+    let target = upstreams.assign(Surface::Consumer, &wanted)?;
+    let token = keys.mint(target.node, now);
+    Ok((target, Some(token)))
 }
 
 /// Send it, hand the answer back.
@@ -422,6 +517,7 @@ mod tests {
     use tokio_rustls::rustls::{self, DigitallySignedStruct, SignatureScheme};
 
     const M: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NODE: &str = "one";
     const BODY: usize = 1 << 20;
 
     /// An api stand-in: HTTP/2 by prior knowledge, answering every request with
@@ -455,11 +551,17 @@ mod tests {
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let proof = attest::proof(spki.clone(), &crate::identity::attestor()).unwrap();
         let table = Upstreams::empty("verify.example.com".into(), "api.example.com".into())
-            .replaced(vec![crate::config::Upstream {
-                measurement: M.into(),
-                applicant: api.into(),
-                client: api.into(),
-            }]);
+            .replaced(crate::upstream::tests::pushed(vec![
+                crate::config::Upstream {
+                    node: NODE.into(),
+                    measurement: M.into(),
+                    applicant: api.into(),
+                    client: api.into(),
+                    // Nothing listens there: an unreachable health port leaves
+                    // the node ready, which is where a fresh push starts it.
+                    health: "127.0.0.1:1".into(),
+                },
+            ]));
         let (_, current) = watch::channel(Arc::new(table));
         tokio::spawn(async move {
             fleet_transport::accept_forever(listener, move |stream, peer| {
@@ -525,8 +627,18 @@ mod tests {
         }
     }
 
-    /// One public HTTP/2 connection, receiving with the given window.
+    /// One public HTTP/2 connection to the applicant's name, receiving with the
+    /// given window.
     async fn caller(gateway: &str, window: u32) -> SendRequest<Empty<Bytes>> {
+        connect(gateway, "verify.example.com", window).await
+    }
+
+    /// The same, to the consumer's name.
+    async fn consumer(gateway: &str) -> SendRequest<Empty<Bytes>> {
+        connect(gateway, "api.example.com", 4 << 20).await
+    }
+
+    async fn connect(gateway: &str, name: &'static str, window: u32) -> SendRequest<Empty<Bytes>> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
@@ -538,7 +650,7 @@ mod tests {
 
         let tcp = tokio::net::TcpStream::connect(gateway).await.unwrap();
         let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
-            .connect(ServerName::try_from("verify.example.com").unwrap(), tcp)
+            .connect(ServerName::try_from(name).unwrap(), tcp)
             .await
             .unwrap();
         let (sender, driver) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
@@ -551,8 +663,9 @@ mod tests {
         sender
     }
 
+    /// What an applicant's link looks like: the machine first, then api's path.
     fn request() -> hyper::http::request::Builder {
-        Request::get("https://verify.example.com/")
+        Request::get(format!("https://verify.example.com/{NODE}/"))
     }
 
     /// A caller that stops reading must not stall anyone else.
@@ -571,7 +684,7 @@ mod tests {
         for _ in 0..8 {
             attacker.ready().await.unwrap();
             let response = attacker
-                .send_request(request().header(MEASUREMENT, M).body(Empty::new()).unwrap())
+                .send_request(request().body(Empty::new()).unwrap())
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -582,7 +695,7 @@ mod tests {
         let body = tokio::time::timeout(Duration::from_secs(10), async {
             victim.ready().await.unwrap();
             let response = victim
-                .send_request(request().header(MEASUREMENT, M).body(Empty::new()).unwrap())
+                .send_request(request().body(Empty::new()).unwrap())
                 .await
                 .unwrap();
             response.into_body().collect().await.unwrap().to_bytes()
@@ -651,15 +764,95 @@ mod tests {
         );
     }
 
-    /// Two measurements are refused rather than resolved to whichever came first.
+    /// A consumer is told where its session was placed, and comes back there
+    /// with the token it was given rather than with a machine of its choosing.
     #[tokio::test]
-    async fn a_measurement_named_twice_is_refused() {
+    async fn a_consumer_is_placed_and_comes_back_with_a_token() {
+        let (gateway, _) = gateway(&api().await).await;
+        let mut consumer = consumer(&gateway).await;
+
+        consumer.ready().await.unwrap();
+        let placed = consumer
+            .send_request(
+                Request::get("https://api.example.com/api/v1/sessions")
+                    .header(MEASUREMENT, M)
+                    .body(Empty::new())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(placed.status(), StatusCode::OK);
+        assert_eq!(placed.headers()[affinity::NODE_HEADER], NODE);
+        let token = placed.headers()[affinity::TOKEN_HEADER].clone();
+
+        // Coming back with it needs no measurement: the token says where.
+        consumer.ready().await.unwrap();
+        let again = consumer
+            .send_request(
+                Request::get("https://api.example.com/api/v1/sessions/1")
+                    .header(affinity::TOKEN_HEADER, &token)
+                    .body(Empty::new())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::OK);
+        assert_eq!(again.headers()[affinity::NODE_HEADER], NODE);
+
+        // Without either, there is nothing to place on and nothing to go back
+        // to, and the answer says which is missing.
+        consumer.ready().await.unwrap();
+        let naked = consumer
+            .send_request(
+                Request::get("https://api.example.com/api/v1/sessions")
+                    .body(Empty::new())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(naked.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// An applicant's link carries the machine, and one without it is not a
+    /// link this role wrote.
+    #[tokio::test]
+    async fn an_applicant_link_without_a_machine_is_refused() {
         let (gateway, _) = gateway(&api().await).await;
         let mut caller = caller(&gateway, 4 << 20).await;
         caller.ready().await.unwrap();
         let response = caller
             .send_request(
-                request()
+                Request::get("https://verify.example.com/")
+                    .body(Empty::new())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // And a machine nobody declares is the same answer as one that would
+        // not talk.
+        caller.ready().await.unwrap();
+        let elsewhere = caller
+            .send_request(
+                Request::get("https://verify.example.com/somewhere/")
+                    .body(Empty::new())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(elsewhere.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    /// Two measurements are refused rather than resolved to whichever came first.
+    #[tokio::test]
+    async fn a_measurement_named_twice_is_refused() {
+        let (gateway, _) = gateway(&api().await).await;
+        let mut consumer = consumer(&gateway).await;
+        consumer.ready().await.unwrap();
+        let response = consumer
+            .send_request(
+                Request::get("https://api.example.com/api/v1/sessions")
                     .header(MEASUREMENT, M)
                     .header(MEASUREMENT, M)
                     .body(Empty::new())

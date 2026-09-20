@@ -73,6 +73,8 @@
 //! which api's own inbound chooses whether to terminate RA-TLS at all.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use hyper::body::Incoming;
@@ -108,14 +110,48 @@ const PING_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_WINDOW: u32 = 1 << 20;
 const STREAM_WINDOW: u32 = 256 << 10;
 
-/// One api instance: a build, and the two ports it serves it on.
+/// One api instance: a machine, the build on it, and the ports it serves.
 struct Instance {
+    /// What this machine is called in a link and in a token.
+    node: String,
     /// The measurement this instance is DECLARED to have. A caller naming it is
     /// routed here; [`connect`] then proves the declaration before anything is
     /// sent.
     measurement: String,
     applicant: String,
     client: String,
+    health: String,
+    /// Whether this instance says it can take a NEW session. Shared with the
+    /// poller, and carried across pushes — see [`Upstreams::replaced`].
+    ready: Arc<Ready>,
+}
+
+/// What the health poller learns, and the only thing routing asks it.
+///
+/// A node that is not ready is skipped when a new session is placed, and
+/// nothing else changes: a request that belongs to a session already on that
+/// node still goes there, because there is nowhere else it could go.
+#[derive(Debug)]
+pub struct Ready(AtomicBool);
+
+impl Default for Ready {
+    /// A freshly declared node starts ready. The host has just said it is part
+    /// of the fleet, the first poll is moments away, and the alternative —
+    /// refusing every new session until a poll lands — turns each push into an
+    /// outage.
+    fn default() -> Self {
+        Ready(AtomicBool::new(true))
+    }
+}
+
+impl Ready {
+    pub fn set(&self, ready: bool) {
+        self.0.store(ready, Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
 }
 
 /// Everywhere this role may forward to, as of one push.
@@ -126,12 +162,36 @@ pub struct Upstreams {
     /// attestor and the verifier, neither of which changes with the fleet.
     tls: Tls,
     instances: Vec<Instance>,
+    /// What affinity tokens are signed with, as of this push. `None` only
+    /// before the first one, when nothing is served yet.
+    affinity: Option<crate::affinity::Keys>,
+    /// Where the next new session goes, among the nodes that can take one.
+    ///
+    /// Round robin, and deliberately the dullest thing that spreads load: the
+    /// gateway knows nothing about how much work a session is, and a cleverer
+    /// rule would be guessing. It is not carried across pushes — after one, the
+    /// table it counted over no longer exists.
+    next: AtomicUsize,
 }
 
-/// Where one request goes: an address, and the build that must be proved there.
+/// Where one request goes: a machine, an address on it, and the build that must
+/// be proved there.
 pub struct Target<'a> {
+    pub node: &'a str,
     pub addr: &'a str,
     pub measurement: &'a str,
+}
+
+/// Which surface a connection belongs to, settled by the name TLS agreed on.
+///
+/// The two differ in more than a port. An applicant arrives by following a link
+/// this fleet wrote, so the machine is in that link and the build follows from
+/// it. A consumer arrives with an integration of its own, names the build it
+/// requires, and is told which machine it landed on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Surface {
+    Applicant,
+    Consumer,
 }
 
 /// Why a request could not be forwarded.
@@ -143,9 +203,12 @@ pub struct Target<'a> {
 pub enum NoRoute {
     /// The handshake settled a name this role does not serve.
     UnknownName,
-    /// No measurement was named.
+    /// No measurement was named where one is required.
     Unspecified,
-    /// A measurement was named and no upstream declares it.
+    /// A build was named and no node declares it, or none that could take a new
+    /// session; a node was named and no upstream carries that label. One answer
+    /// for all three: which machines exist and how they are is the host's
+    /// business and changes under it.
     NoSuchBuild,
 }
 
@@ -157,66 +220,110 @@ impl Upstreams {
             client_name,
             tls: tls_client(),
             instances: Vec::new(),
+            affinity: None,
+            next: AtomicUsize::new(0),
         }
     }
 
-    /// The table a push declares.
-    pub fn replaced(&self, declared: Vec<crate::config::Upstream>) -> Upstreams {
+    /// The table a push declares, keeping what the poller has learned about the
+    /// nodes it still declares.
+    ///
+    /// Health is carried by (label, health address): a push that only adds a
+    /// machine must not make the gateway forget that another one is down, and a
+    /// label pointed at a different address is a different machine.
+    pub fn replaced(&self, declared: crate::config::ValidatedConfig) -> Upstreams {
+        let declared = declared.into_inner();
         Upstreams {
             applicant_name: self.applicant_name.clone(),
             client_name: self.client_name.clone(),
             tls: self.tls.clone(),
+            affinity: Some(crate::affinity::Keys::new(
+                declared.affinity.key.0,
+                declared.affinity.previous_key.map(|key| key.0),
+                Duration::from_secs(declared.affinity.ttl_seconds),
+            )),
             instances: declared
+                .upstreams
                 .into_iter()
                 .map(|d| Instance {
+                    ready: self
+                        .instances
+                        .iter()
+                        .find(|i| i.node == d.node && i.health == d.health)
+                        .map(|i| i.ready.clone())
+                        .unwrap_or_default(),
+                    node: d.node,
                     measurement: d.measurement,
                     applicant: d.applicant,
                     client: d.client,
+                    health: d.health,
                 })
                 .collect(),
+            next: AtomicUsize::new(0),
         }
     }
 
-    /// The target for this connection's surface and this request's measurement.
+    /// Which surface this connection is, from the name the handshake settled.
     ///
-    /// The name is matched without regard to case, because a host name has none:
-    /// rustls hands back the bytes the peer sent, and an exact comparison would
-    /// refuse a caller who spelled a correct name in capitals. The measurement
-    /// is matched exactly — it is hex this role never mints, only compares, and
-    /// a lenient comparison there would be inventing a rule about someone else's
-    /// identifier.
-    pub fn route(
-        &self,
-        server_name: Option<&str>,
-        measurement: Option<&str>,
-    ) -> Result<Target<'_>, NoRoute> {
+    /// Matched without regard to case, because a host name has none: rustls
+    /// hands back the bytes the peer sent, and an exact comparison would refuse
+    /// a caller who spelled a correct name in capitals.
+    pub fn surface(&self, server_name: Option<&str>) -> Result<Surface, NoRoute> {
         let name = server_name.ok_or(NoRoute::UnknownName)?;
-        let applicant = if name.eq_ignore_ascii_case(&self.applicant_name) {
-            true
+        if name.eq_ignore_ascii_case(&self.applicant_name) {
+            Ok(Surface::Applicant)
         } else if name.eq_ignore_ascii_case(&self.client_name) {
-            false
+            Ok(Surface::Consumer)
         } else {
-            return Err(NoRoute::UnknownName);
-        };
+            Err(NoRoute::UnknownName)
+        }
+    }
 
-        // Absent is refused rather than defaulted. A default would pick a build
-        // on the caller's behalf, which is the one decision this whole shape
-        // exists to leave with them.
-        let wanted = measurement.ok_or(NoRoute::Unspecified)?;
+    /// The machine a link or a token names.
+    ///
+    /// No health check: the session this request belongs to lives there and
+    /// nowhere else, so a node that is unwell is still the only answer. It fails
+    /// at the connection instead, which is the same 502 and the truth.
+    pub fn at_node(&self, surface: Surface, node: &str) -> Result<Target<'_>, NoRoute> {
         let instance = self
             .instances
             .iter()
-            .find(|i| i.measurement == wanted)
+            .find(|i| i.node == node)
             .ok_or(NoRoute::NoSuchBuild)?;
+        Ok(instance.target(surface))
+    }
 
-        Ok(Target {
-            addr: if applicant {
-                &instance.applicant
-            } else {
-                &instance.client
-            },
-            measurement: &instance.measurement,
-        })
+    /// Where a NEW session goes: a node running the build the caller named,
+    /// among those that say they can take one.
+    ///
+    /// The caller does not choose. That is the whole point of placing it here:
+    /// a consumer that picked its own node would pin every session to one
+    /// machine, and under load a node that cannot take work would keep being
+    /// handed it.
+    pub fn assign(&self, surface: Surface, measurement: &str) -> Result<Target<'_>, NoRoute> {
+        let candidates: Vec<&Instance> = self
+            .instances
+            .iter()
+            .filter(|i| i.measurement == measurement && i.ready.get())
+            .collect();
+        if candidates.is_empty() {
+            return Err(NoRoute::NoSuchBuild);
+        }
+        let turn = self.next.fetch_add(1, Ordering::Relaxed);
+        Ok(candidates[turn % candidates.len()].target(surface))
+    }
+
+    /// What affinity tokens are signed with, as of this push.
+    pub fn affinity(&self) -> Option<&crate::affinity::Keys> {
+        self.affinity.as_ref()
+    }
+
+    /// Every node's label and health address, for the poller.
+    pub fn to_poll(&self) -> Vec<(String, Arc<Ready>)> {
+        self.instances
+            .iter()
+            .map(|i| (i.health.clone(), i.ready.clone()))
+            .collect()
     }
 
     /// What a connection to any api in this table is secured with.
@@ -227,6 +334,21 @@ impl Upstreams {
     /// How many builds this table declares. For the line an accepted push writes.
     pub fn len(&self) -> usize {
         self.instances.len()
+    }
+}
+
+impl Instance {
+    /// This instance, as the surface in front of it sees it. The measurement is
+    /// what the host DECLARED; the connection proves it before anything is sent.
+    fn target(&self, surface: Surface) -> Target<'_> {
+        Target {
+            node: &self.node,
+            addr: match surface {
+                Surface::Applicant => &self.applicant,
+                Surface::Consumer => &self.client,
+            },
+            measurement: &self.measurement,
+        }
     }
 }
 
@@ -405,79 +527,141 @@ async fn connect(addr: &str, _expected: &str, _tls: &Tls) -> std::io::Result<Ups
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    const A: &str = "aa11";
-    const B: &str = "bb22";
+    /// Two builds, spelled the way a real one is: what routing compares is the
+    /// string, and the table refuses anything a quote could not carry.
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-    fn declared(measurement: &str, applicant: &str, client: &str) -> crate::config::Upstream {
+    fn declared(node: &str, measurement: &str, port: u16) -> crate::config::Upstream {
         crate::config::Upstream {
+            node: node.into(),
             measurement: measurement.into(),
-            applicant: applicant.into(),
-            client: client.into(),
+            applicant: format!("127.0.0.1:{port}"),
+            client: format!("127.0.0.1:{}", port + 1),
+            health: format!("127.0.0.1:{}", port + 2),
         }
     }
 
+    /// A table as the host would have pushed one — through the same checks, so
+    /// a fixture nothing could route is a failing test rather than a passing
+    /// one.
+    pub(crate) fn pushed(
+        upstreams: Vec<crate::config::Upstream>,
+    ) -> crate::config::ValidatedConfig {
+        crate::config::RawConfig {
+            upstreams,
+            affinity: crate::config::Affinity {
+                key: crate::config::Key([0; 32]),
+                previous_key: None,
+                ttl_seconds: 600,
+            },
+        }
+        .try_into()
+        .expect("the fixture declares a routable table")
+    }
+
     fn upstreams() -> Upstreams {
-        Upstreams::empty("verify.example.com".into(), "api.example.com".into()).replaced(vec![
-            declared(A, "127.0.0.1:1", "127.0.0.1:2"),
-            declared(B, "127.0.0.1:3", "127.0.0.1:4"),
-        ])
+        Upstreams::empty("verify.example.com".into(), "api.example.com".into()).replaced(pushed(
+            vec![
+                declared("one", A, 1000),
+                declared("two", A, 2000),
+                declared("three", B, 3000),
+            ],
+        ))
     }
 
     #[test]
-    fn the_name_picks_the_surface_and_the_measurement_picks_the_build() {
+    fn the_name_picks_the_surface() {
         let up = upstreams();
-        let applicant_a = up.route(Some("verify.example.com"), Some(A)).ok().unwrap();
         assert_eq!(
-            (applicant_a.addr, applicant_a.measurement),
-            ("127.0.0.1:1", A)
+            up.surface(Some("verify.example.com")).ok(),
+            Some(Surface::Applicant)
         );
-        let consumer_b = up.route(Some("api.example.com"), Some(B)).ok().unwrap();
         assert_eq!(
-            (consumer_b.addr, consumer_b.measurement),
-            ("127.0.0.1:4", B)
+            up.surface(Some("api.example.com")).ok(),
+            Some(Surface::Consumer)
         );
-    }
-
-    /// A host name has no case, so capitals must not move a caller to the other
-    /// audience's door — or to none at all.
-    #[test]
-    fn case_does_not_change_the_surface() {
-        let up = upstreams();
-        let shouted = up.route(Some("VERIFY.Example.CoM"), Some(A)).ok().unwrap();
-        assert_eq!(shouted.addr, "127.0.0.1:1");
-    }
-
-    /// The three refusals are three different answers, and a caller can act on
-    /// each differently.
-    #[test]
-    fn each_refusal_says_which_thing_was_wrong() {
-        let up = upstreams();
+        // A host name has no case, so capitals must not move a caller to the
+        // other audience's door — or to none at all.
+        assert_eq!(
+            up.surface(Some("VERIFY.Example.CoM")).ok(),
+            Some(Surface::Applicant)
+        );
         assert!(matches!(
-            up.route(Some("elsewhere.example.com"), Some(A)),
+            up.surface(Some("elsewhere.example.com")),
             Err(NoRoute::UnknownName)
         ));
-        assert!(matches!(up.route(None, Some(A)), Err(NoRoute::UnknownName)));
-        assert!(matches!(
-            up.route(Some("verify.example.com"), None),
-            Err(NoRoute::Unspecified)
-        ));
-        assert!(matches!(
-            up.route(Some("verify.example.com"), Some("cc33")),
-            Err(NoRoute::NoSuchBuild)
-        ));
+        assert!(matches!(up.surface(None), Err(NoRoute::UnknownName)));
     }
 
-    /// Naming nothing must not resolve to something. A default would pick a
-    /// build for the caller, which is the decision this shape exists to leave
-    /// with them.
+    /// A label picks the machine, and the surface picks which of its two ports.
     #[test]
-    fn an_unnamed_measurement_is_never_defaulted() {
+    fn a_label_names_one_machine_on_either_surface() {
         let up = upstreams();
-        assert!(up.route(Some("verify.example.com"), None).is_err());
-        assert!(up.route(Some("verify.example.com"), Some("")).is_err());
+        let applicant = up.at_node(Surface::Applicant, "one").ok().unwrap();
+        assert_eq!(
+            (applicant.node, applicant.addr, applicant.measurement),
+            ("one", "127.0.0.1:1000", A)
+        );
+        let consumer = up.at_node(Surface::Consumer, "one").ok().unwrap();
+        assert_eq!(consumer.addr, "127.0.0.1:1001");
+        assert!(up.at_node(Surface::Consumer, "nowhere").is_err());
+    }
+
+    /// A machine that has not been placed on before is placed on now: new
+    /// sessions spread rather than pile onto whichever came first.
+    #[test]
+    fn new_sessions_go_round_the_machines_running_that_build() {
+        let up = upstreams();
+        let first = up
+            .assign(Surface::Consumer, A)
+            .ok()
+            .unwrap()
+            .node
+            .to_owned();
+        let second = up
+            .assign(Surface::Consumer, A)
+            .ok()
+            .unwrap()
+            .node
+            .to_owned();
+        assert_ne!(first, second);
+        assert_eq!(
+            up.assign(Surface::Consumer, A).ok().unwrap().node,
+            first,
+            "and then round again"
+        );
+        assert_eq!(up.assign(Surface::Consumer, B).ok().unwrap().node, "three");
+    }
+
+    /// A build nobody runs and a machine that cannot take work answer the same
+    /// way: which machines exist and how they are is the host's business.
+    #[test]
+    fn nothing_to_place_on_is_one_answer() {
+        let up = upstreams();
+        assert!(matches!(
+            up.assign(Surface::Consumer, "cc33"),
+            Err(NoRoute::NoSuchBuild)
+        ));
+
+        for node in ["one", "two"] {
+            up.instances
+                .iter()
+                .find(|i| i.node == node)
+                .unwrap()
+                .ready
+                .set(false);
+        }
+        assert!(matches!(
+            up.assign(Surface::Consumer, A),
+            Err(NoRoute::NoSuchBuild)
+        ));
+        // And a request that belongs to a session already there still goes
+        // there: unwell or not, it is the only machine that has it.
+        assert!(up.at_node(Surface::Consumer, "one").is_ok());
     }
 
     /// Before the first push nothing routes, and it fails as an unavailable
@@ -486,18 +670,47 @@ mod tests {
     fn an_empty_table_routes_nothing() {
         let up = Upstreams::empty("verify.example.com".into(), "api.example.com".into());
         assert_eq!(up.len(), 0);
+        assert!(up.affinity().is_none());
         assert!(matches!(
-            up.route(Some("verify.example.com"), Some(A)),
+            up.assign(Surface::Consumer, A),
+            Err(NoRoute::NoSuchBuild)
+        ));
+        assert!(matches!(
+            up.at_node(Surface::Applicant, "one"),
             Err(NoRoute::NoSuchBuild)
         ));
     }
 
     /// A replacement is whole: what the new push leaves out stops routing.
     #[test]
-    fn a_build_the_next_push_omits_stops_routing() {
-        let next = upstreams().replaced(vec![declared(B, "127.0.0.1:3", "127.0.0.1:4")]);
+    fn a_machine_the_next_push_omits_stops_routing() {
+        let next = upstreams().replaced(pushed(vec![declared("two", A, 2000)]));
         assert_eq!(next.len(), 1);
-        assert!(next.route(Some("verify.example.com"), Some(A)).is_err());
-        assert!(next.route(Some("verify.example.com"), Some(B)).is_ok());
+        assert!(next.at_node(Surface::Applicant, "one").is_err());
+        assert!(next.at_node(Surface::Applicant, "two").is_ok());
+    }
+
+    /// What the poller learned survives a push that still declares the machine,
+    /// so adding one does not quietly make an unwell one placeable again.
+    #[test]
+    fn a_verdict_survives_a_push_that_keeps_the_machine() {
+        let up = upstreams();
+        up.instances
+            .iter()
+            .find(|i| i.node == "one")
+            .unwrap()
+            .ready
+            .set(false);
+
+        let next = up.replaced(pushed(vec![
+            declared("one", A, 1000),
+            declared("two", A, 2000),
+        ]));
+        assert_eq!(next.assign(Surface::Consumer, A).ok().unwrap().node, "two");
+
+        // A label pointed at a different machine is a different machine, and
+        // starts over.
+        let moved = next.replaced(pushed(vec![declared("one", A, 5000)]));
+        assert!(moved.assign(Surface::Consumer, A).is_ok());
     }
 }
