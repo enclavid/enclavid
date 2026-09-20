@@ -11,10 +11,38 @@
 //!
 //! ## Why it may come from the host at all
 //!
-//! Every value here says WHERE this role may go, never WHETHER to check what it
-//! finds there. An upstream's measurement is a routing hint the connector proves
-//! at the handshake, so a lie about one is a route that fails, not a route that
-//! is taken. There is deliberately no field that could say otherwise.
+//! Every value here says WHERE this role may go and HOW MUCH of the work a
+//! given instance takes — never WHETHER to check what it finds there. A group's
+//! measurement is a routing hint the connector proves at the handshake, so a
+//! lie about one is a route that fails, not a route that is taken. There is
+//! deliberately no field that could say otherwise.
+//!
+//! ## A group, not a machine
+//!
+//! api seals a session's state under a key derived from the chip and the
+//! measurement, so every instance of one build on one part can serve any
+//! session of that build. The unit this role routes to is therefore that set —
+//! a GROUP — and its members are interchangeable. A label names the group, so
+//! an applicant's link and a consumer's token survive the loss of any one
+//! machine, and a request that fails on one member can be tried on another.
+//!
+//! The host declares which instances form a group, and this role does not take
+//! that on trust: every leg proves a chip and a measurement at the handshake,
+//! and a member that proves something other than its group's is refused — see
+//! `crate::leg`.
+//!
+//! ## The shape
+//!
+//! Groups are declared once and the names refer to them, which is how a
+//! reverse proxy's configuration has always read: what a backend IS, then which
+//! of them each served name may reach. A group's addresses differ per name
+//! because one api process serves the two on two ports.
+//!
+//! ```text
+//! groups: one -> the build it runs
+//! names:  verify.example.com -> one -> the addresses of its members there
+//!         api.example.com    -> one -> the addresses of its members there
+//! ```
 //!
 //! ## The type is the grammar
 //!
@@ -24,46 +52,54 @@
 //!
 //! What the grammar cannot say is whether a value could do its job — a label
 //! that survives a URL, a measurement a quote could carry, an address something
-//! could dial. That is the second step, and it is a type rather than a habit:
-//! [`RawConfig`] is what decodes, [`ValidatedConfig`] is what routing is given,
-//! and the only way between them is [`TryFrom`].
+//! could dial, a group named in one place and declared in none. That is the
+//! second step, and it is a type rather than a habit: [`RawConfig`] is what
+//! decodes, [`ValidatedConfig`] is what routing is given, and the only way
+//! between them is [`ValidatedConfig::parse`].
 //!
-//! A push is refused WHOLE if any entry in it is wrong, and the answer says
-//! which. There is a sender to tell, and a table missing one declared build is a
-//! quieter failure than a push that did not apply.
+//! A push is refused WHOLE if any part of it is wrong, and the answer says
+//! which. There is a sender to tell, and a table missing one declared build is
+//! a quieter failure than a push that did not apply.
+
+use std::collections::HashMap;
 
 use serde::Deserialize;
 
 /// One push as it decodes: the complete table, never a change to the previous
 /// one.
-///
-/// What the grammar admits, before anything has looked at the values — a node
-/// label that could not travel in a link, a measurement no quote could carry,
-/// an address nothing could dial. [`ValidatedConfig`] is the form those have
-/// been looked at in.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawConfig {
-    pub upstreams: Vec<Upstream>,
+    /// What each group is, by the label that names it.
+    pub groups: HashMap<String, Group>,
+    /// Which members of which group serve each public name.
+    pub names: HashMap<String, HashMap<String, Vec<String>>>,
     pub affinity: Affinity,
+}
+
+/// What a group is. Only its build today; what it is WORTH — weights, how many
+/// at once — belongs beside the addresses in `names`, because that is where the
+/// choosing happens.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Group {
+    /// The build every member runs. Proved at the handshake, not here.
+    pub measurement: String,
 }
 
 /// A table every check has passed, and the only form routing is given.
 ///
 /// The wrapper exists so that the checks cannot be skipped by a later caller
 /// rather than to make them more thorough: `Upstreams::replaced` takes this,
-/// and this is reachable only through [`TryFrom`].
+/// and this is reachable only through [`ValidatedConfig::parse`].
 pub struct ValidatedConfig(RawConfig);
 
 impl ValidatedConfig {
     /// The table a push declares, or why it is refused.
-    ///
-    /// Two steps, and the type each one produces says which refused: the
-    /// grammar, then the values.
     pub fn parse(body: &[u8]) -> Result<ValidatedConfig, String> {
-        serde_json::from_slice::<RawConfig>(body)
-            .map_err(|e| e.to_string())?
-            .try_into()
+        let raw: RawConfig = serde_json::from_slice(body).map_err(|e| e.to_string())?;
+        raw.check()?;
+        Ok(ValidatedConfig(raw))
     }
 
     /// The table, consuming the wrapper — its job was to stand between decoding
@@ -84,7 +120,7 @@ pub struct Affinity {
     #[serde(default)]
     pub previous_key: Option<Key>,
     /// How long a minted token stays good. Bounded here because it is the only
-    /// thing limiting how long a consumer can keep placing work on a machine it
+    /// thing limiting how long a consumer can keep placing work on a group it
     /// was once given.
     pub ttl_seconds: u64,
 }
@@ -101,44 +137,14 @@ const MAX_TTL_SECONDS: u64 = 3600;
 #[derive(Deserialize)]
 pub struct Key(#[serde(with = "hex::serde")] pub [u8; 32]);
 
-/// One api instance, as the host declares it.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Upstream {
-    /// What this instance is called, in a link and in a token.
-    ///
-    /// A session's state is sealed to the machine that made it, so every later
-    /// request of that session has to come back here. The label is how it finds
-    /// its way: it travels in the applicant's link and in the consumer's token,
-    /// and it says WHICH MACHINE and nothing about whose session.
-    pub node: String,
-    /// The build the host says runs there. Proved at the handshake, not here.
-    ///
-    /// Not unique: several nodes run one build, which is the ordinary state of a
-    /// fleet and the reason there is anything to choose between.
-    pub measurement: String,
-    /// Where api serves the applicant surface.
-    pub applicant: String,
-    /// Where api serves the consumer surface.
-    pub client: String,
-    /// Where api answers what it knows about itself.
-    ///
-    /// Reached through the host like everything else, and unauthenticated. A
-    /// forged "healthy" sends new sessions to a node that cannot run them —
-    /// which the host can cause anyway by not carrying bytes — and it cannot
-    /// substitute a build, because identity is proved on every data connection.
-    pub health: String,
-}
-
-/// What a node label may be.
+/// What a group label may be.
 ///
 /// It ends up in a URL path and in a token, so it is kept to what is safe in
 /// both and short enough to read in a log: lowercase letters, digits and
 /// hyphens. The limit is not a security boundary — the label selects among
-/// instances the host declared and nothing else — it is there so that a
-/// mistake in the host's configuration is refused at the push rather than
-/// found in a link.
-fn is_node_label(label: &str) -> bool {
+/// groups the host declared and nothing else — it is there so that a mistake in
+/// the host's configuration is refused at the push rather than found in a link.
+fn is_group_label(label: &str) -> bool {
     !label.is_empty()
         && label.len() <= 32
         && label
@@ -146,57 +152,71 @@ fn is_node_label(label: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// What the grammar could not say: whether each value could do the job its
-/// field names.
-///
-/// The reason goes back to the sender and nowhere else, and names the entry it
-/// is about. It may quote what the host sent, which is the host's own
-/// configuration.
-impl TryFrom<RawConfig> for ValidatedConfig {
-    type Error = String;
-
-    fn try_from(raw: RawConfig) -> Result<ValidatedConfig, String> {
-        if raw.affinity.ttl_seconds == 0 || raw.affinity.ttl_seconds > MAX_TTL_SECONDS {
+impl RawConfig {
+    /// What the grammar could not say: whether each value could do the job its
+    /// field names, and whether the two halves agree with each other.
+    ///
+    /// The reason goes back to the sender and nowhere else, and names the part
+    /// it is about. It may quote what the host sent, which is the host's own
+    /// configuration.
+    fn check(&self) -> Result<(), String> {
+        if self.affinity.ttl_seconds == 0 || self.affinity.ttl_seconds > MAX_TTL_SECONDS {
             return Err(format!(
                 "affinity.ttl_seconds: expected 1 to {MAX_TTL_SECONDS}"
             ));
         }
 
-        for (i, upstream) in raw.upstreams.iter().enumerate() {
-            if !is_node_label(&upstream.node) {
+        for (label, group) in &self.groups {
+            if !is_group_label(label) {
                 return Err(format!(
-                    "upstreams[{i}].node: expected 1 to 32 characters of a-z, 0-9 or -"
+                    "groups[{label}]: a label is 1 to 32 characters of a-z, 0-9 or -"
                 ));
             }
-            // Two entries under one label would make a link ambiguous, and the
-            // session it points at lives on exactly one machine.
-            if let Some(j) = raw.upstreams[..i]
-                .iter()
-                .position(|earlier| earlier.node == upstream.node)
-            {
+            if fleet_transport::Measurement::parse(&group.measurement).is_none() {
                 return Err(format!(
-                    "upstreams[{i}].node: already declared by upstreams[{j}]"
+                    "groups[{label}].measurement: expected 96 lowercase hex characters"
                 ));
-            }
-            if fleet_transport::Measurement::parse(&upstream.measurement).is_none() {
-                return Err(format!(
-                    "upstreams[{i}].measurement: expected 96 lowercase hex characters"
-                ));
-            }
-            // Three fields that have to be dialable, each carrying its own name
-            // so the refusal says which one — `upstreams[1].client`, not "an
-            // address somewhere in the push".
-            for (field, addr) in [
-                ("applicant", &upstream.applicant),
-                ("client", &upstream.client),
-                ("health", &upstream.health),
-            ] {
-                fleet_transport::check_dial_addr(addr)
-                    .map_err(|e| format!("upstreams[{i}].{field}: {e}"))?;
             }
         }
 
-        Ok(ValidatedConfig(raw))
+        if self.names.is_empty() {
+            return Err("names: a push says which names this role answers to".into());
+        }
+
+        for (name, table) in &self.names {
+            // A certificate is minted over these, so a name no client could
+            // ever match is refused here, where there is a sender to tell —
+            // rather than at the mint, where the answer is a role serving
+            // nothing. `crate::tls` checks it again because it must.
+            if tokio_rustls::rustls::pki_types::DnsName::try_from(name.clone()).is_err() {
+                return Err(format!("names[{name}]: not a DNS name"));
+            }
+            // Every group must be reachable on every name, or a session placed
+            // through one name would be unroutable through another — which the
+            // caller would meet as an unavailable upstream, long after the
+            // mistake was made.
+            for label in self.groups.keys() {
+                if !table.contains_key(label) {
+                    return Err(format!(
+                        "names[{name}][{label}]: missing, and it is declared"
+                    ));
+                }
+            }
+            for (label, members) in table {
+                if !self.groups.contains_key(label) {
+                    return Err(format!("names[{name}][{label}]: no such group is declared"));
+                }
+                if members.is_empty() {
+                    return Err(format!("names[{name}][{label}]: declares no members"));
+                }
+                for (i, addr) in members.iter().enumerate() {
+                    fleet_transport::check_dial_addr(addr)
+                        .map_err(|e| format!("names[{name}][{label}][{i}]: {e}"))?;
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -204,56 +224,245 @@ impl TryFrom<RawConfig> for ValidatedConfig {
 mod tests {
     use super::*;
 
+    const APPLICANT: &str = "verify.example.com";
+    const CONSUMER: &str = "api.example.com";
+
     fn m(c: char) -> String {
         c.to_string().repeat(96)
-    }
-
-    fn upstream(node: &str, measurement: &str, applicant: &str, client: &str) -> String {
-        format!(
-            r#"{{"node":"{node}","measurement":"{measurement}","applicant":"{applicant}","client":"{client}","health":"127.0.0.1:9"}}"#
-        )
     }
 
     /// A key the validation accepts; what it signs is not this module's concern.
     const KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    fn push(entries: &[String]) -> Vec<u8> {
+    /// One group on two machines, reachable under both names.
+    fn push() -> String {
         format!(
-            r#"{{"upstreams":[{}],"affinity":{{"key":"{KEY}","ttl_seconds":600}}}}"#,
-            entries.join(",")
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["127.0.0.1:1", "127.0.0.1:3"] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:2", "127.0.0.1:4"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
+            m('a')
         )
-        .into_bytes()
+    }
+
+    fn parse(body: &str) -> Result<ValidatedConfig, String> {
+        ValidatedConfig::parse(body.as_bytes())
     }
 
     #[test]
-    fn a_well_formed_push_is_taken_in_order() {
-        let got = ValidatedConfig::parse(&push(&[
-            upstream("one", &m('a'), "127.0.0.1:1", "127.0.0.1:2"),
-            upstream("two", &m('b'), "127.0.0.1:3", "127.0.0.1:4"),
-        ]))
-        .unwrap()
-        .into_inner();
-        assert_eq!(got.upstreams.len(), 2);
-        assert_eq!(got.upstreams[0].node, "one");
-        assert_eq!(got.upstreams[0].measurement, m('a'));
-        assert_eq!(got.upstreams[1].client, "127.0.0.1:4");
+    fn a_group_is_declared_once_and_reached_under_both_names() {
+        let got = parse(&push()).unwrap().into_inner();
+        assert_eq!(got.groups["one"].measurement, m('a'));
+        assert_eq!(got.names[APPLICANT]["one"].len(), 2);
+        assert_eq!(got.names[CONSUMER]["one"][1], "127.0.0.1:4");
         assert_eq!(got.affinity.ttl_seconds, 600);
-        assert!(got.affinity.previous_key.is_none());
+    }
+
+    /// The members of a group are interchangeable, so the two names need not
+    /// list the same number of them — what has to match is the group, and that
+    /// is proved at the handshake rather than counted here.
+    #[test]
+    fn the_two_names_need_not_list_the_same_members() {
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["127.0.0.1:1", "127.0.0.1:3"] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
+            m('a')
+        );
+        assert!(parse(&body).is_ok());
+    }
+
+    /// A group placed through one name and unreachable through the other is a
+    /// session that can be created and never continued.
+    #[test]
+    fn a_group_missing_from_one_name_is_refused() {
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{}" }},
+                           "two": {{ "measurement": "{}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["127.0.0.1:1"], "two": ["127.0.0.1:5"] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
+            m('a'),
+            m('b')
+        );
+        let err = parse(&body).err().unwrap();
+        assert!(err.contains("two") && err.contains(CONSUMER), "{err}");
+    }
+
+    #[test]
+    fn a_name_pointing_at_no_declared_group_is_refused() {
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["127.0.0.1:1"], "ghost": ["127.0.0.1:9"] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
+            m('a')
+        );
+        let err = parse(&body).err().unwrap();
+        assert!(err.contains("ghost"), "{err}");
+    }
+
+    /// The names are the push's to declare, and a third one is a third name
+    /// this role will answer for — not a mistake.
+    #[test]
+    fn a_push_may_declare_any_names() {
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }},
+                "elsewhere.example.com": {{ "one": ["127.0.0.1:9"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
+            m('a')
+        );
+        let got = parse(&body).unwrap().into_inner();
+        assert_eq!(got.names.len(), 3);
+    }
+
+    /// A certificate is minted over these, so one no client could match is
+    /// refused where there is still a sender to tell.
+    #[test]
+    fn a_name_that_is_not_a_name_is_refused() {
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{}" }} }},
+              "names": {{ "not a dns name": {{ "one": ["127.0.0.1:1"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
+            m('a')
+        );
+        let err = parse(&body).err().unwrap();
+        assert!(err.contains("not a DNS name"), "{err}");
+    }
+
+    /// A push declaring no name at all leaves nothing to mint a certificate
+    /// over, which is a role that could serve nobody.
+    #[test]
+    fn a_push_with_no_names_is_refused() {
+        let body = format!(
+            r#"{{
+              "groups": {{}},
+              "names": {{}},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
+        );
+        assert!(parse(&body).is_err());
+    }
+
+    #[test]
+    fn a_group_with_no_members_is_refused() {
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": [] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
+            m('a')
+        );
+        assert!(parse(&body).is_err());
+    }
+
+    /// Declaring no group at all is a state the host may choose, not a mistake
+    /// to refuse: every request then fails as an unavailable upstream.
+    #[test]
+    fn an_empty_table_is_a_table() {
+        let body = format!(
+            r#"{{
+              "groups": {{}},
+              "names": {{ "{APPLICANT}": {{}}, "{CONSUMER}": {{}} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
+        );
+        assert!(parse(&body).unwrap().into_inner().groups.is_empty());
+    }
+
+    #[test]
+    fn a_label_that_could_not_travel_is_refused() {
+        for bad in ["Group", "no de", "a/b", &"x".repeat(33)] {
+            let body = format!(
+                r#"{{
+                  "groups": {{ "{bad}": {{ "measurement": "{}" }} }},
+                  "names": {{
+                    "{APPLICANT}": {{ "{bad}": ["127.0.0.1:1"] }},
+                    "{CONSUMER}":  {{ "{bad}": ["127.0.0.1:2"] }} }},
+                  "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
+                m('a')
+            );
+            assert!(parse(&body).is_err(), "accepted `{bad}`");
+        }
+    }
+
+    #[test]
+    fn a_measurement_that_could_never_be_proved_is_refused() {
+        for bad in ["aa11".to_owned(), m('A'), m('g'), String::new()] {
+            let body = format!(
+                r#"{{
+                  "groups": {{ "one": {{ "measurement": "{bad}" }} }},
+                  "names": {{
+                    "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
+                    "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+                  "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
+            );
+            let err = parse(&body)
+                .err()
+                .unwrap_or_else(|| panic!("accepted `{bad}`"));
+            assert!(err.contains("measurement"), "{err}");
+        }
+    }
+
+    #[test]
+    fn one_bad_address_refuses_the_whole_push() {
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:2", "not an address"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
+            m('a')
+        );
+        let err = parse(&body).err().unwrap();
+        assert!(err.contains("[one][1]"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_key_is_refused_not_ignored() {
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{}", "verify": false }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
+            m('a')
+        );
+        assert!(parse(&body).is_err());
     }
 
     /// The key is what makes a token unforgeable, and the expiry is what bounds
-    /// how long a consumer can keep a machine it was handed. A push without
-    /// them, or with a key too short to be one, is refused whole.
+    /// how long a consumer can keep a group it was handed.
     #[test]
     fn affinity_is_required_and_checked() {
-        let one = upstream("one", &m('a'), "127.0.0.1:1", "127.0.0.1:2");
         let with = |affinity: &str| {
-            format!(r#"{{"upstreams":[{one}],"affinity":{affinity}}}"#).into_bytes()
+            format!(
+                r#"{{
+                  "groups": {{ "one": {{ "measurement": "{}" }} }},
+                  "names": {{
+                    "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
+                    "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+                  "affinity": {affinity} }}"#,
+                m('a')
+            )
         };
 
-        assert!(
-            ValidatedConfig::parse(&format!(r#"{{"upstreams":[{one}]}}"#).into_bytes()).is_err()
-        );
         for bad in [
             r#"{"ttl_seconds":600}"#.to_owned(),
             r#"{"key":"abcd","ttl_seconds":600}"#.to_owned(),
@@ -262,117 +471,13 @@ mod tests {
             format!(r#"{{"key":"{KEY}","ttl_seconds":3601}}"#),
             format!(r#"{{"key":"{KEY}","previous_key":"nope","ttl_seconds":600}}"#),
         ] {
-            assert!(
-                ValidatedConfig::parse(&with(&bad)).is_err(),
-                "accepted `{bad}`"
-            );
+            assert!(parse(&with(&bad)).is_err(), "accepted `{bad}`");
         }
         assert!(
-            ValidatedConfig::parse(&with(&format!(
+            parse(&with(&format!(
                 r#"{{"key":"{KEY}","previous_key":"{KEY}","ttl_seconds":600}}"#
             )))
             .is_ok()
         );
-    }
-
-    /// The ordinary state of a fleet: several machines running one build. It
-    /// used to be refused, back when routing picked by build alone.
-    #[test]
-    fn one_build_on_several_nodes_is_normal() {
-        let got = ValidatedConfig::parse(&push(&[
-            upstream("one", &m('a'), "127.0.0.1:1", "127.0.0.1:2"),
-            upstream("two", &m('a'), "127.0.0.1:3", "127.0.0.1:4"),
-        ]))
-        .unwrap()
-        .into_inner();
-        assert_eq!(got.upstreams.len(), 2);
-    }
-
-    #[test]
-    fn a_node_label_that_could_not_travel_is_refused() {
-        for bad in ["", "Node", "no de", "a/b", "x".repeat(33).as_str()] {
-            let err = ValidatedConfig::parse(&push(&[upstream(
-                bad,
-                &m('a'),
-                "127.0.0.1:1",
-                "127.0.0.1:2",
-            )]))
-            .err()
-            .unwrap_or_else(|| panic!("accepted `{bad}`"));
-            assert!(err.starts_with("upstreams[0].node"), "{err}");
-        }
-    }
-
-    /// Declaring no api at all is a state the host may choose, not a mistake to
-    /// refuse: every request then fails as an unavailable upstream.
-    #[test]
-    fn an_empty_table_is_a_table() {
-        assert!(
-            ValidatedConfig::parse(&push(&[]))
-                .unwrap()
-                .into_inner()
-                .upstreams
-                .is_empty()
-        );
-    }
-
-    /// The table is required rather than defaulted: a push that says nothing
-    /// about upstreams is not a push that declares none.
-    #[test]
-    fn a_push_without_the_table_is_refused() {
-        assert!(ValidatedConfig::parse(b"{}").is_err());
-    }
-
-    #[test]
-    fn an_unknown_key_is_refused_not_ignored() {
-        assert!(ValidatedConfig::parse(br#"{"upstreams":[],"verify_measurement":false}"#).is_err());
-
-        let body = format!(
-            r#"{{"upstreams":[{{"node":"x","measurement":"{}","applicant":"127.0.0.1:1","client":"127.0.0.1:2","health":"127.0.0.1:9","weight":3}}]}}"#,
-            m('a')
-        );
-        assert!(ValidatedConfig::parse(body.as_bytes()).is_err());
-    }
-
-    #[test]
-    fn a_measurement_that_could_never_be_proved_is_refused() {
-        for bad in ["aa11".to_owned(), m('A'), m('g'), String::new()] {
-            let err = ValidatedConfig::parse(&push(&[upstream(
-                "one",
-                &bad,
-                "127.0.0.1:1",
-                "127.0.0.1:2",
-            )]))
-            .err()
-            .unwrap_or_else(|| panic!("accepted `{bad}`"));
-            assert!(err.starts_with("upstreams[0].measurement"), "{err}");
-        }
-    }
-
-    #[test]
-    fn a_node_declared_twice_is_refused() {
-        let err = ValidatedConfig::parse(&push(&[
-            upstream("one", &m('a'), "127.0.0.1:1", "127.0.0.1:2"),
-            upstream("two", &m('b'), "127.0.0.1:3", "127.0.0.1:4"),
-            upstream("one", &m('c'), "127.0.0.1:5", "127.0.0.1:6"),
-        ]))
-        .err()
-        .unwrap();
-        assert!(
-            err.contains("upstreams[2]") && err.contains("upstreams[0]"),
-            "{err}"
-        );
-    }
-
-    /// One bad entry refuses the push whole, and the answer names it.
-    #[test]
-    fn one_bad_address_refuses_the_whole_push() {
-        let err = ValidatedConfig::parse(&push(&[
-            upstream("one", &m('a'), "127.0.0.1:1", "127.0.0.1:2"),
-            upstream("two", &m('b'), "127.0.0.1:3", "not an address"),
-        ]))
-        .err()
-        .unwrap();
-        assert!(err.starts_with("upstreams[1].client"), "{err}");
     }
 }

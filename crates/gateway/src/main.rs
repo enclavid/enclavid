@@ -56,9 +56,12 @@ mod affinity;
 mod attest;
 mod config;
 mod identity;
+mod key;
+mod leg;
+mod listen;
 mod probe;
+mod proxy;
 mod push;
-mod serve;
 mod tls;
 mod upstream;
 
@@ -111,6 +114,25 @@ fn required(key: &'static str) -> String {
     })
 }
 
+/// The key this build serves on.
+///
+/// Derived from what the chip gives this guest, so it is the same key at every
+/// boot and a certificate issued for it outlives a restart — see `crate::key`.
+#[cfg(feature = "sev-snp")]
+fn serving_key() -> Result<key::Identity, String> {
+    let chip = enclavid_attestation::derive_seal_key()
+        .map_err(|e| format!("the chip did not return a key to derive from: {e}"))?;
+    key::Identity::derived(&chip)
+}
+
+/// A developer build has no chip, so it derives from a stand-in that is no
+/// secret — see `crate::key::NO_CHIP`. The path is the same one the attested
+/// build takes, which is the point.
+#[cfg(not(feature = "sev-snp"))]
+fn serving_key() -> Result<key::Identity, String> {
+    key::Identity::derived(&key::NO_CHIP)
+}
+
 #[tokio::main]
 async fn main() {
     // First, so nothing can speak before the channel exists.
@@ -141,46 +163,41 @@ async fn main() {
 
     let public_addr = required("ENCLAVID_ADDRESS_IN_PUBLIC");
 
-    // One name per audience. They are what the handshake settles and therefore
-    // what decides which of api's two surfaces a connection reaches — see
-    // `crate::upstream` for why that decision is made here and not from a path.
-    let applicant_name = required("ENCLAVID_PUBLIC_NAME_APPLICANT");
-    let client_name = required("ENCLAVID_PUBLIC_NAME_CLIENT");
     let config_addr = required("ENCLAVID_ADDRESS_IN_CONFIG");
 
-    // Minted before the bind, so a guest that cannot present an identity never
-    // takes the port. The key is generated here and never leaves this guest's
-    // encrypted memory — which is the only reason terminating here is worth
-    // anything, and the reason this cannot be done on the host.
-    let (server_config, spki) = tls::server_config(&[&applicant_name, &client_name])
-        .unwrap_or_else(|e| {
-            debug!("{e}");
-            safe_logger::error_and_panic!(
-                "gateway: cannot mint a serving certificate for the configured names. Stopping.",
-                reason!("a constant; the names are the host's own configuration")
-            )
-        });
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
-
-    // The proof that goes with that certificate, minted once and before the
-    // bind for the same reason: a caller is asked to delegate its choice of api
-    // build to this role, and a role that cannot say what it is has nothing to
-    // delegate to. See `crate::attest`.
-    let proof = attest::proof(spki, &identity::attestor()).unwrap_or_else(|e| {
+    // The key this role serves on, settled before the bind so a guest that
+    // cannot hold an identity never takes the port. It never leaves this
+    // guest's encrypted memory — which is the only reason terminating here is
+    // worth anything, and the reason this cannot be done on the host. The
+    // certificate around it comes later, when a push says which names to mint
+    // it over; the key outlives every one of them, and every restart — see
+    // `crate::key`.
+    let identity = Arc::new(serving_key().unwrap_or_else(|e| {
         debug!("{e}");
         safe_logger::error_and_panic!(
-            "gateway: cannot prove what this build is, so nothing could check it. Stopping.",
+            "gateway: cannot settle the key this role would serve on. Stopping.",
             reason!("a constant reporting a platform state the host provisioned")
         )
-    });
+    }));
 
-    // Every api this role may forward to, as the host last pushed it. Empty
-    // until the first push, and never read from the command line — see
-    // `crate::config` for why it cannot be.
-    let (table, mut current) = watch::channel(Arc::new(upstream::Upstreams::empty(
-        applicant_name.clone(),
-        client_name.clone(),
-    )));
+    // The proof that goes with that key, minted once and before the bind for
+    // the same reason: a caller is asked to delegate its choice of api build to
+    // this role, and a role that cannot say what it is has nothing to delegate
+    // to. It binds the KEY, so it outlives the certificates as well — see
+    // `crate::attest`.
+    let proof =
+        attest::proof(identity.spki().to_vec(), &identity::attestor()).unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "gateway: cannot prove what this build is, so nothing could check it. Stopping.",
+                reason!("a constant reporting a platform state the host provisioned")
+            )
+        });
+
+    // Every api this role may forward to, and every name it answers to, as the
+    // host last pushed them. Empty until the first push, and never read from the
+    // command line — see `crate::config` for why it cannot be.
+    let (table, mut current) = watch::channel(Arc::new(upstream::Upstreams::empty()));
 
     let config_listener = fleet_transport::bind(&config_addr)
         .await
@@ -215,7 +232,7 @@ async fn main() {
     // Asking each api what it knows about itself, on this task for the same
     // reason the push loop is: a role that stopped asking would keep placing new
     // sessions on what it last believed.
-    let probes = probe::poll_forever(current.clone());
+    let probes = probe::probe_forever(current.clone());
     tokio::pin!(probes);
 
     let listener = fleet_transport::bind(&public_addr)
@@ -251,17 +268,34 @@ async fn main() {
     // the wait happens here and unaccepted connections queue in the listener's
     // backlog rather than inside this process.
     let slots = Arc::new(tokio::sync::Semaphore::new(MAX_PUBLIC_CONNECTIONS));
+    // Built once and shared: it holds sizes and timeouts, nothing about a
+    // caller.
+    let conf = Arc::new(pingora_core::server::configuration::ServerConf::default());
+
+    // What it takes to answer a connection — a certificate over the names the
+    // host declared, and a door for each of them — rebuilt whenever those names
+    // change. On this task for the same reason as the others: a role that
+    // stopped rebuilding would present a certificate for names it no longer
+    // serves.
+    let (serving, current_public) = watch::channel(None);
+    let following = listen::follow(current.clone(), identity, proof, conf, serving);
+    tokio::pin!(following);
+
     let public = fleet_transport::accept_forever(listener, move |stream, peer| {
-        let acceptor = acceptor.clone();
-        let current = current.clone();
-        let proof = proof.clone();
+        let current_public = current_public.clone();
         let slots = slots.clone();
         async move {
+            // Nothing to answer with until the first push has been acted on.
+            // Dropping is the honest answer: a handshake needs a certificate,
+            // and there is none.
+            let Some(public) = current_public.borrow().clone() else {
+                return;
+            };
             let Ok(slot) = slots.acquire_owned().await else {
                 return;
             };
             tokio::spawn(async move {
-                serve::connection(acceptor, current, proof, stream, peer).await;
+                listen::connection(public, stream, peer).await;
                 drop(slot);
             });
         }
@@ -271,5 +305,6 @@ async fn main() {
         never = public => never,
         never = &mut pushes => never,
         never = &mut probes => never,
+        never = &mut following => never,
     }
 }

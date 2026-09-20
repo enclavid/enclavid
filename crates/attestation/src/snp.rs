@@ -208,6 +208,48 @@ pub fn verify_quote(quote: &Quote, expected: &ReportData) -> Result<(), Attestat
     verify_quote_endorsed(quote, expected, Endorsement::Carried)
 }
 
+/// Verify a quote that carries NO endorsement, against one the caller fetched.
+///
+/// This is the only way to check a guest with no egress. Such a guest cannot
+/// obtain its own VCEK — the certificate is per (chip, TCB) and comes from
+/// AMD — so its quote carries the report alone, and [`verify_quote`] refuses
+/// it for exactly that reason. The caller reads `chip_id` and the reported TCB
+/// out of the quote, asks AMD's key service for the matching certificate, and
+/// brings it here.
+///
+/// What it proves is STRONGER than a self-endorsed quote, not weaker: a report
+/// verifies under this VCEK only if it was produced by that chip at that TCB,
+/// where a carried chain proves only that some genuine part signed something.
+/// [`MILAN_ASK`] is the intermediate to pass unless AMD has rotated it.
+pub fn verify_quote_supplied(
+    quote: &Quote,
+    expected: &ReportData,
+    ask: &[u8],
+    vcek: &[u8],
+) -> Result<(), AttestationError> {
+    let ask = normalise_cert(ask, "ASK")?;
+    let vcek = normalise_cert(vcek, "VCEK")?;
+    verify_quote_endorsed(
+        quote,
+        expected,
+        Endorsement::Supplied {
+            ask_der: &ask,
+            vcek_der: &vcek,
+        },
+    )
+}
+
+/// AMD's key service serves DER and [`MILAN_ASK`] is PEM, so a caller holding
+/// both would otherwise have to know which is which. Normalising here is what
+/// lets the two arrive as they came.
+fn normalise_cert(bytes: &[u8], what: &str) -> Result<Vec<u8>, AttestationError> {
+    let cert = Certificate::from_der(bytes)
+        .or_else(|_| Certificate::from_pem(bytes))
+        .map_err(|e| AttestationError::InvalidQuote(format!("parse supplied {what}: {e}")))?;
+    cert.to_der()
+        .map_err(|e| AttestationError::InvalidQuote(format!("re-encode {what}: {e}")))
+}
+
 fn verify_quote_endorsed(
     quote: &Quote,
     expected: &ReportData,

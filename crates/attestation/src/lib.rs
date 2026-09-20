@@ -198,7 +198,7 @@ pub use snp_dev::SnpDevAttestor;
 #[cfg(feature = "sev-snp")]
 mod snp;
 #[cfg(feature = "sev-snp")]
-pub use snp::{MILAN_ASK, PRODUCT_LINE, verify_quote};
+pub use snp::{MILAN_ASK, PRODUCT_LINE, verify_quote, verify_quote_supplied};
 /// Minting and reading one's own endorsement parameters need
 /// `/dev/sev-guest`; verification does not, so only this half is Linux-gated.
 #[cfg(all(feature = "sev-snp", target_os = "linux"))]

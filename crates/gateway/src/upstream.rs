@@ -1,61 +1,51 @@
 //! Which api a request goes to, and how the connection to it is made.
 //!
+//! ## The unit is a group, not a machine
+//!
+//! api seals a session's state under a key derived from the chip and the
+//! measurement, and reads that state back from the storage CVM on every
+//! request — it keeps no session in memory. So every instance of one build on
+//! one part can serve any session of that build, and the thing worth naming is
+//! that SET rather than any one machine.
+//!
+//! A label names the group. An applicant's link carries it, a consumer's token
+//! carries it, and inside it every member will do: a request whose member has
+//! gone can be tried on another, and a link outlives the machine that answered
+//! it first.
+//!
+//! What the host declares about grouping this role does not take on trust. Each
+//! leg proves a chip and a measurement at the handshake, so a group whose
+//! members are not one key domain produces a leg that fails rather than a route
+//! that is taken.
+//!
 //! ## Two questions, two answers, and neither is a path
 //!
-//! **Which SURFACE** comes from the name the TLS handshake settled. api serves
-//! two audiences on two ports, and both route tables live under the same
-//! `/api/v1/sessions/...` prefix — deliberately, so the surface reads the same
-//! to a consumer and to an applicant. They are separated by a route table, not
-//! by a prefix, so a gateway routing by path would need a copy of that table in
-//! a second measured role, where drift is silent and sends one audience's
-//! request to the other audience's port.
+//! **Which NAME** comes from the TLS handshake, and it decides which addresses
+//! of a group are the right ones — one api process serves its two audiences on
+//! two ports. Nothing here knows what those audiences ARE; a name maps to
+//! addresses and that is the whole of it.
 //!
-//! **Which INSTANCE** comes from a measurement the caller names. The gateway
-//! holds no pin: it is the consumer that says which api build it is willing to
-//! be served by, having first verified this role's own attestation. That is a
-//! delegation — the consumer checks one party directly and lets it check the
-//! next — and it is what lets api be upgraded without rebuilding this role, and
-//! a consumer stay on a build it audited while others move on.
+//! **Which GROUP** comes from the caller: a label it was given, or — having
+//! none — a measurement it names, against which this role places it. The
+//! gateway holds no pin of its own: it is the consumer that says which api
+//! build it is willing to be served by, having first verified this role's own
+//! attestation. That is a delegation, and it is what lets api be upgraded
+//! without rebuilding this role.
 //!
-//! So this role never parses a path at all, and the session id in one stays out
-//! of its reach: the bytes pass through and nothing here derives anything from
-//! them.
+//! So this role never parses a path beyond the label an applicant's link
+//! carries, and the session id in one stays out of its reach.
 //!
 //! ## The host says where, and never what
 //!
-//! Upstreams arrive from the host, each declaring an address and a measurement.
-//! The address is an untrusted input rather than an assertion — it says where
-//! this role MAY go, never what it will accept — and the declared measurement is
-//! a routing hint that [`connect`] PROVES at the handshake before a byte of HTTP
-//! crosses. A substituted address fails there; a lie about which build sits at
-//! it fails there too.
-//!
-//! That is the division the design wants: the host keeps every lever it needs to
-//! manage a fleet, and gains none over what a consumer ends up talking to.
+//! Addresses arrive from the host. An address is an untrusted input rather than
+//! an assertion — it says where this role MAY go, never what it will accept —
+//! and the declared measurement is a routing hint that [`connect`] PROVES at
+//! the handshake before a byte of HTTP crosses. A substituted address fails
+//! there; a lie about which build sits at it fails there too.
 //!
 //! Each push produces a whole new [`Upstreams`], and a request routes against
 //! whichever table was current when it arrived, so no request sees half of one
 //! push and half of the next.
-//!
-//! ## A connection to api belongs to one public connection
-//!
-//! [`Legs`] is created per public connection and dropped with it, and every
-//! connection to api is opened through one. Nothing is pooled across callers,
-//! not even one after another.
-//!
-//! That is the whole defence against one caller degrading the others, and it is
-//! structural rather than tuned. On a connection shared by everyone, a caller
-//! that stops reading holds the shared HTTP/2 flow-control window and freezes
-//! every other response; a request api refuses hard enough closes the connection
-//! under every caller's in-flight request; and whoever triggered the one shared
-//! connect decides for everyone waiting on it. Owned per public connection, each
-//! of those lands on the caller who caused it. It is the same rule the widely
-//! deployed proxies follow — they do not multiplex different callers on one
-//! upstream connection either.
-//!
-//! The cost is one attested handshake per public connection, which a browser
-//! holding one HTTP/2 connection pays about once per visit. The host learns
-//! nothing new from it: it already carries every public connection in.
 //!
 //! ## The connection to api is attested, in the attested build
 //!
@@ -75,70 +65,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
 
-use hyper::body::Incoming;
-use hyper::client::conn::http2::{self, SendRequest};
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use safe_logger::debug;
-use tokio::sync::Mutex;
-use tokio::task::JoinSet;
-
-/// How long opening a connection to api may take: the dial, the attested
-/// handshake and the HTTP/2 preface together.
+/// Whether a member can be given work.
 ///
-/// Without it a dial the host never answers holds the caller's request for as
-/// long as the host likes.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How often an open connection to api is pinged while a request is on it, and
-/// how long an unanswered ping is tolerated before the connection is treated as
-/// dead. A leg the host stops carrying without closing then fails the request on
-/// it instead of hanging it.
-const PING_INTERVAL: Duration = Duration::from_secs(20);
-const PING_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How much of api's answers a connection may hold before api has to wait for
-/// this role to pass them on.
-///
-/// This is the memory a caller can pin per connection, because the answer is
-/// read from api only as fast as the caller takes it — so it is a bound and not
-/// a tuning knob. hyper's defaults are 5 MiB and 2 MiB, which with a cap on
-/// public connections would be the larger half of this role's memory. Uploads
-/// are not affected: what a 16 MiB capture flows through is api's receive
-/// window, not this one.
-const CONNECTION_WINDOW: u32 = 1 << 20;
-const STREAM_WINDOW: u32 = 256 << 10;
-
-/// One api instance: a machine, the build on it, and the ports it serves.
-struct Instance {
-    /// What this machine is called in a link and in a token.
-    node: String,
-    /// The measurement this instance is DECLARED to have. A caller naming it is
-    /// routed here; [`connect`] then proves the declaration before anything is
-    /// sent.
-    measurement: String,
-    applicant: String,
-    client: String,
-    health: String,
-    /// Whether this instance says it can take a NEW session. Shared with the
-    /// poller, and carried across pushes — see [`Upstreams::replaced`].
-    ready: Arc<Ready>,
-}
-
-/// What the health poller learns, and the only thing routing asks it.
-///
-/// A node that is not ready is skipped when a new session is placed, and
-/// nothing else changes: a request that belongs to a session already on that
-/// node still goes there, because there is nowhere else it could go.
+/// Learned from this role's own legs rather than declared: a member that would
+/// not answer is marked when a request meets it, and proved well again by a
+/// dial that succeeds — see `crate::probe`. Nothing the host says sets it.
 #[derive(Debug)]
 pub struct Ready(AtomicBool);
 
 impl Default for Ready {
-    /// A freshly declared node starts ready. The host has just said it is part
-    /// of the fleet, the first poll is moments away, and the alternative —
-    /// refusing every new session until a poll lands — turns each push into an
-    /// outage.
+    /// A freshly declared member starts ready. The host has just said it is
+    /// part of the fleet, and the alternative — refusing work until something
+    /// proves otherwise — turns each push into an outage.
     fn default() -> Self {
         Ready(AtomicBool::new(true))
     }
@@ -154,279 +93,297 @@ impl Ready {
     }
 }
 
+/// One instance of a group, at the address it serves one name on.
+struct Instance {
+    addr: String,
+    ready: Arc<Ready>,
+}
+
+/// One instance and everything needed to reach it, as the prober sees it.
+pub struct Member {
+    pub addr: String,
+    pub measurement: String,
+    pub part: Arc<Part>,
+    pub ready: Arc<Ready>,
+}
+
+/// A set of api instances that are one key domain, and so interchangeable.
+struct Group {
+    /// The build every member is DECLARED to run. [`connect`] proves it.
+    measurement: String,
+    /// The part every member must prove it runs on — see [`Part`].
+    part: Arc<Part>,
+    /// Members by the name they serve. The lists need not be the same length:
+    /// what has to match across names is the group, not the machine.
+    by_name: HashMap<String, Vec<Instance>>,
+}
+
+/// The chip a group's members turned out to be on.
+///
+/// A group is a set of instances that can serve each other's sessions, and what
+/// makes that true is a key api derives from the PART and the measurement. The
+/// measurement the host declares and this role proves; the part it does not
+/// declare at all — so the first member to answer settles it, and every member
+/// after has to agree.
+///
+/// A host that staples two key domains into one label therefore gets a leg that
+/// fails rather than a session that lands where its state cannot be opened. The
+/// answer is per table: a later push may say something different, and a session
+/// could not have survived that push anyway.
+#[derive(Default)]
+pub struct Part(std::sync::OnceLock<String>);
+
+impl Part {
+    /// Settle the part, or refuse a member that is not on it.
+    pub fn agrees(&self, chip: &str) -> bool {
+        self.0.get_or_init(|| chip.to_owned()) == chip
+    }
+}
+
 /// Everywhere this role may forward to, as of one push.
 pub struct Upstreams {
-    applicant_name: String,
-    client_name: String,
+    /// The names this role answers to, as the push declared them. A
+    /// certificate is minted over exactly these — see `crate::listen`.
+    served: Vec<String>,
     /// Built once, at boot, and carried into every table after. It holds the
     /// attestor and the verifier, neither of which changes with the fleet.
     tls: Tls,
-    instances: Vec<Instance>,
+    groups: HashMap<String, Group>,
     /// What affinity tokens are signed with, as of this push. `None` only
     /// before the first one, when nothing is served yet.
     affinity: Option<crate::affinity::Keys>,
-    /// Where the next new session goes, among the nodes that can take one.
+    /// Where the next choice starts, among groups and among members.
     ///
-    /// Round robin, and deliberately the dullest thing that spreads load: the
-    /// gateway knows nothing about how much work a session is, and a cleverer
-    /// rule would be guessing. It is not carried across pushes — after one, the
+    /// Round robin, and deliberately the dullest thing that spreads load: this
+    /// role knows nothing about how much work a session is, and a cleverer rule
+    /// would be guessing. It is not carried across pushes — after one, the
     /// table it counted over no longer exists.
     next: AtomicUsize,
 }
 
-/// Where one request goes: a machine, an address on it, and the build that must
-/// be proved there.
+/// Where one request goes: a group, an address in it, the build that must be
+/// proved there, and the part the rest of that group turned out to be on.
 pub struct Target<'a> {
-    pub node: &'a str,
+    pub group: &'a str,
     pub addr: &'a str,
     pub measurement: &'a str,
-}
-
-/// Which surface a connection belongs to, settled by the name TLS agreed on.
-///
-/// The two differ in more than a port. An applicant arrives by following a link
-/// this fleet wrote, so the machine is in that link and the build follows from
-/// it. A consumer arrives with an integration of its own, names the build it
-/// requires, and is told which machine it landed on.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Surface {
-    Applicant,
-    Consumer,
+    pub part: Arc<Part>,
 }
 
 /// Why a request could not be forwarded.
 ///
-/// Separate variants because they are separate answers to the caller: one says
-/// the name is wrong, one says nothing was asked for, one says what was asked
-/// for is not here. Collapsing them would make a fleet with no matching build
-/// indistinguishable from a caller who forgot the header.
+/// Two variants because they are two answers to the caller: one says nothing
+/// was asked for, the other says what was asked for is not here. What the
+/// caller is told for each is `crate::proxy`'s to decide.
 pub enum NoRoute {
-    /// The handshake settled a name this role does not serve.
-    UnknownName,
     /// No measurement was named where one is required.
     Unspecified,
-    /// A build was named and no node declares it, or none that could take a new
-    /// session; a node was named and no upstream carries that label. One answer
-    /// for all three: which machines exist and how they are is the host's
+    /// A build was named and no group declares it; or a label was named and no
+    /// group carries it; or the name this connection settled is not served. One
+    /// answer for all three: which groups exist and what they run is the host's
     /// business and changes under it.
-    NoSuchBuild,
+    NoSuchGroup,
 }
 
 impl Upstreams {
-    /// No api at all: what this role holds until the host's first push.
-    pub fn empty(applicant_name: String, client_name: String) -> Upstreams {
+    /// No api and no names: what this role holds until the host's first push.
+    ///
+    /// Nothing is served in this state — there is no certificate to present,
+    /// because a certificate is over names and the names have not arrived.
+    pub fn empty() -> Upstreams {
         Upstreams {
-            applicant_name,
-            client_name,
+            served: Vec::new(),
             tls: tls_client(),
-            instances: Vec::new(),
+            groups: HashMap::new(),
             affinity: None,
             next: AtomicUsize::new(0),
         }
     }
 
-    /// The table a push declares, keeping what the poller has learned about the
-    /// nodes it still declares.
+    /// The table a push declares, keeping what this role has learned about the
+    /// members it still declares.
     ///
-    /// Health is carried by (label, health address): a push that only adds a
-    /// machine must not make the gateway forget that another one is down, and a
-    /// label pointed at a different address is a different machine.
+    /// A member is the same member if its group, its name and its address are
+    /// the same. Anything else is a member this table has not met, and it
+    /// starts ready.
     pub fn replaced(&self, declared: crate::config::ValidatedConfig) -> Upstreams {
         let declared = declared.into_inner();
+        let groups = declared
+            .groups
+            .into_iter()
+            .map(|(label, group)| {
+                let by_name = declared
+                    .names
+                    .iter()
+                    .filter_map(|(name, table)| {
+                        let members = table.get(&label)?;
+                        let members = members
+                            .iter()
+                            .map(|addr| Instance {
+                                ready: self.known(&label, name, addr),
+                                addr: addr.clone(),
+                            })
+                            .collect();
+                        Some((name.clone(), members))
+                    })
+                    .collect();
+                (
+                    label,
+                    Group {
+                        measurement: group.measurement,
+                        part: Arc::new(Part::default()),
+                        by_name,
+                    },
+                )
+            })
+            .collect();
+
+        let mut served: Vec<String> = declared.names.keys().cloned().collect();
+        // Sorted so that two pushes declaring the same names produce the same
+        // list, and the certificate is rebuilt only when the names truly differ.
+        served.sort();
+
         Upstreams {
-            applicant_name: self.applicant_name.clone(),
-            client_name: self.client_name.clone(),
+            served,
             tls: self.tls.clone(),
+            groups,
             affinity: Some(crate::affinity::Keys::new(
                 declared.affinity.key.0,
                 declared.affinity.previous_key.map(|key| key.0),
-                Duration::from_secs(declared.affinity.ttl_seconds),
+                std::time::Duration::from_secs(declared.affinity.ttl_seconds),
             )),
-            instances: declared
-                .upstreams
-                .into_iter()
-                .map(|d| Instance {
-                    ready: self
-                        .instances
-                        .iter()
-                        .find(|i| i.node == d.node && i.health == d.health)
-                        .map(|i| i.ready.clone())
-                        .unwrap_or_default(),
-                    node: d.node,
-                    measurement: d.measurement,
-                    applicant: d.applicant,
-                    client: d.client,
-                    health: d.health,
-                })
-                .collect(),
             next: AtomicUsize::new(0),
         }
     }
 
-    /// Which surface this connection is, from the name the handshake settled.
-    ///
-    /// Matched without regard to case, because a host name has none: rustls
-    /// hands back the bytes the peer sent, and an exact comparison would refuse
-    /// a caller who spelled a correct name in capitals.
-    pub fn surface(&self, server_name: Option<&str>) -> Result<Surface, NoRoute> {
-        let name = server_name.ok_or(NoRoute::UnknownName)?;
-        if name.eq_ignore_ascii_case(&self.applicant_name) {
-            Ok(Surface::Applicant)
-        } else if name.eq_ignore_ascii_case(&self.client_name) {
-            Ok(Surface::Consumer)
-        } else {
-            Err(NoRoute::UnknownName)
-        }
+    /// What this table already knows about a member the next one declares.
+    fn known(&self, label: &str, name: &str, addr: &str) -> Arc<Ready> {
+        self.groups
+            .get(label)
+            .and_then(|group| group.by_name.get(name))
+            .and_then(|members| members.iter().find(|m| m.addr == addr))
+            .map(|m| m.ready.clone())
+            .unwrap_or_default()
     }
 
-    /// The machine a link or a token names.
+    /// A member of the group a caller was given, at the address serving `name`.
     ///
-    /// No health check: the session this request belongs to lives there and
-    /// nowhere else, so a node that is unwell is still the only answer. It fails
-    /// at the connection instead, which is the same 502 and the truth.
-    pub fn at_node(&self, surface: Surface, node: &str) -> Result<Target<'_>, NoRoute> {
-        let instance = self
-            .instances
-            .iter()
-            .find(|i| i.node == node)
-            .ok_or(NoRoute::NoSuchBuild)?;
-        Ok(instance.target(surface))
+    /// Readiness is a preference here and not a filter: the session this
+    /// request belongs to lives in this group and nowhere else, so a group
+    /// whose members all look unwell is still the only place it could go.
+    pub fn at_group(&self, name: &str, label: &str) -> Result<Target<'_>, NoRoute> {
+        let group = self.groups.get(label).ok_or(NoRoute::NoSuchGroup)?;
+        let members = group.by_name.get(name).ok_or(NoRoute::NoSuchGroup)?;
+        let member = self.pick(members).ok_or(NoRoute::NoSuchGroup)?;
+        Ok(Target {
+            group: self.label(label).ok_or(NoRoute::NoSuchGroup)?,
+            addr: &member.addr,
+            measurement: &group.measurement,
+            part: group.part.clone(),
+        })
     }
 
-    /// Where a NEW session goes: a node running the build the caller named,
-    /// among those that say they can take one.
+    /// Where a NEW session goes: a group running the build the caller named,
+    /// and a member of it.
     ///
-    /// The caller does not choose. That is the whole point of placing it here:
-    /// a consumer that picked its own node would pin every session to one
-    /// machine, and under load a node that cannot take work would keep being
-    /// handed it.
-    pub fn assign(&self, surface: Surface, measurement: &str) -> Result<Target<'_>, NoRoute> {
-        let candidates: Vec<&Instance> = self
-            .instances
+    /// Groups are taken in turn, so successive sessions naming one build spread
+    /// across the groups that run it.
+    pub fn place(&self, name: &str, measurement: &str) -> Result<Target<'_>, NoRoute> {
+        let mut candidates: Vec<&String> = self
+            .groups
             .iter()
-            .filter(|i| i.measurement == measurement && i.ready.get())
+            .filter(|(_, group)| group.measurement == measurement)
+            .map(|(label, _)| label)
             .collect();
         if candidates.is_empty() {
-            return Err(NoRoute::NoSuchBuild);
+            return Err(NoRoute::NoSuchGroup);
         }
+        // A map's order is its own; sorting makes the turn mean the same thing
+        // on every table built from the same push.
+        candidates.sort();
+
         let turn = self.next.fetch_add(1, Ordering::Relaxed);
-        Ok(candidates[turn % candidates.len()].target(surface))
+        for step in 0..candidates.len() {
+            let label = candidates[(turn + step) % candidates.len()];
+            if let Ok(target) = self.at_group(name, label) {
+                return Ok(target);
+            }
+        }
+        Err(NoRoute::NoSuchGroup)
     }
 
-    /// What affinity tokens are signed with, as of this push.
+    /// One member, preferring those that are ready.
+    fn pick<'a>(&self, members: &'a [Instance]) -> Option<&'a Instance> {
+        if members.is_empty() {
+            return None;
+        }
+        let turn = self.next.fetch_add(1, Ordering::Relaxed);
+        let ready: Vec<&Instance> = members.iter().filter(|m| m.ready.get()).collect();
+        // None ready is not none available: a member that was marked may have
+        // recovered, and refusing every request until something proves it would
+        // turn one bad answer into an outage. The nginx rule, and for the same
+        // reason.
+        if ready.is_empty() {
+            Some(&members[turn % members.len()])
+        } else {
+            Some(ready[turn % ready.len()])
+        }
+    }
+
+    /// The label as this table spells it, so a `Target` borrows from the table
+    /// rather than from the caller's copy.
+    fn label<'a>(&'a self, label: &str) -> Option<&'a str> {
+        self.groups
+            .get_key_value(label)
+            .map(|(held, _)| held.as_str())
+    }
+
+    /// Every member, as the prober needs it: where it is, what it must prove,
+    /// the part its group settled on, and what is currently believed of it.
+    pub fn members(&self) -> Vec<Member> {
+        self.groups
+            .values()
+            .flat_map(|group| {
+                group.by_name.values().flatten().map(|member| Member {
+                    addr: member.addr.clone(),
+                    measurement: group.measurement.clone(),
+                    part: group.part.clone(),
+                    ready: member.ready.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// What the member at `addr` is known by, so a failed request can mark it.
+    pub fn mark(&self, addr: &str, ready: bool) {
+        for group in self.groups.values() {
+            for members in group.by_name.values() {
+                for member in members {
+                    if member.addr == addr {
+                        member.ready.set(ready);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The names this role answers to, as of this push.
+    pub fn served(&self) -> &[String] {
+        &self.served
+    }
+
     pub fn affinity(&self) -> Option<&crate::affinity::Keys> {
         self.affinity.as_ref()
     }
 
-    /// Every node's label and health address, for the poller.
-    pub fn to_poll(&self) -> Vec<(String, Arc<Ready>)> {
-        self.instances
-            .iter()
-            .map(|i| (i.health.clone(), i.ready.clone()))
-            .collect()
-    }
-
-    /// What a connection to any api in this table is secured with.
     pub fn tls(&self) -> &Tls {
         &self.tls
     }
 
-    /// How many builds this table declares. For the line an accepted push writes.
+    /// How many groups the host has declared. For the one line that says a push
+    /// was taken, and for tests.
     pub fn len(&self) -> usize {
-        self.instances.len()
-    }
-}
-
-impl Instance {
-    /// This instance, as the surface in front of it sees it. The measurement is
-    /// what the host DECLARED; the connection proves it before anything is sent.
-    fn target(&self, surface: Surface) -> Target<'_> {
-        Target {
-            node: &self.node,
-            addr: match surface {
-                Surface::Applicant => &self.applicant,
-                Surface::Consumer => &self.client,
-            },
-            measurement: &self.measurement,
-        }
-    }
-}
-
-/// The connections to api one public connection has opened.
-///
-/// Keyed by address AND measurement: a connection was proved against one build
-/// at one address, and serves nothing else. Dropping this — which happens when
-/// the public connection and every request still on it are done — aborts the
-/// tasks driving those connections, and closes them.
-#[derive(Default)]
-pub struct Legs(Mutex<Open>);
-
-#[derive(Default)]
-struct Open {
-    senders: HashMap<(String, String), SendRequest<Incoming>>,
-    drivers: JoinSet<()>,
-}
-
-impl Legs {
-    /// The connection to `target`, opened on first use or when the last one
-    /// closed.
-    ///
-    /// The lock is held across opening one, so a public connection's concurrent
-    /// first requests wait for a single handshake rather than each starting
-    /// their own. Only that public connection's requests wait on it.
-    pub async fn get(
-        &self,
-        target: Target<'_>,
-        tls: &Tls,
-    ) -> std::io::Result<SendRequest<Incoming>> {
-        let mut open = self.0.lock().await;
-        let key = (target.addr.to_owned(), target.measurement.to_owned());
-        if let Some(sender) = open.senders.get(&key)
-            && !sender.is_closed()
-        {
-            return Ok(sender.clone());
-        }
-
-        let (sender, driver) = tokio::time::timeout(CONNECT_TIMEOUT, async {
-            let io = connect(target.addr, target.measurement, tls).await?;
-            http2::Builder::new(TokioExecutor::new())
-                .timer(TokioTimer::new())
-                .keep_alive_interval(PING_INTERVAL)
-                .keep_alive_timeout(PING_TIMEOUT)
-                // Pinged while idle too, not only while a request is on it. An
-                // idle connection the host has stopped carrying would otherwise
-                // sit here until the public connection ends, holding a
-                // descriptor at both ends of the leg.
-                .keep_alive_while_idle(true)
-                .initial_connection_window_size(CONNECTION_WINDOW)
-                .initial_stream_window_size(STREAM_WINDOW)
-                .handshake(TokioIo::new(io))
-                .await
-                .map_err(std::io::Error::other)
-        })
-        .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "opening the connection to api took too long",
-            )
-        })??;
-
-        // What is finished is let go of before anything new is kept: a closed
-        // leg's entry, and the task that drove it. `JoinSet` holds a finished
-        // task until it is joined, and a public connection that reconnects —
-        // because api restarted, or the host recycled the splice — would
-        // otherwise accumulate both for as long as it lives.
-        open.senders.retain(|_, sender| !sender.is_closed());
-        while open.drivers.try_join_next().is_some() {}
-
-        open.drivers.spawn(async move {
-            if let Err(e) = driver.await {
-                debug!("connection to api ended: {e}");
-            }
-        });
-        open.senders.insert(key, sender.clone());
-        Ok(sender)
+        self.groups.len()
     }
 }
 
@@ -484,28 +441,31 @@ fn tls_client() -> Tls {
     Tls
 }
 
-/// Open one connection to api and refuse it unless it is the declared build.
-///
-/// The connection then speaks HTTP/2 by prior knowledge — api's inbound
-/// recognises the preface, so no ALPN is needed — and hyper's HTTP/2 codec strips
-/// hop-by-hop headers from what is sent on it, so this role carries no protocol
-/// translation of its own.
+/// Open one connection to api and refuse it unless it is the declared build,
+/// on the part the rest of its group is on.
 ///
 /// The server name is RA-TLS's fixed placeholder and settles nothing: an RA-TLS
 /// certificate carries no name, and who the peer is comes from the quote the
 /// verifier checks during the handshake. Which is also why nothing here needs
-/// the public name the browser used.
+/// the public name the caller used.
 ///
-/// The measurement check is here rather than at the routing table because this
-/// is where it can be true. Routing picks by what the host DECLARED; the
-/// handshake is what the peer PROVED, and the two must be the same value or the
-/// connection does not exist.
+/// Both checks are here rather than at the routing table because this is where
+/// they can be true. Routing picks by what the host DECLARED; the handshake is
+/// what the peer PROVED, and the two must agree or the connection does not
+/// exist. The part is stronger still: the host does not declare it at all, so
+/// there is nothing to compare against except what the group's other members
+/// proved — see [`Part`].
 #[cfg(feature = "vsock")]
-async fn connect(addr: &str, expected: &str, tls: &Tls) -> std::io::Result<Upstream> {
+pub async fn connect(
+    addr: &str,
+    expected: &str,
+    part: &Part,
+    tls: &Tls,
+) -> std::io::Result<Upstream> {
     let stream = fleet_transport::dial(addr).await?;
     let tls = tls.connect(enclavid_ra_tls::server_name(), stream).await?;
 
-    let proved = enclavid_ra_tls::peer_measurement(tls.get_ref().1).ok_or_else(|| {
+    let (proved, chip) = enclavid_ra_tls::peer_identity(tls.get_ref().1).ok_or_else(|| {
         std::io::Error::other("the peer completed an attested handshake carrying no measurement")
     })?;
     if proved != expected {
@@ -513,16 +473,35 @@ async fn connect(addr: &str, expected: &str, tls: &Tls) -> std::io::Result<Upstr
         // published image, so neither is a secret. They still do not go to an
         // outward tier: the host chooses how often this happens, and a line whose
         // rate a caller picks is a channel.
-        debug!("upstream at {addr} proved {proved}, declared {expected}");
+        safe_logger::debug!("upstream at {addr} proved {proved}, declared {expected}");
         return Err(std::io::Error::other(
             "the upstream is not the build it was declared to be",
+        ));
+    }
+    if !part.agrees(&chip) {
+        safe_logger::debug!("upstream at {addr} is on another part than its group");
+        return Err(std::io::Error::other(
+            "the upstream is not on the part its group is on",
         ));
     }
     Ok(tls)
 }
 
+/// A developer build proves nothing, so there is nothing to compare — but the
+/// group still settles on a part, because every process on one box is on one
+/// part and saying so keeps the shape the same on both builds.
 #[cfg(not(feature = "vsock"))]
-async fn connect(addr: &str, _expected: &str, _tls: &Tls) -> std::io::Result<Upstream> {
+pub async fn connect(
+    addr: &str,
+    _expected: &str,
+    part: &Part,
+    _tls: &Tls,
+) -> std::io::Result<Upstream> {
+    if !part.agrees("this box") {
+        return Err(std::io::Error::other(
+            "the upstream is not on the part its group is on",
+        ));
+    }
     fleet_transport::dial(addr).await
 }
 
@@ -530,187 +509,194 @@ async fn connect(addr: &str, _expected: &str, _tls: &Tls) -> std::io::Result<Ups
 pub(crate) mod tests {
     use super::*;
 
-    /// Two builds, spelled the way a real one is: what routing compares is the
-    /// string, and the table refuses anything a quote could not carry.
-    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    pub(crate) const APPLICANT: &str = "verify.example.com";
+    pub(crate) const CONSUMER: &str = "api.example.com";
 
-    fn declared(node: &str, measurement: &str, port: u16) -> crate::config::Upstream {
-        crate::config::Upstream {
-            node: node.into(),
-            measurement: measurement.into(),
-            applicant: format!("127.0.0.1:{port}"),
-            client: format!("127.0.0.1:{}", port + 1),
-            health: format!("127.0.0.1:{}", port + 2),
-        }
-    }
+    /// Two builds, spelled the way a real one is: what routing compares is the
+    /// string, and a table refuses anything a quote could not carry.
+    pub(crate) const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    pub(crate) const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     /// A table as the host would have pushed one — through the same checks, so
     /// a fixture nothing could route is a failing test rather than a passing
     /// one.
-    pub(crate) fn pushed(
-        upstreams: Vec<crate::config::Upstream>,
-    ) -> crate::config::ValidatedConfig {
-        crate::config::RawConfig {
-            upstreams,
-            affinity: crate::config::Affinity {
-                key: crate::config::Key([0; 32]),
-                previous_key: None,
-                ttl_seconds: 600,
-            },
+    pub(crate) fn pushed(body: &str) -> crate::config::ValidatedConfig {
+        crate::config::ValidatedConfig::parse(body.as_bytes())
+            .expect("the fixture declares a routable table")
+    }
+
+    const KEY: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// One group on two machines and a second group on one, all under both
+    /// names.
+    fn table() -> Upstreams {
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{A}" }},
+                           "two": {{ "measurement": "{B}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["127.0.0.1:1000", "127.0.0.1:2000"],
+                                  "two": ["127.0.0.1:3000"] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:1001", "127.0.0.1:2001"],
+                                  "two": ["127.0.0.1:3001"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
+        );
+        Upstreams::empty().replaced(pushed(&body))
+    }
+
+    #[test]
+    fn the_name_picks_the_address_and_the_label_picks_the_group() {
+        let up = table();
+        let applicant = up.at_group(APPLICANT, "one").ok().unwrap();
+        assert!(applicant.addr.ends_with("000"), "{}", applicant.addr);
+        assert_eq!(applicant.measurement, A);
+
+        let consumer = up.at_group(CONSUMER, "one").ok().unwrap();
+        assert!(consumer.addr.ends_with("001"), "{}", consumer.addr);
+        assert_eq!(consumer.group, "one");
+    }
+
+    /// Every member of a group serves the sessions of that group, so requests
+    /// spread over all of them.
+    #[test]
+    fn requests_go_round_the_members_of_a_group() {
+        let up = table();
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..4 {
+            seen.push(up.at_group(APPLICANT, "one").ok().unwrap().addr.to_owned());
         }
-        .try_into()
-        .expect("the fixture declares a routable table")
-    }
-
-    fn upstreams() -> Upstreams {
-        Upstreams::empty("verify.example.com".into(), "api.example.com".into()).replaced(pushed(
-            vec![
-                declared("one", A, 1000),
-                declared("two", A, 2000),
-                declared("three", B, 3000),
-            ],
-        ))
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 2, "both members answered");
     }
 
     #[test]
-    fn the_name_picks_the_surface() {
-        let up = upstreams();
-        assert_eq!(
-            up.surface(Some("verify.example.com")).ok(),
-            Some(Surface::Applicant)
+    fn a_new_session_is_placed_on_a_group_running_that_build() {
+        let up = table();
+        let placed = up.place(CONSUMER, B).ok().unwrap();
+        assert_eq!(placed.group, "two");
+        assert_eq!(placed.addr, "127.0.0.1:3001");
+
+        assert!(
+            up.place(CONSUMER, &"c".repeat(96)).is_err(),
+            "a build nobody runs is nowhere to place"
         );
-        assert_eq!(
-            up.surface(Some("api.example.com")).ok(),
-            Some(Surface::Consumer)
-        );
-        // A host name has no case, so capitals must not move a caller to the
-        // other audience's door — or to none at all.
-        assert_eq!(
-            up.surface(Some("VERIFY.Example.CoM")).ok(),
-            Some(Surface::Applicant)
-        );
-        assert!(matches!(
-            up.surface(Some("elsewhere.example.com")),
-            Err(NoRoute::UnknownName)
-        ));
-        assert!(matches!(up.surface(None), Err(NoRoute::UnknownName)));
     }
 
-    /// A label picks the machine, and the surface picks which of its two ports.
     #[test]
-    fn a_label_names_one_machine_on_either_surface() {
-        let up = upstreams();
-        let applicant = up.at_node(Surface::Applicant, "one").ok().unwrap();
-        assert_eq!(
-            (applicant.node, applicant.addr, applicant.measurement),
-            ("one", "127.0.0.1:1000", A)
-        );
-        let consumer = up.at_node(Surface::Consumer, "one").ok().unwrap();
-        assert_eq!(consumer.addr, "127.0.0.1:1001");
-        assert!(up.at_node(Surface::Consumer, "nowhere").is_err());
+    fn a_label_nobody_carries_is_one_answer() {
+        let up = table();
+        assert!(up.at_group(APPLICANT, "three").is_err());
+        assert!(up.at_group("elsewhere.example.com", "one").is_err());
     }
 
-    /// A machine that has not been placed on before is placed on now: new
-    /// sessions spread rather than pile onto whichever came first.
-    #[test]
-    fn new_sessions_go_round_the_machines_running_that_build() {
-        let up = upstreams();
-        let first = up
-            .assign(Surface::Consumer, A)
-            .ok()
-            .unwrap()
-            .node
-            .to_owned();
-        let second = up
-            .assign(Surface::Consumer, A)
-            .ok()
-            .unwrap()
-            .node
-            .to_owned();
-        assert_ne!(first, second);
-        assert_eq!(
-            up.assign(Surface::Consumer, A).ok().unwrap().node,
-            first,
-            "and then round again"
-        );
-        assert_eq!(up.assign(Surface::Consumer, B).ok().unwrap().node, "three");
-    }
-
-    /// A build nobody runs and a machine that cannot take work answer the same
-    /// way: which machines exist and how they are is the host's business.
-    #[test]
-    fn nothing_to_place_on_is_one_answer() {
-        let up = upstreams();
-        assert!(matches!(
-            up.assign(Surface::Consumer, "cc33"),
-            Err(NoRoute::NoSuchBuild)
-        ));
-
-        for node in ["one", "two"] {
-            up.instances
-                .iter()
-                .find(|i| i.node == node)
-                .unwrap()
-                .ready
-                .set(false);
-        }
-        assert!(matches!(
-            up.assign(Surface::Consumer, A),
-            Err(NoRoute::NoSuchBuild)
-        ));
-        // And a request that belongs to a session already there still goes
-        // there: unwell or not, it is the only machine that has it.
-        assert!(up.at_node(Surface::Consumer, "one").is_ok());
-    }
-
-    /// Before the first push nothing routes, and it fails as an unavailable
-    /// upstream rather than as anything that would say the table is empty.
     #[test]
     fn an_empty_table_routes_nothing() {
-        let up = Upstreams::empty("verify.example.com".into(), "api.example.com".into());
+        let up = Upstreams::empty();
         assert_eq!(up.len(), 0);
-        assert!(up.affinity().is_none());
-        assert!(matches!(
-            up.assign(Surface::Consumer, A),
-            Err(NoRoute::NoSuchBuild)
-        ));
-        assert!(matches!(
-            up.at_node(Surface::Applicant, "one"),
-            Err(NoRoute::NoSuchBuild)
-        ));
+        assert!(up.at_group(APPLICANT, "one").is_err());
+        assert!(up.place(CONSUMER, A).is_err());
     }
 
-    /// A replacement is whole: what the new push leaves out stops routing.
+    /// A member marked unwell is skipped while another can take the work.
     #[test]
-    fn a_machine_the_next_push_omits_stops_routing() {
-        let next = upstreams().replaced(pushed(vec![declared("two", A, 2000)]));
-        assert_eq!(next.len(), 1);
-        assert!(next.at_node(Surface::Applicant, "one").is_err());
-        assert!(next.at_node(Surface::Applicant, "two").is_ok());
+    fn an_unwell_member_is_passed_over() {
+        let up = table();
+        up.mark("127.0.0.1:1000", false);
+        for _ in 0..4 {
+            let got = up.at_group(APPLICANT, "one").ok().unwrap();
+            assert_eq!(got.addr, "127.0.0.1:2000");
+        }
     }
 
-    /// What the poller learned survives a push that still declares the machine,
-    /// so adding one does not quietly make an unwell one placeable again.
+    /// And a group whose members all look unwell still answers, because the
+    /// session it holds has nowhere else to be.
     #[test]
-    fn a_verdict_survives_a_push_that_keeps_the_machine() {
-        let up = upstreams();
-        up.instances
-            .iter()
-            .find(|i| i.node == "one")
-            .unwrap()
-            .ready
-            .set(false);
+    fn a_group_with_nothing_well_is_still_where_its_sessions_are() {
+        let up = table();
+        up.mark("127.0.0.1:1000", false);
+        up.mark("127.0.0.1:2000", false);
+        assert!(up.at_group(APPLICANT, "one").is_ok());
+    }
 
-        let next = up.replaced(pushed(vec![
-            declared("one", A, 1000),
-            declared("two", A, 2000),
-        ]));
-        assert_eq!(next.assign(Surface::Consumer, A).ok().unwrap().node, "two");
+    /// What this role learned survives a push that still declares the member,
+    /// and is not inherited by one it does not.
+    #[test]
+    fn a_verdict_survives_a_push_that_keeps_the_member() {
+        let up = table();
+        up.mark("127.0.0.1:1000", false);
 
-        // A label pointed at a different machine is a different machine, and
-        // starts over.
-        let moved = next.replaced(pushed(vec![declared("one", A, 5000)]));
-        assert!(moved.assign(Surface::Consumer, A).is_ok());
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{A}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["127.0.0.1:1000", "127.0.0.1:9000"] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:1001"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
+        );
+        let next = up.replaced(pushed(&body));
+
+        let member = |addr: &str| {
+            next.members()
+                .into_iter()
+                .find(|m| m.addr == addr)
+                .unwrap_or_else(|| panic!("{addr} is declared"))
+        };
+        assert!(
+            !member("127.0.0.1:1000").ready.get(),
+            "the verdict came across"
+        );
+        assert!(
+            member("127.0.0.1:9000").ready.get(),
+            "a member it has not met starts ready"
+        );
+    }
+
+    /// The host declares which instances form a group and never declares the
+    /// part. So the first member to answer settles it, and one that proves
+    /// another part is not in this group however it was declared — which is
+    /// what stops two key domains being stapled under one label.
+    #[test]
+    fn a_group_is_one_part_and_the_first_answer_settles_it() {
+        let part = Part::default();
+        assert!(part.agrees("chip-a"), "the first answer settles it");
+        assert!(part.agrees("chip-a"), "and agrees with itself after");
+        assert!(!part.agrees("chip-b"), "another part is another group");
+    }
+
+    /// A later push may say something different, and a session could not have
+    /// survived that push anyway — so the answer is per table, not for ever.
+    #[test]
+    fn a_push_settles_the_part_again() {
+        let up = table();
+        let settled = up.at_group(APPLICANT, "one").ok().unwrap().part;
+        assert!(settled.agrees("chip-a"));
+
+        let next = up.replaced(pushed(&format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{A}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["127.0.0.1:1000"] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:1001"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
+        )));
+        let after = next.at_group(APPLICANT, "one").ok().unwrap().part;
+        assert!(after.agrees("chip-b"), "a new table settles it anew");
+    }
+
+    #[test]
+    fn a_group_the_next_push_omits_stops_routing() {
+        let up = table();
+        let body = format!(
+            r#"{{
+              "groups": {{ "two": {{ "measurement": "{B}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "two": ["127.0.0.1:3000"] }},
+                "{CONSUMER}":  {{ "two": ["127.0.0.1:3001"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
+        );
+        let next = up.replaced(pushed(&body));
+        assert!(next.at_group(APPLICANT, "one").is_err());
+        assert!(next.at_group(APPLICANT, "two").is_ok());
     }
 }

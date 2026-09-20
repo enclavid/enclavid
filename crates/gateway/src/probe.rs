@@ -1,135 +1,114 @@
-//! What this role asks each api about itself, and what it does with the answer.
+//! How this role learns which members can take work, and how one comes back.
 //!
-//! ## Why the gateway asks, and not the host
+//! ## It asks on the channel it will use
 //!
-//! Whether a machine may be given a NEW session is a conclusion, and the party
-//! that draws it should be the one acting on it. api reports facts about
-//! itself — it is up and listening, each of its legs is connected, the hatch
-//! answers — and says nothing about whether traffic should arrive; see
-//! `fleet_transport::health`. This role is what places sessions, so this role
-//! concludes. The host keeps its own conclusions for its own actions.
+//! api has a port that reports what it knows about itself, and this role does
+//! not use it. That port exists for the party that runs the fleet — it says
+//! whether a guest finished coming up and whether its own legs are connected,
+//! which is what an operator acts on. It answers through the host, unsigned, so
+//! anything concluded from it is concluded on the host's word.
 //!
-//! ## The port it asks is not attested, and that is fine
+//! What this role needs is narrower and it can get it first-hand: can a leg to
+//! this member be opened, and is the build at it still the declared one. A dial
+//! answers both, because the answer IS the attested handshake — see
+//! `crate::upstream::connect`. Nothing is sent on the connection; it is opened
+//! and dropped.
 //!
-//! The answer arrives through the host like everything else, and nothing signs
-//! it. A forged "healthy" sends new sessions to a machine that cannot run them,
-//! which the host can cause anyway by not carrying bytes; a forged "unwell"
-//! steers them elsewhere, which is the host's own balancing. What it cannot do
-//! is substitute a build: identity is proved on every data connection, not here.
+//! ## A failure marks, a dial unmarks
 //!
-//! ## Ready means every fact api reports is good
+//! A member is marked unwell by the request that met it failing, which costs
+//! one request rather than a poll. It is not asked about again until
+//! [`COOL_OFF`] has passed, and then a probe dial — not a caller's request —
+//! decides whether it comes back. That is the pairing every mature proxy ends
+//! up with: learn from real traffic, recover by asking.
 //!
-//! Not just `healthy`. A node whose storage leg is down accepts connections and
-//! completes the attested handshake, and still cannot run a session — which is
-//! exactly the case a connection-level probe would call well.
-//!
-//! Two answers in a row change a verdict, so a single lost poll does not empty
-//! a machine and a single lucky one does not refill it. A failed data
-//! connection marks a node at once, without waiting for the next poll — see
-//! `crate::serve`.
+//! Members that are well are not polled at all. A fleet of well members costs
+//! nothing here, and the first sign of trouble arrives on the path that would
+//! have suffered from it anyway.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use safe_logger::debug;
-use serde::Deserialize;
-use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 
 use crate::upstream::Upstreams;
 
-/// How often each node is asked, and how long an answer may take.
+/// How long a marked member is left alone before a probe tries it.
+#[cfg(not(test))]
+const COOL_OFF: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const COOL_OFF: Duration = Duration::from_millis(20);
+
+/// How often the marked ones are looked at.
 #[cfg(not(test))]
 const INTERVAL: Duration = Duration::from_secs(5);
 #[cfg(test)]
-const INTERVAL: Duration = Duration::from_millis(20);
-const TIMEOUT: Duration = Duration::from_secs(3);
+const INTERVAL: Duration = Duration::from_millis(10);
 
-/// How many answers in a row move a verdict.
-const IN_A_ROW: u32 = 2;
+/// How long one probe dial may take.
+const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// api's answer, as `enclavid_api::health` renders it.
+/// Bring marked members back, for ever.
 ///
-/// Unknown fields are ignored rather than refused: this is a hint for placing
-/// new sessions, and a newer api that reports more about itself should not
-/// become unplaceable to an older gateway.
-#[derive(Deserialize)]
-struct Answer {
-    healthy: bool,
-    peers: HashMap<String, bool>,
-    hatch: bool,
-}
-
-impl Answer {
-    fn ready(&self) -> bool {
-        self.healthy && self.hatch && self.peers.values().all(|up| *up)
-    }
-}
-
-/// Ask every declared node, for ever, and keep the table's verdicts current.
-///
-/// Await this on the role's own task rather than spawning it: a gateway that
-/// stopped asking would go on placing new sessions on whatever it last
-/// believed, and that is a state to end the process over rather than serve
-/// through.
-pub async fn poll_forever(mut table: watch::Receiver<Arc<Upstreams>>) -> ! {
-    // Streaks by address, so a node that goes away and comes back starts over
-    // rather than inheriting a verdict from a previous table.
-    let mut streaks: HashMap<String, (u32, bool)> = HashMap::new();
+/// Await this on the role's own task rather than spawning it: a role that
+/// stopped probing would leave every member it ever marked marked, and slide
+/// into refusing new sessions with no way back. That is a state to end the
+/// process over rather than serve through.
+pub async fn probe_forever(table: watch::Receiver<Arc<Upstreams>>) -> ! {
+    // When each marked member was last tried, so one that has just been marked
+    // is left alone for a while and one that keeps failing is not hammered.
+    let mut tried: HashMap<String, Instant> = HashMap::new();
     loop {
-        let nodes = table.borrow().to_poll();
-        let mut seen = HashMap::new();
-        for (addr, ready) in nodes {
-            let answered = ask(&addr).await;
-            let (count, last) = streaks.get(&addr).copied().unwrap_or((0, answered));
-            let count = if answered == last { count + 1 } else { 1 };
-            if answered != ready.get() && count >= IN_A_ROW {
-                debug!(
-                    "node at {addr} is now {}",
-                    if answered { "ready" } else { "not ready" }
-                );
-                ready.set(answered);
+        let now = Instant::now();
+        let current = table.borrow().clone();
+        for member in current.members() {
+            if member.ready.get() {
+                tried.remove(&member.addr);
+                continue;
             }
-            seen.insert(addr, (count, answered));
-        }
-        streaks = seen;
+            if tried
+                .get(&member.addr)
+                .is_some_and(|last| now.duration_since(*last) < COOL_OFF)
+            {
+                continue;
+            }
+            tried.insert(member.addr.clone(), now);
 
-        // Woken by a push as well as by the clock: a table that just gained a
-        // machine should be asked about it now, not up to an interval later.
-        tokio::select! {
-            _ = tokio::time::sleep(INTERVAL) => {}
-            _ = table.changed() => {}
+            if dial(&current, &member).await {
+                debug!("member at {} answered and is taken back", member.addr);
+                member.ready.set(true);
+                tried.remove(&member.addr);
+            }
         }
+        // Addresses no longer declared stop being remembered, so a member that
+        // comes back under a later push starts clean.
+        tried.retain(|addr, _| current.members().iter().any(|m| &m.addr == addr));
+
+        tokio::time::sleep(INTERVAL).await;
     }
 }
 
-/// One question, and no bytes sent: the port answers and closes, and a prober
-/// that speaks first can have its own answer reset away — see
-/// `fleet_transport::health`.
-async fn ask(addr: &str) -> bool {
-    let answer = tokio::time::timeout(TIMEOUT, async {
-        let mut stream = fleet_transport::dial(addr).await?;
-        let mut body = Vec::new();
-        stream.read_to_end(&mut body).await?;
-        Ok::<_, std::io::Error>(body)
-    })
-    .await;
-
-    match answer {
-        Ok(Ok(body)) => match serde_json::from_slice::<Answer>(&body) {
-            Ok(answer) => answer.ready(),
-            Err(e) => {
-                debug!("health answer from {addr} did not parse: {e}");
-                false
-            }
-        },
+/// One attested handshake and nothing else. Success means the member answers,
+/// is still the build it was declared to be, and is on its group's part — the
+/// same checks a request's own leg makes, which is why this answer means what a
+/// request needs it to.
+async fn dial(table: &Upstreams, member: &crate::upstream::Member) -> bool {
+    let addr = &member.addr;
+    match tokio::time::timeout(
+        TIMEOUT,
+        crate::upstream::connect(addr, &member.measurement, &member.part, table.tls()),
+    )
+    .await
+    {
+        Ok(Ok(_)) => true,
         Ok(Err(e)) => {
-            debug!("health at {addr}: {e}");
+            debug!("probing {addr}: {e}");
             false
         }
         Err(_) => {
-            debug!("health at {addr} did not answer within the timeout");
+            debug!("probing {addr} did not finish within the timeout");
             false
         }
     }
@@ -139,86 +118,82 @@ async fn ask(addr: &str) -> bool {
 mod tests {
     use super::*;
 
-    use tokio::io::AsyncWriteExt;
+    use crate::upstream::tests::{A, APPLICANT, CONSUMER, pushed};
 
-    /// A stand-in for api's health port: answers whatever the flag says, then
-    /// closes, reading nothing.
-    async fn port(healthy: Arc<std::sync::atomic::AtomicBool>) -> String {
+    /// A listener that accepts and says nothing: enough for a dial to succeed,
+    /// which is all a probe asks.
+    async fn answering() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         tokio::spawn(async move {
             loop {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let up = healthy.load(std::sync::atomic::Ordering::Relaxed);
-                let body = format!(
-                    r#"{{"healthy":{up},"peers":{{"storage":{up},"compile_worker":{up},"execution_worker":{up}}},"hatch":{up}}}"#
-                );
-                let _ = stream.write_all(body.as_bytes()).await;
+                let (stream, _) = listener.accept().await.unwrap();
+                // Held so the connection is not closed under the prober.
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    drop(stream);
+                });
             }
         });
         addr
     }
 
-    #[tokio::test]
-    async fn an_answer_decides_and_takes_two_to_change_its_mind() {
-        let healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let addr = port(healthy.clone()).await;
-        assert!(
-            ask(&addr).await,
-            "a node that says everything is up is ready"
+    fn table(addr: &str) -> Arc<Upstreams> {
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{A}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["{addr}"] }},
+                "{CONSUMER}":  {{ "one": ["{addr}"] }} }},
+              "affinity": {{ "key": "{}", "ttl_seconds": 600 }} }}"#,
+            "0".repeat(64)
         );
-
-        healthy.store(false, std::sync::atomic::Ordering::Relaxed);
-        assert!(!ask(&addr).await, "a leg down is not ready");
+        Arc::new(Upstreams::empty().replaced(pushed(&body)))
     }
 
+    /// A member that was marked and answers again is taken back.
     #[tokio::test]
-    async fn a_node_that_does_not_answer_is_not_ready() {
-        // Nothing listening: the dial fails and the verdict is the honest one.
-        assert!(!ask("127.0.0.1:1").await);
-    }
+    async fn a_member_that_answers_comes_back() {
+        let addr = answering().await;
+        let current = table(&addr);
+        current.mark(&addr, false);
 
-    #[tokio::test]
-    async fn the_table_learns_and_unlearns() {
-        let healthy = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let addr = port(healthy.clone()).await;
+        let (_tx, rx) = watch::channel(current.clone());
+        tokio::spawn(probe_forever(rx));
 
-        let table = Upstreams::empty("verify.example.com".into(), "api.example.com".into())
-            .replaced(crate::upstream::tests::pushed(vec![
-                crate::config::Upstream {
-                    node: "one".into(),
-                    measurement: "a".repeat(96),
-                    applicant: "127.0.0.1:1".into(),
-                    client: "127.0.0.1:2".into(),
-                    health: addr.clone(),
-                },
-            ]));
-        let table = Arc::new(table);
-        let (_tx, rx) = watch::channel(table.clone());
-        tokio::spawn(poll_forever(rx));
-
-        // Declared ready, said unwell twice: taken out.
-        let out = tokio::time::timeout(Duration::from_secs(5), async {
-            while table
-                .assign(crate::upstream::Surface::Consumer, &"a".repeat(96))
-                .is_ok()
-            {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await;
-        assert!(out.is_ok(), "an unwell node stops taking new sessions");
-
-        healthy.store(true, std::sync::atomic::Ordering::Relaxed);
         let back = tokio::time::timeout(Duration::from_secs(5), async {
-            while table
-                .assign(crate::upstream::Surface::Consumer, &"a".repeat(96))
-                .is_err()
-            {
+            while !current.members()[0].ready.get() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await;
-        assert!(back.is_ok(), "and takes them again once it says so");
+        assert!(back.is_ok(), "a member that answers is taken back");
+    }
+
+    /// One that does not answer stays out, however long it is probed.
+    #[tokio::test]
+    async fn a_member_that_does_not_answer_stays_out() {
+        let current = table("127.0.0.1:1");
+        current.mark("127.0.0.1:1", false);
+
+        let (_tx, rx) = watch::channel(current.clone());
+        tokio::spawn(probe_forever(rx));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!current.members()[0].ready.get());
+    }
+
+    /// A well member is never dialled: a probe that touched everything would
+    /// cost an attested handshake per member per interval, for nothing.
+    #[tokio::test]
+    async fn the_well_are_left_alone() {
+        // Nothing listens at this address, so a dial would fail and mark it —
+        // if anything dialled it, which is the point.
+        let current = table("127.0.0.1:1");
+        let (_tx, rx) = watch::channel(current.clone());
+        tokio::spawn(probe_forever(rx));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(current.members()[0].ready.get(), "still ready, never asked");
     }
 }

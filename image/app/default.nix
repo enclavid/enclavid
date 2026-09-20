@@ -49,10 +49,15 @@ let
   # applies to the selected package, so setting it where a package has no
   # feature table changes nothing and only obscures which roles depend on it.
   mkPart = { pname, package, binaries, features ? [ ], noDefaultFeatures ? false
-           , preBuild ? "" }:
+           , preBuild ? "", nativeBuildInputs ? [ ] }:
     static.rustPlatform.buildRustPackage {
-      inherit pname src preBuild;
+      inherit pname src preBuild nativeBuildInputs;
       version = "0.1.0";
+
+      # A part that asks for cmake gets the tool and not the hook: a Rust build
+      # configures itself, and the hook would try to configure the source tree
+      # as a cmake project before cargo ever runs.
+      dontUseCmakeConfigure = true;
 
       cargoLock.lockFile = ../../Cargo.lock;
 
@@ -280,6 +285,11 @@ builtins.foldl' (a: b: a // b) { } [
       binaries = [ "gateway" ];
       noDefaultFeatures = true;
       features = [ "sev-snp" "vsock" ];
+      # The proxy library pins `flate2` to the zlib-ng backend, and zlib-ng is
+      # built by cmake. Nothing in this role compresses anything — the
+      # dependency is not optional upstream. Listed here rather than for every
+      # part so that what needs a C toolchain is visible where it is needed.
+      nativeBuildInputs = [ pkgs.cmake ];
     }];
   })
 ]

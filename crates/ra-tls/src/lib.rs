@@ -179,6 +179,18 @@ impl MeasurementPolicy {
 /// ephemeral private key it was bound to — so distinct peers land in distinct
 /// partitions whatever the measurement policy is, including `AcceptAny`.
 pub fn peer_measurement(conn: &rustls::CommonState) -> Option<String> {
+    peer_identity(conn).map(|(measurement, _)| measurement)
+}
+
+/// What the peer proved, both halves: its measurement and the part it runs on.
+///
+/// The same reasoning as [`peer_measurement`], which this is the whole of — it
+/// is only separate because most callers want one half. The chip is worth the
+/// other half to a caller that treats a SET of peers as interchangeable: what
+/// makes them so is a key derived from the part AND the image, so a peer
+/// proving a different part is not in the set however it was declared. It
+/// decides nothing about who may connect.
+pub fn peer_identity(conn: &rustls::CommonState) -> Option<(String, String)> {
     if conn.is_handshaking() {
         return None;
     }
@@ -189,7 +201,7 @@ pub fn peer_measurement(conn: &rustls::CommonState) -> Option<String> {
         .iter()
         .find(|e| e.oid.to_id_string() == RATLS_OID_DOTTED)?;
     let quote: Quote = ciborium::from_reader(ext.value).ok()?;
-    Some(quote.measurement)
+    Some((quote.measurement, quote.chip_id))
 }
 
 /// Build a `rustls::Error` for an RA-TLS verification failure (surfaces to the peer as a

@@ -154,21 +154,23 @@ fn answer(status: StatusCode, message: String) -> Response<Full<Bytes>> {
 mod tests {
     use super::*;
 
-    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    use crate::upstream::tests::{A, APPLICANT, CONSUMER};
 
     fn table() -> (
         watch::Sender<Arc<Upstreams>>,
         watch::Receiver<Arc<Upstreams>>,
     ) {
-        watch::channel(Arc::new(Upstreams::empty(
-            "verify.example.com".into(),
-            "api.example.com".into(),
-        )))
+        watch::channel(Arc::new(Upstreams::empty()))
     }
 
     fn valid() -> String {
         format!(
-            r#"{{"upstreams":[{{"node":"one","measurement":"{A}","applicant":"127.0.0.1:1","client":"127.0.0.1:2","health":"127.0.0.1:3"}}],"affinity":{{"key":"{}","ttl_seconds":600}}}}"#,
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{A}" }} }},
+              "names": {{
+                "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
+                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+              "affinity": {{ "key": "{}", "ttl_seconds": 600 }} }}"#,
             "0".repeat(64)
         )
     }
@@ -187,11 +189,7 @@ mod tests {
         let resp = push(&tx, request(Method::PUT, PATH, valid())).await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(rx.borrow().len(), 1);
-        assert!(
-            rx.borrow()
-                .at_node(crate::upstream::Surface::Applicant, "one")
-                .is_ok()
-        );
+        assert!(rx.borrow().at_group(APPLICANT, "one").is_ok());
     }
 
     /// A refused push leaves the table exactly as it was.

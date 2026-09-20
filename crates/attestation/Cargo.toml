@@ -47,3 +47,6 @@ x509-parser = { version = "0.16", optional = true }
 # Builds a certificate carrying the HWID extension, so what is read out of one
 # can be tested without a VCEK from AMD.
 rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+# Decodes the captured quote in `tests/a_real_part.rs`. The crate itself takes
+# it optionally, with the backend that encodes one.
+ciborium = "0.2"
