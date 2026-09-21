@@ -35,6 +35,17 @@
 //! RA-TLS certificate carries in its extension, so one verifier reads both. The
 //! caller needs nothing from this role to check it: AMD's chain travels inside
 //! the quote, and the root it chains to is compiled into the verifier.
+//!
+//! That is also why it is not JSON. One type with two representations would mean
+//! a verifier that has to read both, and a certificate extension is a DER octet
+//! string, where bytes are what belongs. A readable body would invite reading
+//! the envelope's `measurement` and `chip_id`, which are the sender's
+//! unauthenticated claim — the values that count are inside the signed blob.
+//!
+//! The media type NAMES the schema rather than only the encoding, because a
+//! path is stable and a schema might not be: the `+cbor` suffix keeps ordinary
+//! CBOR tooling working, and the type ahead of it is what a verifier that knows
+//! only this shape can refuse on rather than misparse.
 
 use std::sync::Arc;
 
@@ -49,7 +60,10 @@ use enclavid_attestation::{Attestor, ReportData};
 pub const PATH: &str = "/.well-known/enclavid-attestation";
 
 /// The `Content-Type` the body carries.
-pub const CONTENT_TYPE: &str = "application/cbor";
+///
+/// Part of the wire, not a detail of this build: a verifier written against this
+/// shape reads it. See the module docs for why it names the schema.
+pub const CONTENT_TYPE: &str = "application/vnd.enclavid.attestation+cbor";
 
 /// This role's proof of itself, ready to serve.
 ///
@@ -67,4 +81,18 @@ pub fn proof(spki: Vec<u8>, attestor: &Arc<dyn Attestor>) -> Result<Proof, Strin
     let mut cbor = Vec::new();
     ciborium::into_writer(&quote, &mut cbor).map_err(|e| format!("encode the quote: {e}"))?;
     Ok(Bytes::from(cbor))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both are the wire, so a change to either is a change a verifier outside
+    /// this build has to be told about. Written out rather than compared to
+    /// themselves, which is what a test against the constants would do.
+    #[test]
+    fn the_path_and_the_media_type_are_what_a_verifier_was_written_against() {
+        assert_eq!(PATH, "/.well-known/enclavid-attestation");
+        assert_eq!(CONTENT_TYPE, "application/vnd.enclavid.attestation+cbor");
+    }
 }
