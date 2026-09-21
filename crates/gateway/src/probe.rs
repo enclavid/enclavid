@@ -8,11 +8,20 @@
 //! which is what an operator acts on. It answers through the host, unsigned, so
 //! anything concluded from it is concluded on the host's word.
 //!
-//! What this role needs is narrower and it can get it first-hand: can a leg to
-//! this member be opened, and is the build at it still the declared one. A dial
-//! answers both, because the answer IS the attested handshake — see
-//! `crate::upstream::connect`. Nothing is sent on the connection; it is opened
-//! and dropped.
+//! What this role needs is narrower and it can get it first-hand: would a leg to
+//! this member open. That is a question about LIVENESS and nothing else — what
+//! runs there is settled on every real leg by the handshake and checked again
+//! when one is taken from the pool, so a member running the wrong build is
+//! already indistinguishable from a member that is down: neither can complete a
+//! handshake, and neither can read or write a byte.
+//!
+//! The probe dials the attested way regardless — see `crate::upstream::connect`
+//! — not as a check of its own but because that IS how a leg opens here. A
+//! cheaper probe would answer a different question: a plain connection succeeds
+//! while the host is carrying bytes, which says nothing about whether the leg
+//! this member would actually be given could be established, and a member
+//! returned on that answer would fail its next request and be marked again.
+//! Nothing is sent on the connection; it is opened and dropped.
 //!
 //! ## A failure marks, a dial unmarks
 //!
