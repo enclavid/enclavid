@@ -6,7 +6,7 @@
 //! digest. What arrives here is the fleet's SHAPE — which api builds run and at
 //! which addresses — and it changes whenever a machine is added or a build is
 //! rolled. On the command line it would make the digest a function of the
-//! deployment, and a consumer, which verifies THIS role and then trusts it to
+//! deployment, and a caller, which verifies THIS role and then trusts it to
 //! check api, would have nothing stable to verify against.
 //!
 //! ## Why it may come from the host at all
@@ -22,9 +22,9 @@
 //! api seals a session's state under a key derived from the chip and the
 //! measurement, so every instance of one build on one part can serve any
 //! session of that build. The unit this role routes to is therefore that set —
-//! a GROUP — and its members are interchangeable. A label names the group, so
-//! an applicant's link and a consumer's token survive the loss of any one
-//! machine, and a request that fails on one member can be tried on another.
+//! a GROUP — and its members are interchangeable. A label names the group, so a
+//! link and a token survive the loss of any one machine, and a request that
+//! fails on one member can be tried on another.
 //!
 //! The host declares which instances form a group, and this role does not take
 //! that on trust: every leg proves a chip and a measurement at the handshake,
@@ -53,9 +53,14 @@
 //! What the grammar cannot say is whether a value could do its job — a label
 //! that survives a URL, a measurement a quote could carry, an address something
 //! could dial, a group named in one place and declared in none. That is the
-//! second step, and it is a type rather than a habit: [`RawConfig`] is what
+//! second step, and it is a type rather than a habit: `RawConfig` is what
 //! decodes, [`ValidatedConfig`] is what routing is given, and the only way
 //! between them is [`ValidatedConfig::parse`].
+//!
+//! `RawConfig` is private to this module and there is no way back out to one, so
+//! a reader borrows fields THROUGH the wrapper. The checks are then not a step
+//! someone remembered to take: an unchecked table is a thing that cannot exist
+//! anywhere else in this build.
 //!
 //! A push is refused WHOLE if any part of it is wrong, and the answer says
 //! which. There is a sender to tell, and a table missing one declared build is
@@ -67,14 +72,18 @@ use serde::Deserialize;
 
 /// One push as it decodes: the complete table, never a change to the previous
 /// one.
+///
+/// Private to this module, and that is the whole of the guarantee: a decoded
+/// table cannot be named anywhere else, so nothing outside can hold one that has
+/// not been through `check`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RawConfig {
+struct RawConfig {
     /// What each group is, by the label that names it.
-    pub groups: HashMap<String, Group>,
+    groups: HashMap<String, Group>,
     /// Which members of which group serve each public name.
-    pub names: HashMap<String, HashMap<String, Vec<String>>>,
-    pub affinity: Affinity,
+    names: HashMap<String, HashMap<String, Vec<String>>>,
+    affinity: Affinity,
 }
 
 /// What a group is. Only its build today; what it is WORTH — weights, how many
@@ -90,8 +99,10 @@ pub struct Group {
 /// A table every check has passed, and the only form routing is given.
 ///
 /// The wrapper exists so that the checks cannot be skipped by a later caller
-/// rather than to make them more thorough: `Upstreams::replaced` takes this,
-/// and this is reachable only through [`ValidatedConfig::parse`].
+/// rather than to make them more thorough. It has no way out: `RawConfig` is
+/// private to this module, so a reader borrows fields THROUGH this type and
+/// never comes to hold a table whose provenance it cannot see. Reachable only
+/// through [`ValidatedConfig::parse`].
 pub struct ValidatedConfig(RawConfig);
 
 impl ValidatedConfig {
@@ -102,10 +113,19 @@ impl ValidatedConfig {
         Ok(ValidatedConfig(raw))
     }
 
-    /// The table, consuming the wrapper — its job was to stand between decoding
-    /// and use, and by here it has.
-    pub fn into_inner(self) -> RawConfig {
-        self.0
+    /// What each group is, by the label that names it.
+    pub fn groups(&self) -> &HashMap<String, Group> {
+        &self.0.groups
+    }
+
+    /// Which members of which group serve each public name.
+    pub fn names(&self) -> &HashMap<String, HashMap<String, Vec<String>>> {
+        &self.0.names
+    }
+
+    /// What affinity tokens are signed with, and for how long.
+    pub fn affinity(&self) -> &Affinity {
+        &self.0.affinity
     }
 }
 
@@ -120,8 +140,8 @@ pub struct Affinity {
     #[serde(default)]
     pub previous_key: Option<Key>,
     /// How long a minted token stays good. Bounded here because it is the only
-    /// thing limiting how long a consumer can keep placing work on a group it
-    /// was once given.
+    /// thing limiting how long a caller can keep placing work on a group it was
+    /// once given.
     pub ttl_seconds: u64,
 }
 
@@ -224,8 +244,10 @@ impl RawConfig {
 mod tests {
     use super::*;
 
-    const APPLICANT: &str = "verify.example.com";
-    const CONSUMER: &str = "api.example.com";
+    /// Two names, and nothing here distinguishes them — a push declares names
+    /// and what each one means is not this role's business.
+    const FIRST: &str = "first.example.com";
+    const SECOND: &str = "second.example.com";
 
     fn m(c: char) -> String {
         c.to_string().repeat(96)
@@ -240,8 +262,8 @@ mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["127.0.0.1:1", "127.0.0.1:3"] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:2", "127.0.0.1:4"] }} }},
+                "{FIRST}": {{ "one": ["127.0.0.1:1", "127.0.0.1:3"] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:2", "127.0.0.1:4"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
             m('a')
         )
@@ -253,11 +275,11 @@ mod tests {
 
     #[test]
     fn a_group_is_declared_once_and_reached_under_both_names() {
-        let got = parse(&push()).unwrap().into_inner();
-        assert_eq!(got.groups["one"].measurement, m('a'));
-        assert_eq!(got.names[APPLICANT]["one"].len(), 2);
-        assert_eq!(got.names[CONSUMER]["one"][1], "127.0.0.1:4");
-        assert_eq!(got.affinity.ttl_seconds, 600);
+        let got = parse(&push()).unwrap();
+        assert_eq!(got.groups()["one"].measurement, m('a'));
+        assert_eq!(got.names()[FIRST]["one"].len(), 2);
+        assert_eq!(got.names()[SECOND]["one"][1], "127.0.0.1:4");
+        assert_eq!(got.affinity().ttl_seconds, 600);
     }
 
     /// The members of a group are interchangeable, so the two names need not
@@ -269,8 +291,8 @@ mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["127.0.0.1:1", "127.0.0.1:3"] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+                "{FIRST}": {{ "one": ["127.0.0.1:1", "127.0.0.1:3"] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
             m('a')
         );
@@ -286,14 +308,14 @@ mod tests {
               "groups": {{ "one": {{ "measurement": "{}" }},
                            "two": {{ "measurement": "{}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["127.0.0.1:1"], "two": ["127.0.0.1:5"] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+                "{FIRST}": {{ "one": ["127.0.0.1:1"], "two": ["127.0.0.1:5"] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
             m('a'),
             m('b')
         );
         let err = parse(&body).err().unwrap();
-        assert!(err.contains("two") && err.contains(CONSUMER), "{err}");
+        assert!(err.contains("two") && err.contains(SECOND), "{err}");
     }
 
     #[test]
@@ -302,8 +324,8 @@ mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["127.0.0.1:1"], "ghost": ["127.0.0.1:9"] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+                "{FIRST}": {{ "one": ["127.0.0.1:1"], "ghost": ["127.0.0.1:9"] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
             m('a')
         );
@@ -319,14 +341,14 @@ mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }},
+                "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:2"] }},
                 "elsewhere.example.com": {{ "one": ["127.0.0.1:9"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
             m('a')
         );
-        let got = parse(&body).unwrap().into_inner();
-        assert_eq!(got.names.len(), 3);
+        let got = parse(&body).unwrap();
+        assert_eq!(got.names().len(), 3);
     }
 
     /// A certificate is minted over these, so one no client could match is
@@ -363,8 +385,8 @@ mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": [] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+                "{FIRST}": {{ "one": [] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
             m('a')
         );
@@ -378,10 +400,10 @@ mod tests {
         let body = format!(
             r#"{{
               "groups": {{}},
-              "names": {{ "{APPLICANT}": {{}}, "{CONSUMER}": {{}} }},
+              "names": {{ "{FIRST}": {{}}, "{SECOND}": {{}} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
         );
-        assert!(parse(&body).unwrap().into_inner().groups.is_empty());
+        assert!(parse(&body).unwrap().groups().is_empty());
     }
 
     #[test]
@@ -391,8 +413,8 @@ mod tests {
                 r#"{{
                   "groups": {{ "{bad}": {{ "measurement": "{}" }} }},
                   "names": {{
-                    "{APPLICANT}": {{ "{bad}": ["127.0.0.1:1"] }},
-                    "{CONSUMER}":  {{ "{bad}": ["127.0.0.1:2"] }} }},
+                    "{FIRST}": {{ "{bad}": ["127.0.0.1:1"] }},
+                    "{SECOND}":  {{ "{bad}": ["127.0.0.1:2"] }} }},
                   "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
                 m('a')
             );
@@ -407,8 +429,8 @@ mod tests {
                 r#"{{
                   "groups": {{ "one": {{ "measurement": "{bad}" }} }},
                   "names": {{
-                    "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
-                    "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+                    "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
+                    "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
                   "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
             );
             let err = parse(&body)
@@ -424,8 +446,8 @@ mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:2", "not an address"] }} }},
+                "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:2", "not an address"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
             m('a')
         );
@@ -439,8 +461,8 @@ mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{}", "verify": false }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+                "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#,
             m('a')
         );
@@ -448,7 +470,7 @@ mod tests {
     }
 
     /// The key is what makes a token unforgeable, and the expiry is what bounds
-    /// how long a consumer can keep a group it was handed.
+    /// how long a caller can keep a group it was handed.
     #[test]
     fn affinity_is_required_and_checked() {
         let with = |affinity: &str| {
@@ -456,8 +478,8 @@ mod tests {
                 r#"{{
                   "groups": {{ "one": {{ "measurement": "{}" }} }},
                   "names": {{
-                    "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
-                    "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+                    "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
+                    "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
                   "affinity": {affinity} }}"#,
                 m('a')
             )

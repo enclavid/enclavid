@@ -8,10 +8,9 @@
 //! one part can serve any session of that build, and the thing worth naming is
 //! that SET rather than any one machine.
 //!
-//! A label names the group. An applicant's link carries it, a consumer's token
-//! carries it, and inside it every member will do: a request whose member has
-//! gone can be tried on another, and a link outlives the machine that answered
-//! it first.
+//! A label names the group. A link carries it, a token carries it, and inside it
+//! every member will do: a request whose member has gone can be tried on another,
+//! and a link outlives the machine that answered it first.
 //!
 //! What the host declares about grouping this role does not take on trust. Each
 //! leg proves a chip and a measurement at the handshake, so a group whose
@@ -21,19 +20,18 @@
 //! ## Two questions, two answers, and neither is a path
 //!
 //! **Which NAME** comes from the TLS handshake, and it decides which addresses
-//! of a group are the right ones — one api process serves its two audiences on
-//! two ports. Nothing here knows what those audiences ARE; a name maps to
+//! of a group are the right ones, because one api process listens on more than
+//! one port. WHY it does is not known here and is not needed; a name maps to
 //! addresses and that is the whole of it.
 //!
 //! **Which GROUP** comes from the caller: a label it was given, or — having
-//! none — a measurement it names, against which this role places it. The
-//! gateway holds no pin of its own: it is the consumer that says which api
-//! build it is willing to be served by, having first verified this role's own
-//! attestation. That is a delegation, and it is what lets api be upgraded
-//! without rebuilding this role.
+//! none — a measurement it names, against which this role places it. This role
+//! holds no pin of its own: the caller says which build it is willing to be
+//! served by, having first verified this role's own attestation. That is a
+//! delegation, and it is what lets api be upgraded without rebuilding this role.
 //!
-//! So this role never parses a path beyond the label an applicant's link
-//! carries, and the session id in one stays out of its reach.
+//! So this role never parses a path beyond the label a link carries, and
+//! whatever else that path holds stays out of its reach.
 //!
 //! ## The host says where, and never what
 //!
@@ -54,9 +52,9 @@
 //! session protected on its first hop would be in the clear on its second, and
 //! this role would move the exposure rather than remove it.
 //!
-//! api's inbound is a PUBLIC surface, so it asks this end for nothing — see
-//! `enclavid_api::endorsement`. This end still verifies api, which is the
-//! direction that carries the weight.
+//! api asks this end for nothing — it could not, since what it serves is open to
+//! callers that hold no certificate. See `enclavid_api::endorsement`. This end
+//! still verifies api, which is the direction that carries the weight.
 //!
 //! A developer build dials plain TCP and verifies nothing, because there is no
 //! host between the two processes to protect anything from — the same axis on
@@ -206,21 +204,23 @@ impl Upstreams {
     /// A member is the same member if its group, its name and its address are
     /// the same. Anything else is a member this table has not met, and it
     /// starts ready.
-    pub fn replaced(&self, declared: crate::config::ValidatedConfig) -> Upstreams {
-        let declared = declared.into_inner();
+    /// Read THROUGH the wrapper rather than out of it: what a push decoded into
+    /// cannot be named outside `crate::config`, so this is where the checked
+    /// form turns into the routing one and nowhere else could be.
+    pub fn replaced(&self, declared: &crate::config::ValidatedConfig) -> Upstreams {
         let groups = declared
-            .groups
-            .into_iter()
+            .groups()
+            .iter()
             .map(|(label, group)| {
                 let by_name = declared
-                    .names
+                    .names()
                     .iter()
                     .filter_map(|(name, table)| {
-                        let members = table.get(&label)?;
+                        let members = table.get(label)?;
                         let members = members
                             .iter()
                             .map(|addr| Instance {
-                                ready: self.known(&label, name, addr),
+                                ready: self.known(label, name, addr),
                                 addr: addr.clone(),
                             })
                             .collect();
@@ -228,9 +228,9 @@ impl Upstreams {
                     })
                     .collect();
                 (
-                    label,
+                    label.clone(),
                     Group {
-                        measurement: group.measurement,
+                        measurement: group.measurement.clone(),
                         part: Arc::new(Part::default()),
                         by_name,
                     },
@@ -238,19 +238,20 @@ impl Upstreams {
             })
             .collect();
 
-        let mut served: Vec<String> = declared.names.keys().cloned().collect();
+        let mut served: Vec<String> = declared.names().keys().cloned().collect();
         // Sorted so that two pushes declaring the same names produce the same
         // list, and the certificate is rebuilt only when the names truly differ.
         served.sort();
 
+        let affinity = declared.affinity();
         Upstreams {
             served,
             tls: self.tls.clone(),
             groups,
             affinity: Some(crate::affinity::Keys::new(
-                declared.affinity.key.0,
-                declared.affinity.previous_key.map(|key| key.0),
-                std::time::Duration::from_secs(declared.affinity.ttl_seconds),
+                affinity.key.0,
+                affinity.previous_key.as_ref().map(|key| key.0),
+                std::time::Duration::from_secs(affinity.ttl_seconds),
             )),
             next: AtomicUsize::new(0),
         }
@@ -407,10 +408,10 @@ pub struct Tls;
 
 /// Verifies api and presents nothing.
 ///
-/// api's inbound is a public surface — it asks no caller for a certificate, and
-/// could not, because browsers and consumers' integrations have none. So this
-/// end carries none either. The attestor is still required and still does the
-/// work that matters: it is what VERIFIES api's quote during the handshake.
+/// api asks no caller for a certificate, and could not, because the callers it
+/// is open to hold none. So this end carries none either. The attestor is still
+/// required and still does the work that matters: it is what VERIFIES api's quote
+/// during the handshake.
 ///
 /// `AcceptAny` is the policy, and it is not an absence. It runs the whole of
 /// `verify_quote` — a genuine AMD part, VMPL 0, debug off, no migration agent,
@@ -509,8 +510,11 @@ pub async fn connect(
 pub(crate) mod tests {
     use super::*;
 
-    pub(crate) const APPLICANT: &str = "verify.example.com";
-    pub(crate) const CONSUMER: &str = "api.example.com";
+    /// Two names, and nothing here distinguishes them: what a name means to
+    /// whatever serves it is not this role's business, and a fixture that named
+    /// them for it would teach the next reader otherwise.
+    pub(crate) const FIRST: &str = "first.example.com";
+    pub(crate) const SECOND: &str = "second.example.com";
 
     /// Two builds, spelled the way a real one is: what routing compares is the
     /// string, and a table refuses anything a quote could not carry.
@@ -535,25 +539,25 @@ pub(crate) mod tests {
               "groups": {{ "one": {{ "measurement": "{A}" }},
                            "two": {{ "measurement": "{B}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["127.0.0.1:1000", "127.0.0.1:2000"],
+                "{FIRST}": {{ "one": ["127.0.0.1:1000", "127.0.0.1:2000"],
                                   "two": ["127.0.0.1:3000"] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:1001", "127.0.0.1:2001"],
+                "{SECOND}":  {{ "one": ["127.0.0.1:1001", "127.0.0.1:2001"],
                                   "two": ["127.0.0.1:3001"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
         );
-        Upstreams::empty().replaced(pushed(&body))
+        Upstreams::empty().replaced(&pushed(&body))
     }
 
     #[test]
     fn the_name_picks_the_address_and_the_label_picks_the_group() {
         let up = table();
-        let applicant = up.at_group(APPLICANT, "one").ok().unwrap();
-        assert!(applicant.addr.ends_with("000"), "{}", applicant.addr);
-        assert_eq!(applicant.measurement, A);
+        let first = up.at_group(FIRST, "one").ok().unwrap();
+        assert!(first.addr.ends_with("000"), "{}", first.addr);
+        assert_eq!(first.measurement, A);
 
-        let consumer = up.at_group(CONSUMER, "one").ok().unwrap();
-        assert!(consumer.addr.ends_with("001"), "{}", consumer.addr);
-        assert_eq!(consumer.group, "one");
+        let second = up.at_group(SECOND, "one").ok().unwrap();
+        assert!(second.addr.ends_with("001"), "{}", second.addr);
+        assert_eq!(second.group, "one");
     }
 
     /// Every member of a group serves the sessions of that group, so requests
@@ -563,7 +567,7 @@ pub(crate) mod tests {
         let up = table();
         let mut seen: Vec<String> = Vec::new();
         for _ in 0..4 {
-            seen.push(up.at_group(APPLICANT, "one").ok().unwrap().addr.to_owned());
+            seen.push(up.at_group(FIRST, "one").ok().unwrap().addr.to_owned());
         }
         seen.sort();
         seen.dedup();
@@ -573,12 +577,12 @@ pub(crate) mod tests {
     #[test]
     fn a_new_session_is_placed_on_a_group_running_that_build() {
         let up = table();
-        let placed = up.place(CONSUMER, B).ok().unwrap();
+        let placed = up.place(SECOND, B).ok().unwrap();
         assert_eq!(placed.group, "two");
         assert_eq!(placed.addr, "127.0.0.1:3001");
 
         assert!(
-            up.place(CONSUMER, &"c".repeat(96)).is_err(),
+            up.place(SECOND, &"c".repeat(96)).is_err(),
             "a build nobody runs is nowhere to place"
         );
     }
@@ -586,7 +590,7 @@ pub(crate) mod tests {
     #[test]
     fn a_label_nobody_carries_is_one_answer() {
         let up = table();
-        assert!(up.at_group(APPLICANT, "three").is_err());
+        assert!(up.at_group(FIRST, "three").is_err());
         assert!(up.at_group("elsewhere.example.com", "one").is_err());
     }
 
@@ -594,8 +598,8 @@ pub(crate) mod tests {
     fn an_empty_table_routes_nothing() {
         let up = Upstreams::empty();
         assert_eq!(up.len(), 0);
-        assert!(up.at_group(APPLICANT, "one").is_err());
-        assert!(up.place(CONSUMER, A).is_err());
+        assert!(up.at_group(FIRST, "one").is_err());
+        assert!(up.place(SECOND, A).is_err());
     }
 
     /// A member marked unwell is skipped while another can take the work.
@@ -604,7 +608,7 @@ pub(crate) mod tests {
         let up = table();
         up.mark("127.0.0.1:1000", false);
         for _ in 0..4 {
-            let got = up.at_group(APPLICANT, "one").ok().unwrap();
+            let got = up.at_group(FIRST, "one").ok().unwrap();
             assert_eq!(got.addr, "127.0.0.1:2000");
         }
     }
@@ -616,7 +620,7 @@ pub(crate) mod tests {
         let up = table();
         up.mark("127.0.0.1:1000", false);
         up.mark("127.0.0.1:2000", false);
-        assert!(up.at_group(APPLICANT, "one").is_ok());
+        assert!(up.at_group(FIRST, "one").is_ok());
     }
 
     /// What this role learned survives a push that still declares the member,
@@ -630,11 +634,11 @@ pub(crate) mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{A}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["127.0.0.1:1000", "127.0.0.1:9000"] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:1001"] }} }},
+                "{FIRST}": {{ "one": ["127.0.0.1:1000", "127.0.0.1:9000"] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:1001"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
         );
-        let next = up.replaced(pushed(&body));
+        let next = up.replaced(&pushed(&body));
 
         let member = |addr: &str| {
             next.members()
@@ -669,18 +673,18 @@ pub(crate) mod tests {
     #[test]
     fn a_push_settles_the_part_again() {
         let up = table();
-        let settled = up.at_group(APPLICANT, "one").ok().unwrap().part;
+        let settled = up.at_group(FIRST, "one").ok().unwrap().part;
         assert!(settled.agrees("chip-a"));
 
-        let next = up.replaced(pushed(&format!(
+        let next = up.replaced(&pushed(&format!(
             r#"{{
               "groups": {{ "one": {{ "measurement": "{A}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["127.0.0.1:1000"] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:1001"] }} }},
+                "{FIRST}": {{ "one": ["127.0.0.1:1000"] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:1001"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
         )));
-        let after = next.at_group(APPLICANT, "one").ok().unwrap().part;
+        let after = next.at_group(FIRST, "one").ok().unwrap().part;
         assert!(after.agrees("chip-b"), "a new table settles it anew");
     }
 
@@ -691,12 +695,12 @@ pub(crate) mod tests {
             r#"{{
               "groups": {{ "two": {{ "measurement": "{B}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "two": ["127.0.0.1:3000"] }},
-                "{CONSUMER}":  {{ "two": ["127.0.0.1:3001"] }} }},
+                "{FIRST}": {{ "two": ["127.0.0.1:3000"] }},
+                "{SECOND}":  {{ "two": ["127.0.0.1:3001"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
         );
-        let next = up.replaced(pushed(&body));
-        assert!(next.at_group(APPLICANT, "one").is_err());
-        assert!(next.at_group(APPLICANT, "two").is_ok());
+        let next = up.replaced(&pushed(&body));
+        assert!(next.at_group(FIRST, "one").is_err());
+        assert!(next.at_group(FIRST, "two").is_ok());
     }
 }

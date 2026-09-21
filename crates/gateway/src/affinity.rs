@@ -8,12 +8,12 @@
 //! the group — and by nothing else. Every later request therefore has to reach
 //! that group, and the label is how it finds its way.
 //!
-//! An applicant is told the label by its link, and that is safe: one who edits
-//! it lands where its session is not, and is refused. A caller that also
-//! CREATES sessions is different. Handed a bare label it would keep using the
-//! one it liked, and every session in the fleet would pile into one group. So
-//! what it is handed is signed: a label it can read but not forge, with an
-//! expiry.
+//! A caller following a link is told the label by that link, and that is safe:
+//! one who edits it lands where its session is not, and is refused. A caller
+//! that also CREATES sessions is different. Handed a bare label it would keep
+//! using the one it liked, and every session in the fleet would pile into one
+//! group. So what it is handed is signed: a label it can read but not forge,
+//! with an expiry.
 //!
 //! ## What the signature is worth, and what it is not
 //!
@@ -49,14 +49,14 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-/// Where a token travels, in both directions: the consumer sends back what it
-/// was given. A header rather than a path, because api's paths are api's.
+/// Where a token travels, in both directions: the caller sends back what it was
+/// given. A header rather than a path, because api's paths are api's.
 pub const TOKEN_HEADER: &str = "x-enclavid-group-token";
 
 /// The group a request was placed on, in plain sight beside the token.
 ///
-/// The consumer needs it to write the applicant's link, and it is already
-/// inside the token — this only saves it from decoding one.
+/// A caller that writes links for others needs the label to write them with, and
+/// it is already inside the token — this only saves it from decoding one.
 pub const GROUP_HEADER: &str = "x-enclavid-group";
 
 /// The fixed header of every token this role mints.

@@ -15,7 +15,7 @@
 //! The JSON parser, and nothing past it. A push says where this role may go and
 //! nothing about what it will accept — see `crate::config` — so a push from
 //! anyone who reaches this port, the host or otherwise, can make routes fail but
-//! cannot make a consumer talk to a build it did not name.
+//! cannot make a caller talk to a build it did not name.
 //!
 //! ## One push at a time
 //!
@@ -124,7 +124,7 @@ where
 
     // Built before it is published, with the borrow released first: holding it
     // across `send_replace` would wait on itself.
-    let next = Arc::new(current.borrow().replaced(declared));
+    let next = Arc::new(current.borrow().replaced(&declared));
     let builds = next.len();
     current.send_replace(next);
 
@@ -154,7 +154,7 @@ fn answer(status: StatusCode, message: String) -> Response<Full<Bytes>> {
 mod tests {
     use super::*;
 
-    use crate::upstream::tests::{A, APPLICANT, CONSUMER};
+    use crate::upstream::tests::{A, FIRST, SECOND};
 
     fn table() -> (
         watch::Sender<Arc<Upstreams>>,
@@ -168,8 +168,8 @@ mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{A}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["127.0.0.1:1"] }},
-                "{CONSUMER}":  {{ "one": ["127.0.0.1:2"] }} }},
+                "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
               "affinity": {{ "key": "{}", "ttl_seconds": 600 }} }}"#,
             "0".repeat(64)
         )
@@ -189,7 +189,7 @@ mod tests {
         let resp = push(&tx, request(Method::PUT, PATH, valid())).await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(rx.borrow().len(), 1);
-        assert!(rx.borrow().at_group(APPLICANT, "one").is_ok());
+        assert!(rx.borrow().at_group(FIRST, "one").is_ok());
     }
 
     /// A refused push leaves the table exactly as it was.

@@ -7,7 +7,7 @@
 //! at that rate: Let's Encrypt allows five per week for one set of names. A
 //! role restarted six times in a week would simply stop having a certificate.
 //!
-//! The same key is also the only thing a caller can hold on to. A consumer that
+//! The same key is also the only thing a caller can hold on to. One that
 //! checked this role's quote once knows which key it belongs to, and can then
 //! require that key on every later connection — an ordinary public-key pin,
 //! which standard tools already do. A key that changed at every restart would
@@ -26,7 +26,7 @@
 //! useful: they are one key domain, so one certificate serves them all and a
 //! caller's pin holds across them.
 //!
-//! It cannot be derived by anyone else: the input is a chip secret. A consumer
+//! It cannot be derived by anyone else: the input is a chip secret. A caller
 //! holding the measurement and the certificate still learns which key belongs
 //! to this build only from the quote — which is the whole point of serving one.
 //!

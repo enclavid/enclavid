@@ -118,7 +118,7 @@ async fn dial(table: &Upstreams, member: &crate::upstream::Member) -> bool {
 mod tests {
     use super::*;
 
-    use crate::upstream::tests::{A, APPLICANT, CONSUMER, pushed};
+    use crate::upstream::tests::{A, FIRST, SECOND, pushed};
 
     /// A listener that accepts and says nothing: enough for a dial to succeed,
     /// which is all a probe asks.
@@ -143,12 +143,12 @@ mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{A}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "one": ["{addr}"] }},
-                "{CONSUMER}":  {{ "one": ["{addr}"] }} }},
+                "{FIRST}": {{ "one": ["{addr}"] }},
+                "{SECOND}":  {{ "one": ["{addr}"] }} }},
               "affinity": {{ "key": "{}", "ttl_seconds": 600 }} }}"#,
             "0".repeat(64)
         );
-        Arc::new(Upstreams::empty().replaced(pushed(&body)))
+        Arc::new(Upstreams::empty().replaced(&pushed(&body)))
     }
 
     /// A member that was marked and answers again is taken back.

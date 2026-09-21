@@ -29,7 +29,7 @@
 //! when the leg was opened is written down against its descriptor, and read
 //! back here after a leg has been chosen and before anything is sent.
 //!
-//! ## One rule, and no audiences
+//! ## One rule, and no idea who is calling
 //!
 //! There is one way a request finds its group, with three inputs tried in
 //! order: a label marked in the path, a label inside a signed token, or — with
@@ -51,8 +51,8 @@
 //!
 //! ## What reaches api, and what stops here
 //!
-//! The path is never examined beyond the machine an applicant's link carries,
-//! which is stripped on the way through. The measurement header names a choice
+//! The path is never examined beyond the label a link carries, which is
+//! stripped on the way through. The measurement header names a choice
 //! this hop makes and is removed. The affinity token is this role's own
 //! bookkeeping and is removed. Nothing about the caller's address is added,
 //! because this role has none to add and api holds the session id: the two
@@ -336,9 +336,9 @@ impl ProxyHttp for Hop {
     }
 
     /// Nothing derived from a request reaches a log line. The library builds
-    /// this string from the method, the path and the host, and the path on the
-    /// applicant surface carries the session id — the one value that turns the
-    /// host's separate observations into one linked profile.
+    /// this string from the method, the path and the host, and a path can carry
+    /// the session id — the one value that turns the host's separate
+    /// observations into one linked profile.
     fn request_summary(&self, _session: &Session, _ctx: &Placed) -> String {
         "a request".to_owned()
     }
@@ -418,13 +418,16 @@ fn route<'a>(
     Ok((target, Some(token)))
 }
 
-/// Which api build the caller requires.
+/// Which build the caller requires.
+///
+/// It does not name what that build IS — this role knows only that a group
+/// declares it and a leg proves it. So the header does not either.
 ///
 /// A header rather than anything in the path, and the difference is not
 /// cosmetic. This value is FOR this hop — it selects an upstream and then stops
 /// — so it is stripped before forwarding. A path would travel, and would also
 /// mean reading paths, which this role does not do.
-pub const MEASUREMENT: &str = "x-enclavid-api-measurement";
+pub const MEASUREMENT: &str = "x-enclavid-measurement";
 
 /// What marks a group's label in a path, so it can never be mistaken for a
 /// segment api published.

@@ -154,8 +154,8 @@ mod tests {
     }
 
     /// One bad name among good ones fails the whole certificate. A partial
-    /// answer here would be a build serving one audience and silently not the
-    /// other.
+    /// answer here would be a build serving some of the names the host declared
+    /// and silently not the rest.
     #[test]
     fn one_bad_name_refuses_the_whole_certificate() {
         let identity = Identity::generated().unwrap();

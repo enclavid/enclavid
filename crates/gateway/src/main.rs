@@ -19,17 +19,17 @@
 //! splice that never holds a key and never sees a plaintext record. The TLS
 //! session begins here.
 //!
-//! That is also why there is one public listener rather than two. api serves two
-//! surfaces on two ports because they differ in certificate, mTLS posture and
-//! rate-limit policy; from outside there is one TLS session per connection, and
-//! which surface it belongs to is settled by the NAME it agreed on. Both names
-//! are this role's, and one listener answers for both.
+//! That is also why there is one public listener rather than one per name. From
+//! outside there is one TLS session per connection, and the name it agreed on is
+//! settled by the handshake. Every name the host declares is this role's, and one
+//! listener answers for all of them.
 //!
 //! ## What this build does
 //!
-//! It terminates TLS on the public listener and carries each request to one of
-//! api's two surfaces, chosen by the name the handshake settled, on the api
-//! build the caller named. Bodies stream through unbuffered and unread.
+//! It terminates TLS on the public listener and carries each request to a group
+//! of interchangeable api — at the address that group serves the settled name on,
+//! running the build the caller named. Bodies stream through unbuffered and
+//! unread.
 //!
 //! Which api builds exist, and where, is the host's to say. It pushes that to a
 //! port of its own rather than putting it on the command line, and this role
@@ -38,15 +38,16 @@
 //!
 //! The hop to api is RA-TLS in the attested build: this end verifies api's quote
 //! and proves it carries the measurement the caller named, and presents nothing,
-//! because api's inbound is a public surface — see `crate::upstream`. A
-//! developer build speaks plain HTTP on both legs, because there is no host
-//! between the two processes to protect anything from.
+//! because api asks this end for no certificate — it could not, since what it
+//! serves is open to callers that have none. See `crate::upstream`. A developer
+//! build speaks plain HTTP on both legs, because there is no host between the two
+//! processes to protect anything from.
 //!
-//! The applicant's page is NOT here. It is compiled into api, beside the
-//! handlers it calls, so one launch digest covers both. Terminating the session
-//! here is still what makes that worth anything — a terminator can replace
-//! whatever is served over it, so it has to be measured, and the leg onward has
-//! to be attested. Both are.
+//! Nothing is served from here. Whatever this role carries is compiled into the
+//! build behind it, beside the handlers it calls, so one launch digest covers
+//! both. Terminating the session here is still what makes that worth anything — a
+//! terminator can replace whatever is served over it, so it has to be measured,
+//! and the leg onward has to be attested. Both are.
 //!
 //! What this role does not do is parse what it carries: no body and no path,
 //! ever. That is the standing defence against a runtime exploit, which changes

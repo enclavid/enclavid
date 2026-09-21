@@ -1,14 +1,14 @@
 //! What this role uses to check api, and what it does not check.
 //!
 //! **There is no pin here, and its absence is the design.** This role does not
-//! decide which api build a caller may be served by; the consumer does, per
+//! decide which api build a caller may be served by; the caller does, per
 //! request, having first verified this role's own attestation. See
 //! `crate::upstream` for the delegation that rests on.
 //!
 //! What that leaves this module is one thing: an attestor, which is what
 //! VERIFIES api's quote during the handshake. It is needed even though this end
-//! presents nothing, because verifying is the direction that carries the weight
-//! on a leg to a public surface.
+//! presents nothing, because on a leg where only one end is asked for a
+//! certificate, verifying is the direction that carries the weight.
 //!
 //! Minting is `mint_only_across_parts`: this guest has no egress, so it cannot
 //! fetch the certificate that would endorse its own report — and it does not

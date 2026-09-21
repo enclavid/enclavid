@@ -13,8 +13,8 @@
 //! A group serves each name at a different address, so which name a connection
 //! asked for decides which address its requests go to. It is settled here,
 //! before a byte of HTTP is read, and travels no further than the door it
-//! selects. What a name MEANS to api — which of its audiences — is not known
-//! here and is not needed.
+//! selects. What a name MEANS to whatever serves it is not known here and is not
+//! needed.
 //!
 //! ## And it decides the protocol, so nothing has to guess
 //!
@@ -287,7 +287,7 @@ mod tests {
 
     use crate::affinity;
     use crate::proxy::MEASUREMENT;
-    use crate::upstream::tests::{A, APPLICANT, CONSUMER, pushed};
+    use crate::upstream::tests::{A, FIRST, SECOND, pushed};
 
     const GROUP: &str = "one";
     const BODY: usize = 1 << 20;
@@ -340,12 +340,12 @@ mod tests {
         let spki = identity.spki().to_vec();
         let proof = attest::proof(spki.clone(), &crate::identity::attestor()).unwrap();
 
-        let table = Upstreams::empty().replaced(pushed(&format!(
+        let table = Upstreams::empty().replaced(&pushed(&format!(
             r#"{{
               "groups": {{ "{GROUP}": {{ "measurement": "{A}" }} }},
               "names": {{
-                "{APPLICANT}": {{ "{GROUP}": ["{api}"] }},
-                "{CONSUMER}":  {{ "{GROUP}": ["{api}"] }} }},
+                "{FIRST}": {{ "{GROUP}": ["{api}"] }},
+                "{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
               "affinity": {{ "key": "{}", "ttl_seconds": 600 }} }}"#,
             "0".repeat(64)
         )));
@@ -476,15 +476,13 @@ mod tests {
     #[tokio::test]
     async fn a_marked_label_routes_and_is_taken_out() {
         let (gateway, _) = gateway(&api().await).await;
-        let mut caller = caller(&gateway, APPLICANT, 4 << 20).await;
+        let mut caller = caller(&gateway, FIRST, 4 << 20).await;
 
         let answer = ask(
             &mut caller,
-            Request::get(format!(
-                "https://{APPLICANT}/-{GROUP}/api/v1/sessions/7/status"
-            ))
-            .body(Empty::new())
-            .unwrap(),
+            Request::get(format!("https://{FIRST}/-{GROUP}/api/v1/sessions/7/status"))
+                .body(Empty::new())
+                .unwrap(),
         )
         .await;
         assert_eq!(answer.status(), StatusCode::OK);
@@ -496,11 +494,11 @@ mod tests {
     #[tokio::test]
     async fn a_path_without_a_label_and_a_label_nobody_has() {
         let (gateway, _) = gateway(&api().await).await;
-        let mut caller = caller(&gateway, APPLICANT, 4 << 20).await;
+        let mut caller = caller(&gateway, FIRST, 4 << 20).await;
 
         let bare = ask(
             &mut caller,
-            Request::get(format!("https://{APPLICANT}/api/v1/sessions/7/status"))
+            Request::get(format!("https://{FIRST}/api/v1/sessions/7/status"))
                 .body(Empty::new())
                 .unwrap(),
         )
@@ -509,7 +507,7 @@ mod tests {
 
         let elsewhere = ask(
             &mut caller,
-            Request::get(format!("https://{APPLICANT}/-somewhere/"))
+            Request::get(format!("https://{FIRST}/-somewhere/"))
                 .body(Empty::new())
                 .unwrap(),
         )
@@ -522,11 +520,11 @@ mod tests {
     #[tokio::test]
     async fn a_caller_is_placed_and_comes_back_with_a_token() {
         let (gateway, _) = gateway(&api().await).await;
-        let mut consumer = caller(&gateway, CONSUMER, 4 << 20).await;
+        let mut second = caller(&gateway, SECOND, 4 << 20).await;
 
         let placed = ask(
-            &mut consumer,
-            Request::get(format!("https://{CONSUMER}/api/v1/sessions"))
+            &mut second,
+            Request::get(format!("https://{SECOND}/api/v1/sessions"))
                 .header(MEASUREMENT, A)
                 .body(Empty::new())
                 .unwrap(),
@@ -542,8 +540,8 @@ mod tests {
 
         // Coming back with it needs no measurement: the token says where.
         let again = ask(
-            &mut consumer,
-            Request::get(format!("https://{CONSUMER}/api/v1/sessions/1"))
+            &mut second,
+            Request::get(format!("https://{SECOND}/api/v1/sessions/1"))
                 .header(affinity::TOKEN_HEADER, &token)
                 .body(Empty::new())
                 .unwrap(),
@@ -554,8 +552,8 @@ mod tests {
 
         // With neither there is nothing to place on and nothing to return to.
         let naked = ask(
-            &mut consumer,
-            Request::get(format!("https://{CONSUMER}/api/v1/sessions"))
+            &mut second,
+            Request::get(format!("https://{SECOND}/api/v1/sessions"))
                 .body(Empty::new())
                 .unwrap(),
         )
@@ -569,11 +567,11 @@ mod tests {
     #[tokio::test]
     async fn a_build_nobody_runs_and_a_build_named_twice() {
         let (gateway, _) = gateway(&api().await).await;
-        let mut consumer = caller(&gateway, CONSUMER, 4 << 20).await;
+        let mut second = caller(&gateway, SECOND, 4 << 20).await;
 
         let nobody = ask(
-            &mut consumer,
-            Request::get(format!("https://{CONSUMER}/api/v1/sessions"))
+            &mut second,
+            Request::get(format!("https://{SECOND}/api/v1/sessions"))
                 .header(MEASUREMENT, "c".repeat(96))
                 .body(Empty::new())
                 .unwrap(),
@@ -582,8 +580,8 @@ mod tests {
         assert_eq!(nobody.status(), StatusCode::BAD_GATEWAY);
 
         let twice = ask(
-            &mut consumer,
-            Request::get(format!("https://{CONSUMER}/api/v1/sessions"))
+            &mut second,
+            Request::get(format!("https://{SECOND}/api/v1/sessions"))
                 .header(MEASUREMENT, A)
                 .header(MEASUREMENT, A)
                 .body(Empty::new())
@@ -614,11 +612,11 @@ mod tests {
     #[tokio::test]
     async fn the_attestation_binds_the_serving_key() {
         let (gateway, spki) = gateway(&api().await).await;
-        let mut caller = caller(&gateway, APPLICANT, 4 << 20).await;
+        let mut caller = caller(&gateway, FIRST, 4 << 20).await;
 
         let answer = ask(
             &mut caller,
-            Request::get(format!("https://{APPLICANT}{}", attest::PATH))
+            Request::get(format!("https://{FIRST}{}", attest::PATH))
                 .body(Empty::new())
                 .unwrap(),
         )
@@ -661,12 +659,12 @@ mod tests {
     async fn a_caller_that_stops_reading_does_not_stall_another() {
         let (gateway, _) = gateway(&api().await).await;
 
-        let mut attacker = caller(&gateway, APPLICANT, 65_535).await;
+        let mut attacker = caller(&gateway, FIRST, 65_535).await;
         let mut unread = Vec::new();
         for _ in 0..8 {
             let answer = ask(
                 &mut attacker,
-                Request::get(format!("https://{APPLICANT}/-{GROUP}/"))
+                Request::get(format!("https://{FIRST}/-{GROUP}/"))
                     .body(Empty::new())
                     .unwrap(),
             )
@@ -675,11 +673,11 @@ mod tests {
             unread.push(answer);
         }
 
-        let mut victim = caller(&gateway, APPLICANT, 4 << 20).await;
+        let mut victim = caller(&gateway, FIRST, 4 << 20).await;
         let body = tokio::time::timeout(Duration::from_secs(10), async {
             let answer = ask(
                 &mut victim,
-                Request::get(format!("https://{APPLICANT}/-{GROUP}/"))
+                Request::get(format!("https://{FIRST}/-{GROUP}/"))
                     .body(Empty::new())
                     .unwrap(),
             )
