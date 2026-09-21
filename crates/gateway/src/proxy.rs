@@ -32,10 +32,17 @@
 //! ## One rule, and no idea who is calling
 //!
 //! There is one way a request finds its group, with three inputs tried in
-//! order: a label marked in the path, a label inside a signed token, or — with
-//! neither — a build the caller names, against which this role places it and
-//! says where. Nothing here knows what kind of caller it is serving; a caller
-//! either knows its group or is given one.
+//! order: a label marked in the path, a signed token naming a group and the
+//! build it was placed for, or — with neither — a build the caller names,
+//! against which this role places it and says where. Nothing here knows what
+//! kind of caller it is serving; a caller either knows its group or is given
+//! one.
+//!
+//! The token's build is compared to what that label runs NOW, so the caller's
+//! one choice binds every later request rather than only the first — see
+//! `crate::affinity`. A path-marked label carries no build and nothing here can
+//! check one; what protects a session reached that way is that its state is
+//! sealed to the build that made it, so another cannot open it.
 //!
 //! The name the handshake settled decides only WHICH ADDRESS of that group to
 //! use, because one api process serves two ports. It is a field on this
@@ -398,9 +405,29 @@ fn route<'a>(
     // A token that does not check out is treated as absent rather than refused:
     // it is this role's own bookkeeping, and the caller cannot do anything
     // about a key that rotated twice or a clock that moved.
-    if let Some(label) = token.as_deref().and_then(|token| keys.group_of(token, now)) {
-        let target = table.at_group(name, &label)?;
-        return Ok((target, Some(keys.mint(&label, now))));
+    let placed = token
+        .as_deref()
+        .and_then(|token| keys.placement(token, now));
+    if let Some(placed) = placed {
+        // The build the caller was placed FOR, against what that label runs
+        // now. A label is the host's to re-declare, so without this a caller
+        // that named a build once would follow the label onto another — and a
+        // request that creates something new would land there silently. An
+        // older session would at least break loudly, its state being sealed to
+        // the build that made it.
+        //
+        // A label that is gone and a label that now runs something else are one
+        // case: the token is stale rather than forged, so it is treated as
+        // absent. The caller names what it needs again and is placed again,
+        // which is a recovery it can perform without being told how.
+        let still = table
+            .at_group(name, &placed.group)
+            .ok()
+            .filter(|target| target.measurement == placed.build);
+        if let Some(target) = still {
+            let token = keys.mint(&placed.group, &placed.build, now);
+            return Ok((target, Some(token)));
+        }
     }
 
     // Named once or not at all. Two values would route by whichever came first,
@@ -414,7 +441,7 @@ fn route<'a>(
         .ok_or(NoRoute::Unspecified)?;
 
     let target = table.place(name, &wanted)?;
-    let token = keys.mint(target.group, now);
+    let token = keys.mint(target.group, target.measurement, now);
     Ok((target, Some(token)))
 }
 

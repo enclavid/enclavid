@@ -15,6 +15,22 @@
 //! group. So what it is handed is signed: a label it can read but not forge,
 //! with an expiry.
 //!
+//! ## It binds the build, not only the label
+//!
+//! A label is the host's to re-declare, so a token naming only a label would
+//! follow that re-declaration. The caller named a BUILD once, at placement, and
+//! a token carrying only the group would let that choice bind the first request
+//! and no other.
+//!
+//! So the build travels in the claims and `crate::proxy` compares it to what
+//! the label runs now. It is compared, never trusted: a forged claim only
+//! agrees with the table when the table already says so, which is why the
+//! signature is still worth no more than the paragraph below says.
+//!
+//! A token that no longer agrees is treated as absent rather than refused. The
+//! caller names what it needs again and is placed again — a recovery it already
+//! knows how to perform, because it is how it arrived the first time.
+//!
 //! ## What the signature is worth, and what it is not
 //!
 //! Nothing anyone's data rests on. Forging one steers a session to a group that
@@ -65,7 +81,25 @@ const JWT_HEADER: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 #[derive(Serialize, Deserialize)]
 struct Claims {
     group: String,
+    /// The build that group ran when the token was minted. Carried so that the
+    /// caller's choice binds every later request and not only the first — see
+    /// [`Placement`].
+    build: String,
     exp: u64,
+}
+
+/// What a token says: the group a caller was placed on, and the build it was
+/// placed for.
+///
+/// Both, because the group alone is a moving target. A label is the host's to
+/// re-declare, so a token naming only a label would follow that re-declaration
+/// and put a caller on a build it never named — silently, on the one request
+/// kind where nothing else would catch it. An existing session would break
+/// loudly instead, its state being sealed to the old build; a NEW session
+/// created on such a token would simply land on the new one.
+pub struct Placement {
+    pub group: String,
+    pub build: String,
 }
 
 /// What the host gave this role to sign and check affinity tokens with.
@@ -87,14 +121,16 @@ impl Keys {
         }
     }
 
-    /// A token naming `group`, valid from now.
+    /// A token naming `group` and the `build` it was placed for, valid from now.
     ///
     /// The clock is the guest's, which the host provides — so an expiry is a
     /// number the host can move. That is consistent with what this token
-    /// protects: the host's own balancing.
-    pub fn mint(&self, group: &str, now: SystemTime) -> String {
+    /// protects: the host's own balancing. What it does NOT protect that way is
+    /// the build, which is compared against the table rather than trusted.
+    pub fn mint(&self, group: &str, build: &str, now: SystemTime) -> String {
         let claims = Claims {
             group: group.to_owned(),
+            build: build.to_owned(),
             exp: seconds(now + self.ttl),
         };
         let payload = B64.encode(serde_json::to_vec(&claims).expect("claims serialise"));
@@ -103,12 +139,12 @@ impl Keys {
         format!("{signed}.{signature}")
     }
 
-    /// The group a token names, or nothing at all.
+    /// What a token says, or nothing at all.
     ///
     /// One answer for every way a token can fail — wrong shape, wrong key,
     /// expired. The caller does the same thing in each case: place the request
     /// as if it had arrived without one.
-    pub fn group_of(&self, token: &str, now: SystemTime) -> Option<String> {
+    pub fn placement(&self, token: &str, now: SystemTime) -> Option<Placement> {
         let (signed, signature) = token.rsplit_once('.')?;
         let (header, payload) = signed.split_once('.')?;
         if header != JWT_HEADER {
@@ -124,7 +160,10 @@ impl Keys {
         }
 
         let claims: Claims = serde_json::from_slice(&B64.decode(payload).ok()?).ok()?;
-        (claims.exp > seconds(now)).then_some(claims.group)
+        (claims.exp > seconds(now)).then_some(Placement {
+            group: claims.group,
+            build: claims.build,
+        })
     }
 }
 
@@ -158,17 +197,27 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(1_800_000_000)
     }
 
+    /// A build, spelled the way a real one is.
+    const BUILD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn minted(keys: &Keys) -> String {
+        keys.mint("group-7", BUILD, now())
+    }
+
+    /// Both halves come back, because the group alone would follow a
+    /// re-declaration onto a build the caller never named.
     #[test]
-    fn a_token_names_the_machine_it_was_minted_for() {
+    fn a_token_names_the_group_and_the_build_it_was_minted_for() {
         let keys = keys();
-        let token = keys.mint("group-7", now());
-        assert_eq!(keys.group_of(&token, now()).as_deref(), Some("group-7"));
+        let placed = keys.placement(&minted(&keys), now()).unwrap();
+        assert_eq!(placed.group, "group-7");
+        assert_eq!(placed.build, BUILD);
     }
 
     /// The shape is an ordinary JWT, so an operator can read one with any tool.
     #[test]
     fn the_shape_is_a_jwt() {
-        let token = keys().mint("group-7", now());
+        let token = minted(&keys());
         let parts: Vec<&str> = token.split('.').collect();
         assert_eq!(parts.len(), 3);
         let header = B64.decode(parts[0]).unwrap();
@@ -176,49 +225,55 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&header).unwrap(),
             serde_json::json!({"alg": "HS256", "typ": "JWT"})
         );
+        let claims = B64.decode(parts[1]).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&claims).unwrap()["build"],
+            serde_json::json!(BUILD)
+        );
     }
 
     #[test]
     fn another_key_does_not_pass() {
-        let token = Keys::new([9u8; 32], None, Duration::from_secs(600)).mint("group-7", now());
-        assert_eq!(keys().group_of(&token, now()), None);
+        let token = minted(&Keys::new([9u8; 32], None, Duration::from_secs(600)));
+        assert!(keys().placement(&token, now()).is_none());
     }
 
     /// A token minted before a key rotation still works, which is what keeps a
-    /// session in flight from losing its machine to a configuration change.
+    /// session in flight from losing its group to a configuration change.
     #[test]
     fn the_previous_key_is_accepted_but_not_minted_with() {
         let old = Keys::new([9u8; 32], None, Duration::from_secs(600));
         let rotated = Keys::new([7u8; 32], Some([9u8; 32]), Duration::from_secs(600));
 
-        let before = old.mint("group-7", now());
-        assert_eq!(rotated.group_of(&before, now()).as_deref(), Some("group-7"));
+        let before = minted(&old);
+        assert_eq!(rotated.placement(&before, now()).unwrap().group, "group-7");
 
         // What it mints is signed with the current key, so a gateway that has
         // not seen the old one still accepts it.
-        let after = rotated.mint("group-7", now());
+        let after = minted(&rotated);
         assert_eq!(
             Keys::new([7u8; 32], None, Duration::from_secs(600))
-                .group_of(&after, now())
-                .as_deref(),
-            Some("group-7")
+                .placement(&after, now())
+                .unwrap()
+                .group,
+            "group-7"
         );
     }
 
     #[test]
     fn an_expired_token_names_nothing() {
         let keys = keys();
-        let token = keys.mint("group-7", now());
-        assert_eq!(
-            keys.group_of(&token, now() + Duration::from_secs(601)),
-            None
+        let token = minted(&keys);
+        assert!(
+            keys.placement(&token, now() + Duration::from_secs(601))
+                .is_none()
         );
     }
 
     #[test]
     fn nonsense_names_nothing() {
         let keys = keys();
-        let token = keys.mint("group-7", now());
+        let token = minted(&keys);
         for bad in [
             String::new(),
             "....".to_owned(),
@@ -232,7 +287,26 @@ mod tests {
                 token.split_once('.').unwrap().1
             ),
         ] {
-            assert_eq!(keys.group_of(&bad, now()), None, "accepted `{bad}`");
+            assert!(keys.placement(&bad, now()).is_none(), "accepted `{bad}`");
         }
+    }
+
+    /// A claim edited to name another build does not survive, which is what
+    /// makes the comparison in `crate::proxy` worth making: a caller cannot
+    /// hand itself a token for a build it was never placed on.
+    #[test]
+    fn a_rewritten_build_does_not_pass() {
+        let keys = keys();
+        let token = minted(&keys);
+        let (_, rest) = token.split_once('.').unwrap();
+        let (_, signature) = rest.split_once('.').unwrap();
+        let forged = serde_json::json!({
+            "group": "group-7",
+            "build": "b".repeat(96),
+            "exp": seconds(now() + Duration::from_secs(600)),
+        });
+        let payload = B64.encode(serde_json::to_vec(&forged).unwrap());
+        let bad = format!("{JWT_HEADER}.{payload}.{signature}");
+        assert!(keys.placement(&bad, now()).is_none());
     }
 }

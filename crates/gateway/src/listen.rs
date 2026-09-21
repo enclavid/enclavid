@@ -287,7 +287,7 @@ mod tests {
 
     use crate::affinity;
     use crate::proxy::MEASUREMENT;
-    use crate::upstream::tests::{A, FIRST, SECOND, pushed};
+    use crate::upstream::tests::{A, B, FIRST, SECOND, pushed};
 
     const GROUP: &str = "one";
     const BODY: usize = 1 << 20;
@@ -330,9 +330,26 @@ mod tests {
         addr
     }
 
+    /// What one group running `build` at `api` looks like as a push, under both
+    /// names. The names never change, so a second one replaces the table
+    /// without rebuilding the certificate or the doors — which is how a host
+    /// re-declares a label under a running role.
+    fn table(api: &str, build: &str) -> Upstreams {
+        Upstreams::empty().replaced(&pushed(&format!(
+            r#"{{
+              "groups": {{ "{GROUP}": {{ "measurement": "{build}" }} }},
+              "names": {{
+                "{FIRST}": {{ "{GROUP}": ["{api}"] }},
+                "{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
+              "affinity": {{ "key": "{}", "ttl_seconds": 600 }} }}"#,
+            "0".repeat(64)
+        )))
+    }
+
     /// This role on a loopback listener, with `api` as the one group declared
-    /// under both names. Returns its address and the SPKI its quote binds.
-    async fn gateway(api: &str) -> (String, Vec<u8>) {
+    /// under both names. Returns its address, the SPKI its quote binds, and the
+    /// sender a test pushes a later table through.
+    async fn gateway(api: &str) -> (String, Vec<u8>, watch::Sender<Arc<Upstreams>>) {
         let listener = fleet_transport::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -340,20 +357,9 @@ mod tests {
         let spki = identity.spki().to_vec();
         let proof = attest::proof(spki.clone(), &crate::identity::attestor()).unwrap();
 
-        let table = Upstreams::empty().replaced(&pushed(&format!(
-            r#"{{
-              "groups": {{ "{GROUP}": {{ "measurement": "{A}" }} }},
-              "names": {{
-                "{FIRST}": {{ "{GROUP}": ["{api}"] }},
-                "{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
-              "affinity": {{ "key": "{}", "ttl_seconds": 600 }} }}"#,
-            "0".repeat(64)
-        )));
-        let (pushes, current) = watch::channel(Arc::new(table));
+        let (pushes, current) = watch::channel(Arc::new(table(api, A)));
         let (serving, public) = watch::channel(None);
         tokio::spawn(async move {
-            // Held so the table outlives the follower, as it does in the role.
-            let _pushes = pushes;
             follow(
                 current,
                 identity,
@@ -384,7 +390,7 @@ mod tests {
             })
             .await
         });
-        (addr, spki)
+        (addr, spki, pushes)
     }
 
     /// Accepts any certificate: what is under test is how this role carries
@@ -475,7 +481,7 @@ mod tests {
     /// sees the path it published.
     #[tokio::test]
     async fn a_marked_label_routes_and_is_taken_out() {
-        let (gateway, _) = gateway(&api().await).await;
+        let (gateway, _, _pushes) = gateway(&api().await).await;
         let mut caller = caller(&gateway, FIRST, 4 << 20).await;
 
         let answer = ask(
@@ -493,7 +499,7 @@ mod tests {
     /// carries is the same answer as an upstream that would not talk.
     #[tokio::test]
     async fn a_path_without_a_label_and_a_label_nobody_has() {
-        let (gateway, _) = gateway(&api().await).await;
+        let (gateway, _, _pushes) = gateway(&api().await).await;
         let mut caller = caller(&gateway, FIRST, 4 << 20).await;
 
         let bare = ask(
@@ -519,7 +525,7 @@ mod tests {
     /// the token rather than with a group of its choosing.
     #[tokio::test]
     async fn a_caller_is_placed_and_comes_back_with_a_token() {
-        let (gateway, _) = gateway(&api().await).await;
+        let (gateway, _, _pushes) = gateway(&api().await).await;
         let mut second = caller(&gateway, SECOND, 4 << 20).await;
 
         let placed = ask(
@@ -561,12 +567,69 @@ mod tests {
         assert_eq!(naked.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// A token binds the BUILD, not only the label — so a host re-declaring
+    /// that label cannot move a caller onto something it never named.
+    ///
+    /// The old session would have broken anyway, its state sealed to the build
+    /// that made it. What this closes is the request that creates a NEW one,
+    /// which would have landed on the new build with nothing to notice it.
+    #[tokio::test]
+    async fn a_token_does_not_survive_the_group_being_re_declared() {
+        let api = api().await;
+        let (gateway, _, pushes) = gateway(&api).await;
+        let mut caller = caller(&gateway, SECOND, 4 << 20).await;
+
+        let placed = ask(
+            &mut caller,
+            Request::get(format!("https://{SECOND}/api/v1/sessions"))
+                .header(MEASUREMENT, A)
+                .body(Empty::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(placed.status(), StatusCode::OK);
+        let token = placed.headers()[affinity::TOKEN_HEADER].clone();
+
+        // The host says the same label runs something else now.
+        pushes.send_replace(Arc::new(table(&api, B)));
+
+        let stale = ask(
+            &mut caller,
+            Request::get(format!("https://{SECOND}/api/v1/sessions"))
+                .header(affinity::TOKEN_HEADER, &token)
+                .body(Empty::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            stale.status(),
+            StatusCode::BAD_REQUEST,
+            "a stale token is absent, and the caller is asked to name what it needs"
+        );
+
+        // And naming it is the whole recovery: no new endpoint, no new header.
+        let again = ask(
+            &mut caller,
+            Request::get(format!("https://{SECOND}/api/v1/sessions"))
+                .header(MEASUREMENT, B)
+                .body(Empty::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(again.status(), StatusCode::OK);
+        assert_ne!(
+            again.headers()[affinity::TOKEN_HEADER],
+            token,
+            "the token it comes back with is for the build it just named"
+        );
+    }
+
     /// A build nobody runs is the same answer as an upstream that would not
     /// talk, and two measurements are refused rather than resolved to whichever
     /// came first.
     #[tokio::test]
     async fn a_build_nobody_runs_and_a_build_named_twice() {
-        let (gateway, _) = gateway(&api().await).await;
+        let (gateway, _, _pushes) = gateway(&api().await).await;
         let mut second = caller(&gateway, SECOND, 4 << 20).await;
 
         let nobody = ask(
@@ -595,7 +658,7 @@ mod tests {
     /// served something misleading.
     #[tokio::test]
     async fn a_name_this_role_does_not_serve_is_misdirected() {
-        let (gateway, _) = gateway(&api().await).await;
+        let (gateway, _, _pushes) = gateway(&api().await).await;
         let mut stranger = caller(&gateway, "elsewhere.example.com", 4 << 20).await;
         let answer = ask(
             &mut stranger,
@@ -611,7 +674,7 @@ mod tests {
     /// answered without an api behind it or a build named.
     #[tokio::test]
     async fn the_attestation_binds_the_serving_key() {
-        let (gateway, spki) = gateway(&api().await).await;
+        let (gateway, spki, _pushes) = gateway(&api().await).await;
         let mut caller = caller(&gateway, FIRST, 4 << 20).await;
 
         let answer = ask(
@@ -657,7 +720,7 @@ mod tests {
     /// else; another caller's request takes a leg of its own.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_caller_that_stops_reading_does_not_stall_another() {
-        let (gateway, _) = gateway(&api().await).await;
+        let (gateway, _, _pushes) = gateway(&api().await).await;
 
         let mut attacker = caller(&gateway, FIRST, 65_535).await;
         let mut unread = Vec::new();
