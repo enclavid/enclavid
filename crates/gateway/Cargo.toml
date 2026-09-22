@@ -38,6 +38,16 @@ tokio = { version = "1", features = ["full"] }
 pingora-core = { version = "0.9", default-features = false }
 pingora-proxy = { version = "0.9", default-features = false }
 pingora-http = "0.9"
+# Which member of a group a request goes to, and which members can be given
+# work. The selection is round robin and the health state machine — thresholds,
+# the enable flag, the check loop — is the library's rather than this role's.
+#
+# Its `Backend` carries a `SocketAddr` because it is modelled as something one
+# can connect TO. Nothing in this configuration reads it: the built-in checks
+# are replaced, ketama is never selected, and the peer is built by hand with
+# `custom_l4`. It serves only as the identity that keys health — see
+# `crate::balance`.
+pingora-load-balancing = { version = "0.9", default-features = false }
 # Buffer sizes on the socket pair that carries a leg — see `crate::leg`.
 libc = "0.2"
 # pingora's connector trait is async, and this is how it spells that.

@@ -146,9 +146,6 @@ pub struct Placed {
     /// The build this request requires, kept so that the leg it is actually
     /// given can be checked against it.
     named: Option<String>,
-    /// The member this request was routed to, kept so that a leg that would not
-    /// open can mark it.
-    at: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -217,7 +214,6 @@ impl ProxyHttp for Hop {
             ctx.told = Some((target.group.to_owned(), token));
         }
         ctx.named = Some(target.measurement.to_owned());
-        ctx.at = Some(target.addr.to_owned());
 
         // The address is a placeholder the pool's own check waives, and the
         // leg is what actually dials and proves — see `crate::leg`.
@@ -230,9 +226,9 @@ impl ProxyHttp for Hop {
         // because what was proved of the old one was proved of the old build.
         // This is the only thing keeping the two apart in the pool, which is
         // why `connected_to_upstream` checks the answer rather than trusting it.
-        peer.group_key = key(target.addr, target.measurement);
+        peer.group_key = key(target.addr(), target.measurement);
         peer.options.custom_l4 = Some(Arc::new(Leg::new(
-            target.addr.to_owned(),
+            target.addr().to_owned(),
             target.measurement.to_owned(),
             target.part.clone(),
             table.tls().clone(),
@@ -297,23 +293,20 @@ impl ProxyHttp for Hop {
         Ok(())
     }
 
-    /// A leg that would not open marks its member, so the next request is
-    /// placed elsewhere without meeting the same failure.
+    /// A leg that would not open is noted and nothing else.
     ///
-    /// This is the half of readiness that costs a request rather than a poll,
-    /// and it is why nothing is polled while it is well — see `crate::probe`
-    /// for the half that brings a member back.
+    /// Whether a member can take work is the checks' to say, and they ask it
+    /// directly every interval — see `crate::balance`. Acting here as well
+    /// would mean a flag this role has to clear, and clearing it would mean a
+    /// timer racing the library's schedule.
     fn fail_to_connect(
         &self,
         _session: &mut Session,
         _peer: &HttpPeer,
-        ctx: &mut Placed,
+        _ctx: &mut Placed,
         e: Box<pingora_core::Error>,
     ) -> Box<pingora_core::Error> {
-        if let Some(addr) = ctx.at.as_deref() {
-            debug!("the leg to {addr} would not open, so it is marked");
-            self.table.borrow().mark(addr, false);
-        }
+        debug!("a leg would not open");
         e
     }
 

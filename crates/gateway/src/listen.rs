@@ -334,16 +334,18 @@ mod tests {
     /// names. The names never change, so a second one replaces the table
     /// without rebuilding the certificate or the doors — which is how a host
     /// re-declares a label under a running role.
-    fn table(api: &str, build: &str) -> Upstreams {
-        Upstreams::empty().replaced(&pushed(&format!(
-            r#"{{
+    async fn table(api: &str, build: &str) -> Upstreams {
+        Upstreams::empty()
+            .replaced(&pushed(&format!(
+                r#"{{
               "groups": {{ "{GROUP}": {{ "measurement": "{build}" }} }},
               "names": {{
                 "{FIRST}": {{ "{GROUP}": ["{api}"] }},
                 "{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
               "affinity": {{ "key": "{}", "ttl_seconds": 600 }} }}"#,
-            "0".repeat(64)
-        )))
+                "0".repeat(64)
+            )))
+            .await
     }
 
     /// This role on a loopback listener, with `api` as the one group declared
@@ -357,7 +359,7 @@ mod tests {
         let spki = identity.spki().to_vec();
         let proof = attest::proof(spki.clone(), &crate::identity::attestor()).unwrap();
 
-        let (pushes, current) = watch::channel(Arc::new(table(api, A)));
+        let (pushes, current) = watch::channel(Arc::new(table(api, A).await));
         let (serving, public) = watch::channel(None);
         tokio::spawn(async move {
             follow(
@@ -591,7 +593,7 @@ mod tests {
         let token = placed.headers()[affinity::TOKEN_HEADER].clone();
 
         // The host says the same label runs something else now.
-        pushes.send_replace(Arc::new(table(&api, B)));
+        pushes.send_replace(Arc::new(table(&api, B).await));
 
         let stale = ask(
             &mut caller,

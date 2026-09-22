@@ -122,9 +122,12 @@ where
         Err(reason) => return answer(StatusCode::BAD_REQUEST, format!("{reason}\n")),
     };
 
-    // Built before it is published, with the borrow released first: holding it
-    // across `send_replace` would wait on itself.
-    let next = Arc::new(current.borrow().replaced(&declared));
+    // Built before it is published, and the borrow released FIRST — both
+    // because holding it across `send_replace` would wait on itself, and
+    // because building is now awaited and a `watch` borrow must not be held
+    // across one.
+    let previous = current.borrow().clone();
+    let next = Arc::new(previous.replaced(&declared).await);
     let builds = next.len();
     current.send_replace(next);
 

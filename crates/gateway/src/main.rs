@@ -55,12 +55,12 @@
 
 mod affinity;
 mod attest;
+mod balance;
 mod config;
 mod identity;
 mod key;
 mod leg;
 mod listen;
-mod probe;
 mod proxy;
 mod push;
 mod tls;
@@ -232,8 +232,9 @@ async fn main() {
 
     // Asking each api what it knows about itself, on this task for the same
     // reason the push loop is: a role that stopped asking would keep placing new
-    // sessions on what it last believed.
-    let probes = probe::probe_forever(current.clone());
+    // sessions on members that stopped answering. It follows the table, because
+    // a set of members and the checks asking about it are replaced together.
+    let probes = balance::check_forever(current.clone());
     tokio::pin!(probes);
 
     let listener = fleet_transport::bind(&public_addr)

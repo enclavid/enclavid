@@ -60,50 +60,13 @@
 //! host between the two processes to protect anything from — the same axis on
 //! which api's own inbound chooses whether to terminate RA-TLS at all.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Whether a member can be given work.
-///
-/// Learned from this role's own legs rather than declared: a member that would
-/// not answer is marked when a request meets it, and proved well again by a
-/// dial that succeeds — see `crate::probe`. Nothing the host says sets it.
-#[derive(Debug)]
-pub struct Ready(AtomicBool);
+use pingora_load_balancing::Backend;
 
-impl Default for Ready {
-    /// A freshly declared member starts ready. The host has just said it is
-    /// part of the fleet, and the alternative — refusing work until something
-    /// proves otherwise — turns each push into an outage.
-    fn default() -> Self {
-        Ready(AtomicBool::new(true))
-    }
-}
-
-impl Ready {
-    pub fn set(&self, ready: bool) {
-        self.0.store(ready, Ordering::Relaxed);
-    }
-
-    pub fn get(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-/// One instance of a group, at the address it serves one name on.
-struct Instance {
-    addr: String,
-    ready: Arc<Ready>,
-}
-
-/// One instance and everything needed to reach it, as the prober sees it.
-pub struct Member {
-    pub addr: String,
-    pub measurement: String,
-    pub part: Arc<Part>,
-    pub ready: Arc<Ready>,
-}
+use crate::balance::{self, Balancer};
 
 /// A set of api instances that are one key domain, and so interchangeable.
 struct Group {
@@ -111,9 +74,10 @@ struct Group {
     measurement: String,
     /// The part every member must prove it runs on — see [`Part`].
     part: Arc<Part>,
-    /// Members by the name they serve. The lists need not be the same length:
-    /// what has to match across names is the group, not the machine.
-    by_name: HashMap<String, Vec<Instance>>,
+    /// Members by the name they serve, and which of them may be given work.
+    /// The sets need not be the same size: what has to match across names is
+    /// the group, not the machine. See `crate::balance`.
+    by_name: HashMap<String, Arc<Balancer>>,
 }
 
 /// The chip a group's members turned out to be on.
@@ -150,22 +114,37 @@ pub struct Upstreams {
     /// What affinity tokens are signed with, as of this push. `None` only
     /// before the first one, when nothing is served yet.
     affinity: Option<crate::affinity::Keys>,
-    /// Where the next choice starts, among groups and among members.
+    /// Where the next choice starts among the groups running a build.
     ///
     /// Round robin, and deliberately the dullest thing that spreads load: this
     /// role knows nothing about how much work a session is, and a cleverer rule
-    /// would be guessing. It is not carried across pushes — after one, the
-    /// table it counted over no longer exists.
-    next: AtomicUsize,
+    /// would be guessing. Not carried across pushes — after one, the table it
+    /// counted over no longer exists.
+    ///
+    /// The turn among the MEMBERS of a group is a separate count and not this
+    /// one — it belongs to the set, in `crate::balance`. They were one counter
+    /// once, and that was a defect: placing a session takes a turn of each, so
+    /// the group turn only ever saw every second value, and with two groups
+    /// running one build every new session landed on the same group for ever.
+    next_group: AtomicUsize,
 }
 
-/// Where one request goes: a group, an address in it, the build that must be
+/// Where one request goes: a group, a member of it, the build that must be
 /// proved there, and the part the rest of that group turned out to be on.
 pub struct Target<'a> {
     pub group: &'a str,
-    pub addr: &'a str,
     pub measurement: &'a str,
     pub part: Arc<Part>,
+    /// The member chosen. It carries its own address, which is what this role
+    /// dials by — see `crate::balance`.
+    pub member: Backend,
+}
+
+impl Target<'_> {
+    /// Where to dial, as this role dials — see `crate::balance`.
+    pub fn addr(&self) -> &str {
+        balance::addr_of(&self.member).unwrap_or_default()
+    }
 }
 
 /// Why a request could not be forwarded.
@@ -194,49 +173,72 @@ impl Upstreams {
             tls: tls_client(),
             groups: HashMap::new(),
             affinity: None,
-            next: AtomicUsize::new(0),
+            next_group: AtomicUsize::new(0),
         }
     }
 
-    /// The table a push declares, keeping what this role has learned about the
-    /// members it still declares.
+    /// Every set of members this table holds, as the checks need them: each
+    /// already carries the question its members answer and the rate it is
+    /// asked at — see `crate::balance`.
+    pub fn balancers(&self) -> Vec<Arc<Balancer>> {
+        self.groups
+            .values()
+            .flat_map(|group| group.by_name.values().cloned())
+            .collect()
+    }
+
+    /// The table a push declares.
     ///
-    /// A member is the same member if its group, its name and its address are
-    /// the same. Anything else is a member this table has not met, and it
-    /// starts ready.
+    /// A whole new one, checks and all: every member of the new table starts
+    /// counted able to take work, and the checks start asking again — see
+    /// `crate::balance::check_forever` for what that window costs and why it is
+    /// the cheaper trade. A push is a rare, deliberate act; what it must not
+    /// disturb is the connections already in flight, and it does not, because
+    /// neither the public listener nor the pooled legs live here.
+    ///
     /// Read THROUGH the wrapper rather than out of it: what a push decoded into
     /// cannot be named outside `crate::config`, so this is where the checked
     /// form turns into the routing one and nowhere else could be.
-    pub fn replaced(&self, declared: &crate::config::ValidatedConfig) -> Upstreams {
-        let groups = declared
-            .groups()
-            .iter()
-            .map(|(label, group)| {
-                let by_name = declared
-                    .names()
+    ///
+    /// Awaited because the library discovers its membership rather than being
+    /// given it, and discovery is async even when the answer is already in hand.
+    pub async fn replaced(&self, declared: &crate::config::ValidatedConfig) -> Upstreams {
+        let mut groups: HashMap<String, Group> = HashMap::new();
+        for (label, group) in declared.groups() {
+            let part = Arc::new(Part::default());
+            let mut by_name: HashMap<String, Arc<Balancer>> = HashMap::new();
+            for (name, table) in declared.names() {
+                let Some(addrs) = table.get(label) else {
+                    continue;
+                };
+                let members: BTreeSet<Backend> = addrs
                     .iter()
-                    .filter_map(|(name, table)| {
-                        let members = table.get(label)?;
-                        let members = members
-                            .iter()
-                            .map(|addr| Instance {
-                                ready: self.known(label, name, addr),
-                                addr: addr.clone(),
-                            })
-                            .collect();
-                        Some((name.clone(), members))
-                    })
+                    .filter_map(|addr| balance::member(addr))
                     .collect();
-                (
-                    label.clone(),
-                    Group {
-                        measurement: group.measurement.clone(),
-                        part: Arc::new(Part::default()),
-                        by_name,
-                    },
-                )
-            })
-            .collect();
+                let balancer =
+                    balance::balancer(members, &group.measurement, &part, &self.tls).await;
+                by_name.insert(name.clone(), Arc::new(balancer));
+            }
+            groups.insert(
+                label.clone(),
+                Group {
+                    measurement: group.measurement.clone(),
+                    part,
+                    by_name,
+                },
+            );
+        }
+
+        // Asked once before this table is handed to anything, so it goes out
+        // already knowing which members are absent. Without it the table is
+        // published with every member counted usable and finds out over the
+        // following interval, and the requests that meet an absent member in
+        // that window fail.
+        //
+        // Across sets at once, not one after another: a set holding a member
+        // that is gone waits that check's whole timeout, and sequentially those
+        // waits would add up over a fleet and make a push slow to apply.
+        balance::first_pass(groups.values().flat_map(|group| group.by_name.values())).await;
 
         let mut served: Vec<String> = declared.names().keys().cloned().collect();
         // Sorted so that two pushes declaring the same names produce the same
@@ -253,34 +255,20 @@ impl Upstreams {
                 affinity.previous_key.as_ref().map(|key| key.0),
                 std::time::Duration::from_secs(affinity.ttl_seconds),
             )),
-            next: AtomicUsize::new(0),
+            next_group: AtomicUsize::new(0),
         }
     }
 
-    /// What this table already knows about a member the next one declares.
-    fn known(&self, label: &str, name: &str, addr: &str) -> Arc<Ready> {
-        self.groups
-            .get(label)
-            .and_then(|group| group.by_name.get(name))
-            .and_then(|members| members.iter().find(|m| m.addr == addr))
-            .map(|m| m.ready.clone())
-            .unwrap_or_default()
-    }
-
-    /// A member of the group a caller was given, at the address serving `name`.
-    ///
-    /// Readiness is a preference here and not a filter: the session this
-    /// request belongs to lives in this group and nowhere else, so a group
-    /// whose members all look unwell is still the only place it could go.
+    /// A member of the group a caller was given, among those serving `name`.
     pub fn at_group(&self, name: &str, label: &str) -> Result<Target<'_>, NoRoute> {
         let group = self.groups.get(label).ok_or(NoRoute::NoSuchGroup)?;
-        let members = group.by_name.get(name).ok_or(NoRoute::NoSuchGroup)?;
-        let member = self.pick(members).ok_or(NoRoute::NoSuchGroup)?;
+        let among = group.by_name.get(name).ok_or(NoRoute::NoSuchGroup)?;
+        let member = balance::pick(among).ok_or(NoRoute::NoSuchGroup)?;
         Ok(Target {
             group: self.label(label).ok_or(NoRoute::NoSuchGroup)?,
-            addr: &member.addr,
             measurement: &group.measurement,
             part: group.part.clone(),
+            member,
         })
     }
 
@@ -303,7 +291,7 @@ impl Upstreams {
         // on every table built from the same push.
         candidates.sort();
 
-        let turn = self.next.fetch_add(1, Ordering::Relaxed);
+        let turn = self.next_group.fetch_add(1, Ordering::Relaxed);
         for step in 0..candidates.len() {
             let label = candidates[(turn + step) % candidates.len()];
             if let Ok(target) = self.at_group(name, label) {
@@ -313,59 +301,12 @@ impl Upstreams {
         Err(NoRoute::NoSuchGroup)
     }
 
-    /// One member, preferring those that are ready.
-    fn pick<'a>(&self, members: &'a [Instance]) -> Option<&'a Instance> {
-        if members.is_empty() {
-            return None;
-        }
-        let turn = self.next.fetch_add(1, Ordering::Relaxed);
-        let ready: Vec<&Instance> = members.iter().filter(|m| m.ready.get()).collect();
-        // None ready is not none available: a member that was marked may have
-        // recovered, and refusing every request until something proves it would
-        // turn one bad answer into an outage. The nginx rule, and for the same
-        // reason.
-        if ready.is_empty() {
-            Some(&members[turn % members.len()])
-        } else {
-            Some(ready[turn % ready.len()])
-        }
-    }
-
     /// The label as this table spells it, so a `Target` borrows from the table
     /// rather than from the caller's copy.
     fn label<'a>(&'a self, label: &str) -> Option<&'a str> {
         self.groups
             .get_key_value(label)
             .map(|(held, _)| held.as_str())
-    }
-
-    /// Every member, as the prober needs it: where it is, what it must prove,
-    /// the part its group settled on, and what is currently believed of it.
-    pub fn members(&self) -> Vec<Member> {
-        self.groups
-            .values()
-            .flat_map(|group| {
-                group.by_name.values().flatten().map(|member| Member {
-                    addr: member.addr.clone(),
-                    measurement: group.measurement.clone(),
-                    part: group.part.clone(),
-                    ready: member.ready.clone(),
-                })
-            })
-            .collect()
-    }
-
-    /// What the member at `addr` is known by, so a failed request can mark it.
-    pub fn mark(&self, addr: &str, ready: bool) {
-        for group in self.groups.values() {
-            for members in group.by_name.values() {
-                for member in members {
-                    if member.addr == addr {
-                        member.ready.set(ready);
-                    }
-                }
-            }
-        }
     }
 
     /// The names this role answers to, as of this push.
@@ -533,53 +474,56 @@ pub(crate) mod tests {
 
     /// One group on two machines and a second group on one, all under both
     /// names.
-    fn table() -> Upstreams {
-        let body = format!(
+    fn body() -> String {
+        format!(
             r#"{{
               "groups": {{ "one": {{ "measurement": "{A}" }},
                            "two": {{ "measurement": "{B}" }} }},
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1000", "127.0.0.1:2000"],
-                                  "two": ["127.0.0.1:3000"] }},
+                              "two": ["127.0.0.1:3000"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:1001", "127.0.0.1:2001"],
-                                  "two": ["127.0.0.1:3001"] }} }},
+                                "two": ["127.0.0.1:3001"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
-        );
-        Upstreams::empty().replaced(&pushed(&body))
+        )
     }
 
-    #[test]
-    fn the_name_picks_the_address_and_the_label_picks_the_group() {
-        let up = table();
+    async fn table() -> Upstreams {
+        Upstreams::empty().replaced(&pushed(&body())).await
+    }
+
+    #[tokio::test]
+    async fn the_name_picks_the_address_and_the_label_picks_the_group() {
+        let up = table().await;
         let first = up.at_group(FIRST, "one").ok().unwrap();
-        assert!(first.addr.ends_with("000"), "{}", first.addr);
+        assert!(first.addr().ends_with("000"), "{}", first.addr());
         assert_eq!(first.measurement, A);
 
         let second = up.at_group(SECOND, "one").ok().unwrap();
-        assert!(second.addr.ends_with("001"), "{}", second.addr);
+        assert!(second.addr().ends_with("001"), "{}", second.addr());
         assert_eq!(second.group, "one");
     }
 
     /// Every member of a group serves the sessions of that group, so requests
     /// spread over all of them.
-    #[test]
-    fn requests_go_round_the_members_of_a_group() {
-        let up = table();
+    #[tokio::test]
+    async fn requests_go_round_the_members_of_a_group() {
+        let up = table().await;
         let mut seen: Vec<String> = Vec::new();
         for _ in 0..4 {
-            seen.push(up.at_group(FIRST, "one").ok().unwrap().addr.to_owned());
+            seen.push(up.at_group(FIRST, "one").ok().unwrap().addr().to_owned());
         }
         seen.sort();
         seen.dedup();
         assert_eq!(seen.len(), 2, "both members answered");
     }
 
-    #[test]
-    fn a_new_session_is_placed_on_a_group_running_that_build() {
-        let up = table();
+    #[tokio::test]
+    async fn a_new_session_is_placed_on_a_group_running_that_build() {
+        let up = table().await;
         let placed = up.place(SECOND, B).ok().unwrap();
         assert_eq!(placed.group, "two");
-        assert_eq!(placed.addr, "127.0.0.1:3001");
+        assert_eq!(placed.addr(), "127.0.0.1:3001");
 
         assert!(
             up.place(SECOND, &"c".repeat(96)).is_err(),
@@ -587,72 +531,180 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_label_nobody_carries_is_one_answer() {
-        let up = table();
+    /// Two groups can run one build — that is how a build is rolled out or how
+    /// a fleet spans two parts. New sessions naming it must spread over both,
+    /// or one group takes every session and the other stands idle.
+    #[tokio::test]
+    async fn new_sessions_spread_over_every_group_running_the_build() {
+        let body = format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{A}" }},
+                           "two": {{ "measurement": "{A}" }} }},
+              "names": {{
+                "{FIRST}":  {{ "one": ["127.0.0.1:1000"], "two": ["127.0.0.1:2000"] }},
+                "{SECOND}": {{ "one": ["127.0.0.1:1001"], "two": ["127.0.0.1:2001"] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
+        );
+        let up = Upstreams::empty().replaced(&pushed(&body)).await;
+
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..8 {
+            seen.push(up.place(SECOND, A).ok().unwrap().group.to_owned());
+        }
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 2, "every group running the build was placed on");
+    }
+
+    #[tokio::test]
+    async fn a_label_nobody_carries_is_one_answer() {
+        let up = table().await;
         assert!(up.at_group(FIRST, "three").is_err());
         assert!(up.at_group("elsewhere.example.com", "one").is_err());
     }
 
-    #[test]
-    fn an_empty_table_routes_nothing() {
+    #[tokio::test]
+    async fn an_empty_table_routes_nothing() {
         let up = Upstreams::empty();
         assert_eq!(up.len(), 0);
         assert!(up.at_group(FIRST, "one").is_err());
         assert!(up.place(SECOND, A).is_err());
     }
 
-    /// A member marked unwell is skipped while another can take the work.
-    #[test]
-    fn an_unwell_member_is_passed_over() {
-        let up = table();
-        up.mark("127.0.0.1:1000", false);
-        for _ in 0..4 {
-            let got = up.at_group(FIRST, "one").ok().unwrap();
-            assert_eq!(got.addr, "127.0.0.1:2000");
+    /// A listener that accepts and says nothing: enough for a dial to succeed,
+    /// which is all a check asks.
+    async fn answering() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                // Held so the connection is not closed under the checker.
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    drop(stream);
+                });
+            }
+        });
+        addr
+    }
+
+    /// A push declaring one group under one name, at the addresses given.
+    fn group_of(members: &[&str]) -> String {
+        let list = members
+            .iter()
+            .map(|addr| format!("\"{addr}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{A}" }} }},
+              "names": {{ "{FIRST}": {{ "one": [{list}] }} }},
+              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
+        )
+    }
+
+    /// One pass of the checks over everything the table declares — what the
+    /// schedule started against each set does every interval.
+    async fn checked(up: &Upstreams) {
+        for set in up.balancers() {
+            set.backends().run_health_check(false).await;
         }
     }
 
-    /// And a group whose members all look unwell still answers, because the
-    /// session it holds has nowhere else to be.
-    #[test]
-    fn a_group_with_nothing_well_is_still_where_its_sessions_are() {
-        let up = table();
-        up.mark("127.0.0.1:1000", false);
-        up.mark("127.0.0.1:2000", false);
-        assert!(up.at_group(FIRST, "one").is_ok());
+    /// Which addresses answered over several turns of the round robin.
+    fn over(up: &Upstreams, turns: usize) -> Vec<String> {
+        let mut seen: Vec<String> = (0..turns)
+            .map(|_| up.at_group(FIRST, "one").ok().unwrap().addr().to_owned())
+            .collect();
+        seen.sort();
+        seen.dedup();
+        seen
     }
 
-    /// What this role learned survives a push that still declares the member,
-    /// and is not inherited by one it does not.
-    #[test]
-    fn a_verdict_survives_a_push_that_keeps_the_member() {
-        let up = table();
-        up.mark("127.0.0.1:1000", false);
-
-        let body = format!(
-            r#"{{
-              "groups": {{ "one": {{ "measurement": "{A}" }} }},
-              "names": {{
-                "{FIRST}": {{ "one": ["127.0.0.1:1000", "127.0.0.1:9000"] }},
-                "{SECOND}":  {{ "one": ["127.0.0.1:1001"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
+    /// The task `main` starts really does drive the schedule.
+    ///
+    /// Nothing here asks anything: it starts what the role starts and waits.
+    /// Every other test in this file drives a pass by hand, so without this one
+    /// the wiring between a table and the checks asking about it would be
+    /// unexercised.
+    #[tokio::test]
+    async fn the_schedule_takes_an_absent_member_out_on_its_own() {
+        let live = answering().await;
+        let up = Arc::new(
+            Upstreams::empty()
+                .replaced(&pushed(&group_of(&[&live, "127.0.0.1:1"])))
+                .await,
         );
-        let next = up.replaced(&pushed(&body));
+        let (_table, following) = tokio::sync::watch::channel(up.clone());
+        tokio::spawn(crate::balance::check_forever(following));
 
-        let member = |addr: &str| {
-            next.members()
-                .into_iter()
-                .find(|m| m.addr == addr)
-                .unwrap_or_else(|| panic!("{addr} is declared"))
-        };
+        let out = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while over(&up, 4).len() != 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
         assert!(
-            !member("127.0.0.1:1000").ready.get(),
-            "the verdict came across"
+            out.is_ok(),
+            "the schedule asked, and took the absent one out"
         );
-        assert!(
-            member("127.0.0.1:9000").ready.get(),
-            "a member it has not met starts ready"
+    }
+
+    /// A member that does not answer is skipped from the FIRST request, not
+    /// from the first request after a schedule got round to asking.
+    ///
+    /// That is what the pass inside `replaced` buys: the table is asked before
+    /// it is handed to anything, so it is never current while saying a member
+    /// is usable that this role has never reached.
+    #[tokio::test]
+    async fn a_member_that_does_not_answer_is_passed_over_from_the_start() {
+        let live = answering().await;
+        let up = Upstreams::empty()
+            .replaced(&pushed(&group_of(&[&live, "127.0.0.1:1"])))
+            .await;
+        assert_eq!(over(&up, 4), vec![live], "only the one that answered");
+    }
+
+    /// And a group with nothing left in service still answers, because the
+    /// session it holds has nowhere else to be — still going round its members
+    /// rather than sending every request to whichever one came first.
+    ///
+    /// The turn is what this pins. Selecting twice to express "prefer usable"
+    /// took the round-robin cursor twice, and a group where nothing is usable
+    /// then answered with one member for ever — see `crate::balance::pick`.
+    #[tokio::test]
+    async fn a_group_with_nothing_well_is_still_where_its_sessions_are() {
+        let up = Upstreams::empty()
+            .replaced(&pushed(&group_of(&["127.0.0.1:1", "127.0.0.1:2"])))
+            .await;
+        checked(&up).await;
+        assert!(up.at_group(FIRST, "one").is_ok());
+        assert_eq!(over(&up, 4).len(), 2, "and both of them are tried");
+    }
+
+    /// A push throws away what the checks had found — and nobody sees that,
+    /// because the new table is asked before it becomes the current one.
+    ///
+    /// The checks and the set they ask about are replaced together, so the new
+    /// table starts with every member counted usable. What closes the window
+    /// that would otherwise open is the pass inside `replaced`.
+    #[tokio::test]
+    async fn a_push_never_publishes_a_member_it_has_not_reached() {
+        let live = answering().await;
+        let up = Upstreams::empty()
+            .replaced(&pushed(&group_of(&[&live, "127.0.0.1:1"])))
+            .await;
+        assert_eq!(over(&up, 4), vec![live.clone()], "the absent one is out");
+
+        // A different table, so nothing about the previous one is reused.
+        let next = up
+            .replaced(&pushed(&group_of(&[&live, "127.0.0.1:1", "127.0.0.1:2"])))
+            .await;
+        assert_eq!(
+            over(&next, 6),
+            vec![live],
+            "and both absent ones are out before this table serves anything"
         );
     }
 
@@ -660,8 +712,8 @@ pub(crate) mod tests {
     /// part. So the first member to answer settles it, and one that proves
     /// another part is not in this group however it was declared — which is
     /// what stops two key domains being stapled under one label.
-    #[test]
-    fn a_group_is_one_part_and_the_first_answer_settles_it() {
+    #[tokio::test]
+    async fn a_group_is_one_part_and_the_first_answer_settles_it() {
         let part = Part::default();
         assert!(part.agrees("chip-a"), "the first answer settles it");
         assert!(part.agrees("chip-a"), "and agrees with itself after");
@@ -670,27 +722,34 @@ pub(crate) mod tests {
 
     /// A later push may say something different, and a session could not have
     /// survived that push anyway — so the answer is per table, not for ever.
-    #[test]
-    fn a_push_settles_the_part_again() {
-        let up = table();
+    ///
+    /// Asserted on the identity of the `Part` rather than on what it settled
+    /// to, because by the time a table is current its own checks have already
+    /// dialled its members and settled it — see `replaced`.
+    #[tokio::test]
+    async fn a_push_settles_the_part_again() {
+        let up = table().await;
         let settled = up.at_group(FIRST, "one").ok().unwrap().part;
-        assert!(settled.agrees("chip-a"));
 
-        let next = up.replaced(&pushed(&format!(
+        let body = format!(
             r#"{{
               "groups": {{ "one": {{ "measurement": "{A}" }} }},
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1000"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:1001"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
-        )));
+        );
+        let next = up.replaced(&pushed(&body)).await;
         let after = next.at_group(FIRST, "one").ok().unwrap().part;
-        assert!(after.agrees("chip-b"), "a new table settles it anew");
+        assert!(
+            !Arc::ptr_eq(&settled, &after),
+            "a new table asks the question again rather than inheriting it"
+        );
     }
 
-    #[test]
-    fn a_group_the_next_push_omits_stops_routing() {
-        let up = table();
+    #[tokio::test]
+    async fn a_group_the_next_push_omits_stops_routing() {
+        let up = table().await;
         let body = format!(
             r#"{{
               "groups": {{ "two": {{ "measurement": "{B}" }} }},
@@ -699,7 +758,7 @@ pub(crate) mod tests {
                 "{SECOND}":  {{ "two": ["127.0.0.1:3001"] }} }},
               "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }} }}"#
         );
-        let next = up.replaced(&pushed(&body));
+        let next = up.replaced(&pushed(&body)).await;
         assert!(next.at_group(FIRST, "one").is_err());
         assert!(next.at_group(FIRST, "two").is_ok());
     }
