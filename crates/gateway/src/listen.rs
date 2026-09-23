@@ -1,154 +1,101 @@
-//! The public door: one TLS session per caller, terminated here, and the proxy
-//! that carries what comes out of it.
+//! The public door: the certificate it presents, and the name it remembers.
 //!
-//! ## Why the accept loop is this role's own
+//! ## The accept loop is not here any more
 //!
-//! The proxy library listens on TCP and unix sockets. This guest has neither —
-//! a measured kernel with no network modules leaves vsock as the only way in,
-//! and that is the property the whole design rests on. So the loop is ours, and
-//! what the library is handed is an established connection.
+//! It was, and it was the root of everything else this role used to own. The
+//! proxy library listens on TCP or a unix socket and nothing else — its
+//! `ServerAddress` is a closed choice, with no trait to implement for a third —
+//! and this guest is reached over vsock. So the loop was ours, and from that
+//! followed our own TLS termination, our own stream wrapper, and our own
+//! supervision.
 //!
-//! ## The handshake decides the name, once
+//! `crate::bridge` ends that: it carries the fleet transport to a unix socket in
+//! this guest, and the library listens on that. What is left here is the two
+//! things the library asks of us.
 //!
-//! A group serves each name at a different address, so which name a connection
-//! asked for decides which address its requests go to. It is settled here,
-//! before a byte of HTTP is read, and travels no further than the door it
-//! selects. What a name MEANS to whatever serves it is not known here and is not
-//! needed.
+//! ## What the certificate is, and why a resolver holds it
 //!
-//! ## And it decides the protocol, so nothing has to guess
+//! The key is this guest's own and never leaves its memory — see `crate::key`.
+//! It reaches the library as a value rather than a path, through a resolver
+//! that follows the pushed names: a table declaring different names replaces
+//! the certificate under a listener that stays up, with nothing rebuilt around
+//! it. See [`follow`].
 //!
-//! A connection this role decrypted carries no record of what it negotiated,
-//! so a proxy handed one can only guess at HTTP/2 by looking for its opening
-//! bytes — and a well-formed HTTP/1.1 request shorter than that opening would
-//! then hang, waiting for bytes the caller has no reason to send. This role
-//! does not have to guess: it performed the negotiation. So it picks the path
-//! itself, and both protocols are offered to the caller rather than one being
-//! dropped to make the guessing safe.
+//! ## And why the name is remembered rather than read from the request
+//!
+//! Routing needs the name the caller AGREED to, not the one it claims. A
+//! request carries a `Host` a caller writes; the handshake settled an SNI it
+//! cannot change afterwards, and it is the one the certificate answered for.
+//! Reading `Host` instead would let a caller reach an address it never
+//! negotiated for.
+//!
+//! The library has a place for exactly this: what
+//! [`TlsAccept::handshake_complete_callback`] returns is kept on the
+//! connection's TLS digest, where `crate::proxy` reads it per request.
 
-use std::collections::HashMap;
+use std::any::Any;
 use std::sync::Arc;
-use std::time::Duration;
 
-use pingora_core::apps::{HttpServerApp, HttpServerOptions, ServerApp};
-use pingora_core::protocols::http::ServerSession;
-use pingora_core::protocols::l4::virt::{VirtualSockOpt, VirtualSocket};
+use pingora_core::listeners::tls::TlsSettings;
+use pingora_core::listeners::{Listeners, ServerAddress, TlsAccept};
+use pingora_core::protocols::tls::TlsRef;
 use pingora_core::server::configuration::ServerConf;
+use pingora_core::services::listening::Service;
 use pingora_proxy::HttpProxy;
 use safe_logger::debug;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::sign::CertifiedKey;
 
 use crate::proxy::Hop;
+use crate::tls;
 use crate::upstream::Upstreams;
-use crate::{attest, tls};
 
-/// How long the TLS handshake may take. Without it a caller that connects and
-/// says nothing holds a slot for as long as it likes.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// What the caller decrypted, on its way to the proxy.
+/// The name a connection settled at its handshake.
 ///
-/// The proxy's own stream types are a kernel socket or nothing, and a TLS
-/// session is neither. This is the door it leaves open for exactly that, and it
-/// is only good enough on THIS side: a connection reaching api goes through
-/// `crate::leg` instead, because that one is pooled and a pooled connection
-/// needs a descriptor.
-#[derive(Debug)]
-struct Decrypted<S>(S);
+/// A newtype rather than a bare `String`, because what carries it is keyed by
+/// type: anything else ever kept there as a `String` would take its place.
+pub struct Name(pub String);
 
-impl<S> AsyncRead for Decrypted<S>
-where
-    S: AsyncRead + Unpin,
-{
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+/// Keeps the settled name on the connection, and does nothing else.
+struct Remember;
+
+#[async_trait::async_trait]
+impl TlsAccept for Remember {
+    /// A connection with no name asked for keeps none, and `crate::proxy`
+    /// answers such a request as misdirected — this role serves names, and a
+    /// caller that named none has not reached one.
+    async fn handshake_complete_callback(
+        &self,
+        ssl: &TlsRef,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
+        let name = ssl.server_name()?;
+        Some(Arc::new(Name(name.to_owned())) as Arc<dyn Any + Send + Sync>)
     }
 }
 
-impl<S> AsyncWrite for Decrypted<S>
-where
-    S: AsyncWrite + Unpin,
-{
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.0).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
-    }
-}
-
-impl<S> VirtualSocket for Decrypted<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + Sync + std::fmt::Debug,
-{
-    /// Nothing to set: what these options tune is a kernel socket, and the one
-    /// under this session belongs to the host's splice, not to this session.
-    fn set_socket_option(&self, _opt: VirtualSockOpt) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// What it takes to answer a public connection, as of one push.
-///
-/// Both halves come from the names the host declared, so both are rebuilt when
-/// it declares different ones — a certificate over the new names, and a door
-/// for each of them. Neither is rebuilt per connection.
-///
-/// There is none of this before the first push: a role with no names has no
-/// certificate to present, and a connection reaching it is dropped rather than
-/// answered with something misleading.
-pub struct Public {
-    acceptor: TlsAcceptor,
-    doors: Doors,
-}
-
-/// Follow the table, and publish what serving it takes.
+/// Follow the table, and keep the certificate the listener answers with.
 ///
 /// Await this on the role's own task: a role that stopped following would keep
-/// presenting a certificate for names the host no longer declares, and keep
-/// routing through doors built for a table that is gone.
+/// presenting a certificate for names the host no longer declares.
+///
+/// Nothing is served before the first push — the resolver holds `None` and a
+/// handshake is refused, which is the honest answer when there are no names to
+/// answer for.
 pub async fn follow(
     mut table: watch::Receiver<Arc<Upstreams>>,
     identity: Arc<crate::key::Identity>,
-    proof: attest::Proof,
-    conf: Arc<ServerConf>,
-    publish: watch::Sender<Option<Arc<Public>>>,
+    publish: watch::Sender<Option<Arc<CertifiedKey>>>,
 ) -> ! {
     let mut names: Vec<String> = Vec::new();
     loop {
-        // Changed rather than every loop: the certificate is the expensive part
-        // and the names usually did not move.
+        // Changed rather than every loop: minting is the expensive part and the
+        // names usually did not move.
         let declared = table.borrow().served().to_vec();
         if declared != names {
-            match tls::server_config(&identity, &declared) {
-                Ok(config) => {
+            match tls::certified(&identity, &declared) {
+                Ok(certificate) => {
                     names = declared;
-                    let public = Public {
-                        acceptor: TlsAcceptor::from(Arc::new(config)),
-                        doors: Doors::new(table.clone(), proof.clone(), conf.clone()),
-                    };
-                    publish.send_replace(Some(Arc::new(public)));
+                    publish.send_replace(Some(certificate));
                     debug!("serving {} name(s)", names.len());
                 }
                 // The push that declared these passed the same check, so this
@@ -166,118 +113,52 @@ pub async fn follow(
     }
 }
 
-/// The proxies this role runs: one per name it answers to, plus one for
-/// everything else.
+/// The public service: one listener, the TLS that terminates on it, and the
+/// proxy that carries what comes out.
 ///
-/// They are shared by every caller, and so are the legs they pool — see
-/// `crate::proxy` for why that is safe and why a proxy per caller is not
-/// affordable.
-struct Doors {
-    served: HashMap<String, Arc<HttpProxy<Hop>>>,
-    elsewhere: Arc<HttpProxy<Hop>>,
+/// Built by hand rather than through `http_proxy_service`, because that helper
+/// keeps its listeners private and offers TLS only over TCP. A unix socket with
+/// TLS is expressible, just not through the shortcut.
+pub fn service(
+    at: &std::path::Path,
+    conf: &Arc<ServerConf>,
+    hop: Hop,
+    certificate: watch::Receiver<Option<Arc<CertifiedKey>>>,
+) -> Service<HttpProxy<Hop>> {
+    let mut tls =
+        TlsSettings::with_callbacks(Box::new(Remember)).expect("the TLS settings take a callback");
+    tls.set_cert_resolver(Arc::new(tls::Certificate::following(certificate)));
+    // Both protocols offered, as before: a browser takes h2, and a diagnostic
+    // client on the far side of a byte splice is likely to speak http/1.1.
+    tls.enable_h2();
+
+    let mut listeners = Listeners::new();
+    listeners.add_endpoint(
+        ServerAddress::Uds(at.to_string_lossy().into_owned(), None),
+        Some(tls),
+    );
+
+    let mut proxy = HttpProxy::new(hop, conf.clone());
+    proxy.handle_init_modules();
+    Service::with_listeners("public".to_owned(), listeners, proxy)
 }
 
-impl Doors {
-    fn new(
-        table: watch::Receiver<Arc<Upstreams>>,
-        proof: attest::Proof,
-        conf: Arc<ServerConf>,
-    ) -> Doors {
-        // One ledger for the whole role, because one pool of legs is what it
-        // describes. See `crate::leg::Ledger`.
-        let ledger = Arc::new(crate::leg::Ledger::default());
-        let door = |name: Option<String>| {
-            let mut proxy = HttpProxy::new(
-                Hop::new(name, table.clone(), proof.clone(), ledger.clone()),
-                conf.clone(),
-            );
-            // The proxy would otherwise look for HTTP/2's opening bytes on a
-            // connection it cannot ask about — see the module docs. This says
-            // that a connection reaching it in plain HTTP/2 is expected, and
-            // `connection` is what decides that it is one.
-            let mut options = HttpServerOptions::default();
-            options.h2c = true;
-            proxy.server_options = Some(options);
-            proxy.handle_init_modules();
-            Arc::new(proxy)
-        };
-        let served = table
-            .borrow()
-            .served()
-            .iter()
-            .map(|name| (name.to_lowercase(), door(Some(name.clone()))))
-            .collect();
-        Doors {
-            served,
-            elsewhere: door(None),
-        }
-    }
-
-    /// The door for the name the handshake settled, or the one that says this
-    /// is not the server for it. Matched without regard to case, because a host
-    /// name has none.
-    fn of(&self, name: Option<&str>) -> &Arc<HttpProxy<Hop>> {
-        name.and_then(|name| self.served.get(&name.to_lowercase()))
-            .unwrap_or(&self.elsewhere)
-    }
-}
-
-/// Serve one public connection, from the handshake to the last answer.
-pub async fn connection(public: Arc<Public>, stream: fleet_transport::Stream, peer: String) {
-    let tls = match tokio::time::timeout(HANDSHAKE_TIMEOUT, public.acceptor.accept(stream)).await {
-        Ok(Ok(tls)) => tls,
-        Ok(Err(e)) => {
-            debug!("handshake with {peer} failed: {e}");
-            return;
-        }
-        Err(_) => {
-            debug!("handshake with {peer} did not finish within the timeout");
-            return;
-        }
-    };
-
-    // Both answers of the handshake, taken before the session is moved: which
-    // name this caller asked for, and which protocol it agreed to speak.
-    let (name, over_h2) = {
-        let (_, session) = tls.get_ref();
-        (
-            session.server_name().map(str::to_owned),
-            session.alpn_protocol() == Some(tls::H2),
-        )
-    };
-
-    let proxy = public.doors.of(name.as_deref());
-
-    let stream: pingora_core::protocols::Stream =
-        Box::new(pingora_core::protocols::l4::stream::Stream::from(
-            pingora_core::protocols::l4::virt::VirtualSocketStream::new(Box::new(Decrypted(tls))),
-        ));
-
-    let (_shutdown, watcher) = watch::channel(false);
-    if over_h2 {
-        // Its own accept loop for the streams of this connection.
-        proxy.process_new(stream, &watcher).await;
-    } else {
-        // Straight to the one-request-at-a-time path, with nothing peeked.
-        proxy
-            .process_new_http(ServerSession::new_http1(stream), &watcher)
-            .await;
-    }
-}
-
-/// End to end over loopback: real TLS, a real public connection, an api
-/// stand-in behind. TCP arm only, because the listeners here are TCP.
+/// End to end over a real socket: the library's listener, the library's TLS on
+/// a certificate this role minted, and an api stand-in behind. TCP arm only,
+/// because the leg to the stand-in is TCP here.
 #[cfg(all(test, not(feature = "vsock")))]
 mod tests {
     use super::*;
 
     use std::convert::Infallible;
+    use std::time::Duration;
 
     use bytes::Bytes;
     use http_body_util::{BodyExt, Empty, Full};
     use hyper::client::conn::http2::SendRequest;
     use hyper::{Request, Response, StatusCode};
     use hyper_util::rt::{TokioExecutor, TokioIo};
+    use pingora_core::services::Service as _;
     use tokio_rustls::rustls::client::danger::{
         HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
     };
@@ -286,6 +167,7 @@ mod tests {
     use tokio_rustls::rustls::{self, DigitallySignedStruct, SignatureScheme};
 
     use crate::affinity;
+    use crate::attest;
     use crate::proxy::MEASUREMENT;
     use crate::upstream::tests::{A, B, FIRST, SECOND, pushed};
 
@@ -331,68 +213,67 @@ mod tests {
     }
 
     /// What one group running `build` at `api` looks like as a push, under both
-    /// names. The names never change, so a second one replaces the table
-    /// without rebuilding the certificate or the doors — which is how a host
-    /// re-declares a label under a running role.
-    async fn table(api: &str, build: &str) -> Upstreams {
-        Upstreams::empty()
-            .replaced(&pushed(&format!(
-                r#"{{
+    /// names.
+    fn table(api: &str, build: &str) -> String {
+        format!(
+            r#"{{
               "groups": {{ "{GROUP}": {{ "measurement": "{build}" }} }},
               "names": {{
                 "{FIRST}": {{ "{GROUP}": ["{api}"] }},
                 "{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
               "affinity": {{ "key": "{}", "ttl_seconds": 600 }} }}"#,
-                "0".repeat(64)
-            )))
-            .await
+            "0".repeat(64)
+        )
     }
 
-    /// This role on a loopback listener, with `api` as the one group declared
-    /// under both names. Returns its address, the SPKI its quote binds, and the
-    /// sender a test pushes a later table through.
-    async fn gateway(api: &str) -> (String, Vec<u8>, watch::Sender<Arc<Upstreams>>) {
-        let listener = fleet_transport::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+    /// This role on a unix socket of its own, with `api` as the one group
+    /// declared under both names. Returns the socket, the SPKI its quote binds,
+    /// and the sender a test pushes a later table through.
+    async fn gateway(api: &str) -> (std::path::PathBuf, Vec<u8>, watch::Sender<Arc<Upstreams>>) {
+        let at = std::env::temp_dir().join(format!(
+            "gateway-test-{}-{:?}.sock",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let at = crate::bridge::prepare(at.to_str().unwrap());
 
         let identity = Arc::new(crate::key::Identity::generated().unwrap());
         let spki = identity.spki().to_vec();
         let proof = attest::proof(spki.clone(), &crate::identity::attestor()).unwrap();
 
-        let (pushes, current) = watch::channel(Arc::new(table(api, A).await));
-        let (serving, public) = watch::channel(None);
+        let first = Upstreams::empty().replaced(&pushed(&table(api, A))).await;
+        let (pushes, current) = watch::channel(Arc::new(first));
+
+        let (certificate, presented) = watch::channel(None);
+        tokio::spawn(follow(current.clone(), identity, certificate));
+
+        let hop = Hop::new(
+            current.clone(),
+            proof,
+            Arc::new(crate::leg::Ledger::default()),
+        );
+        let mut public = service(
+            &at,
+            &Arc::new(ServerConf::default()),
+            hop,
+            presented.clone(),
+        );
+        let (never, stop) = watch::channel(false);
         tokio::spawn(async move {
-            follow(
-                current,
-                identity,
-                proof,
-                Arc::new(ServerConf::default()),
-                serving,
-            )
-            .await
+            let _never = never;
+            public.start_service(None, stop, 1).await
         });
 
-        // Nothing is served until the names have a certificate.
+        // Nothing is answered until there is a certificate and a bound socket.
         tokio::time::timeout(Duration::from_secs(5), async {
-            while public.borrow().is_none() {
+            while presented.borrow().is_none() || !at.exists() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
         .expect("the first table is acted on");
 
-        tokio::spawn(async move {
-            fleet_transport::accept_forever(listener, move |stream, peer| {
-                let public = public.borrow().clone();
-                async move {
-                    if let Some(public) = public {
-                        tokio::spawn(connection(public, stream, peer));
-                    }
-                }
-            })
-            .await
-        });
-        (addr, spki, pushes)
+        (at, spki, pushes)
     }
 
     /// Accepts any certificate: what is under test is how this role carries
@@ -446,7 +327,11 @@ mod tests {
     }
 
     /// One public HTTP/2 connection to a name, receiving with the given window.
-    async fn caller(gateway: &str, name: &str, window: u32) -> SendRequest<Empty<Bytes>> {
+    ///
+    /// Straight to the socket the library listens on: what the bridge does in
+    /// front of it is a byte splice, and splicing bytes is not what these tests
+    /// are about.
+    async fn caller(at: &std::path::Path, name: &str, window: u32) -> SendRequest<Empty<Bytes>> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
@@ -456,9 +341,9 @@ mod tests {
             .with_no_client_auth();
         config.alpn_protocols = vec![b"h2".to_vec()];
 
-        let tcp = tokio::net::TcpStream::connect(gateway).await.unwrap();
+        let socket = tokio::net::UnixStream::connect(at).await.unwrap();
         let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
-            .connect(ServerName::try_from(name.to_owned()).unwrap(), tcp)
+            .connect(ServerName::try_from(name.to_owned()).unwrap(), socket)
             .await
             .unwrap();
         let (sender, driver) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
@@ -483,8 +368,8 @@ mod tests {
     /// sees the path it published.
     #[tokio::test]
     async fn a_marked_label_routes_and_is_taken_out() {
-        let (gateway, _, _pushes) = gateway(&api().await).await;
-        let mut caller = caller(&gateway, FIRST, 4 << 20).await;
+        let (at, _, _pushes) = gateway(&api().await).await;
+        let mut caller = caller(&at, FIRST, 4 << 20).await;
 
         let answer = ask(
             &mut caller,
@@ -501,8 +386,8 @@ mod tests {
     /// carries is the same answer as an upstream that would not talk.
     #[tokio::test]
     async fn a_path_without_a_label_and_a_label_nobody_has() {
-        let (gateway, _, _pushes) = gateway(&api().await).await;
-        let mut caller = caller(&gateway, FIRST, 4 << 20).await;
+        let (at, _, _pushes) = gateway(&api().await).await;
+        let mut caller = caller(&at, FIRST, 4 << 20).await;
 
         let bare = ask(
             &mut caller,
@@ -527,8 +412,8 @@ mod tests {
     /// the token rather than with a group of its choosing.
     #[tokio::test]
     async fn a_caller_is_placed_and_comes_back_with_a_token() {
-        let (gateway, _, _pushes) = gateway(&api().await).await;
-        let mut second = caller(&gateway, SECOND, 4 << 20).await;
+        let (at, _, _pushes) = gateway(&api().await).await;
+        let mut second = caller(&at, SECOND, 4 << 20).await;
 
         let placed = ask(
             &mut second,
@@ -571,15 +456,11 @@ mod tests {
 
     /// A token binds the BUILD, not only the label — so a host re-declaring
     /// that label cannot move a caller onto something it never named.
-    ///
-    /// The old session would have broken anyway, its state sealed to the build
-    /// that made it. What this closes is the request that creates a NEW one,
-    /// which would have landed on the new build with nothing to notice it.
     #[tokio::test]
     async fn a_token_does_not_survive_the_group_being_re_declared() {
         let api = api().await;
-        let (gateway, _, pushes) = gateway(&api).await;
-        let mut caller = caller(&gateway, SECOND, 4 << 20).await;
+        let (at, _, pushes) = gateway(&api).await;
+        let mut caller = caller(&at, SECOND, 4 << 20).await;
 
         let placed = ask(
             &mut caller,
@@ -593,7 +474,8 @@ mod tests {
         let token = placed.headers()[affinity::TOKEN_HEADER].clone();
 
         // The host says the same label runs something else now.
-        pushes.send_replace(Arc::new(table(&api, B).await));
+        let next = Upstreams::empty().replaced(&pushed(&table(&api, B))).await;
+        pushes.send_replace(Arc::new(next));
 
         let stale = ask(
             &mut caller,
@@ -608,22 +490,6 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "a stale token is absent, and the caller is asked to name what it needs"
         );
-
-        // And naming it is the whole recovery: no new endpoint, no new header.
-        let again = ask(
-            &mut caller,
-            Request::get(format!("https://{SECOND}/api/v1/sessions"))
-                .header(MEASUREMENT, B)
-                .body(Empty::new())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(again.status(), StatusCode::OK);
-        assert_ne!(
-            again.headers()[affinity::TOKEN_HEADER],
-            token,
-            "the token it comes back with is for the build it just named"
-        );
     }
 
     /// A build nobody runs is the same answer as an upstream that would not
@@ -631,8 +497,8 @@ mod tests {
     /// came first.
     #[tokio::test]
     async fn a_build_nobody_runs_and_a_build_named_twice() {
-        let (gateway, _, _pushes) = gateway(&api().await).await;
-        let mut second = caller(&gateway, SECOND, 4 << 20).await;
+        let (at, _, _pushes) = gateway(&api().await).await;
+        let mut second = caller(&at, SECOND, 4 << 20).await;
 
         let nobody = ask(
             &mut second,
@@ -656,15 +522,34 @@ mod tests {
         assert_eq!(twice.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// A name this role does not answer to is told so, rather than dropped or
-    /// served something misleading.
+    /// A name this role does not answer to is told so — and the name is the one
+    /// the HANDSHAKE settled, which is what makes routing by it worth anything.
     #[tokio::test]
     async fn a_name_this_role_does_not_serve_is_misdirected() {
-        let (gateway, _, _pushes) = gateway(&api().await).await;
-        let mut stranger = caller(&gateway, "elsewhere.example.com", 4 << 20).await;
+        let (at, _, _pushes) = gateway(&api().await).await;
+        let mut stranger = caller(&at, "elsewhere.example.com", 4 << 20).await;
         let answer = ask(
             &mut stranger,
             Request::get("https://elsewhere.example.com/")
+                .body(Empty::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(answer.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    /// And a caller that agreed to one name cannot reach another by asking for
+    /// it in the request. The `Host` is the caller's to write; the name that
+    /// routes is the one it negotiated a certificate for.
+    #[tokio::test]
+    async fn the_host_header_does_not_choose_the_name() {
+        let (at, _, _pushes) = gateway(&api().await).await;
+        // Negotiated for a name this role does not serve, then claims one it
+        // does. If `Host` were what routed, this would be answered.
+        let mut liar = caller(&at, "elsewhere.example.com", 4 << 20).await;
+        let answer = ask(
+            &mut liar,
+            Request::get(format!("https://{FIRST}/-{GROUP}/"))
                 .body(Empty::new())
                 .unwrap(),
         )
@@ -676,8 +561,8 @@ mod tests {
     /// answered without an api behind it or a build named.
     #[tokio::test]
     async fn the_attestation_binds_the_serving_key() {
-        let (gateway, spki, _pushes) = gateway(&api().await).await;
-        let mut caller = caller(&gateway, FIRST, 4 << 20).await;
+        let (at, spki, _pushes) = gateway(&api().await).await;
+        let mut caller = caller(&at, FIRST, 4 << 20).await;
 
         let answer = ask(
             &mut caller,
@@ -722,9 +607,9 @@ mod tests {
     /// else; another caller's request takes a leg of its own.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_caller_that_stops_reading_does_not_stall_another() {
-        let (gateway, _, _pushes) = gateway(&api().await).await;
+        let (at, _, _pushes) = gateway(&api().await).await;
 
-        let mut attacker = caller(&gateway, FIRST, 65_535).await;
+        let mut attacker = caller(&at, FIRST, 65_535).await;
         let mut unread = Vec::new();
         for _ in 0..8 {
             let answer = ask(
@@ -738,7 +623,7 @@ mod tests {
             unread.push(answer);
         }
 
-        let mut victim = caller(&gateway, FIRST, 4 << 20).await;
+        let mut victim = caller(&at, FIRST, 4 << 20).await;
         let body = tokio::time::timeout(Duration::from_secs(10), async {
             let answer = ask(
                 &mut victim,

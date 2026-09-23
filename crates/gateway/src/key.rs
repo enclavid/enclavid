@@ -152,12 +152,10 @@ mod tests {
     #[test]
     fn the_certificate_carries_the_derived_key() {
         let identity = Identity::derived(&[7; 32]).unwrap();
-        let config = crate::tls::server_config(&identity, &["verify.example.com"]).unwrap();
-        let cert = config.cert_resolver.clone();
-        // Building it at all is the assertion that rustls accepted the key and
-        // the certificate as a pair; what they carry is checked by the tests in
-        // `crate::tls`.
-        drop(cert);
+        // Minting it at all is the assertion that rustls accepted the derived
+        // key as one that signs for this certificate; what they carry is
+        // checked by the tests in `crate::tls`.
+        crate::tls::certified(&identity, &["verify.example.com"]).unwrap();
         assert_eq!(identity.spki(), Identity::derived(&[7; 32]).unwrap().spki());
     }
 }

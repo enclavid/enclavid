@@ -29,14 +29,17 @@ safe-logger = { path = "../safe-logger", features = ["device"] }
 fleet-transport = { path = "../fleet-transport" }
 tokio = { version = "1", features = ["full"] }
 
-# The HTTP machinery: the public server, the connections to api, and the
-# placement and retry behaviour around them. Built WITHOUT a TLS backend,
-# because both handshakes are this role's own — the public one terminates on a
-# key this guest minted, and the one to api proves a measurement the caller
-# named, which no general TLS stack can check. See `crate::leg` for how an
-# already-attested connection reaches it.
-pingora-core = { version = "0.9", default-features = false }
-pingora-proxy = { version = "0.9", default-features = false }
+# The HTTP machinery: the public listener, the TLS that terminates on it, the
+# connections to api, and the placement around them.
+#
+# `rustls` and no other backend, pinned the same way `crates/ra-tls` and
+# `crate::tls` pin it — one rustls in the graph, the `ring` provider, no
+# aws-lc and no cmake in a build whose output is a published digest. The public
+# handshake is the library's, answered by a resolver holding a key this guest
+# derived; the leg to api is NOT, because proving a measurement is not something
+# a general TLS stack can do — see `crate::leg`.
+pingora-core = { version = "0.9", default-features = false, features = ["rustls"] }
+pingora-proxy = { version = "0.9", default-features = false, features = ["rustls"] }
 pingora-http = "0.9"
 # Which member of a group a request goes to, and which members can be given
 # work. The selection is round robin and the health state machine — thresholds,
@@ -53,19 +56,12 @@ libc = "0.2"
 # pingora's connector trait is async, and this is how it spells that.
 async-trait = "0.1"
 
-# The public server, and the HTTP/2 client connections to api. `auto` is what
-# dispatches h2 against http/1.1 per public connection. The client is hyper's
-# own per-connection one rather than hyper-util's pooled `Client`: a connection
-# to api belongs to one public connection and is never pooled — see
-# `crate::upstream`.
-hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
-hyper-util = { version = "0.1", features = [
-    "tokio",
-    "server",
-    "server-auto",
-    "http1",
-    "http2",
-] }
+# The CONFIGURATION port only — one HTTP/1.1 server on a port the host pushes
+# to, see `crate::push`. The public side is the proxy library's now, so what
+# was here for it is gone: no client, no HTTP/2, no `server-auto`. The tests
+# need those to play a caller and an api stand-in, and ask for them below.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 # One fixed response body, and the `Bytes` it is built from.
 http-body-util = "0.1"
 bytes = "1"
@@ -107,6 +103,17 @@ ciborium = "0.2"
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
+
+# What only the tests need, so that the measured binary does not carry it.
+#
+# The end-to-end tests play both ends this role sits between: a caller speaking
+# HTTP/2 over TLS, and an api stand-in answering it. Neither shape exists in the
+# binary — the public side is the proxy library's and the leg to api is built
+# through `crate::leg` — so the client and HTTP/2 halves of hyper are asked for
+# HERE. Cargo unifies features per build, so a plain `cargo build` still gets
+# only the server and HTTP/1.1 the configuration port uses.
+[dev-dependencies]
+hyper = { version = "1", features = ["client", "http2"] }
 
 [features]
 # Default: TCP, and a plain HTTP leg to api. That is a developer box, where

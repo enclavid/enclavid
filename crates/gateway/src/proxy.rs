@@ -45,8 +45,9 @@
 //! sealed to the build that made it, so another cannot open it.
 //!
 //! The name the handshake settled decides only WHICH ADDRESS of that group to
-//! use, because one api process serves two ports. It is a field on this
-//! because a connection cannot change the name it agreed to.
+//! use, because one api process listens on more than one port. It is read from
+//! the CONNECTION rather than from the request, because a caller writes its own
+//! `Host` and cannot change the name it agreed to — see `crate::listen`.
 //!
 //! ## Why the label in a path is marked
 //!
@@ -107,14 +108,12 @@ const IDLE: std::time::Duration = std::time::Duration::from_secs(60);
 /// sequential and can neither freeze nor reset one another.
 const STREAMS_PER_LEG: usize = 1;
 
-/// One served name's proxy, built at boot and shared by every caller of it.
+/// The one proxy this role runs, shared by every caller of every name.
 ///
-/// `name` is absent on the one built for names this role does not answer to: a
-/// caller that reached such a name is answered rather than dropped, because the
-/// request is well-formed and this role simply is not its server — see
-/// [`MISDIRECTED`].
+/// One rather than one per name, because the name a request is routed by is a
+/// property of its CONNECTION, not of this object: it is the one the handshake
+/// settled, kept there by `crate::listen` and read back per request.
 pub struct Hop {
-    name: Option<String>,
     table: watch::Receiver<Arc<Upstreams>>,
     proof: attest::Proof,
     ledger: Arc<crate::leg::Ledger>,
@@ -122,17 +121,39 @@ pub struct Hop {
 
 impl Hop {
     pub fn new(
-        name: Option<String>,
         table: watch::Receiver<Arc<Upstreams>>,
         proof: attest::Proof,
         ledger: Arc<crate::leg::Ledger>,
     ) -> Hop {
         Hop {
-            name,
             table,
             proof,
             ledger,
         }
+    }
+
+    /// The name this connection agreed to, if it agreed to one this role
+    /// serves.
+    ///
+    /// Two refusals in one answer, and both are [`MISDIRECTED`]: a caller that
+    /// named nothing has not reached a name, and one that named something this
+    /// table does not declare has reached the wrong server. Neither is a fault
+    /// in the request, which is why neither is a 400.
+    ///
+    /// Read from the connection rather than from the request — see
+    /// `crate::listen` for why `Host` would be the wrong source.
+    fn settled<'a>(&self, session: &Session, table: &'a Upstreams) -> Option<&'a str> {
+        let digest = session.digest()?;
+        let named = digest
+            .ssl_digest
+            .as_ref()?
+            .extension
+            .get::<crate::listen::Name>()?;
+        table
+            .served()
+            .iter()
+            .find(|served| served.eq_ignore_ascii_case(&named.0))
+            .map(String::as_str)
     }
 }
 
@@ -195,14 +216,15 @@ impl ProxyHttp for Hop {
         session: &mut Session,
         ctx: &mut Placed,
     ) -> pingora_core::Result<Box<HttpPeer>> {
+        let table = self.table.borrow().clone();
         // 421 rather than 404: the request is well-formed and this role simply
-        // is not the server for the name it was sent to.
-        let Some(name) = self.name.as_deref() else {
+        // is not the server for the name the connection agreed to.
+        let Some(name) = self.settled(session, &table) else {
             return Err(refuse(MISDIRECTED));
         };
+        let name = name.to_owned();
 
-        let table = self.table.borrow().clone();
-        let (target, minted) = match route(&table, name, session) {
+        let (target, minted) = match route(&table, &name, session) {
             Ok(routed) => routed,
             // 400, because the request is missing something only the caller can
             // supply. Naming a build is not a formality here — it is the whole

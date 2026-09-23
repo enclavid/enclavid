@@ -19,6 +19,11 @@
 //! splice that never holds a key and never sees a plaintext record. The TLS
 //! session begins here.
 //!
+//! The proxy library cannot listen on vsock — it listens on TCP or a unix
+//! socket and offers no trait for a third — so `crate::bridge` carries that
+//! connection one more metre, to a socket inside this guest that the library
+//! does listen on. Everything from the handshake onward is then the library's.
+//!
 //! That is also why there is one public listener rather than one per name. From
 //! outside there is one TLS session per connection, and the name it agreed on is
 //! settled by the handshake. Every name the host declares is this role's, and one
@@ -56,6 +61,7 @@
 mod affinity;
 mod attest;
 mod balance;
+mod bridge;
 mod config;
 mod identity;
 mod key;
@@ -63,6 +69,7 @@ mod leg;
 mod listen;
 mod proxy;
 mod push;
+mod service;
 mod tls;
 mod upstream;
 
@@ -87,17 +94,32 @@ compile_error!(
 
 use std::sync::Arc;
 
-use safe_logger::{debug, info, reason, safe};
+use pingora_core::services::background::background_service;
+use safe_logger::{debug, reason, safe};
 use tokio::sync::watch;
 
 /// How many public connections this role serves at once.
 ///
 /// A ceiling on descriptors and on memory, both of which a public connection
-/// spends — see where it is taken. It is a constant of the build rather than
-/// something the host sets, because the two budgets it divides are this image's:
-/// the descriptor limit it boots with, and the guest's memory. The host decides
-/// how many of these guests to run.
+/// spends — see `crate::bridge`, which is where it is taken. It is a constant of
+/// the build rather than something the host sets, because the two budgets it
+/// divides are this image's: the descriptor limit it boots with, and the guest's
+/// memory. The host decides how many of these guests to run.
+///
+/// STALE, and now doubly so: it was sized when a connection could pin 5 MiB of
+/// windows, and since the bridge each one costs THREE descriptors here rather
+/// than one. It also bounds the wrong half — a leg is opened per request in
+/// flight, not per connection, and one connection may carry a hundred of them.
+/// Derive it from a measured per-connection footprint, and bound legs
+/// separately.
 const MAX_PUBLIC_CONNECTIONS: usize = 256;
+
+/// Where the public connection is handed to the proxy library.
+///
+/// A constant of the build rather than configuration: it is an arrangement
+/// INSIDE this guest, between the bridge and the listener, and nothing outside
+/// can see it or should be able to choose it — see `crate::bridge`.
+const PUBLIC_SOCKET: &str = "/run/gateway-public.sock";
 
 /// A setting this build cannot run without, or the process ends.
 ///
@@ -134,8 +156,26 @@ fn serving_key() -> Result<key::Identity, String> {
     key::Identity::derived(&key::NO_CHIP)
 }
 
-#[tokio::main]
-async fn main() {
+/// A panic ends the PROCESS, not the task it happened on.
+///
+/// Every loop this role runs is a service the server library supervises on a
+/// runtime of its own, and a panicking task there dies quietly: the guest would
+/// go on serving with no configuration port, or with nothing keeping its members
+/// checked, and look perfectly well doing it. Before the library ran them these
+/// loops were awaited on the main task, where a panic ended everything — this is
+/// how that property is kept.
+///
+/// It runs AFTER the logging hook, so the panic is still reported before the
+/// process goes.
+fn end_the_process_on_panic() {
+    let reported = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        reported(info);
+        std::process::abort()
+    }));
+}
+
+fn main() {
     // First, so nothing can speak before the channel exists.
     //
     // Panic locations are on. This binary IS the measured code, so a location
@@ -147,23 +187,11 @@ async fn main() {
     // into.
     safe_logger::install();
     safe_logger::install_panic(true);
+    end_the_process_on_panic();
 
-    // The health port, up before anything that can be slow, and bound on THIS
-    // task rather than inside the spawn — binding inside would turn a failure
-    // into one dead task and a guest that serves with no health port. See
-    // `fleet_transport::health::bind`.
     let health = fleet_transport::health::Health::new();
-    {
-        let health_addr = required("ENCLAVID_ADDRESS_IN_HEALTH");
-        let listener = fleet_transport::health::bind(&health_addr).await;
-        let health = health.clone();
-        tokio::spawn(async move {
-            fleet_transport::health::serve(listener, move || health.body()).await
-        });
-    }
-
+    let health_addr = required("ENCLAVID_ADDRESS_IN_HEALTH");
     let public_addr = required("ENCLAVID_ADDRESS_IN_PUBLIC");
-
     let config_addr = required("ENCLAVID_ADDRESS_IN_CONFIG");
 
     // The key this role serves on, settled before the bind so a guest that
@@ -198,115 +226,81 @@ async fn main() {
     // Every api this role may forward to, and every name it answers to, as the
     // host last pushed them. Empty until the first push, and never read from the
     // command line — see `crate::config` for why it cannot be.
-    let (table, mut current) = watch::channel(Arc::new(upstream::Upstreams::empty()));
+    let (table, current) = watch::channel(Arc::new(upstream::Upstreams::empty()));
+    let (certificate, presented) = watch::channel(None);
+    let inside = bridge::prepare(PUBLIC_SOCKET);
 
-    let config_listener = fleet_transport::bind(&config_addr)
-        .await
-        .unwrap_or_else(|e| {
-            debug!("{e}");
-            safe_logger::error_and_panic!(
-                "gateway: cannot bind the configuration port at {}. Stopping.",
-                safe(&config_addr, reason!("on the measured command line")),
-                reason!("a constant; the address is the host's own configuration")
-            )
-        });
-    info!(
-        "gateway: taking configuration on {}; serving nothing until the first push",
-        safe(&config_addr, reason!("on the measured command line")),
-        reason!("a constant, emitted once at boot before any session exists")
-    );
-
-    // Polled on this task for the life of the process, never spawned: a panic
-    // in it then ends the process instead of one task, and a role that can no
-    // longer be reconfigured does not go on serving a table nobody can change.
-    let pushes = push::serve(config_listener, table);
-    tokio::pin!(pushes);
-
-    // The public port stays closed until there is a table. Open before it, every
-    // request would fail as an unavailable upstream, and the host would see a
-    // guest that answers and cannot tell it from one that routes.
-    tokio::select! {
-        first = current.changed() => first.expect("the sender lives in `pushes`, still held here"),
-        never = &mut pushes => never,
-    }
-
-    // Asking each api what it knows about itself, on this task for the same
-    // reason the push loop is: a role that stopped asking would keep placing new
-    // sessions on members that stopped answering. It follows the table, because
-    // a set of members and the checks asking about it are replaced together.
-    let probes = balance::check_forever(current.clone());
-    tokio::pin!(probes);
-
-    let listener = fleet_transport::bind(&public_addr)
-        .await
-        .unwrap_or_else(|e| {
-            debug!("{e}");
-            safe_logger::error_and_panic!(
-                "gateway: cannot bind the public listener at {}. Stopping.",
-                safe(&public_addr, reason!("on the measured command line")),
-                reason!("a constant; the address is the host's own configuration")
-            )
-        });
-
-    // Said after the bind, not after the spawn: "listening" is a claim about a
-    // socket that exists.
-    info!(
-        "gateway: listening for public connections on {}",
-        safe(&public_addr, reason!("on the measured command line")),
-        reason!("a constant, emitted once at boot before any session exists")
-    );
-    health.declare_healthy();
-
-    // Spawn and return at once. `accept_forever` AWAITS this closure, so doing
-    // the handshake here would put every peer behind the slowest one — which is
-    // the same defect that rules out `axum::serve` for a TLS listener. See
-    // `serve::connection`.
+    // Nothing asynchronous has happened yet, and nothing can: the server builds
+    // its own runtimes, so every port this role takes is taken inside the
+    // service that serves it — see `crate::service`.
     //
-    // The permit is what bounds this role: every public connection costs a
-    // descriptor here, a descriptor and a connection at api, and the memory of
-    // whatever api has sent that the caller has not yet taken. Without a ceiling
-    // one caller opening connections takes all three until an accept fails, and
-    // a failing accept stops every other caller too. Taken BEFORE the spawn, so
-    // the wait happens here and unaccepted connections queue in the listener's
-    // backlog rather than inside this process.
-    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_PUBLIC_CONNECTIONS));
-    // Built once and shared: it holds sizes and timeouts, nothing about a
-    // caller.
-    let conf = Arc::new(pingora_core::server::configuration::ServerConf::default());
-
-    // What it takes to answer a connection — a certificate over the names the
-    // host declared, and a door for each of them — rebuilt whenever those names
-    // change. On this task for the same reason as the others: a role that
-    // stopped rebuilding would present a certificate for names it no longer
-    // serves.
-    let (serving, current_public) = watch::channel(None);
-    let following = listen::follow(current.clone(), identity, proof, conf, serving);
-    tokio::pin!(following);
-
-    let public = fleet_transport::accept_forever(listener, move |stream, peer| {
-        let current_public = current_public.clone();
-        let slots = slots.clone();
-        async move {
-            // Nothing to answer with until the first push has been acted on.
-            // Dropping is the honest answer: a handshake needs a certificate,
-            // and there is none.
-            let Some(public) = current_public.borrow().clone() else {
-                return;
-            };
-            let Ok(slot) = slots.acquire_owned().await else {
-                return;
-            };
-            tokio::spawn(async move {
-                listen::connection(public, stream, peer).await;
-                drop(slot);
-            });
-        }
+    // `None` rather than parsed arguments. The library reads its settings from
+    // an `Opt` it never goes looking for, so this build takes its defaults and
+    // the command line stays what the measurement says it is: the environment
+    // this role reads above, and nothing the library also interprets.
+    let mut server = pingora_core::server::Server::new(None).unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "gateway: the server would not start. Stopping.",
+            reason!("a constant; it reports no address and no caller")
+        )
     });
+    // What this does for a server taking over from an older one: collect its
+    // listening sockets. This role never does that — a guest is replaced whole
+    // and its listener belongs to the host — so with no upgrade asked for, this
+    // reduces to a log line and nothing else. It is here because the library's
+    // own examples put it here, and leaving it out would be a difference from
+    // them that nothing explains.
+    server.bootstrap();
 
-    tokio::select! {
-        never = public => never,
-        never = &mut pushes => never,
-        never = &mut probes => never,
-        never = &mut following => never,
-    }
+    server.add_service(background_service(
+        "health",
+        service::Health {
+            addr: health_addr,
+            state: health.clone(),
+        },
+    ));
+    server.add_service(background_service(
+        "config",
+        service::Config {
+            addr: config_addr,
+            table: std::sync::Mutex::new(Some(table)),
+        },
+    ));
+    server.add_service(background_service(
+        "checks",
+        service::Checks {
+            table: current.clone(),
+        },
+    ));
+    server.add_service(background_service(
+        "certificate",
+        service::Certificate {
+            table: current.clone(),
+            identity,
+            publish: std::sync::Mutex::new(Some(certificate)),
+        },
+    ));
+    server.add_service(background_service(
+        "bridge",
+        service::Bridge {
+            addr: public_addr,
+            to: inside.clone(),
+            at_once: MAX_PUBLIC_CONNECTIONS,
+            table: current.clone(),
+            state: health,
+        },
+    ));
+
+    // The library's own listener, its own TLS, and one proxy for every name —
+    // see `crate::listen`.
+    let hop = proxy::Hop::new(current, proof, Arc::new(leg::Ledger::default()));
+    server.add_service(listen::service(
+        &inside,
+        &server.configuration.clone(),
+        hop,
+        presented,
+    ));
+
+    server.run_forever()
 }
