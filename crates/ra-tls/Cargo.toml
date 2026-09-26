@@ -5,11 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Intra-fleet mutual RA-TLS (orchestrator <-> compile/execution workers). Each side
-# mints an EPHEMERAL self-signed TLS cert whose SubjectPublicKeyInfo is bound into an
-# attestation quote carried in a custom X.509 extension; the rustls handshake verifies
-# the peer's quote DURING the handshake (custom verifier), so a valid TLS session
-# proves the peer runs the pinned measurement and owns the TLS key — no CA, no KMS.
+# RA-TLS: a server mints an EPHEMERAL self-signed TLS cert whose SubjectPublicKeyInfo
+# is bound into an attestation quote carried in a custom X.509 extension; the rustls
+# handshake verifies the peer's quote DURING the handshake (custom verifier), so a
+# valid TLS session proves the peer runs an accepted measurement and owns the TLS key
+# — no CA, no KMS. Mutual on fleet legs, one direction on public surfaces, and the
+# same evidence on its own for a surface whose certificate a browser checks by name.
 #
 # The attestation backend is NOT selected here. This crate takes an `Arc<dyn Attestor>`
 # per config, so it names no backend and enables no feature on `enclavid-attestation` —
@@ -26,7 +27,8 @@ rustls-pki-types = "1"
 
 # Mint the ephemeral self-signed cert + embed the quote in a custom extension.
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
-# Parse the peer's leaf cert on verify: pull our extension + the SPKI DER.
+# Read our extension off the peer's leaf cert, which webpki cannot reach. Only
+# that: the SPKI the quote binds comes from rustls's own parse.
 x509-parser = "0.16"
 
 # CBOR-encode the `Quote` into the cert extension (project is CBOR-native).

@@ -25,8 +25,15 @@ const MOCK_FORMAT: &str = "mock-ed25519";
 /// The measurement every participant in a dev fleet claims and pins. Not a
 /// launch digest of anything — a stand-in that lets the pin path be exercised
 /// where no hardware measurement exists.
-pub const DEV_FLEET_MEASUREMENT: &str =
-    "de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7d";
+///
+/// Shaped like one all the same: 96 lowercase hex characters, the width of an
+/// SNP launch digest. Every place a measurement is checked on its way through
+/// the fleet expects that shape, and a stand-in that fails one of them is a dev
+/// fleet that never routes.
+pub const DEV_FLEET_MEASUREMENT: &str = concat!(
+    "de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7",
+    "de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7de7",
+);
 
 /// Seed behind [`MockAttestor::dev_fleet`]. A literal in a public source tree,
 /// which is precisely why it is confined to the `mock` backend: anything that
@@ -47,7 +54,7 @@ impl MockAttestor {
     pub fn new_random() -> Self {
         Self {
             signing_key: SigningKey::generate(&mut OsRng),
-            measurement: "0".repeat(64),
+            measurement: "0".repeat(96),
         }
     }
 
@@ -133,6 +140,12 @@ impl Attestor for MockAttestor {
         if payload.measurement != self.measurement {
             return Err(AttestationError::MeasurementMismatch);
         }
+        // The envelope's copy is the sender's claim and the signed one is what
+        // counts, so the two must agree — as the SNP backend requires of a real
+        // report. A verifier reads the envelope's afterwards.
+        if quote.measurement != payload.measurement {
+            return Err(AttestationError::MeasurementMismatch);
+        }
 
         let expected_hash = expected.hash();
         if payload.report_data_hex != hex::encode(expected_hash) {
@@ -179,8 +192,7 @@ mod tests {
     fn binding_mismatch_rejected() {
         let attestor = MockAttestor::new_random();
         let quote = attestor.mint(&sample_data()).unwrap();
-        let mut tampered = sample_data();
-        tampered.session_id = "ses_OTHER".to_string();
+        let tampered = ReportData::session("ses_OTHER".to_string(), "sha256:7e93fba".to_string());
         let err = attestor.verify(&quote, &tampered).unwrap_err();
         assert!(matches!(err, AttestationError::BindingMismatch));
     }
@@ -203,15 +215,40 @@ mod tests {
         ));
     }
 
+    /// An envelope claiming another measurement than the one it signed is
+    /// refused, since what a verifier reads afterwards is the envelope's.
+    #[test]
+    fn an_envelope_claiming_another_measurement_is_rejected() {
+        let attestor = MockAttestor::new_random();
+        let mut quote = attestor.mint(&sample_data()).unwrap();
+        quote.measurement = "1".repeat(96);
+        let err = attestor.verify(&quote, &sample_data()).unwrap_err();
+        assert!(matches!(err, AttestationError::MeasurementMismatch));
+    }
+
     #[test]
     fn cross_attestor_rejected() {
         // Two attestors with the same pinned measurement (so the
         // measurement check passes) but different signing keys — verify
         // must fall through to signature failure.
-        let a = MockAttestor::from_seed([1u8; SECRET_KEY_LENGTH], "0".repeat(64));
-        let b = MockAttestor::from_seed([2u8; SECRET_KEY_LENGTH], "0".repeat(64));
+        let a = MockAttestor::from_seed([1u8; SECRET_KEY_LENGTH], "0".repeat(96));
+        let b = MockAttestor::from_seed([2u8; SECRET_KEY_LENGTH], "0".repeat(96));
         let quote_a = a.mint(&sample_data()).unwrap();
         let err = b.verify(&quote_a, &sample_data()).unwrap_err();
         assert!(matches!(err, AttestationError::BadSignature));
+    }
+
+    /// The stand-in has to pass wherever a real measurement is checked — a
+    /// pin, a push — and each of those wants 96 lowercase hex characters, the
+    /// SHA-384 an SNP report carries. At 64 it failed the push check, so a dev
+    /// fleet could be configured but never routed.
+    #[test]
+    fn the_dev_fleet_measurement_is_shaped_like_a_measurement() {
+        assert_eq!(DEV_FLEET_MEASUREMENT.len(), 96);
+        assert!(
+            DEV_FLEET_MEASUREMENT
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
     }
 }

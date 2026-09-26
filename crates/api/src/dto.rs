@@ -30,7 +30,7 @@ use crate::locale::Locale;
 
 /// The pinned policy of a session, echoed to the consumer: the full OCI
 /// reference plus its `sha256:<hex>` digest substring (the same value the
-/// attestation quote binds in `ReportData.policy_digest`), and every plugin
+/// attestation quote binds as the `policy_digest` of `ReportData::Session`), and every plugin
 /// fused alongside it. Shared by the create response (`CreateSessionResponse`)
 /// and the read view (`SessionView`). All refs are digest-pinned — the TEE
 /// only ever runs digest-pinned artifacts.

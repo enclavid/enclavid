@@ -1,14 +1,26 @@
-//! Intra-fleet mutual **RA-TLS** — attested TLS for the orchestrator ↔ worker hops
-//! (`api` ↔ `compile-worker` / `execution-worker`).
+//! **RA-TLS** — TLS whose certificate is authenticated by an attestation quote
+//! rather than by a CA.
 //!
-//! Each side mints an EPHEMERAL self-signed TLS cert. Its
-//! `SubjectPublicKeyInfo` (SPKI) is bound into an attestation [`Quote`]
-//! (`report_data = ReportData::for_ratls(spki)`), and the quote is carried in a
-//! custom X.509 extension on the cert. The rustls handshake runs a CUSTOM verifier
-//! that, DURING the handshake, pulls the peer's quote out of its leaf cert, recomputes
-//! the SPKI binding, and asks the [`Attestor`] to verify the quote (signature, binding,
-//! measurement). So a completed TLS session PROVES the peer runs a pinned measurement
-//! and owns the very TLS key it presented — no CA, no KMS, no post-handshake window.
+//! A server mints an EPHEMERAL self-signed TLS cert. Its `SubjectPublicKeyInfo`
+//! (SPKI) is bound into an attestation [`Quote`] (`report_data =
+//! ReportData::for_ratls(spki)`), and the quote is carried in a custom X.509
+//! extension on the cert — the [`evidence`] for that key. The rustls handshake runs
+//! a CUSTOM verifier that, DURING the handshake, pulls the peer's quote out of its
+//! leaf cert, recomputes the SPKI binding, and asks the [`Attestor`] to verify the
+//! quote (signature, binding, measurement). So a completed TLS session PROVES the
+//! peer runs a measurement the verifier accepts and owns the very TLS key it
+//! presented — no CA, no KMS, no post-handshake window.
+//!
+//! Two kinds of leg, two pairs of configs. A FLEET leg, where both ends are ours,
+//! is mutual: [`server_config`] and [`client_config`] each present a certificate and
+//! each verify the other. A PUBLIC surface, reached by callers that can attest
+//! nothing, is one direction: [`public_server_config`] asks the caller for nothing,
+//! and [`public_client_config`] is the caller that verifies and presents nothing.
+//!
+//! The evidence also travels on its own, for a surface a browser reaches: a
+//! certificate checked by name has no room for a quote, so the quote is handed out
+//! beside it, bound to that certificate's key. [`evidence`] makes it and
+//! [`read_evidence`] reads it back, so the two carriers share one shape.
 //!
 //! **This crate holds no opinion about which backend attests.** [`server_config`] and
 //! [`client_config`] take an `Arc<dyn Attestor>` and a [`MeasurementPolicy`] as arguments,
@@ -50,10 +62,12 @@ const RATLS_SERVER_NAME: &str = "ratls.enclavid.internal";
 /// `rustls::Error` inside the handshake, not here).
 #[derive(Debug)]
 pub enum RaTlsError {
-    /// Minting the ephemeral cert (rcgen) or serializing the quote failed.
+    /// Minting the ephemeral cert (rcgen) failed.
     Cert(String),
     /// The attestation backend failed to mint a quote.
     Attest(String),
+    /// Encoding the evidence, or decoding it, failed.
+    Evidence(String),
     /// Building the rustls config failed.
     Config(String),
 }
@@ -63,6 +77,7 @@ impl fmt::Display for RaTlsError {
         match self {
             RaTlsError::Cert(m) => write!(f, "ra-tls cert: {m}"),
             RaTlsError::Attest(m) => write!(f, "ra-tls attest: {m}"),
+            RaTlsError::Evidence(m) => write!(f, "ra-tls evidence: {m}"),
             RaTlsError::Config(m) => write!(f, "ra-tls config: {m}"),
         }
     }
@@ -149,9 +164,9 @@ impl MeasurementPolicy {
 /// The launch digest of the peer, once the handshake that verified it is over.
 ///
 /// The value lives in a field of the quote that the SENDER writes, so on its own
-/// it is a claim rather than a fact. What makes it a fact is that
-/// [`verify_ratls_cert`] refused this connection unless the field equalled the
-/// measurement inside the firmware-signed report, and unless that report was
+/// it is a claim rather than a fact. What makes it a fact is that the verifier
+/// refused this connection unless the field equalled the measurement inside
+/// the firmware-signed report, and unless that report was
 /// bound to this certificate's own key. Read off an unverified certificate, it
 /// is whatever the sender typed.
 ///
@@ -195,13 +210,25 @@ pub fn peer_identity(conn: &rustls::CommonState) -> Option<(String, String)> {
         return None;
     }
     let cert = conn.peer_certificates()?.first()?;
-    let (_, parsed) = x509_parser::parse_x509_certificate(cert).ok()?;
+    let quote = carried_quote(cert).ok()?;
+    Some((quote.measurement, quote.chip_id))
+}
+
+/// The quote a certificate carries in our extension, decoded and NOT verified.
+///
+/// One function, so the verifier and [`peer_identity`] read the same extension
+/// the same way. x509-parser reads it because webpki offers no way to reach an
+/// extension it does not know — and that is all x509-parser reads: the key the
+/// quote must bind comes from rustls's own parse, in [`verify_ratls_cert`].
+fn carried_quote(cert: &[u8]) -> Result<Quote, String> {
+    let (_, parsed) =
+        x509_parser::parse_x509_certificate(cert).map_err(|e| format!("parse peer cert: {e}"))?;
     let ext = parsed
         .extensions()
         .iter()
-        .find(|e| e.oid.to_id_string() == RATLS_OID_DOTTED)?;
-    let quote: Quote = ciborium::from_reader(ext.value).ok()?;
-    Some((quote.measurement, quote.chip_id))
+        .find(|e| e.oid.to_id_string() == RATLS_OID_DOTTED)
+        .ok_or("peer cert carries no attestation quote")?;
+    read_evidence(ext.value).map_err(|e| e.to_string())
 }
 
 /// Build a `rustls::Error` for an RA-TLS verification failure (surfaces to the peer as a
@@ -210,9 +237,46 @@ fn ratls_error(msg: impl Into<String>) -> rustls::Error {
     rustls::Error::General(format!("ra-tls: {}", msg.into()))
 }
 
+/// The evidence for a key: a quote bound to its DER `SubjectPublicKeyInfo`,
+/// encoded as it travels.
+///
+/// What an RA-TLS certificate carries in its extension, and the one place that
+/// shape is made. A surface that hands out the same evidence another way — beside
+/// a certificate a browser checks by name, which has no room for a quote — calls
+/// this rather than repeating it, so what it serves and what a certificate
+/// carries cannot drift apart.
+pub fn evidence(spki_der: Vec<u8>, attestor: &dyn Attestor) -> Result<Vec<u8>, RaTlsError> {
+    let quote = attestor
+        .mint(&ReportData::for_ratls(spki_der))
+        .map_err(|e| RaTlsError::Attest(e.to_string()))?;
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&quote, &mut encoded)
+        .map_err(|e| RaTlsError::Evidence(format!("encode quote: {e}")))?;
+    Ok(encoded)
+}
+
+/// The quote that [`evidence`] carries, read back.
+///
+/// Decoding only. Whether the quote is genuine, bound to the key in front of the
+/// reader, and of a measurement it accepts is the verifier's to decide — and
+/// until it has, every field here is the sender's claim.
+pub fn read_evidence(encoded: &[u8]) -> Result<Quote, RaTlsError> {
+    ciborium::from_reader(encoded).map_err(|e| RaTlsError::Evidence(format!("decode quote: {e}")))
+}
+
 /// Mint one ephemeral self-signed cert whose SPKI is bound into an attestation quote,
 /// with the quote CBOR-embedded in the [`RATLS_OID_ARCS`] extension. Returns the cert +
 /// its private key for a rustls config.
+///
+/// **Nothing here expires.** The quote binds the key and says nothing about when, the
+/// verifier reads no clock, and every config that presents a certificate mints once and
+/// keeps it for its lifetime. So a private key taken from a running process keeps
+/// passing this verifier for as long as its quote does — while the TCB it was minted at
+/// stays above the verifier's floor. What bounds such a theft is what the verifier does
+/// with the measurement. One that pins measurements stops taking the key once its build
+/// leaves the pin, which is what rolling to a new build does. One that accepts any
+/// measurement never stops; it can only keep the stolen identity to what that
+/// measurement reaches — see [`peer_measurement`].
 fn mint_cert(
     attestor: &dyn Attestor,
 ) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), RaTlsError> {
@@ -220,15 +284,7 @@ fn mint_cert(
     // The DER SubjectPublicKeyInfo the peer will parse out of the cert — the exact bytes
     // the quote binds. `verify_ratls_cert` recomputes the binding from the peer cert's
     // SPKI, so both ends MUST see identical bytes (they do: this is the cert's own SPKI).
-    let spki_der = key_pair.public_key_der();
-    let report_data = ReportData::for_ratls(spki_der);
-    let quote = attestor
-        .mint(&report_data)
-        .map_err(|e| RaTlsError::Attest(e.to_string()))?;
-
-    let mut quote_cbor = Vec::new();
-    ciborium::into_writer(&quote, &mut quote_cbor)
-        .map_err(|e| RaTlsError::Cert(format!("encode quote: {e}")))?;
+    let quote_cbor = evidence(key_pair.public_key_der(), attestor)?;
 
     // No SANs / no CA — the cert is authenticated by the embedded quote, not by name.
     let mut params = rcgen::CertificateParams::new(Vec::<String>::new())
@@ -252,29 +308,24 @@ fn mint_cert(
 /// the peer's leaf cert, pull the quote from our extension, recompute the SPKI binding,
 /// and have the attestor verify the quote + pin the measurement. Pure, synchronous —
 /// runs INSIDE the rustls handshake (verify-DURING), so there is no unverified-peer window.
+///
+/// It reads no clock: the `now` rustls offers is ignored by both verifier roles. See
+/// [`mint_cert`] for what evidence that never expires costs.
 fn verify_ratls_cert(
     end_entity: &CertificateDer<'_>,
     attestor: &dyn Attestor,
     policy: &MeasurementPolicy,
 ) -> Result<(), rustls::Error> {
-    use x509_parser::prelude::*;
+    let quote = carried_quote(end_entity).map_err(ratls_error)?;
 
-    let (_, cert) = X509Certificate::from_der(end_entity.as_ref())
-        .map_err(|e| ratls_error(format!("parse peer cert: {e}")))?;
-
-    // Pull OUR quote extension.
-    let ext = cert
-        .extensions()
-        .iter()
-        .find(|e| e.oid.to_id_string() == RATLS_OID_DOTTED)
-        .ok_or_else(|| ratls_error("peer cert carries no attestation quote"))?;
-    let quote: Quote =
-        ciborium::from_reader(ext.value).map_err(|e| ratls_error(format!("decode quote: {e}")))?;
-
-    // Recompute the binding from THE PEER CERT'S OWN SPKI (raw DER of the
-    // SubjectPublicKeyInfo) — the same bytes `mint_cert` fed to `for_ratls`.
-    let spki_der = cert.public_key().raw.to_vec();
-    let expected = ReportData::for_ratls(spki_der);
+    // The key the quote must bind, taken from the parse that also checks possession.
+    // rustls proves the peer holds its private key by verifying the handshake signature
+    // against webpki's reading of this certificate; binding the key some other parser
+    // found would leave room for a certificate the two read differently — one key
+    // attested, another proven. Same bytes `mint_cert` fed to `for_ratls`: webpki
+    // re-encodes the SPKI as DER, which is how rcgen wrote it.
+    let spki = rustls::server::ParsedCertificate::try_from(end_entity)?.subject_public_key_info();
+    let expected = ReportData::for_ratls(spki.as_ref().to_vec());
 
     attestor
         .verify(&quote, &expected)
@@ -555,12 +606,47 @@ mod tests {
             .iter()
             .find(|e| e.oid.to_id_string() == RATLS_OID_DOTTED)
             .unwrap();
-        let quote: Quote = ciborium::from_reader(ext.value).unwrap();
+        let quote = read_evidence(ext.value).unwrap();
         let (_, b) = X509Certificate::from_der(cert_b.as_ref()).unwrap();
         let wrong = ReportData::for_ratls(b.public_key().raw.to_vec());
         assert!(
             attestor.verify(&quote, &wrong).is_err(),
             "quote must not verify vs another SPKI"
+        );
+    }
+
+    /// The same swap through the verifier itself: a genuine quote carried by a certificate
+    /// for another key is refused. The test above hands the attestor the wrong SPKI by
+    /// hand; this one leaves the verifier to read the key off the certificate in front of
+    /// it, which is the read an attacker would have to fool.
+    #[test]
+    fn a_quote_grafted_onto_another_key_is_refused() {
+        let attestor: Arc<dyn Attestor> =
+            Arc::new(MockAttestor::from_seed([6u8; 32], "0".repeat(64)));
+        let genuine = evidence(
+            rcgen::KeyPair::generate().unwrap().public_key_der(),
+            &*attestor,
+        )
+        .unwrap();
+
+        let other = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params
+            .custom_extensions
+            .push(rcgen::CustomExtension::from_oid_content(
+                RATLS_OID_ARCS,
+                genuine,
+            ));
+        let grafted = params.self_signed(&other).unwrap();
+
+        // Refused at the binding, not earlier: the certificate is well-formed and the quote
+        // is genuine, so any other refusal would leave this untested.
+        let err = verify_ratls_cert(grafted.der(), &*attestor, &MeasurementPolicy::AcceptAny)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&enclavid_attestation::AttestationError::BindingMismatch.to_string()),
+            "{err}"
         );
     }
 

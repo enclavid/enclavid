@@ -18,10 +18,14 @@ mock = ["dep:ed25519-dalek", "dep:rand_core"]
 snp-dev = ["dep:sev", "dep:ed25519-dalek", "dep:rand_core"]
 # Prod SEV-SNP backend: `/dev/sev-guest` mint + AMD VCEK→ASK→ARK chain
 # verification against a compiled-in root.
-sev-snp = ["dep:sev", "dep:ciborium", "dep:serde_bytes", "dep:x509-parser"]
+sev-snp = ["dep:sev", "dep:ciborium", "dep:x509-parser"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# Byte fields encode as byte strings rather than per-byte integer arrays: the
+# quote's blob in every build, which rides inside an X.509 extension on every
+# RA-TLS handshake, and the prod backend's report and certificates inside it.
+serde_bytes = "0.11"
 serde_json = "1"
 sha2 = "0.10"
 hex = "0.4"
@@ -33,10 +37,8 @@ rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 # `sev-snp` backend will also use the firmware + cert-chain APIs.
 sev = { version = "8", default-features = false, features = ["snp", "crypto_nossl", "serde"], optional = true }
 # Quote envelope for the prod backend. CBOR because the quote rides inside an
-# X.509 extension on every RA-TLS handshake; `serde_bytes` so the report and
-# certificates encode as byte strings rather than per-byte integer arrays.
+# X.509 extension on every RA-TLS handshake.
 ciborium = { version = "0.2", optional = true }
-serde_bytes = { version = "0.11", optional = true }
 # The chip a VCEK was issued for rides in an X.509 extension AMD signs. `sev`
 # verifies the chain but never reads that field, so binding a certificate to
 # the report it signs needs a general parser. Already in the lock via
@@ -47,6 +49,7 @@ x509-parser = { version = "0.16", optional = true }
 # Builds a certificate carrying the HWID extension, so what is read out of one
 # can be tested without a VCEK from AMD.
 rcgen = { version = "0.13", default-features = false, features = ["ring"] }
-# Decodes the captured quote in `tests/a_real_part.rs`. The crate itself takes
-# it optionally, with the backend that encodes one.
+# Decodes the captured quote in `tests/a_real_part.rs`, and pins how a quote is
+# encoded in the unit tests. The crate itself takes it optionally, with the
+# backend that encodes one.
 ciborium = "0.2"

@@ -2,7 +2,9 @@
 //!
 //! Every other test in this crate verifies something this crate also minted,
 //! with a software key. This one holds bytes that came off an AMD Milan part in
-//! the fleet: the gateway's own quote, the certificate AMD's key service issued
+//! the fleet: the gateway's own quote — captured while `quote_blob` was still
+//! written as an array of integers, which the decoder still reads — the
+//! certificate AMD's key service issued
 //! for that chip at that TCB, and the public key of the certificate the
 //! connection presented. Nothing here can be produced by running the tests —
 //! the material was captured once and checked in.

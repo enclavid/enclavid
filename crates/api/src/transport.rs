@@ -13,7 +13,7 @@
 //! written against it has to complete the handshake INSIDE `accept` and
 //! therefore serially — one peer stalling mid-handshake holds up every other
 //! peer's accept, and a full attestation verification is not a fast handshake. A
-//! refused handshake would also land in axum's `after_accept_error`, which
+//! refused handshake would also land in axum's `handle_accept_error`, which
 //! classifies a rustls error as a listener problem and throttles accepts to one
 //! per second.
 //!
@@ -49,10 +49,17 @@ use safe_logger::{info, reason, safe};
 
 /// What `serve` needs to wrap a connection, or nothing where it does not.
 ///
-/// Built ONCE and cloned into both surfaces. `enclavid_ra_tls::server_config`
-/// mints a fresh certificate on every call, so building one per surface would
-/// give this process two identities and two quotes, for no reason a peer could
-/// make sense of.
+/// Built ONCE and cloned into both surfaces. The server config behind it —
+/// `enclavid_ra_tls::public_server_config`, through
+/// `endorsement::inbound_server_config` — mints a fresh certificate on every
+/// call, so building one per surface would give this process two identities and
+/// two quotes, for no reason a peer could make sense of.
+///
+/// Once per process, too, and nothing in the certificate or its quote expires —
+/// see `enclavid_ra_tls`. What checks it is the gateway, which takes it for the
+/// build a caller named: so the key of this surface, stolen from a running api,
+/// reaches only callers still naming this build, and rolling to a new build is
+/// what ends that.
 #[cfg(feature = "vsock")]
 pub type Acceptor = tokio_rustls::TlsAcceptor;
 
