@@ -16,8 +16,10 @@ repository.workspace = true
 # handshake is the sole reason this binary must exist at all — general-purpose
 # proxies can splice, but none can emit the preamble.
 #
-# Deps are tokio + clap only. Nothing from the TEE side: the relay is untrusted
-# and must not be able to interpret a single byte it carries.
+# Deps are tokio + clap, and ppp to WRITE one PROXY protocol header from the
+# accepted socket's own addresses. Nothing from the TEE side: the relay is
+# untrusted and must not be able to interpret a single byte it carries — and
+# none of those bytes ever reaches ppp.
 
 [dependencies]
 tokio = { version = "1", features = [
@@ -29,6 +31,9 @@ tokio = { version = "1", features = [
     "time",
 ] }
 clap = { version = "4.5", features = ["derive"] }
+# Writes the header `--proxy-protocol` asks for — see `proxy_header`. The most
+# used implementation, and the one the gateway reads the header with.
+ppp = "2"
 
 # AF_VSOCK exists only on Linux, and this binary only ever RUNS on Linux — but it
 # must still build on a dev machine, so the dependency is target-conditional

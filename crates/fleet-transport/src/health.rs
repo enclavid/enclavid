@@ -44,8 +44,8 @@
 //! request" — no request exists.
 //!
 //! That is why this lives here and not in each role. The invariant is one
-//! function to review and one `grep` to check, instead of four copies that agree
-//! today.
+//! function to review and one `grep` to check, instead of a copy per role that
+//! agrees today.
 //!
 //! It has one consequence a prober's author needs: **do not send anything.**
 //! Closing a socket that still holds unread bytes sends RST rather than FIN, so
@@ -79,11 +79,11 @@
 //!
 //! # The direction is unusual, and that is convenient
 //!
-//! Every other leg goes guest → the host on CID 2 → a relay → a guest, because
-//! vsock addresses guest↔host and there is no guest-to-guest. This one is the
-//! other way: the host dials the guest's own CID, which the VMM exposes
+//! A leg between roles goes guest → the host on CID 2 → a relay → a guest,
+//! because vsock addresses guest↔host and there is no guest-to-guest. This one
+//! is the other way: the host dials the guest's own CID, which the VMM exposes
 //! natively. So the health plane needs nothing on the host and shares no path
-//! with the data plane.
+//! with the legs between roles.
 
 use safe_logger::{debug, info, reason, safe};
 
@@ -199,10 +199,9 @@ pub async fn bind(addr: &str) -> crate::Listener {
 /// current rather than one captured at bind time.
 ///
 /// What to do about an accept that fails is not decided here. That belongs to
-/// [`crate::accept_forever`], which is the same decision for every listener in
-/// this workspace and is documented there — including why a probe that merely
-/// went away is passed over in silence while a listener that cannot accept at
-/// all is not.
+/// [`crate::Incoming`], which makes the same decision for every guest listener
+/// and is documented there — including why a probe that merely went away is
+/// passed over in silence while a listener that cannot accept at all is not.
 pub async fn serve<F>(listener: crate::Listener, body: F) -> !
 where
     F: Fn() -> Vec<u8>,

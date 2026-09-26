@@ -1,5 +1,6 @@
-//! The intra-fleet transport: the byte stream api's dials and its peers'
-//! listeners run RA-TLS over.
+//! The fleet transport: the byte stream every role listens and dials on — the
+//! legs between roles that run RA-TLS over it, and the ports the host reaches a
+//! guest on (a role's public door, its configuration port, its health port).
 //!
 //! Two arms, chosen at compile time by the `vsock` feature, because which one a
 //! binary needs is a fact about where it runs rather than a runtime choice. A
@@ -16,6 +17,8 @@
 //! satisfies what RA-TLS and remoc want of it.
 
 pub mod health;
+#[cfg(feature = "tower-adapter")]
+pub mod service;
 
 #[cfg(all(feature = "vsock", not(target_os = "linux")))]
 compile_error!(
@@ -247,18 +250,34 @@ pub async fn bind(addr: &str) -> std::io::Result<Listener> {
 }
 
 impl Listener {
-    /// Accept one connection. The second element is the peer, for logging only —
-    /// it carries no authority, since who the peer IS is settled by the RA-TLS
-    /// handshake that runs over the stream, not by its address.
-    pub async fn accept(&mut self) -> std::io::Result<(Stream, String)> {
-        let (stream, peer) = self.inner.accept().await?;
-        Ok((stream, format!("{peer:?}")))
+    /// The connections arriving here, for ever. The only way to take one.
+    pub fn incoming(self) -> Incoming {
+        Incoming {
+            listener: self,
+            waiting: None,
+        }
+    }
+
+    /// One raw accept, error and all. Private: what to do with the error is
+    /// [`Incoming`]'s to decide, once, and a public accept would invite every
+    /// caller to decide it again.
+    ///
+    /// Polled rather than awaited because both transports offer it over `&self`,
+    /// which is what lets [`Incoming`] hold the listener without a borrow
+    /// outliving a single poll.
+    fn poll_accept(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<(Stream, String)>> {
+        self.inner
+            .poll_accept(cx)
+            .map_ok(|(stream, peer)| (stream, format!("{peer:?}")))
     }
 
     /// The address this listener actually bound, as a string a [`dial`] would
-    /// accept on the same arm. Its one caller is a test that binds port 0 and
-    /// needs to know what the OS chose; a role never asks, because a role was
-    /// told its address by the measured command line.
+    /// accept on the same arm. Only tests call it, to learn which port the OS
+    /// chose for port 0; a role never asks, because a role was told its address
+    /// by the measured command line.
     pub fn local_addr(&self) -> std::io::Result<String> {
         #[cfg(not(feature = "vsock"))]
         {
@@ -282,36 +301,103 @@ impl Listener {
 /// asking ten times a second does not make that happen sooner.
 const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// What to do after an accept failed. The whole policy, in one place.
+/// One connection, and where it came from.
 ///
-/// Separate from [`accept_forever`] and public because not every accept loop
-/// here can BE `accept_forever`: the `axum::serve::Listener` adapters have to
-/// hand one connection back per call, which a loop that never returns cannot
-/// do. They share this instead — and this, rather than the loop, is what was
-/// actually being written out once per call site and getting it wrong.
+/// The peer is for logging only — it carries no authority, since who the peer
+/// IS is settled by whatever handshake runs over the stream, not by its
+/// address.
+pub struct Accepted {
+    pub stream: Stream,
+    pub peer: String,
+}
+
+/// The connections arriving at one listener.
+///
+/// This is the one accept loop in the crate; everything that takes connections
+/// is a few lines over it — [`accept_forever`] here, `service::serve` for a
+/// role driving a `tower` service. What each hand-written loop used to get
+/// wrong was never the loop but the error arm, and the error arm is inside this
+/// type and nowhere else.
+///
+/// **It never fails and never ends.** A listener has no end, and what to do
+/// with a failed accept is already decided inside this type, so
+/// [`Incoming::next`] returns a connection and there is nothing for a caller to
+/// handle or to get wrong: a peer that went away is skipped, and a listener
+/// that cannot accept at all is waited out and reported.
+pub struct Incoming {
+    listener: Listener,
+    /// Set only while a listener that could not accept AT ALL is being waited
+    /// out. Allocated on that path and no other.
+    waiting: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl Incoming {
+    /// The next connection.
+    ///
+    /// Safe to drop part-way: nothing is taken off the listener until a
+    /// connection is returned, and a wait in progress is kept for the next
+    /// call rather than restarted.
+    pub async fn next(&mut self) -> Accepted {
+        std::future::poll_fn(|cx| self.poll_accepted(cx)).await
+    }
+
+    fn poll_accepted(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Accepted> {
+        use std::future::Future as _;
+        use std::task::Poll;
+        loop {
+            if let Some(waiting) = self.waiting.as_mut() {
+                std::task::ready!(waiting.as_mut().poll(cx));
+                self.waiting = None;
+            }
+            match self.listener.poll_accept(cx) {
+                Poll::Ready(Ok((stream, peer))) => return Poll::Ready(Accepted { stream, peer }),
+                Poll::Ready(Err(e)) => match after_failed_accept(&e) {
+                    AfterAccept::Again => continue,
+                    AfterAccept::Wait => {
+                        self.waiting = Some(Box::pin(tokio::time::sleep(ACCEPT_RETRY_DELAY)));
+                    }
+                },
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// What to do next after an accept failed.
+enum AfterAccept {
+    /// Accept again at once.
+    Again,
+    /// Wait [`ACCEPT_RETRY_DELAY`] first.
+    Wait,
+}
+
+/// Report an accept failure and say what to do about it. The whole policy.
 ///
 /// # Two kinds of error, wanting opposite treatment
 ///
 /// A connection-level one means the peer went away between its connect and the
 /// accept. The queued entry went with it, so the next accept finds the queue
-/// shorter and parks normally — return at once and try again. Nothing is
-/// reported outward either: every listener that calls this has the host at the
-/// far end, so a connection that died on the way is something the host can
-/// already see from its own side.
+/// shorter and parks normally — try again at once. Nothing is reported outward
+/// either: every listener here has the host at the far end, so a connection
+/// that died on the way is something the host can already see from its side.
 ///
-/// Anything else means the accept could not be performed at all — descriptors,
-/// memory — and the connection is STILL queued. The listener therefore stays
-/// readable, `accept` returns the same error immediately, and a bare retry is a
-/// spin: on a role whose `debug!` is compiled out, a silent one. It is also the
-/// only accept failure the host cannot observe from its end, which is why this
-/// one goes outward where the connection errors do not.
+/// Anything else is this process running short — descriptors, memory. Usually
+/// the kernel could not complete the accept at all, the connection is still
+/// queued, the listener stays readable, and a bare retry would fail the same
+/// way at once: a spin, and on a role whose `debug!` is compiled out a silent
+/// one. Sometimes the kernel did hand the connection over and registering it
+/// failed afterwards, in which case that one connection is closed and the next
+/// accept would succeed — but waiting is the right answer either way, because
+/// the shortage is what caused it. It is also the only accept failure the host
+/// cannot observe from its end, which is why this one goes outward where the
+/// connection errors do not.
 ///
 /// The line names no role. Each runs in its own guest with its own log device,
 /// so which one is speaking is already settled by where the line arrived.
-pub async fn after_accept_error(e: &std::io::Error) {
+fn after_failed_accept(e: &std::io::Error) -> AfterAccept {
     if is_connection_error(e) {
         safe_logger::debug!("accept: one connection went away: {e}");
-        return;
+        return AfterAccept::Again;
     }
     safe_logger::warn!(
         "accept failed ({:?}); this guest is taking no connections until it clears. \
@@ -328,30 +414,24 @@ pub async fn after_accept_error(e: &std::io::Error) {
         )
     );
     safe_logger::debug!("  cause: {e}");
-    tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+    AfterAccept::Wait
 }
 
 /// Accept for ever, handing each connection to `on_conn`.
-///
-/// This loop was written four times — once per role and once for the health
-/// port — so it is written here instead. What each of those four got wrong was
-/// not the loop but the error arm; that lives in [`after_accept_error`], which
-/// is also what the listeners that cannot use this loop call.
 ///
 /// `on_conn` is awaited, which means it holds up the next accept: a handler
 /// doing real work must spawn and return. The health port deliberately does
 /// not, and its comment says why — staying serial is what keeps a burst of
 /// probes from becoming a burst of tasks.
-pub async fn accept_forever<F, Fut>(mut listener: Listener, mut on_conn: F) -> !
+pub async fn accept_forever<F, Fut>(listener: Listener, mut on_conn: F) -> !
 where
     F: FnMut(Stream, String) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    let mut incoming = listener.incoming();
     loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => on_conn(stream, peer).await,
-            Err(e) => after_accept_error(&e).await,
-        }
+        let Accepted { stream, peer } = incoming.next().await;
+        on_conn(stream, peer).await;
     }
 }
 
@@ -389,30 +469,37 @@ fn parse_vsock(addr: &str) -> std::io::Result<(u32, u32)> {
 
 #[cfg(test)]
 mod accept_tests {
-    use super::is_connection_error;
+    use super::{AfterAccept, after_failed_accept};
     use std::io::{Error, ErrorKind};
 
-    /// The classification is what decides whether an accept failure is retried
-    /// silently or reported and slept on, so the set is pinned rather than left
-    /// to whoever edits the `matches!` next. The second half is the one that
-    /// matters: an `EMFILE`-class error read as a connection error would spin.
+    /// What an accept failure leads to — retried at once, or waited on — is
+    /// the whole policy, so it is pinned here rather than left to whoever edits
+    /// the classification next. The second half is the one that matters: an
+    /// `EMFILE`-class error read as a departed peer would spin.
     #[test]
-    fn only_a_departed_peer_counts_as_a_connection_error() {
+    fn only_a_departed_peer_is_retried_at_once() {
         for kind in [
             ErrorKind::ConnectionRefused,
             ErrorKind::ConnectionAborted,
             ErrorKind::ConnectionReset,
         ] {
-            assert!(is_connection_error(&Error::from(kind)), "{kind:?}");
+            let decided = after_failed_accept(&Error::from(kind));
+            assert!(matches!(decided, AfterAccept::Again), "{kind:?}");
         }
         // `EMFILE` and `ENFILE` have no stable `ErrorKind` on every toolchain,
         // so they are built from the raw errno the kernel actually returns.
         for raw in [24 /* EMFILE */, 23 /* ENFILE */] {
             let e = Error::from_raw_os_error(raw);
-            assert!(!is_connection_error(&e), "raw {raw} ({:?})", e.kind());
+            let decided = after_failed_accept(&e);
+            assert!(
+                matches!(decided, AfterAccept::Wait),
+                "raw {raw} ({:?})",
+                e.kind()
+            );
         }
         for kind in [ErrorKind::OutOfMemory, ErrorKind::Other] {
-            assert!(!is_connection_error(&Error::from(kind)), "{kind:?}");
+            let decided = after_failed_accept(&Error::from(kind));
+            assert!(matches!(decided, AfterAccept::Wait), "{kind:?}");
         }
     }
 }

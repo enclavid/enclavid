@@ -19,22 +19,32 @@
 //! while holding a different key.
 //!
 //! What the caller then learns is the measurement: the digest of this image,
-//! which it can recompute from the source it audited. Nothing here says which
-//! machine, and nothing here needs to.
+//! which it can recompute from the source it audited. It learns the machine
+//! too: the report names the chip it was signed on, and a caller needs that to
+//! fetch the certificate that endorses it. Nor is anything else about this
+//! guest's reach kept back — the public certificate lists every name it
+//! serves to whoever completes a handshake. Neither is a secret from the host,
+//! which chose the chip and pushed the names.
 //!
 //! ## Minted once, at boot
 //!
-//! The certificate is minted once per process, so the quote over it is too. A
-//! quote per request would let a caller decide how often this guest asks the
-//! Secure Processor to sign something, and would prove nothing more: what is
-//! bound is a key, not a moment.
+//! The quote binds the key, and the key is settled once per process, so the
+//! quote is minted once too — and outlives every certificate minted over that
+//! key as the pushed names change. A quote per request would let a caller
+//! decide how often this guest asks the Secure Processor to sign something, and
+//! would prove nothing more: what is bound is a key, not a moment.
 //!
 //! ## CBOR, and the same shape RA-TLS embeds
 //!
-//! The body is the `Quote` as `ciborium` writes it — byte for byte what an
-//! RA-TLS certificate carries in its extension, so one verifier reads both. The
-//! caller needs nothing from this role to check it: AMD's chain travels inside
-//! the quote, and the root it chains to is compiled into the verifier.
+//! The body is the evidence `enclavid_ra_tls::evidence` makes — what an RA-TLS
+//! certificate carries in its extension, made by the same call, so the two
+//! cannot drift and one decoder reads both.
+//!
+//! What it does not carry is AMD's chain. This guest has no egress to fetch the
+//! certificate that endorses its own report, so the quote goes out bare — see
+//! `crate::identity`. A caller checking it fetches that certificate itself, for
+//! the chip and the firmware versions the report names, and checks it up to
+//! AMD's root; nothing it needs comes from this role.
 //!
 //! That is also why it is not JSON. One type with two representations would mean
 //! a verifier that has to read both, and a certificate extension is a DER octet
@@ -50,7 +60,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use enclavid_attestation::{Attestor, ReportData};
+use enclavid_attestation::Attestor;
 
 /// The one path this role answers for itself.
 ///
@@ -65,22 +75,18 @@ pub const PATH: &str = "/.well-known/enclavid-attestation";
 /// shape reads it. See the module docs for why it names the schema.
 pub const CONTENT_TYPE: &str = "application/vnd.enclavid.attestation+cbor";
 
-/// This role's proof of itself, ready to serve.
+/// This role's evidence about itself, ready to serve.
 ///
 /// Held as `Bytes` because every request hands back the same body: cloning one
 /// is a refcount, where re-encoding per request would be work a caller chooses
 /// the rate of.
-pub type Proof = Bytes;
+pub type Evidence = Bytes;
 
-/// Mint the quote that binds `spki`, and encode it as it will be served.
-pub fn proof(spki: Vec<u8>, attestor: &Arc<dyn Attestor>) -> Result<Proof, String> {
-    let quote = attestor
-        .mint(&ReportData::for_ratls(spki))
-        .map_err(|e| format!("mint a quote for the serving certificate: {e}"))?;
-
-    let mut cbor = Vec::new();
-    ciborium::into_writer(&quote, &mut cbor).map_err(|e| format!("encode the quote: {e}"))?;
-    Ok(Bytes::from(cbor))
+/// Mint the evidence that binds `spki`, as it will be served.
+pub fn evidence(spki: Vec<u8>, attestor: &Arc<dyn Attestor>) -> Result<Evidence, String> {
+    enclavid_ra_tls::evidence(spki, &**attestor)
+        .map(Bytes::from)
+        .map_err(|e| format!("mint the evidence for the serving key: {e}"))
 }
 
 #[cfg(test)]

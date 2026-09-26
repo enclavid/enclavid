@@ -8,8 +8,9 @@
 //! the group — and by nothing else. Every later request therefore has to reach
 //! that group, and the label is how it finds its way.
 //!
-//! A caller following a link is told the label by that link, and that is safe:
-//! one who edits it lands where its session is not, and is refused. A caller
+//! A caller following a link is told the label and its build by that link, and
+//! that is safe: one who edits the label lands where its session is not, and one
+//! who edits the build is refused unless the label runs it. A caller
 //! that also CREATES sessions is different. Handed a bare label it would keep
 //! using the one it liked, and every session in the fleet would pile into one
 //! group. So what it is handed is signed: a label it can read but not forge,
@@ -22,8 +23,8 @@
 //! a token carrying only the group would let that choice bind the first request
 //! and no other.
 //!
-//! So the build travels in the claims and `crate::proxy` compares it to what
-//! the label runs now. It is compared, never trusted: a forged claim only
+//! So the build travels in the token and `crate::route` compares it to what
+//! the label runs now. It is compared, never trusted: a forged build only
 //! agrees with the table when the table already says so, which is why the
 //! signature is still worth no more than the paragraph below says.
 //!
@@ -45,48 +46,42 @@
 //! This role does not know which requests CREATE a session — that is api's
 //! contract, and reading it here would put api's routes in a measured image.
 //! So a caller holding a valid token gets its group for any request, creations
-//! included, and the expiry is what bounds that. The routing schema, when it
-//! lands, is what closes it: creation paths are placed by this role and ignore
-//! the token.
+//! included, and for as long as it keeps asking: every use hands back a fresh
+//! token, so the expiry bounds only a caller that falls silent. A link's marker
+//! does the same with no token at all — it names a group, and a caller that has
+//! seen a label can write one. Only knowing which paths create would close
+//! either.
 //!
-//! ## The format is a JWT, written by hand
+//! ## The format
 //!
-//! HS256 over the usual three base64url parts, so any tool can read one — but
-//! assembled here rather than through a library, because a measured image
-//! should not gain a JWT parser, PEM support and an ASN.1 decoder to check
-//! thirty-two bytes of HMAC. The token is hop-local: nothing outside this role
-//! issues or reads it.
+//! `<label>.<build>.<exp>.<tag>`: the group as a link carries it, the expiry in
+//! Unix seconds, and an HMAC-SHA256 over everything before the last dot, in
+//! hex. Nothing is read out of a token until its tag agrees, and the split
+//! after that is unambiguous: a label holds no dot, a build is hex, an expiry
+//! is digits.
+//!
+//! Not a JWT. The token is hop-local — nothing outside this role issues or
+//! reads it — so a standard format would buy no reader. What it would cost is
+//! base64 and JSON on the way in, and a header naming its own algorithm, which
+//! a verifier has to pin before it can trust anything else. HMAC from `ring`,
+//! because it is the code this role's TLS already runs on: checking a token
+//! adds no cryptography to the image.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use hmac::{Hmac, Mac};
-use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use ring::hmac;
 
 /// Where a token travels, in both directions: the caller sends back what it was
 /// given. A header rather than a path, because api's paths are api's.
 pub const TOKEN_HEADER: &str = "x-enclavid-group-token";
 
-/// The group a request was placed on, in plain sight beside the token.
+/// The group a request was placed on, in plain sight beside the token, in the
+/// form a link carries it: `<label>.<build>`.
 ///
-/// A caller that writes links for others needs the label to write them with, and
-/// it is already inside the token — this only saves it from decoding one.
+/// A caller that writes links for others needs exactly that to write them with.
+/// The token begins with the same string, but a token is this role's own
+/// bookkeeping; this header is the part of the answer a caller may read.
 pub const GROUP_HEADER: &str = "x-enclavid-group";
-
-/// The fixed header of every token this role mints.
-const JWT_HEADER: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
-
-#[derive(Serialize, Deserialize)]
-struct Claims {
-    group: String,
-    /// The build that group ran when the token was minted. Carried so that the
-    /// caller's choice binds every later request and not only the first — see
-    /// [`Placement`].
-    build: String,
-    exp: u64,
-}
 
 /// What a token says: the group a caller was placed on, and the build it was
 /// placed for.
@@ -104,19 +99,20 @@ pub struct Placement {
 
 /// What the host gave this role to sign and check affinity tokens with.
 pub struct Keys {
-    current: [u8; 32],
+    current: hmac::Key,
     /// Accepted but never minted with. Without it, rotating the key would
     /// refuse every token issued in the minutes before the push — a session in
     /// flight would lose its machine for a configuration change.
-    previous: Option<[u8; 32]>,
+    previous: Option<hmac::Key>,
     ttl: Duration,
 }
 
 impl Keys {
     pub fn new(current: [u8; 32], previous: Option<[u8; 32]>, ttl: Duration) -> Keys {
+        let key = |bytes: [u8; 32]| hmac::Key::new(hmac::HMAC_SHA256, &bytes);
         Keys {
-            current,
-            previous,
+            current: key(current),
+            previous: previous.map(key),
             ttl,
         }
     }
@@ -128,15 +124,13 @@ impl Keys {
     /// protects: the host's own balancing. What it does NOT protect that way is
     /// the build, which is compared against the table rather than trusted.
     pub fn mint(&self, group: &str, build: &str, now: SystemTime) -> String {
-        let claims = Claims {
-            group: group.to_owned(),
-            build: build.to_owned(),
-            exp: seconds(now + self.ttl),
-        };
-        let payload = B64.encode(serde_json::to_vec(&claims).expect("claims serialise"));
-        let signed = format!("{JWT_HEADER}.{payload}");
-        let signature = B64.encode(sign(&self.current, signed.as_bytes()));
-        format!("{signed}.{signature}")
+        let signed = format!(
+            "{}.{}",
+            super::marker(group, build),
+            seconds(now + self.ttl)
+        );
+        let tag = hex::encode(hmac::sign(&self.current, signed.as_bytes()));
+        format!("{signed}.{tag}")
     }
 
     /// What a token says, or nothing at all.
@@ -145,40 +139,23 @@ impl Keys {
     /// expired. The caller does the same thing in each case: place the request
     /// as if it had arrived without one.
     pub fn placement(&self, token: &str, now: SystemTime) -> Option<Placement> {
-        let (signed, signature) = token.rsplit_once('.')?;
-        let (header, payload) = signed.split_once('.')?;
-        if header != JWT_HEADER {
-            return None;
-        }
-        let signature = B64.decode(signature).ok()?;
-        let keys = std::iter::once(&self.current).chain(self.previous.iter());
-        if !keys
-            .into_iter()
-            .any(|key| verify(key, signed.as_bytes(), &signature))
-        {
+        let (signed, tag) = token.rsplit_once('.')?;
+        let tag = hex::decode(tag).ok()?;
+        // Constant time, through `ring`'s own comparison: a token is
+        // attacker-supplied, and a byte-at-a-time comparison would say how much
+        // of a forgery was right.
+        let mut keys = std::iter::once(&self.current).chain(self.previous.iter());
+        if !keys.any(|key| hmac::verify(key, signed.as_bytes(), &tag).is_ok()) {
             return None;
         }
 
-        let claims: Claims = serde_json::from_slice(&B64.decode(payload).ok()?).ok()?;
-        (claims.exp > seconds(now)).then_some(Placement {
-            group: claims.group,
-            build: claims.build,
+        let (marked, exp) = signed.rsplit_once('.')?;
+        let (group, build) = marked.split_once(super::BUILD_MARK)?;
+        (exp.parse::<u64>().ok()? > seconds(now)).then(|| Placement {
+            group: group.to_owned(),
+            build: build.to_owned(),
         })
     }
-}
-
-fn sign(key: &[u8], message: &[u8]) -> Vec<u8> {
-    let mut mac = <Hmac<Sha256>>::new_from_slice(key).expect("HMAC takes a key of any length");
-    mac.update(message);
-    mac.finalize().into_bytes().to_vec()
-}
-
-/// Constant time, through `hmac`'s own comparison: a token is attacker-supplied
-/// and a byte-at-a-time comparison would say how much of a forgery was right.
-fn verify(key: &[u8], message: &[u8], signature: &[u8]) -> bool {
-    let mut mac = <Hmac<Sha256>>::new_from_slice(key).expect("HMAC takes a key of any length");
-    mac.update(message);
-    mac.verify_slice(signature).is_ok()
 }
 
 fn seconds(at: SystemTime) -> u64 {
@@ -214,22 +191,19 @@ mod tests {
         assert_eq!(placed.build, BUILD);
     }
 
-    /// The shape is an ordinary JWT, so an operator can read one with any tool.
+    /// The group as a link carries it, the expiry, and a tag — readable by eye,
+    /// so an operator needs no tool to see where a token points.
     #[test]
-    fn the_shape_is_a_jwt() {
+    fn the_shape_is_the_marker_an_expiry_and_a_tag() {
         let token = minted(&keys());
-        let parts: Vec<&str> = token.split('.').collect();
-        assert_eq!(parts.len(), 3);
-        let header = B64.decode(parts[0]).unwrap();
+        let exp = seconds(now() + Duration::from_secs(600));
+        let (signed, tag) = token.rsplit_once('.').unwrap();
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&header).unwrap(),
-            serde_json::json!({"alg": "HS256", "typ": "JWT"})
+            signed,
+            format!("{}.{exp}", super::super::marker("group-7", BUILD))
         );
-        let claims = B64.decode(parts[1]).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&claims).unwrap()["build"],
-            serde_json::json!(BUILD)
-        );
+        assert_eq!(tag.len(), 64);
+        assert!(tag.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -274,39 +248,55 @@ mod tests {
     fn nonsense_names_nothing() {
         let keys = keys();
         let token = minted(&keys);
+        let (signed, tag) = token.rsplit_once('.').unwrap();
+        let other = keys.mint("group-8", BUILD, now());
         for bad in [
             String::new(),
             "....".to_owned(),
             token.replace('.', ""),
-            // A claim edited without re-signing: the whole point of signing it.
-            format!("{}.{}", JWT_HEADER, token.split('.').nth(1).unwrap()),
-            // Another algorithm announced in the header.
-            format!(
-                "{}.{}",
-                B64.encode(br#"{"alg":"none","typ":"JWT"}"#),
-                token.split_once('.').unwrap().1
-            ),
+            // No tag at all: the expiry is then read as one, and is not it.
+            signed.to_owned(),
+            // A tag cut short, or lengthened.
+            format!("{signed}.{}", &tag[..62]),
+            format!("{signed}.{tag}00"),
+            // Another token's tag on this token's parts.
+            format!("{signed}.{}", other.rsplit_once('.').unwrap().1),
         ] {
             assert!(keys.placement(&bad, now()).is_none(), "accepted `{bad}`");
         }
     }
 
-    /// A claim edited to name another build does not survive, which is what
-    /// makes the comparison in `crate::proxy` worth making: a caller cannot
-    /// hand itself a token for a build it was never placed on.
+    /// Every part the tag covers is covered: edit any one without the key and
+    /// the token names nothing.
+    #[test]
+    fn an_edited_part_does_not_pass() {
+        let keys = keys();
+        let token = minted(&keys);
+        let (signed, tag) = token.rsplit_once('.').unwrap();
+        let later = seconds(now() + Duration::from_secs(6_000));
+        for edited in [
+            signed.replacen("group-7", "group-8", 1),
+            signed.replacen(
+                &format!(".{}", seconds(now() + Duration::from_secs(600))),
+                &format!(".{later}"),
+                1,
+            ),
+        ] {
+            assert_ne!(edited, signed);
+            let bad = format!("{edited}.{tag}");
+            assert!(keys.placement(&bad, now()).is_none(), "accepted `{bad}`");
+        }
+    }
+
+    /// A build edited into another does not survive, which is what makes the
+    /// comparison in `crate::route` worth making: a caller cannot hand itself a
+    /// token for a build it was never placed on.
     #[test]
     fn a_rewritten_build_does_not_pass() {
         let keys = keys();
         let token = minted(&keys);
-        let (_, rest) = token.split_once('.').unwrap();
-        let (_, signature) = rest.split_once('.').unwrap();
-        let forged = serde_json::json!({
-            "group": "group-7",
-            "build": "b".repeat(96),
-            "exp": seconds(now() + Duration::from_secs(600)),
-        });
-        let payload = B64.encode(serde_json::to_vec(&forged).unwrap());
-        let bad = format!("{JWT_HEADER}.{payload}.{signature}");
+        let bad = token.replacen(BUILD, &"b".repeat(96), 1);
+        assert_ne!(bad, token);
         assert!(keys.placement(&bad, now()).is_none());
     }
 }

@@ -1,6 +1,6 @@
 //! The blind splice.
 //!
-//! One listener, one destination, `copy_bidirectional` in between. The relay
+//! One listener, one destination, a copy each way in between. The relay
 //! never parses what it carries — that is its security property, and it is a
 //! property of the code's *capabilities*, not of its restraint.
 //!
@@ -61,12 +61,47 @@
 //! running N instances pointed at N guest sockets, so no process holds a map of
 //! the deployment — and a compromised relay learns one endpoint, not the
 //! topology. How those instances get started is deliberately outside this crate.
+//!
+//! ## One header, written and never read
+//!
+//! A guest behind a splice cannot see who dialled: every connection reaches it
+//! from the host. An instance that accepts callers itself can be asked to say,
+//! with a PROXY protocol v2 header written ahead of the caller's bytes — the
+//! gateway shares its places out by that source.
+//!
+//! The relay WRITES that header and never reads one. Behind a front that writes
+//! its own, the option stays off and the front's header is carried like any
+//! other byte. Writing one only "if none is there" would need the relay to read
+//! what it carries, and would pass on a header a caller wrote itself — naming
+//! any address it liked — whenever nothing stood in front of the relay.
+//!
+//! Two things are then the front's to get right, because the relay cannot:
+//!
+//!  * the listener must be reachable by that front alone — a caller that
+//!    reaches it directly writes a header of its own;
+//!  * the front must write its header when it connects, not with the caller's
+//!    first bytes. Until a header arrives the guest cannot tell one source from
+//!    another, so a caller that connects and says nothing would hold the
+//!    guest's places outside any source's share for as long as it stays silent.
+//!    This relay writes its own header as soon as it has dialled.
+//!
+//! Only a TCP listener can write one: a unix or vsock peer has no address such
+//! a header carries.
+//!
+//! ## A closed destination ends the splice
+//!
+//! Once the destination closes, the caller gets a few seconds to finish
+//! (`AFTER_DESTINATION_CLOSES`) and is then let go. The other way round there is no bound: a caller
+//! that closes its side is waiting for an answer, and the destination decides
+//! how long that takes.
 
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 
 /// Upper bound on the hypervisor's acknowledgement line (`OK <port>\n`). Real
@@ -264,13 +299,58 @@ impl std::fmt::Debug for Listener {
 }
 
 impl Listener {
-    pub async fn accept(&self) -> io::Result<Stream> {
+    /// One connection, with its two ends when it has addresses a PROXY header
+    /// can carry — which only TCP does.
+    pub async fn accept(&self) -> io::Result<(Stream, Option<Ends>)> {
         match self {
-            Self::Unix(l) => Ok(Box::new(l.accept().await?.0)),
-            Self::Tcp(l) => Ok(Box::new(l.accept().await?.0)),
+            Self::Unix(l) => Ok((Box::new(l.accept().await?.0), None)),
+            Self::Tcp(l) => {
+                let (stream, source) = l.accept().await?;
+                let destination = stream.local_addr()?;
+                Ok((
+                    Box::new(stream),
+                    Some(Ends {
+                        source,
+                        destination,
+                    }),
+                ))
+            }
             #[cfg(target_os = "linux")]
-            Self::Vsock(l) => Ok(Box::new(l.accept().await?.0)),
+            Self::Vsock(l) => Ok((Box::new(l.accept().await?.0), None)),
         }
+    }
+}
+
+/// Who dialled a TCP listener, and the address it dialled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ends {
+    pub source: SocketAddr,
+    pub destination: SocketAddr,
+}
+
+/// A PROXY protocol v2 header naming `ends`: version 2, the PROXY command, TCP.
+///
+/// An IPv4 caller of a dual-stack listener arrives as a mapped IPv6 address,
+/// and is written as the IPv4 address it is — the one a reader sharing places
+/// out by source should see. Two ends of different families, which the
+/// protocol cannot write as such, are both written as IPv6.
+pub fn proxy_header(ends: Ends) -> Vec<u8> {
+    use ppp::v2::{Builder, Command, Protocol, Version};
+
+    let canonical = |end: SocketAddr| SocketAddr::new(end.ip().to_canonical(), end.port());
+    let pair = match (canonical(ends.source), canonical(ends.destination)) {
+        pair @ (SocketAddr::V4(_), SocketAddr::V4(_)) => pair,
+        (source, destination) => (as_v6(source), as_v6(destination)),
+    };
+    Builder::with_addresses(Version::Two | Command::Proxy, Protocol::Stream, pair)
+        .build()
+        .expect("an address block without records always fits a header")
+}
+
+fn as_v6(end: SocketAddr) -> SocketAddr {
+    match end.ip() {
+        IpAddr::V4(v4) => SocketAddr::new(IpAddr::V6(v4.to_ipv6_mapped()), end.port()),
+        IpAddr::V6(_) => end,
     }
 }
 
@@ -409,10 +489,52 @@ pub fn is_self_referential(listen: &Endpoint, to: &Destination) -> bool {
     }
 }
 
-/// Dial `dest` and splice `inbound` to it until either side ends.
-pub async fn serve_connection(mut inbound: Stream, dest: &Destination) -> io::Result<(u64, u64)> {
+/// How long a caller may go on sending once the destination has closed.
+///
+/// A destination that has closed is done: nothing sent to it afterwards is
+/// answered. Waiting for the caller to close as well would let one that never
+/// does hold a task and two descriptors here for ever — and a relay that
+/// accepts callers directly would run out of descriptors for everyone.
+#[cfg(not(test))]
+const AFTER_DESTINATION_CLOSES: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const AFTER_DESTINATION_CLOSES: Duration = Duration::from_millis(200);
+
+/// Dial `dest`, write `header` there first if there is one, and splice
+/// `inbound` to it until the destination is done — see
+/// `AFTER_DESTINATION_CLOSES` for when that is.
+pub async fn serve_connection(
+    inbound: Stream,
+    dest: &Destination,
+    header: Option<Vec<u8>>,
+) -> io::Result<()> {
     let mut outbound = dest.connect().await?;
-    copy_bidirectional(&mut inbound, &mut outbound).await
+    if let Some(header) = header {
+        outbound.write_all(&header).await?;
+    }
+    let (mut from_caller, mut to_caller) = tokio::io::split(inbound);
+    let (mut from_destination, mut to_destination) = tokio::io::split(outbound);
+    let up = async {
+        tokio::io::copy(&mut from_caller, &mut to_destination).await?;
+        to_destination.shutdown().await
+    };
+    let down = async {
+        tokio::io::copy(&mut from_destination, &mut to_caller).await?;
+        to_caller.shutdown().await
+    };
+    tokio::pin!(up, down);
+    tokio::select! {
+        ended = &mut up => {
+            ended?;
+            down.await
+        }
+        ended = &mut down => {
+            ended?;
+            tokio::time::timeout(AFTER_DESTINATION_CLOSES, up)
+                .await
+                .unwrap_or(Ok(()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -685,8 +807,9 @@ mod tests {
         let listener = Endpoint::Unix(path.clone()).bind(0o600).await.unwrap();
         let dest = Destination::Tcp(echo_addr);
         tokio::spawn(async move {
-            let inbound = listener.accept().await.unwrap();
-            serve_connection(inbound, &dest).await.unwrap();
+            let (inbound, ends) = listener.accept().await.unwrap();
+            assert_eq!(ends, None, "a unix peer has no address to name");
+            serve_connection(inbound, &dest, None).await.unwrap();
         });
 
         let mut client = UnixStream::connect(&path).await.unwrap();
@@ -695,5 +818,150 @@ mod tests {
         let mut back = Vec::new();
         client.read_to_end(&mut back).await.unwrap();
         assert_eq!(back, b"round-trip");
+    }
+
+    /// Each family is named as it is, an IPv4 caller of a dual-stack listener
+    /// as the IPv4 address it is, and two ends of different families both as
+    /// IPv6 — never as no address at all.
+    #[test]
+    fn both_ends_are_named_in_one_family() {
+        use ppp::v2::{Addresses, Command, Header, Protocol};
+
+        for (source, destination, expected) in [
+            (
+                "192.0.2.7:40000",
+                "198.51.100.1:443",
+                ("192.0.2.7:40000", "198.51.100.1:443"),
+            ),
+            (
+                "[2001:db8::7]:40000",
+                "[2001:db8::1]:443",
+                ("[2001:db8::7]:40000", "[2001:db8::1]:443"),
+            ),
+            (
+                "[::ffff:192.0.2.7]:40000",
+                "[::ffff:198.51.100.1]:443",
+                ("192.0.2.7:40000", "198.51.100.1:443"),
+            ),
+            (
+                "192.0.2.7:40000",
+                "[2001:db8::1]:443",
+                ("[::ffff:192.0.2.7]:40000", "[2001:db8::1]:443"),
+            ),
+        ] {
+            let ends = Ends {
+                source: source.parse().unwrap(),
+                destination: destination.parse().unwrap(),
+            };
+            let written = proxy_header(ends);
+            let read = Header::try_from(written.as_slice()).unwrap();
+            assert_eq!(read.command, Command::Proxy);
+            assert_eq!(read.protocol, Protocol::Stream);
+            assert_eq!(read.len(), written.len(), "nothing trails the header");
+            let expected: Addresses = (
+                expected.0.parse::<SocketAddr>().unwrap(),
+                expected.1.parse::<SocketAddr>().unwrap(),
+            )
+                .into();
+            assert_eq!(read.addresses, expected, "{source}");
+        }
+    }
+
+    /// A caller that stays open and silent is let go once the destination has
+    /// closed, instead of holding the splice for as long as it likes.
+    #[tokio::test]
+    async fn a_silent_caller_is_let_go_once_the_destination_closes() {
+        let sink = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dest = Destination::Tcp(sink.local_addr().unwrap().to_string());
+        tokio::spawn(async move {
+            let (closing, _) = sink.accept().await.unwrap();
+            drop(closing);
+        });
+
+        let front = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _silent = TcpStream::connect(front.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (inbound, _) = front.accept().await.unwrap();
+        let splice =
+            tokio::spawn(async move { serve_connection(Box::new(inbound), &dest, None).await });
+
+        tokio::time::timeout(AFTER_DESTINATION_CLOSES * 10, splice)
+            .await
+            .expect("the splice ends although the caller never closed")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// The other way round there is no such bound: a caller that has closed its
+    /// side is waiting for an answer, and gets it however long it takes.
+    #[tokio::test]
+    async fn a_caller_that_closes_first_still_gets_its_answer() {
+        let slow = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dest = Destination::Tcp(slow.local_addr().unwrap().to_string());
+        tokio::spawn(async move {
+            let (mut s, _) = slow.accept().await.unwrap();
+            let mut asked = Vec::new();
+            s.read_to_end(&mut asked).await.unwrap();
+            tokio::time::sleep(AFTER_DESTINATION_CLOSES * 3).await;
+            s.write_all(&asked).await.unwrap();
+            s.shutdown().await.unwrap();
+        });
+
+        let front = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(front.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (inbound, _) = front.accept().await.unwrap();
+        tokio::spawn(async move { serve_connection(Box::new(inbound), &dest, None).await });
+
+        client.write_all(b"a question").await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut answer = Vec::new();
+        client.read_to_end(&mut answer).await.unwrap();
+        assert_eq!(answer, b"a question");
+    }
+
+    /// End to end: a TCP caller is named to the destination ahead of its own
+    /// bytes, which follow untouched.
+    #[tokio::test]
+    async fn a_tcp_caller_is_named_ahead_of_its_bytes() {
+        let sink = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sink_addr = sink.local_addr().unwrap().to_string();
+        let received = tokio::spawn(async move {
+            let (mut s, _) = sink.accept().await.unwrap();
+            let mut all = Vec::new();
+            s.read_to_end(&mut all).await.unwrap();
+            all
+        });
+
+        let listener = Endpoint::Tcp("127.0.0.1:0".into())
+            .bind(0o600)
+            .await
+            .unwrap();
+        let Listener::Tcp(ref tcp) = listener else {
+            unreachable!("a tcp endpoint binds a tcp listener")
+        };
+        let relay_addr = tcp.local_addr().unwrap();
+        let dest = Destination::Tcp(sink_addr);
+        tokio::spawn(async move {
+            let (inbound, ends) = listener.accept().await.unwrap();
+            serve_connection(inbound, &dest, ends.map(proxy_header))
+                .await
+                .unwrap();
+        });
+
+        let mut client = TcpStream::connect(relay_addr).await.unwrap();
+        let caller = client.local_addr().unwrap();
+        client.write_all(b"the caller's bytes").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let all = received.await.unwrap();
+        let header = ppp::v2::Header::try_from(all.as_slice()).unwrap();
+        assert_eq!(
+            header.addresses,
+            ppp::v2::Addresses::from((caller, relay_addr))
+        );
+        assert_eq!(&all[header.len()..], b"the caller's bytes");
     }
 }

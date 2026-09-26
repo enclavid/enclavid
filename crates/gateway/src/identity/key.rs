@@ -30,12 +30,24 @@
 //! holding the measurement and the certificate still learns which key belongs
 //! to this build only from the quote — which is the whole point of serving one.
 //!
-//! ## Why a certificate still has to be asked for
+//! ## The certificate is a wrapper; the key is what stays
 //!
-//! The key is stable; the certificate around it is not this role's to make. A
-//! browser-trusted one is issued by an authority, expires, and is renewed —
-//! and a renewal replaces the wrapper, never the key, which is what keeps the
-//! quote's binding and a caller's pin alive across it. See `crate::tls`.
+//! The certificate around the key is minted here, over whatever names the last
+//! push declared, and minted again when they change — see
+//! `crate::identity::tls`. Each new one replaces the wrapper, never the key,
+//! which is what keeps the quote's binding and a caller's pin alive across it.
+//!
+//! ## Copies of it
+//!
+//! The key is held twice for the life of the process: once to sign
+//! certificates with, once loaded for handshakes. Every copy made on the way —
+//! the chip's key, the derived scalar, the PKCS#8 bytes the TLS library loads
+//! from — is wiped as it goes out of scope, and no push makes another.
+
+use std::sync::Arc;
+
+use tokio_rustls::rustls::sign::SigningKey;
+use zeroize::Zeroizing;
 
 /// What this key is derived FOR, so that no other value derived from the same
 /// chip key can be mistaken for it — or arrived at by accident.
@@ -56,9 +68,12 @@ pub const NO_CHIP: [u8; 32] = *b"a developer build has no chip...";
 ///
 /// The quote binds its `SubjectPublicKeyInfo`, so a caller comparing the quote
 /// to the certificate in front of it is comparing something that has not moved
-/// — see `crate::attest`.
+/// — see `crate::identity::attest`.
 pub struct Identity {
+    /// What certificates over the names are self-signed with.
     key: rcgen::KeyPair,
+    /// What a handshake signs with: the same key, loaded once.
+    signer: Arc<dyn SigningKey>,
     spki: Vec<u8>,
 }
 
@@ -74,19 +89,16 @@ impl Identity {
         for counter in 0u8..8 {
             let mut info = PURPOSE.to_vec();
             info.push(counter);
-            let scalar = enclavid_crypto::kdf::derive_key(chip, &info);
+            let scalar = Zeroizing::new(enclavid_crypto::kdf::derive_key(chip, &info));
 
-            let Ok(secret) = p256::SecretKey::from_bytes(&scalar.into()) else {
+            let Ok(secret) = p256::SecretKey::from_slice(&scalar[..]) else {
                 continue;
             };
             let der = p256::pkcs8::EncodePrivateKey::to_pkcs8_der(&secret)
                 .map_err(|e| format!("encode the derived key: {e}"))?;
             let key = rcgen::KeyPair::try_from(der.as_bytes())
                 .map_err(|e| format!("the derived bytes are not a key: {e}"))?;
-            return Ok(Identity {
-                spki: key.public_key_der(),
-                key,
-            });
+            return Identity::holding(key);
         }
         Err("the derivation found no valid key in eight tries".into())
     }
@@ -97,21 +109,33 @@ impl Identity {
     /// [`NO_CHIP`] so that it takes the same path as the attested one.
     #[cfg(test)]
     pub fn generated() -> Result<Identity, String> {
-        let key = rcgen::KeyPair::generate().map_err(|e| format!("generate key: {e}"))?;
+        Identity::holding(rcgen::KeyPair::generate().map_err(|e| format!("generate key: {e}"))?)
+    }
+
+    /// `key`, and the same key loaded for handshakes — from bytes that are
+    /// wiped once it is.
+    fn holding(key: rcgen::KeyPair) -> Result<Identity, String> {
+        let pkcs8 = Zeroizing::new(key.serialize_der());
+        let signer = super::tls::signer(&pkcs8)?;
         Ok(Identity {
             spki: key.public_key_der(),
             key,
+            signer,
         })
     }
 
     /// The bytes a quote binds, and what a caller parses out of the certificate
-    /// it validated — see `crate::attest`.
+    /// it validated — see `crate::identity::attest`.
     pub fn spki(&self) -> &[u8] {
         &self.spki
     }
 
     pub(crate) fn key(&self) -> &rcgen::KeyPair {
         &self.key
+    }
+
+    pub(crate) fn signer(&self) -> &Arc<dyn SigningKey> {
+        &self.signer
     }
 }
 
@@ -138,8 +162,8 @@ mod tests {
         assert_ne!(one.spki(), other.spki());
     }
 
-    /// A build with nothing to derive from gets a different key every time, and
-    /// says so by construction rather than by pretending to be stable.
+    /// A key nothing derived is a new key every time — which is why no build
+    /// takes one: a developer build derives from [`NO_CHIP`] instead.
     #[test]
     fn a_generated_key_is_a_new_key() {
         let one = Identity::generated().unwrap();
@@ -154,8 +178,8 @@ mod tests {
         let identity = Identity::derived(&[7; 32]).unwrap();
         // Minting it at all is the assertion that rustls accepted the derived
         // key as one that signs for this certificate; what they carry is
-        // checked by the tests in `crate::tls`.
-        crate::tls::certified(&identity, &["verify.example.com"]).unwrap();
+        // checked by the tests in `crate::identity::tls`.
+        crate::identity::tls::certified(&identity, &["verify.example.com"]).unwrap();
         assert_eq!(identity.spki(), Identity::derived(&[7; 32]).unwrap().spki());
     }
 }

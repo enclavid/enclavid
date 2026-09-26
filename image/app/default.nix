@@ -285,11 +285,6 @@ builtins.foldl' (a: b: a // b) { } [
       binaries = [ "gateway" ];
       noDefaultFeatures = true;
       features = [ "sev-snp" "vsock" ];
-      # The proxy library pins `flate2` to the zlib-ng backend, and zlib-ng is
-      # built by cmake. Nothing in this role compresses anything — the
-      # dependency is not optional upstream. Listed here rather than for every
-      # part so that what needs a C toolchain is visible where it is needed.
-      nativeBuildInputs = [ pkgs.cmake ];
     }];
   })
 ]

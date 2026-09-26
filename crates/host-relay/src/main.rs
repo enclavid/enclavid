@@ -16,6 +16,9 @@
 //! # the same links on a VMM that gives the host real AF_VSOCK
 //! host-relay --listen tcp:127.0.0.1:8443 --to vsock:3:443
 //! host-relay --listen vsock:1027         --to vsock:4:1024
+//!
+//! # inbound, accepting callers itself, so it names each one to the guest
+//! host-relay --listen tcp:0.0.0.0:443 --proxy-protocol --to vsock:5:443
 //! ```
 //!
 //! Everything topological — how many workers, what reaches what — is decided by
@@ -26,7 +29,7 @@ use std::io;
 use std::process::ExitCode;
 
 use clap::Parser;
-use host_relay::{Destination, Endpoint, serve_connection};
+use host_relay::{Destination, Endpoint, proxy_header, serve_connection};
 
 #[derive(Parser)]
 #[command(
@@ -58,6 +61,14 @@ struct Args {
     /// is cut short by SIGKILL and the grace is moot.
     #[arg(long, default_value = "10")]
     drain_secs: u64,
+
+    /// Write a PROXY protocol v2 header naming who dialled, ahead of anything
+    /// the caller sends. For an instance that accepts callers itself; behind a
+    /// front that writes its own header, leave it off and that header is
+    /// carried like any other byte. Needs a `tcp:` listener — nothing else has
+    /// a caller's address to name.
+    #[arg(long)]
+    proxy_protocol: bool,
 }
 
 fn parse_octal(s: &str) -> Result<u32, String> {
@@ -71,6 +82,12 @@ async fn main() -> ExitCode {
 
     if host_relay::is_self_referential(&args.listen, &args.to) {
         eprintln!("host-relay: --listen and --to name the same address; that dials itself");
+        return ExitCode::FAILURE;
+    }
+    if args.proxy_protocol && !matches!(args.listen, Endpoint::Tcp(_)) {
+        eprintln!(
+            "host-relay: --proxy-protocol needs a tcp: listener; nothing else has a caller's address to name"
+        );
         return ExitCode::FAILURE;
     }
 
@@ -114,8 +131,8 @@ async fn main() -> ExitCode {
             _ = sigterm.recv() => break,
             _ = sigint.recv() => break,
             accepted = listener.accept() => {
-                let inbound = match accepted {
-                    Ok(stream) => stream,
+                let (inbound, ends) = match accepted {
+                    Ok(accepted) => accepted,
                     Err(e) => {
                         // Per-connection failures are not fatal — staying up matters
                         // more than any single client — but the descriptor-exhaustion
@@ -134,8 +151,9 @@ async fn main() -> ExitCode {
                     }
                 };
                 let dest = args.to.clone();
+                let header = ends.filter(|_| args.proxy_protocol).map(proxy_header);
                 inflight.spawn(async move {
-                    if let Err(e) = serve_connection(inbound, &dest).await {
+                    if let Err(e) = serve_connection(inbound, &dest, header).await {
                         eprintln!("host-relay: splice: {e}");
                     }
                 });

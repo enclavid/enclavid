@@ -27,12 +27,12 @@ const PORT: u32 = 60123;
 #[tokio::test]
 #[ignore = "needs the vsock_loopback kernel module"]
 async fn a_dialed_stream_carries_bytes_both_ways() {
-    let mut listener = fleet_transport::bind(&PORT.to_string())
+    let listener = fleet_transport::bind(&PORT.to_string())
         .await
         .expect("bind vsock listener");
 
     let server = tokio::spawn(async move {
-        let (mut stream, peer) = listener.accept().await.expect("accept");
+        let fleet_transport::Accepted { mut stream, peer } = listener.incoming().next().await;
         println!("accepted from {peer}");
         let mut buf = [0u8; 5];
         stream.read_exact(&mut buf).await.expect("server read");

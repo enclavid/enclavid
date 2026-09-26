@@ -5,18 +5,23 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# The byte stream the intra-fleet legs run RA-TLS over — one place for the
-# TCP/vsock split so the four participants do not each grow their own copy.
+# The byte stream every fleet role listens and dials on — one place for the
+# TCP/vsock split, so the roles do not each grow their own copy.
 [dependencies]
 # `io-util` for the health port's one write; nothing here reads a socket. `time`
-# for the one delay in `accept_forever`, which is what keeps a listener that
-# cannot accept from spinning.
+# for the one delay in `Incoming`, which is what keeps a listener that cannot
+# accept from spinning.
 tokio = { version = "1", features = ["net", "io-util", "time"] }
 # For `impl SafeToLog for LegFailure` — the vouch belongs on the type, and the
 # type lives here — and for the health port's boot line, which is outward and so
 # needs `device`. A no-op in practice: the only crates that depend on this one
-# are the four roles, and each enables `device` on its own account already.
+# are the roles, and each enables `device` on its own account already.
 safe-logger = { path = "../safe-logger", features = ["device"] }
+# The `Service` trait and nothing else — `tower-service` is one trait with no
+# dependencies of its own, so a role that turns the feature below on takes on a
+# definition rather than a framework. Whatever the role stacks on its own
+# service (`ConcurrencyLimit`, say) comes from `tower` in that role.
+tower-service = { version = "0.3", optional = true }
 
 # Linux-only: AF_VSOCK exists in no other kernel. Optional on top of that, so a
 # dev build carries no vsock code at all.
@@ -28,11 +33,37 @@ tokio-vsock = { version = "0.7", optional = true }
 # TCP cannot work there; a developer's box has no vsock peers, so it uses TCP.
 # Which arm a binary carries is a build-time fact about where it runs.
 vsock = ["dep:tokio-vsock"]
+# `service::serve`: accepting connections into a `tower` service that is asked
+# for capacity before each accept. Off by default: a role that only carries
+# bytes should not grow a trait it never names, and every role depends on this
+# crate.
+#
+# `tokio/rt` comes with it because `serve` spawns each connection, where
+# `accept_forever` awaits it. A role that does not turn this on carries no
+# runtime handle it never asked for.
+tower-adapter = ["dep:tower-service", "tokio/rt"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
+# This crate, with the feature on, so that `cargo test -p fleet-transport` builds
+# and runs the tests of `crate::service` rather than skipping them without a
+# word. Nothing else turns the feature on for this crate's own test build.
+fleet-transport = { path = ".", features = ["tower-adapter"] }
+# `sync` for the `Notify` the `service` tests hold connections open with. Asked
+# for here and not above: the crate itself needs no synchronisation primitive.
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+    "sync",
+] }
 # Only to prove the health literals are what a real serializer renders — see
 # `health::tests`. Dev-only on purpose: no measured binary carries a JSON
 # serializer to emit fifteen constant bytes.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The limit the `service` tests put a service behind — the same
+# `ConcurrencyLimit` the roles use, so what is tested is what ships rather than a
+# stand-in written for the test.
+tower = { version = "0.5", default-features = false, features = ["limit", "util"] }

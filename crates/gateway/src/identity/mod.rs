@@ -1,20 +1,28 @@
-//! What this role uses to check api, and what it does not check.
+//! Who this guest is, what it proves about itself, and what it checks api with.
+//!
+//! - `key` — the key this role serves on, derived from the chip so that it is
+//!   the same at every boot;
+//! - `tls` — the certificate over it that a browser is shown, and the resolver
+//!   that follows the names each push declares;
+//! - `attest` — the quote over that key, served beside the certificate;
+//! - [`attestor`] — this build's attestation backend. It mints that quote, and
+//!   it VERIFIES api's quote during every handshake on the leg.
 //!
 //! **There is no pin here, and its absence is the design.** This role does not
 //! decide which api build a caller may be served by; the caller does, per
 //! request, having first verified this role's own attestation. See
-//! `crate::upstream` for the delegation that rests on.
-//!
-//! What that leaves this module is one thing: an attestor, which is what
-//! VERIFIES api's quote during the handshake. It is needed even though this end
-//! presents nothing, because on a leg where only one end is asked for a
-//! certificate, verifying is the direction that carries the weight.
+//! `crate::upstream` for the delegation that rests on. The attestor is needed on
+//! that leg even though this end presents nothing, because on a leg where only
+//! one end is asked for a certificate, verifying is the direction that carries
+//! the weight.
 //!
 //! Minting is `mint_only_across_parts`: this guest has no egress, so it cannot
 //! fetch the certificate that would endorse its own report — and it does not
 //! need one to verify. api holds an endorsement, so the quote it presents
 //! CARRIES its chain, and a verifier with none of its own reads that chain and
-//! checks it to the compiled-in AMD root.
+//! checks it to the compiled-in AMD root. The quote this role serves about
+//! itself therefore goes out bare, and whoever checks it fetches that
+//! certificate — see `attest`.
 //!
 //! **Across parts**, because this role fronts api instances on other machines.
 //! The leaves refuse a peer on another part; this role cannot, and the
@@ -23,11 +31,16 @@
 //! stays: the chain, the VCEK issued to the chip the report names, the platform
 //! posture, the TCB floor, and the exact measurement the caller asked for.
 
+pub mod attest;
+pub mod key;
+pub mod tls;
+
 use std::sync::Arc;
 
 use enclavid_attestation::Attestor;
 
-/// This process's attestation backend.
+/// This process's attestation backend. Built once, at boot, and shared:
+/// building one asks the Secure Processor for a report.
 #[cfg(feature = "sev-snp")]
 pub fn attestor() -> Arc<dyn Attestor> {
     Arc::new(
@@ -35,8 +48,7 @@ pub fn attestor() -> Arc<dyn Attestor> {
             safe_logger::debug!("{e}");
             safe_logger::error_and_panic!(
                 "gateway: cannot present an attested identity — /dev/sev-guest is absent, or this \
-                 guest was launched in a posture this build refuses (VMPL, debug, migration \
-                 agent, TCB floor). Stopping.",
+                 guest was launched in a posture this build refuses. Stopping.",
                 safe_logger::reason!("a constant reporting a platform state the host provisioned")
             )
         }),

@@ -1,11 +1,12 @@
 //! The `gateway` deployable: the measured role that terminates client TLS.
 //!
-//! It exists because nothing does that today. api's two serving listeners run
-//! `axum::serve` on a bare socket, so whatever carries TLS to the host either
-//! terminates it — which ends the central guarantee — or splices it into a
-//! listener that cannot speak it. This role is where "TLS-in-TEE for inbound"
-//! stops being aspirational. Routing, one public name and fewer certificates
-//! are consequences, not the reason.
+//! It exists because nothing else can. api's serving listeners speak plain HTTP
+//! in a developer build and RA-TLS in the attested one — a certificate that
+//! carries a quote, which no browser has a way to trust. So a browser's session
+//! for a public name either ends on the host, which ends the central guarantee,
+//! or ends in a measured role that holds that name's key. This role is where
+//! "TLS-in-TEE for inbound" stops being aspirational. Routing, one public name
+//! and fewer certificates are consequences, not the reason.
 //!
 //! It cannot live on the host: it holds the private key for a public name AND
 //! serves the page. Either alone might be arguable; together they would let a
@@ -19,10 +20,10 @@
 //! splice that never holds a key and never sees a plaintext record. The TLS
 //! session begins here.
 //!
-//! The proxy library cannot listen on vsock — it listens on TCP or a unix
-//! socket and offers no trait for a third — so `crate::bridge` carries that
-//! connection one more metre, to a socket inside this guest that the library
-//! does listen on. Everything from the handshake onward is then the library's.
+//! It arrives on the same transport as every other fleet port, and the only
+//! thing ahead of the handshake is a PROXY protocol header the host's first hop
+//! writes, naming who dialled: `crate::listener` reads it, then starts the TLS
+//! session on the same stream.
 //!
 //! That is also why there is one public listener rather than one per name. From
 //! outside there is one TLS session per connection, and the name it agreed on is
@@ -39,7 +40,7 @@
 //! Which api builds exist, and where, is the host's to say. It pushes that to a
 //! port of its own rather than putting it on the command line, and this role
 //! serves nothing publicly until the first push — see `crate::config` and
-//! `crate::push`.
+//! `crate::config::push`.
 //!
 //! The hop to api is RA-TLS in the attested build: this end verifies api's quote
 //! and proves it carries the measurement the caller named, and presents nothing,
@@ -48,29 +49,28 @@
 //! build speaks plain HTTP on both legs, because there is no host between the two
 //! processes to protect anything from.
 //!
-//! Nothing is served from here. Whatever this role carries is compiled into the
+//! Nothing is served from here but this role's own evidence — see
+//! `crate::identity::attest`. Whatever else it carries is compiled into the
 //! build behind it, beside the handlers it calls, so one launch digest covers
 //! both. Terminating the session here is still what makes that worth anything — a
 //! terminator can replace whatever is served over it, so it has to be measured,
 //! and the leg onward has to be attested. Both are.
 //!
-//! What this role does not do is parse what it carries: no body and no path,
-//! ever. That is the standing defence against a runtime exploit, which changes
-//! behaviour without changing a measurement.
+//! What this role reads of what it carries is little, and fixed: the PROXY
+//! header ahead of a connection, the marker a link carries at the head of a
+//! path, its own evidence's path, and two headers of its own — the build a
+//! caller names and the affinity token. What it takes off by name is the
+//! caller's `Host`, the headers in which a request gives an account of its own
+//! origin, and trailers. Every other byte — the rest of the path, every other
+//! header, every body — passes through unread. That is the standing defence
+//! against a runtime exploit, which changes behaviour without changing a
+//! measurement: what is never interpreted cannot be steered.
 
-mod affinity;
-mod attest;
-mod balance;
-mod bridge;
+mod budget;
 mod config;
 mod identity;
-mod key;
-mod leg;
-mod listen;
-mod proxy;
-mod push;
-mod service;
-mod tls;
+mod listener;
+mod route;
 mod upstream;
 
 #[cfg(not(any(feature = "dev-attestation", feature = "sev-snp")))]
@@ -92,34 +92,20 @@ compile_error!(
      Build without it for non-Linux dev environments."
 );
 
+// Real evidence in front of a leg that checks nothing: `vsock` is what makes
+// the leg to api RA-TLS, and without it the leg is plain and proves no build —
+// while this role would still hand callers a quote saying it is the attested
+// one. See `crate::upstream`.
+#[cfg(all(feature = "sev-snp", not(feature = "vsock")))]
+compile_error!(
+    "feature `sev-snp` needs `vsock`: without it the leg to api verifies nothing, \
+     behind evidence that says this is the attested build"
+);
+
 use std::sync::Arc;
 
-use pingora_core::services::background::background_service;
 use safe_logger::{debug, reason, safe};
 use tokio::sync::watch;
-
-/// How many public connections this role serves at once.
-///
-/// A ceiling on descriptors and on memory, both of which a public connection
-/// spends — see `crate::bridge`, which is where it is taken. It is a constant of
-/// the build rather than something the host sets, because the two budgets it
-/// divides are this image's: the descriptor limit it boots with, and the guest's
-/// memory. The host decides how many of these guests to run.
-///
-/// STALE, and now doubly so: it was sized when a connection could pin 5 MiB of
-/// windows, and since the bridge each one costs THREE descriptors here rather
-/// than one. It also bounds the wrong half — a leg is opened per request in
-/// flight, not per connection, and one connection may carry a hundred of them.
-/// Derive it from a measured per-connection footprint, and bound legs
-/// separately.
-const MAX_PUBLIC_CONNECTIONS: usize = 256;
-
-/// Where the public connection is handed to the proxy library.
-///
-/// A constant of the build rather than configuration: it is an arrangement
-/// INSIDE this guest, between the bridge and the listener, and nothing outside
-/// can see it or should be able to choose it — see `crate::bridge`.
-const PUBLIC_SOCKET: &str = "/run/gateway-public.sock";
 
 /// A setting this build cannot run without, or the process ends.
 ///
@@ -140,54 +126,56 @@ fn required(key: &'static str) -> String {
 /// The key this build serves on.
 ///
 /// Derived from what the chip gives this guest, so it is the same key at every
-/// boot and a certificate issued for it outlives a restart — see `crate::key`.
+/// boot and a certificate issued for it outlives a restart — see
+/// `crate::identity::key`.
 #[cfg(feature = "sev-snp")]
-fn serving_key() -> Result<key::Identity, String> {
-    let chip = enclavid_attestation::derive_seal_key()
-        .map_err(|e| format!("the chip did not return a key to derive from: {e}"))?;
-    key::Identity::derived(&chip)
+fn serving_key() -> Result<identity::key::Identity, String> {
+    let chip = zeroize::Zeroizing::new(
+        enclavid_attestation::derive_seal_key()
+            .map_err(|e| format!("the chip did not return a key to derive from: {e}"))?,
+    );
+    identity::key::Identity::derived(&chip)
 }
 
 /// A developer build has no chip, so it derives from a stand-in that is no
-/// secret — see `crate::key::NO_CHIP`. The path is the same one the attested
-/// build takes, which is the point.
+/// secret — see `crate::identity::key::NO_CHIP`. The path is the same one the
+/// attested build takes, which is the point.
 #[cfg(not(feature = "sev-snp"))]
-fn serving_key() -> Result<key::Identity, String> {
-    key::Identity::derived(&key::NO_CHIP)
+fn serving_key() -> Result<identity::key::Identity, String> {
+    identity::key::Identity::derived(&identity::key::NO_CHIP)
 }
 
-/// A panic ends the PROCESS, not the task it happened on.
+/// Every loop of this role's own is awaited HERE, on the main task.
 ///
-/// Every loop this role runs is a service the server library supervises on a
-/// runtime of its own, and a panicking task there dies quietly: the guest would
-/// go on serving with no configuration port, or with nothing keeping its members
-/// checked, and look perfectly well doing it. Before the library ran them these
-/// loops were awaited on the main task, where a panic ended everything — this is
-/// how that property is kept.
+/// So a panic in any of them ends the process, which is the behaviour worth
+/// having: a guest serving with no configuration port, or with a certificate
+/// that no longer follows the pushed names, looks perfectly well from the
+/// outside and is not.
 ///
-/// It runs AFTER the logging hook, so the panic is still reported before the
-/// process goes.
-fn end_the_process_on_panic() {
-    let reported = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        reported(info);
-        std::process::abort()
-    }));
-}
-
-fn main() {
+/// A panic in a spawned task does NOT end the process, and that is deliberate
+/// too. What this role spawns is per caller or per leg: a task per accepted
+/// connection, public or configuration, and whatever the HTTP library spawns
+/// under it; a driver per leg to api. A hook that aborted on any panic would
+/// turn one malformed request into the end of every session in this guest. The
+/// line between the two is exactly the line between "this role has stopped
+/// working" and "one caller's connection has". A push that panics is the
+/// second: the table it would have replaced stays, and the port takes the next.
+#[tokio::main]
+async fn main() -> std::convert::Infallible {
     // First, so nothing can speak before the channel exists.
     //
     // Panic locations are on. This binary IS the measured code, so a location
     // names a line in a build anyone can fetch and read. The argument is worth
     // rechecking now that it proxies: the far end chooses the input, which is
     // the condition under which the engine roles turn locations off. What keeps
-    // it defensible here is that this role parses nothing of what it carries —
-    // no path, no body — so there is no per-request site for a caller to steer
-    // into.
+    // it defensible here is how little of that input this role reads — a few
+    // fixed shapes, see the module docs — none of it through a path that can
+    // panic, so there is no per-request site for a caller to steer into.
     safe_logger::install();
     safe_logger::install_panic(true);
-    end_the_process_on_panic();
+
+    let descriptors = reserve_descriptors(config::MOST_DESCRIPTORS);
+    budget::limit(descriptors);
 
     let health = fleet_transport::health::Health::new();
     let health_addr = required("ENCLAVID_ADDRESS_IN_HEALTH");
@@ -200,7 +188,7 @@ fn main() {
     // worth anything, and the reason this cannot be done on the host. The
     // certificate around it comes later, when a push says which names to mint
     // it over; the key outlives every one of them, and every restart — see
-    // `crate::key`.
+    // `crate::identity::key`.
     let identity = Arc::new(serving_key().unwrap_or_else(|e| {
         debug!("{e}");
         safe_logger::error_and_panic!(
@@ -209,98 +197,158 @@ fn main() {
         )
     }));
 
-    // The proof that goes with that key, minted once and before the bind for
+    // The evidence that goes with that key, minted once and before the bind for
     // the same reason: a caller is asked to delegate its choice of api build to
     // this role, and a role that cannot say what it is has nothing to delegate
     // to. It binds the KEY, so it outlives the certificates as well — see
-    // `crate::attest`.
-    let proof =
-        attest::proof(identity.spki().to_vec(), &identity::attestor()).unwrap_or_else(|e| {
-            debug!("{e}");
-            safe_logger::error_and_panic!(
-                "gateway: cannot prove what this build is, so nothing could check it. Stopping.",
-                reason!("a constant reporting a platform state the host provisioned")
-            )
-        });
+    // `crate::identity::attest`.
+    //
+    // One attestor for the process, built here and handed to both of its uses:
+    // it mints this evidence, and it verifies api on every leg. Building one
+    // asks the Secure Processor for a report, so it is not built twice.
+    let attestor = identity::attestor();
+    let spki = identity.spki().to_vec();
+    let evidence = identity::attest::evidence(spki, &attestor).unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "gateway: cannot prove what this build is, so nothing could check it. Stopping.",
+            reason!("a constant reporting a platform state the host provisioned")
+        )
+    });
 
     // Every api this role may forward to, and every name it answers to, as the
     // host last pushed them. Empty until the first push, and never read from the
     // command line — see `crate::config` for why it cannot be.
-    let (table, current) = watch::channel(Arc::new(upstream::Upstreams::empty()));
+    let (table, current) = watch::channel(Arc::new(upstream::Upstreams::empty(attestor)));
     let (certificate, presented) = watch::channel(None);
-    let inside = bridge::prepare(PUBLIC_SOCKET);
 
-    // Nothing asynchronous has happened yet, and nothing can: the server builds
-    // its own runtimes, so every port this role takes is taken inside the
-    // service that serves it — see `crate::service`.
-    //
-    // `None` rather than parsed arguments. The library reads its settings from
-    // an `Opt` it never goes looking for, so this build takes its defaults and
-    // the command line stays what the measurement says it is: the environment
-    // this role reads above, and nothing the library also interprets.
-    let mut server = pingora_core::server::Server::new(None).unwrap_or_else(|e| {
+    let health_port = fleet_transport::health::bind(&health_addr).await;
+    let config_port = fleet_transport::bind(&config_addr)
+        .await
+        .unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "gateway: cannot bind the configuration port at {}. Stopping.",
+                safe(&config_addr, reason!("on the measured command line")),
+                reason!("a constant; the address is the host's own configuration")
+            )
+        });
+
+    let hop = Arc::new(route::Hop::new(current.clone(), evidence));
+    let tls = listener::certificate::acceptor(presented);
+
+    // Awaited together, and none of them ever returns — see the note above.
+    // The first to end takes the process with it, which is what "this role has
+    // stopped working" should look like from the outside.
+    tokio::select! {
+        answer = fleet_transport::health::serve(health_port, {
+            let state = health.clone();
+            move || state.body()
+        }) => answer,
+        answer = config::push::serve(config_port, table, descriptors) => answer,
+        answer = listener::certificate::follow(current.clone(), identity, certificate) => answer,
+        answer = public(public_addr, current, hop, tls, health) => answer,
+    }
+}
+
+/// Take as many descriptors as the largest tuning could need, or as many as the
+/// kernel gives, and say how many that is.
+///
+/// A push's connection limits are counts of descriptors, and a limit the
+/// descriptor table cannot back is not one: the moment it is reached, dials to
+/// api fail, then accepts, then the configuration and health ports — every
+/// caller at once, and the host unable to push a fix. So the limit is raised
+/// toward `needed`, and what it reaches is what every push is measured against —
+/// one that could need more is refused at the push, where the host is told why
+/// — and what `crate::budget` counts callers against.
+///
+/// Both numbers are safe to log: the guest's kernel sets the one, and the other
+/// is this build's constant.
+fn reserve_descriptors(needed: libc::rlim_t) -> u64 {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: a stack-local `rlimit` passed by pointer for the duration of the
+    // call, the standard POSIX shape; a non-zero return leaves it untouched.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        safe_logger::error_and_panic!(
+            "gateway: cannot read RLIMIT_NOFILE, so the descriptor budget cannot be checked. \
+             Stopping.",
+            reason!("a constant, emitted once at boot before any session exists")
+        )
+    }
+    // First the hard limit as well. This role is its guest's one process and
+    // runs as root, and nothing else in the image raises the kernel's default —
+    // so the ceiling is this process's to lift, and it lifts it. Where it may
+    // not, the soft limit goes as far as the hard one; where the kernel holds
+    // the soft limit lower still, as far as it will.
+    let mut asks = vec![(needed, needed.max(limit.rlim_max))];
+    let mut soft = needed.min(limit.rlim_max);
+    while soft > limit.rlim_cur {
+        asks.push((soft, limit.rlim_max));
+        soft /= 2;
+    }
+    for (soft, hard) in asks {
+        if soft <= limit.rlim_cur {
+            break;
+        }
+        let raised = libc::rlimit {
+            rlim_cur: soft,
+            rlim_max: hard,
+        };
+        // SAFETY: as above.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
+            limit = raised;
+            break;
+        }
+    }
+
+    let available = limit.rlim_cur;
+    safe_logger::info!(
+        "gateway: {} file descriptors available, of the {} the largest tuning could need; \
+         a push needing more is refused",
+        safe(&available, reason!("a limit this guest's own kernel sets")),
+        safe(&needed, reason!("a constant of the measured build")),
+        reason!("a constant, emitted once at boot before any session exists")
+    );
+    available
+}
+
+/// The public listener, opened only once there is a table to route against.
+///
+/// One push, not a non-empty table: declaring no group at all is a state the
+/// host may choose, and it is still a table. Open before there is one, every
+/// request would fail as an unavailable upstream, and the host could not tell a
+/// guest that answers from one that routes.
+async fn public(
+    addr: String,
+    mut table: watch::Receiver<Arc<upstream::Upstreams>>,
+    hop: Arc<route::Hop>,
+    tls: tokio_rustls::TlsAcceptor,
+    health: Arc<fleet_transport::health::Health>,
+) -> std::convert::Infallible {
+    if table.changed().await.is_err() {
+        // The sender lives as long as the process, so this cannot happen while
+        // anything is still serving.
+        std::future::pending::<()>().await;
+    }
+
+    let listener = fleet_transport::bind(&addr).await.unwrap_or_else(|e| {
         debug!("{e}");
         safe_logger::error_and_panic!(
-            "gateway: the server would not start. Stopping.",
-            reason!("a constant; it reports no address and no caller")
+            "gateway: cannot bind the public listener at {}. Stopping.",
+            safe(&addr, reason!("on the measured command line")),
+            reason!("a constant; the address is the host's own configuration")
         )
     });
-    // What this does for a server taking over from an older one: collect its
-    // listening sockets. This role never does that — a guest is replaced whole
-    // and its listener belongs to the host — so with no upgrade asked for, this
-    // reduces to a log line and nothing else. It is here because the library's
-    // own examples put it here, and leaving it out would be a difference from
-    // them that nothing explains.
-    server.bootstrap();
-
-    server.add_service(background_service(
-        "health",
-        service::Health {
-            addr: health_addr,
-            state: health.clone(),
-        },
-    ));
-    server.add_service(background_service(
-        "config",
-        service::Config {
-            addr: config_addr,
-            table: std::sync::Mutex::new(Some(table)),
-        },
-    ));
-    server.add_service(background_service(
-        "checks",
-        service::Checks {
-            table: current.clone(),
-        },
-    ));
-    server.add_service(background_service(
-        "certificate",
-        service::Certificate {
-            table: current.clone(),
-            identity,
-            publish: std::sync::Mutex::new(Some(certificate)),
-        },
-    ));
-    server.add_service(background_service(
-        "bridge",
-        service::Bridge {
-            addr: public_addr,
-            to: inside.clone(),
-            at_once: MAX_PUBLIC_CONNECTIONS,
-            table: current.clone(),
-            state: health,
-        },
-    ));
-
-    // The library's own listener, its own TLS, and one proxy for every name —
-    // see `crate::listen`.
-    let hop = proxy::Hop::new(current, proof, Arc::new(leg::Ledger::default()));
-    server.add_service(listen::service(
-        &inside,
-        &server.configuration.clone(),
-        hop,
-        presented,
-    ));
-
-    server.run_forever()
+    // Said after the bind, not before: "listening" is a claim about a socket
+    // that exists.
+    safe_logger::info!(
+        "gateway: listening for public connections on {}",
+        safe(&addr, reason!("on the measured command line")),
+        reason!("a constant, emitted once at boot before any session exists")
+    );
+    health.declare_healthy();
+    listener::serve(listener, hop, tls, table).await
 }
