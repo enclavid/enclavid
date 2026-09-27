@@ -31,7 +31,7 @@ enclavid
 ├── plugin                         ← OCI artifact tooling for plugin components
 │   └── embed --i18n ... --icons ...
 └── session                        ← verification session lifecycle
-    ├── create --policy ...
+    ├── create --policy ... [--measurement <hex>]
     ├── get <id>
     └── disclosures <id>
 ```
@@ -71,6 +71,23 @@ enclavid session create \
 > KBS at the pull seam.
 
 Every push takes a **full** OCI reference (`<registry>/<repository>[:tag]`). For the Enclavid registry, the path layout is `enclavid/<workspace_id>/policies/<name>` — this is enforced by the registry's access policy. After `enclavid cloud login` the exact prefix is printed; you can also get it later via `enclavid cloud workspace`.
+
+## Sessions through a gateway
+
+When a gateway sits in front of api, a creating request names the api build it requires, and the gateway places the session on a group of api instances running that build. Point `ENCLAVID_API_URL` at the gateway's api name and `ENCLAVID_APPLICANT_URL` at its applicant name, each as a bare origin (`https://<name>[:port]`, no path):
+
+```bash
+ENCLAVID_API_URL=https://<api name> ENCLAVID_APPLICANT_URL=https://<applicant name> \
+    enclavid session create --policy <pinned-ref> --measurement <96 lowercase hex>
+# or: ENCLAVID_API_MEASUREMENT=<96 lowercase hex> in place of --measurement
+# → also prints group: <label>.<build>
+```
+
+The CLI sends the build as `x-enclavid-measurement`, reads the group back from `x-enclavid-group`, and caches it beside the session token. From then on `session get` and `session disclosures` put the group in front of the path (`<api>/-<label>.<build>/api/v1/sessions/<id>/...`), and the printed applicant link goes under it too (`<applicant>/-<label>.<build>/#/session/<id>`), because the gateway routes a request by that marker alone.
+
+The gateway reads the marker only at the very start of the path, so a base that carries a path of its own would hide it: with a build named, the CLI refuses such a base before sending anything, and later commands refuse it too. Do not write the marker into either variable by hand — the CLI adds it, so it would appear twice.
+
+Against api directly, leave the build out: no group comes back and paths carry no marker. If a build is named and no group comes back all the same, `session create` says so in a note, and the session is on no group.
 
 ## Authentication
 
@@ -147,8 +164,9 @@ The CLI fetches its endpoints (issuer, OAuth client id, scopes) from a discovery
 | --- | --- |
 | `ENCLAVID_REGISTRY_AUTH` | Registry credentials override (`Bearer ...` / `Basic <base64>`) |
 | `ENCLAVID_API_TOKEN` | Raw Bearer for API calls (sessions). Bypasses Logto entirely — for lightweight dev stacks or pre-minted tokens |
-| `ENCLAVID_API_URL` | Enclavid API base URL (sessions). Default: `http://localhost:8001` |
-| `ENCLAVID_APPLICANT_URL` | Base of the applicant link printed after `session create` (`<base>/#/session/<id>`); may include a path, such as a gateway marker. Default: `http://localhost:5173` |
+| `ENCLAVID_API_URL` | Enclavid API base URL (sessions). Through a gateway, its api name as a bare origin, see [Sessions through a gateway](#sessions-through-a-gateway). Default: `http://localhost:8001` |
+| `ENCLAVID_API_MEASUREMENT` | The api build `session create` requires, as 96 lowercase hex characters; `--measurement` wins over it. Sent to a gateway in front of api, see [Sessions through a gateway](#sessions-through-a-gateway). Unset: no build is named, as against api directly |
+| `ENCLAVID_APPLICANT_URL` | Base of the applicant link printed after `session create` (`<base>/#/session/<id>`, or `<base>/-<group>/#/session/<id>` when a gateway placed the session on a group). Through a gateway, its applicant name as a bare origin; the CLI adds the marker itself. Default: `http://localhost:5173` |
 | `ENCLAVID_WORKSPACE_ID` | Active workspace override (CI: avoids the interactive picker in `cloud login`) |
 | `ENCLAVID_CLIENT_ID` | M2M client_id (Logto client_credentials grant for non-interactive auth) |
 | `ENCLAVID_CLIENT_SECRET` | M2M client_secret |
@@ -162,13 +180,16 @@ If the discovery endpoint is unreachable, set `ENCLAVID_ISSUER` / `ENCLAVID_CLI_
 
 ## Files written
 
+`<config>` is the platform config directory: `$XDG_CONFIG_HOME` or `~/.config` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows.
+
 | Path | Contents |
 | --- | --- |
-| `~/.config/enclavid/auth.json` (or platform equivalent), mode `0600` | access_token, refresh_token, id_token, workspaces list, active_workspace_id |
+| `<config>/enclavid/auth.json`, mode `0600` | access_token, refresh_token, id_token, workspaces list, active_workspace_id |
 | `~/.cache/enclavid/cli-config.json` (or platform equivalent) | Cached discovery response (TTL 1h) |
 | `~/.docker/config.json` `credHelpers` entry | Maps Enclavid registry host → `enclavid` helper |
-| `~/.config/enclavid/sessions/<id>/token`, mode `0600` | Per-session `X-Session-Token` (returned by `session create`) |
-| `~/.config/enclavid/sessions/<id>/disclosure.key`, mode `0600` | Per-session age secret-key (auto-generated, or copy of `--disclosure-key`) |
+| `<config>/enclavid/sessions/<id>/token`, mode `0600` | Per-session `X-Session-Token` (returned by `session create`) |
+| `<config>/enclavid/sessions/<id>/disclosure.key`, mode `0600` | Per-session disclosure secret, an X25519 secret key as hex (auto-generated, or copy of `--disclosure-key`); absent when `--from-file` brought its own `client_disclosure_pubkey` |
+| `<config>/enclavid/sessions/<id>/group`, mode `0600` | Per-session group `<label>.<build>` a gateway placed the session on, checked again whenever it is read; absent against api directly |
 
 `enclavid cloud logout` removes the auth file AND the credHelper entry.
 

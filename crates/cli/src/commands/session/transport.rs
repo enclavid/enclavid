@@ -2,6 +2,7 @@
 //!   * the reqwest client (rustls-only — same TLS stack we use elsewhere),
 //!   * `Authorization: Bearer <jwt>` from `auth::get_access_token`,
 //!   * `X-Session-Token: <cached>` for read endpoints,
+//!   * `x-enclavid-measurement: <build>` when `create` names a build,
 //!   * error body capture (we always print the server's JSON error
 //!     instead of letting reqwest swallow it).
 
@@ -9,6 +10,14 @@ use anyhow::{Context, Result, bail};
 use reqwest::{Client, Method, Response, header};
 
 use crate::auth;
+
+/// The api build a creating request requires, for a gateway to place
+/// the session on a group running it. api itself ignores it.
+pub const MEASUREMENT_HEADER: &str = "x-enclavid-measurement";
+
+/// The group a gateway placed a created session on, in the form a
+/// path marker carries it: `<label>.<build>`.
+pub const GROUP_HEADER: &str = "x-enclavid-group";
 
 pub fn http_client() -> Result<Client> {
     Client::builder().build().context("building http client")
@@ -26,6 +35,7 @@ pub async fn send(
     url: &str,
     jwt: &str,
     session_token: Option<&str>,
+    measurement: Option<&str>,
     body: Option<serde_json::Value>,
 ) -> Result<Response> {
     let mut req = client
@@ -33,6 +43,9 @@ pub async fn send(
         .header(header::AUTHORIZATION, format!("Bearer {jwt}"));
     if let Some(t) = session_token {
         req = req.header("x-session-token", t);
+    }
+    if let Some(m) = measurement {
+        req = req.header(MEASUREMENT_HEADER, m);
     }
     if let Some(b) = body {
         req = req.json(&b);

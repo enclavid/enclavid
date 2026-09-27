@@ -10,6 +10,8 @@
 //! Decryption errors abort the command (any single failure means
 //! the cached key doesn't match what the session was created with —
 //! signals user error / wrong session, not partial data).
+//!
+//! Goes under the cached group's marker when `create` cached one.
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -18,8 +20,8 @@ use reqwest::Method;
 use serde::Deserialize;
 use std::path::PathBuf;
 
-use super::api_url;
 use super::cache;
+use super::session_api;
 use super::transport;
 
 #[derive(Deserialize)]
@@ -39,11 +41,12 @@ pub async fn run(session_id: &str, disclosure_key_override: Option<PathBuf>) -> 
     let client = transport::http_client()?;
     let url = format!(
         "{}/api/v1/sessions/{}/disclosures",
-        api_url().trim_end_matches('/'),
+        session_api(session_id)?,
         session_id,
     );
 
-    let response = transport::send(&client, Method::GET, &url, &jwt, Some(&token), None).await?;
+    let response =
+        transport::send(&client, Method::GET, &url, &jwt, Some(&token), None, None).await?;
     let response = transport::ensure_ok(response, "GET /api/v1/sessions/<id>/disclosures").await?;
     let body: DisclosuresResponse = response
         .json()

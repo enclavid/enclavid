@@ -317,11 +317,13 @@ enum SessionCommand {
         #[arg(short = 'f', long = "from-file", conflicts_with = "policy")]
         from_file: Option<PathBuf>,
 
-        /// Path to an age identity used as the disclosure recipient.
+        /// Path to a file holding the disclosure secret (an X25519 secret
+        /// as hex) whose public key is the disclosure recipient.
         /// Wins over a `client_disclosure_pubkey` in `--from-file`. When
         /// absent (and the file supplies none), generate an ephemeral
-        /// keypair and stash the secret under
-        /// `~/.config/enclavid/sessions/<id>/`.
+        /// keypair and stash the secret under `enclavid/sessions/<id>/`
+        /// in the platform config directory (`~/.config` on Linux,
+        /// `~/Library/Application Support` on macOS).
         #[arg(long)]
         disclosure_key: Option<PathBuf>,
 
@@ -330,6 +332,15 @@ enum SessionCommand {
         /// session_id → your-side record on your dashboard.
         #[arg(long)]
         client_ref: Option<String>,
+
+        /// The api build the session must run on, as 96 lowercase hex
+        /// characters (the launch measurement). Sent to a gateway in
+        /// front of api, which places the session on a group running
+        /// that build; the group is cached so later `session` commands
+        /// and the applicant link name it. Falls back to
+        /// `$ENCLAVID_API_MEASUREMENT`; omit both against api directly.
+        #[arg(long)]
+        measurement: Option<String>,
     },
 
     /// Fetch and print the session record (status, policy, disclosure
@@ -346,8 +357,9 @@ enum SessionCommand {
         id: String,
 
         /// Override the disclosure secret path. When absent, look in
-        /// `~/.config/enclavid/sessions/<id>/disclosure.key` (populated
-        /// by the matching `session create`).
+        /// `enclavid/sessions/<id>/disclosure.key` in the platform config
+        /// directory (`~/.config` on Linux, `~/Library/Application
+        /// Support` on macOS; populated by the matching `session create`).
         #[arg(long)]
         disclosure_key: Option<PathBuf>,
     },
@@ -435,8 +447,16 @@ async fn main() -> Result<()> {
                 from_file,
                 disclosure_key,
                 client_ref,
+                measurement,
             } => {
-                commands::session::create::run(policy, from_file, disclosure_key, client_ref).await
+                commands::session::create::run(
+                    policy,
+                    from_file,
+                    disclosure_key,
+                    client_ref,
+                    measurement,
+                )
+                .await
             }
             SessionCommand::Get { id } => commands::session::get::run(&id).await,
             SessionCommand::Disclosures { id, disclosure_key } => {
