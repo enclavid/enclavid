@@ -1478,6 +1478,7 @@ dependencies = [
  "ppp",
  "rcgen",
  "ring",
+ "rustls-webpki",
  "safe-logger",
  "serde",
  "serde_json",

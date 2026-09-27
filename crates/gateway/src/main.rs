@@ -23,7 +23,9 @@
 //! It arrives on the same transport as every other fleet port, and the only
 //! thing ahead of the handshake is a PROXY protocol header the host's first hop
 //! writes, naming who dialled: `crate::listener` reads it, then starts the TLS
-//! session on the same stream.
+//! session on the same stream — unless the hello offers nothing but ACME's
+//! `acme-tls/1`, which is an issuer validating a name, and is carried unopened
+//! to whatever the host says answers it. See `crate::listener::acme`.
 //!
 //! That is also why there is one public listener rather than one per name. From
 //! outside there is one TLS session per connection, and the name it agreed on is
@@ -57,7 +59,8 @@
 //! and the leg onward has to be attested. Both are.
 //!
 //! What this role reads of what it carries is little, and fixed: the PROXY
-//! header ahead of a connection, the marker a link carries at the head of a
+//! header ahead of a connection, the protocols its hello offers, the marker a
+//! link carries at the head of a
 //! path, its own evidence's path and the method asked of it, the host a
 //! request names — its target's authority and its `Host`, compared to the name
 //! the connection agreed to — a header of its own, the build a caller names,
@@ -141,11 +144,12 @@ fn serving_key() -> Result<identity::key::Identity, String> {
 }
 
 /// A developer build has no chip, so it derives from a stand-in that is no
-/// secret — see `crate::identity::key::NO_CHIP`. The path is the same one the
-/// attested build takes, which is the point.
+/// secret — see `crate::identity::key::Identity::no_chip`. The path is the same
+/// one the attested build takes, which is the point; what the key may not have
+/// is an issued certificate.
 #[cfg(not(feature = "sev-snp"))]
 fn serving_key() -> Result<identity::key::Identity, String> {
-    identity::key::Identity::derived(&identity::key::NO_CHIP)
+    identity::key::Identity::no_chip()
 }
 
 /// Every loop of this role's own is awaited HERE, on the main task.
@@ -228,6 +232,9 @@ async fn main() -> std::convert::Infallible {
     // command line — see `crate::config` for why it cannot be.
     let (table, current) = watch::channel(Arc::new(upstream::Upstreams::empty(attestor)));
     let (certificate, presented) = watch::channel(None);
+    // Certificates an issuer signed over the same key, once the host pushes
+    // some — see `crate::config::push`. Until then this role presents its own.
+    let (issued, accepted) = watch::channel(Vec::new());
 
     let health_port = fleet_transport::health::bind(&health_addr).await;
     let config_port = fleet_transport::bind(&config_addr)
@@ -252,8 +259,11 @@ async fn main() -> std::convert::Infallible {
             let state = health.clone();
             move || state.body()
         }) => ended,
-        ended = config::push::serve(config_port, table, descriptors) => ended,
-        ended = listener::certificate::follow(current.clone(), identity, certificate) => ended,
+        ended = config::push::serve(
+            config_port,
+            config::push::Port::new(table, descriptors, identity.clone(), issued),
+        ) => ended,
+        ended = listener::certificate::follow(current.clone(), accepted, identity, certificate) => ended,
         ended = public(public_addr, current, hop, tls, health) => ended,
     }
 }

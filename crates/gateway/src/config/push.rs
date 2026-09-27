@@ -4,6 +4,30 @@
 //! sends the whole table with `PUT /config`. Nothing on the host has to be
 //! running for this role to keep serving; the host speaks when the fleet changes.
 //!
+//! ## And certificates an issuer signed
+//!
+//! The host reads a request for a certificate with `GET /csr` — over the names
+//! it pushed, or over any it asks for, pushed or about to be — has an issuer
+//! sign it, and carries the chain in its next push, among the table's
+//! `certificates`. This role never talks to an issuer: the challenge, the
+//! account and whatever the issuer wants happen on the host, and what crosses
+//! this port is public — a request any holder of the names could ask for, and
+//! certificates that are useless without the key they name, which never leaves
+//! this guest. See `crate::identity::tls::issued` for what is checked before
+//! they are presented, and `crate::listener::certificate` for how they are.
+//!
+//! In the push rather than beside it, because a push is the whole of what the
+//! host says: the push after a restart restores the certificates with the rest,
+//! and one without any presents none. Together they cover every name the push
+//! declares, or the push is refused, so no name is served on this role's own
+//! certificate while issued ones are in use. How the names are split among
+//! them is the host's: one for all, one each, or as its issuer handed them
+//! out. A name is added by asking for a request over it —
+//! `GET /csr?names=c.example` — having it issued, and pushing the name and its
+//! certificate together. An issuer validating over TLS-ALPN-01 reaches the
+//! host's ACME client through this role, for names pushed or not yet — see
+//! `crate::listener::acme`.
+//!
 //! ## It is not the health port
 //!
 //! The health port never reads a byte, and that is its guarantee. This port
@@ -12,12 +36,21 @@
 //!
 //! ## What reading host input here puts at risk
 //!
-//! hyper's HTTP/1 parser, the JSON parser, and the router a rule's path is read
-//! into — see `crate::route::Rules` — and nothing past them. A push says
-//! where this role may go and nothing about what it will accept — see
-//! `crate::config` — so a push from anyone who reaches this port, the host or
-//! otherwise, can make routes fail but cannot make a caller talk to a build it
-//! did not name.
+//! hyper's HTTP/1 parser, the JSON parser, the router a rule's path is read
+//! into — see `crate::route::Rules` — and, for a certificate, a PEM and an
+//! X.509 parser and the name check a TLS client runs; nothing past them. A push
+//! says where this role may go and nothing about what it will accept — see
+//! `crate::config` — so a push can make routes fail but cannot make an
+//! applicant's connection reach anything but a member proving the build its
+//! group names. A certificate for another key is refused, so a push can take
+//! the public surface down at worst, which the host could anyway.
+//!
+//! A push does say one thing more: where an ACME validator's connection is
+//! carried, and so who answers it for the names — who can have a certificate
+//! issued for them. That is the host's to say, as the rest is. Whoever reaches
+//! this port is taken to be the host, which holds the names' address and could
+//! have a certificate issued without this role; which of the host's own
+//! processes may reach it is the host's to settle, not this role's.
 //!
 //! ## One push at a time
 //!
@@ -50,10 +83,15 @@ use hyper_util::rt::TokioIo;
 use safe_logger::{debug, info, reason, safe};
 use tokio::sync::watch;
 
+use crate::identity::key::Identity;
+use crate::identity::tls::{self, Issued};
 use crate::upstream::Upstreams;
 
-/// The one path this port responds to.
+/// Where a table is pushed.
 const PATH: &str = "/config";
+
+/// Where the request for a certificate over the served names is read.
+const REQUEST: &str = "/csr";
 
 /// The largest push accepted. Far beyond any table a fleet declares, and small
 /// enough that the host cannot use a push to take this role's memory.
@@ -68,23 +106,48 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 /// any other value lets two pushes interleave.
 const AT_ONCE: usize = 1;
 
-/// Take pushes for ever, publishing each accepted table to `current`.
-///
-/// `descriptors` is how many the process holds at most — what it got at boot.
-/// A push whose tuning could need more is refused, because a ceiling the
-/// descriptor table cannot back is not a ceiling.
+/// What a push acts on.
+#[derive(Clone)]
+pub struct Port {
+    /// Where each accepted table is published.
+    current: watch::Sender<Arc<Upstreams>>,
+    /// How many descriptors the process holds at most — what it got at boot. A
+    /// push whose tuning could need more is refused, because a ceiling the
+    /// descriptor table cannot back is not a ceiling.
+    descriptors: u64,
+    /// The key a certificate request is signed with, and an issued certificate
+    /// must be for.
+    identity: Arc<Identity>,
+    /// Where the accepted issued certificates are published: none, or enough
+    /// to cover every name.
+    issued: watch::Sender<Vec<Issued>>,
+}
+
+impl Port {
+    pub fn new(
+        current: watch::Sender<Arc<Upstreams>>,
+        descriptors: u64,
+        identity: Arc<Identity>,
+        issued: watch::Sender<Vec<Issued>>,
+    ) -> Port {
+        Port {
+            current,
+            descriptors,
+            identity,
+            issued,
+        }
+    }
+}
+
+/// Take pushes for ever, publishing each accepted table and certificate.
 ///
 /// Await it on the role's own task, not in a spawn: a role that stopped taking
 /// configuration would keep serving a table the host can no longer change, and
 /// that should end the process rather than go on quietly.
-pub async fn serve(
-    listener: fleet_transport::Listener,
-    current: watch::Sender<Arc<Upstreams>>,
-    descriptors: u64,
-) -> ! {
+pub async fn serve(listener: fleet_transport::Listener, port: Port) -> ! {
     let port = tower::ServiceBuilder::new()
         .concurrency_limit(AT_ONCE)
-        .service_fn(move |accepted| connection(current.clone(), descriptors, accepted));
+        .service_fn(move |accepted| connection(port.clone(), accepted));
     fleet_transport::service::serve(listener, port).await
 }
 
@@ -93,15 +156,11 @@ pub async fn serve(
 /// [`PUSH_TIMEOUT`] bounds it here, inside, rather than as a layer around the
 /// service: only here is the peer known, and the two ways a connection ends —
 /// it failed, or it never finished — are told apart side by side.
-async fn connection(
-    current: watch::Sender<Arc<Upstreams>>,
-    descriptors: u64,
-    accepted: fleet_transport::Accepted,
-) -> Result<(), Infallible> {
+async fn connection(port: Port, accepted: fleet_transport::Accepted) -> Result<(), Infallible> {
     let peer = accepted.peer;
     let responding = hyper::service::service_fn(move |req| {
-        let current = current.clone();
-        async move { Ok::<_, Infallible>(push(&current, descriptors, req).await) }
+        let port = port.clone();
+        async move { Ok::<_, Infallible>(push(&port, req).await) }
     });
     let conn = http1::Builder::new()
         // One request per connection. Ordering does not need it — HTTP/1 serves
@@ -124,56 +183,152 @@ async fn connection(
     Ok(())
 }
 
-/// Respond to one request, and apply it if it is a valid push.
-async fn push<B>(
-    current: &watch::Sender<Arc<Upstreams>>,
-    descriptors: u64,
-    req: Request<B>,
-) -> Response<Full<Bytes>>
+/// Respond to one request, and act on it if it is a valid one.
+async fn push<B>(port: &Port, req: Request<B>) -> Response<Full<Bytes>>
 where
     B: Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    if req.uri().path() != PATH {
-        return respond(
+    match (req.method(), req.uri().path()) {
+        (&Method::PUT, PATH) => match body(req).await {
+            Ok(body) => configure(port, &body),
+            Err((status, said)) => respond(status, Some(said.into())),
+        },
+        (&Method::GET, REQUEST) => request(port, req.uri().query()),
+        (_, PATH) => not_allowed("PUT"),
+        (_, REQUEST) => not_allowed("GET"),
+        _ => respond(
             StatusCode::NOT_FOUND,
-            Some(format!("the only path here is {PATH}\n").into()),
-        );
+            Some(format!("the paths here are {PATH} and {REQUEST}\n").into()),
+        ),
     }
-    if req.method() != Method::PUT {
-        let mut refused = respond(
-            StatusCode::METHOD_NOT_ALLOWED,
-            Some("push with PUT\n".into()),
-        );
-        refused.headers_mut().insert(
-            hyper::header::ALLOW,
-            hyper::header::HeaderValue::from_static("PUT"),
-        );
-        return refused;
-    }
+}
 
-    let body = match Limited::new(req.into_body(), MAX_PUSH_BYTES)
+/// The method a path takes, said to one that used another.
+fn not_allowed(method: &'static str) -> Response<Full<Bytes>> {
+    let mut refused = respond(
+        StatusCode::METHOD_NOT_ALLOWED,
+        Some(format!("this path takes {method}\n").into()),
+    );
+    refused.headers_mut().insert(
+        hyper::header::ALLOW,
+        hyper::header::HeaderValue::from_static(method),
+    );
+    refused
+}
+
+/// A request's body, whole and no longer than [`MAX_PUSH_BYTES`], or the status
+/// and text the sender is told instead.
+async fn body<B>(req: Request<B>) -> Result<Bytes, (StatusCode, String)>
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    match Limited::new(req.into_body(), MAX_PUSH_BYTES)
         .collect()
         .await
     {
-        Ok(collected) => collected.to_bytes(),
-        Err(e) if e.downcast_ref::<LengthLimitError>().is_some() => {
-            return respond(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                Some(format!("a push is at most {MAX_PUSH_BYTES} bytes\n").into()),
-            );
-        }
-        Err(_) => {
-            return respond(
-                StatusCode::BAD_REQUEST,
-                Some("the body did not arrive whole\n".into()),
-            );
-        }
-    };
+        Ok(collected) => Ok(collected.to_bytes()),
+        Err(e) if e.downcast_ref::<LengthLimitError>().is_some() => Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("a push is at most {MAX_PUSH_BYTES} bytes\n"),
+        )),
+        Err(_) => Err((
+            StatusCode::BAD_REQUEST,
+            "the body did not arrive whole\n".into(),
+        )),
+    }
+}
 
+/// The most names one request may ask for: as many as a public issuer puts in
+/// one certificate.
+const MOST_REQUESTED_NAMES: usize = 100;
+
+/// The request for a certificate, in DER: over the names the query asks for,
+/// or over the names this role serves now if it asks for none.
+///
+/// Names it does not serve yet may be asked for, and that is the point: a
+/// certificate covering a name before the push that adds it is what lets the
+/// name be served, from the push on, with nothing but that certificate. It is
+/// no more than it looks. An issuer certifies the key for a name only once the
+/// host proves it holds that name, and the key the request is for never leaves
+/// this guest — this role signs a request it builds itself, over names it
+/// checked to be names, and nothing else.
+fn request(port: &Port, query: Option<&str>) -> Response<Full<Bytes>> {
+    let names = match asked_for(query) {
+        Ok(Some(names)) => names,
+        Ok(None) => port.current.borrow().served().to_vec(),
+        Err(said) => return respond(StatusCode::BAD_REQUEST, Some(format!("{said}\n").into())),
+    };
+    if names.is_empty() {
+        return respond(
+            StatusCode::CONFLICT,
+            Some(
+                format!("no names yet — push a configuration first, or ask for them: {REQUEST}?names=a.example,b.example\n")
+                    .into(),
+            ),
+        );
+    }
+    match tls::request(&port.identity, &names) {
+        Ok(der) => Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "application/pkcs10")
+            .body(Full::new(Bytes::from(der)))
+            .expect("a constant response builds"),
+        // A name that is not one — the sender's to fix.
+        Err(reason) => respond(StatusCode::BAD_REQUEST, Some(format!("{reason}\n").into())),
+    }
+}
+
+/// The names a request asks for, from `names=a,b,…` in its query, or `None`
+/// when it asks for none. Each is checked to be a name when the request is
+/// built.
+fn asked_for(query: Option<&str>) -> Result<Option<Vec<String>>, String> {
+    let Some(query) = query else {
+        return Ok(None);
+    };
+    let mut names: Option<Vec<String>> = None;
+    for pair in query.split('&') {
+        match pair.split_once('=') {
+            Some(("names", list)) if names.is_none() => {
+                names = Some(list.split(',').map(str::to_owned).collect());
+            }
+            Some(("names", _)) => return Err("names is given twice".into()),
+            _ => {
+                return Err(format!(
+                    "the one parameter here is names, as in {REQUEST}?names=a.example,b.example"
+                ));
+            }
+        }
+    }
+    if let Some(names) = &names
+        && names.len() > MOST_REQUESTED_NAMES
+    {
+        return Err(format!(
+            "at most {MOST_REQUESTED_NAMES} names to one request"
+        ));
+    }
+    Ok(names)
+}
+
+/// Apply a table, and the issued certificates it carries, if all are valid.
+///
+/// The certificates are checked here rather than with the rest of the table,
+/// because they are checked against this role's key, which a table cannot know
+/// — see [`tls::issued`] for what is checked, and why the sender need not be
+/// trusted. They are checked against the names of the same push, and one that
+/// is refused refuses the push whole, as any other part does.
+///
+/// This role keeps them for as long as it runs and no longer: nothing is
+/// written anywhere. The key they are for is the same at every boot, so the
+/// push the host makes after a restart carries the same certificates, and a
+/// renewal is the next push carrying the next ones.
+fn configure(port: &Port, body: &[u8]) -> Response<Full<Bytes>> {
+    let current = &port.current;
+    let descriptors = port.descriptors;
     // The reason is the sender's to read and is not logged: it can quote the
     // push, and the push is the host's, which already has it.
-    let declared = match crate::config::ValidatedConfig::parse(&body) {
+    let declared = match crate::config::ValidatedConfig::parse(body) {
         Ok(declared) => declared,
         Err(reason) => return respond(StatusCode::BAD_REQUEST, Some(format!("{reason}\n").into())),
     };
@@ -195,13 +350,46 @@ where
         );
     }
 
+    // The reason goes to the sender, whose certificates they are, and is not
+    // logged.
+    let pushed: Vec<String> = declared.names().keys().cloned().collect();
+    let issued = match tls::issued(
+        &port.identity,
+        declared.certificates(),
+        &pushed,
+        std::time::SystemTime::now(),
+    ) {
+        Ok(issued) => issued,
+        Err(reason) => {
+            return respond(
+                StatusCode::BAD_REQUEST,
+                Some(format!("certificates{reason}\n").into()),
+            );
+        }
+    };
+
     // The apply step, with no await in it — see the module docs. The borrow is
     // released before publishing, because holding it across `send_replace`
     // would wait on itself.
     let previous = current.borrow().clone();
     let next = Arc::new(previous.replaced(&declared));
     let groups = next.len();
+    let carried = issued.len();
+    // The certificates before the table. What the listener presents is made
+    // from both, again whenever either moves, and in this order a push that
+    // carries certificates is never answered with this role's own in between.
+    port.issued.send_replace(issued);
     current.send_replace(next);
+    if carried > 0 {
+        info!(
+            "gateway: {} issued certificate(s) presented in place of this role's own",
+            safe(
+                &carried,
+                reason!("how many certificates the host's own push carried")
+            ),
+            reason!("constant text; says the host pushed some, which it did")
+        );
+    }
 
     info!(
         "gateway: configuration accepted, {} group(s) declared",
@@ -244,11 +432,24 @@ mod tests {
     /// Descriptors enough for any tuning, for the tests about something else.
     const ENOUGH: u64 = u64::MAX;
 
-    fn table() -> (
-        watch::Sender<Arc<Upstreams>>,
+    /// A port over an empty table, holding `descriptors`, and the two things it
+    /// publishes: the table and the issued certificates.
+    fn fixture(
+        descriptors: u64,
+    ) -> (
+        Port,
         watch::Receiver<Arc<Upstreams>>,
+        watch::Receiver<Vec<Issued>>,
     ) {
-        watch::channel(Arc::new(Upstreams::empty(crate::identity::attestor())))
+        let (current, table) =
+            watch::channel(Arc::new(Upstreams::empty(crate::identity::attestor())));
+        let (issued, accepted) = watch::channel(Vec::new());
+        let identity = Arc::new(Identity::generated().unwrap());
+        (
+            Port::new(current, descriptors, identity, issued),
+            table,
+            accepted,
+        )
     }
 
     fn valid() -> String {
@@ -279,10 +480,10 @@ mod tests {
     }
 
     /// This role's port on a socket of its own, and where to reach it.
-    async fn port(tx: watch::Sender<Arc<Upstreams>>) -> String {
+    async fn listening(port: Port) -> String {
         let listener = fleet_transport::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve(listener, tx, ENOUGH));
+        tokio::spawn(serve(listener, port));
         addr
     }
 
@@ -299,8 +500,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_valid_push_replaces_the_table() {
-        let (tx, rx) = table();
-        let resp = push(&tx, ENOUGH, request(Method::PUT, PATH, valid())).await;
+        let (port, rx, _) = fixture(ENOUGH);
+        let resp = push(&port, request(Method::PUT, PATH, valid())).await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(rx.borrow().len(), 1);
         assert!(rx.borrow().at_group(FIRST, "one").is_ok());
@@ -310,17 +511,18 @@ mod tests {
     /// refused, and says which numbers to lower.
     #[tokio::test]
     async fn a_push_this_process_could_not_back_is_refused() {
-        let (tx, rx) = table();
         let needed = crate::config::testing::tuning().descriptors();
 
-        let resp = push(&tx, needed - 1, request(Method::PUT, PATH, valid())).await;
+        let (short, rx, _) = fixture(needed - 1);
+        let resp = push(&short, request(Method::PUT, PATH, valid())).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let said = resp.into_body().collect().await.unwrap().to_bytes();
         let said = String::from_utf8_lossy(&said);
         assert!(said.contains("listener.connections"), "{said}");
         assert_eq!(rx.borrow().len(), 0, "and nothing was applied");
 
-        let resp = push(&tx, needed, request(Method::PUT, PATH, valid())).await;
+        let (exact, _, _) = fixture(needed);
+        let resp = push(&exact, request(Method::PUT, PATH, valid())).await;
         assert_eq!(
             resp.status(),
             StatusCode::NO_CONTENT,
@@ -331,17 +533,16 @@ mod tests {
     /// A refused push leaves the table exactly as it was.
     #[tokio::test]
     async fn a_refused_push_changes_nothing() {
-        let (tx, rx) = table();
+        let (port, rx, _) = fixture(ENOUGH);
         assert_eq!(
-            push(&tx, ENOUGH, request(Method::PUT, PATH, valid()))
+            push(&port, request(Method::PUT, PATH, valid()))
                 .await
                 .status(),
             StatusCode::NO_CONTENT
         );
 
         let resp = push(
-            &tx,
-            ENOUGH,
+            &port,
             request(Method::PUT, PATH, r#"{"upstreams":[],"x":1}"#),
         )
         .await;
@@ -349,14 +550,25 @@ mod tests {
         assert_eq!(rx.borrow().len(), 1);
     }
 
+    /// Each path takes its one method, and says which to one using another.
     #[tokio::test]
-    async fn only_put_on_the_one_path_is_a_push() {
-        let (tx, rx) = table();
-        let refused = push(&tx, ENOUGH, request(Method::POST, PATH, valid())).await;
-        assert_eq!(refused.status(), StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(refused.headers()[hyper::header::ALLOW], "PUT");
+    async fn each_path_takes_its_own_method() {
+        let (port, rx, _) = fixture(ENOUGH);
+        for (method, path, allowed) in [
+            (Method::POST, PATH, "PUT"),
+            (Method::GET, PATH, "PUT"),
+            (Method::PUT, REQUEST, "GET"),
+        ] {
+            let refused = push(&port, request(method.clone(), path, valid())).await;
+            assert_eq!(
+                refused.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {path}"
+            );
+            assert_eq!(refused.headers()[hyper::header::ALLOW], allowed);
+        }
         assert_eq!(
-            push(&tx, ENOUGH, request(Method::PUT, "/elsewhere", valid()))
+            push(&port, request(Method::PUT, "/elsewhere", valid()))
                 .await
                 .status(),
             StatusCode::NOT_FOUND
@@ -364,12 +576,208 @@ mod tests {
         assert_eq!(rx.borrow().len(), 0);
     }
 
+    /// A certificate a test issuer signs for `key` over `names`, valid for as
+    /// long as these tests will run.
+    fn signed_for(key: &rcgen::KeyPair, names: &[&str]) -> String {
+        crate::identity::tls::tests::issued_by(
+            &crate::identity::tls::tests::issuer(),
+            key,
+            names,
+            (2020, 1, 1),
+            (2099, 1, 1),
+        )
+    }
+
+    /// The request is read once there are names, and is for this role's key.
+    #[tokio::test]
+    async fn the_request_is_for_this_key_once_there_are_names() {
+        use x509_parser::prelude::FromDer;
+
+        let (port, _rx, _) = fixture(ENOUGH);
+        assert_eq!(
+            push(&port, request(Method::GET, REQUEST, ""))
+                .await
+                .status(),
+            StatusCode::CONFLICT,
+            "no names before a push"
+        );
+        assert_eq!(
+            push(&port, request(Method::PUT, PATH, valid()))
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let resp = push(&port, request(Method::GET, REQUEST, "")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()[hyper::header::CONTENT_TYPE],
+            "application/pkcs10"
+        );
+        let der = resp.into_body().collect().await.unwrap().to_bytes();
+        let (_, csr) =
+            x509_parser::certification_request::X509CertificationRequest::from_der(&der).unwrap();
+        assert_eq!(
+            csr.certification_request_info.subject_pki.raw,
+            port.identity.spki()
+        );
+    }
+
+    /// A request may ask for names no push has declared yet, and is over
+    /// exactly those; a query that is not one list of names is refused.
+    #[tokio::test]
+    async fn a_request_may_ask_for_the_names_a_push_will_declare() {
+        let (port, _rx, _) = fixture(ENOUGH);
+        let resp = push(
+            &port,
+            request(
+                Method::GET,
+                &format!("{REQUEST}?names={FIRST},{SECOND}"),
+                "",
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "before any push");
+        let der = resp.into_body().collect().await.unwrap().to_bytes();
+        let mut asked = [FIRST, SECOND];
+        asked.sort();
+        assert_eq!(crate::identity::tls::tests::requested_names(&der), asked);
+
+        let too_many = vec![FIRST; MOST_REQUESTED_NAMES + 1].join(",");
+        for (query, said) in [
+            (
+                format!("names={FIRST}&names={SECOND}"),
+                "names is given twice",
+            ),
+            (
+                format!("names={FIRST}&which=all"),
+                "the one parameter here is names",
+            ),
+            ("names".to_owned(), "the one parameter here is names"),
+            ("names=bad..example".to_owned(), "is not a DNS name"),
+            ("names=".to_owned(), "is not a DNS name"),
+            (format!("names={too_many}"), "at most"),
+        ] {
+            let resp = push(
+                &port,
+                request(Method::GET, &format!("{REQUEST}?{query}"), ""),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{query}");
+            let got = resp.into_body().collect().await.unwrap().to_bytes();
+            assert!(
+                String::from_utf8_lossy(&got).contains(said),
+                "{query}: {got:?}"
+            );
+        }
+    }
+
+    /// [`valid`], carrying `pems` as its issued certificates.
+    fn carrying(pems: &[String]) -> String {
+        valid().replacen(
+            '{',
+            &format!(
+                "{{ \"certificates\": {},",
+                serde_json::to_string(pems).unwrap()
+            ),
+            1,
+        )
+    }
+
+    /// What the port says to a push it refused.
+    async fn refusal(resp: Response<Full<Bytes>>) -> String {
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let said = resp.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8_lossy(&said).into_owned()
+    }
+
+    /// A push carrying certificates for this role's key that cover its names
+    /// between them — one for both, or one each — presents them; one carrying
+    /// a certificate for another key is refused whole, the table as well, and
+    /// says which; and one carrying none presents none.
+    #[tokio::test]
+    async fn a_push_s_certificates_are_taken_with_it_or_refuse_it() {
+        let (port, rx, mut accepted) = fixture(ENOUGH);
+        let key = port.identity.key();
+
+        for (layout, pems) in [
+            ("one for both", vec![signed_for(key, &[FIRST, SECOND])]),
+            (
+                "one each",
+                vec![signed_for(key, &[FIRST]), signed_for(key, &[SECOND])],
+            ),
+        ] {
+            assert_eq!(
+                push(&port, request(Method::PUT, PATH, carrying(&pems)))
+                    .await
+                    .status(),
+                StatusCode::NO_CONTENT,
+                "{layout}"
+            );
+            assert_eq!(accepted.borrow_and_update().len(), pems.len(), "{layout}");
+        }
+        assert_eq!(rx.borrow().len(), 1);
+
+        let other = rcgen::KeyPair::generate().unwrap();
+        let said = refusal(
+            push(
+                &port,
+                request(
+                    Method::PUT,
+                    PATH,
+                    carrying(&[signed_for(key, &[FIRST]), signed_for(&other, &[SECOND])])
+                        .replace("\"one\"", "\"uno\""),
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            said.contains("certificates[1]: the certificate is for another key"),
+            "{said}"
+        );
+        assert!(
+            !accepted.has_changed().unwrap(),
+            "the certificates presented are still the ones taken"
+        );
+        assert!(
+            rx.borrow().at_group(FIRST, "uno").is_err(),
+            "and the table the push carried was not applied"
+        );
+
+        // A name none of them covers would be served on this role's own, which
+        // no caller trusting the issuer accepts.
+        let said = refusal(
+            push(
+                &port,
+                request(Method::PUT, PATH, carrying(&[signed_for(key, &[FIRST])])),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            said.contains(&format!("certificates: none of them covers {SECOND}")),
+            "{said}"
+        );
+        assert!(!accepted.has_changed().unwrap());
+
+        assert_eq!(
+            push(&port, request(Method::PUT, PATH, valid()))
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(
+            accepted.borrow_and_update().is_empty(),
+            "a push without any presents none"
+        );
+    }
+
     #[tokio::test]
     async fn an_oversized_push_is_refused_before_it_is_parsed() {
-        let (tx, rx) = table();
+        let (port, rx, _) = fixture(ENOUGH);
         let resp = push(
-            &tx,
-            ENOUGH,
+            &port,
             request(Method::PUT, PATH, vec![b' '; MAX_PUSH_BYTES + 1]),
         )
         .await;
@@ -381,8 +789,8 @@ mod tests {
     /// table seen to change.
     #[tokio::test]
     async fn the_port_takes_a_push_over_a_connection() {
-        let (tx, mut rx) = table();
-        let addr = port(tx).await;
+        let (port, mut rx, _) = fixture(ENOUGH);
+        let addr = listening(port).await;
 
         let body = valid();
         let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
@@ -401,8 +809,8 @@ mod tests {
     /// a response, and its push is still applied.
     #[tokio::test]
     async fn a_pusher_that_stops_sending_still_gets_a_response() {
-        let (tx, mut rx) = table();
-        let addr = port(tx).await;
+        let (port, mut rx, _) = fixture(ENOUGH);
+        let addr = listening(port).await;
 
         let body = valid();
         let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
@@ -422,8 +830,8 @@ mod tests {
     /// taken — let alone applied — and once the first is done, it is.
     #[tokio::test]
     async fn a_second_push_waits_for_the_first() {
-        let (tx, rx) = table();
-        let addr = port(tx).await;
+        let (port, rx, _) = fixture(ENOUGH);
+        let addr = listening(port).await;
         let body = valid();
 
         // The first holds the port: its head and only part of its body.
@@ -458,8 +866,8 @@ mod tests {
     /// after PUSH_TIMEOUT.
     #[tokio::test]
     async fn a_pusher_that_would_keep_its_connection_does_not_keep_the_port() {
-        let (tx, _rx) = table();
-        let addr = port(tx).await;
+        let (port, _rx, _) = fixture(ENOUGH);
+        let addr = listening(port).await;
         let body = valid();
 
         let mut first = tokio::net::TcpStream::connect(&addr).await.unwrap();

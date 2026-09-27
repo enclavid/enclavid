@@ -25,6 +25,14 @@
 //! which is why the first hop must write it the moment it connects. What is
 //! read, what is kept and why neither leaves this role is in `source`.
 //!
+//! ## Then the hello, and whose connection it is
+//!
+//! A connection whose hello offers `acme-tls/1` and nothing else is an ACME
+//! validator's, and is carried unopened to wherever the push says answers it —
+//! or, if it says nowhere, refused as a protocol this role does not speak is.
+//! Every other connection is this role's, and the handshake carries on from the
+//! hello rustls has already read. See `acme`.
+//!
 //! ## Why the name is remembered rather than read from the request
 //!
 //! Routing needs the name the caller AGREED to, not the one it claims. A
@@ -72,7 +80,7 @@
 //! caller can stall is bounded:
 //!
 //! - the PROXY header and the TLS handshake after it, together, by
-//!   `handshake_timeout`;
+//!   `handshake_timeout` — and a validator's connection, carried, whole;
 //! - an HTTP/1 request head, by `header_timeout` — which the HTTP library
 //!   applies only if it is given a timer, and otherwise drops without a word.
 //!   Its clock starts as soon as the library waits for the next request, so on
@@ -100,6 +108,7 @@
 //! responding, so what it cuts is a caller that stopped reading or never stops
 //! writing.
 
+mod acme;
 mod body;
 pub mod certificate;
 mod source;
@@ -282,6 +291,8 @@ enum Unopened {
     Header(source::Malformed),
     Crowded,
     Handshake(std::io::Error),
+    /// An ACME validator's, whose carrying failed — see `acme`.
+    Carried(std::io::Error),
 }
 
 impl std::fmt::Display for Unopened {
@@ -290,6 +301,7 @@ impl std::fmt::Display for Unopened {
             Unopened::Header(e) => write!(f, "{e}"),
             Unopened::Crowded => f.write_str("its source holds its share of places"),
             Unopened::Handshake(e) => write!(f, "no handshake: {e}"),
+            Unopened::Carried(e) => write!(f, "an ACME validator's, and carrying it failed: {e}"),
         }
     }
 }
@@ -303,10 +315,15 @@ async fn one(
     accepted: fleet_transport::Accepted,
 ) -> Result<(), Infallible> {
     let fleet_transport::Accepted { stream, peer } = accepted;
-    // The numbers this connection runs by, from the table current as it was
-    // taken. The listener opens only once a push has arrived, so there is one.
-    let Some(tuning) = table.borrow().tuning().map(|tuning| tuning.listener) else {
-        return Ok(());
+    // The numbers this connection runs by, and where it goes if it is an ACME
+    // validator's, from the table current as it was taken. The listener opens
+    // only once a push has arrived, so there is one.
+    let (tuning, validated_at) = {
+        let current = table.borrow();
+        let Some(tuning) = current.tuning().map(|tuning| tuning.listener) else {
+            return Ok(());
+        };
+        (tuning, current.tls_alpn_01().cloned())
     };
     // Its descriptor, counted for as long as it is open — see `crate::budget`.
     let Some(_descriptor) = crate::budget::take() else {
@@ -315,21 +332,46 @@ async fn one(
     };
     // The source's share is taken before the handshake, so a source over it
     // costs no TLS work, and held until this function returns.
+    // An ACME validator's connection is carried whole inside this bound — see
+    // `acme` — and comes out of it with nothing left to serve.
     let opened = tokio::time::timeout(tuning.handshake_timeout, async move {
-        let (origin, stream) = source::read(stream).await.map_err(Unopened::Header)?;
+        let (origin, mut stream) = source::read(stream).await.map_err(Unopened::Header)?;
         let admitted = sources
             .admit(origin, tuning.connections_per_source)
             .ok_or(Unopened::Crowded)?;
-        let settled = tls.accept(stream).await.map_err(Unopened::Handshake)?;
-        Ok::<_, Unopened>((admitted, settled))
+        // The bytes are kept only while there is somewhere to carry them, and
+        // each path lets go of what it does not use before it waits again.
+        let hello = acme::hello(&mut stream, validated_at.is_some())
+            .await
+            .map_err(Unopened::Handshake)?;
+        let validator = hello.validates();
+        let acme::Hello { accepted, read } = hello;
+        if let Some(to) = validated_at.filter(|_| validator) {
+            drop(accepted);
+            acme::carry(stream, &read, &to)
+                .await
+                .map_err(Unopened::Carried)?;
+            return Ok(None);
+        }
+        drop(read);
+        let settled = tokio_rustls::StartHandshake::from_parts(accepted, stream)
+            .into_stream(tls.config().clone())
+            .await
+            .map_err(Unopened::Handshake)?;
+        Ok::<_, Unopened>(Some((admitted, settled)))
     })
     .await;
     let (_admitted, settled) = match opened {
-        Ok(Ok(opened)) => opened,
+        Ok(Ok(Some(opened))) => opened,
+        Ok(Ok(None)) => {
+            debug!("the connection from {peer} was an ACME validator's, carried through");
+            return Ok(());
+        }
         Ok(Err(e)) => {
             // Ordinary: a caller that went away mid-handshake, one that arrived
-            // before the first push and found no certificate, or a source that
-            // already holds its share.
+            // before the first push and found no certificate, a source that
+            // already holds its share, or a validator's connection whose
+            // carrying failed — nothing answering there, or a leg cut short.
             debug!("the connection from {peer} was let go: {e}");
             return Ok(());
         }
@@ -538,6 +580,20 @@ mod tests {
     /// under both names. Returns where to reach it, the SPKI its quote binds,
     /// and the sender a test pushes a later table through.
     async fn gateway(api: &str) -> (String, Vec<u8>, watch::Sender<Arc<Upstreams>>) {
+        let (at, identity, pushes, _) = serving(api).await;
+        (at, identity.spki().to_vec(), pushes)
+    }
+
+    /// [`gateway`], and what it leaves out: the key this role serves on, and
+    /// the sender issued certificates arrive through.
+    async fn serving(
+        api: &str,
+    ) -> (
+        String,
+        Arc<Identity>,
+        watch::Sender<Arc<Upstreams>>,
+        watch::Sender<Vec<crate::identity::tls::Issued>>,
+    ) {
         let identity = Arc::new(Identity::generated().unwrap());
         let spki = identity.spki().to_vec();
         let evidence = attest::evidence(spki.clone(), &crate::identity::attestor()).unwrap();
@@ -546,9 +602,11 @@ mod tests {
         let (pushes, current) = watch::channel(Arc::new(first));
 
         let (certificate, presented) = watch::channel(None);
+        let (issue, issued) = watch::channel(Vec::new());
         tokio::spawn(super::certificate::follow(
             current.clone(),
-            identity,
+            issued,
+            identity.clone(),
             certificate,
         ));
 
@@ -586,7 +644,175 @@ mod tests {
         .await
         .expect("the first table is acted on and its member responds");
 
-        (at, spki, pushes)
+        (at, identity, pushes, issue)
+    }
+
+    /// Certificates an issuer signed for this role's key are what a caller
+    /// asking for any served name is answered with — by a client that trusts
+    /// that issuer and nothing else — whether one covers both names or each
+    /// covers its own, which only the certificate for the name asked for can
+    /// satisfy.
+    #[tokio::test]
+    async fn issued_certificates_reach_a_caller_for_every_served_name() {
+        let api = api().await;
+        let ca = crate::identity::tls::tests::issuer();
+        let layouts: [&[&[&str]]; 2] = [&[&[FIRST, SECOND]], &[&[FIRST], &[SECOND]]];
+        for layout in layouts {
+            let (at, identity, _pushes, issue) = serving(&api).await;
+            let pems: Vec<String> = layout
+                .iter()
+                .map(|names| {
+                    crate::identity::tls::tests::issued_by(
+                        &ca,
+                        identity.key(),
+                        names,
+                        (2020, 1, 1),
+                        (2099, 1, 1),
+                    )
+                })
+                .collect();
+            let issued = crate::identity::tls::issued(
+                &identity,
+                &pems,
+                &[FIRST.to_owned(), SECOND.to_owned()],
+                std::time::SystemTime::now(),
+            )
+            .unwrap();
+            issue.send_replace(issued);
+
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(ca.0.der().clone()).unwrap();
+            let trusting_the_issuer = Arc::new(
+                rustls::ClientConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+            );
+            let handshake = |name: &'static str| {
+                let config = trusting_the_issuer.clone();
+                let at = at.clone();
+                async move {
+                    let socket = tokio::net::TcpStream::connect(&at).await.unwrap();
+                    tokio_rustls::TlsConnector::from(config)
+                        .connect(ServerName::try_from(name).unwrap(), socket)
+                        .await
+                }
+            };
+
+            // Presented on a task of its own, so the wait is on handshakes that
+            // succeed rather than on a flag.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while handshake(FIRST).await.is_err() || handshake(SECOND).await.is_err() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("both names answered with an issued certificate: {layout:?}")
+            });
+        }
+    }
+
+    /// What answers a validator on the host, standing in for an ACME client: a
+    /// TLS server offering `acme-tls/1` alone, on a certificate of its own.
+    /// Returns where it listens and that certificate.
+    async fn acme_client() -> (String, CertificateDer<'static>) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let answered_with = rcgen::CertificateParams::new(vec![FIRST.to_owned()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap()
+            .der()
+            .clone();
+        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![answered_with.clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+        )
+        .unwrap();
+        config.alpn_protocols = vec![b"acme-tls/1".to_vec()];
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    // Held until the validator closes, as a client answering
+                    // one does.
+                    if let Ok(mut tls) = acceptor.accept(socket).await {
+                        let _ = tokio::io::AsyncReadExt::read(&mut tls, &mut [0u8; 1]).await;
+                    }
+                });
+            }
+        });
+        (at, answered_with)
+    }
+
+    /// A handshake with this role offering `protocols`, from a source of its
+    /// own: the protocol agreed, if any, and the certificate presented — or
+    /// nothing if the handshake was refused.
+    async fn offering(
+        at: &str,
+        protocols: &[&[u8]],
+    ) -> Option<(Option<Vec<u8>>, CertificateDer<'static>)> {
+        use tokio::io::AsyncWriteExt;
+
+        let mut socket = tokio::net::TcpStream::connect(at).await.unwrap();
+        socket
+            .write_all(&header_from(fresh_source()))
+            .await
+            .unwrap();
+        let tls = tls_to(socket, FIRST, protocols).await?;
+        let (_, session) = tls.get_ref();
+        Some((
+            session.alpn_protocol().map(<[u8]>::to_vec),
+            session.peer_certificates().unwrap()[0].clone().into_owned(),
+        ))
+    }
+
+    /// A validator's connection — `acme-tls/1` and nothing else — is carried to
+    /// whatever the push says answers it, and handshakes there. One offering
+    /// anything beside it is this role's own; and with nowhere to carry it, a
+    /// validator's is refused, as a protocol this role does not speak is.
+    #[tokio::test]
+    async fn a_validator_s_connection_is_carried_to_what_answers_it() {
+        let api = api().await;
+        let (at, _, pushes, _) = serving(&api).await;
+        let (answering, answered_with) = acme_client().await;
+
+        assert!(
+            offering(&at, &[b"acme-tls/1"]).await.is_none(),
+            "nowhere to carry it yet, so the handshake is refused"
+        );
+
+        let answered = tuned(
+            &api,
+            A,
+            &format!(r#""acme": {{ "tls-alpn-01": "{answering}" }}, {TUNING}"#),
+        );
+        let next = pushes.borrow().replaced(&pushed(&answered));
+        pushes.send_replace(Arc::new(next));
+
+        let (agreed, presented) = offering(&at, &[b"acme-tls/1"])
+            .await
+            .expect("carried, and answered there");
+        assert_eq!(agreed.as_deref(), Some(&b"acme-tls/1"[..]));
+        assert_eq!(presented, answered_with, "answered there, not here");
+
+        let (agreed, presented) = offering(&at, &[b"acme-tls/1", b"h2"])
+            .await
+            .expect("served here");
+        assert_eq!(agreed.as_deref(), Some(&b"h2"[..]));
+        assert_ne!(presented, answered_with, "this role's own");
     }
 
     /// Accepts any certificate: what is under test is how this role carries
@@ -717,7 +943,7 @@ mod tests {
         B::Data: Send,
         B::Error: Into<tower::BoxError>,
     {
-        let tls = tls_to(socket, name, b"h2").await?;
+        let tls = tls_to(socket, name, &[b"h2"]).await?;
         let (sender, driver) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
             .initial_stream_window_size(window)
             .initial_connection_window_size(window)
@@ -728,11 +954,11 @@ mod tests {
         Some(sender)
     }
 
-    /// The TLS a caller opens to `name`, offering one protocol.
+    /// The TLS a caller opens to `name`, offering `protocols`.
     async fn tls_to(
         socket: tokio::net::TcpStream,
         name: &str,
-        protocol: &[u8],
+        protocols: &[&[u8]],
     ) -> Option<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -741,7 +967,7 @@ mod tests {
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))
             .with_no_client_auth();
-        config.alpn_protocols = vec![protocol.to_vec()];
+        config.alpn_protocols = protocols.iter().map(|p| p.to_vec()).collect();
         tokio_rustls::TlsConnector::from(Arc::new(config))
             .connect(ServerName::try_from(name.to_owned()).unwrap(), socket)
             .await
@@ -1130,7 +1356,7 @@ mod tests {
     async fn an_http1_request_is_held_to_its_connection_s_name() {
         let (at, _, _pushes) = gateway(&api().await).await;
         let socket = tokio::net::TcpStream::connect(&at).await.unwrap();
-        let tls = tls_to(socket, FIRST, b"http/1.1").await.unwrap();
+        let tls = tls_to(socket, FIRST, &[b"http/1.1"]).await.unwrap();
         let (mut caller, driver) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
             .await
             .unwrap();
@@ -1162,7 +1388,7 @@ mod tests {
     async fn a_target_that_is_not_a_path_is_refused() {
         let (at, _, _pushes) = gateway(&api().await).await;
         let socket = tokio::net::TcpStream::connect(&at).await.unwrap();
-        let tls = tls_to(socket, FIRST, b"http/1.1").await.unwrap();
+        let tls = tls_to(socket, FIRST, &[b"http/1.1"]).await.unwrap();
         let (mut caller, driver) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
             .await
             .unwrap();

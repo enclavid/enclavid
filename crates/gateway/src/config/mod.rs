@@ -57,7 +57,22 @@
 //!         api.example.com    -> one -> the addresses of its members there
 //! routes: api.example.com -> POST /api/v1/sessions         -> reject_named_group
 //!                         -> /api/v1/sessions/{*rest}      -> require_named_group
+//! certificates: chains an issuer signed for this role's key, if any
+//! acme:   tls-alpn-01 -> where a validator's connection is carried, if anywhere
 //! ```
+//!
+//! The certificates are what a browser is shown, in place of this role's
+//! self-signed one: each for the names it covers, and together for every name.
+//! They are not a setting either: they are presented only if they are for this
+//! role's own key, so a wrong one is a certificate refused, never a caller
+//! answered by someone else — see `crate::config::push`.
+//!
+//! `acme` is where the host's ACME client answers a validator, for a challenge
+//! that has to be answered on the public names' own port. Only where: which
+//! connections are a validator's this role tells from each connection itself,
+//! and no push can send an applicant's there — see `crate::listener::acme`. Nor
+//! is it an upstream. Nothing there is attested, and nothing is carried there
+//! that did not come from the host in the first place.
 //!
 //! The routes are what a name's requests are held to, by method and path, as a
 //! reverse proxy's locations are: where a request may name its group and where

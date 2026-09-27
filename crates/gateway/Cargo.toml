@@ -115,9 +115,15 @@ p256 = { version = "0.13", features = ["pkcs8"] }
 # the image under the crypto crates.
 zeroize = "1"
 
-# Mints the serving certificate at boot. Already in the lock through ra-tls,
-# though for a different kind of certificate — see `crate::identity::tls`.
+# Mints the serving certificate over the pushed names, and the request an
+# issuer finalises against. Already in the lock through ra-tls, though for a different kind of
+# certificate — see `crate::identity::tls`.
 rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+# What an issued certificate is checked with before it is presented: whether it
+# answers for a name as a client would judge it, and its validity window. Both
+# already in the image — the first under rustls, the second under ra-tls.
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc"] }
+x509-parser = "0.16"
 # The leg to api. This role pins no api build: it verifies each upstream's quote
 # and proves it carries the measurement the caller named — see `crate::upstream`.
 # Also the evidence this role serves about itself, made by the same call that
@@ -153,10 +159,10 @@ libc = "0.2"
 ppp = "2"
 
 [dev-dependencies]
-# Reads the key back out of a minted certificate, to pin that it is the one the
-# quote binds. Already in the lock through ra-tls; a test dependency, so it
-# reaches no image through this crate.
-x509-parser = "0.16"
+# A test issuer's certificates written as PEM, the form a push carries them in.
+# The feature is on in the image already through ra-tls; named here so the
+# tests do not lean on that.
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 # A request body a test feeds by hand, to hold it open or trickle it — see
 # `crate::listener::body`. A test build's feature only.
 http-body-util = { version = "0.1", features = ["channel"] }

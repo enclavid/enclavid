@@ -16,6 +16,16 @@
 //! handshake reaching this role then fails rather than being answered with
 //! something misleading. That is the honest state: this role serves names, and
 //! before a push it has none.
+//!
+//! ## Its own certificate, or issued ones in its place
+//!
+//! This role's own certificate is self-signed, and a browser refuses it. Ones
+//! an issuer signed over the same key arrive in a push — see
+//! `crate::config::push` — together covering every name it pushes, and are
+//! presented in place of this role's own for as long as the pushes carry them,
+//! each for the names it covers. Its own comes back when they stop. A caller
+//! that checks this role's quote is served by any of them, since the quote
+//! binds the KEY, which they all share.
 
 use std::sync::Arc;
 
@@ -25,19 +35,22 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::sign::CertifiedKey;
 
-use crate::identity::tls;
+use crate::identity::tls::{self, Issued, Presented};
 use crate::upstream::Upstreams;
 
-/// Follow the table, and keep the certificate the listener presents.
+/// Follow the table and the issued certificates, and keep what the listener
+/// presents.
 ///
 /// Await this on the role's own task: a role that stopped following would keep
 /// presenting a certificate for names the host no longer declares.
 pub async fn follow(
     mut table: watch::Receiver<Arc<Upstreams>>,
+    mut issued: watch::Receiver<Vec<Issued>>,
     identity: Arc<crate::identity::key::Identity>,
-    publish: watch::Sender<Option<Arc<CertifiedKey>>>,
+    publish: watch::Sender<Option<Arc<Presented>>>,
 ) -> ! {
     let mut names: Vec<String> = Vec::new();
+    let mut own: Option<Arc<CertifiedKey>> = None;
     loop {
         // Changed rather than every loop: minting is the expensive part and the
         // names usually did not move.
@@ -46,7 +59,7 @@ pub async fn follow(
             match tls::certified(&identity, &declared) {
                 Ok(certificate) => {
                     names = declared;
-                    publish.send_replace(Some(certificate));
+                    own = Some(certificate);
                     debug!("serving {} name(s)", names.len());
                 }
                 // The push that declared these passed a stricter check than the
@@ -56,9 +69,22 @@ pub async fn follow(
                 Err(e) => debug!("the declared names have no certificate: {e}"),
             }
         }
-        if table.changed().await.is_err() {
-            // The sender lives as long as the process, so this cannot happen
-            // while anything is still serving.
+        // Again whenever either moved. The issued certificates, while a push
+        // carries some, cover every name that push declared between them — or
+        // the push was refused — so they stand in for this role's own on all.
+        if let Some(own) = &own {
+            let presented = Presented::issued(own.clone(), &issued.borrow(), &names);
+            publish.send_replace(Some(Arc::new(presented)));
+        }
+        // Issued certificates that can no longer arrive leave the table to
+        // follow; a table that can no longer change leaves nothing. Both
+        // senders live as long as the process, so neither ends while anything
+        // is still serving.
+        let ended = tokio::select! {
+            changed = table.changed() => changed.is_err(),
+            Ok(()) = issued.changed() => false,
+        };
+        if ended {
             std::future::pending::<()>().await;
         }
     }
@@ -80,7 +106,7 @@ pub async fn follow(
 /// What 1.2 costs is a session id sent in the clear, which lets the host tell
 /// one 1.2 client's connections apart from another's. That is accepted: only
 /// such servers speak 1.2, and the host knows where they are anyway.
-pub fn acceptor(certificate: watch::Receiver<Option<Arc<CertifiedKey>>>) -> TlsAcceptor {
+pub fn acceptor(certificate: watch::Receiver<Option<Arc<Presented>>>) -> TlsAcceptor {
     let mut config = ServerConfig::builder_with_provider(Arc::new(tls::provider()))
         .with_safe_default_protocol_versions()
         .expect("ring offers the default protocol versions")

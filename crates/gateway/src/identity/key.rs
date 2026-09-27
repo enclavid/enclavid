@@ -64,12 +64,16 @@ const PURPOSE: &[u8] = b"enclavid.gateway.serving-key.v1";
 ///
 /// A developer build has no attestation and nothing secret to bind a key to, so
 /// this is not a secret and is not pretending to be one: every developer build
-/// serves on the same key. It exists so that such a build takes the SAME path
-/// as the attested one — a key that is the same at every run, a certificate
-/// issued over it, a pin that holds — rather than a second path that is only
-/// exercised by developers.
+/// serves on the same key, and anyone holding the source can compute it. It
+/// exists so that such a build takes the SAME path as the attested one — a key
+/// derived the same way, the same at every run — rather than a second path that
+/// is only exercised by developers.
+///
+/// What such a key must never have is a certificate an issuer signed: anyone
+/// could present that certificate as this role. So a key derived from this
+/// asks for none and takes none — see [`Identity::public`].
 #[cfg(not(feature = "sev-snp"))]
-pub const NO_CHIP: [u8; 32] = *b"a developer build has no chip...";
+const NO_CHIP: [u8; 32] = *b"a developer build has no chip...";
 
 /// The key this process serves on.
 ///
@@ -77,11 +81,14 @@ pub const NO_CHIP: [u8; 32] = *b"a developer build has no chip...";
 /// to the certificate in front of it is comparing something that has not moved
 /// — see `crate::identity::attest`.
 pub struct Identity {
-    /// What certificates over the names are self-signed with.
+    /// What certificates over the names are self-signed with, and what signs
+    /// the request an issuer certifies it from.
     key: rcgen::KeyPair,
     /// What a handshake signs with: the same key, loaded once.
     signer: Arc<dyn SigningKey>,
     spki: Vec<u8>,
+    /// Whether anyone can compute this key — see [`Identity::public`].
+    public: bool,
 }
 
 impl Identity {
@@ -110,6 +117,17 @@ impl Identity {
         Err("the derivation found no valid key in eight tries".into())
     }
 
+    /// The key a developer build serves on: derived as the attested one is,
+    /// from [`NO_CHIP`] where the chip's key would be — and so [`public`].
+    ///
+    /// [`public`]: Identity::public
+    #[cfg(not(feature = "sev-snp"))]
+    pub fn no_chip() -> Result<Identity, String> {
+        let mut identity = Identity::derived(&NO_CHIP)?;
+        identity.public = true;
+        Ok(identity)
+    }
+
     /// A key nothing derived, for a test that wants two different ones.
     ///
     /// Not a build's way of obtaining a key: a developer build derives from
@@ -128,6 +146,7 @@ impl Identity {
             spki: key.public_key_der(),
             key,
             signer,
+            public: false,
         })
     }
 
@@ -135,6 +154,14 @@ impl Identity {
     /// it validated — see `crate::identity::attest`.
     pub fn spki(&self) -> &[u8] {
         &self.spki
+    }
+
+    /// Whether anyone can compute this key: a developer build's, derived from a
+    /// value in the source rather than a chip secret. Such a key is not asked
+    /// to be certified and takes no certificate an issuer signed — see
+    /// `crate::identity::tls`.
+    pub fn public(&self) -> bool {
+        self.public
     }
 
     pub(crate) fn key(&self) -> &rcgen::KeyPair {
@@ -167,6 +194,21 @@ mod tests {
         let one = Identity::derived(&[7; 32]).unwrap();
         let other = Identity::derived(&[8; 32]).unwrap();
         assert_ne!(one.spki(), other.spki());
+    }
+
+    /// A developer build's key is the same everywhere and marked as one anyone
+    /// can compute; a key from a chip, or one nothing derived, is not.
+    #[cfg(not(feature = "sev-snp"))]
+    #[test]
+    fn a_developer_build_s_key_is_marked_public() {
+        let developer = Identity::no_chip().unwrap();
+        assert!(developer.public());
+        assert_eq!(
+            developer.spki(),
+            Identity::derived(&NO_CHIP).unwrap().spki()
+        );
+        assert!(!Identity::derived(&[7; 32]).unwrap().public());
+        assert!(!Identity::generated().unwrap().public());
     }
 
     /// A key nothing derived is a new key every time — which is why no build
