@@ -10,7 +10,7 @@ type Props = {
   progress: SessionProgress | null;
   error: string | null;
   /// Submit the applicant's input for the current Suspended request
-  /// to /session/:id/input/:slot_id as multipart/form-data. App owns
+  /// to api/v1/sessions/:id/input/:slot_id as multipart/form-data. App owns
   /// the network call + key + state update; Verify just hands it the
   /// slot identifier and the assembled FormData (frames as parts for
   /// media captures, an `accepted` text part for consent).

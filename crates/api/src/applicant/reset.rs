@@ -16,7 +16,7 @@ pub(super) fn delete_state() -> MethodRouter<Arc<AppState>> {
     delete(reset)
 }
 
-/// DELETE /session/:id/state — hand the session back to whoever asks next.
+/// DELETE /api/v1/sessions/{id}/state — hand the session back to whoever asks next.
 ///
 /// The state IS the claim (it's sealed under the applicant key), so dropping it
 /// puts the session back to "unclaimed" and the next /connect can take it with

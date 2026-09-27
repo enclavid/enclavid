@@ -251,7 +251,7 @@ impl Unopened {
 /// A request that never left: its leg would not open, so no byte of it reached
 /// any api, and it can be given to another member unchanged.
 ///
-/// The one failure that hands the request back. Once any of it has been
+/// The one outcome that hands the request back. Once any of it has been
 /// written, whether api acted on it is unknown, and sending it again could do
 /// twice what the caller asked for once.
 pub struct NotSent(pub Request<Sent>);
@@ -264,13 +264,13 @@ impl std::fmt::Debug for NotSent {
     }
 }
 
-impl std::fmt::Display for NotSent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the member's leg would not open, and the request was not sent")
-    }
-}
-
-impl std::error::Error for NotSent {}
+/// What a member does with a request it is offered: starts a response, or hands
+/// the request back unsent.
+///
+/// A value rather than an error, so that giving the request to another member
+/// is a match the compiler checks — see `crate::upstream::balance` — and not an
+/// error inspected for a type it might hold.
+pub type Offered = Result<Response<Returning>, NotSent>;
 
 /// One member, as everything that deals with it shares it: the handle the
 /// balancer holds, every request under way to it, and every body still arriving
@@ -335,18 +335,17 @@ impl Member {
     }
 }
 
-/// Boxed, because the stack around a member boxes it anyway, and because the
-/// set has to tell the two kinds apart: [`NotSent`], which gives the request
-/// back, and [`Unreachable`], which does not.
+/// A request handed back unsent is an [`Offered`] value; the one error is
+/// [`Unreachable`], a request that may have reached api and is not sent again.
 impl tower::Service<Request<Sent>> for Member {
-    type Response = Response<Returning>;
-    type Error = tower::BoxError;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, tower::BoxError>> + Send>>;
+    type Response = Offered;
+    type Error = Unreachable;
+    type Future = Pin<Box<dyn Future<Output = Result<Offered, Unreachable>> + Send>>;
 
     /// Ready unless a leg to this member would not open within the last
     /// `cooldown`; then pending, with a timer for the end of it. Never an
     /// error — see the module docs for what an error here would cost.
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), tower::BoxError>> {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Unreachable>> {
         let out = *held(&self.inner.out);
         let Some(until) = out.filter(|until| *until > tokio::time::Instant::now()) else {
             self.cooling = None;
@@ -412,7 +411,7 @@ impl tower::Service<Request<Sent>> for Member {
                             // Either way nothing of the request has left, so it
                             // goes back whole, for the set to give to another
                             // member.
-                            return Err(NotSent(req).into());
+                            return Ok(Err(NotSent(req)));
                         }
                     },
                 };
@@ -436,21 +435,21 @@ impl tower::Service<Request<Sent>> for Member {
                         debug!("a request to {} got no response in time", member.addr);
                         drop(lent.leg.take());
                         cool(&member);
-                        return Err(Unreachable.into());
+                        return Err(Unreachable);
                     }
                 };
                 match responded {
                     Ok(response) => {
                         let leg = lent.leg.take().expect("lent until the head is back");
                         let (head, body) = response.into_parts();
-                        return Ok(Response::from_parts(
+                        return Ok(Ok(Response::from_parts(
                             head,
                             Returning {
                                 body,
                                 leg: Some(leg),
                                 member,
                             },
-                        ));
+                        )));
                     }
                     // Handed back: the leg's connection had gone before any of
                     // the request reached it — a leg parked a moment before its
@@ -464,7 +463,7 @@ impl tower::Service<Request<Sent>> for Member {
                                 // member's failure, as a leg that would not
                                 // open is.
                                 cool(&member);
-                                return Err(NotSent(back).into());
+                                return Ok(Err(NotSent(back)));
                             }
                             req = back;
                         }
@@ -474,7 +473,7 @@ impl tower::Service<Request<Sent>> for Member {
                                 member.addr,
                                 failed.error()
                             );
-                            return Err(Unreachable.into());
+                            return Err(Unreachable);
                         }
                     },
                 }
@@ -987,6 +986,19 @@ mod tests {
     }
 
     /// Read a body to its end, which is what parks the leg it arrived on.
+    /// Offer `req` to `member` and take the response it starts, which the test
+    /// expects it to.
+    async fn responded(member: &mut Member, req: Request<Sent>) -> Response<Returning> {
+        member
+            .ready()
+            .await
+            .unwrap()
+            .call(req)
+            .await
+            .expect("reached the member")
+            .expect("and was sent")
+    }
+
     async fn drain(response: Response<Returning>) -> Bytes {
         response.into_body().collect().await.unwrap().to_bytes()
     }
@@ -1004,7 +1016,7 @@ mod tests {
             "nothing is open before anything is asked"
         );
 
-        let response = member.ready().await.unwrap().call(asking()).await.unwrap();
+        let response = responded(&mut member, asking()).await;
         assert_eq!(
             member.parked(),
             0,
@@ -1013,7 +1025,7 @@ mod tests {
         assert_eq!(&drain(response).await[..], b"served");
         assert_eq!(member.parked(), 1, "and back once the body has ended");
 
-        let response = member.ready().await.unwrap().call(asking()).await.unwrap();
+        let response = responded(&mut member, asking()).await;
         drain(response).await;
         assert_eq!(member.parked(), 1, "the second request took the same leg");
         assert_eq!(
@@ -1031,8 +1043,8 @@ mod tests {
         let mut member = member(&addr);
 
         // Neither body is read, so neither leg is back in the stack.
-        let first = member.ready().await.unwrap().call(asking()).await.unwrap();
-        let second = member.ready().await.unwrap().call(asking()).await.unwrap();
+        let first = responded(&mut member, asking()).await;
+        let second = responded(&mut member, asking()).await;
         assert_eq!(member.parked(), 0);
         assert_eq!(
             opened.load(Ordering::Relaxed),
@@ -1056,7 +1068,7 @@ mod tests {
         let (addr, open) = restartable().await;
         let mut member = member(&addr);
         for _ in 0..5 {
-            let response = member.ready().await.unwrap().call(asking()).await.unwrap();
+            let response = responded(&mut member, asking()).await;
             drain(response).await;
             assert_eq!(member.parked(), 1);
 
@@ -1064,11 +1076,8 @@ mod tests {
                 serving.abort();
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let again = member.ready().await.unwrap().call(asking()).await;
-            assert_eq!(
-                &drain(again.expect("responded over a fresh leg")).await[..],
-                b"served"
-            );
+            let again = responded(&mut member, asking()).await;
+            assert_eq!(&drain(again).await[..], b"served", "over a fresh leg");
         }
     }
 
@@ -1087,10 +1096,11 @@ mod tests {
             }
         });
         let slow = Request::builder().uri("/").body(body.boxed()).unwrap();
-        let response = member.ready().await.unwrap().call(slow).await;
+        let response = responded(&mut member, slow).await;
         assert_eq!(
-            &drain(response.expect("responded after an upload longer than RESPONSE")).await[..],
-            b"served"
+            &drain(response).await[..],
+            b"served",
+            "responded after an upload longer than RESPONSE"
         );
     }
 
@@ -1217,7 +1227,7 @@ mod tests {
         let (addr, _opened) = api().await;
         let mut member = member(&addr);
 
-        let response = member.ready().await.unwrap().call(asking()).await.unwrap();
+        let response = responded(&mut member, asking()).await;
         drop(response);
         assert_eq!(member.parked(), 1, "the leg is parked, not spent");
     }
@@ -1241,8 +1251,10 @@ mod tests {
         // Nothing checked it first, so it is ready, and the request finds out —
         // and is handed back, since none of it was sent.
         let asked = member.ready().await.unwrap().call(asking()).await;
-        let refused = asked.err().expect("the leg would not open");
-        assert!(refused.is::<NotSent>(), "the request comes back: {refused}");
+        assert!(
+            matches!(asked, Ok(Err(NotSent(_)))),
+            "the leg would not open, and the request comes back"
+        );
 
         let waited = tokio::time::timeout(COOLDOWN / 2, member.ready()).await;
         assert!(
@@ -1263,14 +1275,14 @@ mod tests {
         let (addr, opened) = api().await;
         let mut member = member(&addr);
 
-        let first = member.ready().await.unwrap().call(asking()).await.unwrap();
-        let second = member.ready().await.unwrap().call(asking()).await.unwrap();
+        let first = responded(&mut member, asking()).await;
+        let second = responded(&mut member, asking()).await;
         drain(first).await;
         drain(second).await;
         assert_eq!(member.parked(), 2, "both parked after the burst");
 
         tokio::time::sleep(IDLE + Duration::from_millis(100)).await;
-        let response = member.ready().await.unwrap().call(asking()).await.unwrap();
+        let response = responded(&mut member, asking()).await;
         drain(response).await;
         assert_eq!(
             member.parked(),
@@ -1291,8 +1303,8 @@ mod tests {
         let (addr, _opened) = api().await;
         let mut member = member(&addr);
 
-        let first = member.ready().await.unwrap().call(asking()).await.unwrap();
-        let second = member.ready().await.unwrap().call(asking()).await.unwrap();
+        let first = responded(&mut member, asking()).await;
+        let second = responded(&mut member, asking()).await;
         drain(first).await;
         drain(second).await;
         assert_eq!(member.parked(), 2, "both parked after the burst");
@@ -1330,7 +1342,7 @@ mod tests {
         // The first request on a leg may open with a change to the table's
         // size, so it is not one of the two compared.
         for req in [asking(), carrying(), carrying()] {
-            drain(member.ready().await.unwrap().call(req).await.unwrap()).await;
+            drain(responded(&mut member, req).await).await;
         }
 
         let wire = wire.lock().unwrap();
@@ -1353,7 +1365,7 @@ mod tests {
     async fn a_leg_keeps_no_table_for_responses() {
         let (addr, wire) = recording().await;
         let mut member = member(&addr);
-        drain(member.ready().await.unwrap().call(asking()).await.unwrap()).await;
+        drain(responded(&mut member, asking()).await).await;
 
         let wire = wire.lock().unwrap();
         let (_, settings) = frames(&wire[0])

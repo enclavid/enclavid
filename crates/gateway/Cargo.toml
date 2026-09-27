@@ -97,7 +97,8 @@ tower-http = { version = "0.6", default-features = false, features = [
 ] }
 bytes = "1"
 # `ring` rather than aws-lc, pinned the same way `crates/ra-tls` pins it and for
-# the same reason: aws-lc-sys wants cmake and a C toolchain in a build whose
+# the same reason: both compile C and assembly, but aws-lc is a whole libcrypto
+# where ring is the few primitives TLS needs — far less C in a build whose
 # output is a published digest.
 tokio-rustls = { version = "0.26", default-features = false, features = [
     "ring",

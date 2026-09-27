@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Route, Switch, useLocation } from "wouter";
+import { Route, Router, Switch, useLocation } from "wouter";
+import { useHashLocation } from "wouter/use-hash-location";
 import { SessionRequired } from "@/screens/SessionRequired";
 import { Loading } from "@/screens/Loading";
 import { Welcome } from "@/screens/Welcome";
@@ -12,15 +13,44 @@ import { loadKey } from "@/lib/key";
 import { connect, getStatus, submitInput, ApiError } from "@/lib/api";
 import type { Decision, SessionProgress } from "@/types";
 
-// Routing model. The browser URL is the source of truth for which
-// "real" screen is shown — wouter does the path matching and the back
-// button works for free. Two states sit *outside* the URL because
-// they're decided by the server, not user navigation: `completed` and
-// `terminated`. We surface those as overlays that ignore the location.
+// Routing model. The URL fragment is the source of truth for which
+// "real" screen is shown — wouter matches its routes against the
+// fragment rather than the path, and the back button works for free.
+// The fragment because the page's references are relative to its own
+// address (see `vite.config.ts`), so the path has to stay at the
+// page's root, and because a fragment is never sent to a server at
+// all. Two states sit *outside* the URL because they're decided by
+// the server, not user navigation: `completed` and `terminated`. We
+// surface those as overlays that ignore the location.
 type Terminal = "completed" | "terminated";
 
 export function App() {
-  const sessionId = getSessionId();
+  return (
+    <Router hook={useHashLocation}>
+      <SessionFromLocation />
+    </Router>
+  );
+}
+
+function SessionFromLocation() {
+  const [location] = useLocation();
+  const sessionId = getSessionId(location);
+  if (!sessionId) return <SessionRequired />;
+  // Keyed by the id. Changing the fragment is not a page load, so a
+  // second link pasted into the same tab arrives here with the first
+  // session's state still mounted; the key remounts everything below,
+  // and each session starts from nothing, as it does on a fresh load.
+  return <Session key={sessionId} sessionId={sessionId} />;
+}
+
+// The fragment as wouter's hash location reads it — without its `#`,
+// with one leading slash — but read from the window at the moment of
+// asking, for a callback that outlives the render that created it.
+function currentLocation(): string {
+  return "/" + window.location.hash.replace(/^#?\/?/, "");
+}
+
+function Session({ sessionId }: { sessionId: string }) {
   const [location, setLocation] = useLocation();
 
   const [terminal, setTerminal] = useState<Terminal | null>(null);
@@ -45,7 +75,6 @@ export function App() {
   // mount→unmount→mount, but we only want one network fetch.
   const statusFiredRef = useRef(false);
   useEffect(() => {
-    if (!sessionId) return;
     if (statusFiredRef.current) return;
     statusFiredRef.current = true;
     void (async () => {
@@ -83,15 +112,21 @@ export function App() {
           setTerminal("terminated");
           return;
         }
+        // Read afresh rather than from the render that started this
+        // fetch: the fragment may have moved on while it was out. If it
+        // names another session now, that session has its own mount and
+        // its own fetch, and this one must not steer the address.
+        const now = currentLocation();
+        if (getSessionId(now) !== sessionId) return;
         const prefix = `/session/${sessionId}/`;
-        const sub = location.startsWith(prefix)
-          ? location.slice(prefix.length).replace(/\/$/, "")
+        const sub = now.startsWith(prefix)
+          ? now.slice(prefix.length).replace(/[/?].*$/, "")
           : "";
         const hasKey = !!loadKey(sessionId);
         const valid =
           sub === "start" || sub === "keygen" || sub === "verify";
         if (!valid) {
-          // Bare /session/:id/ (or anything we don't recognize) — pick
+          // Bare #/session/:id/ (or anything we don't recognize) — pick
           // the right starting screen based on whether the user has a
           // key already.
           setLocation(`${prefix}${hasKey ? "verify" : "start"}`, {
@@ -132,7 +167,6 @@ export function App() {
   // version, both racing to finalize, second one failing CAS with
   // version-mismatch.
   useEffect(() => {
-    if (!sessionId) return;
     if (!statusFetched) return;
     const onVerify = location === `/session/${sessionId}/verify`;
     if (!onVerify) {
@@ -146,9 +180,6 @@ export function App() {
     void connectAndRender(sessionId, key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location, sessionId, statusFetched]);
-
-  if (!sessionId) return <SessionRequired />;
-  const sid = sessionId;
 
   async function connectAndRender(id: string, key: Uint8Array) {
     setError(null);
@@ -168,7 +199,7 @@ export function App() {
     slotId: string,
     form: FormData,
   ): Promise<void> {
-    const key = loadKey(sid);
+    const key = loadKey(sessionId);
     if (!key) {
       // Shouldn't happen on /verify (route guard ensures key exists),
       // but throw rather than silently no-op so the caller surfaces
@@ -177,7 +208,7 @@ export function App() {
     }
     setError(null);
     try {
-      const next = await submitInput(sid, slotId, key, form);
+      const next = await submitInput(sessionId, slotId, key, form);
       setProgress(next);
     } catch (e) {
       const msg =
@@ -201,18 +232,18 @@ export function App() {
   return wrap(
     location,
     <Switch>
-      <Route path={`/session/${sid}/start`}>
+      <Route path={`/session/${sessionId}/start`}>
         <Welcome
-          onBegin={() => setLocation(`/session/${sid}/keygen`)}
+          onBegin={() => setLocation(`/session/${sessionId}/keygen`)}
         />
       </Route>
-      <Route path={`/session/${sid}/keygen`}>
+      <Route path={`/session/${sessionId}/keygen`}>
         <Ritual
-          sessionId={sid}
-          onReady={() => setLocation(`/session/${sid}/verify`)}
+          sessionId={sessionId}
+          onReady={() => setLocation(`/session/${sessionId}/verify`)}
         />
       </Route>
-      <Route path={`/session/${sid}/verify`}>
+      <Route path={`/session/${sessionId}/verify`}>
         <Verify
           progress={progress}
           error={error}

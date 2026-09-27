@@ -15,10 +15,12 @@
 //! the page and the handlers it calls, and an applicant asking what
 //! code they are running has one number to check rather than two.
 //!
-//! SPA-style fallback: any path that no API route claimed collapses to
-//! `index.html`, so client-side routing (`/session/<id>/...`) loads
-//! the app shell. A missing asset therefore also serves index.html,
-//! which is acceptable while asset names are content-hashed.
+//! The page is served at `/` and its files at their own paths; nothing
+//! else. Its client-side routes live in the URL fragment
+//! (`/#/session/<id>/...`), which a browser never sends, so every
+//! in-page address arrives here as `/`. Any other path no API route
+//! claimed is a 404 — see `crate::assets::lookup` for why the page is
+//! not served there too.
 //!
 //! **Empty in dev:** a build that was not given the built page carries
 //! no assets and answers 404. Run Vite (`pnpm dev`) alongside and let
@@ -59,10 +61,11 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     // Applicant API routes live under the same `/api/v1/sessions/...`
     // prefix as the client API (see `client::router`) for a consistent
-    // surface across the two audiences. The user-facing SPA route in
-    // the browser stays `/session/<id>/...` (short, pretty) — claimed
-    // by the fallback below; only the JSON endpoints under it are
-    // versioned/plural.
+    // surface across the two audiences. The page calls them by paths
+    // relative to itself, so wherever the page was reached the calls
+    // follow. The page's own routes are not paths: they live in the
+    // fragment (`/#/session/<id>/...`), and the page itself is served
+    // at the root by the fallback below.
     let routes = Router::new()
         .route("/api/v1/sessions/{id}/status", status::get_status())
         .route("/api/v1/sessions/{id}/state", reset::delete_state())
@@ -105,12 +108,8 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// an unverified one that breaks the page is worse than a narrow one that holds.
 const PAGE_POLICY: &str = "frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
 
-/// Serve the compiled-in page for anything no API route claimed.
-///
-/// An unmatched path resolves to the document rather than to nothing, because
-/// the routes a person sees — `/session/<id>/…` — exist only inside the page and
-/// have no file behind them. The cost is that an address meaning nothing renders
-/// the shell with a 200 rather than an error, and the page is what has to say so.
+/// Serve the compiled-in page at `/`, and its files at their own paths, for
+/// anything no API route claimed — see `crate::assets::lookup`.
 async fn page(method: Method, uri: Uri) -> Response {
     if !matches!(method, Method::GET | Method::HEAD) {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
@@ -124,8 +123,12 @@ async fn page(method: Method, uri: Uri) -> Response {
             (header::CACHE_CONTROL, crate::assets::cache_control(asset)),
             (header::CONTENT_SECURITY_POLICY, PAGE_POLICY),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            // The path on this surface carries the session id, and a `Referer`
-            // is how a path reaches somewhere nobody chose to send it.
+            // The session id is not in the page's address — it rides in the
+            // fragment, and no `Referer` carries a fragment. The rest of the
+            // address still says something: the group and build the gateway
+            // routed it to, and any query the link carried. A browser sends
+            // that whole address as the `Referer` of every request the page
+            // makes, its own calls to this api included — so none is sent.
             (header::REFERRER_POLICY, "no-referrer"),
         ],
         asset.bytes,

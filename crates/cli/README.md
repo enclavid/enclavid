@@ -148,7 +148,7 @@ The CLI fetches its endpoints (issuer, OAuth client id, scopes) from a discovery
 | `ENCLAVID_REGISTRY_AUTH` | Registry credentials override (`Bearer ...` / `Basic <base64>`) |
 | `ENCLAVID_API_TOKEN` | Raw Bearer for API calls (sessions). Bypasses Logto entirely — for lightweight dev stacks or pre-minted tokens |
 | `ENCLAVID_API_URL` | Enclavid API base URL (sessions). Default: `http://localhost:8001` |
-| `ENCLAVID_APPLICANT_URL` | Applicant SPA origin printed after `session create`. Default: `http://localhost:5173` |
+| `ENCLAVID_APPLICANT_URL` | Base of the applicant link printed after `session create` (`<base>/#/session/<id>`); may include a path, such as a gateway marker. Default: `http://localhost:5173` |
 | `ENCLAVID_WORKSPACE_ID` | Active workspace override (CI: avoids the interactive picker in `cloud login`) |
 | `ENCLAVID_CLIENT_ID` | M2M client_id (Logto client_credentials grant for non-interactive auth) |
 | `ENCLAVID_CLIENT_SECRET` | M2M client_secret |

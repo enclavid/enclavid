@@ -1,6 +1,9 @@
-// Fetch wrappers for the applicant API. All paths are relative —
-// served from the same origin as the SPA bundle (TEE-hosted), so no
-// CORS / no separate base URL.
+// Fetch wrappers for the applicant API. All paths are relative to the
+// document — no leading slash — so they resolve under whatever path
+// the page itself was served at, on the same origin as the SPA bundle
+// (TEE-hosted): no CORS, no separate base URL. Behind the gateway the
+// page sits under its routing marker, and a relative path keeps every
+// request under it too; see `vite.config.ts`.
 //
 // Errors collapse to a single `ApiError` carrying the HTTP status.
 // Callers can disambiguate (404, 403, 500) when the UI distinction
@@ -31,12 +34,13 @@ async function parseOrThrow<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
-// All applicant endpoints live under `/api/v1/sessions/<id>/...`,
-// matching the client-side surface. The user-facing browser URL is
-// still `/session/<id>/...` (SPA shell, served by the api binary's
-// ServeDir fallback) — only the JSON endpoints are namespaced.
+// All applicant endpoints live under `api/v1/sessions/<id>/...`,
+// matching the client-side surface. The page's own routes are not
+// paths at all: they live in the fragment (`#/session/<id>/...`),
+// which never reaches the server, so it is these API requests, not the
+// page's address, that name the session to it.
 function endpoint(sessionId: string, suffix: string): string {
-  return `/api/v1/sessions/${encodeURIComponent(sessionId)}${suffix}`;
+  return `api/v1/sessions/${encodeURIComponent(sessionId)}${suffix}`;
 }
 
 export async function getStatus(sessionId: string): Promise<StatusResponse> {

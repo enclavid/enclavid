@@ -17,25 +17,27 @@ pub struct Asset {
 
 include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 
-/// The document every unrecognised path falls back to.
+/// The document, served at `/`.
 const INDEX: &str = "/index.html";
 
 /// The prefix Vite gives content-addressed output. A file under it is named by
 /// a hash of what is in it, so its name changes whenever its bytes do.
 const IMMUTABLE_PREFIX: &str = "/assets/";
 
-/// The asset for a request path, following the single-page rule.
+/// The asset for a request path: the file at it, or the document at `/`.
 ///
-/// An unmatched path resolves to the document rather than to nothing, because
-/// the routes a person sees — `/session/<id>/…` — exist only inside the page and
-/// have no file behind them. The cost is the one the gateway notes record: an
-/// address that means nothing renders the shell with a 200 rather than an error,
-/// and the page is what has to say so.
-///
-/// `/` resolves to the document too, which is the same rule and not a special
-/// case: there is no file at `/`.
+/// The page is served at the root, and the routes a person sees —
+/// `#/session/<id>/…` — live in the fragment, which a browser never sends, so
+/// every one of them arrives as `/`. Nothing else resolves to the document. A
+/// page served at a deeper path would resolve what it loads relatively under
+/// that path, and be handed the document again for each of those — a page that
+/// loads and runs nothing, with no error to say why. A path that is no file is
+/// nothing, and the caller answers 404.
 pub fn lookup(path: &str) -> Option<&'static Asset> {
-    exact(path).or_else(|| exact(INDEX))
+    match path {
+        "/" => exact(INDEX),
+        _ => exact(path),
+    }
 }
 
 fn exact(path: &str) -> Option<&'static Asset> {
@@ -68,18 +70,19 @@ mod tests {
     fn an_empty_table_resolves_nothing() {
         if ASSETS.is_empty() {
             assert!(lookup("/").is_none());
-            assert!(lookup("/session/abc").is_none());
+            assert!(lookup("/no/such/page").is_none());
         }
     }
 
-    /// Falling back to the document is what makes the in-page routes work, so
-    /// it is checked wherever a document exists.
+    /// The document is served at `/`, where every in-page route arrives, and
+    /// at no other path that is not a file — checked wherever a document
+    /// exists.
     #[test]
-    fn an_unknown_path_falls_back_to_the_document() {
+    fn the_document_is_served_at_the_root_and_nowhere_else() {
         if exact(INDEX).is_some() {
-            let fallback = lookup("/session/abc/step/2").expect("the document");
-            assert_eq!(fallback.path, INDEX);
             assert_eq!(lookup("/").expect("the document").path, INDEX);
+            assert!(lookup("/no/such/page").is_none());
+            assert!(lookup("/session/ses_ab/assets/index.js").is_none());
         }
     }
 

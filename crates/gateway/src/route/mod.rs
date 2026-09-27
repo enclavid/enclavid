@@ -142,6 +142,9 @@ impl Hop {
             Ok(true) => return refuse(StatusCode::MISDIRECTED_REQUEST),
             Err(Unreadable) => return refuse(StatusCode::BAD_REQUEST),
         }
+        if let Some(slashed) = slashed(&req) {
+            return redirected(&slashed);
+        }
 
         let mut req = req;
         let (target, minted) = match route(&table, &name, &mut req) {
@@ -311,6 +314,41 @@ fn unforwarded<B>(req: &mut Request<B>) {
     for name in FORWARDING {
         req.headers_mut().remove(name);
     }
+}
+
+/// Where a link's marker with nothing after it — `/-<label>.<build>` — is sent:
+/// the same marker with a slash, the query kept.
+///
+/// The page served under a marker refers to what it loads relatively, and a
+/// browser resolves those references against the path up to its last slash.
+/// Without one that is the root, where nothing is routed, so the page would
+/// load and nothing it needs would. A path of its own, never a host, so the
+/// redirect leaves the caller where it was.
+fn slashed<B>(req: &Request<B>) -> Option<String> {
+    let path = req.uri().path();
+    let marker = path.strip_prefix('/')?.strip_prefix(MARK)?;
+    if marker.is_empty() || marker.contains('/') {
+        return None;
+    }
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    Some(format!("{path}/{query}"))
+}
+
+/// A permanent redirect to `location`, a path on this same name, keeping the
+/// method — see [`slashed`].
+fn redirected(location: &str) -> Response<ResponseBody> {
+    let Ok(location) = hyper::header::HeaderValue::from_str(location) else {
+        return refuse(StatusCode::BAD_REQUEST);
+    };
+    let mut response = refuse(StatusCode::PERMANENT_REDIRECT);
+    response
+        .headers_mut()
+        .insert(hyper::header::LOCATION, location);
+    response
 }
 
 /// A body this role wrote itself.

@@ -150,7 +150,7 @@ pub async fn run(
         println!("  client_ref:       {r}");
     }
     println!(
-        "  applicant URL:    {}/session/{}/",
+        "  applicant URL:    {}/#/session/{}",
         applicant_url().trim_end_matches('/'),
         created.session_id,
     );
@@ -169,7 +169,7 @@ pub async fn run(
     println!();
     println!("Next:");
     println!(
-        "  open '{}/session/{}/'",
+        "  open '{}/#/session/{}'",
         applicant_url().trim_end_matches('/'),
         created.session_id
     );

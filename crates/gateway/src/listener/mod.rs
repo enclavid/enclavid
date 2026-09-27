@@ -788,6 +788,49 @@ mod tests {
         );
     }
 
+    /// A link's marker with nothing after it is sent on to the same marker
+    /// with a slash, its query kept: the page served there loads what it needs
+    /// relatively, against the path up to its last slash.
+    #[tokio::test]
+    async fn a_bare_marker_is_sent_on_with_a_slash() {
+        let (at, _, _pushes) = gateway(&api().await).await;
+        let mut caller = caller(&at, FIRST, 4 << 20).await;
+        let response = ask(
+            &mut caller,
+            Request::get(format!("https://{FIRST}/-{GROUP}.{A}?from=link"))
+                .body(Empty::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(
+            response.headers()[hyper::header::LOCATION],
+            format!("/-{GROUP}.{A}/?from=link").as_str()
+        );
+    }
+
+    /// What a page under a marker loads relatively — an asset, a call to api —
+    /// is under the marker as well, and reaches api at its own path.
+    #[tokio::test]
+    async fn what_a_page_loads_under_its_marker_reaches_api_at_its_own_path() {
+        let (at, _, _pushes) = gateway(&api().await).await;
+        let mut caller = caller(&at, FIRST, 4 << 20).await;
+        for path in ["assets/index.js", "api/v1/sessions/7/status"] {
+            let response = ask(
+                &mut caller,
+                Request::get(format!("https://{FIRST}/-{GROUP}.{A}/{path}"))
+                    .body(Empty::new())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers()["x-asked-for"],
+                format!("/{path}").as_str()
+            );
+        }
+    }
+
     /// A path with no marker is not a link, and a label nobody carries gets
     /// the same response as an upstream that would not talk.
     #[tokio::test]

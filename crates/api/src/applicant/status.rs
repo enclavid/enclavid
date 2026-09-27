@@ -27,7 +27,7 @@ pub(super) fn get_status() -> MethodRouter<Arc<AppState>> {
     get(status)
 }
 
-/// GET /session/:id/status — public, no auth.
+/// GET /api/v1/sessions/{id}/status — public, no auth.
 ///
 /// Frontend uses this as the first request to decide which UI flow
 /// to run (continue running session / show "done" / show "ended").

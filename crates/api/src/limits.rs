@@ -18,7 +18,7 @@
 
 // ----- HTTP / multipart body caps -----
 
-/// Body-limit applied to `/session/:id/input/:slot_id` (multipart).
+/// Body-limit applied to `/api/v1/sessions/{id}/input/{slot_id}` (multipart).
 /// Headroom for the largest legitimate payload: ~12 JPEG frames at
 /// ~200 KB plus multipart overhead. Enforced via axum's
 /// `DefaultBodyLimit::max(...)` at the route layer so handler logic

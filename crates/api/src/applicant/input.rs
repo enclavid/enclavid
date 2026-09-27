@@ -24,7 +24,7 @@ pub(super) fn post_input() -> MethodRouter<Arc<AppState>> {
     post(input).layer(DefaultBodyLimit::max(APPLICANT_INPUT_BODY_LIMIT))
 }
 
-/// POST /session/:id/input/:slot_id — submits applicant input for the
+/// POST /api/v1/sessions/{id}/input/{slot_id} — submits applicant input for the
 /// prompt the session is currently awaiting.
 ///
 /// `slot_id` shapes:

@@ -1,6 +1,6 @@
-// Reached when the URL has no `/session/{id}/` prefix. We don't
-// run anything else — just explain that this page is opened via a
-// link from the integrating partner.
+// Reached when the URL fragment does not start with `#/session/{id}`.
+// We don't run anything else — just explain that this page is opened
+// via a link from the integrating partner.
 
 export function SessionRequired() {
   return (

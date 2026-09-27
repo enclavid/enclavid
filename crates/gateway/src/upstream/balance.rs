@@ -298,17 +298,15 @@ impl Members {
             // Bounded by the member: its opening, and `response_timeout` once
             // the body is sent.
             match responding.await {
-                Ok(response) => return Ok(response),
-                Err(e) => match e.downcast::<NotSent>() {
-                    // Nothing of it reached any api, so it is offered again as
-                    // it is. A member that handed it back for its own failure is
-                    // out for its cooldown, so the next choice is not that one.
-                    Ok(back) => req = back.0,
-                    Err(e) => {
-                        debug!("a request did not come back from its member: {e}");
-                        return Err(Unreachable);
-                    }
-                },
+                Ok(Ok(response)) => return Ok(response),
+                // Nothing of it reached any api, so it is offered again as it
+                // is. A member that handed it back for its own failure is out
+                // for its cooldown, so the next choice is not that one.
+                Ok(Err(NotSent(back))) => req = back,
+                Err(e) => {
+                    debug!("a request did not come back from its member: {e}");
+                    return Err(Unreachable);
+                }
             }
         }
         debug!(
