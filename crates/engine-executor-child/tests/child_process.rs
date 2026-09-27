@@ -191,6 +191,8 @@ async fn spawned_child_primes_runs_relays_then_exits() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn spawned_child_runs_a_round_under_the_production_filter() {
+    use std::os::fd::{AsFd, AsRawFd};
+
     let bundle = real_bundle();
     let hardening = engine_supervisor::Hardening {
         seccomp_egress: true,
@@ -198,16 +200,36 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
         // memory, so a hard RLIMIT_AS would break it.
         address_space: None,
     };
+    // The cwasm as the execution-worker hands it over: an open file the child
+    // inherits at `FIRST_INHERITED_FD` and re-opens through `/proc/self/fd/N`.
+    // It sits at another number here, as it does in the worker, so installing
+    // it is a real `dup2` in the spawn, under the same hardening.
+    let staged = to_bundle_ref(&bundle);
+    let opened = std::fs::File::open(&staged.cwasm_path).expect("open the staged cwasm");
+    // A second descriptor for it, held while the first stays open, so it cannot
+    // be the lowest free number the first one may have taken.
+    let cwasm = opened
+        .try_clone()
+        .expect("a second descriptor for the cwasm");
+    assert_ne!(
+        cwasm.as_raw_fd(),
+        engine_supervisor::FIRST_INHERITED_FD,
+        "the spawn must move the fd, as it does in the worker"
+    );
+    let inherited = BundleRef {
+        cwasm_path: format!("/proc/self/fd/{}", engine_supervisor::FIRST_INHERITED_FD),
+        ..staged
+    };
     let (mut child, client) = engine_supervisor::spawn_and_connect::<ChildServiceClient<Ciborium>>(
         &xtask::child_binary("engine-executor-child"),
-        &[],
+        &[cwasm.as_fd()],
         Some(hardening),
     )
     .await
     .expect("spawn a hardened engine-executor-child");
 
     client
-        .prime(to_bundle_ref(&bundle))
+        .prime(inherited)
         .await
         .expect("a hardened child must still deserialize a real cwasm");
 

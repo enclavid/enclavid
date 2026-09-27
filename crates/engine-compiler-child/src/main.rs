@@ -93,11 +93,10 @@ async fn main() {
     {
         Ok(()) => std::process::exit(0),
         Err(e) => {
-            // The supervisor nulls this child's stdout and stderr, and the
-            // log device is opened O_CLOEXEC so a child never inherits it —
-            // this reaches a developer running the child by hand and nobody
-            // else. `debug!` on top of that keeps it out of the measured build
-            // entirely, so the belt does not depend on the braces.
+            // `debug!` keeps this out of the shipped build entirely, and the
+            // log device is opened O_CLOEXEC so a child never inherits it. In a
+            // `debug` build the supervisor hands this child its own stderr, so
+            // the line lands where the worker's do.
             safe_logger::debug!("engine-compiler-child: {e}");
             std::process::exit(1);
         }

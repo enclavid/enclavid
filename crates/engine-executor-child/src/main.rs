@@ -288,13 +288,16 @@ async fn main() {
     // round's applicant plaintext in the one address space where the consumer's
     // wasm runs, so it may not speak to the host at all. `info!`/`warn!`/`error!`
     // are dropped here; `debug!` reaches whoever ran the binary by hand and, when
-    // the supervisor spawned it, the `/dev/null` it was given.
+    // the supervisor spawned it, the stderr it was given — the worker's own in a
+    // `debug` build, and in any other build there is no `debug!` to reach it.
     safe_logger::install_contained();
+    safe_logger::debug!("engine-executor-child: started");
 
     let child = Arc::new(Child {
         executor: Arc::new(Executor::new().expect("engine-executor-child: create executor engine")),
         primed: OnceLock::new(),
     });
+    safe_logger::debug!("engine-executor-child: engine built, serving fd 0");
 
     // The supervisor placed one end of a socketpair on our fd 0; engine-supervisor
     // adopts it, serves `ChildService`, and returns when the supervisor drops its
@@ -308,11 +311,10 @@ async fn main() {
     {
         Ok(()) => std::process::exit(0),
         Err(e) => {
-            // The supervisor nulls this child's stdout and stderr, and the
-            // log device is opened O_CLOEXEC so a child never inherits it —
-            // this reaches a developer running the child by hand and nobody
-            // else. `debug!` on top of that keeps it out of the measured build
-            // entirely, so the belt does not depend on the braces.
+            // `debug!` keeps this out of the shipped build entirely, and the
+            // log device is opened O_CLOEXEC so a child never inherits it. In a
+            // `debug` build the supervisor hands this child its own stderr, so
+            // the line lands where the worker's do.
             safe_logger::debug!("engine-executor-child: {e}");
             std::process::exit(1);
         }

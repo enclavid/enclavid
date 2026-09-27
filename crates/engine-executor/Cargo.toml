@@ -161,8 +161,9 @@ guest-hardening = ["worker", "sev-snp", "engine-supervisor/guest-hardening"]
 # The attested build: reach api over vsock instead of TCP.
 vsock = ["worker", "fleet-transport/vsock"]
 # Compiles the `debug!` sites in. OFF in the measured build, so a production
-# binary holds no diagnostic that nobody wrote a reason for.
-debug = ["safe-logger/debug"]
+# binary holds no diagnostic that nobody wrote a reason for. The supervisor's
+# half hands the per-round child this process's stderr.
+debug = ["safe-logger/debug", "engine-supervisor?/debug"]
 
 [[bin]]
 name = "execution-worker"

@@ -82,3 +82,10 @@ parent = [
 # Implies `parent`: the floor is asserted by a supervisor at boot, before any
 # child exists, so there is nothing for a child build to enforce.
 guest-hardening = ["parent"]
+
+# A build with the `debug!` tier: a disposable child is given its supervisor's
+# stderr, so the child's own `debug!` reaches the port the rest of a `-debug`
+# image writes to, instead of `/dev/null`. Compiled out of every other build —
+# there a child's stdio stays null. Asked for by a worker's own `debug`; implies
+# `parent`, since only a supervisor spawns.
+debug = ["parent", "safe-logger/debug"]

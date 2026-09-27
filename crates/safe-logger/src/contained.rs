@@ -27,7 +27,8 @@
 /// dependency to fill with something that writes to stdout. `debug!` is not the
 /// reason — it needs no installer, because it calls its sink directly rather
 /// than through `log`'s gate. Where it lands is unchanged either way: spawned,
-/// the supervisor's `/dev/null`; run from a terminal, the terminal.
+/// the stderr the supervisor gave it — its own in a build with the `debug!`
+/// tier, `/dev/null` otherwise; run from a terminal, the terminal.
 ///
 /// [`crate::DEVICE_KEY`] is not consulted — not even to fail loudly if it is
 /// set. A process that has decided it may not speak should not change its mind

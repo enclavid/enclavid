@@ -728,8 +728,24 @@ where
     // must not be able to write the round's plaintext to the worker's inherited
     // stdio (→ the host). Child diagnostics are dropped by design; a failure still
     // surfaces as the dropped connection / the pool's error.
+    //
+    // The `debug` build is the exception for stderr, and only it compiles one.
+    // Its image puts the kernel log and every role's `debug!` on the port
+    // already, and no consumer pins it — while a round that fails inside a child
+    // whose stderr is null says nothing at all. So there the child's `debug!`
+    // goes where the worker's does, and it takes the worker's threshold along:
+    // the environment it would read that from is cleared, and a threshold of
+    // everything puts a dependency's dump of every byte it moves on the port.
     cmd.stdout(std::process::Stdio::null());
+    #[cfg(not(feature = "debug"))]
     cmd.stderr(std::process::Stdio::null());
+    #[cfg(feature = "debug")]
+    {
+        cmd.stderr(std::process::Stdio::inherit());
+        if let Ok(level) = std::env::var(safe_logger::LEVEL_KEY) {
+            cmd.env(safe_logger::LEVEL_KEY, level);
+        }
+    }
     // Backstop: an early return / cancelled request SIGKILLs + reaps the child.
     cmd.kill_on_drop(true);
 
@@ -763,6 +779,23 @@ where
     // across this call.
     unsafe {
         cmd.as_std_mut().pre_exec(move || {
+            // ---- caller fd installation (all platforms) ----
+            //
+            // Before the filter, not after: the filter refuses `dup2`, as it
+            // refuses nearly everything a child has no use for, so installing a
+            // caller fd under it kills the child here — before exec, before a
+            // line of its own could say so. The filter goes last, with nothing
+            // after it but `execve`.
+            for &(src, dst) in &mappings {
+                if src == dst {
+                    let flags = libc::fcntl(dst, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(dst, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                } else if libc::dup2(src, dst) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             // ---- Linux post-fork hardening (no-op elsewhere) ----
             #[cfg(target_os = "linux")]
             {
@@ -795,17 +828,6 @@ where
                     }
                 }
             }
-            // ---- caller fd installation (all platforms) ----
-            for &(src, dst) in &mappings {
-                if src == dst {
-                    let flags = libc::fcntl(dst, libc::F_GETFD);
-                    if flags < 0 || libc::fcntl(dst, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                } else if libc::dup2(src, dst) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
             Ok(())
         });
     }
@@ -813,6 +835,7 @@ where
     let child = cmd
         .spawn()
         .map_err(|e| format!("spawn {}: {e}", exe.display()))?;
+    safe_logger::debug!("child spawned: {}", exe.display());
 
     let sup_end =
         tokio::net::UnixStream::from_std(sup_end).map_err(|e| format!("adopt sup_end: {e}"))?;
@@ -821,6 +844,7 @@ where
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(connection_cfg(), read, write)
             .await
             .map_err(|e| format!("child remoc connect: {e}"))?;
+    safe_logger::debug!("child connected: {}", exe.display());
     tokio::spawn(conn);
     let client = rx
         .recv()
