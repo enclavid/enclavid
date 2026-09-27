@@ -92,6 +92,18 @@ impl TcbFloor {
             && tcb.snp >= self.snp
             && tcb.microcode >= self.microcode
     }
+
+    /// The floor as the firmware reads a TCB version it is asked to mix into a
+    /// derived key: the layout of [`PRODUCT_LINE`], as the `sev` crate encodes
+    /// it, read as the little-endian word the request carries.
+    #[cfg(any(target_os = "linux", test))]
+    fn as_key_input(&self) -> u64 {
+        let tcb = TcbVersion::new(None, self.bootloader, self.tee, self.snp, self.microcode);
+        let bytes = tcb
+            .to_bytes_with(sev::Generation::Milan)
+            .expect("the product line this build pins has a TCB layout");
+        u64::from_le_bytes(bytes)
+    }
 }
 
 /// Quote payload for `format: "sev-snp"`: the firmware's report, and — when the
@@ -419,8 +431,8 @@ mod mint {
     use sev::parser::ByteParser;
 
     use super::{
-        Endorsement, PRODUCT_LINE, REQUIRED_VMPL, SNP_FORMAT, SnpEnvelope, check_report_policy,
-        verify_quote, verify_quote_endorsed,
+        Endorsement, MIN_TCB, PRODUCT_LINE, REQUIRED_VMPL, SNP_FORMAT, SnpEnvelope,
+        check_report_policy, verify_quote, verify_quote_endorsed,
     };
     use crate::{AttestationError, Attestor, Quote, ReportData};
 
@@ -497,29 +509,58 @@ mod mint {
     ///     relaunched with debugging enabled derives a different key. The
     ///     platform check already refuses to run that way; this makes the data
     ///     unreadable even if it did.
+    ///   * TCB_VERSION, set to this build's floor [`MIN_TCB`], ties it to the
+    ///     firmware being at least that. The key comes from the chip's key at the
+    ///     TCB requested, and firmware can compute that key only for a TCB at or
+    ///     below its own — so on firmware below the floor this key cannot be made
+    ///     at all: not for this guest, and not for a host that has read this
+    ///     guest's memory or its request key through a defect in that firmware
+    ///     and asks for the key itself. A check in this guest's code could not
+    ///     say as much: a host exploiting old firmware does not run it. The
+    ///     firmware also refuses a TCB above the one this guest was launched at.
+    ///     The floor rather than the current version, because deriving at an
+    ///     older TCB is what the firmware offers this field for — so that a
+    ///     secret outlives an update — and raising the floor is a rebuild, which
+    ///     moves the measurement and the key with it anyway.
     ///
-    /// TCB_VERSION is deliberately NOT mixed. Platform firmware updates are
-    /// routine security hygiene, and binding to them would make every update
-    /// discard sealed state — a mechanism that punishes patching. The floor in
-    /// `check_report_policy` is what keeps old firmware out instead.
+    /// And the platform must pass [`check_report_policy`] before anything is
+    /// derived — its reported TCB at or above the floor, which the firmware
+    /// allows only once that much is committed — and its committed TCB must
+    /// too, so a platform short of it gets this refusal rather than an opaque one
+    /// from the firmware.
     pub fn derive_seal_key() -> Result<[u8; 32], AttestationError> {
         use sev::firmware::guest::{DerivedKey, GuestFieldSelect};
 
         let mut firmware = Firmware::open()
             .map_err(|e| AttestationError::Backend(format!("open /dev/sev-guest: {e}")))?;
 
-        // The mitigation vector in force at launch, which the firmware requires
-        // for this request and which the derivation then also binds.
+        // This guest's own report: the posture checked below, and the
+        // mitigation vector in force at launch, which the firmware requires in
+        // the request. It is carried, not mixed in — mixing it would change the
+        // key whenever firmware adds a mitigation.
         let report_bytes = firmware
             .get_report(None, Some([0u8; 64]), Some(REQUIRED_VMPL))
             .map_err(|e| AttestationError::Backend(format!("guest report request: {e}")))?;
         let report = AttestationReport::from_bytes(&report_bytes).map_err(|e| {
             AttestationError::Backend(format!("firmware returned an unparsable report: {e}"))
         })?;
+        // No signature to check first: this came from the firmware over this
+        // guest's own encrypted channel, which the host cannot write into.
+        check_report_policy(&report)?;
+        if !MIN_TCB.accepts(&report.committed_tcb) {
+            return Err(AttestationError::PolicyRejected(format!(
+                "committed platform TCB below floor: bl={} tee={} snp={} ucode={}",
+                report.committed_tcb.bootloader,
+                report.committed_tcb.tee,
+                report.committed_tcb.snp,
+                report.committed_tcb.microcode
+            )));
+        }
 
         let mut fields = GuestFieldSelect(0);
         fields.set_measurement(true);
         fields.set_guest_policy(true);
+        fields.set_tcb_version(true);
 
         // Root key: the chip-derived VCEK, not the migration key — a migration
         // key would let a migration agent reproduce this secret elsewhere.
@@ -528,7 +569,7 @@ mod mint {
             fields,
             REQUIRED_VMPL,
             0,
-            0,
+            MIN_TCB.as_key_input(),
             Some(report.launch_mit_vector.unwrap_or(0)),
         );
         firmware
@@ -1032,6 +1073,20 @@ mod tests {
         assert!(MIN_TCB.accepts(&tcb(5, 1, 30, 223)));
         assert!(!MIN_TCB.accepts(&tcb(4, 0, 28, 255)));
         assert!(!MIN_TCB.accepts(&tcb(3, 0, 29, 222)));
+    }
+
+    /// The floor goes into a derived key in the firmware's own layout for this
+    /// product line — bootloader in the low byte, TEE next, SNP and microcode
+    /// in the top two — and reads back as the floor. Written out, so a change
+    /// in how the `sev` crate lays it out fails here rather than as a key that
+    /// quietly binds some other TCB.
+    #[test]
+    fn the_floor_enters_a_derived_key_in_the_firmware_s_layout() {
+        let word = MIN_TCB.as_key_input();
+        assert_eq!(word, 0xde1d_0000_0000_0004);
+        let back =
+            TcbVersion::from_bytes_with(&word.to_le_bytes(), sev::Generation::Milan).unwrap();
+        assert_eq!(back, tcb(4, 0, 29, 222));
     }
 
     #[test]

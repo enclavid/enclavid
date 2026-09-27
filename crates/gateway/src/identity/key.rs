@@ -24,11 +24,18 @@
 //! part derives a different key; the same build on another part does too. Two
 //! guests of this build on one part derive the SAME key — which is right, and
 //! useful: they are one key domain, so one certificate serves them all and a
-//! caller's pin holds across them.
+//! caller's pin holds across them. The firmware also mixes in what the host
+//! sets at launch — the host data, the key that signed the launch — so a host
+//! launching one guest differently gives it a different key: a certificate and
+//! a pin that no longer hold, never a key another guest could read.
 //!
 //! It cannot be derived by anyone else: the input is a chip secret. A caller
 //! holding the measurement and the certificate still learns which key belongs
 //! to this build only from the quote — which is the whole point of serving one.
+//! Nor on firmware older than this build's floor: the floor is mixed in, and
+//! firmware below it cannot compute a key at a TCB above its own — so a host
+//! that reads a guest's memory through a defect in old firmware finds no copy
+//! of this key there to take. See `enclavid_attestation::derive_seal_key`.
 //!
 //! ## The certificate is a wrapper; the key is what stays
 //!

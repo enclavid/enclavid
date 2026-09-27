@@ -172,7 +172,8 @@ async fn main() {
     //
     // The seal key comes from the chip: under `sev-snp`, `load_tee_seal_key`
     // calls `enclavid_attestation::derive_seal_key`, so it is bound to the
-    // measurement and never leaves the enclave. The env-var path below it is
+    // measurement and to firmware no older than this build's floor, and never
+    // leaves the enclave. The env-var path below it is
     // the dev build only, and is compiled out of the measured image.
     let tee_seal_key = load_tee_seal_key();
     // Derive the process-lifetime shuffle key from the same TEE

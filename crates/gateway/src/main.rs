@@ -186,6 +186,13 @@ async fn main() -> std::convert::Infallible {
     let public_addr = required("ENCLAVID_ADDRESS_IN_PUBLIC");
     let config_addr = required("ENCLAVID_ADDRESS_IN_CONFIG");
 
+    // One attestor for the process, handed to both of its uses: it mints this
+    // role's evidence, and it verifies api on every leg. Building one asks the
+    // Secure Processor for a report and checks this platform against the
+    // build's floor, so it is built once — and first, so nothing below is
+    // derived on a platform that check refuses.
+    let attestor = identity::attestor();
+
     // The key this role serves on, settled before the bind so a guest that
     // cannot hold an identity never takes the port. It never leaves this
     // guest's encrypted memory — which is the only reason terminating here is
@@ -206,11 +213,6 @@ async fn main() -> std::convert::Infallible {
     // this role, and a role that cannot say what it is has nothing to delegate
     // to. It binds the KEY, so it outlives the certificates as well — see
     // `crate::identity::attest`.
-    //
-    // One attestor for the process, built here and handed to both of its uses:
-    // it mints this evidence, and it verifies api on every leg. Building one
-    // asks the Secure Processor for a report, so it is not built twice.
-    let attestor = identity::attestor();
     let spki = identity.spki().to_vec();
     let evidence = identity::attest::evidence(spki, &attestor).unwrap_or_else(|e| {
         debug!("{e}");
