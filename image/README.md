@@ -132,6 +132,14 @@ The pair belongs together — a `-debug` app wants the `debug` command line.
 Mismatching is confusing and never unsafe: one way writes into a descriptor
 that discards, the other says nothing.
 
+The `debug` command line also sets `ENCLAVID_LOG_LEVEL=info`, not the default
+of everything. The level gates only what DEPENDENCIES log — every `debug!` in
+this tree goes around it — and below `info` they write far more than this port
+can carry: the fleet's RPC layer prints every 8 KiB piece of a message at trace,
+four characters a byte, and the compiler reports every pass of every function
+at debug. Every character on this port is an exit to the host, so at those
+levels a round spends minutes writing and misses its own deadlines.
+
 What stays silent is a failure nobody annotated. That is what `debug` is for —
 the same image with a kernel console, and therefore a different measurement,
 which no consumer pins. Reaching for it is one file away, and it costs about
