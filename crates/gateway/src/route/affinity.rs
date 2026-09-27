@@ -80,7 +80,7 @@ pub const TOKEN_HEADER: &str = "x-enclavid-group-token";
 ///
 /// A caller that writes links for others needs exactly that to write them with.
 /// The token begins with the same string, but a token is this role's own
-/// bookkeeping; this header is the part of the answer a caller may read.
+/// bookkeeping; this header is the part of the response a caller may read.
 pub const GROUP_HEADER: &str = "x-enclavid-group";
 
 /// What a token says: the group a caller was placed on, and the build it was

@@ -71,8 +71,8 @@ pub async fn follow(
 /// the config does not, which is the whole reason a resolver is used rather than
 /// a finished certificate.
 ///
-/// On the same provider the certificate's key was loaded with — see
-/// [`tls::provider`].
+/// On [`tls::provider`], the backend the certificate's key was loaded by — see
+/// [`tls::signer`].
 ///
 /// TLS 1.2 as well as 1.3, because a consumer's own servers may speak nothing
 /// newer, and a caller that speaks 1.3 cannot be pushed down to 1.2 — the

@@ -77,13 +77,15 @@
 //! cannot: an unchecked table is a thing that cannot exist anywhere else in
 //! this build.
 //!
-//! A push is refused WHOLE if any part of it is wrong, and the answer says
+//! A push is refused WHOLE if any part of it is wrong, and the response says
 //! which. There is a sender to tell, and a table missing one declared build is
 //! a quieter failure than a push that did not apply.
 
 pub mod push;
 mod table;
-#[cfg(test)]
+// Its users are the tests that stand api up on TCP, which a vsock build has no
+// place for.
+#[cfg(all(test, not(feature = "vsock")))]
 pub(crate) mod testing;
 
 pub use table::{

@@ -62,7 +62,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use enclavid_attestation::Attestor;
 
-/// The one path this role answers for itself.
+/// The one path this role itself responds to.
 ///
 /// Under `/.well-known/` because that is the reserved space for exactly this —
 /// something about the server rather than about what it serves — and because it

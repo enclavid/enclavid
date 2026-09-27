@@ -23,14 +23,14 @@
 //! A parked leg is taken, not shared. HTTP/2 would happily carry both requests
 //! at once, and that is exactly what must not happen: the flow-control window
 //! belongs to the CONNECTION, so a caller that stops reading freezes the other
-//! answers on it; a `GOAWAY` takes down whatever else is in flight; the reset
+//! responses on it; a `GOAWAY` takes down whatever else is in flight; the reset
 //! budget is spent per connection. All of that needs two callers on one leg at
 //! once, and taking the leg out of the stack is what prevents it.
 //!
 //! So the leg comes back when the RESPONSE BODY ends — see [`Returning`] — not
 //! when the response head arrives. Returning it any earlier would put the next
 //! request on a connection still streaming the last one. A request that never
-//! gets an answer — cancelled, timed out, or failed on its own stream — gives
+//! gets a response — cancelled, timed out, or failed on its own stream — gives
 //! its leg back too, unless the connection went with it — see [`Lent`].
 //!
 //! ## Nothing one caller sends is remembered for the next
@@ -46,10 +46,10 @@
 //!
 //! So neither table is used. Every header a request carries goes over as one
 //! never to be indexed — see [`unremembered`] — and the leg tells api it keeps
-//! no table for answers, so api's answers cannot shape each other either. What
-//! the table still takes is the request line: the name the connection agreed
-//! to, which every request on one leg shares, and the method. The library never
-//! indexes a path.
+//! no table for responses, so api's responses cannot shape each other either.
+//! What the table still takes is the request line: the name the connection
+//! agreed to, which every request on one leg shares, and the method. The
+//! library never indexes a path.
 //!
 //! ## Warmest first
 //!
@@ -72,10 +72,11 @@
 //! Requests are the only question. A member takes work from the moment a push
 //! declares it, and the first request that picks it opens a leg through
 //! [`connect`], which proves the build and the part — so a member the host
-//! declared wrongly, or one that is not there, fails that request and is left
-//! out for `cooldown` — long enough that a member which is down is not asked
-//! by every request meanwhile, short enough that one which has come back takes
-//! work again soon. After it, the next request that picks it asks again.
+//! declared wrongly, or one that is not there, opens no leg for that request,
+//! hands it back, and is left out for `cooldown` — long enough that a member
+//! which is down is not asked by every request meanwhile, short enough that
+//! one which has come back takes work again soon. After it, the next request
+//! that picks it asks again.
 //!
 //! Opening is bounded whole by `open_timeout` — the dial and the handshake —
 //! because either can hang, and it is the handshake that does the work.
@@ -83,18 +84,26 @@
 //! A probe dialling every member on a timer was the alternative. It paid an
 //! attested handshake per member per turn for what traffic already proves, and
 //! paid most when the set was busiest; and it still left a member that failed
-//! real legs in rotation, because only its own answer counted.
+//! real legs in rotation, because only its own response counted.
 //!
 //! Asking by request costs the caller nothing while another member is up. A
 //! request whose leg would not open has not been sent anywhere, so the member
 //! hands it back as [`NotSent`] and the set offers it again — see
 //! `crate::upstream::balance`. A request that reached api is never sent again.
 //!
-//! Only a leg that would not OPEN counts against a member. A request that fails
-//! on a leg that did open may have failed on its caller's account — a body that
-//! broke off — and a head that is slow in coming is bounded by `answer_timeout`,
-//! counted from when the body has all been sent; either way the leg goes back
-//! through [`Lent`], and nothing counts against the member.
+//! Two things count against a member. One is a leg that would not OPEN. The
+//! other is a response that did not START within `response_timeout` — counted
+//! from when the body had all been sent, or from when it was due, for a body
+//! api would not take; see [`BodyDue`]. Neither can be the caller's doing: the
+//! first is a member that is not there, the second one that is there and
+//! sends no response — whose legs stay open, and so would never come to be
+//! opened again, which is what would have found it out. So a leg whose
+//! response did not start in time is closed rather than parked, and the next
+//! request to its member, after the cooldown, opens one afresh.
+//!
+//! Nothing else does. A request that fails sooner, on a leg that did open, may
+//! have failed on its caller's account — a body that broke off — and its leg
+//! goes back through [`Lent`].
 //!
 //! A request the HTTP library has taken is not handed back even when api never
 //! acted on it — a stream api refused, or one past the last a closing api said
@@ -106,8 +115,9 @@
 //! And only when the member is why it would not open. A dial that fails because
 //! THIS process is out of descriptors or memory says nothing about the member —
 //! and counted against it, one such moment would leave every member of every
-//! group out at once, answering nobody long after the moment passed. So such a
-//! request is handed back without leaving the member out — see [`Unopened`].
+//! group out at once, responding to nobody long after the moment passed. So
+//! such a request is handed back without leaving the member out — see
+//! [`Unopened`].
 //!
 //! ## Out is pending, never an error
 //!
@@ -169,7 +179,7 @@ impl Drop for Place {
     }
 }
 
-/// How much of an answer api may send on a leg before this role has read it.
+/// How much of a response api may send on a leg before this role has read it.
 ///
 /// A caller that stops reading stops this role reading too, so this is what one
 /// such caller can leave in memory per stream, besides what waits on the public
@@ -188,6 +198,17 @@ pub type Sent = BoxBody<Bytes, tower::BoxError>;
 /// One attested HTTP/2 connection to a member, carrying one request at a time.
 pub type Leg = SendRequest<Sent>;
 
+/// When a request's body must have arrived whole, set by `crate::listener` as
+/// the request's head arrives.
+///
+/// The body's own bounds are checked as it is read, and a leg reads it only as
+/// fast as api takes it: once api stops taking it, nothing reads it and none of
+/// those bounds is ever checked. So a member bounds that from outside the body,
+/// with `response_timeout` counted from here. A request without one — a
+/// test's — has only the wait from when its body was sent.
+#[derive(Clone, Copy)]
+pub struct BodyDue(pub tokio::time::Instant);
+
 /// Why a request could not be carried to a member.
 ///
 /// One variant, because the answer to the caller is one answer: which machines
@@ -196,7 +217,7 @@ pub type Leg = SendRequest<Sent>;
 /// whoever asked. What the caller is told is `crate::route`'s to decide.
 ///
 /// One in what it says, not in when it comes: a member that is down costs a
-/// dial or a wait before this is returned, and a member that answered costs
+/// dial or a wait before this is returned, and a member that responded costs
 /// nothing. The time is not padded — see `crate::route`.
 #[derive(Debug)]
 pub struct Unreachable;
@@ -308,7 +329,7 @@ impl Member {
 
     /// How many legs are parked. For the tests that pin the mapping between
     /// requests in flight and connections to api.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "vsock")))]
     pub fn parked(&self) -> usize {
         held(&self.inner.idle).len()
     }
@@ -354,15 +375,27 @@ impl tower::Service<Request<Sent>> for Member {
         }
         unremembered(&mut req);
         Box::pin(async move {
-            // The answer's deadline starts when the body has all been sent —
-            // see `sent_whole` — and holds across every leg tried below.
+            // The response's deadline starts when the body has all been sent —
+            // see `sent_whole` — and holds across every leg tried below. A body
+            // api will not take is never sent, so it has a ceiling too: the
+            // same wait, from when the body was due — see [`BodyDue`].
+            let due = req.extensions().get::<BodyDue>().map(|due| due.0);
             let (mut req, sent) = sent_whole(req);
-            let answer_timeout = member.tuning.answer_timeout;
-            let answering = async move {
-                let _ = sent.await;
-                tokio::time::sleep(answer_timeout).await;
+            let response_timeout = member.tuning.response_timeout;
+            let responding = async move {
+                let started = async move {
+                    let _ = sent.await;
+                    tokio::time::sleep(response_timeout).await;
+                };
+                match due {
+                    Some(due) => tokio::select! {
+                        () = started => {}
+                        () = tokio::time::sleep_until(due + response_timeout) => {}
+                    },
+                    None => started.await,
+                }
             };
-            tokio::pin!(answering);
+            tokio::pin!(responding);
 
             loop {
                 let (leg, opened) = match take(&member) {
@@ -392,17 +425,24 @@ impl tower::Service<Request<Sent>> for Member {
                     .as_mut()
                     .expect("lent until the head is back")
                     .try_send_request(req);
-                let answered = tokio::select! {
-                    answered = asked => answered,
-                    () = &mut answering => {
-                        debug!("a request to {} was not answered in time", member.addr);
+                let responded = tokio::select! {
+                    responded = asked => responded,
+                    () = &mut responding => {
+                        // api's to answer for, either way: the body was all
+                        // sent, or api would not take it. So the member is out,
+                        // and the leg is closed rather than parked — a
+                        // connection that carried no response may carry none
+                        // again, and only a leg opened afresh finds that out.
+                        debug!("a request to {} got no response in time", member.addr);
+                        drop(lent.leg.take());
+                        cool(&member);
                         return Err(Unreachable.into());
                     }
                 };
-                match answered {
-                    Ok(answer) => {
+                match responded {
+                    Ok(response) => {
                         let leg = lent.leg.take().expect("lent until the head is back");
-                        let (head, body) = answer.into_parts();
+                        let (head, body) = response.into_parts();
                         return Ok(Response::from_parts(
                             head,
                             Returning {
@@ -458,8 +498,8 @@ fn cool(member: &Inner) {
 
 /// The request, and what says its body has all been sent.
 ///
-/// The answer's deadline counts from there, not from when the request was
-/// handed over: api reads a body whole before it answers, so a deadline that
+/// The response's deadline counts from there, not from when the request was
+/// handed over: api reads a body whole before it responds, so a deadline that
 /// counted the upload would cut off a large one arriving slowly — and the
 /// upload has bounds of its own, in `crate::listener`. A body that fails, or
 /// that the connection drops, counts as sent: nothing more of it is coming.
@@ -517,13 +557,14 @@ impl Body for Watched {
     }
 }
 
-/// A leg on loan to one request until its answer's head is back.
+/// A leg on loan to one request until its response's head is back.
 ///
-/// Parked again if the request never gets that far — its caller went away, the
-/// answer deadline passed, or the request failed on its own stream — unless the
-/// connection went with it. Dropped instead, it would close a connection that
-/// is still good, and a caller cancelling request after request would have this
-/// role open an attested leg for every one.
+/// Parked again if the request never gets that far — its caller went away, or
+/// the request failed on its own stream — unless the connection went with it.
+/// Dropped instead, it would close a connection that is still good, and a
+/// caller cancelling request after request would have this role open an
+/// attested leg for every one. The one leg that is taken back and closed is
+/// one whose response did not start in time — see the module docs.
 struct Lent {
     leg: Option<Leg>,
     member: Arc<Inner>,
@@ -643,7 +684,7 @@ async fn open(member: &Inner) -> Result<Leg, Unopened> {
     let (leg, driving) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
         .initial_stream_window_size(WINDOW)
         .initial_connection_window_size(WINDOW)
-        // No table for api's answers — see the module docs.
+        // No table for api's responses — see the module docs.
         .header_table_size(0)
         .handshake(TokioIo::new(attested))
         .await
@@ -729,15 +770,15 @@ mod tests {
     use http_body_util::{BodyExt, Empty, Full};
     use tower::{Service, ServiceExt};
 
-    use crate::config::testing::{ANSWER, COOLDOWN, LEG_IDLE as IDLE};
+    use crate::config::testing::{COOLDOWN, LEG_IDLE as IDLE, RESPONSE};
 
-    /// An api stand-in that answers everything, and counts the connections it
-    /// accepted — each one a leg a member opened.
+    /// An api stand-in that responds to everything, and counts the connections
+    /// it accepted — each one a leg a member opened.
     async fn api() -> (String, Arc<AtomicUsize>) {
-        answering_after(Duration::ZERO).await
+        responding_after(Duration::ZERO).await
     }
 
-    /// A stand-in that reads each request's body whole before it answers, as
+    /// A stand-in that reads each request's body whole before it responds, as
     /// api does.
     async fn reading_whole() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -789,8 +830,8 @@ mod tests {
         (addr, open)
     }
 
-    /// The same stand-in, starting each answer only after `delay`.
-    async fn answering_after(delay: Duration) -> (String, Arc<AtomicUsize>) {
+    /// The same stand-in, starting each response only after `delay`.
+    async fn responding_after(delay: Duration) -> (String, Arc<AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let opened = Arc::new(AtomicUsize::new(0));
@@ -822,7 +863,7 @@ mod tests {
     /// What each leg sent a stand-in, byte for byte, one record per connection.
     type Wire = Arc<Mutex<Vec<Vec<u8>>>>;
 
-    /// A stand-in that answers everything and keeps what each leg sent it —
+    /// A stand-in that responds to everything and keeps what each leg sent it —
     /// which is how a test sees what went over the wire, rather than what came
     /// out of it.
     async fn recording() -> (String, Wire) {
@@ -946,8 +987,8 @@ mod tests {
     }
 
     /// Read a body to its end, which is what parks the leg it arrived on.
-    async fn drain(answer: Response<Returning>) -> Bytes {
-        answer.into_body().collect().await.unwrap().to_bytes()
+    async fn drain(response: Response<Returning>) -> Bytes {
+        response.into_body().collect().await.unwrap().to_bytes()
     }
 
     /// The whole property in one test: a request opens a leg, the leg comes
@@ -963,17 +1004,17 @@ mod tests {
             "nothing is open before anything is asked"
         );
 
-        let answer = member.ready().await.unwrap().call(asking()).await.unwrap();
+        let response = member.ready().await.unwrap().call(asking()).await.unwrap();
         assert_eq!(
             member.parked(),
             0,
             "the leg is out while the body is arriving"
         );
-        assert_eq!(&drain(answer).await[..], b"served");
+        assert_eq!(&drain(response).await[..], b"served");
         assert_eq!(member.parked(), 1, "and back once the body has ended");
 
-        let answer = member.ready().await.unwrap().call(asking()).await.unwrap();
-        drain(answer).await;
+        let response = member.ready().await.unwrap().call(asking()).await.unwrap();
+        drain(response).await;
         assert_eq!(member.parked(), 1, "the second request took the same leg");
         assert_eq!(
             opened.load(Ordering::Relaxed),
@@ -982,8 +1023,8 @@ mod tests {
         );
     }
 
-    /// Two answers in flight at once cannot share a leg, because sharing one is
-    /// what puts two callers on one flow-control window.
+    /// Two responses in flight at once cannot share a leg, because sharing one
+    /// is what puts two callers on one flow-control window.
     #[tokio::test]
     async fn two_requests_in_flight_take_two_legs() {
         let (addr, opened) = api().await;
@@ -1005,7 +1046,7 @@ mod tests {
     }
 
     /// A parked leg whose connection api cut is not the next request's
-    /// failure: the request goes on over a fresh leg and is answered.
+    /// failure: the request goes on over a fresh leg and gets a response.
     ///
     /// Given a moment for the cut to arrive. A request written into a
     /// connection at the very instant it dies cannot be sent again — api may
@@ -1015,8 +1056,8 @@ mod tests {
         let (addr, open) = restartable().await;
         let mut member = member(&addr);
         for _ in 0..5 {
-            let answer = member.ready().await.unwrap().call(asking()).await.unwrap();
-            drain(answer).await;
+            let response = member.ready().await.unwrap().call(asking()).await.unwrap();
+            drain(response).await;
             assert_eq!(member.parked(), 1);
 
             for serving in open.lock().unwrap().drain(..) {
@@ -1025,41 +1066,132 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let again = member.ready().await.unwrap().call(asking()).await;
             assert_eq!(
-                &drain(again.expect("answered over a fresh leg")).await[..],
+                &drain(again.expect("responded over a fresh leg")).await[..],
                 b"served"
             );
         }
     }
 
-    /// The answer's deadline starts when the body has all been sent: a body
-    /// arriving for longer than the answer may take is still answered, where a
-    /// deadline counting the upload would have cut it off.
+    /// The response's deadline starts when the body has all been sent: a body
+    /// arriving for longer than the response may take is still responded to,
+    /// where a deadline counting the upload would have cut it off.
     #[tokio::test]
-    async fn the_answer_is_timed_from_the_end_of_the_body() {
+    async fn the_response_is_timed_from_the_end_of_the_body() {
         let addr = reading_whole().await;
         let mut member = member(&addr);
         let (mut tx, body) = http_body_util::channel::Channel::<Bytes, tower::BoxError>::new(1);
         tokio::spawn(async move {
             for _ in 0..5 {
-                tokio::time::sleep(ANSWER / 3).await;
+                tokio::time::sleep(RESPONSE / 3).await;
                 tx.send_data(Bytes::from_static(b"part")).await.unwrap();
             }
         });
         let slow = Request::builder().uri("/").body(body.boxed()).unwrap();
-        let answer = member.ready().await.unwrap().call(slow).await;
+        let response = member.ready().await.unwrap().call(slow).await;
         assert_eq!(
-            &drain(answer.expect("answered after an upload longer than ANSWER")).await[..],
+            &drain(response.expect("responded after an upload longer than RESPONSE")).await[..],
             b"served"
         );
     }
 
-    /// A request its caller gives up on before the answer starts leaves its leg
-    /// to the next one, rather than closing a connection that is still good —
-    /// or a caller cancelling request after request would have this role open
-    /// an attested leg for every one.
+    /// A member that takes a request and starts no response in time is left
+    /// out, and the leg that carried it is closed rather than parked — so the
+    /// next request to it, after the cooldown, opens a leg afresh, and a member
+    /// whose connections went silent is found out by that.
+    #[tokio::test]
+    async fn a_member_that_does_not_respond_in_time_is_left_out_and_its_leg_closed() {
+        let (addr, opened) = responding_after(RESPONSE * 10).await;
+        let mut member = member(&addr);
+
+        let failed = member.ready().await.unwrap().call(asking()).await;
+        assert!(failed.is_err(), "no response within RESPONSE");
+        assert_eq!(member.parked(), 0, "the leg is closed, not parked");
+        assert!(
+            tokio::time::timeout(COOLDOWN / 2, member.ready())
+                .await
+                .is_err(),
+            "and the member is out"
+        );
+
+        tokio::time::timeout(COOLDOWN * 2, member.ready())
+            .await
+            .expect("back after the cooldown")
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_millis(50), member.call(asking())).await;
+        assert_eq!(
+            opened.load(Ordering::Relaxed),
+            2,
+            "the next request opened a leg of its own"
+        );
+    }
+
+    /// A body api will not take is never sent whole, and so never starts the
+    /// response's clock — and none of the body's own bounds is checked while
+    /// nothing reads it. The member bounds it from when it was due.
+    #[tokio::test]
+    async fn a_body_api_will_not_take_is_bounded_from_when_it_was_due() {
+        // Takes a stream with a window of a kilobyte, and never reads a byte of
+        // it nor responds: the rest of any larger body can never be sent.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                        .initial_stream_window_size(1024)
+                        .serve_connection(
+                            TokioIo::new(stream),
+                            hyper::service::service_fn(|_: Request<Incoming>| {
+                                std::future::pending::<
+                                    Result<Response<Full<Bytes>>, std::convert::Infallible>,
+                                >()
+                            }),
+                        )
+                        .await;
+                });
+            }
+        });
+        let mut member = member(&addr);
+
+        // Frame by frame, as a caller's upload arrives: once the window and the
+        // library's send buffer are full, nothing asks this body for more.
+        let (mut sending, body) =
+            http_body_util::channel::Channel::<Bytes, tower::BoxError>::new(1);
+        tokio::spawn(async move {
+            while sending
+                .send_data(Bytes::from(vec![0u8; 64 << 10]))
+                .await
+                .is_ok()
+            {}
+        });
+        let due = tokio::time::Instant::now() + RESPONSE;
+        let mut big = Request::builder().uri("/").body(body.boxed()).unwrap();
+        big.extensions_mut().insert(BodyDue(due));
+
+        let asked = member.ready().await.unwrap().call(big);
+        let failed = tokio::time::timeout(RESPONSE * 10, asked)
+            .await
+            .expect("bounded, though the body is never sent whole");
+        assert!(failed.is_err());
+        assert!(
+            tokio::time::Instant::now() >= due + RESPONSE,
+            "and not before the body was due and the response's wait had passed"
+        );
+        assert!(
+            tokio::time::timeout(COOLDOWN / 2, member.ready())
+                .await
+                .is_err(),
+            "and the member is out"
+        );
+    }
+
+    /// A request its caller gives up on before the response starts leaves its
+    /// leg to the next one, rather than closing a connection that is still
+    /// good — or a caller cancelling request after request would have this role
+    /// open an attested leg for every one.
     #[tokio::test]
     async fn a_cancelled_request_leaves_its_leg_to_the_next() {
-        let (addr, opened) = answering_after(Duration::from_secs(10)).await;
+        let (addr, opened) = responding_after(Duration::from_secs(10)).await;
         let mut member = member(&addr);
         for _ in 0..5 {
             let asked = member.ready().await.unwrap().call(asking());
@@ -1067,7 +1199,7 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(50), asked)
                     .await
                     .is_err(),
-                "the stand-in does not answer in time"
+                "the stand-in does not respond in time"
             );
         }
         assert_eq!(
@@ -1078,15 +1210,15 @@ mod tests {
         assert_eq!(member.parked(), 1, "and is parked for the next");
     }
 
-    /// A caller that goes away mid-answer costs the connection it was on
+    /// A caller that goes away mid-response costs the connection it was on
     /// nothing: dropping a half-read body resets that stream and no more.
     #[tokio::test]
     async fn a_leg_comes_back_when_a_caller_stops_reading() {
         let (addr, _opened) = api().await;
         let mut member = member(&addr);
 
-        let answer = member.ready().await.unwrap().call(asking()).await.unwrap();
-        drop(answer);
+        let response = member.ready().await.unwrap().call(asking()).await.unwrap();
+        drop(response);
         assert_eq!(member.parked(), 1, "the leg is parked, not spent");
     }
 
@@ -1138,8 +1270,8 @@ mod tests {
         assert_eq!(member.parked(), 2, "both parked after the burst");
 
         tokio::time::sleep(IDLE + Duration::from_millis(100)).await;
-        let answer = member.ready().await.unwrap().call(asking()).await.unwrap();
-        drain(answer).await;
+        let response = member.ready().await.unwrap().call(asking()).await.unwrap();
+        drain(response).await;
         assert_eq!(
             member.parked(),
             1,
@@ -1215,10 +1347,10 @@ mod tests {
         );
     }
 
-    /// A leg tells api it keeps no table for answers, so no answer api sends on
-    /// it can come out shorter for one it sent before.
+    /// A leg tells api it keeps no table for responses, so no response api
+    /// sends on it can come out shorter for one it sent before.
     #[tokio::test]
-    async fn a_leg_keeps_no_table_for_answers() {
+    async fn a_leg_keeps_no_table_for_responses() {
         let (addr, wire) = recording().await;
         let mut member = member(&addr);
         drain(member.ready().await.unwrap().call(asking()).await.unwrap()).await;

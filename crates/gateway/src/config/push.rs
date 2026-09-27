@@ -51,14 +51,14 @@ use tokio::sync::watch;
 
 use crate::upstream::Upstreams;
 
-/// The one path this port answers.
+/// The one path this port responds to.
 const PATH: &str = "/config";
 
 /// The largest push accepted. Far beyond any table a fleet declares, and small
 /// enough that the host cannot use a push to take this role's memory.
 const MAX_PUSH_BYTES: usize = 1 << 20;
 
-/// How long one connection may take, from accept to answer.
+/// How long one connection may take, from accept to response.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How many configuration connections are served at once.
@@ -87,7 +87,7 @@ pub async fn serve(
     fleet_transport::service::serve(listener, port).await
 }
 
-/// One configuration connection, from its first byte to its answer.
+/// One configuration connection, from its first byte to its response.
 ///
 /// [`PUSH_TIMEOUT`] bounds it here, inside, rather than as a layer around the
 /// service: only here is the peer known, and the two ways a connection ends —
@@ -98,7 +98,7 @@ async fn connection(
     accepted: fleet_transport::Accepted,
 ) -> Result<(), Infallible> {
     let peer = accepted.peer;
-    let answering = hyper::service::service_fn(move |req| {
+    let responding = hyper::service::service_fn(move |req| {
         let current = current.clone();
         async move { Ok::<_, Infallible>(push(&current, descriptors, req).await) }
     });
@@ -106,15 +106,15 @@ async fn connection(
         // One request per connection. Ordering does not need it — HTTP/1 serves
         // one request at a time on a connection anyway. The permit does: it is
         // held for as long as the connection lives, so a pusher that kept its
-        // connection open after the answer would hold the only one until
+        // connection open after the response would hold the only one until
         // PUSH_TIMEOUT, and the next push would wait out the difference.
         .keep_alive(false)
         // A pusher that shuts its sending side once the request is out — as a
-        // tool pushing a file does — is waiting for the answer, not leaving.
+        // tool pushing a file does — is waiting for the response, not leaving.
         // Without this, the end of its input reads as a connection lost in the
         // middle of a request, and the push is dropped without being applied.
         .half_close(true)
-        .serve_connection(TokioIo::new(accepted.stream), answering);
+        .serve_connection(TokioIo::new(accepted.stream), responding);
     match tokio::time::timeout(PUSH_TIMEOUT, conn).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => debug!("config connection from {peer} ended: {e}"),
@@ -123,7 +123,7 @@ async fn connection(
     Ok(())
 }
 
-/// Answer one request, and apply it if it is a valid push.
+/// Respond to one request, and apply it if it is a valid push.
 async fn push<B>(
     current: &watch::Sender<Arc<Upstreams>>,
     descriptors: u64,
@@ -134,13 +134,13 @@ where
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     if req.uri().path() != PATH {
-        return answer(
+        return respond(
             StatusCode::NOT_FOUND,
             Some(format!("the only path here is {PATH}\n").into()),
         );
     }
     if req.method() != Method::PUT {
-        let mut refused = answer(
+        let mut refused = respond(
             StatusCode::METHOD_NOT_ALLOWED,
             Some("push with PUT\n".into()),
         );
@@ -157,13 +157,13 @@ where
     {
         Ok(collected) => collected.to_bytes(),
         Err(e) if e.downcast_ref::<LengthLimitError>().is_some() => {
-            return answer(
+            return respond(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Some(format!("a push is at most {MAX_PUSH_BYTES} bytes\n").into()),
             );
         }
         Err(_) => {
-            return answer(
+            return respond(
                 StatusCode::BAD_REQUEST,
                 Some("the body did not arrive whole\n".into()),
             );
@@ -174,14 +174,14 @@ where
     // push, and the push is the host's, which already has it.
     let declared = match crate::config::ValidatedConfig::parse(&body) {
         Ok(declared) => declared,
-        Err(reason) => return answer(StatusCode::BAD_REQUEST, Some(format!("{reason}\n").into())),
+        Err(reason) => return respond(StatusCode::BAD_REQUEST, Some(format!("{reason}\n").into())),
     };
     // Checked here rather than with the rest: it is about this process, not
     // the table, and the table's checks read nothing but the push. It bounds
     // this tuning alone; `crate::budget` holds across a change from the last.
     let needed = declared.tuning().descriptors();
     if needed > descriptors {
-        return answer(
+        return respond(
             StatusCode::BAD_REQUEST,
             Some(
                 format!(
@@ -210,15 +210,15 @@ where
         ),
         reason!("constant text; says when the host changed this role's table, which it did")
     );
-    answer(StatusCode::NO_CONTENT, None)
+    respond(StatusCode::NO_CONTENT, None)
 }
 
 /// What the sender is told: text it can read, or nothing at all.
 ///
 /// Nothing is a push that applied — what the table now holds is what it sent —
-/// and that answer has no body, so it carries no content type either: one would
-/// describe nothing.
-fn answer<T: Buf>(status: StatusCode, body: Option<Full<T>>) -> Response<Full<T>> {
+/// and that response has no body, so it carries no content type either: one
+/// would describe nothing.
+fn respond<T: Buf>(status: StatusCode, body: Option<Full<T>>) -> Response<Full<T>> {
     let builder = Response::builder().status(status);
     match body {
         Some(text) => builder
@@ -288,11 +288,11 @@ mod tests {
 
     /// Everything the port says back, up to its closing the connection — well
     /// inside PUSH_TIMEOUT, or the test fails rather than waiting it out.
-    async fn answer_to(stream: &mut tokio::net::TcpStream) -> String {
+    async fn response_to(stream: &mut tokio::net::TcpStream) -> String {
         let mut got = String::new();
         tokio::time::timeout(Duration::from_secs(3), stream.read_to_string(&mut got))
             .await
-            .expect("the port answered and closed well inside the timeout")
+            .expect("the port responded and closed well inside the timeout")
             .unwrap();
         got
     }
@@ -390,17 +390,17 @@ mod tests {
             .write_all(format!("{}{body}", head(&body)).as_bytes())
             .await
             .unwrap();
-        let got = answer_to(&mut stream).await;
+        let got = response_to(&mut stream).await;
         assert!(got.starts_with("HTTP/1.1 204"), "{got}");
 
         rx.changed().await.unwrap();
         assert_eq!(rx.borrow().len(), 1);
     }
 
-    /// A pusher that closes its sending side once the request is out is still
-    /// answered, and its push still applied.
+    /// A pusher that closes its sending side once the request is out still gets
+    /// a response, and its push is still applied.
     #[tokio::test]
-    async fn a_pusher_that_stops_sending_is_still_answered() {
+    async fn a_pusher_that_stops_sending_still_gets_a_response() {
         let (tx, mut rx) = table();
         let addr = port(tx).await;
 
@@ -412,7 +412,7 @@ mod tests {
             .unwrap();
         stream.shutdown().await.unwrap();
 
-        let got = answer_to(&mut stream).await;
+        let got = response_to(&mut stream).await;
         assert!(got.starts_with("HTTP/1.1 204"), "{got}");
         rx.changed().await.unwrap();
         assert_eq!(rx.borrow().len(), 1);
@@ -443,19 +443,19 @@ mod tests {
         let waited = tokio::time::timeout(Duration::from_millis(300), second.read(&mut byte)).await;
         assert!(
             waited.is_err(),
-            "the second is not answered while the first holds the port"
+            "the second gets no response while the first holds the port"
         );
         assert_eq!(rx.borrow().len(), 0, "and neither has been applied");
 
-        // The first finishes; then the second is taken and answered.
+        // The first finishes; then the second is taken and responded to.
         first.write_all(&body.as_bytes()[10..]).await.unwrap();
-        assert!(answer_to(&mut first).await.starts_with("HTTP/1.1 204"));
-        assert!(answer_to(&mut second).await.starts_with("HTTP/1.1 204"));
+        assert!(response_to(&mut first).await.starts_with("HTTP/1.1 204"));
+        assert!(response_to(&mut second).await.starts_with("HTTP/1.1 204"));
     }
 
     /// A pusher asking to keep its connection is told the connection closes,
-    /// and does not keep the port: the next push is answered at once, not after
-    /// PUSH_TIMEOUT.
+    /// and does not keep the port: the next push gets its response at once, not
+    /// after PUSH_TIMEOUT.
     #[tokio::test]
     async fn a_pusher_that_would_keep_its_connection_does_not_keep_the_port() {
         let (tx, _rx) = table();
@@ -468,7 +468,7 @@ mod tests {
             .write_all(format!("{keep}{body}").as_bytes())
             .await
             .unwrap();
-        let got = answer_to(&mut first).await.to_ascii_lowercase();
+        let got = response_to(&mut first).await.to_ascii_lowercase();
         assert!(got.contains("connection: close"), "{got}");
 
         let mut second = tokio::net::TcpStream::connect(&addr).await.unwrap();
@@ -476,6 +476,6 @@ mod tests {
             .write_all(format!("{}{body}", head(&body)).as_bytes())
             .await
             .unwrap();
-        assert!(answer_to(&mut second).await.starts_with("HTTP/1.1 204"));
+        assert!(response_to(&mut second).await.starts_with("HTTP/1.1 204"));
     }
 }

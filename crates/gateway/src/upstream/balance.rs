@@ -41,9 +41,9 @@
 //! which is the trap a turn-by-turn rotation fell into twice.
 //!
 //! That limit is not a ceiling on legs, and the difference matters. Its permit
-//! is released when api's answer HEAD comes back, while the leg travels on with
-//! the body — so a caller that stops reading holds a leg and no permit. What
-//! bounds legs is the streams a public connection may open, times the
+//! is released when api's response HEAD comes back, while the leg travels on
+//! with the body — so a caller that stops reading holds a leg and no permit.
+//! What bounds legs is the streams a public connection may open, times the
 //! connections; see `crate::listener`. What the limit does bound is how much
 //! work one member is asked to start at once, so a slow member spreads load
 //! instead of collecting it.
@@ -91,14 +91,15 @@
 //! caller's side they are the same fact: there is no capacity right now. Both
 //! resolve on their own or not at all, so the wait is meant to be short.
 //!
-//! Once a member has the request, `answer_timeout` bounds how long it has to
-//! START answering, counted from when the request body has all been sent —
+//! Once a member has the request, `response_timeout` bounds how long it has to
+//! START its response, counted from when the request body has all been sent —
 //! opening a leg has `open_timeout`, and the upload its own bounds. It is a
 //! ceiling against hanging, not a latency budget: a leg to a peer that accepted
 //! and then said nothing looks exactly like one to a peer that is thinking — the
-//! dial and the HTTP/2 handshake both succeed — and only the answer never comes.
-//! It bounds the head and not the answer's body, so a large answer is not cut
-//! off. See `crate::upstream::member`.
+//! dial and the HTTP/2 handshake both succeed — and only the response never
+//! comes. So a member past it is left out for its cooldown, like one whose leg
+//! would not open. It bounds the head and not the response's body, so a large
+//! response is not cut off. See `crate::upstream::member`.
 //!
 //! ## The numbers are the set's
 //!
@@ -132,8 +133,8 @@ use crate::config::UpstreamTuning;
 type Key = String;
 
 /// One member as the selection sees it: how many requests it may be starting.
-/// How long it has to start answering one is the member's own to bound, since
-/// the clock starts only once the request body has all been sent — see
+/// How long it has to start responding to one is the member's own to bound,
+/// since the clock starts only once the request body has all been sent — see
 /// `crate::upstream::member`.
 type Limited = ConcurrencyLimit<Member>;
 
@@ -183,7 +184,7 @@ pub struct Members {
     /// the request must be one act: two callers that each reserved and then
     /// dispatched would both spend the same reservation.
     ///
-    /// The lock is held for that handshake only — never while an answer is
+    /// The lock is held for that handshake only — never while a response is
     /// coming back — and a caller's `member_wait` runs while it waits for the
     /// lock as well as under it, so a set with nothing to give holds no caller
     /// longer than that, however many are queued.
@@ -191,8 +192,8 @@ pub struct Members {
     /// A lock and not the library's `Buffer`, which is the stock answer to "the
     /// balancer is not `Clone`". `Buffer` waits for readiness inside its own
     /// task, where that wait can be neither bounded on its own nor noticed; a
-    /// timeout outside it would bound readiness and the answer together. This
-    /// role bounds them apart: `member_wait` short, `answer_timeout` long.
+    /// timeout outside it would bound readiness and the response together. This
+    /// role bounds them apart: `member_wait` short, `response_timeout` long.
     choosing: Mutex<Chosen>,
 }
 
@@ -273,7 +274,7 @@ impl Members {
             // with nothing to give would wait out every caller ahead of it as
             // well. Afresh for an offer after a hand-back — see the module docs.
             let deadline = tokio::time::Instant::now() + self.tuning.member_wait;
-            let answering = {
+            let responding = {
                 let Ok(mut choosing) =
                     tokio::time::timeout_at(deadline, self.choosing.lock()).await
                 else {
@@ -294,10 +295,10 @@ impl Members {
                     }
                 }
             };
-            // Bounded by the member: its opening, and `answer_timeout` once the
-            // body is sent.
-            match answering.await {
-                Ok(answer) => return Ok(answer),
+            // Bounded by the member: its opening, and `response_timeout` once
+            // the body is sent.
+            match responding.await {
+                Ok(response) => return Ok(response),
                 Err(e) => match e.downcast::<NotSent>() {
                     // Nothing of it reached any api, so it is offered again as
                     // it is. A member that handed it back for its own failure is
@@ -319,7 +320,7 @@ impl Members {
 
     /// How many members the BALANCER holds, as opposed to what this set was
     /// told — the two differ exactly when changes are queued and not yet read.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "vsock")))]
     fn taken_in(&self) -> usize {
         self.choosing
             .try_lock()
@@ -329,20 +330,20 @@ impl Members {
 
     /// The addresses this set holds, for the tests that pin what a push does
     /// to it.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "vsock")))]
     pub fn addresses(&self) -> BTreeSet<String> {
         self.holds.lock().expect("never held on panic").clone()
     }
 
     /// What this set's members must prove, by identity — what the tests compare
     /// to tell "carried across" from "asked again".
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "vsock")))]
     pub fn proof(&self) -> &Arc<Proof> {
         &self.proof
     }
 
     /// How many members this set holds.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "vsock")))]
     pub fn len(&self) -> usize {
         self.holds.lock().expect("never held on panic").len()
     }
@@ -359,8 +360,8 @@ mod tests {
     use http_body_util::{BodyExt, Empty, Full};
     use hyper_util::rt::{TokioExecutor, TokioIo};
 
-    /// An api stand-in answering with the address it is listening on, so a test
-    /// can tell which member served it, and counting the connections it
+    /// An api stand-in responding with the address it is listening on, so a
+    /// test can tell which member served it, and counting the connections it
     /// accepted — each one a leg a member opened.
     async fn api() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -418,11 +419,11 @@ mod tests {
             .unwrap()
     }
 
-    /// Who answered.
+    /// Who responded.
     async fn served_by(members: &Members) -> String {
-        let answer = members.send(asking()).await.expect("a member took it");
+        let response = members.send(asking()).await.expect("a member took it");
         String::from_utf8(
-            answer
+            response
                 .into_body()
                 .collect()
                 .await
@@ -459,7 +460,7 @@ mod tests {
         assert_eq!(members.len(), 2);
 
         // Both take work. Which one a request goes to is a coin between the
-        // two, which is why this asks until both have answered.
+        // two, which is why this asks until both have responded.
         let spread = tokio::time::timeout(Duration::from_secs(5), async {
             let mut seen = BTreeSet::new();
             while seen.len() < 2 {
@@ -499,13 +500,13 @@ mod tests {
     }
 
     /// A member that accepts a connection and then says nothing is the worst
-    /// case, because every step before the answer SUCCEEDS.
+    /// case, because every step before the response SUCCEEDS.
     ///
     /// The dial connects, the HTTP/2 handshake returns without waiting for the
     /// peer's settings, and the leg is made and looks usable, so nothing counts
-    /// against the member. Only the answer never comes. So
-    /// the bound that matters is on the answer — `answer_timeout` — and
-    /// without it this test hangs for ever rather than failing.
+    /// against the member. Only the response never comes. So the bound that
+    /// matters is on the response — `response_timeout` — and without it this
+    /// test hangs for ever rather than failing.
     #[tokio::test]
     async fn a_member_that_says_nothing_does_not_hold_a_request_for_ever() {
         let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -521,12 +522,12 @@ mod tests {
         let members = members();
         members.declare(&set(&[&addr]));
 
-        let answered = tokio::time::timeout(Duration::from_secs(10), members.send(asking())).await;
+        let responded = tokio::time::timeout(Duration::from_secs(10), members.send(asking())).await;
         assert!(
-            answered
+            responded
                 .expect("the request returned rather than hanging")
                 .is_err(),
-            "a member that never answers is a member the request fails at"
+            "a member that never responds is a member the request fails at"
         );
     }
 
@@ -566,7 +567,7 @@ mod tests {
     /// their own member_wait, not after everyone ahead of them has waited theirs
     /// out.
     ///
-    /// No socket: an empty set is one nothing ever answers at.
+    /// No socket: an empty set is one where nothing ever responds.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn queued_callers_are_refused_within_the_member_wait() {
         let members = Arc::new(members());
@@ -583,12 +584,12 @@ mod tests {
         let took = asked.elapsed();
         assert!(
             took < crate::config::testing::MEMBER_WAIT + Duration::from_millis(150),
-            "all ten answered within one member_wait, took {took:?}"
+            "all ten refused within one member_wait, took {took:?}"
         );
     }
 
     /// A member whose leg would not open costs the caller nothing while another
-    /// is up: the request it hands back goes to the one that answers.
+    /// is up: the request it hands back goes to the one that responds.
     ///
     /// Nothing checked either member before the first request, which is the
     /// point: the question is asked by requests, and one refused leg is enough
@@ -607,7 +608,7 @@ mod tests {
             assert_eq!(
                 served_by(&members).await,
                 live,
-                "every request answered, and by the live one"
+                "every request responded to, and by the live one"
             );
         }
     }
@@ -652,11 +653,11 @@ mod tests {
             declaring.declare(&set(&[&nowhere_too, &live_too]));
         });
 
-        let answer = tokio::time::timeout(wait * 3, members.send(asking()))
+        let response = tokio::time::timeout(wait * 3, members.send(asking()))
             .await
             .expect("bounded")
             .expect("the third offer waited for the member that came up");
-        let body = answer.into_body().collect().await.unwrap().to_bytes();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body, live.as_bytes());
     }
 
@@ -710,8 +711,8 @@ mod tests {
     }
 
     /// A set with nobody in it refuses rather than waiting for ever — the
-    /// balancer is simply never ready, and `member_wait` is what makes that an
-    /// answer.
+    /// balancer is simply never ready, and `member_wait` is what makes that a
+    /// refusal.
     #[tokio::test]
     async fn an_empty_set_refuses_in_bounded_time() {
         let members = members();

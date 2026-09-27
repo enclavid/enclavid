@@ -44,8 +44,8 @@ hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
 # the handshake offers both, the caller speaks whichever it agreed to, and the
 # builder tells them apart by the first bytes rather than asking the TLS layer.
 #
-# `service`, because each request is answered by a tower stack — its body's
-# bounds are layers — and the HTTP library is handed that stack through
+# `service`, because each request gets its response from a tower stack — its
+# body's bounds are layers — and the HTTP library is handed that stack through
 # `TowerToHyperService`.
 hyper-util = { version = "0.1", features = [
     "tokio",
@@ -63,7 +63,7 @@ hyper-util = { version = "0.1", features = [
 # does NOT have is a connection pool — `balance::pool` existed in 0.4 and is
 # gone from 0.5 — so the legs to one member are `crate::upstream::member`'s
 # own, which is also what keeps the count of connections to api tied to
-# requests in flight rather than to callers. The deadline on an answer is the
+# requests in flight rather than to callers. The deadline on a response is the
 # member's own too, since it starts only once the request body is sent.
 tower = { version = "0.5", default-features = false, features = [
     "balance",
@@ -77,7 +77,8 @@ tower = { version = "0.5", default-features = false, features = [
 # This crate is trait definitions and nothing else, which is the whole of what a
 # measured image takes on for it.
 futures-core = { version = "0.3", default-features = false }
-# One fixed response body, and the `Bytes` it is built from.
+# Bodies: the boxed ones both legs carry, the size cap on a push, the frame map
+# that takes a request's trailers off, and the fixed bodies this role writes.
 http-body-util = "0.1"
 # The layers a request's body passes through on its way in — see
 # `crate::listener::body`: the longest pause between frames, and the mapping
@@ -85,10 +86,10 @@ http-body-util = "0.1"
 # cannot be, since a caller sending a byte just inside every pause would never
 # trip it. Already in the lock through api.
 #
-# `catch-panic` answers a request whose answering panicked as one that failed
-# behind this role, rather than resetting its stream — or, on HTTP/1, the whole
-# connection. What it pulls in, `tracing` and `futures-util`, is already here
-# under h2 and tower.
+# `catch-panic` gives a request whose handling panicked the response of one
+# that failed behind this role, rather than resetting its stream — or, on
+# HTTP/1, the whole connection. What it pulls in, `tracing` and `futures-util`,
+# is already here under h2 and tower.
 tower-http = { version = "0.6", default-features = false, features = [
     "timeout",
     "map-request-body",

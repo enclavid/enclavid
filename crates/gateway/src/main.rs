@@ -58,11 +58,13 @@
 //!
 //! What this role reads of what it carries is little, and fixed: the PROXY
 //! header ahead of a connection, the marker a link carries at the head of a
-//! path, its own evidence's path, and two headers of its own — the build a
-//! caller names and the affinity token. What it takes off by name is the
-//! caller's `Host`, the headers in which a request gives an account of its own
-//! origin, and trailers. Every other byte — the rest of the path, every other
-//! header, every body — passes through unread. That is the standing defence
+//! path, its own evidence's path and the method asked of it, the host a
+//! request names — its target's authority and its `Host`, compared to the name
+//! the connection agreed to — and two headers of its own, the build a caller
+//! names and the affinity token. What it takes off by name is the caller's
+//! `Host`, the headers in which a request gives an account of its own origin,
+//! and trailers. Every other byte — the rest of the path, every other header,
+//! every body — passes through unread. That is the standing defence
 //! against a runtime exploit, which changes behaviour without changing a
 //! measurement: what is never interpreted cannot be steered.
 
@@ -153,13 +155,15 @@ fn serving_key() -> Result<identity::key::Identity, String> {
 /// outside and is not.
 ///
 /// A panic in a spawned task does NOT end the process, and that is deliberate
-/// too. What this role spawns is per caller or per leg: a task per accepted
-/// connection, public or configuration, and whatever the HTTP library spawns
-/// under it; a driver per leg to api. A hook that aborted on any panic would
-/// turn one malformed request into the end of every session in this guest. The
-/// line between the two is exactly the line between "this role has stopped
-/// working" and "one caller's connection has". A push that panics is the
-/// second: the table it would have replaced stays, and the port takes the next.
+/// too. What this role spawns is per caller, per leg or per member: a task per
+/// accepted connection, public or configuration, and whatever the HTTP library
+/// spawns under it; a driver per leg to api; a sweep per member, whose loss
+/// only leaves aged legs for the next request to that member to close. A hook
+/// that aborted on any panic would turn one malformed request into the end of
+/// every session in this guest. The line between the two is exactly the line
+/// between "this role has stopped working" and "one caller's connection has".
+/// A push that panics is the second: the table it would have replaced stays,
+/// and the port takes the next.
 #[tokio::main]
 async fn main() -> std::convert::Infallible {
     // First, so nothing can speak before the channel exists.
@@ -241,13 +245,13 @@ async fn main() -> std::convert::Infallible {
     // The first to end takes the process with it, which is what "this role has
     // stopped working" should look like from the outside.
     tokio::select! {
-        answer = fleet_transport::health::serve(health_port, {
+        ended = fleet_transport::health::serve(health_port, {
             let state = health.clone();
             move || state.body()
-        }) => answer,
-        answer = config::push::serve(config_port, table, descriptors) => answer,
-        answer = listener::certificate::follow(current.clone(), identity, certificate) => answer,
-        answer = public(public_addr, current, hop, tls, health) => answer,
+        }) => ended,
+        ended = config::push::serve(config_port, table, descriptors) => ended,
+        ended = listener::certificate::follow(current.clone(), identity, certificate) => ended,
+        ended = public(public_addr, current, hop, tls, health) => ended,
     }
 }
 
@@ -320,7 +324,7 @@ fn reserve_descriptors(needed: libc::rlim_t) -> u64 {
 /// One push, not a non-empty table: declaring no group at all is a state the
 /// host may choose, and it is still a table. Open before there is one, every
 /// request would fail as an unavailable upstream, and the host could not tell a
-/// guest that answers from one that routes.
+/// guest that responds from one that routes.
 async fn public(
     addr: String,
     mut table: watch::Receiver<Arc<upstream::Upstreams>>,

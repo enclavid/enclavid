@@ -4,7 +4,7 @@
 //!
 //! What made a shared connection to api unusable was CONCURRENCY, not sharing:
 //! HTTP/2's flow-control window belongs to the connection, so a caller that
-//! stops reading freezes everyone else's answers on it; a `GOAWAY` takes down
+//! stops reading freezes everyone else's responses on it; a `GOAWAY` takes down
 //! whatever else was in flight; the reset budget is spent per connection. All
 //! of that needs two callers on one connection AT ONCE.
 //!
@@ -67,10 +67,11 @@
 //! stripped on the way through. The target goes on as `https://` and the name
 //! the connection agreed to, and the caller's own `Host` stops here, since the
 //! handshake's name is the one routed by. A request that names a different
-//! host than that one is not routed at all: it is answered 421, as a request
-//! on a connection this role does not serve is. The measurement header names a choice
-//! this hop makes and is removed, whichever way the request is routed. The
-//! affinity token is this role's own bookkeeping and is removed the same way.
+//! host than that one is not routed at all: it is refused with 421, as a
+//! request on a connection this role does not serve is. The measurement header
+//! names a choice this hop makes and is removed, whichever way the request is
+//! routed. The affinity token is this role's own bookkeeping and is removed the
+//! same way.
 //!
 //! Nothing about where the caller is reaches api either — not what the host's
 //! first hop said, and not what the caller says itself. api holds the session
@@ -95,12 +96,12 @@ use crate::identity::attest;
 use crate::upstream::member::Sent;
 use crate::upstream::{NoRoute, Upstreams};
 
-/// What this role answers with.
+/// What this role responds with.
 ///
 /// Boxed because two shapes leave here: a body arriving from api, still on the
 /// leg it came in on, and a fixed one this role wrote itself. Everything after
 /// this point treats them alike, which is what keeps the two paths one path.
-pub type Answer = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
+pub type ResponseBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 
 /// The one hop this role runs, shared by every caller of every name.
 ///
@@ -117,9 +118,9 @@ impl Hop {
         Hop { table, evidence }
     }
 
-    /// Answer one request that arrived on a connection which agreed to `agreed`,
-    /// its body already bounded by `crate::listener`.
-    pub async fn answer(&self, agreed: &str, req: Request<Sent>) -> Response<Answer> {
+    /// Respond to one request that arrived on a connection which agreed to
+    /// `agreed`, its body already bounded by `crate::listener`.
+    pub async fn respond(&self, agreed: &str, req: Request<Sent>) -> Response<ResponseBody> {
         if req.uri().path() == attest::PATH {
             return self.attestation(&req);
         }
@@ -131,7 +132,7 @@ impl Hop {
             return refuse(StatusCode::MISDIRECTED_REQUEST);
         };
         let name = name.to_owned();
-        // And the same answer for a request asked of another name than its
+        // And the same response for a request asked of another name than its
         // connection's. One certificate covers every name, so a browser may
         // pool one connection for two of them; told 421, it asks again on a
         // connection of the right one, where routed as the first it would have
@@ -157,11 +158,11 @@ impl Hop {
         }
         unforwarded(&mut req);
 
-        let Ok(answer) = target.members.send(req).await else {
+        let Ok(response) = target.members.send(req).await else {
             return refuse(StatusCode::BAD_GATEWAY);
         };
 
-        let (mut head, body) = answer.into_parts();
+        let (mut head, body) = response.into_parts();
         // Said on the way back whenever this role did the choosing: the group
         // this request went to, in the form a link carries it, and a token that
         // returns the next one to it. Sliding rather than issued once, so a
@@ -182,11 +183,11 @@ impl Hop {
         Response::from_parts(head, body.boxed())
     }
 
-    /// This role's own path, answered without reaching api at all.
+    /// This role's own path, responded to without reaching api at all.
     ///
     /// It is the one path this build knows: what a request for anything else
     /// means is the host's configuration, never this file's.
-    fn attestation<B>(&self, req: &Request<B>) -> Response<Answer> {
+    fn attestation<B>(&self, req: &Request<B>) -> Response<ResponseBody> {
         if req.method() != "GET" && req.method() != "HEAD" {
             let mut refused = refuse(StatusCode::METHOD_NOT_ALLOWED);
             refused.headers_mut().insert(
@@ -195,8 +196,8 @@ impl Hop {
             );
             return refused;
         }
-        let mut answer = Response::new(fixed(self.evidence.clone()));
-        let headers = answer.headers_mut();
+        let mut response = Response::new(fixed(self.evidence.clone()));
+        let headers = response.headers_mut();
         headers.insert(
             "content-type",
             attest::CONTENT_TYPE.parse().expect("a constant"),
@@ -205,7 +206,7 @@ impl Hop {
         // it to a certificate from a later connection is checking a binding
         // that was true elsewhere.
         headers.insert("cache-control", "no-store".parse().expect("a constant"));
-        answer
+        response
     }
 }
 
@@ -313,28 +314,28 @@ fn unforwarded<B>(req: &mut Request<B>) {
 }
 
 /// A body this role wrote itself.
-fn fixed(bytes: Bytes) -> Answer {
+fn fixed(bytes: Bytes) -> ResponseBody {
     Full::new(bytes).map_err(|never| match never {}).boxed()
 }
 
-/// The answer to a request whose answering panicked: the one a request that
+/// The response when responding to a request panicked: the one a request that
 /// failed behind this role gets, so the caller cannot tell the two apart.
 ///
 /// What the panic said is never read. It may quote the caller's own input, and
 /// this role does not repeat that to anyone.
-pub fn panicked(_: Box<dyn std::any::Any + Send>) -> Response<Answer> {
+pub fn panicked(_: Box<dyn std::any::Any + Send>) -> Response<ResponseBody> {
     refuse(StatusCode::BAD_GATEWAY)
 }
 
-/// An answer that carries a status and nothing else.
+/// A response that carries a status and nothing else.
 ///
 /// No body: what went wrong behind this role is not the caller's business, and
 /// a sentence describing it is a sentence about the fleet.
 ///
 /// For the same reason anything that went wrong behind this role is one status,
 /// `502`, whatever the cause — no route, no machine that would take the work, a
-/// leg that would not open, a leg that failed mid-answer, a panic while
-/// answering. Which machines exist, which builds they run and which can take
+/// leg that would not open, a leg that failed mid-response, a panic while
+/// responding. Which machines exist, which builds they run and which can take
 /// work is the host's business and changes under it, so telling those apart
 /// would report the fleet's shape to whoever asked.
 ///
@@ -343,12 +344,12 @@ pub fn panicked(_: Box<dyn std::any::Any + Send>) -> Response<Answer> {
 /// one. So the clock tells a caller whether a build it named is declared here.
 /// That is not padded: a build is a published digest, and which ones a fleet
 /// runs is the one fact a caller is meant to act on — it names one, and a link
-/// carries one. Padding the fast answer to the slow one would hold a place for
-/// every request that names nothing.
-fn refuse(status: StatusCode) -> Response<Answer> {
-    let mut answer = Response::new(fixed(Bytes::new()));
-    *answer.status_mut() = status;
-    answer
+/// carries one. Padding the fast response to the slow one would hold a place
+/// for every request that names nothing.
+fn refuse(status: StatusCode) -> Response<ResponseBody> {
+    let mut response = Response::new(fixed(Bytes::new()));
+    *response.status_mut() = status;
+    response
 }
 
 /// The one rule: where this request goes, and whether a token goes back.
@@ -396,7 +397,7 @@ fn route<'a, B>(
         }
         // What the label runs NOW, against the build the link was written for.
         // A label that is gone and a label that runs something else are one
-        // answer, as everywhere: which groups exist is the host's business.
+        // response, as everywhere: which groups exist is the host's business.
         let target = table.at_group(name, &marked.label)?;
         if target.measurement != marked.build {
             return Err(NoRoute::NoSuchGroup);
@@ -472,8 +473,9 @@ const BUILD_MARK: char = '.';
 
 /// A group as a link carries it: its label and the build it runs.
 ///
-/// What the placement answer hands back, so a caller writing a link for someone
-/// else writes exactly what this role will compare — see [`marked_in_path`].
+/// What the placement response hands back, so a caller writing a link for
+/// someone else writes exactly what this role will compare — see
+/// [`marked_in_path`].
 fn marker(label: &str, build: &str) -> String {
     format!("{label}{BUILD_MARK}{build}")
 }
@@ -518,9 +520,9 @@ fn marked_in_path<B>(req: &mut Request<B>) -> Result<Option<Marked>, NoRoute> {
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    // Only the path and query are replaced. Everything else the request
-    // arrived with stays, because on HTTP/2 the authority is a field of its
-    // own and a request that lost it is a request api cannot answer.
+    // Only the path and query are replaced, and the rest put back as it came,
+    // so the target stays one `from_parts` accepts; the scheme and authority
+    // are written afresh later anyway — see [`addressed`].
     //
     // A marker that cannot be taken out is refused rather than forwarded: api
     // would see a path it never published, and the marker would travel on.

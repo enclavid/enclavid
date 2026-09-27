@@ -210,19 +210,21 @@ pub struct ListenerTuning {
 #[serde(deny_unknown_fields, default)]
 pub struct UpstreamTuning {
     /// How many requests one member may be starting at once — until api's
-    /// answer head comes back.
+    /// response head comes back.
     pub requests_per_member: usize,
     /// How long a request waits for a member that can take it, counted from
     /// when it asks — and again from when a member hands it back.
     #[serde(rename = "member_wait_ms", deserialize_with = "millis")]
     pub member_wait: Duration,
-    /// How long a member has to START answering, counted from when the request
-    /// body has all been sent.
-    #[serde(rename = "answer_timeout_ms", deserialize_with = "millis")]
-    pub answer_timeout: Duration,
+    /// How long a member has to START its response, counted from when the
+    /// request body has all been sent — or from when it was due, for a body api
+    /// would not take. A member that does not is left out for `cooldown`.
+    #[serde(rename = "response_timeout_ms", deserialize_with = "millis")]
+    pub response_timeout: Duration,
     /// How many times one request may be offered, when legs will not open.
     pub tries: usize,
-    /// How long a member is left out after a leg to it would not open.
+    /// How long a member is left out after a leg to it would not open, or a
+    /// response from it would not start.
     #[serde(rename = "cooldown_ms", deserialize_with = "millis")]
     pub cooldown: Duration,
     /// How long opening an attested leg may take — the dial and the handshake.
@@ -258,8 +260,8 @@ impl Default for ListenerTuning {
             idle_timeout: Duration::from_secs(60),
             lifetime: Duration::from_secs(300),
             // Room for a request that had just started when the shutdown came:
-            // its whole upload and its whole answer — see the relation checked
-            // below.
+            // every try's wait and opening, its whole upload, and the wait for
+            // its response to start — see the relation checked below.
             drain_timeout: Duration::from_secs(300),
             request_body_pause: Duration::from_secs(15),
             // A large capture over a slow mobile link.
@@ -278,7 +280,7 @@ impl Default for UpstreamTuning {
             member_wait: Duration::from_secs(2),
             // Far beyond any round api should take — a ceiling against
             // hanging, not a latency budget.
-            answer_timeout: Duration::from_secs(120),
+            response_timeout: Duration::from_secs(120),
             // Rides out two members lost at once.
             tries: 3,
             cooldown: Duration::from_secs(10),
@@ -376,8 +378,8 @@ impl Tuning {
             ),
             ("upstream.member_wait_ms", u.member_wait, 10, 60_000),
             (
-                "upstream.answer_timeout_ms",
-                u.answer_timeout,
+                "upstream.response_timeout_ms",
+                u.response_timeout,
                 100,
                 3_600_000,
             ),
@@ -389,16 +391,16 @@ impl Tuning {
         }
 
         // A connection being shut down must outlast the longest a request on
-        // it may still be waiting for its answer to start — every try's wait
-        // for a member and its opening, its whole upload, then the answer's own
-        // wait — or the shutdown cuts off requests that were being served.
+        // it may still be waiting for its response to start — every try's wait
+        // for a member and its opening, its whole upload, then the response's
+        // own wait — or the shutdown cuts off requests that were being served.
         let longest = (u.member_wait + u.open_timeout) * u.tries as u32
             + l.request_body_timeout
-            + u.answer_timeout;
+            + u.response_timeout;
         if l.drain_timeout <= longest {
             return Err(format!(
                 "tuning.listener.drain_timeout_ms: must exceed tries x (member_wait_ms + \
-                 open_timeout_ms) + request_body_timeout_ms + answer_timeout_ms = {} ms",
+                 open_timeout_ms) + request_body_timeout_ms + response_timeout_ms = {} ms",
                 longest.as_millis()
             ));
         }
@@ -700,7 +702,7 @@ mod tests {
 
     /// A name a client could never ask for, or one declared twice, is refused
     /// while there is still a sender to tell — not found later as a role that
-    /// answers every connection with "not served here".
+    /// responds to every connection with "not served here".
     #[test]
     fn a_name_no_client_asks_for_or_one_declared_twice_is_refused() {
         let with_names = |first: &str, second: &str| {
@@ -1050,7 +1052,7 @@ mod tests {
     /// breaking the relation is refused even though each value is in range.
     #[test]
     fn values_that_depend_on_each_other_are_checked_together() {
-        // A shutdown would cut off requests still waiting for their answer:
+        // A shutdown would cut off requests still waiting for their response:
         // 3 x (200 + 200) + 5000 + 300.
         let short_drain = TUNING.replace(
             r#""drain_timeout_ms": 150000"#,

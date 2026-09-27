@@ -1,22 +1,27 @@
 //! How long a caller's request body may take.
 //!
-//! A request holds one of its member's places until api's answer starts, and
-//! api reads a body whole before it answers. So a body that arrives slowly
-//! holds that place for as long as it takes — and a caller with a live session
-//! could hold every place a member has with a few bodies it never finishes,
-//! shutting every other caller out of that member.
+//! A request holds one of its member's places until api's response starts,
+//! and api reads a body whole before it responds. So a body that arrives
+//! slowly holds that place for as long as it takes — and a caller with a live
+//! session could hold every place a member has with a few bodies it never
+//! finishes, shutting every other caller out of that member.
 //!
 //! Two bounds, because either alone can be walked around: a pause between two
 //! frames (`request_body_pause`), and the whole body from the request's head
 //! (`request_body_timeout`). A caller sending a byte just inside every pause
 //! trips the second; one that stalls outright trips the first, long before.
 //!
-//! Both are layers of the stack each request is answered by — see
-//! `crate::listener`: `tower-http`'s `MapRequestBodyLayer` wraps the body in a
-//! [`Deadline`], and its `RequestBodyTimeoutLayer` bounds the pauses in that.
+//! Both are layers of the stack each request is responded to by — see
+//! `crate::listener`: [`due`] wraps the body in a [`Deadline`], and
+//! `tower-http`'s `RequestBodyTimeoutLayer` bounds the pauses in that.
 //!
 //! A body past either is cut off: the request to api is reset, and the caller
-//! is answered as for any request that failed behind this role.
+//! gets the response any request that failed behind this role gets.
+//!
+//! Both are checked as the body is read, and a leg reads it only as fast as
+//! api takes it — so a body api stops taking trips neither. That case the
+//! member bounds from outside the body, from the moment [`due`] tells it — see
+//! `crate::upstream::member::BodyDue`.
 //!
 //! ## No trailers
 //!
@@ -31,8 +36,19 @@ use std::time::Duration;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use http_body_util::combinators::MapFrame;
+use hyper::Request;
 use hyper::body::{Body, Frame, SizeHint};
 use tower::BoxError;
+
+/// `req`, with a deadline on its body `within` from now — and that same moment
+/// told to the member that will send it; see `crate::upstream::member::BodyDue`.
+pub fn due<B>(req: Request<B>, within: Duration) -> Request<Deadline<B>> {
+    let due = tokio::time::Instant::now() + within;
+    let (mut head, body) = req.into_parts();
+    head.extensions
+        .insert(crate::upstream::member::BodyDue(due));
+    Request::from_parts(head, Deadline::until(body, due))
+}
 
 /// A body with its trailers taken off — see [`untrailed`].
 pub type Untrailed<B> = MapFrame<B, fn(Frame<Bytes>) -> Frame<Bytes>>;
@@ -59,7 +75,7 @@ where
     http_body_util::BodyExt::boxed(body)
 }
 
-/// A body that must end within a deadline set when it was made.
+/// A body that must end by a deadline.
 pub struct Deadline<B> {
     body: B,
     ends: Pin<Box<tokio::time::Sleep>>,
@@ -67,10 +83,10 @@ pub struct Deadline<B> {
 }
 
 impl<B> Deadline<B> {
-    pub fn new(body: B, within: Duration) -> Deadline<B> {
+    pub fn until(body: B, due: tokio::time::Instant) -> Deadline<B> {
         Deadline {
             body,
-            ends: Box::pin(tokio::time::sleep(within)),
+            ends: Box::pin(tokio::time::sleep_until(due)),
             ended: false,
         }
     }
@@ -143,7 +159,10 @@ mod tests {
         pause: Duration,
         whole: Duration,
     ) -> impl Body<Data = Bytes, Error = BoxError> {
-        TimeoutBody::new(pause, Deadline::new(body, whole))
+        TimeoutBody::new(
+            pause,
+            Deadline::until(body, tokio::time::Instant::now() + whole),
+        )
     }
 
     /// A body that arrives in time arrives whole.

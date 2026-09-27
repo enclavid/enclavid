@@ -96,9 +96,10 @@ pub fn signer(pkcs8: &[u8]) -> Result<Arc<dyn SigningKey>, String> {
 /// `ServerConfig::builder()` picks one from whichever rustls features happen to
 /// be on, which makes the choice a property of the dependency graph instead of a
 /// property of this build — and in an image whose output is a published digest,
-/// that is the wrong place for it to live. One function, so the key a handshake
-/// signs with and the config that runs the handshake come from the same one.
-/// `crates/ra-tls` pins the same provider the same way.
+/// that is the wrong place for it to live. The config that runs the handshake
+/// is built on this; the key it signs with is loaded by [`signer`], through
+/// the same backend's own module rather than this value, and the two are kept
+/// on one backend by hand. `crates/ra-tls` pins the same provider the same way.
 pub fn provider() -> CryptoProvider {
     tokio_rustls::rustls::crypto::ring::default_provider()
 }

@@ -24,7 +24,7 @@ pub const BODY: Duration = Duration::from_secs(5);
 
 pub const REQUESTS_PER_MEMBER: usize = 16;
 pub const MEMBER_WAIT: Duration = Duration::from_millis(200);
-pub const ANSWER: Duration = Duration::from_millis(300);
+pub const RESPONSE: Duration = Duration::from_millis(300);
 pub const TRIES: usize = 3;
 pub const COOLDOWN: Duration = Duration::from_millis(200);
 pub const OPEN: Duration = Duration::from_millis(200);
@@ -40,7 +40,7 @@ pub const TUNING: &str = r#""tuning": {
     "drain_timeout_ms": 150000, "request_body_pause_ms": 1000, "request_body_timeout_ms": 5000
   },
   "upstream": {
-    "requests_per_member": 16, "member_wait_ms": 200, "answer_timeout_ms": 300,
+    "requests_per_member": 16, "member_wait_ms": 200, "response_timeout_ms": 300,
     "tries": 3, "cooldown_ms": 200, "open_timeout_ms": 200, "leg_idle_ms": 300,
     "parked_legs": 256
   }
@@ -66,7 +66,7 @@ pub fn tuning() -> Tuning {
         upstream: UpstreamTuning {
             requests_per_member: REQUESTS_PER_MEMBER,
             member_wait: MEMBER_WAIT,
-            answer_timeout: ANSWER,
+            response_timeout: RESPONSE,
             tries: TRIES,
             cooldown: COOLDOWN,
             open_timeout: OPEN,

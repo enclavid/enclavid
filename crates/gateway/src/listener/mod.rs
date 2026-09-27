@@ -35,7 +35,7 @@
 //!
 //! Here that is a local variable: the name is read off the finished handshake
 //! and handed to every request on that connection. A request that names
-//! another host than it is not routed by either name but answered 421 — see
+//! another host than it is not routed by either name but gets a 421 — see
 //! `crate::route`.
 //!
 //! ## The numbers are the host's
@@ -81,15 +81,15 @@
 //!   `ping_interval`;
 //! - a request body, by `request_body_pause` between two frames and
 //!   `request_body_timeout` whole — it holds a place at its member until api
-//!   answers, and api reads it whole first; see `body`;
+//!   responds, and api reads it whole first; see `body`;
 //! - a connection on which no request has started — for
 //!   `first_request_timeout` after its handshake, for `idle_timeout` after one
 //!   has — which covers a caller that finished the handshake and sent nothing,
 //!   and one that answers pings and asks for nothing. A caller that finished a
 //!   handshake has nothing left to wait for, so the first wait can be short;
 //! - and every connection, busy or not, by `lifetime`. A caller asking once in
-//!   a while never goes idle, and a stream whose answer is never read keeps its
-//!   leg for as long as the connection lives; this is what bounds both. A
+//!   a while never goes idle, and a stream whose response is never read keeps
+//!   its leg for as long as the connection lives; this is what bounds both. A
 //!   browser opens a new connection when an old one is shut down, so an honest
 //!   caller does not notice, and a caller keeping a connection busy to keep its
 //!   place goes to the back of the line for the next one.
@@ -97,7 +97,7 @@
 //! A connection that reaches either of the last two is shut down gracefully,
 //! and given `drain_timeout` for whatever it had started before it is dropped —
 //! longer, the table checks, than any request may wait for api to start
-//! answering, so what it cuts is a caller that stopped reading or never stops
+//! responding, so what it cuts is a caller that stopped reading or never stops
 //! writing.
 
 mod body;
@@ -120,23 +120,23 @@ use crate::route::Hop;
 use crate::upstream::Upstreams;
 use source::Sources;
 
-/// How much of an answer may wait here for a caller that is not reading it,
+/// How much of a response may wait here for a caller that is not reading it,
 /// per stream.
 ///
 /// Past it, this role stops pulling from api, and api's own window on the leg
 /// takes over — so what a caller that never reads can hold in memory is this
-/// plus that window, per stream, and never the whole answer.
+/// plus that window, per stream, and never the whole response.
 const SENDING: usize = 64 << 10;
 
-/// What a public connection answers with: `crate::route`'s answer, boxed once
-/// more by the layer that catches a panic, since its answer to one is a body of
-/// another type.
-type Answered = tower_http::body::UnsyncBoxBody<bytes::Bytes, tower::BoxError>;
+/// What a public connection responds with: `crate::route`'s response, boxed
+/// once more by the layer that catches a panic, since its response to one is a
+/// body of another type.
+type Outgoing = tower_http::body::UnsyncBoxBody<bytes::Bytes, tower::BoxError>;
 
 /// Serve public connections, for ever, by the numbers in `table`.
 ///
 /// Await this on the role's own task: a role whose listener stopped would hold
-/// a socket nothing drains and answer nobody, while still looking alive.
+/// a socket nothing drains and respond to nobody, while still looking alive.
 ///
 /// One connection per place: the place is taken when the transport asks
 /// whether a connection can be taken — BEFORE it is accepted, so a caller over
@@ -236,28 +236,27 @@ async fn follow(places: Arc<Semaphore>, mut table: watch::Receiver<Arc<Upstreams
 }
 
 /// What each request on one connection passes through, outermost first: a
-/// panic anywhere inside answered as a failure behind this role — see
-/// `crate::route::panicked` — then its body given a deadline, then a bound on
-/// its pauses — both by that connection's numbers — then its trailers taken
-/// off, all three in `body`; then boxed into what a leg carries, and answered.
+/// panic anywhere inside turned into the response for a failure behind this
+/// role — see `crate::route::panicked` — then its body given a deadline, then a
+/// bound on its pauses — both by that connection's numbers — then its trailers
+/// taken off, all three in `body`; then boxed into what a leg carries, and
+/// responded to.
 ///
 /// Built here and boxed rather than inline in [`one`]: a closure type held
 /// across an `await` there trips the compiler's `Send` reasoning about the
 /// lifetimes inside a boxed error type, and a boxed service holds no closure
 /// type for it to reason about.
-fn answering(
+fn responding(
     hop: Arc<Hop>,
     agreed: Arc<str>,
     asked: Arc<tokio::sync::Notify>,
     tuning: &crate::config::ListenerTuning,
-) -> tower::util::BoxCloneService<Request<hyper::body::Incoming>, Response<Answered>, Infallible> {
+) -> tower::util::BoxCloneService<Request<hyper::body::Incoming>, Response<Outgoing>, Infallible> {
     let whole = tuning.request_body_timeout;
     tower::ServiceBuilder::new()
         .boxed_clone()
         .layer(CatchPanicLayer::custom(crate::route::panicked))
-        .layer(MapRequestBodyLayer::new(move |incoming| {
-            body::Deadline::new(incoming, whole)
-        }))
+        .map_request(move |req: Request<hyper::body::Incoming>| body::due(req, whole))
         .layer(RequestBodyTimeoutLayer::new(tuning.request_body_pause))
         .layer(MapRequestBodyLayer::new(body::untrailed))
         .layer(MapRequestBodyLayer::new(body::boxed))
@@ -266,7 +265,7 @@ fn answering(
             // that is being used from being taken for idle.
             asked.notify_one();
             let (hop, agreed) = (hop.clone(), agreed.clone());
-            async move { Ok(hop.answer(&agreed, req).await) }
+            async move { Ok(hop.respond(&agreed, req).await) }
         })
 }
 
@@ -295,7 +294,7 @@ impl std::fmt::Display for Unopened {
     }
 }
 
-/// One public connection, from the header to the last answer on it.
+/// One public connection, from the header to the last response on it.
 async fn one(
     hop: Arc<Hop>,
     tls: TlsAcceptor,
@@ -341,17 +340,17 @@ async fn one(
     };
 
     // The name the certificate answered for, read off the finished handshake.
-    // A connection that asked for none keeps none, and `crate::route` answers
-    // such a request as misdirected — this role serves names, and a caller that
-    // named none has not reached one.
+    // A connection that asked for none keeps none, and `crate::route` responds
+    // to such a request as misdirected — this role serves names, and a caller
+    // that named none has not reached one.
     let agreed: Arc<str> = match settled.get_ref().1.server_name() {
         Some(name) => Arc::from(name),
         None => Arc::from(""),
     };
 
-    // Rung by `answering` as each request starts.
+    // Rung by `responding` as each request starts.
     let asked = Arc::new(tokio::sync::Notify::new());
-    let answering = hyper_util::service::TowerToHyperService::new(answering(
+    let responding = hyper_util::service::TowerToHyperService::new(responding(
         hop,
         agreed,
         asked.clone(),
@@ -370,7 +369,7 @@ async fn one(
         .keep_alive_timeout(tuning.ping_interval)
         .max_concurrent_streams(tuning.streams_per_connection)
         .max_send_buf_size(SENDING);
-    let mut conn = std::pin::pin!(server.serve_connection(TokioIo::new(settled), answering));
+    let mut conn = std::pin::pin!(server.serve_connection(TokioIo::new(settled), responding));
 
     let lifetime = tokio::time::sleep(tuning.lifetime);
     tokio::pin!(lifetime);
@@ -388,10 +387,14 @@ async fn one(
     };
     debug!("the connection from {peer} {stopping}");
     conn.as_mut().graceful_shutdown();
-    // Its requests wait by the CURRENT table's numbers, which a push may have
-    // lengthened since this connection was accepted — so it drains for the
-    // longer of its own drain and the current one, which the current table
-    // checked against its own longest wait.
+    // Its requests' bodies are bounded by this connection's own numbers, and
+    // the rest of their wait by those of whichever table routed them — which
+    // a push may have lengthened since. So it drains for the longer of its own
+    // drain and the current one, each checked against its own table's longest
+    // wait. A request routed by a table between the two, or mixing the two,
+    // may wait longer than either drain. That is accepted: pushes that change
+    // the numbers are rare, and a drain that ends first fails a request — it
+    // exposes nothing.
     let drain = table
         .borrow()
         .tuning()
@@ -449,7 +452,7 @@ mod tests {
     const GROUP: &str = "one";
     const BODY: usize = 1 << 20;
 
-    /// An api stand-in: HTTP/2 by prior knowledge, answering with `BODY` bytes
+    /// An api stand-in: HTTP/2 by prior knowledge, responding with `BODY` bytes
     /// and saying in a header which path it was asked for — which is how a test
     /// sees whether the label was taken out on the way through.
     async fn api() -> String {
@@ -464,13 +467,13 @@ mod tests {
                     let service = hyper::service::service_fn(
                         |req: Request<hyper::body::Incoming>| async move {
                             let asked = req.uri().path().to_owned();
-                            let mut answer =
+                            let mut response =
                                 Response::new(Full::new(Bytes::from(vec![b'x'; BODY])));
-                            answer
+                            response
                                 .headers_mut()
                                 .insert("x-asked-for", asked.parse().unwrap());
                             if let Some(authority) = req.uri().authority() {
-                                answer
+                                response
                                     .headers_mut()
                                     .insert("x-asked-of", authority.as_str().parse().unwrap());
                             }
@@ -480,28 +483,28 @@ mod tests {
                                 .chain(crate::route::FORWARDING);
                             for header in stopped {
                                 if req.headers().contains_key(header) {
-                                    answer
+                                    response
                                         .headers_mut()
                                         .insert("x-arrived-with", header.parse().unwrap());
                                 }
                             }
-                            // An upload is read whole before it is answered, as
+                            // An upload is read whole before the response, as
                             // api reads one — and whether trailers came with it
                             // is said back too.
                             if asked.ends_with("/upload")
                                 && let Ok(whole) = req.into_body().collect().await
                             {
                                 if whole.trailers().is_some() {
-                                    answer
+                                    response
                                         .headers_mut()
                                         .insert("x-arrived-with", "trailers".parse().unwrap());
                                 }
                                 let length = whole.to_bytes().len().to_string();
-                                answer
+                                response
                                     .headers_mut()
                                     .insert("x-uploaded", length.parse().unwrap());
                             }
-                            Ok::<_, Infallible>(answer)
+                            Ok::<_, Infallible>(response)
                         },
                     );
                     let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
@@ -560,21 +563,21 @@ mod tests {
             current.clone(),
         ));
 
-        // A certificate has to exist before anything is answered, and it is
-        // minted from the first table on a task of its own — so the wait is on
-        // a request that works, not on a flag this test can read.
+        // A certificate has to exist before anything gets a response, and it
+        // is minted from the first table on a task of its own — so the wait is
+        // on a request that works, not on a flag this test can read.
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if presented.borrow().is_some() {
                     let mut warm = caller(&at, FIRST, 4 << 20).await;
-                    let answer = ask(
+                    let response = ask(
                         &mut warm,
                         Request::get(format!("https://{FIRST}/-{GROUP}.{A}/"))
                             .body(Empty::new())
                             .unwrap(),
                     )
                     .await;
-                    if answer.status() == StatusCode::OK {
+                    if response.status() == StatusCode::OK {
                         return;
                     }
                 }
@@ -582,7 +585,7 @@ mod tests {
             }
         })
         .await
-        .expect("the first table is acted on and its member answers");
+        .expect("the first table is acted on and its member responds");
 
         (at, spki, pushes)
     }
@@ -763,7 +766,7 @@ mod tests {
 
         // With both headers this hop reads, which must stop here on this route
         // as on every other.
-        let answer = ask(
+        let response = ask(
             &mut caller,
             Request::get(format!(
                 "https://{FIRST}/-{GROUP}.{A}/api/v1/sessions/7/status"
@@ -774,16 +777,19 @@ mod tests {
             .unwrap(),
         )
         .await;
-        assert_eq!(answer.status(), StatusCode::OK);
-        assert_eq!(answer.headers()["x-asked-for"], "/api/v1/sessions/7/status");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["x-asked-for"],
+            "/api/v1/sessions/7/status"
+        );
         assert!(
-            !answer.headers().contains_key("x-arrived-with"),
+            !response.headers().contains_key("x-arrived-with"),
             "what this hop reads stops at this hop, whichever way it routed"
         );
     }
 
-    /// A path with no marker is not a link, and a label nobody carries is the
-    /// same answer as an upstream that would not talk.
+    /// A path with no marker is not a link, and a label nobody carries gets
+    /// the same response as an upstream that would not talk.
     #[tokio::test]
     async fn a_path_without_a_label_and_a_label_nobody_has() {
         let (at, _, _pushes) = gateway(&api().await).await;
@@ -820,7 +826,7 @@ mod tests {
             format!("/-{GROUP}./"),
             format!("/-.{A}/"),
         ] {
-            let answer = ask(
+            let response = ask(
                 &mut caller,
                 Request::get(format!("https://{FIRST}{path}"))
                     // Even with the build named where a caller that can set a
@@ -830,7 +836,7 @@ mod tests {
                     .unwrap(),
             )
             .await;
-            assert_eq!(answer.status(), StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
         }
     }
 
@@ -996,7 +1002,7 @@ mod tests {
     async fn a_request_goes_on_under_the_name_its_connection_agreed_to() {
         let (at, _, _pushes) = gateway(&api().await).await;
         let mut caller = caller(&at, FIRST, 4 << 20).await;
-        let answer = ask(
+        let response = ask(
             &mut caller,
             Request::get(format!(
                 "https://{}:8443/-{GROUP}.{A}/",
@@ -1007,10 +1013,10 @@ mod tests {
             .unwrap(),
         )
         .await;
-        assert_eq!(answer.status(), StatusCode::OK);
-        assert_eq!(answer.headers()["x-asked-of"], FIRST);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-asked-of"], FIRST);
         assert!(
-            !answer.headers().contains_key("x-arrived-with"),
+            !response.headers().contains_key("x-arrived-with"),
             "and without the Host the caller wrote"
         );
     }
@@ -1032,9 +1038,9 @@ mod tests {
             if let Some(host) = host {
                 request = request.header("host", host);
             }
-            let answer = ask(&mut caller, request.body(Empty::new()).unwrap()).await;
+            let response = ask(&mut caller, request.body(Empty::new()).unwrap()).await;
             assert_eq!(
-                answer.status(),
+                response.status(),
                 StatusCode::MISDIRECTED_REQUEST,
                 "{target} {host:?}"
             );
@@ -1054,7 +1060,7 @@ mod tests {
         tokio::spawn(driver);
         let mut asked_as = async |host: &str| {
             caller.ready().await.unwrap();
-            let answer = caller
+            let response = caller
                 .send_request(
                     Request::get(format!("/-{GROUP}.{A}/"))
                         .header("host", host)
@@ -1063,9 +1069,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let status = answer.status();
+            let status = response.status();
             // Read to its end, so the connection takes the next request.
-            answer.into_body().collect().await.unwrap();
+            response.into_body().collect().await.unwrap();
             status
         };
         assert_eq!(asked_as(FIRST).await, StatusCode::OK);
@@ -1127,9 +1133,9 @@ mod tests {
         assert_eq!(twice.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// A build nobody runs is the same answer as an upstream that would not
-    /// talk, and two measurements are refused rather than resolved to whichever
-    /// came first.
+    /// A build nobody runs gets the same response as an upstream that would
+    /// not talk, and two measurements are refused rather than resolved to
+    /// whichever came first.
     #[tokio::test]
     async fn a_build_nobody_runs_and_a_build_named_twice() {
         let (at, _, _pushes) = gateway(&api().await).await;
@@ -1169,12 +1175,12 @@ mod tests {
                 .header(header, "203.0.113.7")
                 .header(header, "198.51.100.9");
         }
-        let answer = ask(&mut caller, request.body(Empty::new()).unwrap()).await;
-        assert_eq!(answer.status(), StatusCode::OK);
+        let response = ask(&mut caller, request.body(Empty::new()).unwrap()).await;
+        assert_eq!(response.status(), StatusCode::OK);
         assert!(
-            !answer.headers().contains_key("x-arrived-with"),
+            !response.headers().contains_key("x-arrived-with"),
             "arrived with {:?}",
-            answer.headers().get("x-arrived-with")
+            response.headers().get("x-arrived-with")
         );
     }
 
@@ -1201,7 +1207,7 @@ mod tests {
         drop(sending);
 
         uploader.ready().await.unwrap();
-        let answer = uploader
+        let response = uploader
             .send_request(
                 Request::post(format!("https://{FIRST}/-{GROUP}.{A}/upload"))
                     .body(body)
@@ -1209,12 +1215,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(answer.status(), StatusCode::OK);
-        assert_eq!(answer.headers()["x-uploaded"], "15");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-uploaded"], "15");
         assert!(
-            !answer.headers().contains_key("x-arrived-with"),
+            !response.headers().contains_key("x-arrived-with"),
             "arrived with {:?}",
-            answer.headers().get("x-arrived-with")
+            response.headers().get("x-arrived-with")
         );
     }
 
@@ -1224,14 +1230,14 @@ mod tests {
     async fn a_name_this_role_does_not_serve_is_misdirected() {
         let (at, _, _pushes) = gateway(&api().await).await;
         let mut stranger = caller(&at, "elsewhere.example.com", 4 << 20).await;
-        let answer = ask(
+        let response = ask(
             &mut stranger,
             Request::get("https://elsewhere.example.com/")
                 .body(Empty::new())
                 .unwrap(),
         )
         .await;
-        assert_eq!(answer.status(), StatusCode::MISDIRECTED_REQUEST);
+        assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
     }
 
     /// And a caller that agreed to one name cannot reach another by asking for
@@ -1241,39 +1247,39 @@ mod tests {
     async fn the_host_header_does_not_choose_the_name() {
         let (at, _, _pushes) = gateway(&api().await).await;
         // Negotiated for a name this role does not serve, then claims one it
-        // does. If `Host` were what routed, this would be answered.
+        // does. If `Host` were what routed, this would be served.
         let mut liar = caller(&at, "elsewhere.example.com", 4 << 20).await;
-        let answer = ask(
+        let response = ask(
             &mut liar,
             Request::get(format!("https://{FIRST}/-{GROUP}.{A}/"))
                 .body(Empty::new())
                 .unwrap(),
         )
         .await;
-        assert_eq!(answer.status(), StatusCode::MISDIRECTED_REQUEST);
+        assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
     }
 
-    /// The quote this role serves binds the key it is serving over, and is
-    /// answered without an api behind it or a build named.
+    /// The quote this role serves binds the key it is serving over, and the
+    /// response needs no api behind it and no build named.
     #[tokio::test]
     async fn the_attestation_binds_the_serving_key() {
         let (at, spki, _pushes) = gateway(&api().await).await;
         let mut caller = caller(&at, FIRST, 4 << 20).await;
 
-        let answer = ask(
+        let response = ask(
             &mut caller,
             Request::get(format!("https://{FIRST}{}", attest::PATH))
                 .body(Empty::new())
                 .unwrap(),
         )
         .await;
-        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            answer.headers()[hyper::header::CONTENT_TYPE],
+            response.headers()[hyper::header::CONTENT_TYPE],
             attest::CONTENT_TYPE
         );
 
-        let body = answer.into_body().collect().await.unwrap().to_bytes();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
         let quote = enclavid_ra_tls::read_evidence(&body).unwrap();
         crate::identity::attestor()
             .verify(
@@ -1298,10 +1304,10 @@ mod tests {
     /// A caller that stops reading must not stall anyone else.
     ///
     /// It opens streams and reads none of their bodies, each leaving up to
-    /// `BODY` bytes of api's answer unread behind this role. A leg carries one
-    /// request at a time and travels with the body, so what those hold up is
-    /// their own legs and nothing else; another caller's request takes a leg of
-    /// its own.
+    /// `BODY` bytes of api's response unread behind this role. A leg
+    /// carries one request at a time and travels with the body, so what
+    /// those hold up is their own legs and nothing else; another caller's
+    /// request takes a leg of its own.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_caller_that_stops_reading_does_not_stall_another() {
         let (at, _, _pushes) = gateway(&api().await).await;
@@ -1309,30 +1315,30 @@ mod tests {
         let mut attacker = caller(&at, FIRST, 65_535).await;
         let mut unread = Vec::new();
         for _ in 0..STREAMS {
-            let answer = ask(
+            let response = ask(
                 &mut attacker,
                 Request::get(format!("https://{FIRST}/-{GROUP}.{A}/"))
                     .body(Empty::new())
                     .unwrap(),
             )
             .await;
-            assert_eq!(answer.status(), StatusCode::OK);
-            unread.push(answer);
+            assert_eq!(response.status(), StatusCode::OK);
+            unread.push(response);
         }
 
         let mut victim = caller(&at, FIRST, 4 << 20).await;
         let body = tokio::time::timeout(Duration::from_secs(10), async {
-            let answer = ask(
+            let response = ask(
                 &mut victim,
                 Request::get(format!("https://{FIRST}/-{GROUP}.{A}/"))
                     .body(Empty::new())
                     .unwrap(),
             )
             .await;
-            answer.into_body().collect().await.unwrap().to_bytes()
+            response.into_body().collect().await.unwrap().to_bytes()
         })
         .await
-        .expect("an answer must not wait on a caller that stopped reading");
+        .expect("a response must not wait on a caller that stopped reading");
         assert_eq!(body.len(), BODY);
         drop(unread);
     }
@@ -1362,14 +1368,14 @@ mod tests {
         let mut caller = handshake(socket, FIRST, 4 << 20)
             .await
             .expect("the handshake finishes without a header");
-        let answer = ask(
+        let response = ask(
             &mut caller,
             Request::get(format!("https://{FIRST}/-{GROUP}.{A}/"))
                 .body(Empty::new())
                 .unwrap(),
         )
         .await;
-        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// One source holds its share of the places and no more, while another is
@@ -1384,14 +1390,14 @@ mod tests {
         let mut held = Vec::new();
         for _ in 0..PER_SOURCE {
             let mut connection = opened(&at, FIRST, 4 << 20, crowd).await.unwrap();
-            let answer = ask(
+            let response = ask(
                 &mut connection,
                 Request::get(format!("https://{FIRST}/-{GROUP}.{A}/"))
                     .body(Empty::new())
                     .unwrap(),
             )
             .await;
-            assert_eq!(answer.status(), StatusCode::OK);
+            assert_eq!(response.status(), StatusCode::OK);
             held.push(connection);
         }
         assert!(
@@ -1402,14 +1408,14 @@ mod tests {
         let mut other = opened(&at, FIRST, 4 << 20, fresh_source())
             .await
             .expect("another source is not held to the first one's share");
-        let answer = ask(
+        let response = ask(
             &mut other,
             Request::get(format!("https://{FIRST}/-{GROUP}.{A}/"))
                 .body(Empty::new())
                 .unwrap(),
         )
         .await;
-        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
 
         // The place comes back once this role sees the connection close, which
         // is after the caller drops it — so the wait is on a connection that
@@ -1456,15 +1462,15 @@ mod tests {
     async fn a_caller_that_has_asked_is_given_the_gap_between_requests() {
         let (at, _, _pushes) = gateway(&api().await).await;
         let mut caller = caller(&at, FIRST, 4 << 20).await;
-        let answer = ask(
+        let response = ask(
             &mut caller,
             Request::get(format!("https://{FIRST}/-{GROUP}.{A}/"))
                 .body(Empty::new())
                 .unwrap(),
         )
         .await;
-        assert_eq!(answer.status(), StatusCode::OK);
-        drop(answer);
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
 
         assert!(
             !closed_within(&caller, FIRST_REQUEST * 3).await,
@@ -1479,7 +1485,7 @@ mod tests {
 
     /// A caller that keeps asking never goes idle, and is let go all the same
     /// once its connection has lived LIFETIME — which is what gives its place
-    /// back, and ends any stream on it whose answer nobody reads.
+    /// back, and ends any stream on it whose response nobody reads.
     #[tokio::test]
     async fn a_busy_connection_is_let_go_at_the_end_of_its_life() {
         let (at, _, _pushes) = gateway(&api().await).await;
@@ -1494,7 +1500,7 @@ mod tests {
                     .body(Empty::new())
                     .unwrap();
                 match busy.send_request(request).await {
-                    Ok(answer) => drop(answer),
+                    Ok(response) => drop(response),
                     Err(_) => return,
                 }
                 tokio::time::sleep(IDLE / 4).await;
@@ -1614,35 +1620,36 @@ mod tests {
         drop(second);
     }
 
-    /// A request whose answering panics is answered as one that failed behind
-    /// this role, by the layer `answering` puts outermost — not reset, and on
-    /// HTTP/1 not the whole connection with it.
+    /// The layer that catches a panic, given `crate::route::panicked` as the
+    /// stack in `responding` gives it, responds as to a failure behind this
+    /// role: an empty 502. That the stack puts the layer outermost is not
+    /// checked here — no request can make the real hop panic.
     #[tokio::test]
-    async fn a_panic_is_answered_as_a_failure_behind_this_role() {
+    async fn a_panic_gets_the_response_of_a_failure_behind_this_role() {
         use tower::{Service, ServiceExt};
 
-        let mut answering = tower::ServiceBuilder::new()
+        let mut responding = tower::ServiceBuilder::new()
             .layer(CatchPanicLayer::custom(crate::route::panicked))
             .service_fn(
                 |_: Request<()>| -> std::future::Ready<Result<Response<Empty<Bytes>>, Infallible>> {
                     panic!("what a caller sent")
                 },
             );
-        let answer = answering
+        let response = responding
             .ready()
             .await
             .unwrap()
             .call(Request::new(()))
             .await
             .unwrap();
-        assert_eq!(answer.status(), StatusCode::BAD_GATEWAY);
-        let body = answer.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
         assert!(body.is_empty(), "and says nothing of what the panic said");
     }
 
     /// An upload that stops arriving is cut off after the pause, and its
-    /// caller answered — so it holds its member's place no longer than that,
-    /// though api would have waited for the rest of it for ever.
+    /// caller gets a response — so it holds its member's place no longer
+    /// than that, though api would have waited for the rest of it for ever.
     #[tokio::test]
     async fn a_stalled_upload_is_cut_off_after_the_pause() {
         use http_body_util::channel::Channel;
@@ -1658,7 +1665,7 @@ mod tests {
             .await
             .unwrap();
 
-        let answered = tokio::time::timeout(crate::config::testing::BODY / 2, async {
+        let responded = tokio::time::timeout(crate::config::testing::BODY / 2, async {
             uploader.ready().await.unwrap();
             uploader
                 .send_request(
@@ -1671,7 +1678,7 @@ mod tests {
         })
         .await
         .expect("cut off after the pause, not left for the whole body's deadline");
-        assert_eq!(answered.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(responded.status(), StatusCode::BAD_GATEWAY);
         drop(sending);
     }
 }

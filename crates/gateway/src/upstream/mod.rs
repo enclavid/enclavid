@@ -10,9 +10,9 @@
 //!
 //! A label names the group. A link carries it, a token carries it, and inside it
 //! every member will do: a request whose member's leg would not open goes to
-//! another, and a link outlives the machine that answered it first. A request
-//! that reached api is never sent again; asking again after that is the
-//! caller's.
+//! another, and a link outlives the machine that responded to it first. A
+//! request that reached api is never sent again; asking again after that is
+//! the caller's.
 //!
 //! What the host declares about grouping this role does not take on trust. Each
 //! leg proves a chip and a measurement at the handshake, so a group whose
@@ -390,8 +390,7 @@ impl Upstreams {
         })
     }
 
-    /// Where a NEW session goes: a group running the build the caller named,
-    /// and a member of it.
+    /// Where a NEW session goes: a group running the build the caller named.
     ///
     /// Chosen at random among the groups that run it, which spreads sessions as
     /// well as a turn would and gives the host nothing to aim with. A turn is
@@ -420,7 +419,7 @@ impl Upstreams {
     }
 
     /// What each key domain is held by, for the tests.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "vsock")))]
     pub fn domains(&self) -> &Arc<Domains> {
         &self.domains
     }
@@ -589,7 +588,9 @@ pub async fn connect(addr: &str, proof: &Proof) -> std::io::Result<Upstream> {
     fleet_transport::dial(addr).await
 }
 
-#[cfg(test)]
+/// TCP arm only: the fixtures declare TCP member addresses, which the vsock arm
+/// rightly refuses.
+#[cfg(all(test, not(feature = "vsock")))]
 pub(crate) mod tests {
     use super::*;
 
@@ -756,7 +757,7 @@ pub(crate) mod tests {
     ///
     /// This is what keeps the legs open to api open across a push, and a member
     /// that is out, out. The alternative — rebuilding the set — drops every
-    /// connection and spends requests learning again which members answer.
+    /// connection and spends requests learning again which members respond.
     #[tokio::test]
     async fn a_set_is_carried_across_a_push_and_told_the_difference() {
         let up = Upstreams::empty(crate::identity::attestor())
@@ -1008,89 +1009,93 @@ pub(crate) mod tests {
         assert!(next.at_group(FIRST, "one").is_err());
         assert!(next.at_group(FIRST, "two").is_ok());
     }
+}
 
-    /// What a leg checks once its attested handshake is done, over a pipe and
-    /// on the software backend — the check itself, with no hardware and no
-    /// dial. The software backend proves an empty part, so the part's two cases
-    /// settle the group first and let the handshake disagree.
-    #[cfg(feature = "dev-attestation")]
-    mod proving {
-        use super::*;
+/// What a leg checks once its attested handshake is done, over a pipe and on
+/// the software backend — the check itself, with no hardware and no dial, in
+/// either transport's build. The software backend proves an empty part, so the
+/// part's two cases settle the group first and let the handshake disagree.
+#[cfg(all(test, feature = "dev-attestation"))]
+mod proving {
+    use super::*;
 
-        use enclavid_attestation::{Attestor, MockAttestor};
+    use enclavid_attestation::{Attestor, MockAttestor};
 
-        /// A handshake with a server whose evidence says it runs `served`,
-        /// checked by the verifier this role uses — which on this backend
-        /// shares the server's key and nothing else — then handed to `prove`.
-        async fn proved(served: &str, proof: &Proof) -> std::io::Result<()> {
-            let attestor: Arc<dyn Attestor> = Arc::new(MockAttestor::from_seed([7; 32], served));
-            let accepting = tokio_rustls::TlsAcceptor::from(Arc::new(
-                enclavid_ra_tls::public_server_config(attestor.clone()).unwrap(),
-            ));
-            let connecting = tokio_rustls::TlsConnector::from(Arc::new(
-                enclavid_ra_tls::public_client_config(
-                    attestor,
-                    enclavid_ra_tls::MeasurementPolicy::AcceptAny,
-                )
-                .unwrap(),
-            ));
-            let (ours, theirs) = tokio::io::duplex(64 << 10);
-            let serving = tokio::spawn(async move { accepting.accept(theirs).await.map(drop) });
-            let tls = connecting
-                .connect(enclavid_ra_tls::server_name(), ours)
-                .await
-                .expect("the software backend attests itself");
-            let proven = prove("a pipe", tls.get_ref().1, proof);
-            drop(tls);
-            let _ = serving.await;
-            proven
-        }
+    /// Two builds, spelled as a real one is.
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-        /// The proof one group's legs are opened with, for the build `A`.
-        fn declared(label: &str, domains: &Arc<Domains>) -> Proof {
-            Proof::new(
-                A,
-                label,
-                tls_client(Arc::new(MockAttestor::dev_fleet())),
-                domains.clone(),
+    /// A handshake with a server whose evidence says it runs `served`,
+    /// checked by the verifier this role uses — which on this backend
+    /// shares the server's key and nothing else — then handed to `prove`.
+    async fn proved(served: &str, proof: &Proof) -> std::io::Result<()> {
+        let attestor: Arc<dyn Attestor> = Arc::new(MockAttestor::from_seed([7; 32], served));
+        let accepting = tokio_rustls::TlsAcceptor::from(Arc::new(
+            enclavid_ra_tls::public_server_config(attestor.clone()).unwrap(),
+        ));
+        let connecting = tokio_rustls::TlsConnector::from(Arc::new(
+            enclavid_ra_tls::public_client_config(
+                attestor,
+                enclavid_ra_tls::MeasurementPolicy::AcceptAny,
             )
-        }
+            .unwrap(),
+        ));
+        let (ours, theirs) = tokio::io::duplex(64 << 10);
+        let serving = tokio::spawn(async move { accepting.accept(theirs).await.map(drop) });
+        let tls = connecting
+            .connect(enclavid_ra_tls::server_name(), ours)
+            .await
+            .expect("the software backend attests itself");
+        let proven = prove("a pipe", tls.get_ref().1, proof);
+        drop(tls);
+        let _ = serving.await;
+        proven
+    }
 
-        /// The declared build, on the group's part, is taken — and settles
-        /// the part, so a member on another is refused after it.
-        #[tokio::test]
-        async fn the_declared_build_is_taken_and_settles_the_part() {
-            let proof = declared("one", &Arc::default());
-            proved(A, &proof).await.expect("the declared build");
-            assert!(!proof.agrees("another part"));
-        }
+    /// The proof one group's legs are opened with, for the build `A`.
+    fn declared(label: &str, domains: &Arc<Domains>) -> Proof {
+        Proof::new(
+            A,
+            label,
+            tls_client(Arc::new(MockAttestor::dev_fleet())),
+            domains.clone(),
+        )
+    }
 
-        /// A peer proving another build than the one declared is refused,
-        /// though its evidence is perfectly good.
-        #[tokio::test]
-        async fn another_build_is_refused() {
-            let proof = declared("one", &Arc::default());
-            assert!(proved(B, &proof).await.is_err());
-        }
+    /// The declared build, on the group's part, is taken — and settles
+    /// the part, so a member on another is refused after it.
+    #[tokio::test]
+    async fn the_declared_build_is_taken_and_settles_the_part() {
+        let proof = declared("one", &Arc::default());
+        proved(A, &proof).await.expect("the declared build");
+        assert!(!proof.agrees("another part"));
+    }
 
-        /// The declared build on another part than the group's is refused:
-        /// its sealed state is not this group's to open.
-        #[tokio::test]
-        async fn the_declared_build_on_another_part_is_refused() {
-            let proof = declared("one", &Arc::default());
-            assert!(proof.agrees("another part"));
-            assert!(proved(A, &proof).await.is_err());
-        }
+    /// A peer proving another build than the one declared is refused,
+    /// though its evidence is perfectly good.
+    #[tokio::test]
+    async fn another_build_is_refused() {
+        let proof = declared("one", &Arc::default());
+        assert!(proved(B, &proof).await.is_err());
+    }
 
-        /// The declared build on a part whose key domain another label holds
-        /// is refused: one domain is one group.
-        #[tokio::test]
-        async fn a_domain_another_label_holds_is_refused() {
-            let domains = Arc::default();
-            let other = declared("two", &domains);
-            assert!(other.agrees(""), "the other label holds the domain");
-            let proof = declared("one", &domains);
-            assert!(proved(A, &proof).await.is_err());
-        }
+    /// The declared build on another part than the group's is refused:
+    /// its sealed state is not this group's to open.
+    #[tokio::test]
+    async fn the_declared_build_on_another_part_is_refused() {
+        let proof = declared("one", &Arc::default());
+        assert!(proof.agrees("another part"));
+        assert!(proved(A, &proof).await.is_err());
+    }
+
+    /// The declared build on a part whose key domain another label holds
+    /// is refused: one domain is one group.
+    #[tokio::test]
+    async fn a_domain_another_label_holds_is_refused() {
+        let domains = Arc::default();
+        let other = declared("two", &domains);
+        assert!(other.agrees(""), "the other label holds the domain");
+        let proof = declared("one", &domains);
+        assert!(proved(A, &proof).await.is_err());
     }
 }
