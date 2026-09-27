@@ -1127,7 +1127,9 @@ mod tests {
             .await
             .expect("back after the cooldown")
             .unwrap();
-        let _ = tokio::time::timeout(Duration::from_millis(50), member.call(asking())).await;
+        // Left to miss its deadline as the first did: the leg it went out on
+        // has been opened long before, however loaded the machine running this.
+        let _ = member.call(asking()).await;
         assert_eq!(
             opened.load(Ordering::Relaxed),
             2,

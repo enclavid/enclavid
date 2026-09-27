@@ -129,14 +129,16 @@ enclavid-attestation = { path = "../attestation", default-features = false }
 # Both already in the measured api image.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The affinity key arrives written as hex, and the affinity token's tag leaves
-# written the same way. Already in the measured api image, and this is the
-# decoder the rest of the workspace reads digests with.
-hex = { version = "0.4", features = ["serde"] }
-# The affinity token's tag: HMAC-SHA256 from the library this role's TLS already
-# runs on, so checking a token adds no cryptography to the image — see
-# `crate::route::affinity`. The features are the ones the TLS stack already
-# turns on.
+# Matches the paths a push's rules name — see `crate::route::Rules`. The router
+# api's own is built on, so a rule written as api writes its route matches the
+# requests api's route does, and two rules a request could not choose between
+# are refused at the push. No dependencies of its own; already in the measured
+# api image.
+matchit = "0.8"
+# The keyed hash a source is counted under (`crate::listener::source`), the
+# random choice of a group, and a certificate's serial — from the library this
+# role's TLS already runs on, so none adds cryptography to the image. The
+# features are the ones the TLS stack already turns on.
 ring = "0.17"
 # Two system calls and four error numbers: raising the descriptor limit at boot
 # (see `reserve_descriptors` in `main.rs`), and telling a dial that failed for

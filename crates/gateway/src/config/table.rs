@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::route::Rules;
+
 /// One push as it decodes: the complete table, never a change to the previous
 /// one.
 ///
@@ -24,9 +26,58 @@ struct RawConfig {
     /// Which members of which group serve each public name.
     #[serde(deserialize_with = "unique_tables")]
     names: Names,
-    affinity: Affinity,
+    /// What a name's requests are held to, by method and path. A name with no
+    /// rules holds its requests to nothing beyond how they are routed.
+    #[serde(default, deserialize_with = "unique")]
+    routes: HashMap<String, Vec<Route>>,
     #[serde(default)]
     tuning: Tuning,
+}
+
+/// A rule for the requests one name receives: which of them it matches, and
+/// what those are held to.
+///
+/// It reads as a reverse proxy's location does. The `path` is a template in
+/// the form api writes its own routes in: `/api/v1/sessions` is that path
+/// alone, `{id}` one segment, whatever it holds, and `{*rest}`, at the end,
+/// every path that goes on from there. A `method`, when given, narrows the
+/// rule to requests made with it — and a rule for `GET` holds a `HEAD` as
+/// well, which is a `GET` without its body, unless a rule for `HEAD` names the
+/// same path.
+///
+/// A request is held to the most specific rule that matches it — a segment
+/// spelled out over one left open — and among rules with one path, to the one
+/// naming its method. Two rules a request could not choose between are refused
+/// at the push, and that includes two that leave the same segment open in
+/// different ways, `{id}` and `{*rest}`. The path is api's own, as it reaches
+/// api: after a link's marker has been taken out.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Route {
+    #[serde(default)]
+    pub method: Option<String>,
+    pub path: String,
+    pub flags: Vec<Flag>,
+}
+
+/// What a request a rule matches is held to.
+///
+/// Both are about which group a request reaches, never about whether what it
+/// reaches is checked — that is proved at every leg whatever a push says. A
+/// push that leaves them out lets a caller choose its group where the host
+/// meant to choose, which costs balance and never anyone's data.
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Flag {
+    /// The request may not name a group: this role places it, among the groups
+    /// running the build it names. For a request that creates a session, so
+    /// that sessions spread over the groups rather than pile into the one a
+    /// caller prefers.
+    RejectNamedGroup,
+    /// The request must name a group. For a request about a session that exists
+    /// already, which only its own group can serve: placed afresh, it would land
+    /// where that session is not.
+    RequireNamedGroup,
 }
 
 /// Each public name, and under it the addresses of each group's members there.
@@ -114,34 +165,50 @@ pub struct Group {
 /// private to this module, so a reader borrows fields THROUGH this type and
 /// never comes to hold a table whose provenance it cannot see. Reachable only
 /// through [`ValidatedConfig::parse`].
-pub struct ValidatedConfig(RawConfig);
+pub struct ValidatedConfig {
+    raw: RawConfig,
+    /// Each name's routes, as requests are matched against them. Built here
+    /// because building them is the last of the checks: whether a path is a
+    /// template, and whether two rules could not be chosen between, is found
+    /// by building.
+    rules: HashMap<String, Rules>,
+}
 
 impl ValidatedConfig {
     /// The table a push declares, or why it is refused.
     pub fn parse(body: &[u8]) -> Result<ValidatedConfig, String> {
         let raw: RawConfig = serde_json::from_slice(body).map_err(|e| e.to_string())?;
         raw.check()?;
-        Ok(ValidatedConfig(raw))
+        let rules = raw
+            .routes
+            .iter()
+            .map(|(name, routes)| {
+                Rules::new(routes)
+                    .map(|rules| (name.clone(), rules))
+                    .map_err(|e| format!("routes[{name}]{e}"))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(ValidatedConfig { raw, rules })
     }
 
     /// What each group is, by the label that names it.
     pub fn groups(&self) -> &HashMap<String, Group> {
-        &self.0.groups
+        &self.raw.groups
     }
 
     /// Which members of which group serve each public name.
     pub fn names(&self) -> &Names {
-        &self.0.names
+        &self.raw.names
     }
 
-    /// What affinity tokens are signed with, and for how long.
-    pub fn affinity(&self) -> &Affinity {
-        &self.0.affinity
+    /// What each name's requests are held to.
+    pub fn rules(&self) -> &HashMap<String, Rules> {
+        &self.rules
     }
 
     /// Every timeout, limit and retry count, as this push sets them.
     pub fn tuning(&self) -> &Tuning {
-        &self.0.tuning
+        &self.raw.tuning
     }
 }
 
@@ -421,39 +488,11 @@ fn within<T: PartialOrd + std::fmt::Display>(
     Ok(())
 }
 
-/// What this role signs affinity tokens with — see `crate::route::affinity` for
-/// why this is the host's to give and not something derived from the chip.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Affinity {
-    pub key: Key,
-    /// The key before it, accepted and never minted with, so that rotating one
-    /// does not strand the tokens issued in the minutes before the push.
-    #[serde(default)]
-    pub previous_key: Option<Key>,
-    /// How long a minted token stays good. Bounded here because it is the only
-    /// thing limiting how long a caller can keep placing work on a group it was
-    /// once given.
-    pub ttl_seconds: u64,
-}
-
-/// The widest a token may be allowed to live.
-const MAX_TTL_SECONDS: u64 = 3600;
-
-/// Thirty-two bytes, written as hex.
-///
-/// A type rather than a string with a check beside it: a key IS bytes, so
-/// decoding is the validation, and nothing further in can be handed one that
-/// was never looked at. The decoding is `hex`'s, the same one the rest of the
-/// workspace reads digests with. `Debug` is deliberately not derived.
-#[derive(Deserialize)]
-pub struct Key(#[serde(with = "hex::serde")] pub [u8; 32]);
-
 /// What a group label may be.
 ///
-/// It ends up in a URL path and in a token, so it is kept to what is safe in
-/// both and short enough to read in a log: lowercase letters, digits and
-/// hyphens. The limit is not a security boundary — the label selects among
+/// It ends up in a URL path and a response header, so it is kept to what is
+/// safe in both and short enough to read in a log: lowercase letters, digits
+/// and hyphens. The limit is not a security boundary — the label selects among
 /// groups the host declared and nothing else — it is there so that a mistake in
 /// the host's configuration is refused at the push rather than found in a link.
 fn is_group_label(label: &str) -> bool {
@@ -473,22 +512,6 @@ impl RawConfig {
     /// configuration.
     fn check(&self) -> Result<(), String> {
         self.tuning.check()?;
-
-        if self.affinity.ttl_seconds == 0 || self.affinity.ttl_seconds > MAX_TTL_SECONDS {
-            return Err(format!(
-                "affinity.ttl_seconds: expected 1 to {MAX_TTL_SECONDS}"
-            ));
-        }
-        // All zeros is what a key left unset reads as, and a token signed with
-        // it is one any caller could mint.
-        for (field, key) in [
-            ("affinity.key", Some(&self.affinity.key)),
-            ("affinity.previous_key", self.affinity.previous_key.as_ref()),
-        ] {
-            if key.is_some_and(|key| key.0 == [0; 32]) {
-                return Err(format!("{field}: all zeros, which is no key"));
-            }
-        }
 
         for (label, group) in &self.groups {
             if !is_group_label(label) {
@@ -566,6 +589,52 @@ impl RawConfig {
             }
         }
 
+        for (name, rules) in &self.routes {
+            // Spelled as the name is declared, since that is the spelling a
+            // request is routed under.
+            if !self.names.contains_key(name) {
+                return Err(format!("routes[{name}]: no such name is declared"));
+            }
+            // Which rules overlap is left to `Rules::new`, which is what can
+            // tell: it is where the paths are read as templates.
+            for (i, rule) in rules.iter().enumerate() {
+                let at = format!("routes[{name}][{i}]");
+                if !rule.path.starts_with('/') {
+                    return Err(format!("{at}.path: a path begins with /"));
+                }
+                // The spelling of an open segment elsewhere, and in api's router
+                // before its current one, which refuses it. Taken literally, it
+                // would match nothing and hold nothing.
+                if rule
+                    .path
+                    .split('/')
+                    .any(|segment| segment.starts_with(':') || segment.starts_with('*'))
+                {
+                    return Err(format!(
+                        "{at}.path: a segment left open is {{id}}, and the rest of a path \
+                         {{*rest}}, as api writes them"
+                    ));
+                }
+                if let Some(method) = &rule.method
+                    && (method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()))
+                {
+                    return Err(format!("{at}.method: a method in capitals, such as POST"));
+                }
+                if rule.flags.is_empty() {
+                    return Err(format!(
+                        "{at}.flags: a rule that holds a request to nothing"
+                    ));
+                }
+                if rule.flags.contains(&Flag::RejectNamedGroup)
+                    && rule.flags.contains(&Flag::RequireNamedGroup)
+                {
+                    return Err(format!(
+                        "{at}.flags: a request cannot both name no group and name one"
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -587,9 +656,6 @@ mod tests {
         c.to_string().repeat(96)
     }
 
-    /// A key the validation accepts; what it signs is not this module's concern.
-    const KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
     /// One group on two machines, reachable under both names.
     fn push() -> String {
         format!(
@@ -598,7 +664,7 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1", "127.0.0.1:3"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:2", "127.0.0.1:4"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+              {TUNING} }}"#,
             m('a')
         )
     }
@@ -613,7 +679,10 @@ mod tests {
         assert_eq!(got.groups()["one"].measurement, m('a'));
         assert_eq!(got.names()[FIRST]["one"].len(), 2);
         assert_eq!(got.names()[SECOND]["one"][1], "127.0.0.1:4");
-        assert_eq!(got.affinity().ttl_seconds, 600);
+        assert!(
+            got.rules().is_empty(),
+            "no rules unless the push gives some"
+        );
     }
 
     /// The members of a group are interchangeable, so the two names need not
@@ -627,7 +696,7 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1", "127.0.0.1:3"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+              {TUNING} }}"#,
             m('a')
         );
         assert!(parse(&body).is_ok());
@@ -644,7 +713,7 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1"], "two": ["127.0.0.1:5"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+              {TUNING} }}"#,
             m('a'),
             m('b')
         );
@@ -660,7 +729,7 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1"], "ghost": ["127.0.0.1:9"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+              {TUNING} }}"#,
             m('a')
         );
         let err = parse(&body).err().unwrap();
@@ -678,7 +747,7 @@ mod tests {
                 "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:2"] }},
                 "elsewhere.example.com": {{ "one": ["127.0.0.1:9"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+              {TUNING} }}"#,
             m('a')
         );
         let got = parse(&body).unwrap();
@@ -693,7 +762,7 @@ mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{}" }} }},
               "names": {{ "not a dns name": {{ "one": ["127.0.0.1:1"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+              {TUNING} }}"#,
             m('a')
         );
         let err = parse(&body).err().unwrap();
@@ -712,7 +781,7 @@ mod tests {
                   "names": {{
                     "{first}": {{ "one": ["127.0.0.1:1"] }},
                     "{second}":  {{ "one": ["127.0.0.1:2"] }} }},
-                  "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+                  {TUNING} }}"#,
                 m('a')
             )
         };
@@ -736,7 +805,7 @@ mod tests {
             r#"{{
               "groups": {{}},
               "names": {{}},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#
+              {TUNING} }}"#
         );
         assert!(parse(&body).is_err());
     }
@@ -749,7 +818,7 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "one": [] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+              {TUNING} }}"#,
             m('a')
         );
         assert!(parse(&body).is_err());
@@ -763,7 +832,7 @@ mod tests {
             r#"{{
               "groups": {{}},
               "names": {{ "{FIRST}": {{}}, "{SECOND}": {{}} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#
+              {TUNING} }}"#
         );
         assert!(parse(&body).unwrap().groups().is_empty());
     }
@@ -777,7 +846,7 @@ mod tests {
                   "names": {{
                     "{FIRST}": {{ "{bad}": ["127.0.0.1:1"] }},
                     "{SECOND}":  {{ "{bad}": ["127.0.0.1:2"] }} }},
-                  "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+                  {TUNING} }}"#,
                 m('a')
             );
             assert!(parse(&body).is_err(), "accepted `{bad}`");
@@ -793,7 +862,7 @@ mod tests {
                   "names": {{
                     "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
                     "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-                  "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#
+                  {TUNING} }}"#
             );
             let err = parse(&body)
                 .err()
@@ -815,7 +884,7 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1"], "two": ["127.0.0.1:5"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:2"], "two": ["127.0.0.1:1"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+              {TUNING} }}"#,
             m('a'),
             m('b')
         );
@@ -828,7 +897,7 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:1"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+              {TUNING} }}"#,
             m('a')
         );
         assert!(parse(&shared_by_names).is_ok());
@@ -842,7 +911,7 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:2", "not an address"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+              {TUNING} }}"#,
             m('a')
         );
         let err = parse(&body).err().unwrap();
@@ -862,7 +931,7 @@ mod tests {
                       "names": {{
                         "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
                         "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-                      "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#
+                      {TUNING} }}"#
                 ),
                 "one",
             ),
@@ -874,7 +943,7 @@ mod tests {
                         "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
                         "{FIRST}": {{ "one": ["127.0.0.1:3"] }},
                         "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-                      "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#
+                      {TUNING} }}"#
                 ),
                 FIRST,
             ),
@@ -885,7 +954,7 @@ mod tests {
                       "names": {{
                         "{FIRST}": {{ "one": ["127.0.0.1:1"], "one": ["127.0.0.1:3"] }},
                         "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-                      "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#
+                      {TUNING} }}"#
                 ),
                 "one",
             ),
@@ -905,49 +974,140 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#,
+              {TUNING} }}"#,
             m('a')
         );
         assert!(parse(&body).is_err());
     }
 
-    /// The key is what makes a token unforgeable, and the expiry is what bounds
-    /// how long a caller can keep a group it was handed.
-    #[test]
-    fn affinity_is_required_and_checked() {
-        let with = |affinity: &str| {
-            format!(
-                r#"{{
-                  "groups": {{ "one": {{ "measurement": "{}" }} }},
-                  "names": {{
-                    "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
-                    "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-                  "affinity": {affinity}, {TUNING} }}"#,
-                m('a')
-            )
-        };
+    /// A push whose `routes` member is `routes`.
+    fn routed(routes: &str) -> String {
+        format!(
+            r#"{{
+              "groups": {{ "one": {{ "measurement": "{}" }} }},
+              "names": {{
+                "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
+                "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
+              "routes": {routes}, {TUNING} }}"#,
+            m('a')
+        )
+    }
 
-        for bad in [
-            r#"{"ttl_seconds":600}"#.to_owned(),
-            r#"{"key":"abcd","ttl_seconds":600}"#.to_owned(),
-            format!(r#"{{"key":"{KEY}"}}"#),
-            format!(r#"{{"key":"{KEY}","ttl_seconds":0}}"#),
-            format!(r#"{{"key":"{KEY}","ttl_seconds":3601}}"#),
-            format!(r#"{{"key":"{KEY}","previous_key":"nope","ttl_seconds":600}}"#),
-            format!(r#"{{"key":"{}","ttl_seconds":600}}"#, "0".repeat(64)),
-            format!(
-                r#"{{"key":"{KEY}","previous_key":"{}","ttl_seconds":600}}"#,
-                "0".repeat(64)
+    /// Rules for a name, matching by a path template and holding what they
+    /// match to a flag, are read and built for that name alone.
+    #[test]
+    fn a_name_s_rules_are_read() {
+        let got = parse(&routed(&format!(
+            r#"{{ "{FIRST}": [
+                {{ "method": "POST", "path": "/api/v1/sessions", "flags": ["reject_named_group"] }},
+                {{ "path": "/api/v1/sessions/{{id}}", "flags": ["require_named_group"] }},
+                {{ "path": "/api/v1/sessions/{{id}}/{{*rest}}", "flags": ["require_named_group"] }} ] }}"#
+        )))
+        .unwrap();
+        assert!(got.rules().contains_key(FIRST));
+        assert!(!got.rules().contains_key(SECOND), "no rules unless given");
+    }
+
+    /// Each rule is checked whole, and one that could not mean anything is
+    /// refused where the host can still be told.
+    #[test]
+    fn a_rule_that_could_not_mean_anything_is_refused() {
+        for (bad, says) in [
+            (
+                r#"{ "elsewhere.example.com": [ { "path": "/x", "flags": ["reject_named_group"] } ] }"#
+                    .to_owned(),
+                "no such name",
+            ),
+            (
+                format!(r#"{{ "{FIRST}": [ {{ "flags": ["reject_named_group"] }} ] }}"#),
+                "missing field `path`",
+            ),
+            (
+                format!(
+                    r#"{{ "{FIRST}": [ {{ "path": "/x", "prefix": "/x", "flags": ["reject_named_group"] }} ] }}"#
+                ),
+                "unknown field `prefix`",
+            ),
+            (
+                format!(r#"{{ "{FIRST}": [ {{ "path": "x", "flags": ["reject_named_group"] }} ] }}"#),
+                "[0].path: a path begins with /",
+            ),
+            (
+                format!(r#"{{ "{FIRST}": [ {{ "path": "", "flags": ["reject_named_group"] }} ] }}"#),
+                "[0].path: a path begins with /",
+            ),
+            (
+                format!(r#"{{ "{FIRST}": [ {{ "path": "/x/{{a", "flags": ["reject_named_group"] }} ] }}"#),
+                "[0].path: a {name} is closed",
+            ),
+            (
+                format!(r#"{{ "{FIRST}": [ {{ "path": "/x/:id", "flags": ["reject_named_group"] }} ] }}"#),
+                "[0].path: a segment left open is {id}",
+            ),
+            (
+                format!(r#"{{ "{FIRST}": [ {{ "path": "/x/*rest", "flags": ["reject_named_group"] }} ] }}"#),
+                "[0].path: a segment left open is {id}",
+            ),
+            (
+                format!(
+                    r#"{{ "{FIRST}": [ {{ "path": "{}", "flags": ["reject_named_group"] }} ] }}"#,
+                    opened(26)
+                ),
+                "[0].path: at most 25",
+            ),
+            (
+                format!(
+                    r#"{{ "{FIRST}": [ {{ "method": "post", "path": "/x", "flags": ["reject_named_group"] }} ] }}"#
+                ),
+                "capitals",
+            ),
+            (
+                format!(r#"{{ "{FIRST}": [ {{ "path": "/x", "flags": [] }} ] }}"#),
+                "to nothing",
+            ),
+            (
+                format!(
+                    r#"{{ "{FIRST}": [ {{ "path": "/x", "flags": ["reject_named_group", "require_named_group"] }} ] }}"#
+                ),
+                "both",
+            ),
+            (
+                format!(
+                    r#"{{ "{FIRST}": [ {{ "path": "/x", "flags": ["reject_named_group"] }},
+                                       {{ "path": "/x", "flags": ["require_named_group"] }} ] }}"#
+                ),
+                "routes[first.example.com][1].path: overlaps /x",
+            ),
+            (
+                format!(
+                    r#"{{ "{FIRST}": [ {{ "path": "/x/{{id}}", "flags": ["reject_named_group"] }},
+                                       {{ "path": "/x/{{*rest}}", "flags": ["require_named_group"] }} ] }}"#
+                ),
+                "[1].path: overlaps /x/{id}",
             ),
         ] {
-            assert!(parse(&with(&bad)).is_err(), "accepted `{bad}`");
+            let err = parse(&routed(&bad))
+                .err()
+                .unwrap_or_else(|| panic!("accepted {bad}"));
+            assert!(err.contains(says), "{bad}: {err}");
         }
-        assert!(
-            parse(&with(&format!(
-                r#"{{"key":"{KEY}","previous_key":"{KEY}","ttl_seconds":600}}"#
-            )))
-            .is_ok()
+
+        // A flag nobody knows is refused rather than ignored, as a misspelt
+        // field is.
+        let unknown = format!(r#"{{ "{FIRST}": [ {{ "path": "/x", "flags": ["reject"] }} ] }}"#);
+        assert!(parse(&routed(&unknown)).is_err());
+
+        // As many open segments as the router can name are taken.
+        let most = format!(
+            r#"{{ "{FIRST}": [ {{ "path": "{}", "flags": ["reject_named_group"] }} ] }}"#,
+            opened(25)
         );
+        parse(&routed(&most)).unwrap();
+    }
+
+    /// A path of `n` segments, each left open.
+    fn opened(n: usize) -> String {
+        (0..n).map(|i| format!("/{{p{i}}}")).collect()
     }
 
     /// A push whose `tuning` member is `tuning`.
@@ -958,7 +1118,7 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {tuning} }}"#,
+              {tuning} }}"#,
             m('a')
         )
     }
@@ -978,7 +1138,7 @@ mod tests {
     /// still refused: quietly defaulting it would hide the mistake.
     #[test]
     fn tuning_may_be_left_out_in_whole_or_in_part() {
-        let without_tuning = push().replace(&format!(", {TUNING}"), "");
+        let without_tuning = push().replace(&format!(",\n              {TUNING}"), "");
         assert_ne!(without_tuning, push());
         assert_eq!(*parse(&without_tuning).unwrap().tuning(), Tuning::default());
 

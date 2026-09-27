@@ -31,7 +31,7 @@
 //! measurement, so every instance of one build on one part can serve any
 //! session of that build. The unit this role routes to is therefore that set —
 //! a GROUP — and its members are interchangeable. A label names the group, so a
-//! link and a token survive the loss of any one machine, and a request whose
+//! link survives the loss of any one machine, and a request whose
 //! member has gone before any of it was sent is served by another.
 //!
 //! The host declares which instances form a group, and this role does not take
@@ -55,7 +55,17 @@
 //! groups: one -> the build it runs
 //! names:  verify.example.com -> one -> the addresses of its members there
 //!         api.example.com    -> one -> the addresses of its members there
+//! routes: api.example.com -> POST /api/v1/sessions         -> reject_named_group
+//!                         -> /api/v1/sessions/{*rest}      -> require_named_group
 //! ```
+//!
+//! The routes are what a name's requests are held to, by method and path, as a
+//! reverse proxy's locations are: where a request may name its group and where
+//! it must. Which of api's requests create a session is api's business, and
+//! only the host can say it without this role holding a copy of api's routes —
+//! see `crate::route::Rules`. A path is written as api writes its own routes,
+//! so the host can copy them. Like everything else here, they say where a
+//! request may go, never whether what it reaches is checked.
 //!
 //! ## The type is the grammar
 //!
@@ -89,5 +99,6 @@ mod table;
 pub(crate) mod testing;
 
 pub use table::{
-    ListenerTuning, MOST_DESCRIPTORS, OWN_DESCRIPTORS, Tuning, UpstreamTuning, ValidatedConfig,
+    Flag, ListenerTuning, MOST_DESCRIPTORS, OWN_DESCRIPTORS, Route, Tuning, UpstreamTuning,
+    ValidatedConfig,
 };

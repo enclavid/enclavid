@@ -12,7 +12,8 @@
 //!
 //! ## What reading host input here puts at risk
 //!
-//! hyper's HTTP/1 parser and the JSON parser, and nothing past them. A push says
+//! hyper's HTTP/1 parser, the JSON parser, and the router a rule's path is read
+//! into — see `crate::route::Rules` — and nothing past them. A push says
 //! where this role may go and nothing about what it will accept — see
 //! `crate::config` — so a push from anyone who reaches this port, the host or
 //! otherwise, can make routes fail but cannot make a caller talk to a build it
@@ -257,8 +258,7 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "one": ["127.0.0.1:1"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:2"] }} }},
-              "affinity": {{ "key": "{}", "ttl_seconds": 600 }}, {TUNING} }}"#,
-            "1".repeat(64)
+              {TUNING} }}"#
         )
     }
 

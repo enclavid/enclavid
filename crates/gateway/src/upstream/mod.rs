@@ -8,11 +8,11 @@
 //! one part can serve any session of that build, and the thing worth naming is
 //! that SET rather than any one machine.
 //!
-//! A label names the group. A link carries it, a token carries it, and inside it
-//! every member will do: a request whose member's leg would not open goes to
-//! another, and a link outlives the machine that responded to it first. A
-//! request that reached api is never sent again; asking again after that is
-//! the caller's.
+//! A label names the group. A link carries it, as does every request after the
+//! one it was placed by, and inside it every member will do: a request whose
+//! member's leg would not open goes to another, and a link outlives the machine
+//! that responded to it first. A request that reached api is never sent again;
+//! asking again after that is the caller's.
 //!
 //! What the host declares about grouping this role does not take on trust. Each
 //! leg proves a chip and a measurement at the handshake, so a group whose
@@ -45,8 +45,10 @@
 //! served by, having first verified this role's own attestation. That is a
 //! delegation, and it is what lets api be upgraded without rebuilding this role.
 //!
-//! So this role never parses a path beyond the marker a link carries, and
-//! whatever else that path holds stays out of its reach.
+//! So neither is read from a path beyond the marker a link carries. The rest
+//! of it is matched against the name's rules, which say whether a request may
+//! name its group or must, never which group it goes to — see
+//! `crate::route::Rules`.
 //!
 //! ## The host says where, and never what
 //!
@@ -216,9 +218,9 @@ pub struct Upstreams {
     /// attestor and the verifier, neither of which changes with the fleet.
     tls: Tls,
     groups: HashMap<String, Group>,
-    /// What affinity tokens are signed with, as of this push. `None` only
-    /// before the first one, when nothing is served yet.
-    affinity: Option<crate::route::affinity::Keys>,
+    /// What each name's requests are held to, as of this push — see
+    /// `crate::route::Rules`.
+    rules: HashMap<String, crate::route::Rules>,
     /// Every timeout, limit and retry count, as of this push. `None` only
     /// before the first one — and the public listener does not open until
     /// there is one, so nothing that serves a caller reads it empty.
@@ -243,12 +245,16 @@ pub struct Target<'a> {
 
 /// Why a request could not be forwarded.
 ///
-/// Two variants because they are two answers to the caller: one says nothing
-/// was asked for, the other says what was asked for is not here. What the
-/// caller is told for each is `crate::route`'s to decide.
+/// Three variants, and two answers to the caller: the first two say the
+/// request is missing what only the caller can supply, or carries what a rule
+/// forbids; the last says what was asked for is not here. What the caller is
+/// told for each is `crate::route`'s to decide.
 pub enum NoRoute {
     /// No measurement was named where one is required.
     Unspecified,
+    /// The request names its group where a rule says this role places it, or
+    /// names none where a rule says it must — see `crate::route::Rules`.
+    AgainstRule,
     /// A build was named and no group declares it; or a label was named and no
     /// group carries it; or the name this connection settled is not served. One
     /// answer for all three: which groups exist and what they run is the host's
@@ -272,7 +278,7 @@ impl Upstreams {
             served: Vec::new(),
             tls: tls_client(attestor),
             groups: HashMap::new(),
-            affinity: None,
+            rules: HashMap::new(),
             tuning: None,
             domains: Arc::new(Domains::default()),
         }
@@ -364,16 +370,11 @@ impl Upstreams {
         // list, and the certificate is rebuilt only when the names truly differ.
         served.sort();
 
-        let affinity = declared.affinity();
         Upstreams {
             served,
             tls: self.tls.clone(),
             groups,
-            affinity: Some(crate::route::affinity::Keys::new(
-                affinity.key.0,
-                affinity.previous_key.as_ref().map(|key| key.0),
-                std::time::Duration::from_secs(affinity.ttl_seconds),
-            )),
+            rules: declared.rules().clone(),
             tuning: Some(tuning),
             domains: self.domains.clone(),
         }
@@ -437,8 +438,9 @@ impl Upstreams {
         &self.served
     }
 
-    pub fn affinity(&self) -> Option<&crate::route::affinity::Keys> {
-        self.affinity.as_ref()
+    /// What requests under `name` are held to, if the push said anything.
+    pub fn rules(&self, name: &str) -> Option<&crate::route::Rules> {
+        self.rules.get(name)
     }
 
     /// Every timeout, limit and retry count, as of this push.
@@ -615,8 +617,6 @@ pub(crate) mod tests {
             .expect("the fixture declares a routable table")
     }
 
-    const KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
-
     /// One group on two machines and a second group on one, all under both
     /// names.
     fn body() -> String {
@@ -629,7 +629,7 @@ pub(crate) mod tests {
                               "two": ["127.0.0.1:3000"] }},
                 "{SECOND}":  {{ "one": ["127.0.0.1:1001", "127.0.0.1:2001"],
                                 "two": ["127.0.0.1:3001"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#
+              {TUNING} }}"#
         )
     }
 
@@ -691,7 +691,7 @@ pub(crate) mod tests {
               "names": {{
                 "{FIRST}":  {{ "one": ["127.0.0.1:1000"], "two": ["127.0.0.1:2000"] }},
                 "{SECOND}": {{ "one": ["127.0.0.1:1001"], "two": ["127.0.0.1:2001"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#
+              {TUNING} }}"#
         );
         let up = Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&body));
 
@@ -745,7 +745,7 @@ pub(crate) mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{build}" }} }},
               "names": {{ "{FIRST}": {{ "one": [{list}] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#
+              {TUNING} }}"#
         )
     }
 
@@ -888,7 +888,7 @@ pub(crate) mod tests {
             r#"{{
               "groups": {{ "one": {{ "measurement": "{A}" }}, "tag": {{ "measurement": "{A}" }} }},
               "names": {{ "{FIRST}": {{ "one": ["127.0.0.1:1000"], "tag": ["127.0.0.1:2000"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#
+              {TUNING} }}"#
         );
         let next = up.replaced(&pushed(&with_tag));
         let tag = next.at_group(FIRST, "tag").ok().unwrap().members;
@@ -1003,7 +1003,7 @@ pub(crate) mod tests {
               "names": {{
                 "{FIRST}": {{ "two": ["127.0.0.1:3000"] }},
                 "{SECOND}":  {{ "two": ["127.0.0.1:3001"] }} }},
-              "affinity": {{ "key": "{KEY}", "ttl_seconds": 600 }}, {TUNING} }}"#
+              {TUNING} }}"#
         );
         let next = up.replaced(&pushed(&body));
         assert!(next.at_group(FIRST, "one").is_err());

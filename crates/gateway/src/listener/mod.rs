@@ -445,7 +445,7 @@ mod tests {
     use crate::config::testing::{FIRST_REQUEST, IDLE, LIFETIME, PER_SOURCE, STREAMS, TUNING};
     use crate::identity::attest;
     use crate::identity::key::Identity;
-    use crate::route::affinity;
+    use crate::route::GROUP_HEADER;
 
     use super::certificate::acceptor;
 
@@ -478,7 +478,7 @@ mod tests {
                                     .insert("x-asked-of", authority.as_str().parse().unwrap());
                             }
                             // Said back so a test can prove what stopped here.
-                            let stopped = [MEASUREMENT, affinity::TOKEN_HEADER, "host"]
+                            let stopped = [MEASUREMENT, "host"]
                                 .into_iter()
                                 .chain(crate::route::FORWARDING);
                             for header in stopped {
@@ -530,8 +530,7 @@ mod tests {
               "names": {{
                 "{FIRST}": {{ "{GROUP}": ["{api}"] }},
                 "{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
-              "affinity": {{ "key": "{}", "ttl_seconds": 600 }}, {tuning} }}"#,
-            "1".repeat(64)
+              {tuning} }}"#
         )
     }
 
@@ -764,15 +763,14 @@ mod tests {
         let (at, _, _pushes) = gateway(&api().await).await;
         let mut caller = caller(&at, FIRST, 4 << 20).await;
 
-        // With both headers this hop reads, which must stop here on this route
-        // as on every other.
+        // With the header this hop reads, which must stop here on this route as
+        // on every other.
         let response = ask(
             &mut caller,
             Request::get(format!(
                 "https://{FIRST}/-{GROUP}.{A}/api/v1/sessions/7/status"
             ))
             .header(MEASUREMENT, A)
-            .header(affinity::TOKEN_HEADER, "whatever the caller had")
             .body(Empty::new())
             .unwrap(),
         )
@@ -947,10 +945,10 @@ mod tests {
         assert_eq!(twice.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// A caller naming a build is placed, told where, and comes back there with
-    /// the token rather than with a group of its choosing.
+    /// A caller naming a build is placed, told its group in the form a link
+    /// carries it, and comes back naming that group — with no build to name.
     #[tokio::test]
-    async fn a_caller_is_placed_and_comes_back_with_a_token() {
+    async fn a_caller_is_placed_and_names_its_group_from_then_on() {
         let (at, _, _pushes) = gateway(&api().await).await;
         let mut second = caller(&at, SECOND, 4 << 20).await;
 
@@ -963,30 +961,25 @@ mod tests {
         )
         .await;
         assert_eq!(placed.status(), StatusCode::OK);
-        // In the form a link carries it, so the caller writes exactly that.
-        assert_eq!(
-            placed.headers()[affinity::GROUP_HEADER],
-            format!("{GROUP}.{A}").as_str()
-        );
+        let group = placed.headers()[GROUP_HEADER].to_str().unwrap().to_owned();
+        assert_eq!(group, format!("{GROUP}.{A}"));
         assert!(
             !placed.headers().contains_key("x-arrived-with"),
             "what this hop reads stops at this hop"
         );
-        let token = placed.headers()[affinity::TOKEN_HEADER].clone();
 
-        // Coming back with it needs no measurement: the token says where.
         let again = ask(
             &mut second,
-            Request::get(format!("https://{SECOND}/api/v1/sessions/1"))
-                .header(affinity::TOKEN_HEADER, &token)
+            Request::get(format!("https://{SECOND}/-{group}/api/v1/sessions/1"))
                 .body(Empty::new())
                 .unwrap(),
         )
         .await;
         assert_eq!(again.status(), StatusCode::OK);
-        assert_eq!(
-            again.headers()[affinity::GROUP_HEADER],
-            format!("{GROUP}.{A}").as_str()
+        assert_eq!(again.headers()["x-asked-for"], "/api/v1/sessions/1");
+        assert!(
+            !again.headers().contains_key(GROUP_HEADER),
+            "a caller that named its group is told nothing"
         );
 
         // With neither there is nothing to place on and nothing to return to.
@@ -1000,42 +993,83 @@ mod tests {
         assert_eq!(naked.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// A token binds the BUILD, not only the label — so a host re-declaring
-    /// that label cannot move a caller onto something it never named.
+    /// A name's rules hold creating a session to placement, and every request
+    /// about one to naming its group — over a real connection, as pushed.
     #[tokio::test]
-    async fn a_token_does_not_survive_the_group_being_re_declared() {
+    async fn a_name_s_rules_hold_its_requests() {
         let api = api().await;
         let (at, _, pushes) = gateway(&api).await;
-        let mut caller = caller(&at, SECOND, 4 << 20).await;
+        let ruled = table(&api, A).replace(
+            &format!(r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},"#),
+            &format!(
+                r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
+                "routes": {{ "{SECOND}": [
+                  {{ "method": "POST", "path": "/api/v1/sessions", "flags": ["reject_named_group"] }},
+                  {{ "path": "/api/v1/sessions/{{*rest}}", "flags": ["require_named_group"] }} ] }},"#
+            ),
+        );
+        assert_ne!(ruled, table(&api, A));
+        let next = pushes.borrow().replaced(&pushed(&ruled));
+        pushes.send_replace(Arc::new(next));
+        let mut second = caller(&at, SECOND, 4 << 20).await;
+        let status = |method: &str, path: String, build: Option<&str>| {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("https://{SECOND}{path}"));
+            if let Some(build) = build {
+                request = request.header(MEASUREMENT, build);
+            }
+            request.body(Empty::new()).unwrap()
+        };
 
-        let placed = ask(
-            &mut caller,
-            Request::get(format!("https://{SECOND}/api/v1/sessions"))
+        let created = ask(
+            &mut second,
+            status("POST", "/api/v1/sessions".into(), Some(A)),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        assert!(created.headers().contains_key(GROUP_HEADER));
+
+        let pinned = ask(
+            &mut second,
+            status("POST", format!("/-{GROUP}.{A}/api/v1/sessions"), None),
+        )
+        .await;
+        assert_eq!(
+            pinned.status(),
+            StatusCode::BAD_REQUEST,
+            "a creation names no group"
+        );
+
+        let unnamed = ask(
+            &mut second,
+            status("GET", "/api/v1/sessions/1".into(), Some(A)),
+        )
+        .await;
+        assert_eq!(
+            unnamed.status(),
+            StatusCode::BAD_REQUEST,
+            "a session's request names one"
+        );
+
+        let named = ask(
+            &mut second,
+            status("GET", format!("/-{GROUP}.{A}/api/v1/sessions/1"), None),
+        )
+        .await;
+        assert_eq!(named.status(), StatusCode::OK);
+
+        // The rules are the second name's; the first holds its requests to none.
+        let mut first = caller(&at, FIRST, 4 << 20).await;
+        let elsewhere = ask(
+            &mut first,
+            Request::get(format!("https://{FIRST}/api/v1/sessions/1"))
                 .header(MEASUREMENT, A)
                 .body(Empty::new())
                 .unwrap(),
         )
         .await;
-        assert_eq!(placed.status(), StatusCode::OK);
-        let token = placed.headers()[affinity::TOKEN_HEADER].clone();
-
-        // The host says the same label runs something else now.
-        let next = Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&table(&api, B)));
-        pushes.send_replace(Arc::new(next));
-
-        let stale = ask(
-            &mut caller,
-            Request::get(format!("https://{SECOND}/api/v1/sessions"))
-                .header(affinity::TOKEN_HEADER, &token)
-                .body(Empty::new())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(
-            stale.status(),
-            StatusCode::BAD_REQUEST,
-            "a stale token is absent, and the caller is asked to name what it needs"
-        );
+        assert_eq!(elsewhere.status(), StatusCode::OK);
     }
 
     /// A request goes on to api under the name its connection agreed to,
@@ -1121,59 +1155,38 @@ mod tests {
         assert_eq!(asked_as(SECOND).await, StatusCode::MISDIRECTED_REQUEST);
     }
 
-    /// A caller that names a build is served that build, even while it still
-    /// sends a token for another: a pin moved from one build to the next goes
-    /// where it points now, and the token it gets back says so. Naming the build
-    /// twice is refused whichever way the request would have gone.
+    /// A target that is not a path — a host alone, or `*` — is refused rather
+    /// than routed: a name's rules read the path, and this one would have gone
+    /// on to api as a path they never read.
     #[tokio::test]
-    async fn a_named_build_outranks_the_token() {
-        let (running_a, running_b) = (api().await, api().await);
-        let (at, _, pushes) = gateway(&running_a).await;
-        let both = format!(
-            r#"{{
-              "groups": {{ "one": {{ "measurement": "{A}" }}, "two": {{ "measurement": "{B}" }} }},
-              "names": {{
-                "{FIRST}": {{ "one": ["{running_a}"], "two": ["{running_b}"] }},
-                "{SECOND}": {{ "one": ["{running_a}"], "two": ["{running_b}"] }} }},
-              "affinity": {{ "key": "{}", "ttl_seconds": 600 }}, {TUNING} }}"#,
-            "1".repeat(64)
-        );
-        let next = pushes.borrow().replaced(&pushed(&both));
-        pushes.send_replace(Arc::new(next));
-        let mut caller = caller(&at, SECOND, 4 << 20).await;
-        let asking = |token: Option<&hyper::header::HeaderValue>, named: &[&str]| {
-            let mut request = Request::get(format!("https://{SECOND}/api/v1/sessions"));
-            if let Some(token) = token {
-                request = request.header(affinity::TOKEN_HEADER, token);
-            }
-            for build in named {
-                request = request.header(MEASUREMENT, *build);
-            }
-            request.body(Empty::new()).unwrap()
-        };
-
-        let on_a = ask(&mut caller, asking(None, &[A])).await;
-        assert_eq!(
-            on_a.headers()[affinity::GROUP_HEADER],
-            format!("one.{A}").as_str()
-        );
-        let token_for_a = on_a.headers()[affinity::TOKEN_HEADER].clone();
-
-        let moved = ask(&mut caller, asking(Some(&token_for_a), &[B])).await;
-        assert_eq!(moved.status(), StatusCode::OK);
-        assert_eq!(
-            moved.headers()[affinity::GROUP_HEADER],
-            format!("two.{B}").as_str(),
-            "placed on the build it names, not kept on the token's"
-        );
-        let token_back = moved.headers()[affinity::TOKEN_HEADER].to_str().unwrap();
-        assert!(
-            token_back.starts_with(&format!("two.{B}.")),
-            "and the token it gets back is for that build: {token_back}"
-        );
-
-        let twice = ask(&mut caller, asking(Some(&token_for_a), &[A, A])).await;
-        assert_eq!(twice.status(), StatusCode::BAD_REQUEST);
+    async fn a_target_that_is_not_a_path_is_refused() {
+        let (at, _, _pushes) = gateway(&api().await).await;
+        let socket = tokio::net::TcpStream::connect(&at).await.unwrap();
+        let tls = tls_to(socket, FIRST, b"http/1.1").await.unwrap();
+        let (mut caller, driver) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+            .await
+            .unwrap();
+        tokio::spawn(driver);
+        for target in [FIRST, "*", "/"] {
+            caller.ready().await.unwrap();
+            let response = caller
+                .send_request(
+                    Request::get(target)
+                        .header("host", FIRST)
+                        .header(MEASUREMENT, A)
+                        .body(Empty::<Bytes>::new())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            response.into_body().collect().await.unwrap();
+            let expected = match target {
+                "/" => StatusCode::OK,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            assert_eq!(status, expected, "{target}");
+        }
     }
 
     /// A build nobody runs gets the same response as an upstream that would

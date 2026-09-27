@@ -60,13 +60,14 @@
 //! header ahead of a connection, the marker a link carries at the head of a
 //! path, its own evidence's path and the method asked of it, the host a
 //! request names — its target's authority and its `Host`, compared to the name
-//! the connection agreed to — and two headers of its own, the build a caller
-//! names and the affinity token. What it takes off by name is the caller's
-//! `Host`, the headers in which a request gives an account of its own origin,
-//! and trailers. Every other byte — the rest of the path, every other header,
-//! every body — passes through unread. That is the standing defence
-//! against a runtime exploit, which changes behaviour without changing a
-//! measurement: what is never interpreted cannot be steered.
+//! the connection agreed to — a header of its own, the build a caller names,
+//! and the method and path the name's rules match against. What it takes off
+//! by name is the caller's `Host`, the headers in which a request gives an
+//! account of its own origin, and trailers. Every other byte — the query, every
+//! other header, every body — passes through unread, and the path goes on as
+//! it came but for the marker. That is the standing defence against a runtime
+//! exploit, which changes behaviour without changing a measurement: what is
+//! never interpreted cannot be steered.
 
 mod budget;
 mod config;
