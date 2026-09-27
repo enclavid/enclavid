@@ -723,14 +723,13 @@ fn marked_in_path<B>(req: &mut Request<B>) -> Result<Option<Marked>, NoRoute> {
     }
 }
 
-/// TCP arm only: the fixture declares TCP member addresses. Routing alone —
-/// nothing here opens a leg.
-#[cfg(all(test, not(feature = "vsock")))]
+/// Routing alone — nothing here opens a leg — so in every build.
+#[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::config::testing::TUNING;
-    use crate::upstream::tests::{A, FIRST, pushed};
+    use crate::upstream::tests::{A, FIRST, at, pushed};
 
     /// Which hosts a request may name and still be asked of its connection's,
     /// and which it may not name at all.
@@ -778,11 +777,13 @@ mod tests {
         let body = format!(
             r#"{{
               "groups": {{ "one": {{ "measurement": "{A}" }}, "two": {{ "measurement": "{A}" }} }},
-              "names": {{ "{FIRST}": {{ "one": ["127.0.0.1:1000"], "two": ["127.0.0.1:2000"] }} }},
+              "names": {{ "{FIRST}": {{ "one": ["{}"], "two": ["{}"] }} }},
               "routes": {{ "{FIRST}": [
                 {{ "method": "POST", "path": "/api/v1/sessions", "flags": ["reject_named_group"] }},
                 {{ "path": "/api/v1/sessions/{{*rest}}", "flags": ["require_named_group"] }} ] }},
-              {TUNING} }}"#
+              {TUNING} }}"#,
+            at(1000),
+            at(2000),
         );
         Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&body))
     }

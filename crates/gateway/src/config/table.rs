@@ -639,13 +639,13 @@ impl RawConfig {
     }
 }
 
-/// TCP arm only: the fixtures declare TCP member addresses, which the vsock arm
-/// rightly refuses.
-#[cfg(all(test, not(feature = "vsock")))]
+/// The check alone — nothing here opens a port or a leg — so in every build.
+#[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::config::testing::TUNING;
+    use crate::upstream::tests::at;
 
     /// Two names, and nothing here distinguishes them — a push declares names
     /// and what each one means is not this role's business.
@@ -669,7 +669,14 @@ mod tests {
         )
     }
 
+    /// The table `body` declares, or why it is refused.
+    ///
+    /// The fixtures spell members as TCP addresses. A vsock build reads each as
+    /// the vsock address with the same port — see `at` — since an address its
+    /// transport could not dial is refused, as it should be.
     fn parse(body: &str) -> Result<ValidatedConfig, String> {
+        #[cfg(feature = "vsock")]
+        let body = &body.replace("127.0.0.1:", "vsock://2:");
         ValidatedConfig::parse(body.as_bytes())
     }
 
@@ -678,7 +685,7 @@ mod tests {
         let got = parse(&push()).unwrap();
         assert_eq!(got.groups()["one"].measurement, m('a'));
         assert_eq!(got.names()[FIRST]["one"].len(), 2);
-        assert_eq!(got.names()[SECOND]["one"][1], "127.0.0.1:4");
+        assert_eq!(got.names()[SECOND]["one"][1], at(4));
         assert!(
             got.rules().is_empty(),
             "no rules unless the push gives some"
@@ -889,7 +896,7 @@ mod tests {
             m('b')
         );
         let err = parse(&body).err().unwrap();
-        assert!(err.contains("127.0.0.1:1"), "{err}");
+        assert!(err.contains(&at(1)), "{err}");
 
         let shared_by_names = format!(
             r#"{{

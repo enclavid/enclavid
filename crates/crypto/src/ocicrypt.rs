@@ -205,7 +205,7 @@ mod b64vec {
     use super::{Base64, Encoding};
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&Base64::encode_string(v))
     }
 

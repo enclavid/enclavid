@@ -328,14 +328,14 @@ impl Members {
 
     /// The addresses this set holds, for the tests that pin what a push does
     /// to it.
-    #[cfg(all(test, not(feature = "vsock")))]
+    #[cfg(test)]
     pub fn addresses(&self) -> BTreeSet<String> {
         self.holds.lock().expect("never held on panic").clone()
     }
 
     /// What this set's members must prove, by identity — what the tests compare
     /// to tell "carried across" from "asked again".
-    #[cfg(all(test, not(feature = "vsock")))]
+    #[cfg(test)]
     pub fn proof(&self) -> &Arc<Proof> {
         &self.proof
     }

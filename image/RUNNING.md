@@ -97,6 +97,26 @@ are built by **one cargo invocation per package** — `app/default.nix` explains
 why at length, and the short version is that a shared invocation would unify
 cargo features across a worker and the child that runs untrusted wasm.
 
+## Checking the gateway's attested build
+
+A workspace build on a developer machine is the TCP build with software
+attestation. The gateway image carries another, `vsock` with `sev-snp`, and
+building an image fails on no warning. So check that build on a Linux machine
+with a C toolchain — `ring` compiles C, so it is not cross-built from elsewhere:
+
+```sh
+# Every combination the gateway accepts, warnings as errors, tests included.
+for f in "" "--features vsock" \
+         "--no-default-features --features vsock,sev-snp" \
+         "--no-default-features --features vsock,sev-snp,debug"; do
+  cargo clippy -p enclavid-gateway $f --all-targets -- -D warnings
+done
+
+# The tests that open no socket, on the vsock transport. The `sev-snp` build's
+# tests are compiled above and not run: its attestor opens /dev/sev-guest.
+cargo test -p enclavid-gateway --features vsock
+```
+
 ## The launch
 
 Every flag the measurement depends on comes out of the image, and none of them

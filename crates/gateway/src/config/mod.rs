@@ -93,9 +93,7 @@
 
 pub mod push;
 mod table;
-// Its users are the tests that stand api up on TCP, which a vsock build has no
-// place for.
-#[cfg(all(test, not(feature = "vsock")))]
+#[cfg(test)]
 pub(crate) mod testing;
 
 pub use table::{

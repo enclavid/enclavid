@@ -1375,8 +1375,9 @@ mod tests {
             .find(|(kind, _)| *kind == SETTINGS)
             .expect("a leg opens with its settings");
         // Six bytes a setting: two of identifier, four of value.
+        let (settings, _) = settings.as_chunks::<6>();
         let table = settings
-            .chunks_exact(6)
+            .iter()
             .find(|setting| setting[..2] == [0, 1])
             .expect("the size of the table is said");
         assert_eq!(table[2..], [0, 0, 0, 0]);

@@ -420,7 +420,7 @@ impl Upstreams {
     }
 
     /// What each key domain is held by, for the tests.
-    #[cfg(all(test, not(feature = "vsock")))]
+    #[cfg(test)]
     pub fn domains(&self) -> &Arc<Domains> {
         &self.domains
     }
@@ -590,13 +590,31 @@ pub async fn connect(addr: &str, proof: &Proof) -> std::io::Result<Upstream> {
     fleet_transport::dial(addr).await
 }
 
-/// TCP arm only: the fixtures declare TCP member addresses, which the vsock arm
-/// rightly refuses.
-#[cfg(all(test, not(feature = "vsock")))]
+/// Routing and the table alone — nothing here opens a leg — so in every build,
+/// each declaring member addresses the way its own transport dials them.
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
     use crate::config::testing::TUNING;
+
+    /// A member's address as this build dials one; the port is all a fixture
+    /// chooses.
+    pub(crate) fn at(port: u32) -> String {
+        #[cfg(not(feature = "vsock"))]
+        return format!("127.0.0.1:{port}");
+        #[cfg(feature = "vsock")]
+        return format!("vsock://2:{port}");
+    }
+
+    /// Members at `ports`, as a push lists them.
+    fn listed(ports: &[u32]) -> String {
+        ports
+            .iter()
+            .map(|port| format!("\"{}\"", at(*port)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 
     /// Two names, and nothing here distinguishes them: what a name means to
     /// whatever serves it is not this role's business, and a fixture that named
@@ -625,11 +643,13 @@ pub(crate) mod tests {
               "groups": {{ "one": {{ "measurement": "{A}" }},
                            "two": {{ "measurement": "{B}" }} }},
               "names": {{
-                "{FIRST}": {{ "one": ["127.0.0.1:1000", "127.0.0.1:2000"],
-                              "two": ["127.0.0.1:3000"] }},
-                "{SECOND}":  {{ "one": ["127.0.0.1:1001", "127.0.0.1:2001"],
-                                "two": ["127.0.0.1:3001"] }} }},
-              {TUNING} }}"#
+                "{FIRST}": {{ "one": [{}], "two": [{}] }},
+                "{SECOND}":  {{ "one": [{}], "two": [{}] }} }},
+              {TUNING} }}"#,
+            listed(&[1000, 2000]),
+            listed(&[3000]),
+            listed(&[1001, 2001]),
+            listed(&[3001]),
         )
     }
 
@@ -637,9 +657,10 @@ pub(crate) mod tests {
         Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&body()))
     }
 
-    /// Addresses as a set, which is how a set of members is compared.
-    fn set(addrs: &[&str]) -> std::collections::BTreeSet<String> {
-        addrs.iter().map(|addr| (*addr).to_owned()).collect()
+    /// The members at `ports` as a set, which is how a set of members is
+    /// compared.
+    fn set(ports: &[u32]) -> std::collections::BTreeSet<String> {
+        ports.iter().map(|port| at(*port)).collect()
     }
 
     /// Two questions, two answers: the label picks the GROUP, and the name
@@ -652,17 +673,11 @@ pub(crate) mod tests {
     async fn the_name_picks_the_addresses_and_the_label_picks_the_group() {
         let up = table().await;
         let first = up.at_group(FIRST, "one").ok().unwrap();
-        assert_eq!(
-            first.members.addresses(),
-            set(&["127.0.0.1:1000", "127.0.0.1:2000"])
-        );
+        assert_eq!(first.members.addresses(), set(&[1000, 2000]));
         assert_eq!(first.measurement, A);
 
         let second = up.at_group(SECOND, "one").ok().unwrap();
-        assert_eq!(
-            second.members.addresses(),
-            set(&["127.0.0.1:1001", "127.0.0.1:2001"])
-        );
+        assert_eq!(second.members.addresses(), set(&[1001, 2001]));
         assert_eq!(second.group, "one");
     }
 
@@ -671,7 +686,7 @@ pub(crate) mod tests {
         let up = table().await;
         let placed = up.place(SECOND, B).ok().unwrap();
         assert_eq!(placed.group, "two");
-        assert_eq!(placed.members.addresses(), set(&["127.0.0.1:3001"]));
+        assert_eq!(placed.members.addresses(), set(&[3001]));
 
         assert!(
             up.place(SECOND, &"c".repeat(96)).is_err(),
@@ -689,9 +704,13 @@ pub(crate) mod tests {
               "groups": {{ "one": {{ "measurement": "{A}" }},
                            "two": {{ "measurement": "{A}" }} }},
               "names": {{
-                "{FIRST}":  {{ "one": ["127.0.0.1:1000"], "two": ["127.0.0.1:2000"] }},
-                "{SECOND}": {{ "one": ["127.0.0.1:1001"], "two": ["127.0.0.1:2001"] }} }},
-              {TUNING} }}"#
+                "{FIRST}":  {{ "one": [{}], "two": [{}] }},
+                "{SECOND}": {{ "one": [{}], "two": [{}] }} }},
+              {TUNING} }}"#,
+            listed(&[1000]),
+            listed(&[2000]),
+            listed(&[1001]),
+            listed(&[2001]),
         );
         let up = Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&body));
 
@@ -733,24 +752,20 @@ pub(crate) mod tests {
         assert!(up.place(SECOND, A).is_err());
     }
 
-    /// A push declaring one group under one name, running `build`, at the
-    /// addresses given.
-    fn group_running(build: &str, members: &[&str]) -> String {
-        let list = members
-            .iter()
-            .map(|addr| format!("\"{addr}\""))
-            .collect::<Vec<_>>()
-            .join(",");
+    /// A push declaring one group under one name, running `build`, with members
+    /// at `ports`.
+    fn group_running(build: &str, ports: &[u32]) -> String {
         format!(
             r#"{{
               "groups": {{ "one": {{ "measurement": "{build}" }} }},
-              "names": {{ "{FIRST}": {{ "one": [{list}] }} }},
-              {TUNING} }}"#
+              "names": {{ "{FIRST}": {{ "one": [{}] }} }},
+              {TUNING} }}"#,
+            listed(ports)
         )
     }
 
-    fn group_of(members: &[&str]) -> String {
-        group_running(A, members)
+    fn group_of(ports: &[u32]) -> String {
+        group_running(A, ports)
     }
 
     /// A set of members survives a push, and is told only what changed.
@@ -760,17 +775,17 @@ pub(crate) mod tests {
     /// connection and spends requests learning again which members respond.
     #[tokio::test]
     async fn a_set_is_carried_across_a_push_and_told_the_difference() {
-        let up = Upstreams::empty(crate::identity::attestor())
-            .replaced(&pushed(&group_of(&["127.0.0.1:1000"])));
+        let up =
+            Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&group_of(&[1000])));
         let before = up.at_group(FIRST, "one").ok().unwrap().members;
 
-        let next = up.replaced(&pushed(&group_of(&["127.0.0.1:1000", "127.0.0.1:2000"])));
+        let next = up.replaced(&pushed(&group_of(&[1000, 2000])));
         let after = next.at_group(FIRST, "one").ok().unwrap().members;
 
         assert!(Arc::ptr_eq(&before, &after), "the same set, not a new one");
         assert_eq!(
             after.addresses(),
-            set(&["127.0.0.1:1000", "127.0.0.1:2000"]),
+            set(&[1000, 2000]),
             "and it was told who arrived"
         );
     }
@@ -785,10 +800,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_new_build_at_the_same_addresses_is_a_new_set() {
         let up = Upstreams::empty(crate::identity::attestor())
-            .replaced(&pushed(&group_running(A, &["127.0.0.1:1000"])));
+            .replaced(&pushed(&group_running(A, &[1000])));
         let before = up.at_group(FIRST, "one").ok().unwrap().members;
 
-        let rolled = up.replaced(&pushed(&group_running(B, &["127.0.0.1:1000"])));
+        let rolled = up.replaced(&pushed(&group_running(B, &[1000])));
         let after = rolled.at_group(FIRST, "one").ok().unwrap().members;
 
         assert!(
@@ -803,15 +818,15 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_member_a_push_omits_leaves_the_set() {
         let up = Upstreams::empty(crate::identity::attestor())
-            .replaced(&pushed(&group_of(&["127.0.0.1:1000", "127.0.0.1:2000"])));
-        let next = up.replaced(&pushed(&group_of(&["127.0.0.1:2000"])));
+            .replaced(&pushed(&group_of(&[1000, 2000])));
+        let next = up.replaced(&pushed(&group_of(&[2000])));
         assert_eq!(
             next.at_group(FIRST, "one")
                 .ok()
                 .unwrap()
                 .members
                 .addresses(),
-            set(&["127.0.0.1:2000"])
+            set(&[2000])
         );
     }
 
@@ -860,11 +875,11 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_domain_is_let_go_with_its_label() {
         let up = Upstreams::empty(crate::identity::attestor())
-            .replaced(&pushed(&group_running(A, &["127.0.0.1:1000"])));
+            .replaced(&pushed(&group_running(A, &[1000])));
         let held = up.at_group(FIRST, "one").ok().unwrap().members;
         assert!(held.proof().agrees("chip-a"));
 
-        let renamed = group_running(A, &["127.0.0.1:1000"]).replace("\"one\"", "\"uno\"");
+        let renamed = group_running(A, &[1000]).replace("\"one\"", "\"uno\"");
         let next = up.replaced(&pushed(&renamed));
         let uno = next.at_group(FIRST, "uno").ok().unwrap().members;
         assert!(
@@ -880,15 +895,17 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_domain_stays_held_while_its_label_is_declared() {
         let up = Upstreams::empty(crate::identity::attestor())
-            .replaced(&pushed(&group_running(A, &["127.0.0.1:1000"])));
+            .replaced(&pushed(&group_running(A, &[1000])));
         let held = up.at_group(FIRST, "one").ok().unwrap().members;
         assert!(held.proof().agrees("chip-a"));
 
         let with_tag = format!(
             r#"{{
               "groups": {{ "one": {{ "measurement": "{A}" }}, "tag": {{ "measurement": "{A}" }} }},
-              "names": {{ "{FIRST}": {{ "one": ["127.0.0.1:1000"], "tag": ["127.0.0.1:2000"] }} }},
-              {TUNING} }}"#
+              "names": {{ "{FIRST}": {{ "one": [{}], "tag": [{}] }} }},
+              {TUNING} }}"#,
+            listed(&[1000]),
+            listed(&[2000]),
         );
         let next = up.replaced(&pushed(&with_tag));
         let tag = next.at_group(FIRST, "tag").ok().unwrap().members;
@@ -901,10 +918,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_proof_a_push_did_not_carry_claims_nothing() {
         let up = Upstreams::empty(crate::identity::attestor())
-            .replaced(&pushed(&group_running(A, &["127.0.0.1:1000"])));
+            .replaced(&pushed(&group_running(A, &[1000])));
         let mid_handshake = up.at_group(FIRST, "one").ok().unwrap().members;
 
-        let renamed = group_running(A, &["127.0.0.1:1000"]).replace("\"one\"", "\"uno\"");
+        let renamed = group_running(A, &[1000]).replace("\"one\"", "\"uno\"");
         let next = up.replaced(&pushed(&renamed));
 
         assert!(
@@ -925,7 +942,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_proof_travels_with_the_set() {
         let up = Upstreams::empty(crate::identity::attestor())
-            .replaced(&pushed(&group_running(A, &["127.0.0.1:1000"])));
+            .replaced(&pushed(&group_running(A, &[1000])));
         let settled = up
             .at_group(FIRST, "one")
             .ok()
@@ -934,7 +951,7 @@ pub(crate) mod tests {
             .proof()
             .clone();
 
-        let again = up.replaced(&pushed(&group_running(A, &["127.0.0.1:1000"])));
+        let again = up.replaced(&pushed(&group_running(A, &[1000])));
         let kept = again
             .at_group(FIRST, "one")
             .ok()
@@ -947,7 +964,7 @@ pub(crate) mod tests {
             "the same group keeps the answer, so it cannot be re-stapled by a push"
         );
 
-        let rolled = again.replaced(&pushed(&group_running(B, &["127.0.0.1:1000"])));
+        let rolled = again.replaced(&pushed(&group_running(B, &[1000])));
         let asked = rolled
             .at_group(FIRST, "one")
             .ok()
@@ -966,11 +983,11 @@ pub(crate) mod tests {
     /// neither the build nor the part it settled has moved.
     #[tokio::test]
     async fn new_numbers_are_a_new_set_on_the_same_proof() {
-        let up = Upstreams::empty(crate::identity::attestor())
-            .replaced(&pushed(&group_of(&["127.0.0.1:1000"])));
+        let up =
+            Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&group_of(&[1000])));
         let before = up.at_group(FIRST, "one").ok().unwrap().members;
 
-        let retuned = group_of(&["127.0.0.1:1000"]).replace(r#""tries": 3"#, r#""tries": 2"#);
+        let retuned = group_of(&[1000]).replace(r#""tries": 3"#, r#""tries": 2"#);
         let next = up.replaced(&pushed(&retuned));
         let after = next.at_group(FIRST, "one").ok().unwrap().members;
 
@@ -1001,9 +1018,11 @@ pub(crate) mod tests {
             r#"{{
               "groups": {{ "two": {{ "measurement": "{B}" }} }},
               "names": {{
-                "{FIRST}": {{ "two": ["127.0.0.1:3000"] }},
-                "{SECOND}":  {{ "two": ["127.0.0.1:3001"] }} }},
-              {TUNING} }}"#
+                "{FIRST}": {{ "two": [{}] }},
+                "{SECOND}":  {{ "two": [{}] }} }},
+              {TUNING} }}"#,
+            listed(&[3000]),
+            listed(&[3001]),
         );
         let next = up.replaced(&pushed(&body));
         assert!(next.at_group(FIRST, "one").is_err());
