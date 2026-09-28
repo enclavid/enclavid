@@ -276,4 +276,7 @@ in
   ovmf = ovmf;
   images = named imageFor;
   measurements = named measure;
+  # The package set every part of the image is built from, for anything built
+  # beside the images that should come from the same pin.
+  inherit pkgs;
 }
