@@ -139,6 +139,17 @@ object — including the ID block, which is why `idKeys` is not optional. The
 second line is what the digest does not cover and an operator has to choose:
 memory size, the vsock CID, any drive, where the serial goes.
 
+api is also told, at launch, the host port each of its fleet legs dials — one
+fw_cfg entry per leg, outside the measurement (`crates/api/src/fleet/legs.rs`):
+
+```sh
+  -fw_cfg name=opt/com.enclavid/storage-port,string=8001 \
+  -fw_cfg name=opt/com.enclavid/compile-worker-port,string=8002 \
+  -fw_cfg name=opt/com.enclavid/execution-worker-port,string=8003 \
+```
+
+An api launched without them says which one is missing and stops.
+
 What each measurement-relevant part is doing:
 
 - **`kernel-hashes=on`** — without it the kernel, the initramfs and the command
@@ -190,7 +201,8 @@ the guest's measurement stops matching what was computed for it.
 ### The health ports
 
 The host reads these; nothing else does. They are on the measured command line
-like every other port, and `README.md`'s port table does not yet list them.
+like every port a guest listens on, and `README.md`'s port table does not yet
+list them.
 
 | port | role |
 |---|---|
@@ -222,7 +234,8 @@ from ONE set of parameters, so the two cannot disagree.
 
 Each image carries a `qemu-args` file with the flags the measurement covers.
 Splice it in verbatim and add only what the digest does not describe: memory,
-the vsock CID, any drive, where the serial goes.
+the vsock CID, any drive, where the serial goes — and, for api, its fleet legs'
+ports as fw_cfg entries.
 
     I=$(nix-build image -A images.storage-debug --no-out-link)
     qemu-system-x86_64 -enable-kvm $(cat $I/qemu-args | tr '\n' ' ') \

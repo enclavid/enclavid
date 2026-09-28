@@ -85,9 +85,12 @@ impl AppState {
     /// COMPILE and EXECUTE boundaries are remote clients dialed here — the
     /// workers are separate processes/CVMs started by infrastructure (like the
     /// hatch), NOT spawned by api. api itself links neither Cranelift nor the
-    /// wasmtime runtime.
+    /// wasmtime runtime. The two addresses are `crate::fleet::legs`'.
+    #[allow(clippy::too_many_arguments)]
     pub async fn init(
         transport_out: &str,
+        compile_addr: String,
+        exec_addr: String,
         session_store: Arc<SessionStore>,
         cache_store: CacheStore,
         shuffle_key: Arc<ShuffleKey>,
@@ -97,12 +100,6 @@ impl AppState {
         let hatch = HatchClient::new(transport_out)
             .await
             .expect("failed to connect to hatch");
-        // Addresses are explicit config; fail loud if unset (minimal-defaults).
-        let compile_addr = std::env::var("ENCLAVID_COMPILE_WORKER_ADDR").expect(
-            "ENCLAVID_COMPILE_WORKER_ADDR not set (address of the compile-worker; start one \
-             with `cargo run -p engine-compiler --features worker --bin compile-worker` and \
-             point api at its listen address)",
-        );
         let compile_leg = crate::fleet::Leg::new();
         {
             let leg = compile_leg.clone();
@@ -121,11 +118,6 @@ impl AppState {
             .await;
         }
         let compiler = Arc::new(Compiler::new(compile_leg));
-        let exec_addr = std::env::var("ENCLAVID_EXECUTION_WORKER_ADDR").expect(
-            "ENCLAVID_EXECUTION_WORKER_ADDR not set (address of the execution-worker; start one \
-             with `cargo run -p engine-executor --features worker --bin execution-worker` and \
-             point api at its listen address)",
-        );
         let execute_leg = crate::fleet::Leg::new();
         {
             let leg = execute_leg.clone();

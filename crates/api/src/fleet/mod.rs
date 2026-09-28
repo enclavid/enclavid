@@ -46,6 +46,8 @@
 //! atomic CAS on `expected_version`, so a stale repeat fails the check instead of
 //! applying twice.
 
+pub mod legs;
+
 use std::future::Future;
 use std::time::Duration;
 
@@ -99,7 +101,7 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 /// `addr` is only for the log line, and it belongs there: a peer that never
 /// answers and a peer whose address is wrong look identical from here, and the
 /// address is the one thing that tells them apart. It is safe to name because
-/// the measured command line is where it came from.
+/// the host chose it for this launch ([`legs`]) and holds it already.
 ///
 /// Takes the `Peer` rather than its name because it needs both the name and the
 /// digest pinned for it, and two arguments that have to agree is the shape this
@@ -137,7 +139,7 @@ where
                 warn!(
                     "api: {} at {}: {}{}; retrying in {:?}",
                     safe(&name, reason!("a name fixed in this image")),
-                    safe(&addr, reason!("an address from the measured command line")),
+                    safe(&addr, reason!("an address the host chose for this launch")),
                     e,
                     safe(
                         &pinned,
@@ -149,8 +151,8 @@ where
                     ),
                     safe(&delay, reason!("one of a fixed ladder of delays")),
                     reason!(
-                        "a peer name fixed in this image, an address from the measured \
-                         command line, a closed-enum failure that renders itself, a pinned \
+                        "a peer name fixed in this image, an address the host chose for \
+                         this launch, a closed-enum failure that renders itself, a pinned \
                          digest from this build, and one of a fixed ladder of delays — \
                          nothing a session can reach. Not boot-only: `supervise` dials \
                          again on every loss"
@@ -164,15 +166,15 @@ where
                 warn!(
                     "api: {} at {} accepted nothing within {:?}; retrying in {:?}",
                     safe(&name, reason!("a name fixed in this image")),
-                    safe(&addr, reason!("an address from the measured command line")),
+                    safe(&addr, reason!("an address the host chose for this launch")),
                     safe(
                         &ATTEMPT_TIMEOUT,
                         reason!("a compile-time constant of this build")
                     ),
                     safe(&delay, reason!("one of a fixed ladder of delays")),
                     reason!(
-                        "a peer name fixed in this image, an address from the measured \
-                         command line, a closed-enum failure and one of a fixed ladder of \
+                        "a peer name fixed in this image, an address the host chose for \
+                         this launch, a closed-enum failure and one of a fixed ladder of \
                          delays — nothing a session can reach. Not boot-only: `supervise` \
                          dials again on every loss"
                     )

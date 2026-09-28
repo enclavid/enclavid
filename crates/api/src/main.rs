@@ -200,12 +200,10 @@ async fn main() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_SESSION_TTL_SECS),
     );
+    let legs = fleet::legs::load();
     let (session_backend, cache_backend) =
-        build_storage_backends(attestor.clone(), api_health.clone()).await;
-    info!(
-        "api: storage-CVM connected",
-        reason!("a constant; the address it refers to is on the measured command line")
-    );
+        build_storage_backends(legs.storage, attestor.clone(), api_health.clone()).await;
+    info!("api: storage-CVM connected", reason!("a constant"));
     let session_store = Arc::new(SessionStore::new(session_backend, tee_seal_key, ttl_secs));
     let cache_store = CacheStore::new(cache_backend, &tee_seal_key);
 
@@ -225,6 +223,8 @@ async fn main() {
     let applicant_state = Arc::new(
         AppState::init(
             &address_out,
+            legs.compile_worker,
+            legs.execution_worker,
             session_store,
             cache_store,
             shuffle_key,
@@ -302,21 +302,12 @@ async fn main() {
 /// Dial the trusted storage-CVM (session KV + L2 cwasm cache) over RA-TLS and
 /// hand back both backends on one connection. This is api's ONLY durable-state
 /// backend — the legacy hatch/Redis + host object_store path was retired, so
-/// there is no runtime selector: `ENCLAVID_STORAGE_ADDR` is required (fail-loud,
-/// per `feedback_minimal_defaults`).
+/// there is no runtime selector. `addr` is `crate::fleet::legs`'.
 async fn build_storage_backends(
+    addr: String,
     attestor: Arc<dyn Attestor>,
     api_health: Arc<health::ApiHealth>,
 ) -> (Arc<dyn SessionBackend>, Arc<dyn CacheBackend>) {
-    let addr = std::env::var("ENCLAVID_STORAGE_ADDR").unwrap_or_else(|e| {
-        debug!("{e}");
-        safe_logger::error_and_panic!(
-            "api: ENCLAVID_STORAGE_ADDR is not set — the storage-CVM address comes from the \
-             measured command line. Stopping.",
-            reason!("a constant naming a configuration key the host itself supplied")
-        )
-    });
-
     // Two clients, one connection: they go up and down together, so one
     // supervisor installs into both legs.
     let session_leg = fleet::Leg::new();

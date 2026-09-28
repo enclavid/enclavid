@@ -47,7 +47,7 @@ no shell and no service manager, and PID 1 runs `/bin/app` straight from its
 inittab.
 
 The channel is measured, which makes it the right place for values that say
-what this image *is*: the fixed vsock ports it speaks on, the host CID it
+what this image *is*: the fixed vsock ports it listens on, the host CID it
 reaches. It is the wrong place for anything that differs per machine, which
 would fragment the measurement into one per deployment, and the wrong place
 for a secret, which the command line does not keep. The sealing key is
@@ -58,20 +58,28 @@ bound to this image's measurement.
 
 vsock addresses guest↔host and nothing else, so a guest cannot name another
 guest: it dials CID 2 — the host — and the port is what says who it wants.
-The port numbers therefore ARE the routing, and because they ride a measured
-command line, changing one changes the measurement.
+The port numbers therefore ARE the routing. The ones on a measured command
+line change the measurement when they change.
 
-| port | reached by | carries |
-|---|---|---|
-| 8000 | api → host | the hatch: authorization, OCI pulls, the KBS relay, VCEK |
-| 8001 | api → host | the storage-CVM |
-| 8002 | api → host | the compile-worker |
-| 8003 | api → host | the execution-worker |
-| 8443 | host → api | the consumer-facing surface |
-| 8444 | host → api | the applicant-facing surface |
+| port | reached by | carries | where it is set |
+|---|---|---|---|
+| 8000 | api → host | the hatch: authorization, OCI pulls, the KBS relay, VCEK | command line |
+| 8001 | api → host | the storage-CVM | the launch, fw_cfg |
+| 8002 | api → host | the compile-worker | the launch, fw_cfg |
+| 8003 | api → host | the execution-worker | the launch, fw_cfg |
+| 8443 | host → api | the consumer-facing surface | command line |
+| 8444 | host → api | the applicant-facing surface | command line |
 
 Each outbound port needs something on the host listening there and splicing
 onward to the peer guest; the guest neither knows nor can discover which one.
+
+The three fleet legs' ports are not on api's command line: the host hands
+them to api at launch as fw_cfg entries (`crates/api/src/fleet/legs.rs`), and the
+numbers above are only the ones `deploy/` uses. Putting them in the image
+bound nothing — the host's relay decides where a port leads whatever api
+dials, and what decides whether api talks to a peer is the measurement it pins
+for that leg. Out of the measurement, they let two releases run side by side
+on one host, each api reaching its own peers.
 
 **`production` says `console=null`, and the token is load-bearing.** Omitting
 `console=` does NOT produce a silent kernel — it produces a kernel that enables

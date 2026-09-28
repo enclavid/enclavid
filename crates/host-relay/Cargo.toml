@@ -10,7 +10,8 @@ repository.workspace = true
 # "Which traffic goes where" is decided by which instances are started and with
 # what arguments — never by config inside the process.
 #
-# This is also the ONLY crate in the workspace that knows a hypervisor exists.
+# This is also the ONLY crate in the workspace that knows how a hypervisor
+# carries vsock on the host side.
 # cloud-hypervisor's host-side vsock is not AF_VSOCK: it is a unix socket with
 # the Firecracker "hybrid" protocol (`CONNECT <port>\n` / `OK <port>\n`). That
 # handshake is the sole reason this binary must exist at all — general-purpose
