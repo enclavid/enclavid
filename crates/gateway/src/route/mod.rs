@@ -75,9 +75,9 @@
 //! ## What reaches api, and what stops here
 //!
 //! The marker a link carries is stripped on the way through. The rest of the
-//! path is matched against the name's [`Rules`], which say only whether the
-//! request may name its group, and goes on to api as it came; the query is not
-//! read at all. The target goes on as `https://` and the name
+//! path is matched against the name's [`Rules`], which say whether the request
+//! may name its group and which builds take no new session there, and goes on
+//! to api as it came; the query is not read at all. The target goes on as `https://` and the name
 //! the connection agreed to, and the caller's own `Host` stops here, since the
 //! handshake's name is the one routed by. A request that names a different
 //! host than that one is not routed at all: it is refused with 421, as a
@@ -180,6 +180,20 @@ impl Hop {
             // the caller's behalf.
             Err(NoRoute::Unspecified | NoRoute::AgainstRule) => {
                 return refuse(StatusCode::BAD_REQUEST);
+            }
+            // 410: this build takes no new sessions here, so the caller names
+            // another rather than trying again — which a 502 would invite, and
+            // a 400 would not tell apart from a request it got wrong. It says
+            // only that the build is declared and closed, which its links
+            // answering already say. Not quite RFC 9110's "likely permanent":
+            // a later push can reopen it, which is why it is not to be cached.
+            Err(NoRoute::Refused) => {
+                let mut gone = refuse(StatusCode::GONE);
+                gone.headers_mut().insert(
+                    hyper::header::CACHE_CONTROL,
+                    hyper::header::HeaderValue::from_static("no-store"),
+                );
+                return gone;
             }
             Err(NoRoute::NoSuchGroup) => return refuse(StatusCode::BAD_GATEWAY),
         };
@@ -447,9 +461,10 @@ fn route<'a, B>(
 
     // The name's rules, for the path as api will see it — the marker is out of
     // it by now.
-    let flags = table
+    let terms = table
         .rules(name)
-        .map_or(&[][..], |rules| rules.flags(req.method(), req.uri().path()));
+        .and_then(|rules| rules.terms(req.method(), req.uri().path()));
+    let flags = terms.map_or(&[][..], |terms| terms.flags.as_slice());
     if marked.is_some() && flags.contains(&Flag::RejectNamedGroup) {
         return Err(NoRoute::AgainstRule);
     }
@@ -474,6 +489,11 @@ fn route<'a, B>(
     }
 
     let wanted = named.ok_or(NoRoute::Unspecified)?;
+    // A build that takes no new sessions. The ones it holds carry their group
+    // in their links, so they came in by the branch above and never reach this.
+    if terms.is_some_and(|terms| terms.refused.contains(&wanted)) {
+        return Err(NoRoute::Refused);
+    }
     let target = table.place(name, &wanted)?;
     Ok((target, true))
 }
@@ -498,8 +518,16 @@ fn route<'a, B>(
 /// path no rule for `HEAD` names, it is held to the rule for `GET`.
 #[derive(Clone)]
 pub struct Rules {
-    by_method: HashMap<Method, Router<Vec<Flag>>>,
-    otherwise: Router<Vec<Flag>>,
+    by_method: HashMap<Method, Router<Terms>>,
+    otherwise: Router<Terms>,
+}
+
+/// What the rule matching a request holds it to: its flags, and the builds it
+/// places no new session on.
+#[derive(Clone)]
+struct Terms {
+    flags: Vec<Flag>,
+    refused: Vec<String>,
 }
 
 /// Rules as the push lists them: each beside its place in the list, for a
@@ -553,14 +581,22 @@ impl Rules {
         })
     }
 
-    /// The flags of the most specific rule matching `method` and `path`, or
+    /// The terms of the most specific rule matching `method` and `path`, or
     /// none.
-    fn flags(&self, method: &Method, path: &str) -> &[Flag] {
+    fn terms(&self, method: &Method, path: &str) -> Option<&Terms> {
         self.by_method
             .get(method)
             .unwrap_or(&self.otherwise)
             .at(path)
-            .map_or(&[], |matched| matched.value.as_slice())
+            .ok()
+            .map(|matched| matched.value)
+    }
+
+    /// Their flags alone, for the tests that are about nothing else.
+    #[cfg(test)]
+    fn flags(&self, method: &Method, path: &str) -> &[Flag] {
+        self.terms(method, path)
+            .map_or(&[], |terms| terms.flags.as_slice())
     }
 }
 
@@ -568,7 +604,7 @@ impl Rules {
 /// tier on the same path: the method's own over one it takes from `GET`, and
 /// either over one naming no method — the most specific wins, and naming the
 /// method is the more specific. Two in one tier on one path are a clash.
-fn router(tiers: &[&Listed]) -> Result<Router<Vec<Flag>>, String> {
+fn router(tiers: &[&Listed]) -> Result<Router<Terms>, String> {
     let mut router = Router::new();
     let mut taken: Vec<&str> = Vec::new();
     for tier in tiers {
@@ -594,14 +630,20 @@ fn router(tiers: &[&Listed]) -> Result<Router<Vec<Flag>>, String> {
 const MOST_OPEN: usize = 25;
 
 /// `route`, the `i`th of its name's, put into `router`, or why it cannot be.
-fn held(router: &mut Router<Vec<Flag>>, i: usize, route: &Route) -> Result<(), String> {
+fn held(router: &mut Router<Terms>, i: usize, route: &Route) -> Result<(), String> {
     // Every brace counts, an escaped one and a `{*rest}` as well. That only
     // refuses a path nobody writes.
     if route.path.matches('{').count() > MOST_OPEN {
         return Err(format!("[{i}].path: at most {MOST_OPEN} {{name}}s"));
     }
     router
-        .insert(route.path.as_str(), route.flags.clone())
+        .insert(
+            route.path.as_str(),
+            Terms {
+                flags: route.flags.clone(),
+                refused: route.refuse_measurements.clone(),
+            },
+        )
         .map_err(|e| {
             let why = match e {
                 InsertError::Conflict { with } => format!(
@@ -729,7 +771,7 @@ mod tests {
     use super::*;
 
     use crate::config::testing::TUNING;
-    use crate::upstream::tests::{A, FIRST, at, pushed};
+    use crate::upstream::tests::{A, B, FIRST, at, pushed};
 
     /// Which hosts a request may name and still be asked of its connection's,
     /// and which it may not name at all.
@@ -860,6 +902,113 @@ mod tests {
         assert!(matches!(named, Ok((target, false)) if target.group == "one"));
     }
 
+    /// One group running a build that takes no new sessions, beside one running
+    /// the build that replaced it.
+    fn a_build_closed_beside_a_new_one() -> Upstreams {
+        let body = format!(
+            r#"{{
+              "groups": {{ "old": {{ "measurement": "{A}" }}, "new": {{ "measurement": "{B}" }} }},
+              "names": {{ "{FIRST}": {{ "old": ["{}"], "new": ["{}"] }} }},
+              "routes": {{ "{FIRST}": [
+                {{ "method": "POST", "path": "/api/v1/sessions", "flags": ["reject_named_group"],
+                   "refuse_measurements": ["{A}"] }},
+                {{ "path": "/api/v1/sessions/{{*rest}}", "flags": ["require_named_group"] }} ] }},
+              {TUNING} }}"#,
+            at(1000),
+            at(2000),
+        );
+        Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&body))
+    }
+
+    /// A closed build takes no new session and the one beside it does, while
+    /// the closed build's links still reach its group.
+    #[test]
+    fn a_closed_build_takes_no_new_session_and_keeps_its_links() {
+        let table = a_build_closed_beside_a_new_one();
+        let closed = route(
+            &table,
+            FIRST,
+            &mut asking(Method::POST, "/api/v1/sessions", Some(A)),
+        );
+        assert!(matches!(closed, Err(NoRoute::Refused)));
+        let open = route(
+            &table,
+            FIRST,
+            &mut asking(Method::POST, "/api/v1/sessions", Some(B)),
+        );
+        assert!(matches!(open, Ok((target, true)) if target.group == "new"));
+
+        for _ in 0..16 {
+            let link = route(
+                &table,
+                FIRST,
+                &mut asking(Method::GET, &format!("/-old.{A}/api/v1/sessions/1"), None),
+            );
+            assert!(matches!(link, Ok((target, false)) if target.group == "old"));
+        }
+        let marked = route(
+            &table,
+            FIRST,
+            &mut asking(Method::POST, &format!("/-old.{A}/api/v1/sessions"), None),
+        );
+        assert!(
+            matches!(marked, Err(NoRoute::AgainstRule)),
+            "a marker is refused before the list is read"
+        );
+    }
+
+    /// No other spelling of a closed build is placed: the list is compared as
+    /// placement compares, and every build a push declares is lowercase hex.
+    #[test]
+    fn a_closed_build_has_no_other_spelling() {
+        let table = a_build_closed_beside_a_new_one();
+        for spelled in [A.to_ascii_uppercase(), format!(" {A} ")] {
+            let placed = route(
+                &table,
+                FIRST,
+                &mut asking(Method::POST, "/api/v1/sessions", Some(&spelled)),
+            );
+            assert!(matches!(placed, Err(NoRoute::NoSuchGroup)), "{spelled}");
+        }
+    }
+
+    /// Closed only where its rule holds: a path no rule matches still places a
+    /// request naming it.
+    #[test]
+    fn a_closed_build_is_closed_only_where_the_rule_says() {
+        let table = a_build_closed_beside_a_new_one();
+        let placed = route(
+            &table,
+            FIRST,
+            &mut asking(Method::GET, "/elsewhere", Some(A)),
+        );
+        assert!(matches!(placed, Ok((target, true)) if target.group == "old"));
+    }
+
+    /// The builds a rule refuses go with the rule that holds the request: the
+    /// most specific, and for a HEAD the GET's.
+    #[test]
+    fn a_rule_s_refused_builds_follow_the_most_specific_rule() {
+        let refusing = |method: Option<&str>, path: &str| Route {
+            refuse_measurements: vec![A.to_owned()],
+            ..rule(method, path, Flag::RejectNamedGroup)
+        };
+        let rules = Rules::new(&[
+            refusing(Some("POST"), "/a/{*rest}"),
+            rule(Some("POST"), "/a/b", Flag::RejectNamedGroup),
+            refusing(Some("GET"), "/c"),
+        ])
+        .unwrap();
+        let refused = |method: Method, path| {
+            rules
+                .terms(&method, path)
+                .map(|terms| terms.refused.clone())
+        };
+        assert_eq!(refused(Method::POST, "/a/x"), Some(vec![A.to_owned()]));
+        assert_eq!(refused(Method::POST, "/a/b"), Some(vec![]));
+        assert_eq!(refused(Method::HEAD, "/c"), Some(vec![A.to_owned()]));
+    }
+
     /// A rule for the tests: `flag` on requests to `path`, made with `method`
     /// if one is named.
     fn rule(method: Option<&str>, path: &str, flag: Flag) -> Route {
@@ -867,6 +1016,7 @@ mod tests {
             method: method.map(str::to_owned),
             path: path.to_owned(),
             flags: vec![flag],
+            refuse_measurements: Vec::new(),
         }
     }
 

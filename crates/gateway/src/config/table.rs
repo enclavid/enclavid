@@ -86,6 +86,14 @@ pub struct Route {
     pub method: Option<String>,
     pub path: String,
     pub flags: Vec<Flag>,
+    /// Builds this rule places no new session on: a request naming one is
+    /// refused. Only beside `reject_named_group`, where this role places — a
+    /// link names its group and is refused under that flag before this is
+    /// read, so the sessions such a build holds finish where they are. How a
+    /// release is drained: its new sessions go to the build that replaced it,
+    /// which the caller names.
+    #[serde(default)]
+    pub refuse_measurements: Vec<String>,
 }
 
 /// What a request a rule matches is held to.
@@ -672,6 +680,34 @@ impl RawConfig {
                         "{at}.flags: a request cannot both name no group and name one"
                     ));
                 }
+                // Anywhere else a request may name its group, and a list there
+                // either misses the requests that do or refuses the links of
+                // sessions the build still holds — so it is refused, not read
+                // one way or the other.
+                if !rule.refuse_measurements.is_empty()
+                    && !rule.flags.contains(&Flag::RejectNamedGroup)
+                {
+                    return Err(format!(
+                        "{at}.refuse_measurements: only a rule that places \
+                         (reject_named_group) has builds to refuse; on any other it would \
+                         refuse the links of sessions that exist"
+                    ));
+                }
+                for (j, refused) in rule.refuse_measurements.iter().enumerate() {
+                    if fleet_transport::Measurement::parse(refused).is_none() {
+                        return Err(format!(
+                            "{at}.refuse_measurements[{j}]: expected 96 lowercase hex characters"
+                        ));
+                    }
+                    // A mistyped build would refuse nothing, and the build it
+                    // meant would go on taking new sessions without a word.
+                    if !self.groups.values().any(|g| &g.measurement == refused) {
+                        return Err(format!(
+                            "{at}.refuse_measurements[{j}]: no group runs {refused}, so there \
+                             is nothing to refuse"
+                        ));
+                    }
+                }
             }
         }
 
@@ -1180,6 +1216,71 @@ mod tests {
             opened(25)
         );
         parse(&routed(&most)).unwrap();
+    }
+
+    /// A rule under `flag` that refuses `listed`, the members of a JSON array.
+    fn refusing(flag: &str, listed: &str) -> String {
+        format!(
+            r#"{{ "{FIRST}": [ {{ "method": "POST", "path": "/x", "flags": ["{flag}"],
+                                  "refuse_measurements": [{listed}] }} ] }}"#
+        )
+    }
+
+    /// The builds a placing rule refuses are read beside its flags. The first
+    /// refuses the only build declared — no new session anywhere, which is a
+    /// state the host may choose, as an empty table is. A build listed twice
+    /// refuses it once, and an empty list is no list, beside any flag.
+    #[test]
+    fn a_rule_s_refused_measurements_are_read() {
+        let a = format!(r#""{}""#, m('a'));
+        for routes in [
+            refusing("reject_named_group", &a),
+            refusing("reject_named_group", &format!("{a}, {a}")),
+            refusing("require_named_group", ""),
+        ] {
+            parse(&routed(&routes)).unwrap_or_else(|e| panic!("{routes}: {e}"));
+        }
+    }
+
+    /// A refused build that could not mean anything is refused, and always for
+    /// the same reason: the rule's own check first, then each build in turn.
+    #[test]
+    fn a_refused_measurement_that_could_not_mean_anything_is_refused() {
+        let quoted = |c| format!(r#""{}""#, m(c));
+        for (bad, says) in [
+            (
+                refusing("reject_named_group", r#""aa11""#),
+                "refuse_measurements[0]: expected 96 lowercase hex",
+            ),
+            (
+                refusing("reject_named_group", &quoted('A')),
+                "refuse_measurements[0]: expected 96 lowercase hex",
+            ),
+            (
+                refusing("reject_named_group", &quoted('b')),
+                "refuse_measurements[0]: no group runs",
+            ),
+            (
+                refusing("require_named_group", &quoted('a')),
+                "refuse_measurements: only a rule that places",
+            ),
+            (
+                refusing("require_named_group", r#""aa11""#),
+                "refuse_measurements: only a rule that places",
+            ),
+            (
+                format!(
+                    r#"{{ "{FIRST}": [ {{ "path": "/x", "flags": ["reject_named_group"],
+                                          "refuse_measurement": [] }} ] }}"#
+                ),
+                "unknown field `refuse_measurement`",
+            ),
+        ] {
+            let err = parse(&routed(&bad))
+                .err()
+                .unwrap_or_else(|| panic!("accepted {bad}"));
+            assert!(err.contains(says), "{bad}: {err}");
+        }
     }
 
     /// A path of `n` segments, each left open.

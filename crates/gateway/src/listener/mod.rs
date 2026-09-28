@@ -1298,6 +1298,61 @@ mod tests {
         assert_eq!(elsewhere.status(), StatusCode::OK);
     }
 
+    /// A build closed to new sessions is gone for them — said so, and not to be
+    /// cached — while its links still answer, across the push that closed it; a
+    /// later push reopens it.
+    #[tokio::test]
+    async fn a_closed_build_is_gone_for_new_sessions_over_a_connection() {
+        let api = api().await;
+        let (at, _, pushes) = gateway(&api).await;
+        let ruled = |refused: &str| {
+            table(&api, A).replace(
+                &format!(r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},"#),
+                &format!(
+                    r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
+                    "routes": {{ "{SECOND}": [
+                      {{ "method": "POST", "path": "/api/v1/sessions", "flags": ["reject_named_group"],
+                         "refuse_measurements": [{refused}] }},
+                      {{ "path": "/api/v1/sessions/{{*rest}}", "flags": ["require_named_group"] }} ] }},"#
+                ),
+            )
+        };
+        let push = |body: String| {
+            let next = pushes.borrow().replaced(&pushed(&body));
+            pushes.send_replace(Arc::new(next));
+        };
+        let create = || {
+            Request::post(format!("https://{SECOND}/api/v1/sessions"))
+                .header(MEASUREMENT, A)
+                .body(Empty::new())
+                .unwrap()
+        };
+
+        push(ruled(&format!(r#""{A}""#)));
+        let mut second = caller(&at, SECOND, 4 << 20).await;
+        let gone = ask(&mut second, create()).await;
+        assert_eq!(gone.status(), StatusCode::GONE);
+        assert_eq!(
+            gone.headers().get(hyper::header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert!(!gone.headers().contains_key(GROUP_HEADER), "placed nowhere");
+
+        let link = ask(
+            &mut second,
+            Request::get(format!("https://{SECOND}/-{GROUP}.{A}/api/v1/sessions/1"))
+                .body(Empty::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(link.status(), StatusCode::OK, "its sessions finish");
+
+        push(ruled(""));
+        let reopened = ask(&mut second, create()).await;
+        assert_eq!(reopened.status(), StatusCode::OK);
+        assert!(reopened.headers().contains_key(GROUP_HEADER));
+    }
+
     /// A request goes on to api under the name its connection agreed to,
     /// spelled as that name is — not with the case, port or final dot the
     /// caller wrote, and without its `Host`.

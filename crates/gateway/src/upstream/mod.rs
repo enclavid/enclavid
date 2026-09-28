@@ -248,16 +248,22 @@ pub struct Target<'a> {
 
 /// Why a request could not be forwarded.
 ///
-/// Three variants, and two answers to the caller: the first two say the
+/// Four variants, and three answers to the caller: the first two say the
 /// request is missing what only the caller can supply, or carries what a rule
-/// forbids; the last says what was asked for is not here. What the caller is
-/// told for each is `crate::route`'s to decide.
+/// forbids; the third that the build it named takes no new sessions here; the
+/// last that what was asked for is not here. What the caller is told for each
+/// is `crate::route`'s to decide.
 pub enum NoRoute {
     /// No measurement was named where one is required.
     Unspecified,
     /// The request names its group where a rule says this role places it, or
     /// names none where a rule says it must — see `crate::route::Rules`.
     AgainstRule,
+    /// The build named is one the rule placing this request refuses — see
+    /// `crate::config::Route::refuse_measurements`. About the build, never a
+    /// group: every group running it is closed alike, and nothing here names
+    /// the build that replaced it, which is the caller's to choose.
+    Refused,
     /// A build was named and no group declares it; or a label was named and no
     /// group carries it; or the name this connection settled is not served. One
     /// answer for all three: which groups exist and what they run is the host's
