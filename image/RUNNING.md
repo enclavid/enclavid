@@ -139,10 +139,12 @@ object — including the ID block, which is why `idKeys` is not optional. The
 second line is what the digest does not cover and an operator has to choose:
 memory size, the vsock CID, any drive, where the serial goes.
 
-api is also told, at launch, the host port each of its fleet legs dials — one
-fw_cfg entry per leg, outside the measurement (`crates/api/src/fleet/legs.rs`):
+api is also told, at launch, the host port each of its legs dials — the
+hatch's and its three peers', one fw_cfg entry per leg, outside the
+measurement (`crates/api/src/fleet/legs.rs`):
 
 ```sh
+  -fw_cfg name=opt/com.enclavid/hatch-port,string=8000 \
   -fw_cfg name=opt/com.enclavid/storage-port,string=8001 \
   -fw_cfg name=opt/com.enclavid/compile-worker-port,string=8002 \
   -fw_cfg name=opt/com.enclavid/execution-worker-port,string=8003 \
@@ -234,7 +236,7 @@ from ONE set of parameters, so the two cannot disagree.
 
 Each image carries a `qemu-args` file with the flags the measurement covers.
 Splice it in verbatim and add only what the digest does not describe: memory,
-the vsock CID, any drive, where the serial goes — and, for api, its fleet legs'
+the vsock CID, any drive, where the serial goes — and, for api, its legs'
 ports as fw_cfg entries.
 
     I=$(nix-build image -A images.storage-debug --no-out-link)

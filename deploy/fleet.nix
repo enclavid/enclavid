@@ -1,147 +1,175 @@
-# The fleet as a system-manager module: every guest, the host side they reach,
-# and the gateway's configuration. Everything has a default for one host except
-# what only its operator can know — the public names, and how consumers' tokens
-# are checked. See example.nix.
-{ config, lib, pkgs, image, host, ... }:
+# The fleet as a system-manager module: the gateway, the release it serves —
+# api and the three guests it reaches, with the host side they all reach — and
+# the gateway's configuration. Everything has a default for one host running
+# this checkout, except what only its operator can know: the public names, and
+# how consumers' tokens are checked. See example.nix.
+{ config, lib, pkgs, fleet, ... }:
 let
   cfg = config.enclavid;
   inherit (lib) mkOption types;
 
-  suffix = if cfg.variant == "debug" then "-debug" else "";
-  imageOf = role: image.images."${role}${suffix}";
-  cid = role: toString cfg.cvms.${role}.cid;
+  # This checkout, which the gateway always comes from.
+  own = fleet.release cfg.variant ../.;
 
-  # One guest's settings, each defaulting to what that role needs.
-  cvm = role: defaults: mkOption {
-    description = "The ${role} guest.";
-    default = { };
-    type = types.submodule {
-      options = {
-        cid = mkOption {
-          type = types.ints.between 3 4294967294;
-          default = defaults.cid;
-          description = "Its vsock context ID, unique on the host.";
-        };
-        memory = mkOption {
-          # With its unit: the same string sizes the memory backend, where a
-          # bare number is bytes rather than -m's MiB.
-          type = types.strMatching "[1-9][0-9]*[MG]";
-          default = defaults.memory;
-          description = "Its memory, in MiB or GiB with the unit: 3072M, 3G.";
-        };
-      } // lib.optionalAttrs (defaults ? disk) {
-        disk = {
-          path = mkOption {
-            type = types.str;
-            default = defaults.disk.path;
-            description = "The file its data volume lives in, made at its first start.";
-          };
-          size = mkOption {
-            type = types.str;
-            default = defaults.disk.size;
-            description = "How large to make that file; read only when it is made.";
-          };
-        };
-      };
+  releases = lib.mapAttrsToList
+    (name: r: r // { inherit name; built = fleet.release cfg.variant r.src; })
+    cfg.releases;
+  # The releases whose guests run on this host.
+  local = lib.filter (r: r.guests) releases;
+  gatewayHere = cfg.gateway.enable;
+  roles = [ "api" "storage" "compile-worker" "execution-worker" ];
+
+  # Where a release's guests are, from its index: context IDs from 3 + 10 ×
+  # index, host ports from their base + 100 × index. Index 0 has the numbers a
+  # single release has always had.
+  cidOf = r: role: toString (r.index * 10 + {
+    api = 3;
+    storage = 4;
+    execution-worker = 5;
+    compile-worker = 6;
+  }.${role});
+  portOf = r: base: toString (base + 100 * r.index);
+
+  # The ports the guests listen on are on their measured command lines. Each is
+  # written here once, in the relay that reaches it — api's two surfaces in
+  # `apiPort`, which both ways of reaching them use — and the settings a
+  # command line must carry are made from these and checked against the lines,
+  # so a change to one that the other misses fails the build instead of
+  # carrying nothing. The ports api's legs dial are not on its command line:
+  # they are handed to it at launch, from these same relays and its hatch.
+  apiPort = { client = "8443"; applicant = "8444"; };
+  releaseRelays = r: {
+    storage = { listen = "vsock:${portOf r 8001}"; to = "vsock:${cidOf r "storage"}:8001"; };
+    compile = { listen = "vsock:${portOf r 8002}"; to = "vsock:${cidOf r "compile-worker"}:8002"; };
+    exec = { listen = "vsock:${portOf r 8003}"; to = "vsock:${cidOf r "execution-worker"}:8003"; };
+    health = { listen = "tcp:127.0.0.1:${portOf r 18445}"; to = "vsock:${cidOf r "api"}:8445"; };
+  } // lib.optionalAttrs (r.entrances != null) {
+    # Where a gateway on another host reaches this release's api: over the
+    # network, to a relay here, and on into the guest. Nothing is opened on the
+    # way — the gateway's leg is RA-TLS to api itself.
+    client-entrance = { listen = entrance r 19443; to = "vsock:${cidOf r "api"}:${apiPort.client}"; };
+    applicant-entrance = { listen = entrance r 19444; to = "vsock:${cidOf r "api"}:${apiPort.applicant}"; };
+  };
+  entrance = r: base: "tcp:${r.entrances}:${portOf r base}";
+  # How the gateway here reaches a release's api: straight into its guest on
+  # this host, or to its entrances wherever they are.
+  gatewayToRelease = r: {
+    client = {
+      listen = "vsock:${portOf r 9443}";
+      to = if r.entrances == null then "vsock:${cidOf r "api"}:${apiPort.client}" else entrance r 19443;
+    };
+    applicant = {
+      listen = "vsock:${portOf r 9444}";
+      to = if r.entrances == null then "vsock:${cidOf r "api"}:${apiPort.applicant}" else entrance r 19444;
     };
   };
-
-  # The ports the guests listen on, and the hatch's that api dials, are on their
-  # measured command lines. Each is written here once, in the relay that reaches
-  # it, and the settings below that a command line must carry are made from
-  # these relays and checked against those lines — so a change to one that the
-  # other misses fails the build instead of carrying nothing. The ports api's
-  # fleet legs dial are not on its command line: they are handed to it at
-  # launch, from these same relays.
-  relays = {
-    api-storage = { listen = "vsock:8001"; to = "vsock:${cid "storage"}:8001"; };
-    api-compile = { listen = "vsock:8002"; to = "vsock:${cid "compile-worker"}:8002"; };
-    api-exec = { listen = "vsock:8003"; to = "vsock:${cid "execution-worker"}:8003"; };
-    gateway-api = { listen = "vsock:9443"; to = "vsock:${cid "api"}:8443"; };
-    gateway-applicant = { listen = "vsock:9444"; to = "vsock:${cid "api"}:8444"; };
+  gatewayCid = toString cfg.cvms.gateway.cid;
+  gatewayRelays = {
     public = {
       inherit (cfg.public) listen;
-      to = "vsock:${cid "gateway"}:8446";
+      to = "vsock:${gatewayCid}:8446";
       flags = lib.optional cfg.public.proxyHeader "--proxy-protocol";
     };
-    api-health = { listen = "tcp:127.0.0.1:18445"; to = "vsock:${cid "api"}:8445"; };
-    gateway-health = { listen = "tcp:127.0.0.1:18447"; to = "vsock:${cid "gateway"}:8447"; };
-    gateway-config = { listen = "tcp:127.0.0.1:18448"; to = "vsock:${cid "gateway"}:8448"; };
+    gateway-health = { listen = "tcp:127.0.0.1:18447"; to = "vsock:${gatewayCid}:8447"; };
+    gateway-config = { listen = "tcp:127.0.0.1:18448"; to = "vsock:${gatewayCid}:8448"; };
   } // lib.optionalAttrs (acme != null) {
     # The gateway carries a validator's connection to this port, and the relay
     # on to the host's ACME client.
     acme = { listen = "vsock:${toString acme.port}"; to = acme.client; };
   };
+  perRelease = relaysOf: rs: lib.listToAttrs (lib.concatMap
+    (r: lib.mapAttrsToList (name: relay: lib.nameValuePair "${r.name}-${name}" relay) (relaysOf r))
+    rs);
+  relays = perRelease releaseRelays local
+    // lib.optionalAttrs gatewayHere (gatewayRelays // perRelease gatewayToRelease releases);
   acme = cfg.acme.tls-alpn-01;
-  # The hatch listens on the host itself, so it has no relay; api dials it here.
-  hatchPort = "8000";
+
   # The guest's own port a relay reaches: the last field of its `to`.
-  into = relay: lib.last (lib.splitString ":" relays.${relay}.to);
-  carried = {
+  into = relay: lib.last (lib.splitString ":" relay.to);
+  carried = r: with releaseRelays r; {
     api = [
-      "ENCLAVID_ADDRESS_OUT=vsock://2:${hatchPort}"
-      "ENCLAVID_ADDRESS_IN_CLIENT=${into "gateway-api"}"
-      "ENCLAVID_ADDRESS_IN_APPLICANT=${into "gateway-applicant"}"
-      "ENCLAVID_ADDRESS_IN_HEALTH=${into "api-health"}"
+      "ENCLAVID_ADDRESS_IN_CLIENT=${apiPort.client}"
+      "ENCLAVID_ADDRESS_IN_APPLICANT=${apiPort.applicant}"
+      "ENCLAVID_ADDRESS_IN_HEALTH=${into health}"
     ];
-    storage = [ "ENCLAVID_STORAGE_LISTEN=${into "api-storage"}" ];
-    compile-worker = [ "ENCLAVID_COMPILE_WORKER_LISTEN=${into "api-compile"}" ];
-    execution-worker = [ "ENCLAVID_EXECUTION_WORKER_LISTEN=${into "api-exec"}" ];
-    gateway = [
-      "ENCLAVID_ADDRESS_IN_PUBLIC=${into "public"}"
-      "ENCLAVID_ADDRESS_IN_HEALTH=${into "gateway-health"}"
-      "ENCLAVID_ADDRESS_IN_CONFIG=${into "gateway-config"}"
-    ];
+    storage = [ "ENCLAVID_STORAGE_LISTEN=${into storage}" ];
+    compile-worker = [ "ENCLAVID_COMPILE_WORKER_LISTEN=${into compile}" ];
+    execution-worker = [ "ENCLAVID_EXECUTION_WORKER_LISTEN=${into exec}" ];
   };
-  # A command line as the words the kernel splits it into, so a setting is
-  # matched whole: 8001 is not found inside 80011.
-  cmdline = role: lib.filter (word: word != "")
-    (lib.splitString " " (lib.removeSuffix "\n" (builtins.readFile (../image/cmdline + "/${role}/${cfg.variant}"))));
+  gatewayCarried = with gatewayRelays; [
+    "ENCLAVID_ADDRESS_IN_PUBLIC=${into public}"
+    "ENCLAVID_ADDRESS_IN_HEALTH=${into gateway-health}"
+    "ENCLAVID_ADDRESS_IN_CONFIG=${into gateway-config}"
+  ];
 
-  # What api's legs dial: the port each of their relays listens on, as fw_cfg
-  # entries (crates/api/src/fleet/legs.rs), so a relay and the dial that reaches it
-  # are one definition.
-  legPorts = lib.concatStringsSep " " (lib.mapAttrsToList
-    (name: relay: "${name}-port=${lib.removePrefix "vsock:" relays.${relay}.listen}")
-    {
-      storage = "api-storage";
-      compile-worker = "api-compile";
-      execution-worker = "api-exec";
-    });
+  # What a release's api legs dial: its hatch's port, and the port each peer's
+  # relay listens on, as fw_cfg entries (crates/api/src/fleet/legs.rs) — so a
+  # relay, or the hatch, and the dial that reaches it are one definition.
+  legPorts = r: with releaseRelays r; lib.concatStringsSep " " [
+    "hatch-port=${toString r.hatchPort}"
+    "storage-port=${lib.removePrefix "vsock:" storage.listen}"
+    "compile-worker-port=${lib.removePrefix "vsock:" compile.listen}"
+    "execution-worker-port=${lib.removePrefix "vsock:" exec.listen}"
+  ];
 
-  # The gateway's table: one group running this commit's api, reached under
-  # both names; a request that creates a session is placed by the gateway, and
-  # every other names the group its link carries.
+  # The gateway's table: a group per release, running that release's api and
+  # reached under both names. A request that creates a session is placed by
+  # the gateway — never on a draining release's build — and every other names
+  # the group its link carries.
   named = [
     { path = "/"; flags = [ "require_named_group" ]; }
     { path = "/{*rest}"; flags = [ "require_named_group" ]; }
   ];
   table = {
-    groups.main.measurement = "";
+    groups = lib.listToAttrs (map (r: lib.nameValuePair r.name { measurement = ""; }) releases);
     names = {
-      ${cfg.names.verify}.main = [ "vsock://2:9444" ];
-      ${cfg.names.api}.main = [ "vsock://2:9443" ];
+      ${cfg.names.verify} = lib.listToAttrs (map (r: lib.nameValuePair r.name [ "vsock://2:${portOf r 9444}" ]) releases);
+      ${cfg.names.api} = lib.listToAttrs (map (r: lib.nameValuePair r.name [ "vsock://2:${portOf r 9443}" ]) releases);
     };
     routes = {
-      ${cfg.names.api} = [
-        { method = "POST"; path = "/api/v1/sessions"; flags = [ "reject_named_group" ]; }
-      ] ++ named;
+      ${cfg.names.api} = [{
+        method = "POST";
+        path = "/api/v1/sessions";
+        flags = [ "reject_named_group" ];
+        refuse_measurements = [ ];
+      }] ++ named;
       ${cfg.names.verify} = named;
     };
   } // lib.optionalAttrs (acme != null) {
     acme.tls-alpn-01 = "vsock://2:${toString acme.port}";
   };
+  # A measurement is a build output, so it is filled in by a build rather than
+  # read here.
+  measured = r: "m${toString r.index}";
+  fill = lib.concatStringsSep " | " (
+    map (r: ".groups[${builtins.toJSON r.name}].measurement = \$${measured r}") releases
+    ++ [ ".routes[][] |= (if has(\"refuse_measurements\") then .refuse_measurements = [${
+      lib.concatMapStringsSep ", " (r: "\$${measured r}") (lib.filter (r: r.draining) releases)
+    }] else . end)" ]
+  );
   gatewayJson = pkgs.runCommand "enclavid-gateway.json" { nativeBuildInputs = [ pkgs.jq ]; } ''
-    jq --rawfile m ${image.measurements."api${suffix}"} '.groups.main.measurement = $m' \
+    jq ${lib.concatMapStringsSep " " (r: "--rawfile ${measured r} ${r.built.measurement "api"}") releases} \
+      ${lib.escapeShellArg (if releases == [ ] then "." else fill)} \
       ${pkgs.writeText "enclavid-table.json" (builtins.toJSON table)} >$out
-    jq -e '.groups.main.measurement | test("^[0-9a-f]{96}$")' $out >/dev/null
+    jq -e '[.groups[].measurement] | all(test("^[0-9a-f]{96}$"))' $out >/dev/null
+    # The gateway lets one build on one part carry at most this many groups
+    # (MOST_LABELS_PER_DOMAIN, crates/gateway/src/upstream/mod.rs); past it, a
+    # group's legs are refused and its share of new sessions fails.
+    jq -e '[.groups[].measurement] | group_by(.) | all(length <= 8)' $out >/dev/null || {
+      echo "enclavid.releases: more than 8 run one api build, and the gateway takes at most 8 groups of a build on one host" >&2
+      exit 1
+    }
+    # New sessions are refused by build, so a build draining in one release
+    # would be refused in every other that runs it too.
+    jq -e --argjson open ${lib.escapeShellArg (builtins.toJSON (map (r: r.name) (lib.filter (r: !r.draining) releases)))} '
+      [.routes[][] | .refuse_measurements? // [] | .[]] as $refused
+      | [.groups | to_entries[] | select(.key as $k | $open | index($k)) | .value.measurement]
+      | all(. as $m | $refused | index($m) | not)' $out >/dev/null || {
+      echo "enclavid.releases: a build draining in one release runs undrained in another, and new sessions are refused by build — drain all of them or none" >&2
+      exit 1
+    }
   '';
 
-  bootCvm = pkgs.writeShellApplication {
-    name = "enclavid-boot-cvm";
-    runtimeInputs = [ pkgs.coreutils pkgs.e2fsprogs ];
-    text = "QEMU=${lib.escapeShellArg cfg.qemu}\n" + builtins.readFile ./bin/boot-cvm.sh;
-  };
   pushGateway = pkgs.writeShellApplication {
     name = "enclavid-push-gateway";
     runtimeInputs = [ pkgs.coreutils pkgs.curl pkgs.jq ];
@@ -170,63 +198,59 @@ let
     '' + builtins.readFile ./bin/certificate.sh;
   };
 
-  cvmService = role: c: {
-    description = "Enclavid confidential VM: ${role}";
-    wantedBy = [ "enclavid-fleet.target" ];
-    partOf = [ "enclavid-fleet.target" ];
-    after = [ "enclavid-host.target" ];
-    enableDefaultPath = false;
-    # A guest that cannot come up is tried five times, then left failed for a
-    # person to look at rather than rebooted for ever. Its application ending
-    # powers the guest off, and QEMU exits 0 for that as for any shutdown — so
-    # every exit is a failure here, and only a stop is not.
-    startLimitIntervalSec = 300;
-    startLimitBurst = 5;
-    environment = lib.optionalAttrs (role == "api") { FW_CFG = legPorts; };
-    serviceConfig = {
-      Type = "exec";
-      ExecStart = lib.concatStringsSep " " (
-        [ (lib.getExe bootCvm) role "${imageOf role}" (toString c.cid) c.memory ]
-        ++ lib.optionals (c ? disk) [ c.disk.path c.disk.size ]
-      );
-      Restart = "always";
-      RestartSec = 2;
-      TimeoutStartSec = 120;
-      TimeoutStopSec = 10;
-      StandardInput = "null";
-      LogsDirectory = "enclavid";
-      StateDirectory = "enclavid";
+  releaseServices = r: lib.listToAttrs (map
+    (role: lib.nameValuePair "enclavid-${r.name}-${role}" (fleet.cvmService {
+      name = "${r.name}-${role}";
+      image = r.built.image role;
+      inherit (r.built) qemu;
+      cid = cidOf r role;
+      inherit (cfg.cvms.${role}) memory;
+      # A disk per release: what one release's storage wrote, only that
+      # release's api can open.
+      disk = if role == "storage" then {
+        path = "/var/lib/enclavid/${r.name}/storage.img";
+        state = "enclavid/${r.name}";
+        inherit (cfg.cvms.storage.disk) size;
+      } else null;
+      environment = lib.optionalAttrs (role == "api") { FW_CFG = legPorts r; };
+    }))
+    roles);
+
+  # A role's settings, which every release's guest of that role takes.
+  cvm = role: defaults: mkOption {
+    description = "The ${role} guests' settings.";
+    default = { };
+    type = types.submodule {
+      options = {
+        memory = mkOption {
+          # With its unit: the same string sizes the memory backend, where a
+          # bare number is bytes rather than -m's MiB.
+          type = types.strMatching "[1-9][0-9]*[MG]";
+          default = defaults.memory;
+          description = "Its memory, in MiB or GiB with the unit: 3072M, 3G.";
+        };
+      } // lib.optionalAttrs (defaults ? cid) {
+        cid = mkOption {
+          type = types.ints.between 3 4294967294;
+          default = defaults.cid;
+          description = "Its vsock context ID, unique on the host.";
+        };
+      } // lib.optionalAttrs (defaults ? disk) {
+        disk.size = mkOption {
+          type = types.str;
+          default = defaults.disk.size;
+          description = "How large to make its volume; read only when it is made.";
+        };
+      };
     };
   };
 
-  relayService = name: r: {
-    description = "Enclavid host relay: ${name}";
-    wantedBy = [ "enclavid-host.target" ];
-    partOf = [ "enclavid-host.target" ];
-    enableDefaultPath = false;
-    serviceConfig = {
-      Type = "exec";
-      ExecStart = lib.concatStringsSep " " (
-        [ (lib.getExe' host.host-relay "host-relay") "--listen" r.listen "--to" r.to ]
-        ++ (r.flags or [ ])
-      );
-      Restart = "on-failure";
-      RestartSec = 1;
-      TimeoutStopSec = 15;
-      StandardInput = "null";
-    };
+  # A list other modules add to, and which only the fleet reads.
+  internalList = description: mkOption {
+    type = types.listOf types.str;
+    internal = true;
+    inherit description;
   };
-
-  hatchEnvironment = { HATCH_LISTEN_ADDR = hatchPort; } // (
-    if cfg.hatch.auth == "oidc" then {
-      HATCH_AUTH = "oidc";
-      HATCH_AUTH_OIDC_ISSUER = cfg.hatch.issuer;
-      HATCH_AUTH_OIDC_AUDIENCE = cfg.hatch.audience;
-    } else {
-      HATCH_AUTH = "none";
-      HATCH_AUTH_PRINCIPAL = cfg.hatch.principal;
-    }
-  );
 in
 {
   options.enclavid = {
@@ -259,7 +283,7 @@ in
       default = "production";
       description = ''
         Which images. Every guest writes what it logs to its serial console,
-        /var/log/enclavid/ROLE.serial; debug ones add the kernel's console and
+        /var/log/enclavid/NAME.serial; debug ones add the kernel's console and
         what their dependencies log.
       '';
     };
@@ -336,48 +360,90 @@ in
       default = true;
       description = "Whether the fleet comes up when the host boots.";
     };
-    qemu = mkOption {
-      type = types.str;
-      default = lib.getExe' pkgs.qemu_kvm "qemu-system-x86_64";
-      defaultText = "qemu-system-x86_64 from the images' package set";
-      description = "The QEMU the guests boot under; it has to run SEV-SNP guests.";
-    };
     cvms = {
-      storage = cvm "storage" {
-        cid = 4;
-        memory = "2G";
-        disk = { path = "/var/lib/enclavid/storage.img"; size = "8G"; };
-      };
-      compile-worker = cvm "compile-worker" { cid = 6; memory = "3G"; };
-      execution-worker = cvm "execution-worker" { cid = 5; memory = "3G"; };
-      api = cvm "api" { cid = 3; memory = "3G"; };
-      gateway = cvm "gateway" { cid = 7; memory = "2G"; };
+      storage = cvm "storage" { memory = "2G"; disk.size = "8G"; };
+      compile-worker = cvm "compile-worker" { memory = "3G"; };
+      execution-worker = cvm "execution-worker" { memory = "3G"; };
+      api = cvm "api" { memory = "3G"; };
+      gateway = cvm "gateway" { memory = "2G"; cid = 7; };
     };
-    health = mkOption {
-      type = types.listOf types.str;
+
+    releases = mkOption {
       internal = true;
-      readOnly = true;
-      description = "Where each guest that has one answers its health, as HOST:PORT on the host.";
+      default = { main = { }; };
+      description = ''
+        The releases the gateway serves: this checkout, by default, as `main`.
+        Where a module beside this one puts others — each a full set of guests
+        with host ports and a storage disk of its own, reached under a gateway
+        group of its name.
+      '';
+      type = types.attrsOf (types.submodule {
+        options = {
+          index = mkOption {
+            type = types.ints.between 0 99;
+            default = 0;
+            description = "Fixes the release's guests' vsock context IDs and its host ports.";
+          };
+          src = mkOption {
+            type = types.path;
+            default = ../.;
+            description = "The enclavid tree it is built from.";
+          };
+          draining = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Whether the gateway refuses its build new sessions, while its links still route.";
+          };
+          hatchPort = mkOption {
+            type = types.port;
+            default = fleet.hatchPort;
+            description = "The port of the hatch its api reaches outside through.";
+          };
+          guests = mkOption {
+            type = types.bool;
+            default = true;
+            description = "Whether this host runs the release's guests, or only serves it from its gateway.";
+          };
+          entrances = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = ''
+              The address of the host running the release, where a gateway on
+              another host reaches its api over TCP; null when the gateway runs
+              beside it and reaches it over vsock.
+            '';
+          };
+        };
+      });
     };
-    units = mkOption {
-      type = types.listOf types.str;
+    gateway.enable = mkOption {
       internal = true;
-      readOnly = true;
-      description = "The units meant to stay up once the fleet is: every one but the certificate run.";
+      type = types.bool;
+      default = true;
+      description = "Whether this host runs the gateway, or only releases a gateway elsewhere serves.";
     };
+    health = internalList "Where each guest that has one answers its health, as HOST:PORT on the host.";
+    units = internalList "The units meant to stay up once the fleet is: every one but the certificate run.";
+    memory = internalList "Every guest's memory, for the preflight to sum.";
+    qemus = internalList "Every QEMU a guest boots under, for the preflight to try.";
+    vsockPorts = internalList "Every vsock port on the host something of the fleet listens on.";
   };
 
   config = {
     nixpkgs.hostPlatform = "x86_64-linux";
 
-    enclavid.health = map (relay: lib.removePrefix "tcp:" relays.${relay}.listen) [
-      "api-health"
-      "gateway-health"
-    ];
+    enclavid.health = map (r: lib.removePrefix "tcp:" r.listen)
+      (lib.optional gatewayHere gatewayRelays.gateway-health ++ map (r: (releaseRelays r).health) local);
     enclavid.units =
-      map (role: "enclavid-${role}.service") (lib.attrNames cfg.cvms)
-      ++ map (name: "enclavid-relay-${name}.service") (lib.attrNames relays)
-      ++ [ "enclavid-hatch.service" "enclavid-gateway-push.service" ];
+      lib.optionals gatewayHere [ "enclavid-gateway.service" "enclavid-gateway-push.service" ]
+      ++ lib.optional (local != [ ]) "enclavid-hatch.service"
+      ++ lib.concatMap (r: map (role: "enclavid-${r.name}-${role}.service") roles) local
+      ++ map (name: "enclavid-relay-${name}.service") (lib.attrNames relays);
+    enclavid.memory = lib.optional gatewayHere cfg.cvms.gateway.memory
+      ++ lib.concatMap (_: map (role: cfg.cvms.${role}.memory) roles) local;
+    enclavid.qemus = lib.unique (lib.optional gatewayHere own.qemu ++ map (r: r.built.qemu) local);
+    enclavid.vsockPorts = lib.optional (local != [ ]) (toString fleet.hatchPort)
+      ++ map (r: lib.removePrefix "vsock:" r.listen) (lib.filter (r: lib.hasPrefix "vsock:" r.listen) (lib.attrValues relays));
 
     # system-manager would otherwise take over /etc/passwd and /etc/group.
     services.userborn.enable = false;
@@ -390,15 +456,35 @@ in
     enclavid.acme.tls-alpn-01 = lib.mkIf issue.enable (lib.mkDefault { client = "tcp:127.0.0.1:444"; });
 
     assertions =
-      lib.concatLists (lib.mapAttrsToList
-        (role: settings: map
-          (setting: {
-            assertion = lib.elem setting (cmdline role);
-            message = "enclavid: image/cmdline/${role}/${cfg.variant} no longer carries ${setting}";
-          })
-          settings)
-        carried)
+      lib.concatMap
+        (r: lib.concatLists (lib.mapAttrsToList
+          (role: settings: map
+            (setting: {
+              assertion = lib.elem setting (r.built.cmdline role);
+              message = "enclavid.releases.${r.name}: its image/cmdline/${role}/${cfg.variant} no longer carries ${setting}";
+            })
+            settings)
+          (carried r)))
+        local
+      ++ lib.optionals gatewayHere (map
+        (setting: {
+          assertion = lib.elem setting (own.cmdline "gateway");
+          message = "enclavid: image/cmdline/gateway/${cfg.variant} no longer carries ${setting}";
+        })
+        gatewayCarried)
       ++ [
+        {
+          assertion = lib.all (r: r.guests || r.entrances != null) releases;
+          message = "enclavid.releases: a release whose guests run on another host is reached at its entrances there";
+        }
+        {
+          assertion = lib.all (r: r.guests || gatewayHere) releases;
+          message = "enclavid.releases: a release is run here, or served by the gateway here";
+        }
+        {
+          assertion = gatewayHere || lib.all (r: r.entrances != null) local;
+          message = "enclavid.releases: with the gateway on another host, a release's api is reached at its entrances";
+        }
         {
           assertion = cfg.hatch.auth != "oidc" || (cfg.hatch.issuer != null && cfg.hatch.audience != null);
           message = "enclavid.hatch: auth = \"oidc\" needs issuer and audience";
@@ -408,8 +494,22 @@ in
           message = "enclavid.hatch: auth = \"none\" needs principal";
         }
         {
-          assertion = lib.allUnique (lib.mapAttrsToList (_: c: c.cid) cfg.cvms);
-          message = "enclavid.cvms: every guest needs a vsock context ID of its own";
+          assertion = lib.all (r: builtins.match "[a-z0-9-]{1,32}" r.name != null) releases;
+          message = "enclavid.releases: a release's name is the gateway group it is reached under — 1 to 32 characters of a-z, 0-9 or -";
+        }
+        {
+          assertion = lib.allUnique (map (r: r.index) releases);
+          message = "enclavid.releases: every release needs an index of its own";
+        }
+        {
+          assertion = lib.allUnique (lib.optional gatewayHere cfg.cvms.gateway.cid
+            ++ lib.concatMap (r: map (role: lib.toInt (cidOf r role)) roles) local);
+          message = "enclavid.cvms.gateway.cid: a vsock context ID one of the releases' guests has";
+        }
+        {
+          assertion = lib.allUnique cfg.vsockPorts
+            && lib.allUnique (map (r: r.listen) (lib.filter (r: lib.hasPrefix "tcp:" r.listen) (lib.attrValues relays)));
+          message = "enclavid: two of the relays and hatches listen on one host port";
         }
         {
           assertion = !issue.enable || (acme != null && lib.hasPrefix "tcp:" acme.client);
@@ -417,14 +517,28 @@ in
         }
       ];
 
-    systemd.services = lib.mkMerge [
-      (lib.mapAttrs' (role: c: lib.nameValuePair "enclavid-${role}" (cvmService role c)) cfg.cvms)
-      (lib.mapAttrs' (name: r: lib.nameValuePair "enclavid-relay-${name}" (relayService name r)) relays)
-      {
+    systemd.services = lib.mkMerge ([
+      (lib.mapAttrs' (name: r: lib.nameValuePair "enclavid-relay-${name}" (fleet.relayService name r)) relays)
+      (lib.mkIf (local != [ ]) {
+        enclavid-hatch = fleet.hatchService {
+          name = "shared";
+          port = fleet.hatchPort;
+          src = ../.;
+          settings = cfg.hatch;
+        };
+      })
+      (lib.mkIf gatewayHere {
         # The gateway keeps no configuration across a start: while it is up, its
         # table is pushed — again after every start, since the push is bound to
         # it; and when only the table changes, only the push runs again.
-        enclavid-gateway.unitConfig.Upholds = "enclavid-gateway-push.service";
+        enclavid-gateway = fleet.cvmService
+          {
+            name = "gateway";
+            image = own.image "gateway";
+            inherit (own) qemu;
+            cid = gatewayCid;
+            inherit (cfg.cvms.gateway) memory;
+          } // { unitConfig.Upholds = "enclavid-gateway-push.service"; };
         enclavid-gateway-push = {
           description = "Enclavid: push the gateway its configuration";
           bindsTo = [ "enclavid-gateway.service" ];
@@ -456,25 +570,10 @@ in
             TimeoutStartSec = 600;
           };
         };
+      })
+    ] ++ map releaseServices local);
 
-        enclavid-hatch = {
-          description = "Enclavid hatch: what the guests reach outside";
-          wantedBy = [ "enclavid-host.target" ];
-          partOf = [ "enclavid-host.target" ];
-          enableDefaultPath = false;
-          environment = hatchEnvironment;
-          serviceConfig = {
-            Type = "exec";
-            ExecStart = lib.getExe' host.host-hatch "host-hatch";
-            Restart = "on-failure";
-            RestartSec = 1;
-            StandardInput = "null";
-          };
-        };
-      }
-    ];
-
-    systemd.timers.enclavid-certificate = lib.mkIf issue.enable {
+    systemd.timers.enclavid-certificate = lib.mkIf (issue.enable && gatewayHere) {
       description = "Enclavid: check the gateway's certificate daily";
       wantedBy = [ "enclavid-fleet.target" ];
       partOf = [ "enclavid-fleet.target" ];
@@ -489,7 +588,7 @@ in
     # does not change when the fleet does — and a target is never restarted
     # under the units that are part of it.
     systemd.targets = {
-      enclavid-host.description = "Enclavid host side: the relays and the hatch";
+      enclavid-host.description = "Enclavid host side: the relays and the hatches";
       enclavid-fleet = {
         description = "Enclavid fleet: the confidential VMs, and the host side they reach";
         wants = [ "enclavid-host.target" ];

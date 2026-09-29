@@ -71,16 +71,19 @@ a QEMU that boots SNP guests, memory for every guest, and the public port free.
 What it cannot do is turn any of them on: SEV-SNP is switched on in the
 firmware setup and the host kernel.
 
-Every other setting — the variant, the guests' memory and vsock context IDs,
-the storage disk, where callers reach the gateway, whether the fleet starts at
-boot, which QEMU boots the guests — is an option in `fleet.nix`, with its
-default and what it does.
+Every other setting — the variant, the guests' memory, the storage disk's size,
+where callers reach the gateway, whether the fleet starts at boot — is an option
+in `fleet.nix`, with its default and what it does.
 
 ## What runs
 
+The gateway, and the release it serves — `main`, built from this checkout: api
+and the three guests it reaches.
+
 | unit | what it is |
 | --- | --- |
-| `enclavid-api`, `enclavid-storage`, `enclavid-compile-worker`, `enclavid-execution-worker`, `enclavid-gateway` | the guests |
+| `enclavid-main-api`, `…-storage`, `…-compile-worker`, `…-execution-worker` | the release's guests |
+| `enclavid-gateway` | the gateway's guest |
 | `enclavid-gateway-push` | pushes the gateway its configuration after every start of the gateway |
 | `enclavid-relay-*` | the links between the guests, and from the host into them |
 | `enclavid-hatch` | what the guests reach outside: token checks, registry pulls |
@@ -102,9 +105,10 @@ systemctl status 'enclavid-*'
 journalctl -u enclavid-gateway-push
 ```
 
-Each guest's own log is its serial console, in `/var/log/enclavid/ROLE.serial`;
-with `variant = "debug"` it carries the kernel's console too, and what the
-guests' dependencies log.
+Each guest's own log is its serial console, in
+`/var/log/enclavid/main-ROLE.serial` and `gateway.serial`; with
+`variant = "debug"` it carries the kernel's console too, and what the guests'
+dependencies log.
 
 ## Certificates
 
@@ -153,11 +157,10 @@ one is in place.
 
 ## Updating, rolling back, removing
 
-Build the new commit and switch again. A unit whose definition changed is
-restarted; one that did not is left alone. A new commit changes every guest's
-image, so every guest restarts — and a session a previous api build sealed
-cannot be read by the next one. Storage holds no key; api seals under one bound
-to its own measurement.
+Build and switch again. A unit whose definition changed is restarted; one that
+did not is left alone. A newer commit whose api changed restarts it, and a
+session the previous api build sealed cannot be read by the next one — storage
+holds no key; api seals under one bound to its own measurement.
 
 system-manager keeps the previous generations. To go back to the one before:
 
@@ -178,9 +181,10 @@ to remove it, run the generation's `deactivate`:
 sudo "$(nix-build deploy -A toplevel --arg idKeys ./keys --arg configuration ./fleet.nix)"/bin/deactivate
 ```
 
-The storage disk, `/var/lib/enclavid/storage.img` by default, is left in place.
+The storage disk, `/var/lib/enclavid/main/storage.img`, is left in place.
 
 ## Not here
 
-Several hosts, and two builds side by side while one is rolled out, are yours
-to add.
+Several hosts, and a new release run beside the old one while its sessions
+finish, are yours to add — on the blocks in `lib.nix`, which every module is
+given as `fleet`.

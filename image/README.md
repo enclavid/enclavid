@@ -63,7 +63,7 @@ line change the measurement when they change.
 
 | port | reached by | carries | where it is set |
 |---|---|---|---|
-| 8000 | api → host | the hatch: authorization, OCI pulls, the KBS relay, VCEK | command line |
+| 8000 | api → host | the hatch: authorization, OCI pulls, the KBS relay, VCEK | the launch, fw_cfg |
 | 8001 | api → host | the storage-CVM | the launch, fw_cfg |
 | 8002 | api → host | the compile-worker | the launch, fw_cfg |
 | 8003 | api → host | the execution-worker | the launch, fw_cfg |
@@ -73,13 +73,14 @@ line change the measurement when they change.
 Each outbound port needs something on the host listening there and splicing
 onward to the peer guest; the guest neither knows nor can discover which one.
 
-The three fleet legs' ports are not on api's command line: the host hands
-them to api at launch as fw_cfg entries (`crates/api/src/fleet/legs.rs`), and the
-numbers above are only the ones `deploy/` uses. Putting them in the image
-bound nothing — the host's relay decides where a port leads whatever api
-dials, and what decides whether api talks to a peer is the measurement it pins
-for that leg. Out of the measurement, they let two releases run side by side
-on one host, each api reaching its own peers.
+The ports api dials are not on its command line: the host hands them to api
+at launch as fw_cfg entries (`crates/api/src/fleet/legs.rs`), and the numbers
+above are only the ones `deploy/` uses. Putting them in the image bound
+nothing — the host decides where a port leads whatever api dials; what
+decides whether api talks to a peer is the measurement it pins for that leg,
+and the hatch is believed in nothing it returns. Out of the measurement, they
+let two releases run side by side on one host, each api reaching its own peers
+and its own hatch or a shared one.
 
 **`production` says `console=null`, and the token is load-bearing.** Omitting
 `console=` does NOT produce a silent kernel — it produces a kernel that enables

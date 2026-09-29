@@ -1,1 +1,1 @@
-console=ttyS0 earlyprintk=serial panic=-1 oops=panic sysctl.kernel.yama.ptrace_scope=3 ENCLAVID_ADDRESS_OUT=vsock://2:8000 ENCLAVID_ADDRESS_IN_CLIENT=8443 ENCLAVID_ADDRESS_IN_APPLICANT=8444 ENCLAVID_ADDRESS_IN_HEALTH=8445 ENCLAVID_LOG_LEVEL=info
+console=ttyS0 earlyprintk=serial panic=-1 oops=panic sysctl.kernel.yama.ptrace_scope=3 ENCLAVID_ADDRESS_IN_CLIENT=8443 ENCLAVID_ADDRESS_IN_APPLICANT=8444 ENCLAVID_ADDRESS_IN_HEALTH=8445 ENCLAVID_LOG_LEVEL=info

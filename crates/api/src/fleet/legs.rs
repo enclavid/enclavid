@@ -1,28 +1,32 @@
-//! Where api dials its three fleet legs.
+//! Where api dials its legs: the hatch, and its three fleet peers.
 //!
-//! Each leg is dialed at the host — `vsock://2:PORT`, where a relay the host
-//! runs carries the connection on to the peer's guest. So the host decides
-//! where every dial lands whatever the image says, and a port written into the
-//! measured command line bound nothing. What decides whether api talks to a
-//! peer is the one measurement it pins for that leg (`crate::endorsement`),
-//! checked in the handshake before a byte of a request is sent; a port that
-//! leads anywhere else ends as a refused leg and a false field in the health
-//! answer.
+//! Each leg is dialed at the host — `vsock://2:PORT`. The hatch is the host's
+//! own process; for a peer, a relay the host runs carries the connection on to
+//! the peer's guest. So the host decides where every dial lands whatever the
+//! image says, and a port written into the measured command line bound
+//! nothing. What decides whether api talks to a peer is the one measurement it
+//! pins for that leg (`crate::endorsement`), checked in the handshake before a
+//! byte of a request is sent; a port that leads anywhere else ends as a refused
+//! leg and a false field in the health answer. The hatch is believed in
+//! nothing: what it hands back is checked where it arrives — an endorsement
+//! against the root compiled in, an artifact against its digest.
 //!
 //! So the ports are the launch's, not the image's: two releases can run side by
-//! side on one host, each api's legs reaching its own peers, and neither
-//! measurement carries the host's port plan. They arrive through QEMU's fw_cfg,
-//! one entry per leg under `opt/com.enclavid/`, each a decimal port. Only the
-//! number is the host's — the destination is always the host, fixed here — and
-//! nothing read there reaches the environment, so every other setting stays on
-//! the measured command line.
+//! side on one host, each api's legs reaching its own peers and a hatch of its
+//! own or a shared one, and neither measurement carries the host's port plan.
+//! They arrive through QEMU's fw_cfg, one entry per leg under
+//! `opt/com.enclavid/`, each a decimal port. Only the number is the host's —
+//! the destination is always the host, fixed here — and nothing read there
+//! reaches the environment, so every other setting stays on the measured
+//! command line.
 //!
 //! The dev build dials over TCP and reads whole addresses from its environment.
 
 use safe_logger::{debug, reason, safe};
 
-/// Each leg's address, in the form `fleet_transport` dials.
+/// Each leg's address, in the form `fleet_transport` and `hatch_client` dial.
 pub struct Legs {
+    pub hatch: String,
     pub storage: String,
     pub compile_worker: String,
     pub execution_worker: String,
@@ -31,6 +35,7 @@ pub struct Legs {
 #[cfg(feature = "vsock")]
 pub fn load() -> Legs {
     Legs {
+        hatch: from_launch("hatch-port"),
         storage: from_launch("storage-port"),
         compile_worker: from_launch("compile-worker-port"),
         execution_worker: from_launch("execution-worker-port"),
@@ -40,6 +45,7 @@ pub fn load() -> Legs {
 #[cfg(not(feature = "vsock"))]
 pub fn load() -> Legs {
     Legs {
+        hatch: from_env("ENCLAVID_ADDRESS_OUT"),
         storage: from_env("ENCLAVID_STORAGE_ADDR"),
         compile_worker: from_env("ENCLAVID_COMPILE_WORKER_ADDR"),
         execution_worker: from_env("ENCLAVID_EXECUTION_WORKER_ADDR"),

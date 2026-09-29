@@ -88,13 +88,10 @@ async fn main() {
         });
     }
 
-    let address_out = std::env::var("ENCLAVID_ADDRESS_OUT").unwrap_or_else(|e| {
-        debug!("{e}");
-        safe_logger::error_and_panic!(
-            "api: ENCLAVID_ADDRESS_OUT is not set. Stopping.",
-            reason!("a constant naming a configuration key the host itself supplied")
-        )
-    });
+    // Where each leg is dialed, the hatch's first: the attestation below needs
+    // it. Read from the launch, which talks to nothing.
+    let legs = fleet::legs::load();
+    let address_out = legs.hatch;
 
     // The attestation backend, chosen at compile time — see `endorsement`.
     // FIRST, ahead of the storage-CVM dial below and both listeners: under
@@ -141,9 +138,8 @@ async fn main() {
             .unwrap_or_else(|e| {
                 debug!("{e}");
                 safe_logger::error_and_panic!(
-                    "api: ENCLAVID_ADDRESS_OUT is not a hatch address this build can dial. \
-                     Stopping.",
-                    reason!("a constant naming a configuration key the host itself supplied")
+                    "api: the hatch leg's address is not one this build can dial. Stopping.",
+                    reason!("a constant about an address the host itself supplied")
                 )
             });
         let api_health = api_health.clone();
@@ -200,7 +196,6 @@ async fn main() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_SESSION_TTL_SECS),
     );
-    let legs = fleet::legs::load();
     let (session_backend, cache_backend) =
         build_storage_backends(legs.storage, attestor.clone(), api_health.clone()).await;
     info!("api: storage-CVM connected", reason!("a constant"));

@@ -39,11 +39,14 @@ else
   fail "no /dev/vhost-vsock — load the vhost_vsock module"
 fi
 
-if [ -x "$QEMU" ] && "$QEMU" -object help 2>/dev/null | grep -q sev-snp-guest; then
-  ok "QEMU boots SNP guests ($QEMU)"
-else
-  fail "$QEMU does not boot SNP guests — it is missing, or has no sev-snp-guest object"
-fi
+# One for each release the fleet runs, since each boots under its own.
+for qemu in "${QEMUS[@]}"; do
+  if [ -x "$qemu" ] && "$qemu" -object help 2>/dev/null | grep -q sev-snp-guest; then
+    ok "QEMU boots SNP guests ($qemu)"
+  else
+    fail "$qemu does not boot SNP guests — it is missing, or has no sev-snp-guest object"
+  fi
+done
 
 # A guest's memory is a count of MiB or GiB with its unit; fleet.nix allows
 # nothing else.

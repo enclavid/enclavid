@@ -3,12 +3,15 @@
 # over — plus only what the host decides: memory, the vsock CID, a disk, where
 # the serial console goes, and fw_cfg entries for a guest that reads them.
 #
-#   [FW_CFG="name=value ..."] enclavid-boot-cvm ROLE IMAGE CID MEMORY [DISK SIZE]
-role=$1 image=$2 cid=$3 memory=$4
+#   [FW_CFG="name=value ..."] enclavid-boot-cvm NAME IMAGE CID MEMORY [DISK SIZE]
+#
+# NAME is this guest's among the host's — a release's api is one of several —
+# and names only its console.
+name=$1 image=$2 cid=$3 memory=$4
 
 # Each entry becomes the fw_cfg file opt/com.enclavid/NAME, outside the
 # measurement. Which role reads which is that role's business: api takes the
-# ports of its fleet legs from them.
+# ports of its legs from them.
 fwcfg=()
 read -ra entries <<<"${FW_CFG:-}"
 for entry in "${entries[@]}"; do
@@ -30,7 +33,7 @@ if [ $# -ge 6 ]; then
 fi
 
 # One generation kept: the console of the boot before this one.
-log=/var/log/enclavid/$role.serial
+log=/var/log/enclavid/$name.serial
 [ ! -e "$log" ] || mv -f "$log" "$log.1"
 
 read -ra args <<<"$(tr '\n' ' ' <"$image/qemu-args")"

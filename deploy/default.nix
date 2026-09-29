@@ -24,7 +24,10 @@ let
   };
   toplevel = systemManager.makeSystemConfig {
     modules = [ ./fleet.nix configuration ];
-    specialArgs = { inherit image host; };
+    specialArgs = {
+      inherit host;
+      fleet = import ./lib.nix { inherit lib pkgs idKeys host; };
+    };
   };
   cfg = toplevel.config.enclavid;
   inherit (pkgs) lib;
@@ -33,8 +36,8 @@ let
     name = "enclavid-preflight";
     runtimeInputs = [ pkgs.coreutils pkgs.gawk pkgs.gnugrep pkgs.iproute2 ];
     text = ''
-      QEMU=${lib.escapeShellArg cfg.qemu}
-      MEMORY=(${lib.escapeShellArgs (lib.mapAttrsToList (_: c: c.memory) cfg.cvms)})
+      QEMUS=(${lib.escapeShellArgs cfg.qemus})
+      MEMORY=(${lib.escapeShellArgs cfg.memory})
       LISTEN=${lib.escapeShellArg cfg.public.listen}
     '' + builtins.readFile ./bin/preflight.sh;
   };
