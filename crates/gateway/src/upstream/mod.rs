@@ -238,9 +238,6 @@ pub struct Upstreams {
     /// Which labels hold each key domain. Carried into every table after, and
     /// pruned to what each push declares.
     domains: Arc<Domains>,
-    /// Where an ACME validator's TLS-ALPN-01 connection is carried, as of this
-    /// push — see `crate::listener::acme`.
-    tls_alpn_01: Option<Arc<str>>,
 }
 
 /// Where one request goes: a group, the build that must be proved there, and
@@ -300,7 +297,6 @@ impl Upstreams {
             rules: HashMap::new(),
             tuning: None,
             domains: Arc::new(Domains::default()),
-            tls_alpn_01: None,
         }
     }
 
@@ -397,7 +393,6 @@ impl Upstreams {
             rules: declared.rules().clone(),
             tuning: Some(tuning),
             domains: self.domains.clone(),
-            tls_alpn_01: declared.acme().tls_alpn_01.as_deref().map(Arc::from),
         }
     }
 
@@ -467,11 +462,6 @@ impl Upstreams {
     /// Every timeout, limit and retry count, as of this push.
     pub fn tuning(&self) -> Option<&crate::config::Tuning> {
         self.tuning.as_ref()
-    }
-
-    /// Where an ACME validator's TLS-ALPN-01 connection is carried, if anywhere.
-    pub fn tls_alpn_01(&self) -> Option<&Arc<str>> {
-        self.tls_alpn_01.as_ref()
     }
 
     /// How many groups the host has declared. For the one line that says a push

@@ -2,6 +2,10 @@
 //!
 //! - `key` — the key this role serves on, derived from the chip so that it is
 //!   the same at every boot;
+//! - `account` — the ACME account key, derived beside it, which signs this
+//!   role's requests to an ACME issuer; the one request for a certificate among
+//!   them is for the serving key, as the request `/csr` hands out for other
+//!   issuers is;
 //! - `tls` — the certificate over it that a browser is shown, and the resolver
 //!   that follows the names each push declares;
 //! - `attest` — the quote over that key, served beside the certificate;
@@ -31,6 +35,7 @@
 //! stays: the chain, the VCEK issued to the chip the report names, the platform
 //! posture, the TCB floor, and the exact measurement the caller asked for.
 
+pub mod account;
 pub mod attest;
 pub mod key;
 pub mod tls;

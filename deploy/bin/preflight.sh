@@ -67,21 +67,24 @@ else
   fail "memory: the guests take ${wanted} MiB, and ${total} MiB less ${spare} for the host is not enough"
 fi
 
-case "$LISTEN" in
-  tcp:*)
-    port=${LISTEN##*:}
-    holder=$(ss -Hltnp "sport = :$port" 2>/dev/null || true)
-    if [ -z "$holder" ]; then
-      ok "port $port is free for the public relay"
-    elif grep -q host-relay <<<"$holder"; then
-      ok "port $port is held by the fleet's own relay"
-    elif $root; then
-      fail "port $port is held by another process: $holder"
-    else
-      note "port $port is held, and only root can see by what"
-    fi
-    ;;
-esac
+# Each gateway's public listener.
+for listen in "${LISTENS[@]}"; do
+  case "$listen" in
+    tcp:*)
+      port=${listen##*:}
+      holder=$(ss -Hltnp "sport = :$port" 2>/dev/null || true)
+      if [ -z "$holder" ]; then
+        ok "port $port is free for a public relay"
+      elif grep -q host-relay <<<"$holder"; then
+        ok "port $port is held by the fleet's own relay"
+      elif $root; then
+        fail "port $port is held by another process: $holder"
+      else
+        note "port $port is held, and only root can see by what"
+      fi
+      ;;
+  esac
+done
 
 if [ "$failed" -gt 0 ]; then
   echo "this host cannot run the fleet: $failed check(s) failed"

@@ -28,10 +28,10 @@
 //! ## Then the hello, and whose connection it is
 //!
 //! A connection whose hello offers `acme-tls/1` and nothing else is an ACME
-//! validator's, and is carried unopened to wherever the push says answers it —
-//! or, if it says nowhere, refused as a protocol this role does not speak is.
-//! Every other connection is this role's, and the handshake carries on from the
-//! hello rustls has already read. See `acme`.
+//! validator's, and is answered from what the host armed for the name it asks
+//! for — or, if nothing is armed, refused as a protocol this role does not
+//! speak is. Every other connection is this role's, and the handshake carries
+//! on from the hello rustls has already read. See `acme`.
 //!
 //! ## Why the name is remembered rather than read from the request
 //!
@@ -80,7 +80,7 @@
 //! caller can stall is bounded:
 //!
 //! - the PROXY header and the TLS handshake after it, together, by
-//!   `handshake_timeout` — and a validator's connection, carried, whole;
+//!   `handshake_timeout` — which is the whole of a validator's connection;
 //! - an HTTP/1 request head, by `header_timeout` — which the HTTP library
 //!   applies only if it is given a timer, and otherwise drops without a word.
 //!   Its clock starts as soon as the library waits for the next request, so on
@@ -108,7 +108,7 @@
 //! responding, so what it cuts is a caller that stopped reading or never stops
 //! writing.
 
-mod acme;
+pub mod acme;
 mod body;
 pub mod certificate;
 mod source;
@@ -155,6 +155,7 @@ pub async fn serve(
     listener: fleet_transport::Listener,
     hop: Arc<Hop>,
     tls: TlsAcceptor,
+    challenges: Arc<acme::Challenges>,
     table: watch::Receiver<Arc<Upstreams>>,
 ) -> ! {
     let places = Arc::new(Semaphore::new(0));
@@ -166,6 +167,7 @@ pub async fn serve(
                 one(
                     hop.clone(),
                     tls.clone(),
+                    challenges.clone(),
                     sources.clone(),
                     table.clone(),
                     accepted,
@@ -291,8 +293,8 @@ enum Unopened {
     Header(source::Malformed),
     Crowded,
     Handshake(std::io::Error),
-    /// An ACME validator's, whose carrying failed — see `acme`.
-    Carried(std::io::Error),
+    /// An ACME validator's, whose handshake did not finish — see `acme`.
+    Answered(std::io::Error),
 }
 
 impl std::fmt::Display for Unopened {
@@ -301,7 +303,7 @@ impl std::fmt::Display for Unopened {
             Unopened::Header(e) => write!(f, "{e}"),
             Unopened::Crowded => f.write_str("its source holds its share of places"),
             Unopened::Handshake(e) => write!(f, "no handshake: {e}"),
-            Unopened::Carried(e) => write!(f, "an ACME validator's, and carrying it failed: {e}"),
+            Unopened::Answered(e) => write!(f, "an ACME validator's, answered: {e}"),
         }
     }
 }
@@ -310,20 +312,16 @@ impl std::fmt::Display for Unopened {
 async fn one(
     hop: Arc<Hop>,
     tls: TlsAcceptor,
+    challenges: Arc<acme::Challenges>,
     sources: Arc<Sources>,
     table: watch::Receiver<Arc<Upstreams>>,
     accepted: fleet_transport::Accepted,
 ) -> Result<(), Infallible> {
     let fleet_transport::Accepted { stream, peer } = accepted;
-    // The numbers this connection runs by, and where it goes if it is an ACME
-    // validator's, from the table current as it was taken. The listener opens
-    // only once a push has arrived, so there is one.
-    let (tuning, validated_at) = {
-        let current = table.borrow();
-        let Some(tuning) = current.tuning().map(|tuning| tuning.listener) else {
-            return Ok(());
-        };
-        (tuning, current.tls_alpn_01().cloned())
+    // The numbers this connection runs by, from the table current as it was
+    // taken. The listener opens only once a push has arrived, so there is one.
+    let Some(tuning) = table.borrow().tuning().map(|tuning| tuning.listener) else {
+        return Ok(());
     };
     // Its descriptor, counted for as long as it is open — see `crate::budget`.
     let Some(_descriptor) = crate::budget::take() else {
@@ -332,29 +330,27 @@ async fn one(
     };
     // The source's share is taken before the handshake, so a source over it
     // costs no TLS work, and held until this function returns.
-    // An ACME validator's connection is carried whole inside this bound — see
-    // `acme` — and comes out of it with nothing left to serve.
+    // An ACME validator's connection is a handshake and nothing more, so it
+    // is answered whole inside this bound — see `acme` — and comes out of it
+    // with nothing left to serve.
     let opened = tokio::time::timeout(tuning.handshake_timeout, async move {
         let (origin, mut stream) = source::read(stream).await.map_err(Unopened::Header)?;
         let admitted = sources
             .admit(origin, tuning.connections_per_source)
             .ok_or(Unopened::Crowded)?;
-        // The bytes are kept only while there is somewhere to carry them, and
-        // each path lets go of what it does not use before it waits again.
-        let hello = acme::hello(&mut stream, validated_at.is_some())
+        let hello = acme::hello(&mut stream)
             .await
             .map_err(Unopened::Handshake)?;
-        let validator = hello.validates();
-        let acme::Hello { accepted, read } = hello;
-        if let Some(to) = validated_at.filter(|_| validator) {
-            drop(accepted);
-            acme::carry(stream, &read, &to)
+        let answer = acme::validates(&hello)
+            .then(|| challenges.answering(hello.client_hello().server_name()))
+            .flatten();
+        if let Some(answer) = answer {
+            acme::answered(hello, stream, answer)
                 .await
-                .map_err(Unopened::Carried)?;
+                .map_err(Unopened::Answered)?;
             return Ok(None);
         }
-        drop(read);
-        let settled = tokio_rustls::StartHandshake::from_parts(accepted, stream)
+        let settled = tokio_rustls::StartHandshake::from_parts(hello, stream)
             .into_stream(tls.config().clone())
             .await
             .map_err(Unopened::Handshake)?;
@@ -364,14 +360,14 @@ async fn one(
     let (_admitted, settled) = match opened {
         Ok(Ok(Some(opened))) => opened,
         Ok(Ok(None)) => {
-            debug!("the connection from {peer} was an ACME validator's, carried through");
+            debug!("the connection from {peer} was an ACME validator's, answered");
             return Ok(());
         }
         Ok(Err(e)) => {
             // Ordinary: a caller that went away mid-handshake, one that arrived
             // before the first push and found no certificate, a source that
-            // already holds its share, or a validator's connection whose
-            // carrying failed — nothing answering there, or a leg cut short.
+            // already holds its share, or a validator that left before its
+            // handshake was done.
             debug!("the connection from {peer} was let go: {e}");
             return Ok(());
         }
@@ -459,6 +455,62 @@ fn ended_as<E: std::fmt::Display>(ended: Result<(), E>, peer: &str) {
     }
 }
 
+/// What the tests here and in `acme` share.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::sync::Arc;
+
+    use tokio_rustls::rustls::client::danger::{
+        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    };
+    use tokio_rustls::rustls::crypto::CryptoProvider;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use tokio_rustls::rustls::{self, DigitallySignedStruct, SignatureScheme};
+
+    /// Accepts any certificate, and any handshake signature by it: what is
+    /// under test is how this role carries requests, or answers a validator,
+    /// not its identity. Signatures are not checked because checking one parses
+    /// the certificate as a client would, and a client refuses the critical
+    /// extension a validator's answer carries.
+    #[derive(Debug)]
+    pub(crate) struct AnyCertificate(pub(crate) Arc<CryptoProvider>);
+
+    impl ServerCertVerifier for AnyCertificate {
+        fn verify_server_cert(
+            &self,
+            _: &CertificateDer<'_>,
+            _: &[CertificateDer<'_>],
+            _: &ServerName<'_>,
+            _: &[u8],
+            _: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.0.signature_verification_algorithms.supported_schemes()
+        }
+    }
+}
+
 /// End to end over a real socket: this role's own accept loop, the TLS that
 /// terminates on a certificate it minted, and an api stand-in behind. TCP arm
 /// only, because the leg to the stand-in is TCP here.
@@ -473,12 +525,10 @@ mod tests {
     use http_body_util::{BodyExt, Empty, Full};
     use hyper::StatusCode;
     use hyper::client::conn::http2::SendRequest;
-    use tokio_rustls::rustls::client::danger::{
-        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-    };
-    use tokio_rustls::rustls::crypto::CryptoProvider;
-    use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-    use tokio_rustls::rustls::{self, DigitallySignedStruct, SignatureScheme};
+    use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
+    use tokio_rustls::rustls::{self};
+
+    use super::testing::AnyCertificate;
 
     use crate::route::MEASUREMENT;
     use crate::upstream::tests::{A, B, FIRST, SECOND, pushed};
@@ -580,23 +630,29 @@ mod tests {
     /// under both names. Returns where to reach it, the SPKI its quote binds,
     /// and the sender a test pushes a later table through.
     async fn gateway(api: &str) -> (String, Vec<u8>, watch::Sender<Arc<Upstreams>>) {
-        let (at, identity, pushes, _) = serving(api).await;
-        (at, identity.spki().to_vec(), pushes)
+        let serving = serving(api).await;
+        (serving.at, serving.identity.spki().to_vec(), serving.pushes)
     }
 
-    /// [`gateway`], and what it leaves out: the key this role serves on, and
-    /// the sender issued certificates arrive through.
-    async fn serving(
-        api: &str,
-    ) -> (
-        String,
-        Arc<Identity>,
-        watch::Sender<Arc<Upstreams>>,
-        watch::Sender<Vec<crate::identity::tls::Issued>>,
-    ) {
+    /// [`gateway`], and what it leaves out.
+    struct Serving {
+        at: String,
+        /// The key this role serves on.
+        identity: Arc<Identity>,
+        pushes: watch::Sender<Arc<Upstreams>>,
+        /// Where issued certificates arrive.
+        issue: watch::Sender<Vec<crate::identity::tls::Issued>>,
+        /// What a validator is answered from.
+        challenges: Arc<acme::Challenges>,
+        /// The ACME account's key, as the JWK this role serves.
+        account: String,
+    }
+
+    async fn serving(api: &str) -> Serving {
         let identity = Arc::new(Identity::generated().unwrap());
         let spki = identity.spki().to_vec();
         let evidence = attest::evidence(spki.clone(), &crate::identity::attestor()).unwrap();
+        let account = crate::identity::account::Account::generated().unwrap();
 
         let first = Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&table(api, A)));
         let (pushes, current) = watch::channel(Arc::new(first));
@@ -612,11 +668,17 @@ mod tests {
 
         let listener = fleet_transport::bind("127.0.0.1:0").await.unwrap();
         let at = listener.local_addr().unwrap().to_string();
-        let hop = Arc::new(Hop::new(current.clone(), evidence));
+        let hop = Arc::new(Hop::new(
+            current.clone(),
+            evidence,
+            Bytes::copy_from_slice(account.jwk().as_bytes()),
+        ));
+        let challenges = Arc::new(acme::Challenges::new());
         tokio::spawn(serve(
             listener,
             hop,
             acceptor(presented.clone()),
+            challenges.clone(),
             current.clone(),
         ));
 
@@ -644,7 +706,14 @@ mod tests {
         .await
         .expect("the first table is acted on and its member responds");
 
-        (at, identity, pushes, issue)
+        Serving {
+            at,
+            identity,
+            pushes,
+            issue,
+            challenges,
+            account: account.jwk().to_owned(),
+        }
     }
 
     /// Certificates an issuer signed for this role's key are what a caller
@@ -658,7 +727,15 @@ mod tests {
         let ca = crate::identity::tls::tests::issuer();
         let layouts: [&[&[&str]]; 2] = [&[&[FIRST, SECOND]], &[&[FIRST], &[SECOND]]];
         for layout in layouts {
-            let (at, identity, _pushes, issue) = serving(&api).await;
+            // The table's sender is held: dropped, nothing would follow the
+            // certificates any more.
+            let Serving {
+                at,
+                identity,
+                issue,
+                pushes: _pushes,
+                ..
+            } = serving(&api).await;
             let pems: Vec<String> = layout
                 .iter()
                 .map(|names| {
@@ -716,47 +793,6 @@ mod tests {
         }
     }
 
-    /// What answers a validator on the host, standing in for an ACME client: a
-    /// TLS server offering `acme-tls/1` alone, on a certificate of its own.
-    /// Returns where it listens and that certificate.
-    async fn acme_client() -> (String, CertificateDer<'static>) {
-        let key = rcgen::KeyPair::generate().unwrap();
-        let answered_with = rcgen::CertificateParams::new(vec![FIRST.to_owned()])
-            .unwrap()
-            .self_signed(&key)
-            .unwrap()
-            .der()
-            .clone();
-        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![answered_with.clone()],
-            rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
-        )
-        .unwrap();
-        config.alpn_protocols = vec![b"acme-tls/1".to_vec()];
-        let acceptor = TlsAcceptor::from(Arc::new(config));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let at = listener.local_addr().unwrap().to_string();
-        tokio::spawn(async move {
-            while let Ok((socket, _)) = listener.accept().await {
-                let acceptor = acceptor.clone();
-                tokio::spawn(async move {
-                    // Held until the validator closes, as a client answering
-                    // one does.
-                    if let Ok(mut tls) = acceptor.accept(socket).await {
-                        let _ = tokio::io::AsyncReadExt::read(&mut tls, &mut [0u8; 1]).await;
-                    }
-                });
-            }
-        });
-        (at, answered_with)
-    }
-
     /// A handshake with this role offering `protocols`, from a source of its
     /// own: the protocol agreed, if any, and the certificate presented — or
     /// nothing if the handshake was refused.
@@ -779,90 +815,44 @@ mod tests {
         ))
     }
 
-    /// A validator's connection — `acme-tls/1` and nothing else — is carried to
-    /// whatever the push says answers it, and handshakes there. One offering
-    /// anything beside it is this role's own; and with nowhere to carry it, a
-    /// validator's is refused, as a protocol this role does not speak is.
+    /// A validator's connection — `acme-tls/1` and nothing else — for a name
+    /// the host armed is answered here, as RFC 8737 asks. With nothing armed it
+    /// is refused, as a protocol this role does not speak is; and one offering
+    /// anything beside `acme-tls/1` is served as any other.
     #[tokio::test]
-    async fn a_validator_s_connection_is_carried_to_what_answers_it() {
+    async fn a_validator_is_answered_for_an_armed_name() {
+        const KEY_AUTHORIZATION: &str = "token_-0.thumbprint_-0";
         let api = api().await;
-        let (at, _, pushes, _) = serving(&api).await;
-        let (answering, answered_with) = acme_client().await;
+        let Serving {
+            at,
+            challenges,
+            pushes: _pushes,
+            ..
+        } = serving(&api).await;
 
         assert!(
             offering(&at, &[b"acme-tls/1"]).await.is_none(),
-            "nowhere to carry it yet, so the handshake is refused"
+            "nothing armed yet, so the handshake is refused"
         );
 
-        let answered = tuned(
-            &api,
-            A,
-            &format!(r#""acme": {{ "tls-alpn-01": "{answering}" }}, {TUNING}"#),
-        );
-        let next = pushes.borrow().replaced(&pushed(&answered));
-        pushes.send_replace(Arc::new(next));
-
-        let (agreed, presented) = offering(&at, &[b"acme-tls/1"])
-            .await
-            .expect("carried, and answered there");
+        challenges.arm(FIRST, KEY_AUTHORIZATION).unwrap();
+        let (agreed, presented) = offering(&at, &[b"acme-tls/1"]).await.expect("answered");
         assert_eq!(agreed.as_deref(), Some(&b"acme-tls/1"[..]));
-        assert_eq!(presented, answered_with, "answered there, not here");
+        assert!(super::acme::tests::answers_for(
+            &presented,
+            FIRST,
+            KEY_AUTHORIZATION
+        ));
 
         let (agreed, presented) = offering(&at, &[b"acme-tls/1", b"h2"])
             .await
-            .expect("served here");
+            .expect("served as any other");
         assert_eq!(agreed.as_deref(), Some(&b"h2"[..]));
-        assert_ne!(presented, answered_with, "this role's own");
-    }
-
-    /// Accepts any certificate: what is under test is how this role carries
-    /// requests, not its identity.
-    #[derive(Debug)]
-    struct AnyCertificate(Arc<CryptoProvider>);
-
-    impl ServerCertVerifier for AnyCertificate {
-        fn verify_server_cert(
-            &self,
-            _: &CertificateDer<'_>,
-            _: &[CertificateDer<'_>],
-            _: &ServerName<'_>,
-            _: &[u8],
-            _: UnixTime,
-        ) -> Result<ServerCertVerified, rustls::Error> {
-            Ok(ServerCertVerified::assertion())
-        }
-
-        fn verify_tls12_signature(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            dss: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            rustls::crypto::verify_tls12_signature(
-                message,
-                cert,
-                dss,
-                &self.0.signature_verification_algorithms,
-            )
-        }
-
-        fn verify_tls13_signature(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            dss: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            rustls::crypto::verify_tls13_signature(
-                message,
-                cert,
-                dss,
-                &self.0.signature_verification_algorithms,
-            )
-        }
-
-        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-            self.0.signature_verification_algorithms.supported_schemes()
-        }
+        assert!(!super::acme::tests::answers_for(
+            &presented,
+            FIRST,
+            KEY_AUTHORIZATION
+        ));
     }
 
     /// A source no other caller in this process has, so that a test's own
@@ -1636,6 +1626,43 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    /// The ACME account's key is served beside the quote, on the same
+    /// connection, needing no api behind it — and only read, never posted to.
+    #[tokio::test]
+    async fn the_account_key_is_served_beside_the_quote() {
+        let Serving {
+            at,
+            account,
+            pushes: _pushes,
+            ..
+        } = serving(&api().await).await;
+        let mut caller = caller(&at, FIRST, 4 << 20).await;
+
+        let response = ask(
+            &mut caller,
+            Request::get(format!("https://{FIRST}{}", crate::identity::account::PATH))
+                .body(Empty::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[hyper::header::CONTENT_TYPE],
+            crate::identity::account::CONTENT_TYPE
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, account.as_bytes());
+
+        let response = ask(
+            &mut caller,
+            Request::post(format!("https://{FIRST}{}", crate::identity::account::PATH))
+                .body(Empty::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     /// A caller that stops reading must not stall anyone else.

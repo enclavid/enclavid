@@ -38,7 +38,7 @@ let
     text = ''
       QEMUS=(${lib.escapeShellArgs cfg.qemus})
       MEMORY=(${lib.escapeShellArgs cfg.memory})
-      LISTEN=${lib.escapeShellArg cfg.public.listen}
+      LISTENS=(${lib.escapeShellArgs (lib.mapAttrsToList (_: g: g.listen) cfg.gateways)})
     '' + builtins.readFile ./bin/preflight.sh;
   };
   switch = pkgs.writeShellApplication {

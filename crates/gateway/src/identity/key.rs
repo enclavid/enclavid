@@ -73,7 +73,32 @@ const PURPOSE: &[u8] = b"enclavid.gateway.serving-key.v1";
 /// could present that certificate as this role. So a key derived from this
 /// asks for none and takes none — see [`Identity::public`].
 #[cfg(not(feature = "sev-snp"))]
-const NO_CHIP: [u8; 32] = *b"a developer build has no chip...";
+pub(super) const NO_CHIP: [u8; 32] = *b"a developer build has no chip...";
+
+/// A P-256 key derived from the chip's key for `purpose`, as PKCS#8 — wiped
+/// when dropped, as the scalar it came from is.
+///
+/// The curve has to land on a valid scalar, so the derivation tries again with
+/// the next counter on the vanishingly rare occasion that it does not. Every
+/// key this role derives goes through here, each under a purpose of its own, so
+/// no two can be the same key.
+pub(super) fn derived_pkcs8(
+    chip: &[u8; 32],
+    purpose: &[u8],
+) -> Result<p256::pkcs8::SecretDocument, String> {
+    for counter in 0u8..8 {
+        let mut info = purpose.to_vec();
+        info.push(counter);
+        let scalar = Zeroizing::new(enclavid_crypto::kdf::derive_key(chip, &info));
+
+        let Ok(secret) = p256::SecretKey::from_slice(&scalar[..]) else {
+            continue;
+        };
+        return p256::pkcs8::EncodePrivateKey::to_pkcs8_der(&secret)
+            .map_err(|e| format!("encode the derived key: {e}"));
+    }
+    Err("the derivation found no valid key in eight tries".into())
+}
 
 /// The key this process serves on.
 ///
@@ -96,25 +121,12 @@ impl Identity {
     ///
     /// `chip` is what the firmware derived for this guest. The curve is P-256
     /// because that is what a public authority will issue for and what every
-    /// client verifies; the derivation therefore has to land on a valid scalar,
-    /// and tries again with the next counter on the vanishingly rare occasion
-    /// that it does not.
+    /// client verifies — see [`derived_pkcs8`].
     pub fn derived(chip: &[u8; 32]) -> Result<Identity, String> {
-        for counter in 0u8..8 {
-            let mut info = PURPOSE.to_vec();
-            info.push(counter);
-            let scalar = Zeroizing::new(enclavid_crypto::kdf::derive_key(chip, &info));
-
-            let Ok(secret) = p256::SecretKey::from_slice(&scalar[..]) else {
-                continue;
-            };
-            let der = p256::pkcs8::EncodePrivateKey::to_pkcs8_der(&secret)
-                .map_err(|e| format!("encode the derived key: {e}"))?;
-            let key = rcgen::KeyPair::try_from(der.as_bytes())
-                .map_err(|e| format!("the derived bytes are not a key: {e}"))?;
-            return Identity::holding(key);
-        }
-        Err("the derivation found no valid key in eight tries".into())
+        let der = derived_pkcs8(chip, PURPOSE)?;
+        let key = rcgen::KeyPair::try_from(der.as_bytes())
+            .map_err(|e| format!("the derived bytes are not a key: {e}"))?;
+        Identity::holding(key)
     }
 
     /// The key a developer build serves on: derived as the attested one is,

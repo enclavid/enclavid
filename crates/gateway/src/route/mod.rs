@@ -105,7 +105,7 @@ use safe_logger::debug;
 use tokio::sync::watch;
 
 use crate::config::{Flag, Route};
-use crate::identity::attest;
+use crate::identity::{account, attest};
 use crate::upstream::member::Sent;
 use crate::upstream::{NoRoute, Upstreams};
 
@@ -129,18 +129,31 @@ pub type ResponseBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error
 pub struct Hop {
     table: watch::Receiver<Arc<Upstreams>>,
     evidence: attest::Evidence,
+    /// The ACME account's public key, as a JWK — see `crate::identity::account`.
+    account: Bytes,
 }
 
 impl Hop {
-    pub fn new(table: watch::Receiver<Arc<Upstreams>>, evidence: attest::Evidence) -> Hop {
-        Hop { table, evidence }
+    pub fn new(
+        table: watch::Receiver<Arc<Upstreams>>,
+        evidence: attest::Evidence,
+        account: Bytes,
+    ) -> Hop {
+        Hop {
+            table,
+            evidence,
+            account,
+        }
     }
 
     /// Respond to one request that arrived on a connection which agreed to
     /// `agreed`, its body already bounded by `crate::listener`.
     pub async fn respond(&self, agreed: &str, req: Request<Sent>) -> Response<ResponseBody> {
         if req.uri().path() == attest::PATH {
-            return self.attestation(&req);
+            return own(&req, self.evidence.clone(), attest::CONTENT_TYPE);
+        }
+        if req.uri().path() == account::PATH {
+            return own(&req, self.account.clone(), account::CONTENT_TYPE);
         }
 
         let table = self.table.borrow().clone();
@@ -220,32 +233,33 @@ impl Hop {
         }
         Response::from_parts(head, body.boxed())
     }
+}
 
-    /// This role's own path, responded to without reaching api at all.
-    ///
-    /// It is the one path this build knows: what a request for anything else
-    /// means is the host's configuration, never this file's.
-    fn attestation<B>(&self, req: &Request<B>) -> Response<ResponseBody> {
-        if req.method() != "GET" && req.method() != "HEAD" {
-            let mut refused = refuse(StatusCode::METHOD_NOT_ALLOWED);
-            refused.headers_mut().insert(
-                hyper::header::ALLOW,
-                hyper::header::HeaderValue::from_static("GET, HEAD"),
-            );
-            return refused;
-        }
-        let mut response = Response::new(fixed(self.evidence.clone()));
-        let headers = response.headers_mut();
-        headers.insert(
-            "content-type",
-            attest::CONTENT_TYPE.parse().expect("a constant"),
+/// One of this role's own paths — its quote, or its ACME account's key —
+/// responded to with `body` without reaching api at all.
+///
+/// They are the only paths this build knows: what a request for anything else
+/// means is the host's configuration, never this file's.
+fn own<B>(req: &Request<B>, body: Bytes, content_type: &'static str) -> Response<ResponseBody> {
+    if req.method() != "GET" && req.method() != "HEAD" {
+        let mut refused = refuse(StatusCode::METHOD_NOT_ALLOWED);
+        refused.headers_mut().insert(
+            hyper::header::ALLOW,
+            hyper::header::HeaderValue::from_static("GET, HEAD"),
         );
-        // A quote is checked, not cached: a caller that keeps one and compares
-        // it to a certificate from a later connection is checking a binding
-        // that was true elsewhere.
-        headers.insert("cache-control", "no-store".parse().expect("a constant"));
-        response
+        return refused;
     }
+    let mut response = Response::new(fixed(body));
+    let headers = response.headers_mut();
+    headers.insert(
+        "content-type",
+        hyper::header::HeaderValue::from_static(content_type),
+    );
+    // Both are checked, not cached: a caller that keeps one and compares it to
+    // a certificate from a later connection is checking a binding that was
+    // true elsewhere.
+    headers.insert("cache-control", "no-store".parse().expect("a constant"));
+    response
 }
 
 /// The name this connection agreed to, if it is one this table serves.

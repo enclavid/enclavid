@@ -8,15 +8,15 @@ let
   cfg = config.enclavid;
   inherit (lib) mkOption types;
 
-  # This checkout, which the gateway always comes from.
-  own = fleet.release cfg.variant ../.;
-
   releases = lib.mapAttrsToList
     (name: r: r // { inherit name; built = fleet.release cfg.variant r.src; })
     cfg.releases;
   # The releases whose guests run on this host.
   local = lib.filter (r: r.guests) releases;
-  gatewayHere = cfg.gateway.enable;
+  gateways = lib.mapAttrsToList
+    (name: g: g // { inherit name; built = fleet.release cfg.variant g.src; })
+    cfg.gateways;
+  gatewayHere = gateways != [ ];
   roles = [ "api" "storage" "compile-worker" "execution-worker" ];
 
   # Where a release's guests are, from its index: context IDs from 3 + 10 ×
@@ -51,8 +51,9 @@ let
     applicant-entrance = { listen = entrance r 19444; to = "vsock:${cidOf r "api"}:${apiPort.applicant}"; };
   };
   entrance = r: base: "tcp:${r.entrances}:${portOf r base}";
-  # How the gateway here reaches a release's api: straight into its guest on
-  # this host, or to its entrances wherever they are.
+  # How the gateways here reach a release's api: straight into its guest on
+  # this host, or to its entrances wherever they are. One relay each, which
+  # every gateway dials.
   gatewayToRelease = r: {
     client = {
       listen = "vsock:${portOf r 9443}";
@@ -63,26 +64,36 @@ let
       to = if r.entrances == null then "vsock:${cidOf r "api"}:${apiPort.applicant}" else entrance r 19444;
     };
   };
-  gatewayCid = toString cfg.cvms.gateway.cid;
-  gatewayRelays = {
+  # Where a gateway is, from its index: the context ID 7 + 10 × index — a
+  # release's guests take 3 to 6 of every ten — and host ports as a release's.
+  # Its public listener is where it says: the one callers reach is the one
+  # serving.
+  gatewayCid = g: toString (g.index * 10 + 7);
+  gatewayRelays = g: {
     public = {
-      inherit (cfg.public) listen;
-      to = "vsock:${gatewayCid}:8446";
+      inherit (g) listen;
+      to = "vsock:${gatewayCid g}:8446";
       flags = lib.optional cfg.public.proxyHeader "--proxy-protocol";
     };
-    gateway-health = { listen = "tcp:127.0.0.1:18447"; to = "vsock:${gatewayCid}:8447"; };
-    gateway-config = { listen = "tcp:127.0.0.1:18448"; to = "vsock:${gatewayCid}:8448"; };
-  } // lib.optionalAttrs (acme != null) {
-    # The gateway carries a validator's connection to this port, and the relay
-    # on to the host's ACME client.
-    acme = { listen = "vsock:${toString acme.port}"; to = acme.client; };
+    health = { listen = "tcp:127.0.0.1:${portOf g 18447}"; to = "vsock:${gatewayCid g}:8447"; };
+    config = { listen = "tcp:${fleet.gatewayConfig g.index}"; to = "vsock:${gatewayCid g}:8448"; };
   };
   perRelease = relaysOf: rs: lib.listToAttrs (lib.concatMap
     (r: lib.mapAttrsToList (name: relay: lib.nameValuePair "${r.name}-${name}" relay) (relaysOf r))
     rs);
-  relays = perRelease releaseRelays local
-    // lib.optionalAttrs gatewayHere (gatewayRelays // perRelease gatewayToRelease releases);
-  acme = cfg.acme.tls-alpn-01;
+  perGateway = lib.listToAttrs (lib.concatMap
+    (g: lib.mapAttrsToList (name: relay: lib.nameValuePair "gateway-${g.name}-${name}" relay) (gatewayRelays g))
+    gateways);
+  releaseSide = perRelease releaseRelays local
+    // lib.optionalAttrs gatewayHere (perRelease gatewayToRelease releases);
+  relays = releaseSide // perGateway;
+  # A certificate run arms every gateway here, the one listening where callers
+  # reach — `public.listen` — above all: the issuer's validator comes to it.
+  configs = gs: lib.concatMapStringsSep "," (g: "http://${fleet.gatewayConfig g.index}") gs;
+  reached = lib.filter (g: g.listen == cfg.public.listen) gateways;
+  unreached = lib.filter (g: g.listen != cfg.public.listen) gateways;
+  arming = lib.optionals (reached != [ ]) [ "--reached" (configs reached) ]
+    ++ lib.optionals (unreached != [ ]) [ "--also" (configs unreached) ];
 
   # The guest's own port a relay reaches: the last field of its `to`.
   into = relay: lib.last (lib.splitString ":" relay.to);
@@ -96,11 +107,13 @@ let
     compile-worker = [ "ENCLAVID_COMPILE_WORKER_LISTEN=${into compile}" ];
     execution-worker = [ "ENCLAVID_EXECUTION_WORKER_LISTEN=${into exec}" ];
   };
-  gatewayCarried = with gatewayRelays; [
-    "ENCLAVID_ADDRESS_IN_PUBLIC=${into public}"
-    "ENCLAVID_ADDRESS_IN_HEALTH=${into gateway-health}"
-    "ENCLAVID_ADDRESS_IN_CONFIG=${into gateway-config}"
-  ];
+  gatewayCarried = g:
+    let relay = gatewayRelays g;
+    in [
+      "ENCLAVID_ADDRESS_IN_PUBLIC=${into relay.public}"
+      "ENCLAVID_ADDRESS_IN_HEALTH=${into relay.health}"
+      "ENCLAVID_ADDRESS_IN_CONFIG=${into relay.config}"
+    ];
 
   # What a release's api legs dial: its hatch's port, and the port each peer's
   # relay listens on, as fw_cfg entries (crates/api/src/fleet/legs.rs) — so a
@@ -135,8 +148,6 @@ let
       }] ++ named;
       ${cfg.names.verify} = named;
     };
-  } // lib.optionalAttrs (acme != null) {
-    acme.tls-alpn-01 = "vsock://2:${toString acme.port}";
   };
   # A measurement is a build output, so it is filled in by a build rather than
   # read here.
@@ -170,32 +181,10 @@ let
     }
   '';
 
-  pushGateway = pkgs.writeShellApplication {
-    name = "enclavid-push-gateway";
-    runtimeInputs = [ pkgs.coreutils pkgs.curl pkgs.jq ];
-    text = builtins.readFile ./bin/push-gateway.sh;
-  };
-
   issue = cfg.acme.issue;
-  certificate = pkgs.writeShellApplication {
-    name = "enclavid-certificate";
-    runtimeInputs = [
-      pkgs.coreutils
-      pkgs.curl
-      pkgs.findutils
-      pkgs.gnugrep
-      pkgs.lego
-      pkgs.openssl
-      pushGateway
-    ];
-    text = ''
-      NAMES=(${lib.escapeShellArgs [ cfg.names.verify cfg.names.api ]})
-      RENEW_DAYS=${toString issue.renewDays}
-      EMAIL=${lib.escapeShellArg issue.email}
-      SERVER=${lib.escapeShellArg issue.server}
-      CA_BUNDLE=${lib.escapeShellArg (if issue.caBundle == null then "" else issue.caBundle)}
-      LISTEN=${lib.escapeShellArg (lib.removePrefix "tcp:" acme.client)}
-    '' + builtins.readFile ./bin/certificate.sh;
+  certificate = fleet.certificate {
+    names = [ cfg.names.verify cfg.names.api ];
+    inherit issue;
   };
 
   releaseServices = r: lib.listToAttrs (map
@@ -216,6 +205,69 @@ let
     }))
     roles);
 
+  # A gateway keeps no configuration across a start: while it is up, its table
+  # is pushed — again after every start, since the push is bound to it; and
+  # when only the table changes, only the push runs again. Every gateway takes
+  # the same table.
+  gatewayServices = g:
+    let
+      unit = "enclavid-gateway-${g.name}";
+      port = "http://${fleet.gatewayConfig g.index}";
+    in
+    {
+      ${unit} = fleet.cvmService
+        {
+          name = "gateway-${g.name}";
+          image = g.built.image "gateway";
+          inherit (g.built) qemu;
+          cid = gatewayCid g;
+          inherit (cfg.cvms.gateway) memory;
+        } // { unitConfig.Upholds = "${unit}-push.service"; };
+      "${unit}-push" = {
+        description = "Enclavid: push the gateway ${g.name} its configuration";
+        bindsTo = [ "${unit}.service" ];
+        after = [ "${unit}.service" ];
+        enableDefaultPath = false;
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${lib.getExe fleet.pushGateway} ${port} ${gatewayJson}";
+          TimeoutStartSec = 150;
+        };
+      };
+    } // lib.optionalAttrs issue.enable {
+      # After every push — so after every start of the gateway, whose keys a
+      # new build changes — at every switch, which starts it, and every six
+      # hours, by its timer. A run that fails is tried again a quarter of an
+      # hour later, unless the issuer refused to validate the names: refusals
+      # in a row get the account paused for them, so one waits for the next
+      # check, or a restart by hand. Nothing of the account is kept here: its
+      # key is the gateway's, and the issuer finds the account by it on every
+      # run.
+      "enclavid-certificate-${g.name}" = {
+        description = "Enclavid: keep the gateway ${g.name} on an issued certificate";
+        wantedBy = [ "${unit}-push.service" ];
+        # After every gateway's push, not only its own: the one callers reach
+        # opens its public listener at its first push.
+        after = map (o: "enclavid-gateway-${o.name}-push.service") gateways;
+        enableDefaultPath = false;
+        serviceConfig = {
+          Type = "oneshot";
+          # This gateway's certificate, validated through the gateway callers
+          # reach, and pushed to it with its table.
+          ExecStart = lib.concatStringsSep " " (
+            [ (lib.getExe certificate) "--for" port ] ++ arming ++ [ "--push" gatewayJson ]
+          );
+          Restart = "on-failure";
+          RestartSec = "15min";
+          RestartPreventExitStatus = 3;
+          StateDirectory = "enclavid/certificates";
+          StateDirectoryMode = "0700";
+          TimeoutStartSec = 600;
+        };
+      };
+    };
+
   # A role's settings, which every release's guest of that role takes.
   cvm = role: defaults: mkOption {
     description = "The ${role} guests' settings.";
@@ -228,12 +280,6 @@ let
           type = types.strMatching "[1-9][0-9]*[MG]";
           default = defaults.memory;
           description = "Its memory, in MiB or GiB with the unit: 3072M, 3G.";
-        };
-      } // lib.optionalAttrs (defaults ? cid) {
-        cid = mkOption {
-          type = types.ints.between 3 4294967294;
-          default = defaults.cid;
-          description = "Its vsock context ID, unique on the host.";
         };
       } // lib.optionalAttrs (defaults ? disk) {
         disk.size = mkOption {
@@ -306,14 +352,19 @@ in
     acme.issue = {
       enable = lib.mkEnableOption ''
         issuing and renewing the gateway's certificate from an ACME certificate
-        authority, validated over TLS-ALPN-01 through the gateway. The
-        certificate is checked daily and after every start of the gateway, and
-        issued again when it lapses within `renewDays`, is for another key than
-        the gateway's, or does not cover both names
+        authority, to an account whose key is the gateway's own, validated over
+        TLS-ALPN-01 by the gateway. The certificate is checked every six hours
+        and after every start of the gateway, and issued again when it lapses
+        within `renewDays` or its issuer asks, is for another key than the
+        gateway's, does not cover both names, or came from another `server`
       '';
-      email = mkOption {
-        type = types.str;
-        description = "The ACME account's contact.";
+      acceptTerms = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Agreement to the certificate authority's terms of service, which the
+          gateway's account is opened under. Issuance needs it.
+        '';
       };
       server = mkOption {
         type = types.str;
@@ -332,29 +383,6 @@ in
         description = "Issue again once fewer days than this remain.";
       };
     };
-    acme.tls-alpn-01 = mkOption {
-      default = null;
-      description = ''
-        The host's ACME client, when it validates the names over TLS-ALPN-01:
-        the gateway carries a validator's connection to it, and it answers.
-        Set by `acme.issue` to the client it runs; unset otherwise, and then
-        such a connection is refused.
-      '';
-      type = types.nullOr (types.submodule {
-        options = {
-          client = mkOption {
-            type = types.str;
-            example = "tcp:127.0.0.1:444";
-            description = "Where the ACME client listens for the validator, as host-relay names it.";
-          };
-          port = mkOption {
-            type = types.port;
-            default = 444;
-            description = "The vsock port on the host the gateway carries the connection to.";
-          };
-        };
-      });
-    };
     startAtBoot = mkOption {
       type = types.bool;
       default = true;
@@ -365,7 +393,7 @@ in
       compile-worker = cvm "compile-worker" { memory = "3G"; };
       execution-worker = cvm "execution-worker" { memory = "3G"; };
       api = cvm "api" { memory = "3G"; };
-      gateway = cvm "gateway" { memory = "2G"; cid = 7; };
+      gateway = cvm "gateway" { memory = "2G"; };
     };
 
     releases = mkOption {
@@ -416,11 +444,37 @@ in
         };
       });
     };
-    gateway.enable = mkOption {
+    gateways = mkOption {
       internal = true;
-      type = types.bool;
-      default = true;
-      description = "Whether this host runs the gateway, or only releases a gateway elsewhere serves.";
+      default = { main = { }; };
+      description = ''
+        The gateways this host runs: this checkout's, by default, as `main`,
+        where `public.listen` says. Where a module beside this one puts others
+        — each a guest of its own, from its own tree, with a context ID and
+        host ports fixed by its index and its public listener where it says —
+        or none, on a host whose releases a gateway elsewhere serves. Every one
+        takes the same table and keeps a certificate of its own; the one callers
+        reach is the one serving.
+      '';
+      type = types.attrsOf (types.submodule {
+        options = {
+          index = mkOption {
+            type = types.ints.between 0 99;
+            default = 0;
+            description = "Fixes the gateway's vsock context ID and its host ports.";
+          };
+          src = mkOption {
+            type = types.path;
+            default = ../.;
+            description = "The enclavid tree it is built from.";
+          };
+          listen = mkOption {
+            type = types.str;
+            default = cfg.public.listen;
+            description = "Where its public listener is reached, as host-relay names an address.";
+          };
+        };
+      });
     };
     health = internalList "Where each guest that has one answers its health, as HOST:PORT on the host.";
     units = internalList "The units meant to stay up once the fleet is: every one but the certificate run.";
@@ -433,15 +487,15 @@ in
     nixpkgs.hostPlatform = "x86_64-linux";
 
     enclavid.health = map (r: lib.removePrefix "tcp:" r.listen)
-      (lib.optional gatewayHere gatewayRelays.gateway-health ++ map (r: (releaseRelays r).health) local);
+      (map (g: (gatewayRelays g).health) gateways ++ map (r: (releaseRelays r).health) local);
     enclavid.units =
-      lib.optionals gatewayHere [ "enclavid-gateway.service" "enclavid-gateway-push.service" ]
+      lib.concatMap (g: [ "enclavid-gateway-${g.name}.service" "enclavid-gateway-${g.name}-push.service" ]) gateways
       ++ lib.optional (local != [ ]) "enclavid-hatch.service"
       ++ lib.concatMap (r: map (role: "enclavid-${r.name}-${role}.service") roles) local
       ++ map (name: "enclavid-relay-${name}.service") (lib.attrNames relays);
-    enclavid.memory = lib.optional gatewayHere cfg.cvms.gateway.memory
+    enclavid.memory = map (_: cfg.cvms.gateway.memory) gateways
       ++ lib.concatMap (_: map (role: cfg.cvms.${role}.memory) roles) local;
-    enclavid.qemus = lib.unique (lib.optional gatewayHere own.qemu ++ map (r: r.built.qemu) local);
+    enclavid.qemus = lib.unique (map (g: g.built.qemu) gateways ++ map (r: r.built.qemu) local);
     enclavid.vsockPorts = lib.optional (local != [ ]) (toString fleet.hatchPort)
       ++ map (r: lib.removePrefix "vsock:" r.listen) (lib.filter (r: lib.hasPrefix "vsock:" r.listen) (lib.attrValues relays));
 
@@ -450,10 +504,6 @@ in
 
     # The device every guest is reached through, at every boot.
     environment.etc."modules-load.d/enclavid.conf".text = "vhost_vsock\n";
-
-    # The ACME client `acme.issue` runs listens here, for the gateway to carry
-    # validators to.
-    enclavid.acme.tls-alpn-01 = lib.mkIf issue.enable (lib.mkDefault { client = "tcp:127.0.0.1:444"; });
 
     assertions =
       lib.concatMap
@@ -466,12 +516,14 @@ in
             settings)
           (carried r)))
         local
-      ++ lib.optionals gatewayHere (map
-        (setting: {
-          assertion = lib.elem setting (own.cmdline "gateway");
-          message = "enclavid: image/cmdline/gateway/${cfg.variant} no longer carries ${setting}";
-        })
-        gatewayCarried)
+      ++ lib.concatMap
+        (g: map
+          (setting: {
+            assertion = lib.elem setting (g.built.cmdline "gateway");
+            message = "enclavid.gateways.${g.name}: its image/cmdline/gateway/${cfg.variant} no longer carries ${setting}";
+          })
+          (gatewayCarried g))
+        gateways
       ++ [
         {
           assertion = lib.all (r: r.guests || r.entrances != null) releases;
@@ -502,9 +554,13 @@ in
           message = "enclavid.releases: every release needs an index of its own";
         }
         {
-          assertion = lib.allUnique (lib.optional gatewayHere cfg.cvms.gateway.cid
-            ++ lib.concatMap (r: map (role: lib.toInt (cidOf r role)) roles) local);
-          message = "enclavid.cvms.gateway.cid: a vsock context ID one of the releases' guests has";
+          assertion = lib.all (g: builtins.match "[a-z0-9-]{1,32}" g.name != null) gateways
+            && lib.allUnique (map (g: g.index) gateways);
+          message = "enclavid.gateways: every gateway needs an index of its own, and a name of 1 to 32 characters of a-z, 0-9 or -";
+        }
+        {
+          assertion = lib.all (name: !(releaseSide ? ${name})) (lib.attrNames perGateway);
+          message = "enclavid.releases: a release named gateway-<a gateway's name> would share its relays' names";
         }
         {
           assertion = lib.allUnique cfg.vsockPorts
@@ -512,8 +568,8 @@ in
           message = "enclavid: two of the relays and hatches listen on one host port";
         }
         {
-          assertion = !issue.enable || (acme != null && lib.hasPrefix "tcp:" acme.client);
-          message = "enclavid.acme.issue: its ACME client listens on TCP, so acme.tls-alpn-01.client is a tcp: address";
+          assertion = !issue.enable || issue.acceptTerms;
+          message = "enclavid.acme.issue: the gateway's account is opened under the certificate authority's terms of service — read them and set acceptTerms = true";
         }
       ];
 
@@ -527,62 +583,23 @@ in
           settings = cfg.hatch;
         };
       })
-      (lib.mkIf gatewayHere {
-        # The gateway keeps no configuration across a start: while it is up, its
-        # table is pushed — again after every start, since the push is bound to
-        # it; and when only the table changes, only the push runs again.
-        enclavid-gateway = fleet.cvmService
-          {
-            name = "gateway";
-            image = own.image "gateway";
-            inherit (own) qemu;
-            cid = gatewayCid;
-            inherit (cfg.cvms.gateway) memory;
-          } // { unitConfig.Upholds = "enclavid-gateway-push.service"; };
-        enclavid-gateway-push = {
-          description = "Enclavid: push the gateway its configuration";
-          bindsTo = [ "enclavid-gateway.service" ];
-          after = [ "enclavid-gateway.service" ];
-          enableDefaultPath = false;
-          serviceConfig = {
-            Type = "oneshot";
-            RemainAfterExit = true;
-            ExecStart = "${lib.getExe pushGateway} ${gatewayJson}";
-            TimeoutStartSec = 150;
-          };
-        };
+    ] ++ map releaseServices local ++ map gatewayServices gateways);
 
-        # After every push — so after every start of the gateway, whose key a
-        # new build changes — and daily, by its timer. The relay that carries a
-        # validator to the ACME client is its own to start: a push can run it
-        # before the switch has started a relay new to this generation.
-        enclavid-certificate = lib.mkIf issue.enable {
-          description = "Enclavid: keep the gateway on an issued certificate";
-          wantedBy = [ "enclavid-gateway-push.service" ];
-          wants = [ "enclavid-relay-acme.service" ];
-          after = [ "enclavid-gateway-push.service" "enclavid-relay-acme.service" ];
-          enableDefaultPath = false;
-          serviceConfig = {
-            Type = "oneshot";
-            ExecStart = "${lib.getExe certificate} ${gatewayJson}";
-            StateDirectory = [ "enclavid/acme" "enclavid/certificates" ];
-            StateDirectoryMode = "0700";
-            TimeoutStartSec = 600;
-          };
+    # Every six hours, which is how often Let's Encrypt asks to be asked when a
+    # certificate should be renewed — an early renewal it asks for ahead of
+    # revoking some is seen within the day it gives.
+    systemd.timers = lib.mkIf issue.enable (lib.listToAttrs (map
+      (g: lib.nameValuePair "enclavid-certificate-${g.name}" {
+        description = "Enclavid: check the gateway ${g.name}'s certificate every six hours";
+        wantedBy = [ "enclavid-fleet.target" ];
+        partOf = [ "enclavid-fleet.target" ];
+        timerConfig = {
+          OnCalendar = "00/6:00";
+          RandomizedDelaySec = "30min";
+          Persistent = true;
         };
       })
-    ] ++ map releaseServices local);
-
-    systemd.timers.enclavid-certificate = lib.mkIf (issue.enable && gatewayHere) {
-      description = "Enclavid: check the gateway's certificate daily";
-      wantedBy = [ "enclavid-fleet.target" ];
-      partOf = [ "enclavid-fleet.target" ];
-      timerConfig = {
-        OnCalendar = "daily";
-        RandomizedDelaySec = "1h";
-        Persistent = true;
-      };
-    };
+      gateways));
 
     # Members join a target through their own `wantedBy`, so a target's text
     # does not change when the fleet does — and a target is never restarted

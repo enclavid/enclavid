@@ -24,8 +24,8 @@
 //! thing ahead of the handshake is a PROXY protocol header the host's first hop
 //! writes, naming who dialled: `crate::listener` reads it, then starts the TLS
 //! session on the same stream — unless the hello offers nothing but ACME's
-//! `acme-tls/1`, which is an issuer validating a name, and is carried unopened
-//! to whatever the host says answers it. See `crate::listener::acme`.
+//! `acme-tls/1`, which is an issuer validating a name, and is answered from what
+//! the host armed for it. See `crate::listener::acme`.
 //!
 //! That is also why there is one public listener rather than one per name. From
 //! outside there is one TLS session per connection, and the name it agreed on is
@@ -51,8 +51,9 @@
 //! build speaks plain HTTP on both legs, because there is no host between the two
 //! processes to protect anything from.
 //!
-//! Nothing is served from here but this role's own evidence — see
-//! `crate::identity::attest`. Whatever else it carries is compiled into the
+//! Nothing is served from here but this role's own evidence and the key of its
+//! ACME account — see `crate::identity::attest` and `crate::identity::account`.
+//! Whatever else it carries is compiled into the
 //! build behind it, beside the handlers it calls, so one launch digest covers
 //! both. Terminating the session here is still what makes that worth anything — a
 //! terminator can replace whatever is served over it, so it has to be measured,
@@ -61,7 +62,7 @@
 //! What this role reads of what it carries is little, and fixed: the PROXY
 //! header ahead of a connection, the protocols its hello offers, the marker a
 //! link carries at the head of a
-//! path, its own evidence's path and the method asked of it, the host a
+//! path, its own two paths and the method asked of them, the host a
 //! request names — its target's authority and its `Host`, compared to the name
 //! the connection agreed to — a header of its own, the build a caller names,
 //! and the method and path the name's rules match against. What it takes off
@@ -129,27 +130,35 @@ fn required(key: &'static str) -> String {
     })
 }
 
-/// The key this build serves on.
+/// The key this build serves on, and the ACME account key its certificates are
+/// issued to.
 ///
-/// Derived from what the chip gives this guest, so it is the same key at every
-/// boot and a certificate issued for it outlives a restart — see
-/// `crate::identity::key`.
+/// Both derived from what the chip gives this guest, each for its own purpose,
+/// so they are the same keys at every boot: a certificate issued for the one
+/// outlives a restart, and a CAA record naming the other goes on naming this
+/// build — see `crate::identity::key` and `crate::identity::account`.
 #[cfg(feature = "sev-snp")]
-fn serving_key() -> Result<identity::key::Identity, String> {
+fn keys() -> Result<(identity::key::Identity, identity::account::Account), String> {
     let chip = zeroize::Zeroizing::new(
         enclavid_attestation::derive_seal_key()
             .map_err(|e| format!("the chip did not return a key to derive from: {e}"))?,
     );
-    identity::key::Identity::derived(&chip)
+    Ok((
+        identity::key::Identity::derived(&chip)?,
+        identity::account::Account::derived(&chip)?,
+    ))
 }
 
 /// A developer build has no chip, so it derives from a stand-in that is no
 /// secret — see `crate::identity::key::Identity::no_chip`. The path is the same
-/// one the attested build takes, which is the point; what the key may not have
-/// is an issued certificate.
+/// one the attested build takes, which is the point; what the keys may not
+/// have is an issued certificate, or an account anything is issued to.
 #[cfg(not(feature = "sev-snp"))]
-fn serving_key() -> Result<identity::key::Identity, String> {
-    identity::key::Identity::no_chip()
+fn keys() -> Result<(identity::key::Identity, identity::account::Account), String> {
+    Ok((
+        identity::key::Identity::no_chip()?,
+        identity::account::Account::no_chip()?,
+    ))
 }
 
 /// Every loop of this role's own is awaited HERE, on the main task.
@@ -204,14 +213,16 @@ async fn main() -> std::convert::Infallible {
     // worth anything, and the reason this cannot be done on the host. The
     // certificate around it comes later, when a push says which names to mint
     // it over; the key outlives every one of them, and every restart — see
-    // `crate::identity::key`.
-    let identity = Arc::new(serving_key().unwrap_or_else(|e| {
+    // `crate::identity::key`. The account key beside it is derived with it,
+    // and stays as close.
+    let (identity, account) = keys().unwrap_or_else(|e| {
         debug!("{e}");
         safe_logger::error_and_panic!(
-            "gateway: cannot settle the key this role would serve on. Stopping.",
+            "gateway: cannot settle the keys this role would serve on and sign with. Stopping.",
             reason!("a constant reporting a platform state the host provisioned")
         )
-    }));
+    });
+    let (identity, account) = (Arc::new(identity), Arc::new(account));
 
     // The evidence that goes with that key, minted once and before the bind for
     // the same reason: a caller is asked to delegate its choice of api build to
@@ -248,8 +259,15 @@ async fn main() -> std::convert::Infallible {
             )
         });
 
-    let hop = Arc::new(route::Hop::new(current.clone(), evidence));
+    let hop = Arc::new(route::Hop::new(
+        current.clone(),
+        evidence,
+        bytes::Bytes::copy_from_slice(account.jwk().as_bytes()),
+    ));
     let tls = listener::certificate::acceptor(presented);
+    // What a validator is answered with, armed through the configuration port
+    // and read by the public listener — see `crate::listener::acme`.
+    let challenges = Arc::new(listener::acme::Challenges::new());
 
     // Awaited together, and none of them ever returns — see the note above.
     // The first to end takes the process with it, which is what "this role has
@@ -261,10 +279,17 @@ async fn main() -> std::convert::Infallible {
         }) => ended,
         ended = config::push::serve(
             config_port,
-            config::push::Port::new(table, descriptors, identity.clone(), issued),
+            config::push::Port::new(
+                table,
+                descriptors,
+                identity.clone(),
+                account,
+                challenges.clone(),
+                issued,
+            ),
         ) => ended,
         ended = listener::certificate::follow(current.clone(), accepted, identity, certificate) => ended,
-        ended = public(public_addr, current, hop, tls, health) => ended,
+        ended = public(public_addr, current, hop, tls, challenges, health) => ended,
     }
 }
 
@@ -343,6 +368,7 @@ async fn public(
     mut table: watch::Receiver<Arc<upstream::Upstreams>>,
     hop: Arc<route::Hop>,
     tls: tokio_rustls::TlsAcceptor,
+    challenges: Arc<listener::acme::Challenges>,
     health: Arc<fleet_transport::health::Health>,
 ) -> std::convert::Infallible {
     if table.changed().await.is_err() {
@@ -367,5 +393,5 @@ async fn public(
         reason!("a constant, emitted once at boot before any session exists")
     );
     health.declare_healthy();
-    listener::serve(listener, hop, tls, table).await
+    listener::serve(listener, hop, tls, challenges, table).await
 }

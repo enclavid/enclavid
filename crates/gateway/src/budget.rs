@@ -8,9 +8,8 @@
 //! the new ones are open side by side, each by its own tuning, and together
 //! they can need more than either did.
 //!
-//! So every public connection, every leg to api, and the leg an ACME
-//! validator's connection is carried on also takes one permit from here, for as
-//! long as it holds its descriptor. Within one tuning the push
+//! So every public connection and every leg to api also takes one permit from
+//! here, for as long as it holds its descriptor. Within one tuning the push
 //! check keeps this from running out; across a change, this is what holds.
 //! What it refuses when it does is new work — a connection, a leg — and never
 //! the configuration and health ports, whose descriptors are counted apart.

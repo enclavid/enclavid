@@ -41,25 +41,6 @@ struct RawConfig {
     /// `crate::identity::tls::issued`.
     #[serde(default)]
     certificates: Vec<String>,
-    /// Where the connections an ACME validator opens are carried, by the
-    /// challenge they validate. Absent, such a connection is refused as any
-    /// other this role cannot serve.
-    #[serde(default)]
-    acme: Acme,
-}
-
-/// Where an ACME validator's connections are carried, by challenge.
-///
-/// Only where. Which connections are a validator's this role tells from what
-/// each connection itself offers, and no push can widen that — see
-/// `crate::listener::acme`.
-#[derive(Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct Acme {
-    /// TLS-ALPN-01, RFC 8737: whatever answers the challenge, which holds it
-    /// where this role does not.
-    #[serde(rename = "tls-alpn-01", default)]
-    pub tls_alpn_01: Option<String>,
 }
 
 /// A rule for the requests one name receives: which of them it matches, and
@@ -252,11 +233,6 @@ impl ValidatedConfig {
     pub fn certificates(&self) -> &[String] {
         &self.raw.certificates
     }
-
-    /// Where an ACME validator's connections are carried.
-    pub fn acme(&self) -> &Acme {
-        &self.raw.acme
-    }
 }
 
 /// Every timeout, limit and retry count this role runs by.
@@ -288,7 +264,7 @@ pub struct ListenerTuning {
     /// a leg to api, so this, times `connections`, is what bounds legs.
     pub streams_per_connection: u32,
     /// How long the PROXY header and the TLS handshake may take, together —
-    /// and an ACME validator's connection, the whole of its carrying.
+    /// which is the whole of an ACME validator's connection.
     #[serde(rename = "handshake_timeout_ms", deserialize_with = "millis")]
     pub handshake_timeout: Duration,
     /// How long an HTTP/1 request head may take to arrive.
@@ -714,10 +690,6 @@ impl RawConfig {
             }
         }
 
-        if let Some(addr) = &self.acme.tls_alpn_01 {
-            fleet_transport::check_dial_addr(addr).map_err(|e| format!("acme.tls-alpn-01: {e}"))?;
-        }
-
         Ok(())
     }
 }
@@ -773,32 +745,6 @@ mod tests {
             got.rules().is_empty(),
             "no rules unless the push gives some"
         );
-    }
-
-    /// An ACME validator's connections go where the push says, if it says: an
-    /// address the transport could dial, under a challenge this build knows.
-    #[test]
-    fn acme_says_where_a_challenge_it_knows_is_answered() {
-        assert!(
-            parse(&push()).unwrap().acme().tls_alpn_01.is_none(),
-            "nowhere unless the push says"
-        );
-
-        let got = parse(&with_acme(r#"{ "tls-alpn-01": "127.0.0.1:444" }"#)).unwrap();
-        assert_eq!(got.acme().tls_alpn_01.as_deref(), Some(at(444).as_str()));
-
-        for (acme, said) in [
-            (r#"{ "tls-alpn-01": "nowhere" }"#, "acme.tls-alpn-01"),
-            (r#"{ "http-01": "127.0.0.1:80" }"#, "unknown field"),
-        ] {
-            let err = parse(&with_acme(acme)).err().unwrap();
-            assert!(err.contains(said), "{acme}: {err}");
-        }
-    }
-
-    /// [`push`], with `acme` as its `acme` member.
-    fn with_acme(acme: &str) -> String {
-        push().replacen('{', &format!("{{ \"acme\": {acme},"), 1)
     }
 
     /// The members of a group are interchangeable, so the two names need not

@@ -65,6 +65,42 @@ rec {
     };
   };
 
+  # Where the host reaches a gateway's configuration port, as HOST:PORT, by the
+  # gateway's index: where its table is pushed and its requests to an ACME
+  # issuer are signed.
+  gatewayConfig = index: "127.0.0.1:${toString (18448 + 100 * index)}";
+
+  # Pushes a gateway, at the configuration port given, its table and the issued
+  # certificates on disk for the key it serves on.
+  pushGateway = pkgs.writeShellApplication {
+    name = "enclavid-push-gateway";
+    runtimeInputs = [ pkgs.coreutils pkgs.curl pkgs.jq pkgs.openssl ];
+    text = builtins.readFile ./bin/push-gateway.sh;
+  };
+
+  # Keeps a gateway on a certificate issued to its own ACME account for
+  # `names`, from the directory `issue` — `enclavid.acme.issue` — names. Which
+  # gateway, which ones answer the issuer's validation, and where the
+  # certificate goes are the run's arguments: see bin/certificate.sh.
+  certificate = { names, issue }: pkgs.writeShellApplication {
+    name = "enclavid-certificate";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.curl
+      pkgs.gnugrep
+      pkgs.jq
+      pkgs.openssl
+      pkgs.util-linux
+      pushGateway
+    ];
+    text = ''
+      NAMES=(${lib.escapeShellArgs names})
+      RENEW_DAYS=${toString issue.renewDays}
+      SERVER=${lib.escapeShellArg issue.server}
+      CA_BUNDLE=${lib.escapeShellArg (if issue.caBundle == null then "" else issue.caBundle)}
+    '' + builtins.readFile ./bin/certificate.sh;
+  };
+
   relayService = name: r: {
     description = "Enclavid host relay: ${name}";
     wantedBy = [ "enclavid-host.target" ];

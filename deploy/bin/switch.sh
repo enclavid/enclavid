@@ -26,13 +26,31 @@ for unit in $(systemctl list-units --all --plain --no-legend 'enclavid-*' | awk 
   systemctl reset-failed "$unit"
 done
 
+# The certificate runs. Only its own gateway's push wants a run, so the
+# activation starts one along with a push it starts, and not one new to this
+# switch beside a push already up — as when issuance is first turned on; and one
+# that failed before this switch is to try again now. A run in progress, or
+# waiting a quarter of an hour to run again, is left to it.
+mapfile -t certificates < <(systemctl list-unit-files --no-legend 'enclavid-certificate*.service' | awk '{print $1}')
+for unit in "${certificates[@]}"; do
+  case "$(systemctl show -p ActiveState --value "$unit")" in
+    inactive | failed) systemctl start --no-block "$unit" ;;
+  esac
+done
+
+# Everything starting is waited for — a certificate run too, but not its wait
+# to be tried again: it serves nobody meanwhile, see below.
 for _ in $(seq 180); do
-  systemctl list-units --all --plain --no-legend 'enclavid-*' | grep -q ' activating ' || break
+  systemctl list-units --all --plain --no-legend 'enclavid-*' | awk '
+    $3 == "activating" && !($1 ~ /^enclavid-certificate/ && $4 ~ /^auto-restart/) { starting = 1 }
+    END { exit !starting }' || break
   sleep 1
 done
 
+# The certificate runs aside, which are said below and fail nothing.
 failing() {
-  systemctl list-units --all --plain --no-legend --state=failed 'enclavid-*' | awk '{print $1}'
+  systemctl list-units --all --plain --no-legend --state=failed 'enclavid-*' |
+    awk '$1 !~ /^enclavid-certificate/ {print $1}'
 }
 
 answer=""
@@ -74,6 +92,15 @@ failed=$( { failing; printf '%s\n' "${down[@]}"; } | grep -v '^$' | sort -u || t
 [ -z "$failed" ] || echo "not running: $failed" >&2
 for one in "${unwell[@]}"; do
   echo "not serving: $one" >&2
+done
+# A certificate run depends on an issuer and CAA records the fleet does not
+# control, and the gateway serves on what it holds meanwhile — so one that
+# failed is said, and fails nothing.
+for unit in "${certificates[@]}"; do
+  if [ "$(systemctl show -p Result --value "$unit")" != success ] ||
+    [[ "$(systemctl show -p SubState --value "$unit")" == auto-restart* ]]; then
+    echo "the last certificate run failed: journalctl -u ${unit%.service}; it runs again on its own, or with sudo systemctl restart ${unit%.service}" >&2
+  fi
 done
 if [ -n "$failed" ] || [ ${#unwell[@]} -gt 0 ]; then
   exit 1

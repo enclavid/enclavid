@@ -6,27 +6,41 @@
 //!
 //! ## And certificates an issuer signed
 //!
-//! The host reads a request for a certificate with `GET /csr` — over the names
-//! it pushed, or over any it asks for, pushed or about to be — has an issuer
-//! sign it, and carries the chain in its next push, among the table's
-//! `certificates`. This role never talks to an issuer: the challenge, the
-//! account and whatever the issuer wants happen on the host, and what crosses
-//! this port is public — a request any holder of the names could ask for, and
-//! certificates that are useless without the key they name, which never leaves
-//! this guest. See `crate::identity::tls::issued` for what is checked before
-//! they are presented, and `crate::listener::certificate` for how they are.
+//! The host has a certificate issued for this role's key and carries the chain
+//! in its next push, among the table's `certificates`. See
+//! `crate::identity::tls::issued` for what is checked before they are
+//! presented, and `crate::listener::certificate` for how they are.
 //!
 //! In the push rather than beside it, because a push is the whole of what the
-//! host says: the push after a restart restores the certificates with the rest,
-//! and one without any presents none. Together they cover every name the push
-//! declares, or the push is refused, so no name is served on this role's own
-//! certificate while issued ones are in use. How the names are split among
-//! them is the host's: one for all, one each, or as its issuer handed them
-//! out. A name is added by asking for a request over it —
-//! `GET /csr?names=c.example` — having it issued, and pushing the name and its
-//! certificate together. An issuer validating over TLS-ALPN-01 reaches the
-//! host's ACME client through this role, for names pushed or not yet — see
-//! `crate::listener::acme`.
+//! host says about what is served: the push after a restart restores the
+//! certificates with the rest, and one without any presents none. Together
+//! they cover every name the push declares, or the push is refused, so no name
+//! is served on this role's own certificate while issued ones are in use. How
+//! the names are split among them is the host's: one for all, one each, or as
+//! its issuer handed them out. A name is added by having a certificate issued
+//! over it first, then pushing the name and its certificate together.
+//!
+//! ## And how they are issued
+//!
+//! This role never talks to an issuer — it has no network — but the account the
+//! certificates are issued to is its own: the host runs ACME and asks, on this
+//! port, for each request to be signed, `POST /acme/sign`. What each request
+//! says is written here, and the only request for a certificate is for this
+//! role's key — see `crate::config::acme`. `GET /acme/account` gives the
+//! account's key, whose thumbprint ends every challenge's key authorization.
+//!
+//! The issuer then validates the names over TLS-ALPN-01, on the port callers
+//! reach, and this role answers: the host arms each name with its challenge's
+//! key authorization first, `PUT /acme/tls-alpn-01` — see
+//! `crate::listener::acme`. That is the one thing said here that is not in a
+//! push. It is kept for minutes, forgotten at a restart, and read only by a
+//! validator's handshake, so it changes nothing a caller is served.
+//!
+//! An issuer that is not an ACME one takes a request instead: `GET /csr`, over
+//! the names the host pushed or over any it asks for — pushed or about to be.
+//! Whatever crosses this port for any of this is public: requests any holder
+//! of the names could make, and certificates that are useless without the key
+//! they name, which never leaves this guest.
 //!
 //! ## It is not the health port
 //!
@@ -45,11 +59,16 @@
 //! group names. A certificate for another key is refused, so a push can take
 //! the public surface down at worst, which the host could anyway.
 //!
-//! A push does say one thing more: where an ACME validator's connection is
-//! carried, and so who answers it for the names — who can have a certificate
-//! issued for them. That is the host's to say, as the rest is. Whoever reaches
-//! this port is taken to be the host, which holds the names' address and could
-//! have a certificate issued without this role; which of the host's own
+//! What else this port reads is the host's requests to sign, which `serde_json`
+//! decodes into a closed set of typed requests, and the names it arms, with
+//! their key authorizations. A signature can have this role's key certified
+//! for names the host chose, which it could have asked for with `/csr` in any
+//! case, and nothing more — see `crate::config::acme`. Arming answers a
+//! validator for any account, which says only that whoever runs the order
+//! reaches the name, as the host, carrying every connection, does. Which
+//! accounts may be issued a certificate for a name is its CAA record's to say.
+//!
+//! Whoever reaches this port is taken to be the host; which of the host's own
 //! processes may reach it is the host's to settle, not this role's.
 //!
 //! ## One push at a time
@@ -83,8 +102,10 @@ use hyper_util::rt::TokioIo;
 use safe_logger::{debug, info, reason, safe};
 use tokio::sync::watch;
 
+use crate::identity::account::Account;
 use crate::identity::key::Identity;
 use crate::identity::tls::{self, Issued};
+use crate::listener::acme::Challenges;
 use crate::upstream::Upstreams;
 
 /// Where a table is pushed.
@@ -92,6 +113,15 @@ const PATH: &str = "/config";
 
 /// Where the request for a certificate over the served names is read.
 const REQUEST: &str = "/csr";
+
+/// Where a request to an ACME issuer is signed.
+const SIGN: &str = "/acme/sign";
+
+/// Where the ACME account's key is read.
+const ACCOUNT: &str = "/acme/account";
+
+/// Where a name is armed with its TLS-ALPN-01 challenge's key authorization.
+const ARM: &str = "/acme/tls-alpn-01";
 
 /// The largest push accepted. Far beyond any table a fleet declares, and small
 /// enough that the host cannot use a push to take this role's memory.
@@ -118,6 +148,10 @@ pub struct Port {
     /// The key a certificate request is signed with, and an issued certificate
     /// must be for.
     identity: Arc<Identity>,
+    /// The ACME account the host's requests to an issuer are signed as.
+    account: Arc<Account>,
+    /// What a validator is answered with, by name.
+    challenges: Arc<Challenges>,
     /// Where the accepted issued certificates are published: none, or enough
     /// to cover every name.
     issued: watch::Sender<Vec<Issued>>,
@@ -128,12 +162,16 @@ impl Port {
         current: watch::Sender<Arc<Upstreams>>,
         descriptors: u64,
         identity: Arc<Identity>,
+        account: Arc<Account>,
+        challenges: Arc<Challenges>,
         issued: watch::Sender<Vec<Issued>>,
     ) -> Port {
         Port {
             current,
             descriptors,
             identity,
+            account,
+            challenges,
             issued,
         }
     }
@@ -195,12 +233,74 @@ where
             Err((status, said)) => respond(status, Some(said.into())),
         },
         (&Method::GET, REQUEST) => request(port, req.uri().query()),
+        (&Method::POST, SIGN) => match body(req).await {
+            Ok(body) => sign(port, &body),
+            Err((status, said)) => respond(status, Some(said.into())),
+        },
+        (&Method::GET, ACCOUNT) => account(port),
+        (&Method::PUT, ARM) => match body(req).await {
+            Ok(body) => arm(port, &body),
+            Err((status, said)) => respond(status, Some(said.into())),
+        },
         (_, PATH) => not_allowed("PUT"),
         (_, REQUEST) => not_allowed("GET"),
+        (_, SIGN) => not_allowed("POST"),
+        (_, ACCOUNT) => not_allowed("GET"),
+        (_, ARM) => not_allowed("PUT"),
         _ => respond(
             StatusCode::NOT_FOUND,
-            Some(format!("the paths here are {PATH} and {REQUEST}\n").into()),
+            Some(
+                format!("the paths here are {PATH}, {REQUEST}, {SIGN}, {ACCOUNT} and {ARM}\n")
+                    .into(),
+            ),
         ),
+    }
+}
+
+/// A request to an ACME issuer, signed as this role's account: the JWS to send,
+/// or why it is not signed — see `crate::config::acme`.
+fn sign(port: &Port, body: &[u8]) -> Response<Full<Bytes>> {
+    match crate::config::acme::signed(&port.identity, &port.account, body) {
+        Ok(jws) => Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "application/jose+json")
+            .body(Full::new(Bytes::from(jws)))
+            .expect("a constant response builds"),
+        Err(reason) => respond(StatusCode::BAD_REQUEST, Some(format!("{reason}\n").into())),
+    }
+}
+
+/// The ACME account's key, as a JWK, and its thumbprint — which ends every
+/// challenge's key authorization.
+fn account(port: &Port) -> Response<Full<Bytes>> {
+    let said = format!(
+        r#"{{"jwk":{},"thumbprint":"{}"}}"#,
+        port.account.jwk(),
+        port.account.thumbprint()
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(Full::new(Bytes::from(said)))
+        .expect("a constant response builds")
+}
+
+/// A name and the key authorization a validator for it is answered with.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Arming {
+    name: String,
+    key_authorization: String,
+}
+
+/// Arm a name for a validator — see `crate::listener::acme`.
+fn arm(port: &Port, body: &[u8]) -> Response<Full<Bytes>> {
+    let armed = serde_json::from_slice::<Arming>(body)
+        .map_err(|e| format!("expected {{\"name\": …, \"key_authorization\": …}}: {e}"))
+        .and_then(|arming| port.challenges.arm(&arming.name, &arming.key_authorization));
+    match armed {
+        Ok(()) => respond(StatusCode::NO_CONTENT, None),
+        Err(reason) => respond(StatusCode::BAD_REQUEST, Some(format!("{reason}\n").into())),
     }
 }
 
@@ -242,7 +342,7 @@ where
 
 /// The most names one request may ask for: as many as a public issuer puts in
 /// one certificate.
-const MOST_REQUESTED_NAMES: usize = 100;
+const MOST_REQUESTED_NAMES: usize = crate::config::acme::MOST_NAMES;
 
 /// The request for a certificate, in DER: over the names the query asks for,
 /// or over the names this role serves now if it asks for none.
@@ -445,8 +545,10 @@ mod tests {
             watch::channel(Arc::new(Upstreams::empty(crate::identity::attestor())));
         let (issued, accepted) = watch::channel(Vec::new());
         let identity = Arc::new(Identity::generated().unwrap());
+        let account = Arc::new(Account::generated().unwrap());
+        let challenges = Arc::new(Challenges::new());
         (
-            Port::new(current, descriptors, identity, issued),
+            Port::new(current, descriptors, identity, account, challenges, issued),
             table,
             accepted,
         )
@@ -558,6 +660,9 @@ mod tests {
             (Method::POST, PATH, "PUT"),
             (Method::GET, PATH, "PUT"),
             (Method::PUT, REQUEST, "GET"),
+            (Method::GET, SIGN, "POST"),
+            (Method::POST, ACCOUNT, "GET"),
+            (Method::POST, ARM, "PUT"),
         ] {
             let refused = push(&port, request(method.clone(), path, valid())).await;
             assert_eq!(
@@ -771,6 +876,80 @@ mod tests {
             accepted.borrow_and_update().is_empty(),
             "a push without any presents none"
         );
+    }
+
+    /// A request to an issuer comes back signed as the account whose key the
+    /// port gives — and one this role does not sign is refused, and says why.
+    #[tokio::test]
+    async fn the_account_signs_what_the_host_asks_for() {
+        let (port, _rx, _) = fixture(ENOUGH);
+
+        let resp = push(&port, request(Method::GET, ACCOUNT, "")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let said: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(said["thumbprint"], port.account.thumbprint());
+        assert_eq!(said["jwk"].to_string(), port.account.jwk());
+
+        let asked = r#"{ "post-as-get": { "url": "https://acme.example/order/1",
+                         "nonce": "n0nce", "kid": "https://acme.example/acct/1" } }"#;
+        let resp = push(&port, request(Method::POST, SIGN, asked)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()[hyper::header::CONTENT_TYPE],
+            "application/jose+json"
+        );
+        let jws = resp.into_body().collect().await.unwrap().to_bytes();
+        let (header, payload) = crate::identity::account::tests::opened(
+            &port.account,
+            std::str::from_utf8(&jws).unwrap(),
+        );
+        assert_eq!(header["url"], "https://acme.example/order/1");
+        assert!(payload.is_empty());
+
+        let said = refusal(
+            push(
+                &port,
+                request(Method::POST, SIGN, r#"{ "key-change": {} }"#),
+            )
+            .await,
+        )
+        .await;
+        assert!(said.contains("not a request this role signs"), "{said}");
+    }
+
+    /// A name is armed with a key authorization, and what is not one is
+    /// refused.
+    #[tokio::test]
+    async fn a_name_is_armed_for_a_validator() {
+        let (port, _rx, _) = fixture(ENOUGH);
+        let resp = push(
+            &port,
+            request(
+                Method::PUT,
+                ARM,
+                format!(r#"{{ "name": "{FIRST}", "key_authorization": "token.thumbprint" }}"#),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(port.challenges.answering(Some(FIRST)).is_some());
+
+        for (body, said) in [
+            (
+                format!(r#"{{ "name": "{SECOND}", "key_authorization": "no-dot" }}"#),
+                "key_authorization is not",
+            ),
+            (
+                format!(r#"{{ "name": "{SECOND}", "token": "t" }}"#),
+                "unknown field",
+            ),
+        ] {
+            let said_back =
+                refusal(push(&port, request(Method::PUT, ARM, body.clone())).await).await;
+            assert!(said_back.contains(said), "{body}: {said_back}");
+        }
+        assert!(port.challenges.answering(Some(SECOND)).is_none());
     }
 
     #[tokio::test]

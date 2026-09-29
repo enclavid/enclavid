@@ -84,9 +84,9 @@ fn subject<S: AsRef<str>>(public_names: &[S]) -> Result<rcgen::CertificateParams
 ///
 /// Signed by the key, because that is what proves the requester holds it: an
 /// issuer that accepted a bare public key would certify it for anyone who
-/// asked. Everything else a certificate needs — the issuer's own dealings, the
-/// challenge, the account — happens outside this role, which never talks to an
-/// issuer itself.
+/// asked. It is what `/csr` hands the host for an issuer of its own, and what
+/// the one request for a certificate this role's ACME account signs carries —
+/// see `crate::config::acme`. This role never talks to an issuer itself.
 ///
 /// The names are all it asks for. rcgen gives every certificate a placeholder
 /// common name, and an issuer reads a common name as one more name requested —

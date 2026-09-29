@@ -62,7 +62,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use enclavid_attestation::Attestor;
 
-/// The one path this role itself responds to.
+/// Where this role serves its quote — one of its own two paths, beside its ACME
+/// account's key (`crate::identity::account::PATH`).
 ///
 /// Under `/.well-known/` because that is the reserved space for exactly this —
 /// something about the server rather than about what it serves — and because it

@@ -59,7 +59,6 @@
 //!                                                             refusing the builds it closes
 //!                         -> /api/v1/sessions/{*rest}      -> require_named_group
 //! certificates: chains an issuer signed for this role's key, if any
-//! acme:   tls-alpn-01 -> where a validator's connection is carried, if anywhere
 //! ```
 //!
 //! The certificates are what a browser is shown, in place of this role's
@@ -68,12 +67,10 @@
 //! role's own key, so a wrong one is a certificate refused, never a caller
 //! answered by someone else — see `crate::config::push`.
 //!
-//! `acme` is where the host's ACME client answers a validator, for a challenge
-//! that has to be answered on the public names' own port. Only where: which
-//! connections are a validator's this role tells from each connection itself,
-//! and no push can send an applicant's there — see `crate::listener::acme`. Nor
-//! is it an upstream. Nothing there is attested, and nothing is carried there
-//! that did not come from the host in the first place.
+//! How they are issued is not in the table. The host runs the issuer's protocol
+//! and asks this role to sign its requests, which `acme` writes, and to answer
+//! the issuer's validation, which `crate::listener::acme` does — both on the
+//! configuration port, beside the push.
 //!
 //! The routes are what a name's requests are held to, by method and path, as a
 //! reverse proxy's locations are: where a request may name its group and where
@@ -112,6 +109,7 @@
 //! which. There is a sender to tell, and a table missing one declared build is
 //! a quieter failure than a push that did not apply.
 
+pub mod acme;
 pub mod push;
 mod table;
 #[cfg(test)]
