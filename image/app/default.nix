@@ -28,20 +28,9 @@ let
   pkgs = import nixpkgs { system = "x86_64-linux"; };
   static = pkgs.pkgsStatic;
 
-  # The workspace, minus everything that is an output rather than a source.
-  # Filtering matters for more than build time: an unfiltered `target/` would
-  # put the previous build's artefacts into this build's input hash. The same
-  # holds for `result-2`, `result-3`, … — what `nix-build -o result` names its
-  # links when given several attributes — which would otherwise move every
-  # measurement the next build computes.
-  src = builtins.path {
-    name = "enclavid-src";
-    path = ../..;
-    filter = path: type:
-      let base = baseNameOf path; in
-      !(base == "target" || base == ".git" || base == "node_modules" || base == "result"
-        || builtins.substring 0 7 base == "result-");
-  };
+  # Only what cargo reads, and a fixed seed for the C it compiles — see
+  # workspace.nix for why a measurement needs both.
+  inherit (import ./workspace.nix { inherit (pkgs) lib; }) src fixedSeed;
 
   # ONE cargo invocation over ONE package, and the binaries to keep from it.
   #
@@ -51,8 +40,9 @@ let
   mkPart = { pname, package, binaries, features ? [ ], noDefaultFeatures ? false
            , preBuild ? "", nativeBuildInputs ? [ ] }:
     static.rustPlatform.buildRustPackage {
-      inherit pname src preBuild nativeBuildInputs;
+      inherit pname src nativeBuildInputs;
       version = "0.1.0";
+      preBuild = fixedSeed + preBuild;
 
       # A part that asks for cmake gets the tool and not the hook: a Rust build
       # configures itself, and the hook would try to configure the source tree

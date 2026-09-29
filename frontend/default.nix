@@ -67,7 +67,7 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
     path = ./.;
     filter = path: type:
       let base = baseNameOf path; in
-      !(base == "node_modules" || base == "dist");
+      !(base == "node_modules" || base == "dist" || base == ".DS_Store");
   };
 
   # `pnpm` itself as well as the hook: the hook resolves the binary from PATH
