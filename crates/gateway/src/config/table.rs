@@ -580,8 +580,11 @@ impl RawConfig {
 
         let mut seen: HashMap<String, &str> = HashMap::new();
         // Which group each address is under. One group only: an api instance
-        // under two labels is one key domain wearing two names, and a label no
-        // other session shares is a tag on the session placed there.
+        // under two labels is one set wearing two names, and a label no other
+        // session shares is a tag on the session placed there. A catch for a
+        // mistake more than a bound — an address is a string, and the host can
+        // spell one instance many ways — so the bound on labels is kept where
+        // a leg proves what it reached (`crate::upstream::Domains`).
         let mut under: HashMap<&str, &str> = HashMap::new();
         for (name, table) in &self.names {
             // A certificate is minted over these, so a name no client could
@@ -985,7 +988,7 @@ mod tests {
     }
 
     /// An address belongs to one group: under two labels, one api instance
-    /// would be one key domain wearing two names — and a label that no other
+    /// would be one set wearing two names — and a label that no other
     /// session shares is a tag on the session placed on it. The same group may
     /// list the address under every name.
     #[test]

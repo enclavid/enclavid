@@ -28,21 +28,21 @@
 //! ## A group, not a machine
 //!
 //! api seals a session's state under a key derived from the chip and the
-//! measurement, so every instance of one build on one part can serve any
-//! session of that build. The unit this role routes to is therefore that set —
-//! a GROUP — and its members are interchangeable. A label names the group, so a
-//! link survives the loss of any one machine, and a request whose
-//! member has gone before any of it was sent is served by another.
+//! measurement, so every instance of one build on one part that reads the same
+//! store can serve any session of that build. The unit this role routes to is
+//! therefore that set — a GROUP — and its members are interchangeable. A label
+//! names the group, so a link survives the loss of any one machine, and a
+//! request whose member has gone before any of it was sent is served by another.
 //!
 //! The host declares which instances form a group, and this role does not take
 //! that on trust: every leg proves a chip and a measurement at the handshake,
 //! and a member that proves something other than its group's is refused — see
-//! `crate::upstream::connect`. So is one whose key domain another label already
-//! holds, and a push that lists one address under two groups: a domain is one
-//! group, or a label no other session shares would tag the session placed on it.
-//! Those two are all a leg proves of api's key, which the guest policy goes
-//! into as well — so they are necessary for a group, not sufficient; see
-//! `crate::upstream`.
+//! `crate::upstream::connect`. So is one whose key domain already carries as
+//! many labels as it may, and a push that lists one address under two groups:
+//! labels cost the host nothing, and one that few sessions share would tag the
+//! sessions placed on it. Those two are all a leg proves of api's key, which the
+//! guest policy goes into as well — so they are necessary for a group, not
+//! sufficient; see `crate::upstream`.
 //!
 //! ## The shape
 //!

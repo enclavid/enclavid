@@ -5,8 +5,9 @@
 //! api seals a session's state under a key derived from the chip and the
 //! measurement, and reads that state back from the storage CVM on every
 //! request — it keeps no session in memory. So every instance of one build on
-//! one part can serve any session of that build, and the thing worth naming is
-//! that SET rather than any one machine.
+//! one part that reads the same store can serve any session of that build, and
+//! the thing worth naming is that SET rather than any one machine. Which store
+//! an instance reads the launch decides, and nothing here can prove.
 //!
 //! A label names the group. A link carries it, as does every request after the
 //! one it was placed by, and inside it every member will do: a request whose
@@ -80,12 +81,13 @@
 pub mod balance;
 pub mod member;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use balance::Members;
 
-/// A set of api instances that are one key domain, and so interchangeable.
+/// A set of api instances on one key domain, reading one store, and so
+/// interchangeable.
 struct Group {
     /// What every member must prove, shared with the sets below.
     proof: Arc<Proof>,
@@ -104,12 +106,13 @@ struct Group {
 pub struct Proof {
     /// The build every member is DECLARED to run. [`connect`] proves it.
     measurement: String,
-    /// The group's label, which claims its key domain — see [`Proof::agrees`].
+    /// The group's label, which claims a place in its key domain — see
+    /// [`Proof::agrees`].
     label: String,
     /// The chip the group's members turned out to be on — see
     /// [`Proof::agrees`].
     chip: std::sync::OnceLock<String>,
-    /// Which label holds each key domain, across the whole table.
+    /// Which labels hold each key domain, across the whole table.
     domains: Arc<Domains>,
     /// Set when a push did not carry this proof into its table. A leg of the
     /// replaced table still mid-handshake then claims nothing: its claim would
@@ -122,17 +125,24 @@ pub struct Proof {
     tls: Tls,
 }
 
-/// Which label holds each key domain — a build on a part — across the whole
-/// table, and across pushes.
+/// The most labels one key domain — a build on a part — may carry.
 ///
-/// One label per domain. The instances of one build on one part can serve each
-/// other's sessions, so they are one group whatever the host calls them; a
-/// second label on them would be a name no other session shares, and a session
-/// placed there would carry it like a tag on every request after. So the first
-/// label to prove a domain holds it, and a leg that would prove it for another
-/// is refused.
+/// A label costs the host nothing: an address is a port it runs, so one
+/// instance can stand behind as many as it likes. And a label stays with a
+/// session for its life — every request after the one it was placed by names
+/// it — so a label few sessions share is a tag the host can follow them by;
+/// unbounded, every session could carry one of its own. More than one is still
+/// needed: two full sets of one build, each reading its own store, cannot serve
+/// each other's sessions, and routing has to tell them apart. So a bound, and a
+/// compiled one: this many groups of a build on one part tell the host no more
+/// than that many parts would.
+const MOST_LABELS_PER_DOMAIN: usize = 8;
+
+/// Which labels hold each key domain across the whole table, and across
+/// pushes: the first [`MOST_LABELS_PER_DOMAIN`] to prove it, and a leg that
+/// would prove it for another is refused.
 #[derive(Default)]
-pub struct Domains(std::sync::Mutex<HashMap<(String, String), String>>);
+pub struct Domains(std::sync::Mutex<HashMap<(String, String), BTreeSet<String>>>);
 
 impl Proof {
     /// What a member of the group `label`, declared to run `measurement`, must
@@ -149,21 +159,20 @@ impl Proof {
     }
 
     /// Settle the chip, or refuse a member that is not on it — or whose key
-    /// domain another label already holds.
+    /// domain already carries as many labels as it may.
     ///
-    /// A group is a set of instances that can serve each other's sessions, and
-    /// what makes that true is a key api derives from the PART and the
+    /// A group's members share a key api derives from the PART and the
     /// measurement. The measurement the host declares and this role proves; the
     /// part it does not declare at all — so the first member to answer settles
     /// it, and every member after has to agree.
     ///
     /// A host that staples two key domains into one label therefore gets a leg
     /// that fails rather than a session that lands where its state cannot be
-    /// opened; and one that splits one domain across two labels gets the same
-    /// for the second — see [`Domains`]. Both answers hold for as long as the
-    /// label is declared with that build, across pushes, and are asked again
-    /// only once it is removed, renamed or rolled to another build — a session
-    /// could not have survived that anyway.
+    /// opened; and one that puts more labels on one domain than
+    /// [`MOST_LABELS_PER_DOMAIN`] gets the same for each past it. Both answers
+    /// hold for as long as the label is declared with that build, across
+    /// pushes, and are asked again only once it is removed, renamed or rolled to
+    /// another build — a session could not have survived that anyway.
     pub fn agrees(&self, chip: &str) -> bool {
         if let Some(settled) = self.chip.get() {
             return settled == chip;
@@ -173,19 +182,19 @@ impl Proof {
         if self.retired.load(std::sync::atomic::Ordering::SeqCst) {
             return false;
         }
-        let claimed = !held.contains_key(&domain);
-        if held
-            .entry(domain.clone())
-            .or_insert_with(|| self.label.clone())
-            != &self.label
-        {
-            return false;
-        }
-        // Two members of one group answering at once, from two parts: one
-        // settles the chip, and the other's claim is given back.
-        if self.chip.get_or_init(|| chip.to_owned()) != chip {
+        let labels = held.entry(domain.clone()).or_default();
+        let claimed = labels.insert(self.label.clone());
+        let full = labels.len() > MOST_LABELS_PER_DOMAIN;
+        // A full domain before the chip, so that refusal settles nothing. Two
+        // members of one group answering at once, from two parts: one settles
+        // the chip, and the other's claim is given back.
+        if full || self.chip.get_or_init(|| chip.to_owned()) != chip {
             if claimed {
-                held.remove(&domain);
+                let labels = held.get_mut(&domain).expect("claimed above");
+                labels.remove(&self.label);
+                if labels.is_empty() {
+                    held.remove(&domain);
+                }
             }
             return false;
         }
@@ -194,18 +203,19 @@ impl Proof {
 }
 
 impl Domains {
-    /// Let go of every domain whose label the table no longer declares with
+    /// Let go of every claim whose label the table no longer declares with
     /// that build — a label removed, renamed, or rolled to another build.
     fn keep_declared(&self, declared: &crate::config::ValidatedConfig) {
-        self.0
-            .lock()
-            .expect("never held on panic")
-            .retain(|(measurement, _), label| {
+        let mut held = self.0.lock().expect("never held on panic");
+        for ((measurement, _), labels) in held.iter_mut() {
+            labels.retain(|label| {
                 declared
                     .groups()
                     .get(label)
                     .is_some_and(|group| group.measurement == *measurement)
             });
+        }
+        held.retain(|_, labels| !labels.is_empty());
     }
 }
 
@@ -225,7 +235,7 @@ pub struct Upstreams {
     /// before the first one — and the public listener does not open until
     /// there is one, so nothing that serves a caller reads it empty.
     tuning: Option<crate::config::Tuning>,
-    /// Which label holds each key domain. Carried into every table after, and
+    /// Which labels hold each key domain. Carried into every table after, and
     /// pruned to what each push declares.
     domains: Arc<Domains>,
     /// Where an ACME validator's TLS-ALPN-01 connection is carried, as of this
@@ -863,22 +873,22 @@ pub(crate) mod tests {
         assert!(!proof.agrees("chip-b"), "another part is another group");
     }
 
-    /// And one key domain is one group: a second label on the same build on
-    /// the same part is refused, however the host declared it — a label no
-    /// other session shares would be a tag on the session placed there. The
-    /// refusal settles nothing, so that label may still prove another part.
+    /// And one key domain carries a bounded number of groups: labels past the
+    /// bound on the same build on the same part are refused, however the host
+    /// declared them — unbounded, every session could carry a label of its own
+    /// as a tag. The refusal settles nothing, so that label may still prove
+    /// another part.
     #[tokio::test]
-    async fn a_key_domain_is_one_labels() {
+    async fn a_key_domain_carries_a_bounded_number_of_labels() {
         let domains = Arc::new(Domains::default());
         let tls = tls_client(crate::identity::attestor());
-        let one = Proof::new(A, "one", tls.clone(), domains.clone());
+        for i in 0..MOST_LABELS_PER_DOMAIN {
+            let label = format!("set-{i}");
+            let proof = Proof::new(A, &label, tls.clone(), domains.clone());
+            assert!(proof.agrees("chip-a"), "{label} is within the bound");
+        }
         let tag = Proof::new(A, "tag", tls.clone(), domains.clone());
-
-        assert!(one.agrees("chip-a"));
-        assert!(
-            !tag.agrees("chip-a"),
-            "the domain is held by the first label"
-        );
+        assert!(!tag.agrees("chip-a"), "the domain is full");
         assert!(tag.agrees("chip-b"), "another part is another domain");
 
         // Another build on the same part is another domain as well.
@@ -902,30 +912,59 @@ pub(crate) mod tests {
             uno.proof().agrees("chip-a"),
             "the old label's claim went with it"
         );
-        assert_eq!(next.domains().0.lock().unwrap().len(), 1);
+        let held = next.domains().0.lock().unwrap();
+        assert_eq!(held.len(), 1);
+        assert!(
+            held.values()
+                .all(|labels| labels.len() == 1 && labels.contains("uno"))
+        );
     }
 
-    /// But a domain stays held while its label is declared with its build:
-    /// pushed again beside a new label on the same build, the new label still
-    /// cannot take it. Pruning too much would let it.
-    #[tokio::test]
-    async fn a_domain_stays_held_while_its_label_is_declared() {
-        let up = Upstreams::empty(crate::identity::attestor())
-            .replaced(&pushed(&group_running(A, &[1000])));
-        let held = up.at_group(FIRST, "one").ok().unwrap().members;
-        assert!(held.proof().agrees("chip-a"));
+    /// Groups `labels`, all running build A, each with a member of its own.
+    fn groups_running_a(labels: &[String]) -> String {
+        let groups: Vec<String> = labels
+            .iter()
+            .map(|label| format!(r#""{label}": {{ "measurement": "{A}" }}"#))
+            .collect();
+        let members: Vec<String> = labels
+            .iter()
+            .zip(1000u32..)
+            .map(|(label, port)| format!(r#""{label}": [{}]"#, listed(&[port])))
+            .collect();
+        format!(
+            r#"{{ "groups": {{ {} }}, "names": {{ "{FIRST}": {{ {} }} }}, {TUNING} }}"#,
+            groups.join(", "),
+            members.join(", ")
+        )
+    }
 
-        let with_tag = format!(
-            r#"{{
-              "groups": {{ "one": {{ "measurement": "{A}" }}, "tag": {{ "measurement": "{A}" }} }},
-              "names": {{ "{FIRST}": {{ "one": [{}], "tag": [{}] }} }},
-              {TUNING} }}"#,
-            listed(&[1000]),
-            listed(&[2000]),
-        );
-        let next = up.replaced(&pushed(&with_tag));
+    /// But a full domain stays full while its labels are declared with their
+    /// build: pushed again beside one more label on the same build, that label
+    /// still cannot take a place. Pruning too much would let it — and a label
+    /// the push leaves out does give its place up.
+    #[tokio::test]
+    async fn a_full_domain_stays_full_while_its_labels_are_declared() {
+        let full: Vec<String> = (0..MOST_LABELS_PER_DOMAIN)
+            .map(|i| format!("set-{i}"))
+            .collect();
+        let up = Upstreams::empty(crate::identity::attestor())
+            .replaced(&pushed(&groups_running_a(&full)));
+        for label in &full {
+            let held = up.at_group(FIRST, label).ok().unwrap().members;
+            assert!(held.proof().agrees("chip-a"), "{label} takes a place");
+        }
+
+        let mut with_tag = full.clone();
+        with_tag.push("tag".into());
+        let next = up.replaced(&pushed(&groups_running_a(&with_tag)));
         let tag = next.at_group(FIRST, "tag").ok().unwrap().members;
-        assert!(!tag.proof().agrees("chip-a"), "the domain is still one's");
+        assert!(!tag.proof().agrees("chip-a"), "every place is still held");
+
+        let mut one_left_out = with_tag[1..].to_vec();
+        one_left_out.sort();
+        let after = next.replaced(&pushed(&groups_running_a(&one_left_out)));
+        let tag = after.at_group(FIRST, "tag").ok().unwrap().members;
+        assert!(tag.proof().agrees("chip-a"), "the place set-0 gave up");
     }
 
     /// A leg of a replaced table still mid-handshake when a push renamed its
@@ -1123,14 +1162,18 @@ mod proving {
         assert!(proved(A, &proof).await.is_err());
     }
 
-    /// The declared build on a part whose key domain another label holds
-    /// is refused: one domain is one group.
+    /// The declared build on a part whose key domain carries as many labels
+    /// as it may is refused; with a place left, it is taken.
     #[tokio::test]
-    async fn a_domain_another_label_holds_is_refused() {
+    async fn a_full_domain_is_refused_and_one_with_room_taken() {
         let domains = Arc::default();
-        let other = declared("two", &domains);
-        assert!(other.agrees(""), "the other label holds the domain");
-        let proof = declared("one", &domains);
-        assert!(proved(A, &proof).await.is_err());
+        for i in 1..MOST_LABELS_PER_DOMAIN {
+            assert!(declared(&format!("set-{i}"), &domains).agrees(""));
+        }
+        let last = declared("one", &domains);
+        proved(A, &last).await.expect("the last place");
+
+        let past = declared("two", &domains);
+        assert!(proved(A, &past).await.is_err(), "no place left");
     }
 }

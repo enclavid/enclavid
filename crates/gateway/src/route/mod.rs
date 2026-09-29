@@ -812,7 +812,7 @@ mod tests {
         assert_eq!(asked("/", &["not a host"]), Err(()));
     }
 
-    /// Two groups running one build — two key domains a session must not move
+    /// Two groups running one build — two sets a session must not move
     /// between — under a name whose rules say that creating a session is placed
     /// and a request about one names its group.
     fn two_groups_on_one_build() -> Upstreams {
