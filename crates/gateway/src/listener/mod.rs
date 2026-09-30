@@ -1220,8 +1220,8 @@ mod tests {
             &format!(
                 r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
                 "routes": {{ "{SECOND}": [
-                  {{ "method": "POST", "path": "/api/v1/sessions", "flags": ["reject_named_group"] }},
-                  {{ "path": "/api/v1/sessions/{{*rest}}", "flags": ["require_named_group"] }} ] }},"#
+                  {{ "method": "POST", "path": "/api/v1/sessions", "group": "forbidden" }},
+                  {{ "path": "/api/v1/sessions/{{*rest}}", "group": "required" }} ] }},"#
             ),
         );
         assert_ne!(ruled, table(&api, A));
@@ -1288,6 +1288,69 @@ mod tests {
         assert_eq!(elsewhere.status(), StatusCode::OK);
     }
 
+    /// A page load naming nothing is sent off this origin, a link to the same
+    /// path reaches its group, and neither a worker's script nor this role's
+    /// own space under a link is passed on to it — over a real connection, as
+    /// pushed.
+    #[tokio::test]
+    async fn a_bare_page_load_is_sent_away_and_no_worker_is_fetched() {
+        let api = api().await;
+        let (at, _, pushes) = gateway(&api).await;
+        let away = "https://elsewhere.example.org/from-verify";
+        let ruled = table(&api, A).replace(
+            &format!(r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},"#),
+            &format!(
+                r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
+                "routes": {{ "{SECOND}": [
+                  {{ "method": "GET", "path": "/", "external_origin_redirect_307_to": "{away}" }} ] }},"#
+            ),
+        );
+        assert_ne!(ruled, table(&api, A));
+        let next = pushes.borrow().replaced(&pushed(&ruled));
+        pushes.send_replace(Arc::new(next));
+        let mut second = caller(&at, SECOND, 4 << 20).await;
+        let get = |path: &str, header: Option<(&str, &str)>| {
+            let mut request = Request::get(format!("https://{SECOND}{path}"));
+            if let Some((name, value)) = header {
+                request = request.header(name, value);
+            }
+            request.body(Empty::new()).unwrap()
+        };
+
+        let bare = ask(&mut second, get("/", None)).await;
+        assert_eq!(bare.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            bare.headers()[hyper::header::LOCATION],
+            format!("{away}#").as_str()
+        );
+        assert!(
+            !bare.headers().contains_key("x-asked-for"),
+            "forwarded nowhere"
+        );
+
+        let linked = ask(&mut second, get(&format!("/-{GROUP}.{A}/"), None)).await;
+        assert_eq!(linked.status(), StatusCode::OK);
+        assert_eq!(linked.headers()["x-asked-for"], "/");
+
+        for mark in [
+            ("service-worker", "script"),
+            ("sec-fetch-dest", "serviceworker"),
+        ] {
+            let worker = ask(
+                &mut second,
+                get(&format!("/-{GROUP}.{A}/sw.js"), Some(mark)),
+            )
+            .await;
+            assert_eq!(worker.status(), StatusCode::FORBIDDEN, "{mark:?}");
+            assert!(!worker.headers().contains_key("x-asked-for"), "{mark:?}");
+        }
+
+        let quote = format!("/-{GROUP}.{A}{}", crate::identity::attest::PATH);
+        let under_a_link = ask(&mut second, get(&quote, None)).await;
+        assert_eq!(under_a_link.status(), StatusCode::NOT_FOUND);
+        assert!(!under_a_link.headers().contains_key("x-asked-for"));
+    }
+
     /// A build closed to new sessions is gone for them — said so, and not to be
     /// cached — while its links still answer, across the push that closed it; a
     /// later push reopens it.
@@ -1301,9 +1364,9 @@ mod tests {
                 &format!(
                     r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
                     "routes": {{ "{SECOND}": [
-                      {{ "method": "POST", "path": "/api/v1/sessions", "flags": ["reject_named_group"],
+                      {{ "method": "POST", "path": "/api/v1/sessions", "group": "forbidden",
                          "refuse_measurements": [{refused}] }},
-                      {{ "path": "/api/v1/sessions/{{*rest}}", "flags": ["require_named_group"] }} ] }},"#
+                      {{ "path": "/api/v1/sessions/{{*rest}}", "group": "required" }} ] }},"#
                 ),
             )
         };

@@ -60,41 +60,118 @@ struct RawConfig {
 /// at the push, and that includes two that leave the same segment open in
 /// different ways, `{id}` and `{*rest}`. The path is api's own, as it reaches
 /// api: after a link's marker has been taken out.
+///
+/// What a rule holds its requests to, each a field of its own: whether they
+/// must name their group, the builds it places nothing new on, and where one
+/// naming nothing is sent instead of on. Each is about which group a request
+/// reaches, or whether it reaches one — never about whether what it reaches is
+/// checked, which is proved at every leg whatever a push says. A push that
+/// leaves them out lets a caller choose its group where the host meant to
+/// choose, which costs balance and never anyone's data.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Route {
     #[serde(default)]
     pub method: Option<String>,
     pub path: String,
-    pub flags: Vec<Flag>,
+    /// Whether the request must name its group, or may not. Neither, when left
+    /// out: the caller names its group or the build it requires, as it likes.
+    #[serde(default)]
+    pub group: Option<Naming>,
     /// Builds this rule places no new session on: a request naming one is
-    /// refused. Only beside `reject_named_group`, where this role places — a
-    /// link names its group and is refused under that flag before this is
-    /// read, so the sessions such a build holds finish where they are. How a
-    /// release is drained: its new sessions go to the build that replaced it,
-    /// which the caller names.
+    /// refused. Only beside `"group": "forbidden"`, where this role places — a
+    /// link names its group and is refused there before this is read, so the
+    /// sessions such a build holds finish where they are. How a release is
+    /// drained: its new sessions go to the build that replaced it, which the
+    /// caller names.
     #[serde(default)]
     pub refuse_measurements: Vec<String>,
+    /// A page on an origin this role does not serve, where a request that
+    /// names nothing — no group, no build — is sent by a temporary redirect,
+    /// forwarded nowhere. One naming its group is routed to it, and one naming
+    /// a build is placed, as anywhere.
+    ///
+    /// For a browser typed at the bare name, which has no link to follow and
+    /// sends no header. Not a group of this role's: every build it reaches
+    /// answers under this one origin, a group being a path rather than a name,
+    /// so a page the host chose there — no caller named its build — would run
+    /// beside every session's pages in that browser, reading what they keep and
+    /// standing between it and the links it follows later. Elsewhere it is one
+    /// more site. A rule for `GET` alone, since a redirect repeats any other
+    /// method, body and all.
+    #[serde(default)]
+    pub external_origin_redirect_307_to: Option<String>,
 }
 
-/// What a request a rule matches is held to.
-///
-/// Both are about which group a request reaches, never about whether what it
-/// reaches is checked — that is proved at every leg whatever a push says. A
-/// push that leaves them out lets a caller choose its group where the host
-/// meant to choose, which costs balance and never anyone's data.
+/// Whether a request a rule matches must name its group.
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
-pub enum Flag {
-    /// The request may not name a group: this role places it, among the groups
-    /// running the build it names. For a request that creates a session, so
-    /// that sessions spread over the groups rather than pile into the one a
-    /// caller prefers.
-    RejectNamedGroup,
-    /// The request must name a group. For a request about a session that exists
-    /// already, which only its own group can serve: placed afresh, it would land
-    /// where that session is not.
-    RequireNamedGroup,
+pub enum Naming {
+    /// It must. For a request about a session that exists already, which only
+    /// its own group can serve: placed afresh, it would land where that session
+    /// is not.
+    Required,
+    /// It may not: this role places it, among the groups running the build it
+    /// names. For a request that creates a session, so that sessions spread
+    /// over the groups rather than pile into the one a caller prefers.
+    Forbidden,
+}
+
+/// The longest page a rule may send a request to.
+const MOST_LOCATION: usize = 2048;
+
+/// Whether `location` is a page a request may be sent to — see
+/// [`Route::external_origin_redirect_307_to`] — or why not.
+///
+/// An `https` URL naming its host by name, with nothing before the name that
+/// could pass for one, and no fragment: the one on the redirect is this role's
+/// to write, so none of the caller's travels on. The host is not one of
+/// `served`, compared as a connection is matched to them — without case, and
+/// without a final dot — and whatever the port, which does not part an origin
+/// for everything a browser keeps.
+fn is_elsewhere(location: &str, served: &Names) -> Result<(), String> {
+    if location.len() > MOST_LOCATION {
+        return Err(format!("at most {MOST_LOCATION} characters"));
+    }
+    if location.contains('#') {
+        return Err("no fragment: the redirect carries one of this role's own".into());
+    }
+    let uri: hyper::Uri = location.parse().map_err(|_| "not a URL".to_owned())?;
+    if uri.scheme_str() != Some("https") {
+        return Err("an https URL".into());
+    }
+    let Some(authority) = uri.authority() else {
+        return Err("an https URL, with a host".into());
+    };
+    if authority.as_str().contains('@') {
+        return Err("nothing before the host: a name there reads as the host it is not".into());
+    }
+    let host = authority.host();
+    let bare = host.strip_suffix('.').unwrap_or(host);
+    // A browser reads a host whose last label is a number — decimal, or hex
+    // after `0x` — as an IPv4 address in one of its several spellings, not as
+    // a name: `0x7f000001` is 127.0.0.1 to it.
+    let last = bare.rsplit('.').next().unwrap_or(bare);
+    let decimal = !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit());
+    let hex = match (last.get(..2), last.get(2..)) {
+        (Some(prefix), Some(digits)) => {
+            prefix.eq_ignore_ascii_case("0x") && digits.bytes().all(|b| b.is_ascii_hexdigit())
+        }
+        _ => false,
+    };
+    if decimal || hex || bare.starts_with('[') {
+        return Err(format!("{host}: a host by name, not an address"));
+    }
+    if tokio_rustls::rustls::pki_types::DnsName::try_from(bare.to_owned()).is_err() {
+        return Err(format!("{host}: not a host name"));
+    }
+    if served.keys().any(|name| name.eq_ignore_ascii_case(bare)) {
+        return Err(format!(
+            "{host} is a name this role serves, where every build answers under one origin; \
+             a page elsewhere"
+        ));
+    }
+    Ok(())
 }
 
 /// Each public name, and under it the addresses of each group's members there.
@@ -647,29 +724,42 @@ impl RawConfig {
                 {
                     return Err(format!("{at}.method: a method in capitals, such as POST"));
                 }
-                if rule.flags.is_empty() {
+                if rule.group.is_none() && rule.external_origin_redirect_307_to.is_none() {
                     return Err(format!(
-                        "{at}.flags: a rule that holds a request to nothing"
+                        "{at}: a rule that holds a request to nothing — group, or \
+                         external_origin_redirect_307_to"
                     ));
                 }
-                if rule.flags.contains(&Flag::RejectNamedGroup)
-                    && rule.flags.contains(&Flag::RequireNamedGroup)
-                {
-                    return Err(format!(
-                        "{at}.flags: a request cannot both name no group and name one"
-                    ));
+                if let Some(location) = &rule.external_origin_redirect_307_to {
+                    // Under 307 a browser asks again with the same method and
+                    // body, which would carry a body off to another site.
+                    if rule.method.as_deref() != Some("GET") {
+                        return Err(format!(
+                            "{at}.method: external_origin_redirect_307_to is for GET alone — a \
+                             page load; a redirect repeats any other method, body and all"
+                        ));
+                    }
+                    // Either answer decides the same request the other way:
+                    // "required" refuses the request this sends away, and
+                    // "forbidden" the links it leaves to their groups.
+                    if rule.group.is_some() {
+                        return Err(format!(
+                            "{at}.group: beside external_origin_redirect_307_to, which sends a \
+                             request naming nothing away and routes a link by its marker"
+                        ));
+                    }
+                    is_elsewhere(location, &self.names)
+                        .map_err(|e| format!("{at}.external_origin_redirect_307_to: {e}"))?;
                 }
                 // Anywhere else a request may name its group, and a list there
                 // either misses the requests that do or refuses the links of
                 // sessions the build still holds — so it is refused, not read
                 // one way or the other.
-                if !rule.refuse_measurements.is_empty()
-                    && !rule.flags.contains(&Flag::RejectNamedGroup)
-                {
+                if !rule.refuse_measurements.is_empty() && rule.group != Some(Naming::Forbidden) {
                     return Err(format!(
-                        "{at}.refuse_measurements: only a rule that places \
-                         (reject_named_group) has builds to refuse; on any other it would \
-                         refuse the links of sessions that exist"
+                        "{at}.refuse_measurements: only a rule that places (\"group\": \
+                         \"forbidden\") has builds to refuse; on any other it would refuse the \
+                         links of sessions that exist"
                     ));
                 }
                 for (j, refused) in rule.refuse_measurements.iter().enumerate() {
@@ -1056,14 +1146,14 @@ mod tests {
     }
 
     /// Rules for a name, matching by a path template and holding what they
-    /// match to a flag, are read and built for that name alone.
+    /// match to naming a group or not, are read and built for that name alone.
     #[test]
     fn a_name_s_rules_are_read() {
         let got = parse(&routed(&format!(
             r#"{{ "{FIRST}": [
-                {{ "method": "POST", "path": "/api/v1/sessions", "flags": ["reject_named_group"] }},
-                {{ "path": "/api/v1/sessions/{{id}}", "flags": ["require_named_group"] }},
-                {{ "path": "/api/v1/sessions/{{id}}/{{*rest}}", "flags": ["require_named_group"] }} ] }}"#
+                {{ "method": "POST", "path": "/api/v1/sessions", "group": "forbidden" }},
+                {{ "path": "/api/v1/sessions/{{id}}", "group": "required" }},
+                {{ "path": "/api/v1/sessions/{{id}}/{{*rest}}", "group": "required" }} ] }}"#
         )))
         .unwrap();
         assert!(got.rules().contains_key(FIRST));
@@ -1076,74 +1166,140 @@ mod tests {
     fn a_rule_that_could_not_mean_anything_is_refused() {
         for (bad, says) in [
             (
-                r#"{ "elsewhere.example.com": [ { "path": "/x", "flags": ["reject_named_group"] } ] }"#
+                r#"{ "elsewhere.example.com": [ { "path": "/x", "group": "forbidden" } ] }"#
                     .to_owned(),
                 "no such name",
             ),
             (
-                format!(r#"{{ "{FIRST}": [ {{ "flags": ["reject_named_group"] }} ] }}"#),
+                format!(r#"{{ "{FIRST}": [ {{ "group": "forbidden" }} ] }}"#),
                 "missing field `path`",
             ),
             (
                 format!(
-                    r#"{{ "{FIRST}": [ {{ "path": "/x", "prefix": "/x", "flags": ["reject_named_group"] }} ] }}"#
+                    r#"{{ "{FIRST}": [ {{ "path": "/x", "prefix": "/x", "group": "forbidden" }} ] }}"#
                 ),
                 "unknown field `prefix`",
             ),
             (
-                format!(r#"{{ "{FIRST}": [ {{ "path": "x", "flags": ["reject_named_group"] }} ] }}"#),
+                format!(r#"{{ "{FIRST}": [ {{ "path": "x", "group": "forbidden" }} ] }}"#),
                 "[0].path: a path begins with /",
             ),
             (
-                format!(r#"{{ "{FIRST}": [ {{ "path": "", "flags": ["reject_named_group"] }} ] }}"#),
+                format!(r#"{{ "{FIRST}": [ {{ "path": "", "group": "forbidden" }} ] }}"#),
                 "[0].path: a path begins with /",
             ),
             (
-                format!(r#"{{ "{FIRST}": [ {{ "path": "/x/{{a", "flags": ["reject_named_group"] }} ] }}"#),
+                format!(r#"{{ "{FIRST}": [ {{ "path": "/x/{{a", "group": "forbidden" }} ] }}"#),
                 "[0].path: a {name} is closed",
             ),
             (
-                format!(r#"{{ "{FIRST}": [ {{ "path": "/x/:id", "flags": ["reject_named_group"] }} ] }}"#),
+                format!(r#"{{ "{FIRST}": [ {{ "path": "/x/:id", "group": "forbidden" }} ] }}"#),
                 "[0].path: a segment left open is {id}",
             ),
             (
-                format!(r#"{{ "{FIRST}": [ {{ "path": "/x/*rest", "flags": ["reject_named_group"] }} ] }}"#),
+                format!(r#"{{ "{FIRST}": [ {{ "path": "/x/*rest", "group": "forbidden" }} ] }}"#),
                 "[0].path: a segment left open is {id}",
             ),
             (
                 format!(
-                    r#"{{ "{FIRST}": [ {{ "path": "{}", "flags": ["reject_named_group"] }} ] }}"#,
+                    r#"{{ "{FIRST}": [ {{ "path": "{}", "group": "forbidden" }} ] }}"#,
                     opened(26)
                 ),
                 "[0].path: at most 25",
             ),
             (
                 format!(
-                    r#"{{ "{FIRST}": [ {{ "method": "post", "path": "/x", "flags": ["reject_named_group"] }} ] }}"#
+                    r#"{{ "{FIRST}": [ {{ "method": "post", "path": "/x", "group": "forbidden" }} ] }}"#
                 ),
                 "capitals",
             ),
             (
-                format!(r#"{{ "{FIRST}": [ {{ "path": "/x", "flags": [] }} ] }}"#),
-                "to nothing",
+                format!(r#"{{ "{FIRST}": [ {{ "path": "/x" }} ] }}"#),
+                "[0]: a rule that holds a request to nothing",
             ),
             (
                 format!(
-                    r#"{{ "{FIRST}": [ {{ "path": "/x", "flags": ["reject_named_group", "require_named_group"] }} ] }}"#
+                    r#"{{ "{FIRST}": [ {{ "path": "/x", "flags": ["reject_named_group"] }} ] }}"#
                 ),
-                "both",
+                "unknown field `flags`",
+            ),
+            (
+                away(None, "https://elsewhere.example.org/"),
+                "[0].method: external_origin_redirect_307_to is for GET alone",
+            ),
+            (
+                away(Some("POST"), "https://elsewhere.example.org/"),
+                "[0].method: external_origin_redirect_307_to is for GET alone",
             ),
             (
                 format!(
-                    r#"{{ "{FIRST}": [ {{ "path": "/x", "flags": ["reject_named_group"] }},
-                                       {{ "path": "/x", "flags": ["require_named_group"] }} ] }}"#
+                    r#"{{ "{FIRST}": [ {{ "method": "GET", "path": "/", "group": "required",
+                                          "external_origin_redirect_307_to": "https://elsewhere.example.org/" }} ] }}"#
+                ),
+                "[0].group: beside external_origin_redirect_307_to",
+            ),
+        ] {
+            let err = parse(&routed(&bad))
+                .err()
+                .unwrap_or_else(|| panic!("accepted {bad}"));
+            assert!(err.contains(says), "{bad}: {err}");
+        }
+
+        // Where a request naming nothing may be sent: a page on another origin,
+        // by name, and nothing about it that could pass for one of the names
+        // this role serves.
+        let upper = FIRST.to_ascii_uppercase();
+        for (location, says) in [
+            ("https://elsewhere .example.org/", "not a URL"),
+            ("/elsewhere", "an https URL"),
+            ("http://elsewhere.example.org/", "an https URL"),
+            ("https://elsewhere.example.org/#top", "no fragment"),
+            (
+                &format!("https://{FIRST}@elsewhere.example.org/"),
+                "nothing before the host",
+            ),
+            ("https://203.0.113.7/", "a host by name, not an address"),
+            ("https://[2001:db8::1]/", "a host by name, not an address"),
+            ("https://0x7f000001/", "a host by name, not an address"),
+            ("https://2130706433/", "a host by name, not an address"),
+            ("https://example.0X1f/", "a host by name, not an address"),
+            ("https://a..example.org/", "not a host name"),
+            (&format!("https://{FIRST}/"), "is a name this role serves"),
+            (
+                &format!("https://{upper}:8443/"),
+                "is a name this role serves",
+            ),
+            (
+                &format!("https://{SECOND}./x"),
+                "is a name this role serves",
+            ),
+            (
+                &format!("https://elsewhere.example.org/{}", "x".repeat(2048)),
+                "at most 2048",
+            ),
+        ] {
+            let bad = away(Some("GET"), location);
+            let err = parse(&routed(&bad))
+                .err()
+                .unwrap_or_else(|| panic!("accepted {location}"));
+            assert!(
+                err.contains("[0].external_origin_redirect_307_to: ") && err.contains(says),
+                "{location}: {err}"
+            );
+        }
+
+        for (bad, says) in [
+            (
+                format!(
+                    r#"{{ "{FIRST}": [ {{ "path": "/x", "group": "forbidden" }},
+                                       {{ "path": "/x", "group": "required" }} ] }}"#
                 ),
                 "routes[first.example.com][1].path: overlaps /x",
             ),
             (
                 format!(
-                    r#"{{ "{FIRST}": [ {{ "path": "/x/{{id}}", "flags": ["reject_named_group"] }},
-                                       {{ "path": "/x/{{*rest}}", "flags": ["require_named_group"] }} ] }}"#
+                    r#"{{ "{FIRST}": [ {{ "path": "/x/{{id}}", "group": "forbidden" }},
+                                       {{ "path": "/x/{{*rest}}", "group": "required" }} ] }}"#
                 ),
                 "[1].path: overlaps /x/{id}",
             ),
@@ -1154,38 +1310,68 @@ mod tests {
             assert!(err.contains(says), "{bad}: {err}");
         }
 
-        // A flag nobody knows is refused rather than ignored, as a misspelt
+        // An answer nobody knows is refused rather than ignored, as a misspelt
         // field is.
-        let unknown = format!(r#"{{ "{FIRST}": [ {{ "path": "/x", "flags": ["reject"] }} ] }}"#);
+        let unknown = format!(r#"{{ "{FIRST}": [ {{ "path": "/x", "group": "reject" }} ] }}"#);
         assert!(parse(&routed(&unknown)).is_err());
 
         // As many open segments as the router can name are taken.
         let most = format!(
-            r#"{{ "{FIRST}": [ {{ "path": "{}", "flags": ["reject_named_group"] }} ] }}"#,
+            r#"{{ "{FIRST}": [ {{ "path": "{}", "group": "forbidden" }} ] }}"#,
             opened(25)
         );
         parse(&routed(&most)).unwrap();
     }
 
-    /// A rule under `flag` that refuses `listed`, the members of a JSON array.
-    fn refusing(flag: &str, listed: &str) -> String {
+    /// A rule where naming a group is `naming` that refuses `listed`, the
+    /// members of a JSON array.
+    fn refusing(naming: &str, listed: &str) -> String {
         format!(
-            r#"{{ "{FIRST}": [ {{ "method": "POST", "path": "/x", "flags": ["{flag}"],
+            r#"{{ "{FIRST}": [ {{ "method": "POST", "path": "/x", "group": "{naming}",
                                   "refuse_measurements": [{listed}] }} ] }}"#
         )
     }
 
-    /// The builds a placing rule refuses are read beside its flags. The first
-    /// refuses the only build declared — no new session anywhere, which is a
-    /// state the host may choose, as an empty table is. A build listed twice
-    /// refuses it once, and an empty list is no list, beside any flag.
+    /// A rule sending a request to `/` that names nothing to `location`, for
+    /// `method` if one is named.
+    fn away(method: Option<&str>, location: &str) -> String {
+        let method = method.map_or(String::new(), |m| format!(r#""method": "{m}", "#));
+        format!(
+            r#"{{ "{FIRST}": [ {{ {method}"path": "/",
+                                  "external_origin_redirect_307_to": "{location}" }} ] }}"#
+        )
+    }
+
+    /// A page load sent to a page on another origin, beside the rule every
+    /// other request to the path is held to. A name this role does not serve
+    /// is elsewhere, however near it is to one it does.
+    #[test]
+    fn a_rule_sending_a_page_load_elsewhere_is_read() {
+        for location in [
+            "https://elsewhere.example.org/from-verify?from=verify".to_owned(),
+            "https://example.com".to_owned(),
+            format!("https://www.{FIRST}:8443/"),
+        ] {
+            let routes = format!(
+                r#"{{ "{FIRST}": [ {{ "method": "GET", "path": "/",
+                                      "external_origin_redirect_307_to": "{location}" }},
+                                   {{ "path": "/", "group": "required" }} ] }}"#
+            );
+            parse(&routed(&routes)).unwrap_or_else(|e| panic!("{location}: {e}"));
+        }
+    }
+
+    /// The builds a placing rule refuses are read beside it. The first refuses
+    /// the only build declared — no new session anywhere, which is a state the
+    /// host may choose, as an empty table is. A build listed twice refuses it
+    /// once, and an empty list is no list, beside any rule.
     #[test]
     fn a_rule_s_refused_measurements_are_read() {
         let a = format!(r#""{}""#, m('a'));
         for routes in [
-            refusing("reject_named_group", &a),
-            refusing("reject_named_group", &format!("{a}, {a}")),
-            refusing("require_named_group", ""),
+            refusing("forbidden", &a),
+            refusing("forbidden", &format!("{a}, {a}")),
+            refusing("required", ""),
         ] {
             parse(&routed(&routes)).unwrap_or_else(|e| panic!("{routes}: {e}"));
         }
@@ -1198,28 +1384,36 @@ mod tests {
         let quoted = |c| format!(r#""{}""#, m(c));
         for (bad, says) in [
             (
-                refusing("reject_named_group", r#""aa11""#),
+                refusing("forbidden", r#""aa11""#),
                 "refuse_measurements[0]: expected 96 lowercase hex",
             ),
             (
-                refusing("reject_named_group", &quoted('A')),
+                refusing("forbidden", &quoted('A')),
                 "refuse_measurements[0]: expected 96 lowercase hex",
             ),
             (
-                refusing("reject_named_group", &quoted('b')),
+                refusing("forbidden", &quoted('b')),
                 "refuse_measurements[0]: no group runs",
             ),
             (
-                refusing("require_named_group", &quoted('a')),
+                refusing("required", &quoted('a')),
                 "refuse_measurements: only a rule that places",
             ),
             (
-                refusing("require_named_group", r#""aa11""#),
+                refusing("required", r#""aa11""#),
                 "refuse_measurements: only a rule that places",
             ),
             (
                 format!(
-                    r#"{{ "{FIRST}": [ {{ "path": "/x", "flags": ["reject_named_group"],
+                    r#"{{ "{FIRST}": [ {{ "method": "GET", "path": "/", "refuse_measurements": [{}],
+                                          "external_origin_redirect_307_to": "https://elsewhere.example.org/" }} ] }}"#,
+                    quoted('a')
+                ),
+                "refuse_measurements: only a rule that places",
+            ),
+            (
+                format!(
+                    r#"{{ "{FIRST}": [ {{ "path": "/x", "group": "forbidden",
                                           "refuse_measurement": [] }} ] }}"#
                 ),
                 "unknown field `refuse_measurement`",

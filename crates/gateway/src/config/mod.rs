@@ -55,9 +55,10 @@
 //! groups: one -> the build it runs
 //! names:  verify.example.com -> one -> the addresses of its members there
 //!         api.example.com    -> one -> the addresses of its members there
-//! routes: api.example.com -> POST /api/v1/sessions         -> reject_named_group,
+//! routes: api.example.com    -> POST /api/v1/sessions      -> group forbidden,
 //!                                                             refusing the builds it closes
-//!                         -> /api/v1/sessions/{*rest}      -> require_named_group
+//!                            -> /api/v1/sessions/{*rest}   -> group required
+//!         verify.example.com -> GET /                      -> sent to a page elsewhere
 //! certificates: chains an issuer signed for this role's key, if any
 //! ```
 //!
@@ -83,7 +84,9 @@
 //! A rule that places may also refuse builds: a release being retired takes no
 //! new session, and a caller that names it is told it is gone, while the
 //! sessions it holds finish through their links — see
-//! `crate::config::Route::refuse_measurements`.
+//! `crate::config::Route::refuse_measurements`. A page load that names nothing
+//! may be sent to a page on another origin, never one of this role's — see
+//! `crate::config::Route::external_origin_redirect_307_to`.
 //!
 //! ## The type is the grammar
 //!
@@ -116,6 +119,6 @@ mod table;
 pub(crate) mod testing;
 
 pub use table::{
-    Flag, ListenerTuning, MOST_DESCRIPTORS, OWN_DESCRIPTORS, Route, Tuning, UpstreamTuning,
+    ListenerTuning, MOST_DESCRIPTORS, Naming, OWN_DESCRIPTORS, Route, Tuning, UpstreamTuning,
     ValidatedConfig,
 };

@@ -62,10 +62,12 @@
 //! What this role reads of what it carries is little, and fixed: the PROXY
 //! header ahead of a connection, the protocols its hello offers, the marker a
 //! link carries at the head of a
-//! path, its own two paths and the method asked of them, the host a
+//! path, its own two paths and the space they sit in, the method asked of
+//! them, the host a
 //! request names — its target's authority and its `Host`, compared to the name
 //! the connection agreed to — a header of its own, the build a caller names,
-//! and the method and path the name's rules match against. What it takes off
+//! the two headers a browser marks a service worker's script with, and the
+//! method and path the name's rules match against. What it takes off
 //! by name is the caller's `Host`, the headers in which a request gives an
 //! account of its own origin, and trailers. Every other byte — the query, every
 //! other header, every body — passes through unread, and the path goes on as

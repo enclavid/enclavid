@@ -255,11 +255,12 @@ pub struct Target<'a> {
 
 /// Why a request could not be forwarded.
 ///
-/// Four variants, and three answers to the caller: the first two say the
+/// Five variants, and four answers to the caller: the first two say the
 /// request is missing what only the caller can supply, or carries what a rule
 /// forbids; the third that the build it named takes no new sessions here; the
-/// last that what was asked for is not here. What the caller is told for each
-/// is `crate::route`'s to decide.
+/// fourth that what was asked for is not here; the last that it is this role's
+/// own to answer, and no api's. What the caller is told for each is
+/// `crate::route`'s to decide.
 pub enum NoRoute {
     /// No measurement was named where one is required.
     Unspecified,
@@ -278,6 +279,9 @@ pub enum NoRoute {
     /// sooner than a declared group whose members are down answers; see
     /// `crate::route` for why that is not padded.
     NoSuchGroup,
+    /// The path is in the space this role keeps for what it says about itself
+    /// — see `crate::route::OWN` — and is not one of the paths it answers.
+    Own,
 }
 
 impl Upstreams {

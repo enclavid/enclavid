@@ -128,10 +128,12 @@ let
   # The gateway's table: a group per release, running that release's api and
   # reached under both names. A request that creates a session is placed by
   # the gateway — never on a draining release's build — and every other names
-  # the group its link carries.
+  # the group its link carries. A browser at the bare verify name, which has
+  # no link, is sent to `public.landing` if it is set — off the verify origin,
+  # which every release's pages share.
   named = [
-    { path = "/"; flags = [ "require_named_group" ]; }
-    { path = "/{*rest}"; flags = [ "require_named_group" ]; }
+    { path = "/"; group = "required"; }
+    { path = "/{*rest}"; group = "required"; }
   ];
   table = {
     groups = lib.listToAttrs (map (r: lib.nameValuePair r.name { measurement = ""; }) releases);
@@ -143,10 +145,14 @@ let
       ${cfg.names.api} = [{
         method = "POST";
         path = "/api/v1/sessions";
-        flags = [ "reject_named_group" ];
+        group = "forbidden";
         refuse_measurements = [ ];
       }] ++ named;
-      ${cfg.names.verify} = named;
+      ${cfg.names.verify} = lib.optional (cfg.public.landing != null) {
+        method = "GET";
+        path = "/";
+        external_origin_redirect_307_to = cfg.public.landing;
+      } ++ named;
     };
   };
   # A measurement is a build output, so it is filled in by a build rather than
@@ -346,6 +352,17 @@ in
           Whether the relay writes the PROXY header naming each caller. The
           gateway requires one, so turn this off only behind a front that writes
           its own — and then make sure nothing else reaches the relay.
+        '';
+      };
+      landing = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "https://example.com/from-verify";
+        description = ''
+          Where a browser at the bare verify name, with no link to a session, is
+          sent: an https page under a name the gateway does not serve, which it
+          refuses to send one to. Null answers it 400, as any request naming no
+          group.
         '';
       };
     };

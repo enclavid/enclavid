@@ -66,8 +66,9 @@ use enclavid_attestation::Attestor;
 /// account's key (`crate::identity::account::PATH`).
 ///
 /// Under `/.well-known/` because that is the reserved space for exactly this —
-/// something about the server rather than about what it serves — and because it
-/// cannot collide with a path the host later configures as api's.
+/// something about the server rather than about what it serves — and inside
+/// `crate::route::OWN`, where no request reaches api, under a link's marker or
+/// not: nothing the host configures can put another quote at a path like it.
 pub const PATH: &str = "/.well-known/enclavid-attestation";
 
 /// The `Content-Type` the body carries.
