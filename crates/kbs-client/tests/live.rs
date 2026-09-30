@@ -1,8 +1,8 @@
 //! Live RCAR round-trip against the dev Trustee KBS.
 //!
-//! Requires the KBS profile up and a registered resource:
-//!   cd enclavid-env && docker logout ghcr.io && docker compose --profile kbs up -d
-//!   ADMIN=$(cat kbs/config/docker-compose/admin-token)
+//! Requires a Trustee KBS on localhost:8080 — the one enclavid-env brings up —
+//! and a resource registered with its admin token:
+//!   ADMIN=<the KBS admin token>
 //!   curl -X POST localhost:8080/kbs/v0/resource/default/test/secret \
 //!        -H "Authorization: Bearer $ADMIN" --data-binary 'hello-from-kbs'
 //! Run:  cargo test -p enclavid-kbs-client --test live -- --ignored --nocapture
@@ -46,7 +46,7 @@ fn session_cookie(set_cookies: &[String]) -> String {
 }
 
 #[test]
-#[ignore = "requires live Trustee (docker compose --profile kbs up)"]
+#[ignore = "requires a live Trustee KBS on localhost:8080"]
 fn rcar_round_trip_releases_resource() {
     let mut session = RcarSession::new(TeeKeyPair::generate().unwrap(), SampleEvidence);
 

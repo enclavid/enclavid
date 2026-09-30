@@ -4,7 +4,7 @@
 //!
 //! A certificate is issued for a key. Mint a fresh one at every boot and every
 //! boot needs a fresh certificate — and a public authority will not issue them
-//! at that rate: Let's Encrypt allows five per week for one set of names. A
+//! at that rate: a common one allows five per week for one set of names. A
 //! role restarted six times in a week would simply stop having a certificate.
 //!
 //! The same key is also the only thing a caller can hold on to. One that
