@@ -601,6 +601,10 @@ in
         };
       })
     ] ++ map releaseServices local ++ map gatewayServices gateways);
+    systemd.packages = lib.optional (local != [ ]) (fleet.hatchRoot {
+      unit = "enclavid-hatch.service";
+      src = ../.;
+    });
 
     # Every six hours, which is how often Let's Encrypt asks to be asked when a
     # certificate should be renewed — an early renewal it asks for ahead of

@@ -111,6 +111,16 @@ Each guest's own log is its serial console, in
 `variant = "debug"` it carries the kernel's console too, and what the guests'
 dependencies log.
 
+The hatch fetches what consumers name — their registries, and wherever a
+registry's token service or its redirects lead; their key brokers — and AMD's
+certificates for the chip, from this host's network. Whatever this host
+reaches, a consumer can have it fetch, this host's own ports among them, and
+whatever it reaches sees this host's address. It runs as a user of its own
+with no privilege, opens IP and vsock sockets and no other, and of the host's
+files sees only its program's closure in the store, the CA bundle and its
+resolver's, read-only, in a root that holds nothing else. Over vsock it
+reaches what any local account reaches.
+
 ## Certificates
 
 The gateway serves on a key derived inside it, under a certificate of its own
@@ -265,6 +275,7 @@ The storage disk, `/var/lib/enclavid/main/storage.img`, is left in place.
 
 ## Not here
 
-Several hosts, and a new release run beside the old one while its sessions
-finish, are yours to add — on the blocks in `lib.nix`, which every module is
-given as `fleet`.
+Several hosts, a new release run beside the old one while its sessions finish,
+and a network for the hatch that reaches nothing of this host, are yours to
+add — on the blocks in `lib.nix`, which every module is given as `fleet`, and
+the units they make.

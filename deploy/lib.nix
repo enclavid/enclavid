@@ -119,34 +119,95 @@ rec {
     };
   };
 
+  # The program a hatch runs, from `src`'s own tree.
+  hatchProgram = src:
+    let built = import (within src "image") { inherit idKeys; };
+    in (import (within src "deploy/host.nix") { inherit (built) pkgs; }).host-hatch;
+
+  # A directory with nothing in it, for a hatch's root.
+  emptyRoot = pkgs.runCommand "enclavid-empty-root" { } "mkdir $out";
+
+  # What the hatch `unit`, built from `src`'s tree, sees of the store: its
+  # program's closure and the CA bundle, each bound into its empty root by a
+  # drop-in, and nothing else. The list is the closure's own, written when the
+  # drop-in is built, so evaluating the fleet builds nothing. Every hatch unit
+  # takes one — without it, its root holds no program to run.
+  hatchRoot = { unit, src }: pkgs.runCommand "${unit}-root"
+    { closure = pkgs.closureInfo { rootPaths = [ (hatchProgram src) pkgs.cacert ]; }; }
+    ''
+      mkdir -p $out/lib/systemd/system/${unit}.d
+      { echo '[Service]'; sed 's/^/BindReadOnlyPaths=/' $closure/store-paths; } \
+        >$out/lib/systemd/system/${unit}.d/root.conf
+    '';
+
   # A hatch built from `src`'s own tree, listening on `port`, checking
-  # consumers' tokens as `settings` — `enclavid.hatch` — says.
-  hatchService = { name, port, src, settings }:
-    let
-      built = import (within src "image") { inherit idKeys; };
-      hatch = (import (within src "deploy/host.nix") { inherit (built) pkgs; }).host-hatch;
-    in
-    {
-      description = "Enclavid hatch ${name}: what the guests reach outside";
-      wantedBy = [ "enclavid-host.target" ];
-      partOf = [ "enclavid-host.target" ];
-      enableDefaultPath = false;
-      environment = { HATCH_LISTEN_ADDR = toString port; } // (
-        if settings.auth == "oidc" then {
-          HATCH_AUTH = "oidc";
-          HATCH_AUTH_OIDC_ISSUER = settings.issuer;
-          HATCH_AUTH_OIDC_AUDIENCE = settings.audience;
-        } else {
-          HATCH_AUTH = "none";
-          HATCH_AUTH_PRINCIPAL = settings.principal;
-        }
-      );
-      serviceConfig = {
-        Type = "exec";
-        ExecStart = lib.getExe' hatch "host-hatch";
-        Restart = "on-failure";
-        RestartSec = 1;
-        StandardInput = "null";
-      };
+  # consumers' tokens as `settings` — `enclavid.hatch` — says. It keeps nothing
+  # it could not fetch again, so it is started again however often it ends.
+  hatchService = { name, port, src, settings }: {
+    description = "Enclavid hatch ${name}: what the guests reach outside";
+    wantedBy = [ "enclavid-host.target" ];
+    partOf = [ "enclavid-host.target" ];
+    enableDefaultPath = false;
+    startLimitIntervalSec = 0;
+    environment = {
+      HATCH_LISTEN_ADDR = toString port;
+      # The registry client checks servers against the system's CA bundle,
+      # and the host's own is out of its sight: this one, which hatchRoot
+      # binds in.
+      SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+    } // (
+      if settings.auth == "oidc" then {
+        HATCH_AUTH = "oidc";
+        HATCH_AUTH_OIDC_ISSUER = settings.issuer;
+        HATCH_AUTH_OIDC_AUDIENCE = settings.audience;
+      } else {
+        HATCH_AUTH = "none";
+        HATCH_AUTH_PRINCIPAL = settings.principal;
+      }
+    );
+    serviceConfig = {
+      Type = "exec";
+      ExecStart = lib.getExe' (hatchProgram src) "host-hatch";
+      Restart = "on-failure";
+      RestartSec = 1;
+      StandardInput = "null";
+      # Nothing of the host beyond what a hatch uses: a user of its own, no
+      # privilege, and no way to gain one or to leave its namespaces; sockets
+      # of the three families it opens and no other, so no unix or netlink
+      # socket of anything here; and of the host's files only those it reads,
+      # read-only — its program's closure, the CA bundle, its resolver's — in
+      # a root that holds nothing else, so whatever the host keeps, now or
+      # later, is not there for it.
+      DynamicUser = true;
+      CapabilityBoundingSet = "";
+      RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_VSOCK" ];
+      # The families are checked on the native socket call, which the 32-bit
+      # one and io_uring would go round: neither is left to it.
+      SystemCallArchitectures = "native";
+      SystemCallFilter = [ "@system-service" "~@privileged @resources @aio" ];
+      SystemCallErrorNumber = "EPERM";
+      RestrictNamespaces = true;
+      LockPersonality = true;
+      MemoryDenyWriteExecute = true;
+      RestrictRealtime = true;
+      PrivateDevices = true;
+      PrivateIPC = true;
+      ProtectHome = true;
+      ProtectHostname = true;
+      ProtectClock = true;
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectKernelLogs = true;
+      ProtectControlGroups = true;
+      ProtectProc = "invisible";
+      ProcSubset = "pid";
+      RootDirectory = "${emptyRoot}";
+      TemporaryFileSystem = "/:ro";
+      MountAPIVFS = true;
+      BindReadOnlyPaths = [ "/etc/resolv.conf" ];
+      # What a consumer names is fetched by the hatch itself, never through a
+      # proxy the service manager's environment might name.
+      UnsetEnvironment = [ "HTTP_PROXY" "http_proxy" "HTTPS_PROXY" "https_proxy" "ALL_PROXY" "all_proxy" "NO_PROXY" "no_proxy" ];
     };
+  };
 }
