@@ -29,16 +29,22 @@ mod kds;
 mod oci;
 mod transport;
 
+use std::sync::Arc;
+
 use axum::Router;
 use axum::routing::{get, post};
+use tokio::sync::Semaphore;
 
 use crate::auth::AuthState;
 
-/// Shared handler state. `Clone` is cheap: both fields are Arc-backed.
+/// Shared handler state. `Clone` is cheap: every field is Arc-backed.
 #[derive(Clone)]
 pub struct AppState {
     pub auth: AuthState,
     pub vcek: kds::VcekCache,
+    /// Turns for the pulls under way at once.
+    pub pulls: Arc<Semaphore>,
+    pub kbs: reqwest::Client,
 }
 
 #[tokio::main]
@@ -60,6 +66,8 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         auth,
         vcek: kds::VcekCache::default(),
+        pulls: Arc::new(Semaphore::new(oci::CONCURRENT_PULLS)),
+        kbs: kbs::client()?,
     };
 
     let app = Router::new()
