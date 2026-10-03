@@ -17,9 +17,10 @@
 //! never sees (TLS-in-TEE). So `none` weakens nothing the TEE relies on
 //! cryptographically — it just hands back a fixed tenant in dev.
 //!
-//! Deny paths (oidc mode) are HTTP 401 (bad credential) / 403 (valid but
-//! no org binding). For MVP, RBAC is "any org-scoped token is allowed for
-//! any operation"; per-operation gating lands later.
+//! Deny paths are HTTP 401 (bad credential) / 403 (valid but no org
+//! binding) in oidc mode, and in either mode 429 when the principal is over
+//! its rate limit for the operation (see `rate_limit`). Any org-scoped token
+//! may perform any operation.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -255,17 +256,17 @@ impl OidcAuth {
 pub async fn authorize(State(state): State<AppState>, body: Bytes) -> Result<Vec<u8>, HatchError> {
     let req: AuthorizeRequest = decode_body(&body)?;
 
-    // RBAC for MVP: any org-scoped token is allowed for any operation.
-    // Per-operation gating lands when scopes/roles are wired through the
-    // org template in Logto.
-    let _ = req.operation;
-
+    // Any org-scoped token may perform any operation, within the rate limit.
     let principal = match &state.auth {
         // Dev: no verification, fixed tenant. The empty/dummy bearer the
         // client sends is ignored — there is nothing to validate against.
         AuthState::None { principal } => principal.clone(),
         AuthState::Oidc(oidc) => oidc.verify(&req).await?,
     };
+    state
+        .rate_limits
+        .check(&principal, req.operation)
+        .map_err(HatchError::RateLimited)?;
 
     encode_body(&AuthorizeResponse {
         principal: Some(principal),

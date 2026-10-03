@@ -31,6 +31,9 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 jsonwebtoken = "9"
 url = "2"
 
+# Per-principal rate limits on the client API
+governor = { version = "0.10", default-features = false, features = ["std"] }
+
 # Digest verification convenience on OCI pulls
 sha2 = "0.10"
 hex = "0.4"

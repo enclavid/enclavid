@@ -16,7 +16,7 @@
 //! `enforce` runs and reads it via the `Extension<ClientOperation>`
 //! extractor. On success it injects `Principal(principal)` into
 //! request extensions so the handler downstream can read it; on
-//! failure short-circuits 401 / 403.
+//! failure short-circuits 401 / 403, or 429 with `Retry-After`.
 //!
 //! A single auth layer at the router level wouldn't work — at that
 //! position the auth middleware would run before any per-route
@@ -28,7 +28,7 @@ use std::sync::Arc;
 use axum::extract::{Extension, FromRequestParts, Request, State};
 use axum::http::{HeaderName, StatusCode, header, request::Parts};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use base64ct::{Base64, Encoding};
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, Untrusted, reason};
@@ -249,7 +249,8 @@ pub(super) async fn enforce(
     //      caller reaches /sessions create.
     //   2. Host claims a valid credential belongs to tenant X when
     //      it actually belongs to Y → attempted impersonation.
-    //   3. Host denies valid credentials → denial of service.
+    //   3. Host denies valid credentials, or says their tenant is past
+    //      its rate → denial of service.
     //
     // The TEE has no independent crypto check on the verdict, so a
     // compromised host can mint sessions on behalf of any tenant.
@@ -312,6 +313,13 @@ risk as the AuthN trust gate above.
         AuthVerdict::Allowed { principal } => principal.map(|p| p.0),
         AuthVerdict::Unauthenticated => return Err(StatusCode::UNAUTHORIZED),
         AuthVerdict::PermissionDenied => return Err(StatusCode::FORBIDDEN),
+        AuthVerdict::RateLimited { retry_after_secs } => {
+            return Ok((
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry_after_secs.to_string())],
+            )
+                .into_response());
+        }
     };
     req.extensions_mut().insert(Principal(principal));
 

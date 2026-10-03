@@ -141,7 +141,8 @@ rec {
     '';
 
   # A hatch built from `src`'s own tree, listening on `port`, checking
-  # consumers' tokens as `settings` — `enclavid.hatch` — says. It keeps nothing
+  # consumers' tokens, and how often each asks, as `settings` —
+  # `enclavid.hatch` — says. It keeps nothing
   # it could not fetch again, so it is started again however often it ends.
   hatchService = { name, port, src, settings }: {
     description = "Enclavid hatch ${name}: what the guests reach outside";
@@ -155,7 +156,11 @@ rec {
       # and the host's own is out of its sight: this one, which hatchRoot
       # binds in.
       SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-    } // (
+    } // lib.mapAttrs (_: toString) (lib.filterAttrs (_: n: n != null) {
+      HATCH_SESSION_CREATE_PER_MINUTE = settings.perMinute.sessionCreate;
+      HATCH_SESSION_READ_PER_MINUTE = settings.perMinute.sessionRead;
+      HATCH_DATA_READ_PER_MINUTE = settings.perMinute.dataRead;
+    }) // (
       if settings.auth == "oidc" then {
         HATCH_AUTH = "oidc";
         HATCH_AUTH_OIDC_ISSUER = settings.issuer;

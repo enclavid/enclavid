@@ -11,7 +11,7 @@
 //! compromised hatch can mint fake sessions; bounded only by host-side
 //! rate-limit + audit log. See architecture.md → Network Isolation.
 
-use hatch_protocol::{AuthorizeRequest, AuthorizeResponse};
+use hatch_protocol::{AuthorizeRequest, AuthorizeResponse, RateLimited};
 use hyper::StatusCode;
 
 use crate::boundary;
@@ -54,6 +54,10 @@ pub enum AuthVerdict {
     /// Credential is valid but not permitted for the requested
     /// operation, or has no org binding (HTTP 403).
     PermissionDenied,
+    /// Credential is valid, but its principal has asked for this
+    /// operation more often than it may (HTTP 429). It may ask again in
+    /// `retry_after_secs`.
+    RateLimited { retry_after_secs: u32 },
 }
 
 /// How long the hatch has to answer an authorization request.
@@ -115,6 +119,12 @@ impl AuthClient {
             }
             StatusCode::UNAUTHORIZED => AuthVerdict::Unauthenticated,
             StatusCode::FORBIDDEN => AuthVerdict::PermissionDenied,
+            StatusCode::TOO_MANY_REQUESTS => {
+                let r: RateLimited = hatch_protocol::decode(&resp.body)?;
+                AuthVerdict::RateLimited {
+                    retry_after_secs: r.retry_after_secs,
+                }
+            }
             s => return Err(BridgeError::Transport(format!("authorize: status {s}"))),
         };
 

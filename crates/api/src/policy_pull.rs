@@ -291,19 +291,33 @@ pub fn split_pinned_ref(policy_ref: &str) -> Option<(&str, &str)> {
     Some((repo, digest))
 }
 
-/// Extract the registry hostname (authority portion) from a pinned
-/// OCI ref. The host is everything up to the first `/` in the
-/// `<repo>` part, so for `closed.vendor.com/path/foo@sha256:HEX` the
-/// answer is `closed.vendor.com`. Returns None for malformed refs
-/// (tag-form, non-sha256, or no path component).
+/// The registry a pinned OCI ref is pulled from, named as the hatch's
+/// registry client names it — the host the bearer looked up under it is
+/// sent to. That is the first `/`-separated part of `<repo>` when it reads
+/// as a host (has a `.` or a `:`, or is `localhost`), so for
+/// `closed.vendor.com/path/foo@sha256:HEX` the answer is
+/// `closed.vendor.com`; any other ref, `library/foo` or bare `foo`, is
+/// Docker Hub's, `docker.io`, which `index.docker.io` also names. The
+/// scheme a ref may be written with, `http://` or `https://` — how the
+/// hatch reaches the registry — is not part of it. Returns None for
+/// malformed refs (tag-form or non-sha256).
 ///
 /// Used to drive the `Client.registry_auth` hostname-keyed bearer
 /// lookup at pull time — same hostname rule for policy and plugin
 /// refs, so the API consumer only has to populate one entry per
 /// registry.
 pub fn registry_hostname(oci_ref: &str) -> Option<&str> {
+    const DOCKER_HUB: &str = "docker.io";
     let (repo, _) = split_pinned_ref(oci_ref)?;
-    repo.split_once('/').map(|(host, _)| host)
+    let repo = repo
+        .strip_prefix("http://")
+        .or_else(|| repo.strip_prefix("https://"))
+        .unwrap_or(repo);
+    Some(match repo.split_once('/') {
+        Some(("index.docker.io", _)) => DOCKER_HUB,
+        Some((host, _)) if host.contains(['.', ':']) || host == "localhost" => host,
+        _ => DOCKER_HUB,
+    })
 }
 
 /// Look up the bearer for an OCI ref against the hostname-keyed
@@ -390,5 +404,42 @@ mod tests {
             encrypted.strip_suffix(ocicrypt::ENCRYPTED_MEDIA_SUFFIX),
             Some(WASM_LAYER)
         );
+    }
+
+    /// A ref written with the scheme to reach its registry by finds the
+    /// bearer kept under the registry's bare name, as one without does.
+    #[test]
+    fn the_scheme_is_no_part_of_the_registry_name() {
+        let digest = "sha256:00";
+        for written in ["", "http://", "https://"] {
+            let r = format!("{written}registry.example.com:5000/team/policy@{digest}");
+            assert_eq!(registry_hostname(&r), Some("registry.example.com:5000"));
+        }
+        let auth = HashMap::from([("localhost:5050".to_string(), b"bearer".to_vec())]);
+        let r = format!("http://localhost:5050/policy@{digest}");
+        assert_eq!(bearer_for_ref(&auth, &r), b"bearer");
+    }
+
+    /// A first part that does not read as a host is a Docker Hub path, as
+    /// the hatch's registry client takes it, so a bearer kept under that
+    /// part is not sent to Docker Hub.
+    #[test]
+    fn a_registry_is_named_as_the_hatch_reaches_it() {
+        let digest = "sha256:00";
+        for (repo, registry) in [
+            ("localhost/policy", "localhost"),
+            ("10.0.0.1/policy", "10.0.0.1"),
+            ("registry:5000/policy", "registry:5000"),
+            ("http://registry/team/policy", "docker.io"),
+            ("registry/team/policy", "docker.io"),
+            ("library/policy", "docker.io"),
+            ("policy", "docker.io"),
+            ("index.docker.io/library/policy", "docker.io"),
+        ] {
+            let r = format!("{repo}@{digest}");
+            assert_eq!(registry_hostname(&r), Some(registry), "{repo}");
+        }
+        let auth = HashMap::from([("registry".to_string(), b"bearer".to_vec())]);
+        assert!(bearer_for_ref(&auth, &format!("registry/team/policy@{digest}")).is_empty());
     }
 }

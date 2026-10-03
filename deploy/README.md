@@ -121,6 +121,15 @@ files sees only its program's closure in the store, the CA bundle and its
 resolver's, read-only, in a root that holds nothing else. Over vsock it
 reaches what any local account reaches.
 
+It also counts how often each consumer asks. A principal — the organization
+its token names, or with `auth = "none"` the one `principal` — may create
+sessions, read them and pull their disclosures at the rates
+`hatch.perMinute` sets — unset, 60, 600 and 120 a minute; past them, api
+answers 429 with `Retry-After`. With `auth = "none"` every caller is that one
+principal, so a rate is the host's and anyone can spend it for everyone; `-1`
+leaves an operation unlimited. The count is kept in the hatch's memory: it
+starts afresh when the hatch does, and each host keeps its own.
+
 ## Certificates
 
 The gateway serves on a key derived inside it, under a certificate of its own

@@ -17,7 +17,7 @@
 //!
 //! Endpoints:
 //!   GET    /health                (liveness only — see the route table)
-//!   POST   /authorize             (AuthorizeRequest -> AuthorizeResponse | 401/403)
+//!   POST   /authorize             (AuthorizeRequest -> AuthorizeResponse | 401/403/429)
 //!   POST   /oci/pull              (PullRequest -> PullResponse | 404)
 //!   POST   /kbs/relay             (KbsRelayRequest -> KbsRelayResponse)
 //!   POST   /kds/vcek              (VcekRequest -> VcekResponse | 404)
@@ -27,6 +27,7 @@ mod error;
 mod kbs;
 mod kds;
 mod oci;
+mod rate_limit;
 mod transport;
 
 use std::sync::Arc;
@@ -36,11 +37,13 @@ use axum::routing::{get, post};
 use tokio::sync::Semaphore;
 
 use crate::auth::AuthState;
+use crate::rate_limit::RateLimits;
 
 /// Shared handler state. `Clone` is cheap: every field is Arc-backed.
 #[derive(Clone)]
 pub struct AppState {
     pub auth: AuthState,
+    pub rate_limits: Arc<RateLimits>,
     pub vcek: kds::VcekCache,
     /// Turns for the pulls under way at once.
     pub pulls: Arc<Semaphore>,
@@ -65,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
     // ---- state ----
     let state = AppState {
         auth,
+        rate_limits: Arc::new(RateLimits::from_env()?),
         vcek: kds::VcekCache::default(),
         pulls: Arc::new(Semaphore::new(oci::CONCURRENT_PULLS)),
         kbs: kbs::client()?,

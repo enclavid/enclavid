@@ -18,6 +18,7 @@
 //! HTTP path, control-flow outcomes ride status codes:
 //!   - 401 Unauthorized        — bad credential
 //!   - 403 Forbidden           — credential valid, operation not permitted
+//!   - 429 Too Many Requests   — the principal is past its rate for the operation
 //!   - 404 Not Found           — OCI manifest absent
 //!   - 400 / 500               — malformed request / internal error
 //!
@@ -83,9 +84,17 @@ pub struct AuthorizeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizeResponse {
     /// Authenticated principal (opaque identity string), or None when
-    /// the auth scheme produces none. Deny paths are HTTP 401 / 403,
-    /// not represented here.
+    /// the auth scheme produces none. Deny paths are HTTP 401 / 403 /
+    /// 429, not represented here.
     pub principal: Option<String>,
+}
+
+/// Body of a 429 from `/authorize`: the credential holds, but its principal
+/// has asked for this operation more often than it may.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimited {
+    /// When the principal may ask again, in whole seconds from the answer.
+    pub retry_after_secs: u32,
 }
 
 // ---------------------------------------------------------------------

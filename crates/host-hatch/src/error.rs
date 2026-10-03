@@ -1,14 +1,18 @@
 //! Hatch error → HTTP status mapping.
 //!
 //! Control-flow-significant outcomes ride on status codes (the
-//! `hatch-client` branches on them): 401/403 for the auth deny path,
+//! `hatch-client` branches on them): 401/403/429 for the auth deny path,
 //! 404 for an absent OCI manifest. The response body, when present, is
-//! a UTF-8 diagnostic string — the success payloads are bincode-encoded
-//! DTOs (see `hatch_protocol`).
+//! a UTF-8 diagnostic string, except a 429's, which says when to ask again —
+//! that and the success payloads are CBOR-encoded DTOs (see
+//! `hatch_protocol`).
+
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use hatch_protocol::RateLimited;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -22,6 +26,9 @@ pub enum HatchError {
     Forbidden,
     /// 404 — OCI manifest not found.
     NotFound,
+    /// 429 — the principal is over its rate limit for the operation; it may
+    /// retry after this long.
+    RateLimited(Duration),
     /// 500 — internal / upstream failure.
     Internal(String),
 }
@@ -33,6 +40,14 @@ impl IntoResponse for HatchError {
             HatchError::Unauthorized => StatusCode::UNAUTHORIZED.into_response(),
             HatchError::Forbidden => StatusCode::FORBIDDEN.into_response(),
             HatchError::NotFound => StatusCode::NOT_FOUND.into_response(),
+            HatchError::RateLimited(wait) => {
+                // Rounded up, never to zero: a retry before `wait` is refused.
+                let retry_after_secs = u32::try_from(wait.as_secs() + 1).unwrap_or(u32::MAX);
+                match encode_body(&RateLimited { retry_after_secs }) {
+                    Ok(body) => (StatusCode::TOO_MANY_REQUESTS, body).into_response(),
+                    Err(e) => e.into_response(),
+                }
+            }
             HatchError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m).into_response(),
         }
     }

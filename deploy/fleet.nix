@@ -95,6 +95,9 @@ let
   arming = lib.optionals (reached != [ ]) [ "--reached" (configs reached) ]
     ++ lib.optionals (unreached != [ ]) [ "--also" (configs unreached) ];
 
+  # A hatch's allowance a minute: a count it holds as one, or -1 for none.
+  perMinute = types.nullOr (types.either (types.enum [ (-1) ]) (types.ints.between 1 4294967295));
+
   # The guest's own port a relay reaches: the last field of its `to`.
   into = relay: lib.last (lib.splitString ":" relay.to);
   carried = r: with releaseRelays r; {
@@ -329,6 +332,31 @@ in
       issuer = mkOption { type = types.nullOr types.str; default = null; };
       audience = mkOption { type = types.nullOr types.str; default = null; };
       principal = mkOption { type = types.nullOr types.str; default = null; };
+      # How often one principal may ask for each, a minute, all at once if
+      # need be; -1 for no limit, null for the hatch's own. With
+      # `auth = "none"` every request is the one principal, credential or
+      # none, so a limit is the host's, and anyone can spend it for everyone.
+      perMinute = {
+        sessionCreate = mkOption {
+          type = perMinute;
+          default = null;
+          description = ''
+            Sessions one principal may create a minute; the hatch's own is 60.
+            Every session is later fetched and compiled for its applicant, so
+            this is also what a consumer may have the guests do.
+          '';
+        };
+        sessionRead = mkOption {
+          type = perMinute;
+          default = null;
+          description = "Reads of a session's state one principal may make a minute; the hatch's own is 600.";
+        };
+        dataRead = mkOption {
+          type = perMinute;
+          default = null;
+          description = "Pulls of a session's disclosures one principal may make a minute; the hatch's own is 120.";
+        };
+      };
     };
     variant = mkOption {
       type = types.enum [ "production" "debug" ];
