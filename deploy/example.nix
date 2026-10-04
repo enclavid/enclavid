@@ -8,8 +8,9 @@
     };
     hatch = {
       auth = "oidc";
-      issuer = "https://auth.example.com/oidc";
+      issuer = "https://auth.example.com";
       audience = "https://api.example.com";
+      principalClaim = "org_id";
     };
   };
 }

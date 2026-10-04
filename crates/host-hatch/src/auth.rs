@@ -1,16 +1,17 @@
 //! Auth handler: resolves the client `Authorization` header to a tenant
 //! principal. Two modes, selected by `HATCH_AUTH` (required, fail-loud):
 //!
-//!   * `HATCH_AUTH=oidc` — production. Verifies client JWTs (Logto for
-//!     the MVP) against the issuer's JWKS (cached), found at the
-//!     `jwks_uri` of its OpenID Connect discovery document, checks
-//!     audience/expiration, and extracts `organization_id` as the
-//!     principal. Requires `HATCH_AUTH_OIDC_ISSUER` +
-//!     `HATCH_AUTH_OIDC_AUDIENCE`.
+//!   * `HATCH_AUTH=oidc` — production. Verifies client JWTs against the
+//!     issuer's JWKS (cached), found at the `jwks_uri` of its OpenID
+//!     Connect discovery document, checks audience/expiration, and takes
+//!     the principal from the claim `HATCH_AUTH_OIDC_PRINCIPAL_CLAIM`
+//!     names — the consumer's organization, under whatever name its
+//!     issuer gives it. Requires `HATCH_AUTH_OIDC_ISSUER`,
+//!     `HATCH_AUTH_OIDC_AUDIENCE` and `HATCH_AUTH_OIDC_PRINCIPAL_CLAIM`.
 //!   * `HATCH_AUTH=none` — **dev only**. Skips all verification and
 //!     attributes every request to a fixed `HATCH_AUTH_PRINCIPAL`. Must
 //!     be opted into explicitly — it is never the default, never
-//!     inferred. Lets the local stack run without Logto.
+//!     inferred. Lets the local stack run without an issuer.
 //!
 //! Either way the hatch's verdict is hatch-supplied and TEE-side
 //! defence-in-depth only: the real access anchor is the
@@ -18,8 +19,8 @@
 //! never sees (TLS-in-TEE). So `none` weakens nothing the TEE relies on
 //! cryptographically — it just hands back a fixed tenant in dev.
 //!
-//! Deny paths are HTTP 401 (bad credential) / 403 (valid but no org
-//! binding) in oidc mode, and in either mode 429 when the principal is over
+//! Deny paths are HTTP 401 (bad credential) / 403 (valid but without the
+//! principal claim) in oidc mode, and in either mode 429 when the principal is over
 //! its rate limit for the operation (see `rate_limit`). Any org-scoped token
 //! may perform any operation.
 
@@ -99,10 +100,19 @@ impl AuthState {
                 }
                 let issuer = required_env("HATCH_AUTH_OIDC_ISSUER")?;
                 let audience = required_env("HATCH_AUTH_OIDC_AUDIENCE")?;
-                Ok(AuthState::Oidc(OidcAuth::new(issuer, audience)))
+                let principal_claim = required_env("HATCH_AUTH_OIDC_PRINCIPAL_CLAIM")?;
+                Ok(AuthState::Oidc(OidcAuth::new(
+                    issuer,
+                    audience,
+                    principal_claim,
+                )))
             }
             "none" => {
-                for forbidden in ["HATCH_AUTH_OIDC_ISSUER", "HATCH_AUTH_OIDC_AUDIENCE"] {
+                for forbidden in [
+                    "HATCH_AUTH_OIDC_ISSUER",
+                    "HATCH_AUTH_OIDC_AUDIENCE",
+                    "HATCH_AUTH_OIDC_PRINCIPAL_CLAIM",
+                ] {
                     if std::env::var(forbidden).is_ok() {
                         anyhow::bail!(
                             "HATCH_AUTH=none but {forbidden} is set — \
@@ -130,6 +140,9 @@ impl AuthState {
 pub struct OidcAuth {
     issuer: String,
     audience: String,
+    /// The claim a token names its principal in: a string, the consumer's
+    /// organization as the issuer identifies it.
+    principal_claim: String,
     /// What `keep_keys` holds, and when its last try failed.
     held: watch::Receiver<Held>,
     /// Asks `keep_keys` for the set again, for a kid the held one lacks.
@@ -164,19 +177,9 @@ struct Discovery {
     jwks_uri: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct Claims {
-    /// Logto org-scoped tokens carry this when minted with
-    /// `organization_id`. Required for all client operations.
-    organization_id: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    sub: Option<String>,
-}
-
 impl OidcAuth {
     /// Starts the task that keeps the issuer's keys, for the process's life.
-    pub fn new(issuer: String, audience: String) -> Self {
+    pub fn new(issuer: String, audience: String, principal_claim: String) -> Self {
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
@@ -192,6 +195,7 @@ impl OidcAuth {
         Self {
             issuer,
             audience,
+            principal_claim,
             held,
             wanted,
         }
@@ -253,15 +257,21 @@ impl OidcAuth {
         validation.set_issuer(&[self.issuer.as_str()]);
         validation.set_audience(&[self.audience.as_str()]);
 
-        let data = decode::<Claims>(token, &key, &validation).map_err(|e| {
-            debug!(err = %e, "jwt validation failed");
-            HatchError::Unauthorized
-        })?;
+        let data = decode::<HashMap<String, serde_json::Value>>(token, &key, &validation).map_err(
+            |e| {
+                debug!(err = %e, "jwt validation failed");
+                HatchError::Unauthorized
+            },
+        )?;
 
-        match data.claims.organization_id {
-            Some(s) if !s.is_empty() => Ok(s),
+        match data
+            .claims
+            .get(&self.principal_claim)
+            .and_then(|v| v.as_str())
+        {
+            Some(s) if !s.is_empty() => Ok(s.to_owned()),
             _ => {
-                debug!("authorize: token has no organization_id");
+                debug!(claim = %self.principal_claim, "authorize: token names no principal");
                 Err(HatchError::Forbidden)
             }
         }
@@ -411,6 +421,9 @@ mod tests {
     /// `SECRET` as a JWK's `k`: base64url, unpadded.
     const SECRET_K: &str = "aGF0Y2gtdGVzdC1rZXktaGF0Y2gtdGVzdC1rZXktMzI";
     const AUDIENCE: &str = "https://api.example.test";
+    /// A claim named as ZITADEL names the user's organization: a name of the
+    /// issuer's, which the hatch takes as given.
+    const PRINCIPAL: &str = "urn:zitadel:iam:user:resourceowner:id";
 
     /// A discovery document naming the issuer at `base`, with its keys at a
     /// path no guess off the issuer would reach.
@@ -480,16 +493,24 @@ mod tests {
         }
     }
 
-    /// A request carrying a token `issuer` would issue, signed with `SECRET`
-    /// and naming the key `kid`.
+    /// A request carrying a token `issuer` would issue, signed with `SECRET`,
+    /// naming the key `kid` and the principal `org-1`.
     fn bearer(issuer: &str, kid: &str) -> AuthorizeRequest {
+        bearer_naming(issuer, kid, json!("org-1"))
+    }
+
+    /// As `bearer`, with `principal` as the principal claim's value — or no
+    /// such claim, for `null`.
+    fn bearer_naming(issuer: &str, kid: &str, principal: Value) -> AuthorizeRequest {
         let exp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
             + 600;
-        let claims =
-            json!({ "iss": issuer, "aud": AUDIENCE, "exp": exp, "organization_id": "org-1" });
+        let mut claims = json!({ "iss": issuer, "aud": AUDIENCE, "exp": exp });
+        if !principal.is_null() {
+            claims[PRINCIPAL] = principal;
+        }
         let header = Header {
             kid: Some(kid.into()),
             ..Header::new(Algorithm::HS256)
@@ -501,10 +522,24 @@ mod tests {
         }
     }
 
+    /// A token that holds without naming a principal — the claim missing,
+    /// empty, or not a string — is refused as permitted nothing.
+    #[tokio::test]
+    async fn a_token_without_the_principal_claim_is_forbidden() {
+        let (base, _) = issuer(own, usize::MAX).await;
+        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into(), PRINCIPAL.into());
+        for principal in [Value::Null, json!(""), json!(42), json!(["org-1"])] {
+            let verdict = oidc
+                .verify(&bearer_naming(&base, "k1", principal.clone()))
+                .await;
+            assert!(matches!(verdict, Err(HatchError::Forbidden)), "{principal}");
+        }
+    }
+
     #[tokio::test]
     async fn keys_come_from_where_the_discovery_document_says() {
         let (base, fetches) = issuer(own, usize::MAX).await;
-        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into());
+        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into(), PRINCIPAL.into());
         assert_eq!(oidc.verify(&bearer(&base, "k1")).await.unwrap(), "org-1");
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
     }
@@ -514,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn keys_it_cannot_read_or_for_encryption_are_left_out() {
         let (base, _) = issuer(own, usize::MAX).await;
-        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into());
+        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into(), PRINCIPAL.into());
         assert_eq!(oidc.verify(&bearer(&base, "k1")).await.unwrap(), "org-1");
         assert!(matches!(
             oidc.verify(&bearer(&base, "enc")).await,
@@ -531,7 +566,7 @@ mod tests {
             })
         };
         let (base, fetches) = issuer(elsewhere, usize::MAX).await;
-        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into());
+        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into(), PRINCIPAL.into());
         assert!(matches!(
             oidc.verify(&bearer(&base, "k1")).await,
             Err(HatchError::Internal(_))
@@ -550,7 +585,7 @@ mod tests {
             json!({ "issuer": base, "jwks_uri": format!("{at}/elsewhere/keys") })
         };
         let (base, fetches) = issuer(https, usize::MAX).await;
-        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into());
+        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into(), PRINCIPAL.into());
         assert!(matches!(
             oidc.verify(&bearer(&base, "k1")).await,
             Err(HatchError::Internal(_))
@@ -564,7 +599,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_kid_is_fetched_again_for_once_the_set_has_aged() {
         let (base, fetches) = issuer(own, usize::MAX).await;
-        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into());
+        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into(), PRINCIPAL.into());
         for kid in ["k1", "made-up", "made-up", "k2"] {
             let verdict = oidc.verify(&bearer(&base, kid)).await;
             assert_eq!(verdict.is_ok(), kid == "k1", "{kid}");
@@ -583,7 +618,7 @@ mod tests {
     #[tokio::test]
     async fn callers_at_once_share_one_fetch() {
         let (base, fetches) = issuer(own, usize::MAX).await;
-        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into());
+        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into(), PRINCIPAL.into());
         let mut callers = tokio::task::JoinSet::new();
         for _ in 0..8 {
             let (oidc, req) = (oidc.clone(), bearer(&base, "k1"));
@@ -600,7 +635,7 @@ mod tests {
     #[tokio::test]
     async fn made_up_kids_cost_one_fetch_however_their_callers_end() {
         let (base, fetches) = issuer(own, usize::MAX).await;
-        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into());
+        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into(), PRINCIPAL.into());
         oidc.verify(&bearer(&base, "k1")).await.unwrap();
         age(REFETCH_AFTER + Duration::from_secs(1)).await;
         for _ in 0..20 {
@@ -621,7 +656,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_fetch_keeps_the_held_set() {
         let (base, fetches) = issuer(own, 1).await;
-        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into());
+        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into(), PRINCIPAL.into());
         oidc.verify(&bearer(&base, "k1")).await.unwrap();
         age(JWKS_TTL + Duration::from_secs(1)).await;
         fetched(&fetches, 2).await;
@@ -638,7 +673,7 @@ mod tests {
     #[tokio::test]
     async fn with_no_set_a_failed_fetch_is_answered_at_once() {
         let (base, _) = issuer(own, 0).await;
-        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into());
+        let oidc = OidcAuth::new(base.clone(), AUDIENCE.into(), PRINCIPAL.into());
         for _ in 0..2 {
             let verdict = at_once(oidc.verify(&bearer(&base, "k1"))).await;
             assert!(matches!(verdict, Err(HatchError::Internal(_))));

@@ -165,6 +165,7 @@ rec {
         HATCH_AUTH = "oidc";
         HATCH_AUTH_OIDC_ISSUER = settings.issuer;
         HATCH_AUTH_OIDC_AUDIENCE = settings.audience;
+        HATCH_AUTH_OIDC_PRINCIPAL_CLAIM = settings.principalClaim;
       } else {
         HATCH_AUTH = "none";
         HATCH_AUTH_PRINCIPAL = settings.principal;

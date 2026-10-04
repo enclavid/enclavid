@@ -331,6 +331,16 @@ in
       };
       issuer = mkOption { type = types.nullOr types.str; default = null; };
       audience = mkOption { type = types.nullOr types.str; default = null; };
+      principalClaim = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "urn:zitadel:iam:user:resourceowner:id";
+        description = ''
+          With `auth = "oidc"`, the token claim naming the consumer's
+          organization — the principal requests are counted and sessions kept
+          under. Each issuer names it its own way.
+        '';
+      };
       principal = mkOption { type = types.nullOr types.str; default = null; };
       # How often one principal may ask for each, a minute, all at once if
       # need be; -1 for no limit, null for the hatch's own. With
@@ -583,8 +593,9 @@ in
           message = "enclavid.releases: with the gateway on another host, a release's api is reached at its entrances";
         }
         {
-          assertion = cfg.hatch.auth != "oidc" || (cfg.hatch.issuer != null && cfg.hatch.audience != null);
-          message = "enclavid.hatch: auth = \"oidc\" needs issuer and audience";
+          assertion = cfg.hatch.auth != "oidc"
+            || (cfg.hatch.issuer != null && cfg.hatch.audience != null && cfg.hatch.principalClaim != null);
+          message = "enclavid.hatch: auth = \"oidc\" needs issuer, audience and principalClaim";
         }
         {
           assertion = cfg.hatch.auth != "none" || cfg.hatch.principal != null;

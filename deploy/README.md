@@ -38,8 +38,9 @@ Describe your host, starting from `example.nix`:
     };
     hatch = {
       auth = "oidc";
-      issuer = "https://auth.example.com/oidc";
+      issuer = "https://auth.example.com";
       audience = "https://api.example.com";
+      principalClaim = "org_id";         # the claim naming the consumer's organization
     };
   };
 }
