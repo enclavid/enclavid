@@ -1,16 +1,11 @@
-type Props = {
-  /// Optional human-readable reason, for the case that has one to give
-  /// (an unknown session).
-  reason?: string;
-};
+import { Button } from "@/components/ui/button";
 
-/// "You can't continue from here." Reached when:
-///   * `/status` returns `failed` / `expired` / `unspecified`
-///   * `/status` answers 404 — no such session, or it has expired
-///
-/// A service that did not answer is NOT this screen: that says nothing
-/// about the session, and `Unavailable` offers to try again.
-export function Terminated({ reason }: Props) {
+/// The service did not answer — not the session ending. Reached when
+/// `/status` fails for any reason other than an unknown session (404):
+/// a 5xx, a dropped connection, no network. Nothing about the session
+/// is lost: reconnecting resumes it at the step it was on, so the one
+/// action offered is to try again.
+export function Unavailable() {
   return (
     <main
       className="flex min-h-dvh flex-col items-center justify-center px-6 text-center"
@@ -31,16 +26,22 @@ export function Terminated({ reason }: Props) {
             className="size-7"
             aria-hidden
           >
-            <circle cx="12" cy="12" r="9" />
-            <path d="M12 8v4" />
-            <path d="M12 16h.01" />
+            <path d="M21 12a9 9 0 1 1-3-6.7" />
+            <path d="M21 4v5h-5" />
           </svg>
         </div>
-        <h1 className="text-xl font-semibold">Session ended</h1>
+        <h1 className="text-xl font-semibold">Service unavailable</h1>
         <p className="text-sm leading-relaxed text-muted-foreground">
-          {reason ??
-            "This verification session has ended. Request a new one from the service that linked you here."}
+          We couldn't reach the verification service. Your progress is saved —
+          try again in a moment.
         </p>
+        <Button
+          size="lg"
+          className="h-12 w-full text-base"
+          onClick={() => window.location.reload()}
+        >
+          Try again
+        </Button>
       </div>
     </main>
   );

@@ -45,6 +45,12 @@ async fn input(
     mut ctx: SessionRunCtx,
     multipart: Multipart,
 ) -> Result<SessionProgress, ApiError> {
+    // A completed session takes no more input. Its state may still hold the last
+    // screen it showed, and answering that screen again would run a round that
+    // can reach `finish` a second time — see `shared::standing`.
+    if ctx.completed() {
+        return Err(StatusCode::CONFLICT.into());
+    }
     let session_state = ctx.session_state.take().ok_or_else(|| {
         // /input fires with the assumption that /connect already
         // persisted at least one rendered prompt. If state is None

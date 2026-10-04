@@ -164,6 +164,7 @@ function RequestRenderer({
           stepNumber={(nextIndex ?? 0) + 1}
           totalSteps={total}
           onCapture={handle}
+          maxUploadBytes={request.max_upload_bytes}
           sending={submitting}
         />
         <StatusOverlay

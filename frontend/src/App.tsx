@@ -8,6 +8,7 @@ import { Ritual } from "@/screens/Ritual";
 import { Verify } from "@/screens/Verify";
 import { Completed } from "@/screens/Completed";
 import { Terminated } from "@/screens/Terminated";
+import { Unavailable } from "@/screens/Unavailable";
 import { getSessionId } from "@/lib/session";
 import { loadKey } from "@/lib/key";
 import { connect, getStatus, submitInput, ApiError } from "@/lib/api";
@@ -19,10 +20,12 @@ import type { Decision, SessionProgress } from "@/types";
 // rather than the path, and the back button works for free. The steps go
 // in the fragment because the page's references are relative to its own
 // address (see `vite.config.ts`), so its path cannot grow a segment per
-// step. Two states sit *outside* the URL because they're decided by
-// the server, not user navigation: `completed` and `terminated`. We
-// surface those as overlays that ignore the location.
-type Terminal = "completed" | "terminated";
+// step. Three states sit *outside* the URL because they're decided by
+// the server, not user navigation: `completed`, `terminated` (the
+// session is gone or over) and `unavailable` (the service did not
+// answer — the session is fine). We surface those as overlays that
+// ignore the location.
+type Terminal = "completed" | "terminated" | "unavailable";
 
 export function App() {
   return (
@@ -131,12 +134,12 @@ function Session({ sessionId }: { sessionId: string }) {
           setTerminationReason(
             "We couldn't find this verification session. Request a new link from the service that sent you here.",
           );
+          setTerminal("terminated");
         } else {
-          setTerminationReason(
-            "Couldn't reach the verification service. Please check your connection and reload.",
-          );
+          // A 5xx or no answer says nothing about the session; telling the
+          // applicant it ended would send them away from one that is fine.
+          setTerminal("unavailable");
         }
-        setTerminal("terminated");
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -149,11 +152,10 @@ function Session({ sessionId }: { sessionId: string }) {
   // Gate on `statusFetched`: the status useEffect sets that flag only
   // for running sessions. Terminal sessions (completed / failed /
   // expired) short-circuit before setting it. Without this gate, a
-  // reload on `/verify` for an already-completed session would race
-  // the status effect's own /connect (fired to fetch the decision)
-  // against this effect's /connect — both reading the same starting
-  // version, both racing to finalize, second one failing CAS with
-  // version-mismatch.
+  // reload on `/verify` for an already-completed session would send a
+  // second /connect beside the status effect's own (fired to fetch the
+  // decision). /connect only reads a session that has its decision, so
+  // the pair would agree — but one is all the page needs.
   useEffect(() => {
     if (!statusFetched) return;
     const onVerify = location === "/verify";
@@ -212,6 +214,7 @@ function Session({ sessionId }: { sessionId: string }) {
     return wrap("completed", <Completed decision={completedDecision} />);
   if (terminal === "terminated")
     return wrap("terminated", <Terminated reason={terminationReason} />);
+  if (terminal === "unavailable") return wrap("unavailable", <Unavailable />);
   if (!statusFetched) return wrap("loading", <Loading />);
 
   // Keyed wrapper drives the per-screen mount animation. React

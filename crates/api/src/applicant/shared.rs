@@ -17,7 +17,7 @@ use enclavid_boundary::{AuthN, AuthZ, Replay, reason};
 use engine_types::composition::PluginInstance;
 use hatch_client::{
     Client, DisplayField, Event, Key, Metadata, PluginPin, Prompt, SessionMetadata, SessionState,
-    State as StateField, outbound_session_id,
+    SessionStatus, State as StateField, outbound_session_id,
 };
 // The run wire mirrors: props api builds + ships, the outcome + error it gets
 // back from the execution-worker.
@@ -37,7 +37,7 @@ use super::auth::CallerKey;
 use super::callbacks::CallbackServer;
 use super::media_store::HatchMediaStore;
 use super::persister::{self, SessionPersister};
-use super::views::{SessionProgress, progress_from};
+use super::views::{SessionProgress, progress_from, prompt_view};
 
 /// Build the static `props` list the policy reads via
 /// `context.props`, from the consumer's config bytes in metadata.
@@ -75,6 +75,36 @@ pub(super) fn consent_for_round(
         }
         _ => None,
     }
+}
+
+/// Where a session already stands, when saying so takes no round.
+///
+/// A completed session answers with the decision it was given and never runs
+/// again: a second run could reach `finish` a second time — another disclosure
+/// sealed, the decision the consumer already read rewritten. A started one
+/// answers with the prompt it is waiting on, so reopening the link carries on
+/// where the applicant was instead of starting over. `None` is a session no
+/// round has reached yet, the one case `/connect` still runs.
+///
+/// A free function for the same reason [`consent_for_round`] is one.
+pub(super) fn standing(
+    metadata: &SessionMetadata,
+    session_state: Option<&SessionState>,
+    locale: &Locale,
+) -> Result<Option<SessionProgress>, StatusCode> {
+    if metadata.status == SessionStatus::Completed {
+        // `finalize` writes the two together; a completed session without its
+        // decision is not a state this code produces.
+        let decision = metadata.decision.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Some(SessionProgress::Completed {
+            decision: decision.into(),
+        }));
+    }
+    Ok(session_state
+        .and_then(|s| s.current_prompt.as_ref())
+        .map(|prompt| SessionProgress::AwaitingInput {
+            request: prompt_view(prompt, locale),
+        }))
 }
 
 /// Pre-flight context shared by `/connect` and `/input`. The extractor
@@ -128,6 +158,16 @@ pub(super) struct SessionRunCtx {
 }
 
 impl SessionRunCtx {
+    /// See [`standing`].
+    pub(super) fn standing(&self) -> Result<Option<SessionProgress>, StatusCode> {
+        standing(&self.metadata, self.session_state.as_ref(), &self.locale)
+    }
+
+    /// Whether the session has its decision. No round runs on one that has.
+    pub(super) fn completed(&self) -> bool {
+        self.metadata.status == SessionStatus::Completed
+    }
+
     /// Drive one reducer round: feed `event` against `session_state`
     /// into the policy, persist the returned state (done by the
     /// persister via the engine's `on_session_change` hook), finalize
@@ -779,6 +819,84 @@ mod tests {
             }],
             ..Default::default()
         })
+    }
+
+    fn metadata(
+        status: SessionStatus,
+        decision: Option<hatch_client::Decision>,
+    ) -> SessionMetadata {
+        SessionMetadata {
+            status,
+            decision,
+            ..Default::default()
+        }
+    }
+
+    fn waiting_on(prompt: Prompt) -> SessionState {
+        SessionState {
+            current_prompt: Some(prompt),
+            ..Default::default()
+        }
+    }
+
+    /// The decision it was given, and no round — whatever its state still holds.
+    #[test]
+    fn a_completed_session_answers_with_its_decision() {
+        let state = waiting_on(consent_prompt("dob"));
+        let standing = standing(
+            &metadata(
+                SessionStatus::Completed,
+                Some(hatch_client::Decision::Rejected),
+            ),
+            Some(&state),
+            &Locale::default(),
+        );
+        assert!(matches!(
+            standing,
+            Ok(Some(SessionProgress::Completed {
+                decision: crate::dto::DecisionView::Rejected
+            }))
+        ));
+    }
+
+    /// Never "start over" for a session that has finished.
+    #[test]
+    fn a_completed_session_without_its_decision_is_an_error_not_a_rerun() {
+        let standing = standing(
+            &metadata(SessionStatus::Completed, None),
+            None,
+            &Locale::default(),
+        );
+        assert_eq!(standing.err(), Some(StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    /// Reopening the link carries on from the screen the applicant was on.
+    #[test]
+    fn a_started_session_answers_with_the_prompt_it_waits_on() {
+        let state = waiting_on(Prompt::Media(MediaSpec::default()));
+        let standing = standing(
+            &metadata(SessionStatus::Running, None),
+            Some(&state),
+            &Locale::default(),
+        );
+        assert!(matches!(
+            standing,
+            Ok(Some(SessionProgress::AwaitingInput { .. }))
+        ));
+    }
+
+    /// The one case `/connect` still runs: no round has reached the session.
+    #[test]
+    fn a_fresh_session_has_no_standing() {
+        let running = metadata(SessionStatus::Running, None);
+        assert!(matches!(
+            standing(&running, None, &Locale::default()),
+            Ok(None)
+        ));
+        assert!(matches!(
+            standing(&running, Some(&SessionState::default()), &Locale::default()),
+            Ok(None)
+        ));
     }
 
     /// The only shape that seals, and it seals the screen's own fields.

@@ -542,12 +542,11 @@ impl SessionPersister {
     /// TTL hint) in one Write RPC. No-op while the run is still
     /// awaiting input — the session continues into the next /input round.
     ///
-    /// Idempotent under crash recovery: if a previous run already
-    /// finalized but the response was lost, replay re-runs the policy
-    /// (which fast-paths to `RunStatus::Completed`), and this method
-    /// re-applies the same status flip — the host's CAS accepts it
-    /// because `current_version` reflects the version after that
-    /// previous finalize.
+    /// Runs at most once a session: once `Completed` is written, `/connect`
+    /// answers from the metadata and `/input` refuses, so no round reaches
+    /// here again (`shared::standing`). A response lost after the write is
+    /// recovered by reading, not re-running — a reload finds the session
+    /// completed and `/connect` hands back the decision kept here.
     ///
     /// Failed / Expired transitions are intentionally NOT handled
     /// here. Engine errors stay as Running (operationally retried);

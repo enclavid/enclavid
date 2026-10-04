@@ -81,6 +81,9 @@ export type RequestView =
       filled: number[];
       /// Slot id to POST the next step to (`/input/<slot_id>`).
       next_slot_id: string;
+      /// The most bytes one step's upload may be, multipart framing
+      /// included; past it the server answers 413.
+      max_upload_bytes: number;
     }
   | {
       kind: "consent";

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { fitFrames } from "@/lib/frames";
 import { cn } from "@/lib/utils";
 import type { CaptureStep } from "@/types";
 
@@ -21,6 +22,10 @@ type Props = {
   /// the list to the plugin layer for analysis — no client-side
   /// warp, no video container, just the frames.
   onCapture: (form: FormData) => void;
+  /// The most bytes the upload may be, as the server states it for this
+  /// step. The frames are fitted under it before they are sent — see
+  /// `lib/frames.ts`.
+  maxUploadBytes: number;
   /// True while the parent is submitting the form. Disables both
   /// Retake and Use-photo buttons so the user can't double-tap or
   /// retake mid-submit. Surfaced as a prop (not local state) so the
@@ -67,10 +72,14 @@ export function MediaCapture({
   stepNumber,
   totalSteps,
   onCapture,
+  maxUploadBytes,
   sending = false,
   onCancel,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Set while the frames are being fitted for sending, which takes a
+  // moment on a large capture and comes before `sending` turns on.
+  const fittingRef = useRef(false);
   // Off-DOM canvas reused across frame-grabs to avoid per-frame
   // allocation thrash.
   const grabCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -233,16 +242,27 @@ export function MediaCapture({
     setAttempt((a) => a + 1);
   }
 
-  function confirm() {
+  async function confirm() {
     if (framesRef.current.length === 0) return;
     // Guard against double-fire: the buttons themselves get
     // disabled while `sending`, but tap-bursts on touch devices can
     // sometimes register two onClicks before React commits the
     // disabled state. This local check makes the second one a
     // no-op.
-    if (sending) return;
+    if (sending || fittingRef.current) return;
+    fittingRef.current = true;
+    let frames: Blob[];
+    try {
+      frames = await fitFrames(framesRef.current, maxUploadBytes);
+    } catch {
+      setPhase("error");
+      setErrorMsg("This photo is too large to send. Please retake it.");
+      return;
+    } finally {
+      fittingRef.current = false;
+    }
     const form = new FormData();
-    framesRef.current.forEach((blob, i) => {
+    frames.forEach((blob, i) => {
       // RFC 7578 allows repeated names — axum's Multipart preserves
       // part order, so we just append under one name per part.
       form.append("frame", blob, `${i}.jpg`);

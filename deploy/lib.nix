@@ -124,8 +124,9 @@ rec {
     let built = import (within src "image") { inherit idKeys; };
     in (import (within src "deploy/host.nix") { inherit (built) pkgs; }).host-hatch;
 
-  # A directory with nothing in it, for a hatch's root.
-  emptyRoot = pkgs.runCommand "enclavid-empty-root" { } "mkdir $out";
+  # The directory the hatch `name` runs in as its root. The service manager
+  # needs it to exist before the hatch starts, so the fleet declares it.
+  hatchRootPath = name: "/var/lib/enclavid/hatch-${name}-root";
 
   # What the hatch `unit`, built from `src`'s tree, sees of the store: its
   # program's closure and the CA bundle, each bound into its empty root by a
@@ -207,12 +208,16 @@ rec {
       ProtectControlGroups = true;
       ProtectProc = "invisible";
       ProcSubset = "pid";
-      RootDirectory = "${emptyRoot}";
-      # A copy of it for each run, gone with the run: the service manager makes
-      # its mount points in the root it is given, and a store the host can
-      # write would otherwise keep them, every hatch's closure named in one
-      # shared directory.
-      RootEphemeral = true;
+      # Its root: a directory of its own on the host, holding nothing but the
+      # mount points the service manager makes there, under a tmpfs that hides
+      # even those from the hatch. Not a copy made for each run
+      # (`RootEphemeral=`): the service manager deletes that under a running
+      # service on any daemon-reload, and every file the hatch opens after it
+      # is missing. Nor a directory in the store, where those mount points
+      # would be left behind. And not the tmpfs alone: `DynamicUser=` brings
+      # `ProtectSystem=strict`, whose read-only view of the host's whole `/`
+      # takes the tmpfs's place unless a root of its own is given.
+      RootDirectory = hatchRootPath name;
       TemporaryFileSystem = "/:ro";
       MountAPIVFS = true;
       BindReadOnlyPaths = [ "/etc/resolv.conf" ];

@@ -644,6 +644,15 @@ in
       unit = "enclavid-hatch.service";
       src = ../.;
     });
+    # The hatch's root has to exist before it starts, and owned by root: one
+    # it could write to would be a root it could change.
+    systemd.tmpfiles.settings = lib.mkIf (local != [ ]) {
+      "10-enclavid-hatch"."${fleet.hatchRootPath "shared"}".d = {
+        mode = "0755";
+        user = "root";
+        group = "root";
+      };
+    };
 
     # Every six hours, which is how often Let's Encrypt asks to be asked when a
     # certificate should be renewed — an early renewal it asks for ahead of

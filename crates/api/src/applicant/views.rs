@@ -73,6 +73,12 @@ pub enum RequestView {
         label: String,
         captures: Vec<CaptureStepView>,
         next_slot_id: String,
+        /// The most bytes one step's upload may be, multipart framing
+        /// included; past it the body is refused with 413. The frontend
+        /// fits its frames under this rather than under a number of its own,
+        /// so the two cannot drift apart. A constant of the build, the same
+        /// for every session.
+        max_upload_bytes: usize,
     },
     Consent {
         fields: Vec<dto::ConsentFieldView>,
@@ -174,7 +180,7 @@ pub(super) fn progress_from(status: RunStatus, locale: &Locale) -> SessionProgre
     }
 }
 
-fn prompt_view(prompt: &Prompt, locale: &Locale) -> RequestView {
+pub(super) fn prompt_view(prompt: &Prompt, locale: &Locale) -> RequestView {
     match prompt {
         Prompt::Media(spec) => media_view(spec, locale),
         Prompt::ConsentDisclosure(d) => consent_view(d, locale),
@@ -213,6 +219,7 @@ fn media_view(spec: &MediaSpec, locale: &Locale) -> RequestView {
         // The prompt carries no fill state; the frontend walks the
         // capture steps from the first one and POSTs each in order.
         next_slot_id: "media-0".to_string(),
+        max_upload_bytes: crate::limits::APPLICANT_INPUT_BODY_LIMIT,
     }
 }
 
