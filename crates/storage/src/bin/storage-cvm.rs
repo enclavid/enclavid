@@ -29,6 +29,10 @@ use storage_rpc::{CacheServiceServerShared, SessionStoreServiceServerShared, Sto
 
 /// How many expired sessions the sweeper purges per tick (bounds one sweep pass).
 const SWEEP_BATCH: usize = 1024;
+/// What the compiled-bundle cache may hold, when the command line does not
+/// say: a bundle is about 8 MiB, and the volume the cache shares with the
+/// sessions is a few GiB.
+const DEFAULT_CACHE_BYTES: u64 = 512 * 1024 * 1024;
 /// Concurrent in-flight calls each service handles.
 const SESSION_CONCURRENCY: usize = 16;
 const CACHE_CONCURRENCY: usize = 8;
@@ -171,6 +175,10 @@ async fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(60);
+    let cache_bytes: u64 = std::env::var("ENCLAVID_STORAGE_CACHE_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_CACHE_BYTES);
 
     let sessions = Arc::new(SessionStore::open(&sessions_dir).unwrap_or_else(|e| {
         debug!("{e}");
@@ -199,10 +207,12 @@ async fn main() {
             )
         }),
     );
-    let svc = Arc::new(StorageSvc::new(sessions.clone(), CacheBlobs::new(store)));
+    let cache = CacheBlobs::new(store);
+    let svc = Arc::new(StorageSvc::new(sessions.clone(), cache.clone()));
 
     // TTL sweeper — enforce per-session deadlines INSIDE the trust boundary (the
     // host STATUS byte is gone). Clock is host-skewable → availability-only.
+    // The same tick keeps the cache within its budget.
     {
         let sessions = sessions.clone();
         tokio::spawn(async move {
@@ -249,6 +259,24 @@ async fn main() {
                         debug!("  cause: {e}");
                     }
                 }
+                match cache.evict_to(cache_bytes).await {
+                    Ok(n) if n > 0 => info!(
+                        "storage-cvm: dropped {} cache blob(s) over the budget",
+                        safe(
+                            &n,
+                            reason!(
+                                "a count of files on a volume the host provisions \
+                                 unencrypted and reads itself"
+                            )
+                        ),
+                        reason!("an eviction ran; it is on the sweeper's fixed timer")
+                    ),
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!("storage-cvm: cache eviction failed", reason!("a constant"));
+                        debug!("  cause: {e}");
+                    }
+                }
             }
         });
     }
@@ -262,10 +290,14 @@ async fn main() {
         )
     });
     info!(
-        "storage-cvm: listening on {}, sessions={}, cache={}, sweep={}s",
+        "storage-cvm: listening on {}, sessions={}, cache={} (at most {} bytes), sweep={}s",
         safe(&listen, reason!("on the measured command line")),
         safe(&sessions_dir, reason!("on the measured command line")),
         safe(&cache_dir, reason!("on the measured command line")),
+        safe(
+            &cache_bytes,
+            reason!("off the measured command line, or this build's default when absent")
+        ),
         safe(
             &sweep_secs,
             reason!("off the measured command line, or this build's default when absent")
