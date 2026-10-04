@@ -35,10 +35,8 @@ async function parseOrThrow<T>(res: Response): Promise<T> {
 }
 
 // All applicant endpoints live under `api/v1/sessions/<id>/...`,
-// matching the client-side surface. The page's own routes are not
-// paths at all: they live in the fragment (`#/session/<id>/...`),
-// which never reaches the server, so it is these API requests, not the
-// page's address, that name the session to it.
+// matching the client-side surface, and relative to the page, which
+// sits beside them whether its address names a session or not.
 function endpoint(sessionId: string, suffix: string): string {
   return `api/v1/sessions/${encodeURIComponent(sessionId)}${suffix}`;
 }

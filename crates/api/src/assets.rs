@@ -17,27 +17,39 @@ pub struct Asset {
 
 include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 
-/// The document, served at `/`.
+/// The document, served at `/` and at a session's own path.
 const INDEX: &str = "/index.html";
 
 /// The prefix Vite gives content-addressed output. A file under it is named by
 /// a hash of what is in it, so its name changes whenever its bytes do.
 const IMMUTABLE_PREFIX: &str = "/assets/";
 
-/// The asset for a request path: the file at it, or the document at `/`.
+/// The asset for a request path: the file at it, or the document.
 ///
-/// The page is served at the root, and the routes a person sees —
-/// `#/session/<id>/…` — live in the fragment, which a browser never sends, so
-/// every one of them arrives as `/`. Nothing else resolves to the document. A
-/// page served at a deeper path would resolve what it loads relatively under
-/// that path, and be handed the document again for each of those — a page that
-/// loads and runs nothing, with no error to say why. A path that is no file is
-/// nothing, and the caller answers 404.
+/// The document answers at `/`, where a link that names no session lands, and
+/// at `/<session id>`, the link to one session — `/ses_` and hex, one segment,
+/// so the page sits at the same depth either way and what it loads resolves
+/// beside it. Nothing else resolves to the document: a page served deeper
+/// would resolve what it loads relatively under that path, and be handed the
+/// document again for each of those — a page that loads and runs nothing, with
+/// no error to say why. A path that is no file is nothing, and the caller
+/// answers 404.
 pub fn lookup(path: &str) -> Option<&'static Asset> {
-    match path {
-        "/" => exact(INDEX),
-        _ => exact(path),
+    if path == "/" || names_a_session(path) {
+        exact(INDEX)
+    } else {
+        exact(path)
     }
+}
+
+/// Whether `path` is a session's link: `/ses_` and lowercase hex, nothing after.
+fn names_a_session(path: &str) -> bool {
+    path.strip_prefix("/ses_").is_some_and(|hex| {
+        !hex.is_empty()
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 fn exact(path: &str) -> Option<&'static Asset> {
@@ -74,15 +86,33 @@ mod tests {
         }
     }
 
-    /// The document is served at `/`, where every in-page route arrives, and
-    /// at no other path that is not a file — checked wherever a document
-    /// exists.
+    /// The document is served at `/` and at a session's link, and at no other
+    /// path that is not a file — checked wherever a document exists.
     #[test]
-    fn the_document_is_served_at_the_root_and_nowhere_else() {
+    fn the_document_is_served_at_the_root_and_a_sessions_link_alone() {
         if exact(INDEX).is_some() {
             assert_eq!(lookup("/").expect("the document").path, INDEX);
+            assert_eq!(lookup("/ses_0a1f").expect("a session's link").path, INDEX);
             assert!(lookup("/no/such/page").is_none());
             assert!(lookup("/session/ses_ab/assets/index.js").is_none());
+        }
+    }
+
+    /// One segment of `ses_` and lowercase hex, and nothing more — a deeper or
+    /// trailing path would move what the page loads out from beside it.
+    #[test]
+    fn a_sessions_link_is_one_segment_of_its_id() {
+        assert!(names_a_session("/ses_0a1f"));
+        for not in [
+            "/ses_",
+            "/ses_0A1F",
+            "/ses_0a1f/",
+            "/ses_0a1f/start",
+            "/x/ses_0a1f",
+            "/ses_zz",
+            "ses_0a1f",
+        ] {
+            assert!(!names_a_session(not), "{not}");
         }
     }
 

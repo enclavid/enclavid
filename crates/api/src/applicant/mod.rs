@@ -63,9 +63,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     // prefix as the client API (see `client::router`) for a consistent
     // surface across the two audiences. The page calls them by paths
     // relative to itself, so wherever the page was reached the calls
-    // follow. The page's own routes are not paths: they live in the
-    // fragment (`/#/session/<id>/...`), and the page itself is served
-    // at the root by the fallback below.
+    // follow. The page is served by the fallback below, at the root and
+    // at a session's link (`/<session id>`); its steps live in the
+    // fragment.
     let routes = Router::new()
         .route("/api/v1/sessions/{id}/status", status::get_status())
         .route("/api/v1/sessions/{id}/state", reset::delete_state())
@@ -123,12 +123,10 @@ async fn page(method: Method, uri: Uri) -> Response {
             (header::CACHE_CONTROL, crate::assets::cache_control(asset)),
             (header::CONTENT_SECURITY_POLICY, PAGE_POLICY),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            // The session id is not in the page's address — it rides in the
-            // fragment, and no `Referer` carries a fragment. The rest of the
-            // address still says something: the group and build the gateway
-            // routed it to, and any query the link carried. A browser sends
-            // that whole address as the `Referer` of every request the page
-            // makes, its own calls to this api included — so none is sent.
+            // The page's address names the session, and the group and build
+            // the gateway routed it to. A browser sends that whole address as
+            // the `Referer` of every request the page makes, its own calls to
+            // this api included — so none is sent.
             (header::REFERRER_POLICY, "no-referrer"),
         ],
         asset.bytes,

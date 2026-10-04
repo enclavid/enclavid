@@ -1,19 +1,17 @@
-// URL convention: the page is served at the root of wherever it is
-// reached, and its routes live in the fragment — `…/#/session/{id}/...`.
-// The consumer redirects the applicant to such a link with the
-// session_id baked into the fragment. A browser never sends a fragment
-// to any server, so loading the page names no session; only the API
-// calls the page then makes do. We pull the id out of the router's
-// hash location for downstream callers.
+// URL convention: a link to one session is the page's own address —
+// `…/<session id>`, one segment, `ses_` and hex — and the steps of the
+// flow live in the fragment, `#/start` and on. The page is served there
+// and at the bare root, at the same depth either way, so what it loads
+// and the API it calls resolve beside it (see `vite.config.ts`).
+//
+// The id is in the path, not the fragment: a browser carries a fragment
+// on across a redirect whose target has none, and would take the id to
+// wherever one led; a path it never carries.
 
-// The id stops at a slash or a `?`: a query written after the fragment
-// stays inside it, and is no part of the id.
-const PATH_RE = /^\/session\/([^/?]+)/;
+const SESSION_RE = /\/(ses_[0-9a-f]+)$/;
 
-// `location` is what wouter's hash location hook reports: the fragment
-// without its `#`, always with a leading slash, run through `decodeURI`,
-// and keeping any `?…` written inside it.
-export function getSessionId(location: string): string | null {
-  const m = location.match(PATH_RE);
+// The session the page's address names, if it names one.
+export function getSessionId(pathname: string): string | null {
+  const m = pathname.match(SESSION_RE);
   return m ? m[1] : null;
 }

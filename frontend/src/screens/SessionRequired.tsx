@@ -1,4 +1,4 @@
-// Reached when the URL fragment does not start with `#/session/{id}`.
+// Reached when the page's address names no session (`…/<session id>`).
 // We don't run anything else — just explain that this page is opened
 // via a link from the integrating partner.
 

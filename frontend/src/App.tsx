@@ -13,13 +13,13 @@ import { loadKey } from "@/lib/key";
 import { connect, getStatus, submitInput, ApiError } from "@/lib/api";
 import type { Decision, SessionProgress } from "@/types";
 
-// Routing model. The URL fragment is the source of truth for which
-// "real" screen is shown — wouter matches its routes against the
-// fragment rather than the path, and the back button works for free.
-// The fragment because the page's references are relative to its own
-// address (see `vite.config.ts`), so the path has to stay at the
-// page's root, and because a fragment is never sent to a server at
-// all. Two states sit *outside* the URL because they're decided by
+// Routing model. The page's address names the session (`…/<session id>`,
+// see `lib/session.ts`); the URL fragment is the source of truth for which
+// step of it is shown — wouter matches its routes against the fragment
+// rather than the path, and the back button works for free. The steps go
+// in the fragment because the page's references are relative to its own
+// address (see `vite.config.ts`), so its path cannot grow a segment per
+// step. Two states sit *outside* the URL because they're decided by
 // the server, not user navigation: `completed` and `terminated`. We
 // surface those as overlays that ignore the location.
 type Terminal = "completed" | "terminated";
@@ -33,14 +33,11 @@ export function App() {
 }
 
 function SessionFromLocation() {
-  const [location] = useLocation();
-  const sessionId = getSessionId(location);
+  // The path is fixed for the page's life: another session is another
+  // address, and so another page load.
+  const sessionId = getSessionId(window.location.pathname);
   if (!sessionId) return <SessionRequired />;
-  // Keyed by the id. Changing the fragment is not a page load, so a
-  // second link pasted into the same tab arrives here with the first
-  // session's state still mounted; the key remounts everything below,
-  // and each session starts from nothing, as it does on a fresh load.
-  return <Session key={sessionId} sessionId={sessionId} />;
+  return <Session sessionId={sessionId} />;
 }
 
 // The fragment as wouter's hash location reads it — without its `#`,
@@ -113,29 +110,20 @@ function Session({ sessionId }: { sessionId: string }) {
           return;
         }
         // Read afresh rather than from the render that started this
-        // fetch: the fragment may have moved on while it was out. If it
-        // names another session now, that session has its own mount and
-        // its own fetch, and this one must not steer the address.
-        const now = currentLocation();
-        if (getSessionId(now) !== sessionId) return;
-        const prefix = `/session/${sessionId}/`;
-        const sub = now.startsWith(prefix)
-          ? now.slice(prefix.length).replace(/[/?].*$/, "")
-          : "";
+        // fetch: the fragment may have moved on while it was out.
+        const step = currentLocation().slice(1).replace(/[/?].*$/, "");
         const hasKey = !!loadKey(sessionId);
         const valid =
-          sub === "start" || sub === "keygen" || sub === "verify";
+          step === "start" || step === "keygen" || step === "verify";
         if (!valid) {
-          // Bare #/session/:id/ (or anything we don't recognize) — pick
-          // the right starting screen based on whether the user has a
-          // key already.
-          setLocation(`${prefix}${hasKey ? "verify" : "start"}`, {
-            replace: true,
-          });
-        } else if (sub === "verify" && !hasKey) {
+          // No step — a fresh link — or one we don't recognize: pick the
+          // right starting screen based on whether the user has a key
+          // already.
+          setLocation(hasKey ? "/verify" : "/start", { replace: true });
+        } else if (step === "verify" && !hasKey) {
           // URL says verify but we have no key (cleared storage,
           // shared link). Drop them at the start.
-          setLocation(`${prefix}start`, { replace: true });
+          setLocation("/start", { replace: true });
         }
         setStatusFetched(true);
       } catch (e) {
@@ -168,7 +156,7 @@ function Session({ sessionId }: { sessionId: string }) {
   // version-mismatch.
   useEffect(() => {
     if (!statusFetched) return;
-    const onVerify = location === `/session/${sessionId}/verify`;
+    const onVerify = location === "/verify";
     if (!onVerify) {
       connectFiredRef.current = false;
       return;
@@ -232,18 +220,13 @@ function Session({ sessionId }: { sessionId: string }) {
   return wrap(
     location,
     <Switch>
-      <Route path={`/session/${sessionId}/start`}>
-        <Welcome
-          onBegin={() => setLocation(`/session/${sessionId}/keygen`)}
-        />
+      <Route path="/start">
+        <Welcome onBegin={() => setLocation("/keygen")} />
       </Route>
-      <Route path={`/session/${sessionId}/keygen`}>
-        <Ritual
-          sessionId={sessionId}
-          onReady={() => setLocation(`/session/${sessionId}/verify`)}
-        />
+      <Route path="/keygen">
+        <Ritual sessionId={sessionId} onReady={() => setLocation("/verify")} />
       </Route>
-      <Route path={`/session/${sessionId}/verify`}>
+      <Route path="/verify">
         <Verify
           progress={progress}
           error={error}
