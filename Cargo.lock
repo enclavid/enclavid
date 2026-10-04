@@ -4519,6 +4519,7 @@ dependencies = [
  "hatch-protocol",
  "remoc",
  "serde",
+ "serde_bytes",
  "tokio",
 ]
 

@@ -70,7 +70,10 @@ struct MockCallbacks {
 }
 
 impl ChildCallbacks for MockCallbacks {
-    async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError> {
+    async fn media_load(
+        &self,
+        hash: [u8; 32],
+    ) -> Result<Option<engine_rpc::ByteBuf>, CallbackError> {
         self.media_loads.lock().unwrap().push(hash);
         Ok(None)
     }

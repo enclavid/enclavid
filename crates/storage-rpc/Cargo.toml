@@ -25,6 +25,8 @@ remoc = { version = "0.18", default-features = false, features = [
 # The session-store wire DTOs (ReadRequest/WriteRequest/Slot/Op/…) are reused
 # verbatim as the remoc method payloads.
 hatch-protocol = { path = "../hatch-protocol" }
+# The cache's blobs cross as CBOR byte strings rather than integer arrays.
+serde_bytes = "0.11"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread"] }

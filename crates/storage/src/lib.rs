@@ -24,7 +24,7 @@ mod integration_tests;
 use std::sync::Arc;
 
 use hatch_protocol::{DeleteResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse};
-use storage_rpc::{CacheError, CacheService, SessionError, SessionStoreService};
+use storage_rpc::{ByteBuf, CacheError, CacheService, SessionError, SessionStoreService};
 
 pub use cache::CacheBlobs;
 pub use session::SessionStore;
@@ -134,13 +134,14 @@ impl SessionStoreService for Caller {
 }
 
 impl CacheService for Caller {
-    async fn store(&self, key: String, bytes: Vec<u8>) -> Result<(), CacheError> {
+    async fn store(&self, key: String, bytes: ByteBuf) -> Result<(), CacheError> {
         let name = self.scope.blob(&key);
-        self.svc.cache.store(name.as_str(), bytes).await
+        self.svc.cache.store(name.as_str(), bytes.into_vec()).await
     }
 
-    async fn load(&self, key: String) -> Result<Option<Vec<u8>>, CacheError> {
+    async fn load(&self, key: String) -> Result<Option<ByteBuf>, CacheError> {
         let name = self.scope.blob(&key);
-        self.svc.cache.load(name.as_str()).await
+        let blob = self.svc.cache.load(name.as_str()).await?;
+        Ok(blob.map(ByteBuf::from))
     }
 }

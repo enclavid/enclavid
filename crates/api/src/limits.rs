@@ -22,8 +22,9 @@
 /// Headroom for the largest legitimate payload: ~12 JPEG frames at
 /// ~200 KB plus multipart overhead. Enforced via axum's
 /// `DefaultBodyLimit::max(...)` at the route layer so handler logic
-/// stays free of byte arithmetic.
-pub const APPLICANT_INPUT_BODY_LIMIT: usize = 16 * 1024 * 1024;
+/// stays free of byte arithmetic. Bounded from above by the one remoc item
+/// the capture then travels in — see the wire assertion below.
+pub const APPLICANT_INPUT_BODY_LIMIT: usize = 12 * 1024 * 1024;
 
 // ----- Service-provided input -----
 
@@ -95,6 +96,23 @@ const _: () = assert!(
 const _: () = assert!(
     APPLICANT_INPUT_BODY_LIMIT <= hatch_client::MAX_CLIP_BYTES,
     "a legal applicant body can exceed the clip budget the worker will accept"
+);
+
+/// What a request carries besides the clip and the round's state frame: the
+/// seal on each frame and on the state, the metadata written with them, CBOR
+/// framing.
+const WIRE_HEADROOM: usize = 1024 * 1024;
+
+// The largest clip, with the state frame, travels as ONE remoc item twice: in the
+// run request to the execution-worker, and in the round's write to the
+// storage-CVM. An item past the limit is refused, and remoc closes the channel it
+// was refused on for good — every later call on that leg fails until it is
+// redialled. So a clip api admits must fit, or the 413 the applicant should have
+// had becomes a dropped leg.
+const _: () = assert!(
+    hatch_client::MAX_CLIP_BYTES + hatch_client::SEALED_STATE_PLAINTEXT_BYTES + WIRE_HEADROOM
+        <= remoc::rch::DEFAULT_MAX_ITEM_SIZE,
+    "the largest clip with the state frame no longer fits one remoc item"
 );
 // The frame COUNT has no derivation to check, which is the gap it exists to close:
 // an empty multipart part costs only its framing, so a legal body admits frames by

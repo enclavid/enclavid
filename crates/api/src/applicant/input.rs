@@ -173,7 +173,10 @@ fn parse_media_slot(slot_id: &str) -> Option<u32> {
 ///
 /// The COUNT bound is the load-bearing one. `APPLICANT_INPUT_BODY_LIMIT` says
 /// almost nothing about it: an empty multipart part costs only its framing, so a
-/// legal 16 MiB body is hundreds of thousands of frames.
+/// body at the cap is hundreds of thousands of frames.
+///
+/// A body past `APPLICANT_INPUT_BODY_LIMIT` surfaces as a multipart error, and
+/// `MultipartError::status` is what keeps it a 413 rather than a 400.
 ///
 /// The aggregate is redundant today, and knowingly. The body limit counts framing
 /// too, so the payload bytes it admits are strictly fewer than the body it caps,
@@ -184,15 +187,11 @@ fn parse_media_slot(slot_id: &str) -> Option<u32> {
 async fn collect_frames(mut multipart: Multipart) -> Result<Vec<Vec<u8>>, StatusCode> {
     let mut frames: Vec<Vec<u8>> = Vec::new();
     let mut total = 0usize;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|e| e.status())? {
         if frames.len() == MAX_CLIP_FRAMES {
             return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
-        let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+        let bytes = field.bytes().await.map_err(|e| e.status())?;
         total = total.saturating_add(bytes.len());
         if total > MAX_CLIP_BYTES {
             return Err(StatusCode::PAYLOAD_TOO_LARGE);

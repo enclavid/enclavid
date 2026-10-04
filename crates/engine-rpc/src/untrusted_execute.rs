@@ -180,11 +180,14 @@ where
     T: CallbackServiceUntrusted + Send + Sync + 'static,
     T::Scope: Send,
 {
-    async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError> {
+    async fn media_load(
+        &self,
+        hash: [u8; 32],
+    ) -> Result<Option<crate::execute::ByteBuf>, CallbackError> {
         self.0
             .media_load(Untrusted::new(hash))
             .await
-            .map(Exposed::into_inner)
+            .map(|blob| blob.into_inner().map(crate::execute::ByteBuf::from))
     }
 
     async fn session_change(&self, state: Padded<SessionState>) -> Result<(), CallbackError> {

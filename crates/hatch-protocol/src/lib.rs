@@ -97,6 +97,27 @@ pub struct RateLimited {
     pub retry_after_secs: u32,
 }
 
+// Every byte field below is a CBOR byte string. ciborium writes a bare
+// `Vec<u8>` element by element — two bytes for every byte over 0x17 — so
+// sealed bytes cost about 1.9x their length on the wire, and on the storage
+// leg that was enough to push one round's write past remoc's item limit.
+
+/// `Vec<Vec<u8>>` as a sequence of byte strings: `serde_bytes` covers one
+/// buffer, not a list of them.
+mod byte_list {
+    pub fn serialize<S: serde::Serializer>(items: &[Vec<u8>], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(items.iter().map(|item| serde_bytes::Bytes::new(item)))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Vec<u8>>, D::Error> {
+        let items: Vec<serde_bytes::ByteBuf> = serde::Deserialize::deserialize(d)?;
+        Ok(items
+            .into_iter()
+            .map(serde_bytes::ByteBuf::into_vec)
+            .collect())
+    }
+}
+
 // ---------------------------------------------------------------------
 // OCI pull  (POST /oci/pull)
 // ---------------------------------------------------------------------
@@ -107,17 +128,20 @@ pub struct PullRequest {
     pub policy_ref: String,
     /// Opaque bearer the hatch attaches as `Authorization` (empty =
     /// anonymous). Forwarded verbatim from the TEE.
+    #[serde(with = "serde_bytes")]
     pub registry_auth: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullResponse {
     /// Raw OCI manifest JSON bytes (digest is over these exact bytes).
+    #[serde(with = "serde_bytes")]
     pub manifest: Vec<u8>,
     /// Hex `sha256:<hex>` of `manifest`; the TEE re-verifies it.
     pub manifest_digest: String,
     /// Layer payloads, same order as the manifest's `layers[]`. The TEE
     /// recomputes each layer digest before trusting bytes.
+    #[serde(with = "byte_list")]
     pub layers: Vec<Vec<u8>>,
 }
 
@@ -149,6 +173,7 @@ pub struct KbsRelayRequest {
     /// legs; the TEE driver threads these, the hatch just forwards).
     pub headers: Vec<(String, String)>,
     /// Request body bytes for this leg (opaque to the hatch).
+    #[serde(with = "serde_bytes")]
     pub body: Vec<u8>,
 }
 
@@ -159,6 +184,7 @@ pub struct KbsRelayResponse {
     /// Response headers (the TEE driver reads the RCAR session cookie).
     pub headers: Vec<(String, String)>,
     /// Response body bytes (opaque to the hatch).
+    #[serde(with = "serde_bytes")]
     pub body: Vec<u8>,
 }
 
@@ -255,7 +281,7 @@ pub enum FieldSelector {
     /// One media blob, keyed by its content hash (32-byte BLAKE3). Lives in
     /// a per-session media hash (`session:{id}:media`), separate from the
     /// scalar fields; reads return a `Slot::Scalar` (absent → `None`).
-    Media(Vec<u8>),
+    Media(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +312,7 @@ pub struct ScalarSlot {
     /// `None` = field absent; `Some(empty)` = present-but-empty. The
     /// distinction is load-bearing: a default-valued `SessionMetadata`
     /// serializes to empty bytes, and must not read back as "absent".
+    #[serde(with = "serde_bytes")]
     pub value: Option<Vec<u8>>,
 }
 
@@ -293,6 +320,7 @@ pub struct ScalarSlot {
 pub struct ListSlot {
     /// All entries. Order is UNSPECIFIED (the disclosure field is a set);
     /// consumers must not rely on position. Empty when absent or never written.
+    #[serde(with = "byte_list")]
     pub items: Vec<Vec<u8>>,
 }
 
@@ -323,20 +351,24 @@ pub enum Op {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobWrite {
     pub field: BlobField,
+    #[serde(with = "serde_bytes")]
     pub value: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaWrite {
     /// Content-hash key (32-byte BLAKE3 of the sealed blob's plaintext).
+    #[serde(with = "serde_bytes")]
     pub blob_key: Vec<u8>,
     /// Sealed blob bytes (double-AEAD ciphertext).
+    #[serde(with = "serde_bytes")]
     pub value: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListAppend {
     pub field: ListField,
+    #[serde(with = "serde_bytes")]
     pub value: Vec<u8>,
 }
 
@@ -352,4 +384,61 @@ pub struct DeleteResponse {
     /// 1 if the field had a value and was removed, 0 if already absent.
     /// Informational; not a security signal.
     pub deleted: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bytes past 0x17, which is nearly every byte of a ciphertext: the ones an
+    /// integer array would spend two bytes on.
+    fn sealed() -> Vec<u8> {
+        vec![0xff; 1 << 16]
+    }
+
+    #[test]
+    fn a_sealed_byte_crosses_as_one_byte() {
+        let write = WriteRequest {
+            ops: vec![
+                Op::Blob(BlobWrite {
+                    field: BlobField::State,
+                    value: sealed(),
+                }),
+                Op::MediaWrite(MediaWrite {
+                    blob_key: vec![0xff; 32],
+                    value: sealed(),
+                }),
+                Op::ListAppend(ListAppend {
+                    field: ListField::Disclosure,
+                    value: sealed(),
+                }),
+            ],
+            expected_version: Some(1),
+        };
+        assert!(encode(&write).unwrap().len() < 3 * sealed().len() + 256);
+
+        let read = ReadResponse {
+            slots: vec![
+                Slot::Scalar(ScalarSlot {
+                    value: Some(sealed()),
+                }),
+                Slot::Scalar(ScalarSlot { value: None }),
+                Slot::List(ListSlot {
+                    items: vec![sealed(), Vec::new()],
+                }),
+            ],
+            version: 1,
+        };
+        let wire = encode(&read).unwrap();
+        assert!(wire.len() < 2 * sealed().len() + 256);
+        let back: ReadResponse = decode(&wire).unwrap();
+        assert_eq!(back.slots, read.slots);
+
+        let pulled = PullResponse {
+            manifest: sealed(),
+            manifest_digest: String::new(),
+            layers: vec![sealed()],
+        };
+        assert!(encode(&pulled).unwrap().len() < 2 * sealed().len() + 256);
+    }
 }

@@ -384,7 +384,7 @@ pub const MAX_CLIP_FRAMES: usize = 64;
 /// is counted at ingress. A per-FRAME cap is deliberately not a second number:
 /// api admits a body of this size whatever shape it has, so a tighter per-frame
 /// rule would be one this side invented and the other side does not enforce.
-pub const MAX_CLIP_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_CLIP_BYTES: usize = 12 * 1024 * 1024;
 
 /// One captured artifact — a sequence of JPEG frames over ~1s.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

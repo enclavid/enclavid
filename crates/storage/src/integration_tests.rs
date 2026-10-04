@@ -15,7 +15,7 @@ use hatch_protocol::{
     WriteRequest,
 };
 use storage_rpc::{
-    CacheService, CacheServiceServerShared, SessionError, SessionStoreService,
+    ByteBuf, CacheService, CacheServiceServerShared, SessionError, SessionStoreService,
     SessionStoreServiceServerShared, StorageClients,
 };
 
@@ -47,10 +47,16 @@ fn set_metadata(value: &[u8], expected: Option<u64>) -> WriteRequest {
     }
 }
 
-#[tokio::test]
-async fn remoc_roundtrip_both_services() {
-    let (_dir, store) = store();
-    let svc = Arc::new(Caller::new(store, peer("ab")));
+/// Serve both services to one caller over an in-process duplex and connect to
+/// them as api does. Returns the two clients and the server task.
+///
+/// `session_request_limit` caps the requests the session client may send. The
+/// cap travels with the client, so it is set here, on the serving end.
+async fn connected(
+    svc: Arc<Caller>,
+    session_request_limit: Option<usize>,
+) -> (StorageClients, tokio::task::JoinHandle<()>) {
+    use remoc::rtc::Client as _;
 
     let (a, b) = tokio::io::duplex(1024 * 1024);
     let (a_r, a_w) = split(a);
@@ -67,8 +73,11 @@ async fn remoc_roundtrip_both_services() {
             .await
             .unwrap();
         tokio::spawn(conn);
-        let (s_server, session) =
+        let (s_server, mut session) =
             SessionStoreServiceServerShared::<_, Ciborium>::new(svc.clone(), 4);
+        if let Some(limit) = session_request_limit {
+            session.set_max_request_size(limit);
+        }
         let (c_server, cache) = CacheServiceServerShared::<_, Ciborium>::new(svc.clone(), 4);
         if tx.send(StorageClients { session, cache }).await.is_err() {
             panic!("failed to send storage clients");
@@ -88,7 +97,13 @@ async fn remoc_roundtrip_both_services() {
     .await
     .unwrap();
     tokio::spawn(conn);
-    let clients = rx.recv().await.unwrap().unwrap();
+    (rx.recv().await.unwrap().unwrap(), server)
+}
+
+#[tokio::test]
+async fn remoc_roundtrip_both_services() {
+    let (_dir, store) = store();
+    let (clients, server) = connected(Arc::new(Caller::new(store, peer("ab"))), None).await;
     let session_cli = clients.session;
     let cache_cli = clients.cache;
 
@@ -138,13 +153,52 @@ async fn remoc_roundtrip_both_services() {
     let key = "abcd".repeat(16); // 64 hex chars
     assert_eq!(cache_cli.load(key.clone()).await.unwrap(), None);
     cache_cli
-        .store(key.clone(), b"cwasm".to_vec())
+        .store(key.clone(), ByteBuf::from(b"cwasm".to_vec()))
         .await
         .unwrap();
     assert_eq!(
         cache_cli.load(key.clone()).await.unwrap(),
-        Some(b"cwasm".to_vec())
+        Some(ByteBuf::from(b"cwasm".to_vec()))
     );
+
+    server.abort();
+}
+
+/// What api's storage leg watches its channels for. A request past the client's
+/// size limit fails before a byte of it is sent, and remoc still closes that
+/// client's channel for good — that channel only: the connection stays up and
+/// the other client on it goes on working. Watching the connection alone, a leg
+/// in this state looked up while every session call failed. The limit is lowered
+/// for the test; remoc's own is 16 MiB, and the failure is the same.
+#[tokio::test]
+async fn an_oversized_request_closes_its_channel_and_nothing_else() {
+    use remoc::rtc::Client as _;
+
+    const LIMIT: usize = 4096;
+    let (_dir, store) = store();
+    let (clients, server) = connected(Arc::new(Caller::new(store, peer("ab"))), Some(LIMIT)).await;
+
+    let oversized = WriteRequest {
+        ops: vec![Op::MediaWrite(MediaWrite {
+            blob_key: vec![1u8; 32],
+            value: vec![0xff; 16 * LIMIT],
+        })],
+        expected_version: None,
+    };
+    let id = "sess-1".to_string();
+    assert!(
+        clients
+            .session
+            .write(id.clone(), oversized, Some(9_999_999_999))
+            .await
+            .is_err()
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), clients.session.closed())
+        .await
+        .expect("the session channel closes");
+    assert!(clients.session.exists(id).await.is_err());
+    assert_eq!(clients.cache.load("abcd".repeat(16)).await.unwrap(), None);
 
     server.abort();
 }
@@ -186,7 +240,9 @@ async fn one_caller_cannot_reach_another_caller() {
     )
     .await
     .unwrap();
-    api.store(key.clone(), b"real".to_vec()).await.unwrap();
+    api.store(key.clone(), ByteBuf::from(b"real".to_vec()))
+        .await
+        .unwrap();
 
     // It cannot find out that the session is there...
     assert!(!other.exists(id.clone()).await.unwrap());
@@ -199,7 +255,10 @@ async fn one_caller_cannot_reach_another_caller() {
         .write(id.clone(), set_metadata(b"junk", None), Some(9_999_999_999))
         .await
         .unwrap();
-    other.store(key.clone(), b"junk".to_vec()).await.unwrap();
+    other
+        .store(key.clone(), ByteBuf::from(b"junk".to_vec()))
+        .await
+        .unwrap();
 
     let got = api
         .read(
@@ -234,7 +293,10 @@ async fn one_caller_cannot_reach_another_caller() {
             value: Some(b"selfie".to_vec())
         })
     );
-    assert_eq!(api.load(key).await.unwrap(), Some(b"real".to_vec()));
+    assert_eq!(
+        api.load(key).await.unwrap(),
+        Some(ByteBuf::from(b"real".to_vec()))
+    );
 
     // And the 0 above was a refusal, not an empty record: the same call from the
     // caller that owns it deletes.

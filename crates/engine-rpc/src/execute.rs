@@ -23,6 +23,7 @@
 //! incompatible runtime.
 
 use serde::{Deserialize, Serialize};
+pub use serde_bytes::ByteBuf;
 
 use hatch_client::{Decision, Event, Prompt, SessionState};
 
@@ -326,7 +327,12 @@ pub trait CallbackService {
     /// Rehydrate a stored blob by content hash (orchestrator unseals). `None` =
     /// miss (unknown / never-stored ref) — the worker's `from-blob-ref` traps
     /// on it, same as the in-process gate.
-    async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError>;
+    ///
+    /// The blob crosses as one CBOR byte string. As ciborium's integer array a
+    /// capture cost close to twice its length, and the length on this hop — which
+    /// the host splices — then varied with how many of the image's bytes fell
+    /// under 0x18.
+    async fn media_load(&self, hash: [u8; 32]) -> Result<Option<ByteBuf>, CallbackError>;
 
     /// Seal + persist the post-round session state — the owned form of the
     /// engine's borrowed `SessionChange`, committed under the seal key the worker
@@ -428,7 +434,7 @@ pub trait ChildService {
 #[remoc::rtc::remote]
 pub trait ChildCallbacks {
     /// Rehydrate a stored blob by content hash (api unseals). `None` = miss.
-    async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError>;
+    async fn media_load(&self, hash: [u8; 32]) -> Result<Option<ByteBuf>, CallbackError>;
 
     /// Seal + persist the post-round state — relayed to api's `session_change`,
     /// committed under the seal key this process never holds. Neither the round's
@@ -454,9 +460,9 @@ mod execute_tests {
     }
 
     impl CallbackService for MockCallbacks {
-        async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError> {
+        async fn media_load(&self, hash: [u8; 32]) -> Result<Option<ByteBuf>, CallbackError> {
             self.media_calls.lock().unwrap().push(hash);
-            Ok(Some(vec![0xAB, 0xCD]))
+            Ok(Some(ByteBuf::from(vec![0xAB, 0xCD])))
         }
         async fn session_change(&self, _state: Padded<SessionState>) -> Result<(), CallbackError> {
             *self.state_calls.lock().unwrap() += 1;
@@ -493,7 +499,7 @@ mod execute_tests {
             }
             // Bundle in hand: run, calling BACK for media + state persistence.
             let bytes = callbacks.media_load([9u8; 32]).await?;
-            if bytes != Some(vec![0xAB, 0xCD]) {
+            if bytes != Some(ByteBuf::from(vec![0xAB, 0xCD])) {
                 return Err(ExecError::Unknown);
             }
             callbacks.session_change(req.session_state.clone()).await?;

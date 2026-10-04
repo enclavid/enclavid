@@ -251,7 +251,7 @@ impl MediaStore for RelayMediaStore {
                 debug!("media_load callback: {e}");
                 RunError::new(CallbackFailed)
             })?;
-            let arc = loaded.map(Arc::new);
+            let arc = loaded.map(|blob| Arc::new(blob.into_vec()));
             if let Some(bytes) = &arc {
                 self.memo.lock().unwrap().insert(hash, bytes.clone());
             }

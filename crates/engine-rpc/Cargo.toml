@@ -27,10 +27,10 @@ serde = { version = "1", features = ["derive"] }
 # ballooning the wire form + costing ~hundreds of ms per bundle transfer.
 serde_bytes = "0.11"
 # The hop's own remoc setup lives here (`leg`), so this crate names the AsyncRead /
-# AsyncWrite the connection is built over and spawns its driver. No transport and
-# no attestation: which peer, and whether it may be talked to, stays with the
-# caller.
-tokio = { version = "1", default-features = false, features = ["rt"] }
+# AsyncWrite the connection is built over, spawns its driver and watches its
+# request channel. No transport and no attestation: which peer, and whether it may
+# be talked to, stays with the caller.
+tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
 # The codec `Padded` frames against. Same one remoc carries, but named directly:
 # the frame is encoded and size-checked by this crate itself, not by whatever
 # codec a connection happens to be configured with.
@@ -56,6 +56,6 @@ hatch-client = { path = "../hatch-client", optional = true }
 enclavid-boundary = { path = "../boundary", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }
 # Round-trip test encodes a sample bundle directly (independent of remoc's codec).
 ciborium = "0.2"

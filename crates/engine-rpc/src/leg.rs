@@ -89,6 +89,30 @@ impl std::fmt::Display for LegError {
 }
 impl std::error::Error for LegError {}
 
+/// The handle a caller awaits to learn its leg is over.
+///
+/// A leg is over when its connection ends, and also when the channel its calls go
+/// out on closes under a connection that lives on. remoc closes a request channel
+/// for good on any failed send — an item past its size limit, say, which fails
+/// before a byte of it is sent — and leaves the multiplexer up and pinging. A
+/// caller watching only the connection would go on handing out a client whose
+/// every call fails, and report the leg up while it did.
+///
+/// `closed` is that channel's end: one client's `closed()`, or the first of
+/// several when a leg carries more than one. When it fires the connection is
+/// dropped here, so the peer sees the leg end as well and a redial starts clean.
+pub fn leg_end(
+    mut driver: tokio::task::JoinHandle<()>,
+    closed: impl std::future::Future<Output = ()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = &mut driver => {}
+            () = closed => driver.abort(),
+        }
+    })
+}
+
 /// Serve the execute contract on an already-attested stream until the peer goes
 /// away — the WORKER's half of the hop.
 ///
@@ -135,9 +159,11 @@ where
 /// Bring the hop up on an already-attested stream and take the peer's client —
 /// the CALLER's half.
 ///
-/// Returns the leg plus the connection driver's handle, which the caller owns:
-/// how a dead leg is noticed, reported and redialled is the caller's policy and
-/// none of this crate's business.
+/// Returns the leg plus a handle that finishes when the leg is over — its
+/// connection ended or its request channel closed, see [`leg_end`]. The caller
+/// owns it: how a dead leg is reported and redialled is the caller's policy and
+/// none of this crate's business. Noticing it is this crate's, because the
+/// channel belongs to a client nothing outside it can name.
 #[cfg(feature = "execute")]
 pub async fn connect_executor<R, W>(
     read: R,
@@ -161,7 +187,8 @@ where
         .await
         .map_err(|_| LegError::Clients)?
         .ok_or(LegError::Closed)?;
-    Ok((ExecutorLeg(client), driver))
+    let ended = leg_end(driver, remoc::rtc::Client::closed(&client));
+    Ok((ExecutorLeg(client), ended))
 }
 
 /// The only handle on the execute hop that exists outside this crate.
@@ -326,6 +353,8 @@ where
 }
 
 /// Bring the compile hop up on an already-attested stream — the CALLER's half.
+/// The handle it returns finishes when the leg is over, as [`connect_executor`]'s
+/// does.
 ///
 /// `S` is how the caller judges what comes BACK, named once here rather than at
 /// each call, because a scope is a property of the channel and this channel has
@@ -355,7 +384,8 @@ where
         .await
         .map_err(|_| LegError::Clients)?
         .ok_or(LegError::Closed)?;
-    Ok((CompilerLeg(client, std::marker::PhantomData), driver))
+    let ended = leg_end(driver, remoc::rtc::Client::closed(&client));
+    Ok((CompilerLeg(client, std::marker::PhantomData), ended))
 }
 
 /// The only handle on the compile hop that exists outside this crate.
@@ -389,5 +419,59 @@ impl<S: enclavid_boundary::Open> CompilerLeg<S> {
             .compile(req.into_inner())
             .await
             .map(enclavid_boundary::Untrusted::new)
+    }
+}
+
+#[cfg(test)]
+mod leg_end_tests {
+    use std::time::Duration;
+
+    use tokio::sync::oneshot;
+
+    use super::leg_end;
+
+    /// Says so when the task holding it is dropped — aborted, here.
+    struct Dropped(Option<oneshot::Sender<()>>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    #[tokio::test]
+    async fn a_closed_channel_ends_the_leg_and_drops_its_connection() {
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let driver = tokio::spawn(async move {
+            let _held = Dropped(Some(dropped_tx));
+            std::future::pending::<()>().await;
+        });
+        let (close_tx, close_rx) = oneshot::channel::<()>();
+        let ended = leg_end(driver, async move {
+            let _ = close_rx.await;
+        });
+
+        close_tx.send(()).unwrap();
+        tokio::time::timeout(PATIENCE, ended)
+            .await
+            .expect("the leg ends")
+            .unwrap();
+        tokio::time::timeout(PATIENCE, dropped_rx)
+            .await
+            .expect("the connection is dropped")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_connection_ending_ends_the_leg() {
+        let driver = tokio::spawn(async {});
+        let ended = leg_end(driver, std::future::pending());
+        tokio::time::timeout(PATIENCE, ended)
+            .await
+            .expect("the leg ends")
+            .unwrap();
     }
 }

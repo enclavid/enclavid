@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use remoc::codec::Ciborium;
+use remoc::rtc::Client as _;
 
 use fleet_transport::LegFailure;
 use hatch_client::{BridgeError, CacheBackend, SessionBackend};
@@ -116,7 +117,7 @@ impl CacheCvmBackend {
 impl CacheBackend for CacheCvmBackend {
     async fn store(&self, blob_name: &str, bytes: Vec<u8>) -> Result<(), BridgeError> {
         self.client()?
-            .store(blob_name.to_string(), bytes)
+            .store(blob_name.to_string(), storage_rpc::ByteBuf::from(bytes))
             .await
             .map_err(to_bridge)
     }
@@ -125,12 +126,15 @@ impl CacheBackend for CacheCvmBackend {
         self.client()?
             .load(blob_name.to_string())
             .await
+            .map(|blob| blob.map(storage_rpc::ByteBuf::into_vec))
             .map_err(to_bridge)
     }
 }
 
 /// Dial the storage-CVM at `addr`, RA-TLS-handshake + remoc-frame it, and receive
-/// BOTH service clients on the base channel. Mirrors `connect_execution_worker`.
+/// BOTH service clients on the base channel. Mirrors `connect_execution_worker`,
+/// down to the handle it returns: it finishes when the leg is over, which is the
+/// connection ending or either client's channel closing (`engine_rpc::leg_end`).
 pub async fn connect_storage(
     addr: &str,
     attestor: Arc<dyn enclavid_attestation::Attestor>,
@@ -187,5 +191,15 @@ pub async fn connect_storage(
         })?
         .ok_or(LegFailure::Closed)?;
 
-    Ok((clients, driver))
+    // Two request channels on the one connection, and the leg is over when
+    // either closes: they are installed and torn down together.
+    let (session_closed, cache_closed) = (clients.session.closed(), clients.cache.closed());
+    let ended = engine_rpc::leg_end(driver, async move {
+        tokio::select! {
+            () = session_closed => {}
+            () = cache_closed => {}
+        }
+    });
+
+    Ok((clients, ended))
 }

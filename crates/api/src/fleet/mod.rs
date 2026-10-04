@@ -231,11 +231,14 @@ impl<C: Clone> Leg<C> {
 /// `None` on loss. It is a closure rather than a `Leg` because the storage leg
 /// carries two clients on one connection, and both have to move together.
 ///
-/// `connect` returns the clients and a handle for the connection's driver.
-/// Awaiting that handle is how this learns the connection ended — and it is a
-/// verdict rather than silence, because chmux pings at half its
-/// `connection_timeout` whenever the link is idle, so "no traffic" and "no peer"
-/// are already distinct one layer down.
+/// `connect` returns the clients and a handle that finishes when the leg is over
+/// (`engine_rpc::leg_end`). Awaiting it is how this learns the leg ended, and it
+/// is a verdict rather than silence, because two different ends both reach it.
+/// The connection: chmux pings at half its `connection_timeout` whenever the link
+/// is idle, so "no traffic" and "no peer" are already distinct one layer down. A
+/// request channel: remoc closes one for good on any failed send and keeps the
+/// connection up, so the connection alone would report a leg whose every call
+/// fails as up for as long as it lived.
 pub async fn supervise<C, F, Fut, I>(
     peer: crate::health::Peer,
     addr: String,

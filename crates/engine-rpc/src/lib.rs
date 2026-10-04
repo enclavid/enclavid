@@ -95,20 +95,20 @@ mod execute;
 // into is a habit; a wrapper with no unwrapped alternative is a boundary.
 #[cfg(feature = "execute")]
 pub use execute::{
-    CallbackError, CallbackService, CallbackServiceClient, ChildCallbacks, ChildCallbacksClient,
-    ChildCallbacksServerShared, ChildService, ChildServiceClient, ChildServiceServerShared,
-    ExecError, Prop, RunOutcome, RunReply, RunRequest, RunStatus,
+    ByteBuf, CallbackError, CallbackService, CallbackServiceClient, ChildCallbacks,
+    ChildCallbacksClient, ChildCallbacksServerShared, ChildService, ChildServiceClient,
+    ChildServiceServerShared, ExecError, Prop, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 
 // Both ends of the execute hop, and the doors on the calling end.
 #[cfg(any(feature = "compile", feature = "execute"))]
 mod leg;
-#[cfg(any(feature = "compile", feature = "execute"))]
-pub use leg::LegError;
 #[cfg(feature = "compile")]
 pub use leg::{CompilerLeg, connect_compiler, serve_compiler};
 #[cfg(feature = "execute")]
 pub use leg::{ExecutorLeg, connect_executor, serve_executor};
+#[cfg(any(feature = "compile", feature = "execute"))]
+pub use leg::{LegError, leg_end};
 
 // Constant-size framing for the execute leg's policy-controlled lengths.
 #[cfg(feature = "execute")]

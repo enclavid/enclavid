@@ -657,7 +657,10 @@ struct RelayCallbacks {
 }
 
 impl ChildCallbacks for RelayCallbacks {
-    async fn media_load(&self, hash: [u8; 32]) -> Result<Option<Vec<u8>>, CallbackError> {
+    async fn media_load(
+        &self,
+        hash: [u8; 32],
+    ) -> Result<Option<engine_rpc::ByteBuf>, CallbackError> {
         self.upstream.media_load(hash).await
     }
 

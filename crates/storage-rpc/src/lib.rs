@@ -27,6 +27,10 @@ use serde::{Deserialize, Serialize};
 
 use hatch_protocol::{DeleteResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse};
 
+/// What [`CacheService`] carries its blobs in, named here so neither end needs
+/// `serde_bytes` of its own.
+pub use serde_bytes::ByteBuf;
+
 /// A session-store RPC failure. `VersionMismatch` is the CAS precondition (the
 /// session's stored version did not match `expected_version`, or a must-not-exist
 /// create found an existing session) — the api client maps it back to
@@ -110,11 +114,13 @@ pub trait SessionStoreService {
 /// before it touches a blob. It never sees the composition, only pseudo-random
 /// hex.
 /// Sealed bytes ride the wire; a miss is `Ok(None)` (not an error) so the
-/// orchestrator recompiles.
+/// orchestrator recompiles. As one CBOR byte string (`ByteBuf`), not ciborium's
+/// per-byte integer array: a bundle is megabytes, and the array form came close
+/// to doubling it, to the edge of remoc's item limit.
 #[remoc::rtc::remote]
 pub trait CacheService {
-    async fn store(&self, key: String, bytes: Vec<u8>) -> Result<(), CacheError>;
-    async fn load(&self, key: String) -> Result<Option<Vec<u8>>, CacheError>;
+    async fn store(&self, key: String, bytes: serde_bytes::ByteBuf) -> Result<(), CacheError>;
+    async fn load(&self, key: String) -> Result<Option<serde_bytes::ByteBuf>, CacheError>;
 }
 
 /// The base-channel handshake value: on connect the storage-CVM sends the
