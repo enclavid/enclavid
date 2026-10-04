@@ -21,12 +21,72 @@
 //!   * `applicant::views` — converts a `Prompt::ConsentDisclosure` into
 //!     `RequestView::Consent` for the applicant frontend.
 
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use hatch_client::{DisplayField as ProtoDisplayField, Localized, PromptDisclosure, SessionStatus};
+use hatch_client::{
+    Decision, DisplayField as ProtoDisplayField, Localized, PromptDisclosure, SessionStatus,
+};
 
 use crate::locale::Locale;
+
+/// The policy's verdict on the wire — the same four for the applicant, at
+/// the end of their run, and for the consumer, in the session's view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionView {
+    Approved,
+    Rejected,
+    RejectedRetryable,
+    Review,
+}
+
+impl DecisionView {
+    const ALL: [DecisionView; 4] = [
+        DecisionView::Approved,
+        DecisionView::Rejected,
+        DecisionView::RejectedRetryable,
+        DecisionView::Review,
+    ];
+
+    /// The length of its JSON string.
+    fn width(self) -> usize {
+        serde_json::to_string(&self).map_or(0, |s| s.len())
+    }
+}
+
+impl From<Decision> for DecisionView {
+    fn from(d: Decision) -> Self {
+        match d {
+            Decision::Approved => DecisionView::Approved,
+            Decision::Rejected => DecisionView::Rejected,
+            Decision::RejectedRetryable => DecisionView::RejectedRetryable,
+            Decision::Review => DecisionView::Review,
+        }
+    }
+}
+
+/// `value` as a JSON response whose length does not depend on `decision`:
+/// whitespace after the document, which JSON reads past, makes up the
+/// difference to the longest verdict's name. The host sees the length of
+/// every response, through TLS that pads nothing, and must not read the
+/// verdict off it.
+pub fn json_hiding_decision<T: Serialize>(value: &T, decision: Option<DecisionView>) -> Response {
+    let Ok(mut body) = serde_json::to_vec(value) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    if let Some(decision) = decision {
+        let longest = DecisionView::ALL
+            .iter()
+            .map(|d| d.width())
+            .max()
+            .unwrap_or(0);
+        body.resize(body.len() + longest - decision.width(), b' ');
+    }
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+}
 
 /// The pinned policy of a session, echoed to the consumer: the full OCI
 /// reference plus its `sha256:<hex>` digest substring (the same value the
@@ -332,5 +392,33 @@ mod tests {
             ..Default::default()
         };
         assert_ne!(consent_disclosure_digest(&a), consent_disclosure_digest(&b));
+    }
+
+    /// A response carrying a verdict is as long whichever the verdict, and
+    /// still reads as the JSON it was.
+    #[tokio::test]
+    async fn a_response_is_as_long_whichever_the_verdict() {
+        #[derive(Serialize)]
+        struct View {
+            status: &'static str,
+            decision: DecisionView,
+        }
+        let mut lengths = Vec::new();
+        for decision in DecisionView::ALL {
+            let response = json_hiding_decision(
+                &View {
+                    status: "completed",
+                    decision,
+                },
+                Some(decision),
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("the body");
+            let read: serde_json::Value = serde_json::from_slice(&body).expect("still JSON");
+            assert_eq!(read["decision"], serde_json::to_value(decision).unwrap());
+            lengths.push(body.len());
+        }
+        assert!(lengths.windows(2).all(|w| w[0] == w[1]), "{lengths:?}");
     }
 }

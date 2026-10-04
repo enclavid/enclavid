@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::Json;
+use axum::response::Response;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
 use hatch_client::{Metadata, SessionStatus, outbound_session_id};
 
 use crate::client_state::ClientState;
-use crate::dto::{self, ResolvedPolicyView};
+use crate::dto::{self, DecisionView, ResolvedPolicyView};
 
 use super::auth::{Principal, SessionToken, trust_metadata};
 
@@ -37,6 +37,11 @@ pub struct SessionView {
     /// Unix seconds at session create time. Surfaced for ops /
     /// observability (age, latency); not a security signal.
     pub created_at: u64,
+    /// The policy's verdict, once the session is completed. The one thing
+    /// the consumer learns of a session without the applicant's consent:
+    /// four values, fixed by the platform.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<DecisionView>,
 }
 
 /// Route factory: bare `get(handler)` MethodRouter. Auth attached at
@@ -50,7 +55,7 @@ async fn read(
     Principal(presented_principal): Principal,
     SessionToken(presented_token): SessionToken,
     Path(session_id): Path<String>,
-) -> Result<Json<SessionView>, StatusCode> {
+) -> Result<Response, StatusCode> {
     // Read encrypted metadata. AEAD-bound to session_id so the host
     // can't substitute another session's blob. Everything we surface
     // here (status, policy, count, created_at) lives inside this
@@ -97,7 +102,8 @@ async fn read(
         .map(dto::PluginView::from_pin)
         .collect();
 
-    Ok(Json(SessionView {
+    let decision = metadata.decision.map(DecisionView::from);
+    let view = SessionView {
         session_id,
         status,
         policy: ResolvedPolicyView {
@@ -112,5 +118,7 @@ async fn read(
         },
         disclosures: metadata.disclosure_count,
         created_at: metadata.created_at,
-    }))
+        decision,
+    };
+    Ok(dto::json_hiding_decision(&view, decision))
 }

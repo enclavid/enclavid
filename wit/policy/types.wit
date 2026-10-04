@@ -11,7 +11,10 @@ interface types {
     use enclavid:host/types@0.1.0.{localized-ref, blob};
 
     /// Terminal outcome carried by `action::finish`. The platform renders
-    /// UI from this fixed enum — policy controls no free text.
+    /// UI from this fixed enum — policy controls no free text. The consumer
+    /// reads it from the session unconditionally: no consent screen stands
+    /// before it, so it is the one thing the policy hands the consumer
+    /// without the applicant's accept.
     enum decision {
         approved,
         rejected,
@@ -75,9 +78,10 @@ interface types {
     /// is NOT a separate action — it IS
     /// `render(prompt::consent-disclosure(disclosure))`, sealed by the
     /// runtime only on accept, so what the applicant audits is exactly what
-    /// leaves.
+    /// leaves. The `decision` in `finish` is the exception: the consumer
+    /// learns it whatever the applicant accepted.
     variant action {
         render(prompt),          // result-producing → applicant; reply is a future `event`
-        finish(decision),        // terminal
+        finish(decision),        // terminal; the decision reaches the consumer unconditionally
     }
 }

@@ -536,8 +536,9 @@ impl SessionPersister {
     }
 
     /// Atomically transition the session to Completed after the runner
-    /// returns `RunStatus::Completed`. Updates `metadata.status`
-    /// (TEE-trusted, AEAD-bound) and `BlobField::Status` (host-facing
+    /// returns `RunStatus::Completed`. Updates `metadata.status` and keeps
+    /// the verdict in `metadata.decision` (TEE-trusted, AEAD-bound), and
+    /// `BlobField::Status` (host-facing
     /// TTL hint) in one Write RPC. No-op while the run is still
     /// awaiting input — the session continues into the next /input round.
     ///
@@ -553,17 +554,18 @@ impl SessionPersister {
     /// TTL is enforced inside the storage-CVM off the per-session
     /// deadline (no host-visible status byte).
     pub(super) async fn finalize(&self, run_status: &RunStatus) -> Result<(), StatusCode> {
-        if !matches!(run_status, RunStatus::Completed(_)) {
+        let RunStatus::Completed(decision) = run_status else {
             return Ok(());
-        }
+        };
         let mut metadata = self.metadata.lock().await;
         metadata.status = SessionStatus::Completed;
+        metadata.decision = Some(*decision);
         let expected = self.current_version.load(Ordering::SeqCst);
         let set_metadata = SetMetadata(
             boundary::outbound::to_untrusted(&*metadata)
                 .vouch_unchecked::<AuthZ, _>(reason!("sealed under tee_seal_key — only the attested CVM opens"))
                 .vouch_unchecked::<Covert, _>(reason!(
-                    "finalize only flips status to a fixed enum; size delta deterministic per transition"
+                    "finalize sets status and the decision's one byte; size delta deterministic per transition"
                 )),
         );
         let (session_id, expected_version) =

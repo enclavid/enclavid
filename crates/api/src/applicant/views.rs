@@ -12,17 +12,17 @@
 //! `Accept-Language` preference, with `en` fallback. The frontend
 //! never sees a per-locale translation map.
 
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use hatch_client::{
-    CameraFacing, CaptureGuide, CaptureStep, Decision, MediaSpec, Prompt, PromptDisclosure,
-    capture_guide,
+    CameraFacing, CaptureGuide, CaptureStep, MediaSpec, Prompt, PromptDisclosure, capture_guide,
 };
 // The run outcome comes back from the execution-worker as the `engine_rpc::RunStatus`
 // wire mirror (it wraps the same hatch_client `Prompt` / `Decision`).
 use engine_rpc::RunStatus;
 
-use crate::dto;
+use crate::dto::{self, DecisionView};
 use crate::locale::Locale;
 
 /// Response for run-triggering endpoints (`init`, `input`). Internally-tagged
@@ -35,13 +35,16 @@ pub enum SessionProgress {
     AwaitingInput { request: RequestView },
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DecisionView {
-    Approved,
-    Rejected,
-    RejectedRetryable,
-    Review,
+/// As JSON, as long whichever the verdict — see
+/// [`dto::json_hiding_decision`].
+impl IntoResponse for SessionProgress {
+    fn into_response(self) -> Response {
+        let decision = match &self {
+            SessionProgress::Completed { decision } => Some(*decision),
+            SessionProgress::AwaitingInput { .. } => None,
+        };
+        dto::json_hiding_decision(&self, decision)
+    }
 }
 
 /// JSON-friendly view of the prompt the session is awaiting input for.
@@ -163,20 +166,11 @@ pub enum CaptureGuideView {
 pub(super) fn progress_from(status: RunStatus, locale: &Locale) -> SessionProgress {
     match status {
         RunStatus::Completed(decision) => SessionProgress::Completed {
-            decision: decision_view(decision),
+            decision: decision.into(),
         },
         RunStatus::AwaitingInput(prompt) => SessionProgress::AwaitingInput {
             request: prompt_view(&prompt, locale),
         },
-    }
-}
-
-fn decision_view(d: Decision) -> DecisionView {
-    match d {
-        Decision::Approved => DecisionView::Approved,
-        Decision::Rejected => DecisionView::Rejected,
-        Decision::RejectedRetryable => DecisionView::RejectedRetryable,
-        Decision::Review => DecisionView::Review,
     }
 }
 

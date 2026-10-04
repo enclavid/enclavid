@@ -125,6 +125,36 @@ pub struct SessionMetadata {
     /// field names (`media::media_field_name`), never these hashes — so carrying
     /// them in sealed metadata leaks nothing to the host.
     pub captured_media: Vec<Vec<u8>>,
+    /// The policy's verdict, once it has given one — told to the consumer
+    /// unconditionally. Kept as one byte whichever it is: the host sees the
+    /// size of every sealed write, and must not read the verdict off it.
+    #[serde(with = "decision_byte")]
+    pub decision: Option<Decision>,
+}
+
+/// [`SessionMetadata::decision`] on the wire: `null` or one of four small
+/// integers, each a single CBOR byte.
+mod decision_byte {
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::Decision;
+
+    pub fn serialize<S: Serializer>(decision: &Option<Decision>, s: S) -> Result<S::Ok, S::Error> {
+        decision.map(|d| d as u8).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Decision>, D::Error> {
+        Option::<u8>::deserialize(d)?
+            .map(|code| match code {
+                0 => Ok(Decision::Approved),
+                1 => Ok(Decision::Rejected),
+                2 => Ok(Decision::RejectedRetryable),
+                3 => Ok(Decision::Review),
+                other => Err(D::Error::custom(format!("no decision is {other}"))),
+            })
+            .transpose()
+    }
 }
 
 /// Internal session state for the policy reducer (`BlobField::State`).
@@ -257,12 +287,13 @@ pub struct ClientAccess {
 /// `decision` enum. The platform renders UI from this fixed set; the
 /// policy controls no free text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum Decision {
     #[default]
-    Approved,
-    Rejected,
-    RejectedRetryable,
-    Review,
+    Approved = 0,
+    Rejected = 1,
+    RejectedRetryable = 2,
+    Review = 3,
 }
 
 /// What the runtime renders to the applicant — the sealed mirror of the
@@ -578,5 +609,43 @@ mod clip_tests {
         let bytes = encode(&Empty {}).expect("an empty map encodes");
         let back: Clip = decode(&bytes).expect("an absent field defaults");
         assert!(back.frames.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::*;
+
+    const ALL: [Decision; 4] = [
+        Decision::Approved,
+        Decision::Rejected,
+        Decision::RejectedRetryable,
+        Decision::Review,
+    ];
+
+    fn sealed(decision: Option<Decision>) -> Vec<u8> {
+        encode(&SessionMetadata {
+            decision,
+            ..Default::default()
+        })
+        .expect("metadata encodes")
+    }
+
+    /// The metadata a session is sealed into is as long whichever the verdict,
+    /// and as long before one: the host sees every sealed write's size.
+    #[test]
+    fn the_verdict_does_not_change_the_metadatas_size() {
+        let before = sealed(None).len();
+        for decision in ALL {
+            assert_eq!(sealed(Some(decision)).len(), before, "{decision:?}");
+        }
+    }
+
+    #[test]
+    fn the_verdict_round_trips() {
+        for decision in [None, Some(Decision::Approved), Some(Decision::Review)] {
+            let back: SessionMetadata = decode(&sealed(decision)).expect("metadata decodes");
+            assert_eq!(back.decision, decision);
+        }
     }
 }

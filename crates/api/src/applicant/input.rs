@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, Multipart, Path};
 use axum::http::StatusCode;
-use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 
 use hatch_client::{
@@ -45,7 +44,7 @@ async fn input(
     Path((session_id, slot_id)): Path<(String, String)>,
     mut ctx: SessionRunCtx,
     multipart: Multipart,
-) -> Result<Json<SessionProgress>, ApiError> {
+) -> Result<SessionProgress, ApiError> {
     let session_state = ctx.session_state.take().ok_or_else(|| {
         // /input fires with the assumption that /connect already
         // persisted at least one rendered prompt. If state is None
@@ -65,7 +64,7 @@ async fn input(
         StatusCode::CONFLICT
     })?;
     let event = build_event(&session_state, &slot_id, multipart).await?;
-    Ok(Json(ctx.run(session_state, event).await?))
+    ctx.run(session_state, event).await
 }
 
 /// Build the inbound [`Event`] from the applicant's `/input`, validated

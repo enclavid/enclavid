@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 
 use hatch_client::{Event, SessionState};
@@ -26,6 +25,6 @@ pub(super) fn post_connect() -> MethodRouter<Arc<AppState>> {
 /// different key on an already-claimed session is rejected at the auth
 /// layer with 403; recovery requires `DELETE /api/v1/sessions/{id}/state` first
 /// (no auth, by design — see reset.rs).
-async fn connect(ctx: SessionRunCtx) -> Result<Json<SessionProgress>, ApiError> {
-    Ok(Json(ctx.run(SessionState::default(), Event::Start).await?))
+async fn connect(ctx: SessionRunCtx) -> Result<SessionProgress, ApiError> {
+    ctx.run(SessionState::default(), Event::Start).await
 }

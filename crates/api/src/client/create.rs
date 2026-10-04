@@ -348,6 +348,8 @@ async fn create(
         // No media captured yet — the `from-blob-ref` gate set starts empty and
         // the persister appends each capture's hash as rounds run.
         captured_media: Vec::new(),
+        // Set with `Completed`, when the policy gives it.
+        decision: None,
     };
     // Write ONLY the sealed metadata. The plaintext STATUS byte and PRINCIPAL
     // host hooks are gone: TTL is enforced inside the storage-CVM (its sweeper,
