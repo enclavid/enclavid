@@ -1,5 +1,5 @@
 //! Running each request in a child of its own: admission, the request's
-//! deadline, and the reap that gives its place back once the child is gone.
+//! deadline, and the release that gives its place back once the child is gone.
 
 #[cfg(test)]
 mod tests;
@@ -14,7 +14,7 @@ use std::time::Duration;
 use remoc::RemoteSend;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
-use crate::cgroup::{Cgroups, ChildGroup, Fate};
+use crate::cgroup::{Cgroups, ChildGroup, ExitCause};
 use crate::spawn::{SpawnError, connect, inherited_len, spawn_child};
 
 /// How long a runner waits on a child at the steps a request's own deadline does
@@ -23,10 +23,10 @@ use crate::spawn::{SpawnError, connect, inherited_len, spawn_child};
 /// its load, and none of them is a term of what a round discloses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChildTimes {
-    /// How long an answer's [`Exit::fate`] waits for the reap — the child
+    /// How long an answer's [`Exit::cause`] waits for the release — the child
     /// killed and gone, its group empty — to read how the child ended. Five
     /// seconds by default.
-    pub fate_wait: Duration,
+    pub exit_wait: Duration,
     /// Bound on the child's handshake — spawn, remoc hello, its service client.
     /// Milliseconds for a child that works; this keeps one that connects and
     /// never sends its client from holding its slot forever, so every child is
@@ -43,7 +43,7 @@ pub struct ChildTimes {
 impl Default for ChildTimes {
     fn default() -> Self {
         Self {
-            fate_wait: Duration::from_secs(5),
+            exit_wait: Duration::from_secs(5),
             connect: Duration::from_secs(30),
             room_poll: Duration::from_millis(50),
         }
@@ -124,32 +124,32 @@ pub struct ChildRunner {
 /// for it.
 #[derive(Debug)]
 pub struct Exit {
-    fate: oneshot::Receiver<Fate>,
-    /// The runner's [`ChildTimes::fate_wait`].
+    cause: oneshot::Receiver<ExitCause>,
+    /// The runner's [`ChildTimes::exit_wait`].
     within: Duration,
 }
 
 impl Exit {
-    /// The child's [`Fate`], waited for no longer than [`ChildTimes::fate_wait`]: a
-    /// reap that has not settled by then is answered [`Fate::Unattributed`]
-    /// here, and goes on holding its slot until it does. A runner without
-    /// [`Cgroups`] attributes nothing.
-    pub async fn fate(self) -> Fate {
-        match tokio::time::timeout(self.within, self.fate).await {
-            Ok(Ok(fate)) => fate,
-            _ => Fate::Unattributed,
+    /// Why the child ended, waited for no longer than [`ChildTimes::exit_wait`]:
+    /// a release that has not settled by then is answered
+    /// [`ExitCause::Unattributed`] here, and goes on holding its slot until it
+    /// does. A runner without [`Cgroups`] attributes nothing.
+    pub async fn cause(self) -> ExitCause {
+        match tokio::time::timeout(self.within, self.cause).await {
+            Ok(Ok(cause)) => cause,
+            _ => ExitCause::Unattributed,
         }
     }
 
-    /// An exit already settled at `fate` — what a caller's own tests need to
+    /// An exit already settled at `cause` — what a caller's own tests need to
     /// drive the mapping it makes of one.
     #[doc(hidden)]
-    pub fn known(fate: Fate) -> Self {
+    pub fn known(cause: ExitCause) -> Self {
         let (tx, rx) = oneshot::channel();
-        let _ = tx.send(fate);
+        let _ = tx.send(cause);
         Self {
-            fate: rx,
-            within: ChildTimes::default().fate_wait,
+            cause: rx,
+            within: ChildTimes::default().exit_wait,
         }
     }
 }
@@ -157,7 +157,8 @@ impl Exit {
 /// A running child. Dropping it is how it ends, and every way out of
 /// [`ChildRunner::run`] does — an answer, an error, a cancelled request, a
 /// panic in the caller's closure: the child and everything in its group are
-/// killed at once, and the reap lets go of what it [`Held`] once they are gone.
+/// killed at once, and the release lets go of what it [`Held`] once they are
+/// gone.
 ///
 /// The kill is the drop's own work. Waiting for the kernel is not something a
 /// drop can do, so that part goes to a task.
@@ -167,8 +168,8 @@ struct Child(Option<Held>);
 /// declaration order once the child is gone.
 struct Held {
     process: tokio::process::Child,
-    /// Settled by the reap; the answer's [`Exit`] reads it.
-    fate: Option<oneshot::Sender<Fate>>,
+    /// Settled by the release; the answer's [`Exit`] reads it.
+    cause: Option<oneshot::Sender<ExitCause>>,
     /// The caller's `keep`: what the child maps, so not before it is gone.
     #[allow(dead_code, reason = "held for its drop")]
     kept: Box<dyn Send>,
@@ -189,7 +190,7 @@ impl Drop for Child {
         // Outside a runtime is the process going away: there is nothing to wait
         // with, and what the child held drops here.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(held.reap());
+            runtime.spawn(held.release());
         }
     }
 }
@@ -203,32 +204,32 @@ impl Held {
         }
     }
 
-    /// Wait for the killed child to exit and its group to empty, settle its
-    /// fate, and let go of what it held.
+    /// Wait for the killed child to exit and its group to empty, settle why it
+    /// ended, and let go of what it held.
     ///
     /// Without a bound: a killed child keeps its memory until it is gone, and
     /// one in uninterruptible sleep — likely under memory pressure — can take a
     /// while. A child or group that will not go keeps its slot and what was
     /// kept for it, because it keeps its memory.
-    async fn reap(mut self) {
+    async fn release(mut self) {
         let _ = self.process.wait().await;
-        let fate = match &self.group {
+        let cause = match &self.group {
             Some(group) => {
                 group.emptied().await;
-                group.fate()
+                group.exit_cause()
             }
-            None => Fate::Unattributed,
+            None => ExitCause::Unattributed,
         };
         #[cfg(feature = "debug")]
         if let Some(group) = &self.group {
             safe_logger::debug!(
                 "child: peak {:?} KiB, {:?}",
                 group.peak().map(|bytes| bytes >> 10),
-                fate
+                cause
             );
         }
-        if let Some(settled) = self.fate.take() {
-            let _ = settled.send(fate);
+        if let Some(settled) = self.cause.take() {
+            let _ = settled.send(cause);
         }
         // Off the runtime: the group's drop reclaims what the child left
         // charged, which can be a great many kernel objects.
@@ -298,7 +299,7 @@ impl ChildRunner {
     /// Spawn a fresh child, hand its service client `Cli` to `f`, and drive `f`
     /// under the request's deadline. The answer comes back beside the child's
     /// [`Exit`], which a caller reads only when the answer leaves it asking how
-    /// the child died; the reap runs off the request's path.
+    /// the child died; the release runs off the request's path.
     ///
     /// `f` does the domain work — `prime` then `run`, or `compile` — and its
     /// result is returned as it is. A [`SupervisorError`] is the runner's own:
@@ -355,11 +356,11 @@ impl ChildRunner {
                 return Err(SupervisorError::Spawn(e));
             }
         };
-        let (fate, settled) = oneshot::channel();
+        let (cause, settled) = oneshot::channel();
         // Dropped on every way out of this call, which is what ends the child.
         let _child = Child(Some(Held {
             process,
-            fate: Some(fate),
+            cause: Some(cause),
             kept: Box::new(keep),
             group,
             slot,
@@ -374,8 +375,8 @@ impl ChildRunner {
             .await
             .map_err(|_elapsed| SupervisorError::Deadline(self.deadline))?;
         let exit = Exit {
-            fate: settled,
-            within: self.times.fate_wait,
+            cause: settled,
+            within: self.times.exit_wait,
         };
         Ok((answer, exit))
     }

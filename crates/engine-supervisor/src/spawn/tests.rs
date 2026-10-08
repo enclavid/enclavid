@@ -164,7 +164,7 @@ async fn a_placed_child_runs_under_its_own_identity() {
 
     // End of its input: `cat` goes by itself.
     drop(sup_end);
-    assert!(child.wait().await.expect("cat is reaped").success());
+    assert!(child.wait().await.expect("wait for cat").success());
 }
 
 /// Only what a child is handed survives its exec. A descriptor this process
@@ -202,7 +202,7 @@ async fn only_the_handed_descriptor_survives_the_exec() {
 
     // End of its input: `cat` goes by itself.
     drop(sup_end);
-    assert!(child.wait().await.expect("cat is reaped").success());
+    assert!(child.wait().await.expect("wait for cat").success());
     assert!(inherited, "the handed descriptor is not at {INHERITED_FD}");
     assert!(
         !strayed,

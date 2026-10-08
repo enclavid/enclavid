@@ -210,7 +210,7 @@ What each measurement-relevant part is doing:
   | | `bundle-stream-secs` | 120 |
   | | `bundle-stream-idle-secs` | 20 |
   | | `child-max-tasks` | 64 |
-  | | `child-fate-wait-secs` | 5 |
+  | | `child-exit-wait-secs` | 5 |
   | | `child-connect-secs` | 30 |
   | | `room-poll-ms` | 50 |
   | | `request-buffer` | 4 |
@@ -221,7 +221,7 @@ What each measurement-relevant part is doing:
   | | `compile-headroom-bytes` | 256 MiB |
   | | `base-reserve-bytes` | 512 MiB |
   | | `child-max-tasks` | 64 |
-  | | `child-fate-wait-secs` | 5 |
+  | | `child-exit-wait-secs` | 5 |
   | | `child-connect-secs` | 30 |
   | | `room-poll-ms` | 50 |
   | | `request-buffer` | 4 |

@@ -3,7 +3,7 @@
 //! It LISTENS for the orchestrator (api) and serves `engine_rpc::CompilerService`
 //! — the same api-facing contract as before — but it runs NO Cranelift itself.
 //! Per compile it drives a fresh `engine-compiler-child` PROCESS (spawned + bounded +
-//! deadline-guarded + reaped by the shared [`engine_supervisor::ChildRunner`]) and
+//! deadline-guarded + released by the shared [`engine_supervisor::ChildRunner`]) and
 //! forwards the `(policy, plugins)` to it. Cranelift over UNTRUSTED wasm — a wide
 //! surface — runs ONLY in that disposable per-compile child, so a compiler-bug
 //! exploit is confined to one compile (no persistent implant that could poison a
@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine_supervisor::{
-    Cgroups, ChildLimits, ChildRunner, ChildTimes, DEFAULT_CHILD_MAX_TASKS, Fate, RunnerConfig,
+    Cgroups, ChildLimits, ChildRunner, ChildTimes, DEFAULT_CHILD_MAX_TASKS, ExitCause, RunnerConfig,
 };
 use remoc::codec::Ciborium;
 
@@ -130,8 +130,9 @@ impl CompilerServiceUntrusted for Supervisor {
             ))
             .into_inner();
         // Drive ONE compile in a fresh disposable child, under the runner's
-        // concurrency bound + wall-clock deadline (the runner kills + reaps a wedged
-        // child). The closure is the DOMAIN work: forward the compile.
+        // concurrency bound + wall-clock deadline (the runner kills a wedged child
+        // and releases what it held). The closure is the DOMAIN work: forward the
+        // compile.
         let outcome = self
             .runner
             // No inherited fd: the engine-compiler-child receives its `(policy, plugins)`
@@ -157,9 +158,9 @@ impl CompilerServiceUntrusted for Supervisor {
         // runner-level failure (spawn error, or the deadline killing a wedged child)
         // is `Failed`, its cause kept to this side's debug log.
         match outcome {
-            Ok((Err(CompileError::Failed), exit)) => match exit.fate().await {
-                Fate::OutgrewItsMax => Err(CompileError::Refused),
-                Fate::Unattributed => Err(CompileError::Failed),
+            Ok((Err(CompileError::Failed), exit)) => match exit.cause().await {
+                ExitCause::OutgrewItsMax => Err(CompileError::Refused),
+                ExitCause::Unattributed => Err(CompileError::Failed),
             },
             Ok((domain_result, _)) => domain_result,
             Err(runner_err) => {
@@ -346,7 +347,7 @@ async fn main() {
     let child_max_tasks: u64 = setting(&mut launch, "child-max-tasks", DEFAULT_CHILD_MAX_TASKS);
     let times = ChildTimes::default();
     let child_times = ChildTimes {
-        fate_wait: secs(&mut launch, "child-fate-wait-secs", times.fate_wait),
+        exit_wait: secs(&mut launch, "child-exit-wait-secs", times.exit_wait),
         connect: secs(&mut launch, "child-connect-secs", times.connect),
         room_poll: millis(&mut launch, "room-poll-ms", times.room_poll),
     };
@@ -373,7 +374,7 @@ async fn main() {
     if max_compiles == 0
         || deadline.is_zero()
         || child_max_tasks == 0
-        || child_times.fate_wait.is_zero()
+        || child_times.exit_wait.is_zero()
         || child_times.connect.is_zero()
         || child_times.room_poll.is_zero()
         || request_buffer == 0
@@ -381,7 +382,7 @@ async fn main() {
     {
         safe_logger::error_and_panic!(
             "compile-worker: a compile bound, a compile deadline, a child task cap, a \
-             child fate wait, handshake or room poll time, a request buffer or an \
+             child exit wait, handshake or room poll time, a request buffer or an \
              accept retry of zero compiles nothing; each must be above it. Stopping.",
             reason!("a constant, emitted once at boot before any request exists")
         );
@@ -535,7 +536,7 @@ async fn main() {
     info!(
         "compile-worker (supervisor): listening on {}, engine-compiler-child={}, \
          max_compiles={} sharing {} MiB of {} MiB memory (each to {} MiB, {} MiB to \
-         start, {} tasks), deadline={}s, child_fate_wait={:?}, child_connect={:?}, \
+         start, {} tasks), deadline={}s, child_exit_wait={:?}, child_connect={:?}, \
          room_poll={:?}, request_buffer={}, leg_timeout={:?}, leg_max_ports={}, \
          leg_chunk={} bytes, accept_retry={:?}",
         safe(&addr, reason!("on the measured command line")),
@@ -569,7 +570,7 @@ async fn main() {
             reason!("the host's own setting, or this build's default")
         ),
         safe(
-            &child_times.fate_wait,
+            &child_times.exit_wait,
             reason!("the host's own setting, or this build's default")
         ),
         safe(

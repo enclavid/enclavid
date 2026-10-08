@@ -16,7 +16,7 @@
 //! parent ones are behind the `parent` feature (default-on; the child packages
 //! take `default-features = false`).
 //!
-//! `parent` — spawn, harden, bound, kill, reap:
+//! `parent` — spawn, harden, bound, kill, release:
 //!   * [`ChildRunner`] — admit a request, spawn its child under the syscall
 //!     filters, drive the caller's closure under the request's deadline, and
 //!     kill the child as the call ends, giving its slot back once it is gone.
@@ -66,7 +66,7 @@ mod seccomp;
 mod spawn;
 
 #[cfg(feature = "parent")]
-pub use cgroup::{Cgroups, ChildLimits, DEFAULT_CHILD_MAX_TASKS, Fate};
+pub use cgroup::{Cgroups, ChildLimits, DEFAULT_CHILD_MAX_TASKS, ExitCause};
 #[cfg(feature = "parent")]
 pub use preconditions::{physical_memory, require_fd_budget, require_ptrace_scope};
 #[cfg(feature = "parent")]

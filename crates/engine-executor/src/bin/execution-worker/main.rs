@@ -3,7 +3,7 @@
 //! It LISTENS for the orchestrator (api) and serves `engine_rpc::ExecutorService`
 //! — the same api-facing contract as before — but it runs NO wasm itself. Per
 //! reducer round it drives a fresh `engine-executor-child` PROCESS (spawned + bounded +
-//! deadline-guarded + reaped by the shared [`engine_supervisor::ChildRunner`]), primes
+//! deadline-guarded + released by the shared [`engine_supervisor::ChildRunner`]), primes
 //! it with the compiled bundle, drives exactly one round in it, and discards it.
 //! Untrusted policy wasm and `Component::deserialize` execute ONLY in that
 //! disposable per-round child, behind an OS address-space boundary — so a wasmtime
@@ -28,7 +28,7 @@
 //!
 //! **What is domain vs supervisor.** The generic process plumbing — spawn a
 //! disposable child over a socketpair, bound concurrency, enforce the per-round
-//! wall-clock DEADLINE (so a wedged child can't leak its slot), kill + reap, and
+//! wall-clock DEADLINE (so a wedged child can't leak its slot), kill + release, and
 //! the capability-scoped fd handoff — lives in [`engine_supervisor::ChildRunner`],
 //! shared with the compile-worker. What stays HERE is the executor's domain: the
 //! memfd-backed L1 ([`bundles`]), what a cwasm goes through on its way into it
@@ -494,7 +494,7 @@ async fn main() {
     );
     info!(
         "execution-worker (supervisor): bundle_cache_entries={}, child_max_tasks={}, \
-         child_fate_wait={:?}, child_connect={:?}, room_poll={:?}, request_buffer={}, \
+         child_exit_wait={:?}, child_connect={:?}, room_poll={:?}, request_buffer={}, \
          callback_request_buffer={}, leg_timeout={:?}, leg_max_ports={}, \
          leg_chunk={} bytes, accept_retry={:?}",
         safe(
@@ -506,7 +506,7 @@ async fn main() {
             reason!("the host's own setting, or this build's default")
         ),
         safe(
-            &child_times.fate_wait,
+            &child_times.exit_wait,
             reason!("the host's own setting, or this build's default")
         ),
         safe(

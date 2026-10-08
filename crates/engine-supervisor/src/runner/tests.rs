@@ -25,9 +25,9 @@ fn runner_of(exe: &str, wait: Option<Duration>) -> ChildRunner {
     )
 }
 
-/// How long the runners here let an answer wait for its child's fate.
-fn fate_wait() -> Duration {
-    ChildTimes::default().fate_wait
+/// How long the runners here let an answer wait for why its child ended.
+fn exit_wait() -> Duration {
+    ChildTimes::default().exit_wait
 }
 
 /// Take the runner's one slot from outside, the way a running child holds it.
@@ -163,18 +163,19 @@ async fn a_child_that_never_connects_returns_its_slot() {
 }
 
 /// What a child of `runner` holds while it runs `sleep`, which never goes by
-/// itself, with `kept` as the caller's `keep`; and the fate its reap settles.
-async fn sleeping(runner: &ChildRunner, kept: &Arc<()>) -> (Held, oneshot::Receiver<Fate>) {
+/// itself, with `kept` as the caller's `keep`; and the exit cause its release
+/// settles.
+async fn sleeping(runner: &ChildRunner, kept: &Arc<()>) -> (Held, oneshot::Receiver<ExitCause>) {
     let slot = runner.admit().await.expect("a free slot");
     let process = tokio::process::Command::new("/bin/sleep")
         .arg("1000")
         .kill_on_drop(true)
         .spawn()
         .expect("sleep spawns");
-    let (fate, settled) = oneshot::channel();
+    let (cause, settled) = oneshot::channel();
     let held = Held {
         process,
-        fate: Some(fate),
+        cause: Some(cause),
         kept: Box::new(kept.clone()),
         group: None,
         slot,
@@ -196,16 +197,16 @@ async fn a_slot_is_held_until_its_child_has_exited() {
         .process
         .id()
         .and_then(|id| Pid::from_raw(id.cast_signed()));
-    let reaper = tokio::spawn(held.reap());
+    let release = tokio::spawn(held.release());
     tokio::time::sleep(WAIT).await;
     assert_eq!(runner.slots.available_permits(), 0);
     assert_eq!(Arc::strong_count(&kept), 2);
 
     kill_process(pid.expect("sleep is running"), Signal::KILL).expect("kill sleep");
-    reaper.await.expect("the reap finishes");
+    release.await.expect("the release finishes");
     assert_eq!(runner.slots.available_permits(), 1);
     assert_eq!(Arc::strong_count(&kept), 1);
-    assert_eq!(settled.await, Ok(Fate::Unattributed));
+    assert_eq!(settled.await, Ok(ExitCause::Unattributed));
 }
 
 /// A dropped child is killed then and there: `sleep` never goes by itself, so
@@ -223,20 +224,20 @@ async fn a_dropped_child_is_killed_at_once() {
     assert_eq!(Arc::strong_count(&kept), 1);
 }
 
-/// The answer does not wait on a reap that will not settle: past the fate
+/// The answer does not wait on a release that will not settle: past the exit
 /// wait, an exit attributes nothing.
 #[tokio::test(start_paused = true)]
-async fn an_exit_is_waited_for_no_longer_than_the_fate_wait() {
+async fn an_exit_is_waited_for_no_longer_than_the_exit_wait() {
     let (_unsettled, rx) = oneshot::channel();
     let started = tokio::time::Instant::now();
     let exit = Exit {
-        fate: rx,
-        within: fate_wait(),
+        cause: rx,
+        within: exit_wait(),
     };
-    assert_eq!(exit.fate().await, Fate::Unattributed);
-    assert_eq!(started.elapsed(), fate_wait());
+    assert_eq!(exit.cause().await, ExitCause::Unattributed);
+    assert_eq!(started.elapsed(), exit_wait());
     assert_eq!(
-        Exit::known(Fate::OutgrewItsMax).fate().await,
-        Fate::OutgrewItsMax
+        Exit::known(ExitCause::OutgrewItsMax).cause().await,
+        ExitCause::OutgrewItsMax
     );
 }

@@ -7,7 +7,7 @@
 //! as its limit. A child past its max, or the one the kernel picks when the
 //! total is reached, is killed with everything in its group — the kernel does
 //! not refuse memory at a limit, it kills. What it records about that kill is
-//! what [`Fate`] reads.
+//! what [`ExitCause`] reads.
 //!
 //! Nothing a child had is handed to the next. Each child gets a group made for
 //! it ([`ChildGroup`]) and removed once it is empty, and an identity no other
@@ -98,7 +98,7 @@ pub struct ChildLimits {
 /// Why a child's life ended, as far as the kernel's record of it can say. Read
 /// once the child's group is empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Fate {
+pub enum ExitCause {
     /// Killed at its own max, while the children's total was never reached
     /// during its life. The kernel's record reads the same for one other end: a
     /// child that reached its max without being killed there, and was later
@@ -128,7 +128,7 @@ pub(crate) struct ChildGroup {
     /// is counted.
     total_events: PathBuf,
     /// How often the children's total had been reached when this child was
-    /// made: [`Fate`] asks whether that moved during its life.
+    /// made: [`ExitCause`] asks whether that moved during its life.
     total_oom_before: u64,
     /// What the group's drop asks the kernel to reclaim before the group goes:
     /// the child's max, which is the most it could have left charged.
@@ -154,7 +154,7 @@ pub(crate) struct Placement {
     pub(crate) tasks: u64,
 }
 
-/// The two counters a child's fate is read from, as `memory.events.local`
+/// The two counters a child's exit cause is read from, as `memory.events.local`
 /// reports them for one group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Counters {
@@ -439,17 +439,17 @@ impl ChildGroup {
         }
     }
 
-    /// The child's fate. Only meaningful once the group is empty: the kernel
-    /// counts a kill before it sends it. A record that cannot be read
+    /// Why the child ended. Only meaningful once the group is empty: the
+    /// kernel counts a kill before it sends it. A record that cannot be read
     /// attributes nothing.
-    pub(crate) fn fate(&self) -> Fate {
+    pub(crate) fn exit_cause(&self) -> ExitCause {
         let own = read_counters(&self.path.join("memory.events.local"));
         let total = read_counters(&self.total_events);
         match (own, total) {
             (Ok(own), Ok(total)) if outgrew_max(own, self.total_oom_before, total.oom) => {
-                Fate::OutgrewItsMax
+                ExitCause::OutgrewItsMax
             }
-            _ => Fate::Unattributed,
+            _ => ExitCause::Unattributed,
         }
     }
 
@@ -476,6 +476,30 @@ impl Drop for ChildGroup {
     fn drop(&mut self) {
         let _ = write(&self.path.join("memory.reclaim"), &self.max.to_string());
         let _ = std::fs::remove_dir(&self.path);
+        #[cfg(feature = "debug")]
+        self.log_removal();
+    }
+}
+
+impl ChildGroup {
+    /// Whether the group is gone, and what the kernel counts under `children`
+    /// after it: `nr_dying_descendants` is the removed groups it still holds.
+    #[cfg(feature = "debug")]
+    fn log_removal(&self) {
+        let stat = self
+            .path
+            .parent()
+            .and_then(|children| std::fs::read_to_string(children.join("cgroup.stat")).ok())
+            .unwrap_or_default();
+        let state = if self.path.exists() {
+            "left behind"
+        } else {
+            "removed"
+        };
+        safe_logger::debug!(
+            "child group {state}; children: {}",
+            stat.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
     }
 }
 

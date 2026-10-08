@@ -117,7 +117,7 @@ pub(crate) struct Settings {
     /// [`DEFAULT_CHILD_MAX_TASKS`]).
     pub(crate) child_max_tasks: u64,
     /// How long the runner waits on a child where the round's deadline does not
-    /// reach (`child-fate-wait-secs`, `child-connect-secs`, `room-poll-ms`).
+    /// reach (`child-exit-wait-secs`, `child-connect-secs`, `room-poll-ms`).
     pub(crate) child_times: ChildTimes,
     /// How many of api's requests may wait on its connection
     /// (`request-buffer`, [`DEFAULT_REQUEST_BUFFER`]).
@@ -194,7 +194,7 @@ pub(crate) fn load() -> Settings {
         ),
         child_max_tasks: setting(&mut launch, "child-max-tasks", DEFAULT_CHILD_MAX_TASKS),
         child_times: ChildTimes {
-            fate_wait: secs(&mut launch, "child-fate-wait-secs", child_times.fate_wait),
+            exit_wait: secs(&mut launch, "child-exit-wait-secs", child_times.exit_wait),
             connect: secs(&mut launch, "child-connect-secs", child_times.connect),
             room_poll: millis(&mut launch, "room-poll-ms", child_times.room_poll),
         },
@@ -228,7 +228,7 @@ impl Settings {
             || self.bundle_stream.is_zero()
             || self.bundle_stream_idle.is_zero()
             || self.child_max_tasks == 0
-            || self.child_times.fate_wait.is_zero()
+            || self.child_times.exit_wait.is_zero()
             || self.child_times.connect.is_zero()
             || self.child_times.room_poll.is_zero()
             || self.request_buffer == 0
@@ -238,7 +238,7 @@ impl Settings {
             safe_logger::error_and_panic!(
                 "execution-worker: a child bound, a cache entry count, a round deadline, \
                  round fuel, a bundle stream deadline or idle limit, a child task cap, a \
-                 child fate wait, handshake or room poll time, a request buffer or an accept \
+                 child exit wait, handshake or room poll time, a request buffer or an accept \
                  retry of zero runs nothing; each must be above it. Stopping.",
                 reason!("a constant, emitted once at boot before any request exists")
             );

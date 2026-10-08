@@ -8,11 +8,11 @@ repository.workspace = true
 # Process-isolation plumbing shared by the engine fleet's WORKERS (execution +
 # compile). A worker SUPERVISOR spawns a fresh disposable CHILD PROCESS per
 # request, drives ONE typed remoc RPC in it under a concurrency bound + a
-# wall-clock deadline, and reaps it — so untrusted work (running wasm, or
+# wall-clock deadline, and releases it — so untrusted work (running wasm, or
 # Cranelift-compiling untrusted wasm) is confined to a throwaway per-request
 # process behind an OS address-space boundary. This crate owns the FIDDLY,
 # security-load-bearing bits (socketpair fd hygiene, the deadline that stops a
-# WEDGED child leaking its slot, kill+reap) so they are written + tested ONCE and
+# WEDGED child leaking its slot, kill+release) so they are written + tested ONCE and
 # both workers ride them. A DOMAIN-AGNOSTIC leaf: never engine-rpc or
 # engine-types, so the orchestrator (api) never links it.
 [dependencies]
@@ -64,7 +64,7 @@ seccompiler = { version = "0.4", optional = true }
 [features]
 default = ["parent"]
 
-# The PARENT half: spawn, harden, bound, kill, reap. Default-on, because a
+# The PARENT half: spawn, harden, bound, kill, release. Default-on, because a
 # consumer that says nothing wants a supervisor; the two child packages turn it
 # OFF explicitly, which is where the restriction reads.
 #

@@ -238,7 +238,7 @@ async fn a_child_starts_and_serves_under_the_production_filter() {
 async fn a_runner_answers_and_gives_back_what_its_child_held() {
     use std::sync::Arc;
 
-    use engine_supervisor::{ChildRunner, ChildTimes, Fate, RunnerConfig};
+    use engine_supervisor::{ChildRunner, ChildTimes, ExitCause, RunnerConfig};
 
     let runner = ChildRunner::new(
         RunnerConfig {
@@ -268,9 +268,9 @@ async fn a_runner_answers_and_gives_back_what_its_child_held() {
             .await
             .expect("the runner admits, spawns and answers");
         assert!(matches!(answer, Err(CompileError::Failed)));
-        // Without cgroups nothing is attributed, but the fate settles only once
+        // Without cgroups nothing is attributed, but the cause settles only once
         // the child is gone.
-        assert_eq!(exit.fate().await, Fate::Unattributed);
+        assert_eq!(exit.cause().await, ExitCause::Unattributed);
     }
     tokio::time::timeout(Duration::from_secs(10), async {
         while Arc::strong_count(&kept) > 1 {

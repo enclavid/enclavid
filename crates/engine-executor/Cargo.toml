@@ -54,7 +54,7 @@ engine-rpc = { path = "../engine-rpc", default-features = false, features = ["ex
 # the words directly rather than through whoever happens to re-export them.
 enclavid-boundary = { path = "../boundary", optional = true }
 # Shared disposable-child process-isolation plumbing (spawn + concurrency bound +
-# round deadline + reap); the compile-worker rides the same crate.
+# round deadline + release); the compile-worker rides the same crate.
 engine-supervisor = { path = "../engine-supervisor", optional = true }
 remoc = { version = "0.18", default-features = false, features = [
     "rtc",

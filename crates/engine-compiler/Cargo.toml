@@ -59,7 +59,7 @@ enclavid-embedded = { path = "../embedded" }
 engine-rpc = { path = "../engine-rpc", default-features = false, features = ["compile"], optional = true }
 enclavid-boundary = { path = "../boundary", optional = true }
 # Shared disposable-child process-isolation plumbing (spawn + concurrency bound +
-# compile deadline + reap); the execution-worker rides the same crate. The
+# compile deadline + release); the execution-worker rides the same crate. The
 # compile-worker is its SIMPLER consumer — no cache, no callbacks.
 engine-supervisor = { path = "../engine-supervisor", optional = true }
 remoc = { version = "0.18", default-features = false, features = [

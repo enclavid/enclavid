@@ -13,7 +13,7 @@ use engine_rpc::{
     ChildService, ChildServiceClient, CompatToken, CompositionKey, ExecError,
     ExecutorServiceUntrusted, Padded, Prop, RunOutcome, RunReply, RunRequest, RunStatus,
 };
-use engine_supervisor::{ChildRunner, Exit, Fate, SupervisorError};
+use engine_supervisor::{ChildRunner, Exit, ExitCause, SupervisorError};
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 use safe_logger::{debug, reason};
@@ -66,15 +66,15 @@ fn runner_failure(e: SupervisorError) -> ExecError {
 /// was the cause: killed at its own max, with the children's total never
 /// reached meanwhile, is the policy's, the same as a trap; anything else stays
 /// `Unknown`. Only then is the exit waited for, and never long: see
-/// [`Exit::fate`]. A reply the child did send is kept whatever became of it.
+/// [`Exit::cause`]. A reply the child did send is kept whatever became of it.
 async fn child_reply(
     outcome: Result<(Result<RunStatus, ExecError>, Exit), SupervisorError>,
 ) -> Result<RunStatus, ExecError> {
     match outcome {
         Ok((Err(ExecError::Busy), _)) => Err(ExecError::Unknown),
-        Ok((Err(ExecError::Unknown), exit)) => match exit.fate().await {
-            Fate::OutgrewItsMax => Err(ExecError::Policy),
-            Fate::Unattributed => Err(ExecError::Unknown),
+        Ok((Err(ExecError::Unknown), exit)) => match exit.cause().await {
+            ExitCause::OutgrewItsMax => Err(ExecError::Policy),
+            ExitCause::Unattributed => Err(ExecError::Unknown),
         },
         Ok((domain_result, _)) => domain_result,
         Err(e) => Err(runner_failure(e)),
@@ -110,7 +110,7 @@ pub(crate) struct Supervisor {
     /// ([`engine_rpc::DEFAULT_CALLBACK_REQUEST_BUFFER`]).
     pub(crate) callback_request_buffer: usize,
     /// The disposable per-round child runner (spawn + concurrency bound + round
-    /// deadline + reap), shared with the compile-worker. Its slots are the child
+    /// deadline + release), shared with the compile-worker. Its slots are the child
     /// bound, and a round is admitted to one only with room for one more child
     /// under the children's total and in the guest
     /// ([`engine_executor::admission::DEFAULT_ROUND_HEADROOM_BYTES`]) — both
@@ -224,8 +224,9 @@ impl Supervisor {
         let (fuel, callback_buffer) = (self.round_fuel, self.callback_request_buffer);
 
         // Drive ONE round in a fresh disposable child, under the runner's
-        // concurrency bound + wall-clock deadline (the runner kills + reaps a wedged
-        // child so it can't leak its slot), admitted — a slot, and room for the
+        // concurrency bound + wall-clock deadline (the runner kills a wedged child
+        // and releases what it held, so it can't leak its slot), admitted — a
+        // slot, and room for the
         // child — within the capacity wait. The runner installs the cwasm fd at
         // `INHERITED_FD` in the child; the closure is the DOMAIN work: prime the
         // child (MMAP the cwasm), stand up the callback relay, run.
@@ -597,7 +598,7 @@ mod tests {
     use engine_executor::admission::{DEFAULT_WAITING_PER_CHILD, rounds_held};
     use engine_executor::{Decision, Prompt};
     use engine_rpc::{ExecError, RunStatus};
-    use engine_supervisor::{Exit, Fate, SpawnError, SupervisorError};
+    use engine_supervisor::{Exit, ExitCause, SpawnError, SupervisorError};
 
     use super::{child_reply, round_place, runner_failure};
 
@@ -633,7 +634,7 @@ mod tests {
     }
 
     fn unattributed() -> Exit {
-        Exit::known(Fate::Unattributed)
+        Exit::known(ExitCause::Unattributed)
     }
 
     /// A child has run by the time it answers, so its `Busy` is not passed on;
@@ -665,7 +666,7 @@ mod tests {
     /// gets.
     #[tokio::test]
     async fn a_child_killed_at_its_own_max_is_the_policy() {
-        let exit = Exit::known(Fate::OutgrewItsMax);
+        let exit = Exit::known(ExitCause::OutgrewItsMax);
         assert_eq!(
             child_reply(Ok((Err(ExecError::Unknown), exit))).await.err(),
             Some(ExecError::Policy)
@@ -687,10 +688,10 @@ mod tests {
     /// What a child did answer is its answer: a kill recorded afterwards — on
     /// its way out, or by the runner — changes none of it.
     #[tokio::test]
-    async fn a_reply_is_kept_whatever_the_childs_fate() {
+    async fn a_reply_is_kept_whatever_ended_the_child() {
         let answered = child_reply(Ok((
             Ok(RunStatus::Completed(Decision::Approved)),
-            Exit::known(Fate::OutgrewItsMax),
+            Exit::known(ExitCause::OutgrewItsMax),
         )))
         .await;
         assert!(matches!(
@@ -699,14 +700,14 @@ mod tests {
         ));
         let awaiting = child_reply(Ok((
             Ok(RunStatus::AwaitingInput(Prompt::Media(Default::default()))),
-            Exit::known(Fate::OutgrewItsMax),
+            Exit::known(ExitCause::OutgrewItsMax),
         )))
         .await;
         assert!(matches!(awaiting, Ok(RunStatus::AwaitingInput(_))));
         assert_eq!(
             child_reply(Ok((
                 Err(ExecError::Policy),
-                Exit::known(Fate::OutgrewItsMax)
+                Exit::known(ExitCause::OutgrewItsMax)
             )))
             .await
             .err(),
