@@ -1,5 +1,5 @@
-//! Engine-side resource and validation limits — every numeric cap
-//! the policy execution layer enforces lives here.
+//! Engine-side resource and validation limits — the numeric caps of
+//! the policy execution layer that are terms of the trust contract.
 //!
 //! **These are compile-time constants by design.** Together they
 //! form the engine's slice of the TEE trust contract: a consumer
@@ -7,8 +7,8 @@
 //! too. Loading any of them from env / config / runtime input
 //! would let an untrusted host:
 //!
-//!   * Open covert host→policy channels (policy self-measures its
-//!     fuel/memory budget; runtime-variable budget = side-channel
+//!   * Open covert host→policy channels (a policy can measure a cap
+//!     it runs against; one the host varies is side-channel
 //!     bandwidth).
 //!   * Selectively DoS user classes by tuning caps per-session
 //!     based on out-of-band signals (IP, headers, ...).
@@ -19,41 +19,27 @@
 //! Changing a value here changes the trust contract. Bump the
 //! image, re-attest, communicate to consumers.
 //!
+//! The round's memory max and its fuel are not here. They are settings
+//! the host gives the execution worker at launch
+//! (`engine_executor::admission`, `engine_executor::DEFAULT_ROUND_FUEL`),
+//! outside the measurement: how much the service gives a round.
+//!
+//! What that leaves the host is a threshold of its own choosing. It can
+//! run workers of one image with different values and pick which one a
+//! session reaches, so it learns whether a round — an honest policy's
+//! too — needs more than it chose: one bit per round, and only when the
+//! round fails. A threshold in the build would leave that bit too, only
+//! at a value the host did not pick. Accepted: the host already times
+//! every round it carries, the bit bounds how much a round did rather
+//! than what it was about, and a round it makes fail is availability,
+//! which the host has anyway.
+//!
 //! For HTTP / multipart / external-input size caps see the api
 //! crate's `limits` module — same review discipline applies, but
 //! those live at the IO boundary and are reviewed alongside the
 //! HTTP routes that enforce them.
 
-// ----- Wasmtime resource caps -----
-
-/// Maximum linear memory a session may hold across EVERY component in
-/// its store — policy and pinned plugins together, not each.
-///
-/// Enforced by `engine_executor::state::host::AggregateMemory`, which
-/// charges each grow's increment to one running total. It used to be
-/// `StoreLimitsBuilder::memory_size`, which reads the same and is not:
-/// wasmtime asks the limiter once per linear memory and ignores what
-/// the others hold, so every memory reached this number on its own.
-/// A fused component is one memory per part — measured at 1, 2 and 6
-/// for zero, one and five plugins — and the plugin set is the
-/// consumer's to pin, so the ceiling was theirs to multiply.
-///
-/// Generous enough that ML-bearing work (decoded JPEG frames, ONNX
-/// intermediates) does not trip on it: the end-to-end test runs a
-/// policy with five plugins inside this budget. That measurement is
-/// against the placeholder models the fixtures build, so production
-/// weights are the thing to re-measure against, not this number's
-/// history.
-pub const POLICY_MAX_MEMORY: usize = 128 * 1024 * 1024;
-
-/// Fuel budget for one `Executor::run` call. Each WASM instruction
-/// consumes ~1 unit; out-of-fuel
-/// traps. Pairs with `POLICY_MAX_MEMORY` as the second leg of the
-/// "policy can't hang the enclave" guarantee — memory cap blocks
-/// allocation bombs, fuel cap blocks compute bombs / infinite
-/// loops. Generous for MVP since the policy currently carries
-/// plugin work inline; tighten with plugin separation.
-pub const POLICY_FUEL_BUDGET: u64 = 10_000_000_000;
+// ----- Round resource caps -----
 
 /// Hard cap on the policy's opaque `state` blob, enforced in
 /// `Executor::run` (in `engine-executor`) immediately after each `handle`
@@ -137,6 +123,30 @@ pub const MAX_VALUE_LENGTH: usize = 4096;
 /// rejected; [`MAX_TEXT_VALUE_HARD_BYTES`] is the rejection threshold.
 pub const MAX_TEXT_VALUE_SOFT_CHARS: usize = 1000;
 
+// ----- The consumer's embedded catalogs, as a whole -----
+
+/// The most embedded-section bytes one composition may carry: every
+/// `enclavid:embedded.*.v1` section — disclosure-fields, i18n, icons — of the
+/// policy and of every plugin it pins, at every nesting depth, summed as raw
+/// bytes. Past it the compile is refused before any section is parsed, and no
+/// bundle exists to be cached or installed.
+///
+/// The per-kind caps below bound what ONE component declares; the plugin set is
+/// the consumer's to pin, so they bound no composition. This does, and what
+/// holds a composition's catalogs downstream is sized from it: the metadata the
+/// execute hop accepts (`engine_rpc::MAX_BUNDLE_META_BYTES`) and, through that,
+/// what an execution-worker reserves for one install.
+///
+/// Here rather than in `enclavid-embedded`, which owns the per-component schema
+/// and is shared with the CLI: a composition exists only in the fleet, and this
+/// leaf is what both the compiler that holds the cap and the execute contract
+/// that derives from it link.
+///
+/// 2 MiB: the largest catalog shipped today is under 3 KB, so this is hundreds
+/// of times what a composition needs, while a decoded catalog of tiny keys —
+/// tens of bytes each in a hash table — stays in the tens of MiB.
+pub const MAX_EMBEDDED_SECTION_BYTES: u64 = 2 * 1024 * 1024;
+
 // ----- Schema-level caps re-exported from `enclavid-embedded` -----
 //
 // These are the wire-format limits that bound what a single source
@@ -158,8 +168,8 @@ pub const MAX_TEXT_VALUE_SOFT_CHARS: usize = 1000;
 //   * `MAX_TEXT_VALUE_HARD_BYTES` — hard cap on the raw byte length
 //     of a `translation.value` before sanitisation. Refuses the
 //     whole policy load if any single entry exceeds this. Second-
-//     line guard behind `POLICY_MAX_MEMORY`, which bounds the store's
-//     total linear memory; this caps per-entry size so a million
+//     line guard behind the round's memory max, which bounds everything
+//     the round's process holds; this caps per-entry size so a million
 //     1-byte entries can't slip under the memory wire by spreading
 //     the payload.
 //   * `MAX_DECLARED_DISCLOSURE_FIELDS` / `MAX_DECLARED_LOCALIZED` /

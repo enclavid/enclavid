@@ -102,12 +102,17 @@ pub fn acceptor(_attestor: Arc<dyn Attestor>) -> Acceptor {
 /// leaf sets its own — after the bind, not after the spawn. Dropped without a
 /// send only if this function panics, which is the bind failing, which ends the
 /// process.
+///
+/// `accept_retry` is how long the listener waits after an accept this process
+/// could not complete. The developer's TCP arm leaves that to axum, which waits
+/// a second.
 #[cfg(not(feature = "vsock"))]
 pub async fn serve(
     app: Router,
     addr: &str,
     bound: tokio::sync::oneshot::Sender<()>,
     _acceptor: Acceptor,
+    _accept_retry: std::time::Duration,
 ) {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -130,10 +135,12 @@ pub async fn serve(
     addr: &str,
     bound: tokio::sync::oneshot::Sender<()>,
     acceptor: Acceptor,
+    accept_retry: std::time::Duration,
 ) {
     let listener = fleet_transport::bind(addr)
         .await
-        .expect("failed to bind vsock listener");
+        .expect("failed to bind vsock listener")
+        .with_accept_retry(accept_retry);
     info!(
         "api: listening on vsock://*:{}",
         safe(&addr, reason!("on the measured command line")),

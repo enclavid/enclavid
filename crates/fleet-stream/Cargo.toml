@@ -1,0 +1,24 @@
+[package]
+name = "fleet-stream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# One blob, one stream, across a fleet leg, and the connection config every leg
+# is brought up with — see the crate doc. A leaf, so the roles whose own leaf
+# crates cannot depend on the engine contract can use it too; every dependency
+# below is already in each of their trees.
+[dependencies]
+# `rch` alone: a `bin` channel is a raw chmux port and needs no codec.
+remoc = { version = "0.18", default-features = false, features = ["rch"] }
+serde = { version = "1", features = ["derive"] }
+bytes = "1"
+sha2 = "0.10"
+tokio = { version = "1", default-features = false, features = ["time"] }
+
+[dev-dependencies]
+# The tests bring a real connection up over an in-memory pipe, which takes a codec.
+remoc = { version = "0.18", default-features = false, features = ["rch", "codec-ciborium"] }
+tokio = { version = "1", features = ["macros", "rt", "io-util", "time"] }
+ciborium = "0.2"

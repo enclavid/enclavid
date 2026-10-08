@@ -118,6 +118,14 @@ let
       "ENCLAVID_ADDRESS_IN_CONFIG=${into relay.config}"
     ];
 
+  # A role's launch settings as the one fw_cfg entry its guest reads them from
+  # (crates/fleet-transport/src/launch.rs): `settings=key=value;…`. None set,
+  # none sent, and the guest takes its own defaults.
+  settingsEntry = role:
+    let given = cfg.cvms.${role}.settings;
+    in lib.optional (given != { }) ("settings=" + lib.concatStringsSep ";"
+      (lib.mapAttrsToList (key: value: "${key}=${toString value}") given));
+
   # What a release's api legs dial: its hatch's port, and the port each peer's
   # relay listens on, as fw_cfg entries (crates/api/src/fleet/legs.rs) — so a
   # relay, or the hatch, and the dial that reaches it are one definition.
@@ -210,7 +218,9 @@ let
         state = "enclavid/${r.name}";
         inherit (cfg.cvms.storage.disk) size;
       } else null;
-      environment = lib.optionalAttrs (role == "api") { FW_CFG = legPorts r; };
+      environment =
+        let entries = lib.optional (role == "api") (legPorts r) ++ settingsEntry role;
+        in lib.optionalAttrs (entries != [ ]) { FW_CFG = lib.concatStringsSep " " entries; };
     }))
     roles);
 
@@ -295,6 +305,18 @@ let
           type = types.str;
           default = defaults.disk.size;
           description = "How large to make its volume; read only when it is made.";
+        };
+      } // lib.optionalAttrs (role != "gateway") {
+        settings = mkOption {
+          type = types.attrsOf types.ints.unsigned;
+          default = { };
+          example = { max-children = 8; round-max-bytes = 536870912; };
+          description = ''
+            Its launch settings: how many, how much, how long — each a key the
+            role knows (image/RUNNING.md lists them) and its value. Outside its
+            measurement, so a change restarts the guest and changes no release;
+            a key the role does not know stops its boot.
+          '';
         };
       };
     };
@@ -446,7 +468,7 @@ in
     cvms = {
       storage = cvm "storage" { memory = "2G"; disk.size = "8G"; };
       compile-worker = cvm "compile-worker" { memory = "3G"; };
-      execution-worker = cvm "execution-worker" { memory = "3G"; };
+      execution-worker = cvm "execution-worker" { memory = "8G"; };
       api = cvm "api" { memory = "3G"; };
       gateway = cvm "gateway" { memory = "2G"; };
     };

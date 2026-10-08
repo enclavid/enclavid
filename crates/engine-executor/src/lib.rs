@@ -21,7 +21,8 @@
 //!   ↓ uses
 //! state/       ← Store<T> data layer (HostState, RunInputs)
 //! listener     ← outbound contract (SessionListener trait, SessionChange);
-//!                fired once per round, carrying state + captured media
+//!                fired once per round, carrying the state and, on the
+//!                round that finishes, the decision
 //! limits, sanitize  ← leaf utilities
 //! admission    ← what the supervisor's L1 may admit, and what a slot costs
 //! ```
@@ -73,7 +74,8 @@ pub use hatch_client::{
 pub use listener::{SessionChange, SessionListener};
 pub use media_store::MediaStore;
 pub use runner::{
-    EmbeddedIface, EmbeddedImport, Executor, PluginInstance, PrimedComposition, RunStatus,
+    DEFAULT_ROUND_FUEL, EmbeddedIface, EmbeddedImport, Executor, PluginInstance, PrimedComposition,
+    RunStatus,
 };
 /// Re-exported for the api crate so it can apply the same
 /// control/BIDI/zero-width/Unicode-tag stripping to manifest

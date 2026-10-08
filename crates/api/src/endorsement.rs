@@ -52,7 +52,11 @@ compile_error!(
 /// and each process generates a fresh one, so two processes built this way could never
 /// attest each other. [`fleet_attestor`] supplies the shared dev identity instead.
 #[cfg(feature = "dev-attestation")]
-pub async fn build_attestor(_address_out: &str) -> Arc<dyn Attestor> {
+pub async fn build_attestor(
+    _address_out: &str,
+    _vcek_deadline: std::time::Duration,
+    _vcek_retries: usize,
+) -> Arc<dyn Attestor> {
     Arc::new(enclavid_attestation::SnpDevAttestor::new_random())
 }
 
@@ -225,10 +229,11 @@ pub fn inbound_server_config(
     enclavid_ra_tls::public_server_config(fleet_attestor(attestor))
 }
 
-/// Waits between fetch attempts. The certificate is the one thing this guest
-/// cannot serve without, so a briefly unreachable key service should not cost a
-/// restart — but the wait is bounded, because past that point the platform is
-/// the problem and hanging is worse than stopping.
+/// Waits between fetch attempts, ramping to the last and staying there. The
+/// certificate is the one thing this guest cannot serve without, so a briefly
+/// unreachable key service should not cost a restart — but the wait is bounded,
+/// because past that point the platform is the problem and hanging is worse than
+/// stopping.
 #[cfg(feature = "sev-snp")]
 const RETRY_DELAYS: [std::time::Duration; 5] = [
     std::time::Duration::from_secs(1),
@@ -237,6 +242,11 @@ const RETRY_DELAYS: [std::time::Duration; 5] = [
     std::time::Duration::from_secs(15),
     std::time::Duration::from_secs(30),
 ];
+
+/// How many times a failed fetch is tried again, unless the host says otherwise
+/// (the `vcek-retries` setting): once per rung above, some 53 s of waiting in
+/// all. More rungs repeat the last.
+pub const DEFAULT_VCEK_RETRIES: usize = 5;
 
 /// What a hatch failure is called on the public log. Exhaustive on purpose: a
 /// new `BridgeError` variant will not compile until someone names it, which is
@@ -254,7 +264,11 @@ fn bridge_stage(e: &hatch_client::BridgeError) -> &'static str {
 }
 
 #[cfg(feature = "sev-snp")]
-pub async fn build_attestor(address_out: &str) -> Arc<dyn Attestor> {
+pub async fn build_attestor(
+    address_out: &str,
+    vcek_deadline: std::time::Duration,
+    vcek_retries: usize,
+) -> Arc<dyn Attestor> {
     use enclavid_attestation::{MILAN_ASK, SnpAttestor, vcek_identity};
     use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
     use hatch_client::{HatchClient, KdsClient, VcekRequest, boundary};
@@ -280,7 +294,7 @@ pub async fn build_attestor(address_out: &str) -> Arc<dyn Attestor> {
     let hatch = HatchClient::new(address_out)
         .await
         .expect("failed to connect to hatch");
-    let kds = KdsClient::new(hatch);
+    let kds = KdsClient::new(hatch, vcek_deadline);
 
     // Step 3. Retrying here rather than host-side: the TEE is the only party
     // that can decide to abort, and it can only decide that if it sees the
@@ -302,14 +316,15 @@ pub async fn build_attestor(address_out: &str) -> Arc<dyn Attestor> {
 
         match kds.vcek(exposed).await {
             Ok(response) => break response,
-            Err(e) if attempt < RETRY_DELAYS.len() => {
+            Err(e) if attempt < vcek_retries => {
                 safe_logger::warn!(
                     "api: endorsement fetch failed at {}; retrying",
                     safe_logger::safe(&bridge_stage(&e), reason!("one of five fixed labels")),
                     reason!("a constant, at startup before any session exists")
                 );
                 safe_logger::debug!("  cause: {e}");
-                tokio::time::sleep(RETRY_DELAYS[attempt]).await;
+                let last = RETRY_DELAYS[RETRY_DELAYS.len() - 1];
+                tokio::time::sleep(RETRY_DELAYS.get(attempt).copied().unwrap_or(last)).await;
                 attempt += 1;
             }
             Err(e) => panic!(

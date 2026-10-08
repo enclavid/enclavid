@@ -60,7 +60,8 @@ pub enum AuthVerdict {
     RateLimited { retry_after_secs: u32 },
 }
 
-/// How long the hatch has to answer an authorization request.
+/// How long the hatch has to answer an authorization request, unless the host
+/// says otherwise (api's `authorize-deadline-secs` setting).
 ///
 /// It is tempting to make this the shortest of the four, on the theory that
 /// checking a token against a held key set is the cheapest thing in the set.
@@ -77,19 +78,21 @@ pub enum AuthVerdict {
 /// credential that was valid.
 ///
 /// So this is a backstop against a host that stops answering, not a latency
-/// budget. Same relationship `VCEK_DEADLINE` has to the bounds in `kds`.
-const AUTHORIZE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
+/// budget. Same relationship `DEFAULT_VCEK_DEADLINE` has to the bounds in `kds`.
+pub const DEFAULT_AUTHORIZE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// Client for the hatch `/authorize` endpoint over the shared hatch
 /// connection.
 #[derive(Clone)]
 pub struct AuthClient {
     hatch: HatchClient,
+    deadline: std::time::Duration,
 }
 
 impl AuthClient {
-    pub fn new(hatch: HatchClient) -> Self {
-        Self { hatch }
+    /// A client whose every authorization the hatch has `deadline` to answer.
+    pub fn new(hatch: HatchClient, deadline: std::time::Duration) -> Self {
+        Self { hatch, deadline }
     }
 
     /// Authorize an HTTP request. The auth verdict (allowed / denied
@@ -105,10 +108,7 @@ impl AuthClient {
         // own credential to its validating hatch is the producer's call,
         // not ours to self-approve; we just release it.
         let bytes = hatch_protocol::encode(&req.into_inner())?;
-        let resp = self
-            .hatch
-            .post("/authorize", bytes, AUTHORIZE_DEADLINE)
-            .await?;
+        let resp = self.hatch.post("/authorize", bytes, self.deadline).await?;
 
         let verdict = match resp.status {
             StatusCode::OK => {

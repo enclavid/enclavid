@@ -3,7 +3,7 @@
 //! The policy reducer runs in a wasmtime `Store<HostState>`. The `T`
 //! placed inside that Store is the only state wasm host calls can
 //! reach. [`host::HostState`] carries the static `context.props`, the
-//! per-component `enclavid:embedded/*` registry, and memory limits.
+//! per-component `enclavid:embedded/*` registry, and the media store.
 //! The `context.props` `Host` impl and the empty pure-types `Host`
 //! impls live in [`host`]; the embedded-resolver `Host` impls live in
 //! [`crate::embedded::host`].

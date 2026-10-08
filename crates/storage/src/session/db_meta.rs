@@ -42,10 +42,11 @@ impl DbMeta {
     /// [`super::SessionStore::write`]).
     ///
     /// A file this store cannot serve is refused here rather than at the first
-    /// request.
-    pub(super) fn open(path: &Path) -> Result<DbMeta, StoreErr> {
+    /// request. `busy` is how long a statement waits on the file locked by
+    /// another ([`super::DEFAULT_BUSY_TIMEOUT`]).
+    pub(super) fn open(path: &Path, busy: Duration) -> Result<DbMeta, StoreErr> {
         let conn = Connection::open(path)?;
-        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.busy_timeout(busy)?;
         conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;")?;
         conn.execute_batch(SCHEMA)?;
         // `CREATE TABLE IF NOT EXISTS` is a no-op on a table that is already
@@ -111,19 +112,21 @@ impl DbMeta {
 mod tests {
     use super::*;
 
+    const BUSY: Duration = super::super::DEFAULT_BUSY_TIMEOUT;
+
     // `StoreErr` is deliberately not `Debug` — it carries store messages — so
     // these unwrap through `ok()`.
     #[test]
     fn a_file_this_build_wrote_reopens() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("meta.sqlite");
-        DbMeta::open(&path)
+        DbMeta::open(&path, BUSY)
             .ok()
             .expect("fresh open")
             .put_deadline("n", 10)
             .ok()
             .expect("write");
-        let again = DbMeta::open(&path).ok().expect("reopen");
+        let again = DbMeta::open(&path, BUSY).ok().expect("reopen");
         assert_eq!(
             again.expired(100, 10).ok().expect("select"),
             vec!["n".to_string()]
@@ -143,7 +146,7 @@ mod tests {
                 "CREATE TABLE deadlines(session_id TEXT PRIMARY KEY, deadline INTEGER NOT NULL);",
             )
             .unwrap();
-        assert!(DbMeta::open(&path).is_err());
+        assert!(DbMeta::open(&path, BUSY).is_err());
     }
 
     #[test]
@@ -162,6 +165,6 @@ mod tests {
                  ) WITHOUT ROWID;",
             )
             .unwrap();
-        assert!(DbMeta::open(&path).is_ok());
+        assert!(DbMeta::open(&path, BUSY).is_ok());
     }
 }

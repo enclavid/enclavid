@@ -31,9 +31,9 @@
 //! The seam is not therefore *trusted*. It is adversarial in the child→supervisor
 //! direction, because a child whose Cranelift has been escaped drives its own end —
 //! which is why `engine_supervisor` pins chmux's peer-driven port limits far below
-//! their defaults, and why the child is spawned under a deadline, an address-space
-//! rlimit and an egress seccomp filter. Caps that trap, in the position this role
-//! actually occupies.
+//! their defaults, and why the child is spawned under a deadline, a memory max of
+//! its own, an identity of its own and an egress seccomp filter. Caps that trap,
+//! in the position this role actually occupies.
 
 use engine_rpc::{CompileError, CompileRequest, CompiledBundle};
 

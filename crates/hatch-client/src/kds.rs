@@ -18,26 +18,30 @@ use crate::error::BridgeError;
 use crate::transport::HatchClient;
 use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
-/// How long the hatch has to answer a certificate request.
+/// How long the hatch has to answer a certificate request, unless the host says
+/// otherwise (api's `vcek-deadline-secs` setting).
 ///
 /// This one runs at BOOT, under `endorsement`'s own ladder of retries — and the
 /// ladder is the reason the deadline has to exist rather than a reason it could
 /// be skipped: without it the first attempt parks for ever and the remaining
 /// rungs are never reached, which is the same hole `fleet::dial` closed with
-/// its `ATTEMPT_TIMEOUT`. Generous because the fetch behind it may leave the
+/// its attempt timeout. Generous because the fetch behind it may leave the
 /// machine and AMD's service rate-limits; the cache in front of it is the
 /// hatch's, not ours.
-const VCEK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+pub const DEFAULT_VCEK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Client for the hatch `/kds/vcek` endpoint over the shared hatch connection.
 #[derive(Clone)]
 pub struct KdsClient {
     hatch: HatchClient,
+    deadline: std::time::Duration,
 }
 
 impl KdsClient {
-    pub fn new(hatch: HatchClient) -> Self {
-        Self { hatch }
+    /// A client whose every certificate request the hatch has `deadline` to
+    /// answer.
+    pub fn new(hatch: HatchClient, deadline: std::time::Duration) -> Self {
+        Self { hatch, deadline }
     }
 
     /// Ask for the certificate that endorses this chip at this platform TCB.
@@ -48,7 +52,7 @@ impl KdsClient {
         req: Exposed<VcekRequest>,
     ) -> Result<Untrusted<VcekResponse, (AuthN, AuthZ, Replay)>, BridgeError> {
         let bytes = hatch_protocol::encode(&req.into_inner())?;
-        let resp = self.hatch.post("/kds/vcek", bytes, VCEK_DEADLINE).await?;
+        let resp = self.hatch.post("/kds/vcek", bytes, self.deadline).await?;
 
         match resp.status {
             StatusCode::OK => {

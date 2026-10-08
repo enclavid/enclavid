@@ -308,47 +308,37 @@ async fn main() -> std::convert::Infallible {
 ///
 /// Both numbers are safe to log: the guest's kernel sets the one, and the other
 /// is this build's constant.
-fn reserve_descriptors(needed: libc::rlim_t) -> u64 {
-    let mut limit = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: a stack-local `rlimit` passed by pointer for the duration of the
-    // call, the standard POSIX shape; a non-zero return leaves it untouched.
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
-        safe_logger::error_and_panic!(
-            "gateway: cannot read RLIMIT_NOFILE, so the descriptor budget cannot be checked. \
-             Stopping.",
-            reason!("a constant, emitted once at boot before any session exists")
-        )
-    }
+fn reserve_descriptors(needed: u64) -> u64 {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+
+    // `None` is no limit at all.
+    let limit = getrlimit(Resource::Nofile);
+    let mut available = limit.current.unwrap_or(u64::MAX);
     // First the hard limit as well. This role is its guest's one process and
     // runs as root, and nothing else in the image raises the kernel's default —
     // so the ceiling is this process's to lift, and it lifts it. Where it may
     // not, the soft limit goes as far as the hard one; where the kernel holds
     // the soft limit lower still, as far as it will.
-    let mut asks = vec![(needed, needed.max(limit.rlim_max))];
-    let mut soft = needed.min(limit.rlim_max);
-    while soft > limit.rlim_cur {
-        asks.push((soft, limit.rlim_max));
+    let mut asks = vec![(needed, limit.maximum.map(|hard| hard.max(needed)))];
+    let mut soft = limit.maximum.map_or(needed, |hard| needed.min(hard));
+    while soft > available {
+        asks.push((soft, limit.maximum));
         soft /= 2;
     }
-    for (soft, hard) in asks {
-        if soft <= limit.rlim_cur {
+    for (soft, maximum) in asks {
+        if soft <= available {
             break;
         }
-        let raised = libc::rlimit {
-            rlim_cur: soft,
-            rlim_max: hard,
+        let raised = Rlimit {
+            current: Some(soft),
+            maximum,
         };
-        // SAFETY: as above.
-        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
-            limit = raised;
+        if setrlimit(Resource::Nofile, raised).is_ok() {
+            available = soft;
             break;
         }
     }
 
-    let available = limit.rlim_cur;
     safe_logger::info!(
         "gateway: {} file descriptors available, of the {} the largest tuning could need; \
          a push needing more is refused",

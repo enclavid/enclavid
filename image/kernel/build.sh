@@ -5,12 +5,14 @@
 # versions and digests are pinned. Kept as a script purely so the invocation is
 # discoverable — running nix-build directly is equivalent.
 #
-#   ./build.sh diskless     api, executor, compiler, gateway
-#   ./build.sh storage      the storage CVM
+#   ./build.sh base               api, gateway
+#   ./build.sh compile-worker     the compile-worker
+#   ./build.sh execution-worker   the execution-worker
+#   ./build.sh storage            the storage CVM
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-role=${1:-diskless}
+role=${1:-base}
 
 out=$(nix-build "$here" -A "$role" --no-out-link)
 

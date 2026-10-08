@@ -6,7 +6,8 @@ use axum::routing::{MethodRouter, delete};
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
 use hatch_client::{
-    Metadata, SessionStatus, SetMetadata, WriteField, boundary, outbound_session_id,
+    BridgeError, DropApplicantData, Metadata, SessionStatus, SetMetadata, WriteField, boundary,
+    outbound_session_id,
 };
 
 use crate::state::AppState;
@@ -22,7 +23,8 @@ pub(super) fn delete_state() -> MethodRouter<Arc<AppState>> {
 /// puts the session back to "unclaimed" and the next /connect can take it with
 /// any key — there is no separate in-memory claim to clear. Media and the
 /// disclosure chain go with it, and the disclosure bookkeeping in metadata is
-/// wound back to match.
+/// wound back to match — all in one write, under the version this read the
+/// session at. 409 when the session is completed, or moved under the reset.
 ///
 /// No auth: the legitimate applicant who lost their key cannot prove ownership
 /// cryptographically (state is encrypted with the lost key). Knowledge of
@@ -104,14 +106,13 @@ async fn reset(
             )),
     );
 
-    // Before the delete, and version-gated, which is what makes the status check
-    // above sound rather than advisory. A session that completed between the
-    // read and here has moved the version, so this refuses and no chain is
-    // touched. And from the moment it lands, `disclosure_entry_hashes` is empty
-    // while the entries are not, so the set commitment cannot agree with the
-    // served list — a consumer pull in the window between this and the delete
-    // refuses rather than seeing a half-reset session.
-    let fields: [&dyn WriteField; 1] = [&set_metadata];
+    // The metadata and everything the applicant brought go in ONE write, under
+    // the version the read above returned — which is what makes the status
+    // check above sound rather than advisory. A round that committed since,
+    // completing the session or not, has moved the version: this refuses
+    // whole, and what the round committed stays. There is no moment at which
+    // the metadata is reset and the data is not, or the other way round.
+    let fields: [&dyn WriteField; 2] = [&set_metadata, &DropApplicantData];
     let expected_version = boundary::outbound::to_untrusted(Some(version))
         .vouch_unchecked::<AuthN, _>(reason!("the host's own counter, handed back to it"))
         .vouch_unchecked::<AuthZ, _>(reason!("a CAS token; no release decision hangs on it"))
@@ -119,25 +120,20 @@ async fn reset(
             "a host-minted integer this process only echoes — no policy bandwidth"
         ));
     let fields = boundary::outbound::to_untrusted(&fields[..])
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "one field, whose content is sealed in its own build_op"
-        ))
+        .vouch_unchecked::<AuthN, _>(reason!("two fields, each closed in its own build_op"))
         .vouch_unchecked::<AuthZ, _>(reason!("it writes this session's own key"))
-        .vouch_unchecked::<Covert, _>(reason!("per-field covert closed in build_op"));
-    state
+        .vouch_unchecked::<Covert, _>(reason!(
+            "a fixed pair, so the count says only that a reset happened"
+        ));
+    match state
         .session_store
         .write(outbound_session_id(&session_id), expected_version, fields)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // The `u64` we discard is the host's claim of how many state entries were
-    // removed (0 = was already absent, 1 = wiped). Trust-wise a lying host can
-    // fake either direction; the value is informational, not a security signal.
-    state
-        .session_store
-        .delete(outbound_session_id(&session_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(StatusCode::NO_CONTENT)
+    {
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        // The session moved since the read: a round committed, maybe the one
+        // that completed it. Nothing was reset; asking again reads it afresh.
+        Err(BridgeError::VersionMismatch) => Err(StatusCode::CONFLICT),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }

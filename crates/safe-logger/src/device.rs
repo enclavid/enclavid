@@ -17,13 +17,11 @@ pub const DEVICE_KEY: &str = "ENCLAVID_LOG_DEVICE";
 /// is taken around a single `write` and nothing else — no formatting, no
 /// foreign `Display` — so nothing under it can panic and it can never be
 /// poisoned. That is the whole reason `logger::render` builds the line first.
-///
-/// No `unsafe impl Send`/`Sync` is needed: a `RawFd` is an `i32`.
 static DEVICE: OnceLock<Mutex<Device>> = OnceLock::new();
 
 struct Device {
     #[cfg(target_os = "linux")]
-    fd: std::os::fd::RawFd,
+    fd: std::os::fd::OwnedFd,
 }
 
 /// Set by [`crate::install_contained`]: this process has no outward tier of its
@@ -108,26 +106,25 @@ pub fn install() {
 
 #[cfg(target_os = "linux")]
 fn open_device() {
+    use rustix::fs::{Mode, OFlags};
+
     let Ok(device) = std::env::var(DEVICE_KEY) else {
         return;
     };
-    let fd = unsafe {
-        libc::open(
-            std::ffi::CString::new(device)
-                .expect("device path")
-                .as_ptr(),
-            // O_NOCTTY: a serial port is a terminal, and a session leader that
-            // opens one without this adopts it as its controlling terminal.
-            // That would give the far end — the host — a way to deliver
-            // SIGINT/SIGQUIT/SIGHUP into this process group, turning a
-            // write-only disclosure into something with a direction back.
-            libc::O_WRONLY | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
+    let opened = rustix::fs::open(
+        device.as_str(),
+        // O_NOCTTY: a serial port is a terminal, and a session leader that
+        // opens one without this adopts it as its controlling terminal.
+        // That would give the far end — the host — a way to deliver
+        // SIGINT/SIGQUIT/SIGHUP into this process group, turning a
+        // write-only disclosure into something with a direction back.
+        OFlags::WRONLY | OFlags::NOCTTY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    );
+    let Ok(fd) = opened else {
         // Before the device exists there is nowhere to say why.
         std::process::exit(70);
-    }
+    };
     let _ = DEVICE.set(Mutex::new(Device { fd }));
 }
 
@@ -143,7 +140,7 @@ impl Device {
         // never stall the role, and losing the tail of a line under pressure is
         // the cheaper failure. The lock above is what keeps that loss confined
         // to one line instead of splicing two together.
-        unsafe { libc::write(self.fd, line.as_ptr() as *const libc::c_void, line.len()) };
+        let _ = rustix::io::write(&self.fd, line);
     }
 }
 

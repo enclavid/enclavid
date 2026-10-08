@@ -72,15 +72,17 @@ impl Compiler {
         Self { leg }
     }
 
-    /// Compile `(policy, plugins)` on the worker. A transport failure surfaces
-    /// as `CompileError` via its `From<remoc::rtc::CallError>`.
+    /// Compile `(policy, plugins)` on the worker. A transport failure, or a leg
+    /// that is down, surfaces as `CompileError::Failed`; the worker's own answer,
+    /// `Refused` included, comes back as it was sent.
     pub async fn compile(
         &self,
         policy_wasm: Vec<u8>,
         plugins: Vec<PluginInstance>,
     ) -> Result<CompiledBundle, CompileError> {
         let client = self.leg.get().ok_or_else(|| {
-            CompileError("the compile-worker leg is down; api is reporting it".into())
+            debug!("compile: the compile-worker leg is down");
+            CompileError::Failed
         })?;
         let bundle: Untrusted<CompiledBundle, CompileScope> = client
             .compile(outbound_compile_request(policy_wasm, plugins))
@@ -119,9 +121,11 @@ impl Compiler {
 /// The worker is brought up at boot, not by api. The dial is mutual RA-TLS — TCP by
 /// default, vsock under that feature — and `engine_rpc::connect_compiler` takes the
 /// attested stream from there, keeping the generated client this side cannot name.
+/// `leg` is this end of the connection.
 pub async fn connect_compile_worker(
     addr: &str,
     attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,
+    leg: engine_rpc::LegSettings,
 ) -> Result<
     (
         std::sync::Arc<CompilerLeg<CompileScope>>,
@@ -161,7 +165,7 @@ pub async fn connect_compile_worker(
     // Everything above this line is WHO — the dial, the pins, what a refusal means.
     // Everything below is WHAT MAY CROSS, and that belongs to engine-rpc: it brings
     // the hop up and keeps the generated client, which api has no name for.
-    let (leg, driver) = engine_rpc::connect_compiler(read, write)
+    let (leg, driver) = engine_rpc::connect_compiler(read, write, &leg)
         .await
         .map_err(|e| {
             debug!("compile leg: {e}");
@@ -200,7 +204,7 @@ mod tests {
                 .trust_unchecked::<AuthN, _>(reason!("test fixture"))
                 .into_inner();
             if policy == b"boom" {
-                return Err(CompileError("intentional".into()));
+                return Err(CompileError::Refused);
             }
             Ok(CompiledBundle {
                 cwasm: vec![policy.len() as u8, plugins.len() as u8],
@@ -220,14 +224,23 @@ mod tests {
         let (b_r, b_w) = tokio::io::split(b);
 
         // Worker end: serve the mock through the contract's own serve half.
+        let settings = engine_rpc::LegSettings::default();
         let server = tokio::spawn(async move {
-            let _ = engine_rpc::serve_compiler(a_r, a_w, MockService, 4).await;
+            let _ = engine_rpc::serve_compiler(
+                a_r,
+                a_w,
+                MockService,
+                engine_rpc::DEFAULT_REQUEST_BUFFER,
+                &settings,
+            )
+            .await;
         });
 
         // Orchestrator end: take the leg, wrap in Compiler.
-        let (leg_client, _driver) = engine_rpc::connect_compiler::<CompileScope, _, _>(b_r, b_w)
-            .await
-            .expect("connect");
+        let (leg_client, _driver) =
+            engine_rpc::connect_compiler::<CompileScope, _, _>(b_r, b_w, &settings)
+                .await
+                .expect("connect");
         let client = std::sync::Arc::new(leg_client);
         let leg = crate::fleet::Leg::new();
         leg.set(Some(client.clone()));
@@ -246,7 +259,7 @@ mod tests {
         // `CompiledBundle` is deliberately not `Debug` (it holds megabytes of
         // cwasm), so match the outcome rather than unwrapping it.
         match compiler.compile(b"hello".to_vec(), vec![]).await {
-            Err(CompileError(m)) => assert!(m.contains("leg is down"), "{m}"),
+            Err(e) => assert_eq!(e, CompileError::Failed),
             Ok(_) => panic!("a call on a down leg must fail"),
         }
         leg.set(Some(client));
@@ -255,7 +268,11 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
-        assert!(format!("{err}").contains("intentional"), "got {err}");
+        assert_eq!(
+            err,
+            CompileError::Refused,
+            "the worker's answer crosses as itself"
+        );
 
         server.abort();
     }

@@ -17,20 +17,33 @@ default = ["compile", "execute"]
 # composition catalogs (ComponentDecls / EmbeddedImport) it rebuilds the
 # embedded registry from at run time. The shared `CompiledBundle` needs it under
 # either. Neither pulls Cranelift.
-compile = ["dep:engine-types", "dep:remoc", "dep:enclavid-boundary"]
-execute = ["dep:engine-types", "dep:hatch-client", "dep:remoc", "dep:enclavid-boundary"]
+compile = [
+    "dep:engine-types",
+    "dep:remoc",
+    "dep:enclavid-boundary",
+    "dep:fleet-stream",
+]
+execute = [
+    "dep:engine-types",
+    "dep:hatch-client",
+    "dep:remoc",
+    "dep:enclavid-boundary",
+    "dep:fleet-stream",
+]
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+# `rc` so a `BundleRef` carries its metadata shared: the worker hands one to every
+# round's child from its cache entry without copying the catalogs.
+serde = { version = "1", features = ["derive", "rc"] }
 # Encode large byte fields (the ~7-15 MiB `cwasm`) as a CBOR BYTE STRING, not a
 # serde sequence — ciborium serializes `Vec<u8>` element-by-element otherwise,
 # ballooning the wire form + costing ~hundreds of ms per bundle transfer.
 serde_bytes = "0.11"
 # The hop's own remoc setup lives here (`leg`), so this crate names the AsyncRead /
-# AsyncWrite the connection is built over, spawns its driver and watches its
-# request channel. No transport and no attestation: which peer, and whether it may
-# be talked to, stays with the caller.
-tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+# AsyncWrite the connection is built over, spawns its driver, watches its request
+# channel and bounds how long a streamed bundle may take. No transport and no
+# attestation: which peer, and whether it may be talked to, stays with the caller.
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
 # The codec `Padded` frames against. Same one remoc carries, but named directly:
 # the frame is encoded and size-checked by this crate itself, not by whatever
 # codec a connection happens to be configured with.
@@ -54,6 +67,10 @@ hatch-client = { path = "../hatch-client", optional = true }
 # leaf and is in every image anyway (the logger links it), so the axis bought
 # nothing and cost a configuration in which a leg had no boundary.
 enclavid-boundary = { path = "../boundary", optional = true }
+# The connection config every leg is brought up with, under either feature; and,
+# execute-side, how a bundle crosses beside a `run_with_bundle` call rather than
+# inside it: a length- and digest-checked blob per `bin` channel.
+fleet-stream = { path = "../fleet-stream", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }

@@ -14,7 +14,8 @@
 //! [`RunOutcome::CacheMiss`] with its `compat_token` and running nothing. The
 //! orchestrator then resolves the bundle under its own key — from L2, or by
 //! compiling on an L2 miss (OCI pull + compile-worker) and sealing the result
-//! into L2 — and calls [`ExecutorService::run_with_bundle`].
+//! into L2 — and calls [`ExecutorService::run_with_bundle`]. The bundle streams
+//! beside that call ([`BundleStream`]), so the request is the round alone.
 //!
 //! The direction is the point. A callback the worker could call to ask for a
 //! composition would be a probe surface on the key-holding side, driven by the
@@ -27,9 +28,10 @@ pub use serde_bytes::ByteBuf;
 
 use hatch_client::{Decision, Event, Prompt, SessionState};
 
+use crate::BundleRef;
 use crate::keys::{CompatToken, CompositionKey};
-use crate::padded::Padded;
-use crate::{BundleRef, CompiledBundle};
+use crate::padded::{Framed, Padded};
+use crate::stream::BundleStream;
 
 /// serde mirror of the bindgen `enclavid:host/types.prop` — the consumer's
 /// static-config scalar the policy reads via `context.props`. api builds this
@@ -48,8 +50,9 @@ pub enum Prop {
 /// serde mirror of the engine's `RunStatus` — one round's outcome. Wraps the
 /// hatch_client domain `Prompt`/`Decision` (already serde; both are sealed
 /// into `SessionState`). The worker maps `engine_executor::RunStatus` into this
-/// at the boundary; the orchestrator projects it into the applicant view +
-/// finalize without pulling wasmtime.
+/// at the boundary; the orchestrator projects it into the applicant view, and
+/// checks a terminal one against the decision the round committed, without
+/// pulling wasmtime.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RunStatus {
     /// Policy rendered a prompt and is awaiting the matching applicant input.
@@ -58,7 +61,7 @@ pub enum RunStatus {
     Completed(Decision),
 }
 
-/// A run failure, in the ONE distinction the applicant's screen turns on.
+/// A run failure, in the distinctions the applicant's screen turns on.
 ///
 /// It used to be `Run(String)`, built as `format!("{e:#}")` over the entire anyhow
 /// chain. That chain interpolates text adversary-authored wasm supplied — a policy
@@ -67,11 +70,16 @@ pub enum RunStatus {
 /// and counts. The framing that closes that channel on a round which SUCCEEDS did
 /// not cover the round that traps, and a policy can trap deliberately and retry.
 ///
-/// Two values, and the number is the design rather than an accident of how many
-/// things can go wrong. Every additional variant is a value the policy can SELECT
-/// by choosing how to fail, so the cardinality here should be exactly what the
-/// receiving side acts on — and api acts on one thing: whether to tell the
-/// applicant that the fault is not theirs.
+/// Two values a POLICY can reach, and the number is the design rather than an
+/// accident of how many things can go wrong. Every additional variant is a value
+/// the policy can SELECT by choosing how to fail, so the cardinality here should
+/// be exactly what the receiving side acts on — and api acts on one thing: whether
+/// to tell the applicant that the fault is not theirs.
+///
+/// The third, [`Busy`](ExecError::Busy), is not one of those: it is decided
+/// before a child exists, so no policy is running to choose it, and api acts on
+/// it separately — nothing ran, so the answer is "the same request, later". The
+/// worker keeps it its own: a child that sends it back is answered `Unknown`.
 ///
 /// **The bit is CHEAP, and an earlier draft of this doc said otherwise.** It
 /// claimed "trapping yields `Policy` and hanging yields `Unknown`, so the channel
@@ -95,8 +103,9 @@ pub enum RunStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecError {
     /// The CONSUMER's policy failed where this side can SEE that it was the
-    /// policy: it trapped, exhausted its fuel or memory, or asked the host for
-    /// something it never declared.
+    /// policy: it trapped, exhausted its fuel, asked the host for something it
+    /// never declared, or was killed at its round's own memory max while
+    /// the round children's total was not reached.
     ///
     /// api turns this into a 4xx so the applicant is told the fault is not theirs
     /// and can report it. Attributing it is safe in the direction that matters:
@@ -105,7 +114,7 @@ pub enum ExecError {
     Policy,
     /// Something else failed and this side cannot attribute it: a bundle that
     /// would not load, a spawn that did not happen, a leg that went away, a frame
-    /// that did not fit.
+    /// that did not fit, a child killed while the guest's memory was short.
     ///
     /// It is the honest answer for several failures a policy CAN cause — hanging
     /// past the round deadline, and overflowing a frame with an oversized prompt —
@@ -118,6 +127,15 @@ pub enum ExecError {
     /// Named for what it is rather than for a cause it does not know. api answers
     /// 5xx.
     Unknown,
+    /// Nothing ran: the worker had no room for this round — no place for it to
+    /// wait, or within its wait no cache fill slot or no memory for one more child.
+    ///
+    /// Decided before a child is spawned, so the round's policy never ran and
+    /// cannot have chosen it; what it reports is load on the worker, which the
+    /// host carrying this hop sees anyway. The session is exactly where it was,
+    /// so api answers 503 and the same request later is the whole of the
+    /// recovery.
+    Busy,
 }
 
 impl std::fmt::Display for ExecError {
@@ -125,6 +143,7 @@ impl std::fmt::Display for ExecError {
         match self {
             ExecError::Policy => write!(f, "the policy failed"),
             ExecError::Unknown => write!(f, "the round failed"),
+            ExecError::Busy => write!(f, "no room for the round"),
         }
     }
 }
@@ -192,10 +211,10 @@ impl From<CallbackError> for ExecError {
 /// One reducer round's inputs on the wire. `session_state`/`event`/`props` are the
 /// round's already-decrypted inputs (the seal key stays orchestrator-side).
 ///
-/// `deny_unknown_fields`, for the reason [`CompiledBundle`] carries it: the two
-/// ends of this hop are the same binary version, so a field one side does not
-/// know is version skew and must fail closed rather than be silently dropped into
-/// a round that then runs on a partial request.
+/// `deny_unknown_fields`, for the reason [`CompiledBundle`](crate::CompiledBundle)
+/// carries it: the two ends of this hop are the same binary version, so a field
+/// one side does not know is version skew and must fail closed rather than be
+/// silently dropped into a round that then runs on a partial request.
 ///
 /// Every field is bounded by its own decoder — the key by its shape, the props by
 /// count and bytes, the state by its exact frame, the event's frames by the
@@ -218,6 +237,25 @@ pub struct RunRequest {
     pub session_state: Padded<SessionState>,
     pub event: Event,
 }
+
+/// What a round request carries besides the clip's bytes, the state frame and the
+/// bundle header: the key, the props, the frames' and the event's CBOR heads, and
+/// remoc's own envelope with the reply, callback and two bundle-stream ports. About
+/// 10 KiB with every field at its bound; the rest is margin.
+pub(crate) const RUN_REQUEST_HEADROOM: usize = 64 * 1024;
+
+// A round request travels as ONE remoc item, and an item past the limit fails the
+// channel it was sent on for good. The bundle does not ride in it — it streams
+// beside the call — so what has to fit is the round itself plus the header naming
+// the bundle. `run` sends the same request without the header.
+const _: () = assert!(
+    hatch_client::MAX_CLIP_BYTES
+        + <SessionState as Framed>::FRAME
+        + crate::stream::BUNDLE_HEADER_MAX_ENCODED
+        + RUN_REQUEST_HEADROOM
+        <= remoc::rch::DEFAULT_MAX_ITEM_SIZE,
+    "a round request at its bounds no longer fits one remoc item"
+);
 
 /// The bound on [`RunRequest::props`], applied where the value is decoded.
 ///
@@ -334,9 +372,12 @@ pub trait CallbackService {
     /// under 0x18.
     async fn media_load(&self, hash: [u8; 32]) -> Result<Option<ByteBuf>, CallbackError>;
 
-    /// Seal + persist the post-round session state — the owned form of the
-    /// engine's borrowed `SessionChange`, committed under the seal key the worker
-    /// never holds.
+    /// Seal + persist the post-round session state and, on the round that
+    /// finishes, the policy's decision — the owned form of the engine's borrowed
+    /// `SessionChange`, committed in ONE write under the seal key the worker
+    /// never holds. One write, so a reply lost after it leaves a session that
+    /// reads as finished rather than one whose state has finished while it
+    /// still reads as running.
     ///
     /// Neither what a round DISCLOSED nor what it CAPTURED travels here. The
     /// orchestrator holds both already: the disclosure it derives from the prompt
@@ -344,10 +385,17 @@ pub trait CallbackService {
     /// sent this side in that same event. Taking either back would be accepting,
     /// from the process that executes adversary-supplied code, a copy of
     /// something already in hand.
-    /// FRAMED for the same reason the outbound copy is: this is the same value
-    /// coming back over the same host-spliced hop, and `Covert` cannot be asked
-    /// about it from api's side — api is the receiver here.
-    async fn session_change(&self, state: Padded<SessionState>) -> Result<(), CallbackError>;
+    ///
+    /// Both FRAMED, for the same reason the outbound copy of the state is: this
+    /// is the same value coming back over the same host-spliced hop, and `Covert`
+    /// cannot be asked about it from api's side — api is the receiver here. The
+    /// decision is framed apart from the state because its encoding is a variant
+    /// NAME, whose length differs per value, and its absence is shorter still.
+    async fn session_change(
+        &self,
+        state: Padded<SessionState>,
+        decision: Padded<Option<Decision>>,
+    ) -> Result<(), CallbackError>;
 }
 
 /// The execute boundary as a remote trait. The execution-worker serves it; the
@@ -374,10 +422,18 @@ pub trait ExecutorService {
         callbacks: CallbackServiceClient<remoc::codec::Ciborium>,
     ) -> Result<RunOutcome, ExecError>;
 
+    /// `bundle` streams beside the request rather than riding in it — a header in
+    /// the call, the bytes on two `bin` ends — so the request is the round alone
+    /// and stays one bounded item whatever the bundle weighs. The caller writes
+    /// while it awaits the reply; the reply is the round's outcome, and how the
+    /// writing went is not.
+    ///
+    /// Cancellable like any other call: the stream cannot finish without its
+    /// writer, so a caller that goes away takes the install with it.
     async fn run_with_bundle(
         &self,
         req: RunRequest,
-        bundle: CompiledBundle,
+        bundle: BundleStream,
         callbacks: CallbackServiceClient<remoc::codec::Ciborium>,
     ) -> Result<RunReply, ExecError>;
 }
@@ -401,11 +457,18 @@ pub trait ChildService {
     /// the hop — so the child hop stays tiny. A deserialize failure (toolchain
     /// skew / tampered file) surfaces as [`ExecError::Unknown`] — the bundle is
     /// not the policy, so it is not attributed to one.
+    ///
+    /// A child killed at its own memory max while priming is answered as
+    /// the policy's, like one killed during the round: what prime holds beside
+    /// the engine is the composition and its catalogs as decoded, and both are
+    /// the consumer's.
     async fn prime(&self, bundle: BundleRef) -> Result<(), ExecError>;
 
     /// Drive one reducer round against the primed composition.
     /// `session_state`/`event`/`props` are the round's already-decrypted inputs
-    /// (the seal key never reaches this process). `callbacks` points at the
+    /// (the seal key never reaches this process), and `fuel` is what the round
+    /// may burn — the supervisor's setting, the same for every round it runs.
+    /// `callbacks` points at the
     /// SUPERVISOR's relay, which forwards `media_load` / `session_change` on to
     /// api — so this keyless process rehydrates blobs + persists state without
     /// the seal key, and with no way to ask for a composition at all.
@@ -419,6 +482,7 @@ pub trait ChildService {
         session_state: SessionState,
         event: Event,
         props: Vec<(String, Prop)>,
+        fuel: u64,
         callbacks: ChildCallbacksClient<remoc::codec::Ciborium>,
     ) -> Result<RunStatus, ExecError>;
 }
@@ -436,11 +500,15 @@ pub trait ChildCallbacks {
     /// Rehydrate a stored blob by content hash (api unseals). `None` = miss.
     async fn media_load(&self, hash: [u8; 32]) -> Result<Option<ByteBuf>, CallbackError>;
 
-    /// Seal + persist the post-round state — relayed to api's `session_change`,
-    /// committed under the seal key this process never holds. Neither the round's
-    /// disclosure nor its captures are carried; see
-    /// [`CallbackService::session_change`].
-    async fn session_change(&self, state: SessionState) -> Result<(), CallbackError>;
+    /// Seal + persist the post-round state and, if the round finished, its
+    /// decision — relayed to api's `session_change`, committed together under the
+    /// seal key this process never holds. Neither the round's disclosure nor its
+    /// captures are carried; see [`CallbackService::session_change`].
+    async fn session_change(
+        &self,
+        state: SessionState,
+        decision: Option<Decision>,
+    ) -> Result<(), CallbackError>;
 }
 
 #[cfg(test)]
@@ -456,7 +524,7 @@ mod execute_tests {
     /// BACK with the right arguments mid-run.
     struct MockCallbacks {
         media_calls: Mutex<Vec<[u8; 32]>>,
-        state_calls: Mutex<u32>,
+        state_calls: Mutex<Vec<Option<Decision>>>,
     }
 
     impl CallbackService for MockCallbacks {
@@ -464,8 +532,13 @@ mod execute_tests {
             self.media_calls.lock().unwrap().push(hash);
             Ok(Some(ByteBuf::from(vec![0xAB, 0xCD])))
         }
-        async fn session_change(&self, _state: Padded<SessionState>) -> Result<(), CallbackError> {
-            *self.state_calls.lock().unwrap() += 1;
+        async fn session_change(
+            &self,
+            _state: Padded<SessionState>,
+            decision: Padded<Option<Decision>>,
+        ) -> Result<(), CallbackError> {
+            let decision = decision.open().map_err(|_| CallbackError)?;
+            self.state_calls.lock().unwrap().push(decision);
             Ok(())
         }
     }
@@ -491,10 +564,19 @@ mod execute_tests {
         async fn run_with_bundle(
             &self,
             req: RunRequest,
-            bundle: CompiledBundle,
+            bundle: BundleStream,
             callbacks: CallbackServiceClient<Ciborium>,
         ) -> Result<RunReply, ExecError> {
-            if bundle.cwasm.is_empty() {
+            let mut cwasm = Vec::new();
+            bundle
+                .receive(
+                    &mut cwasm,
+                    crate::DEFAULT_BUNDLE_STREAM_DEADLINE,
+                    crate::DEFAULT_BUNDLE_STREAM_IDLE,
+                )
+                .await
+                .map_err(|_| ExecError::Unknown)?;
+            if cwasm.is_empty() {
                 return Err(ExecError::Unknown);
             }
             // Bundle in hand: run, calling BACK for media + state persistence.
@@ -502,7 +584,12 @@ mod execute_tests {
             if bytes != Some(ByteBuf::from(vec![0xAB, 0xCD])) {
                 return Err(ExecError::Unknown);
             }
-            callbacks.session_change(req.session_state.clone()).await?;
+            callbacks
+                .session_change(
+                    req.session_state.clone(),
+                    Padded::seal(&Some(Decision::Approved)).map_err(ExecError::from)?,
+                )
+                .await?;
             Ok(RunReply {
                 status: Padded::seal(&RunStatus::Completed(Decision::Approved))
                     .map_err(ExecError::from)?,
@@ -522,7 +609,7 @@ mod execute_tests {
     async fn cache_miss_then_run_with_orchestrator_supplied_bundle() {
         let callbacks = Arc::new(MockCallbacks {
             media_calls: Mutex::new(Vec::new()),
-            state_calls: Mutex::new(0),
+            state_calls: Mutex::new(Vec::new()),
         });
 
         let (a, b) = tokio::io::duplex(64 * 1024);
@@ -577,11 +664,15 @@ mod execute_tests {
         }
 
         // Phase 2: orchestrator resolved the bundle under ITS OWN composition_key
-        // and re-drives via run_with_bundle; now the round runs and calls back once.
-        let RunReply { status } = exec_client
-            .run_with_bundle(mk_req(), crate::bundle::sample_bundle(), cb_client)
-            .await
-            .unwrap();
+        // and re-drives via run_with_bundle, writing the bundle beside the call
+        // while it waits; now the round runs and calls back once.
+        let (stream, writer) =
+            BundleStream::split(crate::bundle::sample_bundle()).expect("the sample splits");
+        let (reply, ()) = tokio::join!(
+            exec_client.run_with_bundle(mk_req(), stream, cb_client),
+            writer
+        );
+        let RunReply { status } = reply.unwrap();
         assert!(matches!(
             status.open().expect("the reply's frame decodes"),
             RunStatus::Completed(Decision::Approved)
@@ -590,10 +681,380 @@ mod execute_tests {
             callbacks.media_calls.lock().unwrap().as_slice(),
             &[[9u8; 32]]
         );
-        assert_eq!(*callbacks.state_calls.lock().unwrap(), 1);
+        // One commit, carrying the decision the reply reports.
+        assert_eq!(
+            callbacks.state_calls.lock().unwrap().as_slice(),
+            &[Some(Decision::Approved)]
+        );
 
         drop(exec_client);
         server_task.abort();
+    }
+
+    fn a_request() -> RunRequest {
+        RunRequest {
+            composition_key: CompositionKey::from_digest([0x11; 32]),
+            props: Vec::new(),
+            session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
+            event: Event::Start,
+        }
+    }
+
+    /// The mock executor served on one end of a real connection, and the other
+    /// end's client — taken as `Cli`, which may be a wire-identical stand-in — plus
+    /// a callback client for the calls to carry.
+    async fn serve_mock<Cli: remoc::RemoteSend>() -> (Cli, CallbackServiceClient<Ciborium>) {
+        serve::<Cli, _>(Arc::new(MockExecutor)).await
+    }
+
+    /// [`serve_mock`] with the executor named by the test.
+    async fn serve<Cli: remoc::RemoteSend, E: ExecutorService + Send + Sync + 'static>(
+        executor: Arc<E>,
+    ) -> (Cli, CallbackServiceClient<Ciborium>) {
+        let (a, b) = tokio::io::duplex(1 << 20);
+        let (a_r, a_w) = split(a);
+        let (b_r, b_w) = split(b);
+        tokio::spawn(async move {
+            let (conn, mut tx, _rx) = remoc::Connect::io::<_, _, ExecCli, ExecCli, Ciborium>(
+                crate::connection_cfg(&crate::LegSettings::default()),
+                a_r,
+                a_w,
+            )
+            .await
+            .unwrap();
+            tokio::spawn(conn);
+            let (server, client) = ExecutorServiceServerShared::<_, Ciborium>::new(executor, 4);
+            tx.send(client).await.unwrap();
+            let _ = server.serve(true).await;
+        });
+        let (conn, _tx, mut rx) = remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(
+            crate::connection_cfg(&crate::LegSettings::default()),
+            b_r,
+            b_w,
+        )
+        .await
+        .unwrap();
+        tokio::spawn(conn);
+        let client = rx.recv().await.unwrap().unwrap();
+        let (cb_server, cb_client) = CallbackServiceServerShared::<_, Ciborium>::new(
+            Arc::new(MockCallbacks {
+                media_calls: Mutex::new(Vec::new()),
+                state_calls: Mutex::new(Vec::new()),
+            }),
+            4,
+        );
+        tokio::spawn(async move {
+            let _ = cb_server.serve(true).await;
+        });
+        (client, cb_client)
+    }
+
+    /// Long enough that a leg which did close would have said so.
+    const STILL_OPEN: std::time::Duration = std::time::Duration::from_millis(100);
+
+    /// The header naming `cwasm` beside empty metadata, and that metadata encoded.
+    fn header_for(cwasm: &[u8]) -> (crate::stream::BundleHeader, Vec<u8>) {
+        use fleet_stream::BlobHeader;
+
+        let mut meta = Vec::new();
+        ciborium::into_writer(
+            &crate::bundle::BundleMeta {
+                embedded_imports: Vec::new(),
+                catalogs: Vec::new(),
+            },
+            &mut meta,
+        )
+        .unwrap();
+        let header = crate::stream::BundleHeader {
+            cwasm: BlobHeader::of(cwasm).unwrap(),
+            meta: BlobHeader::of(&meta).unwrap(),
+        };
+        (header, meta)
+    }
+
+    /// A bundle stream that does not arrive whole fails ITS round — and only that.
+    /// The leg under it is not the request channel remoc closes for good on an
+    /// oversized item: the next call on the same client is served.
+    #[tokio::test]
+    async fn a_truncated_bundle_fails_its_own_round_and_the_leg_serves_the_next() {
+        use fleet_stream::bin;
+
+        let (client, cb) = serve_mock::<ExecCli>().await;
+        let full = vec![0x5Au8; 100_000];
+        let (header, meta) = header_for(&full);
+
+        // Ends one byte short.
+        let (cwasm_tx, cwasm_rx) = bin::channel();
+        let (meta_tx, meta_rx) = bin::channel();
+        let stream = BundleStream {
+            header,
+            cwasm: cwasm_rx,
+            meta: meta_rx,
+        };
+        let short = full[..full.len() - 1].to_vec();
+        let (reply, _) = tokio::join!(
+            client.run_with_bundle(a_request(), stream, cb.clone()),
+            async {
+                tokio::join!(
+                    fleet_stream::send(cwasm_tx, short),
+                    fleet_stream::send(meta_tx, meta.clone())
+                )
+            }
+        );
+        assert!(matches!(reply, Err(ExecError::Unknown)));
+
+        // Abandoned part-way: the sender goes away with its message unfinished.
+        let (cwasm_tx, cwasm_rx) = bin::channel();
+        let (meta_tx, meta_rx) = bin::channel();
+        let stream = BundleStream {
+            header,
+            cwasm: cwasm_rx,
+            meta: meta_rx,
+        };
+        let (reply, _) = tokio::join!(
+            client.run_with_bundle(a_request(), stream, cb.clone()),
+            async {
+                tokio::join!(
+                    async {
+                        let mut raw = cwasm_tx.into_inner().await.unwrap();
+                        let part = raw
+                            .send_chunks()
+                            .send(full[..1000].to_vec().into())
+                            .await
+                            .unwrap();
+                        drop(part);
+                        drop(raw);
+                    },
+                    fleet_stream::send(meta_tx, meta.clone())
+                )
+            }
+        );
+        assert!(matches!(reply, Err(ExecError::Unknown)));
+
+        assert!(
+            tokio::time::timeout(STILL_OPEN, remoc::rtc::Client::closed(&client))
+                .await
+                .is_err(),
+            "a failed stream closed the leg's request channel"
+        );
+        assert!(matches!(
+            client.run(a_request(), cb).await,
+            Ok(RunOutcome::CacheMiss { .. })
+        ));
+    }
+
+    /// Sets its flag when dropped, however the future that held it ended.
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A worker whose install says when it began and when it was let go. It does
+    /// what the real one does before anything runs: reads the bundle.
+    struct WatchedExecutor {
+        started: tokio::sync::Notify,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ExecutorService for WatchedExecutor {
+        async fn run(
+            &self,
+            req: RunRequest,
+            callbacks: CallbackServiceClient<Ciborium>,
+        ) -> Result<RunOutcome, ExecError> {
+            MockExecutor.run(req, callbacks).await
+        }
+
+        async fn run_with_bundle(
+            &self,
+            _req: RunRequest,
+            bundle: BundleStream,
+            _callbacks: CallbackServiceClient<Ciborium>,
+        ) -> Result<RunReply, ExecError> {
+            let _held = DropFlag(self.dropped.clone());
+            self.started.notify_one();
+            bundle
+                .receive(
+                    &mut Vec::new(),
+                    crate::DEFAULT_BUNDLE_STREAM_DEADLINE,
+                    crate::DEFAULT_BUNDLE_STREAM_IDLE,
+                )
+                .await
+                .map_err(|_| ExecError::Unknown)?;
+            Err(ExecError::Unknown)
+        }
+    }
+
+    /// A caller that goes away mid-stream takes the install with it: the worker
+    /// drops the handler, and with it whatever the install holds, though the
+    /// stream never failed and its idle deadline is far off. The leg serves the
+    /// next call. What a worker's install permit rests on.
+    #[tokio::test]
+    async fn a_caller_gone_mid_stream_ends_the_install() {
+        use fleet_stream::bin;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let worker = Arc::new(WatchedExecutor {
+            started: tokio::sync::Notify::new(),
+            dropped: Arc::new(AtomicBool::new(false)),
+        });
+        let (client, cb) = serve::<ExecCli, _>(worker.clone()).await;
+        let full = vec![0x5Au8; 100_000];
+        let (header, meta) = header_for(&full);
+        let (cwasm_tx, cwasm_rx) = bin::channel();
+        let (meta_tx, meta_rx) = bin::channel();
+        let stream = BundleStream {
+            header,
+            cwasm: cwasm_rx,
+            meta: meta_rx,
+        };
+
+        // Part of the cwasm, then neither finished nor dropped: nothing but the
+        // caller's going away can end the worker's read.
+        let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let cwasm = async {
+                let Ok(mut raw) = cwasm_tx.into_inner().await else {
+                    return;
+                };
+                let Ok(_part) = raw.send_chunks().send(full[..1000].to_vec().into()).await else {
+                    return;
+                };
+                let _ = sent_tx.send(());
+                std::future::pending::<()>().await;
+            };
+            let _ = tokio::join!(cwasm, fleet_stream::send(meta_tx, meta));
+        });
+
+        let call = client.run_with_bundle(a_request(), stream, cb.clone());
+        tokio::select! {
+            _ = call => panic!("a stream held open let its round finish"),
+            () = async {
+                worker.started.notified().await;
+                sent_rx.await.expect("part of the cwasm was sent");
+            } => {}
+        }
+        // The call went with the select, and nothing else has run since.
+        assert!(
+            !worker.dropped.load(Ordering::SeqCst),
+            "the install ended before its caller did"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !worker.dropped.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker kept the install after its caller was gone");
+        writer.abort();
+        assert!(matches!(
+            client.run(a_request(), cb).await,
+            Ok(RunOutcome::CacheMiss { .. })
+        ));
+    }
+
+    /// The same contract with no bound on the header's lengths, so a test can
+    /// send what [`BundleStream`] will not encode. The wire form is derived from
+    /// the method names and argument shapes, so its client speaks to the real
+    /// server.
+    mod loose {
+        use super::{CallbackServiceClient, Ciborium, ExecError, RunOutcome, RunReply, RunRequest};
+        use fleet_stream::bin;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize)]
+        pub struct LooseBlob {
+            pub len: u64,
+            pub sha256: [u8; 32],
+        }
+        #[derive(Serialize, Deserialize)]
+        pub struct LooseHeader {
+            pub cwasm: LooseBlob,
+            pub meta: LooseBlob,
+        }
+        #[derive(Serialize, Deserialize)]
+        pub struct LooseStream {
+            pub header: LooseHeader,
+            pub cwasm: bin::Receiver,
+            pub meta: bin::Receiver,
+        }
+
+        #[remoc::rtc::remote]
+        pub trait ExecutorService {
+            async fn run(
+                &self,
+                req: RunRequest,
+                callbacks: CallbackServiceClient<Ciborium>,
+            ) -> Result<RunOutcome, ExecError>;
+
+            async fn run_with_bundle(
+                &self,
+                req: RunRequest,
+                bundle: LooseStream,
+                callbacks: CallbackServiceClient<Ciborium>,
+            ) -> Result<RunReply, ExecError>;
+        }
+    }
+
+    /// A header claiming more than the hop accepts is refused where it is
+    /// decoded, before a byte of its stream is read — and a request that does not
+    /// decode fails that call, not the leg.
+    #[tokio::test]
+    async fn a_header_past_its_bound_fails_its_call_and_not_the_leg() {
+        use fleet_stream::bin;
+        use loose::{ExecutorService as _, LooseBlob, LooseHeader, LooseStream};
+
+        let (client, cb) = serve_mock::<loose::ExecutorServiceClient<Ciborium>>().await;
+        let (cwasm_tx, cwasm_rx) = bin::channel();
+        let (meta_tx, meta_rx) = bin::channel();
+        let stream = LooseStream {
+            header: LooseHeader {
+                cwasm: LooseBlob {
+                    len: crate::MAX_CWASM_BYTES + 1,
+                    sha256: [0; 32],
+                },
+                meta: LooseBlob {
+                    len: 0,
+                    sha256: [0; 32],
+                },
+            },
+            cwasm: cwasm_rx,
+            meta: meta_rx,
+        };
+        let (reply, (cwasm_sent, _)) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                tokio::join!(
+                    client.run_with_bundle(a_request(), stream, cb.clone()),
+                    async {
+                        tokio::join!(
+                            fleet_stream::send(cwasm_tx, vec![0u8; 16]),
+                            fleet_stream::send(meta_tx, Vec::new())
+                        )
+                    }
+                )
+            })
+            .await
+            .expect("a refused call and its writer both end");
+        assert!(matches!(reply, Err(ExecError::Unknown)));
+        assert!(
+            cwasm_sent.is_err(),
+            "nobody read the stream, so it cannot have been sent"
+        );
+
+        assert!(
+            tokio::time::timeout(STILL_OPEN, remoc::rtc::Client::closed(&client))
+                .await
+                .is_err(),
+            "a request that did not decode closed the leg's request channel"
+        );
+        assert!(matches!(
+            client.run(a_request(), cb).await,
+            Ok(RunOutcome::CacheMiss { .. })
+        ));
     }
 }
 
@@ -753,8 +1214,8 @@ mod exec_error_tests {
     }
 
     #[test]
-    fn both_values_round_trip() {
-        for e in [ExecError::Policy, ExecError::Unknown] {
+    fn every_value_round_trips() {
+        for e in [ExecError::Policy, ExecError::Unknown, ExecError::Busy] {
             assert_eq!(
                 ciborium::from_reader::<ExecError, _>(&encode(&e)[..]).unwrap(),
                 e
@@ -762,13 +1223,12 @@ mod exec_error_tests {
         }
     }
 
-    /// THE property the shape exists for. Every failure encodes to one of two
-    /// fixed sizes, so what a host counts on this hop carries one bit — and that
-    /// bit costs a policy the round deadline to send, since the way to pick
-    /// `Unknown` is to hang rather than to trap.
+    /// THE property the shape exists for. Every failure encodes to one of three
+    /// fixed sizes, one of which no policy can reach, so what a policy can make a
+    /// host count is still one bit.
     #[test]
     fn a_failure_reply_has_no_length_a_policy_can_set() {
-        let sizes: Vec<usize> = [ExecError::Policy, ExecError::Unknown]
+        let sizes: Vec<usize> = [ExecError::Policy, ExecError::Unknown, ExecError::Busy]
             .iter()
             .map(|e| encode(e).len())
             .collect();

@@ -17,8 +17,8 @@
 //! They arrive through QEMU's fw_cfg, one entry per leg under
 //! `opt/com.enclavid/`, each a decimal port. Only the number is the host's —
 //! the destination is always the host, fixed here — and nothing read there
-//! reaches the environment, so every other setting stays on the measured
-//! command line.
+//! reaches the environment. The role's other launch settings arrive beside
+//! them as one entry of their own (`fleet_transport::launch`).
 //!
 //! The dev build dials over TCP and reads whole addresses from its environment.
 

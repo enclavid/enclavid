@@ -31,6 +31,7 @@
 //! proportional (status-only read = 1-byte payload, no metadata
 //! baggage).
 
+mod applicant;
 mod core;
 mod disclosure;
 mod media;
@@ -40,6 +41,7 @@ mod state;
 mod status;
 
 pub use self::core::{ReadField, ReadTuple, WriteField};
+pub use applicant::DropApplicantData;
 pub use disclosure::{AppendDisclosure, Disclosure};
 pub use media::SetMedia;
 pub use metadata::{Metadata, SetMetadata};
@@ -213,18 +215,6 @@ impl SessionStore {
         });
         let new_version = self.backend.write(id, req.into_inner(), deadline).await?;
         Ok(boundary::from_untrusted(new_version))
-    }
-
-    /// Delete the session's state field. Today only used to drop session
-    /// state on `/reset`; exposed as a typed method rather than via a
-    /// tuple because we have no use case for batched delete.
-    pub async fn delete(
-        &self,
-        id: Exposed<&str>,
-    ) -> Result<Untrusted<u64, (AuthN, AuthZ, Replay)>, BridgeError> {
-        let id = id.into_inner();
-        let deleted = self.backend.delete(id).await?;
-        Ok(boundary::inbound::from_untrusted(deleted))
     }
 
     /// Read + double-open one sealed media blob by its content hash. Backs the

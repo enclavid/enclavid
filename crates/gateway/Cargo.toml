@@ -153,11 +153,11 @@ matchit = "0.8"
 # cryptography to the image. The features are the ones the TLS stack already
 # turns on.
 ring = "0.17"
-# Two system calls and four error numbers: raising the descriptor limit at boot
-# (see `reserve_descriptors` in `main.rs`), and telling a dial that failed for
-# want of descriptors HERE from one the member failed (`crate::upstream::member`).
-# Already in the image under tokio.
-libc = "0.2"
+# Two system calls and four error numbers, in safe wrappers: raising the
+# descriptor limit at boot (see `reserve_descriptors` in `main.rs`), and telling
+# a dial that failed for want of descriptors HERE from one the member failed
+# (`crate::upstream::member`).
+rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
 # Parses the PROXY protocol v2 header the host's first hop writes ahead of each
 # public connection — see `crate::listener::source`. The most used and most
 # tested implementation, taken whole: it has no features to trim, and its text

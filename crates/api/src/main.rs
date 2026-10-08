@@ -16,6 +16,7 @@ mod keyprovider;
 mod limits;
 mod locale;
 mod policy_pull;
+mod settings;
 mod shuffle;
 mod state;
 mod storage;
@@ -30,22 +31,6 @@ use safe_logger::{debug, info, reason};
 use crate::client_state::ClientState;
 use crate::state::AppState;
 
-/// How often api asks the hatch whether this guest can still reach it.
-///
-/// A clock, not a reaction: it runs at this rate whether or not anyone is being
-/// verified, which is exactly what keeps the bit from reporting session
-/// activity. Ten seconds because it is the same order as chmux's own keepalive
-/// on the fleet legs, so every field of the answer ages at one rate and a host
-/// polling it needs one cadence in mind rather than three.
-const HATCH_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// How long one probe waits before calling it a miss.
-///
-/// Shorter than the interval on purpose, so a stalled hatch cannot make probes
-/// overlap: at most one is ever in flight, and the bit is never older than one
-/// interval plus this.
-const HATCH_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
-
 #[tokio::main]
 async fn main() {
     // First, so nothing can speak before the channel exists. Panic locations
@@ -57,6 +42,11 @@ async fn main() {
         "api: alive",
         reason!("a constant, emitted before this process holds anything at all")
     );
+
+    // How long and how often to wait on each leg and on the hatch, and how to
+    // hold each leg up — read from the launch, which talks to nothing, and first,
+    // because the health port below is one of the listeners they set.
+    let settings = settings::load();
 
     // The health port, up before everything: before attestation, before the
     // dials, before either serving listener. api is the one role whose progress
@@ -81,7 +71,9 @@ async fn main() {
         // Bound HERE, on this task, and only the answering loop is spawned:
         // binding inside the spawn would turn a failure into one dead task and
         // a guest that serves with no health port. See `health::bind`.
-        let listener = fleet_transport::health::bind(&health_addr).await;
+        let listener = fleet_transport::health::bind(&health_addr)
+            .await
+            .with_accept_retry(settings.accept_retry);
         let api_health = api_health.clone();
         tokio::spawn(async move {
             fleet_transport::health::serve(listener, move || api_health.body()).await
@@ -99,7 +91,9 @@ async fn main() {
     // somewhere fit to serve and holds the endorsement that lets it prove so.
     // A guest that answers no to either must reach nothing and serve nobody,
     // so nothing that talks to anything may precede it.
-    let attestor: Arc<dyn Attestor> = endorsement::build_attestor(&address_out).await;
+    let attestor: Arc<dyn Attestor> =
+        endorsement::build_attestor(&address_out, settings.vcek_deadline, settings.vcek_retries)
+            .await;
     info!(
         "api: attested",
         reason!(
@@ -143,17 +137,18 @@ async fn main() {
                 )
             });
         let api_health = api_health.clone();
+        let (every, within) = (settings.hatch_probe, settings.hatch_probe_deadline);
         tokio::spawn(async move {
             // `interval` fires once immediately, so the first probe runs now
             // rather than one period from now. `Delay` on a missed tick because
             // the cadence is what carries the meaning: catching up on skipped
             // ticks would bunch probes together and turn a clock into a
             // reaction.
-            let mut tick = tokio::time::interval(HATCH_PROBE_INTERVAL);
+            let mut tick = tokio::time::interval(every);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                let up = probe.probe(HATCH_PROBE_DEADLINE).await.is_ok();
+                let up = probe.probe(within).await.is_ok();
                 api_health.set_hatch(up);
             }
         });
@@ -182,24 +177,22 @@ async fn main() {
     // storage-CVM over RA-TLS. This is api's ONLY durable-state backend — host
     // Redis + the host object_store cache were retired (the hatch now fronts
     // external egress only). All AEAD sealing stays TEE-side in
-    // `SessionStore` / `CacheStore`; the storage-CVM sees ciphertext only.
-    //
-    // ABSOLUTE session TTL (secs): the deadline is `created_at + ttl`, set once at
-    // create; the storage-CVM sweeper GCs the session at that cap (abandoned or
-    // completed-and-pulled). Defaults to 1 week — a generous window for the
-    // consumer to pull disclosures after completion — overridable via
-    // `ENCLAVID_SESSION_TTL_SECS` (availability tuning). The hatch backend ignores it.
-    const DEFAULT_SESSION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
-    let ttl_secs = Some(
-        std::env::var("ENCLAVID_SESSION_TTL_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_SESSION_TTL_SECS),
-    );
-    let (session_backend, cache_backend) =
-        build_storage_backends(legs.storage, attestor.clone(), api_health.clone()).await;
+    // `SessionStore` / `CacheStore`; the storage-CVM sees ciphertext only. Each
+    // session lives `session_ttl_secs` from its creation (`settings`).
+    let (session_backend, cache_backend) = build_storage_backends(
+        legs.storage,
+        attestor.clone(),
+        api_health.clone(),
+        settings.leg_dial,
+        settings.leg,
+    )
+    .await;
     info!("api: storage-CVM connected", reason!("a constant"));
-    let session_store = Arc::new(SessionStore::new(session_backend, tee_seal_key, ttl_secs));
+    let session_store = Arc::new(SessionStore::new(
+        session_backend,
+        tee_seal_key,
+        Some(settings.session_ttl_secs),
+    ));
     let cache_store = CacheStore::new(cache_backend, &tee_seal_key);
 
     // Two listeners, two routers, one process. Topology rationale: TLS
@@ -213,8 +206,15 @@ async fn main() {
     // identities and two quotes, for no reason a peer could make sense of.
     let acceptor = transport::acceptor(attestor.clone());
 
-    let client_state =
-        Arc::new(ClientState::init(&address_out, session_store.clone(), attestor.clone()).await);
+    let client_state = Arc::new(
+        ClientState::init(
+            &address_out,
+            session_store.clone(),
+            attestor.clone(),
+            settings.authorize_deadline,
+        )
+        .await,
+    );
     let applicant_state = Arc::new(
         AppState::init(
             &address_out,
@@ -225,6 +225,7 @@ async fn main() {
             shuffle_key,
             attestor,
             api_health.clone(),
+            &settings,
         )
         .await,
     );
@@ -247,8 +248,9 @@ async fn main() {
             )
         });
         let acceptor = acceptor.clone();
+        let accept_retry = settings.accept_retry;
         async move {
-            transport::serve(client_app, &addr, client_bound, acceptor).await;
+            transport::serve(client_app, &addr, client_bound, acceptor, accept_retry).await;
         }
     });
     let applicant_handle = tokio::spawn({
@@ -259,8 +261,16 @@ async fn main() {
                 reason!("a constant naming a configuration key the host itself supplied")
             )
         });
+        let accept_retry = settings.accept_retry;
         async move {
-            transport::serve(applicant_app, &addr, applicant_bound, acceptor).await;
+            transport::serve(
+                applicant_app,
+                &addr,
+                applicant_bound,
+                acceptor,
+                accept_retry,
+            )
+            .await;
         }
     });
 
@@ -297,11 +307,14 @@ async fn main() {
 /// Dial the trusted storage-CVM (session KV + L2 cwasm cache) over RA-TLS and
 /// hand back both backends on one connection. This is api's ONLY durable-state
 /// backend — the legacy hatch/Redis + host object_store path was retired, so
-/// there is no runtime selector. `addr` is `crate::fleet::legs`'.
+/// there is no runtime selector. `addr` is `crate::fleet::legs`'; it is dialed
+/// as `how` says, and this end of the leg held up as `leg` does.
 async fn build_storage_backends(
     addr: String,
     attestor: Arc<dyn Attestor>,
     api_health: Arc<health::ApiHealth>,
+    how: fleet::Dial,
+    leg: storage_rpc::LegSettings,
 ) -> (Arc<dyn SessionBackend>, Arc<dyn CacheBackend>) {
     // Two clients, one connection: they go up and down together, so one
     // supervisor installs into both legs.
@@ -314,10 +327,11 @@ async fn build_storage_backends(
         fleet::supervise(
             health::Peer::Storage,
             addr.clone(),
+            how,
             api_health,
             move || {
                 let (addr, attestor) = (addr.clone(), attestor.clone());
-                async move { storage::connect_storage(&addr, attestor).await }
+                async move { storage::connect_storage(&addr, attestor, leg).await }
             },
             move |clients| match clients {
                 Some(c) => {

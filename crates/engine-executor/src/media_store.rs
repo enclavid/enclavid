@@ -9,9 +9,9 @@
 //!
 //! Reads are lazy and per-round: the policy's [`blob::from-blob-ref`](crate::
 //! media::BlobRep) calls [`load`](MediaStore::load) mid-`handle` to rehydrate
-//! a stored blob. Writes are NOT on this trait — the runtime always stores a
-//! capture's blobs by handing them to the listener (`SessionChange.media`) so
-//! they co-commit atomically with the reducer state.
+//! a stored blob. Writes are NOT on this trait, nor on the listener — the
+//! orchestrator stores a round's captures itself, from the frames it sent, in
+//! the same atomic write as the reducer state.
 
 use std::future::Future;
 use std::pin::Pin;

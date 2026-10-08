@@ -25,8 +25,8 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 
 use hatch_protocol::{
-    BlobField, DeleteResponse, FieldSelector, ListField, ListSlot, Op, ReadRequest, ReadResponse,
-    ScalarSlot, Slot, WriteResponse,
+    BlobField, FieldSelector, ListField, ListSlot, Op, ReadRequest, ReadResponse, ScalarSlot, Slot,
+    WriteResponse,
 };
 
 use super::StoreErr;
@@ -47,15 +47,19 @@ CREATE TABLE IF NOT EXISTS disclosure(seq INTEGER PRIMARY KEY, v BLOB NOT NULL);
 /// session's file.
 pub(super) struct DbBlobs {
     dir: PathBuf,
+    /// How long a statement waits on a session's file locked by another
+    /// operation before it fails ([`super::DEFAULT_BUSY_TIMEOUT`]).
+    busy: Duration,
 }
 
 impl DbBlobs {
     /// Open the store rooted at `dir` (the `blobs/` directory), creating it if
     /// absent. Idempotent.
-    pub(super) fn open(dir: &Path) -> Result<DbBlobs, StoreErr> {
+    pub(super) fn open(dir: &Path, busy: Duration) -> Result<DbBlobs, StoreErr> {
         std::fs::create_dir_all(dir)?;
         Ok(DbBlobs {
             dir: dir.to_path_buf(),
+            busy,
         })
     }
 
@@ -70,7 +74,7 @@ impl DbBlobs {
     /// preserved. Empty `req.fields` is a version probe. Absent (or crash-empty)
     /// file ⇒ `version == 0` with absent slots.
     pub(super) fn read(&self, name: &str, req: ReadRequest) -> Result<ReadResponse, StoreErr> {
-        let conn = match open_ro(&self.path(name))? {
+        let conn = match open_ro(&self.path(name), self.busy)? {
             Some(c) => c,
             None => return Ok(absent_response(&req)),
         };
@@ -121,7 +125,7 @@ impl DbBlobs {
     /// guard + `version=1` + the round's ops, all in ONE fsync (schema
     /// materialised inside the txn).
     pub(super) fn create(&self, name: &str, ops: Vec<Op>) -> Result<WriteResponse, StoreErr> {
-        let mut conn = open_create(&self.path(name))?;
+        let mut conn = open_create(&self.path(name), self.busy)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA)?;
         if tx
@@ -147,7 +151,7 @@ impl DbBlobs {
         ops: Vec<Op>,
         expected: u64,
     ) -> Result<WriteResponse, StoreErr> {
-        let mut conn = match open_rw(&self.path(name))? {
+        let mut conn = match open_rw(&self.path(name), self.busy)? {
             Some(c) => c,
             None => return Err(StoreErr::VersionMismatch),
         };
@@ -169,36 +173,6 @@ impl DbBlobs {
         Ok(WriteResponse { new_version })
     }
 
-    /// The `/reset` path: drop the STATE scalar, all media and every disclosure,
-    /// keeping the session. Returns the state-field delete count (0 or 1).
-    /// Absent file ⇒ 0.
-    ///
-    /// Disclosures go for the same reason the state does. A reset hands the
-    /// session to whoever asks next, so anything left behind is something the
-    /// next applicant's entries would be appended to — and the consumer reads a
-    /// session's disclosures as one person's, because that is what a session is.
-    /// Leaving them would let a reset splice two people into one record with a
-    /// chain that still verifies. They are safe to drop only because nothing
-    /// served them: the read waits for a completed session and a completed
-    /// session cannot be reset (`enclavid-api::client::disclosures`,
-    /// `enclavid-api::applicant::reset`).
-    pub(super) fn delete(&self, name: &str) -> Result<DeleteResponse, StoreErr> {
-        let mut conn = match open_rw(&self.path(name))? {
-            Some(c) => c,
-            None => return Ok(DeleteResponse { deleted: 0 }),
-        };
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_batch(SCHEMA)?; // no-op if present; guards a crash-empty file
-        let deleted = tx.execute(
-            "DELETE FROM scalars WHERE tag=?1",
-            [blob_tag(BlobField::State)],
-        )? as u64;
-        tx.execute("DELETE FROM media", [])?;
-        tx.execute("DELETE FROM disclosure", [])?;
-        tx.commit()?;
-        Ok(DeleteResponse { deleted })
-    }
-
     /// Existence probe: file present with a committed version row.
     pub(super) fn exists(&self, name: &str) -> Result<bool, StoreErr> {
         self.committed_exists(name)
@@ -207,7 +181,7 @@ impl DbBlobs {
     /// Whether a real (committed-meta) session file exists. Absent or crash-empty
     /// ⇒ `false`.
     pub(super) fn committed_exists(&self, name: &str) -> Result<bool, StoreErr> {
-        let conn = match open_ro(&self.path(name))? {
+        let conn = match open_ro(&self.path(name), self.busy)? {
             Some(c) => c,
             None => return Ok(false),
         };
@@ -268,6 +242,24 @@ fn apply_ops(tx: &Transaction, ops: Vec<Op>) -> Result<(), StoreErr> {
                     params![m.blob_key, m.value],
                 )?;
             }
+            // Disclosures go for the same reason the state does. A reset hands
+            // the session to whoever asks next, so anything left behind is
+            // something the next applicant's entries would be appended to — and
+            // the consumer reads a session's disclosures as one person's,
+            // because that is what a session is. They are safe to drop only
+            // because nothing served them: the read waits for a completed
+            // session and a completed session cannot be reset
+            // (`enclavid-api::client::disclosures`, `enclavid-api::applicant::reset`)
+            // — which holds because this commits under the version the reset
+            // read the session at.
+            Op::Reset => {
+                tx.execute(
+                    "DELETE FROM scalars WHERE tag=?1",
+                    [blob_tag(BlobField::State)],
+                )?;
+                tx.execute("DELETE FROM media", [])?;
+                tx.execute("DELETE FROM disclosure", [])?;
+            }
         }
     }
     Ok(())
@@ -286,8 +278,8 @@ fn absent_response(req: &ReadRequest) -> ReadResponse {
     ReadResponse { slots, version: 0 }
 }
 
-fn write_pragmas(conn: &Connection) -> Result<(), StoreErr> {
-    conn.busy_timeout(Duration::from_secs(5))?;
+fn write_pragmas(conn: &Connection, busy: Duration) -> Result<(), StoreErr> {
+    conn.busy_timeout(busy)?;
     // Durable commits: full fsync per commit (fullfsync forces a real platter
     // flush on macOS; a harmless no-op elsewhere). Rollback-journal mode (default)
     // keeps one file at rest per session.
@@ -307,11 +299,11 @@ fn schema_present(conn: &Connection) -> Result<bool, StoreErr> {
 }
 
 /// Open an existing file read-only. `Ok(None)` = the file does not exist.
-fn open_ro(path: &Path) -> Result<Option<Connection>, StoreErr> {
+fn open_ro(path: &Path, busy: Duration) -> Result<Option<Connection>, StoreErr> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     match Connection::open_with_flags(path, flags) {
         Ok(c) => {
-            c.busy_timeout(Duration::from_secs(5))?;
+            c.busy_timeout(busy)?;
             Ok(Some(c))
         }
         Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::CannotOpen => {
@@ -322,11 +314,11 @@ fn open_ro(path: &Path) -> Result<Option<Connection>, StoreErr> {
 }
 
 /// Open an existing file read-write (no create). `Ok(None)` = absent.
-fn open_rw(path: &Path) -> Result<Option<Connection>, StoreErr> {
+fn open_rw(path: &Path, busy: Duration) -> Result<Option<Connection>, StoreErr> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     match Connection::open_with_flags(path, flags) {
         Ok(c) => {
-            write_pragmas(&c)?;
+            write_pragmas(&c, busy)?;
             Ok(Some(c))
         }
         Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::CannotOpen => {
@@ -338,7 +330,7 @@ fn open_rw(path: &Path) -> Result<Option<Connection>, StoreErr> {
 
 /// Open (creating if absent) a file read-write. Schema is materialised inside the
 /// write transaction (see [`DbBlobs::create`]) so a create is a single fsync.
-fn open_create(path: &Path) -> Result<Connection, StoreErr> {
+fn open_create(path: &Path, busy: Duration) -> Result<Connection, StoreErr> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -346,6 +338,6 @@ fn open_create(path: &Path) -> Result<Connection, StoreErr> {
         | OpenFlags::SQLITE_OPEN_CREATE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(path, flags)?;
-    write_pragmas(&conn)?;
+    write_pragmas(&conn, busy)?;
     Ok(conn)
 }

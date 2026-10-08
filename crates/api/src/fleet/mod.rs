@@ -53,21 +53,36 @@ use std::time::Duration;
 
 use safe_logger::{info, reason, safe, warn};
 
-/// Waits between dial attempts, ramping to a ceiling and staying there.
+/// Waits between dial attempts, ramping to a ceiling ([`Dial::retry_max`]) and
+/// staying there. A rung above the ceiling is the ceiling.
 ///
 /// Quick at first because the ordinary case is a peer that is seconds behind;
 /// then slow, because a peer that is minutes behind is waiting on a human and
 /// polling it faster changes nothing.
-const RETRY_DELAYS: [Duration; 6] = [
+const RETRY_RAMP: [Duration; 5] = [
     Duration::from_millis(250),
     Duration::from_millis(500),
     Duration::from_secs(1),
     Duration::from_secs(2),
     Duration::from_secs(5),
-    Duration::from_secs(10),
 ];
 
-/// Ceiling on ONE attempt, separate from the ladder above.
+/// The longest wait between dial attempts, unless the host says otherwise (the
+/// `leg-retry-max-secs` setting) — the rate at which a peer that is minutes
+/// behind is polled.
+pub const DEFAULT_RETRY_MAX: Duration = Duration::from_secs(10);
+
+/// How a fleet leg is dialed, as the host's settings give it.
+#[derive(Clone, Copy, Debug)]
+pub struct Dial {
+    /// The bound on one attempt ([`DEFAULT_ATTEMPT_TIMEOUT`]).
+    pub within: Duration,
+    /// The longest wait between attempts ([`DEFAULT_RETRY_MAX`]).
+    pub retry_max: Duration,
+}
+
+/// Bound on ONE attempt, separate from the ladder above, unless the host says
+/// otherwise (the `leg-dial-secs` setting).
 ///
 /// The ladder bounds how often a failed attempt is repeated; it does nothing
 /// about an attempt that never finishes. Nothing in the dial path has a timeout
@@ -78,7 +93,7 @@ const RETRY_DELAYS: [Duration; 6] = [
 ///
 /// Generous, because a real attempt does chip work on both ends: the handshake
 /// is mutual RA-TLS, so each side mints and verifies an attestation report.
-const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Dial a fleet peer, waiting however long it takes.
 ///
@@ -105,22 +120,26 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// Takes the `Peer` rather than its name because it needs both the name and the
 /// digest pinned for it, and two arguments that have to agree is the shape this
-/// image already got wrong once elsewhere.
-pub async fn dial<T, F, Fut>(peer: crate::health::Peer, addr: &str, mut attempt: F) -> T
+/// image already got wrong once elsewhere. Each attempt is given
+/// [`Dial::within`], and the waits between them ramp to [`Dial::retry_max`].
+pub async fn dial<T, F, Fut>(peer: crate::health::Peer, addr: &str, how: Dial, mut attempt: F) -> T
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, fleet_transport::LegFailure>>,
 {
     let name = peer.as_str();
-    let mut delays = RETRY_DELAYS.iter().copied();
-    // The ladder's last rung, repeated once it runs out.
-    let mut ceiling = RETRY_DELAYS[RETRY_DELAYS.len() - 1];
+    let Dial { within, retry_max } = how;
+    let mut delays = RETRY_RAMP
+        .iter()
+        .map(move |&rung| rung.min(retry_max))
+        .chain(std::iter::repeat(retry_max));
     loop {
-        match tokio::time::timeout(ATTEMPT_TIMEOUT, attempt()).await {
+        match tokio::time::timeout(within, attempt()).await {
             Ok(Ok(value)) => return value,
             Ok(Err(e)) => {
-                let delay = delays.next().unwrap_or(ceiling);
-                ceiling = delay;
+                // The ramp ends in the ceiling repeated for ever, so this never
+                // runs out.
+                let delay = delays.next().unwrap_or(retry_max);
                 // `LegFailure::Pin` names what the peer attested to; the other
                 // half of the comparison lives here, because the pin is this
                 // image's and the transport crate has no idea it exists.
@@ -149,34 +168,39 @@ where
                              names no session"
                         )
                     ),
-                    safe(&delay, reason!("one of a fixed ladder of delays")),
+                    safe(
+                        &delay,
+                        reason!("a rung of a fixed ladder, capped at the host's setting")
+                    ),
                     reason!(
                         "a peer name fixed in this image, an address the host chose for \
                          this launch, a closed-enum failure that renders itself, a pinned \
-                         digest from this build, and one of a fixed ladder of delays — \
-                         nothing a session can reach. Not boot-only: `supervise` dials \
-                         again on every loss"
+                         digest from this build, and a rung of a fixed ladder capped at the \
+                         host's setting — nothing a session can reach. Not boot-only: \
+                         `supervise` dials again on every loss"
                     )
                 );
                 tokio::time::sleep(delay).await;
             }
             Err(_elapsed) => {
-                let delay = delays.next().unwrap_or(ceiling);
-                ceiling = delay;
+                let delay = delays.next().unwrap_or(retry_max);
                 warn!(
                     "api: {} at {} accepted nothing within {:?}; retrying in {:?}",
                     safe(&name, reason!("a name fixed in this image")),
                     safe(&addr, reason!("an address the host chose for this launch")),
                     safe(
-                        &ATTEMPT_TIMEOUT,
-                        reason!("a compile-time constant of this build")
+                        &within,
+                        reason!("the host's own setting, or this build's default")
                     ),
-                    safe(&delay, reason!("one of a fixed ladder of delays")),
+                    safe(
+                        &delay,
+                        reason!("a rung of a fixed ladder, capped at the host's setting")
+                    ),
                     reason!(
                         "a peer name fixed in this image, an address the host chose for \
-                         this launch, a closed-enum failure and one of a fixed ladder of \
-                         delays — nothing a session can reach. Not boot-only: `supervise` \
-                         dials again on every loss"
+                         this launch, the host's own setting, and a rung of a fixed ladder \
+                         capped at another — nothing a session can reach. Not boot-only: \
+                         `supervise` dials again on every loss"
                     )
                 );
                 tokio::time::sleep(delay).await;
@@ -234,14 +258,17 @@ impl<C: Clone> Leg<C> {
 /// `connect` returns the clients and a handle that finishes when the leg is over
 /// (`engine_rpc::leg_end`). Awaiting it is how this learns the leg ended, and it
 /// is a verdict rather than silence, because two different ends both reach it.
-/// The connection: chmux pings at half its `connection_timeout` whenever the link
-/// is idle, so "no traffic" and "no peer" are already distinct one layer down. A
-/// request channel: remoc closes one for good on any failed send and keeps the
-/// connection up, so the connection alone would report a leg whose every call
-/// fails as up for as long as it lived.
+/// The connection: chmux pings at half its peer's `connection_timeout` whenever
+/// the link is idle, so "no traffic" and "no peer" are already distinct one
+/// layer down. A request channel: remoc closes one for good on any failed send
+/// and keeps the connection up, so the connection alone would report a leg whose
+/// every call fails as up for as long as it lived.
+///
+/// Every dial, the first and each after a loss, is made as `how` says.
 pub async fn supervise<C, F, Fut, I>(
     peer: crate::health::Peer,
     addr: String,
+    how: Dial,
     health: std::sync::Arc<crate::health::ApiHealth>,
     mut connect: F,
     install: I,
@@ -252,7 +279,7 @@ pub async fn supervise<C, F, Fut, I>(
         + Send,
     I: Fn(Option<C>) + Send + 'static,
 {
-    let (clients, driver) = dial(peer, &addr, &mut connect).await;
+    let (clients, driver) = dial(peer, &addr, how, &mut connect).await;
     install(Some(clients));
     health.set_peer(peer, true);
 
@@ -272,7 +299,7 @@ pub async fn supervise<C, F, Fut, I>(
                 )
             );
 
-            let (clients, next) = dial(peer, &addr, &mut connect).await;
+            let (clients, next) = dial(peer, &addr, how, &mut connect).await;
             install(Some(clients));
             health.set_peer(peer, true);
             info!(

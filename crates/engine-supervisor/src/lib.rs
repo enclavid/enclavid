@@ -1,7 +1,7 @@
 //! `engine-supervisor` — disposable per-request child-process isolation for the
 //! engine fleet's workers.
 //!
-//! A worker SUPERVISOR (execution-worker / compile-worker) uses a [`ChildPool`]
+//! A worker SUPERVISOR (execution-worker / compile-worker) uses a [`ChildRunner`]
 //! to run ONE unit of untrusted work — a reducer round, or a Cranelift compile —
 //! in a fresh disposable CHILD PROCESS, then discard it. So a compromise of the
 //! untrusted work (a wasmtime sandbox escape, or a Cranelift bug tripped by
@@ -13,23 +13,20 @@
 //! Both sides of the socketpair are written here, so the fiddly,
 //! security-load-bearing plumbing exists ONCE and every worker rides it. But the
 //! two sides are not for the same reader, so they are separate modules and the
-//! parent one is behind the `parent` feature (default-on; the child packages take
-//! `default-features = false`).
+//! parent ones are behind the `parent` feature (default-on; the child packages
+//! take `default-features = false`).
 //!
 //! `parent` — spawn, harden, bound, kill, reap:
-//!   * [`ChildPool::run`] — acquire a concurrency permit, spawn a fresh child,
-//!     hand its service client to the caller's closure, drive it under a
-//!     wall-clock DEADLINE (a wedged child can't leak its permit forever), then
-//!     kill + reap.
-//!   * [`spawn_and_connect`] — socketpair + `Command` + fd handoff on the child's
-//!     fd 0 + remoc handshake. `Stdio::from` closes the supervisor's copy of the
-//!     child end, so the child's death EOFs the socket promptly. It also installs
-//!     any caller-supplied fds at deterministic numbers ([`FIRST_INHERITED_FD`]..),
-//!     CLOEXEC-cleared so ONLY they survive exec — the capability-scoped handoff the
-//!     executor uses to give a child a read-only fd to just ITS cwasm memfd.
-//!   * [`assert_ptrace_hardened`] — the boot-time floor under sibling isolation.
-//!   * [`assert_fd_budget`] — the boot-time floor under the caps a supervisor's
-//!     own bounds are counted in.
+//!   * [`ChildRunner`] — admit a request, spawn its child under the syscall
+//!     filters, drive the caller's closure under the request's deadline, and
+//!     kill the child as the call ends, giving its slot back once it is gone.
+//!   * [`Cgroups`] — the kernel's hold on the children's memory, built at boot:
+//!     all of them to one total, each to its own max, each in a group and under
+//!     an identity of its own.
+//!   * [`spawn_and_connect`] — one child on its socketpair, with the caller's
+//!     descriptor at [`INHERITED_FD`], for a bench or a test.
+//!   * [`require_ptrace_scope`], [`require_fd_budget`], [`physical_memory`] —
+//!     what a supervisor checks and measures at boot.
 //!
 //! Unfeatured — the child side:
 //!   * [`adopt_fd0`] / [`serve_child`] — adopt the inherited socket, remoc-serve
@@ -37,64 +34,42 @@
 //!
 //! The gate is a feature and not merely a module boundary because of what it
 //! carries: `tokio/process`, `libc` and `safe-logger` hang off the parent half.
-//! The first of those is the interesting one — it makes tokio's runtime start a
-//! signal driver, and that driver is why a disposable child, which spawns
-//! nothing, used to open a `socketpair` on its way up. A shipped child now
-//! starts no such driver, which is what let that syscall back onto the egress
-//! denylist.
+//! The first makes tokio's runtime start a signal driver, which opens a
+//! `socketpair` — a syscall the child's allowlist does not have. A child built
+//! without the feature starts none.
 //!
-//! The DOMAIN stays in each worker: which service the child serves, any mid-call
-//! callbacks (executor only), and any bundle cache. This crate is a domain-
-//! agnostic leaf — tokio, remoc, libc and `safe-logger`, never `engine-rpc` /
-//! `engine-types`, so the orchestrator (api) does not link it. `safe-logger` is
-//! there for one reason: [`assert_ptrace_hardened`] is a load-bearing boot check
-//! and both of its outcomes have to reach an operator, which on a guest neither
-//! stderr nor a panic payload does.
+//! The domain stays in each worker: which service the child serves, any mid-call
+//! callbacks, any bundle cache. This crate is a domain-agnostic leaf — never
+//! `engine-rpc` or `engine-types` — so the orchestrator (api) does not link it.
 //!
-//! Fresh `exec` (not `fork`) per request is deliberate: it was measured at ~7.7 ms
-//! warm, and the round's real cost sat in transport tuning, not spawn — so a
-//! warm-CoW fork-zygote (with its `pidfd` / `close_range` / single-threaded-clone
-//! hazards) is not worth its unsafe here.
+//! A fresh `exec` per request rather than a fork of a warm process: spawning
+//! measured ~7.7 ms warm, and a fork-zygote's `pidfd` / `close_range` /
+//! single-threaded-clone hazards are not worth that.
 
+// Every `unsafe` block here sits between fork and exec or in a forked test
+// probe, where what makes it sound is not obvious from the call alone.
+#![warn(clippy::undocumented_unsafe_blocks)]
+
+mod channel;
 mod child;
-pub use child::{adopt_fd0, serve_child};
+pub use child::{ServeError, adopt_fd0, serve_child};
 
 #[cfg(feature = "parent")]
-mod parent;
+mod cgroup;
 #[cfg(feature = "parent")]
-pub use parent::spawn_and_connect;
+mod preconditions;
 #[cfg(feature = "parent")]
-pub use parent::{
-    ChildPool, FIRST_INHERITED_FD, Hardening, SupervisorError, assert_fd_budget,
-    assert_ptrace_hardened,
-};
+mod runner;
+#[cfg(all(feature = "parent", target_os = "linux"))]
+mod seccomp;
+#[cfg(feature = "parent")]
+mod spawn;
 
-/// The remoc connection config the child hop uses. Raises `max_data_size` from
-/// chmux's 512 KiB default: a compile RETURNS its `cwasm` over this connection,
-/// ~10-15 MiB, which the default would reject outright. (The execute side no
-/// longer sends one the other way — `prime` carries a path to an inherited fd, so
-/// the bytes never cross. The engine RPC contract raises the same limit on the
-/// api hop; this crate is a leaf and can't name that constant, so it keeps its
-/// own — the transport tuning for the child hop.)
-// `remoc::Cfg` is `#[non_exhaustive]`, so a struct literal (`Cfg { .., ..default }`)
-// can't be built from here — the mutate-after-default is the only option.
-#[allow(clippy::field_reassign_with_default)]
-fn connection_cfg() -> remoc::Cfg {
-    let mut cfg = remoc::Cfg::default();
-    cfg.max_data_size = 64 * 1024 * 1024;
-    // Flush immediately: chmux's default 20 ms `flush_delay` (a throughput
-    // coalescing timer) adds ~20 ms per SEND direction to our latency-bound
-    // request/response RPC — measured ~40 ms/round-trip. Each side flushes its own
-    // sends, so BOTH this (child-serve) side and the engine-rpc (api/supervisor)
-    // side must set it. Nothing to coalesce: our writes are whole RPC frames.
-    cfg.flush_delay = std::time::Duration::ZERO;
-    // Pin the peer-driven port limits well below chmux's defaults (16384 ports /
-    // 128 received). The child is UNTRUSTED once its wasm/Cranelift is escaped, and
-    // it drives its own end of this socketpair — the default would let a compromised
-    // child open thousands of ports to exhaust supervisor memory. Our RPC uses only
-    // a handful of concurrent channels (base + prime/run + a few callbacks), so 256
-    // is generous headroom while bounding the exhaustion surface.
-    cfg.max_ports = 256;
-    cfg.max_received_ports = 64;
-    cfg
-}
+#[cfg(feature = "parent")]
+pub use cgroup::{Cgroups, ChildLimits, DEFAULT_CHILD_MAX_TASKS, Fate};
+#[cfg(feature = "parent")]
+pub use preconditions::{physical_memory, require_fd_budget, require_ptrace_scope};
+#[cfg(feature = "parent")]
+pub use runner::{ChildRunner, ChildTimes, Exit, RunnerConfig, SupervisorError};
+#[cfg(feature = "parent")]
+pub use spawn::{INHERITED_FD, SpawnError, spawn_and_connect};

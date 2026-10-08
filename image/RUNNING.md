@@ -54,8 +54,10 @@ right. What follows is the individual pieces, for when one of them is what you
 are working on.
 
 ```sh
-nix-build image/kernel -A diskless        # api, both workers
-nix-build image/kernel -A storage         # the one role with a disk
+nix-build image/kernel -A base              # api, the gateway
+nix-build image/kernel -A compile-worker    # diskless + the memory controller
+nix-build image/kernel -A execution-worker  # diskless + the memory controller
+nix-build image/kernel -A storage           # the one role with a disk
 nix-build image/app    -A api             # and -A storage, -A compile-worker,
                                           # -A execution-worker; each has a
                                           # `-debug` twin
@@ -168,7 +170,85 @@ What each measurement-relevant part is doing:
   field of every report, so it is a security constant that currently lives
   nowhere but a command line.
 - **`-m`** — memory size is *not* a measurement input. Roles may differ freely;
-  observed 2G for storage and 3G for the rest.
+  observed 2G for storage and 3G for the others apart from the
+  execution-worker. That one sizes itself from its memory: it reserves its
+  bundle cache (which the bundles streaming into it share), a base, and a share
+  in itself for each child its child bound allows, and gives the rest to its
+  round children as one total. The kernel holds the children to that total
+  together and each to the round's max, killing a child past either. It
+  refuses to boot when the total cannot hold one child at its max — at the
+  default settings, below about 3.8G; 8G is what the default bound was chosen
+  for — and when the cache cannot hold the largest bundle, about 1.6G, since a
+  round runs its bundle from the cache. Its boot line reports the memory it
+  read, the total, every setting below, and how many rounds fit beside one at
+  its max (`crates/engine-executor/src/admission.rs` has the reserves and the
+  defaults).
+
+- **Launch settings** — how many, how much, how long. Not measurement inputs:
+  every role takes them from one fw_cfg entry, `opt/com.enclavid/settings`,
+  as `key=value` pairs ended by `;` or a newline
+  (`crates/fleet-transport/src/launch.rs`). `enclavid-boot-cvm` passes one as
+  `FW_CFG="settings=max-children=8;round-max-bytes=536870912"`, and the fleet
+  module as `enclavid.cvms.<role>.settings`. Each is optional; a value that
+  does not parse, a key given twice, or a key the role does not know stops the
+  boot. A developer's build without vsock reads each from the environment
+  instead, as `ENCLAVID_<ROLE>_<KEY>` (`ENCLAVID_EXECUTION_WORKER_MAX_CHILDREN`).
+
+  | Role | Setting | Default |
+  | --- | --- | --- |
+  | execution-worker | `max-children` | 12 |
+  | | `waiting-per-child` | 1 |
+  | | `bundle-cache-bytes` | 2 GiB |
+  | | `bundle-cache-entries` | 512 |
+  | | `bundle-idle-secs` | 3600, at most 3600 |
+  | | `base-reserve-bytes` | 256 MiB |
+  | | `round-max-bytes` | 384 MiB |
+  | | `round-headroom-bytes` | 128 MiB |
+  | | `round-deadline-secs` | 120 |
+  | | `round-fuel` | 10 000 000 000 |
+  | | `capacity-wait-secs` | 10 |
+  | | `bundle-stream-secs` | 120 |
+  | | `bundle-stream-idle-secs` | 20 |
+  | | `child-max-tasks` | 64 |
+  | | `child-fate-wait-secs` | 5 |
+  | | `child-connect-secs` | 30 |
+  | | `room-poll-ms` | 50 |
+  | | `request-buffer` | 4 |
+  | | `callback-request-buffer` | 4 |
+  | compile-worker | `max-compiles` | 8 |
+  | | `deadline-secs` | 300 |
+  | | `compile-max-bytes` | 2 GiB |
+  | | `compile-headroom-bytes` | 256 MiB |
+  | | `base-reserve-bytes` | 512 MiB |
+  | | `child-max-tasks` | 64 |
+  | | `child-fate-wait-secs` | 5 |
+  | | `child-connect-secs` | 30 |
+  | | `room-poll-ms` | 50 |
+  | | `request-buffer` | 4 |
+  | storage | `cache-bytes` | 512 MiB |
+  | | `sweep-secs` | 60 |
+  | | `sweep-batch` | 1024 |
+  | | `session-request-buffer` | 16 |
+  | | `cache-request-buffer` | 8 |
+  | | `db-busy-secs` | 5 |
+  | api | `session-ttl-secs` | 1 week |
+  | | `leg-dial-secs` | 30 |
+  | | `leg-retry-max-secs` | 10 |
+  | | `pull-deadline-secs` | 60 |
+  | | `authorize-deadline-secs` | 25 |
+  | | `kbs-deadline-secs` | 20 |
+  | | `vcek-deadline-secs` | 30 |
+  | | `vcek-retries` | 5, `0` for none |
+  | | `hatch-probe-secs` | 10 |
+  | | `hatch-probe-deadline-secs` | 5, under the period |
+  | | `callback-request-buffer` | 4 |
+  | all four | `leg-timeout-secs` | 20 |
+  | | `leg-max-ports` | 256 |
+  | | `leg-chunk-bytes` | 65536 |
+  | | `accept-retry-ms` | 1000 |
+
+  The `leg-*` settings are each end's own: chmux announces them in its hello
+  and the far end fits to them, so the two ends of a leg need not agree.
 
 `-serial file:` is where a role's log device lands. Under
 `cmdline/<role>/production` the application writes to `/dev/ttyS0` with the

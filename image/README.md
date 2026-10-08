@@ -6,7 +6,7 @@ each reproduces byte for byte:
 | input | where | verify |
 |---|---|---|
 | firmware | `ovmf/` — our own edk2 platform, see its README | `nix-build image/ovmf --check` |
-| kernel | `kernel/` | `nix-build image/kernel -A diskless\|storage --check` |
+| kernel | `kernel/` | `nix-build image/kernel -A base\|compile-worker\|execution-worker\|storage --check` |
 | PID 1 | `init/` (binary) + `init/inittab/<role>` | `nix-build image/init --check` |
 | initramfs | `initramfs/` | `nix-build image/initramfs --check` |
 | cmdline | `cmdline/<role>/<variant>` | the file is the value |
@@ -14,11 +14,17 @@ each reproduces byte for byte:
 `app/` builds the role binary the initramfs wraps.
 
 Two of the five are shared rather than per-role. The firmware is one image for
-everyone. The kernel is two: `diskless` for api, the executor, the compiler and
-the gateway, and `storage` for the one role that owns a disk — which is the only
-axis those configs differ on, so a third would be a copy. Everything else — PID
-1's inittab, the initramfs that carries the role binary, and the command line —
-is the role's own, and that is enough to give each its own measurement.
+everyone. The kernel comes in four variants, named for the roles they boot and
+built from fragments named for what they turn on or off: `base` for api and the
+gateway; `compile-worker`; `execution-worker`; and `storage`, for the one role
+that owns a disk. All but `storage` are `diskless`. The two workers'
+variants add the kernel's memory controller — each supervisor holds its
+disposable children, a round or a compile each, to their memory with it, and no
+other role confines anything that way, so no other kernel carries it (see
+`kernel/memcg.config`).
+Everything else — PID 1's inittab, the initramfs that carries the role binary,
+and the command line — is the role's own, and that is enough to give each its
+own measurement.
 
 ## The command line
 
@@ -33,9 +39,31 @@ recovery in this design; a run that cannot continue should stop existing.
 
 `sysctl.kernel.yama.ptrace_scope=3` is the ptrace floor the per-round child
 isolation rests on — "no attach", denying every process including one holding
-`CAP_SYS_PTRACE`, which matters because everything in this guest is root. The
-kernel accepts `sysctl.*` on its command line, so the floor is measured rather
-than provisioned.
+`CAP_SYS_PTRACE`, which matters because everything in this guest is root,
+except the two workers' disposable children — a round or a compile each —
+which run as identities of their own. The kernel accepts `sysctl.*` on its
+command line, so the floor is measured rather than provisioned.
+
+`init_on_free=1` is on every line of the roles that hold plaintext — api, the
+gateway that terminates client TLS, and the two workers. The kernel zeroes each
+page as it is freed: a killed child's memory, a released cwasm, a request
+buffer api let go of. Without it a freed page keeps what it held until
+something reuses it, so whoever reached the guest's kernel would read past
+rounds out of free memory and not only the ones in flight. It costs a zeroing
+pass on every free. The storage role holds only sealed bytes and goes without.
+
+The two workers' lines also carry `printk.devkmsg=off` and
+`sysctl.kernel.dmesg_restrict=1`, and their production lines
+`sysctl.vm.oom_dump_tasks=0`. Each worker's kernel kills a child that
+outgrows its memory, and reports the kill in its log, naming the process and
+what it held. The first two close that log, which is open to any identity
+otherwise, so a child could read a sibling's kill: `/dev/kmsg` to every reader,
+and — set here rather than by sysctl — for good; `syslog(2)` to every reader
+without `CAP_SYSLOG`, which the children's syscall filter refuses as well. The
+supervisor refuses to start without either. The third leaves out of a kill's
+report the table of every task in the guest, which the kernel otherwise walks
+and prints on each kill. The `debug` line keeps the table: there the kernel log
+is on the port, which is where a kill is diagnosed.
 
 The `ENCLAVID_*` entries are the application's configuration, and they are
 spelled exactly as they are in a shell because they end up in the same place.

@@ -6,8 +6,10 @@
 # tool (via a nixpkgs revision), the kernel source (by digest), and the three
 # build variables the kernel embeds into the image.
 #
-#   nix-build image/kernel -A diskless   # api, executor, compiler, gateway
-#   nix-build image/kernel -A storage    # the storage CVM
+#   nix-build image/kernel -A base               # api, gateway
+#   nix-build image/kernel -A compile-worker     # the compile-worker
+#   nix-build image/kernel -A execution-worker   # the execution-worker
+#   nix-build image/kernel -A storage            # the storage CVM
 #   cat result/bzImage.sha256
 #
 # A reviewer verifies a published measurement by running exactly that and
@@ -23,10 +25,14 @@ let
   pkgs = import nixpkgs { system = "x86_64-linux"; };
   version = pkgs.lib.removeSuffix "\n" (builtins.readFile ./kernel_version.txt);
 
-  # `role` selects the fragment layered over common.config. The two differ only
-  # in whether the kernel can reach storage at all.
-  kernelFor = role: pkgs.stdenv.mkDerivation {
-    pname = "enclavid-guest-kernel-${role}";
+  # A variant is named for the roles it boots; a fragment for what it turns on
+  # or off. `fragment` selects the one layered over common.config — diskless or
+  # storage, which differ only in whether the kernel can reach storage at all —
+  # `extra` any further fragments layered over that, in order, and `name` names
+  # the derivation. With no extra fragment the configure step is the same text
+  # as one built from the two alone, so adding a variant moves no other kernel.
+  kernelFor = name: fragment: extra: pkgs.stdenv.mkDerivation {
+    pname = "enclavid-guest-kernel-${name}";
     inherit version;
 
     src = pkgs.fetchurl {
@@ -63,7 +69,7 @@ let
       runHook preConfigure
       make defconfig
       ./scripts/kconfig/merge_config.sh -m .config \
-        ${./common.config} ${./. + "/${role}.config"}
+        ${./common.config} ${./. + "/${fragment}.config"}${pkgs.lib.concatMapStrings (f: " ${f}") extra}
       make olddefconfig
       runHook postConfigure
     '';
@@ -85,6 +91,14 @@ let
   };
 in
 {
-  diskless = kernelFor "diskless";
-  storage = kernelFor "storage";
+  # api and the gateway: diskless, nothing more.
+  base = kernelFor "base" "diskless" [ ];
+  storage = kernelFor "storage" "storage" [ ];
+  # Diskless, plus the memory controller its supervisor holds the per-compile
+  # children to — see memcg.config. Its own variant, so a kernel change the
+  # compiler needs moves no other role.
+  compile-worker = kernelFor "compile-worker" "diskless" [ ./memcg.config ];
+  # Diskless, plus the memory controller its supervisor holds the per-round
+  # children to — see memcg.config.
+  execution-worker = kernelFor "execution-worker" "diskless" [ ./memcg.config ];
 }

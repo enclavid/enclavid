@@ -32,8 +32,9 @@ use std::sync::{Arc, Mutex};
 
 use engine_compiler::Compiler;
 use engine_executor::{
-    Component, EmbeddedImport, EmbeddedRegistry, Executor, MediaStore, PluginInstance,
-    PrimedComposition, Prop, RunInputs, RunResult, RunStatus, SessionChange, SessionListener,
+    Component, DEFAULT_ROUND_FUEL, EmbeddedImport, EmbeddedRegistry, Executor, MediaStore,
+    PluginInstance, PrimedComposition, Prop, RunInputs, RunResult, RunStatus, SessionChange,
+    SessionListener,
 };
 use hatch_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use xtask::fixtures;
@@ -183,6 +184,9 @@ struct PersistListener {
     media: Arc<Mutex<HashMap<[u8; 32], Arc<Vec<u8>>>>>,
     /// How many times the round fired. A trapped round must not persist.
     fires: Mutex<u32>,
+    /// The decision each fire carried, in order: the orchestrator commits it
+    /// with that round's state.
+    decisions: Mutex<Vec<Option<Decision>>>,
 }
 
 impl PersistListener {
@@ -190,6 +194,22 @@ impl PersistListener {
     /// read via `frame::from-blob-ref`).
     fn media_store(&self) -> Arc<dyn MediaStore> {
         Arc::new(MemMediaStore(self.media.clone()))
+    }
+
+    /// Every round committed no decision but the last, and the last committed
+    /// `decision` — the one its status reports.
+    fn finished_with(&self, decision: Decision) {
+        let decisions = self.decisions.lock().unwrap();
+        let (last, earlier) = decisions.split_last().expect("a round fired");
+        assert_eq!(
+            *last,
+            Some(decision),
+            "the finishing round commits its decision"
+        );
+        assert!(
+            earlier.iter().all(Option::is_none),
+            "a round that did not finish committed a decision: {earlier:?}"
+        );
     }
 
     /// Content-address the event's frames and store them — what api does before
@@ -210,9 +230,10 @@ impl SessionListener for PersistListener {
         &'a self,
         change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
-        let _ = change;
+        let decision = change.decision;
         Box::pin(async move {
             *self.fires.lock().unwrap() += 1;
+            self.decisions.lock().unwrap().push(decision);
             Ok(())
         })
     }
@@ -234,6 +255,7 @@ async fn passport_selfie_consent_reject_reaches_rejected() {
         RunStatus::Completed(Decision::Rejected) => {}
         _ => panic!("reject round expected Completed(Rejected)"),
     }
+    listener.finished_with(Decision::Rejected);
 }
 
 #[tokio::test]
@@ -280,6 +302,7 @@ async fn passport_selfie_consent_accept_reaches_approved_over_the_rendered_field
         RunStatus::Completed(Decision::Approved) => {}
         _ => panic!("accept round expected Completed(Approved)"),
     }
+    listener.finished_with(Decision::Approved);
 }
 
 #[tokio::test]
@@ -339,6 +362,7 @@ async fn reload_by_ref_misses() {
     let inputs = || RunInputs {
         listener: listener.clone(),
         media_store: empty_store.clone(),
+        fuel: DEFAULT_ROUND_FUEL,
     };
     let round = |session, event: Event| {
         listener.capture(&event);
@@ -382,6 +406,7 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
         let inputs = || RunInputs {
             listener: listener.clone(),
             media_store: store.clone(),
+            fuel: DEFAULT_ROUND_FUEL,
         };
         let round = |session, event: Event| {
             listener.capture(&event);
@@ -579,6 +604,7 @@ async fn static_fused_artifact_resolves_strictly() {
     let inputs = || RunInputs {
         listener: listener.clone(),
         media_store: listener.media_store(),
+        fuel: DEFAULT_ROUND_FUEL,
     };
     let round = |session, event: Event| {
         listener.capture(&event);
@@ -721,6 +747,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let inputs = || RunInputs {
         listener: listener.clone(),
         media_store: listener.media_store(),
+        fuel: DEFAULT_ROUND_FUEL,
     };
     // start → media(passport) → media(selfie) → consent-disclosure.
     let round = |session, event: Event| {
@@ -835,6 +862,7 @@ impl Harness {
         RunInputs {
             listener: listener.clone(),
             media_store: listener.media_store(),
+            fuel: DEFAULT_ROUND_FUEL,
         }
     }
 

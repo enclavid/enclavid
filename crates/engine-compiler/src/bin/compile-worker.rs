@@ -3,7 +3,7 @@
 //! It LISTENS for the orchestrator (api) and serves `engine_rpc::CompilerService`
 //! — the same api-facing contract as before — but it runs NO Cranelift itself.
 //! Per compile it drives a fresh `engine-compiler-child` PROCESS (spawned + bounded +
-//! deadline-guarded + reaped by the shared [`engine_supervisor::ChildPool`]) and
+//! deadline-guarded + reaped by the shared [`engine_supervisor::ChildRunner`]) and
 //! forwards the `(policy, plugins)` to it. Cranelift over UNTRUSTED wasm — a wide
 //! surface — runs ONLY in that disposable per-compile child, so a compiler-bug
 //! exploit is confined to one compile (no persistent implant that could poison a
@@ -16,10 +16,13 @@
 //! supervisor — no bundle L1, no callback relay — which is exactly why it also
 //! validates that the engine-supervisor boundary is clean (process plumbing only).
 //!
-//! The pool's per-compile wall-clock DEADLINE doubles as the compile-worker's
+//! The runner's per-compile wall-clock DEADLINE doubles as the compile-worker's
 //! availability guard: a malicious wasm can't hang Cranelift forever and wedge
-//! the worker (a real gap the direct-compile design had no bound for). A memory
-//! cap (RLIMIT_AS on the child) is a natural follow-up.
+//! the worker (a real gap the direct-compile design had no bound for). Its
+//! memory is the kernel's to hold, the same way the execution-worker's rounds
+//! are: every compile child together to one total, each alone to its own max,
+//! in a group and under an identity made for it — so a compile that balloons
+//! is killed alone, and its neighbours and this process go on.
 //!
 //! Transport to api: a listener under mutual RA-TLS — TCP by default, vsock
 //! under that feature, which is what the measured image builds. The
@@ -29,31 +32,60 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use engine_supervisor::{ChildPool, Hardening};
+use engine_supervisor::{
+    Cgroups, ChildLimits, ChildRunner, ChildTimes, DEFAULT_CHILD_MAX_TASKS, Fate, RunnerConfig,
+};
 use remoc::codec::Ciborium;
 
 use enclavid_boundary::{AuthN, Untrusted};
 use engine_compiler::{CompileChildService, CompileChildServiceClient};
-use engine_rpc::{CompileError, CompileRequest, CompiledBundle, CompilerServiceUntrusted};
+use engine_rpc::{
+    CompileError, CompileRequest, CompiledBundle, CompilerServiceUntrusted, LegSettings,
+};
 use fleet_transport::LegFailure;
+use fleet_transport::launch::{LaunchError, Settings};
 use safe_logger::{debug, info, reason, safe, warn};
 
-/// Wall-clock ceiling on ONE compile in the child (tunable via
-/// `ENCLAVID_COMPILE_DEADLINE_SECS`; enforced by the [`ChildPool`]). Bounds a
-/// malicious wasm that would otherwise hang Cranelift and hold a child slot
-/// forever — the availability guard the direct-compile design lacked. Generous:
-/// a legitimate cold compile of a large fused component is seconds, not minutes.
+/// Wall-clock limit on ONE compile in the child (the `deadline-secs` setting;
+/// enforced by the [`ChildRunner`]).
+/// Bounds a malicious wasm that would otherwise hang Cranelift and hold a child
+/// slot forever — the availability guard the direct-compile design lacked.
+/// Generous: a legitimate cold compile of a large fused component is seconds,
+/// not minutes.
 const DEFAULT_COMPILE_DEADLINE_SECS: u64 = 300;
 
-/// Default cap on concurrent compile children. Cranelift is CPU-bound, so this is
+/// Default cap on concurrent compile children (the `max-compiles` setting).
+/// Cranelift is CPU-bound, so this is
 /// modest by design (roughly a core budget); compiles are rare (only L2 misses).
 const DEFAULT_MAX_COMPILES: usize = 8;
 
+/// The most one compile child may hold, in bytes, unless the host says
+/// otherwise (the `compile-max-bytes` setting). A compile past it is killed by
+/// the kernel and answered as its composition's: a fused component Cranelift
+/// cannot compile within this is one this deployment refuses, and a larger one
+/// takes a larger setting and a larger guest.
+///
+/// 2 GiB fits one compile at its max inside the 3 GiB guest beside
+/// [`DEFAULT_BASE_RESERVE_BYTES`].
+const DEFAULT_COMPILE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// What must be free before a compile child starts, in the children's total and
+/// in the guest alike, unless the host says otherwise (the
+/// `compile-headroom-bytes` setting): what a child takes to start Cranelift at
+/// all. A gate read before each spawn, not a reservation.
+const DEFAULT_COMPILE_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
+
+/// What this process keeps of the guest's memory for itself, out of reach of the
+/// compile children's total, unless the host says otherwise (the
+/// `base-reserve-bytes` setting): its runtime, its leg to api, and the request
+/// and the reply of each compile in flight.
+const DEFAULT_BASE_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+
 /// The `engine_rpc::CompilerService` impl served to api: forward each compile to
-/// a fresh disposable `engine-compiler-child` via the pool. Shared (`Arc`) across api
-/// connections.
+/// a fresh disposable `engine-compiler-child` via the runner. Shared (`Arc`) across
+/// api connections.
 struct Supervisor {
-    pool: ChildPool,
+    runner: ChildRunner,
 }
 
 impl CompilerServiceUntrusted for Supervisor {
@@ -66,7 +98,7 @@ impl CompilerServiceUntrusted for Supervisor {
     ///
     /// Not `AuthZ`: this role holds no resource a caller could reach past another's,
     /// and what a caller can spend is compute, answered by the deadline, the
-    /// address-space rlimit and the pool rather than by a judgement. Not `Replay`:
+    /// compile's memory max and the runner rather than by a judgement. Not `Replay`:
     /// no request outlives its own call, so there is no version for one to be stale
     /// from — and whether the peer invented it is `Asserted`'s question, which only a
     /// receiver of this role's OUTPUT can ask.
@@ -81,10 +113,10 @@ impl CompilerServiceUntrusted for Supervisor {
         // input cannot reach another's compile, and the result goes back only to
         // whoever asked. Hostile input costs that caller its own compile.
         //
-        // What IS shared is a concurrency budget — the pool's slots, one semaphore
+        // What IS shared is a concurrency budget — the runner's slots, one semaphore
         // across every connection — so a caller can make others WAIT. That is
-        // availability, not a leak, and the deadline plus the address-space rlimit
-        // are what answer it; a judgement about the bytes would not.
+        // availability, not a leak, and the deadline plus the compile's memory
+        // max are what answer it; a judgement about the bytes would not.
         //
         // The data-side statelessness is load-bearing, not incidental: it carries
         // the weight the measurement pin would have carried if this end could pin
@@ -94,43 +126,58 @@ impl CompilerServiceUntrusted for Supervisor {
             .trust_unchecked::<AuthN, _>(enclavid_boundary::reason!(
                 "indifferent: nothing derived from a request outlives its call, so \
                  hostile input reaches only its own compile and its own caller; the \
-                 shared pool slots are availability, capped elsewhere"
+                 shared runner slots are availability, capped elsewhere"
             ))
             .into_inner();
-        // Drive ONE compile in a fresh disposable child, under the pool's
-        // concurrency bound + wall-clock deadline (the pool kills + reaps a wedged
+        // Drive ONE compile in a fresh disposable child, under the runner's
+        // concurrency bound + wall-clock deadline (the runner kills + reaps a wedged
         // child). The closure is the DOMAIN work: forward the compile.
         let outcome = self
-            .pool
-            // No inherited fds: the engine-compiler-child receives its `(policy, plugins)`
-            // over the RPC, not by fd (only the executor hands a cwasm memfd down).
+            .runner
+            // No inherited fd: the engine-compiler-child receives its `(policy, plugins)`
+            // over the RPC, not by fd (only the executor hands a cwasm memfd down),
+            // so nothing it maps needs keeping either.
             .run(
-                &[],
+                None,
+                (),
                 move |client: CompileChildServiceClient<Ciborium>| async move {
                     client.compile(CompileRequest { policy, plugins }).await
                 },
             )
             .await;
 
-        // The pool returns the closure's domain result verbatim on success; a
-        // pool-level failure (spawn error, or the deadline killing a wedged
-        // child) becomes a `CompileError` so api surfaces a config-resolution
-        // failure (compiles are a pure function of the pinned artifacts).
+        // The runner returns the closure's domain result verbatim on success —
+        // `Refused` included, and that is the child's word: a child turned by the
+        // composition it compiles can claim it of that composition, which costs
+        // only that composition's sessions a 422. A child that died without
+        // answering reaches here as `Failed` — the leg to it closed — and the
+        // kernel's record says whether the compile itself was the cause: killed
+        // at its own max, with the children's total never reached meanwhile, is
+        // its composition's, so `Refused`; anything else stays `Failed`. A
+        // runner-level failure (spawn error, or the deadline killing a wedged child)
+        // is `Failed`, its cause kept to this side's debug log.
         match outcome {
-            Ok(domain_result) => domain_result,
-            Err(pool_err) => Err(CompileError(format!("compile supervisor: {pool_err}"))),
+            Ok((Err(CompileError::Failed), exit)) => match exit.fate().await {
+                Fate::OutgrewItsMax => Err(CompileError::Refused),
+                Fate::Unattributed => Err(CompileError::Failed),
+            },
+            Ok((domain_result, _)) => domain_result,
+            Err(runner_err) => {
+                debug!("compile supervisor: {runner_err}");
+                Err(CompileError::Failed)
+            }
         }
     }
 }
 
-/// Locate the `engine-compiler-child` binary: `ENCLAVID_COMPILER_CHILD_BIN` if set, else
-/// the sibling of this supervisor's own executable. They SHIP together — the
-/// image installs both into `/bin` — but they are built apart, each package by
-/// its own cargo invocation, which is what keeps `engine-compiler-child`'s
-/// dependency graph the short one its manifest declares. Fails loud if neither
-/// resolves — per the minimal-defaults rule.
+/// Locate the `engine-compiler-child` binary: `ENCLAVID_COMPILE_WORKER_CHILD_BIN`
+/// if set, else the sibling of this supervisor's own executable. They SHIP
+/// together — the image installs both into `/bin` — but they are built apart,
+/// each package by its own cargo invocation, which is what keeps
+/// `engine-compiler-child`'s dependency graph the short one its manifest
+/// declares. Fails loud if neither resolves — per the minimal-defaults rule.
 fn child_exe() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("ENCLAVID_COMPILER_CHILD_BIN") {
+    if let Ok(p) = std::env::var("ENCLAVID_COMPILE_WORKER_CHILD_BIN") {
         return std::path::PathBuf::from(p);
     }
     let mut p = std::env::current_exe().unwrap_or_else(|e| {
@@ -143,6 +190,45 @@ fn child_exe() -> std::path::PathBuf {
     });
     p.set_file_name("engine-compiler-child");
     p
+}
+
+/// The setting `key` the host gave at launch (see [`fleet_transport::launch`]):
+/// `default` when it gave none, and no boot when it gave one that does not
+/// parse. A value the host wrote and got wrong is not a request for the default.
+fn setting<T: std::str::FromStr>(launch: &mut Settings, key: &'static str, default: T) -> T {
+    match launch.take(key) {
+        None => default,
+        Some(value) => value.parse().unwrap_or_else(|_| {
+            safe_logger::error_and_panic!(
+                "compile-worker: the setting {} does not parse. Stopping.",
+                safe(
+                    &key,
+                    reason!("a constant naming one of this role's settings")
+                ),
+                reason!("a constant, emitted once at boot before any request exists")
+            )
+        }),
+    }
+}
+
+/// A setting given in whole seconds.
+fn secs(launch: &mut Settings, key: &'static str, default: Duration) -> Duration {
+    Duration::from_secs(setting(launch, key, default.as_secs()))
+}
+
+/// A setting given in milliseconds.
+fn millis(launch: &mut Settings, key: &'static str, default: Duration) -> Duration {
+    let default = u64::try_from(default.as_millis()).unwrap_or(u64::MAX);
+    Duration::from_millis(setting(launch, key, default))
+}
+
+/// The host's launch settings could not be taken as given.
+fn refused(e: LaunchError) -> ! {
+    safe_logger::error_and_panic!(
+        "compile-worker: {}. Stopping.",
+        e,
+        reason!("a constant, emitted once at boot before any request exists")
+    )
 }
 
 #[cfg(not(any(feature = "dev-attestation", feature = "sev-snp")))]
@@ -231,6 +317,129 @@ async fn main() {
     safe_logger::install();
     safe_logger::install_panic(true);
 
+    // The host's settings for this guest, read once and before anything else:
+    // reading them talks to nothing, and the health port below is one of the
+    // listeners they set. None of them reaches what a compile produces — that is
+    // the build's — only how many run, how long each may take and hold, and how
+    // this end holds up api's leg.
+    let mut launch = Settings::load("compile-worker").unwrap_or_else(|e| refused(e));
+    let max_compiles: usize = setting(&mut launch, "max-compiles", DEFAULT_MAX_COMPILES);
+    let deadline = secs(
+        &mut launch,
+        "deadline-secs",
+        Duration::from_secs(DEFAULT_COMPILE_DEADLINE_SECS),
+    );
+    // What the compile children may hold, and what this process keeps for
+    // itself: availability, which the kernel enforces (see `Cgroups::create`
+    // below).
+    let compile_max: u64 = setting(&mut launch, "compile-max-bytes", DEFAULT_COMPILE_MAX_BYTES);
+    let compile_headroom: u64 = setting(
+        &mut launch,
+        "compile-headroom-bytes",
+        DEFAULT_COMPILE_HEADROOM_BYTES,
+    );
+    let base_reserve: u64 = setting(
+        &mut launch,
+        "base-reserve-bytes",
+        DEFAULT_BASE_RESERVE_BYTES,
+    );
+    let child_max_tasks: u64 = setting(&mut launch, "child-max-tasks", DEFAULT_CHILD_MAX_TASKS);
+    let times = ChildTimes::default();
+    let child_times = ChildTimes {
+        fate_wait: secs(&mut launch, "child-fate-wait-secs", times.fate_wait),
+        connect: secs(&mut launch, "child-connect-secs", times.connect),
+        room_poll: millis(&mut launch, "room-poll-ms", times.room_poll),
+    };
+    let request_buffer: usize = setting(
+        &mut launch,
+        "request-buffer",
+        engine_rpc::DEFAULT_REQUEST_BUFFER,
+    );
+    let leg_default = LegSettings::default();
+    let leg = LegSettings {
+        timeout: secs(&mut launch, "leg-timeout-secs", leg_default.timeout),
+        max_ports: setting(&mut launch, "leg-max-ports", leg_default.max_ports),
+        chunk_bytes: setting(&mut launch, "leg-chunk-bytes", leg_default.chunk_bytes),
+    };
+    let accept_retry = millis(
+        &mut launch,
+        "accept-retry-ms",
+        fleet_transport::DEFAULT_ACCEPT_RETRY,
+    );
+    launch.finish().unwrap_or_else(|e| refused(e));
+    // A compile waits for a slot as long as one takes, so with none it would
+    // wait forever; a zero deadline ends every compile before it starts; and the
+    // waits and buffers below each do nothing at zero but fail.
+    if max_compiles == 0
+        || deadline.is_zero()
+        || child_max_tasks == 0
+        || child_times.fate_wait.is_zero()
+        || child_times.connect.is_zero()
+        || child_times.room_poll.is_zero()
+        || request_buffer == 0
+        || accept_retry.is_zero()
+    {
+        safe_logger::error_and_panic!(
+            "compile-worker: a compile bound, a compile deadline, a child task cap, a \
+             child fate wait, handshake or room poll time, a request buffer or an \
+             accept retry of zero compiles nothing; each must be above it. Stopping.",
+            reason!("a constant, emitted once at boot before any request exists")
+        );
+    }
+    // The room a compile needs to start must be above zero and within its max,
+    // or no compile could ever start.
+    if compile_headroom == 0 || compile_headroom > compile_max {
+        safe_logger::error_and_panic!(
+            "compile-worker: a {} MiB compile headroom must be above zero and within the \
+             {} MiB compile max. Stopping.",
+            safe(
+                &(compile_headroom >> 20),
+                reason!("the host's own setting, or this build's default")
+            ),
+            safe(
+                &(compile_max >> 20),
+                reason!("the host's own setting, or this build's default")
+            ),
+            reason!("a constant, emitted once at boot before any request exists")
+        );
+    }
+    // What the compile children may hold together: this guest's memory less what
+    // this process keeps. A total that cannot hold one compile at its max
+    // compiles nothing that needs it.
+    let physical = engine_supervisor::physical_memory();
+    let total = physical.saturating_sub(base_reserve);
+    if total < compile_max {
+        safe_logger::error_and_panic!(
+            "compile-worker: {} MiB of memory leaves the compile children {} MiB beside a \
+             {} MiB base reserve — not one compile could run to its {} MiB max. Give this \
+             guest more memory, or the reserve or the compile max less. Stopping.",
+            safe(&(physical >> 20), reason!("a size the host provisioned")),
+            safe(
+                &(total >> 20),
+                reason!("derived from that size and the host's setting")
+            ),
+            safe(
+                &(base_reserve >> 20),
+                reason!("the host's own setting, or this build's default")
+            ),
+            safe(
+                &(compile_max >> 20),
+                reason!("the host's own setting, or this build's default")
+            ),
+            reason!("a constant, emitted once at boot before any request exists")
+        );
+    }
+    if let Some(refusal) = leg.refusal() {
+        safe_logger::error_and_panic!(
+            "compile-worker: {} cannot hold a leg up. Stopping.",
+            safe(
+                &refusal,
+                reason!("a constant naming which of this role's settings")
+            ),
+            reason!("a constant, emitted once at boot before any request exists")
+        );
+    }
+
     // The health port, up before anything that can be slow. The host polls it to
     // learn when this role has finished coming up — which is what lets it bring
     // the fleet up in order instead of racing it, and what replaced the old
@@ -252,7 +461,9 @@ async fn main() {
         // Bound HERE, on this task, and only the answering loop is spawned:
         // binding inside the spawn would turn a failure into one dead task and
         // a guest that serves with no health port. See `health::bind`.
-        let listener = fleet_transport::health::bind(&health_addr).await;
+        let listener = fleet_transport::health::bind(&health_addr)
+            .await
+            .with_accept_retry(accept_retry);
         let health = health.clone();
         tokio::spawn(async move {
             fleet_transport::health::serve(listener, move || health.body()).await
@@ -260,10 +471,10 @@ async fn main() {
     }
 
     // Fail CLOSED if the kernel's ptrace hardening is too weak to isolate one
-    // escaped engine-compiler-child from a sibling's memory (see the shared assertion).
-    // The compile side is PII-free, but it rides the same disposable-child pool, so
-    // it asserts the same invariant — one fix, both workers.
-    engine_supervisor::assert_ptrace_hardened();
+    // escaped engine-compiler-child from a sibling's memory (see the shared check).
+    // The compile side is PII-free, but it rides the same disposable-child runner,
+    // so it requires the same invariant — one fix, both workers.
+    engine_supervisor::require_ptrace_scope();
 
     // api-facing listen address: first arg or ENCLAVID_COMPILE_WORKER_LISTEN.
     // Fail loud if absent (per the minimal-defaults rule).
@@ -278,60 +489,116 @@ async fn main() {
             )
         });
 
-    let max_compiles: usize = std::env::var("ENCLAVID_MAX_COMPILES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_COMPILES);
-    let deadline = Duration::from_secs(
-        std::env::var("ENCLAVID_COMPILE_DEADLINE_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_COMPILE_DEADLINE_SECS),
+    // The kernel's hold on the compile children: the total above for all of
+    // them, the max for each, the room a compile needs before it starts, and
+    // the tasks each may have. In the measured image this builds the group or
+    // stops the boot; a build without `guest-hardening` holds nothing (see
+    // `Cgroups::create`).
+    let cgroups = Cgroups::create(
+        ChildLimits {
+            total,
+            max: compile_max,
+            headroom: compile_headroom,
+            tasks: child_max_tasks,
+        },
+        max_compiles,
     );
-    // Egress seccomp is ALWAYS ON in the build. It is a CONFIDENTIALITY control
-    // (keeps a child an escape turns into native code from dialing the host), so it
-    // must NOT be disableable by the untrusted host — which provisions the CVM's
-    // environment (the same root as the tee_seal_key-from-env gap). It rides the
-    // measured image; disabling it is a deliberate rebuild + re-attest, never a
-    // runtime knob. The AS limit, by contrast, is availability tuning (a lax value
-    // only lets the host OOM its OWN guest), so it stays env-configurable like
-    // max_compiles / deadline; `ENCLAVID_COMPILE_AS_LIMIT_BYTES=0` disables it
-    // (default 4 GiB — bounds a crafted input ballooning Cranelift's arena).
-    let as_bytes = std::env::var("ENCLAVID_COMPILE_AS_LIMIT_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(4 * 1024 * 1024 * 1024);
-    let hardening = Hardening {
-        seccomp_egress: true,
-        address_space: (as_bytes != 0).then_some(as_bytes),
-    };
 
     let child_exe = child_exe();
 
     let svc = Arc::new(Supervisor {
-        pool: ChildPool::new(child_exe.clone(), max_compiles, deadline, Some(hardening)),
+        runner: ChildRunner::new(
+            RunnerConfig {
+                exe: child_exe.clone(),
+                max_children: max_compiles,
+                deadline,
+                // No admission wait: a compile waits for a slot, and for room for
+                // its child, as long as those take.
+                admission_wait: None,
+                times: child_times,
+            },
+            cgroups,
+        ),
     });
 
-    let listener = fleet_transport::bind(&addr).await.unwrap_or_else(|e| {
-        debug!("{e}");
-        safe_logger::error_and_panic!(
-            "compile-worker: cannot bind {}. Stopping.",
-            safe(&addr, reason!("on the measured command line")),
-            reason!("a constant; the address is the host's own configuration")
-        )
-    });
+    let listener = fleet_transport::bind(&addr)
+        .await
+        .unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "compile-worker: cannot bind {}. Stopping.",
+                safe(&addr, reason!("on the measured command line")),
+                reason!("a constant; the address is the host's own configuration")
+            )
+        })
+        .with_accept_retry(accept_retry);
     info!(
         "compile-worker (supervisor): listening on {}, engine-compiler-child={}, \
-         max_compiles={}, deadline={}s",
+         max_compiles={} sharing {} MiB of {} MiB memory (each to {} MiB, {} MiB to \
+         start, {} tasks), deadline={}s, child_fate_wait={:?}, child_connect={:?}, \
+         room_poll={:?}, request_buffer={}, leg_timeout={:?}, leg_max_ports={}, \
+         leg_chunk={} bytes, accept_retry={:?}",
         safe(&addr, reason!("on the measured command line")),
         safe(
             &child_exe.display(),
             reason!("a location inside the measured image")
         ),
-        safe(&max_compiles, reason!("a constant of the measured build")),
+        safe(
+            &max_compiles,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &(total >> 20),
+            reason!("derived from the memory and the host's setting")
+        ),
+        safe(&(physical >> 20), reason!("a size the host provisioned")),
+        safe(
+            &(compile_max >> 20),
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &(compile_headroom >> 20),
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &child_max_tasks,
+            reason!("the host's own setting, or this build's default")
+        ),
         safe(
             &deadline.as_secs(),
-            reason!("a constant of the measured build")
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &child_times.fate_wait,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &child_times.connect,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &child_times.room_poll,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &request_buffer,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &leg.timeout,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &leg.max_ports,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &leg.chunk_bytes,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &accept_retry,
+            reason!("the host's own setting, or this build's default")
         ),
         reason!("a constant, emitted at boot before any policy has been composed")
     );
@@ -369,7 +636,7 @@ async fn main() {
         // next accept is not held up behind this one's whole session.
         async move {
             tokio::spawn(async move {
-                if let Err(e) = serve_conn(stream, ratls, svc).await {
+                if let Err(e) = serve_conn(stream, ratls, svc, request_buffer, leg).await {
                     warn!(
                         "compile-worker: connection from {} ended ({})",
                         safe(&peer, reason!("an address the host routed itself")),
@@ -386,11 +653,15 @@ async fn main() {
     .await
 }
 
-/// RA-TLS-accept one api connection, then hand it to the contract's own serve half.
+/// RA-TLS-accept one api connection, then hand it to the contract's own serve
+/// half, `request_buffer` of api's requests waiting at most, on this end's `leg`
+/// settings.
 async fn serve_conn(
     stream: fleet_transport::Stream,
     ratls: tokio_rustls::TlsAcceptor,
     svc: Arc<Supervisor>,
+    request_buffer: usize,
+    leg: LegSettings,
 ) -> Result<(), LegFailure> {
     let tls = ratls.accept(stream).await.map_err(|e| {
         debug!("ra-tls accept: {e}");
@@ -401,7 +672,7 @@ async fn serve_conn(
     // Above this line is WHO connected; below is WHAT MAY CROSS, which belongs to
     // the contract. Bringing the hop up means naming the generated client, and that
     // is what no crate outside engine-rpc may do.
-    engine_rpc::serve_compiler(read, write, svc, 4)
+    engine_rpc::serve_compiler(read, write, svc, request_buffer, &leg)
         .await
         .map_err(|e| {
             debug!("compile leg: {e}");

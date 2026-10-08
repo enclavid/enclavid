@@ -17,6 +17,7 @@
 //! satisfies what RA-TLS and remoc want of it.
 
 pub mod health;
+pub mod launch;
 #[cfg(feature = "tower-adapter")]
 pub mod service;
 
@@ -220,6 +221,9 @@ pub struct Listener {
     inner: tokio::net::TcpListener,
     #[cfg(feature = "vsock")]
     inner: tokio_vsock::VsockListener,
+    /// How long [`Incoming`] waits after an accept that failed for a reason
+    /// which will not clear on its own ([`DEFAULT_ACCEPT_RETRY`]).
+    accept_retry: std::time::Duration,
 }
 
 /// Bind a fleet listener.
@@ -232,6 +236,7 @@ pub struct Listener {
 pub async fn bind(addr: &str) -> std::io::Result<Listener> {
     Ok(Listener {
         inner: tokio::net::TcpListener::bind(addr).await?,
+        accept_retry: DEFAULT_ACCEPT_RETRY,
     })
 }
 
@@ -246,10 +251,20 @@ pub async fn bind(addr: &str) -> std::io::Result<Listener> {
     let vsock_addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_ANY, port);
     Ok(Listener {
         inner: tokio_vsock::VsockListener::bind(vsock_addr)?,
+        accept_retry: DEFAULT_ACCEPT_RETRY,
     })
 }
 
 impl Listener {
+    /// The same listener, waiting `delay` rather than [`DEFAULT_ACCEPT_RETRY`]
+    /// after an accept that failed for want of something this process holds.
+    pub fn with_accept_retry(self, delay: std::time::Duration) -> Self {
+        Self {
+            accept_retry: delay,
+            ..self
+        }
+    }
+
     /// The connections arriving here, for ever. The only way to take one.
     pub fn incoming(self) -> Incoming {
         Incoming {
@@ -292,14 +307,15 @@ impl Listener {
 }
 
 /// How long to wait before accepting again, after an accept that failed for a
-/// reason which will not clear on its own.
+/// reason which will not clear on its own, unless the role says otherwise
+/// ([`Listener::with_accept_retry`], from its `accept-retry-ms` setting).
 ///
 /// A second, which is what axum uses for its own listeners and hyper before it.
 /// The exact value barely matters — anything nonzero turns a spin into a poll —
 /// but the argument for a long one is what these errors ARE: a process out of
 /// descriptors starts accepting again when something else releases one, and
 /// asking ten times a second does not make that happen sooner.
-const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+pub const DEFAULT_ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// One connection, and where it came from.
 ///
@@ -354,7 +370,8 @@ impl Incoming {
                 Poll::Ready(Err(e)) => match after_failed_accept(&e) {
                     AfterAccept::Again => continue,
                     AfterAccept::Wait => {
-                        self.waiting = Some(Box::pin(tokio::time::sleep(ACCEPT_RETRY_DELAY)));
+                        self.waiting =
+                            Some(Box::pin(tokio::time::sleep(self.listener.accept_retry)));
                     }
                 },
                 Poll::Pending => return Poll::Pending,
@@ -367,7 +384,7 @@ impl Incoming {
 enum AfterAccept {
     /// Accept again at once.
     Again,
-    /// Wait [`ACCEPT_RETRY_DELAY`] first.
+    /// Wait the listener's accept retry first ([`DEFAULT_ACCEPT_RETRY`]).
     Wait,
 }
 

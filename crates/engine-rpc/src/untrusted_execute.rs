@@ -33,16 +33,16 @@
 use std::future::Future;
 
 use enclavid_boundary::{Exposed, Open, Untrusted};
-use hatch_client::SessionState;
+use hatch_client::{Decision, SessionState};
 use remoc::codec::Ciborium;
 
 use crate::adapter::Untrusting;
-use crate::bundle::CompiledBundle;
 use crate::execute::{
     CallbackError, CallbackService, CallbackServiceClient, ExecError, ExecutorService, RunOutcome,
     RunReply, RunRequest,
 };
 use crate::padded::Padded;
+use crate::stream::BundleStream;
 
 /// The callback surface as its SERVER sees it: everything the caller pushed in,
 /// wrapped in the scope this implementor declares.
@@ -75,16 +75,18 @@ pub trait CallbackServiceUntrusted {
         hash: Untrusted<[u8; 32], Self::Scope>,
     ) -> impl Future<Output = Result<Exposed<Option<Vec<u8>>, ()>, CallbackError>> + Send;
 
-    /// Seal + persist the post-round session state. See
-    /// [`CallbackService::session_change`].
+    /// Seal + persist the post-round session state and, if the round finished,
+    /// its decision, in one write. See [`CallbackService::session_change`].
     ///
-    /// The frame stays on the inside of the wrapper rather than being opened
+    /// The frames stay on the inside of the wrappers rather than being opened
     /// here, because the two answer different questions: [`Padded`] says the
     /// length told the host nothing, the scope says whose word the CONTENT is.
-    /// Closing one says nothing about the other.
+    /// Closing one says nothing about the other. Each is wrapped on its own,
+    /// because what makes the worker's word acceptable differs between them.
     fn session_change(
         &self,
         state: Untrusted<Padded<SessionState>, Self::Scope>,
+        decision: Untrusted<Padded<Option<Decision>>, Self::Scope>,
     ) -> impl Future<Output = Result<(), CallbackError>> + Send;
 }
 
@@ -140,10 +142,15 @@ pub trait ExecutorServiceUntrusted {
     /// The bundle is wrapped SEPARATELY from the request, because it is the one
     /// value on this hop for which no discharge kind fits and that has to be
     /// written rather than absorbed into a sentence about the round.
+    ///
+    /// It arrives as a header and two stream ends, and the ends travel INSIDE the
+    /// wrapper. Unlike `callbacks` they are not a capability: what arrives on them
+    /// is a value this side acts on — bytes it files and later maps — so not one of
+    /// those bytes is read before the peel.
     fn run_with_bundle(
         &self,
         req: Untrusted<RunRequest, Self::Scope>,
-        bundle: Untrusted<CompiledBundle, Self::Scope>,
+        bundle: Untrusted<BundleStream, Self::Scope>,
         callbacks: CallbackServiceClient<Ciborium>,
     ) -> impl Future<Output = Result<Exposed<RunReply, ()>, ExecError>> + Send;
 }
@@ -168,7 +175,7 @@ where
     fn run_with_bundle(
         &self,
         req: Untrusted<RunRequest, Self::Scope>,
-        bundle: Untrusted<CompiledBundle, Self::Scope>,
+        bundle: Untrusted<BundleStream, Self::Scope>,
         callbacks: CallbackServiceClient<Ciborium>,
     ) -> impl Future<Output = Result<Exposed<RunReply, ()>, ExecError>> + Send {
         (**self).run_with_bundle(req, bundle, callbacks)
@@ -190,8 +197,14 @@ where
             .map(|blob| blob.into_inner().map(crate::execute::ByteBuf::from))
     }
 
-    async fn session_change(&self, state: Padded<SessionState>) -> Result<(), CallbackError> {
-        self.0.session_change(Untrusted::new(state)).await
+    async fn session_change(
+        &self,
+        state: Padded<SessionState>,
+        decision: Padded<Option<Decision>>,
+    ) -> Result<(), CallbackError> {
+        self.0
+            .session_change(Untrusted::new(state), Untrusted::new(decision))
+            .await
     }
 }
 
@@ -214,7 +227,7 @@ where
     async fn run_with_bundle(
         &self,
         req: RunRequest,
-        bundle: CompiledBundle,
+        bundle: BundleStream,
         callbacks: CallbackServiceClient<Ciborium>,
     ) -> Result<RunReply, ExecError> {
         self.0

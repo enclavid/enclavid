@@ -79,15 +79,6 @@ impl SessionBackend for SessionCvmBackend {
         }
     }
 
-    async fn delete(&self, id: &str) -> Result<u64, BridgeError> {
-        Ok(self
-            .client()?
-            .delete(id.to_string())
-            .await
-            .map_err(to_bridge)?
-            .deleted)
-    }
-
     async fn exists(&self, id: &str) -> Result<bool, BridgeError> {
         self.client()?
             .exists(id.to_string())
@@ -95,6 +86,10 @@ impl SessionBackend for SessionCvmBackend {
             .map_err(to_bridge)
     }
 }
+
+/// What a cache `store` request carries besides the sealed blob: the blob name,
+/// CBOR framing and remoc's own request envelope.
+const STORE_REQUEST_HEADROOM: usize = 64 * 1024;
 
 /// `CacheBackend` over the storage-CVM's `CacheService`.
 pub struct CacheCvmBackend {
@@ -116,6 +111,17 @@ impl CacheCvmBackend {
 #[async_trait::async_trait]
 impl CacheBackend for CacheCvmBackend {
     async fn store(&self, blob_name: &str, bytes: Vec<u8>) -> Result<(), BridgeError> {
+        // A request past the item limit is refused by remoc and fails the
+        // channel for good, and the session store shares this connection: the
+        // leg ends and takes every session's reads and writes with it. A blob
+        // that cannot cross is not sent; the cache is best-effort, so the cost is
+        // a recompile.
+        if bytes.len() + STORE_REQUEST_HEADROOM > remoc::rch::DEFAULT_MAX_ITEM_SIZE {
+            return Err(BridgeError::Transport(format!(
+                "storage-cvm: a {}-byte blob does not fit one request; not stored",
+                bytes.len()
+            )));
+        }
         self.client()?
             .store(blob_name.to_string(), storage_rpc::ByteBuf::from(bytes))
             .await
@@ -135,9 +141,11 @@ impl CacheBackend for CacheCvmBackend {
 /// BOTH service clients on the base channel. Mirrors `connect_execution_worker`,
 /// down to the handle it returns: it finishes when the leg is over, which is the
 /// connection ending or either client's channel closing (`engine_rpc::leg_end`).
+/// `leg` is this end of the connection.
 pub async fn connect_storage(
     addr: &str,
     attestor: Arc<dyn enclavid_attestation::Attestor>,
+    leg: storage_rpc::LegSettings,
 ) -> Result<(StorageClients, tokio::task::JoinHandle<()>), LegFailure> {
     let stream = fleet_transport::dial(addr).await.map_err(|e| {
         debug!("connect {addr}: {e}");
@@ -169,7 +177,7 @@ pub async fn connect_storage(
     let (read, write) = tokio::io::split(tls);
 
     let (conn, _tx, mut rx) = remoc::Connect::io::<_, _, StorageClients, StorageClients, Ciborium>(
-        storage_rpc::connection_cfg(),
+        storage_rpc::connection_cfg(&leg),
         read,
         write,
     )

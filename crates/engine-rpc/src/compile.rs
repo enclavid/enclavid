@@ -13,23 +13,45 @@ use engine_types::composition::PluginInstance;
 
 use crate::CompiledBundle;
 
-/// A compile failure — fusion / codegen / section-parse — or an RPC transport
-/// failure absorbed from [`remoc::rtc::CallError`]. Both surface to the
-/// orchestrator, which maps them to a 500 (a pure function of pinned config, no
-/// applicant input).
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompileError(pub String);
+/// Why a compile produced no bundle: one of two answers, and nothing besides.
+///
+/// No text crosses. What failed on the far side — a wac or Cranelift message
+/// naming the consumer's interfaces, a parser's complaint about a section — stays
+/// on the producer's own debug log; what api receives is the one distinction it
+/// answers differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompileError {
+    /// The composition is one this build does not compile: its embedded
+    /// catalogs, summed over the policy and every plugin, are past
+    /// `MAX_EMBEDDED_SECTION_BYTES`, one of them breaks the catalog format, or
+    /// the metadata it compiles to is past
+    /// [`MAX_BUNDLE_META_BYTES`](crate::MAX_BUNDLE_META_BYTES), which no execute
+    /// hop would take. Or compiling it took more memory than the worker gives one
+    /// compile, and the kernel killed it there. Decided from the pinned bytes and
+    /// the deployment's own limits, so the same pins are refused every time on
+    /// it. api answers it as a failing policy: a 422, for whoever chose the pins
+    /// to clear.
+    Refused,
+    /// Anything else: the composition did not fuse or compile, the child died
+    /// other than at its own memory max or overran its deadline, the leg went
+    /// away. Some of these the pins decide and some are ours, and this side does
+    /// not tell them apart, so api answers 500.
+    Failed,
+}
 
 impl std::fmt::Display for CompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "compile failed: {}", self.0)
+        match self {
+            CompileError::Refused => f.write_str("the composition was refused"),
+            CompileError::Failed => f.write_str("the compile failed"),
+        }
     }
 }
 impl std::error::Error for CompileError {}
 
 impl From<remoc::rtc::CallError> for CompileError {
-    fn from(err: remoc::rtc::CallError) -> Self {
-        CompileError(format!("compile rpc failed: {err}"))
+    fn from(_: remoc::rtc::CallError) -> Self {
+        CompileError::Failed
     }
 }
 
@@ -87,7 +109,7 @@ mod tests {
     impl CompilerService for MockCompiler {
         async fn compile(&self, req: CompileRequest) -> Result<CompiledBundle, CompileError> {
             if req.policy == b"boom" {
-                return Err(CompileError("intentional".into()));
+                return Err(CompileError::Refused);
             }
             let mut bundle = sample_bundle();
             // Echo (policy_len, plugin_count) so the caller can assert the args
@@ -170,7 +192,7 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("expected compile error"),
         };
-        assert!(format!("{err}").contains("intentional"), "got {err}");
+        assert_eq!(err, CompileError::Refused);
 
         drop(client);
         server_task.abort();

@@ -22,20 +22,39 @@ use object_store::local::LocalFileSystem;
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 
-use enclavid_storage::{CacheBlobs, Caller, SessionStore, StorageSvc, now_unix};
+use enclavid_storage::{
+    CacheBlobs, Caller, DEFAULT_BUSY_TIMEOUT, SessionStore, StorageSvc, now_unix,
+};
 use fleet_transport::LegFailure;
+use fleet_transport::launch::{LaunchError, Settings};
 use safe_logger::{debug, info, reason, safe, warn};
-use storage_rpc::{CacheServiceServerShared, SessionStoreServiceServerShared, StorageClients};
+use storage_rpc::{
+    CacheServiceServerShared, LegSettings, SessionStoreServiceServerShared, StorageClients,
+};
 
-/// How many expired sessions the sweeper purges per tick (bounds one sweep pass).
-const SWEEP_BATCH: usize = 1024;
-/// What the compiled-bundle cache may hold, when the command line does not
-/// say: a bundle is about 8 MiB, and the volume the cache shares with the
-/// sessions is a few GiB.
+/// How many expired sessions the sweeper purges per tick, unless the host says
+/// otherwise (the `sweep-batch` setting): what bounds one sweep pass.
+const DEFAULT_SWEEP_BATCH: usize = 1024;
+/// What the compiled-bundle cache may hold, unless the host says otherwise (the
+/// `cache-bytes` setting): a bundle is about 8 MiB, and the volume the cache
+/// shares with the sessions is a few GiB.
 const DEFAULT_CACHE_BYTES: u64 = 512 * 1024 * 1024;
-/// Concurrent in-flight calls each service handles.
-const SESSION_CONCURRENCY: usize = 16;
-const CACHE_CONCURRENCY: usize = 8;
+/// How often expired sessions are swept, unless the host says otherwise (the
+/// `sweep-secs` setting). The host's to choose like the clock the sweep reads.
+const DEFAULT_SWEEP_SECS: u64 = 60;
+/// How many calls each service takes off a connection ahead of handling them,
+/// unless the host says otherwise (the `session-request-buffer` and
+/// `cache-request-buffer` settings) — not how many run at once: remoc spawns a
+/// handler for each call it takes.
+const DEFAULT_SESSION_REQUEST_BUFFER: usize = 16;
+const DEFAULT_CACHE_REQUEST_BUFFER: usize = 8;
+
+/// Each service's request buffer, as the boot read them.
+#[derive(Clone, Copy)]
+struct RequestBuffers {
+    session: usize,
+    cache: usize,
+}
 
 #[cfg(not(any(feature = "dev-attestation", feature = "sev-snp")))]
 compile_error!(
@@ -115,12 +134,112 @@ fn fleet_identity() -> (
     )
 }
 
+/// The setting `key` the host gave at launch (see [`fleet_transport::launch`]):
+/// `default` when it gave none, and no boot when it gave one that does not
+/// parse. A value the host wrote and got wrong is not a request for the default.
+fn setting<T: std::str::FromStr>(launch: &mut Settings, key: &'static str, default: T) -> T {
+    match launch.take(key) {
+        None => default,
+        Some(value) => value.parse().unwrap_or_else(|_| {
+            safe_logger::error_and_panic!(
+                "storage-cvm: the setting {} does not parse. Stopping.",
+                safe(
+                    &key,
+                    reason!("a constant naming one of this role's settings")
+                ),
+                reason!("a constant, emitted once at boot before any request exists")
+            )
+        }),
+    }
+}
+
+/// A setting given in whole seconds.
+fn secs(launch: &mut Settings, key: &'static str, default: Duration) -> Duration {
+    Duration::from_secs(setting(launch, key, default.as_secs()))
+}
+
+/// A setting given in milliseconds.
+fn millis(launch: &mut Settings, key: &'static str, default: Duration) -> Duration {
+    let default = u64::try_from(default.as_millis()).unwrap_or(u64::MAX);
+    Duration::from_millis(setting(launch, key, default))
+}
+
+/// The host's launch settings could not be taken as given.
+fn refused(e: LaunchError) -> ! {
+    safe_logger::error_and_panic!(
+        "storage-cvm: {}. Stopping.",
+        e,
+        reason!("a constant, emitted once at boot before any request exists")
+    )
+}
+
 #[tokio::main]
 async fn main() {
     // First, so nothing can speak before the channel exists. Panic locations are
     // on: this binary IS the measured code, and it holds only ciphertext.
     safe_logger::install();
     safe_logger::install_panic(true);
+
+    // The host's settings for this guest, read once and before anything else:
+    // reading them talks to nothing, and the health port below is one of the
+    // listeners they set. Every one of them is about how this node keeps up with
+    // what it holds — what it holds is ciphertext either way.
+    let mut launch = Settings::load("storage").unwrap_or_else(|e| refused(e));
+    let sweep_secs: u64 = setting(&mut launch, "sweep-secs", DEFAULT_SWEEP_SECS);
+    let sweep_batch: usize = setting(&mut launch, "sweep-batch", DEFAULT_SWEEP_BATCH);
+    let cache_bytes: u64 = setting(&mut launch, "cache-bytes", DEFAULT_CACHE_BYTES);
+    let buffers = RequestBuffers {
+        session: setting(
+            &mut launch,
+            "session-request-buffer",
+            DEFAULT_SESSION_REQUEST_BUFFER,
+        ),
+        cache: setting(
+            &mut launch,
+            "cache-request-buffer",
+            DEFAULT_CACHE_REQUEST_BUFFER,
+        ),
+    };
+    let db_busy = secs(&mut launch, "db-busy-secs", DEFAULT_BUSY_TIMEOUT);
+    let leg_default = LegSettings::default();
+    let leg = LegSettings {
+        timeout: secs(&mut launch, "leg-timeout-secs", leg_default.timeout),
+        max_ports: setting(&mut launch, "leg-max-ports", leg_default.max_ports),
+        chunk_bytes: setting(&mut launch, "leg-chunk-bytes", leg_default.chunk_bytes),
+    };
+    let accept_retry = millis(
+        &mut launch,
+        "accept-retry-ms",
+        fleet_transport::DEFAULT_ACCEPT_RETRY,
+    );
+    launch.finish().unwrap_or_else(|e| refused(e));
+    // A sweep every zero seconds would spin the sweeper without a pause, a
+    // batch of zero would sweep nothing, a service with no request buffer
+    // cannot be built, a zero busy timeout fails every statement that meets a
+    // lock, and a zero accept retry spins on a listener that cannot accept.
+    if sweep_secs == 0
+        || sweep_batch == 0
+        || buffers.session == 0
+        || buffers.cache == 0
+        || db_busy.is_zero()
+        || accept_retry.is_zero()
+    {
+        safe_logger::error_and_panic!(
+            "storage-cvm: the sweep period, the sweep batch, both request buffers, the \
+             database busy timeout and the accept retry must be above zero. Stopping.",
+            reason!("a constant naming configuration keys the host itself supplied")
+        );
+    }
+    if let Some(refusal) = leg.refusal() {
+        safe_logger::error_and_panic!(
+            "storage-cvm: {} cannot hold a leg up. Stopping.",
+            safe(
+                &refusal,
+                reason!("a constant naming which of this role's settings")
+            ),
+            reason!("a constant, emitted once at boot before any request exists")
+        );
+    }
 
     // The health port, up before anything that can be slow. The host polls it to
     // learn when this role has finished coming up — which is what lets it bring
@@ -142,7 +261,9 @@ async fn main() {
         // Bound HERE, on this task, and only the answering loop is spawned:
         // binding inside the spawn would turn a failure into one dead task and
         // a guest that serves with no health port. See `health::bind`.
-        let listener = fleet_transport::health::bind(&health_addr).await;
+        let listener = fleet_transport::health::bind(&health_addr)
+            .await
+            .with_accept_retry(accept_retry);
         let health = health.clone();
         tokio::spawn(async move {
             fleet_transport::health::serve(listener, move || health.body()).await
@@ -171,23 +292,16 @@ async fn main() {
             reason!("a constant naming a configuration key the host itself supplied")
         )
     });
-    let sweep_secs: u64 = std::env::var("ENCLAVID_STORAGE_SWEEP_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(60);
-    let cache_bytes: u64 = std::env::var("ENCLAVID_STORAGE_CACHE_BYTES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_CACHE_BYTES);
-
-    let sessions = Arc::new(SessionStore::open(&sessions_dir).unwrap_or_else(|e| {
-        debug!("{e}");
-        safe_logger::error_and_panic!(
-            "storage-cvm: cannot open the session store at {}. Stopping.",
-            safe(&sessions_dir, reason!("on the measured command line")),
-            reason!("a constant; the path is the host's own configuration")
-        )
-    }));
+    let sessions = Arc::new(
+        SessionStore::open(&sessions_dir, db_busy).unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "storage-cvm: cannot open the session store at {}. Stopping.",
+                safe(&sessions_dir, reason!("on the measured command line")),
+                reason!("a constant; the path is the host's own configuration")
+            )
+        }),
+    );
 
     std::fs::create_dir_all(&cache_dir).unwrap_or_else(|e| {
         debug!("{e}");
@@ -221,7 +335,7 @@ async fn main() {
                 tokio::time::sleep(interval).await;
                 let sessions = sessions.clone();
                 match tokio::task::spawn_blocking(move || {
-                    sessions.sweep_once(now_unix(), SWEEP_BATCH)
+                    sessions.sweep_once(now_unix(), sweep_batch)
                 })
                 .await
                 {
@@ -281,26 +395,63 @@ async fn main() {
         });
     }
 
-    let listener = fleet_transport::bind(&listen).await.unwrap_or_else(|e| {
-        debug!("{e}");
-        safe_logger::error_and_panic!(
-            "storage-cvm: cannot bind {}. Stopping.",
-            safe(&listen, reason!("on the measured command line")),
-            reason!("a constant; the address is the host's own configuration")
-        )
-    });
+    let listener = fleet_transport::bind(&listen)
+        .await
+        .unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "storage-cvm: cannot bind {}. Stopping.",
+                safe(&listen, reason!("on the measured command line")),
+                reason!("a constant; the address is the host's own configuration")
+            )
+        })
+        .with_accept_retry(accept_retry);
     info!(
-        "storage-cvm: listening on {}, sessions={}, cache={} (at most {} bytes), sweep={}s",
+        "storage-cvm: listening on {}, sessions={}, cache={} (at most {} bytes), \
+         sweep={}s of up to {}, request buffers={}/{}, db_busy={:?}, leg_timeout={:?}, \
+         leg_max_ports={}, leg_chunk={} bytes, accept_retry={:?}",
         safe(&listen, reason!("on the measured command line")),
         safe(&sessions_dir, reason!("on the measured command line")),
         safe(&cache_dir, reason!("on the measured command line")),
         safe(
             &cache_bytes,
-            reason!("off the measured command line, or this build's default when absent")
+            reason!("the host's own setting, or this build's default")
         ),
         safe(
             &sweep_secs,
-            reason!("off the measured command line, or this build's default when absent")
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &sweep_batch,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &buffers.session,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &buffers.cache,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &db_busy,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &leg.timeout,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &leg.max_ports,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &leg.chunk_bytes,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &accept_retry,
+            reason!("the host's own setting, or this build's default")
         ),
         reason!("a constant, emitted once at boot")
     );
@@ -337,7 +488,7 @@ async fn main() {
         // next accept is not held up behind this one's whole session.
         async move {
             tokio::spawn(async move {
-                if let Err(e) = serve_conn(stream, ratls, svc).await {
+                if let Err(e) = serve_conn(stream, ratls, svc, buffers, leg).await {
                     warn!(
                         "storage-cvm: connection from {} ended ({})",
                         safe(&peer, reason!("an address the host routed itself")),
@@ -354,12 +505,15 @@ async fn main() {
     .await
 }
 
-/// RA-TLS-accept one api connection, frame it with remoc, and serve BOTH services
-/// (their clients sent to the api on the base channel).
+/// RA-TLS-accept one api connection, frame it with remoc on this end's `leg`
+/// settings, and serve BOTH services (their clients sent to the api on the base
+/// channel).
 async fn serve_conn(
     stream: fleet_transport::Stream,
     ratls: tokio_rustls::TlsAcceptor,
     svc: Arc<StorageSvc>,
+    buffers: RequestBuffers,
+    leg: LegSettings,
 ) -> Result<(), LegFailure> {
     let tls = ratls.accept(stream).await.map_err(|e| {
         debug!("ra-tls accept: {e}");
@@ -386,7 +540,7 @@ async fn serve_conn(
 
     let (read, write) = tokio::io::split(tls);
     let (conn, mut tx, _rx) = remoc::Connect::io::<_, _, StorageClients, StorageClients, Ciborium>(
-        storage_rpc::connection_cfg(),
+        storage_rpc::connection_cfg(&leg),
         read,
         write,
     )
@@ -402,9 +556,8 @@ async fn serve_conn(
     // rather than one node per peer.
     let caller = Arc::new(Caller::new(svc, measurement));
     let (session_server, session) =
-        SessionStoreServiceServerShared::<_, Ciborium>::new(caller.clone(), SESSION_CONCURRENCY);
-    let (cache_server, cache) =
-        CacheServiceServerShared::<_, Ciborium>::new(caller, CACHE_CONCURRENCY);
+        SessionStoreServiceServerShared::<_, Ciborium>::new(caller.clone(), buffers.session);
+    let (cache_server, cache) = CacheServiceServerShared::<_, Ciborium>::new(caller, buffers.cache);
     tx.send(StorageClients { session, cache })
         .await
         .map_err(|e| {

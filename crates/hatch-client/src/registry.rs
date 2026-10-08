@@ -21,26 +21,31 @@ use crate::error::BridgeError;
 use crate::transport::HatchClient;
 use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
-/// How long the hatch has to answer a pull.
+/// How long the hatch has to answer a pull, unless the host says otherwise
+/// (api's `pull-deadline-secs` setting).
 ///
 /// The most generous of the four, because it is the only one whose work is
 /// unbounded from here: the hatch fetches megabytes from a registry this
 /// process cannot see, cannot reach and does not choose. Still bounded, and the
 /// reason is where it runs — `cold_compile` is on the applicant round path, so
 /// a pull that never returns parks a round holding that round's captures, with
-/// nothing beneath it to notice.
-const PULL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+/// nothing beneath it to notice. The host's to tune, as the hatch's own pace
+/// already is: a larger artifact takes longer to pull, and a longer deadline
+/// holds a waiting round's captures longer.
+pub const DEFAULT_PULL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Client for the hatch `/oci/pull` endpoint over the shared hatch
 /// connection.
 #[derive(Clone)]
 pub struct RegistryClient {
     hatch: HatchClient,
+    deadline: std::time::Duration,
 }
 
 impl RegistryClient {
-    pub fn new(hatch: HatchClient) -> Self {
-        Self { hatch }
+    /// A client whose every pull the hatch has `deadline` to answer.
+    pub fn new(hatch: HatchClient, deadline: std::time::Duration) -> Self {
+        Self { hatch, deadline }
     }
 
     /// Pull an OCI artifact (policy bundle or plugin component) by its
@@ -63,7 +68,7 @@ impl RegistryClient {
         // forwarding the consumer's bearer to the registry is the
         // producer's call, not ours to self-approve; we just release it.
         let bytes = hatch_protocol::encode(&req.into_inner())?;
-        let resp = self.hatch.post("/oci/pull", bytes, PULL_DEADLINE).await?;
+        let resp = self.hatch.post("/oci/pull", bytes, self.deadline).await?;
 
         match resp.status {
             StatusCode::OK => {

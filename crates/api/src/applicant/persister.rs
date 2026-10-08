@@ -7,10 +7,13 @@
 //! RPC. The worker reports nothing about consent — see
 //! [`SessionPersister::consented`].
 //!
-//! Atomicity is the whole point: state mutation (consent accepted) and
-//! the disclosure entry that records what was shared land in one host
-//! transaction. A failed write fails the round under version-CAS; the
-//! next attempt re-runs from the last persisted state.
+//! Atomicity is the whole point: state mutation (consent accepted), the
+//! disclosure entry that records what was shared, the round's captures and,
+//! on the round that finishes, the session's completion and its decision, all
+//! land in one host transaction. A failed write fails the round under
+//! version-CAS; the next attempt re-runs from the last persisted state. A
+//! reply lost after the write — the child killed, a leg gone — loses nothing
+//! the session needs: what the round reached is read back, not re-run.
 //!
 //! Why encryption lives here, not in the executor: state and metadata are
 //! already sealed transparently inside hatch-client (`SetState` /
@@ -39,19 +42,18 @@ use std::sync::{Arc, Weak};
 
 use tokio::sync::Mutex;
 
-use axum::http::StatusCode;
 use secrecy::{ExposeSecret, SecretBox};
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
 use enclavid_crypto::seal_to_recipient;
 use hatch_client::{
-    AppendDisclosure, DisplayField, Event, Prompt, SessionMetadata, SessionState, SessionStatus,
-    SessionStore, SetMedia, SetMetadata, SetState, WriteField, boundary, encode_padded,
+    AppendDisclosure, Decision, DisplayField, Event, Prompt, SessionMetadata, SessionState,
+    SessionStatus, SessionStore, SetMedia, SetMetadata, SetState, WriteField, boundary,
+    encode_padded,
 };
-// Owned wire types — the keyless execution-worker sends these back over the
-// `CallbackService`; `CallbackError` replaces the old wasmtime `RunError` as the
-// persist error, keeping api free of the runtime.
-use engine_rpc::{CallbackError, RunStatus};
+// `CallbackError` replaces the old wasmtime `RunError` as the persist error,
+// keeping api free of the runtime.
+use engine_rpc::CallbackError;
 
 use crate::disclosure_commit;
 use crate::dto::{self, DisclosureEnvelope, ENVELOPE_VERSION};
@@ -112,6 +114,12 @@ pub(super) struct SessionPersister {
     /// key. The gate-set extend below is the part that is NOT idempotent, and it
     /// dedups for that reason.
     captures: Weak<Vec<([u8; 32], Vec<u8>)>>,
+    /// WEAK handle to the prompt the state this round committed awaits, set
+    /// once the write lands — what the round's own request answers with when
+    /// the worker's reply never comes. Weak on the terms `consented` is: a
+    /// consent screen carries the applicant's own fields, and the round's frame
+    /// is what owns them.
+    awaiting: Weak<Mutex<Option<Prompt>>>,
     /// Process-lifetime shuffle key, used to permute `DisplayField`
     /// order inside disclosure envelopes before they're sealed to
     /// the consumer. Lives here (and not in engine) because the
@@ -136,6 +144,11 @@ pub(super) type RoundConsent = Arc<Mutex<Option<Vec<DisplayField>>>>;
 /// The round's sole strong hold on the frames it captured, held by the round's
 /// own frame exactly as [`RoundConsent`] is.
 pub(super) type RoundCaptures = Arc<Vec<([u8; 32], Vec<u8>)>>;
+
+/// The round's sole strong hold on the prompt its own write left the session
+/// awaiting, held by the round's own frame exactly as [`RoundConsent`] is.
+/// Empty until that write lands.
+pub(super) type RoundAwaiting = Arc<Mutex<Option<Prompt>>>;
 
 /// The frames this round captured, content-addressed on THIS side.
 ///
@@ -188,6 +201,7 @@ impl SessionPersister {
         metadata: SessionMetadata,
         consent: &RoundConsent,
         captures: &RoundCaptures,
+        awaiting: &RoundAwaiting,
         shuffle_key: Arc<ShuffleKey>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -199,6 +213,7 @@ impl SessionPersister {
             metadata: Mutex::new(metadata),
             consented: Arc::downgrade(consent),
             captures: Arc::downgrade(captures),
+            awaiting: Arc::downgrade(awaiting),
             shuffle_key,
         })
     }
@@ -206,19 +221,46 @@ impl SessionPersister {
     /// api side of the keyless executor's `CallbackService::session_change`:
     /// seal + persist one round's post-`state`, together with the consent and the
     /// captures THIS side recorded for the round, in ONE atomic host transaction.
-    /// Only `state` arrives over rpc; the other two are `Weak` upgrades of values
-    /// the round's own frame owns, because the worker has nothing to say about
-    /// either. The seal key stays orchestrator-side. A failed write fails the
-    /// round under version-CAS; the next attempt re-runs from the last persisted
-    /// state.
+    /// `state` and `decision` arrive over rpc; the other two are `Weak` upgrades
+    /// of values the round's own frame owns, because the worker has nothing to
+    /// say about either. The seal key stays orchestrator-side. A failed write
+    /// fails the round under version-CAS; the next attempt re-runs from the last
+    /// persisted state.
+    ///
+    /// A `decision` is the round finishing, and it is committed in the same
+    /// write: status `Completed` and the verdict (TEE-trusted, AEAD-bound in
+    /// metadata). So it happens at most once a session — once it is written,
+    /// `/connect` answers from the metadata and `/input` refuses, no round
+    /// reaches here again (`shared::standing`), and a second call in the round
+    /// that wrote it is refused.
+    ///
+    /// A reply lost after the write is recovered by reading, not re-running.
+    /// The round's own request answers from what the write committed — the
+    /// decision kept here, or the prompt the committed state awaits, kept in
+    /// the round's [`RoundAwaiting`] — and a reload finds the same in the store.
+    ///
+    /// Failed / Expired are intentionally never written. Engine errors stay as
+    /// Running (operationally retried); TTL is enforced inside the storage-CVM
+    /// off the per-session deadline (no host-visible status byte).
     ///
     /// What the round consented to is NOT a parameter: see
     /// [`SessionPersister::consented`].
-    pub(super) async fn persist(&self, state: SessionState) -> Result<(), CallbackError> {
+    pub(super) async fn persist(
+        &self,
+        state: SessionState,
+        decision: Option<Decision>,
+    ) -> Result<(), CallbackError> {
         // Serialize the whole critical section on the metadata guard, taken
         // before the acceptance is claimed: a second callback in the same round
         // waits here rather than interleaving with this one.
         let mut metadata = self.metadata.lock().await;
+
+        // A session completes once. A further commit in the round that completed
+        // it would rewrite the decision, which the consumer may already have read.
+        if metadata.status == SessionStatus::Completed {
+            safe_logger::debug!("persist: the session completed earlier this round");
+            return Err(CallbackError);
+        }
 
         // What gets sealed is what THIS side derived before the round. The
         // worker is the one process here that executes adversary-supplied code,
@@ -265,6 +307,14 @@ impl SessionPersister {
         // and a later successful one in the same round left the chain short of
         // its own count, and the consumer's pull 500s on that mismatch forever.
         let mut working = metadata.clone();
+        // A round that finished commits its decision in this same write as its
+        // state: a reply lost after it — the child killed, a leg gone — leaves a
+        // session that reads as completed, not one whose state has finished while
+        // its status still says running.
+        if let Some(decision) = decision {
+            working.status = SessionStatus::Completed;
+            working.decision = Some(decision);
+        }
         let commit = {
             let set_state = self.build_state_op(&state, token_bytes)?;
             // Seal every captured frame this round into the media store,
@@ -296,11 +346,12 @@ impl SessionPersister {
                 Vec::with_capacity(2 + appends.len() + media_ops.len());
             ops.push(&set_state);
 
-            // Rewrite metadata when this commit emitted a disclosure (extends the
-            // disclosure-hash chain) OR captured media (appends to the gate set).
-            // Plain rounds stay SetState-only, keeping the payload small.
+            // Rewrite metadata when this commit finished the session (status and
+            // decision), emitted a disclosure (extends the disclosure-hash chain)
+            // OR captured media (appends to the gate set). Plain rounds stay
+            // SetState-only, keeping the payload small.
             let set_metadata_holder;
-            if !appends.is_empty() || !media_ops.is_empty() {
+            if decision.is_some() || !appends.is_empty() || !media_ops.is_empty() {
                 set_metadata_holder = self.build_metadata_op(&mut working, &appends);
                 ops.push(&set_metadata_holder);
             }
@@ -312,9 +363,13 @@ impl SessionPersister {
         commit?;
 
         // The host has it. Now, and only now, spend the acceptance and publish
-        // the bookkeeping that describes what was written.
+        // the bookkeeping that describes what was written — and where it left
+        // the session, which a round whose frame is gone has no one to tell.
         *metadata = working;
         *consented = None;
+        if let Some(awaiting) = self.awaiting.upgrade() {
+            *awaiting.lock().await = state.current_prompt;
+        }
         Ok(())
     }
 
@@ -440,10 +495,11 @@ impl SessionPersister {
 
     /// Advance the disclosure bookkeeping (count + running hash chain) and
     /// build the `SetMetadata` op carrying the updated metadata (disclosure
-    /// chain AND the captured-media gate set, which the caller appended before
-    /// this). AuthN is closed inside hatch-client by the AEAD-seal under
-    /// `tee_seal_key`. Called when this commit emitted disclosures or captured
-    /// media; `appends` may be empty on a media-only round.
+    /// chain AND the captured-media gate set and, on the round that finishes,
+    /// the status and decision, which the caller set before this). AuthN is
+    /// closed inside hatch-client by the AEAD-seal under `tee_seal_key`. Called
+    /// when this commit finished the session, emitted disclosures or captured
+    /// media; `appends` may be empty.
     fn build_metadata_op<'m>(
         &self,
         metadata: &'m mut SessionMetadata,
@@ -475,7 +531,8 @@ impl SessionPersister {
                      also carried are NOT host-visible — a media write is keyed by an HKDF of \
                      tee_seal_key so the raw hash never leaves the TEE — but they grow this blob \
                      by 32 B per frame, a count the host reads off the SetMedia ops in this same \
-                     batch anyway"
+                     batch anyway. On the round that finishes it carries the status and the \
+                     decision's one byte: a size delta fixed per transition, whichever decision"
                 )),
         )
     }
@@ -535,75 +592,11 @@ impl SessionPersister {
         Ok(())
     }
 
-    /// Atomically transition the session to Completed after the runner
-    /// returns `RunStatus::Completed`. Updates `metadata.status` and keeps
-    /// the verdict in `metadata.decision` (TEE-trusted, AEAD-bound), and
-    /// `BlobField::Status` (host-facing
-    /// TTL hint) in one Write RPC. No-op while the run is still
-    /// awaiting input — the session continues into the next /input round.
-    ///
-    /// Runs at most once a session: once `Completed` is written, `/connect`
-    /// answers from the metadata and `/input` refuses, so no round reaches
-    /// here again (`shared::standing`). A response lost after the write is
-    /// recovered by reading, not re-running — a reload finds the session
-    /// completed and `/connect` hands back the decision kept here.
-    ///
-    /// Failed / Expired transitions are intentionally NOT handled
-    /// here. Engine errors stay as Running (operationally retried);
-    /// TTL is enforced inside the storage-CVM off the per-session
-    /// deadline (no host-visible status byte).
-    pub(super) async fn finalize(&self, run_status: &RunStatus) -> Result<(), StatusCode> {
-        let RunStatus::Completed(decision) = run_status else {
-            return Ok(());
-        };
-        let mut metadata = self.metadata.lock().await;
-        metadata.status = SessionStatus::Completed;
-        metadata.decision = Some(*decision);
-        let expected = self.current_version.load(Ordering::SeqCst);
-        let set_metadata = SetMetadata(
-            boundary::outbound::to_untrusted(&*metadata)
-                .vouch_unchecked::<AuthZ, _>(reason!("sealed under tee_seal_key — only the attested CVM opens"))
-                .vouch_unchecked::<Covert, _>(reason!(
-                    "finalize sets status and the decision's one byte; size delta deterministic per transition"
-                )),
-        );
-        let (session_id, expected_version) =
-            boundary::outbound::to_untrusted((self.session_id.as_str(), Some(expected)))
-                .vouch_unchecked::<AuthN, _>(reason!(
-                    "session id + version: public host identifiers, not TEE secrets"
-                ))
-                .vouch_unchecked::<AuthZ, _>(reason!("fed back to the host that owns them"))
-                .vouch_unchecked::<Covert, _>(reason!(
-                    "fixed-shape UUID + host's own counter — no policy bandwidth"
-                ))
-                .distribute();
-        let fields: [&dyn WriteField; 1] = [&set_metadata];
-        let ops = boundary::outbound::to_untrusted(&fields[..])
-            .vouch_unchecked::<AuthN, _>(reason!(
-                "recipe set; each field's content is sealed in its own build_op"
-            ))
-            .vouch_unchecked::<AuthZ, _>(reason!("each op writes its own session key"))
-            .vouch_unchecked::<Covert, _>(reason!("1 op (sealed metadata), fixed by finalize"));
-        let new_version = self
-            .session_store
-            .write(session_id, expected_version, ops)
-            .await
-            .map_err(|e| {
-                safe_logger::debug!(
-                    "persister.finalize: session_store.write failed for {} \
-                     (expected version {expected}): {e}",
-                    self.session_id,
-                );
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
-            .trust_unchecked::<AuthN, _>(reason!("version is a CAS token only — no leak path"))
-            .trust_unchecked::<AuthZ, _>(reason!("version is not an ownership signal"))
-            .trust_unchecked::<Replay, _>(reason!(
-                "staleness surfaces as VersionMismatch; handler returns 500, client retries"
-            ))
-            .into_inner();
-        self.current_version.store(new_version, Ordering::SeqCst);
-        Ok(())
+    /// The decision this round committed, if it reached one: what the session's
+    /// own write holds, read back for the round's reply to be checked against,
+    /// or answered in its place when the reply never came.
+    pub(super) async fn decided(&self) -> Option<Decision> {
+        self.metadata.lock().await.decision
     }
 }
 

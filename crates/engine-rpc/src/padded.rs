@@ -122,7 +122,7 @@ use std::marker::PhantomData;
 use serde::de::{self, Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
 
-use hatch_client::SessionState;
+use hatch_client::{Decision, SessionState};
 
 use crate::execute::{CallbackError, ExecError, RunStatus};
 
@@ -287,10 +287,18 @@ impl Framed for RunStatus {
     const FRAME: usize = <SessionState as Framed>::FRAME;
 }
 
+impl Framed for Option<Decision> {
+    /// The decision a finishing round commits, and its absence on every other
+    /// round, at one length. The encoding is a variant NAME — eighteen bytes at
+    /// the longest — and its absence one byte, so unframed it would say both
+    /// whether the round finished and how.
+    const FRAME: usize = 32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hatch_client::{Decision, Localized, Prompt, Translation};
+    use hatch_client::{Localized, Prompt, Translation};
 
     #[test]
     fn round_trips_through_the_frame() {
@@ -339,6 +347,28 @@ mod tests {
         ciborium::into_writer(&awaiting, &mut awaiting_wire).expect("encodes");
         ciborium::into_writer(&completed, &mut completed_wire).expect("encodes");
         assert_eq!(awaiting_wire.len(), completed_wire.len());
+    }
+
+    /// Every value a round commits beside its state — no decision, or any of the
+    /// four — crosses at one length, and each comes back as itself.
+    #[test]
+    fn every_decision_and_none_cross_at_one_length() {
+        let all = [
+            None,
+            Some(Decision::Approved),
+            Some(Decision::Rejected),
+            Some(Decision::RejectedRetryable),
+            Some(Decision::Review),
+        ];
+        let mut lengths = Vec::new();
+        for decision in all {
+            let framed = Padded::seal(&decision).expect("fits the frame");
+            assert_eq!(framed.open().expect("decodes"), decision);
+            let mut wire = Vec::new();
+            ciborium::into_writer(&framed, &mut wire).expect("encodes");
+            lengths.push(wire.len());
+        }
+        assert!(lengths.iter().all(|&l| l == lengths[0]), "{lengths:?}");
     }
 
     /// The invariant the two frames exist to keep: a prompt big enough to need

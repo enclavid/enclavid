@@ -11,8 +11,9 @@ repository.workspace = true
 # attested Rust CVMs; the `hatch` keeps its plain HTTP+CBOR protocol. A SEPARATE
 # crate from engine-rpc on purpose — the storage-CVM is a different fleet role
 # with its own measured image, and must not link the engine compile/execute
-# contract. Deps are hatch-protocol (the wire DTOs, reused verbatim) + remoc +
-# serde only — NOT hatch-client, so there is no dependency cycle.
+# contract. Deps are hatch-protocol (the wire DTOs, reused verbatim), remoc,
+# serde and the fleet-stream leaf only — NOT hatch-client, so there is no
+# dependency cycle.
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +28,9 @@ remoc = { version = "0.18", default-features = false, features = [
 hatch-protocol = { path = "../hatch-protocol" }
 # The cache's blobs cross as CBOR byte strings rather than integer arrays.
 serde_bytes = "0.11"
+# The connection config every fleet leg is brought up with, shared with the
+# engine's legs.
+fleet-stream = { path = "../fleet-stream" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread"] }

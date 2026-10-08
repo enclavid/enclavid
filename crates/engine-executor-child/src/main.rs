@@ -79,7 +79,7 @@ impl ChildService for Child {
         // Rebuild the composition-wide embedded registry from the bundle's
         // per-component catalogs (ref → data), same as the old in-worker prime.
         let mut builder = EmbeddedRegistry::builder();
-        for c in &bundle.catalogs {
+        for c in bundle.catalogs.iter() {
             builder.add_component(c.hash, c.decls.clone());
         }
         let embedded = Arc::new(builder.build());
@@ -102,6 +102,7 @@ impl ChildService for Child {
         session_state: SessionState,
         event: Event,
         props: Vec<(String, engine_rpc::Prop)>,
+        fuel: u64,
         callbacks: ChildCallbacksClient<Ciborium>,
     ) -> Result<engine_rpc::RunStatus, ExecError> {
         let primed = self.primed.get().ok_or_else(|| {
@@ -128,6 +129,7 @@ impl ChildService for Child {
         let inputs = RunInputs {
             listener,
             media_store,
+            fuel,
         };
 
         let (status, _next_state) = self
@@ -168,12 +170,16 @@ impl std::error::Error for CallbackFailed {}
 /// The round that traps would otherwise carry exactly the channel `Padded` closes
 /// on the round that succeeds, and a policy can trap deliberately and retry.
 ///
-/// Almost everything reaching here IS the policy: a trap, out of fuel, out of
-/// memory, a host function refusing a key no catalog declared. The exception is a
-/// failed callback to api — the seal-key holder's own leg went away, and saying
-/// "the policy failed" about that would be attributing our outage to the consumer.
+/// Almost everything reaching here IS the policy: a trap, out of fuel, a host
+/// function refusing a key no catalog declared. The exception is a failed
+/// callback to api — the seal-key holder's own leg went away, and saying "the
+/// policy failed" about that would be attributing our outage to the consumer.
 /// It is recovered as a VALUE by `downcast`, never by reading a rendering, because
 /// by the time it arrives here it has unwound as an ordinary `wasmtime::Error`.
+///
+/// A round past its memory never gets here: the kernel kills the process at
+/// its max, and the supervisor reads from the kernel's record whether the
+/// round itself was the cause.
 ///
 /// The rendering goes to `debug!`, and in the SHIPPED image that is nowhere: the
 /// child is built without the `debug` feature, so the site compiles out, and its
@@ -190,8 +196,9 @@ fn round_failure(e: RunError) -> ExecError {
     ExecError::Policy
 }
 
-/// `SessionListener` that forwards each round's `on_session_change` to the
-/// supervisor's `ChildCallbacks::session_change` (→ api). Converts the BORROWED
+/// `SessionListener` that forwards each round's `on_session_change` — the state
+/// and, if the round finished, its decision — to the supervisor's
+/// `ChildCallbacks::session_change` (→ api). Converts the BORROWED
 /// `SessionChange` to owned wire form synchronously (before the await), so the
 /// future owns everything it sends.
 struct RelayListener {
@@ -204,12 +211,16 @@ impl SessionListener for RelayListener {
         change: SessionChange<'a>,
     ) -> Pin<Box<dyn Future<Output = RunResult<()>> + Send + 'a>> {
         let state = change.state.clone();
+        let decision = change.decision;
         let callbacks = self.callbacks.clone();
         Box::pin(async move {
-            callbacks.session_change(state).await.map_err(|e| {
-                debug!("session_change callback: {e}");
-                RunError::new(CallbackFailed)
-            })
+            callbacks
+                .session_change(state, decision)
+                .await
+                .map_err(|e| {
+                    debug!("session_change callback: {e}");
+                    RunError::new(CallbackFailed)
+                })
         })
     }
 }

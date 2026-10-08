@@ -54,6 +54,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// `settings` says how long the hatch has to answer a pull and a KBS leg.
     pub fn new(
         session_store: Arc<SessionStore>,
         hatch: HatchClient,
@@ -61,13 +62,14 @@ impl AppState {
         executor: Arc<Executor>,
         shuffle_key: Arc<ShuffleKey>,
         cache_store: CacheStore,
+        settings: &crate::settings::Settings,
     ) -> Self {
         // Registry + KBS share the hatch connection (cheap Clone: hyper Client is
         // Arc-backed) — these are EXTERNAL egress and stay on the hatch
         // regardless of the storage backend. The L2 `cache_store` is built by the
         // caller (`main`) on the selected cache backend (hatch object_store or the
         // storage-CVM) and sealed under an HKDF subkey of `tee_seal_key`.
-        let kbs = KbsClient::new(hatch.clone());
+        let kbs = KbsClient::new(hatch.clone(), settings.kbs_deadline);
         // Both boundaries are remote clients connected by the caller (`init`):
         // `compiler` → the compile-worker, `executor` → the execution-worker.
         Self {
@@ -75,7 +77,7 @@ impl AppState {
             executor,
             cache_store,
             session_store,
-            registry: RegistryClient::new(hatch),
+            registry: RegistryClient::new(hatch, settings.pull_deadline),
             kbs,
             shuffle_key,
         }
@@ -85,7 +87,8 @@ impl AppState {
     /// COMPILE and EXECUTE boundaries are remote clients dialed here — the
     /// workers are separate processes/CVMs started by infrastructure (like the
     /// hatch), NOT spawned by api. api itself links neither Cranelift nor the
-    /// wasmtime runtime. The two addresses are `crate::fleet::legs`'.
+    /// wasmtime runtime. The two addresses are `crate::fleet::legs`'; how they
+    /// are dialed and held up is `settings`'.
     #[allow(clippy::too_many_arguments)]
     pub async fn init(
         transport_out: &str,
@@ -96,10 +99,12 @@ impl AppState {
         shuffle_key: Arc<ShuffleKey>,
         attestor: Arc<dyn enclavid_attestation::Attestor>,
         api_health: Arc<crate::health::ApiHealth>,
+        settings: &crate::settings::Settings,
     ) -> Self {
         let hatch = HatchClient::new(transport_out)
             .await
             .expect("failed to connect to hatch");
+        let tuning = settings.leg;
         let compile_leg = crate::fleet::Leg::new();
         {
             let leg = compile_leg.clone();
@@ -108,10 +113,11 @@ impl AppState {
             crate::fleet::supervise(
                 crate::health::Peer::CompileWorker,
                 compile_addr.clone(),
+                settings.leg_dial,
                 api_health.clone(),
                 move || {
                     let (addr, attestor) = (addr.clone(), attestor.clone());
-                    async move { connect_compile_worker(&addr, attestor).await }
+                    async move { connect_compile_worker(&addr, attestor, tuning).await }
                 },
                 move |client| leg.set(client),
             )
@@ -123,13 +129,17 @@ impl AppState {
             let leg = execute_leg.clone();
             let addr = exec_addr.clone();
             let attestor = attestor.clone();
+            let callback_buffer = settings.callback_request_buffer;
             crate::fleet::supervise(
                 crate::health::Peer::ExecutionWorker,
                 exec_addr.clone(),
+                settings.leg_dial,
                 api_health,
                 move || {
                     let (addr, attestor) = (addr.clone(), attestor.clone());
-                    async move { connect_execution_worker(&addr, attestor).await }
+                    async move {
+                        connect_execution_worker(&addr, attestor, tuning, callback_buffer).await
+                    }
                 },
                 move |client| leg.set(client),
             )
@@ -143,6 +153,7 @@ impl AppState {
             executor,
             shuffle_key,
             cache_store,
+            settings,
         )
     }
 }

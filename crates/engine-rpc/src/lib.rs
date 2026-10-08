@@ -27,14 +27,16 @@
 //!     Cranelift-compiles into a `CompiledBundle`.
 //!   * `execute` → `ExecutorService` + `CallbackService` + the execute wire
 //!     types (`RunRequest`, `RunReply`, `RunStatus`, `Prop`, `ExecError`,
-//!     `CallbackError`); pulls `hatch-client`.
+//!     `CallbackError`) + `BundleStream` — the bundle a `run_with_bundle`
+//!     carries, streamed beside the request; pulls `hatch-client` and
+//!     `fleet-stream`.
 //!
 //! The compiled artifact ([`CompiledBundle`] / [`CatalogEntry`]) is SHARED: it
-//! is the compile OUTPUT and the execute priming INPUT (and the api L2 cache
-//! entry), so it lives ungated in `bundle` and both features name it. Both
-//! features pull `engine-types` — the compile side for `PluginInstance`, the
-//! execute side for the composition catalogs it rebuilds the embedded registry
-//! from. Neither pulls Cranelift.
+//! is the compile OUTPUT, the api L2 cache entry, and what the execute door
+//! installs on a worker after a cache miss, so it lives ungated in `bundle` and
+//! both features name it. Both features pull `engine-types` — the compile side
+//! for `PluginInstance`, the execute side for the composition catalogs it
+//! rebuilds the embedded registry from. Neither pulls Cranelift.
 //!
 //! `remoc` (the rtc substrate) and `enclavid-boundary` (the concern vocabulary
 //! the doors are written in) are pulled by either feature. A compile-worker
@@ -50,13 +52,14 @@
 //! What a hop may carry, and the words that say so, arrive together.
 //!
 //! Adversarial-peer hardening lives in the connection [`remoc::Cfg`] (pin
-//! `chmux::Cfg` limits: `max_ports`, `max_data_size` — RAISE from the 512 KiB
-//! default for the compile boundary, cwasm bundles are ~10–15 MiB —
-//! `max_received_ports`, `connection_timeout`) plus per-service handler
-//! validation (hash-bound media loads, bounded session-change).
+//! `chmux::Cfg` limits: `max_ports`, `max_received_ports`, `chunk_size`,
+//! `connection_timeout`; `max_data_size` is raised too, but it is not a size
+//! limit — the per-item cap is remoc's) plus per-service handler validation
+//! (hash-bound media loads, bounded session-change, bundle streams held to
+//! their header).
 
-// The compiled artifact — shared by BOTH boundaries (compile output, execute
-// prime input, api L2 cache entry).
+// The compiled artifact — shared by BOTH boundaries (compile output, api L2
+// cache entry, what the execute door streams to a worker on a miss).
 #[cfg(any(feature = "compile", feature = "execute"))]
 mod bundle;
 #[cfg(any(feature = "compile", feature = "execute"))]
@@ -106,9 +109,19 @@ mod leg;
 #[cfg(feature = "compile")]
 pub use leg::{CompilerLeg, connect_compiler, serve_compiler};
 #[cfg(feature = "execute")]
-pub use leg::{ExecutorLeg, connect_executor, serve_executor};
+pub use leg::{DEFAULT_CALLBACK_REQUEST_BUFFER, ExecutorLeg, connect_executor, serve_executor};
 #[cfg(any(feature = "compile", feature = "execute"))]
-pub use leg::{LegError, leg_end};
+pub use leg::{DEFAULT_REQUEST_BUFFER, LegError, leg_end};
+
+// The bundle a `run_with_bundle` carries, streamed beside the request so the
+// request stays one bounded item. Built only by the door; read only through
+// `BundleStream::receive`.
+#[cfg(feature = "execute")]
+mod stream;
+#[cfg(feature = "execute")]
+pub use stream::{
+    BundleError, BundleStream, DEFAULT_BUNDLE_STREAM_DEADLINE, DEFAULT_BUNDLE_STREAM_IDLE,
+};
 
 // Constant-size framing for the execute leg's policy-controlled lengths.
 #[cfg(feature = "execute")]
@@ -129,52 +142,7 @@ pub use untrusted_execute::{CallbackServiceUntrusted, ExecutorServiceUntrusted};
 #[cfg(any(feature = "compile", feature = "execute"))]
 mod adapter;
 
-/// The remoc connection config both fleet peers build from. Raises
-/// `max_data_size` from chmux's 512 KiB default: compiled `cwasm` bundles
-/// run ~10–15 MiB, so the default would reject a compile reply outright.
-/// Centralized so orchestrator + workers agree on the limits — part of the
-/// adversarial-peer hardening surface (see the crate doc). `remoc::Cfg` is a
-/// re-export of `chmux::Cfg`, so the field is flat.
+/// The remoc connection config both ends of an engine leg build from, and what a
+/// role sets of it — shared with the storage tier's legs (see `fleet_stream`).
 #[cfg(any(feature = "compile", feature = "execute"))]
-// `remoc::Cfg` is `#[non_exhaustive]`, so it can't be built as a struct literal
-// from here — mutate-after-default is the only option.
-#[allow(clippy::field_reassign_with_default)]
-pub fn connection_cfg() -> remoc::Cfg {
-    let mut cfg = remoc::Cfg::default();
-    cfg.max_data_size = 64 * 1024 * 1024;
-    // chmux's default `flush_delay` is 20 ms — it waits that long to COALESCE
-    // sends (a throughput optimization) before flushing. For our latency-bound
-    // request/response RPC that adds ~20 ms per direction ≈ ~40 ms per round-trip
-    // (measured), on EVERY call across the fleet. Flush immediately instead — our
-    // messages are already whole RPC frames, so there is nothing to coalesce.
-    cfg.flush_delay = std::time::Duration::ZERO;
-    // Pin the peer-driven port limits below chmux's defaults (16384 / 128): the
-    // worker end of this hop is untrusted once its wasm/Cranelift is escaped, and a
-    // compromised peer could otherwise open thousands of ports to exhaust memory.
-    // Our RPC uses only a handful of concurrent channels, so 256 is ample headroom.
-    // How long a leg may go silent before it is treated as gone. chmux pings at
-    // HALF this whenever there is nothing else to send, and gives up when nothing
-    // has arrived within it — so this one number sets both the ping rate and the
-    // patience, and there is no separate knob for them (`chmux::Cfg` has no
-    // `ping_interval`; see mux.rs, where `send_task` takes
-    // `remote_cfg.connection_timeout / 2` and `recv_task` takes
-    // `local_cfg.connection_timeout`).
-    //
-    // 20 s rather than the 60 s default: it is what bounds the window in which
-    // api is alive, listening, and failing every request that touches a dead
-    // peer. Lowering it only became cheap once a dead leg stopped ending the
-    // process — a false positive now costs a leg flap and a redial, where before
-    // it would have powered the guest off.
-    //
-    // Not lower than that, because the margin is exactly one ping: the ratio is
-    // fixed at 2, so a ping that arrives late by more than its own interval times
-    // the link out. Bytes are not lost on this hop — vsock through a splicing
-    // relay is a reliable stream — so "late" means the sender's runtime did not
-    // schedule the send task for 10 s, which the roles that hand their work to
-    // child processes should never do. 10 s would halve that margin for a
-    // detection window nobody has asked for.
-    cfg.connection_timeout = Some(std::time::Duration::from_secs(20));
-    cfg.max_ports = 256;
-    cfg.max_received_ports = 64;
-    cfg
-}
+pub use fleet_stream::{LegSettings, connection_cfg};

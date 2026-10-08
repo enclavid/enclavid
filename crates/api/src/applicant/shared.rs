@@ -16,13 +16,14 @@ use enclavid_boundary::Asserted;
 use enclavid_boundary::{AuthN, AuthZ, Replay, reason};
 use engine_types::composition::PluginInstance;
 use hatch_client::{
-    Client, DisplayField, Event, Key, Metadata, PluginPin, Prompt, SessionMetadata, SessionState,
-    SessionStatus, State as StateField, outbound_session_id,
+    Client, Decision, DisplayField, Event, Key, Metadata, PluginPin, Prompt, SessionMetadata,
+    SessionState, SessionStatus, State as StateField, outbound_session_id,
 };
 // The run wire mirrors: props api builds + ships, the outcome + error it gets
 // back from the execution-worker.
 use engine_rpc::{
-    CompatToken, CompiledBundle, CompositionKey, ExecError, Prop, RunOutcome, RunRequest,
+    CompatToken, CompileError, CompiledBundle, CompositionKey, ExecError, Prop, RunOutcome,
+    RunRequest, RunStatus,
 };
 
 use crate::cwasm_cache;
@@ -36,7 +37,7 @@ use crate::state::AppState;
 use super::auth::CallerKey;
 use super::callbacks::CallbackServer;
 use super::media_store::HatchMediaStore;
-use super::persister::{self, SessionPersister};
+use super::persister::{self, RoundAwaiting, SessionPersister};
 use super::views::{SessionProgress, progress_from, prompt_view};
 
 /// Build the static `props` list the policy reads via
@@ -93,8 +94,9 @@ pub(super) fn standing(
     locale: &Locale,
 ) -> Result<Option<SessionProgress>, StatusCode> {
     if metadata.status == SessionStatus::Completed {
-        // `finalize` writes the two together; a completed session without its
-        // decision is not a state this code produces.
+        // The round that finishes commits the two together, with its state; a
+        // completed session without its decision is not a state this code
+        // produces.
         let decision = metadata.decision.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
         return Ok(Some(SessionProgress::Completed {
             decision: decision.into(),
@@ -169,11 +171,13 @@ impl SessionRunCtx {
     }
 
     /// Drive one reducer round: feed `event` against `session_state`
-    /// into the policy, persist the returned state (done by the
-    /// persister via the engine's `on_session_change` hook), finalize
-    /// the session on a terminal decision, and project the result into
-    /// the JSON view returned to the applicant. Consumes self —
-    /// handlers call it once per request.
+    /// into the policy, persist the returned state — and, on a terminal
+    /// decision, the session's completion with it, in the same write (done
+    /// by the persister via the engine's `on_session_change` hook) — check
+    /// the reply against what was committed, or answer from what was
+    /// committed when no reply came, and project the result into the JSON
+    /// view returned to the applicant. Consumes self — handlers call it once
+    /// per request.
     pub(super) async fn run(
         self,
         session_state: SessionState,
@@ -213,6 +217,9 @@ impl SessionRunCtx {
         // The applicant's own frames, content-addressed here. Sent to the worker
         // in the event below and never taken back from it.
         let captures = persister::round_captures(&event);
+        // Where this round's write leaves the session, once it lands. Held here
+        // on the terms the consent is.
+        let awaiting = RoundAwaiting::default();
         let persister = SessionPersister::for_round(
             state.session_store.clone(),
             session_id.clone(),
@@ -224,6 +231,7 @@ impl SessionRunCtx {
             metadata.clone(),
             &consent,
             &captures,
+            &awaiting,
             state.shuffle_key.clone(),
         );
         // Bound, like `token_owner` above and for the same reason: it is the sole
@@ -250,91 +258,136 @@ impl SessionRunCtx {
         let session_state = crate::executor::outbound_round_state(&session_state)
             .map_err(|e| classify_run_error(&session_id, &e))?;
 
-        // Phase 1: cache-only run. The worker serves the composition from its own
-        // L1, or reports a miss — no bundle crosses on this call.
-        //
-        // `map` carries the scope through: the concerns were answered about the
-        // state, and assembling the request around it addresses none of them and
-        // reopens none, so the receipt the door demands is the one the mint wrote.
-        let req = session_state.clone().map(|session_state| RunRequest {
-            composition_key: composition_key.clone(),
-            props: props.clone(),
-            session_state,
-            event: event.clone(),
-        });
-        // The reply is the worker's word as much as anything it pushes back, so it
-        // arrives under the same scope and has to be judged before it is used.
-        let status = match state
-            .executor
-            .run(req, callbacks.clone())
-            .await
-            .map_err(|e| classify_run_error(&session_id, &e))?
-            // CONTAINED, and the reason has to cover BOTH arms — an earlier version
-            // spoke only about the miss, while the hit arm carried a whole
-            // policy-authored prompt through the same peel. A cache miss and a
-            // cache hit differ in whether the worker's L1 happened to hold the
-            // composition, which is no reason for two different judgements.
-            .trust_unchecked::<Asserted, _>(reason!(
-                "contained: a miss names only a slot inside the composition namespace \
-                 api itself computed, so a fabricated token costs a recompile and \
-                 never yields another composition's code; a hit carries a prompt that \
-                 is shown to the applicant, its sole auditor. The one thing api seals \
-                 from it is the session's terminal status, and finalize reads only \
-                 the discriminant — a fixed enum, one bit. The round's DISCLOSURE \
-                 comes from api's own copy, never from this"
-            ))
-            .into_inner()
-        {
-            RunOutcome::Ran(status) => status
-                .open()
-                .map_err(|e| classify_run_error(&session_id, &e.into()))?,
-            RunOutcome::CacheMiss { compat_token } => {
-                // L1 miss: resolve the bundle OURSELVES, keyed by the
-                // `composition_key` WE computed — never one echoed by the worker —
-                // which is what closes the L2 cache-poisoning vector. A resolution
-                // failure (e.g. 410 GONE) is a pure function of the pinned config,
-                // surfaced to the consumer verbatim. Phase 2: re-drive WITH the
-                // bundle via `run_with_bundle`, which always runs (no second miss).
-                let bundle = resolve_bundle(
-                    &state,
-                    &composition_key,
-                    &compat_token,
-                    &session_id,
-                    &metadata,
-                )
+        let reply = async {
+            // Phase 1: cache-only run. The worker serves the composition from its
+            // own L1, or reports a miss — no bundle crosses on this call.
+            //
+            // `map` carries the scope through: the concerns were answered about
+            // the state, and assembling the request around it addresses none of
+            // them and reopens none, so the receipt the door demands is the one
+            // the mint wrote.
+            let req = session_state.clone().map(|session_state| RunRequest {
+                composition_key: composition_key.clone(),
+                props: props.clone(),
+                session_state,
+                event: event.clone(),
+            });
+            // The reply is the worker's word as much as anything it pushes back,
+            // so it arrives under the same scope and has to be judged before it
+            // is used.
+            let status = match state
+                .executor
+                .run(req, callbacks.clone())
                 .await
-                .map_err(ApiError::Status)?;
-                let req = session_state.map(|session_state| RunRequest {
-                    composition_key,
-                    props,
-                    session_state,
-                    event,
-                });
-                state
-                    .executor
-                    .run_with_bundle(req, bundle, callbacks)
-                    .await
-                    .map_err(|e| classify_run_error(&session_id, &e))?
-                    .trust_unchecked::<Asserted, _>(reason!(
-                        "contained: shown to the applicant, who is the sole auditor \
-                         of what they see. The one thing api seals from it is the \
-                         session's terminal status, and finalize reads only the \
-                         discriminant — a fixed enum, one bit. The round's DISCLOSURE \
-                         comes from api's own copy, never from this"
-                    ))
-                    .into_inner()
+                .map_err(|e| classify_run_error(&session_id, &e))?
+                // CONTAINED, and the reason has to cover BOTH arms — an earlier
+                // version spoke only about the miss, while the hit arm carried a
+                // whole policy-authored prompt through the same peel. A cache miss
+                // and a cache hit differ in whether the worker's L1 happened to
+                // hold the composition, which is no reason for two different
+                // judgements.
+                .trust_unchecked::<Asserted, _>(reason!(
+                    "contained: a miss names only a slot inside the composition namespace \
+                     api itself computed, so a fabricated token costs a recompile and \
+                     never yields another composition's code; a hit carries a prompt that \
+                     is shown to the applicant, its sole auditor, or a decision api only \
+                     compares with the one the round committed. The round's DISCLOSURE \
+                     comes from api's own copy, never from this"
+                ))
+                .into_inner()
+            {
+                RunOutcome::Ran(status) => status
+                    .open()
+                    .map_err(|e| classify_run_error(&session_id, &e.into()))?,
+                RunOutcome::CacheMiss { compat_token } => {
+                    // L1 miss: resolve the bundle OURSELVES, keyed by the
+                    // `composition_key` WE computed — never one echoed by the
+                    // worker — which is what closes the L2 cache-poisoning vector.
+                    // A resolution failure (e.g. 410 GONE) is a pure function of
+                    // the pinned config, surfaced to the consumer verbatim. Phase
+                    // 2: re-drive WITH the bundle via `run_with_bundle`, which
+                    // always runs (no second miss).
+                    let bundle = resolve_bundle(
+                        &state,
+                        &composition_key,
+                        &compat_token,
+                        &session_id,
+                        &metadata,
+                    )
+                    .await?;
+                    let req = session_state.map(|session_state| RunRequest {
+                        composition_key,
+                        props,
+                        session_state,
+                        event,
+                    });
+                    state
+                        .executor
+                        .run_with_bundle(req, bundle, callbacks)
+                        .await
+                        .map_err(|e| classify_run_error(&session_id, &e))?
+                        .trust_unchecked::<Asserted, _>(reason!(
+                            "contained: a prompt is shown to the applicant, who is the \
+                             sole auditor of what they see, and a decision api only \
+                             compares with the one the round committed. The round's \
+                             DISCLOSURE comes from api's own copy, never from this"
+                        ))
+                        .into_inner()
+                }
+            };
+            Ok::<_, ApiError>(status)
+        }
+        .await;
+
+        let status = match reply {
+            // The decision, if the round reached one, was committed with its
+            // state in the one write `persist` made. The reply has to say the
+            // same, or the worker contradicted itself and neither word answers
+            // the applicant.
+            Ok(status) => {
+                if !agrees(&status, persister.decided().await) {
+                    safe_logger::debug!(
+                        "session_run_ctx: the reply for {session_id} contradicts what its \
+                         round committed"
+                    );
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+                }
+                status
+            }
+            // A failure, but the round's write may have landed first — the child
+            // killed after its commit, a leg gone before its reply. If it did,
+            // the session moved on all the same, and the applicant is answered
+            // with where it now stands, which is what a reload would show them:
+            // not an error inviting them to send this round's input again, to a
+            // prompt it was never for. If nothing was written, the error stands.
+            Err(e) => {
+                committed(persister.decided().await, awaiting.lock().await.take()).ok_or(e)?
             }
         };
-        // No-op while the run is still awaiting input; flips status to
-        // Completed atomically (metadata + host-plaintext Status) when
-        // the run terminated.
-        persister.finalize(&status).await?;
         Ok(progress_from(status, &locale))
     }
 }
 
-/// Map a worker's [`ExecError`] to an HTTP-facing answer — a two-way branch over a
-/// two-value enum.
+/// Whether a round's reply says what the round committed: a finished round
+/// committed exactly the decision it reports, and any other round none.
+fn agrees(status: &RunStatus, committed: Option<Decision>) -> bool {
+    match status {
+        RunStatus::Completed(decision) => committed == Some(*decision),
+        RunStatus::AwaitingInput(_) => committed.is_none(),
+    }
+}
+
+/// What the round's own write committed, as its reply would have said it: the
+/// decision on the round that finished, the prompt the committed state awaits
+/// on any other. `None` when no write landed.
+fn committed(decided: Option<Decision>, awaiting: Option<Prompt>) -> Option<RunStatus> {
+    decided
+        .map(RunStatus::Completed)
+        .or_else(|| awaiting.map(RunStatus::AwaitingInput))
+}
+
+/// Map a worker's [`ExecError`] to an HTTP-facing answer — a fixed answer per
+/// value of a fixed enum.
 ///
 /// It used to be a SUBSTRING SEARCH. The error was a `String` built with
 /// `format!("{e:#}")` over the trap chain; this function looked for
@@ -351,7 +404,8 @@ impl SessionRunCtx {
 /// what this side is willing to attribute. WHAT the policy did is authored by the
 /// consumer's own wasm, so a field carrying it would be the policy choosing bytes
 /// on a wire; WHICH ref it failed to declare is a string wasm picked and could be
-/// a function of the applicant's own data.
+/// a function of the applicant's own data. A 503 says nothing ran, so the same
+/// request may be sent again.
 ///
 /// The consumer, who could act on a diagnosis, deliberately gets none of this
 /// here: a failure reason routed to them is an applicant-derived value reaching
@@ -371,6 +425,36 @@ fn classify_run_error(session_id: &str, e: &ExecError) -> ApiError {
             }),
         ),
         ExecError::Unknown => ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR),
+        // Nothing ran and nothing changed: the worker had no room for the round.
+        // The one answer that means "the same request, later".
+        ExecError::Busy => ApiError::Status(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+/// Map the compile hop's [`CompileError`] to an HTTP-facing answer — a fixed
+/// answer per value of a fixed enum, as [`classify_run_error`] does for a round.
+///
+/// A refusal is the composition's and permanent: the compiler decided it from
+/// the pinned bytes alone, so the answer is the 4xx a failing policy gets, with a
+/// fixed body. Anything else is a 500: what failed may be the pins' or ours, and
+/// this side cannot tell which.
+fn classify_compile_error(session_id: &str, policy_ref: &str, e: CompileError) -> ApiError {
+    safe_logger::debug!(
+        "lookup_policy: compile failed for {session_id} (policy_ref {policy_ref}): {e}"
+    );
+    match e {
+        // A fixed body. Nothing in it varies, so nothing in it is a channel.
+        CompileError::Refused => ApiError::with_body(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({
+                "error": "policy_refused",
+                "hint": "this session's verification policy, with the plugins the session \
+                         pins, was refused by the compiler. Nothing the applicant did caused \
+                         it, and retrying will not clear it; the policy, or the plugins \
+                         pinned when the session was created, have to change.",
+            }),
+        ),
+        CompileError::Failed => ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -586,16 +670,17 @@ fn session_composition_key(
 /// bundle; L2 miss → cold-compile (OCI pull + compile-worker), store to L2
 /// (best-effort), return. This is the ONE place a compile is now triggered — the
 /// orchestrator holds no in-memory component cache, so it recomputes from L2 (or
-/// compiles) each time the worker's L1 misses. Coalescing of concurrent misses
-/// happens on the WORKER side (its L1 `try_get_with`); a cross-worker race just
-/// re-reads L2 or double-compiles (idempotent write), acceptable and rare.
+/// compiles) each time the worker's L1 misses. Concurrent misses are not
+/// coalesced: each round resolves and streams its own bundle, the worker stages
+/// each one and runs every round on the first it commits; a cross-worker race
+/// just re-reads L2 or double-compiles (idempotent write), acceptable and rare.
 pub(super) async fn resolve_bundle(
     state: &AppState,
     composition_key: &CompositionKey,
     compat_token: &CompatToken,
     session_id: &str,
     metadata: &SessionMetadata,
-) -> Result<CompiledBundle, StatusCode> {
+) -> Result<CompiledBundle, ApiError> {
     if let Some(bundle) =
         cwasm_cache::try_load(&state.cache_store, composition_key, compat_token).await
     {
@@ -616,16 +701,16 @@ pub(super) async fn resolve_bundle(
 /// Runs only on an L2 miss — [`resolve_bundle`] calls this, then stores the
 /// result to L2. The bundle then goes to the worker on `run_with_bundle`.
 ///
-/// Errors map to HTTP-ish statuses (surfaced as a run failure once the retry
-/// with a bundle fails, which `classify_run_error` maps):
+/// Errors are the round's answer, returned as they are:
 ///   * 410 Gone — registry pull / decrypt failed (artifact removed / malformed)
-///   * 5xx — composition / infra problems
+///   * 422 — the compiler refused the composition; the same pins always are
+///   * 500 — anything else in the compile, or an infra problem
 async fn cold_compile(
     state: &AppState,
     session_id: &str,
     metadata: &SessionMetadata,
     client: &Client,
-) -> Result<CompiledBundle, StatusCode> {
+) -> Result<CompiledBundle, ApiError> {
     // Look up the bearer for the policy registry by hostname. Same
     // lookup applies per plugin below. Missing entry collapses to an
     // empty slice ⇒ anonymous pull (host attaches no Authorization
@@ -696,19 +781,13 @@ async fn cold_compile(
     // Hand the pulled bytes to the COMPILE boundary: the compile-worker fuses +
     // compiles + parses sections into a `CompiledBundle` (cwasm + i18n/icons
     // import manifest + per-component catalogs, composition order) over rpc.
-    // `PolicyCache::get_or_compute` persists the bundle to L2 and reconstructs
-    // the L1 `PolicyEntry` from it.
+    // [`resolve_bundle`] stores what comes back in L2; the execution-worker
+    // files it in its own L1 when `run_with_bundle` streams it there.
     state
         .compiler
         .compile(artifact.wasm_bytes, plugin_instances)
         .await
-        .map_err(|e| {
-            safe_logger::debug!(
-                "lookup_policy: compile failed for {session_id} (policy_ref {}): {e}",
-                metadata.policy_ref,
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+        .map_err(|e| classify_compile_error(session_id, &metadata.policy_ref, e))
 }
 
 /// Content-address of a fused composition: each artifact (policy + ORDERED
@@ -809,6 +888,58 @@ fn hash_artifact(h: &mut Sha256, artifact_ref: &str, key: Option<&Key>, download
 mod tests {
     use super::*;
     use hatch_client::{MediaSpec, PromptDisclosure};
+
+    /// A worker with no room is the one failure that says "the same request,
+    /// later" — an empty 503, nothing for a policy to have chosen.
+    #[test]
+    fn a_busy_worker_is_a_503() {
+        assert!(matches!(
+            classify_run_error("ses_test", &ExecError::Busy),
+            ApiError::Status(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+    }
+
+    /// A refused composition is its pins' to fix — the fixed 422 a failing
+    /// policy gets; any other compile failure stays a 500.
+    #[test]
+    fn a_refused_composition_is_a_422() {
+        assert!(matches!(
+            classify_compile_error("ses_test", "r/p@sha256:00", CompileError::Refused),
+            ApiError::StatusWithBody(StatusCode::UNPROCESSABLE_ENTITY, _)
+        ));
+        assert!(matches!(
+            classify_compile_error("ses_test", "r/p@sha256:00", CompileError::Failed),
+            ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR)
+        ));
+    }
+
+    /// A reply answers the applicant only when it says what the round's own
+    /// write committed: the same decision, or none on a round still waiting.
+    #[test]
+    fn a_reply_must_say_what_the_round_committed() {
+        let finished = RunStatus::Completed(Decision::Approved);
+        let waiting = RunStatus::AwaitingInput(Prompt::Media(MediaSpec::default()));
+        assert!(agrees(&finished, Some(Decision::Approved)));
+        assert!(!agrees(&finished, Some(Decision::Rejected)));
+        assert!(!agrees(&finished, None));
+        assert!(agrees(&waiting, None));
+        assert!(!agrees(&waiting, Some(Decision::Approved)));
+    }
+
+    /// A round whose reply never came answers with what its write committed,
+    /// and with nothing — the error stands — when no write landed.
+    #[test]
+    fn a_lost_reply_is_answered_from_the_write() {
+        assert!(matches!(
+            committed(Some(Decision::Rejected), None),
+            Some(RunStatus::Completed(Decision::Rejected))
+        ));
+        assert!(matches!(
+            committed(None, Some(Prompt::Media(MediaSpec::default()))),
+            Some(RunStatus::AwaitingInput(Prompt::Media(_)))
+        ));
+        assert!(committed(None, None).is_none());
+    }
 
     fn consent_prompt(key: &str) -> Prompt {
         Prompt::ConsentDisclosure(PromptDisclosure {

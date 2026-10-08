@@ -49,8 +49,8 @@ pub fn to_untrusted<T>(value: T) -> ToUntrusted<T> {
 }
 
 /// Mint the session id as a fully-vouched outbound value — the record address
-/// the store indexes by. Used by the lone-id store calls (`read` / `delete` /
-/// `exists`); `write` bundles its id into the `(id, version)` tuple instead.
+/// the store indexes by. Used by the lone-id store calls (`read` / `exists`);
+/// `write` bundles its id into the `(id, version)` tuple instead.
 /// NOT a generic "anything goes" mint — it is specific to the session id so the
 /// audited reason lives in one place (grep `outbound_session_id(`).
 ///

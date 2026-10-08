@@ -119,6 +119,8 @@ impl Executor {
     /// Post-miss attempt: hand the worker the `bundle` we resolved under
     /// `req.composition_key`; it files it in L1 under that key and runs. Always runs
     /// (a bundle is in hand), so this returns the round's `RunStatus` directly.
+    /// The bundle streams beside the request (`engine_rpc::BundleStream`), written
+    /// by the door in this process while the call is awaited.
     pub async fn run_with_bundle<C>(
         &self,
         req: Exposed<RunRequest, ()>,
@@ -137,10 +139,14 @@ impl Executor {
 /// [`Executor`] client. Mirrors `connect_compile_worker`: the worker is
 /// infra-started, not spawned by api; the transport is a direct TCP dial today,
 /// swapped for the host vsock-relay rendezvous + RA-TLS under Plan-A. The worker
-/// sends us its service client on the base channel once connected.
+/// sends us its service client on the base channel once connected. `leg` is this
+/// end of the connection, and `callback_buffer` how many of a round's callbacks
+/// may wait for its server.
 pub async fn connect_execution_worker(
     addr: &str,
     attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,
+    leg: engine_rpc::LegSettings,
+    callback_buffer: usize,
 ) -> Result<(std::sync::Arc<ExecutorLeg>, tokio::task::JoinHandle<()>), LegFailure> {
     let stream = fleet_transport::dial(addr).await.map_err(|e| {
         debug!("connect {addr}: {e}");
@@ -175,7 +181,7 @@ pub async fn connect_execution_worker(
     // Everything above this line is WHO — the dial, the pins, what a refusal
     // means. Everything below is WHAT MAY CROSS, and that is engine-rpc's: it
     // brings the hop up and keeps the generated client, which api has no name for.
-    let (leg, driver) = engine_rpc::connect_executor(read, write)
+    let (leg, driver) = engine_rpc::connect_executor(read, write, &leg, callback_buffer)
         .await
         .map_err(|e| {
             debug!("execute leg: {e}");

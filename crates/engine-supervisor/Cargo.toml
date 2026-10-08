@@ -13,9 +13,8 @@ repository.workspace = true
 # process behind an OS address-space boundary. This crate owns the FIDDLY,
 # security-load-bearing bits (socketpair fd hygiene, the deadline that stops a
 # WEDGED child leaking its slot, kill+reap) so they are written + tested ONCE and
-# both workers ride them. A DOMAIN-AGNOSTIC leaf: it depends ONLY on tokio +
-# remoc, NOT on engine-rpc / engine-types, so the orchestrator (api) never links
-# it. The future fork-zygote (warm CoW start) lands HERE → both workers benefit.
+# both workers ride them. A DOMAIN-AGNOSTIC leaf: never engine-rpc or
+# engine-types, so the orchestrator (api) never links it.
 [dependencies]
 # The CHILD half needs only these three: a runtime, the socketpair it adopts on
 # fd 0, and the framing remoc reads it with. `process`/`sync`/`time` are the
@@ -26,10 +25,27 @@ remoc = { version = "0.18", default-features = false, features = [
     "rtc",
     "codec-ciborium",
 ] }
-# For the pre_exec fd handoff: dup2/fcntl to install a caller's fd at a
-# deterministic child fd number with CLOEXEC cleared (the memfd cwasm delivery).
-# Raw libc (not nix) because a pre_exec closure must be async-signal-safe — no
-# allocation, no panics — which the thin syscall wrappers here satisfy.
+# The error types of both halves. A derive, so nothing of it reaches the binary.
+thiserror = "1"
+# The system calls the parent makes, in safe wrappers: the boot checks (the
+# descriptor limit, what is mounted, the guest's memory, an inherited file's
+# length) and everything a child is given between fork and exec — its memory
+# group, score, limits and identity. rustix makes each one a direct system call
+# that allocates nothing for a `&CStr` path, which is what a post-fork closure
+# needs, and its `thread` calls change the calling thread alone, which a forked
+# child's single thread is. Already in every worker image, through wasmtime.
+rustix = { version = "1.1", optional = true, default-features = false, features = [
+    "std",
+    "fs",
+    "mount",
+    "process",
+    "system",
+    "thread",
+] }
+# What rustix does not cover: putting a caller's fd on a fixed child fd number
+# (`dup2` to a number nothing in the child owns yet), and the constants the
+# boot checks compare against. Also the developer's non-Linux arm of the memory
+# reading.
 libc = { version = "0.2", optional = true }
 # The boot-time floors report both outcomes. On a guest stderr is /dev/null and a
 # panic payload never leaves, so a load-bearing check that used either would
@@ -38,10 +54,10 @@ libc = { version = "0.2", optional = true }
 # — a developer's machine is where an undersized RLIMIT_NOFILE turns up first.
 safe-logger = { path = "../safe-logger", optional = true }
 
-# Build the child's egress seccomp BPF (deny socket-family syscalls) in the
-# PARENT; the filter is installed post-fork via a raw seccomp(2) syscall over the
-# pre-built program (async-signal-safe). Pure Rust — no libseccomp C dep. Linux-
-# only: the disposable-child workers run only under the SEV-SNP CVM.
+# Builds the child's syscall filters in the PARENT; they are installed post-fork
+# by `apply_filter` over the pre-built programs — `no_new_privs` and seccomp(2),
+# nothing allocated. Pure Rust — no libseccomp C dep. Linux-only: the
+# disposable-child workers run only under the SEV-SNP CVM.
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = { version = "0.4", optional = true }
 
@@ -54,18 +70,18 @@ default = ["parent"]
 #
 # It is a feature and not merely a module because of ONE dependency:
 # `tokio/process`. The parent needs `tokio::process::Command`; enabling that
-# feature makes tokio's runtime start a signal driver, and the signal driver is
-# why a disposable child — which spawns nothing — calls `socketpair` at startup.
-# That call had to be taken back out of the egress seccomp denylist to keep
-# children alive. Off here, the cause goes away rather than the symptom.
+# feature makes tokio's runtime start a signal driver, which calls `socketpair`
+# at startup — a call the child's syscall allowlist does not have. A child
+# built without the feature starts no such driver.
 #
 # `dep:` on a target-gated optional dependency is inert on the non-matching
 # platform, so naming seccompiler here is correct off Linux too. safe-logger is
 # NOT target-gated — the descriptor floor reports on every platform.
 parent = [
     "dep:libc",
+    "dep:rustix",
     "dep:seccompiler",
-    # `assert_ptrace_hardened` reports both outcomes on the channel, so the
+    # `require_ptrace_scope` reports both outcomes on the channel, so the
     # parent half needs the outward tier. The child half of this crate says
     # nothing at all.
     "dep:safe-logger",
@@ -75,12 +91,14 @@ parent = [
     "tokio/time",
 ]
 
-# Whether this build ENFORCES the ptrace floor — see `assert_ptrace_hardened`.
+# Whether this build ENFORCES the ptrace floor — see `require_ptrace_scope` —
+# and holds its children's memory with the kernel's — see `Cgroups::create`.
 # Off by default because the floor is `scope=3`, which a machine cannot undo
-# without rebooting; a measured guest image builds with it on. Same shape as the
+# without rebooting, and the memory tree needs a cgroup v2 root this process may
+# build under; a measured guest image builds with it on. Same shape as the
 # attestation backend axis: a compile-time choice, never a runtime bypass.
-# Implies `parent`: the floor is asserted by a supervisor at boot, before any
-# child exists, so there is nothing for a child build to enforce.
+# Implies `parent`: both are set up by a supervisor at boot, before any child
+# exists, so there is nothing for a child build to enforce.
 guest-hardening = ["parent"]
 
 # A build with the `debug!` tier: a disposable child is given its supervisor's
@@ -89,3 +107,10 @@ guest-hardening = ["parent"]
 # there a child's stdio stays null. Asked for by a worker's own `debug`; implies
 # `parent`, since only a supervisor spawns.
 debug = ["parent", "safe-logger/debug"]
+
+[dev-dependencies]
+# Paused time: the admission tests assert a wait to its end without sitting it out.
+tokio = { version = "1", features = ["macros", "rt", "time", "sync", "test-util"] }
+# Mapping an inherited cwasm the way the executor child does, in the identity
+# test.
+rustix = { version = "1.1", default-features = false, features = ["mm"] }

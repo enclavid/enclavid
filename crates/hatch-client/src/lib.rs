@@ -13,7 +13,7 @@ mod transport;
 // rest. No protobuf anywhere in the project.
 mod domain;
 
-pub use auth::{AuthClient, AuthVerdict, Principal};
+pub use auth::{AuthClient, AuthVerdict, DEFAULT_AUTHORIZE_DEADLINE, Principal};
 pub use backend::{CacheBackend, SessionBackend};
 pub use cache::CacheStore;
 // The hatch's own outbound mint. The VOCABULARY it is written in is not
@@ -34,15 +34,15 @@ pub use hatch_protocol::PullResponse as RegistryPullResponse;
 pub use hatch_protocol::{AuthorizeRequest, ClientOperation, PullRequest};
 pub use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
 pub use hatch_protocol::{VcekRequest, VcekResponse};
-pub use kbs::KbsClient;
-pub use kds::KdsClient;
-pub use registry::RegistryClient;
+pub use kbs::{DEFAULT_RELAY_DEADLINE, KbsClient};
+pub use kds::{DEFAULT_VCEK_DEADLINE, KdsClient};
+pub use registry::{DEFAULT_PULL_DEADLINE, RegistryClient};
 // Disclosure carried by `Prompt::ConsentDisclosure`. Re-exported under
 // a qualified name so it doesn't collide with the session-store
 // `session::Disclosure` wire type below.
 pub use domain::Disclosure as PromptDisclosure;
 pub use session::{
-    AppendDisclosure, Ctx, Disclosure, Metadata, ReadField, ReadTuple,
+    AppendDisclosure, Ctx, Disclosure, DropApplicantData, Metadata, ReadField, ReadTuple,
     SEALED_STATE_PLAINTEXT_BYTES, SessionStore, SetMedia, SetMetadata, SetPrincipal, SetState,
     SetStatus, State, Status, WriteField, encode_padded,
 };

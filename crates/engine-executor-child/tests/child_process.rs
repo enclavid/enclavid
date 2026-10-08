@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use engine_compiler::Compiler;
-use engine_executor::{Event, SessionState};
+use engine_executor::{DEFAULT_ROUND_FUEL, Event, SessionState};
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 
@@ -57,8 +57,8 @@ fn to_bundle_ref(bundle: &CompiledBundle) -> BundleRef {
     std::fs::write(&path, &bundle.cwasm).expect("write test cwasm file");
     BundleRef {
         cwasm_path: path.to_string_lossy().into_owned(),
-        embedded_imports: bundle.embedded_imports.clone(),
-        catalogs: bundle.catalogs.clone(),
+        embedded_imports: bundle.embedded_imports.clone().into(),
+        catalogs: bundle.catalogs.clone().into(),
     }
 }
 
@@ -77,7 +77,11 @@ impl ChildCallbacks for MockCallbacks {
         self.media_loads.lock().unwrap().push(hash);
         Ok(None)
     }
-    async fn session_change(&self, _state: SessionState) -> Result<(), CallbackError> {
+    async fn session_change(
+        &self,
+        _state: SessionState,
+        _decision: Option<engine_executor::Decision>,
+    ) -> Result<(), CallbackError> {
         *self.session_changes.lock().unwrap() += 1;
         Ok(())
     }
@@ -115,10 +119,13 @@ async fn spawn_child() -> (tokio::process::Child, ChildServiceClient<Ciborium>) 
     let sup_end = tokio::net::UnixStream::from_std(sup_end).unwrap();
     let (read, write) = sup_end.into_split();
     type Cli = ChildServiceClient<Ciborium>;
-    let (conn, _tx, mut rx) =
-        remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(engine_rpc::connection_cfg(), read, write)
-            .await
-            .unwrap();
+    let (conn, _tx, mut rx) = remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(
+        engine_rpc::connection_cfg(&engine_rpc::LegSettings::default()),
+        read,
+        write,
+    )
+    .await
+    .unwrap();
     tokio::spawn(conn);
     let client = rx
         .recv()
@@ -155,7 +162,13 @@ async fn spawned_child_primes_runs_relays_then_exits() {
     // Genesis: the policy renders the passport media prompt and fires the
     // listener once — relayed to the mock as ONE session_change.
     let status = client
-        .run(SessionState::default(), Event::Start, vec![], cb_client)
+        .run(
+            SessionState::default(),
+            Event::Start,
+            vec![],
+            DEFAULT_ROUND_FUEL,
+            cb_client,
+        )
         .await
         .expect("run genesis round");
     assert!(
@@ -177,17 +190,14 @@ async fn spawned_child_primes_runs_relays_then_exits() {
     assert!(status.success(), "child exits cleanly, got {status:?}");
 }
 
-/// The same round, but through `spawn_and_connect` with the hardening the
-/// execution-worker actually uses — so the child runs under the egress
-/// seccomp filter.
+/// The same round, but through `spawn_and_connect` with the filter the
+/// execution-worker's children always run under.
 ///
-/// `spawn_child` above builds the pair and the `Command` by hand, which is
-/// convenient and means it applies NO hardening; every other test in this
-/// module therefore exercises a child the production filter has never
-/// touched. This one closes that: it primes a real cwasm and runs a genesis
-/// round, so wasmtime — `mmap`, `deserialize_file`, the whole engine — comes
-/// up under the filter rather than beside it. A rule too broad shows up here
-/// as a child that never finishes its handshake.
+/// `spawn_child` above builds the pair and the `Command` by hand, with no
+/// filter, so every other test in this module runs a child outside it. This
+/// one primes a real cwasm and runs a genesis round, so wasmtime — `mmap`,
+/// `deserialize_file`, the whole engine — comes up under the filter. A syscall
+/// the filter lacks shows up here as a child that never finishes its round.
 ///
 /// Linux-only: the filter is a no-op elsewhere, so off Linux this would
 /// assert nothing.
@@ -197,16 +207,10 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
     use std::os::fd::{AsFd, AsRawFd};
 
     let bundle = real_bundle();
-    let hardening = engine_supervisor::Hardening {
-        seccomp_egress: true,
-        // What execution-worker passes: wasmtime reserves large VIRTUAL
-        // memory, so a hard RLIMIT_AS would break it.
-        address_space: None,
-    };
     // The cwasm as the execution-worker hands it over: an open file the child
-    // inherits at `FIRST_INHERITED_FD` and re-opens through `/proc/self/fd/N`.
+    // inherits at `INHERITED_FD` and re-opens through `/proc/self/fd/N`.
     // It sits at another number here, as it does in the worker, so installing
-    // it is a real `dup2` in the spawn, under the same hardening.
+    // it is a real `dup2` in the spawn, under the same filter.
     let staged = to_bundle_ref(&bundle);
     let opened = std::fs::File::open(&staged.cwasm_path).expect("open the staged cwasm");
     // A second descriptor for it, held while the first stays open, so it cannot
@@ -216,17 +220,17 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
         .expect("a second descriptor for the cwasm");
     assert_ne!(
         cwasm.as_raw_fd(),
-        engine_supervisor::FIRST_INHERITED_FD,
+        engine_supervisor::INHERITED_FD,
         "the spawn must move the fd, as it does in the worker"
     );
     let inherited = BundleRef {
-        cwasm_path: format!("/proc/self/fd/{}", engine_supervisor::FIRST_INHERITED_FD),
+        cwasm_path: format!("/proc/self/fd/{}", engine_supervisor::INHERITED_FD),
         ..staged
     };
     let (mut child, client) = engine_supervisor::spawn_and_connect::<ChildServiceClient<Ciborium>>(
         &xtask::child_binary("engine-executor-child"),
-        &[cwasm.as_fd()],
-        Some(hardening),
+        Some(cwasm.as_fd()),
+        true,
     )
     .await
     .expect("spawn a hardened engine-executor-child");
@@ -246,7 +250,13 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
     });
 
     let status = client
-        .run(SessionState::default(), Event::Start, vec![], cb_client)
+        .run(
+            SessionState::default(),
+            Event::Start,
+            vec![],
+            DEFAULT_ROUND_FUEL,
+            cb_client,
+        )
         .await
         .expect("a hardened child must still run a round");
     assert!(
@@ -469,7 +479,13 @@ async fn measure_per_round_cost() {
         });
         let t = Instant::now();
         client
-            .run(SessionState::default(), Event::Start, vec![], cb_client)
+            .run(
+                SessionState::default(),
+                Event::Start,
+                vec![],
+                DEFAULT_ROUND_FUEL,
+                cb_client,
+            )
             .await
             .expect("run");
         rn.push(t.elapsed());

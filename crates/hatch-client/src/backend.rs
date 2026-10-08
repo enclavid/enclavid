@@ -34,10 +34,6 @@ pub trait SessionBackend: Send + Sync {
         deadline_unix_secs: Option<u64>,
     ) -> Result<u64, BridgeError>;
 
-    /// Delete the STATE field + purge media (the `/reset` path). Returns the
-    /// state-field delete count.
-    async fn delete(&self, id: &str) -> Result<u64, BridgeError>;
-
     async fn exists(&self, id: &str) -> Result<bool, BridgeError>;
 }
 

@@ -19,6 +19,7 @@ members = [
     "crates/embedded",
     "crates/kbs-client",
     "crates/engine-rpc",
+    "crates/fleet-stream",
     "crates/fleet-transport",
     "crates/gateway",
     "crates/safe-logger",

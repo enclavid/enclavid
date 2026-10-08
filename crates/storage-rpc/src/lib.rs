@@ -25,7 +25,7 @@
 use remoc::codec::Ciborium;
 use serde::{Deserialize, Serialize};
 
-use hatch_protocol::{DeleteResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse};
+use hatch_protocol::{ReadRequest, ReadResponse, WriteRequest, WriteResponse};
 
 /// What [`CacheService`] carries its blobs in, named here so neither end needs
 /// `serde_bytes` of its own.
@@ -90,19 +90,14 @@ pub trait SessionStoreService {
     /// Atomic CAS write. `req.expected_version`: `None` = must-not-exist
     /// (create), `Some(v)` = current version must equal `v`; otherwise
     /// [`SessionError::VersionMismatch`]. `deadline_unix_secs` refreshes the
-    /// session's TTL deadline in the same transaction.
+    /// session's TTL deadline in the same transaction. A `/reset` is a write
+    /// too (`Op::Reset`), so it is version-checked like any other.
     async fn write(
         &self,
         id: String,
         req: WriteRequest,
         deadline_unix_secs: Option<u64>,
     ) -> Result<WriteResponse, SessionError>;
-
-    /// Drop the session STATE field + purge all media (the `/reset` path).
-    /// Leaves metadata/version so the session still `exists` and can be
-    /// re-claimed with a fresh applicant key. Returns the state-field delete
-    /// count.
-    async fn delete(&self, id: String) -> Result<DeleteResponse, SessionError>;
 
     /// Existence probe (version present).
     async fn exists(&self, id: String) -> Result<bool, SessionError>;
@@ -135,40 +130,7 @@ pub struct StorageClients {
     pub cache: CacheServiceClient<Ciborium>,
 }
 
-/// The remoc connection config both storage peers build from — same limits as
-/// `engine-rpc::connection_cfg` (media blobs + cwasm bundles up to 64 MiB ride
-/// this channel; immediate flush for latency; pinned peer-driven port limits for
-/// adversarial-peer hardening). `remoc::Cfg` is a re-export of `chmux::Cfg`, so
-/// the fields are flat and (being `#[non_exhaustive]`) must be mutated after
-/// `default()`.
-#[allow(clippy::field_reassign_with_default)]
-pub fn connection_cfg() -> remoc::Cfg {
-    // How long a leg may go silent before it is treated as gone. chmux pings at
-    // HALF this whenever there is nothing else to send, and gives up when nothing
-    // has arrived within it — so this one number sets both the ping rate and the
-    // patience, and there is no separate knob for them (`chmux::Cfg` has no
-    // `ping_interval`; see mux.rs, where `send_task` takes
-    // `remote_cfg.connection_timeout / 2` and `recv_task` takes
-    // `local_cfg.connection_timeout`).
-    //
-    // 20 s rather than the 60 s default: it is what bounds the window in which
-    // api is alive, listening, and failing every request that touches a dead
-    // peer. Lowering it only became cheap once a dead leg stopped ending the
-    // process — a false positive now costs a leg flap and a redial, where before
-    // it would have powered the guest off.
-    //
-    // Not lower than that, because the margin is exactly one ping: the ratio is
-    // fixed at 2, so a ping that arrives late by more than its own interval times
-    // the link out. Bytes are not lost on this hop — vsock through a splicing
-    // relay is a reliable stream — so "late" means the sender's runtime did not
-    // schedule the send task for 10 s, which the roles that hand their work to
-    // child processes should never do. 10 s would halve that margin for a
-    // detection window nobody has asked for.
-    let mut cfg = remoc::Cfg::default();
-    cfg.connection_timeout = Some(std::time::Duration::from_secs(20));
-    cfg.max_data_size = 64 * 1024 * 1024;
-    cfg.flush_delay = std::time::Duration::ZERO;
-    cfg.max_ports = 256;
-    cfg.max_received_ports = 64;
-    cfg
-}
+/// The remoc connection config both storage peers build from, and what a role
+/// sets of it — the one every fleet leg is brought up with (see `fleet_stream`).
+/// Media blobs and cwasm bundles up to 64 MiB ride this channel.
+pub use fleet_stream::{LegSettings, connection_cfg};

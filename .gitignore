@@ -5,6 +5,8 @@ target
 CLAUDE.md
 docs/*
 .claude
+.agents
+skills-lock.json
 
 # Local dev env (carries TEE_key — random per dev box, never commit).
 .env

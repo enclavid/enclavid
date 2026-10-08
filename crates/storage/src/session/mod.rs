@@ -25,12 +25,20 @@ mod db_blobs;
 mod db_meta;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
-use hatch_protocol::{DeleteResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse};
+use hatch_protocol::{ReadRequest, ReadResponse, WriteRequest, WriteResponse};
 use storage_rpc::SessionError;
 
 use db_blobs::DbBlobs;
 use db_meta::DbMeta;
+
+/// How long a statement waits on a file another operation holds locked before
+/// it fails, unless the host says otherwise (the storage role's `db-busy-secs`
+/// setting). Contention is per session — two operations on one session's file,
+/// or the create and the sweep on the index — and a commit holds the lock for
+/// the length of its fsync, so this is a matter of the disk under the volume.
+pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Crate-internal error so the tier bodies use plain `?`. `rusqlite::Error` and
 /// the public `SessionError` are both foreign, so the orphan rule forbids a
@@ -73,12 +81,14 @@ pub struct SessionStore {
 
 impl SessionStore {
     /// Open the store rooted at `dir`, creating `blobs/` (per-session files) and
-    /// the deadline index (`meta.sqlite`). Idempotent.
-    pub fn open(dir: &str) -> Result<SessionStore, SessionError> {
+    /// the deadline index (`meta.sqlite`). Idempotent. `busy` is how long a
+    /// statement waits on a file another operation holds locked
+    /// ([`DEFAULT_BUSY_TIMEOUT`]).
+    pub fn open(dir: &str, busy: Duration) -> Result<SessionStore, SessionError> {
         (|| -> Result<SessionStore, StoreErr> {
             let root = PathBuf::from(dir);
-            let blobs = DbBlobs::open(&root.join("blobs"))?;
-            let meta = DbMeta::open(&root.join("meta.sqlite"))?;
+            let blobs = DbBlobs::open(&root.join("blobs"), busy)?;
+            let meta = DbMeta::open(&root.join("meta.sqlite"), busy)?;
             Ok(SessionStore { blobs, meta })
         })()
         .map_err(SessionError::from)
@@ -122,12 +132,6 @@ impl SessionStore {
         .map_err(SessionError::from)
     }
 
-    /// `/reset`: drop STATE + media + disclosures, keep the session (see
-    /// [`DbBlobs::delete`]).
-    pub fn delete(&self, name: &str) -> Result<DeleteResponse, SessionError> {
-        self.blobs.delete(name).map_err(SessionError::from)
-    }
-
     /// Existence probe (see [`DbBlobs::exists`]).
     pub fn exists(&self, name: &str) -> Result<bool, SessionError> {
         self.blobs.exists(name).map_err(SessionError::from)
@@ -157,7 +161,7 @@ impl SessionStore {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionStore;
+    use super::{DEFAULT_BUSY_TIMEOUT, SessionStore};
     use hatch_protocol::{
         BlobField, BlobWrite, FieldSelector, ListAppend, ListField, ListSlot, MediaWrite, Op,
         ReadRequest, ScalarSlot, Slot, WriteRequest,
@@ -166,7 +170,7 @@ mod tests {
 
     fn tmp_store() -> (tempfile::TempDir, SessionStore) {
         let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::open(dir.path().to_str().unwrap()).unwrap();
+        let store = SessionStore::open(dir.path().to_str().unwrap(), DEFAULT_BUSY_TIMEOUT).unwrap();
         (dir, store)
     }
 
@@ -338,7 +342,7 @@ mod tests {
     /// reset is an entry the next applicant's would be appended to, under a
     /// session id the consumer reads as one person.
     #[test]
-    fn delete_purges_media_and_disclosures_keeps_session() {
+    fn a_reset_purges_state_media_and_disclosures_and_keeps_the_session() {
         let (_d, s) = tmp_store();
         let req = WriteRequest {
             ops: vec![
@@ -357,9 +361,12 @@ mod tests {
             ],
             expected_version: None,
         };
-        s.write("s", req, Some(100)).unwrap();
-        let del = s.delete("s").unwrap();
-        assert_eq!(del.deleted, 1);
+        let created = s.write("s", req, Some(100)).unwrap();
+        let reset = WriteRequest {
+            ops: vec![Op::Reset],
+            expected_version: Some(created.new_version),
+        };
+        s.write("s", reset, None).unwrap();
         assert!(s.exists("s").unwrap(), "session still exists after reset");
         let got = s
             .read(
@@ -376,6 +383,57 @@ mod tests {
         assert_eq!(got.slots[0], Slot::Scalar(ScalarSlot { value: None }));
         assert_eq!(got.slots[1], Slot::Scalar(ScalarSlot { value: None }));
         assert_eq!(got.slots[2], Slot::List(ListSlot { items: vec![] }));
+    }
+
+    /// A reset under a version the session has moved past drops nothing: what a
+    /// round committed after the reset read the session stays.
+    #[test]
+    fn a_reset_under_a_stale_version_drops_nothing() {
+        let (_d, s) = tmp_store();
+        let read_at = s
+            .write("s", set_blob(BlobField::State, b"st"), Some(100))
+            .unwrap()
+            .new_version;
+        let round = WriteRequest {
+            ops: vec![Op::ListAppend(ListAppend {
+                field: ListField::Disclosure,
+                value: b"consented".to_vec(),
+            })],
+            expected_version: Some(read_at),
+        };
+        s.write("s", round, None).unwrap();
+
+        let reset = WriteRequest {
+            ops: vec![Op::Reset],
+            expected_version: Some(read_at),
+        };
+        assert!(matches!(
+            s.write("s", reset, None),
+            Err(SessionError::VersionMismatch)
+        ));
+        let got = s
+            .read(
+                "s",
+                ReadRequest {
+                    fields: vec![
+                        FieldSelector::Blob(BlobField::State),
+                        FieldSelector::List(ListField::Disclosure),
+                    ],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            got.slots[0],
+            Slot::Scalar(ScalarSlot {
+                value: Some(b"st".to_vec())
+            })
+        );
+        assert_eq!(
+            got.slots[1],
+            Slot::List(ListSlot {
+                items: vec![b"consented".to_vec()]
+            })
+        );
     }
 
     #[test]

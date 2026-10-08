@@ -32,8 +32,12 @@ use wasmtime::{Config, Engine};
 
 use engine_types::composition::{EmbeddedImport, PluginInstance};
 use engine_types::embedded::ComponentDecls;
+use engine_types::limits::MAX_EMBEDDED_SECTION_BYTES;
 
-pub use decls::{EmbeddedCatalog, load_embedded, load_embedded_nested, top_level_imports};
+use decls::embedded_section_bytes;
+pub use decls::{
+    CatalogRefused, EmbeddedCatalog, load_embedded, load_embedded_nested, top_level_imports,
+};
 pub use hash::{catalog_hash, embedded_import_name, slug};
 
 /// A fused policy component plus the manifest of distinct embedded
@@ -162,11 +166,28 @@ impl Compiler {
     /// `engine-compiler-child` — the process the compile-worker spawns — which
     /// wraps the result into the wire `CompiledBundle`, so this orchestration
     /// lives ONCE, in the pure lib.
+    ///
+    /// Refuses, before any section is parsed, a composition whose embedded
+    /// sections are past `MAX_EMBEDDED_SECTION_BYTES`, and then one whose
+    /// catalogs break their format; the error then carries a [`CatalogRefused`],
+    /// which the child answers as a refusal. [`compose`](Self::compose) and
+    /// [`fuse`](Self::fuse), which tests and tooling call directly, hold no such
+    /// cap.
     pub fn compile_to_parts(
         &self,
         policy_wasm: &[u8],
         plugins: &[PluginInstance],
     ) -> wasmtime::Result<BundleParts> {
+        // The cap first, on lengths alone: everything below parses, and what it
+        // would parse is what the cap bounds. Summed over the whole composition,
+        // because the plugin set is the consumer's to pin.
+        let mut section_bytes = embedded_section_bytes(policy_wasm)?;
+        for p in plugins {
+            section_bytes += embedded_section_bytes(&p.wasm)?;
+        }
+        if section_bytes > MAX_EMBEDDED_SECTION_BYTES {
+            return Err(wasmtime::Error::new(CatalogRefused::PastCap));
+        }
         let policy_catalog = load_embedded(policy_wasm)?;
         let mut catalogs = Vec::with_capacity(1 + plugins.len());
         catalogs.push((policy_catalog.hash, policy_catalog.decls));

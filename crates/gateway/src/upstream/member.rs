@@ -241,8 +241,10 @@ enum Unopened {
 
 impl Unopened {
     fn of(e: &std::io::Error) -> Unopened {
-        match e.raw_os_error() {
-            Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS) => Unopened::Here,
+        use rustix::io::Errno;
+
+        match Errno::from_io_error(e) {
+            Some(Errno::MFILE | Errno::NFILE | Errno::NOMEM | Errno::NOBUFS) => Unopened::Here,
             _ => Unopened::There,
         }
     }
@@ -1399,13 +1401,15 @@ mod tests {
     /// about the member, and must not leave it out; anything else does.
     #[test]
     fn only_a_failure_of_the_member_counts_against_it() {
-        for here in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::ENOBUFS] {
-            let e = std::io::Error::from_raw_os_error(here);
+        use rustix::io::Errno;
+
+        for here in [Errno::MFILE, Errno::NFILE, Errno::NOMEM, Errno::NOBUFS] {
+            let e = std::io::Error::from(here);
             assert!(matches!(Unopened::of(&e), Unopened::Here), "{e}");
         }
         for there in [
-            std::io::Error::from_raw_os_error(libc::ECONNREFUSED),
-            std::io::Error::from_raw_os_error(libc::ETIMEDOUT),
+            std::io::Error::from(Errno::CONNREFUSED),
+            std::io::Error::from(Errno::TIMEDOUT),
             std::io::Error::other("the upstream is not the build it was declared to be"),
         ] {
             assert!(matches!(Unopened::of(&there), Unopened::There), "{there}");

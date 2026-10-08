@@ -10,8 +10,8 @@
 name=$1 image=$2 cid=$3 memory=$4
 
 # Each entry becomes the fw_cfg file opt/com.enclavid/NAME, outside the
-# measurement. Which role reads which is that role's business: api takes the
-# ports of its legs from them.
+# measurement. Which role reads which is that role's business: every role takes
+# its settings from one, `settings`, and api the ports of its legs from others.
 fwcfg=()
 read -ra entries <<<"${FW_CFG:-}"
 for entry in "${entries[@]}"; do

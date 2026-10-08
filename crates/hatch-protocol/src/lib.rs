@@ -243,7 +243,6 @@ pub struct VcekResponse {
 // to the storage-CVM over RA-TLS):
 //   read(id, ReadRequest)   -> ReadResponse
 //   write(id, WriteRequest, deadline) -> WriteResponse | SessionError::VersionMismatch
-//   delete(id)              -> DeleteResponse          [/reset]
 //   exists(id)              -> bool
 // (These were formerly the hatch `/sessions/*` HTTP routes; that path was
 // retired when durable state moved into the storage-CVM.)
@@ -346,6 +345,10 @@ pub enum Op {
     /// media hash. Idempotent — the key IS the content, so a re-write is a
     /// no-op-equivalent overwrite of identical bytes.
     MediaWrite(MediaWrite),
+    /// Drop the state, every media blob and every disclosure, keeping the
+    /// session's metadata and version — the `/reset` path. In order with the
+    /// ops beside it, so under the same version check and in the same commit.
+    Reset,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,13 +380,6 @@ pub struct WriteResponse {
     /// Session version after the write. Callers chain subsequent writes
     /// by feeding this back as the next `expected_version`.
     pub new_version: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeleteResponse {
-    /// 1 if the field had a value and was removed, 0 if already absent.
-    /// Informational; not a security signal.
-    pub deleted: u64,
 }
 
 #[cfg(test)]

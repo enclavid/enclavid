@@ -104,7 +104,7 @@ pub fn load_embedded_nested(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<EmbeddedC
         match &payload {
             Payload::ComponentSection { .. } | Payload::ModuleSection { .. } => {
                 if stack.len() > MAX_NESTING {
-                    return Err(wasmtime::Error::msg(format!(
+                    return Err(invalid(format!(
                         "component nesting exceeds {MAX_NESTING} levels",
                     )));
                 }
@@ -131,6 +131,59 @@ pub fn load_embedded_nested(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<EmbeddedC
 /// a re-fused hybrid core adds one more. A generous bound guards
 /// against pathological inputs without constraining real artifacts.
 const MAX_NESTING: usize = 8;
+
+/// Why a composition's embedded catalogs are not accepted.
+///
+/// Its own type, carried inside the `wasmtime::Error` the loaders and
+/// [`Compiler::compile_to_parts`](crate::Compiler::compile_to_parts) return, with
+/// what broke as the error's context. These are the failures this crate can tell
+/// are the composition's: each is a rule of the catalog format, checked against
+/// the pinned bytes before anything is fused, so the same pins meet it every
+/// time. The compile child looks for it there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogRefused {
+    /// The embedded sections, summed over the policy and every plugin, are past
+    /// `MAX_EMBEDDED_SECTION_BYTES`. Decided on lengths, before any is parsed.
+    PastCap,
+    /// One catalog breaks its format: a section repeated in one component, one
+    /// that does not parse, one declaring past a `MAX_DECLARED_*` count, or
+    /// catalogs nested deeper than the loader descends.
+    Invalid,
+}
+
+impl std::fmt::Display for CatalogRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CatalogRefused::PastCap => "the composition's embedded catalogs are past their cap",
+            CatalogRefused::Invalid => "an embedded catalog breaks its format",
+        })
+    }
+}
+impl std::error::Error for CatalogRefused {}
+
+/// A [`CatalogRefused::Invalid`], with `cause` as its context for the debug log.
+fn invalid(cause: String) -> wasmtime::Error {
+    wasmtime::Error::new(CatalogRefused::Invalid).context(cause)
+}
+
+/// The raw bytes of every embedded section in `wasm_bytes` — its own and every
+/// nested component's and module's — summed. Lengths only: nothing is parsed,
+/// so this can run before anything that parses does. Every depth, because a
+/// pre-fused policy's nested catalogs are parsed too ([`load_embedded_nested`]).
+pub(crate) fn embedded_section_bytes(wasm_bytes: &[u8]) -> wasmtime::Result<u64> {
+    let mut total = 0u64;
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let payload =
+            payload.map_err(|e| wasmtime::Error::msg(format!("wasm component parse: {e}")))?;
+        if let Payload::CustomSection(reader) = &payload {
+            let name = reader.name();
+            if name == SECTION_DISCLOSURE_FIELDS || name == SECTION_I18N || name == SECTION_ICONS {
+                total += reader.data().len() as u64;
+            }
+        }
+    }
+    Ok(total)
+}
 
 /// The import names of a component's OWN (top-level) world. Used to
 /// recover the `embedded-slot:<hash>/<iface>` imports a pre-fused
@@ -190,7 +243,7 @@ impl<'a> RawFrame<'a> {
                     _ => return Ok(()),
                 };
                 if slot.is_some() {
-                    return Err(wasmtime::Error::msg(format!(
+                    return Err(invalid(format!(
                         "duplicate custom section `{}` in component wasm",
                         reader.name(),
                     )));
@@ -236,12 +289,12 @@ fn build_decls(
         .map(|b| parse_disclosure_fields(b))
         .transpose()
         .map_err(|e| {
-            wasmtime::Error::msg(format!(
+            invalid(format!(
                 "parsing custom section `{SECTION_DISCLOSURE_FIELDS}` as JSON: {e}",
             ))
         })?;
     let i18n_section = i18n_bytes.map(|b| parse_i18n(b)).transpose().map_err(|e| {
-        wasmtime::Error::msg(format!(
+        invalid(format!(
             "parsing custom section `{SECTION_I18N}` as JSON: {e}"
         ))
     })?;
@@ -249,7 +302,7 @@ fn build_decls(
         .map(|b| parse_icons(b))
         .transpose()
         .map_err(|e| {
-            wasmtime::Error::msg(format!(
+            invalid(format!(
                 "parsing custom section `{SECTION_ICONS}` as JSON: {e}"
             ))
         })?;
@@ -266,20 +319,20 @@ fn build_decls(
         .map(|d| d.fields.len())
         .unwrap_or(0);
     if df_count > MAX_DECLARED_DISCLOSURE_FIELDS {
-        return Err(wasmtime::Error::msg(format!(
+        return Err(invalid(format!(
             "component declares {df_count} disclosure-fields, max is \
              {MAX_DECLARED_DISCLOSURE_FIELDS}",
         )));
     }
     let l_count = i18n_section.as_ref().map(|i| i.entries.len()).unwrap_or(0);
     if l_count > MAX_DECLARED_LOCALIZED {
-        return Err(wasmtime::Error::msg(format!(
+        return Err(invalid(format!(
             "component declares {l_count} i18n entries, max is {MAX_DECLARED_LOCALIZED}",
         )));
     }
     let icon_count = icons_section.as_ref().map(|i| i.names.len()).unwrap_or(0);
     if icon_count > MAX_DECLARED_ICONS {
-        return Err(wasmtime::Error::msg(format!(
+        return Err(invalid(format!(
             "component declares {icon_count} icons, max is {MAX_DECLARED_ICONS}",
         )));
     }

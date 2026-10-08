@@ -85,7 +85,7 @@ interface types {
         constructor(hash: blob-hash);
         /// Pull this blob's bytes into the caller's linear memory. For a
         /// rehydrated (constructed) blob this is the LAZY load point. Bounded by
-        /// the component's memory limit.
+        /// the round's memory max: a round that goes past it is ended.
         bytes: func() -> list<u8>;
         /// This blob's content hash — stash in `state` to rehydrate the blob in
         /// a later round via the constructor.

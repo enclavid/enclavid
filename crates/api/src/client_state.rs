@@ -23,13 +23,16 @@ pub struct ClientState {
 }
 
 impl ClientState {
+    /// `authorize_deadline` is how long the hatch has to answer each
+    /// authorization.
     pub fn new(
         session_store: Arc<SessionStore>,
         hatch: HatchClient,
         attestor: Arc<dyn Attestor>,
+        authorize_deadline: std::time::Duration,
     ) -> Self {
         Self {
-            auth: AuthClient::new(hatch),
+            auth: AuthClient::new(hatch, authorize_deadline),
             session_store,
             attestor,
         }
@@ -39,10 +42,11 @@ impl ClientState {
         transport_out: &str,
         session_store: Arc<SessionStore>,
         attestor: Arc<dyn Attestor>,
+        authorize_deadline: std::time::Duration,
     ) -> Self {
         let hatch = HatchClient::new(transport_out)
             .await
             .expect("failed to connect to hatch");
-        Self::new(session_store, hatch, attestor)
+        Self::new(session_store, hatch, attestor, authorize_deadline)
     }
 }

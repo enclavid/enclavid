@@ -23,11 +23,11 @@ mod integration_tests;
 
 use std::sync::Arc;
 
-use hatch_protocol::{DeleteResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse};
+use hatch_protocol::{ReadRequest, ReadResponse, WriteRequest, WriteResponse};
 use storage_rpc::{ByteBuf, CacheError, CacheService, SessionError, SessionStoreService};
 
 pub use cache::CacheBlobs;
-pub use session::SessionStore;
+pub use session::{DEFAULT_BUSY_TIMEOUT, SessionStore};
 
 use scope::Scope;
 
@@ -118,12 +118,6 @@ impl SessionStoreService for Caller {
         let s = self.svc.sessions.clone();
         let name = self.scope.session(&id);
         blocking(move || s.write(name.as_str(), req, deadline_unix_secs)).await
-    }
-
-    async fn delete(&self, id: String) -> Result<DeleteResponse, SessionError> {
-        let s = self.svc.sessions.clone();
-        let name = self.scope.session(&id);
-        blocking(move || s.delete(name.as_str())).await
     }
 
     async fn exists(&self, id: String) -> Result<bool, SessionError> {

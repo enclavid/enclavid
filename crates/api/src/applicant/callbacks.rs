@@ -2,10 +2,12 @@
 //!
 //! During a run the worker calls BACK over the same remoc connection: `media_load`
 //! to rehydrate a stored blob, and `session_change` to seal + persist the
-//! post-round state. Neither what the round disclosed nor what it captured
-//! arrives here — the orchestrator holds both already. [`CallbackServer`] wires those
-//! to the per-round [`SessionPersister`] + [`HatchMediaStore`] (they hold the seal
-//! key + applicant token). It implements `engine_rpc::CallbackService`; the
+//! post-round state — with, on the round that finishes, the policy's decision,
+//! committed in the same write. Neither what the round disclosed nor what it
+//! captured arrives here — the orchestrator holds both already.
+//! [`CallbackServer`] wires those to the per-round [`SessionPersister`] +
+//! [`HatchMediaStore`] (they hold the seal key + applicant token). It
+//! implements `engine_rpc::CallbackService`; the
 //! orchestrator stands one up per run and passes its client into
 //! `ExecutorService::run` (see [`crate::executor`]).
 //!
@@ -50,7 +52,7 @@ use std::sync::Arc;
 
 use enclavid_boundary::{Asserted, Exposed, Untrusted, reason};
 use engine_rpc::{CallbackError, CallbackServiceUntrusted, Padded};
-use hatch_client::SessionState;
+use hatch_client::{Decision, SessionState};
 
 use super::media_store::HatchMediaStore;
 use super::persister::SessionPersister;
@@ -88,6 +90,7 @@ impl CallbackServiceUntrusted for CallbackServer {
     async fn session_change(
         &self,
         state: Untrusted<Padded<SessionState>, Self::Scope>,
+        decision: Untrusted<Padded<Option<Decision>>, Self::Scope>,
     ) -> Result<(), CallbackError> {
         // Two separate questions, and closing one says nothing about the other.
         // The frame answers "did the length tell the host anything" — settled by
@@ -106,6 +109,16 @@ impl CallbackServiceUntrusted for CallbackServer {
             ))
             .into_inner()
             .open()?;
-        self.persister.persist(state).await
+        // The verdict is the policy's to reach, and the worker is where the
+        // policy runs, so its word is the only one there is about it. api commits
+        // it as that, and checks the round's reply against it.
+        let decision = decision
+            .trust_unchecked::<Asserted, _>(reason!(
+                "contained: the verdict is the policy's to choose by design, one of \
+                 four fixed values — the worker's word is all it ever was"
+            ))
+            .into_inner()
+            .open()?;
+        self.persister.persist(state, decision).await
     }
 }

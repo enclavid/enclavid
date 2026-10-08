@@ -66,14 +66,15 @@ tokio = { version = "1", features = [
     "net",
     "io-util",
     # `process` — the supervisor spawns per-round `engine-executor-child` processes;
-    # `sync` — the bounded-children `Semaphore`; `time` — the child-reap timeout.
+    # `sync` — the bounded-children `Semaphore`; `time` — the round deadlines.
     "process",
     "sync",
     "time",
 ], optional = true }
-# Bounded per-composition L1 (same idiom as the orchestrator's L1 PolicyCache:
-# max_capacity + time_to_idle), now holding the cwasm memfd + registry metadata.
-moka = { version = "0.12", features = ["future"], optional = true }
+# The L1's map: eviction order, a weigher, a hook that keeps an entry a round is
+# using, and one fill per composition however many rounds miss on it at once.
+# No default features: std locks and std's hasher, nothing beyond `hashbrown`.
+quick_cache = { version = "0.7", default-features = false, optional = true }
 
 # Mutual RA-TLS on the api->worker hop: the worker's listener wraps each accepted
 # TCP stream in an attested TLS server. Dev-bypass = the mock attestation backend
@@ -88,23 +89,24 @@ fleet-transport = { path = "../fleet-transport", optional = true }
 enclavid-attestation = { path = "../attestation", default-features = false, optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
 
-# Zeroize the transient wire `cwasm` `Vec` (possible embedded model weights) on
-# drop — the one plaintext copy we own before it is written into the memfd. (The
-# long-lived memfd is NOT scrubbed: it's legitimately cache-resident and SEV-SNP
-# blinds the host; scrubbing key material via `secrecy` is where zeroize pays.)
-zeroize = { version = "1", optional = true }
-
 # The supervisor materializes each composition's `cwasm` as an anonymous in-RAM
 # file the child MMAPs by fd. On the Linux CVM that is a sealed `memfd` (RAM-backed,
 # no filesystem name, write-sealed); `memfd` is already in our tree via wasmtime, so
 # this direct dep adds nothing to the binary. `worker`-gated.
 [target.'cfg(target_os = "linux")'.dependencies]
 memfd = { version = "0.6", optional = true }
+# `mm` for the read-only mapping the admission check reads a sealed cwasm through,
+# in place. Already in our tree via wasmtime and memfd, so it adds nothing either.
+rustix = { version = "1", default-features = false, features = ["mm"], optional = true }
 
 # Dev/test (macOS) fallback: an unlinked tmpfile gives the same anonymous, fd-only
 # lifetime as a memfd. Never compiled for the Linux CVM.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tempfile = { version = "3", optional = true }
+# The tmpfile has no seals to hold a mapping still, so there the admission check
+# reads a copy instead, scrubbed on drop: it is plaintext (possible embedded model
+# weights).
+zeroize = { version = "1", optional = true }
 
 [features]
 # Enables the `execution-worker` bin. api does not depend on this crate at all —
@@ -120,7 +122,7 @@ worker = [
     "dep:engine-supervisor",
     "dep:remoc",
     "dep:tokio",
-    "dep:moka",
+    "dep:quick_cache",
     "dep:enclavid-ra-tls",
     "dep:fleet-transport",
     "dep:enclavid-attestation",
@@ -129,6 +131,7 @@ worker = [
     # target-specific dependency tables. `dep:` on a target-gated optional dep is
     # inert on the non-matching platform.
     "dep:memfd",
+    "dep:rustix",
     "dep:tempfile",
     "dep:zeroize",
 ]
@@ -149,7 +152,8 @@ dev-attestation = ["enclavid-attestation?/mock"]
 # from its own copy of the same chip's. See `SnpAttestor::mint_only`.
 sev-snp = ["enclavid-attestation?/sev-snp"]
 # The posture a measured guest image builds with: enforce the kernel ptrace floor
-# the per-round child isolation rests on.
+# the per-round child isolation rests on, and hold the round children to their
+# memory with the kernel's memory controller, or refuse to boot.
 # It pulls `sev-snp` in with it. A build that calls itself the measured posture
 # while signing with the dev fleet's shared software key is the one mistake
 # nothing else catches, because forgetting `--no-default-features` is silent —
@@ -179,8 +183,9 @@ required-features = ["worker"]
 [dev-dependencies]
 # happy_path.rs drives rounds in-process; the one that spawns the real child
 # process moved out with the binary, and the tokio features it needed
-# (process/net/io-util/time) went with it.
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# (process/net/io-util/time) went with it. `time`, `sync` and `test-util` are the
+# worker's capacity tests: they wait on its semaphores under a paused clock.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "test-util"] }
 # happy_path.rs is the end-to-end integration test: it COMPOSES a policy +
 # plugins (engine-compiler), round-trips the cwasm onto this crate's engine,
 # and drives full reducer rounds against real fixtures.

@@ -17,11 +17,25 @@
 # /tmp and /run are tmpfs because the CVM has no disk — every writable path is
 # encrypted RAM. Both are noexec: nothing here ever executes out of a writable
 # path, and refusing up front costs nothing.
+#
+# /proc does not stay as mounted here: the supervisor remounts it
+# hidepid=invisible as it starts, so its per-round children, which run under
+# identities of their own, see no process's entries but their own. It cannot be
+# said on this page — busybox init hands any line holding an equals sign to a
+# shell, and there is none.
 ::sysinit:/bin/busybox mount -t proc -o nosuid,nodev,noexec proc /proc
 ::sysinit:/bin/busybox mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
 ::sysinit:/bin/busybox mount -t devtmpfs -o nosuid devtmpfs /dev
 ::sysinit:/bin/busybox mount -t tmpfs -o nosuid,nodev,noexec tmpfs /tmp
 ::sysinit:/bin/busybox mount -t tmpfs -o nosuid,nodev,noexec tmpfs /run
+
+# The memory controller the supervisor holds its per-round children to. The
+# kernel makes the mount point under /sys; the supervisor builds the tree under
+# it at boot and refuses to start without it. `favordynmods` because every
+# child moves itself into the group made for it as it starts: without it each
+# move first waits out an RCU grace period while holding the lock that every
+# other move, and every group kill, needs.
+::sysinit:/bin/busybox mount -t cgroup2 -o nosuid,nodev,noexec,favordynmods cgroup2 /sys/fs/cgroup
 
 # The application. Each role's initramfs provides its own binary under this one
 # name, so PID 1 needs no configuration and there is nothing to mis-set.

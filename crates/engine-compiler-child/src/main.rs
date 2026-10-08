@@ -40,8 +40,12 @@ use std::sync::Arc;
 
 use remoc::codec::Ciborium;
 
-use engine_compiler::{CompileChildService, CompileChildServiceServerShared, Compiler};
-use engine_rpc::{CatalogEntry, CompileError, CompileRequest, CompiledBundle};
+use engine_compiler::{
+    CatalogRefused, CompileChildService, CompileChildServiceServerShared, Compiler,
+};
+use engine_rpc::{
+    CatalogEntry, CompileError, CompileRequest, CompiledBundle, MAX_BUNDLE_META_BYTES,
+};
 
 /// Holds this process's Cranelift [`Compiler`]; serves ONE compile then exits.
 struct Child {
@@ -58,9 +62,19 @@ impl CompileChildService for Child {
         let parts =
             tokio::task::spawn_blocking(move || compiler.compile_to_parts(&policy, &plugins))
                 .await
-                .map_err(|e| CompileError(format!("compile task join failed: {e}")))?
-                .map_err(|e| CompileError(e.to_string()))?;
-        Ok(CompiledBundle {
+                .map_err(|e| {
+                    safe_logger::debug!("engine-compiler-child: compile task: {e}");
+                    CompileError::Failed
+                })?
+                .map_err(|e| {
+                    safe_logger::debug!("engine-compiler-child: compile: {e:?}");
+                    if e.is::<CatalogRefused>() {
+                        CompileError::Refused
+                    } else {
+                        CompileError::Failed
+                    }
+                })?;
+        let bundle = CompiledBundle {
             cwasm: parts.cwasm,
             embedded_imports: parts.embedded_imports,
             catalogs: parts
@@ -68,7 +82,20 @@ impl CompileChildService for Child {
                 .into_iter()
                 .map(|(hash, decls)| CatalogEntry { hash, decls })
                 .collect(),
-        })
+        };
+        // The bound the execute hop holds metadata to, held where the metadata is
+        // made: a bundle past it would be cached and then fail every round that
+        // streams it. Past it by construction — the same pins compile to the same
+        // metadata — so it is a refusal, like catalogs the compiler refuses.
+        let meta = bundle.encoded_meta().ok_or_else(|| {
+            safe_logger::debug!("engine-compiler-child: the metadata does not encode");
+            CompileError::Failed
+        })?;
+        if meta.len() as u64 > MAX_BUNDLE_META_BYTES {
+            safe_logger::debug!("engine-compiler-child: the metadata is past its bound");
+            return Err(CompileError::Refused);
+        }
+        Ok(bundle)
     }
 }
 

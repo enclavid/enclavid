@@ -79,7 +79,7 @@ let
   # NAME is what has to be right; `/bin/app` alone would not do.
   roles = {
     api = {
-      kernel = kernel.diskless;
+      kernel = kernel.base;
       binary = "enclavid-api";
     };
     storage = {
@@ -91,12 +91,12 @@ let
       dirs = [ "data" ];
     };
     compile-worker = {
-      kernel = kernel.diskless;
+      kernel = kernel.compile-worker;
       binary = "compile-worker";
       siblings = [ "engine-compiler-child" ];
     };
     execution-worker = {
-      kernel = kernel.diskless;
+      kernel = kernel.execution-worker;
       binary = "execution-worker";
       siblings = [ "engine-executor-child" ];
     };
@@ -108,7 +108,7 @@ let
     # leaves-then-api ordering entirely rather than one step past it, and api can
     # be rebuilt under it without rebuilding it.
     gateway = {
-      kernel = kernel.diskless;
+      kernel = kernel.base;
       binary = "gateway";
     };
   };

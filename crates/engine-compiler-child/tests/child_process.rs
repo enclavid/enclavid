@@ -16,6 +16,7 @@
 //! so what gets spawned below is what ships. See that function for the whole
 //! reasoning.
 
+use std::borrow::Cow;
 use std::time::Duration;
 
 use remoc::codec::Ciborium;
@@ -27,17 +28,15 @@ use engine_types::composition::PluginInstance;
 /// Spawn the real `engine-compiler-child` over a socketpair (via engine-supervisor) the way the
 /// compile-worker supervisor does, and return the child + its service client.
 async fn spawn() -> (tokio::process::Child, CompileChildServiceClient<Ciborium>) {
-    spawn_with(None).await
+    spawn_with(false).await
 }
 
 async fn spawn_with(
-    hardening: Option<engine_supervisor::Hardening>,
+    filtered: bool,
 ) -> (tokio::process::Child, CompileChildServiceClient<Ciborium>) {
     let exe = xtask::child_binary("engine-compiler-child");
     engine_supervisor::spawn_and_connect::<CompileChildServiceClient<Ciborium>>(
-        &exe,
-        &[],
-        hardening,
+        &exe, None, filtered,
     )
     .await
     .expect("spawn engine-compiler-child")
@@ -61,11 +60,51 @@ async fn garbage_policy_fails_safe_then_child_exits() {
     )
     .await
     .expect("compile must not hang");
-    let CompileError(msg) = match outcome {
+    match outcome {
         Ok(_) => panic!("garbage policy must fail to compile, got a bundle"),
-        Err(e) => e,
-    };
-    assert!(!msg.is_empty(), "CompileError should carry a message");
+        Err(e) => assert_eq!(
+            e,
+            CompileError::Failed,
+            "garbage fails to compile; it is not a refusal"
+        ),
+    }
+
+    drop(client);
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("child must exit after its client is dropped")
+        .expect("wait for child");
+    assert!(status.success(), "child exits cleanly, got {status:?}");
+}
+
+/// A component holding one custom section of `len` bytes.
+fn with_section(name: &str, len: usize) -> Vec<u8> {
+    let mut c = wasm_encoder::Component::new();
+    c.section(&wasm_encoder::CustomSection {
+        name: Cow::Borrowed(name),
+        data: Cow::Owned(vec![b'x'; len]),
+    });
+    c.finish()
+}
+
+/// Catalogs past the cap are REFUSED, and the refusal crosses the seam as itself.
+#[tokio::test]
+async fn catalogs_past_the_cap_are_refused_through_the_child() {
+    let (mut child, client) = spawn().await;
+    let cap = engine_types::limits::MAX_EMBEDDED_SECTION_BYTES as usize;
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        client.compile(CompileRequest {
+            policy: with_section(enclavid_embedded::SECTION_I18N, cap + 1),
+            plugins: vec![],
+        }),
+    )
+    .await
+    .expect("a refusal must not hang");
+    match outcome {
+        Ok(_) => panic!("catalogs past the cap must not compile"),
+        Err(e) => assert_eq!(e, CompileError::Refused),
+    }
 
     drop(client);
     let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
@@ -120,11 +159,7 @@ async fn a_real_policy_compiles_through_the_spawned_child() {
         })
         .collect();
 
-    let hardening = engine_supervisor::Hardening {
-        seccomp_egress: true,
-        address_space: None,
-    };
-    let (mut child, client) = spawn_with(Some(hardening)).await;
+    let (mut child, client) = spawn_with(true).await;
 
     let bundle = tokio::time::timeout(
         Duration::from_secs(300),
@@ -135,7 +170,7 @@ async fn a_real_policy_compiles_through_the_spawned_child() {
     )
     .await
     .expect("a real compile must not hang")
-    .unwrap_or_else(|CompileError(m)| panic!("the fixture policy must compile: {m}"));
+    .unwrap_or_else(|e| panic!("the fixture policy must compile: {e}"));
 
     assert!(
         bundle.cwasm.len() > 1_000_000,
@@ -155,26 +190,20 @@ async fn a_real_policy_compiles_through_the_spawned_child() {
     assert!(status.success(), "child exits cleanly, got {status:?}");
 }
 
-/// The production hardening must not stop a child from working.
+/// The production filter must not stop a child from working.
 ///
-/// The egress filter denies sockets, every open for writing, and `ioctl` — and it
-/// is installed between fork and exec, so it governs the whole of the child's
-/// startup: the loader (none: static musl), the tokio runtime coming up, the
-/// remoc handshake, and Cranelift. Nothing had ever spawned a real child WITH a
-/// `Hardening` in a test, so "the filter is not too broad" was an argument rather
-/// than a measurement — and denying a syscall the runtime needs would fail at
-/// exec, in production, on the first round.
+/// It is installed between fork and exec, so it governs the whole of the
+/// child's startup: the tokio runtime coming up, the remoc handshake, and
+/// Cranelift. A syscall the runtime needs and the filter lacks shows up here as
+/// a child that dies before it answers — rather than in production, on the
+/// first compile.
 ///
 /// Linux-only: the filter is a no-op elsewhere, so the assertion would be vacuous
 /// on a dev host.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_child_starts_and_serves_under_the_production_filter() {
-    let hardening = engine_supervisor::Hardening {
-        seccomp_egress: true,
-        address_space: None,
-    };
-    let (mut child, client) = spawn_with(Some(hardening)).await;
+    let (mut child, client) = spawn_with(true).await;
 
     // Reaching a `CompileError` at all proves the child got through exec, stood a
     // runtime up, completed the handshake and ran Cranelift far enough to reject
@@ -190,7 +219,7 @@ async fn a_child_starts_and_serves_under_the_production_filter() {
     .expect("a hardened child must not hang");
     match outcome {
         Ok(_) => panic!("garbage policy must fail to compile, got a bundle"),
-        Err(CompileError(msg)) => assert!(!msg.is_empty(), "CompileError should carry a message"),
+        Err(e) => assert_eq!(e, CompileError::Failed),
     }
 
     drop(client);
@@ -199,4 +228,55 @@ async fn a_child_starts_and_serves_under_the_production_filter() {
         .expect("hardened child must exit after its client is dropped")
         .expect("wait for child");
     assert!(status.success(), "child exits cleanly, got {status:?}");
+}
+
+/// The runner's whole path with a real child, as the compile-worker drives it:
+/// admitted, spawned under the filters, answered — and then killed as the call
+/// ends, its slot and what was kept for it given back once it is gone. A runner
+/// of one slot answering twice is the slot coming back.
+#[tokio::test]
+async fn a_runner_answers_and_gives_back_what_its_child_held() {
+    use std::sync::Arc;
+
+    use engine_supervisor::{ChildRunner, ChildTimes, Fate, RunnerConfig};
+
+    let runner = ChildRunner::new(
+        RunnerConfig {
+            exe: xtask::child_binary("engine-compiler-child"),
+            max_children: 1,
+            deadline: Duration::from_secs(30),
+            admission_wait: Some(Duration::from_secs(30)),
+            times: ChildTimes::default(),
+        },
+        None,
+    );
+    let kept = Arc::new(());
+    for _ in 0..2 {
+        let (answer, exit) = runner
+            .run(
+                None,
+                kept.clone(),
+                |client: CompileChildServiceClient<Ciborium>| async move {
+                    client
+                        .compile(CompileRequest {
+                            policy: b"not a wasm component".to_vec(),
+                            plugins: vec![],
+                        })
+                        .await
+                },
+            )
+            .await
+            .expect("the runner admits, spawns and answers");
+        assert!(matches!(answer, Err(CompileError::Failed)));
+        // Without cgroups nothing is attributed, but the fate settles only once
+        // the child is gone.
+        assert_eq!(exit.fate().await, Fate::Unattributed);
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while Arc::strong_count(&kept) > 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("what was kept for each child is let go of once it is gone");
 }

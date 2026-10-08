@@ -29,7 +29,9 @@ fn peer(tag: &str) -> String {
 
 fn store() -> (tempfile::TempDir, Arc<StorageSvc>) {
     let dir = tempfile::tempdir().unwrap();
-    let sessions = Arc::new(SessionStore::open(dir.path().to_str().unwrap()).unwrap());
+    let sessions = Arc::new(
+        SessionStore::open(dir.path().to_str().unwrap(), crate::DEFAULT_BUSY_TIMEOUT).unwrap(),
+    );
     let svc = Arc::new(StorageSvc::new(
         sessions,
         CacheBlobs::new(Arc::new(InMemory::new())),
@@ -66,7 +68,7 @@ async fn connected(
     let server = tokio::spawn(async move {
         let (conn, mut tx, _rx) =
             remoc::Connect::io::<_, _, StorageClients, StorageClients, Ciborium>(
-                storage_rpc::connection_cfg(),
+                storage_rpc::connection_cfg(&storage_rpc::LegSettings::default()),
                 a_r,
                 a_w,
             )
@@ -90,7 +92,7 @@ async fn connected(
 
     // Client end (the api orchestrator): receive both service clients.
     let (conn, _tx, mut rx) = remoc::Connect::io::<_, _, StorageClients, StorageClients, Ciborium>(
-        storage_rpc::connection_cfg(),
+        storage_rpc::connection_cfg(&storage_rpc::LegSettings::default()),
         b_r,
         b_w,
     )
@@ -145,8 +147,11 @@ async fn remoc_roundtrip_both_services() {
     assert!(matches!(stale, Err(SessionError::VersionMismatch)));
 
     assert!(session_cli.exists(id.clone()).await.unwrap());
-    let del = session_cli.delete(id.clone()).await.unwrap();
-    assert_eq!(del.deleted, 0); // no STATE field was written, only METADATA
+    let reset = WriteRequest {
+        ops: vec![Op::Reset],
+        expected_version: Some(2),
+    };
+    session_cli.write(id.clone(), reset, None).await.unwrap();
     assert!(session_cli.exists(id.clone()).await.unwrap()); // session survives reset
 
     // --- cache: store → load → miss ---
@@ -215,8 +220,8 @@ async fn one_caller_cannot_reach_another_caller() {
 
     let id = "sess-1".to_string();
     let key = "abcd".repeat(16);
-    // STATE and media, not just metadata: those are the two things `delete`
-    // touches, so a record without them makes `deleted == 0` mean nothing.
+    // STATE and media, not just metadata: those are what a reset drops, so a
+    // record without them would let a reset that reached it go unseen.
     api.write(
         id.clone(),
         WriteRequest {
@@ -247,8 +252,16 @@ async fn one_caller_cannot_reach_another_caller() {
     // It cannot find out that the session is there...
     assert!(!other.exists(id.clone()).await.unwrap());
     assert_eq!(other.load(key.clone()).await.unwrap(), None);
-    // ...cannot reset it out from under the applicant...
-    assert_eq!(other.delete(id.clone()).await.unwrap().deleted, 0);
+    // ...cannot reset it out from under the applicant, even naming its
+    // version...
+    let reset = || WriteRequest {
+        ops: vec![Op::Reset],
+        expected_version: Some(1),
+    };
+    assert!(matches!(
+        other.write(id.clone(), reset(), None).await,
+        Err(SessionError::VersionMismatch)
+    ));
     // ...and its own create succeeds rather than colliding, which is the point:
     // it lands in its own partition, so api's CAS version is not touched.
     other
@@ -280,7 +293,7 @@ async fn one_caller_cannot_reach_another_caller() {
             value: Some(b"real".to_vec())
         })
     );
-    // The reducer state and the capture the foreign delete would have wiped.
+    // The reducer state and the capture the foreign reset would have wiped.
     assert_eq!(
         got.slots[1],
         Slot::Scalar(ScalarSlot {
@@ -298,9 +311,9 @@ async fn one_caller_cannot_reach_another_caller() {
         Some(ByteBuf::from(b"real".to_vec()))
     );
 
-    // And the 0 above was a refusal, not an empty record: the same call from the
-    // caller that owns it deletes.
-    assert_eq!(api.delete(id).await.unwrap().deleted, 1);
+    // And the refusal above was the partition, not the version: the same call
+    // from the caller that owns it resets.
+    api.write(id, reset(), None).await.unwrap();
 }
 
 /// The TTL is not partitioned, and must not be: one sweeper, one clock, every

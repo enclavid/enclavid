@@ -34,7 +34,7 @@ use wasmtime::{Config, Engine, Store};
 use crate::Host_ as GeneratedHost;
 use crate::Host_Pre as GeneratedHostPre;
 use crate::embedded::{Icon, IconRef, Localized, LocalizedRef, undeclared_trap};
-use crate::limits::{POLICY_FUEL_BUDGET, POLICY_MAX_STATE_BYTES};
+use crate::limits::POLICY_MAX_STATE_BYTES;
 use crate::listener::SessionChange;
 use crate::state::{HostState, RunInputs};
 
@@ -46,6 +46,19 @@ pub use status::RunStatus;
 /// the wasmtime-free halves of the fleet can name them. Re-exported here
 /// so callers keep addressing them as `engine_executor::*`.
 pub use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstance};
+
+/// How much fuel one round gets unless the host says otherwise (the execution
+/// worker's `round-fuel` setting). Each WASM instruction burns about one unit,
+/// and a round that runs out traps and is answered as its policy's failure.
+/// Paired with the round's memory max: memory stops allocation bombs, fuel
+/// stops compute bombs and loops that never end. Generous because the policy
+/// carries plugin work inline.
+///
+/// The host's to set because how long a round may compute is the service's
+/// capacity. What choosing it lets the host learn — whether a round needs more
+/// than the host chose, from the round failing — is set out in
+/// `engine_types::limits`.
+pub const DEFAULT_ROUND_FUEL: u64 = 10_000_000_000;
 
 /// Runs a compiled policy component against session state.
 ///
@@ -177,9 +190,10 @@ impl Executor {
     ///
     /// Returns the next [`RunStatus`] and the updated [`SessionState`]
     /// (new opaque `state` + new `current_prompt`). The `SessionListener` is
-    /// fired exactly once, with the post-round state and nothing else — neither
-    /// the round's disclosure nor its captures, both of which the orchestrator
-    /// already holds.
+    /// fired exactly once, with the post-round state and, if the round
+    /// finished, its decision — neither the round's disclosure nor its
+    /// captures, both of which the orchestrator already holds. By then the
+    /// round's `Store` is gone: see the call.
     pub async fn run(
         &self,
         primed: &PrimedComposition,
@@ -199,8 +213,7 @@ impl Executor {
             &self.engine,
             HostState::new(props, embedded.clone(), media_store),
         );
-        store.limiter(|s| &mut s.limits);
-        store.set_fuel(POLICY_FUEL_BUDGET)?;
+        store.set_fuel(inputs.fuel)?;
         let bindings = primed.pre.instantiate_async(&mut store).await?;
 
         // Mint the frame handles for this round. Nothing is staged for the
@@ -248,8 +261,16 @@ impl Executor {
             }
         };
 
-        // Single listener fire for the round, carrying the post-round state and
-        // nothing else.
+        // The commit is the one wait a round spends at its largest, and the
+        // process is held to its memory by a kill, not a refusal. So everything
+        // the commit does not need goes first: the store — every linear memory,
+        // table and instance, the round's media — and the state it was handed.
+        drop(store);
+        drop(session);
+
+        // Single listener fire for the round, carrying the post-round state and,
+        // if the round finished, its decision — committed together, so a reply
+        // lost after the commit leaves a session that reads as finished.
         //
         // The consent gate that used to sit here — accept + a consent
         // `current_prompt` ⇒ seal those exact fields — now runs in the
@@ -257,9 +278,14 @@ impl Executor {
         // could not stay in both places: this process runs the policy, so a
         // disclosure computed here is only ever as trustworthy as this process
         // is, and the orchestrator would have to re-derive it regardless.
+        let decision = match &status {
+            RunStatus::Completed(decision) => Some(*decision),
+            RunStatus::AwaitingInput(_) => None,
+        };
         listener
             .on_session_change(SessionChange {
                 state: &next_session,
+                decision,
             })
             .await?;
 
