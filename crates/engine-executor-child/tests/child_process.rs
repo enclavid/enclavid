@@ -93,7 +93,7 @@ impl ChildCallbacks for MockCallbacks {
 fn real_bundle() -> CompiledBundle {
     let compiler = Compiler::new().expect("compiler");
     let parts = compiler
-        .compile_to_parts(xtask::fixtures::test_policy(), &all_plugins())
+        .compile_to_parts(xtask::fixtures::test_policy().to_vec(), all_plugins())
         .expect("compile_to_parts");
     CompiledBundle {
         cwasm: parts.cwasm,

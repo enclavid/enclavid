@@ -35,22 +35,37 @@
 //! its own, an identity of its own and an egress seccomp filter. Caps that trap,
 //! in the position this role actually occupies.
 
-use engine_rpc::{CompileError, CompileRequest, CompiledBundle};
+use serde::{Deserialize, Serialize};
+
+use engine_rpc::{CompileError, CompileRequest, MAX_CWASM_BYTES};
+use fleet_stream::BlobHeader;
+
+/// What a compile child gives back: the metadata, encoded as the execute hop
+/// streams it, and the cwasm's length and digest.
+///
+/// The cwasm itself is not here. The child writes it to the file the supervisor
+/// handed it at `engine_supervisor::INHERITED_FD`, which outlives the child: the
+/// child is gone as soon as it has answered, and its cwasm streams on to api from
+/// the supervisor. The pages are the child's, written by it and charged to its
+/// memory group, so they count against the compiles' total until they are gone.
+///
+/// `deny_unknown_fields`: an unknown field is a child speaking a contract this
+/// supervisor does not have.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildCompiled {
+    #[serde(with = "serde_bytes")]
+    pub meta: Vec<u8>,
+    pub cwasm: BlobHeader<MAX_CWASM_BYTES>,
+}
 
 /// One compile, driven in a disposable child.
 ///
-/// Identical in shape to `engine_rpc::CompilerService` today, and expected to
-/// diverge as the api hop takes on what this one does not need — the way the
-/// execute leg's `ExecutorService` and `ChildService` already differ in their
-/// arguments, their envelopes and their framing. If the two ever settle into
-/// permanent agreement, the split was wrong and they should be merged back.
+/// The request is the api hop's own — the components streaming beside it, which
+/// the supervisor relays — and the answer is not: the cwasm is in the file the
+/// child was handed rather than in a stream beside the reply, since the child
+/// does not outlive the call.
 #[remoc::rtc::remote]
 pub trait CompileChildService {
-    /// `req` rather than two bare arguments, and for the same reason the api hop
-    /// uses one: `CompileRequest::policy` is `serde_bytes`, so a multi-MiB component
-    /// crosses as ONE CBOR byte string instead of an array of integers. That costs
-    /// roughly twice the bytes and hundreds of milliseconds when it is got wrong —
-    /// a lesson this tree has already paid for twice, on `CompiledBundle::cwasm` and
-    /// on `PluginInstance::wasm`.
-    async fn compile(&self, req: CompileRequest) -> Result<CompiledBundle, CompileError>;
+    async fn compile(&self, req: CompileRequest) -> Result<ChildCompiled, CompileError>;
 }

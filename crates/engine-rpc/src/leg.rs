@@ -330,21 +330,21 @@ mod doors {
         /// It crosses as two streams beside a bounded request ([`BundleStream`]):
         /// the request is the round alone, so a full clip and a large bundle
         /// never have to fit one remoc item together. The same bytes, framed
-        /// differently, and the header is derived from them — so the release
-        /// raises nothing new. Their lengths are fixed per composition, set when the
+        /// differently, and the header names them — so the release raises
+        /// nothing new. Their lengths are fixed per composition, set when the
         /// consumer's policy was compiled and never a function of applicant data,
         /// and "this composition was cold" was already legible on this hop.
         pub async fn run_with_bundle<C>(
             &self,
             req: Exposed<RunRequest, ()>,
-            bundle: crate::CompiledBundle,
+            bundle: crate::BundleSource,
             callbacks: C,
         ) -> Result<Untrusted<RunStatus, C::Scope>, ExecError>
         where
             C: CallbackServiceUntrusted + Send + Sync + 'static,
             C::Scope: Send,
         {
-            let (stream, writer) = BundleStream::split(bundle)?;
+            let (stream, writer) = BundleStream::split(bundle);
             let mut call = std::pin::pin!(self.client.run_with_bundle(
                 req.into_inner(),
                 stream,
@@ -467,7 +467,8 @@ impl<S: enclavid_boundary::Open> CompilerLeg<S> {
     /// Compile, and hand back the bundle as the peer's word.
     ///
     /// `req` arrives at `Exposed<_, ()>` — every concern the caller's mint opened has
-    /// been answered somewhere. A receipt, not a proof: see `Exposed::map`.
+    /// been answered somewhere. A receipt, not a proof: see `Exposed::map`. Its
+    /// components stream beside the call, written here while it is awaited.
     ///
     /// The answer comes back `Untrusted`. Nothing binds it to the question — this
     /// side cannot re-derive it (it carries no Cranelift, by design) and a digest
@@ -475,13 +476,19 @@ impl<S: enclavid_boundary::Open> CompilerLeg<S> {
     /// gets said rather than assumed.
     pub async fn compile(
         &self,
-        req: enclavid_boundary::Exposed<crate::compile::CompileRequest, ()>,
-    ) -> Result<enclavid_boundary::Untrusted<crate::CompiledBundle, S>, crate::CompileError> {
+        req: enclavid_boundary::Exposed<crate::compile::CompileSource, ()>,
+    ) -> Result<enclavid_boundary::Untrusted<crate::CompileReply, S>, crate::CompileError> {
         use crate::compile::CompilerService as _;
-        self.0
-            .compile(req.into_inner())
-            .await
-            .map(enclavid_boundary::Untrusted::new)
+        let (request, writer) = req.into_inner().split();
+        let mut call = std::pin::pin!(self.0.compile(request));
+        // The reply comes once the components were read, or once the worker
+        // gave up on them; the writer is never the outcome. Driven here rather
+        // than spawned, so it cannot outlive the call however the call ends.
+        let reply = tokio::select! {
+            reply = &mut call => reply,
+            () = writer => call.await,
+        };
+        reply.map(enclavid_boundary::Untrusted::new)
     }
 }
 
@@ -643,6 +650,7 @@ mod door_tests {
             cwasm,
             ..sample_bundle()
         };
+        let bundle = crate::BundleSource::whole(bundle).unwrap();
         assert!(approved(
             leg.run_with_bundle(round(event), bundle, NoCallbacks).await
         ));
@@ -654,8 +662,9 @@ mod door_tests {
     #[tokio::test]
     async fn a_worker_that_never_reads_the_bundle_still_answers_the_round() {
         let leg = leg(FakeWorker { expect: None }).await;
+        let bundle = crate::BundleSource::whole(sample_bundle()).unwrap();
         assert!(approved(
-            leg.run_with_bundle(round(Event::Start), sample_bundle(), NoCallbacks)
+            leg.run_with_bundle(round(Event::Start), bundle, NoCallbacks)
                 .await
         ));
     }

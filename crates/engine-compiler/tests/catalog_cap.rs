@@ -26,9 +26,16 @@ fn carrying(name: &str, len: usize) -> Component {
 /// Why the compile refused the composition — every one here is, its sections
 /// not being JSON — so which rule refused it says whether the cap came first.
 fn refusal(policy: &[u8], plugins: &[PluginInstance]) -> CatalogRefused {
+    let plugins = plugins
+        .iter()
+        .map(|p| PluginInstance {
+            package: p.package.clone(),
+            wasm: p.wasm.clone(),
+        })
+        .collect();
     match Compiler::new()
         .expect("compiler")
-        .compile_to_parts(policy, plugins)
+        .compile_to_parts(policy.to_vec(), plugins)
     {
         Ok(_) => panic!("sections that are not JSON must not compile"),
         Err(e) => *e

@@ -466,9 +466,9 @@ in
       description = "Whether the fleet comes up when the host boots.";
     };
     cvms = {
-      storage = cvm "storage" { memory = "2G"; disk.size = "8G"; };
-      compile-worker = cvm "compile-worker" { memory = "3G"; };
-      execution-worker = cvm "execution-worker" { memory = "8G"; };
+      storage = cvm "storage" { memory = "2G"; disk.size = "12G"; };
+      compile-worker = cvm "compile-worker" { memory = "8G"; };
+      execution-worker = cvm "execution-worker" { memory = "10G"; };
       api = cvm "api" { memory = "3G"; };
       gateway = cvm "gateway" { memory = "2G"; };
     };

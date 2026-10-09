@@ -1303,6 +1303,7 @@ dependencies = [
  "axum",
  "base64ct",
  "blake3",
+ "bytes",
  "ciborium",
  "enclavid-attestation",
  "enclavid-boundary",
@@ -1311,6 +1312,7 @@ dependencies = [
  "enclavid-ra-tls",
  "engine-rpc",
  "engine-types",
+ "fleet-stream",
  "fleet-transport",
  "futures",
  "hatch-client",
@@ -1480,9 +1482,12 @@ dependencies = [
 name = "enclavid-storage"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "enclavid-attestation",
  "enclavid-ra-tls",
+ "fleet-stream",
  "fleet-transport",
+ "futures",
  "hatch-protocol",
  "hex",
  "object_store",
@@ -1516,6 +1521,7 @@ name = "engine-compiler"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bytes",
  "enclavid-attestation",
  "enclavid-boundary",
  "enclavid-embedded",
@@ -1523,9 +1529,15 @@ dependencies = [
  "engine-rpc",
  "engine-supervisor",
  "engine-types",
+ "fleet-stream",
  "fleet-transport",
+ "futures",
+ "memfd",
  "remoc",
  "safe-logger",
+ "serde",
+ "serde_bytes",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "wac-graph",
@@ -1538,13 +1550,16 @@ dependencies = [
 name = "engine-compiler-child"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "enclavid-embedded",
  "engine-compiler",
  "engine-rpc",
  "engine-supervisor",
  "engine-types",
+ "fleet-stream",
  "remoc",
  "safe-logger",
+ "tempfile",
  "tokio",
  "wasm-encoder 0.247.0",
  "xtask",
@@ -1573,6 +1588,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "wasm-encoder 0.247.0",
  "wasmtime",
  "xtask",
  "zeroize",
@@ -1596,10 +1612,12 @@ dependencies = [
 name = "engine-rpc"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "ciborium",
  "enclavid-boundary",
  "engine-types",
  "fleet-stream",
+ "futures-util",
  "hatch-client",
  "remoc",
  "serde",
@@ -1714,6 +1732,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "ciborium",
+ "futures-util",
  "remoc",
  "serde",
  "sha2",
@@ -2070,6 +2089,7 @@ dependencies = [
  "ciborium",
  "enclavid-boundary",
  "enclavid-crypto",
+ "futures",
  "hatch-protocol",
  "hex",
  "http-body-util",
@@ -2128,6 +2148,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "futures",
  "governor",
  "hatch-protocol",
  "hex",
@@ -4456,7 +4477,6 @@ dependencies = [
  "hatch-protocol",
  "remoc",
  "serde",
- "serde_bytes",
  "tokio",
 ]
 

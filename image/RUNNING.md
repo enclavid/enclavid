@@ -170,19 +170,22 @@ What each measurement-relevant part is doing:
   field of every report, so it is a security constant that currently lives
   nowhere but a command line.
 - **`-m`** — memory size is *not* a measurement input. Roles may differ freely;
-  observed 2G for storage and 3G for the others apart from the
-  execution-worker. That one sizes itself from its memory: it reserves its
-  bundle cache (which the bundles streaming into it share), a base, and a share
-  in itself for each child its child bound allows, and gives the rest to its
-  round children as one total. The kernel holds the children to that total
-  together and each to the round's max, killing a child past either. It
-  refuses to boot when the total cannot hold one child at its max — at the
-  default settings, below about 3.8G; 8G is what the default bound was chosen
-  for — and when the cache cannot hold the largest bundle, about 1.6G, since a
-  round runs its bundle from the cache. Its boot line reports the memory it
-  read, the total, every setting below, and how many rounds fit beside one at
-  its max (`crates/engine-executor/src/admission.rs` has the reserves and the
-  defaults).
+  the defaults below are chosen for 2G for storage, 3G for api, 8G for the
+  compile-worker and 10G for the execution-worker. The execution-worker sizes
+  itself from its memory: it reserves its bundle cache (which the bundles
+  streaming into it share), a base, and a share in itself for each child its
+  child bound allows, and gives the rest to its round children as one total.
+  The kernel holds the children to that total together and each to the round's
+  max, killing a child past either. It refuses to boot when the total cannot
+  hold one child at its max — at the default settings, when its kernel reports
+  below about 5.4G (a 10G launch reports 9000 MiB) — and when the cache cannot
+  hold the largest bundle, about 1.6G, since a round runs its bundle from the
+  cache. Its boot line reports the memory it read, the total, every setting
+  below, and how many rounds fit beside one at its max
+  (`crates/engine-executor/src/admission.rs` has the reserves and the
+  defaults). The compile-worker refuses to boot when its memory less its base
+  reserve cannot hold one compile at its max — at the default settings, when
+  its kernel reports below about 4.5G (an 8G launch reports 7514 MiB).
 
 - **Launch settings** — how many, how much, how long. Not measurement inputs:
   every role takes them from one fw_cfg entry, `opt/com.enclavid/settings`,
@@ -198,7 +201,7 @@ What each measurement-relevant part is doing:
   | --- | --- | --- |
   | execution-worker | `max-children` | 12 |
   | | `waiting-per-child` | 1 |
-  | | `bundle-cache-bytes` | 2 GiB |
+  | | `bundle-cache-bytes` | 4 GiB |
   | | `bundle-cache-entries` | 512 |
   | | `bundle-idle-secs` | 3600, at most 3600 |
   | | `base-reserve-bytes` | 256 MiB |
@@ -215,9 +218,9 @@ What each measurement-relevant part is doing:
   | | `room-poll-ms` | 50 |
   | | `request-buffer` | 4 |
   | | `callback-request-buffer` | 4 |
-  | compile-worker | `max-compiles` | 8 |
-  | | `deadline-secs` | 300 |
-  | | `compile-max-bytes` | 2 GiB |
+  | compile-worker | `max-compiles` | 4 |
+  | | `deadline-secs` | 100 |
+  | | `compile-max-bytes` | 4 GiB |
   | | `compile-headroom-bytes` | 256 MiB |
   | | `base-reserve-bytes` | 512 MiB |
   | | `child-max-tasks` | 64 |
@@ -225,7 +228,7 @@ What each measurement-relevant part is doing:
   | | `child-connect-secs` | 30 |
   | | `room-poll-ms` | 50 |
   | | `request-buffer` | 4 |
-  | storage | `cache-bytes` | 512 MiB |
+  | storage | `cache-bytes` | 4 GiB |
   | | `sweep-secs` | 60 |
   | | `sweep-batch` | 1024 |
   | | `session-request-buffer` | 16 |

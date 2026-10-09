@@ -190,6 +190,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"
 # plugins (engine-compiler), round-trips the cwasm onto this crate's engine,
 # and drives full reducer rounds against real fixtures.
 engine-compiler = { path = "../engine-compiler" }
+# load_copies.rs builds a component carrying a large data segment, to see what
+# loading its cwasm copies.
+wasm-encoder = "0.247"
 # fake_capture emits a real JPEG so the face-age plugin's in-sandbox
 # decode → preprocess → inference pipeline has something to decode.
 jpeg-encoder = "0.6"

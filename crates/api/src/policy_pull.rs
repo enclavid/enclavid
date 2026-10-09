@@ -1,17 +1,26 @@
-//! Policy + plugin artifact resolution. Pulls OCI artifacts (manifest +
-//! single wasm layer), verifies every digest in the TEE against the
-//! pinned reference, and returns wasm bytes ready to compile. The
-//! policy and plugin paths share a common trust gate so a single
-//! integrity-check path covers both artifact kinds.
+//! Policy + plugin artifact resolution, in two steps. [`wasm_layer`] fetches an
+//! artifact's manifest, checks it against the pinned reference in the TEE,
+//! picks its wasm layer and, for an encrypted one, obtains its key — everything
+//! that can be refused before a byte of wasm moves. [`WasmLayer::pieces`] then
+//! fetches that one layer as a stream, held to the size and digest the verified
+//! manifest declares and decrypted on the way, for the compile to read as it
+//! comes. The policy and plugin paths share this one trust gate.
+//!
+//! Only the wasm layer is fetched. The manifest's digest pins the whole
+//! artifact, every layer's digest is inside it, and the other layers are not
+//! used — so fetching and checking them would add a pull and nothing else.
 
 use std::collections::HashMap;
 
+use bytes::Bytes;
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
-use enclavid_crypto::ocicrypt;
-use hatch_client::{Key, PullRequest, RegistryClient, boundary};
+use enclavid_crypto::ocicrypt::{self, LayerDecryptor};
+use hatch_client::{BlobPieces, BlobRequest, Key, ManifestRequest, RegistryClient, boundary};
 
 use crate::keyprovider::{self, KbsContext};
 
@@ -37,16 +46,12 @@ pub enum PullError {
     ManifestParse(String),
     #[error("manifest digest mismatch: expected {expected}, got {actual}")]
     ManifestDigest { expected: String, actual: String },
-    #[error("layer digest mismatch at index {index}: expected {expected}, got {actual}")]
-    LayerDigest {
-        index: usize,
-        expected: String,
-        actual: String,
-    },
+    #[error("layer digest mismatch: expected {expected}, got {actual}")]
+    LayerDigest { expected: String, actual: String },
+    #[error("the layer is not the size its manifest declares")]
+    LayerSize,
     #[error("manifest declares no layer with the wasm media type")]
     NoWasmLayer,
-    #[error("manifest layer/payload count mismatch: {layers} vs {payloads}")]
-    LayerCountMismatch { layers: usize, payloads: usize },
     #[error("artifact decryption failed: {0}")]
     Decrypt(String),
 }
@@ -62,17 +67,6 @@ fn classify_transport_error(e: hatch_client::BridgeError) -> PullError {
     }
 }
 
-/// Result of a successful policy pull: the policy's wasm component
-/// bytes, ready for compile. Any embedded text-ref declarations
-/// (`enclavid:embedded.disclosure-fields.v1`,
-/// `enclavid:embedded.i18n.v1`) live inside the wasm as component-
-/// level custom sections; the caller extracts them via
-/// `engine_compiler::load_embedded`. No sidecar layer.
-pub struct PolicyArtifact {
-    /// Wasm bytes ready to compile with wasmtime.
-    pub wasm_bytes: Vec<u8>,
-}
-
 #[derive(Deserialize)]
 struct OciManifest {
     layers: Vec<OciDescriptor>,
@@ -86,66 +80,46 @@ struct OciDescriptor {
     #[serde(rename = "mediaType")]
     media_type: String,
     digest: String,
+    /// The layer's length in bytes, which OCI requires every descriptor to
+    /// declare.
+    size: u64,
     /// ocicrypt stores the wrapped key + public cipher opts here (on the
     /// layer descriptor). Empty for plaintext layers.
     #[serde(default)]
     annotations: HashMap<String, String>,
 }
 
-/// Pull and integrity-check a policy OCI artifact. Returns the
-/// `application/wasm` layer bytes after recomputing every digest
-/// against the pinned reference.
-pub async fn pull_policy(
-    registry: &RegistryClient,
-    policy_ref: &str,
-    registry_auth: &[u8],
-    key: Option<&Key>,
-    kbs_ctx: Option<&KbsContext<'_>>,
-) -> Result<PolicyArtifact, PullError> {
-    let wasm_bytes = pull_wasm_layer(registry, policy_ref, registry_auth, key, kbs_ctx).await?;
-    Ok(PolicyArtifact { wasm_bytes })
-}
-
-/// One pulled plugin component. Same shape as `PolicyArtifact`; kept as
-/// a distinct type so future plugin-specific metadata (per-plugin
-/// embedded sections, signed attestation, …) can land without
-/// touching policy code paths.
+/// One artifact's wasm layer, known from its verified manifest and not fetched
+/// yet: how long it is, and what fetching it takes.
 ///
-/// Plugins are pure compute under our trust model — they may not import
-/// any host function — so they ship no embedded declarations sections.
-pub struct PluginArtifact {
-    /// Plain wasm component bytes — ready to compile with wasmtime.
-    pub wasm_bytes: Vec<u8>,
+/// Any embedded text-ref declarations (`enclavid:embedded.disclosure-fields.v1`,
+/// `enclavid:embedded.i18n.v1`) live inside the wasm as component-level custom
+/// sections, which the compiler extracts. No sidecar layer.
+pub struct WasmLayer {
+    registry: RegistryClient,
+    reference: String,
+    registry_auth: Vec<u8>,
+    digest: String,
+    size: u64,
+    decrypt: Option<LayerDecryptor>,
 }
 
-/// Pull and integrity-check a plugin OCI artifact. Identical trust
-/// path to `pull_policy` (host is untrusted on response content;
-/// every hash recomputed in the TEE against the pinned digest).
-pub async fn pull_plugin(
-    registry: &RegistryClient,
-    plugin_ref: &str,
-    registry_auth: &[u8],
-    key: Option<&Key>,
-    kbs_ctx: Option<&KbsContext<'_>>,
-) -> Result<PluginArtifact, PullError> {
-    let wasm_bytes = pull_wasm_layer(registry, plugin_ref, registry_auth, key, kbs_ctx).await?;
-    Ok(PluginArtifact { wasm_bytes })
-}
-
-/// Shared trust path for policy and plugin pulls. Verifies manifest
-/// digest + every layer digest against the pinned reference inside the
-/// trust gate, then extracts the first `application/wasm` layer.
-async fn pull_wasm_layer(
+/// Fetch and check an artifact's manifest, and pick its wasm layer: a
+/// plaintext `application/wasm` one, or an ocicrypt-encrypted one, whose key
+/// is obtained here. `key` is what the session pins for this artifact; a key
+/// for a plaintext layer is refused rather than ignored, so no cleartext is
+/// served where encryption was expected.
+pub async fn wasm_layer(
     registry: &RegistryClient,
     artifact_ref: &str,
     registry_auth: &[u8],
     key: Option<&Key>,
     kbs_ctx: Option<&KbsContext<'_>>,
-) -> Result<Vec<u8>, PullError> {
+) -> Result<WasmLayer, PullError> {
     let artifact_digest = extract_digest(artifact_ref)
         .ok_or_else(|| PullError::InvalidRef(artifact_ref.to_string()))?;
-    let req = boundary::outbound::to_untrusted(PullRequest {
-        policy_ref: artifact_ref.to_string(),
+    let req = boundary::outbound::to_untrusted(ManifestRequest {
+        reference: artifact_ref.to_string(),
         registry_auth: registry_auth.to_vec(),
     })
     .vouch_unchecked::<AuthN, _>(reason!(
@@ -158,48 +132,21 @@ async fn pull_wasm_layer(
     .vouch_unchecked::<Covert, _>(reason!(
         "both consumer-supplied at session create, not policy-controlled"
     ));
-    let response = registry
-        .pull(req)
+    let manifest = registry
+        .manifest(req)
         .await
         .map_err(classify_transport_error)?
-        .trust::<AuthN, _, _, _, _>(|r| {
-            // Manifest bytes must hash to the pinned digest.
-            let manifest_actual = sha256_hex(&r.manifest);
-            if !digest_matches(artifact_digest, &manifest_actual) {
-                return Err(PullError::ManifestDigest {
+        .trust::<AuthN, _, _, _, _>(|manifest| {
+            // The manifest's bytes must hash to the pinned digest.
+            let actual = sha256_hex(&manifest);
+            if digest_matches(artifact_digest, &actual) {
+                Ok(manifest)
+            } else {
+                Err(PullError::ManifestDigest {
                     expected: artifact_digest.to_string(),
-                    actual: format!("sha256:{manifest_actual}"),
-                });
+                    actual: format!("sha256:{actual}"),
+                })
             }
-            if r.manifest_digest != manifest_actual
-                && r.manifest_digest != format!("sha256:{manifest_actual}")
-            {
-                return Err(PullError::ManifestDigest {
-                    expected: format!("sha256:{manifest_actual}"),
-                    actual: r.manifest_digest.clone(),
-                });
-            }
-            let manifest: OciManifest = serde_json::from_slice(&r.manifest)
-                .map_err(|e| PullError::ManifestParse(e.to_string()))?;
-            if manifest.layers.len() != r.layers.len() {
-                return Err(PullError::LayerCountMismatch {
-                    layers: manifest.layers.len(),
-                    payloads: r.layers.len(),
-                });
-            }
-            for (idx, (descriptor, payload)) in
-                manifest.layers.iter().zip(r.layers.iter()).enumerate()
-            {
-                let layer_actual = sha256_hex(payload);
-                if !digest_matches(&descriptor.digest, &layer_actual) {
-                    return Err(PullError::LayerDigest {
-                        index: idx,
-                        expected: descriptor.digest.clone(),
-                        actual: format!("sha256:{layer_actual}"),
-                    });
-                }
-            }
-            Ok(r)
         })?
         .trust_unchecked::<AuthZ, _>(reason!(
             "OCI registry server enforces pull authorisation with the host-supplied \
@@ -209,51 +156,170 @@ async fn pull_wasm_layer(
             "content-addressed by digest — bit-identical responses for the same digest"
         ))
         .into_inner();
+    let manifest: OciManifest =
+        serde_json::from_slice(&manifest).map_err(|e| PullError::ManifestParse(e.to_string()))?;
 
-    let manifest: OciManifest = serde_json::from_slice(&response.manifest)
-        .map_err(|e| PullError::ManifestParse(e.to_string()))?;
-
-    // Select the wasm layer: plaintext `application/wasm`, or the
-    // ocicrypt-encrypted `application/wasm+encrypted`. Digests above were
-    // verified over the (cipher)text bytes exactly as the manifest pins
-    // them, so the integrity gate is unaffected by encryption.
-    for (idx, descriptor) in manifest.layers.iter().enumerate() {
-        if descriptor.media_type == WASM_LAYER {
-            // Plaintext layer. A supplied key means the client expected
-            // encryption — refuse rather than silently serving cleartext.
+    for descriptor in manifest.layers {
+        let decrypt = if descriptor.media_type == WASM_LAYER {
             if key.is_some() {
                 return Err(PullError::Decrypt(
                     "a key was supplied but the layer is not encrypted".to_string(),
                 ));
             }
-            return Ok(response.layers[idx].clone());
-        }
-        if let Some(inner) = descriptor
+            None
+        } else if descriptor
             .media_type
             .strip_suffix(ocicrypt::ENCRYPTED_MEDIA_SUFFIX)
+            == Some(WASM_LAYER)
         {
-            if inner != WASM_LAYER {
-                continue;
-            }
             let key = key.ok_or_else(|| {
                 PullError::Decrypt("layer is encrypted but no key was supplied".to_string())
             })?;
-            return decrypt_layer(&response.layers[idx], &descriptor.annotations, key, kbs_ctx)
-                .await;
-        }
+            Some(layer_decryptor(&descriptor.annotations, key, kbs_ctx).await?)
+        } else {
+            continue;
+        };
+        return Ok(WasmLayer {
+            registry: registry.clone(),
+            reference: artifact_ref.to_string(),
+            registry_auth: registry_auth.to_vec(),
+            digest: descriptor.digest,
+            size: descriptor.size,
+            decrypt,
+        });
     }
     Err(PullError::NoWasmLayer)
 }
 
-/// Decrypt an ocicrypt-encrypted wasm layer: read the public cipher opts
-/// from the `enc.pubopts` annotation, obtain the private opts via the
-/// key dispatch, and run the AES-256-CTR+HMAC decryption.
-async fn decrypt_layer(
-    ciphertext: &[u8],
+impl WasmLayer {
+    /// The wasm's length: the layer's, which an AES-CTR layer's plaintext
+    /// shares.
+    pub fn length(&self) -> u64 {
+        self.size
+    }
+
+    /// The wasm, fetched when first read and held to the verified manifest on
+    /// the way: to the layer's size as it comes, and to its digest — and, when
+    /// encrypted, to its HMAC and plaintext digest — where it ends.
+    ///
+    /// A layer that fails any of them ends in an error where it would have
+    /// ended, never in a quiet end. The pieces before that are not yet checked,
+    /// which is why they go only to a compile that starts once every component
+    /// has arrived whole.
+    pub fn pieces(self) -> BoxStream<'static, Result<Bytes, PullError>> {
+        let Self {
+            registry,
+            reference,
+            registry_auth,
+            digest,
+            size,
+            decrypt,
+        } = self;
+        let fetch = async move {
+            let req = boundary::outbound::to_untrusted(BlobRequest {
+                reference,
+                digest: digest.clone(),
+                registry_auth,
+            })
+            .vouch_unchecked::<AuthN, _>(reason!(
+                "a digest from the manifest this TEE verified, and the consumer's own ref \
+                 and bearer, courier-forwarded — not a TEE secret"
+            ))
+            .vouch_unchecked::<AuthZ, _>(reason!(
+                "forwarding the bearer to its registry IS the courier op"
+            ))
+            .vouch_unchecked::<Covert, _>(reason!(
+                "every part is consumer-supplied or read from the consumer's own manifest, \
+                 not policy-controlled"
+            ));
+            let pieces = registry
+                .blob(req)
+                .await
+                .map_err(classify_transport_error)?
+                .trust_unchecked::<AuthN, _>(reason!(
+                    "held below to the size and digest the pinned manifest declares, so a \
+                     blob that is not that layer ends in an error before anything acts on it"
+                ))
+                .trust_unchecked::<AuthZ, _>(reason!(
+                    "OCI registry server enforces pull authorisation with the host-supplied \
+                     bearer; TEE doesn't gate access at this layer"
+                ))
+                .trust_unchecked::<Replay, _>(reason!(
+                    "content-addressed by digest — bit-identical responses for the same digest"
+                ))
+                .into_inner();
+            Ok::<_, PullError>(held(pieces, digest, size, decrypt))
+        };
+        futures::stream::once(fetch).try_flatten().boxed()
+    }
+}
+
+/// What [`held`] carries from one piece to the next.
+struct Holding {
+    pieces: BlobPieces,
+    digest: String,
+    left: u64,
+    sum: Sha256,
+    decrypt: Option<LayerDecryptor>,
+}
+
+/// `pieces` held to `size` as they come and to `digest` where they end, and
+/// decrypted by `decrypt` if given, whose checks are made where they end too.
+fn held(
+    pieces: BlobPieces,
+    digest: String,
+    size: u64,
+    decrypt: Option<LayerDecryptor>,
+) -> BoxStream<'static, Result<Bytes, PullError>> {
+    let holding = Holding {
+        pieces,
+        digest,
+        left: size,
+        sum: Sha256::new(),
+        decrypt,
+    };
+    futures::stream::try_unfold(holding, |mut h| async move {
+        let Some(piece) = h.pieces.next().await else {
+            if h.left != 0 {
+                return Err(PullError::LayerSize);
+            }
+            let actual = hex::encode(std::mem::take(&mut h.sum).finalize());
+            if !digest_matches(&h.digest, &actual) {
+                return Err(PullError::LayerDigest {
+                    expected: h.digest,
+                    actual: format!("sha256:{actual}"),
+                });
+            }
+            if let Some(decrypt) = h.decrypt.take() {
+                decrypt
+                    .finish()
+                    .map_err(|e| PullError::Decrypt(e.to_string()))?;
+            }
+            return Ok(None);
+        };
+        let piece = piece.map_err(classify_transport_error)?;
+        h.left = h
+            .left
+            .checked_sub(piece.len() as u64)
+            .ok_or(PullError::LayerSize)?;
+        h.sum.update(&piece);
+        let plain = match h.decrypt.as_mut() {
+            Some(decrypt) => Bytes::from(decrypt.decrypt(&piece)),
+            None => piece,
+        };
+        Ok(Some((plain, h)))
+    })
+    .boxed()
+}
+
+/// The decryptor for an ocicrypt-encrypted wasm layer: the public cipher opts
+/// from the `enc.pubopts` annotation, and the private opts from the key
+/// dispatch.
+async fn layer_decryptor(
     annotations: &HashMap<String, String>,
     key: &Key,
     kbs_ctx: Option<&KbsContext<'_>>,
-) -> Result<Vec<u8>, PullError> {
+) -> Result<LayerDecryptor, PullError> {
     let pubopts = annotations
         .get(ocicrypt::ANNOTATION_PUBOPTS)
         .ok_or_else(|| PullError::Decrypt("missing enc.pubopts annotation".to_string()))?;
@@ -262,7 +328,7 @@ async fn decrypt_layer(
     let private = keyprovider::obtain_priv_opts(annotations, key, kbs_ctx)
         .await
         .map_err(|e| PullError::Decrypt(e.to_string()))?;
-    ocicrypt::decrypt(ciphertext, &public, &private).map_err(|e| PullError::Decrypt(e.to_string()))
+    LayerDecryptor::new(&public, &private).map_err(|e| PullError::Decrypt(e.to_string()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -347,52 +413,108 @@ mod tests {
     use super::*;
     use hatch_client::Key;
 
+    /// `bytes` as pieces of `piece` bytes, as the hatch's stream would carry
+    /// them.
+    fn pieces(bytes: &[u8], piece: usize) -> BlobPieces {
+        let pieces: Vec<_> = bytes
+            .chunks(piece)
+            .map(|p| Ok(Bytes::copy_from_slice(p)))
+            .collect();
+        futures::stream::iter(pieces).boxed()
+    }
+
+    async fn read(
+        stream: BoxStream<'static, Result<Bytes, PullError>>,
+    ) -> Result<Vec<u8>, PullError> {
+        stream
+            .try_fold(Vec::new(), |mut all, p| async move {
+                all.extend_from_slice(&p);
+                Ok(all)
+            })
+            .await
+    }
+
+    fn digest_of(bytes: &[u8]) -> String {
+        format!("sha256:{}", sha256_hex(bytes))
+    }
+
+    /// The `enc.pubopts` annotation a manifest carries for `public`.
+    fn annotations(public: &ocicrypt::PublicLayerBlockCipherOptions) -> HashMap<String, String> {
+        HashMap::from([(
+            ocicrypt::ANNOTATION_PUBOPTS.to_string(),
+            ocicrypt::pubopts_to_annotation(public).unwrap(),
+        )])
+    }
+
     /// The full decrypt seam for an `inline`-keyed layer: ocicrypt-encrypt
     /// some bytes the way `enclavid oci push --encrypt inline` does, lay the
-    /// `enc.pubopts` annotation as the manifest would carry it, then run
-    /// `decrypt_layer` (pubopts read + keyprovider Inline dispatch + ocicrypt
-    /// decrypt) and assert it reproduces the plaintext.
+    /// `enc.pubopts` annotation as the manifest would carry it, take the
+    /// decryptor through the keyprovider Inline dispatch, and read the layer's
+    /// stream through it: the plaintext comes out whole.
     #[tokio::test]
-    async fn decrypt_layer_inline_round_trips() {
-        let plaintext = b"\x00asm\x01\x00\x00\x00 pretend wasm component bytes".to_vec();
-
+    async fn an_inline_keyed_layer_streams_out_decrypted() {
+        let plaintext: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
         let (ciphertext, public, private) = ocicrypt::encrypt(&plaintext);
         assert_ne!(ciphertext, plaintext, "layer must actually be encrypted");
-
-        let mut annotations = HashMap::new();
-        annotations.insert(
-            ocicrypt::ANNOTATION_PUBOPTS.to_string(),
-            ocicrypt::pubopts_to_annotation(&public).unwrap(),
-        );
         let key = Key::Inline(ocicrypt::privopts_to_json(&private).unwrap());
 
-        let out = decrypt_layer(&ciphertext, &annotations, &key, None)
+        let decrypt = layer_decryptor(&annotations(&public), &key, None)
             .await
-            .expect("decrypt should succeed with the matching inline key");
-        assert_eq!(out, plaintext);
+            .expect("the matching inline key yields a decryptor");
+        let out = held(
+            pieces(&ciphertext, 7_777),
+            digest_of(&ciphertext),
+            ciphertext.len() as u64,
+            Some(decrypt),
+        );
+        assert_eq!(read(out).await.unwrap(), plaintext);
     }
 
     /// A wrong inline key must fail closed (HMAC over the ciphertext rejects
-    /// it), never return garbage plaintext.
+    /// it) where the layer ends, never end quietly on garbage plaintext.
     #[tokio::test]
-    async fn decrypt_layer_rejects_wrong_inline_key() {
-        let plaintext = b"sensitive policy bytes".to_vec();
-        let (ciphertext, public, _private) = ocicrypt::encrypt(&plaintext);
-
+    async fn a_wrong_inline_key_ends_the_layer_in_an_error() {
+        let (ciphertext, public, _private) = ocicrypt::encrypt(b"sensitive policy bytes");
         // A private-opts JSON from an UNRELATED encryption (different key).
         let (_ct2, _pub2, other_private) = ocicrypt::encrypt(b"unrelated");
-
-        let mut annotations = HashMap::new();
-        annotations.insert(
-            ocicrypt::ANNOTATION_PUBOPTS.to_string(),
-            ocicrypt::pubopts_to_annotation(&public).unwrap(),
-        );
         let key = Key::Inline(ocicrypt::privopts_to_json(&other_private).unwrap());
 
-        let err = decrypt_layer(&ciphertext, &annotations, &key, None)
+        let decrypt = layer_decryptor(&annotations(&public), &key, None)
             .await
-            .expect_err("wrong key must fail");
-        assert!(matches!(err, PullError::Decrypt(_)));
+            .unwrap();
+        let out = held(
+            pieces(&ciphertext, 5),
+            digest_of(&ciphertext),
+            ciphertext.len() as u64,
+            Some(decrypt),
+        );
+        assert!(matches!(read(out).await, Err(PullError::Decrypt(_))));
+    }
+
+    /// A plaintext layer is held to the size and digest its manifest declares:
+    /// longer, shorter, or other bytes, and it ends in an error.
+    #[tokio::test]
+    async fn a_layer_is_held_to_its_size_and_digest() {
+        let layer: Vec<u8> = (0..50_000).map(|i| (i % 7) as u8).collect();
+        let digest = digest_of(&layer);
+        let size = layer.len() as u64;
+
+        let whole = held(pieces(&layer, 4096), digest.clone(), size, None);
+        assert_eq!(read(whole).await.unwrap(), layer);
+
+        let longer = held(pieces(&layer, 4096), digest.clone(), size - 1, None);
+        assert!(matches!(read(longer).await, Err(PullError::LayerSize)));
+
+        let shorter = held(pieces(&layer, 4096), digest.clone(), size + 1, None);
+        assert!(matches!(read(shorter).await, Err(PullError::LayerSize)));
+
+        let mut other = layer.clone();
+        other[100] ^= 1;
+        let tampered = held(pieces(&other, 4096), digest, size, None);
+        assert!(matches!(
+            read(tampered).await,
+            Err(PullError::LayerDigest { .. })
+        ));
     }
 
     /// A supplied key on a plaintext `application/wasm` layer is rejected —

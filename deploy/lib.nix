@@ -224,10 +224,11 @@ rec {
       # What a consumer names is fetched by the hatch itself, never through a
       # proxy the service manager's environment might name.
       UnsetEnvironment = [ "HTTP_PROXY" "http_proxy" "HTTPS_PROXY" "https_proxy" "ALL_PROXY" "all_proxy" "NO_PROXY" "no_proxy" ];
-      # Four pulls at once, each holding at most 256 MiB and its encoding on
-      # the way out, with room besides: past it, the hatch alone is stopped
-      # and started again, never a guest beside it.
-      MemoryMax = "4G";
+      # Four pulls at once, each a manifest of at most 256 KiB or a blob passed
+      # through a piece at a time, beside a hatch at rest of some 50 MiB, with
+      # room besides: past it, the hatch alone is stopped and started again,
+      # never a guest beside it.
+      MemoryMax = "1G";
     };
   };
 }

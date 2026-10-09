@@ -16,6 +16,9 @@ serde = { version = "1", features = ["derive"] }
 bytes = "1"
 sha2 = "0.10"
 tokio = { version = "1", default-features = false, features = ["time"] }
+# `Stream`, what `send_from` takes its pieces from and `into_pieces` gives
+# them as. remoc is built on it.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 # The tests bring a real connection up over an in-memory pipe, which takes a codec.

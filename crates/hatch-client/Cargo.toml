@@ -20,6 +20,9 @@ hatch-protocol = { path = "../hatch-protocol" }
 # (hatch HTTP today, storage-CVM remoc tomorrow) swaps behind an `Arc<dyn _>`
 # without generics rippling through api's AppState.
 async-trait = "0.1"
+# `Stream`, what a cache blob crosses the seam as, sealed and opened a piece
+# at a time.
+futures = { version = "0.3", default-features = false, features = ["std"] }
 # Serde + CBOR for the sealed domain types (see src/domain.rs). Same
 # codec as the wire envelope — zero protobuf in the project.
 serde = { version = "1", features = ["derive"] }

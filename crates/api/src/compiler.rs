@@ -1,30 +1,33 @@
 //! The COMPILE boundary: fuse + compile a policy + its pinned plugins into a
-//! [`CompiledBundle`]. api NEVER compiles in-process — it always drives a
+//! cwasm and its metadata. api NEVER compiles in-process — it always drives a
 //! compile-worker over rpc, so the api binary links NO Cranelift.
 //!
 //! [`Compiler`] wraps the `engine_rpc::CompilerService` client. The worker is a
 //! separate CVM, brought up at boot rather than by api.
 //! api [`connect`](connect_compile_worker)s to it at a configured address, under
-//! mutual RA-TLS; the transport is TCP by default and vsock under that feature. The orchestrator holds the returned cwasm as BYTES via
-//! [`bundle_to_entry`] and never deserializes it — the live `Component` is
-//! materialized only on the execution-worker (the compile→execute seam is
-//! bytes-in, bytes-out both ends).
-//!
-//! The [`CompiledBundle`] wire type lives in the `engine-rpc` crate (it is the compile
-//! RPC return value, the L2 cache bundle — see [`crate::cwasm_cache`] — AND what
-//! api hands the worker on `run_with_bundle`) so a cold compile and an L2 hit
-//! resolve the same bundle the worker deserializes.
+//! mutual RA-TLS; the transport is TCP by default and vsock under that feature.
+//! The components stream to the worker beside the call, and the cwasm streams
+//! back beside the reply: api passes it on — to the execution-worker and to L2,
+//! see [`crate::tee`] — as it arrives, never holds it whole, and never
+//! deserializes it. The live `Component` is materialized only on the
+//! execution-worker.
+
+use bytes::Bytes;
+use futures::stream::BoxStream;
 
 use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
-use engine_rpc::{CompileError, CompileRequest, CompiledBundle, CompilerLeg};
-use engine_types::composition::PluginInstance;
+use engine_rpc::{
+    COMPILE_STREAM_DEADLINE, COMPILE_STREAM_IDLE, CompileError, CompileReply, CompileSource,
+    CompilerLeg, MAX_BUNDLE_META_BYTES,
+};
+use fleet_stream::{Incoming, StreamError};
 use fleet_transport::LegFailure;
 use safe_logger::debug;
 
 /// The COMPILE boundary: a client for a compile-worker's `engine_rpc::CompilerService`.
 /// Given already-pulled artifact bytes (the orchestrator owns the OCI pull +
 /// registry auth), the worker fuses + Cranelift-compiles + parses sections into
-/// a [`CompiledBundle`]. The client is a cheap remoc handle (`Send + Sync`);
+/// a [`Compiled`]. The client is a cheap remoc handle (`Send + Sync`);
 /// concurrent `/connect` compiles multiplex over the one connection.
 /// How api judges the compile hop's answers — see [`Compiler::compile`].
 pub type CompileScope = (Asserted,);
@@ -42,11 +45,8 @@ type ToCompiler<T> = Exposed<T, (AuthN, AuthZ, Covert)>;
 /// `outbound_session_id` precedent: the audited answers live in one place (grep
 /// `outbound_compile_request(`) instead of being restated at each call, where they
 /// would be the same three sentences forever.
-fn outbound_compile_request(
-    policy: Vec<u8>,
-    plugins: Vec<PluginInstance>,
-) -> Exposed<CompileRequest, ()> {
-    let open: ToCompiler<CompileRequest> = Exposed::new(CompileRequest { policy, plugins });
+fn outbound_compile_request(source: CompileSource) -> Exposed<CompileSource, ()> {
+    let open: ToCompiler<CompileSource> = Exposed::new(source);
     open.vouch_unchecked::<AuthN, _>(reason!(
         "identified: this leg dials ONE compile-time-pinned measurement, and the \
          handshake fails before a byte moves if the peer is not it"
@@ -65,6 +65,18 @@ pub struct Compiler {
     leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileScope>>>>,
 }
 
+/// What a compile gives back: the metadata, encoded as the execute hop streams
+/// it, and the cwasm — its length and digest, and its pieces as they arrive,
+/// held to both. A cwasm that is not what it was named ends its pieces in an
+/// error where it would have ended, so a reader passing them on abandons rather
+/// than finishes.
+pub struct Compiled {
+    pub meta: Vec<u8>,
+    pub cwasm_len: u64,
+    pub cwasm_sha256: [u8; 32],
+    pub cwasm: BoxStream<'static, Result<Bytes, StreamError>>,
+}
+
 impl Compiler {
     pub fn new(
         leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileScope>>>>,
@@ -72,21 +84,16 @@ impl Compiler {
         Self { leg }
     }
 
-    /// Compile `(policy, plugins)` on the worker. A transport failure, or a leg
-    /// that is down, surfaces as `CompileError::Failed`; the worker's own answer,
-    /// `Refused` included, comes back as it was sent.
-    pub async fn compile(
-        &self,
-        policy_wasm: Vec<u8>,
-        plugins: Vec<PluginInstance>,
-    ) -> Result<CompiledBundle, CompileError> {
+    /// Compile the components `source` streams on the worker. A transport
+    /// failure, or a leg that is down, surfaces as `CompileError::Failed`; the
+    /// worker's own answer, `Refused` included, comes back as it was sent.
+    pub async fn compile(&self, source: CompileSource) -> Result<Compiled, CompileError> {
         let client = self.leg.get().ok_or_else(|| {
             debug!("compile: the compile-worker leg is down");
             CompileError::Failed
         })?;
-        let bundle: Untrusted<CompiledBundle, CompileScope> = client
-            .compile(outbound_compile_request(policy_wasm, plugins))
-            .await?;
+        let reply: Untrusted<CompileReply, CompileScope> =
+            client.compile(outbound_compile_request(source)).await?;
         // CONTAINED, and the honest form of it: there is NO check available here.
         //
         // Read the axis carefully, because the obvious reading is the wrong one.
@@ -104,7 +111,7 @@ impl Compiler {
         // bytes to the slot they were filed under, never to the question that was
         // asked. It is a tamper-evident bag: proof nobody opened it afterwards, and
         // no evidence at all about what went in.
-        Ok(bundle
+        let CompileReply { meta, cwasm, body } = reply
             .trust_unchecked::<Asserted, _>(reason!(
                 "NO KIND FITS — an accepted risk, not a discharge. Not re-derived \
                  (this side carries no Cranelift), not bound (a digest the compiler \
@@ -113,7 +120,28 @@ impl Compiler {
                  did not author it). Carried because no check exists and the fleet \
                  needs a compiler; what limits the damage is downstream containment"
             ))
-            .into_inner())
+            .into_inner();
+        // What the execute hop takes, held here where api would otherwise pass on
+        // what no worker accepts.
+        if meta.len() as u64 > MAX_BUNDLE_META_BYTES {
+            debug!("compile: the metadata is past its bound");
+            return Err(CompileError::Failed);
+        }
+        // The digest is the compiler's word too; it is held to it all the same,
+        // so that what this side passes on is at least what the compiler named.
+        let pieces = Incoming::open(body, cwasm.length(), COMPILE_STREAM_IDLE)
+            .await
+            .map_err(|e| {
+                debug!("compile: the cwasm's stream: {e}");
+                CompileError::Failed
+            })?
+            .into_pieces(COMPILE_STREAM_DEADLINE, Some(cwasm.sha256()));
+        Ok(Compiled {
+            meta,
+            cwasm_len: cwasm.length(),
+            cwasm_sha256: cwasm.sha256(),
+            cwasm: pieces,
+        })
     }
 }
 
@@ -183,6 +211,9 @@ pub async fn connect_compile_worker(
 mod tests {
     use super::*;
     use enclavid_boundary::AuthN;
+    use engine_rpc::CompileRequest;
+    use fleet_stream::{BlobHeader, bin};
+    use futures::StreamExt;
 
     // A minimal in-process server, so the Compiler client's rpc plumbing is
     // exercised without a real worker (the transport factory
@@ -191,6 +222,9 @@ mod tests {
     // It implements the UNTRUSTED view because that is the only implementable
     // shape: engine-rpc exports no raw server, so a test cannot serve this
     // contract by a route production code could not take either.
+    //
+    // Its cwasm is the policy's length and the plugin count; for the policy
+    // `lie` it names one cwasm and sends another.
     struct MockService;
 
     impl engine_rpc::CompilerServiceUntrusted for MockService {
@@ -199,23 +233,42 @@ mod tests {
         async fn compile(
             &self,
             req: Untrusted<CompileRequest, Self::Scope>,
-        ) -> Result<CompiledBundle, CompileError> {
-            let CompileRequest { policy, plugins } = req
+        ) -> Result<CompileReply, CompileError> {
+            let (policy, plugins) = req
                 .trust_unchecked::<AuthN, _>(reason!("test fixture"))
-                .into_inner();
+                .into_inner()
+                .receive()
+                .await
+                .map_err(|_| CompileError::Failed)?;
             if policy == b"boom" {
                 return Err(CompileError::Refused);
             }
-            Ok(CompiledBundle {
-                cwasm: vec![policy.len() as u8, plugins.len() as u8],
-                embedded_imports: vec![],
-                catalogs: vec![],
+            let cwasm = vec![policy.len() as u8, plugins.len() as u8];
+            let header = BlobHeader::of(&cwasm).unwrap();
+            let sent = if policy == b"lie" { vec![9, 9] } else { cwasm };
+            let (tx, body) = bin::channel();
+            tokio::spawn(fleet_stream::send(tx, sent));
+            Ok(CompileReply {
+                meta: b"meta".to_vec(),
+                cwasm: header,
+                body,
             })
         }
     }
 
+    async fn read(compiled: Compiled) -> Vec<Result<Bytes, StreamError>> {
+        compiled.cwasm.collect().await
+    }
+
+    fn whole(
+        policy: &[u8],
+        plugins: Vec<engine_types::composition::PluginInstance>,
+    ) -> CompileSource {
+        CompileSource::whole(policy.to_vec(), plugins).unwrap()
+    }
+
     /// The Compiler client drives a CompilerService over an in-memory remoc
-    /// duplex: args cross, the typed bundle returns, and the error path
+    /// duplex: args cross, the cwasm streams back, and the error path
     /// propagates.
     #[tokio::test]
     async fn compiler_round_trips() {
@@ -246,25 +299,32 @@ mod tests {
         leg.set(Some(client.clone()));
         let compiler = Compiler::new(leg.clone());
 
-        let plugins = vec![PluginInstance {
+        let plugins = vec![engine_types::composition::PluginInstance {
             package: "p".into(),
             wasm: vec![0],
         }];
-        let bundle = compiler.compile(b"hello".to_vec(), plugins).await.unwrap();
-        assert_eq!(bundle.cwasm, vec![5u8, 1u8]);
+        let compiled = compiler.compile(whole(b"hello", plugins)).await.unwrap();
+        assert_eq!(compiled.meta, b"meta");
+        assert_eq!(compiled.cwasm_len, 2);
+        assert_eq!(read(compiled).await, vec![Ok(Bytes::from_static(&[5, 1]))]);
+
+        // A cwasm that is not the one it was named ends in an error, never in a
+        // quiet end a reader passing it on would finish on.
+        let compiled = compiler.compile(whole(b"lie", vec![])).await.unwrap();
+        assert_eq!(read(compiled).await.last(), Some(&Err(StreamError::Digest)));
 
         // A down leg fails the call rather than waiting: how long to wait for a
         // peer is the host's decision, and the health port is already telling it.
         leg.set(None);
-        // `CompiledBundle` is deliberately not `Debug` (it holds megabytes of
-        // cwasm), so match the outcome rather than unwrapping it.
-        match compiler.compile(b"hello".to_vec(), vec![]).await {
+        // `Compiled` is deliberately not `Debug` (it holds a stream), so match the
+        // outcome rather than unwrapping it.
+        match compiler.compile(whole(b"hello", vec![])).await {
             Err(e) => assert_eq!(e, CompileError::Failed),
             Ok(_) => panic!("a call on a down leg must fail"),
         }
         leg.set(Some(client));
 
-        let err = match compiler.compile(b"boom".to_vec(), vec![]).await {
+        let err = match compiler.compile(whole(b"boom", vec![])).await {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };

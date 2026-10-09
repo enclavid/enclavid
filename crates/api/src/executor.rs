@@ -21,8 +21,8 @@
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
 use engine_rpc::{
-    CallbackServiceUntrusted, CompiledBundle, ExecError, ExecutorLeg, Padded, RunOutcome,
-    RunRequest, RunStatus,
+    BundleSource, CallbackServiceUntrusted, ExecError, ExecutorLeg, Padded, RunOutcome, RunRequest,
+    RunStatus,
 };
 use fleet_transport::LegFailure;
 use hatch_client::SessionState;
@@ -120,11 +120,12 @@ impl Executor {
     /// `req.composition_key`; it files it in L1 under that key and runs. Always runs
     /// (a bundle is in hand), so this returns the round's `RunStatus` directly.
     /// The bundle streams beside the request (`engine_rpc::BundleStream`), written
-    /// by the door in this process while the call is awaited.
+    /// by the door in this process while the call is awaited — from memory after
+    /// a compile, from the cache on an L2 hit.
     pub async fn run_with_bundle<C>(
         &self,
         req: Exposed<RunRequest, ()>,
-        bundle: CompiledBundle,
+        bundle: BundleSource,
         callbacks: C,
     ) -> Result<Untrusted<RunStatus, C::Scope>, ExecError>
     where

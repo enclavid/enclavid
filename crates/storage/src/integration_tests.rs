@@ -4,22 +4,56 @@
 //! the api ↔ storage-CVM path minus RA-TLS. Mirrors `engine-rpc`'s execute test.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use object_store::memory::InMemory;
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 use tokio::io::split;
 
+use fleet_stream::{Incoming, StreamError, StreamLen, bin};
 use hatch_protocol::{
     BlobField, BlobWrite, FieldSelector, MediaWrite, Op, ReadRequest, ScalarSlot, Slot,
     WriteRequest,
 };
 use storage_rpc::{
-    ByteBuf, CacheService, CacheServiceServerShared, SessionError, SessionStoreService,
-    SessionStoreServiceServerShared, StorageClients,
+    CacheBlob, CacheError, CacheService, CacheServiceClient, CacheServiceServerShared,
+    SessionError, SessionStoreService, SessionStoreServiceServerShared, StorageClients,
 };
 
 use crate::{CacheBlobs, Caller, SessionStore, StorageSvc};
+
+/// Store `bytes` under `key` through a cache client, streaming them beside the
+/// call as api does.
+async fn put(
+    cache: &CacheServiceClient<Ciborium>,
+    key: &str,
+    bytes: &[u8],
+) -> Result<(), CacheError> {
+    let (tx, body) = bin::channel();
+    let blob = CacheBlob {
+        length: StreamLen::new(bytes.len() as u64).unwrap(),
+        body,
+    };
+    let (stored, _) = tokio::join!(
+        cache.store(key.to_string(), blob),
+        fleet_stream::send(tx, bytes.to_vec())
+    );
+    stored
+}
+
+/// The blob under `key` through a cache client, read whole as api reads one.
+async fn get(cache: &CacheServiceClient<Ciborium>, key: &str) -> Option<Vec<u8>> {
+    let blob = cache.load(key.to_string()).await.unwrap()?;
+    let mut incoming = Incoming::open(blob.body, blob.length.get(), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut got = Vec::new();
+    while let Some(piece) = incoming.next().await.unwrap() {
+        got.extend_from_slice(&piece);
+    }
+    Some(got)
+}
 
 /// A stand-in launch digest. Any two distinct strings would do — the partition
 /// derives from the bytes, not from their shape.
@@ -34,7 +68,7 @@ fn store() -> (tempfile::TempDir, Arc<StorageSvc>) {
     );
     let svc = Arc::new(StorageSvc::new(
         sessions,
-        CacheBlobs::new(Arc::new(InMemory::new())),
+        CacheBlobs::new(Arc::new(InMemory::new()), 64 * 1024 * 1024),
     ));
     (dir, svc)
 }
@@ -154,17 +188,46 @@ async fn remoc_roundtrip_both_services() {
     session_cli.write(id.clone(), reset, None).await.unwrap();
     assert!(session_cli.exists(id.clone()).await.unwrap()); // session survives reset
 
-    // --- cache: store → load → miss ---
+    // --- cache: miss → store → load → remove → miss ---
     let key = "abcd".repeat(16); // 64 hex chars
-    assert_eq!(cache_cli.load(key.clone()).await.unwrap(), None);
-    cache_cli
-        .store(key.clone(), ByteBuf::from(b"cwasm".to_vec()))
-        .await
-        .unwrap();
-    assert_eq!(
-        cache_cli.load(key.clone()).await.unwrap(),
-        Some(ByteBuf::from(b"cwasm".to_vec()))
-    );
+    assert_eq!(get(&cache_cli, &key).await, None);
+    put(&cache_cli, &key, b"cwasm").await.unwrap();
+    assert_eq!(get(&cache_cli, &key).await, Some(b"cwasm".to_vec()));
+    cache_cli.remove(key.clone()).await.unwrap();
+    assert_eq!(get(&cache_cli, &key).await, None);
+
+    server.abort();
+}
+
+/// A blob past one remoc item crosses both ways, and one its sender abandons
+/// part-way is never kept: the store answers an error and the blob before it
+/// stays.
+#[tokio::test]
+async fn cache_blobs_stream_and_an_abandoned_one_is_not_kept() {
+    let (_dir, store) = store();
+    let (clients, server) = connected(Arc::new(Caller::new(store, peer("ab"))), None).await;
+    let cache = clients.cache;
+    let key = "ef".repeat(32);
+
+    let big: Vec<u8> = (0..remoc::rch::DEFAULT_MAX_ITEM_SIZE + 1)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    put(&cache, &key, &big).await.unwrap();
+    assert!(get(&cache, &key).await == Some(big.clone()));
+
+    let (tx, body) = bin::channel();
+    let blob = CacheBlob {
+        length: StreamLen::new(1000).unwrap(),
+        body,
+    };
+    let (stored, ()) = tokio::join!(cache.store(key.clone(), blob), async move {
+        let mut raw = tx.into_inner().await.unwrap();
+        let part = raw.send_chunks().send(vec![0u8; 500].into()).await.unwrap();
+        drop(part);
+    });
+    let e = stored.expect_err("an abandoned blob is not stored");
+    assert!(e.0.contains(&StreamError::Cancelled.to_string()), "{e}");
+    assert!(get(&cache, &key).await == Some(big));
 
     server.abort();
 }
@@ -203,20 +266,24 @@ async fn an_oversized_request_closes_its_channel_and_nothing_else() {
         .await
         .expect("the session channel closes");
     assert!(clients.session.exists(id).await.is_err());
-    assert_eq!(clients.cache.load("abcd".repeat(16)).await.unwrap(), None);
+    assert_eq!(get(&clients.cache, &"abcd".repeat(16)).await, None);
 
     server.abort();
 }
 
 /// The scenario the partition exists for: a guest the host launched connects,
 /// attests as itself (which is all this node can require of it), and asks for
-/// the records api is using. Called directly rather than over remoc — the
-/// property is in who serves the call, and one connection carries one peer.
+/// the records api is using. The session store is called directly — the
+/// property is in who serves the call — and the cache over a connection per
+/// caller, since its blobs stream beside the calls.
 #[tokio::test]
 async fn one_caller_cannot_reach_another_caller() {
     let (_dir, store) = store();
-    let api = Caller::new(store.clone(), peer("ab"));
-    let other = Caller::new(store, peer("cd"));
+    let api = Arc::new(Caller::new(store.clone(), peer("ab")));
+    let other = Arc::new(Caller::new(store, peer("cd")));
+    let (api_clients, api_server) = connected(api.clone(), None).await;
+    let (other_clients, other_server) = connected(other.clone(), None).await;
+    let (api_cache, other_cache) = (api_clients.cache, other_clients.cache);
 
     let id = "sess-1".to_string();
     let key = "abcd".repeat(16);
@@ -245,13 +312,11 @@ async fn one_caller_cannot_reach_another_caller() {
     )
     .await
     .unwrap();
-    api.store(key.clone(), ByteBuf::from(b"real".to_vec()))
-        .await
-        .unwrap();
+    put(&api_cache, &key, b"real").await.unwrap();
 
     // It cannot find out that the session is there...
     assert!(!other.exists(id.clone()).await.unwrap());
-    assert_eq!(other.load(key.clone()).await.unwrap(), None);
+    assert_eq!(get(&other_cache, &key).await, None);
     // ...cannot reset it out from under the applicant, even naming its
     // version...
     let reset = || WriteRequest {
@@ -268,10 +333,8 @@ async fn one_caller_cannot_reach_another_caller() {
         .write(id.clone(), set_metadata(b"junk", None), Some(9_999_999_999))
         .await
         .unwrap();
-    other
-        .store(key.clone(), ByteBuf::from(b"junk".to_vec()))
-        .await
-        .unwrap();
+    put(&other_cache, &key, b"junk").await.unwrap();
+    other_cache.remove(key.clone()).await.unwrap();
 
     let got = api
         .read(
@@ -306,14 +369,14 @@ async fn one_caller_cannot_reach_another_caller() {
             value: Some(b"selfie".to_vec())
         })
     );
-    assert_eq!(
-        api.load(key).await.unwrap(),
-        Some(ByteBuf::from(b"real".to_vec()))
-    );
+    // Neither its store nor its remove reached api's blob.
+    assert_eq!(get(&api_cache, &key).await, Some(b"real".to_vec()));
 
     // And the refusal above was the partition, not the version: the same call
     // from the caller that owns it resets.
     api.write(id, reset(), None).await.unwrap();
+    api_server.abort();
+    other_server.abort();
 }
 
 /// The TTL is not partitioned, and must not be: one sweeper, one clock, every

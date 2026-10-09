@@ -57,6 +57,11 @@ enclavid-embedded = { path = "../embedded" }
 # (engine-compiler-child), not here. api does not depend on this crate at all; it
 # drives the worker over rpc. ---
 engine-rpc = { path = "../engine-rpc", default-features = false, features = ["compile"], optional = true }
+# The child's answer on the seam: its metadata as bytes, its cwasm named by
+# length and digest; and the streams the supervisor relays and serves.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_bytes = { version = "0.11", optional = true }
+fleet-stream = { path = "../fleet-stream", optional = true }
 enclavid-boundary = { path = "../boundary", optional = true }
 # Shared disposable-child process-isolation plumbing (spawn + concurrency bound +
 # compile deadline + release); the execution-worker rides the same crate. The
@@ -84,6 +89,14 @@ fleet-transport = { path = "../fleet-transport", optional = true }
 # and api, which can reach AMD, verifies against its own copy of the same chip's.
 enclavid-attestation = { path = "../attestation", default-features = false, optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+# The file a compile child writes its cwasm into, which outlives the child: a
+# `memfd` on the Linux CVM (RAM-backed, nameless) — already in our tree via
+# wasmtime — and an unlinked tmpfile on a developer's machine. And the pieces it
+# streams on to api in.
+memfd = { version = "0.6", optional = true }
+tempfile = { version = "3", optional = true }
+futures = { version = "0.3", default-features = false, features = ["std"], optional = true }
+bytes = { version = "1", optional = true }
 
 [features]
 # Enables the `compile-worker` (supervisor) bin. Only the worker build pulls
@@ -108,13 +121,23 @@ worker = [
     "dep:enclavid-attestation",
     "dep:tokio-rustls",
     "dep:fleet-transport",
+    "dep:memfd",
+    "dep:tempfile",
+    "dep:futures",
+    "dep:bytes",
 ]
 # This role's supervisor↔child hop (`crate::seam`). Its own feature rather than
 # part of `worker`, because BOTH halves need it — the supervisor to drive the
 # child, the child to serve — and the child is a separate package that takes the
 # pure library. It is the whole of what either half needs from `engine-rpc`, which
 # is why the dependency rides here.
-child-seam = ["dep:engine-rpc", "dep:remoc"]
+child-seam = [
+    "dep:engine-rpc",
+    "dep:remoc",
+    "dep:serde",
+    "dep:serde_bytes",
+    "dep:fleet-stream",
+]
 
 # The attestation backend, and it is a choice rather than an addition. Cargo
 # features are additive, so `sev-snp` on top of the default would leave the

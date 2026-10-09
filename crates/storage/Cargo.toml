@@ -51,6 +51,11 @@ sha2 = "0.10"
 # per-instance: each blob is sealed under the writer's chip-bound `tee_seal_key`
 # (see `crate::cache`), so it is never fleet-shared.
 object_store = "0.12"
+# The cache's blobs cross the leg as streams, written to disk and read from it
+# a piece at a time.
+fleet-stream = { path = "../fleet-stream" }
+bytes = "1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
 
 remoc = { version = "0.18", default-features = false, features = [
     "rtc",

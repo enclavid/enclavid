@@ -1,6 +1,6 @@
 //! Wire DTOs shared across two transports:
 //!   * the host-side `hatch` over HTTP-over-vsock — the EGRESS envelopes
-//!     (`AuthorizeRequest`, `PullRequest`, `KbsRelayRequest`,
+//!     (`AuthorizeRequest`, `ManifestRequest`, `BlobRequest`, `KbsRelayRequest`,
 //!     `VcekRequest`);
 //!   * the trusted `storage-CVM` over RA-TLS/remoc — the session-store
 //!     DTOs (`ReadRequest` / `WriteRequest` / `Slot` / …), reused verbatim
@@ -119,13 +119,15 @@ mod byte_list {
 }
 
 // ---------------------------------------------------------------------
-// OCI pull  (POST /oci/pull)
+// OCI pull: a manifest (POST /oci/manifest), then the one blob of it the
+// TEE chose (POST /oci/blob). Which blob, and whether any of it is what the
+// pinned reference names, is decided TEE-side; the hatch parses neither.
 // ---------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PullRequest {
+pub struct ManifestRequest {
     /// Full pinned OCI reference `<registry>/<repo>@sha256:<hex>`.
-    pub policy_ref: String,
+    pub reference: String,
     /// Opaque bearer the hatch attaches as `Authorization` (empty =
     /// anonymous). Forwarded verbatim from the TEE.
     #[serde(with = "serde_bytes")]
@@ -133,16 +135,25 @@ pub struct PullRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PullResponse {
-    /// Raw OCI manifest JSON bytes (digest is over these exact bytes).
+pub struct ManifestResponse {
+    /// Raw OCI manifest JSON bytes (the pinned digest is over these exact
+    /// bytes, and the TEE recomputes it).
     #[serde(with = "serde_bytes")]
     pub manifest: Vec<u8>,
-    /// Hex `sha256:<hex>` of `manifest`; the TEE re-verifies it.
-    pub manifest_digest: String,
-    /// Layer payloads, same order as the manifest's `layers[]`. The TEE
-    /// recomputes each layer digest before trusting bytes.
-    #[serde(with = "byte_list")]
-    pub layers: Vec<Vec<u8>>,
+}
+
+/// One blob of a pinned reference's repository, by its digest. The answer is
+/// NOT CBOR: it is the blob's bytes, streamed as the response body as they come
+/// from the registry, so no blob is held whole on either side of the hop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobRequest {
+    /// Full pinned OCI reference whose repository holds the blob.
+    pub reference: String,
+    /// The blob's digest, `sha256:<hex>`, as the manifest names it.
+    pub digest: String,
+    /// As in [`ManifestRequest`].
+    #[serde(with = "serde_bytes")]
+    pub registry_auth: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------
@@ -430,11 +441,7 @@ mod tests {
         let back: ReadResponse = decode(&wire).unwrap();
         assert_eq!(back.slots, read.slots);
 
-        let pulled = PullResponse {
-            manifest: sealed(),
-            manifest_digest: String::new(),
-            layers: vec![sealed()],
-        };
+        let pulled = ManifestResponse { manifest: sealed() };
         assert!(encode(&pulled).unwrap().len() < 2 * sealed().len() + 256);
     }
 }

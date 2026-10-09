@@ -25,7 +25,9 @@ mod hash;
 #[cfg(feature = "child-seam")]
 mod seam;
 #[cfg(feature = "child-seam")]
-pub use seam::{CompileChildService, CompileChildServiceClient, CompileChildServiceServerShared};
+pub use seam::{
+    ChildCompiled, CompileChildService, CompileChildServiceClient, CompileChildServiceServerShared,
+};
 
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
@@ -42,9 +44,9 @@ pub use hash::{catalog_hash, embedded_import_name, slug};
 
 /// A fused policy component plus the manifest of distinct embedded
 /// imports its host `Linker` must register. Returned by
-/// [`Compiler::compose`]; the caller serializes `component` to `cwasm`
-/// (the process-honest boundary output) and hands the manifest to the
-/// executor's run path.
+/// [`Compiler::compose`], for tests and tooling that run a composition in
+/// the process that compiled it; the fleet's compile output is
+/// [`BundleParts`].
 pub struct Composition {
     pub component: Component,
     pub embedded_imports: Vec<EmbeddedImport>,
@@ -103,69 +105,43 @@ impl Compiler {
         policy_wasm: &[u8],
         plugins: &[PluginInstance],
     ) -> wasmtime::Result<Vec<u8>> {
-        let (bytes, _manifest) = compose::fuse(policy_wasm, plugins)?;
+        let (bytes, _manifest) = compose::fuse(policy_wasm.to_vec(), lent(plugins))?;
         Ok(bytes)
     }
 
-    /// Fuse a policy with its pinned plugins into ONE component and
-    /// compile it. `wac-graph` single-store fusion (see
-    /// `compose::fuse`) wires every plugin export into the policy's
-    /// imports; the result runs in one wasmtime `Store`, so
-    /// cross-component WIT resources are native handles. With no
-    /// plugins this is just [`compile`](Self::compile) on the policy
-    /// bytes.
+    /// Fuse a policy with its pinned plugins into ONE component (see
+    /// `fused`) and compile it, loaded and ready to run here. For tests and
+    /// tooling, which run what they compile in the same process, and copy the
+    /// components they lend it; the fleet's compile is
+    /// [`compile_to_parts`](Self::compile_to_parts).
     ///
     /// This is a build-time step: the caller compiles once per
     /// `(policy, plugin-set)` and reuses the returned [`Composition`]
     /// across every reducer round.
-    ///
-    /// Three shapes are handled:
-    ///
-    ///   * **Dynamic** — a non-fused policy plus runtime `plugins`:
-    ///     `compose::fuse` routes each component's i18n / icons import
-    ///     to a distinct per-catalog import (the manifest).
-    ///   * **Static** — a pre-fused policy artifact with no runtime
-    ///     plugins: compiled as-is; the manifest is reconstructed from
-    ///     the `embedded-slot:*` imports the artifact already carries
-    ///     (empty for a lone unfused policy, whose canonical embedded
-    ///     imports the host serves first-match).
-    ///   * **Hybrid** — a pre-fused core plus runtime `plugins`: fused
-    ///     again; the core's own routed imports bubble through and are
-    ///     re-emitted alongside the freshly routed runtime ones.
     pub fn compose(
         &self,
         policy_wasm: &[u8],
         plugins: &[PluginInstance],
     ) -> wasmtime::Result<Composition> {
-        let (component, mut embedded_imports) = if plugins.is_empty() {
-            (
-                self.compile(policy_wasm)?,
-                compose::reconstruct_strict_manifest(policy_wasm)?,
-            )
-        } else {
-            let (fused, mut manifest) = compose::fuse(policy_wasm, plugins)?;
-            // Hybrid pass-through: the core's own `embedded-slot:*`
-            // imports came through fusion untouched — add their manifest
-            // entries. Empty for a non-fused dynamic policy.
-            manifest.extend(compose::reconstruct_strict_manifest(policy_wasm)?);
-            (Component::new(&self.engine, &fused)?, manifest)
-        };
-        // Dedup by instance name: a runtime plugin and a baked one can
-        // share a catalog (same slug) — register the host instance once.
-        let mut seen = std::collections::HashSet::new();
-        embedded_imports.retain(|e| seen.insert(e.instance_name.clone()));
+        let (bytes, embedded_imports) = fused(policy_wasm.to_vec(), lent(plugins))?;
         Ok(Composition {
-            component,
+            component: self.compile(&bytes)?,
             embedded_imports,
         })
     }
 
     /// The whole compile-boundary output as [`BundleParts`]: parse each
-    /// component's embedded catalog (composition order, policy first), fuse +
-    /// Cranelift-compile, and serialize to `cwasm`. Called by
+    /// component's embedded catalog (composition order, policy first), fuse
+    /// (see `fused`), and Cranelift-compile to `cwasm`. Called by
     /// `engine-compiler-child` — the process the compile-worker spawns — which
     /// wraps the result into the wire `CompiledBundle`, so this orchestration
     /// lives ONCE, in the pure lib.
+    ///
+    /// Takes the components whole, so each form of the composition is let go
+    /// once the next is made: the components once fused, the fused bytes once
+    /// compiled. The compile writes its artifact straight into the `cwasm`
+    /// bytes; nothing of it is loaded or made runnable here, so there is no
+    /// loaded copy to serialize from.
     ///
     /// Refuses, before any section is parsed, a composition whose embedded
     /// sections are past `MAX_EMBEDDED_SECTION_BYTES`, and then one whose
@@ -175,34 +151,87 @@ impl Compiler {
     /// cap.
     pub fn compile_to_parts(
         &self,
-        policy_wasm: &[u8],
-        plugins: &[PluginInstance],
+        policy_wasm: Vec<u8>,
+        plugins: Vec<PluginInstance>,
     ) -> wasmtime::Result<BundleParts> {
         // The cap first, on lengths alone: everything below parses, and what it
         // would parse is what the cap bounds. Summed over the whole composition,
         // because the plugin set is the consumer's to pin.
-        let mut section_bytes = embedded_section_bytes(policy_wasm)?;
-        for p in plugins {
+        let mut section_bytes = embedded_section_bytes(&policy_wasm)?;
+        for p in &plugins {
             section_bytes += embedded_section_bytes(&p.wasm)?;
         }
         if section_bytes > MAX_EMBEDDED_SECTION_BYTES {
             return Err(wasmtime::Error::new(CatalogRefused::PastCap));
         }
-        let policy_catalog = load_embedded(policy_wasm)?;
+        let policy_catalog = load_embedded(&policy_wasm)?;
         let mut catalogs = Vec::with_capacity(1 + plugins.len());
         catalogs.push((policy_catalog.hash, policy_catalog.decls));
-        for p in plugins {
+        for p in &plugins {
             let c = load_embedded(&p.wasm)?;
             catalogs.push((c.hash, c.decls));
         }
-        let composition = self.compose(policy_wasm, plugins)?;
-        let cwasm = self.serialize_component(&composition.component)?;
+        let (bytes, embedded_imports) = fused(policy_wasm, plugins)?;
+        let cwasm = self.engine.precompile_component(&bytes)?;
         Ok(BundleParts {
             cwasm,
-            embedded_imports: composition.embedded_imports,
+            embedded_imports,
             catalogs,
         })
     }
+}
+
+/// The bytes a composition compiles from, and the manifest of distinct
+/// embedded imports its host `Linker` must register. `wac-graph`
+/// single-store fusion (see `compose::fuse`) wires every plugin export into
+/// the policy's imports; the result runs in one wasmtime `Store`, so
+/// cross-component WIT resources are native handles. With no plugins the
+/// bytes are the policy's own.
+///
+/// Three shapes are handled:
+///
+///   * **Dynamic** — a non-fused policy plus runtime `plugins`:
+///     `compose::fuse` routes each component's i18n / icons import
+///     to a distinct per-catalog import (the manifest).
+///   * **Static** — a pre-fused policy artifact with no runtime
+///     plugins: compiled as-is; the manifest is reconstructed from
+///     the `embedded-slot:*` imports the artifact already carries
+///     (empty for a lone unfused policy, whose canonical embedded
+///     imports the host serves first-match).
+///   * **Hybrid** — a pre-fused core plus runtime `plugins`: fused
+///     again; the core's own routed imports bubble through and are
+///     re-emitted alongside the freshly routed runtime ones.
+fn fused(
+    policy_wasm: Vec<u8>,
+    plugins: Vec<PluginInstance>,
+) -> wasmtime::Result<(Vec<u8>, Vec<EmbeddedImport>)> {
+    // A pre-fused core's own `embedded-slot:*` imports come through fusion
+    // untouched, so their entries are read off the core before fusion takes
+    // its bytes. Empty for a non-fused policy.
+    let mut core_imports = compose::reconstruct_strict_manifest(&policy_wasm)?;
+    let (bytes, mut embedded_imports) = if plugins.is_empty() {
+        (policy_wasm, Vec::new())
+    } else {
+        compose::fuse(policy_wasm, plugins)?
+    };
+    embedded_imports.append(&mut core_imports);
+    // Dedup by instance name: a runtime plugin and a baked one can
+    // share a catalog (same slug) — register the host instance once.
+    let mut seen = std::collections::HashSet::new();
+    embedded_imports.retain(|e| seen.insert(e.instance_name.clone()));
+    Ok((bytes, embedded_imports))
+}
+
+/// Owned copies of the plugins a caller lends, for the entry points that
+/// borrow rather than take.
+fn lent(plugins: &[PluginInstance]) -> Vec<PluginInstance> {
+    plugins
+        .iter()
+        .map(|p| PluginInstance {
+            package: p.package.clone(),
+            wasm: p.wasm.clone(),
+        })
+        .collect()
 }
 
 /// The wasmtime [`Config`] both fleet halves build their [`Engine`] from.

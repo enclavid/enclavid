@@ -32,8 +32,7 @@ use std::future::Future;
 use enclavid_boundary::{Open, Untrusted};
 
 use crate::adapter::Untrusting;
-use crate::bundle::CompiledBundle;
-use crate::compile::{CompileError, CompileRequest, CompilerService};
+use crate::compile::{CompileError, CompileReply, CompileRequest, CompilerService};
 
 /// The compile surface as its server sees it. Implement this and hand it to
 /// [`serve_compiler`](crate::serve_compiler), which is the only way to serve these
@@ -56,7 +55,7 @@ pub trait CompilerServiceUntrusted {
     fn compile(
         &self,
         req: Untrusted<CompileRequest, Self::Scope>,
-    ) -> impl Future<Output = Result<CompiledBundle, CompileError>> + Send;
+    ) -> impl Future<Output = Result<CompileReply, CompileError>> + Send;
 }
 
 /// A shared service is still one: the supervisor is `Arc`-held because its pool and
@@ -71,7 +70,7 @@ where
     fn compile(
         &self,
         req: Untrusted<CompileRequest, Self::Scope>,
-    ) -> impl Future<Output = Result<CompiledBundle, CompileError>> + Send {
+    ) -> impl Future<Output = Result<CompileReply, CompileError>> + Send {
         (**self).compile(req)
     }
 }
@@ -84,7 +83,7 @@ where
     T: CompilerServiceUntrusted + Send + Sync + 'static,
     T::Scope: Send,
 {
-    async fn compile(&self, req: CompileRequest) -> Result<CompiledBundle, CompileError> {
+    async fn compile(&self, req: CompileRequest) -> Result<CompileReply, CompileError> {
         self.0.compile(Untrusted::new(req)).await
     }
 }

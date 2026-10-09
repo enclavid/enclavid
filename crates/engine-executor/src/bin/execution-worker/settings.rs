@@ -15,7 +15,6 @@ use engine_executor::DEFAULT_ROUND_FUEL;
 use engine_executor::admission::{
     DEFAULT_BASE_RESERVE_BYTES, DEFAULT_BUNDLE_CACHE_ENTRIES, DEFAULT_CAPACITY_WAIT_SECS,
     DEFAULT_ROUND_HEADROOM_BYTES, DEFAULT_ROUND_MAX_BYTES, DEFAULT_WAITING_PER_CHILD,
-    ROUND_PROCESS_BYTES,
 };
 use engine_rpc::{
     DEFAULT_BUNDLE_STREAM_DEADLINE, DEFAULT_BUNDLE_STREAM_IDLE, DEFAULT_CALLBACK_REQUEST_BUFFER,
@@ -48,8 +47,9 @@ const DEFAULT_ROUND_DEADLINE_SECS: u64 = 120;
 /// an entry RETAINS, so this is a BYTE limit, not an entry count: each cwasm is
 /// ~10-15 MiB of memfd RAM, so an entry-count cap would nominally admit >100 GB,
 /// and an authenticated consumer minting many distinct `composition_key`s could
-/// OOM the supervisor (crashing every concurrent in-flight round). 2 GiB holds
-/// ~130-200 compositions. It is reserved whole out of this guest's memory before
+/// OOM the supervisor (crashing every concurrent in-flight round). 4 GiB holds
+/// two compositions carrying a gigabyte of data each beside about a hundred
+/// ordinary ones. It is reserved whole out of this guest's memory before
 /// the round children's total is set (see `children_total`), so a larger cache is
 /// a smaller total. It holds the fills streaming into the cache as well as its
 /// entries: a fill reserves what it will hold out of it before its first byte.
@@ -68,7 +68,7 @@ const DEFAULT_ROUND_DEADLINE_SECS: u64 = 120;
 /// bundles in use can take together, and a budget that cannot hold a fill of the
 /// largest bundle could never run that bundle — the worker does not boot with
 /// one (see [`fill_charge`]); about 1.6 GiB is the least it takes.
-const DEFAULT_BUNDLE_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const DEFAULT_BUNDLE_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// How many round children may run at once unless the host says otherwise
 /// (the `max-children` setting). A count, not a memory figure:
@@ -79,13 +79,14 @@ const DEFAULT_BUNDLE_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// children's total before any child runs.
 ///
 /// Twelve, because twelve rounds on the guest's two CPUs are already six to
-/// each. Against an 8 GiB guest, which its kernel reports as about 7400 MiB,
-/// that leaves the children about 4.2 GiB at the other defaults — room for
-/// eleven rounds at the headroom beside one at its max with some 2.5 GiB to
-/// spare, so one round growing to its max does not by itself reach the total
-/// and take a neighbour with it. An availability setting: a guest below about
-/// 3.8 GiB does not boot with it, and below about 5.3 GiB the count is more than
-/// the memory holds at the headroom, so rounds past what it holds answer busy.
+/// each. Against a 10 GiB guest, which its kernel reports as 9000 MiB, that
+/// leaves the children about 3.8 GiB at the other defaults — room for eleven
+/// rounds at the headroom beside one at its max with some 2 GiB to spare, so
+/// one round growing to its max does not by itself reach the total and take a
+/// neighbour with it. An availability setting: a guest whose kernel reports
+/// below about 5.4 GiB does not boot with it, and below about 6.5 GiB the count
+/// is more than the memory holds at the headroom, so rounds past what it holds
+/// answer busy.
 const DEFAULT_MAX_CHILDREN: usize = 12;
 
 // The default cache holds a fill of the largest bundle the execute hop accepts.
@@ -293,29 +294,19 @@ impl Settings {
             );
         }
 
-        // A round's max must leave its composition room above what the process
-        // holds of its own, or every round would end at it and be answered as its
-        // policy's failure. And the room a child needs to start must be above
-        // zero — there is nothing to divide by below otherwise — and within that
-        // max, or no child could ever start.
-        if self.round_max <= ROUND_PROCESS_BYTES
-            || self.round_headroom == 0
-            || self.round_headroom > self.round_max
-        {
+        // The room a child needs to start must be above zero — there is nothing
+        // to divide by below otherwise — and within a round's max, or no child
+        // could ever start.
+        if self.round_headroom == 0 || self.round_headroom > self.round_max {
             safe_logger::error_and_panic!(
-                "execution-worker: a round max of {} MiB must be above the {} MiB a round's \
-                 process holds of its own, and a {} MiB round headroom above zero and \
-                 within that max. Stopping.",
+                "execution-worker: a {} MiB round headroom must be above zero and within \
+                 the {} MiB round max. Stopping.",
                 safe(
-                    &(self.round_max >> 20),
+                    &(self.round_headroom >> 20),
                     reason!("the host's own setting, or this build's default")
                 ),
                 safe(
-                    &(ROUND_PROCESS_BYTES >> 20),
-                    reason!("a constant of the measured build")
-                ),
-                safe(
-                    &(self.round_headroom >> 20),
+                    &(self.round_max >> 20),
                     reason!("the host's own setting, or this build's default")
                 ),
                 reason!("a constant, emitted once at boot before any request exists")
@@ -371,13 +362,13 @@ mod tests {
 
     use super::{DEFAULT_BUNDLE_CACHE_BYTES, DEFAULT_MAX_CHILDREN};
 
-    /// The default child bound against the guest it was chosen for: an 8 GiB
-    /// launch, which its kernel reports as about 7.4 GiB. Every round but one at
-    /// the headroom and that one at its max fit the children's total, so one
-    /// round growing to its max does not by itself reach the total.
+    /// The default child bound against the guest it was chosen for: a 10 GiB
+    /// launch, which its kernel reports as 9000 MiB. Every round but one at the
+    /// headroom and that one at its max fit the children's total, so one round
+    /// growing to its max does not by itself reach the total.
     #[test]
-    fn the_default_bound_fits_an_8_gib_guest() {
-        const REPORTED: u64 = 7400 * 1024 * 1024;
+    fn the_default_bound_fits_a_10_gib_guest() {
+        const REPORTED: u64 = 9000 * 1024 * 1024;
         let total = children_total(
             REPORTED,
             DEFAULT_BUNDLE_CACHE_BYTES,

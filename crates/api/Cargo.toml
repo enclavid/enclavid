@@ -84,6 +84,10 @@ safe-logger = { path = "../safe-logger", features = ["device"] }
 # clients api dials on the trusted storage-CVM at boot. Reuses the same
 # RA-TLS/remoc stack as the engine workers.
 storage-rpc = { path = "../storage-rpc" }
+# The cache's blobs cross the storage leg as streams, and a cached bundle goes on
+# to a worker as one, a piece at a time.
+fleet-stream = { path = "../fleet-stream" }
+bytes = "1"
 # Object-safe async impls of the hatch-client `SessionBackend` / `CacheBackend`
 # seams for the storage-CVM clients.
 async-trait = "0.1"

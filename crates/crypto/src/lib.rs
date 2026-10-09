@@ -3,6 +3,10 @@
 //! - [`aead`] — symmetric AEAD (ChaCha20-Poly1305) for session blobs the
 //!   TEE reads back, sealed under TEE-held keys (`tee_seal_key`,
 //!   `applicant_session_token`); AAD binds a ciphertext to its session.
+//! - [`sealed_stream`] — the same AEAD over a stream (the STREAM
+//!   construction), for blobs too large to seal or open whole: segments
+//!   sealed and opened one at a time, the stream's end authenticated with
+//!   them.
 //! - [`sealed_box`] — anonymous public-key sealing (libsodium `crypto_box_seal`)
 //!   to a consumer's X25519 key, for blobs a downstream consumer reads. The
 //!   sender's keypair is ephemeral, so the TEE cannot reopen what it sealed.
@@ -22,6 +26,7 @@ pub mod aead;
 pub mod kdf;
 pub mod ocicrypt;
 pub mod sealed_box;
+pub mod sealed_stream;
 pub mod secret_bytes;
 
 pub use error::CryptoError;

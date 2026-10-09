@@ -52,7 +52,7 @@
 
 mod channel;
 mod child;
-pub use child::{ServeError, adopt_fd0, serve_child};
+pub use child::{INHERITED_FD, ServeError, adopt_fd0, serve_child, take_inherited_fd};
 
 #[cfg(feature = "parent")]
 mod cgroup;
@@ -72,4 +72,4 @@ pub use preconditions::{physical_memory, require_fd_budget, require_ptrace_scope
 #[cfg(feature = "parent")]
 pub use runner::{ChildRunner, ChildTimes, Exit, RunnerConfig, SupervisorError};
 #[cfg(feature = "parent")]
-pub use spawn::{INHERITED_FD, SpawnError, spawn_and_connect};
+pub use spawn::{SpawnError, spawn_and_connect};

@@ -4,14 +4,46 @@
 //! Unfeatured, so a child package can depend on this crate with
 //! `default-features = false` and reach exactly this much of it.
 
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use remoc::RemoteSend;
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 
 use crate::channel::channel_config;
+
+/// The child fd number an inherited descriptor lands on: the one after stdio —
+/// fd 0 the socketpair, 1 and 2 stdout and stderr. A fixed number rather than
+/// the supervisor's own, which would tell a child how many descriptors the
+/// supervisor holds.
+pub const INHERITED_FD: RawFd = libc::STDERR_FILENO + 1;
+
+/// Take the descriptor the supervisor handed this child at [`INHERITED_FD`],
+/// once.
+///
+/// Called before anything in the child opens a file: a slot left empty would be
+/// the next file's, and taking it would make a second owner of that file. A
+/// second call is refused, so there is never a second owner of this one either.
+pub fn take_inherited_fd() -> std::io::Result<OwnedFd> {
+    static TAKEN: AtomicBool = AtomicBool::new(false);
+    if TAKEN.swap(true, Ordering::AcqRel) {
+        return Err(std::io::Error::other(
+            "the inherited descriptor was taken already",
+        ));
+    }
+    // SAFETY: `fcntl(F_GETFD)` on a bare number reads that slot's flags or fails
+    // with EBADF; it creates, closes and dereferences nothing.
+    if unsafe { libc::fcntl(INHERITED_FD, libc::F_GETFD) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the slot is open, as just checked, and nothing else in this
+    // process owns it. The supervisor placed it before exec, and `TAKEN` makes
+    // this the only `OwnedFd` ever made of it, so it is closed once, by the
+    // owner returned here.
+    Ok(unsafe { OwnedFd::from_raw_fd(INHERITED_FD) })
+}
 
 /// Why a child stopped serving its supervisor other than by being done.
 ///

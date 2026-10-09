@@ -22,14 +22,44 @@
 //! from `hatch-protocol` as the remoc payloads, so the CVM and the legacy hatch
 //! path speak the same shapes.
 
+use std::time::Duration;
+
 use remoc::codec::Ciborium;
 use serde::{Deserialize, Serialize};
 
+use fleet_stream::{StreamLen, bin};
 use hatch_protocol::{ReadRequest, ReadResponse, WriteRequest, WriteResponse};
 
-/// What [`CacheService`] carries its blobs in, named here so neither end needs
-/// `serde_bytes` of its own.
-pub use serde_bytes::ByteBuf;
+/// The longest blob the cache takes or gives, in bytes: 2 GiB.
+///
+/// Above the largest one api seals into it — a cwasm at the execute hop's bound
+/// (1.5 GiB) with its metadata and the seal's overhead — which api holds itself
+/// to where it writes one.
+pub const MAX_CACHE_BLOB_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// How long a cache blob may go without a new byte, on either end: the patience
+/// a leg gives silence by default. Both ends stream from what they hold, the
+/// store from its disk and api from its seal, and neither has reason to pause.
+pub const CACHE_STREAM_IDLE: Duration = Duration::from_secs(20);
+
+/// How long a whole cache blob may take to cross. The idle deadline bounds a
+/// stall, not a trickle; this carries a blob at [`MAX_CACHE_BLOB_BYTES`] at about
+/// 17 MiB/s, far below what the leg runs at.
+pub const CACHE_STREAM_DEADLINE: Duration = Duration::from_secs(120);
+
+/// A cache blob crossing the leg: its exact length in the call, its bytes on a
+/// `bin` channel beside it.
+///
+/// No digest. api seals every blob it stores and opens it again a segment at a
+/// time, refusing a segment the store or the wire changed and a stream that ends
+/// anywhere but where it was sealed to end, so a digest here would check the
+/// same thing again with less to go on. What the length and the one finished
+/// message give is that a store keeps only a blob that arrived whole.
+#[derive(Serialize, Deserialize)]
+pub struct CacheBlob {
+    pub length: StreamLen<MAX_CACHE_BLOB_BYTES>,
+    pub body: bin::Receiver,
+}
 
 /// A session-store RPC failure. `VersionMismatch` is the CAS precondition (the
 /// session's stored version did not match `expected_version`, or a must-not-exist
@@ -108,14 +138,22 @@ pub trait SessionStoreService {
 /// cache_id))`), which the CVM re-derives under the calling peer's own scope
 /// before it touches a blob. It never sees the composition, only pseudo-random
 /// hex.
-/// Sealed bytes ride the wire; a miss is `Ok(None)` (not an error) so the
-/// orchestrator recompiles. As one CBOR byte string (`ByteBuf`), not ciborium's
-/// per-byte integer array: a bundle is megabytes, and the array form came close
-/// to doubling it, to the edge of remoc's item limit.
+///
+/// Sealed bytes ride the wire, each blob streamed beside its call as a
+/// [`CacheBlob`], so no call carries one and no blob is held whole on either
+/// end. A miss is `Ok(None)` (not an error) so the orchestrator recompiles.
 #[remoc::rtc::remote]
 pub trait CacheService {
-    async fn store(&self, key: String, bytes: serde_bytes::ByteBuf) -> Result<(), CacheError>;
-    async fn load(&self, key: String) -> Result<Option<serde_bytes::ByteBuf>, CacheError>;
+    /// Keep the blob streaming beside the call under `key`, in place of any
+    /// before it. It is in place only once all of it has arrived: a stream that
+    /// fails leaves what was there.
+    async fn store(&self, key: String, blob: CacheBlob) -> Result<(), CacheError>;
+
+    /// The blob under `key`, streaming beside the reply, or `None`.
+    async fn load(&self, key: String) -> Result<Option<CacheBlob>, CacheError>;
+
+    /// Drop the blob under `key`, if there is one.
+    async fn remove(&self, key: String) -> Result<(), CacheError>;
 }
 
 /// The base-channel handshake value: on connect the storage-CVM sends the
@@ -132,5 +170,4 @@ pub struct StorageClients {
 
 /// The remoc connection config both storage peers build from, and what a role
 /// sets of it — the one every fleet leg is brought up with (see `fleet_stream`).
-/// Media blobs and cwasm bundles up to 64 MiB ride this channel.
 pub use fleet_stream::{LegSettings, connection_cfg};

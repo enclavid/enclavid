@@ -72,7 +72,10 @@ mod compile;
 // this one can name the generated client for the api hop — let alone call it — and
 // none can serve the RAW contract either. Both ends reach the hop through `leg`.
 #[cfg(feature = "compile")]
-pub use compile::{CompileError, CompileRequest};
+pub use compile::{
+    COMPILE_STREAM_DEADLINE, COMPILE_STREAM_IDLE, CompileError, CompileReply, CompileRequest,
+    CompileSource, MAX_COMPONENTS_BYTES, PluginLength,
+};
 
 // The compile contract as its SERVER sees it.
 #[cfg(feature = "compile")]
@@ -120,7 +123,8 @@ pub use leg::{DEFAULT_REQUEST_BUFFER, LegError, leg_end};
 mod stream;
 #[cfg(feature = "execute")]
 pub use stream::{
-    BundleError, BundleStream, DEFAULT_BUNDLE_STREAM_DEADLINE, DEFAULT_BUNDLE_STREAM_IDLE,
+    BundleError, BundleSource, BundleStream, DEFAULT_BUNDLE_STREAM_DEADLINE,
+    DEFAULT_BUNDLE_STREAM_IDLE,
 };
 
 // Constant-size framing for the execute leg's policy-controlled lengths.

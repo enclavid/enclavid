@@ -74,9 +74,10 @@ use hatch_client::{MAX_CLIP_BYTES, SEALED_STATE_PLAINTEXT_BYTES};
 /// expressed as "no entry may be charged less than a budget's worth divided by
 /// this".
 ///
-/// 512 against the 2 GiB default budget puts the floor at 4 MiB, which is under
-/// any real cwasm (7–15 MiB), so a legitimate entry is charged its own size and
-/// this number never binds. It binds only on the bundles that provoked it. A
+/// 512 against the 4 GiB default budget puts the floor at 8 MiB, about the
+/// smallest real cwasm (7–15 MiB), so a legitimate entry is charged its own size
+/// or a little more, and this number binds in earnest only on the bundles that
+/// provoked it. A
 /// count that puts the floor above a real cwasm charges every entry the floor,
 /// and the cache holds fewer compositions than its bytes would.
 ///
@@ -136,32 +137,6 @@ pub fn supervisor_per_child(waiting_per_child: usize) -> u64 {
         .saturating_add(SUPERVISOR_ROUND_BYTES)
 }
 
-/// What a round's process holds of its own, beside what its composition
-/// touches — reasoned from the code rather than measured, about 75 MiB of it
-/// named:
-///
-///   * the clip, held whole: up to `MAX_CLIP_BYTES` (12 MiB) as received, again
-///     as the blobs it decodes into, and once more as the copy a host function
-///     hands the policy — about 36 MiB;
-///   * state frames of 1.25 MiB: the one received, the one returned, the
-///     prompt, and the encode `session_change` makes — about 6 MiB;
-///   * the engine, the deserialized component's metadata, the async fiber
-///     stack, and the process itself — about 30 MiB.
-///
-/// The rest is for what grows with the composition and what the kernel charges
-/// the round besides: the media memo, which keeps every distinct capture the
-/// round loads; the consumer's catalogs as decoded, twice — the reference and
-/// the registry built from it — which is tens of MiB for catalogs at
-/// `MAX_EMBEDDED_SECTION_BYTES` split into tiny keys; page tables, thread stacks
-/// and the socket buffers the round sends. Not charged to the round at all: the
-/// cwasm's own pages, which the supervisor wrote and every child of one
-/// composition maps — only the pages a round writes over become its own.
-///
-/// A fact about the code, so not a setting: the worker refuses a round max that
-/// leaves the composition nothing above it, since every round there would end
-/// at the max and be answered as its policy's failure.
-pub const ROUND_PROCESS_BYTES: u64 = 128 * 1024 * 1024;
-
 /// The most memory one round may hold, unless the host says otherwise
 /// (the `round-max-bytes` setting): every linear memory its
 /// composition touches — policy and pinned plugins together, however many
@@ -180,22 +155,31 @@ pub const ROUND_PROCESS_BYTES: u64 = 128 * 1024 * 1024;
 /// that group — a developer's machine, every test — holds a round's memory to
 /// nothing.
 ///
-/// [`ROUND_PROCESS_BYTES`] of it is the process's; the 256 MiB above that is
-/// the composition's, sized so that ML-bearing work (decoded JPEG frames, ONNX
-/// intermediates) does not trip on it. An availability setting like the rest:
+/// Sized for a round at its bounds, reasoned from the code. What its process
+/// holds of its own: the clip, up to `MAX_CLIP_BYTES` (12 MiB), held as
+/// received, again as the blobs it decodes into, and once more as the copy a
+/// host function hands the policy; state frames of 1.25 MiB — the one
+/// received, the one returned, the prompt, and the encode `session_change`
+/// makes; the engine and the process itself. And room above that for what
+/// grows with the composition: ML-bearing work (decoded JPEG frames, ONNX
+/// intermediates), the media memo, which keeps every distinct capture the round
+/// loads, and the consumer's catalogs as decoded, twice — the reference and the
+/// registry built from it. The kernel charges a round only the pages it
+/// touches, and not the cwasm's own, which the supervisor wrote and every child
+/// of one composition maps. An availability setting like the rest:
 /// the host choosing it decides how much a round may hold, which is a promise
 /// about the service. Set low, it ends rounds as their policy's failure; what
 /// the host learns from where they end is set out in `engine_types::limits`.
 /// A debug build logs each round's peak as its group empties
 /// (`engine_supervisor`, `debug` feature), which is what to set it from.
-pub const DEFAULT_ROUND_MAX_BYTES: u64 = ROUND_PROCESS_BYTES + 256 * 1024 * 1024;
+pub const DEFAULT_ROUND_MAX_BYTES: u64 = 384 * 1024 * 1024;
 
 /// What must be free before one more child is started — under the children's
 /// total, and in the guest's available memory — read before each spawn — unless
 /// the host says otherwise (the `round-headroom-bytes` setting).
 ///
-/// About an honest round's own cost with a clip at its bound — the 75 MiB or
-/// so of process [`ROUND_PROCESS_BYTES`] names — plus room for the policy's own
+/// About an honest round's own cost with a clip at its bound — the clip three
+/// times over, its state frames, its engine — plus room for the policy's own
 /// working memory. Reasoned, not measured; a debug build logs each round's peak
 /// as its group empties, which is what to set it from.
 ///
@@ -209,10 +193,9 @@ pub const DEFAULT_ROUND_MAX_BYTES: u64 = ROUND_PROCESS_BYTES + 256 * 1024 * 1024
 /// which the worker checks at boot.
 pub const DEFAULT_ROUND_HEADROOM_BYTES: u64 = 128 * 1024 * 1024;
 
-// The defaults pass the worker's own boot checks: the gate never asks for more
-// room than one child may hold, and the max leaves the composition room.
+// The defaults pass the worker's own boot check: the gate never asks for more
+// room than one child may hold.
 const _: () = assert!(DEFAULT_ROUND_HEADROOM_BYTES <= DEFAULT_ROUND_MAX_BYTES);
-const _: () = assert!(DEFAULT_ROUND_MAX_BYTES > ROUND_PROCESS_BYTES);
 
 /// What a round holds in this supervisor while it waits — for a fill slot, for
 /// another round's fill of the same composition, or for a child: its request as

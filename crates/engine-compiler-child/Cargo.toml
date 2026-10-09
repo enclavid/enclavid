@@ -48,6 +48,9 @@ remoc = { version = "0.18", default-features = false, features = [
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Contained posture only — this process says nothing outward. See `main`.
 safe-logger = { path = "../safe-logger" }
+# The cwasm's length and digest, as the child names what it wrote. A leaf of
+# remoc, serde, sha2 and bytes, all already above.
+fleet-stream = { path = "../fleet-stream" }
 
 [features]
 # Compiles the `debug!` sites in. OFF in the measured build.
@@ -80,6 +83,10 @@ xtask = { path = "../../xtask" }
 # A component carrying an embedded section, for the refusal the child answers.
 enclavid-embedded = { path = "../embedded" }
 wasm-encoder = "0.247"
+# The output file a test hands the child, as the supervisor's memfd; and the
+# metadata it answers with, decoded.
+tempfile = "3"
+ciborium = "0.2"
 tokio = { version = "1", features = [
     "macros",
     "rt-multi-thread",

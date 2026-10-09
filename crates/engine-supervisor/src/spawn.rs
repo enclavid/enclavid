@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use remoc::RemoteSend;
 use remoc::codec::Ciborium;
 
+use crate::INHERITED_FD;
 use crate::cgroup::Placement;
 use crate::channel::channel_config;
 
@@ -46,12 +47,6 @@ pub enum SpawnError {
     #[error("the child closed before sending its service client")]
     Closed,
 }
-
-/// The child fd number an inherited descriptor lands on: the one after stdio —
-/// fd 0 the socketpair, 1 and 2 stdout and stderr. A fixed number rather than
-/// the supervisor's own, which would tell a child how many descriptors the
-/// supervisor holds.
-pub const INHERITED_FD: RawFd = libc::STDERR_FILENO + 1;
 
 /// Spawn `exe` as a fresh child with one end of a socketpair on its fd 0, frame
 /// the supervisor's end with remoc (supervisor = client, child = server), and

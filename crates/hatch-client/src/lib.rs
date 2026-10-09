@@ -14,7 +14,7 @@ mod transport;
 mod domain;
 
 pub use auth::{AuthClient, AuthVerdict, DEFAULT_AUTHORIZE_DEADLINE, Principal};
-pub use backend::{CacheBackend, SessionBackend};
+pub use backend::{BlobPieces, CacheBackend, SessionBackend};
 pub use cache::CacheStore;
 // The hatch's own outbound mint. The VOCABULARY it is written in is not
 // re-exported: `Untrusted`/`Exposed`/the markers/`reason!` come from
@@ -30,8 +30,7 @@ pub use domain::{
     MAX_CLIP_FRAMES, MediaResult, MediaSpec, PluginPin, Prompt, SessionMetadata, SessionState,
     SessionStatus, Translation, capture_guide,
 };
-pub use hatch_protocol::PullResponse as RegistryPullResponse;
-pub use hatch_protocol::{AuthorizeRequest, ClientOperation, PullRequest};
+pub use hatch_protocol::{AuthorizeRequest, BlobRequest, ClientOperation, ManifestRequest};
 pub use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
 pub use hatch_protocol::{VcekRequest, VcekResponse};
 pub use kbs::{DEFAULT_RELAY_DEADLINE, KbsClient};

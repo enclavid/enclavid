@@ -23,10 +23,18 @@
 //! about whether either should be believed. That stays the receiving role's
 //! question, asked the way it asks it of any other argument.
 //!
+//! A stream whose bytes carry their own authentication — sealed by the side that
+//! will open them again — needs no digest on the way, and neither does one whose
+//! digest would only be its sender's word again over a channel that already
+//! holds the sender to its bytes. Its call declares only its length
+//! ([`StreamLen`]), and the receiver takes it a piece at a time ([`Incoming`]),
+//! holding it to that length and to ending as one finished message.
+//!
 //! An end is read where it arrives and never forwarded. remoc can hand a `bin` end
 //! on to a third party, and doing so buffers up to a receiver's `max_data_size` and
 //! drops a partial message without a word. A hop that passes bytes on reads them
-//! with [`recv_exact`] and writes them again with [`send`].
+//! with [`recv_exact`] or [`Incoming`] and writes them again with [`send`] or
+//! [`send_from`].
 //!
 //! It also holds the connection every such stream runs over: the one remoc config
 //! both leg contracts build from, and what a role sets of it ([`LegSettings`]).
@@ -38,6 +46,8 @@ pub use leg::{LegSettings, connection_cfg};
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures_util::stream::BoxStream;
+use futures_util::{Stream, StreamExt};
 use remoc::chmux::RecvChunkError;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -52,16 +62,16 @@ pub use remoc::rch::bin;
 /// from a length a peer chose beyond what the receiving role decided to accept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
-struct StreamLen<const MAX: u64>(u64);
+pub struct StreamLen<const MAX: u64>(u64);
 
 impl<const MAX: u64> StreamLen<MAX> {
     /// `n`, or `None` past the bound.
-    const fn new(n: u64) -> Option<Self> {
+    pub const fn new(n: u64) -> Option<Self> {
         if n > MAX { None } else { Some(Self(n)) }
     }
 
     /// The length, already held to the bound.
-    const fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 }
@@ -83,8 +93,7 @@ pub struct BlobHeader<const MAX: u64> {
 }
 
 impl<const MAX: u64> BlobHeader<MAX> {
-    /// The header naming `bytes`, or `None` past the bound. The only constructor,
-    /// so a header this side sends always describes bytes it holds.
+    /// The header naming `bytes`, or `None` past the bound.
     pub fn of(bytes: &[u8]) -> Option<Self> {
         Some(Self {
             len: StreamLen::new(bytes.len() as u64)?,
@@ -92,10 +101,26 @@ impl<const MAX: u64> BlobHeader<MAX> {
         })
     }
 
+    /// The header for bytes this side streams without holding them whole, named
+    /// by the length and digest it knows them by, or `None` past the bound. The
+    /// receiver holds the bytes to it as to any other, so a header that does not
+    /// describe what follows fails the stream, not the receiver.
+    pub fn new(length: u64, sha256: [u8; 32]) -> Option<Self> {
+        Some(Self {
+            len: StreamLen::new(length)?,
+            sha256,
+        })
+    }
+
     /// The declared length. Not `len`: this is a claim about a stream, not a
     /// collection that could be empty.
     pub fn length(&self) -> u64 {
         self.len.get()
+    }
+
+    /// The declared digest.
+    pub fn sha256(&self) -> [u8; 32] {
+        self.sha256
     }
 }
 
@@ -115,6 +140,8 @@ pub enum StreamError {
     Closed,
     /// Nothing new arrived within the idle deadline.
     Idle,
+    /// The stream did not end within its deadline.
+    Deadline,
     /// The message ended before its declared length.
     Short,
     /// The message ran past its declared length.
@@ -133,6 +160,7 @@ impl std::fmt::Display for StreamError {
             StreamError::Cancelled => "the stream was abandoned part-way",
             StreamError::Closed => "the stream's connection closed",
             StreamError::Idle => "the stream stalled",
+            StreamError::Deadline => "the stream did not end in time",
             StreamError::Short => "the stream ended short of its declared length",
             StreamError::Long => "the stream ran past its declared length",
             StreamError::Digest => "the stream does not match its declared digest",
@@ -152,12 +180,162 @@ pub async fn send(tx: bin::Sender, bytes: impl Into<Bytes>) -> Result<(), Stream
     tx.send(bytes.into()).await.map_err(|_| StreamError::Closed)
 }
 
+/// Why [`send_from`] stopped before its message ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendError<E> {
+    /// The channel could not take the message: [`StreamError::Connect`] or
+    /// [`StreamError::Closed`].
+    Stream(StreamError),
+    /// The source failed. The message was abandoned with it, which the receiver
+    /// reads as [`StreamError::Cancelled`].
+    Source(E),
+}
+
+/// Send what `source` yields as ONE message, ended once `source` is.
+///
+/// The same message [`send`] makes, for bytes this side does not hold whole: each
+/// piece goes on as it comes, and the message ends only when the source does. A
+/// source that fails, or a future dropped part-way, leaves the message without
+/// its last chunk, so the receiver never reads it as one that finished.
+pub async fn send_from<S, E>(tx: bin::Sender, mut source: S) -> Result<(), SendError<E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+{
+    let closed = |_| SendError::Stream(StreamError::Closed);
+    let mut tx = tx
+        .into_inner()
+        .await
+        .map_err(|_| SendError::Stream(StreamError::Connect))?;
+    let mut message = tx.send_chunks();
+    while let Some(piece) = source.next().await {
+        message = message
+            .send(piece.map_err(SendError::Source)?)
+            .await
+            .map_err(closed)?;
+    }
+    message.finish().await.map_err(closed)
+}
+
+/// A stream received a piece at a time, held to the length its call declared.
+///
+/// Holds it to everything [`recv_exact`] does but the digest: one finished
+/// message, no byte past the length, no fewer, and no longer than the idle
+/// deadline without a new byte. For bytes whose authenticity is checked where
+/// they are opened — a sealed stream — or to read a blob without a sink, as
+/// [`recv_exact`] does under its digest.
+pub struct Incoming {
+    rx: remoc::chmux::Receiver,
+    left: u64,
+    idle: Duration,
+    deadline: Instant,
+    started: bool,
+    ended: bool,
+}
+
+impl Incoming {
+    /// Take `rx` for a stream of exactly `length` bytes.
+    ///
+    /// `idle` is how long the stream may go without a new byte. It is measured
+    /// from the last chunk that carried data, not from the last chunk: chmux
+    /// delivers an empty chunk as readily as a full one, and a deadline that each
+    /// of them reset would let a live peer that sends nothing hold the reader
+    /// forever.
+    pub async fn open(rx: bin::Receiver, length: u64, idle: Duration) -> Result<Self, StreamError> {
+        let deadline = Instant::now() + idle;
+        let rx = timeout_at(deadline, rx.into_inner())
+            .await
+            .map_err(|_| StreamError::Idle)?
+            .map_err(|_| StreamError::Connect)?;
+        Ok(Self {
+            rx,
+            left: length,
+            idle,
+            deadline,
+            started: false,
+            ended: false,
+        })
+    }
+
+    /// The next piece, or `None` once the stream ended at exactly its length.
+    /// An error ends the stream, and what came before it is not the blob.
+    pub async fn next(&mut self) -> Result<Option<Bytes>, StreamError> {
+        if self.ended {
+            return Ok(None);
+        }
+        loop {
+            // The deadline wraps the whole `recv_chunk`, not one read inside it:
+            // chmux skips data that arrives without a message's first chunk and
+            // keeps waiting, so a bound on anything narrower would not bound this.
+            match timeout_at(self.deadline, self.rx.recv_chunk()).await {
+                Err(_) => return Err(StreamError::Idle),
+                Ok(Ok(Some(chunk))) => {
+                    self.started = true;
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    // Before it is handed on, so not one byte past the declared
+                    // length is.
+                    if chunk.len() as u64 > self.left {
+                        return Err(StreamError::Long);
+                    }
+                    self.left -= chunk.len() as u64;
+                    self.deadline = Instant::now() + self.idle;
+                    return Ok(Some(chunk));
+                }
+                // `None` before any chunk is a sender that closed without a
+                // message, not an empty blob: an empty blob arrives as one empty
+                // chunk, then `None`.
+                Ok(Ok(None)) if !self.started => return Err(StreamError::NoMessage),
+                Ok(Ok(None)) if self.left != 0 => return Err(StreamError::Short),
+                Ok(Ok(None)) => {
+                    self.ended = true;
+                    return Ok(None);
+                }
+                Ok(Err(RecvChunkError::Cancelled)) => return Err(StreamError::Cancelled),
+                Ok(Err(RecvChunkError::ChMux)) => return Err(StreamError::Closed),
+            }
+        }
+    }
+
+    /// The pieces as a stream, ended `within` from now at the latest, and — given
+    /// a `sha256` — held to it: bytes that do not hash to it end the stream in
+    /// [`StreamError::Digest`] where it would have ended. So a reader that passes
+    /// the pieces on, with [`send_from`], hands its own reader an abandoned
+    /// message rather than a finished one.
+    pub fn into_pieces(
+        self,
+        within: Duration,
+        sha256: Option<[u8; 32]>,
+    ) -> BoxStream<'static, Result<Bytes, StreamError>> {
+        let end = Instant::now() + within;
+        let digest = sha256.map(|want| (want, Sha256::new()));
+        futures_util::stream::try_unfold(
+            (self, digest),
+            move |(mut incoming, mut digest)| async move {
+                let next = timeout_at(end, incoming.next())
+                    .await
+                    .map_err(|_| StreamError::Deadline)??;
+                let Some(piece) = next else {
+                    if let Some((want, sum)) = digest
+                        && sum.finalize().as_slice() != want
+                    {
+                        return Err(StreamError::Digest);
+                    }
+                    return Ok(None);
+                };
+                if let Some((_, sum)) = digest.as_mut() {
+                    sum.update(&piece);
+                }
+                Ok(Some((piece, (incoming, digest))))
+            },
+        )
+        .boxed()
+    }
+}
+
 /// Receive exactly the blob `header` names into `sink`.
 ///
-/// `idle` is how long the stream may go without a new byte. It is measured from the
-/// last chunk that carried data, not from the last chunk: chmux delivers an empty
-/// chunk as readily as a full one, and a deadline that each of them reset would let
-/// a live peer that sends nothing hold this call forever.
+/// `idle` is as [`Incoming::open`] takes it.
 ///
 /// `sink` is written synchronously between awaits, so it should be RAM-backed — a
 /// memfd or a `Vec`. On any error what is in it is not the blob and must not be
@@ -168,46 +346,11 @@ pub async fn recv_exact<const MAX: u64, W: std::io::Write + ?Sized>(
     idle: Duration,
     sink: &mut W,
 ) -> Result<(), StreamError> {
-    let mut deadline = Instant::now() + idle;
-    let mut rx = timeout_at(deadline, rx.into_inner())
-        .await
-        .map_err(|_| StreamError::Idle)?
-        .map_err(|_| StreamError::Connect)?;
-
-    let want = header.length();
-    let mut got = 0u64;
-    let mut started = false;
+    let mut incoming = Incoming::open(rx, header.length(), idle).await?;
     let mut digest = Sha256::new();
-    loop {
-        // The deadline wraps the whole `recv_chunk`, not one read inside it: chmux
-        // skips data that arrives without a message's first chunk and keeps
-        // waiting, so a bound on anything narrower would not bound this.
-        match timeout_at(deadline, rx.recv_chunk()).await {
-            Err(_) => return Err(StreamError::Idle),
-            Ok(Ok(Some(chunk))) => {
-                started = true;
-                if chunk.is_empty() {
-                    continue;
-                }
-                // Before the sink, so not one byte past the declared length is kept.
-                if chunk.len() as u64 > want - got {
-                    return Err(StreamError::Long);
-                }
-                digest.update(&chunk);
-                sink.write_all(&chunk).map_err(|_| StreamError::Sink)?;
-                got += chunk.len() as u64;
-                deadline = Instant::now() + idle;
-            }
-            // `None` before any chunk is a sender that closed without a message, not
-            // an empty blob: an empty blob arrives as one empty chunk, then `None`.
-            Ok(Ok(None)) if !started => return Err(StreamError::NoMessage),
-            Ok(Ok(None)) => break,
-            Ok(Err(RecvChunkError::Cancelled)) => return Err(StreamError::Cancelled),
-            Ok(Err(RecvChunkError::ChMux)) => return Err(StreamError::Closed),
-        }
-    }
-    if got != want {
-        return Err(StreamError::Short);
+    while let Some(chunk) = incoming.next().await? {
+        digest.update(&chunk);
+        sink.write_all(&chunk).map_err(|_| StreamError::Sink)?;
     }
     if digest.finalize().as_slice() != header.sha256 {
         return Err(StreamError::Digest);
@@ -501,6 +644,95 @@ mod tests {
         sent.unwrap();
         got.unwrap();
         assert_eq!(sink, blob);
+    }
+
+    /// Pieces from a source, of sizes that line up with nothing, arrive as the one
+    /// message they make, held to its length alone.
+    #[tokio::test]
+    async fn pieces_from_a_source_arrive_as_one_message() {
+        let (mut tx, mut rx) = connection().await;
+        let (bin_tx, bin_rx) = pair(&mut tx, &mut rx).await;
+        let blob = pattern(300_000);
+        let pieces: Vec<Result<Bytes, ()>> = blob
+            .chunks(7_777)
+            .map(|p| Ok(Bytes::copy_from_slice(p)))
+            .collect();
+        let (sent, got) = tokio::join!(
+            send_from(bin_tx, futures_util::stream::iter(pieces)),
+            async {
+                let mut incoming = Incoming::open(bin_rx, blob.len() as u64, IDLE).await?;
+                let mut got = Vec::new();
+                while let Some(piece) = incoming.next().await? {
+                    got.extend_from_slice(&piece);
+                }
+                Ok::<_, StreamError>(got)
+            }
+        );
+        sent.unwrap();
+        assert_eq!(got.unwrap(), blob);
+    }
+
+    #[tokio::test]
+    async fn an_empty_source_sends_an_empty_message() {
+        let (mut tx, mut rx) = connection().await;
+        let (bin_tx, bin_rx) = pair(&mut tx, &mut rx).await;
+        let (sent, got) = tokio::join!(
+            send_from(
+                bin_tx,
+                futures_util::stream::iter(Vec::<Result<Bytes, ()>>::new())
+            ),
+            async {
+                let mut incoming = Incoming::open(bin_rx, 0, IDLE).await?;
+                incoming.next().await
+            }
+        );
+        sent.unwrap();
+        assert_eq!(got, Ok(None));
+    }
+
+    /// A source that fails part-way abandons the message: the receiver must not
+    /// read what it got as a blob that ended there.
+    #[tokio::test]
+    async fn a_source_that_fails_abandons_its_message() {
+        let (mut tx, mut rx) = connection().await;
+        let (bin_tx, bin_rx) = pair(&mut tx, &mut rx).await;
+        let pieces = vec![Ok(Bytes::from(pattern(1000))), Err("the source broke")];
+        let (sent, got) = tokio::join!(
+            send_from(bin_tx, futures_util::stream::iter(pieces)),
+            async {
+                let mut incoming = Incoming::open(bin_rx, 1000, IDLE).await?;
+                while incoming.next().await?.is_some() {}
+                Ok::<_, StreamError>(())
+            }
+        );
+        assert_eq!(sent, Err(SendError::Source("the source broke")));
+        assert_eq!(got, Err(StreamError::Cancelled));
+    }
+
+    /// Pieces read as a stream against a digest end as the blob when it matches,
+    /// and in `Digest` — never in a quiet end — when it does not.
+    #[tokio::test]
+    async fn pieces_held_to_a_digest_end_in_an_error_when_it_differs() {
+        let blob = pattern(200_000);
+        let sha256 = BlobHeader::<BOUND>::of(&blob).unwrap().sha256();
+        for (sent, want) in [(blob.clone(), Ok(blob.clone())), {
+            let mut other = blob.clone();
+            other[7] ^= 1;
+            (other, Err(StreamError::Digest))
+        }] {
+            let (mut tx, mut rx) = connection().await;
+            let (bin_tx, bin_rx) = pair(&mut tx, &mut rx).await;
+            let (_, got) = tokio::join!(send(bin_tx, sent), async {
+                let incoming = Incoming::open(bin_rx, blob.len() as u64, IDLE).await?;
+                let mut pieces = incoming.into_pieces(IDLE, Some(sha256));
+                let mut got = Vec::new();
+                while let Some(piece) = pieces.next().await {
+                    got.extend_from_slice(&piece?);
+                }
+                Ok::<_, StreamError>(got)
+            });
+            assert!(got == want);
+        }
     }
 
     /// The reason the crate exists: a blob one byte past remoc's item limit, which

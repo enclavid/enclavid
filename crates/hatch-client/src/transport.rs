@@ -143,6 +143,54 @@ impl HatchClient {
         self.request("POST", path, body, deadline).await
     }
 
+    /// POST raw bytes to `path`, and take the answer's status and its body as
+    /// pieces as they come — for an answer too large to hold whole. Same rule
+    /// as [`Self::post`]: only this crate's typed egress clients call it.
+    ///
+    /// `deadline` bounds the whole of it, from the call to the body's last
+    /// piece, and `idle` the wait for each piece: this hop has nothing beneath
+    /// it that would notice a host that stops sending (see [`Self::request`]).
+    /// A body cut short by either, or by the hatch, ends in an error.
+    pub(crate) async fn post_stream(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+        deadline: Duration,
+        idle: Duration,
+    ) -> Result<(StatusCode, crate::BlobPieces), BridgeError> {
+        use futures::StreamExt;
+        use tokio::time::{Instant, timeout_at};
+
+        let end = Instant::now() + deadline;
+        let req = self.build("POST", path, body)?;
+        let resp = timeout_at(end, self.client.request(req))
+            .await
+            .map_err(|_| {
+                BridgeError::Transport(format!(
+                    "{path}: the hatch did not answer within the deadline"
+                ))
+            })?
+            .map_err(|e| BridgeError::Transport(format!("request: {e}")))?;
+        let status = resp.status();
+        let frames = http_body_util::BodyStream::new(resp.into_body());
+        let pieces = futures::stream::try_unfold(frames, move |mut frames| async move {
+            loop {
+                let next = timeout_at(end.min(Instant::now() + idle), frames.next())
+                    .await
+                    .map_err(|_| BridgeError::Transport("the body stalled or ran late".into()))?;
+                let Some(frame) = next else {
+                    return Ok(None);
+                };
+                let frame = frame.map_err(|e| BridgeError::Transport(format!("body: {e}")))?;
+                // Trailers carry nothing this hop sends; only data is the body.
+                if let Ok(data) = frame.into_data() {
+                    return Ok(Some((data, frames)));
+                }
+            }
+        });
+        Ok((status, pieces.boxed()))
+    }
+
     /// Ask the hatch whether it is there. Carries nothing, returns nothing but
     /// the fact of an answer.
     ///
@@ -168,6 +216,20 @@ impl HatchClient {
         }
     }
 
+    fn build(
+        &self,
+        method: &str,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Result<Request<Full<Bytes>>, BridgeError> {
+        Request::builder()
+            .method(method)
+            .uri(format!("{}{}", self.base, path))
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|e| BridgeError::Transport(format!("build request: {e}")))
+    }
+
     async fn request(
         &self,
         method: &str,
@@ -175,13 +237,7 @@ impl HatchClient {
         body: Vec<u8>,
         deadline: Duration,
     ) -> Result<HttpResp, BridgeError> {
-        let uri = format!("{}{}", self.base, path);
-        let req = Request::builder()
-            .method(method)
-            .uri(uri)
-            .header(CONTENT_TYPE, "application/octet-stream")
-            .body(Full::new(Bytes::from(body)))
-            .map_err(|e| BridgeError::Transport(format!("build request: {e}")))?;
+        let req = self.build(method, path, body)?;
 
         // One clock over the WHOLE exchange — connect, status line and body.
         //
@@ -192,7 +248,7 @@ impl HatchClient {
         // fleet legs are bounded by chmux's own idle detection; this one has
         // nothing but this.
         //
-        // That matters most where it is least visible: `/oci/pull` and
+        // That matters most where it is least visible: `/oci/manifest` and
         // `/kbs/relay` are reached from `cold_compile`, which runs INSIDE an
         // applicant round, so an unbounded wait here parks a round that is
         // holding that round's captures.

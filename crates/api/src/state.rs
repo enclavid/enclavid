@@ -18,7 +18,7 @@ pub type ApplicantSessionToken = SecretBox<Vec<u8>>;
 
 pub struct AppState {
     /// The COMPILE boundary the cold path calls: hand pulled artifact bytes to a
-    /// compile-worker over rpc, get back a `CompiledBundle`. api NEVER compiles
+    /// compile-worker over rpc, get back a streaming `Compiled`. api NEVER compiles
     /// in-process (no Cranelift); the worker is started by infrastructure and
     /// api [`connect`](connect_compile_worker)s to it. See [`crate::compiler`].
     pub compiler: Arc<Compiler>,
@@ -30,11 +30,11 @@ pub struct AppState {
     /// [`crate::executor`]. The orchestrator delegates compile + execute through
     /// these two client boundaries.
     pub executor: Arc<Executor>,
-    /// L2 compiled-policy cache: hatch-backed, AEAD-sealed cwasm bundles, keyed
+    /// L2 compiled-policy cache: storage-CVM-backed, sealed cwasm bundles, keyed
     /// by `(composition_key, compat_token)`. This is the orchestrator's ONLY
     /// compiled-artifact store — there is NO api-side in-RAM L1; the sole
     /// in-memory component cache lives on the execution-worker, which reports a
-    /// miss rather than filling it itself. `resolve_bundle` (`applicant::shared`)
+    /// miss rather than filling it itself. `run_resolved` (`applicant::shared`)
     /// is the L2-read-or-compile-and-store entry point that miss drives. See
     /// [`crate::cwasm_cache`].
     pub cache_store: CacheStore,

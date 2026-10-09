@@ -22,6 +22,8 @@ compile = [
     "dep:remoc",
     "dep:enclavid-boundary",
     "dep:fleet-stream",
+    "dep:futures-util",
+    "dep:bytes",
 ]
 execute = [
     "dep:engine-types",
@@ -29,6 +31,8 @@ execute = [
     "dep:remoc",
     "dep:enclavid-boundary",
     "dep:fleet-stream",
+    "dep:futures-util",
+    "dep:bytes",
 ]
 
 [dependencies]
@@ -71,6 +75,10 @@ enclavid-boundary = { path = "../boundary", optional = true }
 # execute-side, how a bundle crosses beside a `run_with_bundle` call rather than
 # inside it: a length- and digest-checked blob per `bin` channel.
 fleet-stream = { path = "../fleet-stream", optional = true }
+# The pieces a bundle's cwasm passes through the door as, when the sender does
+# not hold it whole (`BundleSource::streamed`).
+futures-util = { version = "0.3", default-features = false, optional = true }
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }

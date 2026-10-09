@@ -1,37 +1,38 @@
-//! OCI pull handler: fetches artifacts from whichever registry the
-//! TEE-supplied `policy_ref` points at, attaching `registry_auth`
-//! verbatim. The hatch authenticates to no registry on its own.
+//! OCI pull handlers: fetch from whichever registry the TEE-supplied reference
+//! points at, attaching `registry_auth` verbatim. The hatch authenticates to no
+//! registry on its own.
 //!
-//! Trust note: the TEE recomputes `manifest_digest` and each layer
-//! digest after receiving the response. We compute `manifest_digest`
-//! as a convenience; the security property comes from TEE-side
-//! recomputation.
+//! Two steps, and the hatch parses neither: the raw manifest a pinned reference
+//! names (`/oci/manifest`), then the one blob of it the TEE chose by digest
+//! (`/oci/blob`), streamed as the response body as it comes from the registry.
+//! Which blob, and whether any of the bytes are what the reference pins, the TEE
+//! decides — it recomputes the manifest's digest against the pin, picks the
+//! layer from the manifest it verified, and holds the blob to that layer's
+//! digest and size as it reads it.
 //!
-//! A fresh `Client` per pull: oci-client caches the first auth value it
-//! sees with no invalidation API, so per-pull clients keep auth correct.
+//! A fresh `Client` per call: oci-client caches the first auth value it sees
+//! with no invalidation API, so per-call clients keep auth correct.
 //!
 //! Every guest on this host shares the hatch, so what one pull may cost it is
-//! bounded: a few pulls at a time, each within a deadline, a manifest small
-//! enough to read, and a total of bytes held — none of it sized by what the
-//! registry says.
+//! bounded: a few pulls at a time, each turn held for as long as its stream
+//! runs, a manifest small enough to read, a blob's bytes capped and its stream
+//! given a deadline — none of it sized by what the registry says. Nothing of a
+//! blob is held here beyond the piece in hand.
 
-use std::io;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
+use axum::response::Response;
+use futures::{StreamExt, TryStreamExt};
 use oci_client::Reference;
 use oci_client::client::{Client, ClientConfig, ClientProtocol};
 use oci_client::errors::OciDistributionError;
 use oci_client::secrets::RegistryAuth;
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
-use tokio::io::AsyncWrite;
+use tokio::time::{Instant, timeout, timeout_at};
 use tracing::warn;
 
-use hatch_protocol::{PullRequest, PullResponse};
+use hatch_protocol::{BlobRequest, ManifestRequest, ManifestResponse};
 
 use crate::AppState;
 use crate::error::{HatchError, decode_body, encode_body};
@@ -41,61 +42,159 @@ const MANIFEST_ACCEPTS: &[&str] = &[
     "application/vnd.docker.distribution.manifest.v2+json",
 ];
 
-/// Pulls under way at once; the unit's memory limit is sized against it.
+/// Pulls under way at once — a manifest, or a blob for as long as its stream
+/// runs; the unit's memory limit is sized against it.
 pub const CONCURRENT_PULLS: usize = 4;
-/// What one pull holds, its layers together.
-const PULL_BYTES: usize = 256 << 20;
 /// A manifest names its layers in a few kilobytes; one far past that is not
 /// parsed.
 const MANIFEST_BYTES: usize = 256 << 10;
-const LAYERS: usize = 16;
-/// Under the TEE's own minute for a pull, waiting for a turn included, so the
-/// hatch gives up on a pull no sooner than its caller and not long after.
-const PULL_TIMEOUT: Duration = Duration::from_secs(55);
+/// The most of one blob this passes on: above the largest a TEE takes, which
+/// it holds to the size the manifest declares.
+const BLOB_BYTES: u64 = 2 << 30;
+/// Under the TEE's own minute for a manifest, waiting for a turn included, so
+/// the hatch gives up no sooner than its caller and not long after.
+const MANIFEST_TIMEOUT: Duration = Duration::from_secs(55);
+/// The longest one blob's stream may hold a turn, waiting for it included. The
+/// TEE ends its read sooner, at its own deadline, which ends this stream with
+/// it; this bounds a stream nobody is reading any more.
+const BLOB_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Between two reads of one response.
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// POST /oci/pull
-pub async fn pull(State(state): State<AppState>, body: Bytes) -> Result<Vec<u8>, HatchError> {
-    let req: PullRequest = decode_body(&body)?;
-    let (protocol, policy_ref) = scheme(&req.policy_ref);
-    let reference = parse_ref(policy_ref)?;
+/// POST /oci/manifest
+pub async fn manifest(State(state): State<AppState>, body: Bytes) -> Result<Vec<u8>, HatchError> {
+    let req: ManifestRequest = decode_body(&body)?;
+    let (protocol, reference) = scheme(&req.reference);
+    let reference = parse_ref(reference)?;
     let auth = build_auth(&req.registry_auth)?;
     let client = build_client(protocol)?;
 
-    let pulled = tokio::time::timeout(PULL_TIMEOUT, async {
+    let manifest = timeout(MANIFEST_TIMEOUT, async {
         let _turn = state
             .pulls
             .acquire()
             .await
             .map_err(|e| HatchError::Internal(format!("pull: {e}")))?;
-        do_pull(&client, &auth, &reference).await.map_err(|e| {
-            warn!(reference = %reference, err = %e, "pull failed");
-            classify_oci_error(e)
-        })
+        let (manifest, _) = client
+            .pull_manifest_raw(&reference, &auth, MANIFEST_ACCEPTS)
+            .await
+            .map_err(|e| {
+                warn!(reference = %reference, err = %e, "manifest pull failed");
+                classify_oci_error(e)
+            })?;
+        Ok::<_, HatchError>(manifest)
     })
     .await
     .map_err(|_| {
-        warn!(reference = %reference, "pull timed out");
-        HatchError::Internal("pull: timed out".to_string())
-    })?;
-    let (manifest, layers) = pulled?;
-    let digest = sha256_hex(&manifest);
-
-    encode_body(&PullResponse {
-        manifest,
-        manifest_digest: format!("sha256:{digest}"),
-        layers,
+        warn!(reference = %reference, "manifest pull timed out");
+        HatchError::Internal("manifest: timed out".to_string())
+    })??;
+    if manifest.len() > MANIFEST_BYTES {
+        return Err(HatchError::Internal(format!(
+            "manifest of {} bytes, past {MANIFEST_BYTES}",
+            manifest.len()
+        )));
+    }
+    encode_body(&ManifestResponse {
+        manifest: manifest.to_vec(),
     })
 }
 
-/// Map an OCI error to an HTTP status. 404 / `MANIFEST_UNKNOWN` →
-/// `NotFound` so the TEE-side client gets a typed not-found without the
-/// substring-grep hack it used to do on gRPC status messages.
+/// POST /oci/blob
+///
+/// The answer's status says whether the blob's stream started; a failure after
+/// that — the registry's, the cap's, the deadline's — ends the body short,
+/// which the TEE reads as a blob that did not arrive.
+pub async fn blob(State(state): State<AppState>, body: Bytes) -> Result<Response, HatchError> {
+    let req: BlobRequest = decode_body(&body)?;
+    let (protocol, reference) = scheme(&req.reference);
+    let reference = parse_ref(reference)?;
+    let digest = parse_digest(&req.digest)?;
+    let auth = build_auth(&req.registry_auth)?;
+    let client = build_client(protocol)?;
+
+    let end = Instant::now() + BLOB_TIMEOUT;
+    let (turn, stream) = timeout_at(end, async {
+        let turn = state
+            .pulls
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| HatchError::Internal(format!("pull: {e}")))?;
+        // The digest alone, never a descriptor: a descriptor's `urls` would
+        // have the client fetch from wherever the manifest names.
+        // This client has fetched nothing yet, so it holds no token to send.
+        client
+            .auth(&reference, &auth, oci_client::RegistryOperation::Pull)
+            .await
+            .map_err(classify_oci_error)?;
+        let stream = client
+            .pull_blob_stream(&reference, digest)
+            .await
+            .map_err(|e| {
+                warn!(reference = %reference, err = %e, "blob pull failed");
+                classify_oci_error(e)
+            })?;
+        Ok::<_, HatchError>((turn, stream))
+    })
+    .await
+    .map_err(|_| HatchError::Internal("blob: timed out".to_string()))??;
+
+    let pieces = pass_on(
+        stream.stream.map_err(std::io::Error::other),
+        BLOB_BYTES,
+        end,
+        turn,
+    );
+    Ok(Response::new(Body::from_stream(pieces)))
+}
+
+/// `pieces` as the answer's body: refused past `cap` bytes together or past
+/// `end`, and ended at the first refusal or failure. `turn` is held for as long
+/// as the stream runs — given back when it ends or is dropped, and not before.
+fn pass_on<S, T>(
+    pieces: S,
+    cap: u64,
+    end: Instant,
+    turn: T,
+) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send
+where
+    S: futures::Stream<Item = std::io::Result<Bytes>> + Send + Unpin,
+    T: Send,
+{
+    futures::stream::unfold(
+        (pieces, 0u64, Some(turn)),
+        move |(mut pieces, mut sent, turn)| async move {
+            let turn = turn?;
+            let piece = match timeout_at(end, pieces.next()).await {
+                Err(_) => Err(std::io::Error::other("blob: past its deadline")),
+                Ok(None) => return None,
+                Ok(Some(Err(e))) => Err(e),
+                Ok(Some(Ok(piece))) => {
+                    sent += piece.len() as u64;
+                    if sent > cap {
+                        Err(std::io::Error::other(format!("blob past {cap} bytes")))
+                    } else {
+                        Ok(piece)
+                    }
+                }
+            };
+            let turn = piece.is_ok().then_some(turn);
+            Some((piece, (pieces, sent, turn)))
+        },
+    )
+}
+
+/// Map an OCI error to an HTTP status. 404 / `MANIFEST_UNKNOWN` / `BLOB_UNKNOWN`
+/// → `NotFound` so the TEE-side client gets a typed not-found.
 fn classify_oci_error(e: OciDistributionError) -> HatchError {
     let msg = format!("{e:?}");
-    if msg.contains("MANIFEST_UNKNOWN") || msg.contains("code: 404") || msg.contains("404") {
+    if msg.contains("MANIFEST_UNKNOWN")
+        || msg.contains("BLOB_UNKNOWN")
+        || msg.contains("code: 404")
+        || msg.contains("404")
+    {
         HatchError::NotFound
     } else {
         HatchError::Internal(format!("pull: {e}"))
@@ -105,15 +204,25 @@ fn classify_oci_error(e: OciDistributionError) -> HatchError {
 /// Require digest form (`@sha256:<hex>`) — the TEE only ever pins by
 /// digest; a tag-form ref is a TEE bug or a host trying to move digest
 /// resolution into our boundary. Loud reject (400).
-fn parse_ref(policy_ref: &str) -> Result<Reference, HatchError> {
-    let reference = Reference::try_from(policy_ref)
-        .map_err(|e| HatchError::BadRequest(format!("invalid policy_ref: {e}")))?;
-    if reference.digest().is_none() {
+fn parse_ref(reference: &str) -> Result<Reference, HatchError> {
+    let parsed = Reference::try_from(reference)
+        .map_err(|e| HatchError::BadRequest(format!("invalid reference: {e}")))?;
+    if parsed.digest().is_none() {
         return Err(HatchError::BadRequest(
-            "policy_ref must be digest-pinned (`<registry>/<repo>@sha256:<hex>`)".to_string(),
+            "reference must be digest-pinned (`<registry>/<repo>@sha256:<hex>`)".to_string(),
         ));
     }
-    Ok(reference)
+    Ok(parsed)
+}
+
+/// A blob digest is `sha256:` and 64 hex digits, and nothing else is fetched
+/// by one.
+fn parse_digest(digest: &str) -> Result<&str, HatchError> {
+    let hex = digest
+        .strip_prefix("sha256:")
+        .filter(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()));
+    hex.map(|_| digest)
+        .ok_or_else(|| HatchError::BadRequest("a blob digest is `sha256:<64 hex>`".to_string()))
 }
 
 /// Translate the opaque bearer into oci-client's typed `RegistryAuth`.
@@ -140,13 +249,13 @@ fn build_auth(registry_auth: &[u8]) -> Result<RegistryAuth, HatchError> {
 /// reference — `http://` for plain HTTP, `https://` or none for HTTPS, as
 /// every client takes a reference that names none — and the reference
 /// without it.
-fn scheme(policy_ref: &str) -> (ClientProtocol, &str) {
-    if let Some(rest) = policy_ref.strip_prefix("http://") {
+fn scheme(reference: &str) -> (ClientProtocol, &str) {
+    if let Some(rest) = reference.strip_prefix("http://") {
         (ClientProtocol::Http, rest)
-    } else if let Some(rest) = policy_ref.strip_prefix("https://") {
+    } else if let Some(rest) = reference.strip_prefix("https://") {
         (ClientProtocol::Https, rest)
     } else {
-        (ClientProtocol::Https, policy_ref)
+        (ClientProtocol::Https, reference)
     }
 }
 
@@ -160,113 +269,9 @@ fn build_client(protocol: ClientProtocol) -> Result<Client, HatchError> {
     .map_err(|e| HatchError::Internal(format!("registry client: {e}")))
 }
 
-/// Pull RAW manifest bytes + each layer payload. Raw bytes because the
-/// registry's content-addressed digest is over these exact bytes;
-/// re-serializing would change the sha256 and fail TEE verification.
-async fn do_pull(
-    client: &Client,
-    auth: &RegistryAuth,
-    reference: &Reference,
-) -> Result<(Vec<u8>, Vec<Vec<u8>>), OciDistributionError> {
-    let (manifest_bytes, _server_digest) = client
-        .pull_manifest_raw(reference, auth, MANIFEST_ACCEPTS)
-        .await?;
-    if manifest_bytes.len() > MANIFEST_BYTES {
-        return Err(OciDistributionError::GenericError(Some(format!(
-            "manifest of {} bytes, past {MANIFEST_BYTES}",
-            manifest_bytes.len()
-        ))));
-    }
-    let manifest_bytes = manifest_bytes.to_vec();
-
-    let parsed: ManifestForLayers = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| OciDistributionError::GenericError(Some(format!("manifest parse: {e}"))))?;
-    if parsed.layers.len() > LAYERS {
-        return Err(OciDistributionError::GenericError(Some(format!(
-            "manifest of {} layers, past {LAYERS}",
-            parsed.layers.len()
-        ))));
-    }
-
-    let mut left = PULL_BYTES;
-    let mut payloads = Vec::with_capacity(parsed.layers.len());
-    for descriptor in parsed.layers.iter() {
-        // The digest alone, never the descriptor: a descriptor's `urls` would
-        // have the client fetch from wherever the manifest names.
-        let mut out = Capped::new(left);
-        client
-            .pull_blob(reference, descriptor.digest.as_str(), &mut out)
-            .await?;
-        left = out.left;
-        payloads.push(out.held);
-    }
-    Ok((manifest_bytes, payloads))
-}
-
-/// Minimal manifest subset used to enumerate layer blobs. We deserialize
-/// only to discover layer digests for `pull_blob`; bytes returned to the
-/// TEE come straight from the registry.
-#[derive(Deserialize)]
-struct ManifestForLayers {
-    layers: Vec<LayerForFetch>,
-}
-
-#[derive(Deserialize)]
-struct LayerForFetch {
-    digest: String,
-}
-
-/// A layer's bytes, taken as they arrive up to what the pull has left and
-/// refused past it — however large the registry declared the layer.
-struct Capped {
-    held: Vec<u8>,
-    left: usize,
-}
-
-impl Capped {
-    fn new(left: usize) -> Self {
-        Self {
-            held: Vec::new(),
-            left,
-        }
-    }
-}
-
-impl AsyncWrite for Capped {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-        data: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        if data.len() > self.left {
-            return Poll::Ready(Err(io::Error::other(format!(
-                "pull past {PULL_BYTES} bytes"
-            ))));
-        }
-        self.left -= data.len();
-        self.held.extend_from_slice(data);
-        Poll::Ready(Ok(data.len()))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    hex::encode(h.finalize())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn the_scheme_is_the_one_written_and_https_without_one() {
@@ -289,12 +294,47 @@ mod tests {
         }
     }
 
+    /// A blob is passed on up to the cap and refused past it, nothing follows
+    /// the refusal, and the turn is given back with it.
     #[tokio::test]
-    async fn a_layer_is_taken_up_to_what_the_pull_has_left() {
-        let mut out = Capped::new(8);
-        out.write_all(b"12345").await.unwrap();
-        assert!(out.write_all(b"6789").await.is_err());
-        assert_eq!(out.held, b"12345");
-        assert_eq!(out.left, 3);
+    async fn a_blob_is_passed_on_up_to_its_cap() {
+        let pieces = futures::stream::iter(
+            [&b"12345"[..], b"678", b"9", b"after"]
+                .into_iter()
+                .map(|p| Ok(Bytes::from_static(p))),
+        );
+        let turn = std::sync::Arc::new(());
+        let end = Instant::now() + Duration::from_secs(10);
+        let got: Vec<_> = pass_on(pieces, 8, end, turn.clone()).collect().await;
+        assert_eq!(got.len(), 3);
+        assert!(got[0].is_ok() && got[1].is_ok());
+        assert!(got[2].is_err(), "the piece past the cap is refused");
+        assert_eq!(std::sync::Arc::strong_count(&turn), 1, "the turn is back");
+    }
+
+    /// A stream that stalls past its deadline ends in an error, not a wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_blob_past_its_deadline_ends() {
+        let pieces =
+            futures::stream::iter([Ok(Bytes::from_static(b"1"))]).chain(futures::stream::pending());
+        let end = Instant::now() + Duration::from_secs(5);
+        let got: Vec<_> = pass_on(Box::pin(pieces), 8, end, ()).collect().await;
+        assert_eq!(got.len(), 2);
+        assert!(got[1].is_err());
+    }
+
+    #[test]
+    fn only_a_sha256_digest_names_a_blob() {
+        let hex = "ab".repeat(32);
+        assert!(parse_digest(&format!("sha256:{hex}")).is_ok());
+        for bad in [
+            hex.clone(),
+            format!("sha512:{hex}"),
+            format!("sha256:{}", &hex[..63]),
+            format!("sha256:{hex}/../x"),
+            format!("sha256:{}", "zz".repeat(32)),
+        ] {
+            assert!(parse_digest(&bad).is_err(), "{bad}");
+        }
     }
 }

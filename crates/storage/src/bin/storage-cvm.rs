@@ -36,9 +36,11 @@ use storage_rpc::{
 /// otherwise (the `sweep-batch` setting): what bounds one sweep pass.
 const DEFAULT_SWEEP_BATCH: usize = 1024;
 /// What the compiled-bundle cache may hold, unless the host says otherwise (the
-/// `cache-bytes` setting): a bundle is about 8 MiB, and the volume the cache
-/// shares with the sessions is a few GiB.
-const DEFAULT_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+/// `cache-bytes` setting), the bundles being written counted with the ones
+/// written. 4 GiB holds three bundles carrying a gigabyte of data each beside
+/// hundreds of ordinary ones (about 8 MiB each), and leaves the sessions most
+/// of the 12 GiB volume the cache shares with them.
+const DEFAULT_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// How often expired sessions are swept, unless the host says otherwise (the
 /// `sweep-secs` setting). The host's to choose like the clock the sweep reads.
 const DEFAULT_SWEEP_SECS: u64 = 60;
@@ -321,12 +323,13 @@ async fn main() {
             )
         }),
     );
-    let cache = CacheBlobs::new(store);
+    let cache = CacheBlobs::new(store, cache_bytes);
     let svc = Arc::new(StorageSvc::new(sessions.clone(), cache.clone()));
 
     // TTL sweeper — enforce per-session deadlines INSIDE the trust boundary (the
     // host STATUS byte is gone). Clock is host-skewable → availability-only.
-    // The same tick keeps the cache within its budget.
+    // The same tick brings the cache within its budget when that was lowered
+    // since its blobs were written; a store keeps within it on its own.
     {
         let sessions = sessions.clone();
         tokio::spawn(async move {
@@ -373,7 +376,7 @@ async fn main() {
                         debug!("  cause: {e}");
                     }
                 }
-                match cache.evict_to(cache_bytes).await {
+                match cache.evict().await {
                     Ok(n) if n > 0 => info!(
                         "storage-cvm: dropped {} cache blob(s) over the budget",
                         safe(

@@ -124,55 +124,100 @@ pub fn encrypt(
     (buf, public, private)
 }
 
-/// Decrypt an ocicrypt `AES_256_CTR_HMAC_SHA256` layer. Verifies the HMAC
-/// over the ciphertext (constant-time) before decrypting, then checks the
-/// plaintext digest if present.
+/// Decrypt an ocicrypt `AES_256_CTR_HMAC_SHA256` layer held whole: the HMAC
+/// over the ciphertext and the plaintext digest, if present, are checked, and
+/// nothing is returned unless both pass.
 pub fn decrypt(
     ciphertext: &[u8],
     public: &PublicLayerBlockCipherOptions,
     private: &PrivateLayerBlockCipherOptions,
 ) -> Result<Vec<u8>, CryptoError> {
-    if public.cipher_type != CIPHER_AES256CTR_HMAC_SHA256 {
-        return Err(CryptoError::new(format!(
-            "unsupported ocicrypt cipher: {}",
-            public.cipher_type
-        )));
-    }
-    if private.symmetric_key.len() != KEY_SIZE {
-        return Err(CryptoError::new("ocicrypt symkey must be 32 bytes"));
-    }
-    // ocicrypt `get_opt`: public has priority, falling back to private.
-    // The nonce is written to the private opts at encrypt time.
-    let nonce = public
-        .cipher_options
-        .get(NONCE_KEY)
-        .or_else(|| private.cipher_options.get(NONCE_KEY))
-        .ok_or_else(|| CryptoError::new("ocicrypt nonce missing"))?;
-    if nonce.len() != NONCE_SIZE {
-        return Err(CryptoError::new("ocicrypt nonce must be 16 bytes"));
-    }
+    let mut decryptor = LayerDecryptor::new(public, private)?;
+    let plaintext = decryptor.decrypt(ciphertext);
+    decryptor.finish()?;
+    Ok(plaintext)
+}
 
-    // Verify HMAC over the ciphertext before touching plaintext.
-    let mut mac = HmacSha256::new_from_slice(private.symmetric_key.expose())
-        .expect("hmac accepts any key length");
-    mac.update(ciphertext);
-    mac.verify_slice(&public.hmac)
-        .map_err(|_| CryptoError::new("ocicrypt hmac verification failed"))?;
+/// Decrypts an ocicrypt `AES_256_CTR_HMAC_SHA256` layer as its ciphertext
+/// arrives, for a layer too large to hold whole. CTR is a stream cipher, so
+/// the plaintext is exactly as long as the ciphertext and comes out piece by
+/// piece.
+///
+/// What comes out is NOT yet authenticated. The HMAC over the ciphertext, and
+/// the plaintext's digest where the private opts carry one, are checked only by
+/// [`finish`](Self::finish), once the whole layer has passed. So a caller hands
+/// the pieces only to a reader that acts on nothing before the layer has ended,
+/// and ends the layer with `finish`'s answer.
+pub struct LayerDecryptor {
+    cipher: Aes256Ctr,
+    mac: HmacSha256,
+    hmac: Vec<u8>,
+    plaintext: Sha256,
+    digest: String,
+}
 
-    let mut buf = ciphertext.to_vec();
-    let mut cipher = Aes256Ctr::new(
-        private.symmetric_key.expose().into(),
-        nonce.as_slice().into(),
-    );
-    cipher.apply_keystream(&mut buf);
-
-    if !private.digest.is_empty() {
-        let actual = format!("sha256:{}", hex::encode(Sha256::digest(&buf)));
-        if !private.digest.eq_ignore_ascii_case(&actual) {
-            return Err(CryptoError::new("ocicrypt plaintext digest mismatch"));
+impl LayerDecryptor {
+    /// A decryptor for the layer `public` and `private` describe.
+    pub fn new(
+        public: &PublicLayerBlockCipherOptions,
+        private: &PrivateLayerBlockCipherOptions,
+    ) -> Result<Self, CryptoError> {
+        if public.cipher_type != CIPHER_AES256CTR_HMAC_SHA256 {
+            return Err(CryptoError::new(format!(
+                "unsupported ocicrypt cipher: {}",
+                public.cipher_type
+            )));
         }
+        if private.symmetric_key.len() != KEY_SIZE {
+            return Err(CryptoError::new("ocicrypt symkey must be 32 bytes"));
+        }
+        // ocicrypt `get_opt`: public has priority, falling back to private.
+        // The nonce is written to the private opts at encrypt time.
+        let nonce = public
+            .cipher_options
+            .get(NONCE_KEY)
+            .or_else(|| private.cipher_options.get(NONCE_KEY))
+            .ok_or_else(|| CryptoError::new("ocicrypt nonce missing"))?;
+        if nonce.len() != NONCE_SIZE {
+            return Err(CryptoError::new("ocicrypt nonce must be 16 bytes"));
+        }
+        Ok(Self {
+            cipher: Aes256Ctr::new(
+                private.symmetric_key.expose().into(),
+                nonce.as_slice().into(),
+            ),
+            mac: HmacSha256::new_from_slice(private.symmetric_key.expose())
+                .expect("hmac accepts any key length"),
+            hmac: public.hmac.clone(),
+            plaintext: Sha256::new(),
+            digest: private.digest.clone(),
+        })
     }
-    Ok(buf)
+
+    /// The plaintext of the next piece of ciphertext, unauthenticated.
+    pub fn decrypt(&mut self, ciphertext: &[u8]) -> Vec<u8> {
+        self.mac.update(ciphertext);
+        let mut piece = ciphertext.to_vec();
+        self.cipher.apply_keystream(&mut piece);
+        self.plaintext.update(&piece);
+        piece
+    }
+
+    /// The layer has ended: whether everything that passed is what was
+    /// encrypted — the HMAC over the ciphertext, compared in constant time, and
+    /// the plaintext digest if the private opts carry one.
+    pub fn finish(self) -> Result<(), CryptoError> {
+        self.mac
+            .verify_slice(&self.hmac)
+            .map_err(|_| CryptoError::new("ocicrypt hmac verification failed"))?;
+        if !self.digest.is_empty() {
+            let actual = format!("sha256:{}", hex::encode(self.plaintext.finalize()));
+            if !self.digest.eq_ignore_ascii_case(&actual) {
+                return Err(CryptoError::new("ocicrypt plaintext digest mismatch"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Encode public opts for the `enc.pubopts` layer annotation: base64(JSON).
@@ -292,5 +337,29 @@ mod tests {
         bad.cipher_options
             .insert(NONCE_KEY.to_string(), vec![0u8; NONCE_SIZE]);
         assert!(decrypt(&ct, &public, &bad).is_err());
+    }
+
+    /// Decrypted in pieces, a layer comes out as it does whole, and passes
+    /// only once all of it has; a layer short of its end, or with a byte
+    /// changed, does not.
+    #[test]
+    fn a_layer_decrypts_in_pieces_and_is_checked_at_its_end() {
+        let plaintext: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
+        let (ct, public, private) = encrypt(&plaintext);
+
+        let mut d = LayerDecryptor::new(&public, &private).unwrap();
+        let out: Vec<u8> = ct.chunks(7_777).flat_map(|p| d.decrypt(p)).collect();
+        d.finish().expect("the whole layer passes");
+        assert_eq!(out, plaintext);
+
+        let mut d = LayerDecryptor::new(&public, &private).unwrap();
+        d.decrypt(&ct[..ct.len() - 1]);
+        assert!(d.finish().is_err(), "a layer short of its end");
+
+        let mut flipped = ct.clone();
+        flipped[50_000] ^= 1;
+        let mut d = LayerDecryptor::new(&public, &private).unwrap();
+        d.decrypt(&flipped);
+        assert!(d.finish().is_err(), "a layer with a byte changed");
     }
 }

@@ -23,8 +23,12 @@ mod integration_tests;
 
 use std::sync::Arc;
 
+use fleet_stream::{Incoming, StreamLen, bin};
 use hatch_protocol::{ReadRequest, ReadResponse, WriteRequest, WriteResponse};
-use storage_rpc::{ByteBuf, CacheError, CacheService, SessionError, SessionStoreService};
+use storage_rpc::{
+    CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheError, CacheService, SessionError,
+    SessionStoreService,
+};
 
 pub use cache::CacheBlobs;
 pub use session::{DEFAULT_BUSY_TIMEOUT, SessionStore};
@@ -128,14 +132,40 @@ impl SessionStoreService for Caller {
 }
 
 impl CacheService for Caller {
-    async fn store(&self, key: String, bytes: ByteBuf) -> Result<(), CacheError> {
+    async fn store(&self, key: String, blob: CacheBlob) -> Result<(), CacheError> {
         let name = self.scope.blob(&key);
-        self.svc.cache.store(name.as_str(), bytes.into_vec()).await
+        let length = blob.length.get();
+        // A stream that fails, at its deadline among other ways, is not kept:
+        // what was written aside goes, and what was there stays. Held to the
+        // length it came with, which is what its room in the cache was made for.
+        let pieces = Incoming::open(blob.body, length, CACHE_STREAM_IDLE)
+            .await
+            .map_err(|e| CacheError(e.to_string()))?
+            .into_pieces(CACHE_STREAM_DEADLINE, None);
+        self.svc.cache.store(name.as_str(), length, pieces).await
     }
 
-    async fn load(&self, key: String) -> Result<Option<ByteBuf>, CacheError> {
+    async fn load(&self, key: String) -> Result<Option<CacheBlob>, CacheError> {
         let name = self.scope.blob(&key);
-        let blob = self.svc.cache.load(name.as_str()).await?;
-        Ok(blob.map(ByteBuf::from))
+        let Some((size, pieces)) = self.svc.cache.load(name.as_str()).await? else {
+            return Ok(None);
+        };
+        let length = StreamLen::new(size)
+            .ok_or_else(|| CacheError("a blob past what the leg carries".into()))?;
+        let (tx, body) = bin::channel();
+        // The reply carries the receiving end, so the bytes go after the reply
+        // has: a task of their own, which ends with the stream, with a caller
+        // that stopped reading, or at the deadline.
+        tokio::spawn(async move {
+            let _ =
+                tokio::time::timeout(CACHE_STREAM_DEADLINE, fleet_stream::send_from(tx, pieces))
+                    .await;
+        });
+        Ok(Some(CacheBlob { length, body }))
+    }
+
+    async fn remove(&self, key: String) -> Result<(), CacheError> {
+        let name = self.scope.blob(&key);
+        self.svc.cache.remove(name.as_str()).await
     }
 }

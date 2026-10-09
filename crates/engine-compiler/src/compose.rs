@@ -40,23 +40,27 @@ const POLICY_PACKAGE: &str = "enclavid:composed-policy";
 /// Fuse `policy_wasm` with `plugins` into one component's bytes plus the
 /// manifest of distinct per-component i18n/icons imports.
 ///
+/// Takes the components whole: the graph keeps them as they are rather than
+/// a copy, and they are gone once the fused bytes are made, so a composition
+/// is held twice at most here — its components and the component they become.
+///
 /// Fails loud if a component's bytes aren't a component, if two plugins
 /// register under the same `package` id, or if a wac graph operation
 /// fails (e.g. a type mismatch on a functional wiring).
 pub(crate) fn fuse(
-    policy_wasm: &[u8],
-    plugins: &[PluginInstance],
+    policy_wasm: Vec<u8>,
+    plugins: Vec<PluginInstance>,
 ) -> wasmtime::Result<(Vec<u8>, Vec<EmbeddedImport>)> {
     let mut graph = CompositionGraph::new();
 
     let policy_id = register(&mut graph, POLICY_PACKAGE, policy_wasm)?;
-    let policy_hash = catalog_hash_of(policy_wasm)?;
+    let policy_hash = catalog_hash_of(graph[policy_id].bytes())?;
 
     let mut plugin_pkgs: Vec<(PackageId, [u8; 32])> = Vec::with_capacity(plugins.len());
     for plugin in plugins {
-        let id = register(&mut graph, &plugin.package, &plugin.wasm)?;
+        let id = register(&mut graph, &plugin.package, plugin.wasm)?;
         reject_reserved_exports(&graph, id, &plugin.package)?;
-        plugin_pkgs.push((id, catalog_hash_of(&plugin.wasm)?));
+        plugin_pkgs.push((id, catalog_hash_of(graph[id].bytes())?));
     }
 
     let policy_inst = graph.instantiate(policy_id);
@@ -306,9 +310,13 @@ fn slot_import_parts(name: &str) -> Option<(EmbeddedIface, String)> {
     Some((iface, version))
 }
 
-/// Register a component's bytes as a package in the graph.
-fn register(graph: &mut CompositionGraph, name: &str, wasm: &[u8]) -> wasmtime::Result<PackageId> {
-    let pkg = Package::from_bytes(name, None, wasm.to_vec(), graph.types_mut())
+/// Register a component's bytes as a package in the graph, which keeps them.
+fn register(
+    graph: &mut CompositionGraph,
+    name: &str,
+    wasm: Vec<u8>,
+) -> wasmtime::Result<PackageId> {
+    let pkg = Package::from_bytes(name, None, wasm, graph.types_mut())
         .map_err(|e| wasmtime::Error::msg(format!("wac: parse component `{name}`: {e}")))?;
     graph
         .register_package(pkg)

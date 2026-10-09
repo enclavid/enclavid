@@ -11,16 +11,18 @@
 
 use std::sync::Arc;
 
+use futures::{StreamExt, TryStreamExt};
 use remoc::codec::Ciborium;
 use remoc::rtc::Client as _;
 
+use fleet_stream::{Incoming, StreamLen, bin};
 use fleet_transport::LegFailure;
-use hatch_client::{BridgeError, CacheBackend, SessionBackend};
+use hatch_client::{BlobPieces, BridgeError, CacheBackend, SessionBackend};
 use hatch_protocol::{ReadRequest, Slot, WriteRequest};
 use safe_logger::debug;
 use storage_rpc::{
-    CacheService, CacheServiceClient, SessionError, SessionStoreService, SessionStoreServiceClient,
-    StorageClients,
+    CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheService, CacheServiceClient,
+    SessionError, SessionStoreService, SessionStoreServiceClient, StorageClients,
 };
 
 /// Fold any storage-tier RPC error into the hatch-client transport error the
@@ -87,11 +89,10 @@ impl SessionBackend for SessionCvmBackend {
     }
 }
 
-/// What a cache `store` request carries besides the sealed blob: the blob name,
-/// CBOR framing and remoc's own request envelope.
-const STORE_REQUEST_HEADROOM: usize = 64 * 1024;
-
-/// `CacheBackend` over the storage-CVM's `CacheService`.
+/// `CacheBackend` over the storage-CVM's `CacheService`. Every blob streams
+/// beside its call, so no call carries one: a blob of any size crosses without
+/// coming near remoc's item limit, and one that fails ends its own stream and
+/// nothing else on the connection the session store shares.
 pub struct CacheCvmBackend {
     leg: Arc<crate::fleet::Leg<CacheServiceClient<Ciborium>>>,
 }
@@ -110,29 +111,53 @@ impl CacheCvmBackend {
 
 #[async_trait::async_trait]
 impl CacheBackend for CacheCvmBackend {
-    async fn store(&self, blob_name: &str, bytes: Vec<u8>) -> Result<(), BridgeError> {
-        // A request past the item limit is refused by remoc and fails the
-        // channel for good, and the session store shares this connection: the
-        // leg ends and takes every session's reads and writes with it. A blob
-        // that cannot cross is not sent; the cache is best-effort, so the cost is
-        // a recompile.
-        if bytes.len() + STORE_REQUEST_HEADROOM > remoc::rch::DEFAULT_MAX_ITEM_SIZE {
-            return Err(BridgeError::Transport(format!(
-                "storage-cvm: a {}-byte blob does not fit one request; not stored",
-                bytes.len()
-            )));
-        }
-        self.client()?
-            .store(blob_name.to_string(), storage_rpc::ByteBuf::from(bytes))
-            .await
-            .map_err(to_bridge)
+    async fn store(
+        &self,
+        blob_name: &str,
+        length: u64,
+        pieces: BlobPieces,
+    ) -> Result<(), BridgeError> {
+        let length = StreamLen::new(length).ok_or_else(|| {
+            BridgeError::Transport(
+                "storage-cvm: a blob past what the leg carries; not stored".into(),
+            )
+        })?;
+        let (tx, body) = bin::channel();
+        let client = self.client()?;
+        let mut call =
+            std::pin::pin!(client.store(blob_name.to_string(), CacheBlob { length, body }));
+        // The store answers once the blob has arrived, so the pieces are written
+        // while it is awaited. One that fails abandons the blob, and the store
+        // answers that; a store that answers first has stopped reading.
+        let reply = tokio::select! {
+            reply = &mut call => reply,
+            _ = fleet_stream::send_from(tx, pieces) => call.await,
+        };
+        reply.map_err(to_bridge)
     }
 
-    async fn load(&self, blob_name: &str) -> Result<Option<Vec<u8>>, BridgeError> {
-        self.client()?
+    async fn load(&self, blob_name: &str) -> Result<Option<(u64, BlobPieces)>, BridgeError> {
+        let Some(blob) = self
+            .client()?
             .load(blob_name.to_string())
             .await
-            .map(|blob| blob.map(storage_rpc::ByteBuf::into_vec))
+            .map_err(to_bridge)?
+        else {
+            return Ok(None);
+        };
+        let length = blob.length.get();
+        let pieces = Incoming::open(blob.body, length, CACHE_STREAM_IDLE)
+            .await
+            .map_err(to_bridge)?
+            .into_pieces(CACHE_STREAM_DEADLINE, None)
+            .map_err(to_bridge);
+        Ok(Some((length, pieces.boxed())))
+    }
+
+    async fn remove(&self, blob_name: &str) -> Result<(), BridgeError> {
+        self.client()?
+            .remove(blob_name.to_string())
+            .await
             .map_err(to_bridge)
     }
 }

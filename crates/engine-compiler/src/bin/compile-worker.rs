@@ -3,8 +3,9 @@
 //! It LISTENS for the orchestrator (api) and serves `engine_rpc::CompilerService`
 //! — the same api-facing contract as before — but it runs NO Cranelift itself.
 //! Per compile it drives a fresh `engine-compiler-child` PROCESS (spawned + bounded +
-//! deadline-guarded + released by the shared [`engine_supervisor::ChildRunner`]) and
-//! forwards the `(policy, plugins)` to it. Cranelift over UNTRUSTED wasm — a wide
+//! deadline-guarded + released by the shared [`engine_supervisor::ChildRunner`]),
+//! relays the components to it as they stream in, and streams the cwasm the
+//! child left behind on to api. Neither is held whole here. Cranelift over UNTRUSTED wasm — a wide
 //! surface — runs ONLY in that disposable per-compile child, so a compiler-bug
 //! exploit is confined to one compile (no persistent implant that could poison a
 //! later tenant's cwasm). It is started for api, not by it — one instance per
@@ -29,18 +30,23 @@
 //! supervisor↔child hop is a private per-child socketpair (never leaves this
 //! host).
 
+use std::fs::File;
+use std::os::fd::AsFd;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use engine_supervisor::{
     Cgroups, ChildLimits, ChildRunner, ChildTimes, DEFAULT_CHILD_MAX_TASKS, ExitCause, RunnerConfig,
 };
+use fleet_stream::bin;
 use remoc::codec::Ciborium;
 
 use enclavid_boundary::{AuthN, Untrusted};
-use engine_compiler::{CompileChildService, CompileChildServiceClient};
+use engine_compiler::{ChildCompiled, CompileChildService, CompileChildServiceClient};
 use engine_rpc::{
-    CompileError, CompileRequest, CompiledBundle, CompilerServiceUntrusted, LegSettings,
+    COMPILE_STREAM_DEADLINE, CompileError, CompileReply, CompileRequest, CompilerServiceUntrusted,
+    LegSettings, MAX_BUNDLE_META_BYTES,
 };
 use fleet_transport::LegFailure;
 use fleet_transport::launch::{LaunchError, Settings};
@@ -50,14 +56,23 @@ use safe_logger::{debug, info, reason, safe, warn};
 /// enforced by the [`ChildRunner`]).
 /// Bounds a malicious wasm that would otherwise hang Cranelift and hold a child
 /// slot forever — the availability guard the direct-compile design lacked.
-/// Generous: a legitimate cold compile of a large fused component is seconds,
-/// not minutes.
-const DEFAULT_COMPILE_DEADLINE_SECS: u64 = 300;
+///
+/// It runs from the child's start, so it covers the components arriving — the
+/// pull from the registry, which they stream in from — as well as the compile.
+/// 100 s is what a `/connect` that compiles can spend on both and still stream
+/// the cwasm and run its first round inside the gateway's 120 s: a compile
+/// outliving the request that asked for it holds a slot and its memory for
+/// nobody.
+const DEFAULT_COMPILE_DEADLINE_SECS: u64 = 100;
 
 /// Default cap on concurrent compile children (the `max-compiles` setting).
 /// Cranelift is CPU-bound, so this is
 /// modest by design (roughly a core budget); compiles are rare (only L2 misses).
-const DEFAULT_MAX_COMPILES: usize = 8;
+///
+/// Four: one compile at [`DEFAULT_COMPILE_MAX_BYTES`] beside three of an
+/// ordinary policy (about 0.6 GiB each) fit the children's total in the 8 GiB
+/// guest. Two at their max do not, and the kernel ends one of them.
+const DEFAULT_MAX_COMPILES: usize = 4;
 
 /// The most one compile child may hold, in bytes, unless the host says
 /// otherwise (the `compile-max-bytes` setting). A compile past it is killed by
@@ -65,9 +80,12 @@ const DEFAULT_MAX_COMPILES: usize = 8;
 /// cannot compile within this is one this deployment refuses, and a larger one
 /// takes a larger setting and a larger guest.
 ///
-/// 2 GiB fits one compile at its max inside the 3 GiB guest beside
-/// [`DEFAULT_BASE_RESERVE_BYTES`].
-const DEFAULT_COMPILE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// A compile holds about three times the data its composition carries at its
+/// peak — the fused component, and wasmtime's memory image and object on their
+/// way to the cwasm — beside what Cranelift takes for its code. 4 GiB holds a
+/// gigabyte of data beside an ordinary policy's code, and fits inside the 8 GiB
+/// guest beside [`DEFAULT_BASE_RESERVE_BYTES`].
+const DEFAULT_COMPILE_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// What must be free before a compile child starts, in the children's total and
 /// in the guest alike, unless the host says otherwise (the
@@ -77,9 +95,13 @@ const DEFAULT_COMPILE_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
 
 /// What this process keeps of the guest's memory for itself, out of reach of the
 /// compile children's total, unless the host says otherwise (the
-/// `base-reserve-bytes` setting): its runtime, its leg to api, and the request
-/// and the reply of each compile in flight.
+/// `base-reserve-bytes` setting): its runtime, its leg to api, and what each
+/// compile in flight passes through it — the pieces of its components and of its
+/// cwasm on their way, and its metadata.
 const DEFAULT_BASE_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// What the cwasm streams to api in, read from the file the child wrote.
+const CWASM_PIECE_BYTES: usize = 1024 * 1024;
 
 /// The `engine_rpc::CompilerService` impl served to api: forward each compile to
 /// a fresh disposable `engine-compiler-child` via the runner. Shared (`Arc`) across
@@ -107,7 +129,7 @@ impl CompilerServiceUntrusted for Supervisor {
     async fn compile(
         &self,
         req: Untrusted<CompileRequest, Self::Scope>,
-    ) -> Result<CompiledBundle, CompileError> {
+    ) -> Result<CompileReply, CompileError> {
         // INDIFFERENT, and it is a property of the position rather than of the
         // bytes: nothing DERIVED FROM a request outlives its call, so one caller's
         // input cannot reach another's compile, and the result goes back only to
@@ -122,27 +144,41 @@ impl CompilerServiceUntrusted for Supervisor {
         // the weight the measurement pin would have carried if this end could pin
         // api back. A cache added here would end that, and would need the executor's
         // per-caller partitioning before it could.
-        let CompileRequest { policy, plugins } = req
+        let req = req
             .trust_unchecked::<AuthN, _>(enclavid_boundary::reason!(
                 "indifferent: nothing derived from a request outlives its call, so \
                  hostile input reaches only its own compile and its own caller; the \
                  shared runner slots are availability, capped elsewhere"
             ))
             .into_inner();
+        // Components past the hop's bound together are the pins' doing, so the
+        // same pins are refused every time.
+        let (onward, relay) = req.relay().ok_or(CompileError::Refused)?;
+        let output = output_file().map_err(|e| {
+            debug!("compile output file: {e}");
+            CompileError::Failed
+        })?;
         // Drive ONE compile in a fresh disposable child, under the runner's
         // concurrency bound + wall-clock deadline (the runner kills a wedged child
-        // and releases what it held). The closure is the DOMAIN work: forward the
-        // compile.
+        // and releases what it held). The closure is the DOMAIN work: relay the
+        // components to the child as they arrive, and wait for its answer. The
+        // child writes its cwasm to `output`, which it is handed at its inherited
+        // descriptor and nothing else.
         let outcome = self
             .runner
-            // No inherited fd: the engine-compiler-child receives its `(policy, plugins)`
-            // over the RPC, not by fd (only the executor hands a cwasm memfd down),
-            // so nothing it maps needs keeping either.
             .run(
-                None,
+                Some(output.as_fd()),
                 (),
                 move |client: CompileChildServiceClient<Ciborium>| async move {
-                    client.compile(CompileRequest { policy, plugins }).await
+                    let mut call = std::pin::pin!(client.compile(onward));
+                    // The child answers once it has compiled, which it does only
+                    // on components that arrived whole; the relay is never the
+                    // outcome, and one that fails abandons them on the child's
+                    // side too.
+                    tokio::select! {
+                        reply = &mut call => reply,
+                        _ = relay => call.await,
+                    }
                 },
             )
             .await;
@@ -157,18 +193,97 @@ impl CompilerServiceUntrusted for Supervisor {
         // its composition's, so `Refused`; anything else stays `Failed`. A
         // runner-level failure (spawn error, or the deadline killing a wedged child)
         // is `Failed`, its cause kept to this side's debug log.
-        match outcome {
-            Ok((Err(CompileError::Failed), exit)) => match exit.cause().await {
-                ExitCause::OutgrewItsMax => Err(CompileError::Refused),
-                ExitCause::Unattributed => Err(CompileError::Failed),
-            },
-            Ok((domain_result, _)) => domain_result,
+        let compiled = match outcome {
+            Ok((Ok(compiled), _)) => compiled,
+            Ok((Err(CompileError::Failed), exit)) => {
+                return match exit.cause().await {
+                    ExitCause::OutgrewItsMax => Err(CompileError::Refused),
+                    ExitCause::Unattributed => Err(CompileError::Failed),
+                };
+            }
+            Ok((Err(e), _)) => return Err(e),
             Err(runner_err) => {
                 debug!("compile supervisor: {runner_err}");
-                Err(CompileError::Failed)
+                return Err(CompileError::Failed);
             }
-        }
+        };
+        reply(output, compiled)
     }
+}
+
+/// The file a compile child writes its cwasm into: made here, handed to the
+/// child at its inherited descriptor, and read back here once the child is gone.
+///
+/// On the Linux CVM a `memfd`: RAM-backed (never touches disk), nameless and
+/// CLOEXEC, so no child holds it but the one it is handed to on purpose. On a
+/// developer's macOS an unlinked tmpfile, with the same anonymous, fd-only,
+/// refcounted lifetime.
+#[cfg(target_os = "linux")]
+fn output_file() -> std::io::Result<File> {
+    memfd::MemfdOptions::default()
+        .close_on_exec(true)
+        .create("enclavid-compiled")
+        .map(memfd::Memfd::into_file)
+        .map_err(std::io::Error::other)
+}
+#[cfg(not(target_os = "linux"))]
+fn output_file() -> std::io::Result<File> {
+    tempfile::tempfile()
+}
+
+/// Answer api with what the child left: its metadata in the reply, and its cwasm
+/// streaming from `output` beside it, held to the length the child said.
+///
+/// The child's word throughout, and it is carried on as such: api holds the
+/// cwasm to the digest as it reads it. What is checked here is what would harm
+/// this side — metadata past its bound would make a reply past remoc's item
+/// limit, which ends the serving of the connection it is sent on.
+fn reply(output: File, compiled: ChildCompiled) -> Result<CompileReply, CompileError> {
+    let ChildCompiled { meta, cwasm } = compiled;
+    if meta.len() as u64 > MAX_BUNDLE_META_BYTES {
+        debug!("compile: the child's metadata is past its bound");
+        return Err(CompileError::Failed);
+    }
+    let written = output.metadata().map_err(|e| {
+        debug!("compile output: {e}");
+        CompileError::Failed
+    })?;
+    if written.len() != cwasm.length() {
+        debug!("compile: the child's cwasm is not the length it said");
+        return Err(CompileError::Failed);
+    }
+    let (tx, body) = bin::channel();
+    // The reply carries the receiving end, so the bytes go after the reply has:
+    // a task of their own, holding the file until it is sent, the reader stops
+    // reading, or the deadline.
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(
+            COMPILE_STREAM_DEADLINE,
+            fleet_stream::send_from(tx, file_pieces(output, written.len())),
+        )
+        .await;
+    });
+    Ok(CompileReply { meta, cwasm, body })
+}
+
+/// The first `len` bytes of `file`, in pieces.
+fn file_pieces(
+    file: File,
+    len: u64,
+) -> std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> {
+    use std::os::unix::fs::FileExt;
+    Box::pin(futures::stream::try_unfold(
+        (file, 0u64),
+        move |(file, at)| async move {
+            if at == len {
+                return Ok(None);
+            }
+            let mut piece = vec![0u8; CWASM_PIECE_BYTES.min((len - at) as usize)];
+            file.read_exact_at(&mut piece, at)?;
+            let next = at + piece.len() as u64;
+            Ok(Some((Bytes::from(piece), (file, next))))
+        },
+    ))
 }
 
 /// Locate the `engine-compiler-child` binary: `ENCLAVID_COMPILE_WORKER_CHILD_BIN`

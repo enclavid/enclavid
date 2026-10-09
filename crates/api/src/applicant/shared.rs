@@ -9,12 +9,12 @@ use std::sync::Arc;
 use axum::extract::{FromRequestParts, Path};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
+use futures::{StreamExt, TryStreamExt};
 use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 
 use enclavid_boundary::Asserted;
-use enclavid_boundary::{AuthN, AuthZ, Replay, reason};
-use engine_types::composition::PluginInstance;
+use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted, reason};
 use hatch_client::{
     Client, Decision, DisplayField, Event, Key, Metadata, PluginPin, Prompt, SessionMetadata,
     SessionState, SessionStatus, State as StateField, outbound_session_id,
@@ -22,8 +22,8 @@ use hatch_client::{
 // The run wire mirrors: props api builds + ships, the outcome + error it gets
 // back from the execution-worker.
 use engine_rpc::{
-    CompatToken, CompileError, CompiledBundle, CompositionKey, ExecError, Prop, RunOutcome,
-    RunRequest, RunStatus,
+    BundleSource, CallbackServiceUntrusted, CompatToken, CompileError, CompileSource,
+    CompositionKey, ExecError, Prop, RunOutcome, RunRequest, RunStatus,
 };
 
 use crate::cwasm_cache;
@@ -154,7 +154,7 @@ pub(super) struct SessionRunCtx {
     /// L1 cache, and (with the worker's `compat_token`) keys the orchestrator's
     /// L2. Passed to the worker on the run; named back in its cache-miss reply.
     composition_key: CompositionKey,
-    /// This session's metadata — kept for the round so `resolve_bundle` can
+    /// This session's metadata — kept for the round so `run_resolved` can
     /// cold-compile (OCI pull + fuse) on an L2 miss.
     metadata: SessionMetadata,
 }
@@ -307,32 +307,30 @@ impl SessionRunCtx {
                     // the pinned config, surfaced to the consumer verbatim. Phase
                     // 2: re-drive WITH the bundle via `run_with_bundle`, which
                     // always runs (no second miss).
-                    let bundle = resolve_bundle(
+                    let req = session_state.map(|session_state| RunRequest {
+                        composition_key: composition_key.clone(),
+                        props,
+                        session_state,
+                        event,
+                    });
+                    run_resolved(
                         &state,
                         &composition_key,
                         &compat_token,
                         &session_id,
                         &metadata,
+                        req,
+                        callbacks,
                     )
-                    .await?;
-                    let req = session_state.map(|session_state| RunRequest {
-                        composition_key,
-                        props,
-                        session_state,
-                        event,
-                    });
-                    state
-                        .executor
-                        .run_with_bundle(req, bundle, callbacks)
-                        .await
-                        .map_err(|e| classify_run_error(&session_id, &e))?
-                        .trust_unchecked::<Asserted, _>(reason!(
-                            "contained: a prompt is shown to the applicant, who is the \
+                    .await?
+                    .map_err(|e| classify_run_error(&session_id, &e))?
+                    .trust_unchecked::<Asserted, _>(reason!(
+                        "contained: a prompt is shown to the applicant, who is the \
                              sole auditor of what they see, and a decision api only \
                              compares with the one the round committed. The round's \
                              DISCLOSURE comes from api's own copy, never from this"
-                        ))
-                        .into_inner()
+                    ))
+                    .into_inner()
                 }
             };
             Ok::<_, ApiError>(status)
@@ -589,7 +587,7 @@ persist; same containment as above.
         // Compute the composition cache key — names the fused component in the
         // worker's L1 and keys the orchestrator's L2. The pull + compile is LAZY:
         // a worker L1 miss comes back as `RunOutcome::CacheMiss` and sends this
-        // side into `resolve_bundle`, so nothing is compiled on the extractor
+        // side into `run_resolved`, so nothing is compiled on the extractor
         // path.
         let composition_key = session_composition_key(&session_id, &metadata)?;
 
@@ -648,7 +646,7 @@ persist; same containment as above.
 /// the execution-worker's L1 cache — every session pinning the same policy +
 /// plugins shares ONE compile — and (b) keys the orchestrator's L2 (paired with
 /// the worker's `compat_token`). NO pull or compile happens here; that is lazy,
-/// driven by [`resolve_bundle`] when the worker reports an L1 miss.
+/// driven by [`run_resolved`] when the worker reports an L1 miss.
 fn session_composition_key(
     session_id: &str,
     metadata: &SessionMetadata,
@@ -665,41 +663,89 @@ fn session_composition_key(
     ))
 }
 
-/// Resolve the compiled bundle for `(composition_key, compat_token)` — what api
-/// does with a worker's cache miss. L2 hit → return the (unsealed)
-/// bundle; L2 miss → cold-compile (OCI pull + compile-worker), store to L2
-/// (best-effort), return. This is the ONE place a compile is now triggered — the
-/// orchestrator holds no in-memory component cache, so it recomputes from L2 (or
-/// compiles) each time the worker's L1 misses. Concurrent misses are not
-/// coalesced: each round resolves and streams its own bundle, the worker stages
-/// each one and runs every round on the first it commits; a cross-worker race
-/// just re-reads L2 or double-compiles (idempotent write), acceptable and rare.
-pub(super) async fn resolve_bundle(
+/// Resolve the compiled bundle for `(composition_key, compat_token)` and run the
+/// round with it — what api does with a worker's cache miss. This is the ONE
+/// place a compile is triggered: the orchestrator holds no in-memory component
+/// cache, so it opens L2 (or compiles) each time the worker's L1 misses.
+///
+///   * L2 hit: the bundle goes to the worker straight from the cache, a piece at
+///     a time, so api never holds the cwasm. An entry found bad on the way — it
+///     did not open, or did not hold what its header said — fails this round as
+///     any infra fault does, and is dropped, so the next miss compiles afresh.
+///     The round is not retried here: the worker answers a bundle it refused as
+///     it answers a round that failed after running, so this side cannot know
+///     that nothing ran.
+///   * L2 miss: cold-compile (OCI pull + compile-worker), then the worker and the
+///     cache take the cwasm at once as it streams back from the compiler
+///     ([`crate::tee`]), so api never holds it whole here either. A cache that
+///     cannot keep it costs the next miss a compile; the round goes on. A cwasm
+///     that is not what the compiler named reaches both as an abandoned stream,
+///     and neither keeps it.
+///
+/// The outer error is resolution's, the inner the round's. Concurrent misses are
+/// not coalesced: each round resolves and streams its own bundle, the worker
+/// stages each one and runs every round on the first it commits; a cross-worker
+/// race just re-reads L2 or double-compiles (idempotent write), acceptable and
+/// rare.
+async fn run_resolved<C>(
     state: &AppState,
     composition_key: &CompositionKey,
     compat_token: &CompatToken,
     session_id: &str,
     metadata: &SessionMetadata,
-) -> Result<CompiledBundle, ApiError> {
-    if let Some(bundle) =
-        cwasm_cache::try_load(&state.cache_store, composition_key, compat_token).await
-    {
-        return Ok(bundle);
+    req: Exposed<RunRequest, ()>,
+    callbacks: C,
+) -> Result<Result<Untrusted<RunStatus, C::Scope>, ExecError>, ApiError>
+where
+    C: CallbackServiceUntrusted + Send + Sync + 'static,
+    C::Scope: Send,
+{
+    if let Some(hit) = cwasm_cache::open(&state.cache_store, composition_key, compat_token).await {
+        let cwasm_cache::Hit { source, found_bad } = hit;
+        let reply = state.executor.run_with_bundle(req, source, callbacks).await;
+        if found_bad.get() {
+            cwasm_cache::remove(&state.cache_store, composition_key, compat_token).await;
+        }
+        return Ok(reply);
     }
     let client = metadata.client.as_ref().ok_or_else(|| {
-        safe_logger::debug!("resolve_bundle: metadata.client missing for {session_id}");
+        safe_logger::debug!("run_resolved: metadata.client missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let bundle = cold_compile(state, session_id, metadata, client).await?;
-    cwasm_cache::store(&state.cache_store, composition_key, compat_token, &bundle).await;
-    Ok(bundle)
+    let crate::compiler::Compiled {
+        meta,
+        cwasm_len,
+        cwasm_sha256,
+        cwasm,
+    } = cold_compile(state, session_id, metadata, client).await?;
+    let (feed, to_worker, to_cache) = crate::tee::tee(cwasm);
+    let source = BundleSource::streamed(cwasm_len, cwasm_sha256, meta.clone(), to_worker)
+        .ok_or_else(|| {
+            safe_logger::debug!(
+                "run_resolved: a bundle past the execute hop's bounds for {session_id}"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let entry = cwasm_cache::Entry {
+        meta: &meta,
+        cwasm_len,
+        cwasm_sha256,
+        cwasm: to_cache,
+    };
+    let (reply, (), ()) = tokio::join!(
+        state.executor.run_with_bundle(req, source, callbacks),
+        cwasm_cache::store(&state.cache_store, composition_key, compat_token, entry),
+        feed,
+    );
+    Ok(reply)
 }
 
 /// Cold path: pull the policy + pinned plugins (the orchestrator owns OCI +
 /// registry auth), then hand the bytes to the [`Compiler`](crate::compiler::Compiler)
-/// boundary, which fuses + compiles + parses sections into a [`CompiledBundle`].
-/// Runs only on an L2 miss — [`resolve_bundle`] calls this, then stores the
-/// result to L2. The bundle then goes to the worker on `run_with_bundle`.
+/// boundary, which fuses + compiles + parses sections into a cwasm and its
+/// metadata, the cwasm streaming back as it comes.
+/// Runs only on an L2 miss — [`run_resolved`] calls this, then sends the result
+/// to the worker on `run_with_bundle` and to L2 at once.
 ///
 /// Errors are the round's answer, returned as they are:
 ///   * 410 Gone — registry pull / decrypt failed (artifact removed / malformed)
@@ -710,7 +756,7 @@ async fn cold_compile(
     session_id: &str,
     metadata: &SessionMetadata,
     client: &Client,
-) -> Result<CompiledBundle, ApiError> {
+) -> Result<crate::compiler::Compiled, ApiError> {
     // Look up the bearer for the policy registry by hostname. Same
     // lookup applies per plugin below. Missing entry collapses to an
     // empty slice ⇒ anonymous pull (host attaches no Authorization
@@ -722,24 +768,22 @@ async fn cold_compile(
     // inline / plaintext artifacts ignore it.
     let kbs_ctx = crate::keyprovider::KbsContext { kbs: &state.kbs };
 
-    // Run the policy pull and every plugin pull concurrently so the
-    // /connect critical path is bounded by the slowest fetch instead
-    // of paying linear network latency. Each future is independent
-    // and only the final outputs feed `Runner::run`.
-    let policy_fut = policy_pull::pull_policy(
+    // Every manifest first, concurrently, with every key it needs: all that
+    // can be refused before a byte of wasm moves, so the /connect critical
+    // path waits on the slowest of them rather than on their sum.
+    let policy_fut = policy_pull::wasm_layer(
         &state.registry,
         &metadata.policy_ref,
         policy_bearer,
         metadata.policy_key.as_ref(),
         Some(&kbs_ctx),
     );
-
     let plugin_futs = client.plugins.iter().map(|pin| {
         let bearer = policy_pull::bearer_for_ref(&client.registry_auth, &pin.impl_ref);
         let registry = &state.registry;
         let kbs_ctx = &kbs_ctx;
         async move {
-            policy_pull::pull_plugin(
+            policy_pull::wasm_layer(
                 registry,
                 &pin.impl_ref,
                 bearer,
@@ -747,47 +791,68 @@ async fn cold_compile(
                 Some(kbs_ctx),
             )
             .await
-            .map(|art| (pin.package.clone(), art))
+            .map(|layer| (pin.package.clone(), layer))
         }
     });
     let (policy_res, plugin_results) =
         futures::future::join(policy_fut, futures::future::join_all(plugin_futs)).await;
 
-    let artifact = policy_res.map_err(|e| {
+    let policy = policy_res.map_err(|e| {
         safe_logger::debug!(
-            "lookup_policy: pull_and_decrypt failed for session {session_id} \
+            "lookup_policy: the policy's manifest failed for session {session_id} \
              (policy_ref={}): {e}",
             metadata.policy_ref,
         );
         StatusCode::GONE
     })?;
-
-    let mut plugin_instances: Vec<PluginInstance> = Vec::with_capacity(plugin_results.len());
+    let mut plugins = Vec::with_capacity(plugin_results.len());
     for res in plugin_results {
-        let (package, art) = res.map_err(|e| {
-            safe_logger::debug!("lookup_policy: pull_plugin failed for session {session_id}: {e}",);
+        plugins.push(res.map_err(|e| {
+            safe_logger::debug!(
+                "lookup_policy: a plugin's manifest failed for session {session_id}: {e}"
+            );
             StatusCode::GONE
-        })?;
-        // Keep the raw component bytes — the compiler fuses on bytes, not a
-        // pre-compiled `Component`, and parses each plugin's embedded catalog
-        // itself (content-hash keyed, so strict per-component resolution lines
-        // up). The compile-worker does this in `Compiler::compile_to_parts`.
-        plugin_instances.push(PluginInstance {
-            package,
-            wasm: art.wasm_bytes,
-        });
+        })?);
     }
 
-    // Hand the pulled bytes to the COMPILE boundary: the compile-worker fuses +
-    // compiles + parses sections into a `CompiledBundle` (cwasm + i18n/icons
-    // import manifest + per-component catalogs, composition order) over rpc.
-    // [`resolve_bundle`] stores what comes back in L2; the execution-worker
-    // files it in its own L1 when `run_with_bundle` streams it there.
-    state
-        .compiler
-        .compile(artifact.wasm_bytes, plugin_instances)
-        .await
-        .map_err(|e| classify_compile_error(session_id, &metadata.policy_ref, e))
+    // Then the layers themselves, one after another in composition order —
+    // policy first — as one stream into the COMPILE boundary: each fetched
+    // when the one before it has been read, so no fetch waits half-read on
+    // another. The compile-worker fuses + compiles + parses sections into a
+    // cwasm and its metadata (the i18n/icons import manifest + per-component
+    // catalogs, composition order), starting only once every component has
+    // arrived whole. [`run_resolved`] passes the cwasm on to L2 and to the
+    // execution-worker as it streams back; the worker files it in its own L1.
+    //
+    // A layer that turns out not to be what its manifest pinned ends the stream
+    // in an error, which the compile answers as a failure; marked here, so the
+    // round answers it as the pull failure it is, 410, as a manifest's would be.
+    let policy_length = policy.length();
+    let lengths = plugins
+        .iter()
+        .map(|(package, layer)| (package.clone(), layer.length()))
+        .collect();
+    let pull_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let marked = pull_failed.clone();
+    let layers = std::iter::once(policy).chain(plugins.into_iter().map(|(_, layer)| layer));
+    let components = futures::stream::iter(layers)
+        .flat_map(policy_pull::WasmLayer::pieces)
+        .inspect_err(move |e| {
+            safe_logger::debug!("lookup_policy: a layer did not arrive as pinned: {e}");
+            marked.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+    let source = CompileSource::streamed(policy_length, lengths, components);
+    let compiled = match source {
+        Some(source) => state.compiler.compile(source).await,
+        None => Err(CompileError::Refused),
+    };
+    compiled.map_err(|e| {
+        if pull_failed.load(std::sync::atomic::Ordering::Relaxed) {
+            StatusCode::GONE.into()
+        } else {
+            classify_compile_error(session_id, &metadata.policy_ref, e)
+        }
+    })
 }
 
 /// Content-address of a fused composition: each artifact (policy + ORDERED

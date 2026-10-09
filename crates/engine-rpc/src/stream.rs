@@ -11,15 +11,21 @@
 //! a blob rather than a header field because at its bound
 //! ([`MAX_BUNDLE_META_BYTES`], 7 MiB) it cannot fit beside a full clip in one
 //! request.
+//!
+//! The sender need not hold the cwasm whole: a [`BundleSource`] names it by its
+//! length and digest and passes its pieces on as they come, from wherever the
+//! sender has them.
 
 use std::future::Future;
 use std::time::Duration;
 
+use bytes::Bytes;
 use fleet_stream::{BlobHeader, StreamError, bin};
+use futures_util::stream::BoxStream;
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::bundle::{BundleMeta, CompiledBundle, MAX_BUNDLE_META_BYTES, MAX_CWASM_BYTES};
-use crate::execute::ExecError;
 
 /// How long a bundle stream may go without a new byte, unless the receiver says
 /// otherwise.
@@ -53,11 +59,54 @@ pub(crate) struct BundleHeader {
     pub(crate) meta: BlobHeader<MAX_BUNDLE_META_BYTES>,
 }
 
+/// A bundle as the door sends it: its metadata, encoded and held, and its cwasm as
+/// pieces the sender need not hold whole, named up front by length and digest.
+pub struct BundleSource {
+    header: BundleHeader,
+    meta: Vec<u8>,
+    cwasm: BoxStream<'static, Result<Bytes, ()>>,
+}
+
+impl BundleSource {
+    /// A bundle held whole. `None` if its metadata does not encode, or either
+    /// blob is past what the hop accepts — which a round cannot fix.
+    ///
+    /// Both digests are taken here, inline — about 35 ms for a 66 MB cwasm on
+    /// SHA-NI — on the round that already waits for the bundle to cross.
+    pub fn whole(bundle: CompiledBundle) -> Option<Self> {
+        let meta = bundle.encoded_meta()?;
+        let cwasm = BlobHeader::<MAX_CWASM_BYTES>::of(&bundle.cwasm)?;
+        let piece = futures_util::stream::iter([Ok::<_, ()>(Bytes::from(bundle.cwasm))]);
+        Self::streamed(cwasm.length(), cwasm.sha256(), meta, piece)
+    }
+
+    /// A bundle whose cwasm passes through as `cwasm` yields it, named by the
+    /// `length` and `sha256` the sender knows it by, with its metadata `meta`,
+    /// encoded. `None` past either bound.
+    ///
+    /// The receiver files nothing it has not checked whole against the name, so a
+    /// `cwasm` that fails part-way, or yields other bytes than it was named by,
+    /// fails the round's bundle and nothing else.
+    pub fn streamed<S, E>(length: u64, sha256: [u8; 32], meta: Vec<u8>, cwasm: S) -> Option<Self>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    {
+        Some(Self {
+            header: BundleHeader {
+                cwasm: BlobHeader::new(length, sha256)?,
+                meta: BlobHeader::of(&meta)?,
+            },
+            meta,
+            cwasm: cwasm.map(|piece| piece.map_err(|_| ())).boxed(),
+        })
+    }
+}
+
 /// The bundle a `run_with_bundle` call carries: a bounded header in the request,
 /// and one `bin` end per blob beside it.
 ///
 /// The fields are private to this crate, so outside it a stream is built only by
-/// the door, from a whole [`CompiledBundle`], and read only through
+/// the door, from a [`BundleSource`], and read only through
 /// [`receive`](Self::receive), which holds every byte to the header.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,35 +155,28 @@ impl BundleStream {
     /// order without one waiting on the other. It must run while the call is
     /// awaited: the receiver reads inside the call, so a writer started after it
     /// returns has nobody left to write to.
-    ///
-    /// Both digests are taken here, inline — about 35 ms for a 66 MB cwasm on
-    /// SHA-NI — on the round that already waits for the bundle to cross.
-    pub(crate) fn split(
-        bundle: CompiledBundle,
-    ) -> Result<(Self, impl Future<Output = ()> + Send + 'static), ExecError> {
-        let meta = bundle.encoded_meta().ok_or(ExecError::Unknown)?;
-        let CompiledBundle { cwasm, .. } = bundle;
-        // `None` is a bundle past what the hop accepts, which a round cannot fix.
-        let header = BundleHeader {
-            cwasm: BlobHeader::of(&cwasm).ok_or(ExecError::Unknown)?,
-            meta: BlobHeader::of(&meta).ok_or(ExecError::Unknown)?,
-        };
+    pub(crate) fn split(source: BundleSource) -> (Self, impl Future<Output = ()> + Send + 'static) {
+        let BundleSource {
+            header,
+            meta,
+            cwasm,
+        } = source;
         let (cwasm_tx, cwasm_rx) = bin::channel();
         let (meta_tx, meta_rx) = bin::channel();
         let writer = async move {
             let _ = tokio::join!(
-                fleet_stream::send(cwasm_tx, cwasm),
+                fleet_stream::send_from(cwasm_tx, cwasm),
                 fleet_stream::send(meta_tx, meta),
             );
         };
-        Ok((
+        (
             Self {
                 header,
                 cwasm: cwasm_rx,
                 meta: meta_rx,
             },
             writer,
-        ))
+        )
     }
 
     /// Receive both blobs, each to its exact length and digest, within
@@ -261,17 +303,13 @@ mod tests {
         );
     }
 
-    /// The door's own pair: what `split` sends, `receive` takes back whole.
-    #[tokio::test]
-    async fn a_split_bundle_is_received_whole() {
-        let bundle = crate::bundle::sample_bundle();
-        let cwasm = bundle.cwasm.clone();
-        let meta_encoded = bundle.encoded_meta().unwrap();
-        let (stream, writer) = BundleStream::split(bundle).unwrap();
-
-        // Across a real connection, because a `bin` end only connects by crossing
-        // one. Each end's driver is spawned as soon as that end is up: the other
-        // end's handshake still needs it running.
+    /// `source` split, its stream sent across a real connection — a `bin` end
+    /// only connects by crossing one — and received there while the writer runs.
+    /// Each end's driver is spawned as soon as that end is up: the other end's
+    /// handshake still needs it running.
+    async fn send_across(
+        source: BundleSource,
+    ) -> (Vec<u8>, Result<(u64, BundleMeta, u64), BundleError>) {
         type Ends = BundleStream;
         async fn end(
             io: tokio::io::DuplexStream,
@@ -290,6 +328,7 @@ mod tests {
             tokio::spawn(conn);
             (tx, rx)
         }
+        let (stream, writer) = BundleStream::split(source);
         let (a, b) = tokio::io::duplex(1 << 20);
         let ((mut tx, _), (_, mut rx)) = tokio::join!(end(a), end(b));
 
@@ -304,11 +343,79 @@ mod tests {
             ),
             writer
         );
+        (sink, got)
+    }
+
+    /// The door's own pair: what `split` sends, `receive` takes back whole.
+    #[tokio::test]
+    async fn a_split_bundle_is_received_whole() {
+        let bundle = crate::bundle::sample_bundle();
+        let cwasm = bundle.cwasm.clone();
+        let meta_encoded = bundle.encoded_meta().unwrap();
+
+        let (sink, got) = send_across(BundleSource::whole(bundle).unwrap()).await;
         let (len, meta, meta_len) = got.unwrap();
         assert_eq!(len, cwasm.len() as u64);
         assert_eq!(meta_len, meta_encoded.len() as u64);
         assert_eq!(sink, cwasm);
         assert_eq!(meta.embedded_imports.len(), 1);
         assert!(meta.catalogs[0].decls.disclosure_fields.contains("dob"));
+    }
+
+    /// A cwasm passed through in pieces arrives as the one blob it was named as.
+    #[tokio::test]
+    async fn a_streamed_cwasm_is_received_whole() {
+        let cwasm: Vec<u8> = (0..300_000).map(|i| (i % 251) as u8).collect();
+        let named = BlobHeader::<MAX_CWASM_BYTES>::of(&cwasm).unwrap();
+        let meta = crate::bundle::sample_bundle().encoded_meta().unwrap();
+        let pieces: Vec<Result<Bytes, ()>> = cwasm
+            .chunks(10_007)
+            .map(|p| Ok(Bytes::copy_from_slice(p)))
+            .collect();
+        let source = BundleSource::streamed(
+            named.length(),
+            named.sha256(),
+            meta,
+            futures_util::stream::iter(pieces),
+        )
+        .unwrap();
+        let (sink, got) = send_across(source).await;
+        assert_eq!(got.unwrap().0, cwasm.len() as u64);
+        assert!(sink == cwasm);
+    }
+
+    /// A source that fails part-way, or yields other bytes than it was named by,
+    /// fails the cwasm's stream: the receiver never takes it as the bundle.
+    #[tokio::test]
+    async fn a_streamed_cwasm_that_fails_or_differs_is_refused() {
+        let cwasm: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
+        let named = BlobHeader::<MAX_CWASM_BYTES>::of(&cwasm).unwrap();
+        let meta = || crate::bundle::sample_bundle().encoded_meta().unwrap();
+
+        let failing = vec![
+            Ok(Bytes::copy_from_slice(&cwasm[..1000])),
+            Err("the source broke"),
+        ];
+        let source = BundleSource::streamed(
+            named.length(),
+            named.sha256(),
+            meta(),
+            futures_util::stream::iter(failing),
+        )
+        .unwrap();
+        let (_, got) = send_across(source).await;
+        assert_eq!(got.err(), Some(BundleError::Cwasm(StreamError::Cancelled)));
+
+        let mut other = cwasm.clone();
+        other[50_000] ^= 1;
+        let source = BundleSource::streamed(
+            named.length(),
+            named.sha256(),
+            meta(),
+            futures_util::stream::iter([Ok::<_, ()>(Bytes::from(other))]),
+        )
+        .unwrap();
+        let (_, got) = send_across(source).await;
+        assert_eq!(got.err(), Some(BundleError::Cwasm(StreamError::Digest)));
     }
 }

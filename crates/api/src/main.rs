@@ -20,6 +20,7 @@ mod settings;
 mod shuffle;
 mod state;
 mod storage;
+mod tee;
 mod transport;
 
 use std::sync::Arc;
@@ -116,7 +117,7 @@ async fn main() {
     // guest can reach it is a fact only this guest holds.
     //
     // A failure changes nothing but the bit. The hatch is on the cold-start path
-    // (`/authorize` for the consumer surface, `/oci/pull` and `/kbs/relay` from
+    // (`/authorize` for the consumer surface, `/oci/*` and `/kbs/relay` from
     // `cold_compile`), and an applicant round on a warm composition never
     // touches it — so withdrawing this guest over a hatch fault would end
     // sessions that are running correctly. What to do about it is the host's

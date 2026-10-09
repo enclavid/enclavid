@@ -45,8 +45,9 @@ rustix = { version = "1.1", optional = true, default-features = false, features 
 # What rustix does not cover: putting a caller's fd on a fixed child fd number
 # (`dup2` to a number nothing in the child owns yet), and the constants the
 # boot checks compare against. Also the developer's non-Linux arm of the memory
-# reading.
-libc = { version = "0.2", optional = true }
+# reading. Both halves: the child half checks that the fd it was handed is open
+# before taking it.
+libc = "0.2"
 # The boot-time floors report both outcomes. On a guest stderr is /dev/null and a
 # panic payload never leaves, so a load-bearing check that used either would
 # announce nothing to the operator who has to act on it. NOT target-gated: the
@@ -78,7 +79,6 @@ default = ["parent"]
 # platform, so naming seccompiler here is correct off Linux too. safe-logger is
 # NOT target-gated — the descriptor floor reports on every platform.
 parent = [
-    "dep:libc",
     "dep:rustix",
     "dep:seccompiler",
     # `require_ptrace_scope` reports both outcomes on the channel, so the

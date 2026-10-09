@@ -55,9 +55,9 @@ pub use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstanc
 /// carries plugin work inline.
 ///
 /// The host's to set because how long a round may compute is the service's
-/// capacity. What choosing it lets the host learn — whether a round needs more
-/// than the host chose, from the round failing — is set out in
-/// `engine_types::limits`.
+/// capacity, not a term of what a session discloses. The worker reads it once
+/// at boot, so it cannot single out a session, and a policy learns it only by
+/// running out, which ends the round.
 pub const DEFAULT_ROUND_FUEL: u64 = 10_000_000_000;
 
 /// Runs a compiled policy component against session state.

@@ -18,7 +18,8 @@
 //! Endpoints:
 //!   GET    /health                (liveness only — see the route table)
 //!   POST   /authorize             (AuthorizeRequest -> AuthorizeResponse | 401/403/429)
-//!   POST   /oci/pull              (PullRequest -> PullResponse | 404)
+//!   POST   /oci/manifest          (ManifestRequest -> ManifestResponse | 404)
+//!   POST   /oci/blob              (BlobRequest -> the blob, streamed | 404)
 //!   POST   /kbs/relay             (KbsRelayRequest -> KbsRelayResponse)
 //!   POST   /kds/vcek              (VcekRequest -> VcekResponse | 404)
 
@@ -88,7 +89,8 @@ async fn main() -> anyhow::Result<()> {
         // parties.
         .route("/health", get(health))
         .route("/authorize", post(auth::authorize))
-        .route("/oci/pull", post(oci::pull))
+        .route("/oci/manifest", post(oci::manifest))
+        .route("/oci/blob", post(oci::blob))
         .route("/kbs/relay", post(kbs::relay))
         .route("/kds/vcek", post(kds::vcek))
         .with_state(state);

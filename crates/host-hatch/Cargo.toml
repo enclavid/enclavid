@@ -27,6 +27,8 @@ tokio = { version = "1", features = ["full"] }
 
 # Outbound: OCI registry pulls + OIDC JWKS fetch (host-side network)
 oci-client = "0.16"
+# A blob's stream, passed on to the TEE as it comes from the registry.
+futures = { version = "0.3", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 jsonwebtoken = "9"
 url = "2"

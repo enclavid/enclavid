@@ -666,8 +666,9 @@ mod execute_tests {
         // Phase 2: orchestrator resolved the bundle under ITS OWN composition_key
         // and re-drives via run_with_bundle, writing the bundle beside the call
         // while it waits; now the round runs and calls back once.
-        let (stream, writer) =
-            BundleStream::split(crate::bundle::sample_bundle()).expect("the sample splits");
+        let (stream, writer) = BundleStream::split(
+            crate::BundleSource::whole(crate::bundle::sample_bundle()).expect("the sample splits"),
+        );
         let (reply, ()) = tokio::join!(
             exec_client.run_with_bundle(mk_req(), stream, cb_client),
             writer
