@@ -14,20 +14,23 @@
 //! with no invalidation API, so per-call clients keep auth correct.
 //!
 //! Every guest on this host shares the hatch, so what one pull may cost it is
-//! bounded: a few pulls at a time, each turn held for as long as its stream
-//! runs, a manifest small enough to read, a blob's bytes capped and its stream
-//! given a deadline — none of it sized by what the registry says. Nothing of a
-//! blob is held here beyond the piece in hand.
+//! bounded: so many manifests and so many blobs at a time, counted apart, a
+//! blob counted for as long as its stream runs, a manifest small enough to
+//! read, a blob's bytes capped and its stream given a deadline — none of it
+//! sized by what the registry says. Nothing of a blob is held here beyond the
+//! piece in hand. How many of those one consumer's sessions have under way at
+//! once is bounded where the consumer is known, inside the TEE.
 
 use std::time::Duration;
 
+use anyhow::Context;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::response::Response;
 use futures::{StreamExt, TryStreamExt};
 use oci_client::Reference;
 use oci_client::client::{Client, ClientConfig, ClientProtocol};
-use oci_client::errors::OciDistributionError;
+use oci_client::errors::{OciDistributionError, OciErrorCode};
 use oci_client::secrets::RegistryAuth;
 use tokio::time::{Instant, timeout, timeout_at};
 use tracing::warn;
@@ -42,9 +45,30 @@ const MANIFEST_ACCEPTS: &[&str] = &[
     "application/vnd.docker.distribution.manifest.v2+json",
 ];
 
-/// Pulls under way at once — a manifest, or a blob for as long as its stream
-/// runs; the unit's memory limit is sized against it.
-pub const CONCURRENT_PULLS: usize = 4;
+/// Manifests fetched at once, unless the host says otherwise
+/// (`HATCH_CONCURRENT_MANIFESTS`). Counted apart from blobs, so a check waits
+/// on no blob stream; each is read whole, at most [`MANIFEST_BYTES`], so all of
+/// them together are 32 MiB at most. Many times what one consumer may have
+/// under way at once, so it takes that many consumers to hold them all.
+pub const DEFAULT_CONCURRENT_MANIFESTS: usize = 128;
+/// Blobs streamed at once, unless the host says otherwise
+/// (`HATCH_CONCURRENT_BLOBS`), each counted for as long as its stream runs and
+/// each holding one piece at a time. More of them only share the host's
+/// bandwidth further.
+pub const DEFAULT_CONCURRENT_BLOBS: usize = 8;
+
+/// The count a setting names: `default` when it is unset, a count above zero
+/// otherwise, or no start.
+pub fn concurrent(name: &str, default: usize) -> anyhow::Result<usize> {
+    let count = match std::env::var(name).ok() {
+        None => default,
+        Some(n) => n
+            .parse()
+            .with_context(|| format!("{name}: a count above zero"))?,
+    };
+    anyhow::ensure!(count > 0, "{name}: a count above zero");
+    Ok(count)
+}
 /// A manifest names its layers in a few kilobytes; one far past that is not
 /// parsed.
 const MANIFEST_BYTES: usize = 256 << 10;
@@ -72,7 +96,7 @@ pub async fn manifest(State(state): State<AppState>, body: Bytes) -> Result<Vec<
 
     let manifest = timeout(MANIFEST_TIMEOUT, async {
         let _turn = state
-            .pulls
+            .manifests
             .acquire()
             .await
             .map_err(|e| HatchError::Internal(format!("pull: {e}")))?;
@@ -117,7 +141,7 @@ pub async fn blob(State(state): State<AppState>, body: Bytes) -> Result<Response
     let end = Instant::now() + BLOB_TIMEOUT;
     let (turn, stream) = timeout_at(end, async {
         let turn = state
-            .pulls
+            .blobs
             .clone()
             .acquire_owned()
             .await
@@ -186,9 +210,22 @@ where
     )
 }
 
-/// Map an OCI error to an HTTP status. 404 / `MANIFEST_UNKNOWN` / `BLOB_UNKNOWN`
-/// → `NotFound` so the TEE-side client gets a typed not-found.
+/// Map an OCI error to an HTTP status. The registry refusing the bearer →
+/// `Forbidden`; 404 / `MANIFEST_UNKNOWN` / `BLOB_UNKNOWN` → `NotFound`; so the
+/// TEE-side client can tell both from a registry that did not answer.
 fn classify_oci_error(e: OciDistributionError) -> HatchError {
+    let refused = match &e {
+        OciDistributionError::UnauthorizedError { .. } => true,
+        OciDistributionError::ServerError { code, .. } => matches!(code, 401 | 403),
+        OciDistributionError::RegistryError { envelope, .. } => envelope
+            .errors
+            .iter()
+            .any(|e| matches!(e.code, OciErrorCode::Unauthorized | OciErrorCode::Denied)),
+        _ => false,
+    };
+    if refused {
+        return HatchError::Forbidden;
+    }
     let msg = format!("{e:?}");
     if msg.contains("MANIFEST_UNKNOWN")
         || msg.contains("BLOB_UNKNOWN")
@@ -310,6 +347,53 @@ mod tests {
         assert!(got[0].is_ok() && got[1].is_ok());
         assert!(got[2].is_err(), "the piece past the cap is refused");
         assert_eq!(std::sync::Arc::strong_count(&turn), 1, "the turn is back");
+    }
+
+    /// A registry refusing the bearer is told apart from one that is absent
+    /// and from one that did not answer, so the TEE can tell a session to stop
+    /// from a session to ask again.
+    #[test]
+    fn a_refusal_is_told_apart_from_no_answer() {
+        use oci_client::errors::{OciEnvelope, OciError};
+        let server = |code| OciDistributionError::ServerError {
+            code,
+            url: String::new(),
+            message: String::new(),
+        };
+        let envelope = |code| OciDistributionError::RegistryError {
+            envelope: OciEnvelope {
+                errors: vec![OciError {
+                    code,
+                    message: String::new(),
+                    detail: serde_json::Value::Null,
+                }],
+            },
+            url: String::new(),
+        };
+        let unauthorized = OciDistributionError::UnauthorizedError { url: String::new() };
+        for refused in [
+            unauthorized,
+            server(401),
+            server(403),
+            envelope(OciErrorCode::Denied),
+            envelope(OciErrorCode::Unauthorized),
+        ] {
+            assert!(matches!(classify_oci_error(refused), HatchError::Forbidden));
+        }
+        assert!(matches!(
+            classify_oci_error(server(404)),
+            HatchError::NotFound
+        ));
+        for unanswered in [
+            server(429),
+            server(503),
+            envelope(OciErrorCode::Toomanyrequests),
+        ] {
+            assert!(matches!(
+                classify_oci_error(unanswered),
+                HatchError::Internal(_)
+            ));
+        }
     }
 
     /// A stream that stalls past its deadline ends in an error, not a wait.

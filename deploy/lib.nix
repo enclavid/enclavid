@@ -161,6 +161,8 @@ rec {
       HATCH_SESSION_CREATE_PER_MINUTE = settings.perMinute.sessionCreate;
       HATCH_SESSION_READ_PER_MINUTE = settings.perMinute.sessionRead;
       HATCH_DATA_READ_PER_MINUTE = settings.perMinute.dataRead;
+      HATCH_CONCURRENT_MANIFESTS = settings.concurrent.manifests;
+      HATCH_CONCURRENT_BLOBS = settings.concurrent.blobs;
     }) // (
       if settings.auth == "oidc" then {
         HATCH_AUTH = "oidc";
@@ -224,10 +226,10 @@ rec {
       # What a consumer names is fetched by the hatch itself, never through a
       # proxy the service manager's environment might name.
       UnsetEnvironment = [ "HTTP_PROXY" "http_proxy" "HTTPS_PROXY" "https_proxy" "ALL_PROXY" "all_proxy" "NO_PROXY" "no_proxy" ];
-      # Four pulls at once, each a manifest of at most 256 KiB or a blob passed
-      # through a piece at a time, beside a hatch at rest of some 50 MiB, with
-      # room besides: past it, the hatch alone is stopped and started again,
-      # never a guest beside it.
+      # By default 128 manifests at once of at most 256 KiB each, 32 MiB in
+      # all, and eight blobs passed through a piece at a time, beside a hatch
+      # at rest of some 50 MiB, with room besides: past it, the hatch alone is
+      # stopped and started again, never a guest beside it.
       MemoryMax = "1G";
     };
   };

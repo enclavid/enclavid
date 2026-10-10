@@ -46,8 +46,10 @@ pub struct AppState {
     pub auth: AuthState,
     pub rate_limits: Arc<RateLimits>,
     pub vcek: kds::VcekCache,
-    /// Turns for the pulls under way at once.
-    pub pulls: Arc<Semaphore>,
+    /// The manifests fetched at once, one permit each.
+    pub manifests: Arc<Semaphore>,
+    /// The blobs streamed at once, one permit each.
+    pub blobs: Arc<Semaphore>,
     pub kbs: reqwest::Client,
 }
 
@@ -71,7 +73,14 @@ async fn main() -> anyhow::Result<()> {
         auth,
         rate_limits: Arc::new(RateLimits::from_env()?),
         vcek: kds::VcekCache::default(),
-        pulls: Arc::new(Semaphore::new(oci::CONCURRENT_PULLS)),
+        manifests: Arc::new(Semaphore::new(oci::concurrent(
+            "HATCH_CONCURRENT_MANIFESTS",
+            oci::DEFAULT_CONCURRENT_MANIFESTS,
+        )?)),
+        blobs: Arc::new(Semaphore::new(oci::concurrent(
+            "HATCH_CONCURRENT_BLOBS",
+            oci::DEFAULT_CONCURRENT_BLOBS,
+        )?)),
         kbs: kbs::client()?,
     };
 

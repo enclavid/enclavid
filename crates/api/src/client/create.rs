@@ -22,7 +22,8 @@ use hatch_client::{
 use crate::client_state::ClientState;
 use crate::dto::{PluginView, ResolvedPolicyView};
 use crate::limits::{
-    CLIENT_SESSION_TOKEN_BYTES, MAX_CLIENT_REF_LEN, MAX_REGISTRY_AUTH_LEN, SESSION_ID_RANDOM_BYTES,
+    CLIENT_SESSION_TOKEN_BYTES, MAX_CLIENT_REF_LEN, MAX_PLUGINS, MAX_REGISTRY_AUTH_LEN,
+    SESSION_ID_RANDOM_BYTES,
 };
 use crate::policy_pull;
 
@@ -256,6 +257,9 @@ async fn create(
     // an opaque pull error at /connect. Also dedupe-checks on
     // package id — two pins for the same WIT package would create
     // ambiguity at link time and is almost certainly a caller bug.
+    if body.plugins.len() > MAX_PLUGINS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let mut seen_packages: std::collections::HashSet<&str> = Default::default();
     for pr in &body.plugins {
         if pr.package.is_empty() || pr.impl_ref.is_empty() {

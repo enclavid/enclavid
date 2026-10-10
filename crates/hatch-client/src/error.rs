@@ -30,6 +30,11 @@ pub enum BridgeError {
     /// e.g. an OCI manifest that doesn't exist. Lets callers surface a
     /// clean 404 instead of a generic transport error.
     NotFound,
+    /// The hatch will not make the pull as asked: the registry refused the
+    /// bearer (HTTP 403), or the request is one the hatch never makes (HTTP
+    /// 400). Asking again changes nothing — unlike `Transport`, which may be a
+    /// registry that did not answer this time.
+    Refused,
 }
 
 impl From<hatch_protocol::CodecError> for BridgeError {
@@ -52,6 +57,7 @@ impl std::fmt::Display for BridgeError {
             Self::Crypto(e) => write!(f, "crypto: {e}"),
             Self::VersionMismatch => write!(f, "version mismatch"),
             Self::NotFound => write!(f, "not found"),
+            Self::Refused => write!(f, "refused"),
         }
     }
 }

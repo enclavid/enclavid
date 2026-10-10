@@ -22,7 +22,8 @@ pub enum HatchError {
     BadRequest(String),
     /// 401 — missing / invalid credential.
     Unauthorized,
-    /// 403 — credential valid but not permitted (or no org binding).
+    /// 403 — credential valid but not permitted (or no org binding); on a pull,
+    /// the registry refused the bearer.
     Forbidden,
     /// 404 — OCI manifest not found.
     NotFound,

@@ -62,6 +62,12 @@ pub const MAX_CLIENT_REF_LEN: usize = 128;
 /// Enforced at session-create time, before any persistence.
 pub const MAX_REGISTRY_AUTH_LEN: usize = 8 * 1024;
 
+/// Maximum number of plugins one session may pin. Each is a manifest fetched
+/// before the session's first round and a layer pulled on a cold compile, so
+/// this bounds what one session asks of the registries; real compositions
+/// pin a handful. Enforced at session-create time, before any persistence.
+pub const MAX_PLUGINS: usize = 32;
+
 // ----- The derivations the worker's own bounds rest on -----
 //
 // The execution-worker enforces its own bounds on what arrives, because it

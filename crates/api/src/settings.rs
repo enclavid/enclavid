@@ -1,7 +1,7 @@
 //! What the host decides about api at launch, outside its measurement
 //! (`fleet_transport::launch`): how long a session lives, how long and how
-//! often api waits on its legs and on the hatch, and how it holds up its own
-//! end of each leg.
+//! often api waits on its legs and on the hatch, how many pulls one consumer
+//! may have under way at once, and how it holds up its own end of each leg.
 //!
 //! None of them reaches the terms between applicant, consumer and policy, and
 //! none opens anything to the host. The hatch is the host's own process, so how
@@ -50,8 +50,12 @@ pub struct Settings {
     /// How each fleet leg is dialed: one attempt's bound (`leg-dial-secs`) and
     /// the longest wait between attempts (`leg-retry-max-secs`).
     pub leg_dial: Dial,
-    /// How long the hatch has to answer a pull (`pull-deadline-secs`).
+    /// How long the hatch has to answer a pull (`pull-deadline-secs`), and how
+    /// long a pull waits for its consumer's turn.
     pub pull_deadline: Duration,
+    /// Registry requests one consumer may have under way at once
+    /// (`registry-requests-per-consumer`).
+    pub registry_requests_per_consumer: usize,
     /// How long the hatch has to answer an authorization
     /// (`authorize-deadline-secs`).
     pub authorize_deadline: Duration,
@@ -107,6 +111,11 @@ pub fn load() -> Settings {
             &mut launch,
             "pull-deadline-secs",
             hatch_client::DEFAULT_PULL_DEADLINE,
+        ),
+        registry_requests_per_consumer: number(
+            &mut launch,
+            "registry-requests-per-consumer",
+            crate::turns::DEFAULT_REGISTRY_REQUESTS_PER_CONSUMER,
         ),
         authorize_deadline: secs(
             &mut launch,

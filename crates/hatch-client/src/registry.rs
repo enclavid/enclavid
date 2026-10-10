@@ -62,7 +62,8 @@ impl RegistryClient {
     /// consumer's bearer to the registry is the producer's call, not ours to
     /// self-approve. The answer is wrapped in `Untrusted` — the caller MUST
     /// check it hashes to the pinned digest before parsing it. A 404 from the
-    /// hatch surfaces as the typed `BridgeError::NotFound`.
+    /// hatch surfaces as the typed `BridgeError::NotFound`, a 403 or 400 as
+    /// `BridgeError::Refused`.
     pub async fn manifest(
         &self,
         req: Exposed<ManifestRequest>,
@@ -78,6 +79,7 @@ impl RegistryClient {
                 Ok(boundary::inbound::from_untrusted(r.manifest))
             }
             StatusCode::NOT_FOUND => Err(BridgeError::NotFound),
+            StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST => Err(BridgeError::Refused),
             s => Err(BridgeError::Transport(format!("manifest: status {s}"))),
         }
     }
@@ -85,7 +87,8 @@ impl RegistryClient {
     /// One blob, its bytes as they come. Wrapped in `Untrusted` like the
     /// manifest: the caller MUST hold the pieces to the size and digest its
     /// verified manifest declares, and act on none of them before the blob has
-    /// ended and passed. A 404 surfaces as `BridgeError::NotFound`.
+    /// ended and passed. A 404 surfaces as `BridgeError::NotFound`, a 403 or
+    /// 400 as `BridgeError::Refused`.
     pub async fn blob(
         &self,
         req: Exposed<BlobRequest>,
@@ -98,6 +101,7 @@ impl RegistryClient {
         match status {
             StatusCode::OK => Ok(boundary::inbound::from_untrusted(pieces)),
             StatusCode::NOT_FOUND => Err(BridgeError::NotFound),
+            StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST => Err(BridgeError::Refused),
             s => Err(BridgeError::Transport(format!("blob: status {s}"))),
         }
     }

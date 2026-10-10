@@ -389,6 +389,21 @@ in
           description = "Pulls of a session's disclosures one principal may make a minute; the hatch's own is 120.";
         };
       };
+      # How many registry fetches the hatch has under way at once, for every
+      # guest on the host together; null for the hatch's own. How many of them
+      # one consumer's sessions may have is api's `registry-requests-per-consumer`.
+      concurrent = {
+        manifests = mkOption {
+          type = types.nullOr types.ints.positive;
+          default = null;
+          description = "Manifests fetched at once; the hatch's own is 128, each at most 256 KiB.";
+        };
+        blobs = mkOption {
+          type = types.nullOr types.ints.positive;
+          default = null;
+          description = "Blobs streamed at once, each for as long as its stream runs; the hatch's own is 8.";
+        };
+      };
     };
     variant = mkOption {
       type = types.enum [ "production" "debug" ];

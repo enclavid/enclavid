@@ -260,6 +260,7 @@ fn bridge_stage(e: &hatch_client::BridgeError) -> &'static str {
         B::Crypto(_) => "crypto",
         B::VersionMismatch => "version",
         B::NotFound => "not-found",
+        B::Refused => "refused",
     }
 }
 

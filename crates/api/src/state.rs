@@ -7,6 +7,7 @@ use hatch_client::{CacheStore, HatchClient, KbsClient, RegistryClient, SessionSt
 use crate::compiler::{Compiler, connect_compile_worker};
 use crate::executor::{Executor, connect_execution_worker};
 use crate::shuffle::ShuffleKey;
+use crate::turns::ConsumerTurns;
 
 /// Applicant key held in TEE memory for the duration of a request. Raw
 /// bytes used as the inner AEAD layer key for session state + media.
@@ -42,6 +43,9 @@ pub struct AppState {
     /// Registry client used by /connect for the lazy policy pull.
     /// Same hatch connection as the rest of hatch-client.
     pub registry: RegistryClient,
+    /// Each consumer's share of the registry requests under way at once. See
+    /// [`crate::turns`].
+    pub consumer_turns: ConsumerTurns,
     /// KBS relay client for the `kbs` key path: couriers each Trustee
     /// RCAR leg to the artifact owner's KBS through the hatch. Same hatch
     /// connection.
@@ -78,6 +82,10 @@ impl AppState {
             cache_store,
             session_store,
             registry: RegistryClient::new(hatch, settings.pull_deadline),
+            consumer_turns: ConsumerTurns::new(
+                settings.registry_requests_per_consumer,
+                settings.pull_deadline,
+            ),
             kbs,
             shuffle_key,
         }

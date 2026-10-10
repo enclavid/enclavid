@@ -677,10 +677,12 @@ fn session_composition_key(
 /// check only: a later round whose composition has left every cache still
 /// pulls, with the bearers the session was created with.
 ///
-/// One manifest per artifact, concurrently, each checked against its pin. A
-/// refusal is 410 Gone, as a failed pull is. The answer depends on the pins and
-/// the bearers, never on what the caches hold. The hatch sees the refs and the
-/// bearers, and when the session's first round ran.
+/// One manifest per artifact, concurrently as far as the consumer's turns
+/// allow, each checked against its pin. Any artifact refused is 410 Gone, as a
+/// failed pull is; otherwise one that got no answer is 503, the same request
+/// later ([`pull_failure`]). The answer depends on the pins, the bearers and
+/// the registries, never on what the caches hold. The hatch sees the refs and
+/// the bearers, and when the session's first round ran.
 async fn check_pull(
     state: &AppState,
     session_id: &str,
@@ -690,21 +692,51 @@ async fn check_pull(
         safe_logger::debug!("check_pull: metadata.client missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+    let turns = &state.consumer_turns.of(consumer(client));
     let artifacts = artifacts_with_bearers(&metadata.policy_ref, client);
     let manifests = artifacts
         .into_iter()
         .map(|(artifact_ref, bearer)| async move {
-            policy_pull::manifest(&state.registry, artifact_ref, bearer)
+            policy_pull::manifest(&state.registry, turns, artifact_ref, bearer)
                 .await
                 .map_err(|e| (artifact_ref, e))
         });
+    let mut failed = None;
     for res in futures::future::join_all(manifests).await {
-        res.map_err(|(artifact_ref, e)| {
-            safe_logger::debug!("check_pull: {artifact_ref} refused for session {session_id}: {e}");
-            StatusCode::GONE
-        })?;
+        if let Err((artifact_ref, e)) = res {
+            safe_logger::debug!("check_pull: {artifact_ref} failed for session {session_id}: {e}");
+            // A refusal stands whatever else went unanswered.
+            if failed != Some(StatusCode::GONE) {
+                failed = Some(pull_failure(&e));
+            }
+        }
     }
-    Ok(())
+    match failed {
+        Some(status) => Err(status.into()),
+        None => Ok(()),
+    }
+}
+
+/// What a failed pull answers. 503 when the registry, the hatch or the
+/// consumer's turn did not answer this time — the one answer that means "the
+/// same request, later"; 410 Gone when the answer is the pins' and will not
+/// change: a refusal, an artifact absent or not what its pin names.
+fn pull_failure(e: &policy_pull::PullError) -> StatusCode {
+    if e.is_unanswered() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::GONE
+    }
+}
+
+/// The consumer a session's pulls count against ([`crate::turns`]): the
+/// organization that created it, as its sealed metadata records.
+fn consumer(client: &Client) -> &str {
+    client
+        .access
+        .as_ref()
+        .and_then(|access| access.principal.as_deref())
+        .unwrap_or_default()
 }
 
 /// Every artifact a session pins — the policy, then each plugin — with the
@@ -805,6 +837,8 @@ where
 ///
 /// Errors are the round's answer, returned as they are:
 ///   * 410 Gone — registry pull / decrypt failed (artifact removed / malformed)
+///   * 503 — the registry, the hatch or the consumer's turn did not answer in
+///     time ([`pull_failure`])
 ///   * 422 — the compiler refused the composition; the same pins always are
 ///   * 500 — anything else in the compile, or an infra problem
 async fn cold_compile(
@@ -824,11 +858,17 @@ async fn cold_compile(
     // inline / plaintext artifacts ignore it.
     let kbs_ctx = crate::keyprovider::KbsContext { kbs: &state.kbs };
 
+    // Every fetch below takes one of the consumer's turns, so this compile and
+    // the consumer's other sessions together hold no more of the hatch than
+    // their share.
+    let turns = &state.consumer_turns.of(consumer(client));
+
     // Every manifest first, concurrently, with every key it needs: all that
     // can be refused before a byte of wasm moves, so the /connect critical
     // path waits on the slowest of them rather than on their sum.
     let policy_fut = policy_pull::wasm_layer(
         &state.registry,
+        turns,
         &metadata.policy_ref,
         policy_bearer,
         metadata.policy_key.as_ref(),
@@ -841,6 +881,7 @@ async fn cold_compile(
         async move {
             policy_pull::wasm_layer(
                 registry,
+                turns,
                 &pin.impl_ref,
                 bearer,
                 pin.key.as_ref(),
@@ -859,7 +900,7 @@ async fn cold_compile(
              (policy_ref={}): {e}",
             metadata.policy_ref,
         );
-        StatusCode::GONE
+        pull_failure(&e)
     })?;
     let mut plugins = Vec::with_capacity(plugin_results.len());
     for res in plugin_results {
@@ -867,7 +908,7 @@ async fn cold_compile(
             safe_logger::debug!(
                 "lookup_policy: a plugin's manifest failed for session {session_id}: {e}"
             );
-            StatusCode::GONE
+            pull_failure(&e)
         })?);
     }
 
@@ -880,34 +921,32 @@ async fn cold_compile(
     // arrived whole. [`run_resolved`] passes the cwasm on to L2 and to the
     // execution-worker as it streams back; the worker files it in its own L1.
     //
-    // A layer that turns out not to be what its manifest pinned ends the stream
-    // in an error, which the compile answers as a failure; marked here, so the
-    // round answers it as the pull failure it is, 410, as a manifest's would be.
+    // A layer that does not arrive, or turns out not to be what its manifest
+    // pinned, ends the stream in an error, which the compile answers as a
+    // failure; marked here, so the round answers it as the pull failure it is,
+    // as a manifest's would be.
     let policy_length = policy.length();
     let lengths = plugins
         .iter()
         .map(|(package, layer)| (package.clone(), layer.length()))
         .collect();
-    let pull_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pull_failed = Arc::new(std::sync::OnceLock::new());
     let marked = pull_failed.clone();
     let layers = std::iter::once(policy).chain(plugins.into_iter().map(|(_, layer)| layer));
     let components = futures::stream::iter(layers)
         .flat_map(policy_pull::WasmLayer::pieces)
         .inspect_err(move |e| {
             safe_logger::debug!("lookup_policy: a layer did not arrive as pinned: {e}");
-            marked.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = marked.set(pull_failure(e));
         });
     let source = CompileSource::streamed(policy_length, lengths, components);
     let compiled = match source {
         Some(source) => state.compiler.compile(source).await,
         None => Err(CompileError::Refused),
     };
-    compiled.map_err(|e| {
-        if pull_failed.load(std::sync::atomic::Ordering::Relaxed) {
-            StatusCode::GONE.into()
-        } else {
-            classify_compile_error(session_id, &metadata.policy_ref, e)
-        }
+    compiled.map_err(|e| match pull_failed.get() {
+        Some(status) => (*status).into(),
+        None => classify_compile_error(session_id, &metadata.policy_ref, e),
     })
 }
 

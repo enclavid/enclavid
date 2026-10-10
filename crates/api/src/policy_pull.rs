@@ -19,12 +19,14 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tokio::sync::OwnedSemaphorePermit;
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
 use enclavid_crypto::ocicrypt::{self, LayerDecryptor};
 use hatch_client::{BlobPieces, BlobRequest, Key, ManifestRequest, RegistryClient, boundary};
 
 use crate::keyprovider::{self, KbsContext};
+use crate::turns::Turns;
 
 /// OCI layer media type for wasm component layers (policies and
 /// plugins both). Per `[[project-wkg-wac-poc-findings]]`, wkg's pull
@@ -56,6 +58,24 @@ pub enum PullError {
     NoWasmLayer,
     #[error("artifact decryption failed: {0}")]
     Decrypt(String),
+    /// The hatch will not make the pull as asked — the registry refused the
+    /// bearer, most often.
+    #[error("the registry refused the pull")]
+    Refused,
+    /// The consumer's other pulls held every turn it has for as long as this
+    /// one could wait ([`crate::turns`]).
+    #[error("no turn for this consumer's pull in time")]
+    Busy,
+}
+
+impl PullError {
+    /// Whether the same pull may succeed if asked again: the registry, the
+    /// hatch or the consumer's turn did not answer this time. Everything else —
+    /// a refusal, an artifact absent or not what its pin names — is the pins'
+    /// and stays.
+    pub fn is_unanswered(&self) -> bool {
+        matches!(self, Self::Transport(_) | Self::Busy)
+    }
 }
 
 /// Map a bridge transport error to a `PullError`. The hatch classifies
@@ -65,6 +85,7 @@ pub enum PullError {
 fn classify_transport_error(e: hatch_client::BridgeError) -> PullError {
     match e {
         hatch_client::BridgeError::NotFound => PullError::NotFound,
+        hatch_client::BridgeError::Refused => PullError::Refused,
         other => PullError::Transport(format!("{other:?}")),
     }
 }
@@ -99,6 +120,7 @@ struct OciDescriptor {
 /// sections, which the compiler extracts. No sidecar layer.
 pub struct WasmLayer {
     registry: RegistryClient,
+    turns: Turns,
     reference: String,
     registry_auth: Vec<u8>,
     digest: String,
@@ -110,15 +132,17 @@ pub struct WasmLayer {
 /// plaintext `application/wasm` one, or an ocicrypt-encrypted one, whose key
 /// is obtained here. `key` is what the session pins for this artifact; a key
 /// for a plaintext layer is refused rather than ignored, so no cleartext is
-/// served where encryption was expected.
+/// served where encryption was expected. The manifest, and later the layer,
+/// each take one of `turns` for as long as they are fetched.
 pub async fn wasm_layer(
     registry: &RegistryClient,
+    turns: &Turns,
     artifact_ref: &str,
     registry_auth: &[u8],
     key: Option<&Key>,
     kbs_ctx: Option<&KbsContext<'_>>,
 ) -> Result<WasmLayer, PullError> {
-    let manifest = manifest(registry, artifact_ref, registry_auth).await?;
+    let manifest = manifest(registry, turns, artifact_ref, registry_auth).await?;
     let manifest: OciManifest =
         serde_json::from_slice(&manifest).map_err(|e| PullError::ManifestParse(e.to_string()))?;
 
@@ -144,6 +168,7 @@ pub async fn wasm_layer(
         };
         return Ok(WasmLayer {
             registry: registry.clone(),
+            turns: turns.clone(),
             reference: artifact_ref.to_string(),
             registry_auth: registry_auth.to_vec(),
             digest: descriptor.digest,
@@ -157,14 +182,17 @@ pub async fn wasm_layer(
 /// An artifact's manifest, fetched with `registry_auth` and checked to be the
 /// one `artifact_ref` pins. Getting it is also the registry's word that this
 /// bearer may pull the artifact: the registry grants pull per repository, so
-/// the same bearer fetches the manifest and every blob in it.
+/// the same bearer fetches the manifest and every blob in it. Fetched on one of
+/// `turns`.
 pub async fn manifest(
     registry: &RegistryClient,
+    turns: &Turns,
     artifact_ref: &str,
     registry_auth: &[u8],
 ) -> Result<Vec<u8>, PullError> {
     let artifact_digest = extract_digest(artifact_ref)
         .ok_or_else(|| PullError::InvalidRef(artifact_ref.to_string()))?;
+    let _turn = turns.take().await.ok_or(PullError::Busy)?;
     let req = boundary::outbound::to_untrusted(ManifestRequest {
         reference: artifact_ref.to_string(),
         registry_auth: registry_auth.to_vec(),
@@ -221,10 +249,12 @@ impl WasmLayer {
     /// A layer that fails any of them ends in an error where it would have
     /// ended, never in a quiet end. The pieces before that are not yet checked,
     /// which is why they go only to a compile that starts once every component
-    /// has arrived whole.
+    /// has arrived whole. One of the consumer's turns is held from the request
+    /// until the stream ends or is dropped.
     pub fn pieces(self) -> BoxStream<'static, Result<Bytes, PullError>> {
         let Self {
             registry,
+            turns,
             reference,
             registry_auth,
             digest,
@@ -232,6 +262,7 @@ impl WasmLayer {
             decrypt,
         } = self;
         let fetch = async move {
+            let turn = turns.take().await.ok_or(PullError::Busy)?;
             let req = boundary::outbound::to_untrusted(BlobRequest {
                 reference,
                 digest: digest.clone(),
@@ -264,7 +295,7 @@ impl WasmLayer {
                     "content-addressed by digest — bit-identical responses for the same digest"
                 ))
                 .into_inner();
-            Ok::<_, PullError>(held(pieces, digest, size, decrypt))
+            Ok::<_, PullError>(held(pieces, digest, size, decrypt, turn))
         };
         futures::stream::once(fetch).try_flatten().boxed()
     }
@@ -277,15 +308,19 @@ struct Holding {
     left: u64,
     sum: Sha256,
     decrypt: Option<LayerDecryptor>,
+    /// Given back when the stream ends or is dropped, and not before.
+    _turn: OwnedSemaphorePermit,
 }
 
 /// `pieces` held to `size` as they come and to `digest` where they end, and
 /// decrypted by `decrypt` if given, whose checks are made where they end too.
+/// `turn` is held as long as the stream is.
 fn held(
     pieces: BlobPieces,
     digest: String,
     size: u64,
     decrypt: Option<LayerDecryptor>,
+    turn: OwnedSemaphorePermit,
 ) -> BoxStream<'static, Result<Bytes, PullError>> {
     let holding = Holding {
         pieces,
@@ -293,6 +328,7 @@ fn held(
         left: size,
         sum: Sha256::new(),
         decrypt,
+        _turn: turn,
     };
     futures::stream::try_unfold(holding, |mut h| async move {
         let Some(piece) = h.pieces.next().await else {
@@ -426,8 +462,12 @@ fn extract_digest(policy_ref: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use hatch_client::Key;
+    use tokio::sync::Semaphore;
+
+    use super::*;
 
     /// `bytes` as pieces of `piece` bytes, as the hatch's stream would carry
     /// them.
@@ -452,6 +492,11 @@ mod tests {
 
     fn digest_of(bytes: &[u8]) -> String {
         format!("sha256:{}", sha256_hex(bytes))
+    }
+
+    /// A turn of a queue nobody else uses.
+    fn turn() -> OwnedSemaphorePermit {
+        Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap()
     }
 
     /// The `enc.pubopts` annotation a manifest carries for `public`.
@@ -482,6 +527,7 @@ mod tests {
             digest_of(&ciphertext),
             ciphertext.len() as u64,
             Some(decrypt),
+            turn(),
         );
         assert_eq!(read(out).await.unwrap(), plaintext);
     }
@@ -503,6 +549,7 @@ mod tests {
             digest_of(&ciphertext),
             ciphertext.len() as u64,
             Some(decrypt),
+            turn(),
         );
         assert!(matches!(read(out).await, Err(PullError::Decrypt(_))));
     }
@@ -515,22 +562,43 @@ mod tests {
         let digest = digest_of(&layer);
         let size = layer.len() as u64;
 
-        let whole = held(pieces(&layer, 4096), digest.clone(), size, None);
+        let whole = held(pieces(&layer, 4096), digest.clone(), size, None, turn());
         assert_eq!(read(whole).await.unwrap(), layer);
 
-        let longer = held(pieces(&layer, 4096), digest.clone(), size - 1, None);
+        let longer = held(pieces(&layer, 4096), digest.clone(), size - 1, None, turn());
         assert!(matches!(read(longer).await, Err(PullError::LayerSize)));
 
-        let shorter = held(pieces(&layer, 4096), digest.clone(), size + 1, None);
+        let shorter = held(pieces(&layer, 4096), digest.clone(), size + 1, None, turn());
         assert!(matches!(read(shorter).await, Err(PullError::LayerSize)));
 
         let mut other = layer.clone();
         other[100] ^= 1;
-        let tampered = held(pieces(&other, 4096), digest, size, None);
+        let tampered = held(pieces(&other, 4096), digest, size, None, turn());
         assert!(matches!(
             read(tampered).await,
             Err(PullError::LayerDigest { .. })
         ));
+    }
+
+    /// A layer holds its consumer's turn while it is read and gives it back
+    /// once it is done with, whole or in an error, for the next pull to take.
+    #[tokio::test]
+    async fn a_layer_gives_its_turn_back() {
+        let layer = vec![7u8; 10_000];
+        let one = Arc::new(Semaphore::new(1));
+        for digest in [digest_of(&layer), digest_of(b"other")] {
+            let permit = one.clone().try_acquire_owned().unwrap();
+            let out = held(
+                pieces(&layer, 1000),
+                digest,
+                layer.len() as u64,
+                None,
+                permit,
+            );
+            assert_eq!(one.available_permits(), 0);
+            let _ = read(out).await;
+            assert_eq!(one.available_permits(), 1);
+        }
     }
 
     /// A supplied key on a plaintext `application/wasm` layer is rejected —

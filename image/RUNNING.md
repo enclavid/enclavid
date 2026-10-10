@@ -242,6 +242,7 @@ What each measurement-relevant part is doing:
   | | `leg-dial-secs` | 30 |
   | | `leg-retry-max-secs` | 10 |
   | | `pull-deadline-secs` | 60 |
+  | | `registry-requests-per-consumer` | 4 |
   | | `authorize-deadline-secs` | 25 |
   | | `kbs-deadline-secs` | 20 |
   | | `vcek-deadline-secs` | 30 |
