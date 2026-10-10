@@ -15,6 +15,7 @@
 //! The listener is whatever `fleet-transport` selects at compile time, wrapped
 //! in RA-TLS either way: vsock in the measured build, TCP on a developer box.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +42,12 @@ const DEFAULT_SWEEP_BATCH: usize = 1024;
 /// hundreds of ordinary ones (about 8 MiB each), and leaves the sessions most
 /// of the 12 GiB volume the cache shares with them.
 const DEFAULT_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// What a compiled bundle loaded from the cache is read from disk in, and so
+/// streamed in, unless the host says otherwise (the `cache-read-bytes`
+/// setting). Past a leg's chunk a piece adds nothing to how fast it crosses;
+/// below it, each piece is a frame of its own. Never zero: a read of nothing
+/// would never reach the end.
+const DEFAULT_CACHE_READ_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap();
 /// How often expired sessions are swept, unless the host says otherwise (the
 /// `sweep-secs` setting). The host's to choose like the clock the sweep reads.
 const DEFAULT_SWEEP_SECS: u64 = 60;
@@ -190,6 +197,8 @@ async fn main() {
     let sweep_secs: u64 = setting(&mut launch, "sweep-secs", DEFAULT_SWEEP_SECS);
     let sweep_batch: usize = setting(&mut launch, "sweep-batch", DEFAULT_SWEEP_BATCH);
     let cache_bytes: u64 = setting(&mut launch, "cache-bytes", DEFAULT_CACHE_BYTES);
+    let cache_read: NonZeroUsize =
+        setting(&mut launch, "cache-read-bytes", DEFAULT_CACHE_READ_BYTES);
     let buffers = RequestBuffers {
         session: setting(
             &mut launch,
@@ -208,6 +217,7 @@ async fn main() {
         timeout: secs(&mut launch, "leg-timeout-secs", leg_default.timeout),
         max_ports: setting(&mut launch, "leg-max-ports", leg_default.max_ports),
         chunk_bytes: setting(&mut launch, "leg-chunk-bytes", leg_default.chunk_bytes),
+        receive_bytes: setting(&mut launch, "leg-receive-bytes", leg_default.receive_bytes),
     };
     let accept_retry = millis(
         &mut launch,
@@ -323,7 +333,7 @@ async fn main() {
             )
         }),
     );
-    let cache = CacheBlobs::new(store, cache_bytes);
+    let cache = CacheBlobs::new(store, cache_bytes, cache_read);
     let svc = Arc::new(StorageSvc::new(sessions.clone(), cache.clone()));
 
     // TTL sweeper — enforce per-session deadlines INSIDE the trust boundary (the
@@ -410,14 +420,19 @@ async fn main() {
         })
         .with_accept_retry(accept_retry);
     info!(
-        "storage-cvm: listening on {}, sessions={}, cache={} (at most {} bytes), \
-         sweep={}s of up to {}, request buffers={}/{}, db_busy={:?}, leg_timeout={:?}, \
-         leg_max_ports={}, leg_chunk={} bytes, accept_retry={:?}",
+        "storage-cvm: listening on {}, sessions={}, cache={} (at most {} bytes, read in \
+         {} bytes), sweep={}s of up to {}, request buffers={}/{}, db_busy={:?}, \
+         leg_timeout={:?}, leg_max_ports={}, leg_chunk={} bytes, leg_receive={} bytes, \
+         accept_retry={:?}",
         safe(&listen, reason!("on the measured command line")),
         safe(&sessions_dir, reason!("on the measured command line")),
         safe(&cache_dir, reason!("on the measured command line")),
         safe(
             &cache_bytes,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &cache_read,
             reason!("the host's own setting, or this build's default")
         ),
         safe(
@@ -450,6 +465,10 @@ async fn main() {
         ),
         safe(
             &leg.chunk_bytes,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &leg.receive_bytes,
             reason!("the host's own setting, or this build's default")
         ),
         safe(

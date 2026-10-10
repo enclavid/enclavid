@@ -27,12 +27,14 @@ tower-service = { version = "0.3", optional = true }
 # dev build carries no vsock code at all.
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = { version = "0.7", optional = true }
+# The vsock socket options libc's constants do not carry (`set_vsock_buffer`).
+libc = { version = "0.2", optional = true }
 
 [features]
 # The attested build. A measured guest kernel is built without CONFIG_INET, so
 # TCP cannot work there; a developer's box has no vsock peers, so it uses TCP.
 # Which arm a binary carries is a build-time fact about where it runs.
-vsock = ["dep:tokio-vsock"]
+vsock = ["dep:tokio-vsock", "dep:libc"]
 # `service::serve`: accepting connections into a `tower` service that is asked
 # for capacity before each accept. Off by default: a role that only carries
 # bytes should not grow a trait it never names, and every role depends on this

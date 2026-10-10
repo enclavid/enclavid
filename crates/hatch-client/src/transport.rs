@@ -338,6 +338,12 @@ mod vsock {
             let addr = VsockAddr::new(self.cid, self.port);
             Box::pin(async move {
                 let stream = VsockStream::connect(addr).await?;
+                // What the hatch streams to api — a pulled layer — runs no
+                // faster than the credit this socket grants it.
+                fleet_transport::set_vsock_buffer(
+                    std::os::fd::AsFd::as_fd(&stream),
+                    fleet_transport::VSOCK_BUFFER_BYTES,
+                )?;
                 Ok(VsockIo(TokioIo::new(stream)))
             })
         }

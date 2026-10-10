@@ -42,6 +42,8 @@ ppp = "2"
 # `Unsupported` if actually used off-Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = "0.7"
+# The vsock socket options libc's constants do not carry (`set_vsock_buffer`).
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

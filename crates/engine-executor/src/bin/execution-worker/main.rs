@@ -496,7 +496,7 @@ async fn main() {
         "execution-worker (supervisor): bundle_cache_entries={}, child_max_tasks={}, \
          child_exit_wait={:?}, child_connect={:?}, room_poll={:?}, request_buffer={}, \
          callback_request_buffer={}, leg_timeout={:?}, leg_max_ports={}, \
-         leg_chunk={} bytes, accept_retry={:?}",
+         leg_chunk={} bytes, leg_receive={} bytes, accept_retry={:?}",
         safe(
             &bundle_cache_entries,
             reason!("the host's own setting, or this build's default")
@@ -535,6 +535,10 @@ async fn main() {
         ),
         safe(
             &leg.chunk_bytes,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &leg.receive_bytes,
             reason!("the host's own setting, or this build's default")
         ),
         safe(

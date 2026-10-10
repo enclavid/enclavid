@@ -29,6 +29,7 @@ engine-types = { path = "../engine-types" }
 # on the executor's runtime-only engine.
 wasmtime = { version = "46", default-features = false, features = [
     "cranelift",
+    "parallel-compilation",
     "component-model",
     "runtime",
     "std",

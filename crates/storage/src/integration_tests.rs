@@ -68,7 +68,11 @@ fn store() -> (tempfile::TempDir, Arc<StorageSvc>) {
     );
     let svc = Arc::new(StorageSvc::new(
         sessions,
-        CacheBlobs::new(Arc::new(InMemory::new()), 64 * 1024 * 1024),
+        CacheBlobs::new(
+            Arc::new(InMemory::new()),
+            64 * 1024 * 1024,
+            std::num::NonZeroUsize::new(64 * 1024).unwrap(),
+        ),
     ));
     (dir, svc)
 }

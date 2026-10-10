@@ -11,7 +11,7 @@ repository.workspace = true
 # build — replaces the TCP connect with a vsock connect; no IP stack
 # needed in the TEE kernel. The two are mutually exclusive.
 default = []
-vsock = ["dep:tokio-vsock", "dep:tower-service"]
+vsock = ["dep:tokio-vsock", "dep:tower-service", "dep:fleet-transport", "fleet-transport/vsock"]
 
 [dependencies]
 # Shared HTTP-over-vsock wire DTOs (CBOR-encoded).
@@ -59,6 +59,8 @@ tokio = { version = "1", features = ["net", "rt", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = { version = "0.7", optional = true }
+# The fleet's one setter of a vsock socket's buffer (`set_vsock_buffer`).
+fleet-transport = { path = "../fleet-transport", optional = true }
 # `tower_service::Service<Uri>` impl for the vsock connector.
 tower-service = { version = "0.3", optional = true }
 

@@ -73,7 +73,7 @@ pub struct Settings {
     /// (`callback-request-buffer`).
     pub callback_request_buffer: usize,
     /// This end of every fleet leg (`leg-timeout-secs`, `leg-max-ports`,
-    /// `leg-chunk-bytes`).
+    /// `leg-chunk-bytes`, `leg-receive-bytes`).
     pub leg: LegSettings,
     /// How long a listener waits after an accept this process could not
     /// complete (`accept-retry-ms`).
@@ -143,6 +143,7 @@ pub fn load() -> Settings {
             timeout: secs(&mut launch, "leg-timeout-secs", leg.timeout),
             max_ports: parsed(&mut launch, "leg-max-ports", leg.max_ports),
             chunk_bytes: parsed(&mut launch, "leg-chunk-bytes", leg.chunk_bytes),
+            receive_bytes: parsed(&mut launch, "leg-receive-bytes", leg.receive_bytes),
         },
         accept_retry: Duration::from_millis(number(
             &mut launch,

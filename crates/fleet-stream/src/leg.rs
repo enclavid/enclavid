@@ -10,8 +10,8 @@
 use std::time::Duration;
 
 /// What a role decides about its own end of each fleet leg, unless the host says
-/// otherwise (its `leg-timeout-secs`, `leg-max-ports` and `leg-chunk-bytes`
-/// settings).
+/// otherwise (its `leg-timeout-secs`, `leg-max-ports`, `leg-chunk-bytes` and
+/// `leg-receive-bytes` settings).
 ///
 /// None of it reaches what a session discloses or how it is padded: the framing
 /// that holds the host's view of a round to a constant size is the contract's,
@@ -56,6 +56,17 @@ pub struct LegSettings {
     /// streams across a leg whole, and a quarter of the frames measured about
     /// twice the throughput.
     pub chunk_bytes: u32,
+    /// How much a port's sender may have on its way to this end before it waits
+    /// for this end to take some: the window a stream crosses the leg in.
+    ///
+    /// The RECEIVER's to choose, like the chunk. A stream runs no faster than
+    /// this window over the time a chunk takes to cross and its credit to come
+    /// back. 8 MiB by default rather than chmux's 512 KiB: a bundle crossing a
+    /// leg between two guests, through the host's relay, ran about half again
+    /// as fast with it, and nothing past it. The price is what a peer that
+    /// sends without this end reading can make it hold: this much on every
+    /// port it holds open, so up to `max_ports` times this.
+    pub receive_bytes: u32,
 }
 
 impl Default for LegSettings {
@@ -64,6 +75,7 @@ impl Default for LegSettings {
             timeout: Duration::from_secs(20),
             max_ports: 256,
             chunk_bytes: 64 * 1024,
+            receive_bytes: 8 * 1024 * 1024,
         }
     }
 }
@@ -81,6 +93,9 @@ impl LegSettings {
         }
         if self.chunk_bytes < 4 || self.chunk_bytes > u32::MAX - 16 {
             return Some("a leg chunk outside 4 bytes to 2^32 - 16");
+        }
+        if self.receive_bytes < 4 {
+            return Some("a leg receive window under 4 bytes");
         }
         None
     }
@@ -113,6 +128,7 @@ pub fn connection_cfg(leg: &LegSettings) -> remoc::Cfg {
     cfg.connection_timeout = Some(leg.timeout);
     cfg.max_ports = leg.max_ports;
     cfg.chunk_size = leg.chunk_bytes;
+    cfg.receive_buffer = leg.receive_bytes;
     cfg.max_data_size = 64 * 1024 * 1024;
     cfg.flush_delay = Duration::ZERO;
     cfg.max_received_ports = 64;
@@ -146,6 +162,10 @@ mod tests {
             },
             LegSettings {
                 chunk_bytes: 3,
+                ..leg
+            },
+            LegSettings {
+                receive_bytes: 3,
                 ..leg
             },
         ] {

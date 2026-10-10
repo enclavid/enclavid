@@ -201,7 +201,9 @@ impl Endpoint {
             #[cfg(target_os = "linux")]
             Self::Vsock(port) => {
                 let addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_ANY, *port);
-                Ok(Listener::Vsock(tokio_vsock::VsockListener::bind(addr)?))
+                let listener = tokio_vsock::VsockListener::bind(addr)?;
+                set_vsock_buffer(std::os::fd::AsFd::as_fd(&listener))?;
+                Ok(Listener::Vsock(listener))
             }
             #[cfg(not(target_os = "linux"))]
             Self::Vsock(_) => no_vsock(),
@@ -269,7 +271,9 @@ impl Destination {
             #[cfg(target_os = "linux")]
             Self::Vsock { cid, port } => {
                 let addr = tokio_vsock::VsockAddr::new(*cid, *port);
-                Ok(Box::new(tokio_vsock::VsockStream::connect(addr).await?))
+                let stream = tokio_vsock::VsockStream::connect(addr).await?;
+                set_vsock_buffer(std::os::fd::AsFd::as_fd(&stream))?;
+                Ok(Box::new(stream))
             }
             #[cfg(not(target_os = "linux"))]
             Self::Vsock { .. } => no_vsock(),
@@ -500,6 +504,42 @@ const AFTER_DESTINATION_CLOSES: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const AFTER_DESTINATION_CLOSES: Duration = Duration::from_millis(200);
 
+/// Give a vsock socket a 4 MiB buffer, raising its ceiling first: the credit
+/// vsock grants a guest sending through the relay, which a stream crossing it
+/// runs no faster than. The guests do the same on their side
+/// (`fleet_transport::set_vsock_buffer`); the relay shares no crate with them,
+/// so it holds its own — by a raw `setsockopt`, since neither libc's constants
+/// nor rustix's or nix's socket options carry `AF_VSOCK`'s.
+#[cfg(target_os = "linux")]
+fn set_vsock_buffer(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // linux/vm_sockets.h: SO_VM_SOCKETS_BUFFER_MAX_SIZE, then _BUFFER_SIZE.
+    const OPTIONS: [libc::c_int; 2] = [2, 0];
+    let bytes: u64 = 4 * 1024 * 1024;
+    for option in OPTIONS {
+        // SAFETY: `fd` is a live socket for the whole call, and the kernel reads
+        // exactly `size_of::<u64>()` bytes from a u64 that outlives it.
+        let rc = unsafe {
+            libc::setsockopt(
+                fd.as_raw_fd(),
+                libc::AF_VSOCK,
+                option,
+                (&raw const bytes).cast(),
+                std::mem::size_of::<u64>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// What the relay reads at a time, each way. `tokio::io::copy` takes 8 KiB, so
+/// a bundle crossing a leg cost the relay a read and a write per 8 KiB, and
+/// twice the CPU this does.
+const COPY_BYTES: usize = 1024 * 1024;
+
 /// Dial `dest`, write `header` there first if there is one, and splice
 /// `inbound` to it until the destination is done — see
 /// `AFTER_DESTINATION_CLOSES` for when that is.
@@ -512,14 +552,16 @@ pub async fn serve_connection(
     if let Some(header) = header {
         outbound.write_all(&header).await?;
     }
-    let (mut from_caller, mut to_caller) = tokio::io::split(inbound);
-    let (mut from_destination, mut to_destination) = tokio::io::split(outbound);
+    let (from_caller, mut to_caller) = tokio::io::split(inbound);
+    let (from_destination, mut to_destination) = tokio::io::split(outbound);
+    let mut from_caller = tokio::io::BufReader::with_capacity(COPY_BYTES, from_caller);
+    let mut from_destination = tokio::io::BufReader::with_capacity(COPY_BYTES, from_destination);
     let up = async {
-        tokio::io::copy(&mut from_caller, &mut to_destination).await?;
+        tokio::io::copy_buf(&mut from_caller, &mut to_destination).await?;
         to_destination.shutdown().await
     };
     let down = async {
-        tokio::io::copy(&mut from_destination, &mut to_caller).await?;
+        tokio::io::copy_buf(&mut from_destination, &mut to_caller).await?;
         to_caller.shutdown().await
     };
     tokio::pin!(up, down);

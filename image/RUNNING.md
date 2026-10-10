@@ -161,8 +161,10 @@ What each measurement-relevant part is doing:
   property is off, so three of the five inputs `README.md` calls pinned are only
   pinned because this flag is here.
 - **`-cpu EPYC-Milan-v2` and `-smp N`** — the VMSA pages are measured, one per
-  vCPU, so both the type and the count enter the digest. See the open question
-  below.
+  vCPU, so both the type and the count enter the digest. The count is each
+  role's own (`roles.<role>.vcpus` in `default.nix`: api, storage and the
+  compile-worker 4, the execution-worker 8, the gateway 2). See the open
+  question below.
 - **`policy=0x30000`** — bits 16 and 17. Bit 17 is reserved and must be set; bit
   16 is `SMT_ALLOWED`, so this guest agrees to run on a host with SMT enabled.
   Debug (bit 19) and migration-agent (bit 18) are clear, which is what
@@ -227,8 +229,10 @@ What each measurement-relevant part is doing:
   | | `child-exit-wait-secs` | 5 |
   | | `child-connect-secs` | 30 |
   | | `room-poll-ms` | 50 |
+  | | `cwasm-read-bytes` | 1 MiB |
   | | `request-buffer` | 4 |
   | storage | `cache-bytes` | 4 GiB |
+  | | `cache-read-bytes` | 1 MiB |
   | | `sweep-secs` | 60 |
   | | `sweep-batch` | 1024 |
   | | `session-request-buffer` | 16 |
@@ -248,6 +252,7 @@ What each measurement-relevant part is doing:
   | all four | `leg-timeout-secs` | 20 |
   | | `leg-max-ports` | 256 |
   | | `leg-chunk-bytes` | 65536 |
+  | | `leg-receive-bytes` | 8388608 |
   | | `accept-retry-ms` | 1000 |
 
   The `leg-*` settings are each end's own: chmux announces them in its hello

@@ -31,6 +31,7 @@
 //! host).
 
 use std::fs::File;
+use std::num::NonZeroUsize;
 use std::os::fd::AsFd;
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,9 +70,10 @@ const DEFAULT_COMPILE_DEADLINE_SECS: u64 = 100;
 /// Cranelift is CPU-bound, so this is
 /// modest by design (roughly a core budget); compiles are rare (only L2 misses).
 ///
-/// Four: one compile at [`DEFAULT_COMPILE_MAX_BYTES`] beside three of an
-/// ordinary policy (about 0.6 GiB each) fit the children's total in the 8 GiB
-/// guest. Two at their max do not, and the kernel ends one of them.
+/// Four: one for each of the guest's four CPUs, and one compile at
+/// [`DEFAULT_COMPILE_MAX_BYTES`] beside three of an ordinary policy (about
+/// 0.6 GiB each) fit the children's total in the 8 GiB guest. Two at their max
+/// do not, and the kernel ends one of them.
 const DEFAULT_MAX_COMPILES: usize = 4;
 
 /// The most one compile child may hold, in bytes, unless the host says
@@ -100,14 +102,19 @@ const DEFAULT_COMPILE_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
 /// cwasm on their way, and its metadata.
 const DEFAULT_BASE_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 
-/// What the cwasm streams to api in, read from the file the child wrote.
-const CWASM_PIECE_BYTES: usize = 1024 * 1024;
+/// What the cwasm is read in from the file the child wrote, and so streamed to
+/// api in, unless the host says otherwise (the `cwasm-read-bytes` setting).
+/// Past a leg's chunk a piece adds nothing to how fast it crosses; below it,
+/// each piece is a frame of its own. Never zero: a read of nothing would never
+/// reach the end.
+const DEFAULT_CWASM_READ_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap();
 
 /// The `engine_rpc::CompilerService` impl served to api: forward each compile to
 /// a fresh disposable `engine-compiler-child` via the runner. Shared (`Arc`) across
 /// api connections.
 struct Supervisor {
     runner: ChildRunner,
+    cwasm_read: NonZeroUsize,
 }
 
 impl CompilerServiceUntrusted for Supervisor {
@@ -207,7 +214,7 @@ impl CompilerServiceUntrusted for Supervisor {
                 return Err(CompileError::Failed);
             }
         };
-        reply(output, compiled)
+        reply(output, compiled, self.cwasm_read)
     }
 }
 
@@ -238,7 +245,11 @@ fn output_file() -> std::io::Result<File> {
 /// cwasm to the digest as it reads it. What is checked here is what would harm
 /// this side — metadata past its bound would make a reply past remoc's item
 /// limit, which ends the serving of the connection it is sent on.
-fn reply(output: File, compiled: ChildCompiled) -> Result<CompileReply, CompileError> {
+fn reply(
+    output: File,
+    compiled: ChildCompiled,
+    piece: NonZeroUsize,
+) -> Result<CompileReply, CompileError> {
     let ChildCompiled { meta, cwasm } = compiled;
     if meta.len() as u64 > MAX_BUNDLE_META_BYTES {
         debug!("compile: the child's metadata is past its bound");
@@ -259,17 +270,18 @@ fn reply(output: File, compiled: ChildCompiled) -> Result<CompileReply, CompileE
     tokio::spawn(async move {
         let _ = tokio::time::timeout(
             COMPILE_STREAM_DEADLINE,
-            fleet_stream::send_from(tx, file_pieces(output, written.len())),
+            fleet_stream::send_from(tx, file_pieces(output, written.len(), piece)),
         )
         .await;
     });
     Ok(CompileReply { meta, cwasm, body })
 }
 
-/// The first `len` bytes of `file`, in pieces.
+/// The first `len` bytes of `file`, in pieces of `piece` bytes.
 fn file_pieces(
     file: File,
     len: u64,
+    piece: NonZeroUsize,
 ) -> std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> {
     use std::os::unix::fs::FileExt;
     Box::pin(futures::stream::try_unfold(
@@ -278,7 +290,7 @@ fn file_pieces(
             if at == len {
                 return Ok(None);
             }
-            let mut piece = vec![0u8; CWASM_PIECE_BYTES.min((len - at) as usize)];
+            let mut piece = vec![0u8; piece.get().min((len - at) as usize)];
             file.read_exact_at(&mut piece, at)?;
             let next = at + piece.len() as u64;
             Ok(Some((Bytes::from(piece), (file, next))))
@@ -466,6 +478,8 @@ async fn main() {
         connect: secs(&mut launch, "child-connect-secs", times.connect),
         room_poll: millis(&mut launch, "room-poll-ms", times.room_poll),
     };
+    let cwasm_read: NonZeroUsize =
+        setting(&mut launch, "cwasm-read-bytes", DEFAULT_CWASM_READ_BYTES);
     let request_buffer: usize = setting(
         &mut launch,
         "request-buffer",
@@ -476,6 +490,7 @@ async fn main() {
         timeout: secs(&mut launch, "leg-timeout-secs", leg_default.timeout),
         max_ports: setting(&mut launch, "leg-max-ports", leg_default.max_ports),
         chunk_bytes: setting(&mut launch, "leg-chunk-bytes", leg_default.chunk_bytes),
+        receive_bytes: setting(&mut launch, "leg-receive-bytes", leg_default.receive_bytes),
     };
     let accept_retry = millis(
         &mut launch,
@@ -623,6 +638,7 @@ async fn main() {
     let child_exe = child_exe();
 
     let svc = Arc::new(Supervisor {
+        cwasm_read,
         runner: ChildRunner::new(
             RunnerConfig {
                 exe: child_exe.clone(),
@@ -652,8 +668,8 @@ async fn main() {
         "compile-worker (supervisor): listening on {}, engine-compiler-child={}, \
          max_compiles={} sharing {} MiB of {} MiB memory (each to {} MiB, {} MiB to \
          start, {} tasks), deadline={}s, child_exit_wait={:?}, child_connect={:?}, \
-         room_poll={:?}, request_buffer={}, leg_timeout={:?}, leg_max_ports={}, \
-         leg_chunk={} bytes, accept_retry={:?}",
+         room_poll={:?}, cwasm_read={} bytes, request_buffer={}, leg_timeout={:?}, \
+         leg_max_ports={}, leg_chunk={} bytes, leg_receive={} bytes, accept_retry={:?}",
         safe(&addr, reason!("on the measured command line")),
         safe(
             &child_exe.display(),
@@ -697,6 +713,10 @@ async fn main() {
             reason!("the host's own setting, or this build's default")
         ),
         safe(
+            &cwasm_read,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
             &request_buffer,
             reason!("the host's own setting, or this build's default")
         ),
@@ -710,6 +730,10 @@ async fn main() {
         ),
         safe(
             &leg.chunk_bytes,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &leg.receive_bytes,
             reason!("the host's own setting, or this build's default")
         ),
         safe(

@@ -10,6 +10,7 @@
 //! compile on another instance is a clean miss, not a shared-key dependency.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -18,12 +19,41 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt, TryStreamExt};
 use object_store::path::Path as ObjPath;
-use object_store::{ObjectStore, WriteMultipart};
+use object_store::{GetResultPayload, ObjectStore, WriteMultipart};
 
 use storage_rpc::CacheError;
 
 fn internal(e: impl std::fmt::Display) -> CacheError {
     CacheError(e.to_string())
+}
+
+/// The first `len` bytes of `file`, in pieces of `piece` bytes, each read off
+/// the runtime's threads.
+fn file_pieces(
+    file: std::fs::File,
+    len: u64,
+    piece: NonZeroUsize,
+) -> BoxStream<'static, Result<Bytes, CacheError>> {
+    use std::os::unix::fs::FileExt;
+    let file = Arc::new(file);
+    futures::stream::try_unfold(0u64, move |at| {
+        let file = file.clone();
+        async move {
+            if at >= len {
+                return Ok(None);
+            }
+            let take = piece.get().min((len - at) as usize);
+            let piece = tokio::task::spawn_blocking(move || {
+                let mut piece = vec![0u8; take];
+                file.read_exact_at(&mut piece, at).map(|()| piece)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?;
+            Ok(Some((Bytes::from(piece), at + take as u64)))
+        }
+    })
+    .boxed()
 }
 
 /// Max accepted key length — a hex SHA-256 label is 64 chars; allow headroom
@@ -60,6 +90,11 @@ pub struct CacheBlobs {
     store: Arc<dyn ObjectStore>,
     /// The most the blobs, and the blobs being written, may take together.
     budget: u64,
+    /// What a blob being loaded is read from disk in, and so the pieces it
+    /// streams to its caller in. The store's own reader takes 8 KiB at a time,
+    /// each on a thread of its own, and each piece then crossed the leg as a
+    /// frame of its own — so a large blob cost its pieces rather than its bytes.
+    read_piece: NonZeroUsize,
     /// What the blobs being written will take once written: a blob being
     /// written aside is not among those the store lists, so this is what counts
     /// it.
@@ -88,11 +123,13 @@ impl Drop for Room {
 }
 
 impl CacheBlobs {
-    /// A cache in `store` that keeps within `budget` bytes.
-    pub fn new(store: Arc<dyn ObjectStore>, budget: u64) -> Self {
+    /// A cache in `store` that keeps within `budget` bytes, and reads a blob it
+    /// loads in pieces of `read_piece` bytes.
+    pub fn new(store: Arc<dyn ObjectStore>, budget: u64, read_piece: NonZeroUsize) -> Self {
         Self {
             store,
             budget,
+            read_piece,
             writing: Arc::default(),
             making_room: Arc::default(),
             used: Arc::default(),
@@ -156,10 +193,12 @@ impl CacheBlobs {
         match self.store.get(&path).await {
             Ok(res) => {
                 self.used().insert(path.to_string(), SystemTime::now());
-                Ok(Some((
-                    res.meta.size,
-                    res.into_stream().map_err(internal).boxed(),
-                )))
+                let size = res.meta.size;
+                let pieces = match res.payload {
+                    GetResultPayload::File(file, _) => file_pieces(file, size, self.read_piece),
+                    GetResultPayload::Stream(pieces) => pieces.map_err(internal).boxed(),
+                };
+                Ok(Some((size, pieces)))
             }
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(internal(e)),
@@ -274,8 +313,12 @@ mod tests {
     /// A budget no test here reaches unless it means to.
     const ROOMY: u64 = 64 * 1024 * 1024;
 
+    /// What the tests read a blob on disk in: small, so a test blob spans
+    /// several pieces.
+    const READ_PIECE: NonZeroUsize = NonZeroUsize::new(64 * 1024).unwrap();
+
     fn cache(budget: u64) -> CacheBlobs {
-        CacheBlobs::new(Arc::new(InMemory::new()), budget)
+        CacheBlobs::new(Arc::new(InMemory::new()), budget, READ_PIECE)
     }
 
     async fn put(cache: &CacheBlobs, key: &str, bytes: &[u8]) {
@@ -309,6 +352,21 @@ mod tests {
             .store(&key, blob.len() as u64, pieces(&blob, 65_536))
             .await
             .unwrap();
+        assert_eq!(get(&cache, &key).await, Some(blob));
+    }
+
+    /// A blob on disk comes back whole across several read pieces and a short
+    /// last one.
+    #[tokio::test]
+    async fn a_blob_on_disk_loads_whole_in_pieces() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+        let cache = CacheBlobs::new(Arc::new(store), ROOMY, READ_PIECE);
+        let key = "ef".repeat(32);
+        let blob: Vec<u8> = (0..READ_PIECE.get() * 2 + 12_345)
+            .map(|i| (i % 253) as u8)
+            .collect();
+        put(&cache, &key, &blob).await;
         assert_eq!(get(&cache, &key).await, Some(blob));
     }
 
@@ -417,11 +475,11 @@ mod tests {
     #[tokio::test]
     async fn the_sweep_brings_the_cache_within_a_lowered_budget() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let before = CacheBlobs::new(store.clone(), 300);
+        let before = CacheBlobs::new(store.clone(), 300, READ_PIECE);
         for key in ["aa", "bb", "cc"] {
             put(&before, &key.repeat(32), &[0u8; 100]).await;
         }
-        let after = CacheBlobs::new(store, 200);
+        let after = CacheBlobs::new(store, 200, READ_PIECE);
         assert_eq!(after.evict().await.unwrap(), 1);
         assert_eq!(after.evict().await.unwrap(), 0);
     }

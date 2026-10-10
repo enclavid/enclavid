@@ -73,13 +73,13 @@ const DEFAULT_BUNDLE_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// How many round children may run at once unless the host says otherwise
 /// (the `max-children` setting). A count, not a memory figure:
 /// what the children take in memory the kernel holds them to, and what the count
-/// bounds is what memory does not — how many rounds share the guest's two CPUs,
+/// bounds is what memory does not — how many rounds share the guest's CPUs,
 /// the descriptors and tasks each slot holds, and the share of this process each
 /// child is reserved (`supervisor_per_child`), which comes out of the
 /// children's total before any child runs.
 ///
-/// Twelve, because twelve rounds on the guest's two CPUs are already six to
-/// each. Against a 10 GiB guest, which its kernel reports as 9000 MiB, that
+/// Twelve, because twelve rounds on the guest's eight CPUs are already one and
+/// a half to each, beside the supervisor's own work. Against a 10 GiB guest, which its kernel reports as 9000 MiB, that
 /// leaves the children about 3.8 GiB at the other defaults — room for eleven
 /// rounds at the headroom beside one at its max with some 2 GiB to spare, so
 /// one round growing to its max does not by itself reach the total and take a
@@ -127,7 +127,7 @@ pub(crate) struct Settings {
     /// (`callback-request-buffer`, [`DEFAULT_CALLBACK_REQUEST_BUFFER`]).
     pub(crate) callback_request_buffer: usize,
     /// This end of api's legs (`leg-timeout-secs`, `leg-max-ports`,
-    /// `leg-chunk-bytes`).
+    /// `leg-chunk-bytes`, `leg-receive-bytes`).
     pub(crate) leg: LegSettings,
     /// How long a listener waits after an accept this process could not
     /// complete (`accept-retry-ms`, [`DEFAULT_ACCEPT_RETRY`]).
@@ -209,6 +209,7 @@ pub(crate) fn load() -> Settings {
             timeout: secs(&mut launch, "leg-timeout-secs", leg.timeout),
             max_ports: setting(&mut launch, "leg-max-ports", leg.max_ports),
             chunk_bytes: setting(&mut launch, "leg-chunk-bytes", leg.chunk_bytes),
+            receive_bytes: setting(&mut launch, "leg-receive-bytes", leg.receive_bytes),
         },
         accept_retry: millis(&mut launch, "accept-retry-ms", DEFAULT_ACCEPT_RETRY),
     };

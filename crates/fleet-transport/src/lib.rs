@@ -187,7 +187,46 @@ pub async fn dial(addr: &str) -> std::io::Result<Stream> {
 #[cfg(feature = "vsock")]
 pub async fn dial(addr: &str) -> std::io::Result<Stream> {
     let (cid, port) = parse_vsock(addr)?;
-    tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(cid, port)).await
+    let stream = tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(cid, port)).await?;
+    set_vsock_buffer(std::os::fd::AsFd::as_fd(&stream), VSOCK_BUFFER_BYTES)?;
+    Ok(stream)
+}
+
+/// What a vsock socket here lets its peer have in flight toward it: the credit
+/// vsock grants the sender, which a stream crossing the socket runs no faster
+/// than over the time the credit takes to come back. The kernel's own 256 KiB
+/// held a bundle crossing a leg to less than it carries with this.
+#[cfg(feature = "vsock")]
+pub const VSOCK_BUFFER_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Set a vsock socket's buffer to `bytes`, raising its ceiling first — the
+/// kernel refuses a buffer past the ceiling, which starts at the default.
+///
+/// The one place the guests do this, by a raw `setsockopt`: neither libc's
+/// constants nor rustix's or nix's socket options carry `AF_VSOCK`'s.
+#[cfg(feature = "vsock")]
+pub fn set_vsock_buffer(fd: std::os::fd::BorrowedFd<'_>, bytes: u64) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // linux/vm_sockets.h.
+    const SO_VM_SOCKETS_BUFFER_SIZE: libc::c_int = 0;
+    const SO_VM_SOCKETS_BUFFER_MAX_SIZE: libc::c_int = 2;
+    for option in [SO_VM_SOCKETS_BUFFER_MAX_SIZE, SO_VM_SOCKETS_BUFFER_SIZE] {
+        // SAFETY: `fd` is a live socket for the whole call, and the kernel reads
+        // exactly `size_of::<u64>()` bytes from a u64 that outlives it.
+        let rc = unsafe {
+            libc::setsockopt(
+                fd.as_raw_fd(),
+                libc::AF_VSOCK,
+                option,
+                (&raw const bytes).cast(),
+                std::mem::size_of::<u64>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Refuse an address [`dial`] could not use, without dialing it.
@@ -249,8 +288,11 @@ pub async fn bind(addr: &str) -> std::io::Result<Listener> {
         )
     })?;
     let vsock_addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_ANY, port);
+    let inner = tokio_vsock::VsockListener::bind(vsock_addr)?;
+    // A socket this listener accepts takes its buffer from the listener.
+    set_vsock_buffer(std::os::fd::AsFd::as_fd(&inner), VSOCK_BUFFER_BYTES)?;
     Ok(Listener {
-        inner: tokio_vsock::VsockListener::bind(vsock_addr)?,
+        inner,
         accept_retry: DEFAULT_ACCEPT_RETRY,
     })
 }

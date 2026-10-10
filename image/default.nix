@@ -49,12 +49,9 @@ let
   # Everything the guest is started with that the measurement also depends on.
   # One set, two consumers: `qemuArgs` below writes the launch line and
   # `measure` writes the digest, so a change here moves both together.
+  # The vCPU count is the one input that differs by role, so it is each role's
+  # `vcpus` below rather than a field here.
   launch = {
-    # Every possible vCPU contributes a VMSA page to the digest, so this is an
-    # input and not a tuning knob: booting with a different count produces a
-    # guest whose measurement no peer pins. Verified — 2, 4 and 8 give three
-    # different digests on otherwise identical inputs.
-    vcpus = 2;
     # Selects the CPUID signature written into each VMSA. `EPYC-Milan`,
     # `-Milan-v1` and `-Milan-v2` all resolve to family 25 model 1 stepping 1
     # and produce identical digests; the -v2 spelling is used because it is what
@@ -72,32 +69,51 @@ let
   };
 
   # What each role is: which kernel it boots, which binaries its initramfs
-  # carries, and what its PID 1 does.
+  # carries, what its PID 1 does, and how many vCPUs it is launched with.
   #
   # `siblings` is a name → binary map rather than a list because the workers
   # resolve their per-round child as a sibling of their own executable, so the
   # NAME is what has to be right; `/bin/app` alone would not do.
+  #
+  # Every possible vCPU contributes a VMSA page to the digest, so `vcpus` is an
+  # input and not a tuning knob: booting with a different count produces a
+  # guest whose measurement no peer pins. Verified — 2, 4 and 8 give three
+  # different digests on otherwise identical inputs.
   roles = {
+    # Four: every byte a bundle or a pulled layer carries passes through api —
+    # out of one leg's TLS, through its digest and the cache's seal, into one or
+    # two more legs' TLS — and with two it was the whole fleet's limit on how
+    # fast one crossed.
     api = {
       kernel = kernel.base;
       binary = "enclavid-api";
+      vcpus = 4;
     };
+    # Four: a bundle written to or read from the cache is a leg's TLS and the
+    # volume's I/O at once.
     storage = {
       kernel = kernel.storage;
       binary = "storage-cvm";
+      vcpus = 4;
       # The mount point for the data volume. The application makes `sessions/`
       # and `cache/` underneath at runtime; the image carries only what PID 1
       # needs before it starts.
       dirs = [ "data" ];
     };
+    # Four: one CPU for each compile the worker runs at once by default, and
+    # Cranelift spreads one compile across all of them when it runs alone.
     compile-worker = {
       kernel = kernel.compile-worker;
       binary = "compile-worker";
+      vcpus = 4;
       siblings = [ "engine-compiler-child" ];
     };
+    # Eight: a round is CPU the whole time it runs — inference inside the
+    # sandbox above all — and the worker runs twelve at once.
     execution-worker = {
       kernel = kernel.execution-worker;
       binary = "execution-worker";
+      vcpus = 8;
       siblings = [ "engine-executor-child" ];
     };
     # Terminates client TLS and dials api over RA-TLS — but pins NOTHING, so it
@@ -110,6 +126,7 @@ let
     gateway = {
       kernel = kernel.base;
       binary = "gateway";
+      vcpus = 2;
     };
   };
 
@@ -166,7 +183,7 @@ let
     pkgs.runCommand "enclavid-measurement-${role}-${variant}"
       { nativeBuildInputs = [ pkgs.sev-snp-measure ]; } ''
       sev-snp-measure --mode snp \
-        --vcpus ${toString launch.vcpus} \
+        --vcpus ${toString spec.vcpus} \
         --vcpu-type ${launch.vcpuType} \
         --guest-features ${launch.guestFeatures} \
         --ovmf ${firmware} \
@@ -231,7 +248,7 @@ let
       # machine. Without keys the line is the same minus that assertion.
       cat > $out/qemu-args <<ARGS
       -cpu ${launch.vcpuType}
-      -smp ${toString launch.vcpus}
+      -smp ${toString spec.vcpus}
       -machine q35,confidential-guest-support=sev0,memory-backend=ram0
       -object sev-snp-guest,id=sev0,cbitpos=${toString launch.cbitpos},reduced-phys-bits=${toString launch.reducedPhysBits},kernel-hashes=on,policy=${launch.policy}${idBlockProps role variant}
       -bios ${firmware}
