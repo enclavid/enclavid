@@ -66,7 +66,7 @@ impl std::error::Error for KeyError {}
 /// Names one fused composition: 64 lowercase hex characters, always.
 ///
 /// api computes it, from the pinned policy ref, the pinned plugin set and the
-/// authority each was fetched under; the worker caches under it and NEVER names
+/// key each is decrypted with; the worker caches under it and NEVER names
 /// one back. That direction is the L2 cache-poisoning defence and it is not this
 /// type's doing — what this type adds is that the string reaching a store is a
 /// digest rendering and can be nothing else.

@@ -350,6 +350,8 @@ async fn create(
         captured_media: Vec::new(),
         // Set with `Completed`, when the policy gives it.
         decision: None,
+        // Asked before the first round, not here: see `applicant::shared`.
+        pull_allowed: false,
     };
     // Write ONLY the sealed metadata. The plaintext STATUS byte and PRINCIPAL
     // host hooks are gone: TTL is enforced inside the storage-CVM (its sweeper,

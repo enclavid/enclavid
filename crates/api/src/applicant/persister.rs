@@ -83,10 +83,10 @@ pub(super) struct SessionPersister {
     pub current_version: AtomicU64,
     /// Mutable copy of session metadata. We update
     /// `disclosure_count` and the `disclosure_entry_hashes` set-commitment
-    /// leaf list whenever a round seals a disclosure and rewrite metadata
-    /// atomically alongside the state + append ops. Other metadata
-    /// fields stay constant across the session lifetime; this is
-    /// purely a bookkeeping wrapper.
+    /// leaf list whenever a round seals a disclosure, and `pull_allowed` on the
+    /// session's first write, and rewrite metadata atomically alongside the
+    /// state + append ops. Other metadata fields stay constant across the
+    /// session lifetime; this is purely a bookkeeping wrapper.
     pub metadata: Mutex<SessionMetadata>,
     /// The fields this round may seal, decided by THIS side before the worker
     /// ran — from the pre-round `current_prompt` and the accepted event, the
@@ -307,6 +307,10 @@ impl SessionPersister {
         // and a later successful one in the same round left the chain short of
         // its own count, and the consumer's pull 500s on that mismatch forever.
         let mut working = metadata.clone();
+        // A round reaches here only once the registry let the session pull what
+        // it pins (`SessionRunCtx::run`), so the first write to land says so,
+        // and no later round asks again.
+        working.pull_allowed = true;
         // A round that finished commits its decision in this same write as its
         // state: a reply lost after it — the child killed, a leg gone — leaves a
         // session that reads as completed, not one whose state has finished while
@@ -347,11 +351,16 @@ impl SessionPersister {
             ops.push(&set_state);
 
             // Rewrite metadata when this commit finished the session (status and
-            // decision), emitted a disclosure (extends the disclosure-hash chain)
-            // OR captured media (appends to the gate set). Plain rounds stay
+            // decision), emitted a disclosure (extends the disclosure-hash chain),
+            // captured media (appends to the gate set) OR is the session's first
+            // to land since the registry let it pull. Plain rounds stay
             // SetState-only, keeping the payload small.
             let set_metadata_holder;
-            if decision.is_some() || !appends.is_empty() || !media_ops.is_empty() {
+            if decision.is_some()
+                || !appends.is_empty()
+                || !media_ops.is_empty()
+                || !metadata.pull_allowed
+            {
                 set_metadata_holder = self.build_metadata_op(&mut working, &appends);
                 ops.push(&set_metadata_holder);
             }
@@ -498,8 +507,8 @@ impl SessionPersister {
     /// chain AND the captured-media gate set and, on the round that finishes,
     /// the status and decision, which the caller set before this). AuthN is
     /// closed inside hatch-client by the AEAD-seal under `tee_seal_key`. Called
-    /// when this commit finished the session, emitted disclosures or captured
-    /// media; `appends` may be empty.
+    /// when this commit finished the session, emitted disclosures, captured
+    /// media or is the first to record the pull mark; `appends` may be empty.
     fn build_metadata_op<'m>(
         &self,
         metadata: &'m mut SessionMetadata,
@@ -532,7 +541,9 @@ impl SessionPersister {
                      tee_seal_key so the raw hash never leaves the TEE — but they grow this blob \
                      by 32 B per frame, a count the host reads off the SetMedia ops in this same \
                      batch anyway. On the round that finishes it carries the status and the \
-                     decision's one byte: a size delta fixed per transition, whichever decision"
+                     decision's one byte: a size delta fixed per transition, whichever decision. \
+                     The pull mark is one byte either way, written by the session's first \
+                     committed round whatever the policy did"
                 )),
         )
     }

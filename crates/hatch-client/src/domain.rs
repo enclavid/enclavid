@@ -130,6 +130,11 @@ pub struct SessionMetadata {
     /// size of every sealed write, and must not read the verdict off it.
     #[serde(with = "decision_byte")]
     pub decision: Option<Decision>,
+    /// Whether the registry has let this session's bearers pull every artifact
+    /// it pins. Asked before each round until one round's write records it, and
+    /// never after: an api restart or a reset does not ask again. One byte
+    /// either way, so the host does not read it off the metadata's size.
+    pub pull_allowed: bool,
 }
 
 /// [`SessionMetadata::decision`] on the wire: `null` or one of four small
@@ -639,6 +644,17 @@ mod decision_tests {
         for decision in ALL {
             assert_eq!(sealed(Some(decision)).len(), before, "{decision:?}");
         }
+    }
+
+    /// Nor does the record that the registry let the session pull.
+    #[test]
+    fn the_pull_mark_does_not_change_the_metadatas_size() {
+        let allowed = encode(&SessionMetadata {
+            pull_allowed: true,
+            ..Default::default()
+        })
+        .expect("metadata encodes");
+        assert_eq!(allowed.len(), sealed(None).len());
     }
 
     #[test]

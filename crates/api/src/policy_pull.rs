@@ -4,7 +4,9 @@
 //! that can be refused before a byte of wasm moves. [`WasmLayer::pieces`] then
 //! fetches that one layer as a stream, held to the size and digest the verified
 //! manifest declares and decrypted on the way, for the compile to read as it
-//! comes. The policy and plugin paths share this one trust gate.
+//! comes. The policy and plugin paths share this one trust gate. [`manifest`]
+//! alone is how a session shows, before its first round runs, that it may pull
+//! what it pins — whether its compile then turns out to be cached or not.
 //!
 //! Only the wasm layer is fetched. The manifest's digest pins the whole
 //! artifact, every layer's digest is inside it, and the other layers are not
@@ -116,46 +118,7 @@ pub async fn wasm_layer(
     key: Option<&Key>,
     kbs_ctx: Option<&KbsContext<'_>>,
 ) -> Result<WasmLayer, PullError> {
-    let artifact_digest = extract_digest(artifact_ref)
-        .ok_or_else(|| PullError::InvalidRef(artifact_ref.to_string()))?;
-    let req = boundary::outbound::to_untrusted(ManifestRequest {
-        reference: artifact_ref.to_string(),
-        registry_auth: registry_auth.to_vec(),
-    })
-    .vouch_unchecked::<AuthN, _>(reason!(
-        "policy_ref public (digest-pinned); registry_auth is the consumer's bearer, \
-         courier-forwarded — not a TEE secret"
-    ))
-    .vouch_unchecked::<AuthZ, _>(reason!(
-        "forwarding the bearer to its registry IS the courier op"
-    ))
-    .vouch_unchecked::<Covert, _>(reason!(
-        "both consumer-supplied at session create, not policy-controlled"
-    ));
-    let manifest = registry
-        .manifest(req)
-        .await
-        .map_err(classify_transport_error)?
-        .trust::<AuthN, _, _, _, _>(|manifest| {
-            // The manifest's bytes must hash to the pinned digest.
-            let actual = sha256_hex(&manifest);
-            if digest_matches(artifact_digest, &actual) {
-                Ok(manifest)
-            } else {
-                Err(PullError::ManifestDigest {
-                    expected: artifact_digest.to_string(),
-                    actual: format!("sha256:{actual}"),
-                })
-            }
-        })?
-        .trust_unchecked::<AuthZ, _>(reason!(
-            "OCI registry server enforces pull authorisation with the host-supplied \
-             bearer; TEE doesn't gate access at this layer"
-        ))
-        .trust_unchecked::<Replay, _>(reason!(
-            "content-addressed by digest — bit-identical responses for the same digest"
-        ))
-        .into_inner();
+    let manifest = manifest(registry, artifact_ref, registry_auth).await?;
     let manifest: OciManifest =
         serde_json::from_slice(&manifest).map_err(|e| PullError::ManifestParse(e.to_string()))?;
 
@@ -189,6 +152,59 @@ pub async fn wasm_layer(
         });
     }
     Err(PullError::NoWasmLayer)
+}
+
+/// An artifact's manifest, fetched with `registry_auth` and checked to be the
+/// one `artifact_ref` pins. Getting it is also the registry's word that this
+/// bearer may pull the artifact: the registry grants pull per repository, so
+/// the same bearer fetches the manifest and every blob in it.
+pub async fn manifest(
+    registry: &RegistryClient,
+    artifact_ref: &str,
+    registry_auth: &[u8],
+) -> Result<Vec<u8>, PullError> {
+    let artifact_digest = extract_digest(artifact_ref)
+        .ok_or_else(|| PullError::InvalidRef(artifact_ref.to_string()))?;
+    let req = boundary::outbound::to_untrusted(ManifestRequest {
+        reference: artifact_ref.to_string(),
+        registry_auth: registry_auth.to_vec(),
+    })
+    .vouch_unchecked::<AuthN, _>(reason!(
+        "policy_ref public (digest-pinned); registry_auth is the consumer's bearer, \
+         courier-forwarded — not a TEE secret"
+    ))
+    .vouch_unchecked::<AuthZ, _>(reason!(
+        "forwarding the bearer to its registry IS the courier op"
+    ))
+    .vouch_unchecked::<Covert, _>(reason!(
+        "both consumer-supplied at session create, not policy-controlled"
+    ));
+    Ok(registry
+        .manifest(req)
+        .await
+        .map_err(classify_transport_error)?
+        .trust::<AuthN, _, _, _, _>(|manifest| {
+            // The manifest's bytes must hash to the pinned digest.
+            let actual = sha256_hex(&manifest);
+            if digest_matches(artifact_digest, &actual) {
+                Ok(manifest)
+            } else {
+                Err(PullError::ManifestDigest {
+                    expected: artifact_digest.to_string(),
+                    actual: format!("sha256:{actual}"),
+                })
+            }
+        })?
+        .trust_unchecked::<AuthZ, _>(reason!(
+            "names no kind — ACCEPTED RISK: the registry decides with the consumer's \
+             bearer, and its refusal binds only as far as the host relays it, so a host \
+             can answer yes in its place. That host holds every layer and bearer it \
+             couriers, so what it lets through is what it could serve on a pull"
+        ))
+        .trust_unchecked::<Replay, _>(reason!(
+            "content-addressed by digest — bit-identical responses for the same digest"
+        ))
+        .into_inner())
 }
 
 impl WasmLayer {
@@ -241,7 +257,7 @@ impl WasmLayer {
                      blob that is not that layer ends in an error before anything acts on it"
                 ))
                 .trust_unchecked::<AuthZ, _>(reason!(
-                    "OCI registry server enforces pull authorisation with the host-supplied \
+                    "OCI registry server enforces pull authorisation with the consumer's \
                      bearer; TEE doesn't gate access at this layer"
                 ))
                 .trust_unchecked::<Replay, _>(reason!(
