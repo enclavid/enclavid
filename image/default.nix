@@ -39,7 +39,11 @@ let
     url = "https://github.com/NixOS/nixpkgs/archive/a3b98866eecd08edac6e61a3081e69540a35020f.tar.gz";
     sha256 = "0gy7jvdm3yfr2mddcch4yr7l8nw5y21gfls5in05j1f282bcr9mh";
   };
-  pkgs = import nixpkgs { system = "x86_64-linux"; };
+  # With the host QEMU the images are launched under; see `qemu/`.
+  pkgs = import nixpkgs {
+    system = "x86_64-linux";
+    overlays = [ (import ./qemu) ];
+  };
   lib = pkgs.lib;
 
   kernel = import ./kernel;
@@ -58,8 +62,14 @@ let
     # the `-cpu` flag says, and two names for one thing invites drift.
     vcpuType = "EPYC-Milan-v2";
     # The `sev_features` field of every VMSA page. Bit 0 is SNP_ACTIVE, which is
-    # what KVM sets for a launch with no IGVM file — which is this one.
-    guestFeatures = "0x1";
+    # what KVM sets for a launch with no IGVM file — which is this one. Bit 9 is
+    # SECURE_TSC, which `snpFlags` turns on.
+    guestFeatures = "0x201";
+    # The `sev-snp-guest` flags behind `guestFeatures` past SNP_ACTIVE. Secure
+    # TSC: the guest's TSC is fixed at launch, and the host cannot move it after.
+    # A launch with flags the features do not match is a different digest, so
+    # the ID block refuses it.
+    snpFlags = "secure-tsc=on";
     # SMT_ALLOWED | reserved-bit-1. Debug is off and there is no migration
     # agent; `crates/attestation` refuses a report that says otherwise.
     policy = "0x30000";
@@ -250,7 +260,7 @@ let
       -cpu ${launch.vcpuType}
       -smp ${toString spec.vcpus}
       -machine q35,confidential-guest-support=sev0,memory-backend=ram0
-      -object sev-snp-guest,id=sev0,cbitpos=${toString launch.cbitpos},reduced-phys-bits=${toString launch.reducedPhysBits},kernel-hashes=on,policy=${launch.policy}${idBlockProps role variant}
+      -object sev-snp-guest,id=sev0,cbitpos=${toString launch.cbitpos},reduced-phys-bits=${toString launch.reducedPhysBits},kernel-hashes=on,policy=${launch.policy},${launch.snpFlags}${idBlockProps role variant}
       -bios ${firmware}
       ARGS
       sed -i 's/^      //' $out/qemu-args

@@ -1,0 +1,90 @@
+From 4196b5f0a0c01581418263fb8d9f63a179741b2c Mon Sep 17 00:00:00 2001
+From: "Naveen N Rao (AMD)" <naveen@kernel.org>
+Date: Wed, 20 May 2026 18:57:54 +0530
+Subject: [PATCH] target/i386: SEV: Generalize handling of
+ SVM_SEV_FEAT_SNP_ACTIVE
+
+Align with IGVM files providing SEV features with
+SVM_SEV_FEAT_SNP_ACTIVE set by setting the same when creating a
+sev-snp-guest object.
+
+Since KVM sets this feature itself, SVM_SEV_FEAT_SNP_ACTIVE is unset
+before KVM_SEV_INIT2 ioctl is invoked. Move that out of IGVM-specific
+section to common code.
+
+While at it, convert the existing SVM_SEV_FEAT_SNP_ACTIVE definition to
+use the BIT() macro for consistency with upcoming feature flags.
+
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Naveen N Rao (AMD) <naveen@kernel.org>
+Link: https://lore.kernel.org/r/031de849edf2ae4eaa6e00df83b053605a3ecfea.1779281646.git.naveen@kernel.org
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ target/i386/sev.c | 24 +++++++++++++++++-------
+ target/i386/sev.h |  2 +-
+ 2 files changed, 18 insertions(+), 8 deletions(-)
+
+diff --git a/target/i386/sev.c b/target/i386/sev.c
+index d7dcefc8ecf5f..7b03f534b104c 100644
+--- a/target/i386/sev.c
++++ b/target/i386/sev.c
+@@ -324,6 +324,15 @@ sev_set_guest_state(SevCommonState *sev_common, SevState new_state)
+     sev_common->state = new_state;
+ }
+ 
++static void sev_set_feature(SevCommonState *sev_common, uint64_t feature, bool set)
++{
++    if (set) {
++        sev_common->sev_features |= feature;
++    } else {
++        sev_common->sev_features &= ~feature;
++    }
++}
++
+ static void
+ sev_ram_block_added(RAMBlockNotifier *n, void *host, size_t size,
+                     size_t max_size)
+@@ -1899,15 +1908,15 @@ static int sev_common_kvm_init(ConfidentialGuestSupport *cgs, Error **errp)
+                     ->process(x86machine->igvm, machine, true, errp) == -1) {
+                 return -1;
+             }
+-            /*
+-             * KVM maintains a bitmask of allowed sev_features. This does not
+-             * include SVM_SEV_FEAT_SNP_ACTIVE which is set accordingly by KVM
+-             * itself. Therefore we need to clear this flag.
+-             */
+-            args.vmsa_features = sev_common->sev_features &
+-                                 ~SVM_SEV_FEAT_SNP_ACTIVE;
+         }
+ 
++        /*
++         * KVM maintains a bitmask of allowed sev_features. This does not
++         * include SVM_SEV_FEAT_SNP_ACTIVE which is set accordingly by KVM
++         * itself. Therefore we need to clear this flag.
++         */
++        args.vmsa_features = sev_common->sev_features & ~SVM_SEV_FEAT_SNP_ACTIVE;
++
+         ret = sev_ioctl(sev_common->sev_fd, KVM_SEV_INIT2, &args, &fw_error);
+         break;
+     }
+@@ -3211,6 +3220,7 @@ sev_snp_guest_instance_init(Object *obj)
+ 
+     /* default init/start/finish params for kvm */
+     sev_snp_guest->kvm_start_conf.policy = DEFAULT_SEV_SNP_POLICY;
++    sev_set_feature(SEV_COMMON(sev_snp_guest), SVM_SEV_FEAT_SNP_ACTIVE, true);
+ }
+ 
+ static void
+diff --git a/target/i386/sev.h b/target/i386/sev.h
+index 4358df40e48bd..b84ca3ce0b672 100644
+--- a/target/i386/sev.h
++++ b/target/i386/sev.h
+@@ -46,7 +46,7 @@ bool sev_snp_enabled(void);
+ #define SEV_SNP_POLICY_SMT      0x10000
+ #define SEV_SNP_POLICY_DBG      0x80000
+ 
+-#define SVM_SEV_FEAT_SNP_ACTIVE 1
++#define SVM_SEV_FEAT_SNP_ACTIVE     BIT(0)
+ 
+ typedef struct SevKernelLoaderContext {
+     char *setup_data;

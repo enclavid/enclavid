@@ -37,6 +37,14 @@ rather than continuing in a corrupted state, and a panic ends the machine
 instead of leaving it running with a broken kernel. There is no in-place
 recovery in this design; a run that cannot continue should stop existing.
 
+`no-kvmclock tsc=reliable` keep the guest's clock on its TSC, which Secure TSC
+(`launch.snpFlags` in `default.nix`) fixes at launch out of the host's reach.
+Without the first, the kernel prefers KVM's paravirtual clock, whose readings
+the host writes, unless CPUID says the TSC is invariant — and the host writes
+CPUID too, and the measurement does not cover it. Without the second, the
+kernel checks the TSC against the HPET and the ACPI timer, both emulated by the
+host, and on a mismatch it gives up the TSC for one of them.
+
 `sysctl.kernel.yama.ptrace_scope=3` is the ptrace floor the per-round child
 isolation rests on — "no attach", denying every process including one holding
 `CAP_SYS_PTRACE`, which matters because everything in this guest is root,

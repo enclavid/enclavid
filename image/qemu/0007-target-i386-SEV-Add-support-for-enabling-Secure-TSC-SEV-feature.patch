@@ -1,0 +1,95 @@
+From a26f9b975d5c0690ac5828fadb6242bfee79c008 Mon Sep 17 00:00:00 2001
+From: "Naveen N Rao (AMD)" <naveen@kernel.org>
+Date: Wed, 20 May 2026 18:58:00 +0530
+Subject: [PATCH] target/i386: SEV: Add support for enabling Secure TSC SEV
+ feature
+
+Add support for enabling Secure TSC VMSA SEV feature in SEV-SNP guests
+through a new "secure-tsc" boolean property on SEV-SNP guest objects. By
+default, KVM uses the host TSC frequency for Secure TSC.
+
+Sample command-line:
+  -machine q35,confidential-guest-support=sev0 \
+  -object sev-snp-guest,id=sev0,cbitpos=51,reduced-phys-bits=1,secure-tsc=on
+
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Co-developed-by: Ketan Chaturvedi <Ketan.Chaturvedi@amd.com>
+Signed-off-by: Ketan Chaturvedi <Ketan.Chaturvedi@amd.com>
+Co-developed-by: Nikunj A Dadhania <nikunj@amd.com>
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+Signed-off-by: Naveen N Rao (AMD) <naveen@kernel.org>
+Link: https://lore.kernel.org/r/9f58b92a173f319b3ef725f5ed8a2a173eed55b1.1779281646.git.naveen@kernel.org
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ qapi/qom.json     |  6 +++++-
+ target/i386/sev.c | 13 +++++++++++++
+ target/i386/sev.h |  1 +
+ 3 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/qapi/qom.json b/qapi/qom.json
+index ad7e39aa7560a..4732fa89751cc 100644
+--- a/qapi/qom.json
++++ b/qapi/qom.json
+@@ -1113,6 +1113,9 @@
+ #     firmware.  Set this to true to disable the use of VCEK.
+ #     (default: false) (since: 9.1)
+ #
++# @secure-tsc: enable Secure TSC
++#     (default: false) (since 11.1)
++#
+ # Since: 9.1
+ ##
+ { 'struct': 'SevSnpGuestProperties',
+@@ -1124,7 +1127,8 @@
+             '*id-auth': 'str',
+             '*author-key-enabled': 'bool',
+             '*host-data': 'str',
+-            '*vcek-disabled': 'bool' } }
++            '*vcek-disabled': 'bool',
++            '*secure-tsc': 'bool' } }
+ 
+ ##
+ # @TdxGuestProperties:
+diff --git a/target/i386/sev.c b/target/i386/sev.c
+index 2103a121aa269..fdfeb604f6cf6 100644
+--- a/target/i386/sev.c
++++ b/target/i386/sev.c
+@@ -3212,6 +3212,16 @@ sev_snp_guest_set_host_data(Object *obj, const char *value, Error **errp)
+     memcpy(finish->host_data, blob, len);
+ }
+ 
++static bool sev_snp_guest_get_secure_tsc(Object *obj, Error **errp)
++{
++    return is_sev_feature_set(SEV_COMMON(obj), SVM_SEV_FEAT_SECURE_TSC);
++}
++
++static void sev_snp_guest_set_secure_tsc(Object *obj, bool value, Error **errp)
++{
++    sev_set_feature(SEV_COMMON(obj), SVM_SEV_FEAT_SECURE_TSC, value);
++}
++
+ static void
+ sev_snp_guest_class_init(ObjectClass *oc, const void *data)
+ {
+@@ -3247,6 +3257,9 @@ sev_snp_guest_class_init(ObjectClass *oc, const void *data)
+     object_class_property_add_str(oc, "host-data",
+                                   sev_snp_guest_get_host_data,
+                                   sev_snp_guest_set_host_data);
++    object_class_property_add_bool(oc, "secure-tsc",
++                                  sev_snp_guest_get_secure_tsc,
++                                  sev_snp_guest_set_secure_tsc);
+ }
+ 
+ static void
+diff --git a/target/i386/sev.h b/target/i386/sev.h
+index d19a396697477..7725f92e1959b 100644
+--- a/target/i386/sev.h
++++ b/target/i386/sev.h
+@@ -48,6 +48,7 @@ bool sev_snp_enabled(void);
+ 
+ #define SVM_SEV_FEAT_SNP_ACTIVE     BIT(0)
+ #define SVM_SEV_FEAT_DEBUG_SWAP     BIT(5)
++#define SVM_SEV_FEAT_SECURE_TSC     BIT(9)
+ 
+ typedef struct SevKernelLoaderContext {
+     char *setup_data;

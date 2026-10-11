@@ -1,0 +1,56 @@
+From 9743cd30f33ff9ab5338efc3801505f125280587 Mon Sep 17 00:00:00 2001
+From: "Naveen N Rao (AMD)" <naveen@kernel.org>
+Date: Wed, 20 May 2026 18:57:56 +0530
+Subject: [PATCH] target/i386: SEV: Consolidate SEV feature validation to
+ common init path
+
+Currently, check_sev_features() is called in multiple places when
+processing IGVM files: both when processing the initial VMSA SEV
+features from IGVM, as well as when validating the full contents of the
+VMSA. Move this to a single point in sev_common_kvm_init() to simplify
+the flow, as well as to re-use this function when VMSA SEV features are
+being set without using IGVM files.
+
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Naveen N Rao (AMD) <naveen@kernel.org>
+Link: https://lore.kernel.org/r/35449df94eb20c29923a7cd0e2742ddba605928c.1779281646.git.naveen@kernel.org
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ target/i386/sev.c | 10 ++++------
+ 1 file changed, 4 insertions(+), 6 deletions(-)
+
+diff --git a/target/i386/sev.c b/target/i386/sev.c
+index 093d29e761369..d8fb88d2b2144 100644
+--- a/target/i386/sev.c
++++ b/target/i386/sev.c
+@@ -600,9 +600,6 @@ static int check_vmsa_supported(SevCommonState *sev_common, hwaddr gpa,
+     vmsa_check.x87_fcw = 0;
+     vmsa_check.mxcsr = 0;
+ 
+-    if (check_sev_features(sev_common, vmsa_check.sev_features, errp) < 0) {
+-        return -1;
+-    }
+     vmsa_check.sev_features = 0;
+ 
+     if (!buffer_is_zero(&vmsa_check, sizeof(vmsa_check))) {
+@@ -1920,6 +1917,10 @@ static int sev_common_kvm_init(ConfidentialGuestSupport *cgs, Error **errp)
+             }
+         }
+ 
++        if (check_sev_features(sev_common, sev_common->sev_features, errp) < 0) {
++            return -1;
++        }
++
+         /*
+          * KVM maintains a bitmask of allowed sev_features. This does not
+          * include SVM_SEV_FEAT_SNP_ACTIVE which is set accordingly by KVM
+@@ -2581,9 +2582,6 @@ static int cgs_set_guest_state(hwaddr gpa, uint8_t *ptr, uint64_t len,
+                            __func__);
+                 return -1;
+             }
+-            if (check_sev_features(sev_common, sa->sev_features, errp) < 0) {
+-                return -1;
+-            }
+             sev_common->sev_features = sa->sev_features;
+         }
+         return 0;

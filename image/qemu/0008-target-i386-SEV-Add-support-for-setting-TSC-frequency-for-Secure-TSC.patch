@@ -1,0 +1,145 @@
+From f79c89c296896d97f5c6dc4f1635dbbe897bfdbc Mon Sep 17 00:00:00 2001
+From: "Naveen N Rao (AMD)" <naveen@kernel.org>
+Date: Wed, 20 May 2026 18:58:01 +0530
+Subject: [PATCH] target/i386: SEV: Add support for setting TSC frequency for
+ Secure TSC
+
+Add support for configuring the TSC frequency when Secure TSC is enabled
+in SEV-SNP guests through a new "tsc-frequency" property on SEV-SNP
+guest objects, similar to the vCPU-specific property used by regular
+guests and TDX. A new property is needed since SEV-SNP guests require
+the TSC frequency to be specified during early SNP_LAUNCH_START command
+before any vCPUs are created.
+
+The user-provided TSC frequency is set through KVM_SET_TSC_KHZ before
+issuing KVM_SEV_SNP_LAUNCH_START.
+
+Attempts to set TSC frequency on both the SEV_SNP object and the cpu
+object result in an error from KVM (on the vCPU ioctl), so do not add
+separate checks for the same.
+
+Sample command-line:
+  -machine q35,confidential-guest-support=sev0 \
+  -object sev-snp-guest,id=sev0,cbitpos=51,reduced-phys-bits=1,secure-tsc=on,tsc-frequency=2500000000
+
+Co-developed-by: Ketan Chaturvedi <Ketan.Chaturvedi@amd.com>
+Signed-off-by: Ketan Chaturvedi <Ketan.Chaturvedi@amd.com>
+Co-developed-by: Nikunj A Dadhania <nikunj@amd.com>
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+Signed-off-by: Naveen N Rao (AMD) <naveen@kernel.org>
+Link: https://lore.kernel.org/r/af688610978f213a456a7753e1d9fe7d3a51e80a.1779281646.git.naveen@kernel.org
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ qapi/qom.json     |  6 +++++-
+ target/i386/sev.c | 46 ++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/qapi/qom.json b/qapi/qom.json
+index 4732fa89751cc..4a9b7f9088447 100644
+--- a/qapi/qom.json
++++ b/qapi/qom.json
+@@ -1116,6 +1116,9 @@
+ # @secure-tsc: enable Secure TSC
+ #     (default: false) (since 11.1)
+ #
++# @tsc-frequency: set secure TSC frequency.  Only valid if Secure TSC
++#     is enabled (default: zero) (since 11.1)
++#
+ # Since: 9.1
+ ##
+ { 'struct': 'SevSnpGuestProperties',
+@@ -1128,7 +1131,8 @@
+             '*author-key-enabled': 'bool',
+             '*host-data': 'str',
+             '*vcek-disabled': 'bool',
+-            '*secure-tsc': 'bool' } }
++            '*secure-tsc': 'bool',
++            '*tsc-frequency': 'uint32' } }
+ 
+ ##
+ # @TdxGuestProperties:
+diff --git a/target/i386/sev.c b/target/i386/sev.c
+index fdfeb604f6cf6..ae9c85af1311a 100644
+--- a/target/i386/sev.c
++++ b/target/i386/sev.c
+@@ -183,6 +183,7 @@ struct SevSnpGuestState {
+     char *id_auth_base64;
+     uint8_t *id_auth;
+     char *host_data;
++    uint32_t tsc_khz;
+ 
+     struct kvm_sev_snp_launch_start kvm_start_conf;
+     struct kvm_sev_snp_launch_finish kvm_finish_conf;
+@@ -547,6 +548,13 @@ static int check_sev_features(SevCommonState *sev_common, uint64_t sev_features,
+                    __func__, sev_features, sev_common->supported_sev_features);
+         return -1;
+     }
++    if (sev_snp_enabled() && SEV_SNP_GUEST(sev_common)->tsc_khz &&
++        !(sev_features & SVM_SEV_FEAT_SECURE_TSC)) {
++        error_setg(errp,
++                   "%s: TSC frequency can only be set if Secure TSC is enabled",
++                   __func__);
++        return -1;
++    }
+     return 0;
+ }
+ 
+@@ -1095,6 +1103,19 @@ sev_snp_launch_start(SevCommonState *sev_common)
+             return 1;
+     }
+ 
++    if (is_sev_feature_set(sev_common, SVM_SEV_FEAT_SECURE_TSC) &&
++        sev_snp_guest->tsc_khz) {
++        rc = -EINVAL;
++        if (kvm_check_extension(kvm_state, KVM_CAP_VM_TSC_CONTROL)) {
++            rc = kvm_vm_ioctl(kvm_state, KVM_SET_TSC_KHZ, sev_snp_guest->tsc_khz);
++        }
++        if (rc < 0) {
++            error_report("%s: Unable to set Secure TSC frequency to %u kHz ret=%d",
++                         __func__, sev_snp_guest->tsc_khz, rc);
++            return 1;
++        }
++    }
++
+     rc = sev_ioctl(sev_common->sev_fd, KVM_SEV_SNP_LAUNCH_START,
+                    start, &fw_error);
+     if (rc < 0) {
+@@ -3222,6 +3243,28 @@ static void sev_snp_guest_set_secure_tsc(Object *obj, bool value, Error **errp)
+     sev_set_feature(SEV_COMMON(obj), SVM_SEV_FEAT_SECURE_TSC, value);
+ }
+ 
++static void
++sev_snp_guest_get_tsc_frequency(Object *obj, Visitor *v, const char *name,
++                                void *opaque, Error **errp)
++{
++    uint32_t value = SEV_SNP_GUEST(obj)->tsc_khz * 1000;
++
++    visit_type_uint32(v, name, &value, errp);
++}
++
++static void
++sev_snp_guest_set_tsc_frequency(Object *obj, Visitor *v, const char *name,
++                                void *opaque, Error **errp)
++{
++    uint32_t value;
++
++    if (!visit_type_uint32(v, name, &value, errp)) {
++        return;
++    }
++
++    SEV_SNP_GUEST(obj)->tsc_khz = value / 1000;
++}
++
+ static void
+ sev_snp_guest_class_init(ObjectClass *oc, const void *data)
+ {
+@@ -3260,6 +3303,9 @@ sev_snp_guest_class_init(ObjectClass *oc, const void *data)
+     object_class_property_add_bool(oc, "secure-tsc",
+                                   sev_snp_guest_get_secure_tsc,
+                                   sev_snp_guest_set_secure_tsc);
++    object_class_property_add(oc, "tsc-frequency", "uint32",
++                              sev_snp_guest_get_tsc_frequency,
++                              sev_snp_guest_set_tsc_frequency, NULL, NULL);
+ }
+ 
+ static void

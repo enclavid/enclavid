@@ -1,0 +1,39 @@
+From a593e468dac5e3d7815eba8993304909efb16f9e Mon Sep 17 00:00:00 2001
+From: "Naveen N Rao (AMD)" <naveen@kernel.org>
+Date: Wed, 20 May 2026 18:57:55 +0530
+Subject: [PATCH] target/i386: SEV: Ensure SEV features are only set through
+ qemu cli or IGVM
+
+In preparation for qemu being able to set SEV features through the cli,
+add a check to ensure that SEV features are not also set if using IGVM
+files.
+
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Naveen N Rao (AMD) <naveen@kernel.org>
+Link: https://lore.kernel.org/r/6939de99f13d7170af68b74e711eb9f03f32f682.1779281646.git.naveen@kernel.org
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ target/i386/sev.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/target/i386/sev.c b/target/i386/sev.c
+index 7b03f534b104c..093d29e761369 100644
+--- a/target/i386/sev.c
++++ b/target/i386/sev.c
+@@ -1904,6 +1904,16 @@ static int sev_common_kvm_init(ConfidentialGuestSupport *cgs, Error **errp)
+          * as SEV_STATE_UNINIT.
+          */
+         if (x86machine->igvm) {
++            /*
++             * Test only the user-set SEV features by masking out
++             * SVM_SEV_FEAT_SNP_ACTIVE which is set by default.
++             */
++            if (sev_common->sev_features & ~SVM_SEV_FEAT_SNP_ACTIVE) {
++                error_setg(errp,
++                           "%s: SEV features can't be specified when using IGVM files",
++                           __func__);
++                return -1;
++            }
+             if (IGVM_CFG_GET_CLASS(x86machine->igvm)
+                     ->process(x86machine->igvm, machine, true, errp) == -1) {
+                 return -1;

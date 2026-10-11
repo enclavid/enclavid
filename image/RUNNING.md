@@ -11,22 +11,19 @@ machine where the fleet does boot; where a value is transcribed from something
 that ran, it is marked as such, and where it is derived from the expressions in
 this directory rather than observed, that is marked too.
 
-## Four things a launch needs that this repository does not contain
+## What a launch needs that this repository does not contain
 
-| | what | why it is not here |
-|---|---|---|
-| VMM | QEMU with SEV-SNP support | built from source on the host |
+Nothing is left on this list. The firmware, the launch parameters, the measuring
+tool and the VMM were on it and are not any more: `image/ovmf` builds the AmdSev
+firmware from the pinned edk2, `image/default.nix` holds the launch parameters
+and calls `sev-snp-measure` from the pinned nixpkgs, and `image/qemu` is the
+QEMU the images are launched under.
 
-That is the whole of it now. The firmware, the launch parameters and the
-measuring tool were on this list and are not any more: `image/ovmf` builds the
-AmdSev firmware from the pinned edk2, `image/default.nix` holds the launch
-parameters and calls `sev-snp-measure` from the pinned nixpkgs.
-
-QEMU stays outside because it does not enter the digest — it constructs the
-VMSA, but what it constructs is a function of the parameters, not of its own
-version. It matters to whether the guest boots at all: `sev-snp-guest`,
-`kernel-hashes` and `vhost-vsock-pci` all have to be present. Observed: 10.2.4,
-built from source.
+QEMU does not enter the digest — it constructs the VMSA, but what it constructs
+is a function of the parameters, not of its own version. It is pinned all the
+same, because whether the guest boots at all depends on it: `sev-snp-guest`,
+`kernel-hashes`, `secure-tsc` and `vhost-vsock-pci` all have to be present, and
+`secure-tsc` is in no QEMU release up to 11.1.2.
 
 ### Firmware
 
@@ -42,10 +39,14 @@ taken against it, and none of them carry over.
 
 ### VMM
 
-Observed: QEMU 10.2.4, built from source. The version matters to a measurement
-only through the VMSA it constructs, but it matters to whether the guest boots
-at all — `sev-snp-guest`, `kernel-hashes` and `vhost-vsock-pci` all have to be
-present.
+`image/qemu`: QEMU 11.1.2 from the pinned nixpkgs' recipe, plus AMD's Secure TSC
+series — nine upstream commits, applied unchanged. The version matters to a
+measurement only through the VMSA it constructs, but it matters to whether the
+guest boots at all — `sev-snp-guest`, `kernel-hashes`, `secure-tsc` and
+`vhost-vsock-pci` all have to be present.
+
+The patches go with QEMU 11.2, the first release to carry the series: moving
+`image/qemu` to it leaves a version and a hash, and the nine files are deleted.
 
 ## Building the images
 
@@ -372,8 +373,9 @@ the two are known to agree.
 Every argument must match the launch exactly, and `--append` especially: the
 command line is taken verbatim, so a stray space is a different machine.
 
-`--guest-features` defaults to `0x1` in the tool. If the launch ever enables
-anything beyond `SNPActive` — `debug-swap`, say — this has to move with it.
+`--guest-features` defaults to `0x1` in the tool. The launch also enables Secure
+TSC, bit 9, so the build passes `0x201`; anything else it ever enables —
+`debug-swap`, say — has to move with it.
 
 ## Open: does the vCPU count have to be pinned?
 

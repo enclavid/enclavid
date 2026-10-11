@@ -37,7 +37,7 @@ let
 
     src = pkgs.fetchurl {
       url = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${version}.tar.xz";
-      sha256 = "eb36801e119529b13513c3459dc20e2a32f7053629f3aabb63ea501a4d88f63d";
+      sha256 = "f410638061a165c12f42ab871d2f3fcd525515359b5faeee80969cff84524df9";
     };
 
     nativeBuildInputs = with pkgs; [ bc bison flex elfutils openssl perl python3 ];
@@ -63,7 +63,7 @@ let
     # it moves only when kernel_version.txt moves.
     KBUILD_BUILD_USER = "user";
     KBUILD_BUILD_HOST = "host";
-    KBUILD_BUILD_TIMESTAMP = "Sat Aug 23 00:00:00 UTC 2026";
+    KBUILD_BUILD_TIMESTAMP = "Sat Oct 03 00:00:00 UTC 2026";
 
     configurePhase = ''
       runHook preConfigure

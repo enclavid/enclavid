@@ -1,0 +1,34 @@
+From 891d419f972f96b19ef7531dc72c11c302af5f35 Mon Sep 17 00:00:00 2001
+From: "Naveen N Rao (AMD)" <naveen@kernel.org>
+Date: Wed, 20 May 2026 18:57:58 +0530
+Subject: [PATCH] target/i386: SEV: Enable use of KVM_SEV_INIT2 for SEV-ES
+ guests
+
+In preparation for allowing SEV-ES guests to enable VMSA SEV features,
+update sev_init2_required() to return true if any SEV features are
+requested. This enables qemu to use KVM_SEV_INIT2 for SEV-ES guests when
+necessary.
+
+Reviewed-by: Nikunj A Dadhania <nikunj@amd.com>
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Naveen N Rao (AMD) <naveen@kernel.org>
+Link: https://lore.kernel.org/r/f2a7778ab26b11a8de90e170ff984ccd29dc05a0.1779281646.git.naveen@kernel.org
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ target/i386/sev.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/target/i386/sev.c b/target/i386/sev.c
+index 52379855b3e9f..9cdccc872a367 100644
+--- a/target/i386/sev.c
++++ b/target/i386/sev.c
+@@ -1697,8 +1697,7 @@ sev_vm_state_change(void *opaque, bool running, RunState state)
+  */
+ static bool sev_init2_required(SevGuestState *sev_guest)
+ {
+-    /* Currently no KVM_SEV_INIT2-specific options are exposed via QEMU */
+-    return false;
++    return !!SEV_COMMON(sev_guest)->sev_features;
+ }
+ 
+ static int sev_kvm_type(X86ConfidentialGuest *cg)
