@@ -1,0 +1,87 @@
+package enclavid:policy@0.1.0;
+
+/// Value shapes the policy handles: the inbound `event`, the outbound
+/// `action` batch, and the records they carry. Kept separate from the
+/// behavioural `policy` interface (WASI-style types-vs-behaviour split)
+/// so helper plugins can `use` the records without importing the `handle`
+/// export.
+interface types {
+    use enclavid:shared-types/capture@0.1.0.{media-spec};
+    use enclavid:shared-types/disclosure@0.1.0.{display-field};
+    use enclavid:host/types@0.1.0.{localized-ref, blob};
+
+    /// Terminal outcome carried by `action::finish`. The platform renders
+    /// UI from this fixed enum — policy controls no free text. The consumer
+    /// reads it from the session unconditionally: no consent screen stands
+    /// before it, so it is the one thing the policy hands the consumer
+    /// without the applicant's accept.
+    enum decision {
+        approved,
+        rejected,
+        rejected-retryable,
+        review,
+    }
+
+    /// One consent-and-disclosure. The `fields` are BOTH what the
+    /// applicant is shown on the consent screen AND — if they accept —
+    /// the exact set the runtime seals to the consumer. Show == seal,
+    /// structurally: the applicant audits precisely what leaves. `reason`
+    /// and `requester` are `localized-ref`s shown on the screen; `reason`
+    /// is bound to the consent record, `requester` is applicant-facing
+    /// only (never sealed to the consumer).
+    record disclosure {
+        fields: list<display-field>,
+        reason: localized-ref,
+        requester: localized-ref,
+    }
+
+    /// What the runtime renders to the applicant. Its reply comes back as
+    /// the matching `event` on a later turn.
+    variant prompt {
+        media(media-spec),                // capture one artifact; reply → event::media
+        consent-disclosure(disclosure),   // consent-to-disclose screen; ON ACCEPT the runtime seals it to the consumer
+    }
+
+    /// One captured artifact's frame stream — typically 8–12 JPEG frames over
+    /// ~1s. A plain record grouping the frames in order; each frame is a
+    /// host-owned `blob` handle (owned by `enclavid:host/types`) — "frame" is
+    /// the semantic role, `blob` the storage unit. The policy is a pure router
+    /// — it forwards a frame blob to a verification plugin, which reads the
+    /// pixels it needs. Anti-replay / forensic signals (parallax, glare drift,
+    /// hand jitter) live in inter-frame differences — which is why a capture is
+    /// a clip, not a single photo.
+    record clip {
+        frames: list<blob>,
+    }
+
+    /// The captured artifact for one `media-spec` step (carried by
+    /// `event::media`). `slot` is the capture-step index it fills; `clip`
+    /// bundles the host-owned frame blob handles — the policy forwards a frame
+    /// to a verification plugin rather than reading pixels itself.
+    record media-result {
+        slot: u32,
+        clip: clip,
+    }
+
+    /// INBOUND: the result of a prior `action`, fed by the runtime to
+    /// `handle`, one per call.
+    variant event {
+        start,                          // genesis: session opened (config via `context.props`)
+        consent-disclosure(bool),       // ← reply to prompt::consent-disclosure: accepted? (true ⇒ disclosure already sealed)
+        media(media-result),            // ← reply to prompt::media: one capture step completed
+    }
+
+    /// OUTBOUND: the action the policy returns from `handle`. `render` is
+    /// result-producing — its reply arrives as a future `event`; `finish`
+    /// is terminal. The round ends in exactly one of these two outward
+    /// states: awaiting applicant input, or done. Disclosure to the consumer
+    /// is NOT a separate action — it IS
+    /// `render(prompt::consent-disclosure(disclosure))`, sealed by the
+    /// runtime only on accept, so what the applicant audits is exactly what
+    /// leaves. The `decision` in `finish` is the exception: the consumer
+    /// learns it whatever the applicant accepted.
+    variant action {
+        render(prompt),          // result-producing → applicant; reply is a future `event`
+        finish(decision),        // terminal; the decision reaches the consumer unconditionally
+    }
+}

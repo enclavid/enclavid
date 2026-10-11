@@ -1,0 +1,71 @@
+package enclavid:shared-types@0.1.0;
+
+/// Capture-flow shapes — `media-spec` / `capture-step` and friends. Pure
+/// value types used by the `enclavid:policy` contract
+/// (`action::render(prompt::media)` + `event::media`) and helper plugins
+/// (e.g. `enclavid:well-known`). The host capabilities that mint the refs
+/// these records carry live in `enclavid:host`.
+interface capture {
+    use enclavid:host/types@0.1.0.{localized-ref, icon-ref};
+
+    /// Which physical camera the capture step should use.
+    variant camera-facing {
+        front,                    // selfie
+        rear,                     // documents
+        any,                      // browser picks; useful for laptops without a rear lens
+    }
+
+    /// On-screen guideline shown over the camera preview. Purely UX
+    /// hint — doesn't affect the captured bytes.
+    variant capture-guide {
+        %none,                    // no overlay
+        rect(f32),                // rectangle of given width:height aspect (1.42 passport, 1.585 ID-1)
+        oval,                     // face oval for selfie / liveness
+    }
+
+    /// One step within a multi-step capture. For two-sided documents:
+    /// front + back. For multi-page documents: one step per page.
+    /// Single-shot captures (passport photo page, selfie) use a single step.
+    /// Multi-step captures within ONE media render belong to the
+    /// SAME artifact — plugins analyse them together.
+    ///
+    /// `icon` is an `icon-ref` resolved through `enclavid:host/embedded-icons.icon`
+    /// — the name has to appear in the calling component's
+    /// `enclavid:embedded.icons.v1` section, blocking the free-form
+    /// covert channel a raw `option<string>` would otherwise be. Not
+    /// a text-ref because there's nothing to localise — icon-name is
+    /// purely a frontend dispatch token, never displayed verbatim.
+    ///
+    /// The three remaining surfaces are `localized-ref`s into the
+    /// component's pre-declared `i18n` catalog:
+    ///   * `instructions` — pre-capture intro body. Paired with
+    ///     `icon` to form "what you're about to do". Shown before
+    ///     the camera turns on for THIS step — even between steps
+    ///     of a multi-step capture ("now flip to the back").
+    ///   * `label` — short on-camera overlay shown during capture
+    ///     ("Photo page", "Back side").
+    ///   * `review-hint` — post-capture check on the preview screen
+    ///     ("Make sure the MRZ is sharp and free of glare").
+    record capture-step {
+        icon: option<icon-ref>,
+        instructions: localized-ref,
+        label: localized-ref,
+        camera: camera-facing,
+        guide: capture-guide,
+        review-hint: localized-ref,
+    }
+
+    /// Spec for one media render (`prompt::media`). Use multiple steps
+    /// for multi-side / multi-page captures of the same artifact. Use
+    /// multiple media renders for independent artifacts (e.g.,
+    /// shareholder passports).
+    ///
+    /// `label` is the overall artifact title surfaced as context on
+    /// every screen of the capture flow ("Your passport"). Per-step
+    /// copy — pre-capture instructions, on-camera prompt,
+    /// post-capture review — lives on `capture-step`.
+    record media-spec {
+        label: localized-ref,
+        captures: list<capture-step>,
+    }
+}

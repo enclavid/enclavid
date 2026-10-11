@@ -1,0 +1,94 @@
+package enclavid:host@0.1.0;
+
+/// Value shapes carried by the host capabilities in this package. Kept
+/// in a SEPARATE types interface (WASI-style types-vs-behaviour split)
+/// so the value type can be `use`d without importing the capability
+/// getter, and so `enclavid:host` stays a self-contained leaf package.
+///
+/// The three embedded refs (`localized-ref` / `icon-ref` /
+/// `disclosure-field-ref`) are RESOURCES, minted only by the host's
+/// `embedded-{i18n,icons,disclosure-fields}` capabilities. A component
+/// cannot construct one — the handle IS the proof the key was declared,
+/// so membership needs no crypto token. They live HERE (a shared
+/// interface) rather than inside each embedded interface so the strict
+/// per-component routing twin — a structural clone of `embedded-i18n` /
+/// `embedded-icons` with a distinct id — still references the SAME
+/// resource type and subtype-matches the component's canonical import.
+///
+/// `blob` is likewise a host-owned resource — one stored byte-blob, minted
+/// by the runtime into `event::media` and rehydrated across rounds via its
+/// `constructor(blob-hash)`. It is the UNIVERSAL unit: a captured camera frame
+/// is a blob, a future uploaded document / PDF is a blob — the host stores and
+/// hands them out identically. It lives here (not in
+/// `enclavid:shared-types/capture`) so both the policy and any verification
+/// plugin reference the SAME resource type and can pass a handle across the
+/// fused policy↔plugin boundary; the bytes stay host-side and enter a
+/// component's linear memory only when it pulls `bytes`. `blob-hash` is the
+/// content address that identifies any stored blob. The `clip` record that groups
+/// the blobs of one capture is NOT here — it's policy-facing (only
+/// `media-result` uses it) and lives in `enclavid:policy/types`; this package
+/// holds only what the host mints or owns.
+interface types {
+    /// One static configuration value the consumer supplies at session
+    /// creation (was `eval-args`). Read on demand via
+    /// `session-context.props`.
+    variant prop {
+        %string(string),
+        int(s64),
+        float(f64),
+        %bool(bool),
+        null,
+    }
+
+    /// A validated reference to a `localized` catalog entry — surfaces as
+    /// UI text once the host resolves it to the applicant's locale.
+    resource localized-ref;
+    /// A validated reference to an `icons` catalog entry — surfaces as a
+    /// machine icon name the applicant frontend dispatches.
+    resource icon-ref;
+    /// A validated reference to a `disclosure-fields` catalog entry —
+    /// surfaces as the machine `display-field.key` the consumer receives.
+    resource disclosure-field-ref;
+
+    /// A blob's content ADDRESS — the hex-encoded 32-byte BLAKE3 of its bytes.
+    /// An opaque STRING token (NOT one of the `-ref` resources above — those are
+    /// opaque per-round capability handles; this is a serializable value): the
+    /// policy stashes it in its opaque sealed `state` and passes it to the `blob`
+    /// constructor to rehydrate across rounds; it never inspects it. A string
+    /// (not raw bytes) for cross-language ergonomics — JS/Go/Rust: JSON-safe,
+    /// `==`-comparable, map-keyable, loggable (`[]byte` can't even be a Go map
+    /// key). TYPE-AGNOSTIC: a future `document`/`pdf` resource reuses the same
+    /// store and hash. (Algo-agility, if ever needed, via a multihash-style
+    /// `algo:` prefix inside the string.)
+    type blob-hash = string;
+
+    /// One stored byte-blob — a host-owned lazy CONTENT handle (has `bytes`),
+    /// distinct from the opaque `-ref` capability handles above. The universal
+    /// unit of storage: 1 blob ↔ 1 `blob-hash` ↔ 1 sealed blob host-side. A
+    /// captured camera frame is a blob; a future uploaded document / PDF is a
+    /// blob too. The semantic KIND lives in the record that groups blobs
+    /// (`clip.frames`) and the plugin that reads them — not in this type. A
+    /// verification plugin pulls the bytes via `bytes` (so they enter linear
+    /// memory only at use); the policy keeps the `blob-hash` in `state` to
+    /// rehydrate the blob in a later round. For camera frames: pristine bytes,
+    /// no container, no inter-frame compression that could mask the forensic
+    /// signal.
+    resource blob {
+        /// Rehydrate the blob with this content hash from the session's media
+        /// store. Own-session only (cross-session is cryptographically blocked).
+        /// Returns a COLD handle — no host IO yet; the bytes are pulled lazily on
+        /// the first `bytes()`. TRAPS on a miss (unknown / wrong-length hash): a
+        /// fabricated hash is never a legitimate outcome for a correct policy (it
+        /// only ever stashes hashes it got from a real `hash()`), so it fails loud
+        /// rather than handing the policy a recoverable branch. (A constructor is
+        /// possible precisely because there's no error result — only blob-or-trap.)
+        constructor(hash: blob-hash);
+        /// Pull this blob's bytes into the caller's linear memory. For a
+        /// rehydrated (constructed) blob this is the LAZY load point. Bounded by
+        /// the round's memory max: a round that goes past it is ended.
+        bytes: func() -> list<u8>;
+        /// This blob's content hash — stash in `state` to rehydrate the blob in
+        /// a later round via the constructor.
+        hash: func() -> blob-hash;
+    }
+}

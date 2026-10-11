@@ -1,0 +1,16 @@
+package local:policy@0.1.0;
+
+// What this policy imports and exports. Every interface imported here is
+// either the host's or a plugin's; the consumer pins an implementation of each
+// plugin package (here `enclavid:well-known`) when it creates a session.
+//
+// To use another plugin, import its interfaces here, put its WIT in `deps/`,
+// and run `npm run types`.
+world policy {
+    import enclavid:well-known/capture@0.1.0;
+    import enclavid:well-known/disclosure-fields@0.1.0;
+    import enclavid:host/embedded-i18n@0.1.0;
+    import enclavid:host/embedded-disclosure-fields@0.1.0;
+    import enclavid:host/session-context@0.1.0;
+    export enclavid:policy/policy@0.1.0;
+}

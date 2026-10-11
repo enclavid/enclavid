@@ -1,0 +1,10 @@
+package enclavid:policy@0.1.0;
+
+/// The policy's behaviour. `handle` reacts to one `event` and returns a
+/// new opaque `state` plus an `action` for the runtime to perform. A pure
+/// function: the runtime owns the mailbox, persistence, and effects.
+interface policy {
+    use types.{event, action};
+
+    handle: func(state: list<u8>, event: event) -> tuple<list<u8>, action>;
+}

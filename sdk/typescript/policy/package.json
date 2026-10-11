@@ -1,0 +1,33 @@
+{
+  "name": "@enclavid/policy",
+  "version": "0.1.0",
+  "description": "Write an Enclavid policy in TypeScript with a state of the policy's own type.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/enclavid/enclavid",
+    "directory": "sdk/typescript/policy"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/*.test.*"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --test dist/index.test.js"
+  },
+  "dependencies": {
+    "devalue": "^6.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~6.0.3"
+  }
+}
