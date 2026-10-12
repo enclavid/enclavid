@@ -1,0 +1,8 @@
+# The kernel's settings, read-only for everything after. The kernel lets a
+# process whose user is root write them by their file mode alone, capabilities
+# or not, and some name a program the kernel itself would then run with every
+# capability. The application is root without capabilities; undoing this takes
+# CAP_SYS_ADMIN, which nothing after holds.
+type = scripted
+command = /bin/busybox mount -o remount,bind,ro,nosuid,nodev,noexec /proc/sys
+depends-on: proc-sys

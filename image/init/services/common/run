@@ -1,0 +1,3 @@
+# /run, as /tmp: tmpfs, and noexec.
+type = scripted
+command = /bin/busybox mount -t tmpfs -o nosuid,nodev,noexec tmpfs /run

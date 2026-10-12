@@ -1,0 +1,16 @@
+# /dev is not a formality:
+#
+#   /dev/sev-guest   where a role's attestation reports, and api's
+#                    `tee_seal_key`, come from;
+#   /dev/ttyS0       the serial device ENCLAVID_LOG_DEVICE names, the single
+#                    channel anything here may speak on;
+#   /dev/null        where engine-supervisor points each disposable child's
+#                    stdout and stderr, so an escaped child cannot write a
+#                    round's plaintext to a descriptor it inherited;
+#   /dev/vda         the storage role's volume.
+#
+# The initramfs carries /dev/console and /dev/null of its own (image/initramfs)
+# because dinit needs both before this runs; this mounts over them. `noexec`:
+# root may make files in it, and none of them is anything to run.
+type = scripted
+command = /bin/busybox mount -t devtmpfs -o nosuid,noexec devtmpfs /dev

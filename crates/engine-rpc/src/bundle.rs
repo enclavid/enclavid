@@ -77,15 +77,16 @@ const _: () = assert!(
 /// Not a few, as a JSON-sized intuition suggests: a tiny key costs more as a
 /// hash-table slot than as bytes. An i18n key with no translations is two bytes
 /// encoded and a 49-byte bucket decoded, in a table that can stand half empty
-/// one past a growth boundary. Measured (`tests/meta_weight.rs`, counting musl's
-/// 16-byte unit and 4-byte header): 31.8 at the worst for metadata as this crate
-/// encodes it. A realistic catalog decodes to two or three times its encoding.
+/// one past a growth boundary. Measured (`tests/meta_weight.rs`, counting
+/// glibc's 8-byte header, 16-byte rounding and 32-byte minimum chunk): 36.0 at
+/// the worst for metadata as this crate encodes it. A realistic catalog decodes
+/// to two or three times its encoding.
 ///
 /// An encoding written by hand to size tables for members that then collapse
-/// into one can reach about 57. Only a peer other than api writes one, and what
-/// such a peer can make this worker hold is availability the host can take from
-/// it anyway.
-pub const META_WEIGHT_MARGIN: u64 = 32;
+/// into one can go well past it. Only a peer other than api writes one, and
+/// what such a peer can make this worker hold is availability the host can take
+/// from it anyway.
+pub const META_WEIGHT_MARGIN: u64 = 40;
 
 /// The most memory the decoded catalogs of one composition hold, in bytes:
 /// thirty-two times what the compiler lets its embedded sections carry, 64 MiB.
@@ -94,9 +95,9 @@ pub const META_WEIGHT_MARGIN: u64 = 32;
 /// takes, it is at most `MAX_EMBEDDED_SECTION_BYTES` of JSON. The costliest shape
 /// per byte of JSON is a key with one tiny translation — `"ab":{"a":""},`,
 /// fourteen bytes, decodes to a hash-table slot, two `String`s and a `Vec` — and
-/// a composition whose sections hold nothing else decodes to some twenty-one
-/// times their length (`tests/meta_weight.rs`). A realistic catalog decodes to
-/// about twice.
+/// a composition whose sections hold nothing else decodes to some sixteen times
+/// their length (`tests/meta_weight.rs`). A realistic catalog decodes to about
+/// twice.
 pub const MAX_DECODED_META_BYTES: u64 = 32 * MAX_EMBEDDED_SECTION_BYTES;
 
 /// A freshly compiled composition: the wasmtime-serialized fused component

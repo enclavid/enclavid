@@ -1,0 +1,8 @@
+# The memory controller's root, opened to its owner. cgroup v2 makes its root
+# directory 0555, writable only by a holder of CAP_DAC_OVERRIDE, which the
+# supervisor does not hold (see `app`). This lets root — the supervisor, uid 0 —
+# make its children's group there; the children, under identities of their
+# own, gain nothing from it.
+type = scripted
+command = /bin/busybox chmod 0755 /sys/fs/cgroup
+depends-on: cgroup

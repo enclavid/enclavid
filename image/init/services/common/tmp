@@ -1,0 +1,5 @@
+# /tmp, tmpfs because the CVM has no disk for it — every writable path is
+# encrypted RAM. noexec: nothing here ever executes out of a writable path, and
+# refusing up front costs nothing.
+type = scripted
+command = /bin/busybox mount -t tmpfs -o nosuid,nodev,noexec tmpfs /tmp

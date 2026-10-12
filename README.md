@@ -1,4 +1,4 @@
-# Enclavid
+# enclavid
 
 **A privacy-preserving identity / KYC verification engine that runs the
 verifier's own policy inside a TEE — designed so the operator can learn neither
@@ -66,11 +66,13 @@ flowchart LR
 
   subgraph host["Untrusted host"]
     hatch["hatch<br/>token checks · OCI pull · KBS relay · AMD VCEK fetch"]
+    relays["time relays<br/>blind byte carriers"]
   end
 
   registry[("OCI registry")]
   kbs[("KBS")]
   kds[("AMD key service")]
+  nts[("NTS servers<br/>six operators")]
 
   consumer -->|TLS| gateway
   applicant -->|TLS| gateway
@@ -78,6 +80,8 @@ flowchart LR
   hatch --> registry
   hatch --> kbs
   hatch --> kds
+  tee -->|"vsock, every enclave"| relays
+  relays --> nts
 ```
 
 Trust boundaries:
@@ -101,10 +105,17 @@ Trust boundaries:
   durable session state (and a cache of compiled policies) as
   **encrypted-only data**: everything is sealed enclave-side, so it never holds
   a key or plaintext.
-- **TEE ↔ untrusted host (`hatch`)** — the enclaves have no NIC; all outbound
+- **TEE ↔ untrusted host (`hatch`)** — the enclaves have no NIC; their outbound
   I/O goes through an HTTP-over-vsock service on the host (token checks, OCI
   pulls, the KBS relay, VCEK fetches from AMD's key service). The host is
   untrusted on content: artifacts are digest-pinned and checked TEE-side.
+- **Every enclave ↔ NTS servers** — each enclave keeps its own clock from
+  Network Time Security servers, reached through blind relays on the host. The
+  key exchange is TLS ending in the enclave, against roots compiled into it;
+  every time packet is authenticated; and the clock moves only when three
+  servers of different operators agree. The host can delay or drop that
+  traffic, not change it, and an enclave whose clock is no longer kept powers
+  off rather than run on it.
 
 ## Verifying the gateway
 
@@ -162,6 +173,16 @@ that: the verification plugins are placeholders so far.
   release changes neither its measurement nor its certificate, and it can route
   to an old and a new release at once while refusing new sessions to the one
   being drained.
+- **Trusted time in every enclave** — each one sets its clock from NTS before
+  its application starts, three of six independent operators agreeing, and
+  keeps it on Secure TSC, the one clocksource the host cannot move: the kernel
+  is left no other to fall back to. An enclave whose clock goes unkept for
+  about an hour, or would have to jump more than 2 s, powers off.
+- **Least privilege inside each enclave** — before anything runs, PID 1 makes
+  the kernel's settings, `/sys` and the root filesystem read-only and closes
+  its own control socket. Each application holds only the capabilities it
+  needs (the api, storage and the gateway as a user of their own), and the
+  clock keeper only the right to set the clock, under a syscall filter.
 - **Tooling** — a command-line client for authoring and pushing policies and
   plugins, and a web frontend served from the enclave.
 
@@ -174,6 +195,9 @@ that: the verification plugins are placeholders so far.
 - **Hardware-attested key release** — the KBS path is wired, but presents
   placeholder evidence rather than an SEV-SNP report, so a KBS cannot yet limit
   release to the attested enclave.
+- **Time and randomness for policies** — a policy cannot yet read the date (for
+  a passport's expiry, or an age) or draw random numbers. The trusted clock is
+  in place; the interfaces that hand it, and randomness, to a policy are next.
 - **Consumer tooling** — a command that verifies the gateway's attestation, and
   client SDKs.
 - **Webhooks** — notifying the consumer of status changes and ready disclosures.

@@ -7,7 +7,7 @@ each reproduces byte for byte:
 |---|---|---|
 | firmware | `ovmf/` — our own edk2 platform, see its README | `nix-build image/ovmf --check` |
 | kernel | `kernel/` | `nix-build image/kernel -A base\|compile-worker\|execution-worker\|storage --check` |
-| PID 1 | `init/` (binary) + `init/inittab/<role>` | `nix-build image/init --check` |
+| PID 1 | `init/` (dinit, busybox) + `init/services/` | `nix-build image/init -A dinit -A busybox --check` |
 | initramfs | `initramfs/` | `nix-build image/initramfs --check` |
 | cmdline | `cmdline/<role>/<variant>` | the file is the value |
 
@@ -22,9 +22,49 @@ variants add the kernel's memory controller — each supervisor holds its
 disposable children, a round or a compile each, to their memory with it, and no
 other role confines anything that way, so no other kernel carries it (see
 `kernel/memcg.config`).
-Everything else — PID 1's inittab, the initramfs that carries the role binary,
+Everything else — PID 1's services, the initramfs that carries the role binary,
 and the command line — is the role's own, and that is enough to give each its
 own measurement.
+
+## PID 1
+
+dinit (`init/`). It starts each role's services (`init/services/`, the
+`common` ones and the role's own) in the order their dependencies give: the
+mounts, then the clock keeper, then the application. Nothing restarts — dinit is
+built never to — so when any of them ends, what depends on it stops, and once
+every service has stopped dinit starts `recovery`, which powers the guest off.
+The application finishing, dying, or its clock no longer being kept all end the
+same way: a run that cannot continue should stop existing.
+
+No application keeps root's capabilities; each holds only those its role's
+`app` file names: none for api and storage, one for the gateway, and four for
+each worker's supervisor, which it uses to give each disposable child an
+identity of its own. api, storage and the gateway run as a user of their own,
+`app` (1000), handed by `app-files` just what they open — the log device, the
+attestation device, the launch settings, storage's volume — so they own
+nothing else of root's. The workers' supervisors stay root, under `noroot`
+securebits, locked, so that being root brings no capability into an exec: a
+process that can give its children identities could be root again whenever
+it liked, so a user of its own would bound nothing. The two workers mount
+`/proc` `hidepid=invisible` in a `proc` of their own, so neither supervisor
+holds a right to mount. The clock keeper narrows
+itself to `CAP_SYS_TIME` once it has opened what it needs.
+
+Root without capabilities can still write whatever root owns by its file
+mode, and some of that would hand capabilities back: the kernel's settings
+(one names a program the kernel runs with every capability), attributes under
+/sys (which clocksource the kernel reads, among them), PID 1's service files
+and the programs it runs, and its control socket. So before the clock keeper
+starts, `lockdown` makes /proc/sys, /sys and the root filesystem read-only and
+takes every permission off the control socket; undoing any of it takes
+`CAP_SYS_ADMIN` or `CAP_DAC_OVERRIDE`, which nothing after holds. /dev, /tmp
+and /run, which stay writable, are `noexec`; and the kernel has no core dumps.
+
+busybox is still in the image, for the four things dinit has no code for:
+`mount`, `poweroff`, the `chmod` that opens the two workers' cgroup root to its
+owner, and the `chown` that hands the other roles' applications what they open.
+It carries those applets and nothing else — no shell above all
+(`init/busybox.config`).
 
 ## The command line
 
@@ -37,13 +77,42 @@ rather than continuing in a corrupted state, and a panic ends the machine
 instead of leaving it running with a broken kernel. There is no in-place
 recovery in this design; a run that cannot continue should stop existing.
 
-`no-kvmclock tsc=reliable` keep the guest's clock on its TSC, which Secure TSC
+`--auto-recovery` is PID 1's: the kernel passes on what it does not recognise
+and that starts with `--`. With it, dinit meets every service stopped by
+starting `recovery` — the guest's poweroff — rather than by asking at the
+console what to do, of an operator who is not there.
+
+`no-kvmclock tsc=reliable` put the guest's clock on its TSC, which Secure TSC
 (`launch.snpFlags` in `default.nix`) fixes at launch out of the host's reach.
 Without the first, the kernel prefers KVM's paravirtual clock, whose readings
 the host writes, unless CPUID says the TSC is invariant — and the host writes
-CPUID too, and the measurement does not cover it. Without the second, the
-kernel checks the TSC against the HPET and the ACPI timer, both emulated by the
-host, and on a mismatch it gives up the TSC for one of them.
+CPUID too, and the measurement does not cover it. The second stops the kernel
+checking the TSC against the HPET and the ACPI timer, both emulated by the
+host; under Secure TSC this kernel already treats the TSC as reliable, so it
+says what holds rather than changing it.
+
+Neither keeps the clock on the TSC for good. The kernel still gives the TSC up
+after boot when it judges it unstable, and part of what it judges by is the
+host's to say — ACPI asking it to re-read the idle states, for one. It would
+move to a clocksource the host emulates and can stop, and every timer in the
+guest would stop with it, every check of the clock included. So there is
+nothing to move to: `hpet=disable` here, the kernel built without the ACPI PM
+timer (`kernel/common.config`), and the KVM clock off by `no-kvmclock`; and
+`idle=halt` keeps ACPI from re-reading idle states at all. The clock keeper
+below refuses to start unless the TSC is the only clocksource the kernel has,
+and checks every second after that it still reads it.
+
+The TSC makes elapsed time the guest's own; where the calendar starts is still
+the emulated RTC's, which is the host's. Every role's PID 1 therefore starts
+`timesync` (`crates/timesync`) before the application: it takes the calendar
+from NTS servers — the key exchange ending in the guest, every time packet
+authenticated, three servers of different operators agreeing — and dinit starts
+the application only once the keeper says the kernel's clock is synchronised.
+The application never runs on the host's calendar. The keeper ending ends the
+guest, and once it has first set the clock it ends itself on any step of more
+than 2 s; and every role runs a guard (`timesync::guard`) that ends it, and so the
+guest, once the kernel's own error estimate says the clock has gone about an
+hour without being kept.
 
 `sysctl.kernel.yama.ptrace_scope=3` is the ptrace floor the per-round child
 isolation rests on — "no attach", denying every process including one holding
@@ -76,11 +145,10 @@ is on the port, which is where a kill is diagnosed.
 The `ENCLAVID_*` entries are the application's configuration, and they are
 spelled exactly as they are in a shell because they end up in the same place.
 The kernel hands init any parameter it does not recognise that contains `=`
-as an environment variable, and init execs the application with what it
+as an environment variable, and dinit starts every service with what it
 inherited — so `std::env::var` finds them and the binaries need no notion of
-where they came from. Nothing else could fill an environment here: there is
-no shell and no service manager, and PID 1 runs `/bin/app` straight from its
-inittab.
+where they came from. Nothing else fills an environment here: there is no
+shell, and dinit is given no environment file of its own.
 
 The channel is measured, which makes it the right place for values that say
 what this image *is*: the fixed vsock ports it listens on, the host CID it
@@ -133,20 +201,13 @@ register values from whatever the guest was doing, and `panic()` calls
 `console_verbose()`, so a log level cannot be trusted to hold it back. Only the
 absence of an enabled console can.
 
-What `console=null` governs is the KERNEL. What the APPLICATION's fds 1 and 2
-end up pointing at is a separate question, and it is not fully settled: this
-initramfs carries no `/dev/console` node, and the `devtmpfs` that supplies one
-is mounted by a `::sysinit:` line — which runs before `::wait:/bin/app`, so the
-node does exist by then, but whether busybox init hands the application that
-console or a descriptor it settled on before the mount depends on when busybox
-opens it. Either way the production image is silent: the null console discards,
-and init's fallback descriptor returns `EBADF`, which Rust's stdio reports as
-success.
-
-The open question is the `debug` variant, whose command line puts a real
-console on the port. If the application inherits a pre-`devtmpfs` descriptor,
-`debug!` is invisible there and the `-debug` app twin buys nothing. Needs a
-boot.
+What `console=null` governs is the KERNEL. What the APPLICATION's fds 0, 1 and
+2 point at is the console too, by its service file: `app` and `timesync` share
+dinit's console (`options: shares-console`), and the initramfs carries a
+`/dev/console` node of its own for dinit to open before any service has mounted
+`/dev`. So the production image is silent — the null console discards — and the
+`debug` variant, whose command line puts a real console on the port, shows what
+the application writes there.
 
 Silencing the kernel does not silence the role. `ENCLAVID_LOG_DEVICE` names the
 same port, and the role opens it itself — see `crates/safe-logger`. That is the
@@ -193,8 +254,8 @@ which no consumer pins. Reaching for it is one file away, and it costs about
 ## The storage volume
 
 One role persists, and it is the only one that gets a device. `storage` expects
-a single virtio disk carrying an ext4 filesystem, mounted by its inittab at
-`/data`, with the session store and the cwasm cache underneath. Whoever
+a single virtio disk carrying an ext4 filesystem, mounted by its `data` service
+at `/data`, with the session store and the cwasm cache underneath. Whoever
 provisions the disk makes the filesystem once; the guest only mounts it, and
 mounts it `nosuid,nodev,noexec` because nothing on it is meant to be executed
 or to name a device.
@@ -211,6 +272,6 @@ survives a restart of the same image. It does not survive a new release of api:
 a different measurement derives a different key, and what the previous one wrote
 stays unreadable.
 
-`poweroff -f` in the inittab flushes first — busybox skips the `sync()` only for
-`-n` — so an ordinary shutdown loses nothing. A guest killed rather than shut
+`poweroff -f`, which `recovery` runs, flushes first — busybox skips the `sync()`
+only for `-n` — so an ordinary shutdown loses nothing. A guest killed rather than shut
 down leaves the journal to replay, which ext4 does on the next mount.

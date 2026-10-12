@@ -1,0 +1,25 @@
+# The clock, before the application: the keeper (crates/timesync) takes the
+# calendar from NTS servers and writes a line to a pipe dinit gives it — its
+# descriptor in READY_FD — when the kernel's clock is first synchronised by
+# their agreement. dinit counts it started only then,
+# so the application, which depends on it, never runs on the calendar the host
+# booted the guest with.
+#
+# It goes on keeping the clock, and ends when it cannot — the kernel left the
+# TSC, a step too large to be the clock's fault, or a fault of its own. Its
+# ending ends the guest (see `boot`), and so does not managing a first
+# synchronisation within `start-timeout`.
+#
+# Root, with every capability, only until it has opened what it needs: it then
+# keeps CAP_SYS_TIME alone and locks itself under a syscall filter before it
+# reads anything from the network. Its log device (/dev/ttyS0) is root's to
+# open, which is why that is done in the process rather than by `run-as` here.
+#
+# The console for stdio, as `app` has it, for the same reason.
+type = process
+command = /bin/timesync
+depends-on: lockdown
+ready-notification = pipevar:READY_FD
+start-timeout = 600
+restart = false
+options: shares-console

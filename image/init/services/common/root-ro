@@ -1,0 +1,10 @@
+# The root filesystem — PID 1's service files, every program it runs, its
+# control socket — read-only for everything after. Its files are root's, so
+# root may change them without any capability, and PID 1 loads `recovery`, and
+# runs /bin/busybox, with every capability once everything else has ended.
+# Last, once the mounts have made their mount points and the control socket has
+# lost its permissions.
+type = scripted
+command = /bin/busybox mount -o remount,bind,ro /
+depends-on: mounts
+depends-on: control-socket

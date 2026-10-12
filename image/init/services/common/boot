@@ -1,0 +1,11 @@
+# What dinit starts at boot: the application, and through its dependencies
+# everything under it — the mounts, then the clock, then the application.
+#
+# Nothing here restarts. Every service is `restart = false` (and dinit is built
+# never to restart by default), so when the application or the clock keeper
+# ends, what depends on it stops, this stops, and with every service stopped
+# dinit — started with `--auto-recovery` from the command line — starts
+# `recovery`, which powers the guest off. A run that cannot continue should stop
+# existing; there is no in-place recovery in this design.
+type = internal
+depends-on: app

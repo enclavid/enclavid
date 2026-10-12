@@ -48,21 +48,12 @@
 //! production image nothing on those reaches the host. Only code that opens the
 //! log device itself does, and that is this crate.
 //!
-//! Two mechanisms could be producing that silence, and which one it is has not
-//! been settled by a boot. `console=null` on the measured command line points
-//! `/dev/console` at a console that discards — but the initramfs archive
-//! carries no `/dev/console` node (see image/initramfs), and the `devtmpfs`
-//! supplying one is mounted by a `::sysinit:` line. That line runs before
-//! `::wait:/bin/app`, so the node exists by then; whether busybox init hands the
-//! application THAT console or a descriptor it settled on earlier, before the
-//! mount, depends on when busybox opens it.
-//!
-//! Both discard: the null console by design, and init's fallback — a read-only
-//! descriptor — by returning `EBADF`, which Rust's stdio reports as success. So
-//! the invariant holds either way and nothing here rests on the answer. What
-//! does rest on it is whether [`debug!`] is visible in the `debug` image, whose
-//! command line puts a real console on the port. Until someone boots one and
-//! looks, treat that as unverified.
+//! What produces that silence is the console. PID 1 (dinit) gives a role's
+//! process the console for fds 0, 1 and 2 (`shares-console` in its service
+//! file, image/init/services), and `console=null` on the measured command line
+//! points `/dev/console` at a console that discards. The `debug` image's
+//! command line puts a real console on the port instead, which is where
+//! [`debug!`] is seen.
 //!
 //! # Why nothing unvouched is forwarded
 //!

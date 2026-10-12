@@ -193,6 +193,11 @@ async fn main() -> std::convert::Infallible {
     // panic, so there is no per-request site for a caller to steer into.
     safe_logger::install();
     safe_logger::install_panic(true);
+    // The guest's clock is kept by `timesync`; this role ends, and the guest with
+    // it, once the kernel stops vouching for it. The certificates it serves and
+    // checks are judged by this clock.
+    #[cfg(feature = "vsock")]
+    timesync::guard();
 
     let descriptors = reserve_descriptors(config::MOST_DESCRIPTORS);
     budget::limit(descriptors);
@@ -314,11 +319,11 @@ fn reserve_descriptors(needed: u64) -> u64 {
     // `None` is no limit at all.
     let limit = getrlimit(Resource::Nofile);
     let mut available = limit.current.unwrap_or(u64::MAX);
-    // First the hard limit as well. This role is its guest's one process and
-    // runs as root, and nothing else in the image raises the kernel's default —
-    // so the ceiling is this process's to lift, and it lifts it. Where it may
-    // not, the soft limit goes as far as the hard one; where the kernel holds
-    // the soft limit lower still, as far as it will.
+    // First the hard limit as well. This role holds CAP_SYS_RESOURCE for this
+    // alone (its service file), and nothing else in the image raises the
+    // kernel's default — so the ceiling is this process's to lift, and it
+    // lifts it. Where it may not, the soft limit goes as far as the hard one;
+    // where the kernel holds the soft limit lower still, as far as it will.
     let mut asks = vec![(needed, limit.maximum.map(|hard| hard.max(needed)))];
     let mut soft = limit.maximum.map_or(needed, |hard| needed.min(hard));
     while soft > available {

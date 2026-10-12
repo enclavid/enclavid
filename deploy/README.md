@@ -87,7 +87,7 @@ checkout: the gateway's guest, and api with the three guests it reaches.
 | `enclavid-gateway-main` | the gateway's guest |
 | `enclavid-gateway-main-push` | pushes the gateway its configuration after every start of the gateway |
 | `enclavid-certificate-main` | keeps the gateway on an issued certificate, with `acme.issue` |
-| `enclavid-relay-*` | the links between the guests, and from the host into them |
+| `enclavid-relay-*` | the links between the guests, from the host into them, and from them to their NTS servers |
 | `enclavid-hatch` | what the guests reach outside: token checks, registry pulls |
 | `enclavid-fleet.target`, `enclavid-host.target` | all of the above |
 
@@ -130,6 +130,19 @@ answers 429 with `Retry-After`. With `auth = "none"` every caller is that one
 principal, so a rate is the host's and anyone can spend it for everyone; `-1`
 leaves an operation unlimited. The count is kept in the hatch's memory: it
 starts afresh when the hatch does, and each host keeps its own.
+
+Every guest keeps its own clock from NTS servers, and starts its application
+only once three of them agree. The `enclavid-relay-time-*` units carry that
+from this host's network: for each server on a guest's list
+(`crates/timesync/servers`), its key exchange on TCP port 4460 and its time
+packets on UDP port 123. A guest that cannot reach three of them does not
+start. The servers see this host's address, and nothing the relays carry can
+be read or changed here — the key exchange ends inside the guest and every
+time packet is authenticated — so what this host decides is only whether it
+arrives. Every guest on the host shares these units, so each lets one guest
+hold at most a few connections at once, lets a quiet one go, and spaces out
+the packets one connection sends; and they run as a user of their own, with
+no capability and bounded memory.
 
 ## Certificates
 

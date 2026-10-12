@@ -1,0 +1,6 @@
+# Nothing to hand over: this role's application stays root. Its supervisor
+# gives each disposable child an identity of its own (`cap_setuid`), and a
+# process that can do that can be root again whenever it likes, so a user of
+# its own would bound nothing; `lockdown` is what bounds root here.
+type = internal
+depends-on: mounts

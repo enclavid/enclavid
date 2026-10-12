@@ -224,10 +224,11 @@ pub(crate) fn spawn_child(
                     Gid, Uid, set_thread_groups, set_thread_res_gid, set_thread_res_uid,
                 };
 
-                // As root, so the value is also this process's floor — a write
-                // by a holder of CAP_SYS_RESOURCE sets the minimum the process
-                // may later lower it to. And before the identity changes:
-                // `/proc/self` stays root's until the exec.
+                // While it still holds CAP_SYS_RESOURCE, raised for the worker
+                // by its service file, so the value is also this process's
+                // floor — a write by a holder of it sets the minimum the
+                // process may later lower it to. And before the identity
+                // changes: `/proc/self` stays root's until the exec.
                 let score = rustix::fs::open(
                     c"/proc/self/oom_score_adj",
                     OFlags::WRONLY | OFlags::CLOEXEC,

@@ -82,6 +82,10 @@ quick_cache = { version = "0.7", default-features = false, optional = true }
 # `enclavid-ra-tls` names no backend and has no features to flip.
 enclavid-ra-tls = { path = "../ra-tls", optional = true }
 fleet-transport = { path = "../fleet-transport", optional = true }
+# The guard on the guest's clock (`timesync::guard`), in the attested build: a
+# round's time is this clock. Optional, and only through `vsock`, because the
+# child links this crate's library and must not take an outward channel with it.
+timesync = { path = "../timesync", optional = true }
 # The RA-TLS backend is chosen here, not by ra-tls — see the `[features]` axis.
 # The hardware arm exists now. This worker still has no path to AMD, which is
 # what shapes it rather than what prevents it: it mints without an endorsement
@@ -162,8 +166,8 @@ sev-snp = ["enclavid-attestation?/sev-snp"]
 # configuration: `guest-hardening` asserts a ptrace floor no ordinary kernel
 # meets, so a build carrying it already refuses to run outside a measured image.
 guest-hardening = ["worker", "sev-snp", "engine-supervisor/guest-hardening"]
-# The attested build: reach api over vsock instead of TCP.
-vsock = ["worker", "fleet-transport/vsock"]
+# The attested build: reach api over vsock instead of TCP, and guard the clock.
+vsock = ["worker", "fleet-transport/vsock", "dep:timesync"]
 # Compiles the `debug!` sites in. OFF in the measured build, so a production
 # binary holds no diagnostic that nobody wrote a reason for. The supervisor's
 # half hands the per-round child this process's stderr.

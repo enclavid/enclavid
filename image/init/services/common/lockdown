@@ -1,0 +1,9 @@
+# What everything after PID 1's own services runs under: the role's mounts, and
+# nothing root could change without a capability — the kernel's settings,
+# /sys, the root filesystem and PID 1's control socket — left changeable. The
+# clock keeper, and with it the application, start only after.
+type = internal
+depends-on: mounts
+depends-on: proc-sys-ro
+depends-on: sys-ro
+depends-on: root-ro

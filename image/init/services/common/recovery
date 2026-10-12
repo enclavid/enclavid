@@ -1,0 +1,10 @@
+# The guest's end. dinit starts this when every other service has stopped
+# without anyone asking for a shutdown — which, since nothing here restarts, is
+# what any service ending comes to (see `boot`): the application finishing,
+# dying, or its clock no longer being kept.
+#
+# `-f` powers off at once. A CVM with nothing left to do should stop existing
+# rather than sit idle holding a session's memory, and busybox's forced
+# poweroff still flushes first (see image/README.md on the storage role).
+type = scripted
+command = /bin/busybox poweroff -f

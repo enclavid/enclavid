@@ -1,0 +1,33 @@
+# The application: the execution-worker. Each role's initramfs provides its own
+# binary under this one name, so PID 1 needs no configuration and there is
+# nothing to mis-set.
+#
+# Started once the clock is synchronised (see `timesync`), and stopped if the
+# keeper ends. When it ends — cleanly or not — the guest ends with it (see
+# `boot`).
+#
+# It runs as root, so the files it opens, all of them root's, stay its own; but
+# `noroot` keeps uid 0 from bringing root's capabilities into the exec, and
+# `-locked` keeps that so for anything it might start. It holds what
+# `capabilities` raises with `^`, and nothing in the image carries file
+# capabilities to add to it. Its supervisor (crates/engine-supervisor) holds
+# four, all for the disposable child each round runs in, and gives every one up
+# in the child before its exec:
+#   cap_setuid, cap_setgid  the child's identity, never reused, set between
+#                           fork and exec;
+#   cap_sys_resource        the child's `oom_score_adj`, written by a holder of
+#                           it, is the floor the child cannot lower itself below;
+#   cap_kill                killing a child, by then of another identity.
+# It mounts nothing: its `proc` service mounts /proc as the supervisor needs it.
+#
+# Its stdin, stdout and stderr are the console, as a process PID 1 starts has
+# always had here: `console=null` on a production command line discards them,
+# and the `debug` one puts a real console on the serial port. What may reach the
+# host goes to the log device by name (crates/safe-logger), never through these.
+type = process
+command = /bin/app
+depends-on: timesync
+restart = false
+securebits = noroot noroot-locked
+capabilities = ^cap_setuid,^cap_setgid,^cap_sys_resource,^cap_kill
+options: shares-console

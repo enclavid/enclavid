@@ -40,9 +40,9 @@ type Peak = ();
 /// holds, every cached composition's cwasm included, because reading another
 /// process's descriptors needs only the READ ptrace mode and Yama gates only
 /// ATTACH. The entries the kernel serves to anyone — a sibling's `status`, its
-/// `cgroup`, the `oom_score_adj` the supervisor gave it — are hidden by the
-/// remount of `/proc` with `hidepid=invisible` at boot ([`Cgroups::create`]),
-/// which leaves each identity only its own. It cannot write a cgroup file, all
+/// `cgroup`, the `oom_score_adj` the supervisor gave it — are hidden by
+/// `/proc`'s `hidepid=invisible`, which the worker's own `proc` service mounts
+/// it with and [`Cgroups::create`] checks: each identity sees only its own. It cannot write a cgroup file, all
 /// of which are root's, so it cannot move itself out of its group or raise its
 /// own max, and it cannot even look inside `children/`, which only root may
 /// enter; it cannot raise a hard limit; and it cannot open `/proc/kmsg`.
@@ -64,8 +64,8 @@ pub(crate) const CHILD_UID_BASE: u32 = 65_536;
 /// this.
 pub const DEFAULT_CHILD_MAX_TASKS: u64 = 64;
 
-/// Where the cgroup v2 hierarchy is mounted: each worker's inittab mounts it
-/// there before the supervisor starts. The children's group is `children/`
+/// Where the cgroup v2 hierarchy is mounted: each worker's `cgroup` service
+/// (image/init/services) mounts it there before the supervisor starts. The children's group is `children/`
 /// directly below it.
 #[cfg(all(target_os = "linux", feature = "guest-hardening"))]
 const ROOT: &std::ffi::CStr = c"/sys/fs/cgroup";
@@ -176,9 +176,9 @@ impl Cgroups {
     /// mounted is cgroup v2 with the memory controller, this process sits at the
     /// root, `children` at their task cap leave half the guest's PIDs, the
     /// kernel log is closed to every reader without CAP_SYSLOG and `/dev/kmsg`
-    /// to every reader at all, and the limits hold one child at its max with at
-    /// least one task. Then it remounts `/proc` so that no process sees
-    /// another's entries unless it may trace it, and builds the group.
+    /// to every reader at all, `/proc` shows no process another's entries
+    /// unless it may trace it, and the limits hold one child at its max with at
+    /// least one task. Then it builds the group.
     /// `children/` must not exist yet: this process runs once per boot, so a
     /// group already there was built by something else, with limits this
     /// process did not set.
@@ -293,21 +293,15 @@ impl Cgroups {
         // so a child sees its own and none of its siblings' — not even the
         // `status`, `cgroup` and `oom_score_adj` the kernel otherwise serves
         // to anyone, which would say which other rounds are running and how
-        // large each one's composition is. Root loses nothing. Set here
-        // because PID 1's inittab cannot say it: busybox init hands any line
-        // holding `=` to a shell, and the image has none. A remount names the
-        // mount's flags afresh, so the inittab's are repeated.
-        {
-            use rustix::mount::{MountFlags, mount_remount};
-            at(
-                "hiding each process's /proc entries from the others",
-                mount_remount(
-                    c"/proc",
-                    MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC,
-                    c"hidepid=invisible",
-                )
-                .map_err(io::Error::from),
-            )?;
+        // large each one's composition is. This process reads only its own.
+        // The worker's `proc` service mounts it so; this process has no right
+        // to mount, and checks.
+        let mounts = at(
+            "reading what is mounted at /proc",
+            std::fs::read_to_string("/proc/self/mountinfo"),
+        )?;
+        if !proc_hides_entries(&mounts) {
+            return Err(refused("finding /proc mounted hidepid=invisible"));
         }
 
         at(
@@ -578,6 +572,40 @@ fn populated(text: &str) -> Option<bool> {
     }
 }
 
+/// Whether `/proc` shows each process's entries only to those that may trace
+/// it, by `/proc/self/mountinfo`: the mount on top at `/proc` is procfs, and
+/// every procfs mounted anywhere — each an instance with options of its own —
+/// has `hidepid=invisible` and no `gid=`, the group that option would let see
+/// everything. A line is the mount's own fields, ` - `, then the filesystem
+/// type, the source and the superblock's options; the mount point is the fifth
+/// field, escaped, so it holds no space.
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "guest-hardening")),
+    allow(dead_code)
+)]
+fn proc_hides_entries(mountinfo: &str) -> bool {
+    let mounts = || {
+        mountinfo.lines().filter_map(|line| {
+            let (mount, superblock) = line.split_once(" - ")?;
+            let point = mount.split(' ').nth(4)?;
+            let mut fields = superblock.split(' ');
+            let (kind, _source, options) = (fields.next()?, fields.next()?, fields.next()?);
+            Some((point, kind, options))
+        })
+    };
+    let hides = |options: &str| {
+        options.split(',').any(|o| o == "hidepid=invisible")
+            && !options.split(',').any(|o| o.starts_with("gid="))
+    };
+    mounts()
+        .rev()
+        .find(|&(point, _, _)| point == "/proc")
+        .is_some_and(|(_, kind, _)| kind == "proc")
+        && mounts()
+            .filter(|&(_, kind, _)| kind == "proc")
+            .all(|(_, _, options)| hides(options))
+}
+
 /// `MemAvailable` out of `/proc/meminfo`, in bytes.
 fn mem_available(meminfo: &str) -> Option<u64> {
     let kib = meminfo
@@ -629,8 +657,9 @@ fn outgrew_max(own: Counters, total_oom_before: u64, total_oom_after: u64) -> bo
 /// of the guest's memory instead — still takes a child before the supervisor,
 /// whose score is `0`. Never `-1000`: a process there is never chosen, and a
 /// group whose every process is unchosen leaves the charge that reached the
-/// limit waiting for good. Written as root before the identity changes, so it
-/// is also the floor the child cannot lower itself below.
+/// limit waiting for good. Written before the identity changes, by a holder of
+/// CAP_SYS_RESOURCE, so it is also the floor the child cannot lower itself
+/// below.
 fn oom_score_adj(inherited: u64, total: u64) -> i32 {
     1000 - inherited
         .saturating_mul(1000)
@@ -696,6 +725,58 @@ mod tests {
         assert_eq!(counters(""), None);
         assert_eq!(counters("oom 1\n"), None);
         assert_eq!(counters("oom x\noom_kill 1\n"), None);
+    }
+
+    #[test]
+    fn proc_mounted_hidepid_invisible_hides_entries() {
+        let mountinfo = "\
+22 1 0:20 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw,hidepid=invisible
+23 1 0:21 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw
+";
+        assert!(proc_hides_entries(mountinfo));
+    }
+
+    #[test]
+    fn proc_mounted_plain_does_not() {
+        let mountinfo = "22 1 0:20 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n";
+        assert!(!proc_hides_entries(mountinfo));
+    }
+
+    #[test]
+    fn the_mount_on_top_is_the_one_that_counts() {
+        // Hidden first, then mounted over without it.
+        let mountinfo = "\
+22 1 0:20 / /proc rw,relatime - proc proc rw,hidepid=invisible
+30 22 0:25 / /proc rw,relatime - proc proc rw
+";
+        assert!(!proc_hides_entries(mountinfo));
+        // Optional fields before the separator do not shift the rest.
+        let shared = "22 1 0:20 / /proc rw shared:1 master:2 - proc proc rw,hidepid=invisible\n";
+        assert!(proc_hides_entries(shared));
+    }
+
+    #[test]
+    fn a_group_let_see_everything_does_not() {
+        let mountinfo = "22 1 0:20 / /proc rw - proc proc rw,gid=65536,hidepid=invisible\n";
+        assert!(!proc_hides_entries(mountinfo));
+    }
+
+    #[test]
+    fn a_second_procfs_without_it_does_not() {
+        // Each procfs is its own instance: one elsewhere, mounted plain, shows
+        // every entry whatever /proc does.
+        let mountinfo = "\
+22 1 0:20 / /proc rw - proc proc rw,hidepid=invisible
+40 25 0:30 / /run/proc rw - proc proc rw
+";
+        assert!(!proc_hides_entries(mountinfo));
+    }
+
+    #[test]
+    fn something_else_at_proc_does_not() {
+        let mountinfo = "22 1 0:20 / /proc rw - tmpfs tmpfs rw,hidepid=invisible\n";
+        assert!(!proc_hides_entries(mountinfo));
+        assert!(!proc_hides_entries(""));
     }
 
     #[test]

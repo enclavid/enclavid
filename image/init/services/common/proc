@@ -1,0 +1,5 @@
+# /proc. The two workers replace this with a `proc` of their own, mounted
+# hidepid=invisible for their disposable children, which run under identities
+# of their own.
+type = scripted
+command = /bin/busybox mount -t proc -o nosuid,nodev,noexec proc /proc

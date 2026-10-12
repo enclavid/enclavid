@@ -1,0 +1,8 @@
+# What this role mounts before anything runs: the pseudo-filesystems, and
+# nothing of its own — it holds no disk and spawns no children.
+type = internal
+depends-on: proc
+depends-on: sys
+depends-on: dev
+depends-on: tmp
+depends-on: run

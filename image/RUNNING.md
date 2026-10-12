@@ -65,22 +65,26 @@ nix-build image/app    -A api             # and -A storage, -A compile-worker,
 ```
 
 The initramfs is a function rather than an attribute set, because what it wraps
-differs per role. The two workers must be given their child binary as a
-`sibling`, because a worker resolves it next to its own executable; storage
-needs `/data` as a mount point, because its inittab mounts `/dev/vda` there.
+differs per role. Every role takes the clock keeper and its services — the
+`common` ones and its own. The two workers must be given their child binary as
+a `sibling`, because a worker resolves it next to its own executable; storage
+needs `/data` as a mount point, because its `data` service mounts `/dev/vda`
+there.
 
 ```sh
 A='(import ./image/app)'
 
 nix-build image/initramfs -o irfs-storage \
   --arg app "$A.storage + \"/storage-cvm\"" \
-  --arg inittab ./image/init/inittab/storage \
+  --arg timesync "$A.timesync + \"/timesync\"" \
+  --arg services '[ ./image/init/services/common ./image/init/services/storage ]' \
   --argstr name storage \
   --arg dirs '[ "data" ]'
 
 nix-build image/initramfs -o irfs-execution-worker \
   --arg app "$A.\"execution-worker\" + \"/execution-worker\"" \
-  --arg inittab ./image/init/inittab/execution-worker \
+  --arg timesync "$A.timesync + \"/timesync\"" \
+  --arg services '[ ./image/init/services/common ./image/init/services/execution-worker ]' \
   --argstr name execution-worker \
   --arg siblings "{ engine-executor-child = $A.\"execution-worker\" + \"/engine-executor-child\"; }"
 ```
@@ -270,6 +274,11 @@ vsock addresses guest↔host only, so a guest cannot dial another guest. Every
 fleet leg is two hops through a host-side relay, which means the relays must
 exist before the guest that dials through them is useful.
 
+0. Start the relays to the NTS servers, two per server on
+   `crates/timesync/servers`. Every guest starts its application only once
+   three of them agree on the time, so without these no guest starts its
+   application — its console says which servers it cannot reach, and after the
+   keeper's ten minutes (`start-timeout`) the guest powers off.
 1. Start the three leaves. Each answers `{"healthy":false}` on its health port
    from the moment it binds, and `{"healthy":true}` once it is listening.
 2. Start one relay per leg and the hatch.
@@ -278,6 +287,11 @@ exist before the guest that dials through them is useful.
    never becomes ready, not as one that exits.
 
 ```sh
+# one pair per server on crates/timesync/servers: <port> and <port>+1
+host-relay --listen vsock:7100 --to tcp:time.cloudflare.com:4460
+host-relay --listen vsock:7101 --to udp:time.cloudflare.com:123
+# …
+
 host-relay --listen vsock:8001 --to vsock:$STORAGE_CID:8001
 host-relay --listen vsock:8002 --to vsock:$COMPILE_CID:8002
 host-relay --listen vsock:8003 --to vsock:$EXEC_CID:8003

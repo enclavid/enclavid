@@ -32,6 +32,10 @@ safe-logger = { path = "../safe-logger", features = ["device"] }
 # connection is taken, so a full one leaves the rest in the kernel's backlog —
 # see `crate::listener` and `crate::config::push`.
 fleet-transport = { path = "../fleet-transport", features = ["tower-adapter"] }
+# The guard on the guest's clock (`timesync::guard`), in the attested build: the
+# certificates this role serves and checks are judged by this clock. The library
+# alone.
+timesync = { path = "../timesync", optional = true }
 tokio = { version = "1", features = ["full"] }
 
 # Three things: the HTTP/1.1 server on the configuration port the host pushes
@@ -188,7 +192,7 @@ default = ["dev-attestation"]
 # A measured guest kernel has no IP stack, so vsock is not a preference. It is
 # also the axis that decides whether the leg to api is RA-TLS, mirroring the
 # same choice on api's inbound.
-vsock = ["fleet-transport/vsock"]
+vsock = ["fleet-transport/vsock", "dep:timesync"]
 # The ONE shared identity a dev fleet needs: a software attestor verifies
 # against its own key, so peers that each generated their own could never attest
 # each other.

@@ -19,17 +19,23 @@
 //!
 //! # inbound, accepting callers itself, so it names each one to the guest
 //! host-relay --listen tcp:0.0.0.0:443 --proxy-protocol --to vsock:5:443
+//!
+//! # a guest's NTS server: its key exchange, and its time packets as datagrams;
+//! # every guest on the host shares these, so none may hold more than its share
+//! host-relay --listen vsock:7100 --per-guest 8 --to tcp:time.cloudflare.com:4460
+//! host-relay --listen vsock:7101 --per-guest 8 --to udp:time.cloudflare.com:123
 //! ```
 //!
 //! Everything topological — how many workers, what reaches what — is decided by
 //! which instances are started with which arguments. See the crate docs for why
 //! the process holds no map of its own.
 
+use std::collections::HashMap;
 use std::io;
 use std::process::ExitCode;
 
 use clap::Parser;
-use host_relay::{Destination, Endpoint, proxy_header, serve_connection};
+use host_relay::{Accepted, Destination, Endpoint, proxy_header, serve_connection};
 
 #[derive(Parser)]
 #[command(
@@ -46,7 +52,8 @@ struct Args {
     listen: Endpoint,
 
     /// Where to send it: `hybrid:<path>:<port>` (cloud-hypervisor guest),
-    /// `vsock:<cid>:<port>` (real AF_VSOCK guest) or `tcp:<addr>`.
+    /// `vsock:<cid>:<port>` (real AF_VSOCK guest), `tcp:<addr>`, or `udp:<addr>`
+    /// for a caller that frames datagrams on its stream.
     #[arg(long, value_parser = Destination::parse)]
     to: Destination,
 
@@ -69,6 +76,13 @@ struct Args {
     /// a caller's address to name.
     #[arg(long)]
     proxy_protocol: bool,
+
+    /// At most this many connections open at once from any one guest; one
+    /// past that is closed as it arrives. For a relay every guest on the host
+    /// shares, so that none can take the others' turns. Needs a `vsock:`
+    /// listener — nothing else says which guest dialled. Unset, no limit.
+    #[arg(long)]
+    per_guest: Option<usize>,
 }
 
 fn parse_octal(s: &str) -> Result<u32, String> {
@@ -87,6 +101,18 @@ async fn main() -> ExitCode {
     if args.proxy_protocol && !matches!(args.listen, Endpoint::Tcp(_)) {
         eprintln!(
             "host-relay: --proxy-protocol needs a tcp: listener; nothing else has a caller's address to name"
+        );
+        return ExitCode::FAILURE;
+    }
+    if args.proxy_protocol && matches!(args.to, Destination::Udp(_)) {
+        eprintln!(
+            "host-relay: --proxy-protocol writes a header ahead of a stream, and a udp: destination is not one"
+        );
+        return ExitCode::FAILURE;
+    }
+    if args.per_guest.is_some() && !matches!(args.listen, Endpoint::Vsock(_)) {
+        eprintln!(
+            "host-relay: --per-guest needs a vsock: listener; nothing else says which guest dialled"
         );
         return ExitCode::FAILURE;
     }
@@ -126,12 +152,15 @@ async fn main() -> ExitCode {
     };
 
     let mut inflight = tokio::task::JoinSet::new();
+    // How many connections each guest has open, under --per-guest. A task
+    // returns its guest when it ends, which is what reaping it counts down.
+    let mut open: HashMap<u32, usize> = HashMap::new();
     loop {
         tokio::select! {
             _ = sigterm.recv() => break,
             _ = sigint.recv() => break,
             accepted = listener.accept() => {
-                let (inbound, ends) = match accepted {
+                let Accepted { stream: inbound, ends, guest } = match accepted {
                     Ok(accepted) => accepted,
                     Err(e) => {
                         // Per-connection failures are not fatal — staying up matters
@@ -150,20 +179,40 @@ async fn main() -> ExitCode {
                         continue;
                     }
                 };
+                // Reap what has finished. A JoinSet only releases a task's
+                // allocation when it is joined, so without this every connection
+                // ever served is retained for the process lifetime — a slow climb
+                // to the OOM killer, which would tear down exactly the live
+                // sessions the drain below exists to protect. It also keeps
+                // `len()` meaning "in flight" rather than "served since boot",
+                // and the counts below meaning what is still open.
+                while let Some(ended) = inflight.try_join_next() {
+                    if let Ok(Some(guest)) = ended
+                        && let Some(count) = open.get_mut(&guest)
+                    {
+                        *count -= 1;
+                        if *count == 0 {
+                            open.remove(&guest);
+                        }
+                    }
+                }
+                let counted = guest.filter(|_| args.per_guest.is_some());
+                if let (Some(most), Some(guest)) = (args.per_guest, counted) {
+                    let count = open.entry(guest).or_default();
+                    if *count >= most {
+                        // Dropping it closes it, as the guest will see.
+                        continue;
+                    }
+                    *count += 1;
+                }
                 let dest = args.to.clone();
                 let header = ends.filter(|_| args.proxy_protocol).map(proxy_header);
                 inflight.spawn(async move {
                     if let Err(e) = serve_connection(inbound, &dest, header).await {
                         eprintln!("host-relay: splice: {e}");
                     }
+                    counted
                 });
-                // Reap what has finished. A JoinSet only releases a task's
-                // allocation when it is joined, so without this every connection
-                // ever served is retained for the process lifetime — a slow climb
-                // to the OOM killer, which would tear down exactly the live
-                // sessions the drain below exists to protect. It also keeps
-                // `len()` meaning "in flight" rather than "served since boot".
-                while inflight.try_join_next().is_some() {}
             }
         }
     }

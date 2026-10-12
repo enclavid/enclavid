@@ -28,6 +28,16 @@ rec {
       qemu = lib.getExe' built.pkgs.qemu_kvm "qemu-system-x86_64";
     };
 
+  # The NTS servers a tree's guests keep their clocks by, each a port and a
+  # name, as its crates/timesync/servers lists them. A tree from before the
+  # list has guests that dial none.
+  timeServers = src:
+    let file = within src "crates/timesync/servers";
+    in lib.optionals (builtins.pathExists file) (map
+      (line: { port = lib.elemAt (words line) 0; name = lib.elemAt (words line) 1; })
+      (lib.filter (line: words line != [ ] && !lib.hasPrefix "#" line)
+        (lib.splitString "\n" (builtins.readFile file))));
+
   # One launcher per QEMU, since a release boots under the QEMU its
   # measurements were computed for.
   bootCvm = qemu: pkgs.writeShellApplication {
@@ -101,11 +111,16 @@ rec {
     '' + builtins.readFile ./bin/certificate.sh;
   };
 
+  # Started again however often it ends: a relay to a public name — an NTS
+  # server's — resolves it as it starts, and fails for as long as the host's
+  # resolver is not up yet. With the default limit on starts, a few such
+  # failures in a row would leave it stopped for good.
   relayService = name: r: {
     description = "Enclavid host relay: ${name}";
     wantedBy = [ "enclavid-host.target" ];
     partOf = [ "enclavid-host.target" ];
     enableDefaultPath = false;
+    startLimitIntervalSec = 0;
     serviceConfig = {
       Type = "exec";
       ExecStart = lib.concatStringsSep " " (
@@ -116,6 +131,15 @@ rec {
       RestartSec = 1;
       TimeoutStopSec = 15;
       StandardInput = "null";
+    } // lib.optionalAttrs (r.unprivileged or false) {
+      # A relay that listens on a vsock port above the reserved ones and dials
+      # out needs nothing of root's, and one every guest here reaches should
+      # hold nothing a guest could turn: a user of its own, no capability, no
+      # way to gain one, and a bound on the memory its callers can make it hold.
+      DynamicUser = true;
+      CapabilityBoundingSet = "";
+      NoNewPrivileges = true;
+      MemoryMax = "256M";
     };
   };
 

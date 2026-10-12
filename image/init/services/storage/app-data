@@ -1,0 +1,7 @@
+# The volume's top, handed to storage's own user (1000, see `app`), which makes
+# what it keeps under it itself. Not recursive: everything below is that user's
+# already, made by it, and a walk of the whole volume at every boot would cost
+# in proportion to what it holds.
+type = scripted
+command = /bin/busybox chown 1000:1000 /data
+depends-on: data

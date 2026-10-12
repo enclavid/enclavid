@@ -25,6 +25,11 @@ let
   pkgs = import nixpkgs { system = "x86_64-linux"; };
   version = pkgs.lib.removeSuffix "\n" (builtins.readFile ./kernel_version.txt);
 
+  src = pkgs.fetchurl {
+    url = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${version}.tar.xz";
+    sha256 = "f410638061a165c12f42ab871d2f3fcd525515359b5faeee80969cff84524df9";
+  };
+
   # A variant is named for the roles it boots; a fragment for what it turns on
   # or off. `fragment` selects the one layered over common.config — diskless or
   # storage, which differ only in whether the kernel can reach storage at all —
@@ -33,12 +38,7 @@ let
   # as one built from the two alone, so adding a variant moves no other kernel.
   kernelFor = name: fragment: extra: pkgs.stdenv.mkDerivation {
     pname = "enclavid-guest-kernel-${name}";
-    inherit version;
-
-    src = pkgs.fetchurl {
-      url = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${version}.tar.xz";
-      sha256 = "f410638061a165c12f42ab871d2f3fcd525515359b5faeee80969cff84524df9";
-    };
+    inherit version src;
 
     nativeBuildInputs = with pkgs; [ bc bison flex elfutils openssl perl python3 ];
 
@@ -91,6 +91,10 @@ let
   };
 in
 {
+  # The source itself, for the one host tool the image takes from it: the
+  # initramfs writes its device nodes with the kernel's own `gen_init_cpio`.
+  inherit src;
+
   # api and the gateway: diskless, nothing more.
   base = kernelFor "base" "diskless" [ ];
   storage = kernelFor "storage" "storage" [ ];

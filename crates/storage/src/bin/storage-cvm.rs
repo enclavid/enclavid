@@ -188,6 +188,11 @@ async fn main() {
     // on: this binary IS the measured code, and it holds only ciphertext.
     safe_logger::install();
     safe_logger::install_panic(true);
+    // The guest's clock is kept by `timesync`; this role ends, and the guest with
+    // it, once the kernel stops vouching for it. The sweeper deletes sessions by
+    // this clock.
+    #[cfg(feature = "vsock")]
+    timesync::guard();
 
     // The host's settings for this guest, read once and before anything else:
     // reading them talks to nothing, and the health port below is one of the

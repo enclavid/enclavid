@@ -1,0 +1,8 @@
+# PID 1's control socket, which can load and start any service as full root,
+# with every permission taken off: connecting needs write permission on it,
+# which root then has only through CAP_DAC_OVERRIDE, held by nothing after.
+# Nothing here uses the socket. `root-ro` then keeps the permissions off: the
+# socket is on the root filesystem (see init/default.nix), which it makes
+# read-only.
+type = scripted
+command = /bin/busybox chmod 000 /dinitctl

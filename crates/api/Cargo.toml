@@ -20,7 +20,7 @@ default = ["dev-attestation"]
 # whether the two serving surfaces terminate RA-TLS: a developer box has no host
 # between the caller and this process, an attested launch does. See
 # `crate::transport`.
-vsock = ["hatch-client/vsock", "fleet-transport/vsock", "dep:hyper-util", "dep:hyper"]
+vsock = ["hatch-client/vsock", "fleet-transport/vsock", "dep:hyper-util", "dep:hyper", "dep:timesync"]
 # Software backends, no hardware. Two of them, for two different jobs: `snp-dev`
 # gives session quotes the real SEV-SNP report FORMAT so policy and KBS code sees
 # the fields it will in production, while `mock` supplies the ONE shared identity
@@ -80,6 +80,10 @@ fleet-transport = { path = "../fleet-transport" }
 # The one channel this role may speak on, and the capture that keeps everything
 # else off it.
 safe-logger = { path = "../safe-logger", features = ["device"] }
+# The guard on the guest's clock (`timesync::guard`), in the attested build: a
+# guest keeps its clock with `timesync`, and this role ends when the kernel stops
+# vouching for it. The library alone — none of the keeper comes with it.
+timesync = { path = "../timesync", optional = true }
 # The storage-tier RPC contract — the remoc `SessionStoreService` / `CacheService`
 # clients api dials on the trusted storage-CVM at boot. Reuses the same
 # RA-TLS/remoc stack as the engine workers.

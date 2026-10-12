@@ -1,0 +1,9 @@
+# The one role that persists. Its disk holds nothing but ciphertext sealed on
+# the api side, so the volume needs no encryption of its own — what it needs is
+# to survive a restart, which RAM does not. The filesystem is made once by
+# whoever provisions the disk; this only mounts it, and mounts it as data:
+# nosuid, nodev and noexec, because nothing on it is ever meant to be executed
+# or to name a device.
+type = scripted
+command = /bin/busybox mount -t ext4 -o nosuid,nodev,noexec /dev/vda /data
+depends-on: dev

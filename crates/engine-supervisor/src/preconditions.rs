@@ -16,7 +16,8 @@
 ///
 /// It is 3, "no attach". `scope=1` lets a child `PR_SET_PTRACER_ANY` and invite
 /// a cooperating sibling. `scope=2` admits any holder of `CAP_SYS_PTRACE`, which
-/// a child spawned without an identity of its own has, PID 1 running as root.
+/// a child spawned without an identity of its own holds wherever its parent
+/// does.
 /// (Every child a runner with [`Cgroups`](crate::Cgroups) spawns has an identity
 /// of its own and no capability; the floor covers them too.) Only `scope=3`
 /// denies everyone, and it cannot be lowered again without a reboot — in a

@@ -1,0 +1,28 @@
+# The NTS servers every guest keeps its clock by. Compiled into `timesync`, so it
+# is part of every measured image, and read by deploy/, which starts the relays
+# that reach them.
+#
+#   <vsock port>  <server>
+#
+# A guest reaches each server through the host on two ports: the key exchange
+# (TLS, server port 4460) on the port written here, and the time packets (UDP,
+# server port 123) on the next one up. The relays are blind and the host is not
+# trusted with either: the key exchange ends inside the guest, against the roots
+# in roots/, and every time packet is authenticated with the keys it agreed.
+#
+# One server per operator. A clock is taken only when three of them agree, so
+# no single operator can move it — and three servers of one operator would let
+# that operator do it alone.
+#
+# Each has to name ITSELF, on port 123, as the server to send time packets to:
+# the relay for them is started from this file and cannot follow a key exchange
+# that names somewhere else. Netnod names an address of its own and is not here.
+#
+# A port, once written, keeps its server: releases built from different commits
+# share one host, and deploy/ refuses a port two of them read differently.
+7100 time.cloudflare.com
+7102 ptbtime1.ptb.de
+7104 nts.time.nl
+7106 virginia.time.system76.com
+7108 a.st1.ntp.br
+7110 1.ntp.ubuntu.com

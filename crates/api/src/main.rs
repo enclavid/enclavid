@@ -40,6 +40,11 @@ async fn main() {
     // panic at a secret runs here without changing the measurement.
     safe_logger::install();
     safe_logger::install_panic(true);
+    // The guest's clock is kept by `timesync`; this role ends, and the guest with
+    // it, once the kernel stops vouching for it. Session deadlines and every
+    // token and certificate checked here read it.
+    #[cfg(feature = "vsock")]
+    timesync::guard();
     info!(
         "api: alive",
         reason!("a constant, emitted before this process holds anything at all")

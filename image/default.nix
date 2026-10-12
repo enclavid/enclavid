@@ -158,7 +158,8 @@ let
     import ./initramfs {
       name = "${role}-${variant}";
       app = app + "/${spec.binary}";
-      inittab = ./init/inittab + "/${role}";
+      timesync = apps.${appAttr "timesync" variant} + "/timesync";
+      services = [ ./init/services/common (./init/services + "/${role}") ];
       dirs = spec.dirs or [ ];
       siblings = lib.listToAttrs (map
         (s: lib.nameValuePair s (app + "/${s}"))

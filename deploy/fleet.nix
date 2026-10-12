@@ -86,7 +86,33 @@ let
     gateways);
   releaseSide = perRelease releaseRelays local
     // lib.optionalAttrs gatewayHere (perRelease gatewayToRelease releases);
-  relays = releaseSide // perGateway;
+  # The NTS servers every guest here keeps its clock by, from each one's own
+  # list, and a pair of relays to each that all of them share: the key exchange
+  # on the server's port, the time packets as datagrams on the next. The host
+  # carries both blind — the key exchange ends inside the guest, against roots
+  # in its measurement, and every time packet is authenticated with its keys.
+  timeServers = lib.unique (lib.concatMap (x: fleet.timeServers x.src) (local ++ gateways));
+  # Every guest here shares these relays, so none may hold more than a few of
+  # their connections at once: a guest asks each server one packet at a time,
+  # on a connection of its own, and has one key exchange with it at most.
+  timeRelayFlags = [ "--per-guest" "8" ];
+  timeRelays = lib.listToAttrs (lib.concatMap
+    (s: [
+      (lib.nameValuePair "time-${s.port}" {
+        listen = "vsock:${s.port}";
+        to = "tcp:${s.name}:4460";
+        flags = timeRelayFlags;
+        unprivileged = true;
+      })
+      (lib.nameValuePair "time-${s.port}-packets" {
+        listen = "vsock:${toString (lib.toInt s.port + 1)}";
+        to = "udp:${s.name}:123";
+        flags = timeRelayFlags;
+        unprivileged = true;
+      })
+    ])
+    timeServers);
+  relays = releaseSide // perGateway // timeRelays;
   # A certificate run arms every gateway here, the one listening where callers
   # reach — `public.listen` — above all: the issuer's validator comes to it.
   configs = gs: lib.concatMapStringsSep "," (g: "http://${fleet.gatewayConfig g.index}") gs;
@@ -654,6 +680,10 @@ in
         {
           assertion = lib.all (name: !(releaseSide ? ${name})) (lib.attrNames perGateway);
           message = "enclavid.releases: a release named gateway-<a gateway's name> would share its relays' names";
+        }
+        {
+          assertion = lib.allUnique (map (s: s.port) timeServers);
+          message = "enclavid: two of the releases and gateways here read one NTS server port as two servers (crates/timesync/servers)";
         }
         {
           assertion = lib.allUnique cfg.vsockPorts

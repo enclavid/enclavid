@@ -43,7 +43,7 @@ pub(crate) fn filters() -> &'static [BpfProgram; 2] {
 /// pointer a filter cannot read, so whatever it let through would include a
 /// fork, and `CLONE_INTO_CGROUP`, which starts the new process in a group of
 /// the caller's choosing. glibc, told it is missing, makes its threads with
-/// `clone`, whose flags [`allowlist`] does read; musl never calls it.
+/// `clone`, whose flags [`allowlist`] does read.
 ///
 /// A filter of its own because the allowlist has one answer for everything it
 /// refuses, and that answer is a kill — which would end a glibc child at its
@@ -80,10 +80,8 @@ fn no_clone3() -> BpfProgram {
 /// # Where the list comes from
 ///
 /// Measured: both children traced through spawn, prime or compile, one round
-/// and exit, on both libc targets, because they differ — musl calls `open`
-/// where glibc calls `openat`, waits in `epoll_pwait` where glibc uses
-/// `epoll_wait`, and makes threads with `clone` where glibc tries `clone3`. The
-/// guest is static musl; the tests run the host's glibc build.
+/// and exit, against glibc. The guest links it statically and the tests
+/// dynamically; a static link only drops the loader's own calls.
 ///
 /// Entries marked `reasoned` cover paths the trace did not reach. The one that
 /// matters most is `rt_sigreturn`: wasmtime turns a wasm trap into a Rust error
@@ -122,8 +120,6 @@ fn allowlist() -> BpfProgram {
 
     // `openat` carries flags in a register, so the mode is visible.
     rules.insert(libc::SYS_openat, read_only_open(2));
-    #[cfg(target_arch = "x86_64")]
-    rules.insert(libc::SYS_open, read_only_open(1));
 
     // Threads, never processes. The compile child offloads Cranelift to a
     // blocking pool and the executor child decodes large items on one, and a
@@ -151,9 +147,9 @@ fn allowlist() -> BpfProgram {
     // kill from this filter would outrank it.
     rules.insert(libc::SYS_clone3, Vec::new());
 
-    // `prlimit64` to read this process's own limits and nothing more: musl's
-    // and glibc's `getrlimit` are `prlimit64(0, resource, NULL, old)`, and
-    // neither child sets a limit after exec. Setting one would let a child
+    // `prlimit64` to read this process's own limits and nothing more: glibc's
+    // `getrlimit` is `prlimit64(0, resource, NULL, old)`, and neither child
+    // sets a limit after exec. Setting one would let a child
     // raise what its spawn lowered — its core limit, its task cap — and naming
     // another pid would reach the supervisor's.
     rules.insert(
@@ -259,7 +255,6 @@ const ALLOWED: &[libc::c_long] = &[
     // ── Waiting ────────────────────────────────────────────────────────
     libc::SYS_epoll_create1,
     libc::SYS_epoll_ctl,
-    libc::SYS_epoll_pwait, // musl
     libc::SYS_eventfd2,
     libc::SYS_ppoll,
     libc::SYS_futex,
@@ -274,7 +269,8 @@ const ALLOWED: &[libc::c_long] = &[
     libc::SYS_clock_getres,  // reasoned
     // ── Threads: `clone` carries a condition, in `allowlist`; `clone3` is
     //    refused by `no_clone3` ───────────────────────────────────────────
-    // ── Files, and only for reading. `open`/`openat` carry a condition ─
+    // ── Files, and only for reading. `openat` carries a condition; the
+    //    old `open` is not listed ─────────────────────────────────────────
     libc::SYS_fstat,
     libc::SYS_newfstatat, // glibc
     libc::SYS_statx,      // glibc
@@ -297,15 +293,12 @@ const ALLOWED: &[libc::c_long] = &[
 ];
 
 /// Entry points aarch64 does not have at all, so naming them unconditionally
-/// would not compile there. musl uses `open` and `stat` where glibc uses
-/// `openat` and `statx`, so the guest's own libc needs them; `open` carries
-/// the same read-only condition as `openat`.
+/// would not compile there.
 ///
 /// The guest is x86_64 — SEV-SNP — and an aarch64 port would have to revisit
 /// this whole list against that libc rather than just this block.
 #[cfg(target_arch = "x86_64")]
 const ALLOWED_X86_64: &[libc::c_long] = &[
-    libc::SYS_stat,
     libc::SYS_access,
     libc::SYS_poll,
     libc::SYS_epoll_wait,
@@ -329,7 +322,7 @@ const ALLOWED_X86_64: &[libc::c_long] = &[
 /// The path is behind a pointer, which a filter may not read; the flags are
 /// not, and the verb is what matters. `Dword` because the kernel truncates
 /// `flags` to `int` before reading it, so nothing hides in the high half.
-/// `O_LARGEFILE` and `O_CLOEXEC`, which musl adds, are outside the mask.
+/// `O_LARGEFILE` and `O_CLOEXEC`, which a libc may add, are outside the mask.
 fn read_only_open(flags_arg: u8) -> Vec<SeccompRule> {
     let read_only = SeccompCondition::new(
         flags_arg,

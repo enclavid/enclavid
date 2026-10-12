@@ -10,8 +10,12 @@
 # Every role also has an `-A <role>-debug` twin, which differs by one feature
 # and belongs with `cmdline/<role>/debug`. See `withDebug` below.
 #
-# Static musl, because the initramfs carries no libc and no dynamic loader —
-# see image/initramfs.
+# Static glibc, because the initramfs carries no libc and no dynamic loader —
+# see image/initramfs. glibc rather than musl for its allocator: musl serves
+# every block past 128 KiB with a fresh mmap and munmap, and a cold session's
+# compile, transfer and store spent a quarter more CPU on it, the compile a
+# third more. Nothing here uses what glibc cannot do statically — name service
+# lookups, dlopen, iconv — since a guest resolves no names and loads nothing.
 #
 # `measurements` is the three leaves' launch digests, and only api's part reads
 # them — the gateway pins nothing, so it needs none. It is an argument rather
@@ -26,7 +30,6 @@ let
     sha256 = "0gy7jvdm3yfr2mddcch4yr7l8nw5y21gfls5in05j1f282bcr9mh";
   };
   pkgs = import nixpkgs { system = "x86_64-linux"; };
-  static = pkgs.pkgsStatic;
 
   # Only what cargo reads, and a fixed seed for the C it compiles — see
   # workspace.nix for why a measurement needs both.
@@ -39,10 +42,15 @@ let
   # feature table changes nothing and only obscures which roles depend on it.
   mkPart = { pname, package, binaries, features ? [ ], noDefaultFeatures ? false
            , preBuild ? "", nativeBuildInputs ? [ ] }:
-    static.rustPlatform.buildRustPackage {
+    pkgs.rustPlatform.buildRustPackage {
       inherit pname src nativeBuildInputs;
       version = "0.1.0";
       preBuild = fixedSeed + preBuild;
+
+      # The static archives go to the binaries' link alone, through rustc. On
+      # the search path every link sees they would reach the build scripts too,
+      # which link dynamically and fail on a libc.a found ahead of libc.so.
+      RUSTFLAGS = "-C target-feature=+crt-static -L native=${pkgs.glibc.static}/lib";
 
       # A part that asks for cmake gets the tool and not the hook: a Rust build
       # configures itself, and the hook would try to configure the source tree
@@ -55,15 +63,15 @@ let
       buildFeatures = features;
       buildNoDefaultFeatures = noDefaultFeatures;
 
-      # The workspace has crates that do not belong in a guest image and do not
-      # cross-compile cleanly (the CLI, host-side daemons). Build one package.
+      # The workspace has crates that do not belong in a guest image (the CLI,
+      # host-side daemons). Build one package.
       doCheck = false;
 
       installPhase = ''
         runHook preInstall
         mkdir -p $out
         for b in ${builtins.concatStringsSep " " binaries}; do
-          install -m 0755 "target/${static.stdenv.hostPlatform.rust.rustcTarget}/release/$b" $out/$b
+          install -m 0755 "target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/$b" $out/$b
           (cd $out && sha256sum "$b" > "$b.sha256")
         done
         runHook postInstall
@@ -250,6 +258,20 @@ builtins.foldl' (a: b: a // b) { } [
         features = [ "contained" ];
       }
     ];
+  })
+
+  # The clock keeper every role's initramfs carries beside its application, the
+  # same binary in all of them: it reaches its NTS servers over vsock for the
+  # same reason every role does. Its own cargo invocation, like every part —
+  # nothing it asks for reaches an application, and nothing an application asks
+  # for reaches it. See crates/timesync.
+  (withDebug "timesync" {
+    pname = "enclavid-app-timesync";
+    parts = [{
+      package = "timesync";
+      binaries = [ "timesync" ];
+      features = [ "vsock" ];
+    }];
   })
 
   # The role that terminates client TLS. `vsock` for the same reason as every

@@ -1,0 +1,4 @@
+# /sys: where the keeper reads which clocksource the kernel uses, and where the
+# workers' memory controller is mounted.
+type = scripted
+command = /bin/busybox mount -t sysfs -o nosuid,nodev,noexec sysfs /sys

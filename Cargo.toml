@@ -26,6 +26,7 @@ members = [
     "crates/ra-tls",
     "crates/storage-rpc",
     "crates/storage",
+    "crates/timesync",
     "xtask",
 ]
 

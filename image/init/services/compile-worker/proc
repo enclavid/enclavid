@@ -1,0 +1,9 @@
+# /proc, for this role in place of the common one: `hidepid=invisible`, so a
+# process's entries show only to those that may trace it. The disposable child
+# each compile runs in, under an identity of its own, sees its own entries and
+# no sibling's — not even the `status`, `cgroup` and `oom_score_adj` the kernel
+# otherwise serves to anyone, which would say which other compiles are running
+# and how large each is. The supervisor reads only its own, holds no right to
+# mount, and refuses to start on a /proc without this.
+type = scripted
+command = /bin/busybox mount -t proc -o nosuid,nodev,noexec,hidepid=invisible proc /proc

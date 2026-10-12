@@ -1,0 +1,31 @@
+# The application: the gateway. Each role's initramfs provides its own binary
+# under this one name, so PID 1 needs no configuration and there is nothing to
+# mis-set.
+#
+# Started once the clock is synchronised (see `timesync`), and stopped if the
+# keeper ends. When it ends — cleanly or not — the guest ends with it (see
+# `boot`).
+#
+# It runs as a user of its own, `app` (1000, image/initramfs), handed what it
+# opens by `app-files`. As root it would own whatever root does, capabilities
+# or not — the kernel's settings, PID 1's files — and `lockdown` keeping those
+# read-only is then the second line, not the only one. It holds what
+# `capabilities` raises with `^` (dinit keeps capabilities across the change of
+# user, then raises these into the ambient set), and nothing in the image
+# carries file capabilities to add to it; not being root, an exec gives it
+# nothing more, and it has nothing to become root again with. The gateway
+# holds one: `cap_sys_resource`, to lift the hard limit on its descriptors to
+# what its largest tuning could need (`reserve_descriptors`,
+# crates/gateway/src/main.rs).
+#
+# Its stdin, stdout and stderr are the console, as a process PID 1 starts has
+# always had here: `console=null` on a production command line discards them,
+# and the `debug` one puts a real console on the serial port. What may reach the
+# host goes to the log device by name (crates/safe-logger), never through these.
+type = process
+command = /bin/app
+depends-on: timesync
+restart = false
+run-as = app
+capabilities = ^cap_sys_resource
+options: shares-console

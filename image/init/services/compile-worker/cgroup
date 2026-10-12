@@ -1,0 +1,9 @@
+# The memory controller the supervisor holds its per-compile children to. The
+# kernel makes the mount point under /sys; the supervisor builds the tree under
+# it at boot and refuses to start without it. `favordynmods` because every
+# child moves itself into the group made for it as it starts: without it each
+# move first waits out an RCU grace period while holding the lock that every
+# other move, and every group kill, needs.
+type = scripted
+command = /bin/busybox mount -t cgroup2 -o nosuid,nodev,noexec,favordynmods cgroup2 /sys/fs/cgroup
+depends-on: sys

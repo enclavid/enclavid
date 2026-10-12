@@ -1,0 +1,9 @@
+# What this role mounts before anything runs: the pseudo-filesystems, and the
+# memory controller its supervisor holds the per-compile children to.
+type = internal
+depends-on: proc
+depends-on: sys
+depends-on: dev
+depends-on: tmp
+depends-on: run
+depends-on: cgroup-root

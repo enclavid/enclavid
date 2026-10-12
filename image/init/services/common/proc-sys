@@ -1,0 +1,5 @@
+# /proc/sys bound onto itself, so that it is a mount of its own, which
+# `proc-sys-ro` can then make read-only without touching the rest of /proc.
+type = scripted
+command = /bin/busybox mount -o bind /proc/sys /proc/sys
+depends-on: proc

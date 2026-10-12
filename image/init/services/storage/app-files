@@ -1,0 +1,9 @@
+# What storage's own user (1000, see `app`) is handed before it runs: the log
+# device, the attestation device, and the launch settings (fw_cfg; by_name
+# links into by_key, where the files are); its volume, by `app-data`.
+# Nothing else of root's is its to open. Before `sys-ro`, which makes /sys
+# read-only.
+type = scripted
+command = /bin/busybox chown -R 1000:1000 /dev/ttyS0 /dev/sev-guest /sys/firmware/qemu_fw_cfg/by_key
+depends-on: mounts
+depends-on: app-data

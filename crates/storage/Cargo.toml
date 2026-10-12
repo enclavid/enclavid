@@ -35,6 +35,9 @@ hatch-protocol = { path = "../hatch-protocol" }
 enclavid-ra-tls = { path = "../ra-tls" }
 fleet-transport = { path = "../fleet-transport" }
 enclavid-attestation = { path = "../attestation", default-features = false }
+# The guard on the guest's clock (`timesync::guard`), in the attested build: the
+# sweeper deletes sessions by this clock. The library alone.
+timesync = { path = "../timesync", optional = true }
 
 # Per-session store: one embedded SQLite database file per session (bundled so
 # the amalgamation is built into the measured image, no system libsqlite). ACID
@@ -101,7 +104,7 @@ sev-snp = ["enclavid-attestation/sev-snp"]
 # gap rather than inventing a marker feature to close it.
 #
 # A measured guest kernel has no IP stack, so vsock is not a preference.
-vsock = ["fleet-transport/vsock"]
+vsock = ["fleet-transport/vsock", "dep:timesync"]
 # Compiles the `debug!` sites in. OFF in the measured build, so a production
 # binary holds no diagnostic that nobody wrote a reason for.
 debug = ["safe-logger/debug"]

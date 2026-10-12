@@ -1,0 +1,9 @@
+# /sys, read-only for everything after, for the same reason as `proc-sys-ro`:
+# its attributes take writes from root by file mode alone, and among them is
+# which clocksource the kernel reads time from. After each role has handed its
+# application what it opens under it (`app-files`). The workers' memory
+# controller is a mount of its own under it and stays writable.
+type = scripted
+command = /bin/busybox mount -o remount,bind,ro,nosuid,nodev,noexec /sys
+depends-on: sys
+depends-on: app-files

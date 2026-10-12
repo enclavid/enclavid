@@ -18,13 +18,20 @@ thread_local! {
     static PEAK: Cell<u64> = const { Cell::new(0) };
 }
 
-/// What an allocation of `size` bytes costs: musl's allocator, which the
-/// measured image links, hands out 16-byte units and keeps a 4-byte header in
-/// each. Its coarser size classes above 160 bytes are not modelled, which moves
-/// nothing here: what dominates is strings of a unit or two and tables past
-/// 128 KiB, which musl maps whole.
+/// What an allocation of `size` bytes costs: glibc's allocator, which the
+/// measured image links, keeps an 8-byte header on each chunk, rounds it up to
+/// 16 bytes and never hands out fewer than 32. Past 128 KiB it starts out
+/// mapping a block whole, a page at a time; it raises that threshold as such
+/// blocks are freed, so counting every block past it as mapped is the dearer
+/// of the two and the one modelled.
 fn cost(size: usize) -> u64 {
-    (size as u64 + 4).next_multiple_of(16)
+    const MAPPED_FROM: u64 = 128 * 1024;
+    let size = size as u64;
+    if size >= MAPPED_FROM {
+        (size + 16).next_multiple_of(4096)
+    } else {
+        (size + 8).next_multiple_of(16).max(32)
+    }
 }
 
 fn grow(n: u64) {

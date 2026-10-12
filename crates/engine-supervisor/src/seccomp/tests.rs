@@ -353,35 +353,15 @@ fn each_call_ends_as_listed() {
             Survived,
         ),
     ];
-    // musl's `open`, under the same condition as `openat`.
+    // The old `open`, which glibc never calls: not listed, so killed even
+    // read-only, and the only open a child has is the `openat` whose mode the
+    // filter reads.
     #[cfg(target_arch = "x86_64")]
-    rows.extend([
-        (
-            "open(O_RDONLY)",
-            call!(libc::SYS_open, null, libc::O_RDONLY),
-            Survived,
-        ),
-        (
-            "open(O_WRONLY)",
-            call!(libc::SYS_open, null, libc::O_WRONLY),
-            Killed,
-        ),
-        (
-            "open(O_RDONLY | O_CREAT)",
-            call!(
-                libc::SYS_open,
-                created,
-                libc::O_RDONLY | libc::O_CREAT,
-                0o600
-            ),
-            Killed,
-        ),
-        (
-            "open(O_RDONLY | O_TRUNC)",
-            call!(libc::SYS_open, null, libc::O_RDONLY | libc::O_TRUNC),
-            Killed,
-        ),
-    ]);
+    rows.push((
+        "open(O_RDONLY)",
+        call!(libc::SYS_open, null, libc::O_RDONLY),
+        Killed,
+    ));
 
     let mut wrong = Vec::new();
     for (what, call, expected) in rows {

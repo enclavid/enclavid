@@ -4,16 +4,25 @@
 //! never parses what it carries — that is its security property, and it is a
 //! property of the code's *capabilities*, not of its restraint.
 //!
-//! ## Three transports on each side
+//! ## Three transports on each side, and datagrams
 //!
 //! ```text
 //! listen                       destination
 //!   unix:<path>                  hybrid:<path>:<port>   unix socket + CONNECT preamble
 //!   tcp:<addr>                   vsock:<cid>:<port>     real AF_VSOCK
 //!   vsock:<port>                 tcp:<addr>
+//!                                udp:<addr>             one datagram per frame, see below
 //! ```
 //!
 //! Any listener may feed any destination; the splice is transport-agnostic.
+//!
+//! `udp:` is for a guest that has to exchange datagrams — NTS time packets —
+//! and has only vsock, which carries none. The guest frames each one on the
+//! stream as its length in two big-endian bytes and then itself; the relay
+//! sends each frame as one datagram, and frames each datagram that comes back
+//! the same way. The length is the one thing the relay reads, and it reads it
+//! to know where a datagram ends, not what is in it: the property above holds
+//! for everything a frame carries.
 //!
 //! ## Why `hybrid` exists, and why it is the only thing here that is forced
 //!
@@ -96,13 +105,13 @@
 //! how long that takes.
 
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket, UnixListener, UnixStream};
 
 /// Upper bound on the hypervisor's acknowledgement line (`OK <port>\n`). Real
 /// replies are under 16 bytes; the cap keeps a wedged or hostile endpoint from
@@ -150,8 +159,15 @@ pub enum Destination {
     /// `vsock:<cid>:<port>` — a listener inside a CVM over real `AF_VSOCK`. No
     /// preamble: the kernel carries the address.
     Vsock { cid: u32, port: u32 },
-    /// `tcp:<addr>` — a plain listener on the host, today only `host-hatch`.
+    /// `tcp:<addr>` — a plain listener on the host or past it: `host-hatch`, a
+    /// release's entrances, an NTS server's key exchange.
     Tcp(String),
+    /// `udp:<addr>` — a datagram service, such as an NTS server's time packets,
+    /// at the address its name resolved to when the relay started. Each of its
+    /// datagrams is timed by whoever sent it, and a lookup per connection would
+    /// sit on the outbound leg of every one; a changed address takes a restart.
+    /// The stream it is reached by carries framed datagrams; see the crate docs.
+    Udp(SocketAddr),
 }
 
 impl Endpoint {
@@ -215,17 +231,11 @@ impl Destination {
     /// Parse a `scheme:value` destination spec.
     pub fn parse(spec: &str) -> Result<Self, String> {
         match spec.split_once(':') {
-            // Resolved at parse time, not at first connection: an unresolvable
-            // address would otherwise pass startup and then fail once per client
-            // forever, which reads as a network fault rather than a typo.
             Some(("tcp", addr)) if !addr.is_empty() => {
-                use std::net::ToSocketAddrs;
-                addr.to_socket_addrs()
-                    .map_err(|e| format!("`{addr}` does not resolve: {e}"))?
-                    .next()
-                    .ok_or_else(|| format!("`{addr}` resolved to no address"))?;
+                resolve(addr)?;
                 Ok(Self::Tcp(addr.to_string()))
             }
+            Some(("udp", addr)) if !addr.is_empty() => resolve(addr).map(Self::Udp),
             // Split the port off the RIGHT so a path may contain colons.
             Some(("hybrid", rest)) => {
                 let (path, port) = rest
@@ -258,16 +268,22 @@ impl Destination {
                 Ok(Self::Vsock { cid, port })
             }
             _ => Err(format!(
-                "expected hybrid:<path>:<port>, vsock:<cid>:<port> or tcp:<addr>, got `{spec}`"
+                "expected hybrid:<path>:<port>, vsock:<cid>:<port>, tcp:<addr> or udp:<addr>, \
+                 got `{spec}`"
             )),
         }
     }
 
-    /// Open a connection to this destination.
+    /// Open a connection to this destination. A `udp:` one has no connection
+    /// to open: [`serve_connection`] carries its datagrams itself.
     pub async fn connect(&self) -> io::Result<Stream> {
         match self {
             Self::Hybrid { socket, port } => Ok(Box::new(connect_hybrid(socket, *port).await?)),
             Self::Tcp(addr) => Ok(Box::new(TcpStream::connect(addr).await?)),
+            Self::Udp(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a udp: destination carries datagrams, not a stream",
+            )),
             #[cfg(target_os = "linux")]
             Self::Vsock { cid, port } => {
                 let addr = tokio_vsock::VsockAddr::new(*cid, *port);
@@ -279,6 +295,18 @@ impl Destination {
             Self::Vsock { .. } => no_vsock(),
         }
     }
+}
+
+/// The first address `addr` resolves to, or why it resolves to none. At parse
+/// time, not at first connection: an unresolvable address would otherwise pass
+/// startup and then fail once per client forever, which reads as a network
+/// fault rather than a typo.
+fn resolve(addr: &str) -> Result<SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+    addr.to_socket_addrs()
+        .map_err(|e| format!("`{addr}` does not resolve: {e}"))?
+        .next()
+        .ok_or_else(|| format!("`{addr}` resolved to no address"))
 }
 
 /// A bound listener, whatever transport it came from.
@@ -305,24 +333,46 @@ impl std::fmt::Debug for Listener {
 impl Listener {
     /// One connection, with its two ends when it has addresses a PROXY header
     /// can carry — which only TCP does.
-    pub async fn accept(&self) -> io::Result<(Stream, Option<Ends>)> {
+    pub async fn accept(&self) -> io::Result<Accepted> {
         match self {
-            Self::Unix(l) => Ok((Box::new(l.accept().await?.0), None)),
+            Self::Unix(l) => Ok(Accepted {
+                stream: Box::new(l.accept().await?.0),
+                ends: None,
+                guest: None,
+            }),
             Self::Tcp(l) => {
                 let (stream, source) = l.accept().await?;
                 let destination = stream.local_addr()?;
-                Ok((
-                    Box::new(stream),
-                    Some(Ends {
+                Ok(Accepted {
+                    stream: Box::new(stream),
+                    ends: Some(Ends {
                         source,
                         destination,
                     }),
-                ))
+                    guest: None,
+                })
             }
             #[cfg(target_os = "linux")]
-            Self::Vsock(l) => Ok((Box::new(l.accept().await?.0), None)),
+            Self::Vsock(l) => {
+                let (stream, caller) = l.accept().await?;
+                Ok(Accepted {
+                    stream: Box::new(stream),
+                    ends: None,
+                    guest: Some(caller.cid()),
+                })
+            }
         }
     }
+}
+
+/// What a listener accepted.
+pub struct Accepted {
+    pub stream: Stream,
+    /// Who dialled, for a TCP listener.
+    pub ends: Option<Ends>,
+    /// Which guest dialled, by its context ID, for a vsock listener. The relay
+    /// counts by it and reads nothing else of the caller.
+    pub guest: Option<u32>,
 }
 
 /// Who dialled a TCP listener, and the address it dialled.
@@ -548,6 +598,9 @@ pub async fn serve_connection(
     dest: &Destination,
     header: Option<Vec<u8>>,
 ) -> io::Result<()> {
+    if let Destination::Udp(target) = dest {
+        return serve_datagrams(inbound, *target).await;
+    }
     let mut outbound = dest.connect().await?;
     if let Some(header) = header {
         outbound.write_all(&header).await?;
@@ -577,6 +630,100 @@ pub async fn serve_connection(
                 .unwrap_or(Ok(()))
         }
     }
+}
+
+/// Carry framed datagrams between `inbound` and the service at `target` until
+/// the caller closes: each frame from the caller goes out as one datagram, and
+/// each datagram back comes in as one frame. See the crate docs for the framing.
+///
+/// One socket per caller, connected to the destination, so the kernel drops
+/// any datagram that is not from it. A connected socket is also handed the
+/// ICMP errors about what it sent — "port unreachable", say — at its next send
+/// or receive, ahead of a datagram queued behind them; they end nothing, since
+/// the caller learns of a lost datagram by its answer not coming. The splice
+/// ends when the caller closes, or when the socket or the stream fails
+/// otherwise.
+async fn serve_datagrams(inbound: Stream, target: SocketAddr) -> io::Result<()> {
+    let unbound = match target {
+        SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+    };
+    let socket = UdpSocket::bind(unbound).await?;
+    socket.connect(target).await?;
+    let (from_caller, to_caller) = tokio::io::split(inbound);
+    tokio::select! {
+        ended = datagrams_out(from_caller, &socket) => ended,
+        ended = datagrams_back(&socket, to_caller) => ended,
+    }
+}
+
+/// How long a datagram caller may go without sending before it is let go. A
+/// UDP socket never says the far side has gone, so without this a caller that
+/// stops sending and never closes would hold its socket for good — and a
+/// `udp:` relay is shared by every guest on the host.
+const DATAGRAM_IDLE: Duration = Duration::from_secs(30);
+
+/// The least time between two datagrams from one caller. A time service is
+/// asked every few seconds at most; this keeps a caller from making the relay
+/// send to its destination as fast as it can write frames.
+const DATAGRAM_GAP: Duration = Duration::from_millis(250);
+
+/// Frames from the caller, sent as datagrams no closer together than
+/// [`DATAGRAM_GAP`]. Ends without error when the caller closes between frames,
+/// or sends none for [`DATAGRAM_IDLE`].
+async fn datagrams_out(
+    mut from_caller: impl AsyncRead + Unpin,
+    socket: &UdpSocket,
+) -> io::Result<()> {
+    let mut datagram = vec![0u8; usize::from(u16::MAX)];
+    let mut last_sent: Option<tokio::time::Instant> = None;
+    loop {
+        let length = match tokio::time::timeout(DATAGRAM_IDLE, from_caller.read_u16()).await {
+            Err(_idle) => return Ok(()),
+            Ok(Ok(length)) => usize::from(length),
+            Ok(Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            Ok(Err(e)) => return Err(e),
+        };
+        from_caller.read_exact(&mut datagram[..length]).await?;
+        if let Some(last_sent) = last_sent {
+            tokio::time::sleep_until(last_sent + DATAGRAM_GAP).await;
+        }
+        last_sent = Some(tokio::time::Instant::now());
+        match socket.send(&datagram[..length]).await {
+            Ok(_) => {}
+            Err(e) if from_icmp(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Datagrams from the destination, framed for the caller.
+async fn datagrams_back(
+    socket: &UdpSocket,
+    mut to_caller: impl AsyncWrite + Unpin,
+) -> io::Result<()> {
+    let mut frame = vec![0u8; 2 + usize::from(u16::MAX)];
+    loop {
+        let length = match socket.recv(&mut frame[2..]).await {
+            Ok(length) => length,
+            Err(e) if from_icmp(&e) => continue,
+            Err(e) => return Err(e),
+        };
+        let prefix = u16::try_from(length).expect("the buffer holds no more than u16::MAX");
+        frame[..2].copy_from_slice(&prefix.to_be_bytes());
+        to_caller.write_all(&frame[..2 + length]).await?;
+    }
+}
+
+/// Whether an error on a connected UDP socket is the kernel passing on an ICMP
+/// error about an earlier datagram, rather than the socket failing.
+fn from_icmp(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkUnreachable
+    )
 }
 
 #[cfg(test)]
@@ -620,6 +767,15 @@ mod tests {
             Destination::parse("tcp:127.0.0.1:8000").unwrap(),
             Destination::Tcp("127.0.0.1:8000".into())
         );
+        assert_eq!(
+            Destination::parse("udp:127.0.0.1:123").unwrap(),
+            Destination::Udp(SocketAddr::from(([127, 0, 0, 1], 123)))
+        );
+        // Resolved once, at parse: the name is gone by the time a caller comes.
+        assert_eq!(
+            Destination::parse("udp:localhost:123").unwrap(),
+            Destination::Udp(crate::resolve("localhost:123").unwrap())
+        );
 
         for bad in [
             "hybrid:/run/x.sock",
@@ -633,6 +789,7 @@ mod tests {
             // A destination that cannot resolve must fail at startup, not once
             // per connection forever.
             "tcp:not a host:1",
+            "udp:not a host:1",
         ] {
             assert!(Destination::parse(bad).is_err(), "`{bad}` should not parse");
         }
@@ -849,9 +1006,12 @@ mod tests {
         let listener = Endpoint::Unix(path.clone()).bind(0o600).await.unwrap();
         let dest = Destination::Tcp(echo_addr);
         tokio::spawn(async move {
-            let (inbound, ends) = listener.accept().await.unwrap();
-            assert_eq!(ends, None, "a unix peer has no address to name");
-            serve_connection(inbound, &dest, None).await.unwrap();
+            let accepted = listener.accept().await.unwrap();
+            assert_eq!(accepted.ends, None, "a unix peer has no address to name");
+            assert_eq!(accepted.guest, None, "nor a guest to be");
+            serve_connection(accepted.stream, &dest, None)
+                .await
+                .unwrap();
         });
 
         let mut client = UnixStream::connect(&path).await.unwrap();
@@ -860,6 +1020,68 @@ mod tests {
         let mut back = Vec::new();
         client.read_to_end(&mut back).await.unwrap();
         assert_eq!(back, b"round-trip");
+    }
+
+    /// Each frame goes out as one datagram, whole, and each datagram back comes
+    /// in as one frame — an empty one included.
+    #[tokio::test]
+    async fn frames_cross_as_datagrams_and_back() {
+        let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            loop {
+                let (n, from) = echo.recv_from(&mut buf).await.unwrap();
+                echo.send_to(&buf[..n], from).await.unwrap();
+            }
+        });
+
+        let (caller, relay_side) = tokio::io::duplex(4096);
+        let dest = Destination::Udp(echo_addr);
+        let serving =
+            tokio::spawn(async move { serve_connection(Box::new(relay_side), &dest, None).await });
+
+        let (mut from_relay, mut to_relay) = tokio::io::split(caller);
+        for datagram in [&b"one"[..], &[], &[9u8; 1200]] {
+            let mut frame = (datagram.len() as u16).to_be_bytes().to_vec();
+            frame.extend_from_slice(datagram);
+            to_relay.write_all(&frame).await.unwrap();
+
+            let length = from_relay.read_u16().await.unwrap();
+            let mut back = vec![0u8; usize::from(length)];
+            from_relay.read_exact(&mut back).await.unwrap();
+            assert_eq!(back, datagram);
+        }
+
+        // The caller closing between frames is the end of the splice, not an
+        // error.
+        to_relay.shutdown().await.unwrap();
+        serving.await.unwrap().unwrap();
+    }
+
+    /// A destination answering "port unreachable" ends nothing: Linux hands the
+    /// error to the socket's next send, and the relay goes on to the next frame,
+    /// ending only when the caller does. (macOS passes no such error on, so
+    /// there this holds trivially.)
+    #[tokio::test]
+    async fn an_icmp_error_ends_nothing() {
+        let closed = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let closed_addr = closed.local_addr().unwrap();
+        drop(closed);
+
+        let (caller, relay_side) = tokio::io::duplex(4096);
+        let dest = Destination::Udp(closed_addr);
+        let serving =
+            tokio::spawn(async move { serve_connection(Box::new(relay_side), &dest, None).await });
+
+        let (_from_relay, mut to_relay) = tokio::io::split(caller);
+        for _ in 0..3 {
+            to_relay.write_all(&[0, 3, b'a', b'b', b'c']).await.unwrap();
+            // Long enough for the kernel's answer to come back before the next.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        to_relay.shutdown().await.unwrap();
+        serving.await.unwrap().unwrap();
     }
 
     /// Each family is named as it is, an IPv4 caller of a dual-stack listener
@@ -987,8 +1209,8 @@ mod tests {
         let relay_addr = tcp.local_addr().unwrap();
         let dest = Destination::Tcp(sink_addr);
         tokio::spawn(async move {
-            let (inbound, ends) = listener.accept().await.unwrap();
-            serve_connection(inbound, &dest, ends.map(proxy_header))
+            let accepted = listener.accept().await.unwrap();
+            serve_connection(accepted.stream, &dest, accepted.ends.map(proxy_header))
                 .await
                 .unwrap();
         });

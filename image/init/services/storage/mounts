@@ -1,0 +1,9 @@
+# What this role mounts before anything runs: the pseudo-filesystems, and its
+# volume.
+type = internal
+depends-on: proc
+depends-on: sys
+depends-on: dev
+depends-on: tmp
+depends-on: run
+depends-on: data
