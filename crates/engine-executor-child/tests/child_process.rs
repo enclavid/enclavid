@@ -25,7 +25,7 @@ use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 
 use engine_rpc::{
-    BundleRef, CallbackError, CatalogEntry, ChildCallbacks, ChildCallbacksServerShared,
+    BundleRef, ByteBuf, CallbackError, CatalogEntry, ChildCallbacks, ChildCallbacksServerShared,
     ChildService, ChildServiceClient, CompiledBundle, ExecError, RunStatus,
 };
 
@@ -165,7 +165,7 @@ async fn spawned_child_primes_runs_relays_then_exits() {
         .run(
             SessionState::default(),
             Event::Start,
-            vec![],
+            ByteBuf::new(),
             DEFAULT_ROUND_FUEL,
             cb_client,
         )
@@ -253,7 +253,7 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
         .run(
             SessionState::default(),
             Event::Start,
-            vec![],
+            ByteBuf::new(),
             DEFAULT_ROUND_FUEL,
             cb_client,
         )
@@ -482,7 +482,7 @@ async fn measure_per_round_cost() {
             .run(
                 SessionState::default(),
                 Event::Start,
-                vec![],
+                ByteBuf::new(),
                 DEFAULT_ROUND_FUEL,
                 cb_client,
             )

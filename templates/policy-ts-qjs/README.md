@@ -26,12 +26,40 @@ enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
 - `src/global.ts` — makes QuickJS's global object reachable as `global`, for
   the TextEncoder polyfill imported next to it.
 - `wit/world.wit` — what the policy imports (the host's interfaces and plugins')
-  and exports. Their WIT is in `wit/deps/`.
+  and exports, and the props it takes. The WIT it imports is in `wit/deps/`.
 - `i18n.json` — the texts the policy shows, by key and locale.
 - `disclosure-fields.json` — the keys of the fields the policy may disclose to
   the consumer, on the applicant's consent.
 - `types/` — the TypeScript types of everything in `wit/`, written by
   `npm run types` (the build writes them too). Not edited by hand.
+
+## Props
+
+Props are what the consumer sets for each session: a threshold, a mode, a
+value to compare the document against. The policy declares them as a record in
+`wit/world.wit`, in the interface `enclavid:host-ext/policy-props`, and reads
+them with `get()`:
+
+```ts
+import * as props from "enclavid:host-ext/policy-props@0.1.0";
+
+if (props.get().selfie === false) { … }
+```
+
+The record is the policy's own, so its fields are typed like the rest of the
+world. The interface's name and its one function, `get`, are fixed: the host
+serves them. The consumer gives the props as a JSON object keyed by the
+record's field names as the WIT spells them (`min-age`, not `minAge`), at most
+1 KiB, when it creates the session:
+
+```json
+{ "policy": "…", "props": { "selfie": false } }
+```
+
+A field may be a `bool`, a number type, `char`, `string`, an `enum`, a `list`,
+an `option` (`null` or left out is none) or another record. A session whose
+props do not fit the record fails when it runs, as does a session given props
+for a policy that takes none. A policy that takes none leaves the import out.
 
 ## Using a plugin
 

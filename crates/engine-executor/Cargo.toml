@@ -7,7 +7,7 @@ repository.workspace = true
 
 # The EXECUTE half of the engine fleet: deserialize a compiled `cwasm`,
 # instantiate it, and drive ONE pure-reducer round through the bindgen host
-# world (session-context, embedded resolvers, media blobs). This crate
+# world (embedded resolvers, media blobs) and the policy's own props. This crate
 # runs the UNTRUSTED policy wasm and carries NO Cranelift — its wasmtime is
 # RUNTIME-only, so the execution-worker CVM has zero compiler surface. It
 # shares only the plain-data engine-types leaf with engine-compiler; a
@@ -39,6 +39,12 @@ wasmtime = { version = "46", default-features = false, features = [
 # Content-addresses each captured frame (`convert::event_to_wit`) so the
 # blob store keys blobs by BLAKE3 hash.
 blake3 = "1"
+# Reads the consumer's props, a JSON object, into the record the policy
+# declares for them (`props`), with a serde seed carrying the record's type;
+# serde_path_to_error says where in them a read failed.
+serde = "1"
+serde_json = "1"
+serde_path_to_error = "0.1"
 
 # --- execution-worker bin deps (optional) — pulled ONLY by the `worker`
 # feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable
@@ -197,6 +203,10 @@ engine-compiler = { path = "../engine-compiler" }
 # load_copies.rs builds a component carrying a large data segment, to see what
 # loading its cwasm copies.
 wasm-encoder = "0.247"
+# The props tests build a component from WIT alone, one per record type they
+# read props into.
+wit-component = { version = "0.247", features = ["dummy-module"] }
+wit-parser = "0.247"
 # fake_capture emits a real JPEG so the face-age plugin's in-sandbox
 # decode → preprocess → inference pipeline has something to decode.
 jpeg-encoder = "0.6"

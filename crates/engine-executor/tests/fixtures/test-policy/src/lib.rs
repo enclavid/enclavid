@@ -91,29 +91,22 @@ fn state_at(step: u8) -> Vec<u8> {
     vec![step]
 }
 
-/// Read the optional `state_bloat = N` value from the consumer config
-/// (`context.props`). Present only when the harness drives the engine's
-/// `POLICY_MAX_STATE_BYTES` cap; absent on every real flow.
+/// The optional `state-bloat = N` prop. Present only when the harness drives
+/// the engine's `POLICY_MAX_STATE_BYTES` cap; absent on every real flow.
 fn bloat_bytes() -> Option<usize> {
-    use enclavid::host::types::Prop;
-    enclavid::host::session_context::props()
-        .into_iter()
-        .find(|(k, _)| k == "state_bloat")
-        .and_then(|(_, v)| match v {
-            Prop::Int(n) if n >= 0 => Some(n as usize),
-            _ => None,
-        })
+    enclavid::host_ext::policy_props::get()
+        .state_bloat
+        .map(|n| n as usize)
 }
 
-/// Read the optional `skip_passport_read` prop. When set, the selfie round
+/// The optional `skip-passport-read` prop. When set, the selfie round
 /// rehydrates the passport handle but does NOT read its `bytes()`, so a
 /// counting media store can prove `from-blob-ref` alone triggers no load (the
 /// pull is lazy, on `bytes()`). Absent on every real flow.
 fn skip_passport_read() -> bool {
-    use enclavid::host::types::Prop;
-    enclavid::host::session_context::props()
-        .into_iter()
-        .any(|(k, v)| k == "skip_passport_read" && matches!(v, Prop::Int(1)))
+    enclavid::host_ext::policy_props::get()
+        .skip_passport_read
+        .unwrap_or(false)
 }
 
 fn build_consent(age_years: i32) -> Disclosure {
@@ -156,11 +149,11 @@ fn build_consent(age_years: i32) -> Disclosure {
 impl Guest for TestPolicy {
     fn handle(state: Vec<u8>, event: Event) -> (Vec<u8>, Action) {
         match (step_of(&state), event) {
-            // Genesis → ask for the passport photo page. When the consumer
-            // config carries `state_bloat = N` the policy returns an N-byte
-            // blob instead of the 1-byte step, so the harness can exercise
-            // the engine's POLICY_MAX_STATE_BYTES cap; absent the flag this
-            // is the normal 1-byte step.
+            // Genesis → ask for the passport photo page. When the props
+            // carry `state-bloat = N` the policy returns an N-byte blob
+            // instead of the 1-byte step, so the harness can exercise the
+            // engine's POLICY_MAX_STATE_BYTES cap; absent the prop this is
+            // the normal 1-byte step.
             (STEP_START, Event::Start) => {
                 let state = match bloat_bytes() {
                     Some(n) => vec![0u8; n],

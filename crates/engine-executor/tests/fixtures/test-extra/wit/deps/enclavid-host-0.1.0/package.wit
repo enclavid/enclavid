@@ -1,3 +1,16 @@
+/// Capabilities the TEE host provides to the policy live in the RESERVED
+/// `enclavid:host` package, and in any `enclavid:host-*` one: a composed plugin
+/// may `import` an interface there (reading the same host surface the policy
+/// does), but it must never SATISFY one. Runtime fusion refuses to wire a plugin
+/// export into a host-reserved import and rejects outright any plugin that
+/// exports one — host interfaces are served exclusively by the TEE `Linker`.
+/// New host capabilities land as new interfaces in these packages, so the trust
+/// boundary stays a single prefix check rather than a denylist that must be kept
+/// in sync.
+///
+/// `enclavid:host-ext` is the one the policy declares itself, because the type
+/// is its own: `policy-props`, whose `get` returns the props the consumer gave
+/// the session, in whatever record the policy declares for them.
 package enclavid:host@0.1.0;
 
 /// Value shapes carried by the host capabilities in this package. Kept
@@ -17,29 +30,18 @@ package enclavid:host@0.1.0;
 ///
 /// `blob` is likewise a host-owned resource — one stored byte-blob, minted
 /// by the runtime into `event::media` and rehydrated across rounds via its
-/// `from-blob-ref` static constructor. It is the UNIVERSAL unit: a captured
-/// camera frame is a blob, a future uploaded document / PDF is a blob — the
-/// host stores and hands them out identically. It lives here (not in
+/// `constructor(blob-hash)`. It is the UNIVERSAL unit: a captured camera frame
+/// is a blob, a future uploaded document / PDF is a blob — the host stores and
+/// hands them out identically. It lives here (not in
 /// `enclavid:shared-types/capture`) so both the policy and any verification
 /// plugin reference the SAME resource type and can pass a handle across the
 /// fused policy↔plugin boundary; the bytes stay host-side and enter a
-/// component's linear memory only when it pulls `bytes`. `blob-ref` is the
-/// content ref that addresses any stored blob. The `clip` record that groups
+/// component's linear memory only when it pulls `bytes`. `blob-hash` is the
+/// content address that identifies any stored blob. The `clip` record that groups
 /// the blobs of one capture is NOT here — it's policy-facing (only
 /// `media-result` uses it) and lives in `enclavid:policy/types`; this package
 /// holds only what the host mints or owns.
 interface types {
-  /// One static configuration value the consumer supplies at session
-  /// creation (was `eval-args`). Read on demand via
-  /// `session-context.props`.
-  variant prop {
-    %string(string),
-    int(s64),
-    float(f64),
-    %bool(bool),
-    null,
-  }
-
   /// A validated reference to a `localized` catalog entry — surfaces as
   /// UI text once the host resolves it to the applicant's locale.
   resource localized-ref;
@@ -144,27 +146,5 @@ interface embedded-icons {
   /// Resolve a name from the component's `icons` declarations. Traps if
   /// the name isn't declared.
   icon: func(name: string) -> icon-ref;
-}
-
-/// Capabilities the TEE host provides to the policy live in the RESERVED
-/// `enclavid:host` package: a composed plugin may `import` an interface
-/// here (reading the same host surface the policy does), but it must never
-/// SATISFY one. Runtime fusion (`runner::compose`) refuses to wire a plugin
-/// export into a host-reserved import and rejects outright any plugin that
-/// exports one — host interfaces are served exclusively by the TEE
-/// `Linker`. New host capabilities land as new interfaces in this package,
-/// so the trust boundary stays a single namespace check rather than a
-/// denylist that must be kept in sync.
-/// Ambient session context the policy IMPORTS — the actor's `Props`. A
-/// SEPARATE interface because it goes host → policy (imported), the
-/// opposite direction of the exported `enclavid:policy/policy`, and a
-/// WIT interface is imported/exported as a whole.
-interface session-context {
-  use types.{prop};
-
-  /// The consumer's static config (`metadata.input`). Constant for the
-  /// session, callable any turn — referentially transparent, not a
-  /// side-effect.
-  props: func() -> list<tuple<string, prop>>;
 }
 

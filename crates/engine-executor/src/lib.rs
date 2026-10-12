@@ -20,6 +20,7 @@
 //!                engine-compiler.
 //!   ↓ uses
 //! state/       ← Store<T> data layer (HostState, RunInputs)
+//! props        ← the consumer's props as the record the policy declares
 //! listener     ← outbound contract (SessionListener trait, SessionChange);
 //!                fired once per round, carrying the state and, on the
 //!                round that finishes, the decision
@@ -54,15 +55,11 @@ pub fn compat_token() -> String {
 mod listener;
 mod media;
 mod media_store;
+mod props;
 mod runner;
 mod sanitize;
 mod state;
 
-/// The bindgen-generated `enclavid:host/types.prop` — the consumer's
-/// static-config value variant. Re-exported so the api crate can build
-/// the `props` list it hands to [`Executor::run`] without taking a direct
-/// bindgen dependency.
-pub use crate::enclavid::host::types::Prop;
 pub use embedded::{
     ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedRegistry,
     EmbeddedRegistryBuilder, Icon, IconStore, Localized, LocalizedStore, RefKind, RefStore,
@@ -116,7 +113,6 @@ wasmtime::component::bindgen!({
             import enclavid:host/embedded-disclosure-fields@0.1.0;
             import enclavid:host/embedded-i18n@0.1.0;
             import enclavid:host/embedded-icons@0.1.0;
-            import enclavid:host/session-context@0.1.0;
             export enclavid:policy/policy@0.1.0;
         }
     "#,

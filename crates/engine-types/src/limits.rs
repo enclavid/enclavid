@@ -70,31 +70,21 @@
 /// in lockstep.
 pub const POLICY_MAX_STATE_BYTES: usize = 1024 * 1024;
 
-// ----- The consumer's static config, as it arrives on the execute hop -----
+// ----- The consumer's props, as they arrive on the execute hop -----
 //
-// `props` is a pure function of the consumer's JSON config, which api already
-// caps at `enclavid_api::limits::MAX_MATCH_INPUT_SIZE` — 1 KiB, the
-// bulk-matching defence. These two are the SAME bound restated where the
-// execution-worker can enforce it, and they exist because the worker cannot see
-// api's constant and must not assume its caller is api. The worker accepts any
-// attested guest, so "api already capped it" is a statement about a peer it
-// cannot identify.
+// The props are the JSON object the consumer gave the session, which api already
+// caps at `enclavid_api::limits::MAX_PROPS_SIZE` — 1 KiB, the bulk-matching
+// defence. This is the SAME bound restated where the execution-worker can enforce
+// it, and it exists because the worker cannot see api's constant and must not
+// assume its caller is api. The worker accepts any attested guest, so "api
+// already capped it" is a statement about a peer it cannot identify.
 //
-// Derived rather than picked. In a JSON object of N bytes every entry costs at
-// least six (`"k":0,`) and every byte of a key or a string value costs at least
-// one, so 1 KiB of config cannot yield more than ~170 entries or more than 1 KiB
-// of key-and-value bytes. Both numbers below sit above that with room, so no
-// legitimate config is near them — deliberately looser, so a legitimate round is
-// never refused worker-side. A `const` assertion in the api crate pins them to
-// that origin, which is the only place both constants are visible at once, so a
-// derivation that stopped holding fails to compile.
+// Deliberately looser than api's, so a legitimate round is never refused
+// worker-side. A `const` assertion in the api crate pins it to that origin, which
+// is the only place both constants are visible at once, so a bound that stopped
+// covering api's fails to compile.
 
-/// Maximum entries in one round's `props` list.
-pub const MAX_PROPS: usize = 256;
-
-/// Maximum total bytes across every `props` key and every string `props` value.
-/// Non-string values are fixed-width scalars and are bounded by [`MAX_PROPS`]
-/// alone.
+/// Maximum bytes of one round's props, the JSON object as api keeps it.
 pub const MAX_PROPS_BYTES: usize = 4 * 1024;
 
 // ----- text-ref validation -----

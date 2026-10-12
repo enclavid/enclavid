@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use wasmtime::component::ResourceTable;
+use wasmtime::component::{ResourceTable, Val};
 
 use crate::embedded::EmbeddedRegistry;
 use crate::listener::SessionListener;
@@ -8,7 +8,7 @@ use crate::media_store::MediaStore;
 
 /// Data placed into wasmtime `Store<HostState>` for the duration of one
 /// `handle` call. The policy is a pure reducer, so this state carries
-/// only ambient read surfaces (`enclavid:host/session-context` props,
+/// only ambient read surfaces (the session's props, the
 /// `enclavid:embedded/*` registry) plus the runtime plumbing (the
 /// media store). No replay log, no per-call disclosure buffer — the
 /// runner fires the listener once the round is over, not from a
@@ -19,10 +19,11 @@ use crate::media_store::MediaStore;
 /// hold it to (the round's max, `admission::DEFAULT_ROUND_MAX_BYTES`); fuel
 /// is set on the Store directly.
 pub struct HostState {
-    /// Static consumer config (`metadata.input`), surfaced to the
-    /// policy through `enclavid:host/session-context.props`. Constant for
-    /// the session; the policy may read it any round.
-    pub props: Vec<(String, crate::enclavid::host::types::Prop)>,
+    /// The props the consumer gave the session, as the record the policy
+    /// declares for them, which `enclavid:host-ext/policy-props.get`
+    /// returns. Constant for the session; the policy may read it any round.
+    /// `None` for a policy that declares none.
+    pub props: Option<Val>,
     /// Per-composition `enclavid:host/embedded-*` registry — one frozen
     /// index built from the policy's and every fused plugin's embedded
     /// sections. The embedded host fns resolve a key against it (first
@@ -63,7 +64,7 @@ pub struct RunInputs {
 
 impl HostState {
     pub(crate) fn new(
-        props: Vec<(String, crate::enclavid::host::types::Prop)>,
+        props: Option<Val>,
         embedded: Arc<EmbeddedRegistry>,
         media_store: Arc<dyn MediaStore>,
     ) -> Self {
@@ -73,17 +74,6 @@ impl HostState {
             table: ResourceTable::new(),
             media_store,
         }
-    }
-}
-
-/// `enclavid:host/session-context` — the policy's ambient `props`
-/// getter. Referentially transparent: returns the same static consumer
-/// config every call, no side effect, no replay concern.
-impl crate::enclavid::host::session_context::Host for HostState {
-    async fn props(
-        &mut self,
-    ) -> wasmtime::Result<Vec<(String, crate::enclavid::host::types::Prop)>> {
-        Ok(self.props.clone())
     }
 }
 

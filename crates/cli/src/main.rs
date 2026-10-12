@@ -310,8 +310,8 @@ enum SessionCommand {
 
         /// Path to a JSON file holding the **entire** `POST /sessions`
         /// body — `policy`, `plugins: [{package, impl_ref, key?}]`,
-        /// `policy_key`, `registry_auth`, etc. (the same shape a consumer
-        /// backend would send). If it omits `client_disclosure_pubkey`,
+        /// `policy_key`, `registry_auth`, `props`, etc. (the same shape a
+        /// consumer backend would send). If it omits `client_disclosure_pubkey`,
         /// the CLI injects an auto-generated one and caches its secret.
         /// Mutually exclusive with `--policy`.
         #[arg(short = 'f', long = "from-file", conflicts_with = "policy")]

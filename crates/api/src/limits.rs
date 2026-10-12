@@ -26,14 +26,13 @@
 /// the capture then travels in — see the wire assertion below.
 pub const APPLICANT_INPUT_BODY_LIMIT: usize = 12 * 1024 * 1024;
 
-// ----- Service-provided input -----
+// ----- The consumer's props -----
 
-/// Hard cap on the JSON byte payload accepted via Match-Mode
-/// service input (the `input` field of session metadata, parsed
-/// into typed `eval-args`). Tight enough to prevent a malicious
-/// service from smuggling a database of names in and extracting
+/// Hard cap on the props a consumer gives a session, measured as the
+/// compact JSON object api keeps. Tight enough to prevent a malicious
+/// consumer from smuggling a database of names in and extracting
 /// match results — the architecture's bulk-matching defence.
-pub const MAX_MATCH_INPUT_SIZE: usize = 1024;
+pub const MAX_PROPS_SIZE: usize = 1024;
 
 // ----- Session identifier shape -----
 
@@ -83,21 +82,9 @@ pub const MAX_PLUGINS: usize = 32;
 // stopped holding should not compile, and both sides of every comparison are
 // constants, so there is nothing to run.
 
-/// Bytes the smallest possible JSON entry costs. What turns the config's byte cap
-/// into an entry count.
-///
-/// The MARGINAL cost of an entry is six (`,"k":0`); five is that minus the comma
-/// the last entry does not pay, so dividing by five can only over-count entries —
-/// which is the safe direction for a bound the worker's cap must cover.
-const MIN_JSON_BYTES_PER_ENTRY: usize = 5;
-
 const _: () = assert!(
-    MAX_MATCH_INPUT_SIZE / MIN_JSON_BYTES_PER_ENTRY <= engine_types::limits::MAX_PROPS,
-    "the config cap can yield more props entries than the worker will accept"
-);
-const _: () = assert!(
-    MAX_MATCH_INPUT_SIZE <= engine_types::limits::MAX_PROPS_BYTES,
-    "the config cap can yield more props bytes than the worker will accept"
+    MAX_PROPS_SIZE <= engine_types::limits::MAX_PROPS_BYTES,
+    "the props cap admits more bytes than the worker will accept"
 );
 const _: () = assert!(
     APPLICANT_INPUT_BODY_LIMIT <= hatch_client::MAX_CLIP_BYTES,

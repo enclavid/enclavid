@@ -26,6 +26,7 @@ use crate::limits::{
     SESSION_ID_RANDOM_BYTES,
 };
 use crate::policy_pull;
+use crate::props;
 
 use super::auth::Principal;
 
@@ -81,6 +82,15 @@ pub struct CreateSessionRequest {
     /// [`KeyRequest`].
     #[serde(default)]
     pub policy_key: Option<KeyRequest>,
+
+    /// The props the policy reads for this session, as a JSON object keyed by
+    /// the field names of the record the policy declares for them
+    /// (`enclavid:host-ext/policy-props`). Omit for a policy that takes none.
+    /// At most [`MAX_PROPS_SIZE`](crate::limits::MAX_PROPS_SIZE) bytes as
+    /// compact JSON; whether they fit the record is the policy's to say, when
+    /// the session runs.
+    #[serde(default)]
+    pub props: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// One plugin pin in the create-session request. Mirrors the sealed
@@ -291,6 +301,10 @@ async fn create(
 
     let policy_key = KeyRequest::into_domain(body.policy_key)?;
 
+    // Held to their size here, before persistence; whether they fit the record
+    // the policy declares is checked where the policy runs.
+    let props = props::encode(body.props.as_ref()).ok_or(StatusCode::BAD_REQUEST)?;
+
     let session_id = generate_session_id();
 
     // Per-session capability bearer. Returned to the client below
@@ -334,7 +348,7 @@ async fn create(
     };
     let metadata = SessionMetadata {
         policy_ref: policy_ref.clone(),
-        input: Vec::new(),
+        props,
         client: Some(client_block),
         // TEE-trusted lifecycle status — the sole copy now (the plaintext
         // host-facing BlobField::Status byte is no longer emitted).

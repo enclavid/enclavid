@@ -1,3 +1,16 @@
+/// Capabilities the TEE host provides to the policy live in the RESERVED
+/// `enclavid:host` package, and in any `enclavid:host-*` one: a composed plugin
+/// may `import` an interface there (reading the same host surface the policy
+/// does), but it must never SATISFY one. Runtime fusion refuses to wire a plugin
+/// export into a host-reserved import and rejects outright any plugin that
+/// exports one — host interfaces are served exclusively by the TEE `Linker`.
+/// New host capabilities land as new interfaces in these packages, so the trust
+/// boundary stays a single prefix check rather than a denylist that must be kept
+/// in sync.
+///
+/// `enclavid:host-ext` is the one the policy declares itself, because the type
+/// is its own: `policy-props`, whose `get` returns the props the consumer gave
+/// the session, in whatever record the policy declares for them.
 package enclavid:host@0.1.0;
 
 /// Value shapes carried by the host capabilities in this package. Kept
@@ -29,17 +42,6 @@ package enclavid:host@0.1.0;
 /// `media-result` uses it) and lives in `enclavid:policy/types`; this package
 /// holds only what the host mints or owns.
 interface types {
-    /// One static configuration value the consumer supplies at session
-    /// creation (was `eval-args`). Read on demand via
-    /// `session-context.props`.
-    variant prop {
-        %string(string),
-        int(s64),
-        float(f64),
-        %bool(bool),
-        null,
-    }
-
     /// A validated reference to a `localized` catalog entry — surfaces as
     /// UI text once the host resolves it to the applicant's locale.
     resource localized-ref;

@@ -33,20 +33,6 @@ use crate::keys::{CompatToken, CompositionKey};
 use crate::padded::{Framed, Padded};
 use crate::stream::BundleStream;
 
-/// serde mirror of the bindgen `enclavid:host/types.prop` — the consumer's
-/// static-config scalar the policy reads via `context.props`. api builds this
-/// from the session's JSON config (`enclavid-api::input`); the worker maps it
-/// back to the bindgen `Prop` before the run. Defined here (not a bindgen
-/// re-export) so the client-only orchestrator builds props without wasmtime.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Prop {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    String(String),
-}
-
 /// serde mirror of the engine's `RunStatus` — one round's outcome. Wraps the
 /// hatch_client domain `Prompt`/`Decision` (already serde; both are sealed
 /// into `SessionState`). The worker maps `engine_executor::RunStatus` into this
@@ -228,10 +214,11 @@ pub struct RunRequest {
     /// serves under this key and never names a key back, so it cannot steer which
     /// slot a compile lands in (L2 cache-poisoning defence).
     pub composition_key: CompositionKey,
-    /// Static consumer config the policy reads via `context.props`. Bounded on
-    /// decode — see the `props` module below.
-    #[serde(deserialize_with = "props::deserialize")]
-    pub props: Vec<(String, Prop)>,
+    /// The props the consumer gave the session: the JSON object as api keeps
+    /// it, empty when it gave none. The worker reads it into the record the
+    /// policy declares for it. Bounded on decode — see the `props` module below.
+    #[serde(with = "props")]
+    pub props: Vec<u8>,
     /// FRAMED: `state` and `current_prompt` are both policy-chosen lengths, and a
     /// host process splices this hop byte-for-byte. See [`Padded`].
     pub session_state: Padded<SessionState>,
@@ -257,57 +244,31 @@ const _: () = assert!(
     "a round request at its bounds no longer fits one remoc item"
 );
 
-/// The bound on [`RunRequest::props`], applied where the value is decoded.
+/// The codec for [`RunRequest::props`]: one byte string out, a bounded one in.
 ///
-/// It exists on this side because the worker cannot see api's ingress cap and must
-/// not assume its caller is api: the leaves accept any attested guest. The numbers
-/// are `engine_types::limits`' restatement of api's `MAX_MATCH_INPUT_SIZE`, and
-/// the derivation is written there.
+/// The bound exists on this side because the worker cannot see api's ingress cap
+/// and must not assume its caller is api: the leaves accept any attested guest.
+/// The number is `engine_types::limits`' restatement of api's `MAX_PROPS_SIZE`,
+/// and why it is looser is written there.
 mod props {
-    use super::Prop;
-    use engine_types::limits::{MAX_PROPS, MAX_PROPS_BYTES};
-    use serde::de::{self, SeqAccess, Visitor};
+    use engine_types::limits::MAX_PROPS_BYTES;
+    use serde::Deserialize;
+    use serde::de;
 
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        d: D,
-    ) -> Result<Vec<(String, Prop)>, D::Error> {
-        struct Props;
+    pub(super) fn serialize<S: serde::Serializer>(props: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        serde_bytes::serialize(props, s)
+    }
 
-        impl<'de> Visitor<'de> for Props {
-            type Value = Vec<(String, Prop)>;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "at most {MAX_PROPS} static config entries")
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                // No `with_capacity` off the size hint: the hint is the sender's
-                // claim about how much this side should allocate, which is the
-                // thing being bounded.
-                let mut out: Vec<(String, Prop)> = Vec::new();
-                let mut bytes = 0usize;
-                while let Some((k, v)) = seq.next_element::<(String, Prop)>()? {
-                    if out.len() == MAX_PROPS {
-                        return Err(de::Error::custom(format!(
-                            "more than {MAX_PROPS} static config entries"
-                        )));
-                    }
-                    bytes = bytes.saturating_add(k.len());
-                    if let Prop::String(s) = &v {
-                        bytes = bytes.saturating_add(s.len());
-                    }
-                    if bytes > MAX_PROPS_BYTES {
-                        return Err(de::Error::custom(format!(
-                            "static config over {MAX_PROPS_BYTES} bytes"
-                        )));
-                    }
-                    out.push((k, v));
-                }
-                Ok(out)
-            }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        // Bounded after the decode, as `Clip`'s frames are: what the decode itself
+        // may allocate is bounded by the one remoc item the request travels in.
+        let props = serde_bytes::ByteBuf::deserialize(d)?;
+        if props.len() > MAX_PROPS_BYTES {
+            return Err(de::Error::custom(format!(
+                "props over {MAX_PROPS_BYTES} bytes"
+            )));
         }
-
-        d.deserialize_seq(Props)
+        Ok(props.into_vec())
     }
 }
 
@@ -481,7 +442,7 @@ pub trait ChildService {
         &self,
         session_state: SessionState,
         event: Event,
-        props: Vec<(String, Prop)>,
+        props: ByteBuf,
         fuel: u64,
         callbacks: ChildCallbacksClient<remoc::codec::Ciborium>,
     ) -> Result<RunStatus, ExecError>;
@@ -650,7 +611,7 @@ mod execute_tests {
 
         let mk_req = || RunRequest {
             composition_key: CompositionKey::from_digest([0x11; 32]),
-            props: vec![("age".into(), Prop::Int(30))],
+            props: br#"{"age":30}"#.to_vec(),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Start,
         };
@@ -1067,16 +1028,17 @@ mod execute_tests {
 #[cfg(test)]
 mod request_bound_tests {
     use super::*;
-    use engine_types::limits::{MAX_PROPS, MAX_PROPS_BYTES};
+    use engine_types::limits::MAX_PROPS_BYTES;
     use hatch_client::{Clip, MAX_CLIP_FRAMES, MediaResult};
     use serde::Serialize;
+    use serde_bytes::Bytes;
 
     /// A stand-in with the same field names and no bounds, so a test can put on
     /// the wire what the real type will not produce.
     #[derive(Serialize)]
     struct LooseRequest<'a> {
         composition_key: &'a str,
-        props: &'a [(String, Prop)],
+        props: &'a Bytes,
         session_state: Padded<SessionState>,
         event: Event,
     }
@@ -1091,10 +1053,10 @@ mod request_bound_tests {
         ciborium::from_reader(&b[..]).map_err(|_| ())
     }
 
-    fn loose<'a>(key: &'a str, props: &'a [(String, Prop)], event: Event) -> LooseRequest<'a> {
+    fn loose<'a>(key: &'a str, props: &'a [u8], event: Event) -> LooseRequest<'a> {
         LooseRequest {
             composition_key: key,
-            props,
+            props: Bytes::new(props),
             session_state: frame(),
             event,
         }
@@ -1107,58 +1069,36 @@ mod request_bound_tests {
     #[test]
     fn the_ordinary_round_decodes() {
         let key = a_key();
-        let props = [("age".to_string(), Prop::Int(30))];
-        let req = decode(&loose(&key, &props, Event::Start)).expect("a legal round decodes");
+        let props = br#"{"age":30}"#;
+        let req = decode(&loose(&key, props, Event::Start)).expect("a legal round decodes");
         assert_eq!(req.composition_key.as_str(), key);
-        assert_eq!(req.props.len(), 1);
+        assert_eq!(req.props, props);
     }
 
     #[test]
     fn a_key_that_is_not_a_digest_rendering_is_refused() {
-        let props: [(String, Prop); 0] = [];
-        assert!(decode(&loose("whatever-i-like", &props, Event::Start)).is_err());
+        assert!(decode(&loose("whatever-i-like", b"", Event::Start)).is_err());
     }
 
-    #[test]
-    fn more_props_than_the_config_can_yield_are_refused() {
-        let props: Vec<(String, Prop)> = (0..=MAX_PROPS)
-            .map(|i| (format!("k{i}"), Prop::Null))
-            .collect();
-        assert!(decode(&loose(&a_key(), &props, Event::Start)).is_err());
-    }
-
-    /// Few entries, each enormous — the shape a count bound alone would admit.
     #[test]
     fn props_over_the_byte_bound_are_refused() {
-        let props = vec![
-            (
-                "k".to_string(),
-                Prop::String("x".repeat(MAX_PROPS_BYTES / 2)),
-            ),
-            (
-                "k".to_string(),
-                Prop::String("x".repeat(MAX_PROPS_BYTES / 2)),
-            ),
-            (
-                "k".to_string(),
-                Prop::String("x".repeat(MAX_PROPS_BYTES / 2)),
-            ),
-        ];
-        assert!(decode(&loose(&a_key(), &props, Event::Start)).is_err());
+        let at_bound = vec![b'x'; MAX_PROPS_BYTES];
+        assert!(decode(&loose(&a_key(), &at_bound, Event::Start)).is_ok());
+        let over = vec![b'x'; MAX_PROPS_BYTES + 1];
+        assert!(decode(&loose(&a_key(), &over, Event::Start)).is_err());
     }
 
     /// The event's frames are bounded by their own type, and the request decoder
     /// inherits that rather than restating it.
     #[test]
     fn an_event_over_the_capture_bound_is_refused() {
-        let props: [(String, Prop); 0] = [];
         let event = Event::Media(MediaResult {
             slot: 0,
             clip: Clip {
                 frames: vec![vec![1u8]; MAX_CLIP_FRAMES + 1],
             },
         });
-        assert!(decode(&loose(&a_key(), &props, event)).is_err());
+        assert!(decode(&loose(&a_key(), b"", event)).is_err());
     }
 
     /// Version skew fails closed rather than running a round on a request this
@@ -1168,18 +1108,17 @@ mod request_bound_tests {
         #[derive(Serialize)]
         struct Plus<'a> {
             composition_key: &'a str,
-            props: &'a [(String, Prop)],
+            props: &'a Bytes,
             session_state: Padded<SessionState>,
             event: Event,
             future_field: u32,
         }
         let key = a_key();
-        let props: [(String, Prop); 0] = [];
         let mut b = Vec::new();
         ciborium::into_writer(
             &Plus {
                 composition_key: &key,
-                props: &props,
+                props: Bytes::new(b""),
                 session_state: frame(),
                 event: Event::Start,
                 future_field: 1,

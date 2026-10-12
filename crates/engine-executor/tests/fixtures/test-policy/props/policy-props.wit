@@ -1,0 +1,18 @@
+package enclavid:host-ext@0.1.0;
+
+/// The props this policy takes. The host serves `get`; the record is this
+/// policy's own. Kept out of `wit/` and vendored into `wit/deps` by `wkg`,
+/// which reads a package it does not find in a registry only from a path.
+interface policy-props {
+    /// Both are harness knobs, absent on every real flow.
+    record props {
+        /// Return a state blob of this many bytes from genesis, to drive the
+        /// engine's POLICY_MAX_STATE_BYTES cap.
+        state-bloat: option<u32>,
+        /// Rehydrate the passport handle on the selfie round without reading
+        /// its bytes, to prove the pull is lazy.
+        skip-passport-read: option<bool>,
+    }
+
+    get: func() -> props;
+}

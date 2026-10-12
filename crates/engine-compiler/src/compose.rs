@@ -6,7 +6,7 @@
 //! high-level `wac_graph::plug` helper, because `plug` MERGES every
 //! same-named unsatisfied import into one — which is what we want for
 //! `disclosure-fields` (option B: DF is merged, first-match, bounded by
-//! the visible static-set size) and `enclavid:host/session-context`, but NOT
+//! the visible static-set size) and `enclavid:host-ext/policy-props`, but NOT
 //! for i18n / icons, whose stored value differs per component. For those
 //! two, each component's `enclavid:host/embedded-<iface>` import is routed
 //! to a DISTINCT composite import named by that component's catalog
@@ -331,7 +331,7 @@ fn catalog_hash_of(wasm: &[u8]) -> wasmtime::Result<[u8; 32]> {
 /// The strict-routed kind of an embedded import name, or `None` for DF
 /// / non-embedded imports (which stay merged). Only `embedded-i18n` and
 /// `embedded-icons` are per-component routed; `disclosure-fields` and
-/// `session-context` stay merged / host-served as-is.
+/// `policy-props` stay merged / host-served as-is.
 fn strict_iface(name: &str) -> Option<EmbeddedIface> {
     if name.starts_with("enclavid:host/embedded-i18n") {
         Some(EmbeddedIface::I18n)
@@ -345,18 +345,24 @@ fn strict_iface(name: &str) -> Option<EmbeddedIface> {
 /// Interfaces the TEE host `Linker` serves EXCLUSIVELY. A composed
 /// plugin may IMPORT one (reading the same host surface the policy does)
 /// but must never SATISFY one: wiring a plugin export into a
-/// host-reserved import would let the plugin interpose on the session
-/// config the policy reads (`session-context`), the applicant-facing
+/// host-reserved import would let the plugin interpose on the props the
+/// policy reads (`enclavid:host-ext/policy-props`), the applicant-facing
 /// text / icons (`embedded-i18n` / `embedded-icons`), or the consumer
-/// disclosure vocabulary (`disclosure-fields`) — all under the reserved
-/// `enclavid:host/` package. Kept as ONE prefix check so a new host
-/// capability under `enclavid:host/` is protected the moment it exists —
-/// no per-interface filter to remember, no denylist to drift.
-/// `embedded-slot:*` are the synthetic per-catalog twins fusion itself
-/// derives from the `embedded-i18n` / `embedded-icons` imports,
-/// host-owned by construction.
+/// disclosure vocabulary (`disclosure-fields`). Reserved is every interface
+/// of `enclavid:host` and of any `enclavid:host-*` package — `host-ext` is
+/// the one whose WIT the policy writes itself, since the props' type is its
+/// own. Kept as ONE prefix rule so a new host capability in those packages is
+/// protected the moment it exists — no per-interface filter to remember, no
+/// denylist to drift. `embedded-slot:*` are the synthetic per-catalog twins
+/// fusion itself derives from the `embedded-i18n` / `embedded-icons`
+/// imports, host-owned by construction.
 fn is_host_reserved(name: &str) -> bool {
-    name.starts_with("enclavid:host/") || name.starts_with(EMBEDDED_SLOT_PREFIX)
+    if name.starts_with(EMBEDDED_SLOT_PREFIX) {
+        return true;
+    }
+    name.strip_prefix("enclavid:")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(package, _)| package == "host" || package.starts_with("host-"))
 }
 
 /// Reject a plugin that EXPORTS a host-reserved interface. A plugin may
@@ -391,10 +397,12 @@ mod tests {
     fn host_reserved_covers_every_host_served_namespace() {
         // The families the host `Linker` serves exclusively: a plugin may
         // import these but must never satisfy or export one.
-        assert!(is_host_reserved("enclavid:host/session-context@0.1.0"));
-        // A future host capability under `enclavid:host/` is protected the
-        // moment it exists — no edit to this predicate needed.
+        assert!(is_host_reserved("enclavid:host-ext/policy-props@0.1.0"));
+        // A future host capability in `enclavid:host` or a `enclavid:host-*`
+        // package is protected the moment it exists — no edit to this
+        // predicate needed.
         assert!(is_host_reserved("enclavid:host/timer@0.1.0"));
+        assert!(is_host_reserved("enclavid:host-next/timer@0.1.0"));
         assert!(is_host_reserved("enclavid:host/embedded-i18n@0.1.0"));
         assert!(is_host_reserved("enclavid:host/embedded-icons@0.1.0"));
         assert!(is_host_reserved(
@@ -419,5 +427,10 @@ mod tests {
         assert!(!is_host_reserved(
             "enclavid:well-known/disclosure-fields@0.1.0"
         ));
+        // Only `host` and `host-*` packages, and only in `enclavid`: a package
+        // that merely starts with the letters, or another namespace's `host`,
+        // stays satisfiable.
+        assert!(!is_host_reserved("enclavid:hosting/plan@0.1.0"));
+        assert!(!is_host_reserved("acme:host/props@0.1.0"));
     }
 }

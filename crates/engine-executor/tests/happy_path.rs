@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use engine_compiler::Compiler;
 use engine_executor::{
     Component, DEFAULT_ROUND_FUEL, EmbeddedImport, EmbeddedRegistry, Executor, MediaStore,
-    PluginInstance, PrimedComposition, Prop, RunInputs, RunResult, RunStatus, SessionChange,
+    PluginInstance, PrimedComposition, RunInputs, RunResult, RunStatus, SessionChange,
     SessionListener,
 };
 use hatch_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
@@ -107,7 +107,7 @@ impl TestRunner {
         primed: &PrimedComposition,
         session: Session,
         event: Event,
-        props: Vec<(String, Prop)>,
+        props: &[u8],
         inputs: RunInputs,
     ) -> RunResult<(RunStatus, Session)> {
         self.executor
@@ -366,7 +366,7 @@ async fn reload_by_ref_misses() {
     };
     let round = |session, event: Event| {
         listener.capture(&event);
-        h.runner.run(&h.primed, session, event, vec![], inputs())
+        h.runner.run(&h.primed, session, event, b"", inputs())
     };
 
     let (_s, session) = round(Session::default(), Event::Start).await.unwrap();
@@ -398,10 +398,10 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
             map: listener.media.clone(),
             loads: loads.clone(),
         });
-        let props: Vec<(String, Prop)> = if read_bytes {
-            vec![]
+        let props: &[u8] = if read_bytes {
+            b""
         } else {
-            vec![("skip_passport_read".to_string(), Prop::Int(1))]
+            br#"{"skip-passport-read": true}"#
         };
         let inputs = || RunInputs {
             listener: listener.clone(),
@@ -410,8 +410,7 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
         };
         let round = |session, event: Event| {
             listener.capture(&event);
-            h.runner
-                .run(&h.primed, session, event, props.clone(), inputs())
+            h.runner.run(&h.primed, session, event, props, inputs())
         };
         let (_s, session) = round(Session::default(), Event::Start).await.unwrap();
         let (_s, session) = round(session, Event::Media(fake_capture())).await.unwrap();
@@ -491,16 +490,43 @@ async fn empty_selfie_clip_is_retryable_via_plugin() {
     }
 }
 
+/// Props that do not fit the record the policy declares fail the round before
+/// the policy runs: nothing it could do with half its props is reached, and
+/// nothing is persisted.
+#[tokio::test]
+async fn props_that_do_not_fit_the_policys_record_fail_the_round() {
+    let h = Harness::new();
+    for props in [
+        r#"{"state-bloat": -1}"#,
+        r#"{"state-bloat": "big"}"#,
+        r#"{"stateBloat": 1}"#,
+    ] {
+        let listener = Arc::new(PersistListener::default());
+        let result = h
+            .runner
+            .run(
+                &h.primed,
+                Session::default(),
+                Event::Start,
+                props.as_bytes(),
+                h.inputs(&listener),
+            )
+            .await;
+        assert!(result.is_err(), "{props} ran");
+        assert_eq!(*listener.fires.lock().unwrap(), 0, "{props} persisted");
+    }
+}
+
 #[tokio::test]
 async fn oversized_state_traps() {
     let h = Harness::new();
     let listener = Arc::new(PersistListener::default());
 
-    // Drive genesis with a consumer config that makes the policy return a
-    // blob one byte over the cap — the runtime must trap the round rather
-    // than seal an over-cap (clip-smuggling) state.
-    let over = engine_executor::limits::POLICY_MAX_STATE_BYTES as i64 + 1;
-    let props = vec![("state_bloat".to_string(), Prop::Int(over))];
+    // Drive genesis with props that make the policy return a blob one byte
+    // over the cap — the runtime must trap the round rather than seal an
+    // over-cap (clip-smuggling) state.
+    let over = engine_executor::limits::POLICY_MAX_STATE_BYTES + 1;
+    let props = format!(r#"{{"state-bloat": {over}}}"#);
 
     let result = h
         .runner
@@ -508,7 +534,7 @@ async fn oversized_state_traps() {
             &h.primed,
             Session::default(),
             Event::Start,
-            props,
+            props.as_bytes(),
             h.inputs(&listener),
         )
         .await;
@@ -608,7 +634,7 @@ async fn static_fused_artifact_resolves_strictly() {
     };
     let round = |session, event: Event| {
         listener.capture(&event);
-        runner.run(&primed, session, event, vec![], inputs())
+        runner.run(&primed, session, event, b"", inputs())
     };
     let (status, session) = round(Session::default(), Event::Start)
         .await
@@ -752,7 +778,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     // start → media(passport) → media(selfie) → consent-disclosure.
     let round = |session, event: Event| {
         listener.capture(&event);
-        runner.run(&primed, session, event, vec![], inputs())
+        runner.run(&primed, session, event, b"", inputs())
     };
     let (status, session) = round(Session::default(), Event::Start)
         .await
@@ -877,7 +903,7 @@ impl Harness {
         // the orchestrator's order, and the reason it needs nothing back.
         listener.capture(&event);
         self.runner
-            .run(&self.primed, session, event, vec![], self.inputs(listener))
+            .run(&self.primed, session, event, b"", self.inputs(listener))
             .await
             .expect("reducer round")
     }

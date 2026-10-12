@@ -66,7 +66,7 @@ interface types {
     /// INBOUND: the result of a prior `action`, fed by the runtime to
     /// `handle`, one per call.
     variant event {
-        start,                          // genesis: session opened (config via `context.props`)
+        start,                          // genesis: session opened (props via `enclavid:host-ext/policy-props`)
         consent-disclosure(bool),       // ← reply to prompt::consent-disclosure: accepted? (true ⇒ disclosure already sealed)
         media(media-result),            // ← reply to prompt::media: one capture step completed
     }

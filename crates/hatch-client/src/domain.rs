@@ -101,7 +101,9 @@ pub enum CameraFacing {
 #[serde(default)]
 pub struct SessionMetadata {
     pub policy_ref: String,
-    pub input: Vec<u8>,
+    /// The props the consumer gave the session: a JSON object, empty when it
+    /// gave none. The policy reads them as the record it declares for them.
+    pub props: Vec<u8>,
     pub client: Option<Client>,
     pub status: SessionStatus,
     pub created_at: u64,

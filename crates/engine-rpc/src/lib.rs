@@ -26,7 +26,7 @@
 //!   * `compile` → `CompilerService` + `CompileError`; the worker fuses +
 //!     Cranelift-compiles into a `CompiledBundle`.
 //!   * `execute` → `ExecutorService` + `CallbackService` + the execute wire
-//!     types (`RunRequest`, `RunReply`, `RunStatus`, `Prop`, `ExecError`,
+//!     types (`RunRequest`, `RunReply`, `RunStatus`, `ExecError`,
 //!     `CallbackError`) + `BundleStream` — the bundle a `run_with_bundle`
 //!     carries, streamed beside the request; pulls `hatch-client` and
 //!     `fleet-stream`.
@@ -103,7 +103,7 @@ mod execute;
 pub use execute::{
     ByteBuf, CallbackError, CallbackService, CallbackServiceClient, ChildCallbacks,
     ChildCallbacksClient, ChildCallbacksServerShared, ChildService, ChildServiceClient,
-    ChildServiceServerShared, ExecError, Prop, RunOutcome, RunReply, RunRequest, RunStatus,
+    ChildServiceServerShared, ExecError, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 
 // Both ends of the execute hop, and the doors on the calling end.

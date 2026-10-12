@@ -19,16 +19,15 @@ use hatch_client::{
     Client, Decision, DisplayField, Event, Key, Metadata, PluginPin, Prompt, SessionMetadata,
     SessionState, SessionStatus, State as StateField, outbound_session_id,
 };
-// The run wire mirrors: props api builds + ships, the outcome + error it gets
-// back from the execution-worker.
+// The run wire mirrors: the request api ships, the outcome + error it gets back
+// from the execution-worker.
 use engine_rpc::{
     BundleSource, CallbackServiceUntrusted, CompatToken, CompileError, CompileSource,
-    CompositionKey, ExecError, Prop, RunOutcome, RunRequest, RunStatus,
+    CompositionKey, ExecError, RunOutcome, RunRequest, RunStatus,
 };
 
 use crate::cwasm_cache;
 use crate::error::ApiError;
-use crate::input::parse_input;
 use crate::locale::Locale;
 use crate::policy_pull;
 
@@ -39,15 +38,6 @@ use super::callbacks::CallbackServer;
 use super::media_store::HatchMediaStore;
 use super::persister::{self, RoundAwaiting, SessionPersister};
 use super::views::{SessionProgress, progress_from, prompt_view};
-
-/// Build the static `props` list the policy reads via
-/// `context.props`, from the consumer's config bytes in metadata.
-pub(super) fn parse_props(metadata: &SessionMetadata) -> Result<Vec<(String, Prop)>, StatusCode> {
-    parse_input(&metadata.input).map_err(|e| {
-        safe_logger::debug!("parse_props: parse_input failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })
-}
 
 /// What this round is allowed to disclose to the consumer, if anything.
 ///
@@ -149,7 +139,8 @@ pub(super) struct SessionRunCtx {
     /// [`CallbackServer`] the keyless worker calls back into. Holds the seal key
     /// + a `Weak` to the applicant token.
     media_store: Arc<HatchMediaStore>,
-    props: Vec<(String, Prop)>,
+    /// The props the consumer gave the session, as api kept them at creation.
+    props: Vec<u8>,
     /// Composition cache key — names the fused component in the execution-worker's
     /// L1 cache, and (with the worker's `compat_token`) keys the orchestrator's
     /// L2. Passed to the worker on the run; named back in its cache-miss reply.
@@ -555,7 +546,7 @@ rollback is an accepted residual of the host-holds-all-state model.
                 StatusCode::NOT_FOUND
             })?;
 
-        let props = parse_props(&metadata)?;
+        let props = metadata.props.clone();
 
         let session_state = state_opt
             .trust_unchecked::<Replay, _>(reason!(

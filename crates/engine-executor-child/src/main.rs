@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use remoc::codec::Ciborium;
 
 use engine_executor::{
-    Component, EmbeddedRegistry, Event, Executor, MediaStore, PrimedComposition, Prop, RunError,
+    Component, EmbeddedRegistry, Event, Executor, MediaStore, PrimedComposition, RunError,
     RunInputs, RunResult, RunStatus, SessionChange, SessionListener, SessionState,
 };
 use engine_rpc::{
@@ -101,7 +101,7 @@ impl ChildService for Child {
         &self,
         session_state: SessionState,
         event: Event,
-        props: Vec<(String, engine_rpc::Prop)>,
+        props: engine_rpc::ByteBuf,
         fuel: u64,
         callbacks: ChildCallbacksClient<Ciborium>,
     ) -> Result<engine_rpc::RunStatus, ExecError> {
@@ -109,12 +109,6 @@ impl ChildService for Child {
             debug!("engine-executor-child: run before prime");
             ExecError::Unknown
         })?;
-
-        // Map the wire `Prop` mirror to the bindgen `enclavid:host/types.prop`.
-        let props: Vec<(String, Prop)> = props
-            .into_iter()
-            .map(|(k, v)| (k, to_engine_prop(v)))
-            .collect();
 
         // Keyless callback proxies: blob loads + state persistence forward to the
         // supervisor's relay over the SAME socketpair connection (→ api). The seal
@@ -134,7 +128,7 @@ impl ChildService for Child {
 
         let (status, _next_state) = self
             .executor
-            .run(primed, session_state, event, props, inputs)
+            .run(primed, session_state, event, &props, inputs)
             .await
             .map_err(round_failure)?;
 
@@ -268,17 +262,6 @@ impl MediaStore for RelayMediaStore {
             }
             Ok(arc)
         })
-    }
-}
-
-/// Map the wire `Prop` mirror to the bindgen `enclavid:host/types.prop`.
-fn to_engine_prop(p: engine_rpc::Prop) -> Prop {
-    match p {
-        engine_rpc::Prop::Null => Prop::Null,
-        engine_rpc::Prop::Bool(b) => Prop::Bool(b),
-        engine_rpc::Prop::Int(i) => Prop::Int(i),
-        engine_rpc::Prop::Float(f) => Prop::Float(f),
-        engine_rpc::Prop::String(s) => Prop::String(s),
     }
 }
 

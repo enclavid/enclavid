@@ -9,9 +9,9 @@ use std::time::Duration;
 use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed, Untrusted};
 use engine_executor::{Event, SessionState};
 use engine_rpc::{
-    BundleMeta, BundleRef, BundleStream, CallbackServiceClient, ChildCallbacksServerShared,
-    ChildService, ChildServiceClient, CompatToken, CompositionKey, ExecError,
-    ExecutorServiceUntrusted, Padded, Prop, RunOutcome, RunReply, RunRequest, RunStatus,
+    BundleMeta, BundleRef, BundleStream, ByteBuf, CallbackServiceClient,
+    ChildCallbacksServerShared, ChildService, ChildServiceClient, CompatToken, CompositionKey,
+    ExecError, ExecutorServiceUntrusted, Padded, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 use engine_supervisor::{ChildRunner, Exit, ExitCause, SupervisorError};
 use remoc::codec::Ciborium;
@@ -212,7 +212,7 @@ impl Supervisor {
         lease: Lease,
         session_state: SessionState,
         event: Event,
-        props: Vec<(String, Prop)>,
+        props: Vec<u8>,
         callbacks: CallbackServiceClient<Ciborium>,
     ) -> Result<RunStatus, ExecError> {
         let entry = lease.entry().clone();
@@ -259,7 +259,13 @@ impl Supervisor {
                     });
 
                     client
-                        .run(session_state, event, props, fuel, relay_client)
+                        .run(
+                            session_state,
+                            event,
+                            ByteBuf::from(props),
+                            fuel,
+                            relay_client,
+                        )
                         .await
                 },
             )
@@ -367,9 +373,9 @@ impl Slot {
 ///     a digest rendering and nothing else.
 ///   * `session_state` — `Padded`'s exact-frame decode: a frame of any other size
 ///     is refused outright.
-///   * `props` — the count and byte bounds in its decoder. LOOSER than api's own
-///     ingress cap, deliberately, so a legitimate round is never refused here;
-///     what matters to this role is that the set is finite, not that it matches.
+///   * `props` — the byte bound in its decoder. LOOSER than api's own ingress
+///     cap, deliberately, so a legitimate round is never refused here; what
+///     matters to this role is that the props are finite, not that they match.
 ///   * `event` — the frame count and clip budget in `Clip`'s decoder, likewise.
 ///
 /// None of that is a check on AUTHENTICITY and none of it is claimed as one —

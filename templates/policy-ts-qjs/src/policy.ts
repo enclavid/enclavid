@@ -1,5 +1,6 @@
-// A KYC walk: the passport, then a selfie, then a consent screen with the
-// fields the consumer receives if the applicant accepts.
+// A KYC walk: the passport, then a selfie unless the consumer turned it off,
+// then a consent screen with the fields the consumer receives if the applicant
+// accepts.
 //
 // The runtime calls `start` on a session's first round and `handle` on every
 // round after it, with the event that brought it. Each returns the state to
@@ -12,6 +13,7 @@ import type { Action, Event } from "enclavid:policy/types@0.1.0";
 import * as capture from "enclavid:well-known/capture@0.1.0";
 import * as fields from "enclavid:well-known/disclosure-fields@0.1.0";
 import { localized } from "enclavid:host/embedded-i18n@0.1.0";
+import * as props from "enclavid:host-ext/policy-props@0.1.0";
 
 // The state is this policy's own: kept between rounds, sealed, never seen by
 // anyone but the policy. Plain data only — the passport's frame cannot be kept,
@@ -20,6 +22,23 @@ type State =
   | { step: "passport" }
   | { step: "selfie"; passport: string }
   | { step: "consent" };
+
+// The consent screen: the fields the consumer receives if the applicant accepts.
+const consent: () => Action = () => ({
+  tag: "render",
+  val: {
+    tag: "consent-disclosure",
+    val: {
+      fields: [
+        fields.fullName("Jane Q. Citizen"),
+        fields.dateOfBirth("1990-04-12"),
+        fields.nationality("Utopia"),
+      ],
+      reason: localized("consent_reason"),
+      requester: localized("requester"),
+    },
+  },
+});
 
 export const policy = definePolicy(
   withStart<State, Event, Action>({
@@ -36,6 +55,10 @@ export const policy = definePolicy(
           if (frame === undefined) {
             return [state, { tag: "finish", val: "rejected-retryable" }];
           }
+          // The props are the consumer's, the same in every round.
+          if (props.get().selfie === false) {
+            return [{ step: "consent" }, consent()];
+          }
           return [
             { step: "selfie", passport: frame.hash() },
             { tag: "render", val: { tag: "media", val: capture.selfie() } },
@@ -43,24 +66,7 @@ export const policy = definePolicy(
         }
 
         case "selfie":
-          return [
-            { step: "consent" },
-            {
-              tag: "render",
-              val: {
-                tag: "consent-disclosure",
-                val: {
-                  fields: [
-                    fields.fullName("Jane Q. Citizen"),
-                    fields.dateOfBirth("1990-04-12"),
-                    fields.nationality("Utopia"),
-                  ],
-                  reason: localized("consent_reason"),
-                  requester: localized("requester"),
-                },
-              },
-            },
-          ];
+          return [{ step: "consent" }, consent()];
 
         case "consent": {
           const accepted = event.tag === "consent-disclosure" && event.val;

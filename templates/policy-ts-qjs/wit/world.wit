@@ -11,6 +11,23 @@ world policy {
     import enclavid:well-known/disclosure-fields@0.1.0;
     import enclavid:host/embedded-i18n@0.1.0;
     import enclavid:host/embedded-disclosure-fields@0.1.0;
-    import enclavid:host/session-context@0.1.0;
+    import enclavid:host-ext/policy-props@0.1.0;
     export enclavid:policy/policy@0.1.0;
+}
+
+// The props this policy takes: what the consumer sets for each session. The
+// interface's name and its `get` are the host's, which serves them; the record
+// is this policy's own, so it is written here rather than taken from `deps/`.
+// The consumer gives the props as a JSON object keyed by these field names
+// when it creates a session, and a session whose props do not fit the record
+// fails. Leave the import out for a policy that takes none.
+package enclavid:host-ext@0.1.0 {
+    interface policy-props {
+        record props {
+            // Ask for a selfie after the passport, unless this is `false`.
+            selfie: option<bool>,
+        }
+
+        get: func() -> props;
+    }
 }

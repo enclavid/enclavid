@@ -28,6 +28,7 @@ mod convert;
 mod status;
 
 use hatch_client::{Event, SessionState};
+use wasmtime::component::types::ComponentFunc;
 use wasmtime::component::{Component, Linker, Resource};
 use wasmtime::{Config, Engine, Store};
 
@@ -86,6 +87,9 @@ pub struct Executor {
 pub struct PrimedComposition {
     pre: GeneratedHostPre<HostState>,
     embedded: std::sync::Arc<crate::embedded::EmbeddedRegistry>,
+    /// The type of the props' `get`, when the composition imports it: what
+    /// each round builds the consumer's props into before the policy runs.
+    props: Option<ComponentFunc>,
 }
 
 impl Executor {
@@ -158,15 +162,14 @@ impl Executor {
     /// <iface>`); `embedded` is the composition-wide registry those resolve
     /// against (and that [`run`](Self::run) reads at the action boundary).
     ///
-    /// bindgen wires the CANONICAL-named imports on `HostState`:
-    /// `session-context.props`, the merged
+    /// bindgen wires the CANONICAL-named imports on `HostState`: the merged
     /// `enclavid:host/embedded-disclosure-fields` (first-match, option B), and the
     /// canonical `enclavid:host/embedded-{i18n,icons}` (used only by a lone
     /// unfused policy — a fused component routes those away, so the canonical
     /// registrations sit unused, harmless). Plugin↔policy interfaces are internal
-    /// to the fused component, so the Linker never sees them. The strict
-    /// per-catalog resolvers (`embedded-slot:<hash>/<iface>`) — which bindgen
-    /// can't emit as dynamic names — are added on top.
+    /// to the fused component, so the Linker never sees them. Added on top: the
+    /// strict per-catalog resolvers (`embedded-slot:<hash>/<iface>`), whose names
+    /// bindgen can't emit, and the props' `get`, whose type is the policy's.
     pub fn prime(
         &self,
         component: &Component,
@@ -176,16 +179,26 @@ impl Executor {
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
         GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
         register_strict_embedded(&mut linker, embedded_imports, &embedded)?;
+        let props = crate::props::declared(component, &self.engine);
+        if props.is_some() {
+            register_props(&mut linker)?;
+        }
         let pre = GeneratedHostPre::new(linker.instantiate_pre(component)?)?;
-        Ok(PrimedComposition { pre, embedded })
+        Ok(PrimedComposition {
+            pre,
+            embedded,
+            props,
+        })
     }
 
     /// Drive one reducer round against a [`PrimedComposition`]. `session` carries
     /// the policy's opaque `state` blob and the `current_prompt` prompt from the
     /// previous round; `event` is the inbound mailbox message the runtime built
-    /// from the applicant's `/input`. `props` is the static consumer config the
-    /// policy reads via `enclavid:host/session-context.props`. `inputs` carries
-    /// the per-round `listener` + `media_store` (the composition-wide `embedded`
+    /// from the applicant's `/input`. `props` is the JSON object the consumer gave
+    /// the session, empty when it gave none; it becomes the record the policy
+    /// declares for it before the policy runs, and a round whose props do not fit
+    /// that record fails there (see [`crate::props`]). `inputs` carries the
+    /// per-round `listener` + `media_store` (the composition-wide `embedded`
     /// already lives in `primed`).
     ///
     /// Returns the next [`RunStatus`] and the updated [`SessionState`]
@@ -199,9 +212,10 @@ impl Executor {
         primed: &PrimedComposition,
         session: SessionState,
         event: Event,
-        props: Vec<(String, crate::Prop)>,
+        props: &[u8],
         inputs: RunInputs,
     ) -> wasmtime::Result<(RunStatus, SessionState)> {
+        let props = crate::props::value(primed.props.as_ref(), props)?;
         let embedded = primed.embedded.clone();
         let listener = inputs.listener;
         let media_store = inputs.media_store;
@@ -354,6 +368,25 @@ fn register_strict_embedded(
         }
     }
     Ok(())
+}
+
+/// Register the props' `get`, which returns the record the round built from the
+/// consumer's props. Dynamic, because the record's type is the policy's: the
+/// Linker takes whatever type the component declares, and wasmtime checks the
+/// value against it on the way out.
+fn register_props(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
+    linker
+        .root()
+        .instance(crate::props::INTERFACE)?
+        .func_new_async(crate::props::FUNCTION, |store, _ty, _params, results| {
+            let props = store.data().props.clone();
+            Box::new(async move {
+                // `run` builds the props whenever the composition imports `get`.
+                results[0] =
+                    props.ok_or_else(|| wasmtime::Error::msg("the round has no props built"))?;
+                Ok(())
+            })
+        })
 }
 
 /// Marker type bridging bindgen's `HasData` to `&mut HostState`. Host
