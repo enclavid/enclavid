@@ -3,6 +3,7 @@ mod assets;
 mod client;
 mod client_state;
 mod compiler;
+mod compositions;
 mod cwasm_cache;
 mod disclosure_commit;
 mod dto;
@@ -16,6 +17,7 @@ mod limits;
 mod locale;
 mod policy_pull;
 mod props;
+mod semaphores;
 mod settings;
 mod shuffle;
 mod state;
@@ -124,8 +126,8 @@ async fn main() {
     //
     // A failure changes nothing but the bit. The hatch is on the cold-start path
     // (`/authorize` for the consumer surface, `/oci/*` and `/kbs/relay` from
-    // `cold_compile`), and an applicant round on a warm composition never
-    // touches it — so withdrawing this guest over a hatch fault would end
+    // `Compositions::compile`), and an applicant round on a warm composition
+    // never touches it — so withdrawing this guest over a hatch fault would end
     // sessions that are running correctly. What to do about it is the host's
     // call, made from the whole answer.
     //
@@ -213,26 +215,27 @@ async fn main() {
     // identities and two quotes, for no reason a peer could make sense of.
     let acceptor = transport::acceptor(attestor.clone());
 
-    let client_state = Arc::new(
-        ClientState::init(
-            &address_out,
-            session_store.clone(),
-            attestor.clone(),
-            settings.authorize_deadline,
-        )
-        .await,
-    );
     let applicant_state = Arc::new(
         AppState::init(
             &address_out,
             legs.compile_worker,
             legs.execution_worker,
-            session_store,
+            session_store.clone(),
             cache_store,
             shuffle_key,
-            attestor,
+            attestor.clone(),
             api_health.clone(),
             &settings,
+        )
+        .await,
+    );
+    let client_state = Arc::new(
+        ClientState::init(
+            &address_out,
+            session_store,
+            attestor,
+            applicant_state.compositions.clone(),
+            settings.authorize_deadline,
         )
         .await,
     );

@@ -4,7 +4,9 @@
 //! Both cross the execute hop, both end up naming a cache slot, and each is CHOSEN
 //! by the side that does not read it back. `composition_key` travels api → worker,
 //! where the worker files bytes under it; `compat_token` travels worker → api,
-//! where api joins it into an L2 cache id.
+//! where api joins it into an L2 cache id. The compile-worker answers the same
+//! token for the cwasm it produces, which is how api keeps a compile no round
+//! asked for — a warmup — under the slot a round will look in.
 //!
 //! The two seats are not symmetric, and flattening them would undo the distinction
 //! the rest of this leg exists to make. On the worker, the producer is genuinely

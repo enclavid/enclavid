@@ -10,11 +10,12 @@
 //! time out. With it, that consumer holds at most its own share, and the rest
 //! of its requests wait in its own queue.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use crate::semaphores::Semaphores;
 
 /// Registry requests one consumer may have under way at once, unless the host
 /// says otherwise (`registry-requests-per-consumer`). A session's first round
@@ -27,9 +28,8 @@ pub const DEFAULT_REGISTRY_REQUESTS_PER_CONSUMER: usize = 4;
 /// Every consumer's queue, made when its first request comes and gone when its
 /// last one ends.
 pub struct ConsumerTurns {
-    each: usize,
     wait: Duration,
-    queues: Mutex<HashMap<String, Weak<Semaphore>>>,
+    queues: Semaphores<String>,
 }
 
 impl ConsumerTurns {
@@ -37,28 +37,15 @@ impl ConsumerTurns {
     /// given up on.
     pub fn new(each: usize, wait: Duration) -> Self {
         Self {
-            each,
             wait,
-            queues: Mutex::new(HashMap::new()),
+            queues: Semaphores::new(each),
         }
     }
 
     /// The queue `consumer`'s requests take their turns from.
     pub fn of(&self, consumer: &str) -> Turns {
-        let mut queues = self.queues.lock().unwrap_or_else(PoisonError::into_inner);
-        let semaphore = match queues.get(consumer).and_then(Weak::upgrade) {
-            Some(semaphore) => semaphore,
-            None => {
-                // No request of anyone's holds or awaits a queue whose `Weak`
-                // is dead, so dropping those loses nothing.
-                queues.retain(|_, queue| queue.strong_count() > 0);
-                let semaphore = Arc::new(Semaphore::new(self.each));
-                queues.insert(consumer.to_owned(), Arc::downgrade(&semaphore));
-                semaphore
-            }
-        };
         Turns {
-            semaphore,
+            semaphore: self.queues.of(consumer),
             wait: self.wait,
         }
     }
@@ -104,15 +91,5 @@ mod tests {
         let queue = turns.of("c");
         drop(queue.take().await.expect("a turn"));
         assert!(queue.take().await.is_some());
-    }
-
-    /// A consumer with nothing under way leaves nothing behind.
-    #[tokio::test]
-    async fn an_idle_consumer_leaves_no_queue() {
-        let turns = ConsumerTurns::new(1, Duration::from_millis(50));
-        drop(turns.of("gone").take().await);
-        let _other = turns.of("other");
-        let queues = turns.queues.lock().unwrap();
-        assert!(!queues.contains_key("gone"));
     }
 }

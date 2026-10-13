@@ -17,12 +17,14 @@ use futures::stream::BoxStream;
 
 use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
 use engine_rpc::{
-    COMPILE_STREAM_DEADLINE, COMPILE_STREAM_IDLE, CompileError, CompileReply, CompileSource,
-    CompilerLeg, MAX_BUNDLE_META_BYTES,
+    COMPILE_STREAM_DEADLINE, COMPILE_STREAM_IDLE, CompatToken, CompileError, CompileReply,
+    CompileSource, CompilerLeg, MAX_BUNDLE_META_BYTES,
 };
-use fleet_stream::{Incoming, StreamError};
+use fleet_stream::Incoming;
 use fleet_transport::LegFailure;
+use futures::{StreamExt, TryStreamExt};
 use safe_logger::debug;
+use tokio::sync::OnceCell;
 
 /// The COMPILE boundary: a client for a compile-worker's `engine_rpc::CompilerService`.
 /// Given already-pulled artifact bytes (the orchestrator owns the OCI pull +
@@ -63,25 +65,58 @@ fn outbound_compile_request(source: CompileSource) -> Exposed<CompileSource, ()>
 
 pub struct Compiler {
     leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileScope>>>>,
+    /// The compile-worker's ABI id, asked once and kept: api pins the worker's
+    /// measurement, so the build behind the leg — its runtime with it — cannot
+    /// change while this process runs, however often the leg is re-dialled.
+    compat_token: OnceCell<CompatToken>,
 }
 
-/// What a compile gives back: the metadata, encoded as the execute hop streams
-/// it, and the cwasm — its length and digest, and its pieces as they arrive,
-/// held to both. A cwasm that is not what it was named ends its pieces in an
-/// error where it would have ended, so a reader passing them on abandons rather
-/// than finishes.
+/// What a compile gives back, and what L2 keeps of it (`crate::cwasm_cache`):
+/// the metadata, encoded as the execute hop streams it, and the cwasm — its
+/// length and digest, and its pieces as they arrive, held to both. A cwasm that
+/// is not what it was named ends its pieces in an error where it would have
+/// ended, so a reader passing them on abandons rather than finishes; why it
+/// broke is on the debug log, not in the error.
 pub struct Compiled {
     pub meta: Vec<u8>,
     pub cwasm_len: u64,
     pub cwasm_sha256: [u8; 32],
-    pub cwasm: BoxStream<'static, Result<Bytes, StreamError>>,
+    pub cwasm: BoxStream<'static, Result<Bytes, ()>>,
 }
 
 impl Compiler {
     pub fn new(
         leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileScope>>>>,
     ) -> Self {
-        Self { leg }
+        Self {
+            leg,
+            compat_token: OnceCell::new(),
+        }
+    }
+
+    /// The ABI id of the cwasm the compile-worker produces: the token L2 keeps
+    /// a compile under when no round's miss names one. Asked of the worker the
+    /// first time and kept; a down leg, or the worker's failure, is
+    /// `CompileError::Failed` and is asked again next time.
+    pub async fn compat_token(&self) -> Result<CompatToken, CompileError> {
+        self.compat_token
+            .get_or_try_init(|| async {
+                let client = self.leg.get().ok_or_else(|| {
+                    debug!("compat_token: the compile-worker leg is down");
+                    CompileError::Failed
+                })?;
+                let token: Untrusted<CompatToken, CompileScope> = client.compat_token().await?;
+                Ok(token
+                    .trust_unchecked::<Asserted, _>(reason!(
+                        "contained: it names only the slot a compile is filed under, \
+                         inside the composition namespace api computed; no round loads \
+                         by it — each looks up by the token its own executor named — so \
+                         a wrong one only files a compile where no round looks"
+                    ))
+                    .into_inner())
+            })
+            .await
+            .cloned()
     }
 
     /// Compile the components `source` streams on the worker. A transport
@@ -135,7 +170,9 @@ impl Compiler {
                 debug!("compile: the cwasm's stream: {e}");
                 CompileError::Failed
             })?
-            .into_pieces(COMPILE_STREAM_DEADLINE, Some(cwasm.sha256()));
+            .into_pieces(COMPILE_STREAM_DEADLINE, Some(cwasm.sha256()))
+            .map_err(|e| debug!("compile: the cwasm broke part-way: {e}"))
+            .boxed();
         Ok(Compiled {
             meta,
             cwasm_len: cwasm.length(),
@@ -213,7 +250,6 @@ mod tests {
     use enclavid_boundary::AuthN;
     use engine_rpc::CompileRequest;
     use fleet_stream::{BlobHeader, bin};
-    use futures::StreamExt;
 
     // A minimal in-process server, so the Compiler client's rpc plumbing is
     // exercised without a real worker (the transport factory
@@ -254,9 +290,13 @@ mod tests {
                 body,
             })
         }
+
+        async fn compat_token(&self) -> Result<engine_rpc::CompatToken, CompileError> {
+            engine_rpc::CompatToken::parse("test-token").map_err(|_| CompileError::Failed)
+        }
     }
 
-    async fn read(compiled: Compiled) -> Vec<Result<Bytes, StreamError>> {
+    async fn read(compiled: Compiled) -> Vec<Result<Bytes, ()>> {
         compiled.cwasm.collect().await
     }
 
@@ -308,10 +348,23 @@ mod tests {
         assert_eq!(compiled.cwasm_len, 2);
         assert_eq!(read(compiled).await, vec![Ok(Bytes::from_static(&[5, 1]))]);
 
+        // The worker's ABI id, asked once and kept: a leg that goes down after
+        // still answers it, the build behind the leg being pinned.
+        assert_eq!(
+            compiler.compat_token().await.unwrap().as_str(),
+            "test-token"
+        );
+        leg.set(None);
+        assert_eq!(
+            compiler.compat_token().await.unwrap().as_str(),
+            "test-token"
+        );
+        leg.set(Some(client.clone()));
+
         // A cwasm that is not the one it was named ends in an error, never in a
         // quiet end a reader passing it on would finish on.
         let compiled = compiler.compile(whole(b"lie", vec![])).await.unwrap();
-        assert_eq!(read(compiled).await.last(), Some(&Err(StreamError::Digest)));
+        assert_eq!(read(compiled).await.last(), Some(&Err(())));
 
         // A down leg fails the call rather than waiting: how long to wait for a
         // peer is the host's decision, and the health port is already telling it.

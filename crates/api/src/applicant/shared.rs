@@ -9,23 +9,22 @@ use std::sync::Arc;
 use axum::extract::{FromRequestParts, Path};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
-use futures::{StreamExt, TryStreamExt};
 use secrecy::{ExposeSecret, SecretBox};
-use sha2::{Digest, Sha256};
 
 use enclavid_boundary::Asserted;
 use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted, reason};
 use hatch_client::{
-    Client, Decision, DisplayField, Event, Key, Metadata, PluginPin, Prompt, SessionMetadata,
-    SessionState, SessionStatus, State as StateField, outbound_session_id,
+    Client, Decision, DisplayField, Event, Metadata, Prompt, SessionMetadata, SessionState,
+    SessionStatus, State as StateField, outbound_session_id,
 };
 // The run wire mirrors: the request api ships, the outcome + error it gets back
 // from the execution-worker.
 use engine_rpc::{
-    BundleSource, CallbackServiceUntrusted, CompatToken, CompileError, CompileSource,
-    CompositionKey, ExecError, RunOutcome, RunRequest, RunStatus,
+    BundleSource, CallbackServiceUntrusted, CompatToken, CompositionKey, ExecError, RunOutcome,
+    RunRequest, RunStatus,
 };
 
+use crate::compositions::{Composition, composition_key, consumer, pull_failure};
 use crate::cwasm_cache;
 use crate::error::ApiError;
 use crate::locale::Locale;
@@ -426,33 +425,6 @@ fn classify_run_error(session_id: &str, e: &ExecError) -> ApiError {
     }
 }
 
-/// Map the compile hop's [`CompileError`] to an HTTP-facing answer — a fixed
-/// answer per value of a fixed enum, as [`classify_run_error`] does for a round.
-///
-/// A refusal is the composition's and permanent: the compiler decided it from
-/// the pinned bytes alone, so the answer is the 4xx a failing policy gets, with a
-/// fixed body. Anything else is a 500: what failed may be the pins' or ours, and
-/// this side cannot tell which.
-fn classify_compile_error(session_id: &str, policy_ref: &str, e: CompileError) -> ApiError {
-    safe_logger::debug!(
-        "lookup_policy: compile failed for {session_id} (policy_ref {policy_ref}): {e}"
-    );
-    match e {
-        // A fixed body. Nothing in it varies, so nothing in it is a channel.
-        CompileError::Refused => ApiError::with_body(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            serde_json::json!({
-                "error": "policy_refused",
-                "hint": "this session's verification policy, with the plugins the session \
-                         pins, was refused by the compiler. Nothing the applicant did caused \
-                         it, and retrying will not clear it; the policy, or the plugins \
-                         pinned when the session was created, have to change.",
-            }),
-        ),
-        CompileError::Failed => ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
 impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
     type Rejection = StatusCode;
 
@@ -683,12 +655,13 @@ async fn check_pull(
         safe_logger::debug!("check_pull: metadata.client missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let turns = &state.consumer_turns.of(consumer(client));
+    let compositions = &state.compositions;
+    let turns = &compositions.consumer_turns.of(consumer(client));
     let artifacts = artifacts_with_bearers(&metadata.policy_ref, client);
     let manifests = artifacts
         .into_iter()
         .map(|(artifact_ref, bearer)| async move {
-            policy_pull::manifest(&state.registry, turns, artifact_ref, bearer)
+            policy_pull::manifest(&compositions.registry, turns, artifact_ref, bearer)
                 .await
                 .map_err(|e| (artifact_ref, e))
         });
@@ -706,28 +679,6 @@ async fn check_pull(
         Some(status) => Err(status.into()),
         None => Ok(()),
     }
-}
-
-/// What a failed pull answers. 503 when the registry, the hatch or the
-/// consumer's turn did not answer this time — the one answer that means "the
-/// same request, later"; 410 Gone when the answer is the pins' and will not
-/// change: a refusal, an artifact absent or not what its pin names.
-fn pull_failure(e: &policy_pull::PullError) -> StatusCode {
-    if e.is_unanswered() {
-        StatusCode::SERVICE_UNAVAILABLE
-    } else {
-        StatusCode::GONE
-    }
-}
-
-/// The consumer a session's pulls count against ([`crate::turns`]): the
-/// organization that created it, as its sealed metadata records.
-fn consumer(client: &Client) -> &str {
-    client
-        .access
-        .as_ref()
-        .and_then(|access| access.principal.as_deref())
-        .unwrap_or_default()
 }
 
 /// Every artifact a session pins — the policy, then each plugin — with the
@@ -754,18 +705,22 @@ fn artifacts_with_bearers<'a>(policy_ref: &'a str, client: &'a Client) -> Vec<(&
 ///     The round is not retried here: the worker answers a bundle it refused as
 ///     it answers a round that failed after running, so this side cannot know
 ///     that nothing ran.
-///   * L2 miss: cold-compile (OCI pull + compile-worker), then the worker and the
-///     cache take the cwasm at once as it streams back from the compiler
-///     ([`crate::tee`]), so api never holds it whole here either. A cache that
-///     cannot keep it costs the next miss a compile; the round goes on. A cwasm
-///     that is not what the compiler named reaches both as an abandoned stream,
-///     and neither keeps it.
+///   * L2 miss, and the session's consumer has a compile of the composition under
+///     way — a warmup's, or another round's: wait for it to end, then look in L2
+///     again. Once: a round that still misses after it compiles too.
+///   * L2 miss otherwise: this round compiles it
+///     ([`Compositions::compile`](crate::compositions::Compositions::compile)),
+///     and the worker and the cache take the cwasm at once as it streams back
+///     ([`crate::tee`]), so api never holds it whole here either. Whoever of the
+///     same consumer comes for the composition meanwhile waits until the cache
+///     has kept it or failed to. A cache that cannot keep it costs the next miss
+///     a compile; the round goes on. A cwasm that is not what the compiler named
+///     reaches both as an abandoned stream, and neither keeps it.
 ///
-/// The outer error is resolution's, the inner the round's. Concurrent misses are
-/// not coalesced: each round resolves and streams its own bundle, the worker
-/// stages each one and runs every round on the first it commits; a cross-worker
-/// race just re-reads L2 or double-compiles (idempotent write), acceptable and
-/// rare.
+/// The outer error is resolution's, the inner the round's. Compiles are one at a
+/// time per composition and consumer in THIS process (see
+/// [`crate::compositions`]); another consumer's, or another api's, race just
+/// re-reads L2 or double-compiles (idempotent write).
 async fn run_resolved<C>(
     state: &AppState,
     composition_key: &CompositionKey,
@@ -779,24 +734,44 @@ where
     C: CallbackServiceUntrusted + Send + Sync + 'static,
     C::Scope: Send,
 {
-    if let Some(hit) = cwasm_cache::open(&state.cache_store, composition_key, compat_token).await {
-        let cwasm_cache::Hit { source, found_bad } = hit;
-        let reply = state.executor.run_with_bundle(req, source, callbacks).await;
-        if found_bad.get() {
-            cwasm_cache::remove(&state.cache_store, composition_key, compat_token).await;
-        }
-        return Ok(reply);
-    }
-    let client = metadata.client.as_ref().ok_or_else(|| {
+    let compositions = &state.compositions;
+    let composition = Composition::of(metadata).ok_or_else(|| {
         safe_logger::debug!("run_resolved: metadata.client missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+    let open = || cwasm_cache::open(&compositions.cache_store, composition_key, compat_token);
+    let mut hit = open().await;
+    let mut compiling = None;
+    if hit.is_none() {
+        let lock = compositions.compile_lock(composition_key, &composition.consumer);
+        match lock.clone().try_acquire_owned() {
+            // Nobody of this consumer is compiling it: this round does, and holds
+            // the lock while it does, so the next to come waits for this compile.
+            Ok(held) => compiling = Some(held),
+            // Someone is: wait for that compile to end — once — and look again. A
+            // round that still misses compiles too, alongside rather than after
+            // whoever took the lock next, so rounds on a composition that does
+            // not compile are answered together, not one after another.
+            Err(_) => {
+                drop(lock.acquire().await);
+                hit = open().await;
+            }
+        }
+    }
+    if let Some(hit) = hit {
+        let cwasm_cache::Hit { source, found_bad } = hit;
+        let reply = state.executor.run_with_bundle(req, source, callbacks).await;
+        if found_bad.get() {
+            cwasm_cache::remove(&compositions.cache_store, composition_key, compat_token).await;
+        }
+        return Ok(reply);
+    }
     let crate::compiler::Compiled {
         meta,
         cwasm_len,
         cwasm_sha256,
         cwasm,
-    } = cold_compile(state, session_id, metadata, client).await?;
+    } = compositions.compile(&composition, session_id).await?;
     let (feed, to_worker, to_cache) = crate::tee::tee(cwasm);
     let source = BundleSource::streamed(cwasm_len, cwasm_sha256, meta.clone(), to_worker)
         .ok_or_else(|| {
@@ -805,212 +780,37 @@ where
             );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    let entry = cwasm_cache::Entry {
-        meta: &meta,
+    // The same compile, with the cache's branch of its cwasm.
+    let entry = crate::compiler::Compiled {
+        meta,
         cwasm_len,
         cwasm_sha256,
         cwasm: to_cache,
     };
+    // The compile is over for whoever waits on it once the cache has kept it, or
+    // failed to — not once this round has run, which they need not wait for.
+    let keep = async {
+        cwasm_cache::store(
+            &compositions.cache_store,
+            composition_key,
+            compat_token,
+            entry,
+        )
+        .await;
+        drop(compiling);
+    };
     let (reply, (), ()) = tokio::join!(
         state.executor.run_with_bundle(req, source, callbacks),
-        cwasm_cache::store(&state.cache_store, composition_key, compat_token, entry),
+        keep,
         feed,
     );
     Ok(reply)
 }
 
-/// Cold path: pull the policy + pinned plugins (the orchestrator owns OCI +
-/// registry auth), then hand the bytes to the [`Compiler`](crate::compiler::Compiler)
-/// boundary, which fuses + compiles + parses sections into a cwasm and its
-/// metadata, the cwasm streaming back as it comes.
-/// Runs only on an L2 miss — [`run_resolved`] calls this, then sends the result
-/// to the worker on `run_with_bundle` and to L2 at once.
-///
-/// Errors are the round's answer, returned as they are:
-///   * 410 Gone — registry pull / decrypt failed (artifact removed / malformed)
-///   * 503 — the registry, the hatch or the consumer's turn did not answer in
-///     time ([`pull_failure`])
-///   * 422 — the compiler refused the composition; the same pins always are
-///   * 500 — anything else in the compile, or an infra problem
-async fn cold_compile(
-    state: &AppState,
-    session_id: &str,
-    metadata: &SessionMetadata,
-    client: &Client,
-) -> Result<crate::compiler::Compiled, ApiError> {
-    // Look up the bearer for the policy registry by hostname. Same
-    // lookup applies per plugin below. Missing entry collapses to an
-    // empty slice ⇒ anonymous pull (host attaches no Authorization
-    // header).
-    let policy_bearer = policy_pull::bearer_for_ref(&client.registry_auth, &metadata.policy_ref);
-
-    // Context for the `kbs` key path: the hatch relay client that
-    // couriers each RCAR leg. Shared by the policy and every plugin pull;
-    // inline / plaintext artifacts ignore it.
-    let kbs_ctx = crate::keyprovider::KbsContext { kbs: &state.kbs };
-
-    // Every fetch below takes one of the consumer's turns, so this compile and
-    // the consumer's other sessions together hold no more of the hatch than
-    // their share.
-    let turns = &state.consumer_turns.of(consumer(client));
-
-    // Every manifest first, concurrently, with every key it needs: all that
-    // can be refused before a byte of wasm moves, so the /connect critical
-    // path waits on the slowest of them rather than on their sum.
-    let policy_fut = policy_pull::wasm_layer(
-        &state.registry,
-        turns,
-        &metadata.policy_ref,
-        policy_bearer,
-        metadata.policy_key.as_ref(),
-        Some(&kbs_ctx),
-    );
-    let plugin_futs = client.plugins.iter().map(|pin| {
-        let bearer = policy_pull::bearer_for_ref(&client.registry_auth, &pin.impl_ref);
-        let registry = &state.registry;
-        let kbs_ctx = &kbs_ctx;
-        async move {
-            policy_pull::wasm_layer(
-                registry,
-                turns,
-                &pin.impl_ref,
-                bearer,
-                pin.key.as_ref(),
-                Some(kbs_ctx),
-            )
-            .await
-            .map(|layer| (pin.package.clone(), layer))
-        }
-    });
-    let (policy_res, plugin_results) =
-        futures::future::join(policy_fut, futures::future::join_all(plugin_futs)).await;
-
-    let policy = policy_res.map_err(|e| {
-        safe_logger::debug!(
-            "lookup_policy: the policy's manifest failed for session {session_id} \
-             (policy_ref={}): {e}",
-            metadata.policy_ref,
-        );
-        pull_failure(&e)
-    })?;
-    let mut plugins = Vec::with_capacity(plugin_results.len());
-    for res in plugin_results {
-        plugins.push(res.map_err(|e| {
-            safe_logger::debug!(
-                "lookup_policy: a plugin's manifest failed for session {session_id}: {e}"
-            );
-            pull_failure(&e)
-        })?);
-    }
-
-    // Then the layers themselves, one after another in composition order —
-    // policy first — as one stream into the COMPILE boundary: each fetched
-    // when the one before it has been read, so no fetch waits half-read on
-    // another. The compile-worker fuses + compiles + parses sections into a
-    // cwasm and its metadata (the i18n/icons import manifest + per-component
-    // catalogs, composition order), starting only once every component has
-    // arrived whole. [`run_resolved`] passes the cwasm on to L2 and to the
-    // execution-worker as it streams back; the worker files it in its own L1.
-    //
-    // A layer that does not arrive, or turns out not to be what its manifest
-    // pinned, ends the stream in an error, which the compile answers as a
-    // failure; marked here, so the round answers it as the pull failure it is,
-    // as a manifest's would be.
-    let policy_length = policy.length();
-    let lengths = plugins
-        .iter()
-        .map(|(package, layer)| (package.clone(), layer.length()))
-        .collect();
-    let pull_failed = Arc::new(std::sync::OnceLock::new());
-    let marked = pull_failed.clone();
-    let layers = std::iter::once(policy).chain(plugins.into_iter().map(|(_, layer)| layer));
-    let components = futures::stream::iter(layers)
-        .flat_map(policy_pull::WasmLayer::pieces)
-        .inspect_err(move |e| {
-            safe_logger::debug!("lookup_policy: a layer did not arrive as pinned: {e}");
-            let _ = marked.set(pull_failure(e));
-        });
-    let source = CompileSource::streamed(policy_length, lengths, components);
-    let compiled = match source {
-        Some(source) => state.compiler.compile(source).await,
-        None => Err(CompileError::Refused),
-    };
-    compiled.map_err(|e| match pull_failed.get() {
-        Some(status) => (*status).into(),
-        None => classify_compile_error(session_id, &metadata.policy_ref, e),
-    })
-}
-
-/// Content-address of a fused composition: each artifact (policy + ORDERED
-/// plugins) as `(ref, decrypt key)`. The compiled bundle is a pure function of
-/// the pulled-and-decrypted artifact bytes and nothing session-specific, so it
-/// is the right cache key — sessions pinning the same artifacts share one
-/// pull + fuse + Cranelift compile.
-///
-/// **A cache HIT skips the two gates a MISS goes through** (download, then
-/// decrypt) — it hands back the already pulled-and-decrypted component. The two
-/// are kept in different places:
-///   * **Download** is asked of the registry by every session, hit or miss
-///     ([`check_pull`]), so the OCI bearer is NOT in the key and every consumer
-///     the registry lets pull an artifact shares its compile. For a third-party
-///     LICENSED plugin the bearer is the license, and that check is the license
-///     check. A ref names registry, repository and digest, and a registry grants
-///     pull per repository, so a session allowed the ref is allowed exactly the
-///     bytes that were compiled.
-///   * **Decrypt authority** — the [`Key`] — is in the key: `None` (plaintext)
-///     shares; `Inline` (owner secret) mixes `sha256(bytes)`, so only holders of
-///     the same key share; `Kbs` a marker only. Encryption's job is secrecy from
-///     the PLATFORM (KBS releases only to the attested TEE), NOT per-client
-///     licensing — that is the download gate — so `Kbs` needs no per-client
-///     credential here. (A metered/licensed KBS would be consulted every session
-///     as the registry is, never folded into this key: the cache only ever skips
-///     the decrypt+compile, never a per-session check.)
-///
-/// The inline key is HASHED, never embedded raw. Order matters (fusion order
-/// fixes merged first-match), so pins are hashed in `client.plugins` order;
-/// every field is length-prefixed against delimiter-collision. Refs are
-/// digest-pinned (session create refuses a tag), so one key never names two
-/// different contents.
-fn composition_key(
-    policy_ref: &str,
-    policy_key: Option<&Key>,
-    plugins: &[PluginPin],
-) -> CompositionKey {
-    let mut h = Sha256::new();
-    hash_artifact(&mut h, policy_ref, policy_key);
-    h.update((plugins.len() as u64).to_le_bytes());
-    for p in plugins {
-        h.update((p.package.len() as u64).to_le_bytes());
-        h.update(p.package.as_bytes());
-        hash_artifact(&mut h, &p.impl_ref, p.key.as_ref());
-    }
-    // Handed to the type as a DIGEST, not as a rendering of one. There is no
-    // fallible constructor to get this wrong with: what leaves here has the shape
-    // the worker's decoder demands because it could not have had another.
-    CompositionKey::from_digest(h.finalize().into())
-}
-
-/// Feed one artifact's `(ref, decrypt authority)` into the composition hash.
-/// See [`composition_key`] for the rationale.
-fn hash_artifact(h: &mut Sha256, artifact_ref: &str, key: Option<&Key>) {
-    h.update((artifact_ref.len() as u64).to_le_bytes());
-    h.update(artifact_ref.as_bytes());
-    match key {
-        None => h.update([0x00u8]),
-        Some(Key::Inline(bytes)) => {
-            h.update([0x01u8]);
-            let digest = Sha256::digest(bytes);
-            h.update((digest.len() as u64).to_le_bytes());
-            h.update(digest);
-        }
-        Some(Key::Kbs(_)) => h.update([0x02u8]),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hatch_client::{MediaSpec, PromptDisclosure};
+    use hatch_client::{MediaSpec, PluginPin, PromptDisclosure};
 
     /// A worker with no room is the one failure that says "the same request,
     /// later" — an empty 503, nothing for a policy to have chosen.
@@ -1019,20 +819,6 @@ mod tests {
         assert!(matches!(
             classify_run_error("ses_test", &ExecError::Busy),
             ApiError::Status(StatusCode::SERVICE_UNAVAILABLE)
-        ));
-    }
-
-    /// A refused composition is its pins' to fix — the fixed 422 a failing
-    /// policy gets; any other compile failure stays a 500.
-    #[test]
-    fn a_refused_composition_is_a_422() {
-        assert!(matches!(
-            classify_compile_error("ses_test", "r/p@sha256:00", CompileError::Refused),
-            ApiError::StatusWithBody(StatusCode::UNPROCESSABLE_ENTITY, _)
-        ));
-        assert!(matches!(
-            classify_compile_error("ses_test", "r/p@sha256:00", CompileError::Failed),
-            ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR)
         ));
     }
 
@@ -1194,78 +980,6 @@ mod tests {
             impl_ref: impl_ref.into(),
             key: None,
         }
-    }
-
-    #[test]
-    fn composition_key_deterministic_and_order_sensitive() {
-        let plugins = [
-            pin("enclavid:well-known", "reg/wk@sha256:11"),
-            pin("enclavid:face-age", "reg/fa@sha256:22"),
-        ];
-        let key = composition_key("reg/policy@sha256:aa", None, &plugins);
-
-        // Same composition → same key (the whole point: cross-session sharing).
-        assert_eq!(key, composition_key("reg/policy@sha256:aa", None, &plugins));
-
-        // Plugin ORDER is significant (fusion order fixes merged first-match) →
-        // reversing must change the key.
-        let reversed = [plugins[1].clone(), plugins[0].clone()];
-        assert_ne!(
-            key,
-            composition_key("reg/policy@sha256:aa", None, &reversed)
-        );
-
-        // Different policy ref → different key.
-        assert_ne!(key, composition_key("reg/policy@sha256:bb", None, &plugins));
-
-        // Different plugin set (dropping one) → different key.
-        assert_ne!(
-            key,
-            composition_key("reg/policy@sha256:aa", None, &plugins[..1])
-        );
-    }
-
-    #[test]
-    fn composition_key_length_prefixed_no_delimiter_collision() {
-        // Without length-prefixing, field boundaries could be ambiguous: a
-        // policy ref "ab" + package "c" would concat-collide with ref "a" +
-        // package "bc". Length-prefixing must keep them distinct.
-        let a = composition_key("ab", None, &[pin("c", "r")]);
-        let b = composition_key("a", None, &[pin("bc", "r")]);
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn composition_key_partitions_by_decryption_authority() {
-        use hatch_client::{KbsKey, Key};
-        let plugins = [pin("p", "r")];
-        let none = composition_key("policy", None, &plugins);
-        let inline_a = composition_key("policy", Some(&Key::Inline(vec![1, 2, 3])), &plugins);
-        let inline_b = composition_key("policy", Some(&Key::Inline(vec![9, 9, 9])), &plugins);
-
-        // Plaintext (None) and encrypted (Inline) are distinct scopes, and two
-        // different Inline keys never share — a non-holder can't hit a holder's
-        // entry (the whole point: a cache hit must not bypass decrypt auth).
-        assert_ne!(none, inline_a);
-        assert_ne!(inline_a, inline_b);
-        // Same Inline key → same key: key-holders DO share.
-        assert_eq!(
-            inline_a,
-            composition_key("policy", Some(&Key::Inline(vec![1, 2, 3])), &plugins)
-        );
-
-        // Kbs is attestation-gated (every TEE session equally authorized), so it
-        // does NOT partition by endpoint — that would only reduce sharing.
-        let kbs = |endpoint: &str| {
-            composition_key(
-                "policy",
-                Some(&Key::Kbs(KbsKey {
-                    endpoint: endpoint.into(),
-                })),
-                &plugins,
-            )
-        };
-        assert_eq!(kbs("a"), kbs("b"));
     }
 
     /// The pull check asks about the policy and every plugin, in pin order,

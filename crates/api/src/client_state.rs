@@ -16,10 +16,15 @@ use std::sync::Arc;
 use enclavid_attestation::Attestor;
 use hatch_client::{AuthClient, HatchClient, SessionStore};
 
+use crate::compositions::Compositions;
+
 pub struct ClientState {
     pub auth: AuthClient,
     pub session_store: Arc<SessionStore>,
     pub attestor: Arc<dyn Attestor>,
+    /// The applicant surface's, shared: a warmup has a composition compiled
+    /// and kept before any round asks for it.
+    pub compositions: Arc<Compositions>,
 }
 
 impl ClientState {
@@ -29,12 +34,14 @@ impl ClientState {
         session_store: Arc<SessionStore>,
         hatch: HatchClient,
         attestor: Arc<dyn Attestor>,
+        compositions: Arc<Compositions>,
         authorize_deadline: std::time::Duration,
     ) -> Self {
         Self {
             auth: AuthClient::new(hatch, authorize_deadline),
             session_store,
             attestor,
+            compositions,
         }
     }
 
@@ -42,11 +49,18 @@ impl ClientState {
         transport_out: &str,
         session_store: Arc<SessionStore>,
         attestor: Arc<dyn Attestor>,
+        compositions: Arc<Compositions>,
         authorize_deadline: std::time::Duration,
     ) -> Self {
         let hatch = HatchClient::new(transport_out)
             .await
             .expect("failed to connect to hatch");
-        Self::new(session_store, hatch, attestor, authorize_deadline)
+        Self::new(
+            session_store,
+            hatch,
+            attestor,
+            compositions,
+            authorize_deadline,
+        )
     }
 }

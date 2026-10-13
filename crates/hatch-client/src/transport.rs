@@ -249,9 +249,9 @@ impl HatchClient {
         // nothing but this.
         //
         // That matters most where it is least visible: `/oci/manifest` and
-        // `/kbs/relay` are reached from `cold_compile`, which runs INSIDE an
-        // applicant round, so an unbounded wait here parks a round that is
-        // holding that round's captures.
+        // `/kbs/relay` are reached from api's compile path, which can run
+        // INSIDE an applicant round, so an unbounded wait here parks a round
+        // that is holding that round's captures.
         let exchange = async move {
             let resp = self
                 .client

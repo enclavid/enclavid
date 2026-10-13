@@ -84,10 +84,11 @@ mod untrusted_compile;
 pub use untrusted_compile::CompilerServiceUntrusted;
 
 // The two names a cache slot is addressed by, as types that carry their own
-// shape check. Execute-side: both cross that hop and nothing else names them.
-#[cfg(feature = "execute")]
+// shape check. Both cross the execute hop; the compile hop carries the token too,
+// for a compile no round asked for.
+#[cfg(any(feature = "compile", feature = "execute"))]
 mod keys;
-#[cfg(feature = "execute")]
+#[cfg(any(feature = "compile", feature = "execute"))]
 pub use keys::{CompatToken, CompositionKey, KeyError};
 
 #[cfg(feature = "execute")]

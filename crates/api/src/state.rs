@@ -5,6 +5,7 @@ use secrecy::SecretBox;
 use hatch_client::{CacheStore, HatchClient, KbsClient, RegistryClient, SessionStore};
 
 use crate::compiler::{Compiler, connect_compile_worker};
+use crate::compositions::Compositions;
 use crate::executor::{Executor, connect_execution_worker};
 use crate::shuffle::ShuffleKey;
 use crate::turns::ConsumerTurns;
@@ -18,11 +19,12 @@ use crate::turns::ConsumerTurns;
 pub type ApplicantSessionToken = SecretBox<Vec<u8>>;
 
 pub struct AppState {
-    /// The COMPILE boundary the cold path calls: hand pulled artifact bytes to a
-    /// compile-worker over rpc, get back a streaming `Compiled`. api NEVER compiles
-    /// in-process (no Cranelift); the worker is started by infrastructure and
-    /// api [`connect`](connect_compile_worker)s to it. See [`crate::compiler`].
-    pub compiler: Arc<Compiler>,
+    /// Compiling a composition and keeping it — the COMPILE boundary api drives
+    /// over rpc (it never compiles in-process: no Cranelift), L2, the registry
+    /// pulls, each consumer's turns, the KBS relay — shared with the client
+    /// surface, whose warmups ask for compiles ahead of the rounds that miss. See
+    /// [`crate::compositions`].
+    pub compositions: Arc<Compositions>,
     /// The EXECUTE boundary each reducer round drives: a client for the remote
     /// execution-worker (started by infrastructure; api [`connect`s]
     /// (connect_execution_worker) to it). api holds NO wasmtime — the round runs
@@ -31,25 +33,7 @@ pub struct AppState {
     /// [`crate::executor`]. The orchestrator delegates compile + execute through
     /// these two client boundaries.
     pub executor: Arc<Executor>,
-    /// L2 compiled-policy cache: storage-CVM-backed, sealed cwasm bundles, keyed
-    /// by `(composition_key, compat_token)`. This is the orchestrator's ONLY
-    /// compiled-artifact store — there is NO api-side in-RAM L1; the sole
-    /// in-memory component cache lives on the execution-worker, which reports a
-    /// miss rather than filling it itself. `run_resolved` (`applicant::shared`)
-    /// is the L2-read-or-compile-and-store entry point that miss drives. See
-    /// [`crate::cwasm_cache`].
-    pub cache_store: CacheStore,
     pub session_store: Arc<SessionStore>,
-    /// Registry client used by /connect for the lazy policy pull.
-    /// Same hatch connection as the rest of hatch-client.
-    pub registry: RegistryClient,
-    /// Each consumer's share of the registry requests under way at once. See
-    /// [`crate::turns`].
-    pub consumer_turns: ConsumerTurns,
-    /// KBS relay client for the `kbs` key path: couriers each Trustee
-    /// RCAR leg to the artifact owner's KBS through the hatch. Same hatch
-    /// connection.
-    pub kbs: KbsClient,
     /// Per-session `DisplayField` shuffle seeds are HKDF-derived from
     /// this key + the session id at `/connect`-time and threaded
     /// into `engine::RunInputs`. See [`crate::shuffle`] for the
@@ -76,17 +60,20 @@ impl AppState {
         let kbs = KbsClient::new(hatch.clone(), settings.kbs_deadline);
         // Both boundaries are remote clients connected by the caller (`init`):
         // `compiler` → the compile-worker, `executor` → the execution-worker.
-        Self {
+        let compositions = Compositions::new(
             compiler,
-            executor,
             cache_store,
-            session_store,
-            registry: RegistryClient::new(hatch, settings.pull_deadline),
-            consumer_turns: ConsumerTurns::new(
+            RegistryClient::new(hatch, settings.pull_deadline),
+            ConsumerTurns::new(
                 settings.registry_requests_per_consumer,
                 settings.pull_deadline,
             ),
             kbs,
+        );
+        Self {
+            compositions: Arc::new(compositions),
+            executor,
+            session_store,
             shuffle_key,
         }
     }

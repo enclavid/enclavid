@@ -239,6 +239,18 @@ impl SessionListener for PersistListener {
     }
 }
 
+/// The compiler and the runtime name one cwasm ABI. api keeps a compile in L2
+/// under the compiler's token and looks it up under the runtime's, so tokens
+/// that differed would make every compile a miss — or, for a token that stayed
+/// while the ABI under it moved, a load the runtime refuses.
+#[test]
+fn the_compiler_and_the_runtime_name_one_cwasm_abi() {
+    assert_eq!(
+        engine_compiler::compat_token(),
+        engine_executor::compat_token()
+    );
+}
+
 #[tokio::test]
 async fn passport_selfie_consent_reject_reaches_rejected() {
     let h = Harness::new();

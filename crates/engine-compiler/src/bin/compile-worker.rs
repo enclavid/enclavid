@@ -46,8 +46,8 @@ use remoc::codec::Ciborium;
 use enclavid_boundary::{AuthN, Untrusted};
 use engine_compiler::{ChildCompiled, CompileChildService, CompileChildServiceClient};
 use engine_rpc::{
-    COMPILE_STREAM_DEADLINE, CompileError, CompileReply, CompileRequest, CompilerServiceUntrusted,
-    LegSettings, MAX_BUNDLE_META_BYTES,
+    COMPILE_STREAM_DEADLINE, CompatToken, CompileError, CompileReply, CompileRequest,
+    CompilerServiceUntrusted, LegSettings, MAX_BUNDLE_META_BYTES,
 };
 use fleet_transport::LegFailure;
 use fleet_transport::launch::{LaunchError, Settings};
@@ -115,6 +115,8 @@ const DEFAULT_CWASM_READ_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).un
 struct Supervisor {
     runner: ChildRunner,
     cwasm_read: NonZeroUsize,
+    /// The ABI id of the cwasm this role compiles, which api keys L2 by.
+    compat_token: CompatToken,
 }
 
 impl CompilerServiceUntrusted for Supervisor {
@@ -215,6 +217,11 @@ impl CompilerServiceUntrusted for Supervisor {
             }
         };
         reply(output, compiled, self.cwasm_read)
+    }
+
+    /// A constant of this build, the same for any caller.
+    async fn compat_token(&self) -> Result<CompatToken, CompileError> {
+        Ok(self.compat_token.clone())
     }
 }
 
@@ -641,8 +648,21 @@ async fn main() {
 
     let child_exe = child_exe();
 
+    // The ABI id of what this role compiles, parsed at boot as the
+    // execution-worker parses its own: a build whose runtime version does not
+    // fit the wire shape is a broken build, and says so here.
+    let compat_token = CompatToken::parse(&engine_compiler::compat_token()).unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "compile-worker: this compiler's cwasm ABI id does not fit the shape the \
+             compile contract carries. Stopping.",
+            reason!("a constant of the measured build, naming no runtime input")
+        )
+    });
+
     let svc = Arc::new(Supervisor {
         cwasm_read,
+        compat_token,
         runner: ChildRunner::new(
             RunnerConfig {
                 exe: child_exe.clone(),

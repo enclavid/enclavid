@@ -27,7 +27,7 @@ use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 ///
 /// Per leg, not per handshake: a full RCAR exchange is three of these, so the
 /// worst case a caller can wait is three times this. Bounded because a relay is
-/// reached from `cold_compile`, which runs inside an applicant round — an
+/// reached from api's compile path, which can run inside an applicant round — an
 /// unbounded wait here parks a round that is holding that round's captures.
 pub const DEFAULT_RELAY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 

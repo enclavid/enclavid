@@ -329,6 +329,11 @@ pub struct CompileReply {
 #[remoc::rtc::remote]
 pub trait CompilerService {
     async fn compile(&self, req: CompileRequest) -> Result<CompileReply, CompileError>;
+
+    /// The ABI id of the cwasm this worker compiles — the token L2 keeps a
+    /// compile under. api asks it of a compile no round asked for, a warmup,
+    /// which has no execution-worker's miss to name the slot by.
+    async fn compat_token(&self) -> Result<crate::CompatToken, CompileError>;
 }
 
 #[cfg(test)]
@@ -361,6 +366,10 @@ mod tests {
                 cwasm: header,
                 body,
             })
+        }
+
+        async fn compat_token(&self) -> Result<crate::CompatToken, CompileError> {
+            crate::CompatToken::parse("test-token").map_err(|_| CompileError::Failed)
         }
     }
 
@@ -444,6 +453,10 @@ mod tests {
             Ok(_) => panic!("expected compile error"),
         };
         assert_eq!(err, CompileError::Refused);
+
+        // The worker's ABI id crosses as the token it parsed.
+        let token = client.compat_token().await.expect("the token crosses");
+        assert_eq!(token.as_str(), "test-token");
 
         drop(client);
         server_task.abort();

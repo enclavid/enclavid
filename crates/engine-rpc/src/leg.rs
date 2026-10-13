@@ -490,6 +490,18 @@ impl<S: enclavid_boundary::Open> CompilerLeg<S> {
         };
         reply.map(enclavid_boundary::Untrusted::new)
     }
+
+    /// The ABI id of the cwasm the worker compiles, as the peer's word: it
+    /// names its own runtime, which this side cannot inspect.
+    pub async fn compat_token(
+        &self,
+    ) -> Result<enclavid_boundary::Untrusted<crate::CompatToken, S>, crate::CompileError> {
+        use crate::compile::CompilerService as _;
+        self.0
+            .compat_token()
+            .await
+            .map(enclavid_boundary::Untrusted::new)
+    }
 }
 
 /// The execute door end to end: `connect_executor` on one side, `serve_executor`

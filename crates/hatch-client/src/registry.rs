@@ -31,7 +31,7 @@ use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 /// The most generous of the four, because it is the only one whose work is
 /// unbounded from here: the hatch fetches from a registry this process cannot
 /// see, cannot reach and does not choose. Still bounded, and the reason is
-/// where it runs — api's pull check and `cold_compile` are both on the
+/// where it runs — api's pull check and its compile path are both on the
 /// applicant round path, so a pull that never returns parks a round holding
 /// that round's captures, with nothing beneath it to notice. The host's to tune, as the hatch's own pace
 /// already is: a larger artifact takes longer to pull, and a longer deadline

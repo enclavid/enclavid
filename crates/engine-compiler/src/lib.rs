@@ -234,6 +234,18 @@ fn lent(plugins: &[PluginInstance]) -> Vec<PluginInstance> {
         .collect()
 }
 
+/// The ABI id of the cwasm this compiler produces: what L2 keeps a compile
+/// under, so a runtime of another wasmtime never addresses it. The same string
+/// `engine_executor::compat_token` derives for the runtime that loads it — the
+/// two crates link the same wasmtime and build their engines from the same
+/// [`engine_config`], and the executor's `happy_path` test holds them equal.
+pub fn compat_token() -> String {
+    format!(
+        "wt{}-cm-fuel",
+        wasmtime::ModuleVersionStrategy::WasmtimeVersion.as_str()
+    )
+}
+
 /// The wasmtime [`Config`] both fleet halves build their [`Engine`] from.
 /// It MUST be identical on the compile and execute sides: `consume_fuel`
 /// compiles fuel checks INTO the code, so a mismatch would make a cwasm

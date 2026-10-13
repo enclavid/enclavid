@@ -25,7 +25,9 @@
 //!      target), so a fleet runtime bump gives the new worker a new key ⇒ a MISS
 //!      (recompile) instead of a stale, incompatible cwasm; a change to the entry
 //!      or to the metadata's layout does the same via the format epoch. Old blobs
-//!      are never addressed by the new binary/runtime.
+//!      are never addressed by the new binary/runtime. A warmup, with no worker's
+//!      miss to name it, keeps its compile under the compile-worker's own token —
+//!      the same string, both being the pinned builds of one release.
 //!   2. The worker decodes the metadata under `deny_unknown_fields` and no
 //!      `#[serde(default)]`, so even if a version bump is forgotten, ANY
 //!      struct-shape drift refuses the bundle rather than misreading it.
@@ -57,7 +59,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 
 use enclavid_crypto::sealed_stream::sealed_len;
@@ -65,6 +66,8 @@ use engine_rpc::{
     BundleSource, CompatToken, CompositionKey, MAX_BUNDLE_META_BYTES, MAX_CWASM_BYTES,
 };
 use hatch_client::{BlobPieces, BridgeError, CacheStore};
+
+use crate::compiler::Compiled;
 
 /// Bumped whenever an entry's layout changes — its header, or the metadata's
 /// encoding (a field of `BundleMeta` added / removed / retyped, or a nested serde
@@ -96,16 +99,7 @@ fn cache_id(composition_key: &CompositionKey, compat_token: &CompatToken) -> Str
     format!("{composition_key}.{compat_token}.v{CACHE_FORMAT_VERSION}")
 }
 
-/// What an entry is made of: the metadata, encoded as the execute hop streams
-/// it, and the cwasm — its length, its digest, and its pieces as they come.
-pub struct Entry<'a> {
-    pub meta: &'a [u8],
-    pub cwasm_len: u64,
-    pub cwasm_sha256: [u8; 32],
-    pub cwasm: BoxStream<'static, Result<Bytes, ()>>,
-}
-
-/// Store `entry` to L2 under `(composition_key, compat_token)`, its cwasm
+/// Keep `compiled` in L2 under `(composition_key, compat_token)`, its cwasm
 /// passing through as it comes. Best-effort: a failure is logged and swallowed;
 /// a broken cache never breaks a session. A cwasm that fails part-way, or is not
 /// the length it was named, is not kept.
@@ -113,22 +107,19 @@ pub async fn store(
     cache: &CacheStore,
     composition_key: &CompositionKey,
     compat_token: &CompatToken,
-    entry: Entry<'_>,
+    compiled: Compiled,
 ) {
     let mut header = Vec::with_capacity(ENTRY_HEADER_BYTES);
-    header.extend_from_slice(&(entry.meta.len() as u64).to_be_bytes());
-    header.extend_from_slice(&entry.cwasm_len.to_be_bytes());
-    header.extend_from_slice(&entry.cwasm_sha256);
-    let length = (ENTRY_HEADER_BYTES + entry.meta.len()) as u64 + entry.cwasm_len;
-    let pieces = futures::stream::iter([
-        Ok(Bytes::from(header)),
-        Ok(Bytes::copy_from_slice(entry.meta)),
-    ])
-    .chain(
-        entry
-            .cwasm
-            .map_err(|()| BridgeError::Transport("the cwasm stopped part-way; not stored".into())),
-    );
+    header.extend_from_slice(&(compiled.meta.len() as u64).to_be_bytes());
+    header.extend_from_slice(&compiled.cwasm_len.to_be_bytes());
+    header.extend_from_slice(&compiled.cwasm_sha256);
+    let length = (ENTRY_HEADER_BYTES + compiled.meta.len()) as u64 + compiled.cwasm_len;
+    let pieces = futures::stream::iter([Ok(Bytes::from(header)), Ok(Bytes::from(compiled.meta))])
+        .chain(
+            compiled.cwasm.map_err(|()| {
+                BridgeError::Transport("the cwasm stopped part-way; not stored".into())
+            }),
+        );
     if let Err(e) = cache
         .store(
             &cache_id(composition_key, compat_token),
@@ -364,10 +355,10 @@ mod tests {
         (0..len).map(|i| (i % 251) as u8).collect()
     }
 
-    /// An entry of `meta` and `cwasm`, the cwasm passing through in pieces.
-    fn entry<'a>(meta: &'a [u8], cwasm: &[u8]) -> Entry<'a> {
-        Entry {
-            meta,
+    /// A compile of `meta` and `cwasm`, the cwasm passing through in pieces.
+    fn entry(meta: &[u8], cwasm: &[u8]) -> Compiled {
+        Compiled {
+            meta: meta.to_vec(),
             cwasm_len: cwasm.len() as u64,
             cwasm_sha256: fleet_stream::BlobHeader::<MAX_CWASM_BYTES>::of(cwasm)
                 .unwrap()

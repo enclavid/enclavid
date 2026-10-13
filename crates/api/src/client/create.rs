@@ -15,11 +15,12 @@ use sha2::{Digest, Sha256};
 use enclavid_attestation::ReportData;
 use enclavid_boundary::{AuthN, AuthZ, Covert, reason};
 use hatch_client::{
-    Client, ClientAccess, PluginPin, SessionMetadata, SessionStatus, SetMetadata, WriteField,
+    Client, ClientAccess, Key, PluginPin, SessionMetadata, SessionStatus, SetMetadata, WriteField,
     boundary,
 };
 
 use crate::client_state::ClientState;
+use crate::compositions::Composition;
 use crate::dto::{PluginView, ResolvedPolicyView};
 use crate::limits::{
     CLIENT_SESSION_TOKEN_BYTES, MAX_CLIENT_REF_LEN, MAX_PLUGINS, MAX_REGISTRY_AUTH_LEN,
@@ -91,6 +92,13 @@ pub struct CreateSessionRequest {
     /// the session runs.
     #[serde(default)]
     pub props: Option<serde_json::Map<String, serde_json::Value>>,
+
+    /// Compile the session's composition and keep it as soon as the session is
+    /// created, so the applicant's first round does not wait for the compile.
+    /// The response does not wait for it either. The same as
+    /// `POST /api/v1/warmup` with this body's pins.
+    #[serde(default)]
+    pub warmup: bool,
 }
 
 /// One plugin pin in the create-session request. Mirrors the sealed
@@ -156,6 +164,112 @@ impl KeyRequest {
             }
         })
     }
+}
+
+/// What a request pins — the policy, its plugins, their keys, and the bearers
+/// to pull them with — validated as one, by session creation and by a warmup
+/// alike.
+pub(super) struct Pins {
+    pub policy_ref: String,
+    /// The policy's digest, the hex after `@sha256:`.
+    pub policy_digest: String,
+    pub plugins: Vec<PluginPin>,
+    pub policy_key: Option<Key>,
+    pub registry_auth: HashMap<String, Vec<u8>>,
+}
+
+impl Pins {
+    /// The composition these pins make, its pulls counted against `consumer`.
+    pub fn composition(&self, consumer: Option<&str>) -> Composition {
+        Composition {
+            policy_ref: self.policy_ref.clone(),
+            policy_key: self.policy_key.clone(),
+            plugins: self.plugins.clone(),
+            registry_auth: self.registry_auth.clone(),
+            consumer: consumer.unwrap_or_default().to_owned(),
+        }
+    }
+}
+
+/// Validate what a request pins. Every refusal is a 400, before anything is
+/// kept or compiled.
+pub(super) fn pins(
+    policy: String,
+    plugin_requests: Vec<PluginRequest>,
+    registry_auth_requests: BTreeMap<String, String>,
+    policy_key: Option<KeyRequest>,
+    headers: &HeaderMap,
+) -> Result<Pins, StatusCode> {
+    // Validate the ref shape up-front — tag-form (no `@sha256:`) or
+    // bad-algo refs trap here with a clean 400, instead of failing
+    // later inside policy_pull with an opaque error. The TEE only ever
+    // runs digest-pinned artifacts; a consumer wanting `:latest`
+    // ergonomics resolves the tag to a digest in their own control plane.
+    let policy_digest = policy_pull::split_pinned_ref(&policy)
+        .map(|(_, d)| d.to_string())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    // Build the hostname-keyed bearer map. Body-supplied `registry_auth`
+    // is the authoritative source — caller specifies which hostname
+    // gets which bearer (covers heterogeneous "policy in our Angos,
+    // plugin in ghcr" deployments). When the body map is empty AND an
+    // inbound `Authorization` header is present, fall back to using
+    // that header as the bearer for the policy registry only — common
+    // case where the same credential serves both the API call and the
+    // policy pull. Length-bound the SUM of values so a malicious
+    // consumer can't bloat session metadata.
+    let mut registry_auth: HashMap<String, Vec<u8>> = HashMap::new();
+    if !registry_auth_requests.is_empty() {
+        for (host, bearer) in registry_auth_requests {
+            registry_auth.insert(host, bearer.into_bytes());
+        }
+    } else if let Some(hv) = headers.get(header::AUTHORIZATION) {
+        let policy_host = policy_pull::registry_hostname(&policy).ok_or(StatusCode::BAD_REQUEST)?;
+        registry_auth.insert(policy_host.to_string(), hv.as_bytes().to_vec());
+    }
+    let total_bearer_bytes: usize = registry_auth.values().map(Vec::len).sum();
+    if total_bearer_bytes > MAX_REGISTRY_AUTH_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validate every plugin ref is digest-pinned (`@sha256:<hex>`)
+    // before persistence — surfaces typos as a clean 400 instead of
+    // an opaque pull error at /connect. Also dedupe-checks on
+    // package id — two pins for the same WIT package would create
+    // ambiguity at link time and is almost certainly a caller bug.
+    if plugin_requests.len() > MAX_PLUGINS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut seen_packages: std::collections::HashSet<&str> = Default::default();
+    for pr in &plugin_requests {
+        if pr.package.is_empty() || pr.impl_ref.is_empty() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if policy_pull::split_pinned_ref(&pr.impl_ref).is_none() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if !seen_packages.insert(pr.package.as_str()) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    let plugins: Vec<PluginPin> = plugin_requests
+        .into_iter()
+        .map(|pr| {
+            Ok(PluginPin {
+                package: pr.package,
+                impl_ref: pr.impl_ref,
+                key: KeyRequest::into_domain(pr.key)?,
+            })
+        })
+        .collect::<Result<_, StatusCode>>()?;
+
+    Ok(Pins {
+        policy_ref: policy,
+        policy_digest,
+        plugins,
+        policy_key: KeyRequest::into_domain(policy_key)?,
+        registry_auth,
+    })
 }
 
 /// Length-bound + printable-ASCII gate on `client_ref`. Empty
@@ -228,78 +342,28 @@ async fn create(
     headers: HeaderMap,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, StatusCode> {
-    // Validate the ref shape up-front — tag-form (no `@sha256:`) or
-    // bad-algo refs trap here with a clean 400, instead of failing
-    // later inside policy_pull with an opaque error. The TEE only ever
-    // runs digest-pinned artifacts; a consumer wanting `:latest`
-    // ergonomics resolves the tag to a digest in their own control plane.
-    let policy_digest = policy_pull::split_pinned_ref(&body.policy)
-        .map(|(_, d)| d.to_string())
-        .ok_or(StatusCode::BAD_REQUEST)?;
-    let policy_ref = body.policy.clone();
-
-    // Build the hostname-keyed bearer map. Body-supplied `registry_auth`
-    // is the authoritative source — caller specifies which hostname
-    // gets which bearer (covers heterogeneous "policy in our Angos,
-    // plugin in ghcr" deployments). When the body map is empty AND an
-    // inbound `Authorization` header is present, fall back to using
-    // that header as the bearer for the policy registry only — common
-    // case where the same credential serves both the API call and the
-    // policy pull. Length-bound the SUM of values so a malicious
-    // consumer can't bloat session metadata.
-    let mut registry_auth: HashMap<String, Vec<u8>> = HashMap::new();
-    if !body.registry_auth.is_empty() {
-        for (host, bearer) in body.registry_auth {
-            registry_auth.insert(host, bearer.into_bytes());
-        }
-    } else if let Some(hv) = headers.get(header::AUTHORIZATION) {
-        let policy_host =
-            policy_pull::registry_hostname(&body.policy).ok_or(StatusCode::BAD_REQUEST)?;
-        registry_auth.insert(policy_host.to_string(), hv.as_bytes().to_vec());
-    }
-    let total_bearer_bytes: usize = registry_auth.values().map(Vec::len).sum();
-    if total_bearer_bytes > MAX_REGISTRY_AUTH_LEN {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // Validate every plugin ref is digest-pinned (`@sha256:<hex>`)
-    // before persistence — surfaces typos as a clean 400 instead of
-    // an opaque pull error at /connect. Also dedupe-checks on
-    // package id — two pins for the same WIT package would create
-    // ambiguity at link time and is almost certainly a caller bug.
-    if body.plugins.len() > MAX_PLUGINS {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut seen_packages: std::collections::HashSet<&str> = Default::default();
-    for pr in &body.plugins {
-        if pr.package.is_empty() || pr.impl_ref.is_empty() {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        if policy_pull::split_pinned_ref(&pr.impl_ref).is_none() {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        if !seen_packages.insert(pr.package.as_str()) {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-    }
-    let plugins: Vec<PluginPin> = body
-        .plugins
-        .into_iter()
-        .map(|pr| {
-            Ok(PluginPin {
-                package: pr.package,
-                impl_ref: pr.impl_ref,
-                key: KeyRequest::into_domain(pr.key)?,
-            })
-        })
-        .collect::<Result<_, StatusCode>>()?;
+    let pins = pins(
+        body.policy,
+        body.plugins,
+        body.registry_auth,
+        body.policy_key,
+        &headers,
+    )?;
+    // Taken before the pins move into the sealed metadata below; compiled once
+    // the session is written.
+    let warmup = body.warmup.then(|| pins.composition(principal.as_deref()));
+    let Pins {
+        policy_ref,
+        policy_digest,
+        plugins,
+        policy_key,
+        registry_auth,
+    } = pins;
 
     // Snapshot the plugin set for the create response before the pins move into
     // the sealed metadata below — the full set of digest-pinned artifacts that
     // will build the cwasm, echoed to the consumer alongside the policy.
     let plugin_views: Vec<PluginView> = plugins.iter().map(PluginView::from_pin).collect();
-
-    let policy_key = KeyRequest::into_domain(body.policy_key)?;
 
     // Held to their size here, before persistence; whether they fit the record
     // the policy declares is checked where the policy runs.
@@ -410,6 +474,13 @@ async fn create(
         .write(sid, expected_version, ops)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // After the write, so a warmup never compiles for a session that does not
+    // exist; not awaited, so the response does not wait for the compile.
+    if let Some(composition) = warmup {
+        let compositions = state.compositions.clone();
+        tokio::spawn(async move { compositions.warm(composition).await });
+    }
 
     Ok(Json(CreateSessionResponse {
         session_id,
