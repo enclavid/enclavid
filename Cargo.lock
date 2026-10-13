@@ -1633,6 +1633,9 @@ dependencies = [
  "wasm-encoder 0.247.0",
  "wasmparser 0.247.0",
  "wasmtime",
+ "wasmtime-environ",
+ "wit-component 0.247.0",
+ "wit-parser 0.247.0",
 ]
 
 [[package]]
@@ -1737,6 +1740,7 @@ dependencies = [
 name = "engine-types"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "enclavid-embedded",
  "serde",
  "serde_bytes",
@@ -2185,6 +2189,7 @@ dependencies = [
  "ciborium",
  "enclavid-boundary",
  "enclavid-crypto",
+ "engine-types",
  "fleet-transport",
  "futures",
  "hatch-protocol",

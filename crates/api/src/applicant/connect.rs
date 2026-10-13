@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
+use axum::http::StatusCode;
 use axum::routing::{MethodRouter, post};
 
 use hatch_client::{Event, SessionState};
 
-use crate::error::ApiError;
 use crate::state::AppState;
 
-use super::shared::SessionRunCtx;
-use super::views::SessionProgress;
+use super::round::SessionRunCtx;
+use super::views::{SessionProgress, prompt_view};
 
 /// Route factory: bare `post(handler)` MethodRouter. Auth attached at
 /// router level via `.layer(auth())` — see `applicant::router`.
@@ -20,15 +20,22 @@ pub(super) fn post_connect() -> MethodRouter<Arc<AppState>> {
 /// session and gets where it stands. A session no round has reached yet runs
 /// genesis: the policy reducer is driven from a fresh `SessionState::default()`
 /// (empty opaque `state`, no `current_prompt`) with `Event::Start`, and the
-/// resulting state + prompt are persisted. A session already started answers
-/// with the prompt it is waiting on, and one already completed with its
-/// decision — neither runs the policy (see `shared::standing`). A different key
-/// on an already-claimed session is rejected at the auth layer with 403;
-/// recovery requires `DELETE /api/v1/sessions/{id}/state` first (no auth, by
-/// design — see reset.rs).
-async fn connect(ctx: SessionRunCtx) -> Result<SessionProgress, ApiError> {
-    if let Some(standing) = ctx.standing()? {
-        return Ok(standing);
+/// resulting state + prompt are persisted. A different key on an
+/// already-claimed session is rejected at the auth layer with 403; recovery
+/// requires `DELETE /api/v1/sessions/{id}/state` first (no auth, by design —
+/// see reset.rs).
+async fn connect(ctx: SessionRunCtx) -> Result<SessionProgress, StatusCode> {
+    // A started session answers with the prompt it waits on, so reopening the
+    // link carries on where the applicant was instead of starting over. One that
+    // has ended never reaches here: the extractor answers it (`round::extract`).
+    if let Some(prompt) = ctx
+        .session_state
+        .as_ref()
+        .and_then(|s| s.current_prompt.as_ref())
+    {
+        return Ok(SessionProgress::AwaitingInput {
+            request: prompt_view(prompt, &ctx.locale),
+        });
     }
     ctx.run(SessionState::default(), Event::Start).await
 }

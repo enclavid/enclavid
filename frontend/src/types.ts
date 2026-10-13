@@ -9,7 +9,7 @@ export type SessionStatus =
   | "unspecified"
   | "running"
   | "completed"
-  | "failed"
+  | "init_failed"
   | "expired";
 
 export type StatusResponse = {

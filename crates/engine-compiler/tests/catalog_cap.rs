@@ -5,7 +5,8 @@
 use std::borrow::Cow;
 
 use enclavid_embedded::{SECTION_I18N, SECTION_ICONS};
-use engine_compiler::{CatalogRefused, Compiler};
+use engine_compiler::Compiler;
+use engine_types::compile::{Artifact, CompileFault};
 use engine_types::composition::PluginInstance;
 use engine_types::limits::MAX_EMBEDDED_SECTION_BYTES;
 use wasm_encoder::{Component, CustomSection, NestedComponentSection};
@@ -25,7 +26,7 @@ fn carrying(name: &str, len: usize) -> Component {
 
 /// Why the compile refused the composition — every one here is, its sections
 /// not being JSON — so which rule refused it says whether the cap came first.
-fn refusal(policy: &[u8], plugins: &[PluginInstance]) -> CatalogRefused {
+fn refusal(policy: &[u8], plugins: &[PluginInstance]) -> CompileFault {
     let plugins = plugins
         .iter()
         .map(|p| PluginInstance {
@@ -38,14 +39,15 @@ fn refusal(policy: &[u8], plugins: &[PluginInstance]) -> CatalogRefused {
         .compile_to_parts(policy.to_vec(), plugins)
     {
         Ok(_) => panic!("sections that are not JSON must not compile"),
-        Err(e) => *e
-            .downcast_ref::<CatalogRefused>()
-            .unwrap_or_else(|| panic!("sections that are not JSON are refused, got {e:?}")),
+        Err(e) => e
+            .downcast_ref::<CompileFault>()
+            .unwrap_or_else(|| panic!("sections that are not JSON are refused, got {e:?}"))
+            .clone(),
     }
 }
 
 fn refused(policy: &[u8], plugins: &[PluginInstance]) -> bool {
-    refusal(policy, plugins) == CatalogRefused::PastCap
+    refusal(policy, plugins) == CompileFault::CatalogsPastCap
 }
 
 #[test]
@@ -82,6 +84,6 @@ fn a_pre_fused_policy_counts_its_nested_catalogs() {
 fn sections_at_the_cap_are_parsed_as_ever() {
     assert_eq!(
         refusal(&carrying(SECTION_I18N, CAP).finish(), &[]),
-        CatalogRefused::Invalid
+        CompileFault::CatalogInvalid(Artifact::Policy)
     );
 }

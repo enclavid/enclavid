@@ -21,11 +21,16 @@
 
 use std::collections::HashMap;
 
-use wac_graph::types::{ItemKind, Package};
-use wac_graph::{CompositionGraph, EncodeOptions, NodeId, PackageId};
+use wac_graph::types::{ItemKind, Package, Type, Types};
+use wac_graph::{
+    CompositionGraph, EncodeError, EncodeOptions, InstantiationArgumentError, NodeId, PackageId,
+};
+use wasmtime_environ::component::alternate_lookup_key;
 
+use engine_types::compile::{Artifact, CompileFault, HOST_INTERFACES};
 use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstance};
 
+use crate::decls::unreadable;
 use crate::{embedded_import_name, load_embedded, load_embedded_nested, top_level_imports};
 
 /// Namespace prefix of a strict per-component embedded import that a
@@ -46,21 +51,23 @@ const POLICY_PACKAGE: &str = "enclavid:composed-policy";
 ///
 /// Fails loud if a component's bytes aren't a component, if two plugins
 /// register under the same `package` id, or if a wac graph operation
-/// fails (e.g. a type mismatch on a functional wiring).
+/// fails (e.g. a type mismatch on a functional wiring). Where the failure is
+/// the composition's, the error carries the [`CompileFault`] saying which.
 pub(crate) fn fuse(
     policy_wasm: Vec<u8>,
     plugins: Vec<PluginInstance>,
 ) -> wasmtime::Result<(Vec<u8>, Vec<EmbeddedImport>)> {
     let mut graph = CompositionGraph::new();
 
-    let policy_id = register(&mut graph, POLICY_PACKAGE, policy_wasm)?;
-    let policy_hash = catalog_hash_of(graph[policy_id].bytes())?;
+    let policy_id = register(&mut graph, POLICY_PACKAGE, policy_wasm, Artifact::Policy)?;
+    let policy_hash = catalog_hash_of(graph[policy_id].bytes(), Artifact::Policy)?;
 
     let mut plugin_pkgs: Vec<(PackageId, [u8; 32])> = Vec::with_capacity(plugins.len());
     for plugin in plugins {
-        let id = register(&mut graph, &plugin.package, plugin.wasm)?;
+        let artifact = Artifact::Plugin(plugin.package.clone());
+        let id = register(&mut graph, &plugin.package, plugin.wasm, artifact.clone())?;
         reject_reserved_exports(&graph, id, &plugin.package)?;
-        plugin_pkgs.push((id, catalog_hash_of(graph[id].bytes())?));
+        plugin_pkgs.push((id, catalog_hash_of(graph[id].bytes(), artifact)?));
     }
 
     let policy_inst = graph.instantiate(policy_id);
@@ -145,9 +152,7 @@ pub(crate) fn fuse(
                     })?;
                 graph
                     .set_instantiation_argument(consumer_inst, &import_name, export)
-                    .map_err(|e| {
-                        wasmtime::Error::msg(format!("wac: wire import `{import_name}`: {e}"))
-                    })?;
+                    .map_err(|e| wiring(&import_name, e))?;
             }
         }
     }
@@ -167,10 +172,100 @@ pub(crate) fn fuse(
             .map_err(|e| wasmtime::Error::msg(format!("wac: export `{name}`: {e}")))?;
     }
 
-    let bytes = graph
-        .encode(EncodeOptions::default())
-        .map_err(|e| wasmtime::Error::msg(format!("wac: encode fused component: {e}")))?;
+    let bytes = graph.encode(EncodeOptions::default()).map_err(encoding)?;
     Ok((bytes, manifest))
+}
+
+/// A wiring error as the compile answers it: a plugin's export that is not of
+/// the type the import names is the composition's, and refuses it.
+fn wiring(import_name: &str, e: InstantiationArgumentError) -> wasmtime::Error {
+    let mismatched = matches!(e, InstantiationArgumentError::ArgumentTypeMismatch { .. });
+    let e = wasmtime::Error::msg(format!("wac: wire import `{import_name}`: {e}"));
+    if mismatched {
+        e.context(CompileFault::about(import_name, CompileFault::Mismatched))
+    } else {
+        e
+    }
+}
+
+/// An encoding error as the compile answers it. Each is the composition's: two
+/// components importing one interface as different types, or a fused component
+/// that does not validate.
+fn encoding(e: EncodeError) -> wasmtime::Error {
+    let fault = match &e {
+        EncodeError::ImportTypeMergeConflict { import, .. } => {
+            CompileFault::about(import, CompileFault::Mismatched)
+        }
+        EncodeError::ImplicitImportConflict { name, .. } => {
+            CompileFault::about(name, CompileFault::Mismatched)
+        }
+        _ => CompileFault::Invalid,
+    };
+    wasmtime::Error::msg(format!("wac: encode fused component: {e}")).context(fault)
+}
+
+/// The fused composition, refused if it still imports an interface nothing
+/// serves: neither the host ([`HOST_INTERFACES`], matched as wasmtime's linker
+/// matches a name, and the `embedded-slot:` twins fusion named itself) nor —
+/// an interface of types alone, its resources all another's — one that needs
+/// nothing served. No round of such a composition could run: the
+/// execution-worker's linker refuses it before one does.
+///
+/// Read as a wac package, which validates everything but the function bodies,
+/// and kept as one, so the bytes are compiled from where they are. `plugged`
+/// says whether there was a fusion: without one the bytes are the policy's
+/// own, and bytes that do not read are the policy not being a component.
+pub(crate) fn served(bytes: Vec<u8>, plugged: bool) -> wasmtime::Result<Package> {
+    let mut types = Types::default();
+    let package = Package::from_bytes("enclavid:fused", None, bytes, &mut types).map_err(|e| {
+        let fault = if plugged {
+            CompileFault::Invalid
+        } else {
+            CompileFault::NotAComponent(Artifact::Policy)
+        };
+        wasmtime::Error::msg(format!("wac: read the fused component: {e}")).context(fault)
+    })?;
+    for (name, kind) in &types[package.ty()].imports {
+        if !name.starts_with(EMBEDDED_SLOT_PREFIX)
+            && !served_by_host(name)
+            && needs_serving(&types, kind)
+        {
+            return Err(
+                wasmtime::Error::msg(format!("nothing serves the import `{name}`"))
+                    .context(CompileFault::about(name, CompileFault::Unsatisfied)),
+            );
+        }
+    }
+    Ok(package)
+}
+
+/// Whether the host serves `name`: one of [`HOST_INTERFACES`] exactly, or a
+/// semver-compatible version of one — the rule wasmtime's linker looks a name
+/// up by.
+fn served_by_host(name: &str) -> bool {
+    let track = alternate_lookup_key(name).map(|(key, _)| key);
+    HOST_INTERFACES.iter().any(|host| {
+        *host == name
+            || track.is_some_and(|track| {
+                alternate_lookup_key(host).is_some_and(|(key, _)| key == track)
+            })
+    })
+}
+
+/// Whether an import has to be served to instantiate: a function, a component,
+/// a module, a resource of its own, or an interface holding any of those. An
+/// interface of value types, and of resources aliased from another, needs
+/// nothing — as wasmtime's linker sees it.
+fn needs_serving(types: &Types, kind: &ItemKind) -> bool {
+    match kind {
+        ItemKind::Instance(id) => types[*id]
+            .exports
+            .values()
+            .any(|export| needs_serving(types, export)),
+        ItemKind::Type(Type::Resource(id)) => types[*id].alias.is_none(),
+        ItemKind::Type(_) | ItemKind::Value(_) => false,
+        ItemKind::Func(_) | ItemKind::Component(_) | ItemKind::Module(_) => true,
+    }
 }
 
 /// Route one component's i18n / icons imports to distinct composite
@@ -214,7 +309,8 @@ fn route_strict_embedded(
                 let ItemKind::Instance(canonical_id) = kind else {
                     return Err(wasmtime::Error::msg(format!(
                         "embedded import `{import_name}` is not an interface instance",
-                    )));
+                    ))
+                    .context(CompileFault::about(&import_name, CompileFault::Mismatched)));
                 };
                 // Structural twin with a distinct id so wac won't merge it.
                 let mut twin = graph.types()[canonical_id].clone();
@@ -237,9 +333,7 @@ fn route_strict_embedded(
         };
         graph
             .set_instantiation_argument(inst, &import_name, node)
-            .map_err(|e| {
-                wasmtime::Error::msg(format!("wac: route embedded import `{import_name}`: {e}"))
-            })?;
+            .map_err(|e| wiring(&import_name, e))?;
     }
     Ok(())
 }
@@ -256,7 +350,7 @@ pub(crate) fn reconstruct_strict_manifest(wasm: &[u8]) -> wasmtime::Result<Vec<E
     if !imports.iter().any(|n| n.starts_with(EMBEDDED_SLOT_PREFIX)) {
         return Ok(Vec::new());
     }
-    let catalogs = load_embedded_nested(wasm)?;
+    let catalogs = load_embedded_nested(wasm).map_err(|e| unreadable(Artifact::Policy, e))?;
     let mut manifest = Vec::new();
     for name in imports {
         let Some((iface, version)) = slot_import_parts(&name) else {
@@ -270,6 +364,7 @@ pub(crate) fn reconstruct_strict_manifest(wasm: &[u8]) -> wasmtime::Result<Vec<E
                 wasmtime::Error::msg(format!(
                     "pre-fused artifact imports `{name}` but no nested catalog matches it",
                 ))
+                .context(CompileFault::CatalogInvalid(Artifact::Policy))
             })?;
         manifest.push(EmbeddedImport {
             instance_name: name,
@@ -315,17 +410,22 @@ fn register(
     graph: &mut CompositionGraph,
     name: &str,
     wasm: Vec<u8>,
+    artifact: Artifact,
 ) -> wasmtime::Result<PackageId> {
-    let pkg = Package::from_bytes(name, None, wasm, graph.types_mut())
-        .map_err(|e| wasmtime::Error::msg(format!("wac: parse component `{name}`: {e}")))?;
+    let pkg = Package::from_bytes(name, None, wasm, graph.types_mut()).map_err(|e| {
+        wasmtime::Error::msg(format!("wac: parse component `{name}`: {e}"))
+            .context(CompileFault::NotAComponent(artifact))
+    })?;
     graph
         .register_package(pkg)
         .map_err(|e| wasmtime::Error::msg(format!("wac: register `{name}`: {e}")))
 }
 
 /// Content-hash of a component's own (top-level) embedded catalog.
-fn catalog_hash_of(wasm: &[u8]) -> wasmtime::Result<[u8; 32]> {
-    Ok(load_embedded(wasm)?.hash)
+fn catalog_hash_of(wasm: &[u8], artifact: Artifact) -> wasmtime::Result<[u8; 32]> {
+    Ok(load_embedded(wasm)
+        .map_err(|e| unreadable(artifact, e))?
+        .hash)
 }
 
 /// The strict-routed kind of an embedded import name, or `None` for DF
@@ -383,7 +483,10 @@ fn reject_reserved_exports(
                 "plugin `{package}` exports host-reserved interface `{name}`: a \
                  plugin may import host capabilities but must never export one \
                  (host interfaces are served exclusively by the TEE)",
-            )));
+            ))
+            .context(CompileFault::ReservedExport(Artifact::Plugin(
+                package.into(),
+            ))));
         }
     }
     Ok(())

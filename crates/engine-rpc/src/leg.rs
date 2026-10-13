@@ -470,14 +470,18 @@ impl<S: enclavid_boundary::Open> CompilerLeg<S> {
     /// been answered somewhere. A receipt, not a proof: see `Exposed::map`. Its
     /// components stream beside the call, written here while it is awaited.
     ///
-    /// The answer comes back `Untrusted`. Nothing binds it to the question — this
-    /// side cannot re-derive it (it carries no Cranelift, by design) and a digest
-    /// the peer also chose would be its word twice — so the wrapper is where that
-    /// gets said rather than assumed.
+    /// The answer comes back `Untrusted`, a refusal as much as a bundle. Nothing
+    /// binds a bundle to the question — this side cannot re-derive it (it carries
+    /// no Cranelift, by design) and a digest the peer also chose would be its word
+    /// twice — and a refusal names interfaces and packages the peer picked. The
+    /// wrapper is where that gets said rather than assumed.
     pub async fn compile(
         &self,
         req: enclavid_boundary::Exposed<crate::compile::CompileSource, ()>,
-    ) -> Result<enclavid_boundary::Untrusted<crate::CompileReply, S>, crate::CompileError> {
+    ) -> Result<
+        enclavid_boundary::Untrusted<crate::CompileReply, S>,
+        enclavid_boundary::Untrusted<crate::CompileError, S>,
+    > {
         use crate::compile::CompilerService as _;
         let (request, writer) = req.into_inner().split();
         let mut call = std::pin::pin!(self.0.compile(request));
@@ -488,19 +492,26 @@ impl<S: enclavid_boundary::Open> CompilerLeg<S> {
             reply = &mut call => reply,
             () = writer => call.await,
         };
-        reply.map(enclavid_boundary::Untrusted::new)
+        reply
+            .map(enclavid_boundary::Untrusted::new)
+            .map_err(enclavid_boundary::Untrusted::new)
     }
 
     /// The ABI id of the cwasm the worker compiles, as the peer's word: it
-    /// names its own runtime, which this side cannot inspect.
+    /// names its own runtime, which this side cannot inspect. Its failure is
+    /// the peer's word too.
     pub async fn compat_token(
         &self,
-    ) -> Result<enclavid_boundary::Untrusted<crate::CompatToken, S>, crate::CompileError> {
+    ) -> Result<
+        enclavid_boundary::Untrusted<crate::CompatToken, S>,
+        enclavid_boundary::Untrusted<crate::CompileError, S>,
+    > {
         use crate::compile::CompilerService as _;
         self.0
             .compat_token()
             .await
             .map(enclavid_boundary::Untrusted::new)
+            .map_err(enclavid_boundary::Untrusted::new)
     }
 }
 

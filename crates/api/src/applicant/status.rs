@@ -16,7 +16,7 @@ use crate::state::AppState;
 pub struct StatusResponse {
     /// Lifecycle label — same wire shape as the client API's
     /// `GET /sessions/:id` so frontends can switch on the same
-    /// strings ("running" / "completed" / "failed" / "expired").
+    /// strings ("running" / "completed" / "init_failed" / "expired").
     /// Renders via the shared `dto::SessionStatusDef` remote.
     #[serde(with = "dto::SessionStatusDef")]
     pub status: SessionStatus,

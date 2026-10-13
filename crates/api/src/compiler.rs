@@ -105,7 +105,8 @@ impl Compiler {
                     debug!("compat_token: the compile-worker leg is down");
                     CompileError::Failed
                 })?;
-                let token: Untrusted<CompatToken, CompileScope> = client.compat_token().await?;
+                let token: Untrusted<CompatToken, CompileScope> =
+                    client.compat_token().await.map_err(refusal)?;
                 Ok(token
                     .trust_unchecked::<Asserted, _>(reason!(
                         "contained: it names only the slot a compile is filed under, \
@@ -127,8 +128,10 @@ impl Compiler {
             debug!("compile: the compile-worker leg is down");
             CompileError::Failed
         })?;
-        let reply: Untrusted<CompileReply, CompileScope> =
-            client.compile(outbound_compile_request(source)).await?;
+        let reply: Untrusted<CompileReply, CompileScope> = client
+            .compile(outbound_compile_request(source))
+            .await
+            .map_err(refusal)?;
         // CONTAINED, and the honest form of it: there is NO check available here.
         //
         // Read the axis carefully, because the obvious reading is the wrong one.
@@ -180,6 +183,19 @@ impl Compiler {
             cwasm: pieces,
         })
     }
+}
+
+/// The compile-worker's failure, taken as it gave it. A refusal is what api keeps
+/// as the session's init error and the consumer reads, so this is where the
+/// worker's word about it is let through, and on what grounds.
+fn refusal(e: Untrusted<CompileError, CompileScope>) -> CompileError {
+    e.trust_unchecked::<Asserted, _>(reason!(
+        "bounded: a value of a fixed set whose only text is a name held to the WIT \
+         alphabet and 128 bytes as it is decoded, read only by the consumer that \
+         pinned this composition, about its own artifacts and imports; a compile \
+         child its composition turned picks no more than that per compile"
+    ))
+    .into_inner()
 }
 
 /// Connect to a compile-worker already listening at `addr` and hand back the leg.
@@ -277,7 +293,7 @@ mod tests {
                 .await
                 .map_err(|_| CompileError::Failed)?;
             if policy == b"boom" {
-                return Err(CompileError::Refused);
+                return Err(CompileError::Refused(engine_rpc::CompileFault::Invalid));
             }
             let cwasm = vec![policy.len() as u8, plugins.len() as u8];
             let header = BlobHeader::of(&cwasm).unwrap();
@@ -383,7 +399,7 @@ mod tests {
         };
         assert_eq!(
             err,
-            CompileError::Refused,
+            CompileError::Refused(engine_rpc::CompileFault::Invalid),
             "the worker's answer crosses as itself"
         );
 

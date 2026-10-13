@@ -9,7 +9,7 @@ use serde::Serialize;
 use hatch_client::{Metadata, SessionStatus, outbound_session_id};
 
 use crate::client_state::ClientState;
-use crate::dto::{self, DecisionView, ResolvedPolicyView};
+use crate::dto::{self, DecisionView, InitErrorView, ResolvedPolicyView};
 
 use super::auth::{Principal, SessionToken, trust_metadata};
 
@@ -42,6 +42,10 @@ pub struct SessionView {
     /// four values, fixed by the platform.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision: Option<DecisionView>,
+    /// Why the session could not be prepared to run, once its status is
+    /// `init_failed`: what in the consumer's own setup to change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub init_error: Option<InitErrorView>,
 }
 
 /// Route factory: bare `get(handler)` MethodRouter. Auth attached at
@@ -103,6 +107,7 @@ async fn read(
         .collect();
 
     let decision = metadata.decision.map(DecisionView::from);
+    let init_error = metadata.init_error.as_ref().map(InitErrorView::from);
     let view = SessionView {
         session_id,
         status,
@@ -119,6 +124,7 @@ async fn read(
         disclosures: metadata.disclosure_count,
         created_at: metadata.created_at,
         decision,
+        init_error,
     };
     Ok(dto::json_hiding_decision(&view, decision))
 }

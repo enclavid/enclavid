@@ -105,7 +105,7 @@ function Session({ sessionId }: { sessionId: string }) {
           return;
         }
         if (
-          status === "failed" ||
+          status === "init_failed" ||
           status === "expired" ||
           status === "unspecified"
         ) {

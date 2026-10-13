@@ -16,7 +16,7 @@ use enclavid_attestation::ReportData;
 use enclavid_boundary::{AuthN, AuthZ, Covert, reason};
 use hatch_client::{
     Client, ClientAccess, Key, PluginPin, SessionMetadata, SessionStatus, SetMetadata, WriteField,
-    boundary,
+    boundary, is_wit_name,
 };
 
 use crate::client_state::ClientState;
@@ -223,12 +223,14 @@ fn pins(
     // an opaque pull error at /connect. Also dedupe-checks on
     // package id — two pins for the same WIT package would create
     // ambiguity at link time and is almost certainly a caller bug.
+    // The package is spelled as a WIT package name is: it is what the
+    // session's init error names a plugin by.
     if plugin_requests.len() > MAX_PLUGINS {
         return Err(StatusCode::BAD_REQUEST);
     }
     let mut seen_packages: std::collections::HashSet<&str> = Default::default();
     for pr in &plugin_requests {
-        if pr.package.is_empty() || pr.impl_ref.is_empty() {
+        if !is_wit_name(&pr.package) || pr.impl_ref.is_empty() {
             return Err(StatusCode::BAD_REQUEST);
         }
         if policy_pull::split_pinned_ref(&pr.impl_ref).is_none() {
@@ -415,8 +417,10 @@ async fn create(
         captured_media: Vec::new(),
         // Set with `Completed`, when the policy gives it.
         decision: None,
-        // Asked before the first round, not here: see `applicant::shared`.
+        // Asked before the first round, not here: see `applicant::round`.
         pull_allowed: false,
+        // Set with `InitFailed`, if preparing the session fails: see `crate::init`.
+        init_error: None,
     };
     // Write ONLY the sealed metadata. The plaintext STATUS byte and PRINCIPAL
     // host hooks are gone: TTL is enforced inside the storage-CVM (its sweeper,

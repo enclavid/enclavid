@@ -1,7 +1,8 @@
 //! Applicant-facing API: per-session endpoints used by the verification
 //! frontend, plus the static frontend assets themselves. Each handler in
-//! its own file for navigability; shared helpers and JSON view types
-//! live in their own modules.
+//! its own file for navigability; the round both `/connect` and `/input`
+//! drive lives in `round`, the consent rule in `consent`, and the JSON view
+//! types in `views`.
 //!
 //! Auth model mirrors the client API: a single `enforce` middleware,
 //! attached per-route via `.layer(auth())`. See `auth.rs` for cache
@@ -31,11 +32,12 @@
 mod auth;
 mod callbacks;
 mod connect;
+mod consent;
 mod input;
 pub(crate) mod media_store;
 mod persister;
 mod reset;
-mod shared;
+mod round;
 mod status;
 mod views;
 

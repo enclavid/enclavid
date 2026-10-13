@@ -19,6 +19,7 @@
 //! `engine-executor`. Each re-exports the types here it needs at
 //! ergonomic paths.
 
+pub mod compile;
 pub mod composition;
 pub mod embedded;
 pub mod limits;

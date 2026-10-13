@@ -21,6 +21,8 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+pub use engine_types::compile::{Artifact, CompileFault, InterfaceName, is_wit_name};
+
 use crate::error::BridgeError;
 
 // ---------------------------------------------------------------------
@@ -54,8 +56,9 @@ pub enum SessionStatus {
     Running = 1,
     /// Policy returned a domain Status — webhook fired, data may be ready.
     Completed = 2,
-    /// Unrecoverable infrastructure error during the run.
-    Failed = 3,
+    /// The session could not be prepared to run, and asking again will not
+    /// change that — see [`SessionMetadata::init_error`]. Terminal.
+    InitFailed = 3,
     /// Idle TTL elapsed without applicant interaction.
     Expired = 4,
 }
@@ -74,7 +77,7 @@ impl SessionStatus {
             0 => Some(Self::Unspecified),
             1 => Some(Self::Running),
             2 => Some(Self::Completed),
-            3 => Some(Self::Failed),
+            3 => Some(Self::InitFailed),
             4 => Some(Self::Expired),
             _ => None,
         }
@@ -137,6 +140,89 @@ pub struct SessionMetadata {
     /// never after: an api restart or a reset does not ask again. One byte
     /// either way, so the host does not read it off the metadata's size.
     pub pull_allowed: bool,
+    /// Why the session could not be prepared to run, written with
+    /// [`SessionStatus::InitFailed`]. In one frame whatever it says: the host
+    /// sees the size of every sealed write, and which part of the consumer's
+    /// setup failed, and how, is not the host's to read.
+    #[serde(with = "init_error_frame")]
+    pub init_error: Option<InitError>,
+}
+
+/// Why a session could not be prepared to run: something the consumer set up for
+/// it does not work, and asking again will not change that.
+///
+/// Decided before any of the policy's code runs — by api from the pins, the
+/// bearers and the keys, or by the compile-worker from the pinned bytes. Nothing
+/// in it is the policy's to choose, which is what lets the consumer read it
+/// whole: a round, where the policy runs, never produces one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InitError {
+    /// An artifact the session pins could not be pulled.
+    Pull {
+        artifact: Artifact,
+        problem: PullProblem,
+    },
+    /// The compile refused the composition, for the reason it gave.
+    Compile(CompileFault),
+}
+
+/// What stood in the way of pulling an artifact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PullProblem {
+    /// The registry has no artifact under the pinned reference.
+    NotFound,
+    /// The registry refused the session's bearer for it.
+    Refused,
+    /// What the registry served is not what the pin names: another digest, or
+    /// a layer of another length.
+    NotAsPinned,
+    /// Its manifest does not parse, or its encrypted layer lacks the
+    /// annotations decrypting it takes.
+    Malformed,
+    /// Its manifest has no `application/wasm` layer, plain or encrypted.
+    NoWasmLayer,
+    /// Its layer is encrypted, and the session gave no key for it.
+    KeyMissing,
+    /// The session gave a key for it, and its layer is not encrypted.
+    NotEncrypted,
+    /// The key the session gave, or the one its KBS released, does not decrypt
+    /// the layer.
+    KeyDoesNotOpen,
+    /// The KBS refused to release the key, or answered with none it could.
+    KeyNotReleased,
+}
+
+/// The bytes an [`InitError`] is kept in, whatever it says.
+pub const INIT_ERROR_FRAME: usize = 512;
+
+/// [`SessionMetadata::init_error`] on the wire: `null`, or the error's CBOR in a
+/// byte string of [`INIT_ERROR_FRAME`] bytes, zeros after it.
+mod init_error_frame {
+    use serde::de::Error as _;
+    use serde::ser::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::{INIT_ERROR_FRAME, InitError};
+
+    pub fn serialize<S: Serializer>(error: &Option<InitError>, s: S) -> Result<S::Ok, S::Error> {
+        let Some(error) = error else {
+            return s.serialize_none();
+        };
+        let mut frame = Vec::new();
+        ciborium::into_writer(error, &mut frame).map_err(S::Error::custom)?;
+        if frame.len() > INIT_ERROR_FRAME {
+            return Err(S::Error::custom("an init error past its frame"));
+        }
+        frame.resize(INIT_ERROR_FRAME, 0);
+        s.serialize_some(serde_bytes::Bytes::new(&frame))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<InitError>, D::Error> {
+        // One value is read off the front; the zeros after it are not looked at.
+        Option::<serde_bytes::ByteBuf>::deserialize(d)?
+            .map(|frame| ciborium::from_reader(frame.as_slice()).map_err(D::Error::custom))
+            .transpose()
+    }
 }
 
 /// [`SessionMetadata::decision`] on the wire: `null` or one of four small
@@ -657,6 +743,83 @@ mod decision_tests {
         })
         .expect("metadata encodes");
         assert_eq!(allowed.len(), sealed(None).len());
+    }
+
+    fn init_errors() -> Vec<InitError> {
+        const PROBLEMS: [PullProblem; 9] = [
+            PullProblem::NotFound,
+            PullProblem::Refused,
+            PullProblem::NotAsPinned,
+            PullProblem::Malformed,
+            PullProblem::NoWasmLayer,
+            PullProblem::KeyMissing,
+            PullProblem::NotEncrypted,
+            PullProblem::KeyDoesNotOpen,
+            PullProblem::KeyNotReleased,
+        ];
+        let longest_name = "a".repeat(InterfaceName::MAX_BYTES);
+        let artifacts = [
+            Artifact::Policy,
+            Artifact::Plugin("a".into()),
+            Artifact::Plugin(longest_name.clone()),
+        ];
+        let longest = InterfaceName::new(&longest_name).unwrap();
+        let shortest = InterfaceName::new("a").unwrap();
+        let pulls = artifacts.clone().into_iter().flat_map(|artifact| {
+            PROBLEMS.into_iter().map(move |problem| InitError::Pull {
+                artifact: artifact.clone(),
+                problem,
+            })
+        });
+        let compiles = artifacts
+            .into_iter()
+            .flat_map(|a| {
+                [
+                    CompileFault::NotAComponent(a.clone()),
+                    CompileFault::ReservedExport(a.clone()),
+                    CompileFault::CatalogInvalid(a),
+                ]
+            })
+            .chain([
+                CompileFault::CatalogsPastCap,
+                CompileFault::Unsatisfied(longest.clone()),
+                CompileFault::Unsatisfied(shortest.clone()),
+                CompileFault::Mismatched(longest),
+                CompileFault::Mismatched(shortest),
+                CompileFault::Invalid,
+                CompileFault::TooLarge,
+                CompileFault::OutOfMemory,
+            ])
+            .map(InitError::Compile);
+        pulls.chain(compiles).collect()
+    }
+
+    fn failed(init_error: InitError) -> Vec<u8> {
+        encode(&SessionMetadata {
+            status: SessionStatus::InitFailed,
+            init_error: Some(init_error),
+            ..Default::default()
+        })
+        .expect("metadata encodes")
+    }
+
+    /// Which artifact failed, and how, is not read off the sealed write's size:
+    /// every init error is kept in the same frame.
+    #[test]
+    fn the_init_error_does_not_change_the_metadatas_size() {
+        let sizes: std::collections::BTreeSet<usize> =
+            init_errors().into_iter().map(|e| failed(e).len()).collect();
+        assert_eq!(sizes.len(), 1, "{sizes:?}");
+    }
+
+    #[test]
+    fn the_init_error_round_trips() {
+        for error in init_errors() {
+            let back: SessionMetadata = decode(&failed(error.clone())).expect("metadata decodes");
+            assert_eq!(back.init_error, Some(error));
+        }
+        let back: SessionMetadata = decode(&sealed(None)).expect("metadata decodes");
+        assert_eq!(back.init_error, None);
     }
 
     #[test]

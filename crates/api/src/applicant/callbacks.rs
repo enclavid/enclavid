@@ -43,7 +43,7 @@
 //! contract may disagree, each rightly about its own position.
 //!
 //! It does not follow the value everywhere, either. `current_prompt` reaches
-//! `consent_for_round` on the NEXT round out of the sealed store rather than over
+//! `consent::for_round` on the NEXT round out of the sealed store rather than over
 //! this leg, and the double AEAD legitimately closes AuthN/AuthZ over a blob the
 //! worker authored — so the store launders the provenance, and this scope says
 //! nothing about that field where it is finally read.
@@ -100,7 +100,7 @@ impl CallbackServiceUntrusted for CallbackServer {
         // Nothing api reads out of the round's own state is worth more than the
         // worker's word, and api does not read any of it: `state` is sealed
         // verbatim. The one field it DOES interpret — `current_prompt` — reaches
-        // `consent_for_round` on the NEXT round, out of the sealed store rather
+        // `consent::for_round` on the NEXT round, out of the sealed store rather
         // than over this leg, where this scope does not follow it.
         let state = state
             .trust_unchecked::<Asserted, _>(reason!(

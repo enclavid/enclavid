@@ -20,12 +20,13 @@ use tokio::sync::Semaphore;
 
 use engine_rpc::{CompileError, CompileSource, CompositionKey};
 use hatch_client::{
-    CacheStore, Client, KbsClient, Key, PluginPin, RegistryClient, SessionMetadata,
+    Artifact, CacheStore, Client, CompileFault, InitError, KbsClient, Key, PluginPin, PullProblem,
+    RegistryClient, SessionMetadata,
 };
 
 use crate::compiler::{Compiled, Compiler};
 use crate::cwasm_cache;
-use crate::error::ApiError;
+use crate::init::Unavailable;
 use crate::policy_pull;
 use crate::semaphores::Semaphores;
 use crate::turns::ConsumerTurns;
@@ -164,17 +165,18 @@ impl Compositions {
     /// and parses sections into a cwasm and its metadata, the cwasm streaming
     /// back as it comes. `for_whom` names the caller on the debug log.
     ///
-    /// Errors are a round's answer, returned as they are:
-    ///   * 410 Gone — registry pull / decrypt failed (artifact removed / malformed)
-    ///   * 503 — the registry, the hatch or the consumer's turn did not answer in
-    ///     time ([`pull_failure`])
-    ///   * 422 — the compiler refused the composition; the same pins always are
+    /// Errors:
+    ///   * an [`InitError`] — an artifact the pins name could not be pulled, and
+    ///     asking again will not change that ([`pull_failure`]); or the compiler
+    ///     refused the composition, as it always will the same pins
+    ///   * 503 — the registry, the KBS, the hatch or the consumer's turn did not
+    ///     answer in time
     ///   * 500 — anything else in the compile, or an infra problem
     pub async fn compile(
         &self,
         composition: &Composition,
         for_whom: &str,
-    ) -> Result<Compiled, ApiError> {
+    ) -> Result<Compiled, Unavailable> {
         // Look up the bearer for the policy registry by hostname. Same
         // lookup applies per plugin below. Missing entry collapses to an
         // empty slice ⇒ anonymous pull (host attaches no Authorization
@@ -228,13 +230,13 @@ impl Compositions {
                 "compile: the policy's manifest failed for {for_whom} (policy_ref={}): {e}",
                 composition.policy_ref,
             );
-            pull_failure(&e)
+            pull_failure(Artifact::Policy, &e)
         })?;
         let mut plugins = Vec::with_capacity(plugin_results.len());
-        for res in plugin_results {
+        for (pin, res) in composition.plugins.iter().zip(plugin_results) {
             plugins.push(res.map_err(|e| {
                 safe_logger::debug!("compile: a plugin's manifest failed for {for_whom}: {e}");
-                pull_failure(&e)
+                pull_failure(Artifact::Plugin(pin.package.clone()), &e)
             })?);
         }
 
@@ -258,59 +260,54 @@ impl Compositions {
             .collect();
         let pull_failed = Arc::new(std::sync::OnceLock::new());
         let marked = pull_failed.clone();
-        let layers = std::iter::once(policy).chain(plugins.into_iter().map(|(_, layer)| layer));
+        let layers = std::iter::once((Artifact::Policy, policy)).chain(
+            plugins
+                .into_iter()
+                .map(|(package, layer)| (Artifact::Plugin(package), layer)),
+        );
         let components = futures::stream::iter(layers)
-            .flat_map(policy_pull::WasmLayer::pieces)
-            .inspect_err(move |e| {
+            .flat_map(|(artifact, layer)| layer.pieces().map_err(move |e| (artifact.clone(), e)))
+            .inspect_err(move |(artifact, e)| {
                 safe_logger::debug!("compile: a layer did not arrive as pinned: {e}");
-                let _ = marked.set(pull_failure(e));
+                let _ = marked.set((artifact.clone(), e.problem()));
             });
         let source = CompileSource::streamed(policy_length, lengths, components);
         let compiled = match source {
             Some(source) => self.compiler.compile(source).await,
-            None => Err(CompileError::Refused),
+            None => Err(CompileError::Refused(CompileFault::TooLarge)),
         };
         compiled.map_err(|e| match pull_failed.get() {
-            Some(status) => (*status).into(),
+            Some((artifact, problem)) => unavailable(artifact.clone(), *problem),
             None => classify_compile_error(for_whom, &composition.policy_ref, e),
         })
     }
 }
 
-/// What a failed pull answers. 503 when the registry, the hatch or the
-/// consumer's turn did not answer this time — the one answer that means "the
-/// same request, later"; 410 Gone when the answer is the pins' and will not
-/// change: a refusal, an artifact absent or not what its pin names.
-pub fn pull_failure(e: &policy_pull::PullError) -> StatusCode {
-    if e.is_unanswered() {
-        StatusCode::SERVICE_UNAVAILABLE
-    } else {
-        StatusCode::GONE
+/// What a failed pull of `artifact` makes of the request: the session's
+/// [`InitError`] when the answer is the pins' and asking again will not change
+/// it — a refusal, an artifact absent, not what its pin names, or not one its
+/// keys open — and otherwise 503, the same request later.
+pub fn pull_failure(artifact: Artifact, e: &policy_pull::PullError) -> Unavailable {
+    unavailable(artifact, e.problem())
+}
+
+fn unavailable(artifact: Artifact, problem: Option<PullProblem>) -> Unavailable {
+    match problem {
+        Some(problem) => Unavailable::Init(InitError::Pull { artifact, problem }),
+        None => StatusCode::SERVICE_UNAVAILABLE.into(),
     }
 }
 
-/// Map the compile hop's [`CompileError`] to an HTTP-facing answer — a fixed
-/// answer per value of a fixed enum, as `classify_run_error` does for a round.
-///
-/// A refusal is the composition's and permanent: the compiler decided it from
-/// the pinned bytes alone, so the answer is the 4xx a failing policy gets, with a
-/// fixed body. Anything else is a 500: what failed may be the pins' or ours, and
+/// What a compile that produced no bundle makes of the request: a refusal is
+/// the composition's and permanent — the compiler decided it from the pinned
+/// bytes alone — so it is the session's [`InitError`], kept as the compiler
+/// gave it. Anything else is a 500: what failed may be the pins' or ours, and
 /// this side cannot tell which.
-fn classify_compile_error(for_whom: &str, policy_ref: &str, e: CompileError) -> ApiError {
+fn classify_compile_error(for_whom: &str, policy_ref: &str, e: CompileError) -> Unavailable {
     safe_logger::debug!("compile: failed for {for_whom} (policy_ref {policy_ref}): {e}");
     match e {
-        // A fixed body. Nothing in it varies, so nothing in it is a channel.
-        CompileError::Refused => ApiError::with_body(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            serde_json::json!({
-                "error": "policy_refused",
-                "hint": "this session's verification policy, with the plugins the session \
-                         pins, was refused by the compiler. Nothing the applicant did caused \
-                         it, and retrying will not clear it; the policy, or the plugins \
-                         pinned when the session was created, have to change.",
-            }),
-        ),
-        CompileError::Failed => ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR),
+        CompileError::Refused(fault) => Unavailable::Init(InitError::Compile(fault)),
+        CompileError::Failed => StatusCode::INTERNAL_SERVER_ERROR.into(),
     }
 }
 
@@ -324,7 +321,7 @@ fn classify_compile_error(for_whom: &str, policy_ref: &str, e: CompileError) -> 
 /// decrypt) — it hands back the already pulled-and-decrypted component. The two
 /// are kept in different places:
 ///   * **Download** is asked of the registry by every session, hit or miss
-///     (`check_pull` in `applicant::shared`), so the OCI bearer is NOT in the key
+///     (`check_pull` in `applicant::round`), so the OCI bearer is NOT in the key
 ///     and every consumer the registry lets pull an artifact shares its compile.
 ///     For a third-party LICENSED plugin the bearer is the license, and that check
 ///     is the license check. A ref names registry, repository and digest, and a
@@ -349,12 +346,12 @@ pub fn composition_key(
     plugins: &[PluginPin],
 ) -> CompositionKey {
     let inputs = Inputs {
-        policy: Artifact::new(policy_ref, policy_key),
+        policy: ArtifactInput::new(policy_ref, policy_key),
         plugins: plugins
             .iter()
             .map(|pin| Plugin {
                 package: &pin.package,
-                artifact: Artifact::new(&pin.impl_ref, pin.key.as_ref()),
+                artifact: ArtifactInput::new(&pin.impl_ref, pin.key.as_ref()),
             })
             .collect(),
     };
@@ -371,7 +368,7 @@ pub fn composition_key(
 /// [`composition_key`] hashes.
 #[derive(Serialize)]
 struct Inputs<'a> {
-    policy: Artifact<'a>,
+    policy: ArtifactInput<'a>,
     /// In fusion order.
     plugins: Vec<Plugin<'a>>,
 }
@@ -379,17 +376,17 @@ struct Inputs<'a> {
 #[derive(Serialize)]
 struct Plugin<'a> {
     package: &'a str,
-    artifact: Artifact<'a>,
+    artifact: ArtifactInput<'a>,
 }
 
 /// One artifact: its digest-pinned ref, and what decrypts it.
 #[derive(Serialize)]
-struct Artifact<'a> {
+struct ArtifactInput<'a> {
     reference: &'a str,
     decrypt: Decrypt,
 }
 
-impl<'a> Artifact<'a> {
+impl<'a> ArtifactInput<'a> {
     fn new(reference: &'a str, key: Option<&Key>) -> Self {
         let decrypt = match key {
             None => Decrypt::Nothing,

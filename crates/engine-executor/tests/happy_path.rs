@@ -251,6 +251,17 @@ fn the_compiler_and_the_runtime_name_one_cwasm_abi() {
     );
 }
 
+/// The fleet's own compile — catalogs, fusion, the check that nothing it
+/// imports goes unserved — takes the real policy with every plugin it imports,
+/// the composition every round here runs.
+#[test]
+fn the_fleets_compile_takes_the_real_composition() {
+    Compiler::new()
+        .unwrap()
+        .compile_to_parts(fixtures::test_policy().to_vec(), all_plugins())
+        .expect("the real composition compiles");
+}
+
 #[tokio::test]
 async fn passport_selfie_consent_reject_reaches_rejected() {
     let h = Harness::new();

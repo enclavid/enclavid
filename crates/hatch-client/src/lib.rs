@@ -25,10 +25,11 @@ pub use transport::HatchClient;
 // Wire DTO re-exports — the operation selector and the OCI pull
 // response now come from the shared `hatch-protocol` crate.
 pub use domain::{
-    Action, CameraFacing, CaptureGuide, CaptureStep, Client, ClientAccess, Clip, Decision,
-    DisplayField, Event, GuideNone, GuideOval, GuideRect, KbsKey, Key, Localized, MAX_CLIP_BYTES,
-    MAX_CLIP_FRAMES, MediaResult, MediaSpec, PluginPin, Prompt, SessionMetadata, SessionState,
-    SessionStatus, Translation, capture_guide,
+    Action, Artifact, CameraFacing, CaptureGuide, CaptureStep, Client, ClientAccess, Clip,
+    CompileFault, Decision, DisplayField, Event, GuideNone, GuideOval, GuideRect, InitError,
+    InterfaceName, KbsKey, Key, Localized, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MediaResult, MediaSpec,
+    PluginPin, Prompt, PullProblem, SessionMetadata, SessionState, SessionStatus, Translation,
+    capture_guide, is_wit_name,
 };
 pub use hatch_protocol::{AuthorizeRequest, BlobRequest, ClientOperation, ManifestRequest};
 pub use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};

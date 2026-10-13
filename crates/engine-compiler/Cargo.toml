@@ -41,6 +41,11 @@ wasmtime = { version = "46", default-features = false, features = [
 # wasm-tools 0.247 encoding, which wasmtime 46 loads.
 wac-graph = "0.10"
 
+# `alternate_lookup_key`, the rule wasmtime's linker matches an import's version
+# by: the compile refuses an import nothing serves by the rule the
+# execution-worker's linker would. The same crate wasmtime already links.
+wasmtime-environ = { version = "46", default-features = false, features = ["component-model"] }
+
 # `decls::load_embedded` pulls the embedded custom sections (disclosure-
 # fields / i18n / icons) straight out of a compiled component without
 # round-tripping through wasmtime instantiation.
@@ -185,3 +190,7 @@ required-features = ["worker"]
 # embedded_nested.rs builds synthetic (nested) components to exercise
 # load_embedded_nested's recursion without cargo-building fixtures.
 wasm-encoder = "0.247"
+# refusals.rs builds policies and plugins from WIT alone, to see which
+# compositions the compile refuses and for what.
+wit-component = { version = "0.247", features = ["dummy-module"] }
+wit-parser = "0.247"

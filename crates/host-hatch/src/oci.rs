@@ -211,27 +211,39 @@ where
 }
 
 /// Map an OCI error to an HTTP status. The registry refusing the bearer →
-/// `Forbidden`; 404 / `MANIFEST_UNKNOWN` / `BLOB_UNKNOWN` → `NotFound`; so the
-/// TEE-side client can tell both from a registry that did not answer.
+/// `Forbidden`; a 404, or an error envelope saying the manifest, blob or
+/// repository is unknown → `NotFound`; so the TEE-side client can tell both
+/// from a registry that did not answer. Read off the error's fields, never its
+/// rendering: a rendering spells the envelope's codes as Rust names, and carries
+/// the digest, which can hold any run of digits.
 fn classify_oci_error(e: OciDistributionError) -> HatchError {
-    let refused = match &e {
-        OciDistributionError::UnauthorizedError { .. } => true,
-        OciDistributionError::ServerError { code, .. } => matches!(code, 401 | 403),
-        OciDistributionError::RegistryError { envelope, .. } => envelope
-            .errors
-            .iter()
-            .any(|e| matches!(e.code, OciErrorCode::Unauthorized | OciErrorCode::Denied)),
-        _ => false,
+    let any_code = |envelope: &oci_client::errors::OciEnvelope, codes: &[OciErrorCode]| {
+        envelope.errors.iter().any(|e| codes.contains(&e.code))
+    };
+    let (refused, unknown) = match &e {
+        OciDistributionError::UnauthorizedError { .. } => (true, false),
+        OciDistributionError::ImageManifestNotFoundError(_) => (false, true),
+        OciDistributionError::ServerError { code, .. } => (matches!(code, 401 | 403), *code == 404),
+        OciDistributionError::RegistryError { envelope, .. } => (
+            any_code(
+                envelope,
+                &[OciErrorCode::Unauthorized, OciErrorCode::Denied],
+            ),
+            any_code(
+                envelope,
+                &[
+                    OciErrorCode::ManifestUnknown,
+                    OciErrorCode::BlobUnknown,
+                    OciErrorCode::NameUnknown,
+                    OciErrorCode::NotFound,
+                ],
+            ),
+        ),
+        _ => (false, false),
     };
     if refused {
-        return HatchError::Forbidden;
-    }
-    let msg = format!("{e:?}");
-    if msg.contains("MANIFEST_UNKNOWN")
-        || msg.contains("BLOB_UNKNOWN")
-        || msg.contains("code: 404")
-        || msg.contains("404")
-    {
+        HatchError::Forbidden
+    } else if unknown {
         HatchError::NotFound
     } else {
         HatchError::Internal(format!("pull: {e}"))
@@ -380,9 +392,22 @@ mod tests {
         ] {
             assert!(matches!(classify_oci_error(refused), HatchError::Forbidden));
         }
+        for unknown in [
+            server(404),
+            envelope(OciErrorCode::ManifestUnknown),
+            envelope(OciErrorCode::BlobUnknown),
+            envelope(OciErrorCode::NameUnknown),
+        ] {
+            assert!(matches!(classify_oci_error(unknown), HatchError::NotFound));
+        }
+        // A digest is no evidence of anything, whatever digits it holds.
         assert!(matches!(
-            classify_oci_error(server(404)),
-            HatchError::NotFound
+            classify_oci_error(OciDistributionError::ServerError {
+                code: 503,
+                url: "http://r/v2/p/manifests/sha256:404404".to_string(),
+                message: "code: 404".to_string(),
+            }),
+            HatchError::Internal(_)
         ));
         for unanswered in [
             server(429),

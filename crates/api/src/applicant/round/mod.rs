@@ -1,0 +1,386 @@
+//! One reducer round of an applicant's session, as `/connect` and `/input`
+//! drive it.
+//!
+//! ```text
+//! mod.rs         ← SessionRunCtx and `run`: the round, its reply checked against
+//!                  what it committed
+//! extract.rs     ← loading the session for a round; one that has ended is
+//!                  answered there and runs nothing
+//! pull_check.rs  ← whether the session's bearers may pull what it pins
+//! resolve.rs     ← a worker's cache miss: the composition from L2, or compiled
+//! ```
+
+mod extract;
+mod pull_check;
+mod resolve;
+
+use std::sync::Arc;
+
+use axum::http::StatusCode;
+use secrecy::SecretBox;
+
+use enclavid_boundary::{Asserted, reason};
+use engine_rpc::{CompositionKey, ExecError, RunOutcome, RunRequest, RunStatus};
+use hatch_client::{Decision, Event, Prompt, SessionMetadata, SessionState};
+
+use crate::init::Unavailable;
+use crate::locale::Locale;
+use crate::state::AppState;
+
+use super::callbacks::CallbackServer;
+use super::media_store::HatchMediaStore;
+use super::persister::{self, RoundAwaiting, SessionPersister};
+use super::views::{SessionProgress, progress_from};
+
+use pull_check::check_pull;
+use resolve::run_resolved;
+
+/// Pre-flight context shared by `/connect` and `/input`. The extractor
+/// fetches metadata, reads + integrity-trusts the previously-persisted
+/// session state under the caller's bearer key, looks up the compiled
+/// policy, and prepares the per-run persister + engine resources.
+///
+/// Handlers receive a fully-loaded ctx, decide on the inbound
+/// [`Event`] (connect: `Event::Start` on a fresh `SessionState`;
+/// input: the event matched against the loaded state's
+/// `current_prompt`), and dispatch both back via
+/// [`SessionRunCtx::run`]. That's where the connect / input flows
+/// diverge: connect tolerates a missing state (default-init), input
+/// requires it (409) and validates the submitted input against the
+/// prompt the session is awaiting.
+pub(super) struct SessionRunCtx {
+    state: Arc<AppState>,
+    pub(super) session_id: String,
+    /// State previously persisted under this `applicant_session_token`. `None`
+    /// for a session whose `/connect` has never reached this far —
+    /// connect treats that as "fresh start", input as 409.
+    pub(super) session_state: Option<SessionState>,
+    /// Applicant's preferred locale (from `Accept-Language` header).
+    /// Text-ref resolution happens server-side so the wire payload is
+    /// a plain string per ref — frontend doesn't carry i18n logic.
+    pub(super) locale: Locale,
+    /// SOLE strong owner of the applicant token for this round. The persister
+    /// and media store hold only `Weak`s to it, so the plaintext token's
+    /// lifetime is exactly this context: it drops (and zeroizes) when the run
+    /// ends. MUST outlive `executor.run().await` — see [`SessionRunCtx::run`].
+    applicant_session_token: Arc<SecretBox<Vec<u8>>>,
+    /// Age recipient the round's disclosure seals to, lifted out of metadata on
+    /// the extractor path so `run` can build the persister once it knows what
+    /// the round consented to.
+    disclosure_pubkey: String,
+    /// Session version the state read returned — the persister's opening CAS
+    /// token.
+    version: u64,
+    /// The per-round media store — becomes the `media_load` half of the
+    /// [`CallbackServer`] the keyless worker calls back into. Holds the seal key
+    /// + a `Weak` to the applicant token.
+    media_store: Arc<HatchMediaStore>,
+    /// The props the consumer gave the session, as api kept them at creation.
+    props: Vec<u8>,
+    /// Composition cache key — names the fused component in the execution-worker's
+    /// L1 cache, and (with the worker's `compat_token`) keys the orchestrator's
+    /// L2. Passed to the worker on the run; named back in its cache-miss reply.
+    composition_key: CompositionKey,
+    /// This session's metadata — kept for the round so `run_resolved` can
+    /// cold-compile (OCI pull + fuse) on an L2 miss.
+    metadata: SessionMetadata,
+}
+
+impl SessionRunCtx {
+    /// Drive one reducer round: feed `event` against `session_state`
+    /// into the policy, persist the returned state — and, on a terminal
+    /// decision, the session's completion with it, in the same write (done
+    /// by the persister via the engine's `on_session_change` hook) — check
+    /// the reply against what was committed, or answer from what was
+    /// committed when no reply came, and project the result into the JSON
+    /// view returned to the applicant. Consumes self — handlers call it once
+    /// per request.
+    pub(super) async fn run(
+        self,
+        session_state: SessionState,
+        event: Event,
+    ) -> Result<SessionProgress, StatusCode> {
+        let SessionRunCtx {
+            state,
+            session_id,
+            locale,
+            // Bound (not dropped into `..`) ON PURPOSE: this is the sole strong
+            // ref to the applicant token, and the persister / media store hold
+            // only `Weak`s. It MUST stay alive across `executor.run().await`
+            // below so their `upgrade()`s succeed while the worker calls back to
+            // seal state / open media. Dropping it early makes those upgrades
+            // return `None` and the round fails. It drops (and zeroizes) at the
+            // end of this fn.
+            applicant_session_token: token_owner,
+            disclosure_pubkey,
+            version,
+            media_store,
+            props,
+            composition_key,
+            metadata,
+            ..
+        } = self;
+        // Before anything runs: the worker may serve this composition from a
+        // cache, with no pull behind it. Until a round's write records the
+        // answer ([`SessionPersister::persist`]), every round asks.
+        if !metadata.pull_allowed
+            && let Err(e) = check_pull(&state, &session_id, &metadata).await
+        {
+            return Err(e
+                .settle(&state.session_store, &session_id, version, &metadata)
+                .await);
+        }
+        // The persister derives what this round may seal from the event and the
+        // pre-round prompt, both of which are ours — see
+        // [`SessionPersister::for_round`]. So the round's one seal is settled
+        // before the request leaves this process, and the binding that makes it
+        // evidence was already checked in `input`, whose digest gate is what
+        // authorizes a seal at all.
+        // Sole strong hold on what this round may disclose. The persister borrows
+        // it as a `Weak`, exactly as it does the applicant token, so the
+        // applicant's plaintext fields live exactly as long as this frame —
+        // however the frame ends.
+        let consent = persister::round_consent(&event, &session_state.current_prompt);
+        // The applicant's own frames, content-addressed here. Sent to the worker
+        // in the event below and never taken back from it.
+        let captures = persister::round_captures(&event);
+        // Where this round's write leaves the session, once it lands. Held here
+        // on the terms the consent is.
+        let awaiting = RoundAwaiting::default();
+        let persister = SessionPersister::for_round(
+            state.session_store.clone(),
+            session_id.clone(),
+            // Weak: `token_owner` below is the sole strong ref, and it must
+            // outlive the worker's callbacks.
+            Arc::downgrade(&token_owner),
+            disclosure_pubkey,
+            version,
+            metadata.clone(),
+            &consent,
+            &captures,
+            &awaiting,
+            state.shuffle_key.clone(),
+        );
+        // Bound, like `token_owner` above and for the same reason: it is the sole
+        // strong hold on the applicant's consented fields, the persister has only
+        // a `Weak`, and it must outlive `executor.run().await` so a callback can
+        // still seal. It drops at the end of this fn, whichever way the fn ends.
+
+        // Callbacks the keyless worker calls DURING a run: blob rehydration
+        // (`media_load`) + state persistence (`session_change`). Bundle resolution
+        // is NOT here — the orchestrator drives it itself on a cache miss (below),
+        // under the `composition_key` IT computed, so the worker never names which
+        // L2 slot a compile lands in.
+        // Handed over as the UNTRUSTED view — there is no other kind to hand over.
+        // The raw callback server is not engine-rpc's to export, so this side has
+        // no unwrapped contract available to implement by accident.
+        let callbacks = CallbackServer {
+            persister: persister.clone(),
+            media_store,
+        };
+
+        // Framed ONCE for both phases: the peel that closes `Covert` produces the
+        // wire value, so the retry below re-sends the same constant-size frame
+        // rather than re-encoding an identical one.
+        let session_state = crate::executor::outbound_round_state(&session_state)
+            .map_err(|e| classify_run_error(&session_id, &e))?;
+
+        let reply = async {
+            // Phase 1: cache-only run. The worker serves the composition from its
+            // own L1, or reports a miss — no bundle crosses on this call.
+            //
+            // `map` carries the scope through: the concerns were answered about
+            // the state, and assembling the request around it addresses none of
+            // them and reopens none, so the receipt the door demands is the one
+            // the mint wrote.
+            let req = session_state.clone().map(|session_state| RunRequest {
+                composition_key: composition_key.clone(),
+                props: props.clone(),
+                session_state,
+                event: event.clone(),
+            });
+            // The reply is the worker's word as much as anything it pushes back,
+            // so it arrives under the same scope and has to be judged before it
+            // is used.
+            let status = match state
+                .executor
+                .run(req, callbacks.clone())
+                .await
+                .map_err(|e| classify_run_error(&session_id, &e))?
+                // CONTAINED, and the reason has to cover BOTH arms — an earlier
+                // version spoke only about the miss, while the hit arm carried a
+                // whole policy-authored prompt through the same peel. A cache miss
+                // and a cache hit differ in whether the worker's L1 happened to
+                // hold the composition, which is no reason for two different
+                // judgements.
+                .trust_unchecked::<Asserted, _>(reason!(
+                    "contained: a miss names only a slot inside the composition namespace \
+                     api itself computed, so a fabricated token costs a recompile and \
+                     never yields another composition's code; a hit carries a prompt that \
+                     is shown to the applicant, its sole auditor, or a decision api only \
+                     compares with the one the round committed. The round's DISCLOSURE \
+                     comes from api's own copy, never from this"
+                ))
+                .into_inner()
+            {
+                RunOutcome::Ran(status) => status
+                    .open()
+                    .map_err(|e| classify_run_error(&session_id, &e.into()))?,
+                RunOutcome::CacheMiss { compat_token } => {
+                    // L1 miss: resolve the bundle OURSELVES, keyed by the
+                    // `composition_key` WE computed — never one echoed by the
+                    // worker — which is what closes the L2 cache-poisoning vector.
+                    // A resolution failure that is the pins' marks the session as
+                    // one that could not be prepared ([`crate::init`]). Phase 2:
+                    // re-drive WITH the bundle via `run_with_bundle`, which
+                    // always runs (no second miss).
+                    let req = session_state.map(|session_state| RunRequest {
+                        composition_key: composition_key.clone(),
+                        props,
+                        session_state,
+                        event,
+                    });
+                    run_resolved(
+                        &state,
+                        &composition_key,
+                        &compat_token,
+                        &session_id,
+                        &metadata,
+                        req,
+                        callbacks,
+                    )
+                    .await?
+                    .map_err(|e| classify_run_error(&session_id, &e))?
+                    .trust_unchecked::<Asserted, _>(reason!(
+                        "contained: a prompt is shown to the applicant, who is the \
+                             sole auditor of what they see, and a decision api only \
+                             compares with the one the round committed. The round's \
+                             DISCLOSURE comes from api's own copy, never from this"
+                    ))
+                    .into_inner()
+                }
+            };
+            Ok::<_, Unavailable>(status)
+        }
+        .await;
+
+        let status = match reply {
+            // The decision, if the round reached one, was committed with its
+            // state in the one write `persist` made. The reply has to say the
+            // same, or the worker contradicted itself and neither word answers
+            // the applicant.
+            Ok(status) => {
+                if !agrees(&status, persister.decided().await) {
+                    safe_logger::debug!(
+                        "session_run_ctx: the reply for {session_id} contradicts what its \
+                         round committed"
+                    );
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+                status
+            }
+            // Found before the round ran, so no write of its can have landed.
+            Err(e @ Unavailable::Init(_)) => {
+                return Err(e
+                    .settle(&state.session_store, &session_id, version, &metadata)
+                    .await);
+            }
+            // A failure, but the round's write may have landed first — the child
+            // killed after its commit, a leg gone before its reply. If it did,
+            // the session moved on all the same, and the applicant is answered
+            // with where it now stands, which is what a reload would show them:
+            // not an error inviting them to send this round's input again, to a
+            // prompt it was never for. If nothing was written, the error stands.
+            Err(Unavailable::Request(e)) => {
+                committed(persister.decided().await, awaiting.lock().await.take()).ok_or(e)?
+            }
+        };
+        Ok(progress_from(status, &locale))
+    }
+}
+
+/// Whether a round's reply says what the round committed: a finished round
+/// committed exactly the decision it reports, and any other round none.
+fn agrees(status: &RunStatus, committed: Option<Decision>) -> bool {
+    match status {
+        RunStatus::Completed(decision) => committed == Some(*decision),
+        RunStatus::AwaitingInput(_) => committed.is_none(),
+    }
+}
+
+/// What the round's own write committed, as its reply would have said it: the
+/// decision on the round that finished, the prompt the committed state awaits
+/// on any other. `None` when no write landed.
+fn committed(decided: Option<Decision>, awaiting: Option<Prompt>) -> Option<RunStatus> {
+    decided
+        .map(RunStatus::Completed)
+        .or_else(|| awaiting.map(RunStatus::AwaitingInput))
+}
+
+/// Map a worker's [`ExecError`] to the applicant's answer — a status per value
+/// of a fixed enum, and nothing besides.
+///
+/// A 4xx says the fault is not theirs — they can stop retrying and report it —
+/// and that is the whole of what this side is willing to attribute. WHAT the
+/// policy did is authored by the consumer's own wasm, so anything carrying it
+/// would be the policy choosing bytes on a wire, possibly as a function of the
+/// applicant's data. A 503 says nothing ran, so the same request may be sent
+/// again.
+///
+/// The consumer, who could act on a diagnosis, deliberately gets none of this:
+/// a failure reason routed to them from a round is a value the policy chose
+/// while holding the applicant's data.
+fn classify_run_error(session_id: &str, e: &ExecError) -> StatusCode {
+    safe_logger::debug!("session_run_ctx: executor.run failed for {session_id}: {e}");
+    match e {
+        ExecError::Policy => StatusCode::UNPROCESSABLE_ENTITY,
+        ExecError::Unknown => StatusCode::INTERNAL_SERVER_ERROR,
+        // Nothing ran and nothing changed: the worker had no room for the round.
+        // The one answer that means "the same request, later".
+        ExecError::Busy => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hatch_client::MediaSpec;
+
+    /// A worker with no room is the one failure that says "the same request,
+    /// later" — an empty 503, nothing for a policy to have chosen.
+    #[test]
+    fn a_busy_worker_is_a_503() {
+        assert_eq!(
+            classify_run_error("ses_test", &ExecError::Busy),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// A reply answers the applicant only when it says what the round's own
+    /// write committed: the same decision, or none on a round still waiting.
+    #[test]
+    fn a_reply_must_say_what_the_round_committed() {
+        let finished = RunStatus::Completed(Decision::Approved);
+        let waiting = RunStatus::AwaitingInput(Prompt::Media(MediaSpec::default()));
+        assert!(agrees(&finished, Some(Decision::Approved)));
+        assert!(!agrees(&finished, Some(Decision::Rejected)));
+        assert!(!agrees(&finished, None));
+        assert!(agrees(&waiting, None));
+        assert!(!agrees(&waiting, Some(Decision::Approved)));
+    }
+
+    /// A round whose reply never came answers with what its write committed,
+    /// and with nothing — the error stands — when no write landed.
+    #[test]
+    fn a_lost_reply_is_answered_from_the_write() {
+        assert!(matches!(
+            committed(Some(Decision::Rejected), None),
+            Some(RunStatus::Completed(Decision::Rejected))
+        ));
+        assert!(matches!(
+            committed(None, Some(Prompt::Media(MediaSpec::default()))),
+            Some(RunStatus::AwaitingInput(Prompt::Media(_)))
+        ));
+        assert!(committed(None, None).is_none());
+    }
+}

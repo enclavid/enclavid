@@ -40,6 +40,9 @@ enclavid-crypto = { path = "../crypto" }
 # because `safe-logger` needs the same words for the serial-port crossing and
 # must not pull a wire client in to get them.
 enclavid-boundary = { path = "../boundary" }
+# The compile's refusal, kept whole in sealed metadata as the session's init
+# error. A wasmtime-free leaf.
+engine-types = { path = "../engine-types" }
 # Wraps the raw `tee_seal_key` master + its HKDF subkeys: zeroize-on-drop and
 # Debug-redaction, with `expose_secret()` making every key use explicit. Same
 # version + idiom the api already uses for the applicant token.

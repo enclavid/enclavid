@@ -23,9 +23,11 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
 use enclavid_crypto::ocicrypt::{self, LayerDecryptor};
-use hatch_client::{BlobPieces, BlobRequest, Key, ManifestRequest, RegistryClient, boundary};
+use hatch_client::{
+    BlobPieces, BlobRequest, Key, ManifestRequest, PullProblem, RegistryClient, boundary,
+};
 
-use crate::keyprovider::{self, KbsContext};
+use crate::keyprovider::{self, KbsContext, KeyFailure};
 use crate::turns::Turns;
 
 /// OCI layer media type for wasm component layers (policies and
@@ -56,6 +58,16 @@ pub enum PullError {
     LayerSize,
     #[error("manifest declares no layer with the wasm media type")]
     NoWasmLayer,
+    #[error("the layer is encrypted but no key was supplied")]
+    KeyMissing,
+    #[error("a key was supplied but the layer is not encrypted")]
+    NotEncrypted,
+    /// The encrypted layer's annotations do not say how it was encrypted.
+    #[error("encryption annotations: {0}")]
+    Encryption(String),
+    #[error("artifact key: {0}")]
+    Key(keyprovider::KeyError),
+    /// The key in hand does not decrypt the layer.
     #[error("artifact decryption failed: {0}")]
     Decrypt(String),
     /// The hatch will not make the pull as asked — the registry refused the
@@ -69,12 +81,34 @@ pub enum PullError {
 }
 
 impl PullError {
-    /// Whether the same pull may succeed if asked again: the registry, the
-    /// hatch or the consumer's turn did not answer this time. Everything else —
-    /// a refusal, an artifact absent or not what its pin names — is the pins'
-    /// and stays.
-    pub fn is_unanswered(&self) -> bool {
-        matches!(self, Self::Transport(_) | Self::Busy)
+    /// What the failure says about the session's pins, when asking again will
+    /// not change it: a refusal, an artifact absent, not what its pin names, or
+    /// not one its keys open. `None` when the same pull may succeed later — the
+    /// registry, the KBS, the hatch or the consumer's turn did not answer this
+    /// time.
+    pub fn problem(&self) -> Option<PullProblem> {
+        Some(match self {
+            Self::Transport(_) | Self::Busy => return None,
+            Self::Key(e) => match e.kind {
+                KeyFailure::Unanswered => return None,
+                KeyFailure::NotReleased => PullProblem::KeyNotReleased,
+                KeyFailure::Invalid => PullProblem::KeyDoesNotOpen,
+                KeyFailure::Malformed => PullProblem::Malformed,
+            },
+            Self::NotFound => PullProblem::NotFound,
+            Self::Refused => PullProblem::Refused,
+            // A pin without a digest: creation refuses one, so it is the pin
+            // that is not as a pin must be.
+            Self::InvalidRef(_)
+            | Self::ManifestDigest { .. }
+            | Self::LayerDigest { .. }
+            | Self::LayerSize => PullProblem::NotAsPinned,
+            Self::ManifestParse(_) | Self::Encryption(_) => PullProblem::Malformed,
+            Self::NoWasmLayer => PullProblem::NoWasmLayer,
+            Self::KeyMissing => PullProblem::KeyMissing,
+            Self::NotEncrypted => PullProblem::NotEncrypted,
+            Self::Decrypt(_) => PullProblem::KeyDoesNotOpen,
+        })
     }
 }
 
@@ -149,9 +183,7 @@ pub async fn wasm_layer(
     for descriptor in manifest.layers {
         let decrypt = if descriptor.media_type == WASM_LAYER {
             if key.is_some() {
-                return Err(PullError::Decrypt(
-                    "a key was supplied but the layer is not encrypted".to_string(),
-                ));
+                return Err(PullError::NotEncrypted);
             }
             None
         } else if descriptor
@@ -159,9 +191,7 @@ pub async fn wasm_layer(
             .strip_suffix(ocicrypt::ENCRYPTED_MEDIA_SUFFIX)
             == Some(WASM_LAYER)
         {
-            let key = key.ok_or_else(|| {
-                PullError::Decrypt("layer is encrypted but no key was supplied".to_string())
-            })?;
+            let key = key.ok_or(PullError::KeyMissing)?;
             Some(layer_decryptor(&descriptor.annotations, key, kbs_ctx).await?)
         } else {
             continue;
@@ -374,12 +404,12 @@ async fn layer_decryptor(
 ) -> Result<LayerDecryptor, PullError> {
     let pubopts = annotations
         .get(ocicrypt::ANNOTATION_PUBOPTS)
-        .ok_or_else(|| PullError::Decrypt("missing enc.pubopts annotation".to_string()))?;
+        .ok_or_else(|| PullError::Encryption("missing enc.pubopts annotation".to_string()))?;
     let public = ocicrypt::pubopts_from_annotation(pubopts)
-        .map_err(|e| PullError::Decrypt(e.to_string()))?;
+        .map_err(|e| PullError::Encryption(e.to_string()))?;
     let private = keyprovider::obtain_priv_opts(annotations, key, kbs_ctx)
         .await
-        .map_err(|e| PullError::Decrypt(e.to_string()))?;
+        .map_err(PullError::Key)?;
     LayerDecryptor::new(&public, &private).map_err(|e| PullError::Decrypt(e.to_string()))
 }
 
@@ -578,6 +608,46 @@ mod tests {
             read(tampered).await,
             Err(PullError::LayerDigest { .. })
         ));
+    }
+
+    /// A pull that may succeed if asked again says nothing about the pins; one
+    /// that will not names what about them stands in the way.
+    #[test]
+    fn only_a_pull_that_will_not_pass_names_a_problem() {
+        use keyprovider::KeyError;
+        for unanswered in [
+            PullError::Transport("reset".into()),
+            PullError::Busy,
+            PullError::Key(KeyError::new(KeyFailure::Unanswered, "kbs relay")),
+        ] {
+            assert_eq!(unanswered.problem(), None, "{unanswered}");
+        }
+        for (e, problem) in [
+            (PullError::NotFound, PullProblem::NotFound),
+            (PullError::Refused, PullProblem::Refused),
+            (PullError::LayerSize, PullProblem::NotAsPinned),
+            (PullError::NoWasmLayer, PullProblem::NoWasmLayer),
+            (PullError::KeyMissing, PullProblem::KeyMissing),
+            (PullError::NotEncrypted, PullProblem::NotEncrypted),
+            (
+                PullError::Decrypt("hmac".into()),
+                PullProblem::KeyDoesNotOpen,
+            ),
+            (
+                PullError::Key(KeyError::new(KeyFailure::NotReleased, "403")),
+                PullProblem::KeyNotReleased,
+            ),
+            (
+                PullError::Key(KeyError::new(KeyFailure::Invalid, "json")),
+                PullProblem::KeyDoesNotOpen,
+            ),
+            (
+                PullError::Key(KeyError::new(KeyFailure::Malformed, "no enc.keys")),
+                PullProblem::Malformed,
+            ),
+        ] {
+            assert_eq!(e.problem(), Some(problem), "{e}");
+        }
     }
 
     /// A layer holds its consumer's turn while it is read and gives it back

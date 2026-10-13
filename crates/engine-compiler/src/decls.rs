@@ -26,6 +26,7 @@ use enclavid_embedded::{
 };
 use wasmparser::{Parser, Payload};
 
+use engine_types::compile::{Artifact, CompileFault};
 use engine_types::embedded::{ComponentDecls, Translation};
 use engine_types::limits::{
     MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_ICONS, MAX_DECLARED_LOCALIZED,
@@ -132,38 +133,40 @@ pub fn load_embedded_nested(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<EmbeddedC
 /// against pathological inputs without constraining real artifacts.
 const MAX_NESTING: usize = 8;
 
-/// Why a composition's embedded catalogs are not accepted.
+/// An embedded catalog breaks its format: a section repeated in one component,
+/// one that does not parse, one declaring past a `MAX_DECLARED_*` count, or
+/// catalogs nested deeper than the loader descends.
 ///
-/// Its own type, carried inside the `wasmtime::Error` the loaders and
-/// [`Compiler::compile_to_parts`](crate::Compiler::compile_to_parts) return, with
-/// what broke as the error's context. These are the failures this crate can tell
-/// are the composition's: each is a rule of the catalog format, checked against
-/// the pinned bytes before anything is fused, so the same pins meet it every
-/// time. The compile child looks for it there.
+/// Its own type, carried inside the `wasmtime::Error` the loaders return, with
+/// what broke as the error's context: a rule of the catalog format, checked
+/// against the pinned bytes, so the same pins meet it every time.
+/// [`Compiler::compile_to_parts`](crate::Compiler::compile_to_parts) looks for it
+/// there, and refuses the composition for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CatalogRefused {
-    /// The embedded sections, summed over the policy and every plugin, are past
-    /// `MAX_EMBEDDED_SECTION_BYTES`. Decided on lengths, before any is parsed.
-    PastCap,
-    /// One catalog breaks its format: a section repeated in one component, one
-    /// that does not parse, one declaring past a `MAX_DECLARED_*` count, or
-    /// catalogs nested deeper than the loader descends.
-    Invalid,
-}
+pub struct CatalogRefused;
 
 impl std::fmt::Display for CatalogRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            CatalogRefused::PastCap => "the composition's embedded catalogs are past their cap",
-            CatalogRefused::Invalid => "an embedded catalog breaks its format",
-        })
+        f.write_str("an embedded catalog breaks its format")
     }
 }
 impl std::error::Error for CatalogRefused {}
 
-/// A [`CatalogRefused::Invalid`], with `cause` as its context for the debug log.
+/// A [`CatalogRefused`], with `cause` as its context for the debug log.
 fn invalid(cause: String) -> wasmtime::Error {
-    wasmtime::Error::new(CatalogRefused::Invalid).context(cause)
+    wasmtime::Error::new(CatalogRefused).context(cause)
+}
+
+/// What a loader's failure to read `artifact` refuses the composition for: a
+/// catalog that breaks its format, or — the bytes not reading as wasm at all —
+/// an artifact that is not a component.
+pub(crate) fn unreadable(artifact: Artifact, e: wasmtime::Error) -> wasmtime::Error {
+    let fault = if e.is::<CatalogRefused>() {
+        CompileFault::CatalogInvalid(artifact)
+    } else {
+        CompileFault::NotAComponent(artifact)
+    };
+    e.context(fault)
 }
 
 /// The raw bytes of every embedded section in `wasm_bytes` — its own and every

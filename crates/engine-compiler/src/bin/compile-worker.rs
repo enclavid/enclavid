@@ -46,7 +46,7 @@ use remoc::codec::Ciborium;
 use enclavid_boundary::{AuthN, Untrusted};
 use engine_compiler::{ChildCompiled, CompileChildService, CompileChildServiceClient};
 use engine_rpc::{
-    COMPILE_STREAM_DEADLINE, CompatToken, CompileError, CompileReply, CompileRequest,
+    COMPILE_STREAM_DEADLINE, CompatToken, CompileError, CompileFault, CompileReply, CompileRequest,
     CompilerServiceUntrusted, LegSettings, MAX_BUNDLE_META_BYTES,
 };
 use fleet_transport::LegFailure;
@@ -162,7 +162,9 @@ impl CompilerServiceUntrusted for Supervisor {
             .into_inner();
         // Components past the hop's bound together are the pins' doing, so the
         // same pins are refused every time.
-        let (onward, relay) = req.relay().ok_or(CompileError::Refused)?;
+        let (onward, relay) = req
+            .relay()
+            .ok_or(CompileError::Refused(CompileFault::TooLarge))?;
         let output = output_file().map_err(|e| {
             debug!("compile output file: {e}");
             CompileError::Failed
@@ -194,19 +196,23 @@ impl CompilerServiceUntrusted for Supervisor {
 
         // The runner returns the closure's domain result verbatim on success —
         // `Refused` included, and that is the child's word: a child turned by the
-        // composition it compiles can claim it of that composition, which costs
-        // only that composition's sessions a 422. A child that died without
-        // answering reaches here as `Failed` — the leg to it closed — and the
-        // kernel's record says whether the compile itself was the cause: killed
-        // at its own max, with the children's total never reached meanwhile, is
-        // its composition's, so `Refused`; anything else stays `Failed`. A
-        // runner-level failure (spawn error, or the deadline killing a wedged child)
-        // is `Failed`, its cause kept to this side's debug log.
+        // composition it compiles can claim any fault of that composition, which
+        // costs only that composition's sessions their init, and tells their
+        // consumer one value from a fixed set, its one name held to an alphabet
+        // and a length. A child that died without answering reaches here as
+        // `Failed` — the leg to it closed — and the kernel's record says whether
+        // the compile itself was the cause: killed at its own max, with the
+        // children's total never reached meanwhile, is its composition's, so
+        // `Refused(OutOfMemory)`; anything else stays `Failed`. A runner-level
+        // failure (spawn error, or the deadline killing a wedged child) is
+        // `Failed`, its cause kept to this side's debug log.
         let compiled = match outcome {
             Ok((Ok(compiled), _)) => compiled,
             Ok((Err(CompileError::Failed), exit)) => {
                 return match exit.cause().await {
-                    ExitCause::OutgrewItsMax => Err(CompileError::Refused),
+                    ExitCause::OutgrewItsMax => {
+                        Err(CompileError::Refused(CompileFault::OutOfMemory))
+                    }
                     ExitCause::Unattributed => Err(CompileError::Failed),
                 };
             }

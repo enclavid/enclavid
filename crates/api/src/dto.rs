@@ -27,7 +27,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use hatch_client::{
-    Decision, DisplayField as ProtoDisplayField, Localized, PromptDisclosure, SessionStatus,
+    Artifact, CompileFault, Decision, DisplayField as ProtoDisplayField, InitError, Localized,
+    PromptDisclosure, PullProblem, SessionStatus,
 };
 
 use crate::locale::Locale;
@@ -68,6 +69,119 @@ impl From<Decision> for DecisionView {
     }
 }
 
+/// Why a session could not be prepared to run, as the consumer reads it in the
+/// session's view: `{"kind": "pull", "artifact": …, "problem": …}`, or
+/// `{"kind": "compile", "problem": …}` with what the problem names beside it —
+/// an artifact, a plugin by the package it is pinned under, or an import by the
+/// interface name it is imported under. Each problem is one of a fixed set.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InitErrorView {
+    Pull {
+        artifact: ArtifactView,
+        problem: PullProblemView,
+    },
+    Compile(CompileProblemView),
+}
+
+impl From<&InitError> for InitErrorView {
+    fn from(error: &InitError) -> Self {
+        match error {
+            InitError::Compile(fault) => InitErrorView::Compile(fault.into()),
+            InitError::Pull { artifact, problem } => InitErrorView::Pull {
+                artifact: artifact.into(),
+                problem: (*problem).into(),
+            },
+        }
+    }
+}
+
+/// See [`Artifact`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ArtifactView {
+    Policy,
+    Plugin { package: String },
+}
+
+impl From<&Artifact> for ArtifactView {
+    fn from(artifact: &Artifact) -> Self {
+        match artifact {
+            Artifact::Policy => ArtifactView::Policy,
+            Artifact::Plugin(package) => ArtifactView::Plugin {
+                package: package.clone(),
+            },
+        }
+    }
+}
+
+/// See [`CompileFault`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "problem", rename_all = "snake_case")]
+pub enum CompileProblemView {
+    NotAComponent { artifact: ArtifactView },
+    ReservedExport { artifact: ArtifactView },
+    CatalogInvalid { artifact: ArtifactView },
+    CatalogsPastCap,
+    UnsatisfiedImport { interface: String },
+    MismatchedImport { interface: String },
+    Invalid,
+    TooLarge,
+    OutOfMemory,
+}
+
+impl From<&CompileFault> for CompileProblemView {
+    fn from(fault: &CompileFault) -> Self {
+        match fault {
+            CompileFault::NotAComponent(a) => Self::NotAComponent { artifact: a.into() },
+            CompileFault::ReservedExport(a) => Self::ReservedExport { artifact: a.into() },
+            CompileFault::CatalogInvalid(a) => Self::CatalogInvalid { artifact: a.into() },
+            CompileFault::CatalogsPastCap => Self::CatalogsPastCap,
+            CompileFault::Unsatisfied(i) => Self::UnsatisfiedImport {
+                interface: i.as_str().into(),
+            },
+            CompileFault::Mismatched(i) => Self::MismatchedImport {
+                interface: i.as_str().into(),
+            },
+            CompileFault::Invalid => Self::Invalid,
+            CompileFault::TooLarge => Self::TooLarge,
+            CompileFault::OutOfMemory => Self::OutOfMemory,
+        }
+    }
+}
+
+/// See [`PullProblem`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullProblemView {
+    NotFound,
+    Refused,
+    NotAsPinned,
+    Malformed,
+    NoWasmLayer,
+    KeyMissing,
+    NotEncrypted,
+    KeyDoesNotOpen,
+    KeyNotReleased,
+}
+
+impl From<PullProblem> for PullProblemView {
+    fn from(p: PullProblem) -> Self {
+        match p {
+            PullProblem::NotFound => PullProblemView::NotFound,
+            PullProblem::Refused => PullProblemView::Refused,
+            PullProblem::NotAsPinned => PullProblemView::NotAsPinned,
+            PullProblem::Malformed => PullProblemView::Malformed,
+            PullProblem::NoWasmLayer => PullProblemView::NoWasmLayer,
+            PullProblem::KeyMissing => PullProblemView::KeyMissing,
+            PullProblem::NotEncrypted => PullProblemView::NotEncrypted,
+            PullProblem::KeyDoesNotOpen => PullProblemView::KeyDoesNotOpen,
+            PullProblem::KeyNotReleased => PullProblemView::KeyNotReleased,
+        }
+    }
+}
+
+/// How much shorter `value`'s JSON is than the longest of `all`'s.
 /// `value` as a JSON response whose length does not depend on `decision`:
 /// whitespace after the document, which JSON reads past, makes up the
 /// difference to the longest verdict's name. The host sees the length of
@@ -149,7 +263,7 @@ pub enum SessionStatusDef {
     Unspecified,
     Running,
     Completed,
-    Failed,
+    InitFailed,
     Expired,
 }
 
@@ -420,5 +534,48 @@ mod tests {
             lengths.push(body.len());
         }
         assert!(lengths.windows(2).all(|w| w[0] == w[1]), "{lengths:?}");
+    }
+
+    use hatch_client::InterfaceName;
+
+    /// An init error reads as it was kept: a plugin by its package, an import
+    /// by its interface name, the problem by its name.
+    #[test]
+    fn an_init_error_reads_as_it_was_kept() {
+        let view = |e: InitError| serde_json::to_value(InitErrorView::from(&e)).unwrap();
+        assert_eq!(
+            view(InitError::Pull {
+                artifact: Artifact::Plugin("enclavid:face-detect@0.1.0".into()),
+                problem: PullProblem::NotFound,
+            }),
+            serde_json::json!({
+                "kind": "pull",
+                "artifact": { "kind": "plugin", "package": "enclavid:face-detect@0.1.0" },
+                "problem": "not_found",
+            })
+        );
+        assert_eq!(
+            view(InitError::Compile(CompileFault::NotAComponent(
+                Artifact::Policy
+            ))),
+            serde_json::json!({
+                "kind": "compile",
+                "problem": "not_a_component",
+                "artifact": { "kind": "policy" },
+            })
+        );
+        let name = InterfaceName::new("enclavid:well-known/capture@0.1.0").unwrap();
+        assert_eq!(
+            view(InitError::Compile(CompileFault::Unsatisfied(name))),
+            serde_json::json!({
+                "kind": "compile",
+                "problem": "unsatisfied_import",
+                "interface": "enclavid:well-known/capture@0.1.0",
+            })
+        );
+        assert_eq!(
+            view(InitError::Compile(CompileFault::OutOfMemory)),
+            serde_json::json!({ "kind": "compile", "problem": "out_of_memory" })
+        );
     }
 }

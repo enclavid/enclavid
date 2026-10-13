@@ -27,7 +27,8 @@ use remoc::codec::Ciborium;
 
 use engine_compiler::{ChildCompiled, CompileChildService, CompileChildServiceClient};
 use engine_rpc::{
-    BundleMeta, CompileError, CompileRequest, CompileSource, MAX_CWASM_BYTES, PluginLength,
+    Artifact, BundleMeta, CompileError, CompileFault, CompileRequest, CompileSource,
+    MAX_CWASM_BYTES, PluginLength,
 };
 use engine_types::composition::PluginInstance;
 use fleet_stream::{BlobHeader, StreamLen, bin};
@@ -111,11 +112,16 @@ async fn garbage_policy_fails_safe_then_child_exits() {
         Ok(_) => panic!("garbage policy must fail to compile, got a bundle"),
         Err(e) => assert_eq!(
             e,
-            CompileError::Failed,
-            "garbage fails to compile; it is not a refusal"
+            not_a_component(),
+            "garbage is refused, named as the policy it was pinned as"
         ),
     }
     exits_cleanly(spawned).await;
+}
+
+/// What a policy that is not a component is refused for.
+fn not_a_component() -> CompileError {
+    CompileError::Refused(CompileFault::NotAComponent(Artifact::Policy))
 }
 
 /// A component holding one custom section of `len` bytes.
@@ -145,7 +151,7 @@ async fn catalogs_past_the_cap_are_refused_through_the_child() {
     .expect("a refusal must not hang");
     match outcome {
         Ok(_) => panic!("catalogs past the cap must not compile"),
-        Err(e) => assert_eq!(e, CompileError::Refused),
+        Err(e) => assert_eq!(e, CompileError::Refused(CompileFault::CatalogsPastCap)),
     }
     exits_cleanly(spawned).await;
 }
@@ -295,8 +301,8 @@ async fn a_child_starts_and_serves_under_the_production_filter() {
     let spawned = spawn_with(true).await;
 
     // Reaching a `CompileError` at all proves the child got through exec, stood a
-    // runtime up, completed the handshake, took its components and ran Cranelift
-    // far enough to reject the input.
+    // runtime up, completed the handshake, took its components and read them far
+    // enough to reject the input.
     let outcome = tokio::time::timeout(
         Duration::from_secs(30),
         compile(&spawned.client, b"not a wasm component".to_vec(), vec![]),
@@ -305,7 +311,7 @@ async fn a_child_starts_and_serves_under_the_production_filter() {
     .expect("a hardened child must not hang");
     match outcome {
         Ok(_) => panic!("garbage policy must fail to compile, got a bundle"),
-        Err(e) => assert_eq!(e, CompileError::Failed),
+        Err(e) => assert_eq!(e, not_a_component()),
     }
     exits_cleanly(spawned).await;
 }
@@ -343,7 +349,7 @@ async fn a_runner_answers_and_gives_back_what_its_child_held() {
             )
             .await
             .expect("the runner admits, spawns and answers");
-        assert!(matches!(answer, Err(CompileError::Failed)));
+        assert_eq!(answer.err(), Some(not_a_component()));
         // Without cgroups nothing is attributed, but the cause settles only once
         // the child is gone.
         assert_eq!(exit.cause().await, ExitCause::Unattributed);

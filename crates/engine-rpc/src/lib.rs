@@ -73,8 +73,8 @@ mod compile;
 // none can serve the RAW contract either. Both ends reach the hop through `leg`.
 #[cfg(feature = "compile")]
 pub use compile::{
-    COMPILE_STREAM_DEADLINE, COMPILE_STREAM_IDLE, CompileError, CompileReply, CompileRequest,
-    CompileSource, MAX_COMPONENTS_BYTES, PluginLength,
+    Artifact, COMPILE_STREAM_DEADLINE, COMPILE_STREAM_IDLE, CompileError, CompileFault,
+    CompileReply, CompileRequest, CompileSource, InterfaceName, MAX_COMPONENTS_BYTES, PluginLength,
 };
 
 // The compile contract as its SERVER sees it.

@@ -432,4 +432,79 @@ mod tests {
         );
         assert!(executor.deserialize_component(&[]).is_err());
     }
+
+    /// The compile refuses a composition that, fused, imports anything outside
+    /// [`HOST_INTERFACES`](engine_types::compile::HOST_INTERFACES) that needs
+    /// serving — so every name there must be one this linker serves. A policy
+    /// importing all of them compiles AND primes; were a name to stop being
+    /// served here, the compile would let through compositions no round runs.
+    #[test]
+    fn the_host_serves_every_interface_the_compile_counts_as_its() {
+        use engine_types::compile::HOST_INTERFACES;
+        use wit_component::{
+            ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata,
+        };
+        use wit_parser::{ManglingAndAbi, Resolve};
+
+        let mut resolve = Resolve::default();
+        for package in ["host", "shared-types", "policy"] {
+            resolve
+                .push_dir(format!(
+                    "{}/../../wit/{package}",
+                    env!("CARGO_MANIFEST_DIR")
+                ))
+                .expect("the repository's WIT parses");
+        }
+        let imports: String = HOST_INTERFACES
+            .iter()
+            .map(|name| format!("import {name};"))
+            .collect();
+        // The props' interface is the policy's to write; this one holds a record.
+        let wit = format!(
+            "package test:host-served;
+             world policy {{
+                 {imports}
+                 export enclavid:policy/policy@0.1.0;
+             }}
+             package enclavid:host-ext@0.1.0 {{
+                 interface policy-props {{
+                     record props {{ flag: bool }}
+                     get: func() -> props;
+                 }}
+             }}"
+        );
+        let package = resolve
+            .push_str("policy.wit", &wit)
+            .expect("the WIT parses");
+        let world = resolve
+            .select_world(&[package], Some("policy"))
+            .expect("the world");
+        let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
+        embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8)
+            .expect("the metadata");
+        let bytes = ComponentEncoder::default()
+            .module(&module)
+            .expect("the module")
+            .validate(true)
+            .encode()
+            .expect("the component");
+
+        let compiler = engine_compiler::Compiler::new().expect("a compiler");
+        compiler
+            .compile_to_parts(bytes.clone(), Vec::new())
+            .expect("the compile takes every host interface as served");
+        let compiled = compiler.compile(&bytes).expect("it compiles");
+        let cwasm = compiler
+            .serialize_component(&compiled)
+            .expect("it serializes");
+        let executor = Executor::new().expect("an executor");
+        let component = executor.deserialize_component(&cwasm).expect("it loads");
+        executor
+            .prime(
+                &component,
+                &[],
+                std::sync::Arc::new(crate::embedded::EmbeddedRegistry::default()),
+            )
+            .expect("the linker serves every host interface");
+    }
 }

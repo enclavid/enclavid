@@ -8,17 +8,40 @@ fn pin(package: &str, impl_ref: &str) -> PluginPin {
     }
 }
 
-/// A refused composition is its pins' to fix — the fixed 422 a failing
-/// policy gets; any other compile failure stays a 500.
+/// A pull that will not pass is the session's init error, naming the artifact;
+/// one that may pass later is a 503 for this request alone.
 #[test]
-fn a_refused_composition_is_a_422() {
+fn a_pull_failure_fails_init_only_when_it_will_not_pass() {
+    let plugin = Artifact::Plugin("enclavid:extra@0.1.0".into());
+    match pull_failure(plugin.clone(), &policy_pull::PullError::Refused) {
+        Unavailable::Init(InitError::Pull { artifact, problem }) => {
+            assert_eq!(artifact, plugin);
+            assert_eq!(problem, PullProblem::Refused);
+        }
+        _ => panic!("a refusal is the session's init error"),
+    }
     assert!(matches!(
-        classify_compile_error("ses_test", "r/p@sha256:00", CompileError::Refused),
-        ApiError::StatusWithBody(StatusCode::UNPROCESSABLE_ENTITY, _)
+        pull_failure(Artifact::Policy, &policy_pull::PullError::Busy),
+        Unavailable::Request(StatusCode::SERVICE_UNAVAILABLE)
     ));
+}
+
+/// A refused composition is its pins' to fix: the session's init error, the
+/// fault as the compiler gave it. Any other compile failure stays a 500.
+#[test]
+fn a_refused_composition_is_the_sessions_init_error() {
+    let fault = CompileFault::NotAComponent(Artifact::Plugin("enclavid:extra@0.1.0".into()));
+    match classify_compile_error(
+        "ses_test",
+        "r/p@sha256:00",
+        CompileError::Refused(fault.clone()),
+    ) {
+        Unavailable::Init(InitError::Compile(kept)) => assert_eq!(kept, fault),
+        _ => panic!("a refusal is the session's init error"),
+    }
     assert!(matches!(
         classify_compile_error("ses_test", "r/p@sha256:00", CompileError::Failed),
-        ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR)
+        Unavailable::Request(StatusCode::INTERNAL_SERVER_ERROR)
     ));
 }
 

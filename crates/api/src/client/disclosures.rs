@@ -75,9 +75,9 @@ async fn read(
     // a chain the next applicant appends to — one session id carrying two
     // people's consented data, with a commitment that still verifies.
     //
-    // `Failed` is excluded with `Running`: an infrastructure error is not a
-    // verification, and half of one is not a smaller result but a different
-    // claim about a person.
+    // `InitFailed` is excluded with `Running`: a session that could not be
+    // prepared to run is not a verification, and half of one is not a smaller
+    // result but a different claim about a person.
     if metadata.status != SessionStatus::Completed {
         return Err(StatusCode::CONFLICT);
     }

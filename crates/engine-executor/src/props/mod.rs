@@ -42,7 +42,7 @@ use wasmtime::{Engine, Result, bail};
 use seed::Typed;
 
 /// The interface a policy imports to read its props.
-pub(crate) const INTERFACE: &str = "enclavid:host-ext/policy-props@0.1.0";
+pub(crate) const INTERFACE: &str = engine_types::compile::POLICY_PROPS;
 
 /// Its one function, taking nothing and returning the props.
 pub(crate) const FUNCTION: &str = "get";

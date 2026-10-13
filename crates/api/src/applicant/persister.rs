@@ -176,10 +176,7 @@ pub(super) fn round_captures(event: &Event) -> RoundCaptures {
 /// mistake is a product that silently stops disclosing — which no type catches
 /// and no test short of a full round would either.
 pub(super) fn round_consent(event: &Event, current_prompt: &Option<Prompt>) -> RoundConsent {
-    Arc::new(Mutex::new(super::shared::consent_for_round(
-        event,
-        current_prompt,
-    )))
+    Arc::new(Mutex::new(super::consent::for_round(event, current_prompt)))
 }
 
 impl SessionPersister {
@@ -231,17 +228,18 @@ impl SessionPersister {
     /// write: status `Completed` and the verdict (TEE-trusted, AEAD-bound in
     /// metadata). So it happens at most once a session — once it is written,
     /// `/connect` answers from the metadata and `/input` refuses, no round
-    /// reaches here again (`shared::standing`), and a second call in the round
-    /// that wrote it is refused.
+    /// reaches here again, and a second call in the round that wrote it is
+    /// refused.
     ///
     /// A reply lost after the write is recovered by reading, not re-running.
     /// The round's own request answers from what the write committed — the
     /// decision kept here, or the prompt the committed state awaits, kept in
     /// the round's [`RoundAwaiting`] — and a reload finds the same in the store.
     ///
-    /// Failed / Expired are intentionally never written. Engine errors stay as
-    /// Running (operationally retried); TTL is enforced inside the storage-CVM
-    /// off the per-session deadline (no host-visible status byte).
+    /// A round writes no other status. InitFailed is `crate::init`'s, decided
+    /// before a round runs; Expired is never written — TTL is enforced inside
+    /// the storage-CVM off the per-session deadline (no host-visible status
+    /// byte). Engine errors stay as Running (operationally retried).
     ///
     /// What the round consented to is NOT a parameter: see
     /// [`SessionPersister::consented`].

@@ -49,10 +49,10 @@ use std::sync::{Arc, Mutex};
 use remoc::codec::Ciborium;
 
 use engine_compiler::{
-    CatalogRefused, ChildCompiled, CompileChildService, CompileChildServiceServerShared, Compiler,
+    ChildCompiled, CompileChildService, CompileChildServiceServerShared, Compiler,
 };
 use engine_rpc::{
-    CatalogEntry, CompileError, CompileRequest, CompiledBundle, MAX_BUNDLE_META_BYTES,
+    CatalogEntry, CompileError, CompileFault, CompileRequest, CompiledBundle, MAX_BUNDLE_META_BYTES,
 };
 use fleet_stream::BlobHeader;
 
@@ -90,10 +90,10 @@ impl CompileChildService for Child {
             })?
             .map_err(|e| {
                 safe_logger::debug!("engine-compiler-child: compile: {e:?}");
-                if e.is::<CatalogRefused>() {
-                    CompileError::Refused
-                } else {
-                    CompileError::Failed
+                // A refusal is carried as a value, never read off the message.
+                match e.downcast_ref::<CompileFault>() {
+                    Some(fault) => CompileError::Refused(fault.clone()),
+                    None => CompileError::Failed,
                 }
             })?;
         let bundle = CompiledBundle {
@@ -115,12 +115,12 @@ impl CompileChildService for Child {
         })?;
         if meta.len() as u64 > MAX_BUNDLE_META_BYTES {
             safe_logger::debug!("engine-compiler-child: the metadata is past its bound");
-            return Err(CompileError::Refused);
+            return Err(CompileError::Refused(CompileFault::TooLarge));
         }
         let CompiledBundle { cwasm, .. } = bundle;
         let header = BlobHeader::of(&cwasm).ok_or_else(|| {
             safe_logger::debug!("engine-compiler-child: the cwasm is past its bound");
-            CompileError::Refused
+            CompileError::Refused(CompileFault::TooLarge)
         })?;
         // Written off the reactor, like the compile: the file is RAM, but the
         // cwasm can be large.

@@ -32,14 +32,15 @@ pub use seam::{
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
 
+use engine_types::compile::{Artifact, CompileFault};
 use engine_types::composition::{EmbeddedImport, PluginInstance};
 use engine_types::embedded::ComponentDecls;
 use engine_types::limits::MAX_EMBEDDED_SECTION_BYTES;
 
-use decls::embedded_section_bytes;
 pub use decls::{
     CatalogRefused, EmbeddedCatalog, load_embedded, load_embedded_nested, top_level_imports,
 };
+use decls::{embedded_section_bytes, unreadable};
 pub use hash::{catalog_hash, embedded_import_name, slug};
 
 /// A fused policy component plus the manifest of distinct embedded
@@ -143,36 +144,49 @@ impl Compiler {
     /// bytes; nothing of it is loaded or made runnable here, so there is no
     /// loaded copy to serialize from.
     ///
-    /// Refuses, before any section is parsed, a composition whose embedded
-    /// sections are past `MAX_EMBEDDED_SECTION_BYTES`, and then one whose
-    /// catalogs break their format; the error then carries a [`CatalogRefused`],
-    /// which the child answers as a refusal. [`compose`](Self::compose) and
-    /// [`fuse`](Self::fuse), which tests and tooling call directly, hold no such
-    /// cap.
+    /// A composition the pinned bytes decide against is refused: the error then
+    /// carries the [`CompileFault`] saying why, which the child answers as a
+    /// refusal. Before any section is parsed, one whose embedded sections are
+    /// past `MAX_EMBEDDED_SECTION_BYTES`; then one whose catalogs break their
+    /// format, that does not fuse, or that, fused, still imports what nothing
+    /// serves (`compose::served`). [`compose`](Self::compose) and
+    /// [`fuse`](Self::fuse), which tests and tooling call directly, hold none of
+    /// this.
     pub fn compile_to_parts(
         &self,
         policy_wasm: Vec<u8>,
         plugins: Vec<PluginInstance>,
     ) -> wasmtime::Result<BundleParts> {
+        let components = || {
+            std::iter::once((Artifact::Policy, &policy_wasm)).chain(
+                plugins
+                    .iter()
+                    .map(|p| (Artifact::Plugin(p.package.clone()), &p.wasm)),
+            )
+        };
         // The cap first, on lengths alone: everything below parses, and what it
         // would parse is what the cap bounds. Summed over the whole composition,
         // because the plugin set is the consumer's to pin.
-        let mut section_bytes = embedded_section_bytes(&policy_wasm)?;
-        for p in &plugins {
-            section_bytes += embedded_section_bytes(&p.wasm)?;
+        let mut section_bytes = 0;
+        for (artifact, wasm) in components() {
+            section_bytes += embedded_section_bytes(wasm)
+                .map_err(|e| e.context(CompileFault::NotAComponent(artifact)))?;
         }
         if section_bytes > MAX_EMBEDDED_SECTION_BYTES {
-            return Err(wasmtime::Error::new(CatalogRefused::PastCap));
+            return Err(wasmtime::Error::new(CompileFault::CatalogsPastCap));
         }
-        let policy_catalog = load_embedded(&policy_wasm)?;
         let mut catalogs = Vec::with_capacity(1 + plugins.len());
-        catalogs.push((policy_catalog.hash, policy_catalog.decls));
-        for p in &plugins {
-            let c = load_embedded(&p.wasm)?;
-            catalogs.push((c.hash, c.decls));
+        for (artifact, wasm) in components() {
+            let catalog = load_embedded(wasm).map_err(|e| unreadable(artifact, e))?;
+            catalogs.push((catalog.hash, catalog.decls));
         }
+        let plugged = !plugins.is_empty();
         let (bytes, embedded_imports) = fused(policy_wasm, plugins)?;
-        let cwasm = self.engine.precompile_component(&bytes)?;
+        let fused = compose::served(bytes, plugged)?;
+        let cwasm = self
+            .engine
+            .precompile_component(fused.bytes())
+            .map_err(|e| e.context(CompileFault::Invalid))?;
         Ok(BundleParts {
             cwasm,
             embedded_imports,

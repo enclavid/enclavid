@@ -27,20 +27,41 @@ pub struct KbsContext<'a> {
     pub kbs: &'a KbsClient,
 }
 
-/// Failure obtaining the layer key. Mapped to `PullError::Decrypt` by the
-/// caller — deliberately opaque (no partial-secret leakage).
+/// Failure obtaining the layer key: which kind, and what went wrong for the
+/// debug log — no partial secret in it.
 #[derive(Debug)]
-pub struct KeyError(pub String);
+pub struct KeyError {
+    pub kind: KeyFailure,
+    detail: String,
+}
+
+/// What a failure to obtain a key says about asking again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyFailure {
+    /// Nothing answered this time — the KBS, or the hatch on the way to it — or
+    /// this side failed on its own. The same request may succeed later.
+    Unanswered,
+    /// The KBS answered and released no key: it refused, or what it sent holds
+    /// none.
+    NotReleased,
+    /// The key the session gave inline is not one.
+    Invalid,
+    /// The artifact does not say which KBS resource holds its key.
+    Malformed,
+}
 
 impl KeyError {
-    fn msg(m: impl Into<String>) -> Self {
-        Self(m.into())
+    pub(crate) fn new(kind: KeyFailure, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
     }
 }
 
 impl std::fmt::Display for KeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.detail)
     }
 }
 
@@ -51,11 +72,12 @@ pub async fn obtain_priv_opts(
     ctx: Option<&KbsContext<'_>>,
 ) -> Result<PrivateLayerBlockCipherOptions, KeyError> {
     match key {
-        Key::Inline(bytes) => {
-            ocicrypt::privopts_from_json(bytes).map_err(|e| KeyError::msg(e.to_string()))
-        }
+        Key::Inline(bytes) => ocicrypt::privopts_from_json(bytes)
+            .map_err(|e| KeyError::new(KeyFailure::Invalid, e.to_string())),
         Key::Kbs(params) => {
-            let ctx = ctx.ok_or_else(|| KeyError::msg("kbs key requires a KBS context"))?;
+            let ctx = ctx.ok_or_else(|| {
+                KeyError::new(KeyFailure::Unanswered, "kbs key requires a KBS context")
+            })?;
             let resource = resource_uri(annotations)?;
             kbs_release(&params.endpoint, &resource, ctx).await
         }
@@ -82,14 +104,15 @@ async fn kbs_release(
     // only the report_data binding, no hardware signature; a real SEV-SNP
     // deployment swaps in an SNP evidence provider here.
     let mut session = RcarSession::new(
-        TeeKeyPair::generate().map_err(|e| KeyError::msg(format!("ephemeral key: {e}")))?,
+        TeeKeyPair::generate()
+            .map_err(|e| KeyError::new(KeyFailure::Unanswered, format!("ephemeral key: {e}")))?,
         SampleEvidence,
     );
 
     // Leg 1 — POST /kbs/v0/auth → nonce + `kbs-session-id` cookie.
     let auth_body = session
         .auth_body()
-        .map_err(|e| KeyError::msg(e.to_string()))?;
+        .map_err(|e| KeyError::new(KeyFailure::Unanswered, e.to_string()))?;
     let resp = relay(
         ctx,
         endpoint,
@@ -115,12 +138,12 @@ async fn kbs_release(
     let cookie = session_cookie(&resp.headers)?;
     session
         .set_challenge(&resp.body)
-        .map_err(|e| KeyError::msg(format!("challenge: {e}")))?;
+        .map_err(|e| KeyError::new(KeyFailure::NotReleased, format!("challenge: {e}")))?;
 
     // Leg 2 — POST /kbs/v0/attest (cookie) → attestation token (200).
     let attest_body = session
         .attest_body()
-        .map_err(|e| KeyError::msg(e.to_string()))?;
+        .map_err(|e| KeyError::new(KeyFailure::Unanswered, e.to_string()))?;
     let mut headers = json_headers();
     headers.push(("cookie".to_string(), cookie.clone()));
     let resp = relay(
@@ -161,7 +184,7 @@ async fn kbs_release(
         require_ok(&r, "resource")?;
         session
             .unwrap_resource(&r.body)
-            .map_err(|e| KeyError::msg(format!("jwe unwrap: {e}")))
+            .map_err(|e| KeyError::new(KeyFailure::NotReleased, format!("jwe unwrap: {e}")))
     })?
     .trust_unchecked::<AuthZ, _>(reason!(
         "the KBS enforces release authorization via its resource policy (Rego) + token; \
@@ -173,7 +196,8 @@ async fn kbs_release(
     ))
     .into_inner();
 
-    ocicrypt::privopts_from_json(&priv_json).map_err(|e| KeyError::msg(e.to_string()))
+    ocicrypt::privopts_from_json(&priv_json)
+        .map_err(|e| KeyError::new(KeyFailure::NotReleased, e.to_string()))
 }
 
 /// Vouch and relay one RCAR leg through the hatch. The leg body is public
@@ -211,21 +235,28 @@ async fn relay(
     ctx.kbs
         .relay(exposed)
         .await
-        .map_err(|e| KeyError::msg(format!("kbs relay: {e}")))
+        .map_err(|e| KeyError::new(KeyFailure::Unanswered, format!("kbs relay: {e}")))
 }
 
 fn json_headers() -> Vec<(String, String)> {
     vec![("content-type".to_string(), "application/json".to_string())]
 }
 
+/// A leg that did not answer 200 releases nothing. A KBS that was overloaded,
+/// timed out or failed on its side may answer later; any other status is its
+/// answer.
 fn require_ok(resp: &KbsRelayResponse, leg: &str) -> Result<(), KeyError> {
-    if resp.status != 200 {
-        return Err(KeyError::msg(format!(
-            "kbs {leg} leg returned status {}",
-            resp.status
-        )));
+    if resp.status == 200 {
+        return Ok(());
     }
-    Ok(())
+    let kind = match resp.status {
+        408 | 429 | 500..=599 => KeyFailure::Unanswered,
+        _ => KeyFailure::NotReleased,
+    };
+    Err(KeyError::new(
+        kind,
+        format!("kbs {leg} leg returned status {}", resp.status),
+    ))
 }
 
 /// Extract the `kbs-session-id` cookie from a leg's `Set-Cookie` headers,
@@ -239,7 +270,10 @@ fn session_cookie(headers: &[(String, String)]) -> Result<String, KeyError> {
             return Ok(format!("kbs-session-id={val}"));
         }
     }
-    Err(KeyError::msg("auth response missing kbs-session-id cookie"))
+    Err(KeyError::new(
+        KeyFailure::NotReleased,
+        "auth response missing kbs-session-id cookie",
+    ))
 }
 
 /// Read the KBS resource URI (`kbs:///<repo>/<type>/<tag>`) from the
@@ -252,20 +286,27 @@ fn resource_uri(annotations: &HashMap<String, String>) -> Result<String, KeyErro
         .iter()
         .find(|(k, _)| k.starts_with(ocicrypt::ANNOTATION_KEYS_PREFIX))
         .map(|(_, v)| v.trim().to_string())
-        .ok_or_else(|| KeyError::msg("kbs key: encrypted layer missing enc.keys.* annotation"))
+        .ok_or_else(|| {
+            KeyError::new(
+                KeyFailure::Malformed,
+                "kbs key: encrypted layer missing enc.keys.* annotation",
+            )
+        })
 }
 
 /// Map a `kbs:///<repo>/<type>/<tag>` resource URI to its KBS request path
 /// `/kbs/v0/resource/<repo>/<type>/<tag>`.
 fn resource_path(resource: &str) -> Result<String, KeyError> {
-    let rest = resource
-        .strip_prefix("kbs:///")
-        .ok_or_else(|| KeyError::msg("kbs resource must be kbs:///<repo>/<type>/<tag>"))?;
+    let malformed = || {
+        KeyError::new(
+            KeyFailure::Malformed,
+            "kbs resource must be kbs:///<repo>/<type>/<tag>",
+        )
+    };
+    let rest = resource.strip_prefix("kbs:///").ok_or_else(malformed)?;
     let parts: Vec<&str> = rest.split('/').collect();
     if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
-        return Err(KeyError::msg(
-            "kbs resource must be kbs:///<repo>/<type>/<tag>",
-        ));
+        return Err(malformed());
     }
     Ok(format!("/kbs/v0/resource/{rest}"))
 }
@@ -320,6 +361,26 @@ mod tests {
             ),
         ];
         assert_eq!(session_cookie(&headers).unwrap(), "kbs-session-id=abc123");
+    }
+
+    /// A KBS that was overloaded, timed out or failed on its side may release
+    /// the key later; any other answer but 200 is its refusal.
+    #[test]
+    fn a_leg_that_failed_on_the_kbs_side_may_pass_later() {
+        let leg = |status| KbsRelayResponse {
+            status,
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        assert!(require_ok(&leg(200), "auth").is_ok());
+        for status in [408, 429, 500, 502, 503, 504] {
+            let e = require_ok(&leg(status), "auth").unwrap_err();
+            assert_eq!(e.kind, KeyFailure::Unanswered, "{status}");
+        }
+        for status in [400, 401, 403, 404] {
+            let e = require_ok(&leg(status), "auth").unwrap_err();
+            assert_eq!(e.kind, KeyFailure::NotReleased, "{status}");
+        }
     }
 
     #[test]

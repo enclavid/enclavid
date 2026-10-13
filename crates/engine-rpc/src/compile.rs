@@ -22,6 +22,7 @@ use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
+pub use engine_types::compile::{Artifact, CompileFault, InterfaceName};
 use engine_types::composition::PluginInstance;
 
 use crate::bundle::MAX_CWASM_BYTES;
@@ -44,37 +45,33 @@ pub const COMPILE_STREAM_IDLE: Duration = Duration::from_secs(20);
 /// [`MAX_COMPONENTS_BYTES`] at about 13 MiB/s, far below what a leg runs at.
 pub const COMPILE_STREAM_DEADLINE: Duration = Duration::from_secs(120);
 
-/// Why a compile produced no bundle: one of two answers, and nothing besides.
+/// Why a compile produced no bundle.
 ///
-/// No text crosses. What failed on the far side — a wac or Cranelift message
-/// naming the consumer's interfaces, a parser's complaint about a section — stays
-/// on the producer's own debug log; what api receives is the one distinction it
-/// answers differently.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// No text crosses. What failed on the far side — a wac or Cranelift message, a
+/// parser's complaint about a section — stays on the producer's own debug log;
+/// what api receives is a [`CompileFault`] from a fixed set, the one name in it
+/// held to an alphabet and a length where it is decoded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompileError {
-    /// The composition is one this build does not compile: its embedded
-    /// catalogs, summed over the policy and every plugin, are past
-    /// `MAX_EMBEDDED_SECTION_BYTES`, one of them breaks the catalog format, or
-    /// the metadata it compiles to is past
-    /// [`MAX_BUNDLE_META_BYTES`](crate::MAX_BUNDLE_META_BYTES), which no execute
-    /// hop would take. Or its components are past [`MAX_COMPONENTS_BYTES`], or
-    /// compiling it took more memory than the worker gives one compile, and the
-    /// kernel killed it there. Decided from the pinned bytes and the
-    /// deployment's own limits, so the same pins are refused every time on it.
-    /// api answers it as a failing policy: a 422, for whoever chose the pins to
-    /// clear.
-    Refused,
-    /// Anything else: the composition did not fuse or compile, the child died
-    /// other than at its own memory max or overran its deadline, a stream broke,
-    /// the leg went away. Some of these the pins decide and some are ours, and
-    /// this side does not tell them apart, so api answers 500.
+    /// The composition is one this build does not compile, for the reason the
+    /// fault gives: it did not fuse, a catalog or an import is not as it must
+    /// be, it is past what the deployment carries, or compiling it took more
+    /// memory than the worker gives one compile and the kernel killed it there.
+    /// Decided from the pinned bytes and the deployment's own limits, so the
+    /// same pins are refused every time on it. api keeps it as the session's
+    /// init error, for whoever chose the pins to clear.
+    Refused(CompileFault),
+    /// Anything else: the child died other than at its own memory max or
+    /// overran its deadline, a stream broke, the leg went away. Ours, or not
+    /// told apart from ours, so api answers 500 and the session may compile on
+    /// a later round.
     Failed,
 }
 
 impl std::fmt::Display for CompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CompileError::Refused => f.write_str("the composition was refused"),
+            CompileError::Refused(fault) => write!(f, "the composition was refused: {fault}"),
             CompileError::Failed => f.write_str("the compile failed"),
         }
     }
@@ -353,7 +350,9 @@ mod tests {
         async fn compile(&self, req: CompileRequest) -> Result<CompileReply, CompileError> {
             let (policy, plugins) = req.receive().await.map_err(|_| CompileError::Failed)?;
             if policy == b"boom" {
-                return Err(CompileError::Refused);
+                return Err(CompileError::Refused(CompileFault::Unsatisfied(
+                    InterfaceName::new("test:api/api@0.1.0").expect("a legal name"),
+                )));
             }
             let cwasm: Vec<u8> = std::iter::once(policy.len() as u8)
                 .chain(plugins.iter().map(|p| p.wasm.len() as u8))
@@ -452,7 +451,12 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("expected compile error"),
         };
-        assert_eq!(err, CompileError::Refused);
+        assert_eq!(
+            err,
+            CompileError::Refused(CompileFault::Unsatisfied(
+                InterfaceName::new("test:api/api@0.1.0").expect("a legal name")
+            ))
+        );
 
         // The worker's ABI id crosses as the token it parsed.
         let token = client.compat_token().await.expect("the token crosses");
