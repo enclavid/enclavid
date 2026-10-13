@@ -3,8 +3,8 @@
 //! compiled by the compile-worker, kept in L2 (`crate::cwasm_cache`).
 //!
 //! A compile is a pure function of the pinned artifacts and of nothing a session
-//! holds, so a composition is asked for with no session at all by a warmup, and
-//! every session pinning the same artifacts shares one compile. One compile at a
+//! holds, so a warmup asks for one with no round at all, and every session
+//! pinning the same artifacts shares one compile. One compile at a
 //! time per composition and consumer ([`Compositions::compile_lock`]): whoever
 //! finds its own consumer's compile under way waits for it and reads what it
 //! left in L2, rather than compiling the same pins again.

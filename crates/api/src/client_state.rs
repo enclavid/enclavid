@@ -5,11 +5,11 @@
 //! quotes; the applicant flow uses BearerKey and continues from a session
 //! that this listener already created.
 //!
-//! `runner` and `policies` are shared with `AppState` — the engine
-//! lazily compiles policy wasm at applicant /connect and reuses the
-//! cached `Component` for subsequent /input rounds. `session_store` is
-//! also shared so writes from this side (metadata, status) and reads
-//! from the applicant side (state) hit the same backing service.
+//! `compositions` is shared with `AppState`: a warmup asked for here
+//! compiles through the same compile locks and into the same L2 a round
+//! looks in. `session_store` is also shared so writes from this side
+//! (metadata, status) and reads from the applicant side (state) hit the
+//! same backing service.
 
 use std::sync::Arc;
 
@@ -22,8 +22,8 @@ pub struct ClientState {
     pub auth: AuthClient,
     pub session_store: Arc<SessionStore>,
     pub attestor: Arc<dyn Attestor>,
-    /// The applicant surface's, shared: a warmup has a composition compiled
-    /// and kept before any round asks for it.
+    /// The applicant surface's, shared: a warmup has a session's composition
+    /// compiled and kept before any round asks for it.
     pub compositions: Arc<Compositions>,
 }
 

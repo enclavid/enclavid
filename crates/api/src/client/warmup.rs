@@ -1,47 +1,29 @@
-//! `POST /api/v1/warmup` — have a composition compiled and kept before any
-//! session asks for it.
+//! `POST /api/v1/sessions/{id}/warmup` — have a session's composition compiled
+//! and kept before its applicant connects.
 //!
-//! The body is what a session pins: the policy, its plugins, their keys, the
-//! registry bearers — the same fields, held to the same checks, as
-//! `POST /api/v1/sessions`. The answer is `202 Accepted` as soon as the pins are
-//! valid; the compile runs after it, and a composition already kept, or already
-//! being compiled, is not compiled again. Nothing is answered about how it went:
-//! a session pinning the same composition meets any failure at its own first
-//! round, as it would without a warmup.
+//! No body: what is compiled is what the session pins, read from its sealed
+//! metadata. The answer is `202 Accepted` at once; the compile runs after it, and
+//! a composition already kept, or already being compiled for the same consumer,
+//! is not compiled again. Nothing is answered about how it went: the session's
+//! first round meets any failure, as it would without a warmup. A session that
+//! will not run again has nothing to warm, and is answered `409 Conflict`.
 //!
-//! Authorized as a session creation is: it spends what creating a session with
-//! these pins would — one compile — and nothing a creation does not.
+//! The same as `"warmup": true` on the creation, for a session created without
+//! it. Authorized as a creation is: it spends what the creation would have — one
+//! compile — and nothing more.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::Json;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::routing::{MethodRouter, post};
-use serde::Deserialize;
+
+use hatch_client::{Metadata, SessionStatus, outbound_session_id};
 
 use crate::client_state::ClientState;
+use crate::compositions::Composition;
 
-use super::auth::Principal;
-use super::create::{KeyRequest, PluginRequest, pins};
-
-/// The pins of a composition, as `POST /api/v1/sessions` takes them.
-#[derive(Deserialize)]
-pub struct WarmupRequest {
-    /// Full pinned OCI reference for the policy artifact,
-    /// `<registry>/<repository>@sha256:<hex>`.
-    pub policy: String,
-    /// Per-hostname registry bearer map, as for a session.
-    #[serde(default)]
-    pub registry_auth: BTreeMap<String, String>,
-    /// Plugin pins, in composition order.
-    #[serde(default)]
-    pub plugins: Vec<PluginRequest>,
-    /// The policy artifact's decryption key. Omit ⇒ not encrypted.
-    #[serde(default)]
-    pub policy_key: Option<KeyRequest>,
-}
+use super::auth::{Principal, SessionToken, trust_metadata};
 
 /// Route factory: bare `post(handler)` MethodRouter. Auth is attached at the
 /// router level via `.layer(auth(op))` — see `client::router`.
@@ -51,18 +33,23 @@ pub(super) fn post_warmup() -> MethodRouter<Arc<ClientState>> {
 
 async fn warmup(
     State(state): State<Arc<ClientState>>,
-    Principal(principal): Principal,
-    headers: HeaderMap,
-    Json(body): Json<WarmupRequest>,
+    Principal(presented_principal): Principal,
+    SessionToken(presented_token): SessionToken,
+    Path(session_id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let pins = pins(
-        body.policy,
-        body.plugins,
-        body.registry_auth,
-        body.policy_key,
-        &headers,
-    )?;
-    let composition = pins.composition(principal.as_deref());
+    let ((metadata_untrusted,), _version) = state
+        .session_store
+        .read(outbound_session_id(&session_id), (Metadata,))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let metadata = trust_metadata(metadata_untrusted, &presented_token, &presented_principal)?;
+    if metadata.status != SessionStatus::Running {
+        return Err(StatusCode::CONFLICT);
+    }
+    let composition = Composition::of(&metadata).ok_or_else(|| {
+        safe_logger::debug!("client/warmup: metadata.client missing for {session_id}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let compositions = state.compositions.clone();
     tokio::spawn(async move { compositions.warm(composition).await });
     Ok(StatusCode::ACCEPTED)

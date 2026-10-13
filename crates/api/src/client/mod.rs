@@ -6,8 +6,9 @@
 //!                                              policy, disclosure count, ...)
 //!   GET  /api/v1/sessions/:id/disclosures    — pull age-encrypted disclosure
 //!                                              entries (opaque ciphertext)
-//!   POST /api/v1/warmup                      — have a composition compiled
-//!                                              and kept ahead of its sessions
+//!   POST /api/v1/sessions/:id/warmup         — have the session's composition
+//!                                              compiled and kept ahead of
+//!                                              its first round
 //!
 //! Session creation is a single endpoint: the client supplies the
 //! policy ref + disclosure pubkey + per-plugin pins in one body, the
@@ -17,7 +18,7 @@
 //! applicant /connect, so abandoned sessions don't pay compile-cost
 //! and TEE restarts don't strand in-flight work — unless the client asks
 //! for it sooner: `"warmup": true` on the creation, or a warmup of the
-//! same pins, compiles it right after the answer.
+//! session, compiles it right after the answer.
 //!
 //! See architecture.md → Client-Facing Session Creation for the
 //! protocol shape and threat model. Counterparts to the applicant
@@ -86,10 +87,10 @@ pub fn router(state: Arc<ClientState>) -> Router {
             "/api/v1/sessions/{id}/disclosures",
             disclosures::get_disclosures().layer(auth(ClientOperation::DataRead)),
         )
-        // Authorized as a creation: it spends what creating a session with
-        // these pins would, and nothing a creation does not.
+        // Authorized as a creation: it spends what creating the session with
+        // `"warmup": true` would have, and nothing a creation does not.
         .route(
-            "/api/v1/warmup",
+            "/api/v1/sessions/{id}/warmup",
             warmup::post_warmup().layer(auth(ClientOperation::SessionCreate)),
         )
         // Mark auth-bearing request headers as sensitive. Two

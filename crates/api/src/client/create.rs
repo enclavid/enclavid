@@ -96,7 +96,7 @@ pub struct CreateSessionRequest {
     /// Compile the session's composition and keep it as soon as the session is
     /// created, so the applicant's first round does not wait for the compile.
     /// The response does not wait for it either. The same as
-    /// `POST /api/v1/warmup` with this body's pins.
+    /// `POST /api/v1/sessions/{id}/warmup` on the session once it is created.
     #[serde(default)]
     pub warmup: bool,
 }
@@ -166,34 +166,20 @@ impl KeyRequest {
     }
 }
 
-/// What a request pins — the policy, its plugins, their keys, and the bearers
-/// to pull them with — validated as one, by session creation and by a warmup
-/// alike.
-pub(super) struct Pins {
-    pub policy_ref: String,
+/// What a creation pins — the policy, its plugins, their keys, and the bearers
+/// to pull them with — validated as one.
+struct Pins {
+    policy_ref: String,
     /// The policy's digest, the hex after `@sha256:`.
-    pub policy_digest: String,
-    pub plugins: Vec<PluginPin>,
-    pub policy_key: Option<Key>,
-    pub registry_auth: HashMap<String, Vec<u8>>,
-}
-
-impl Pins {
-    /// The composition these pins make, its pulls counted against `consumer`.
-    pub fn composition(&self, consumer: Option<&str>) -> Composition {
-        Composition {
-            policy_ref: self.policy_ref.clone(),
-            policy_key: self.policy_key.clone(),
-            plugins: self.plugins.clone(),
-            registry_auth: self.registry_auth.clone(),
-            consumer: consumer.unwrap_or_default().to_owned(),
-        }
-    }
+    policy_digest: String,
+    plugins: Vec<PluginPin>,
+    policy_key: Option<Key>,
+    registry_auth: HashMap<String, Vec<u8>>,
 }
 
 /// Validate what a request pins. Every refusal is a 400, before anything is
 /// kept or compiled.
-pub(super) fn pins(
+fn pins(
     policy: String,
     plugin_requests: Vec<PluginRequest>,
     registry_auth_requests: BTreeMap<String, String>,
@@ -349,9 +335,6 @@ async fn create(
         body.policy_key,
         &headers,
     )?;
-    // Taken before the pins move into the sealed metadata below; compiled once
-    // the session is written.
-    let warmup = body.warmup.then(|| pins.composition(principal.as_deref()));
     let Pins {
         policy_ref,
         policy_digest,
@@ -477,7 +460,9 @@ async fn create(
 
     // After the write, so a warmup never compiles for a session that does not
     // exist; not awaited, so the response does not wait for the compile.
-    if let Some(composition) = warmup {
+    if body.warmup
+        && let Some(composition) = Composition::of(&metadata)
+    {
         let compositions = state.compositions.clone();
         tokio::spawn(async move { compositions.warm(composition).await });
     }
