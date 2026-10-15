@@ -123,6 +123,9 @@ serde_json = "1"
 # codec the hatch wire DTOs use; deny_unknown_fields makes any bundle
 # schema drift a decode error (→ cache miss).
 ciborium = "0.2"
+# ciborium's own lower layer: it reads a CBOR head on its own, which is how an
+# L2 entry says how long its byte strings are before they are read.
+ciborium-ll = "0.2"
 base64ct = { version = "1", features = ["alloc"] }
 secrecy = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }

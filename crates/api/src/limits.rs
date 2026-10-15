@@ -29,7 +29,7 @@ pub const APPLICANT_INPUT_BODY_LIMIT: usize = 12 * 1024 * 1024;
 // ----- The consumer's props -----
 
 /// Hard cap on the props a consumer gives a session, measured as the
-/// compact JSON object api keeps. Tight enough to prevent a malicious
+/// compact JSON value api keeps. Tight enough to prevent a malicious
 /// consumer from smuggling a database of names in and extracting
 /// match results — the architecture's bulk-matching defence.
 pub const MAX_PROPS_SIZE: usize = 1024;

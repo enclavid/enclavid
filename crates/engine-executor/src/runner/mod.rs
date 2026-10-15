@@ -88,7 +88,7 @@ pub struct PrimedComposition {
     pre: GeneratedHostPre<HostState>,
     embedded: std::sync::Arc<crate::embedded::EmbeddedRegistry>,
     /// The type of the props' `get`, when the composition imports it: what
-    /// each round builds the consumer's props into before the policy runs.
+    /// each round reads its props into before the policy runs.
     props: Option<ComponentFunc>,
 }
 
@@ -191,13 +191,26 @@ impl Executor {
         })
     }
 
+    /// The consumer's props, `json`, read as the type the primed composition
+    /// declares and written as WAVE — what every round of the session is then
+    /// handed — or `None` when it declares none; or where they do not fit, and
+    /// why. Nothing of the policy runs: the type is read off the component. See
+    /// [`crate::props`].
+    pub fn read_props(
+        &self,
+        primed: &PrimedComposition,
+        json: &[u8],
+    ) -> Result<Option<String>, engine_types::props::PropsRefusal> {
+        crate::props::read(primed.props.as_ref(), json)
+    }
+
     /// Drive one reducer round against a [`PrimedComposition`]. `session` carries
     /// the policy's opaque `state` blob and the `current_prompt` prompt from the
     /// previous round; `event` is the inbound mailbox message the runtime built
-    /// from the applicant's `/input`. `props` is the JSON object the consumer gave
-    /// the session, empty when it gave none; it becomes the record the policy
-    /// declares for it before the policy runs, and a round whose props do not fit
-    /// that record fails there (see [`crate::props`]). `inputs` carries the
+    /// from the applicant's `/input`. `props` is the consumer's props as
+    /// [`read_props`](Self::read_props) wrote them when the session was prepared,
+    /// in WAVE, empty for a composition that declares none; they become that
+    /// value before the policy runs (see [`crate::props`]). `inputs` carries the
     /// per-round `listener` + `media_store` (the composition-wide `embedded`
     /// already lives in `primed`).
     ///
@@ -370,10 +383,11 @@ fn register_strict_embedded(
     Ok(())
 }
 
-/// Register the props' `get`, which returns the record the round built from the
-/// consumer's props. Dynamic, because the record's type is the policy's: the
-/// Linker takes whatever type the component declares, and wasmtime checks the
-/// value against it on the way out.
+/// Register the props' `get`, which returns the value the round read its props
+/// into. Dynamic, because the type is the policy's: the Linker takes whatever
+/// type the component declares, and wasmtime checks the value against it on the
+/// way out. Registered at [`crate::props::INTERFACE`]'s own version, which the
+/// linker serves to a semver-compatible import as well.
 fn register_props(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     linker
         .root()
@@ -433,14 +447,10 @@ mod tests {
         assert!(executor.deserialize_component(&[]).is_err());
     }
 
-    /// The compile refuses a composition that, fused, imports anything outside
-    /// [`HOST_INTERFACES`](engine_types::compile::HOST_INTERFACES) that needs
-    /// serving — so every name there must be one this linker serves. A policy
-    /// importing all of them compiles AND primes; were a name to stop being
-    /// served here, the compile would let through compositions no round runs.
-    #[test]
-    fn the_host_serves_every_interface_the_compile_counts_as_its() {
-        use engine_types::compile::HOST_INTERFACES;
+    /// A policy importing `imports` and exporting the policy interface, beside
+    /// the props package `props` — the version it is written at, and its
+    /// interface's body — compiled by the fleet's compile and primed here.
+    fn primed(imports: &str, props: (&str, &str)) -> (Executor, PrimedComposition) {
         use wit_component::{
             ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata,
         };
@@ -455,22 +465,15 @@ mod tests {
                 ))
                 .expect("the repository's WIT parses");
         }
-        let imports: String = HOST_INTERFACES
-            .iter()
-            .map(|name| format!("import {name};"))
-            .collect();
-        // The props' interface is the policy's to write; this one holds a record.
+        let (version, body) = props;
         let wit = format!(
             "package test:host-served;
              world policy {{
                  {imports}
                  export enclavid:policy/policy@0.1.0;
              }}
-             package enclavid:host-ext@0.1.0 {{
-                 interface policy-props {{
-                     record props {{ flag: bool }}
-                     get: func() -> props;
-                 }}
+             package enclavid:host-ext@{version} {{
+                 interface policy-props {{ {body} }}
              }}"
         );
         let package = resolve
@@ -490,21 +493,57 @@ mod tests {
             .expect("the component");
 
         let compiler = engine_compiler::Compiler::new().expect("a compiler");
-        compiler
-            .compile_to_parts(bytes.clone(), Vec::new())
+        let parts = compiler
+            .compile_to_parts(bytes, Vec::new())
             .expect("the compile takes every host interface as served");
-        let compiled = compiler.compile(&bytes).expect("it compiles");
-        let cwasm = compiler
-            .serialize_component(&compiled)
-            .expect("it serializes");
         let executor = Executor::new().expect("an executor");
-        let component = executor.deserialize_component(&cwasm).expect("it loads");
-        executor
+        let component = executor
+            .deserialize_component(&parts.cwasm)
+            .expect("it loads");
+        let primed = executor
             .prime(
                 &component,
-                &[],
+                &parts.embedded_imports,
                 std::sync::Arc::new(crate::embedded::EmbeddedRegistry::default()),
             )
             .expect("the linker serves every host interface");
+        (executor, primed)
+    }
+
+    const FLAG: &str = "record props { flag: bool } get: func() -> props;";
+
+    /// The compile refuses a composition that, fused, imports anything outside
+    /// [`HOST_INTERFACES`](engine_types::compile::HOST_INTERFACES) that needs
+    /// serving — so every name there must be one this linker serves. A policy
+    /// importing all of them compiles AND primes; were a name to stop being
+    /// served here, the compile would let through compositions no round runs.
+    #[test]
+    fn the_host_serves_every_interface_the_compile_counts_as_its() {
+        use engine_types::compile::HOST_INTERFACES;
+
+        let imports: String = HOST_INTERFACES
+            .iter()
+            .map(|name| format!("import {name};"))
+            .collect();
+        // The props' interface is the policy's to write; this one holds a record.
+        let (executor, primed) = primed(&imports, ("0.1.0", FLAG));
+        assert_eq!(
+            executor.read_props(&primed, br#"{"flag": true}"#),
+            Ok(Some("{flag: true}".into()))
+        );
+    }
+
+    /// The props' interface imported at a semver-compatible version, which the
+    /// compile admits, is found, served and read like its own.
+    #[test]
+    fn props_at_a_compatible_version_are_served() {
+        let (executor, primed) = primed(
+            "import enclavid:host-ext/policy-props@0.1.7;",
+            ("0.1.7", FLAG),
+        );
+        assert_eq!(
+            executor.read_props(&primed, br#"{"flag": false}"#),
+            Ok(Some("{flag: false}".into()))
+        );
     }
 }

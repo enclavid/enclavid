@@ -84,11 +84,10 @@ mod untrusted_compile;
 pub use untrusted_compile::CompilerServiceUntrusted;
 
 // The two names a cache slot is addressed by, as types that carry their own
-// shape check. Both cross the execute hop; the compile hop carries the token too,
-// for a compile no round asked for.
-#[cfg(any(feature = "compile", feature = "execute"))]
+// shape check. Both cross the execute hop, and only it.
+#[cfg(feature = "execute")]
 mod keys;
-#[cfg(any(feature = "compile", feature = "execute"))]
+#[cfg(feature = "execute")]
 pub use keys::{CompatToken, CompositionKey, KeyError};
 
 #[cfg(feature = "execute")]
@@ -104,7 +103,8 @@ mod execute;
 pub use execute::{
     ByteBuf, CallbackError, CallbackService, CallbackServiceClient, ChildCallbacks,
     ChildCallbacksClient, ChildCallbacksServerShared, ChildService, ChildServiceClient,
-    ChildServiceServerShared, ExecError, RunOutcome, RunReply, RunRequest, RunStatus,
+    ChildServiceServerShared, ExecError, PrepareOutcome, PrepareReply, PrepareRequest, Preparing,
+    PropsRead, RoundProps, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 
 // Both ends of the execute hop, and the doors on the calling end.
@@ -113,7 +113,9 @@ mod leg;
 #[cfg(feature = "compile")]
 pub use leg::{CompilerLeg, connect_compiler, serve_compiler};
 #[cfg(feature = "execute")]
-pub use leg::{DEFAULT_CALLBACK_REQUEST_BUFFER, ExecutorLeg, connect_executor, serve_executor};
+pub use leg::{
+    DEFAULT_CALLBACK_REQUEST_BUFFER, ExecutorLeg, Preparation, connect_executor, serve_executor,
+};
 #[cfg(any(feature = "compile", feature = "execute"))]
 pub use leg::{DEFAULT_REQUEST_BUFFER, LegError, leg_end};
 

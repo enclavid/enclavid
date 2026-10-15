@@ -3,13 +3,15 @@
 //! compiled by the compile-worker, kept in L2 (`crate::cwasm_cache`).
 //!
 //! A compile is a pure function of the pinned artifacts and of nothing a session
-//! holds, so a warmup asks for one with no round at all, and every session
-//! pinning the same artifacts shares one compile. One compile at a
+//! holds, so preparing a session asks for one with no round at all, and every
+//! session pinning the same artifacts shares one compile. One compile at a
 //! time per composition and consumer ([`Compositions::compile_lock`]): whoever
 //! finds its own consumer's compile under way waits for it and reads what it
-//! left in L2, rather than compiling the same pins again.
+//! left in L2, rather than compiling the same pins again. What the worker is
+//! handed on its miss comes from here ([`Compositions::with_bundle`]).
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -18,7 +20,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
-use engine_rpc::{CompileError, CompileSource, CompositionKey};
+use engine_rpc::{BundleSource, CompatToken, CompileError, CompileSource, CompositionKey};
 use hatch_client::{
     Artifact, CacheStore, Client, CompileFault, InitError, KbsClient, Key, PluginPin, PullProblem,
     RegistryClient, SessionMetadata,
@@ -26,6 +28,7 @@ use hatch_client::{
 
 use crate::compiler::{Compiled, Compiler};
 use crate::cwasm_cache;
+use crate::executor::Executor;
 use crate::init::Unavailable;
 use crate::policy_pull;
 use crate::semaphores::Semaphores;
@@ -75,9 +78,12 @@ pub fn consumer(client: &Client) -> &str {
         .unwrap_or_default()
 }
 
-/// What compiling takes, shared by the rounds that miss and the warmups that
-/// ask ahead of them.
+/// What having a composition ready to run takes — compiling it, keeping it in
+/// L2, and the execution-worker that holds it — shared by the rounds that miss
+/// and the preparations that ask ahead of them.
 pub struct Compositions {
+    /// The execution-worker a session is prepared on (`crate::init`).
+    pub executor: Arc<Executor>,
     compiler: Arc<Compiler>,
     /// L2 — see [`crate::cwasm_cache`].
     pub cache_store: CacheStore,
@@ -87,10 +93,14 @@ pub struct Compositions {
     kbs: KbsClient,
     /// One permit per composition and consumer — see [`Self::compile_lock`].
     compile_locks: Semaphores<(CompositionKey, String)>,
+    /// One warmup at a time per session (`crate::init::warm`): one asked for
+    /// while another is under way is that one.
+    pub warming: Semaphores<String>,
 }
 
 impl Compositions {
     pub fn new(
+        executor: Arc<Executor>,
         compiler: Arc<Compiler>,
         cache_store: CacheStore,
         registry: RegistryClient,
@@ -98,12 +108,14 @@ impl Compositions {
         kbs: KbsClient,
     ) -> Self {
         Self {
+            executor,
             compiler,
             cache_store,
             registry,
             consumer_turns,
             kbs,
             compile_locks: Semaphores::new(1),
+            warming: Semaphores::new(1),
         }
     }
 
@@ -120,44 +132,106 @@ impl Compositions {
         self.compile_locks.of(&(key.clone(), consumer.to_owned()))
     }
 
-    /// Have `composition` compiled and kept in L2 before a round asks for it:
-    /// what a warmup does. Best-effort and quiet — a failure is logged and left
-    /// for the session's own first round to meet, which answers it.
+    /// Resolve the compiled bundle of `composition` for `(key, compat_token)` and
+    /// `send` it to the worker — what api does with a worker's cache miss, for a
+    /// round and for a preparation alike. This is the ONE place a compile is
+    /// triggered: the orchestrator holds no in-memory component cache, so it
+    /// opens L2 (or compiles) each time the worker's L1 misses.
     ///
-    /// Done already when L2 holds it, or when the same consumer's compile of it
-    /// is under way; otherwise it pulls, compiles, and keeps the cwasm under the
-    /// compiler's own token, the one the execution-worker names when it misses
-    /// (both are the pinned builds of this release).
-    pub async fn warm(&self, composition: Composition) {
-        let token = match self.compiler.compat_token().await {
-            Ok(token) => token,
-            Err(e) => {
-                safe_logger::debug!("warmup: the compiler's token: {e}");
-                return;
+    ///   * L2 hit: the bundle goes to the worker straight from the cache, a piece
+    ///     at a time, so api never holds the cwasm. An entry found bad on the way
+    ///     — it did not open, or did not hold what its header said — fails this
+    ///     call as any infra fault does, and is dropped, so the next miss compiles
+    ///     afresh. The call is not retried here: the worker answers a bundle it
+    ///     refused as it answers a call that failed after running, so this side
+    ///     cannot know that nothing ran.
+    ///   * L2 miss, and the same consumer has a compile of the composition under
+    ///     way — a preparation's, or a round's: wait for it to end, then look in
+    ///     L2 again. Once: a call that still misses after it compiles too.
+    ///   * L2 miss otherwise: this call compiles it ([`compile`](Self::compile)),
+    ///     and the worker and the cache take the cwasm at once as it streams back
+    ///     ([`crate::tee`]), so api never holds it whole here either. Whoever of
+    ///     the same consumer comes for the composition meanwhile waits until the
+    ///     cache has kept it or failed to. A cache that cannot keep it costs the
+    ///     next miss a compile; the call goes on. A cwasm that is not what the
+    ///     compiler named reaches both as an abandoned stream, and neither keeps
+    ///     it.
+    ///
+    /// The error is resolution's; what `send` answers is the call's. Compiles
+    /// are one at a time per composition and consumer in THIS process; another
+    /// consumer's, or another api's, race just re-reads L2 or double-compiles
+    /// (idempotent write).
+    pub async fn with_bundle<T, F, Fut>(
+        &self,
+        composition: &Composition,
+        key: &CompositionKey,
+        compat_token: &CompatToken,
+        for_whom: &str,
+        send: F,
+    ) -> Result<T, Unavailable>
+    where
+        F: FnOnce(BundleSource) -> Fut,
+        Fut: Future<Output = T>,
+    {
+        let open = || cwasm_cache::open(&self.cache_store, key, compat_token);
+        let mut hit = open().await;
+        let mut compiling = None;
+        if hit.is_none() {
+            let lock = self.compile_lock(key, &composition.consumer);
+            match lock.clone().try_acquire_owned() {
+                // Nobody of this consumer is compiling it: this call does, and
+                // holds the lock while it does, so the next to come waits for
+                // this compile.
+                Ok(held) => compiling = Some(held),
+                // Someone is: wait for that compile to end — once — and look
+                // again. A call that still misses compiles too, alongside rather
+                // than after whoever took the lock next, so calls on a
+                // composition that does not compile are answered together, not
+                // one after another.
+                Err(_) => {
+                    drop(lock.acquire().await);
+                    hit = open().await;
+                }
             }
-        };
-        let key = composition.key();
-        // Opened only to see that it is there; the cwasm is never read.
-        if cwasm_cache::open(&self.cache_store, &key, &token)
-            .await
-            .is_some()
-        {
-            return;
         }
-        // The same consumer compiling it already: that compile keeps it.
-        let Ok(compiling) = self
-            .compile_lock(&key, &composition.consumer)
-            .try_acquire_owned()
-        else {
-            return;
+        if let Some(hit) = hit {
+            let cwasm_cache::Hit { source, found_bad } = hit;
+            let reply = send(source).await;
+            if found_bad.get() {
+                cwasm_cache::remove(&self.cache_store, key, compat_token).await;
+            }
+            return Ok(reply);
+        }
+        let Compiled {
+            meta,
+            cwasm_len,
+            cwasm_sha256,
+            cwasm,
+        } = self.compile(composition, for_whom).await?;
+        let (feed, to_worker, to_cache) = crate::tee::tee(cwasm);
+        let source = BundleSource::streamed(cwasm_len, cwasm_sha256, meta.clone(), to_worker)
+            .ok_or_else(|| {
+                safe_logger::debug!(
+                    "compile: a bundle past the execute hop's bounds for {for_whom}"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        // The same compile, with the cache's branch of its cwasm.
+        let entry = Compiled {
+            meta,
+            cwasm_len,
+            cwasm_sha256,
+            cwasm: to_cache,
         };
-        let compiled = match self.compile(&composition, "a warmup").await {
-            Ok(compiled) => compiled,
-            // Already on the debug log, where the compile path writes it.
-            Err(_) => return,
+        // The compile is over for whoever waits on it once the cache has kept
+        // it, or failed to — not once this call has been answered, which they
+        // need not wait for.
+        let keep = async {
+            cwasm_cache::store(&self.cache_store, key, compat_token, entry).await;
+            drop(compiling);
         };
-        cwasm_cache::store(&self.cache_store, &key, &token, compiled).await;
-        drop(compiling);
+        let (reply, (), ()) = tokio::join!(send(source), keep, feed);
+        Ok(reply)
     }
 
     /// Pull the policy and its pinned plugins (api owns OCI and the registry
@@ -321,7 +395,7 @@ fn classify_compile_error(for_whom: &str, policy_ref: &str, e: CompileError) -> 
 /// decrypt) — it hands back the already pulled-and-decrypted component. The two
 /// are kept in different places:
 ///   * **Download** is asked of the registry by every session, hit or miss
-///     (`check_pull` in `applicant::round`), so the OCI bearer is NOT in the key
+///     (`check_pull` in `crate::init`), so the OCI bearer is NOT in the key
 ///     and every consumer the registry lets pull an artifact shares its compile.
 ///     For a third-party LICENSED plugin the bearer is the license, and that check
 ///     is the license check. A ref names registry, repository and digest, and a

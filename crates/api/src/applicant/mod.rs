@@ -6,8 +6,9 @@
 //!
 //! Auth model mirrors the client API: a single `enforce` middleware,
 //! attached per-route via `.layer(auth())`. See `auth.rs` for cache
-//! semantics. `/status` (GET) and `/state` (DELETE, recovery path) are
-//! intentionally unauthenticated and bypass the layer at the router.
+//! semantics. `/status` (GET), `/state` (DELETE, recovery path) and
+//! `/warmup` (POST, before the applicant has a key) are intentionally
+//! unauthenticated and bypass the layer at the router.
 //!
 //! Static assets:
 //! The applicant frontend is served from this same surface, compiled
@@ -40,6 +41,7 @@ mod reset;
 mod round;
 mod status;
 mod views;
+mod warmup;
 
 use std::sync::Arc;
 
@@ -71,6 +73,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let routes = Router::new()
         .route("/api/v1/sessions/{id}/status", status::get_status())
         .route("/api/v1/sessions/{id}/state", reset::delete_state())
+        .route("/api/v1/sessions/{id}/warmup", warmup::post_warmup())
         .route(
             "/api/v1/sessions/{id}/connect",
             connect::post_connect().layer(auth()),

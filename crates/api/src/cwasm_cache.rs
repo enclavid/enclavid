@@ -11,11 +11,13 @@
 //!
 //! ## What an entry holds
 //!
-//! In this order: a header — the metadata's length, the cwasm's length and its
-//! SHA-256 — then the metadata as the execute hop streams it, then the cwasm. So
-//! a hit reads the header and the metadata, both small, and names the cwasm to
-//! the worker before a byte of it is read; the cwasm then goes from the cache to
-//! the worker a piece at a time, and api never holds it whole.
+//! In this order: the cwasm's SHA-256 and the metadata as the execute hop
+//! streams it, each a CBOR byte string, then the cwasm, raw, to the entry's end.
+//! The CBOR heads say where each string ends, and so where the cwasm starts and
+//! how long it is. A hit reads the digest and the metadata, both small, and
+//! names the cwasm to the worker before a byte of it is read; the cwasm then
+//! goes from the cache to the worker a piece at a time, and api never holds it
+//! whole.
 //!
 //! ## Compatibility / invalidation — guards
 //!
@@ -25,9 +27,8 @@
 //!      target), so a fleet runtime bump gives the new worker a new key ⇒ a MISS
 //!      (recompile) instead of a stale, incompatible cwasm; a change to the entry
 //!      or to the metadata's layout does the same via the format epoch. Old blobs
-//!      are never addressed by the new binary/runtime. A warmup, with no worker's
-//!      miss to name it, keeps its compile under the compile-worker's own token —
-//!      the same string, both being the pinned builds of one release.
+//!      are never addressed by the new binary/runtime. A preparation names the
+//!      token the way a round does: by the worker's miss.
 //!   2. The worker decodes the metadata under `deny_unknown_fields` and no
 //!      `#[serde(default)]`, so even if a version bump is forgotten, ANY
 //!      struct-shape drift refuses the bundle rather than misreading it.
@@ -55,13 +56,13 @@
 //! that does not open all degrade to the cold compile path. The cache is a pure
 //! optimization; correctness never depends on it.
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 
-use enclavid_crypto::sealed_stream::sealed_len;
 use engine_rpc::{
     BundleSource, CompatToken, CompositionKey, MAX_BUNDLE_META_BYTES, MAX_CWASM_BYTES,
 };
@@ -69,22 +70,86 @@ use hatch_client::{BlobPieces, BridgeError, CacheStore};
 
 use crate::compiler::Compiled;
 
-/// Bumped whenever an entry's layout changes — its header, or the metadata's
-/// encoding (a field of `BundleMeta` added / removed / retyped, or a nested serde
-/// type's shape changes). A bump re-partitions the cache: old entries get a
-/// different `cache_id` and are never read (guard 1).
-const CACHE_FORMAT_VERSION: u32 = 2;
+/// Bumped whenever an entry's layout changes — what precedes the cwasm, or the
+/// metadata's encoding (a field of `BundleMeta` added / removed / retyped, or a
+/// nested serde type's shape changes). A bump re-partitions the cache: old
+/// entries get a different `cache_id` and are never read (guard 1).
+const CACHE_FORMAT_VERSION: u32 = 3;
 
-/// An entry's header: the metadata's length, the cwasm's length, the cwasm's
-/// SHA-256.
-const ENTRY_HEADER_BYTES: usize = 8 + 8 + 32;
+/// What an entry's first read takes, before where its metadata ends is known:
+/// one sealed segment. What precedes the metadata is in it, and an ordinary
+/// metadata is all in it.
+const FIRST_READ: usize = enclavid_crypto::sealed_stream::SEGMENT_BYTES;
 
-// The largest entry the execute hop's bounds allow, sealed, fits what the
-// storage leg carries.
-const _: () = assert!(
-    sealed_len(ENTRY_HEADER_BYTES as u64 + MAX_BUNDLE_META_BYTES + MAX_CWASM_BYTES)
-        <= storage_rpc::MAX_CACHE_BLOB_BYTES
-);
+/// What precedes an entry's metadata: the cwasm's digest, and the head of the
+/// metadata's string, `meta_len` bytes long — each as CBOR writes it.
+fn front(cwasm_sha256: &[u8; 32], meta_len: usize) -> Vec<u8> {
+    let mut front = string_head(cwasm_sha256.len());
+    front.extend_from_slice(cwasm_sha256);
+    front.extend(string_head(meta_len));
+    front
+}
+
+/// Where an entry's parts are, read off its first bytes: the cwasm's digest, and
+/// the span of the metadata, which may run past what was read. The cwasm is what
+/// follows the metadata, to the entry's end.
+struct Front {
+    cwasm_sha256: [u8; 32],
+    meta: Range<usize>,
+    cwasm_len: u64,
+}
+
+impl Front {
+    /// The front of an entry `length` bytes long, from `start`, its first bytes
+    /// — the digest's string and the metadata's head in full. Held to the bounds
+    /// the execute hop takes.
+    fn read(start: &[u8], length: u64) -> Result<Self, BridgeError> {
+        let digest = string_at(start, 0)?;
+        let cwasm_sha256 = start
+            .get(digest.clone())
+            .and_then(|digest| digest.try_into().ok())
+            .ok_or_else(not_an_entry)?;
+        let meta = string_at(start, digest.end)?;
+        let cwasm_len = length
+            .checked_sub(meta.end as u64)
+            .ok_or_else(not_an_entry)?;
+        if meta.len() as u64 > MAX_BUNDLE_META_BYTES || cwasm_len > MAX_CWASM_BYTES {
+            return Err(not_an_entry());
+        }
+        Ok(Self {
+            cwasm_sha256,
+            meta,
+            cwasm_len,
+        })
+    }
+}
+
+/// Where the byte string whose CBOR head is at `at` in `start` lies — the head
+/// read by ciborium's own decoder, which is what knows how long a head is and
+/// what it says. The string itself may run past `start`.
+fn string_at(start: &[u8], at: usize) -> Result<Range<usize>, BridgeError> {
+    let mut decoder = ciborium_ll::Decoder::from(start.get(at..).unwrap_or_default());
+    match decoder.pull() {
+        Ok(ciborium_ll::Header::Bytes(Some(len))) => {
+            let from = at + decoder.offset();
+            Ok(from..from.checked_add(len).ok_or_else(not_an_entry)?)
+        }
+        _ => Err(not_an_entry()),
+    }
+}
+
+/// The CBOR head of a byte string `len` bytes long.
+fn string_head(len: usize) -> Vec<u8> {
+    let mut head = Vec::new();
+    ciborium_ll::Encoder::from(&mut head)
+        .push(ciborium_ll::Header::Bytes(Some(len)))
+        .expect("CBOR into memory fails only on a write, and a Vec refuses none");
+    head
+}
+
+fn not_an_entry() -> BridgeError {
+    BridgeError::Codec("an L2 entry not laid out as one".into())
+}
 
 /// Opaque cache key: the composition hash scoped by the runtime ABI
 /// (`compat_token`) and the entry-format epoch. [`CacheStore`] uses it as both
@@ -109,12 +174,9 @@ pub async fn store(
     compat_token: &CompatToken,
     compiled: Compiled,
 ) {
-    let mut header = Vec::with_capacity(ENTRY_HEADER_BYTES);
-    header.extend_from_slice(&(compiled.meta.len() as u64).to_be_bytes());
-    header.extend_from_slice(&compiled.cwasm_len.to_be_bytes());
-    header.extend_from_slice(&compiled.cwasm_sha256);
-    let length = (ENTRY_HEADER_BYTES + compiled.meta.len()) as u64 + compiled.cwasm_len;
-    let pieces = futures::stream::iter([Ok(Bytes::from(header)), Ok(Bytes::from(compiled.meta))])
+    let front = front(&compiled.cwasm_sha256, compiled.meta.len());
+    let length = (front.len() + compiled.meta.len()) as u64 + compiled.cwasm_len;
+    let pieces = futures::stream::iter([Ok(Bytes::from(front)), Ok(Bytes::from(compiled.meta))])
         .chain(
             compiled.cwasm.map_err(|()| {
                 BridgeError::Transport("the cwasm stopped part-way; not stored".into())
@@ -140,7 +202,7 @@ pub struct Hit {
 }
 
 /// Whether a hit's cwasm stream ended because the entry did not open, or did not
-/// hold what its header said — not because the leg under it failed. An entry
+/// hold what its start said — not because the leg under it failed. An entry
 /// found bad stays bad, so it is dropped rather than read again.
 pub struct FoundBad(Arc<AtomicBool>);
 
@@ -151,15 +213,15 @@ impl FoundBad {
 }
 
 /// Open the L2 entry for `(composition_key, compat_token)`. Returns `None` on a
-/// miss, a transport failure, or an entry whose header or metadata does not
-/// open — all before the worker is called, so the caller takes the cold path
-/// with nothing sent.
+/// miss, a transport failure, or an entry whose start does not open or is not
+/// laid out as one — all before the worker is called, so the caller takes the
+/// cold path with nothing sent.
 pub async fn open(
     cache: &CacheStore,
     composition_key: &CompositionKey,
     compat_token: &CompatToken,
 ) -> Option<Hit> {
-    let (length, mut pieces) = match cache.load(&cache_id(composition_key, compat_token)).await {
+    let (length, pieces) = match cache.load(&cache_id(composition_key, compat_token)).await {
         Ok(Some(entry)) => entry,
         Ok(None) => return None,
         Err(e) => {
@@ -167,25 +229,8 @@ pub async fn open(
             return None;
         }
     };
-    let opened = async {
-        let mut rest = Bytes::new();
-        let header = take(&mut pieces, &mut rest, ENTRY_HEADER_BYTES).await?;
-        let meta_len = u64::from_be_bytes(header[0..8].try_into().expect("8 bytes"));
-        let cwasm_len = u64::from_be_bytes(header[8..16].try_into().expect("8 bytes"));
-        let cwasm_sha256: [u8; 32] = header[16..48].try_into().expect("32 bytes");
-        if meta_len > MAX_BUNDLE_META_BYTES
-            || cwasm_len > MAX_CWASM_BYTES
-            || ENTRY_HEADER_BYTES as u64 + meta_len + cwasm_len != length
-        {
-            return Err(BridgeError::Codec(
-                "an L2 entry whose header does not fit it".into(),
-            ));
-        }
-        let meta = take(&mut pieces, &mut rest, meta_len as usize).await?;
-        Ok((meta, cwasm_len, cwasm_sha256, rest))
-    };
-    let (meta, cwasm_len, cwasm_sha256, rest) = match opened.await {
-        Ok(opened) => opened,
+    let (meta, front, cwasm) = match split(pieces, length).await {
+        Ok(split) => split,
         Err(e) => {
             safe_logger::debug!("cwasm_cache: L2 entry did not open (cold path): {e}");
             return None;
@@ -193,19 +238,45 @@ pub async fn open(
     };
     let bad = Arc::new(AtomicBool::new(false));
     let flag = bad.clone();
-    let cwasm = futures::stream::iter([Ok(rest)])
-        .chain(pieces)
+    let cwasm = cwasm
         .try_filter(|piece| std::future::ready(!piece.is_empty()))
         .inspect_err(move |e| {
             if matches!(e, BridgeError::Crypto(_) | BridgeError::Codec(_)) {
                 flag.store(true, Ordering::Relaxed);
             }
         });
-    let source = BundleSource::streamed(cwasm_len, cwasm_sha256, meta, cwasm)?;
+    let source = BundleSource::streamed(front.cwasm_len, front.cwasm_sha256, meta, cwasm)?;
     Some(Hit {
         source,
         found_bad: FoundBad(bad),
     })
+}
+
+/// An entry's `pieces`, `length` bytes in all, taken apart: its metadata, its
+/// front, and its cwasm, still to stream. What of the first read is past the
+/// metadata is the cwasm's start; a metadata past the first read goes on in the
+/// pieces after it.
+async fn split(
+    mut pieces: BlobPieces,
+    length: u64,
+) -> Result<(Vec<u8>, Front, BlobPieces), BridgeError> {
+    let mut rest = Bytes::new();
+    let first = FIRST_READ.min(usize::try_from(length).unwrap_or(usize::MAX));
+    let first = Bytes::from(take(&mut pieces, &mut rest, first).await?);
+    let front = Front::read(&first, length)?;
+    let (meta, cwasm_start) = match first.get(front.meta.clone()) {
+        Some(meta) => (meta.to_vec(), first.slice(front.meta.end..)),
+        None => {
+            let mut meta = first[front.meta.start..].to_vec();
+            let more = front.meta.end - first.len();
+            meta.extend(take(&mut pieces, &mut rest, more).await?);
+            (meta, Bytes::new())
+        }
+    };
+    let cwasm = futures::stream::iter([Ok(cwasm_start), Ok(rest)])
+        .chain(pieces)
+        .boxed();
+    Ok((meta, front, cwasm))
 }
 
 /// Drop the L2 entry for `(composition_key, compat_token)`. Best-effort, like
@@ -226,9 +297,10 @@ async fn take(pieces: &mut BlobPieces, rest: &mut Bytes, n: usize) -> Result<Vec
     let mut out = Vec::with_capacity(n);
     while out.len() < n {
         if rest.is_empty() {
-            *rest = pieces.next().await.ok_or_else(|| {
-                BridgeError::Codec("an L2 entry shorter than its header".into())
-            })??;
+            *rest = pieces
+                .next()
+                .await
+                .ok_or_else(|| BridgeError::Codec("an L2 entry shorter than it says".into()))??;
             continue;
         }
         let part = rest.split_to((n - out.len()).min(rest.len()));
@@ -311,7 +383,9 @@ mod tests {
 
     /// A cache in memory, under the real store's seal.
     #[derive(Default)]
-    struct Blobs(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
+    struct Blobs {
+        held: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    }
 
     #[async_trait::async_trait]
     impl hatch_client::CacheBackend for Blobs {
@@ -323,21 +397,19 @@ mod tests {
         ) -> Result<(), BridgeError> {
             let blob = read(pieces).await?;
             assert_eq!(blob.len() as u64, length);
-            self.0.lock().unwrap().insert(name.to_string(), blob);
+            self.held.lock().unwrap().insert(name.to_string(), blob);
             Ok(())
         }
 
         async fn load(&self, name: &str) -> Result<Option<(u64, BlobPieces)>, BridgeError> {
-            Ok(self
-                .0
-                .lock()
-                .unwrap()
-                .get(name)
-                .map(|blob| (blob.len() as u64, pieces(blob, 4096))))
+            let Some(blob) = self.held.lock().unwrap().get(name).cloned() else {
+                return Ok(None);
+            };
+            Ok(Some((blob.len() as u64, pieces(&blob, 4096))))
         }
 
         async fn remove(&self, name: &str) -> Result<(), BridgeError> {
-            self.0.lock().unwrap().remove(name);
+            self.held.lock().unwrap().remove(name);
             Ok(())
         }
     }
@@ -367,10 +439,11 @@ mod tests {
         }
     }
 
-    /// What `store` writes is the header, the metadata, then the cwasm — and
-    /// `open` takes it as such, sending nothing back as bad.
+    /// What `store` writes is the digest and the metadata, each a CBOR byte
+    /// string, then the cwasm — as CBOR itself reads it back — and `open` takes
+    /// it as such, sending nothing back as bad.
     #[tokio::test]
-    async fn an_entry_holds_its_header_its_metadata_then_its_cwasm() {
+    async fn an_entry_holds_its_digest_its_metadata_then_its_cwasm() {
         let cache = CacheStore::new(Arc::new(Blobs::default()), &[3; 32]);
         let (meta, cwasm) = (b"the metadata".to_vec(), cwasm(300_000));
         let stored = entry(&meta, &cwasm);
@@ -384,12 +457,14 @@ mod tests {
             .unwrap();
         let entry = read(plain).await.unwrap();
         assert_eq!(entry.len() as u64, length);
-        let meta_len = meta.len();
-        assert_eq!(entry[0..8], (meta_len as u64).to_be_bytes());
-        assert_eq!(entry[8..16], 300_000u64.to_be_bytes());
-        assert_eq!(entry[16..48], sha256);
-        assert_eq!(entry[48..48 + meta_len], meta[..]);
-        assert!(entry[48 + meta_len..] == cwasm[..]);
+        let mut rest = &entry[..];
+        let string = |rest: &mut &[u8]| match ciborium::from_reader(rest).unwrap() {
+            ciborium::Value::Bytes(bytes) => bytes,
+            other => panic!("not a byte string: {other:?}"),
+        };
+        assert_eq!(string(&mut rest), sha256);
+        assert_eq!(string(&mut rest), meta);
+        assert!(rest == &cwasm[..]);
 
         let hit = open(&cache, &key(1), &token("tok")).await.expect("a hit");
         assert!(!hit.found_bad.get());
@@ -399,32 +474,94 @@ mod tests {
         );
     }
 
-    /// An entry whose header does not fit what it holds is a miss before the
-    /// worker is called.
+    /// An entry laid out as `store` lays one out.
+    fn laid_out(meta: &[u8], cwasm: &[u8]) -> Vec<u8> {
+        let mut entry = front(&[9; 32], meta.len());
+        entry.extend_from_slice(meta);
+        entry.extend_from_slice(cwasm);
+        entry
+    }
+
+    /// The largest entry the execute hop's bounds allow, sealed, fits what the
+    /// storage leg carries — its front as `store` writes it — and a first read
+    /// holds that front, as `Front::read` needs.
+    #[test]
+    fn the_largest_entry_fits_the_storage_leg() {
+        let front = front(&[0; 32], MAX_BUNDLE_META_BYTES as usize).len();
+        let entry = front as u64 + MAX_BUNDLE_META_BYTES + MAX_CWASM_BYTES;
+        assert!(
+            enclavid_crypto::sealed_stream::sealed_len(entry) <= storage_rpc::MAX_CACHE_BLOB_BYTES
+        );
+        assert!(front <= FIRST_READ);
+    }
+
+    /// An entry comes apart into its metadata and its cwasm in pieces of any
+    /// size, its metadata inside the first read or running past it.
     #[tokio::test]
-    async fn an_entry_whose_header_does_not_fit_it_is_a_miss() {
+    async fn an_entry_comes_apart_into_its_metadata_and_its_cwasm() {
+        for meta_len in [0, 12, FIRST_READ - 60, FIRST_READ, 3 * FIRST_READ + 5] {
+            let meta = cwasm(meta_len);
+            let wasm: Vec<u8> = cwasm(200_000).into_iter().rev().collect();
+            let entry = laid_out(&meta, &wasm);
+            for piece in [7, 4096, 100_003] {
+                let (got, front, rest) = split(pieces(&entry, piece), entry.len() as u64)
+                    .await
+                    .unwrap();
+                assert!(got == meta, "{meta_len} in pieces of {piece}");
+                assert_eq!(front.cwasm_sha256, [9; 32]);
+                assert_eq!(front.cwasm_len, wasm.len() as u64);
+                assert!(
+                    read(rest).await.unwrap() == wasm,
+                    "{meta_len} in pieces of {piece}"
+                );
+            }
+        }
+    }
+
+    /// An entry not laid out as one — its first item not a byte string, a
+    /// digest of another length, a metadata running past the entry — is a miss
+    /// before the worker is called.
+    #[tokio::test]
+    async fn an_entry_not_laid_out_as_one_is_a_miss() {
         let cache = CacheStore::new(Arc::new(Blobs::default()), &[3; 32]);
-        let mut entry = Vec::new();
-        entry.extend_from_slice(&5u64.to_be_bytes());
-        entry.extend_from_slice(&5u64.to_be_bytes());
-        entry.extend_from_slice(&[0; 32]);
-        entry.extend_from_slice(b"meta.");
+        let mut not_a_string = Vec::new();
+        ciborium::into_writer(&5u64, &mut not_a_string).unwrap();
+        not_a_string.extend(laid_out(b"meta", b"cwasm"));
+        let mut short_digest = string_head(31);
+        short_digest.extend_from_slice(&[9; 31]);
+        short_digest.extend(string_head(4));
+        short_digest.extend_from_slice(b"meta");
+        let mut meta_past_the_end = string_head(32);
+        meta_past_the_end.extend_from_slice(&[9; 32]);
+        meta_past_the_end.extend(string_head(1000));
+        meta_past_the_end.extend_from_slice(b"meta");
         let id = cache_id(&key(1), &token("tok"));
-        cache
-            .store(&id, entry.len() as u64, pieces(&entry, 7))
-            .await
-            .unwrap();
-        assert!(open(&cache, &key(1), &token("tok")).await.is_none());
+        for entry in [not_a_string, short_digest, meta_past_the_end] {
+            cache
+                .store(&id, entry.len() as u64, pieces(&entry, 7))
+                .await
+                .unwrap();
+            assert!(open(&cache, &key(1), &token("tok")).await.is_none());
+        }
     }
 
     /// A cwasm that stops part-way is not kept, and leaves no entry to hit.
     #[tokio::test]
     async fn a_cwasm_that_stops_part_way_is_not_stored() {
         let cache = CacheStore::new(Arc::new(Blobs::default()), &[3; 32]);
-        let meta = b"m".to_vec();
-        let mut stored = entry(&meta, &cwasm(50_000));
+        let mut stored = entry(b"the metadata", &cwasm(50_000));
         stored.cwasm = futures::stream::iter([Ok(Bytes::from(cwasm(10_000))), Err(())]).boxed();
         store(&cache, &key(1), &token("tok"), stored).await;
+        assert!(open(&cache, &key(1), &token("tok")).await.is_none());
+    }
+
+    /// An entry removed is a miss after.
+    #[tokio::test]
+    async fn a_removed_entry_is_a_miss() {
+        let cache = CacheStore::new(Arc::new(Blobs::default()), &[3; 32]);
+        store(&cache, &key(1), &token("tok"), entry(b"m", &cwasm(1000))).await;
+        assert!(open(&cache, &key(1), &token("tok")).await.is_some());
+        remove(&cache, &key(1), &token("tok")).await;
         assert!(open(&cache, &key(1), &token("tok")).await.is_none());
     }
 }

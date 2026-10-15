@@ -6,19 +6,20 @@
 //!                                              policy, disclosure count, ...)
 //!   GET  /api/v1/sessions/:id/disclosures    — pull age-encrypted disclosure
 //!                                              entries (opaque ciphertext)
-//!   POST /api/v1/sessions/:id/warmup         — have the session's composition
-//!                                              compiled and kept ahead of
+//!   POST /api/v1/sessions/:id/warmup         — prepare the session ahead of
 //!                                              its first round
 //!
 //! Session creation is a single endpoint: the client supplies the
 //! policy ref + disclosure pubkey + per-plugin pins in one body, the
 //! TEE mints attestation, persists metadata (AEAD-sealed under
 //! tee_seal_key), and returns the session_id ready for applicant
-//! interaction. Policy artifact pull + compile happens lazily at
-//! applicant /connect, so abandoned sessions don't pay compile-cost
-//! and TEE restarts don't strand in-flight work — unless the client asks
-//! for it sooner: `"warmup": true` on the creation, or a warmup of the
-//! session, compiles it right after the answer.
+//! interaction. Preparing the session to run (`crate::init::prepare`) —
+//! the pull, the compile, the execution-worker holding the composition and
+//! reading its props — happens at applicant /connect, or when the
+//! applicant's page asks for it, so abandoned sessions don't pay
+//! compile-cost and TEE restarts don't strand in-flight work — unless the
+//! client asks for it sooner: `"warmup": true` on the creation, or a warmup
+//! of the session, prepares it right after the answer.
 //!
 //! See architecture.md → Client-Facing Session Creation for the
 //! protocol shape and threat model. Counterparts to the applicant

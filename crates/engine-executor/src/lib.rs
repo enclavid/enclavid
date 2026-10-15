@@ -20,7 +20,7 @@
 //!                engine-compiler.
 //!   ↓ uses
 //! state/       ← Store<T> data layer (HostState, RunInputs)
-//! props        ← the consumer's props as the record the policy declares
+//! props        ← the consumer's props as the type the policy declares
 //! listener     ← outbound contract (SessionListener trait, SessionChange);
 //!                fired once per round, carrying the state and, on the
 //!                round that finishes, the decision

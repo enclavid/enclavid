@@ -394,7 +394,8 @@ async fn main() {
     });
 
     // Compositions no round has used for the idle time go, whether or not
-    // another needs their room.
+    // another needs their room. Each sweep also says how many filled ahead of
+    // their rounds went before a round used them, since the last.
     {
         let svc = svc.clone();
         tokio::spawn(async move {
@@ -402,6 +403,22 @@ async fn main() {
             loop {
                 sweep.tick().await;
                 svc.bundles.evict_idle(bundle_idle);
+                let unused = svc.bundles.warmed_evicted();
+                if unused > 0 {
+                    info!(
+                        "execution-worker: {} compositions prepared ahead of their \
+                         rounds went before a round used them",
+                        safe(
+                            &unused,
+                            reason!(
+                                "a count of this worker's own evictions, naming no \
+                                 composition and no session; the host sees each \
+                                 refill on the hop anyway"
+                            )
+                        ),
+                        reason!("how well entries filled ahead are kept, once a sweep")
+                    );
+                }
             }
         });
     }

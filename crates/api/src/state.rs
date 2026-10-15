@@ -61,6 +61,7 @@ impl AppState {
         // Both boundaries are remote clients connected by the caller (`init`):
         // `compiler` → the compile-worker, `executor` → the execution-worker.
         let compositions = Compositions::new(
+            executor.clone(),
             compiler,
             cache_store,
             RegistryClient::new(hatch, settings.pull_deadline),

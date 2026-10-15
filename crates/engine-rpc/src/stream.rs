@@ -228,7 +228,7 @@ impl BundleStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execute::{RUN_REQUEST_HEADROOM, RunRequest};
+    use crate::execute::{RUN_REQUEST_HEADROOM, RoundProps, RunRequest};
     use crate::keys::CompositionKey;
     use crate::padded::{Framed, Padded};
     use hatch_client::{Clip, Event, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MediaResult, SessionState};
@@ -279,7 +279,11 @@ mod tests {
     fn a_round_request_at_its_bounds_fits_its_budget() {
         let req = RunRequest {
             composition_key: CompositionKey::from_digest([0xFF; 32]),
-            props: vec![0xFF; engine_types::limits::MAX_PROPS_BYTES],
+            props: Padded::seal(&RoundProps(vec![
+                0xFF;
+                engine_types::limits::MAX_PROPS_BYTES
+            ]))
+            .expect("props at their bound fit their frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Media(MediaResult {
                 slot: u32::MAX,
@@ -292,6 +296,7 @@ mod tests {
         ciborium::into_writer(&(&req, &widest_header()), &mut b).unwrap();
         let budget = MAX_CLIP_BYTES
             + <SessionState as Framed>::FRAME
+            + <RoundProps as Framed>::FRAME
             + BUNDLE_HEADER_MAX_ENCODED
             + RUN_REQUEST_HEADROOM;
         assert!(

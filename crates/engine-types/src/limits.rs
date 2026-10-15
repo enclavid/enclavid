@@ -72,20 +72,28 @@ pub const POLICY_MAX_STATE_BYTES: usize = 1024 * 1024;
 
 // ----- The consumer's props, as they arrive on the execute hop -----
 //
-// The props are the JSON object the consumer gave the session, which api already
-// caps at `enclavid_api::limits::MAX_PROPS_SIZE` — 1 KiB, the bulk-matching
-// defence. This is the SAME bound restated where the execution-worker can enforce
-// it, and it exists because the worker cannot see api's constant and must not
-// assume its caller is api. The worker accepts any attested guest, so "api
-// already capped it" is a statement about a peer it cannot identify.
+// The props are the JSON value the consumer gave the session — capped by api at
+// `enclavid_api::limits::MAX_PROPS_SIZE`, 1 KiB, the bulk-matching defence. The
+// execution-worker reads them as the type the policy declares when the session
+// is prepared, and writes them as WAVE, which api keeps and hands every round.
+// The WAVE grows with the type as well as with the JSON — `some(…)` around every
+// optional value given, a float spelled out in full, which `1e-300` is three
+// hundred digits of — so nothing but this bound holds it: a reading past it is
+// refused as too long.
 //
-// Deliberately looser than api's, so a legitimate round is never refused
-// worker-side. A `const` assertion in the api crate pins it to that origin, which
-// is the only place both constants are visible at once, so a bound that stopped
-// covering api's fails to compile.
+// The WAVE's length is the type's and the props' own, and the host would count
+// it on every hop and every write it crossed, so it crosses and rests in a frame
+// of this size: `engine_rpc::RoundProps` on the round's hop,
+// `hatch_client::PREPARED_FRAME` in the sealed metadata. Hence a small bound —
+// past what 1 KiB of JSON comes to for any but a contrived type.
+//
+// The worker holds both to it because it cannot see api's checks and must not
+// assume its caller is api: it accepts any attested guest, so "api already
+// capped it" is a statement about a peer it cannot identify.
 
-/// Maximum bytes of one round's props, the JSON object as api keeps it.
-pub const MAX_PROPS_BYTES: usize = 4 * 1024;
+/// Maximum bytes of the props on the execute hop: the JSON a preparation reads,
+/// and the WAVE a round is handed.
+pub const MAX_PROPS_BYTES: usize = 8 * 1024;
 
 // ----- text-ref validation -----
 

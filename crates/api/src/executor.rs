@@ -18,10 +18,16 @@
 //! and api resolves the bundle under its own key before calling
 //! [`run_with_bundle`](Executor::run_with_bundle). The keyless side never asks
 //! the key-holding side for a composition.
+//!
+//! Preparing a session takes the same two calls with no round
+//! ([`prepare`](Executor::prepare)): it fills the worker's L1 ahead of the
+//! session's rounds, and has the props read against the type the composition
+//! declares for them.
 
-use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
+use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
 use engine_rpc::{
-    BundleSource, CallbackServiceUntrusted, ExecError, ExecutorLeg, Padded, RunOutcome, RunRequest,
+    BundleSource, CallbackServiceUntrusted, CompositionKey, ExecError, ExecutorLeg, Padded,
+    Preparation, PrepareRequest, Preparing, PropsRead, RoundProps, RunOutcome, RunRequest,
     RunStatus,
 };
 use fleet_transport::LegFailure;
@@ -74,6 +80,30 @@ pub(crate) fn outbound_round_state(
              hands it nothing it did not already hold"
         ))
         .vouch::<Covert, _, _, _, _>(Padded::seal)?)
+}
+
+/// Mint a round's props — the WAVE its session's preparation wrote, `None` for a
+/// composition that declares none — as a constant-size frame, the only way they
+/// reach an execution-worker.
+///
+/// `AuthN` is IDENTIFIED, as for the state. `AuthZ` is NO-SECRET: the worker's
+/// own output, from the preparation, handed back to the same peer. `Covert` is
+/// TRANSFORMED, done by the peel: as read, the props' length is their type's
+/// and their own.
+pub(crate) fn outbound_round_props(props: Option<&str>) -> Result<Padded<RoundProps>, ExecError> {
+    let props = RoundProps(props.map(str::as_bytes).unwrap_or_default().to_vec());
+    let framed: ToWorker<RoundProps> = Exposed::new(props);
+    Ok(framed
+        .vouch_unchecked::<AuthN, _>(reason!(
+            "identified: this leg dials ONE compile-time-pinned measurement, and the \
+             handshake fails before a byte moves if the peer is not it"
+        ))
+        .vouch_unchecked::<AuthZ, _>(reason!(
+            "no-secret: the props as a preparation's worker wrote them, handed back to \
+             the same peer"
+        ))
+        .vouch::<Covert, _, _, _, _>(|props| Padded::seal(&props))?
+        .into_inner())
 }
 
 /// The EXECUTE boundary: a client for an execution-worker's
@@ -134,6 +164,60 @@ impl Executor {
     {
         self.client()?.run_with_bundle(req, bundle, callbacks).await
     }
+
+    /// Cache-only attempt at preparing a session: hold its composition, and read
+    /// its props if asked. What the worker read on a hit, or its ABI id on a
+    /// miss, at which point the caller resolves the bundle as a round does and
+    /// calls [`prepare_with_bundle`](Self::prepare_with_bundle). Both are the
+    /// worker's word, judged as everything on this leg is (`WorkerScope` in
+    /// `crate::applicant::callbacks`).
+    pub async fn prepare(
+        &self,
+        req: Exposed<PrepareRequest, ()>,
+    ) -> Result<Preparation<(Asserted,)>, ExecError> {
+        self.client()?.prepare(req).await
+    }
+
+    /// Post-miss attempt at preparing a session, with the bundle resolved under
+    /// `req.composition_key`, which crosses as a round's does.
+    pub async fn prepare_with_bundle(
+        &self,
+        req: Exposed<PrepareRequest, ()>,
+        bundle: BundleSource,
+    ) -> Result<Untrusted<PropsRead, (Asserted,)>, ExecError> {
+        self.client()?.prepare_with_bundle(req, bundle).await
+    }
+}
+
+/// Mint a session's preparation as a fully-vouched request — the only way one
+/// reaches an execution-worker.
+///
+/// `AuthN` is IDENTIFIED, as for a round. `AuthZ` is NO-SECRET: the props are
+/// the ones every round of the session hands this same peer, as WAVE once
+/// read, and the key names the composition it is handed on every miss.
+/// `Covert` is ALREADY-HELD: the props are the consumer's JSON, whose length
+/// the host saw on the request that created the session, and nothing of the
+/// applicant's is in it — a session is prepared before any of its rounds.
+pub(crate) fn outbound_preparation(
+    composition_key: &CompositionKey,
+    preparing: Preparing,
+) -> Exposed<PrepareRequest, ()> {
+    let open: ToWorker<PrepareRequest> = Exposed::new(PrepareRequest {
+        composition_key: composition_key.clone(),
+        preparing,
+    });
+    open.vouch_unchecked::<AuthN, _>(reason!(
+        "identified: this leg dials ONE compile-time-pinned measurement, and the \
+         handshake fails before a byte moves if the peer is not it"
+    ))
+    .vouch_unchecked::<AuthZ, _>(reason!(
+        "no-secret: the props every round of this session hands the same peer, and \
+         the key it is handed on every miss"
+    ))
+    .vouch_unchecked::<Covert, _>(reason!(
+        "already-held: the consumer's own props, whose length the host saw when the \
+         session was created; nothing of an applicant's is in them"
+    ))
 }
 
 /// Connect to an execution-worker already listening at `addr` and hand back an

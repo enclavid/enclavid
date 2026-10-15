@@ -11,7 +11,7 @@ import { Terminated } from "@/screens/Terminated";
 import { Unavailable } from "@/screens/Unavailable";
 import { getSessionId } from "@/lib/session";
 import { loadKey } from "@/lib/key";
-import { connect, getStatus, submitInput, ApiError } from "@/lib/api";
+import { connect, getStatus, submitInput, warmup, ApiError } from "@/lib/api";
 import type { Decision, SessionProgress } from "@/types";
 
 // Routing model. The page's address names the session (`…/<session id>`,
@@ -116,6 +116,9 @@ function Session({ sessionId }: { sessionId: string }) {
         // fetch: the fragment may have moved on while it was out.
         const step = currentLocation().slice(1).replace(/[/?].*$/, "");
         const hasKey = !!loadKey(sessionId);
+        // An applicant with no key yet is a while from /connect: have
+        // the session made ready meanwhile.
+        if (!hasKey) void warmup(sessionId);
         const valid =
           step === "start" || step === "keygen" || step === "verify";
         if (!valid) {

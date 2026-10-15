@@ -20,8 +20,8 @@ use hatch_client::{
 };
 
 use crate::client_state::ClientState;
-use crate::compositions::Composition;
 use crate::dto::{PluginView, ResolvedPolicyView};
+use crate::init;
 use crate::limits::{
     CLIENT_SESSION_TOKEN_BYTES, MAX_CLIENT_REF_LEN, MAX_PLUGINS, MAX_REGISTRY_AUTH_LEN,
     SESSION_ID_RANDOM_BYTES,
@@ -84,18 +84,21 @@ pub struct CreateSessionRequest {
     #[serde(default)]
     pub policy_key: Option<KeyRequest>,
 
-    /// The props the policy reads for this session, as a JSON object keyed by
-    /// the field names of the record the policy declares for them
-    /// (`enclavid:host-ext/policy-props`). Omit for a policy that takes none.
+    /// The props the policy reads for this session, as the JSON value of the
+    /// type the policy declares for them (`enclavid:host-ext/policy-props`): an
+    /// object keyed by its field names for a record, as a rule, or a number, a
+    /// string, an array. Omit for a policy that takes none, or none to give.
     /// At most [`MAX_PROPS_SIZE`](crate::limits::MAX_PROPS_SIZE) bytes as
-    /// compact JSON; whether they fit the record is the policy's to say, when
-    /// the session runs.
+    /// compact JSON; whether they fit is the type the policy declares to say,
+    /// when the session is prepared to run.
     #[serde(default)]
-    pub props: Option<serde_json::Map<String, serde_json::Value>>,
+    pub props: Option<serde_json::Value>,
 
-    /// Compile the session's composition and keep it as soon as the session is
-    /// created, so the applicant's first round does not wait for the compile.
-    /// The response does not wait for it either. The same as
+    /// Prepare the session to run as soon as it is created — its pins checked,
+    /// its composition compiled, kept and held by the execution-worker, its
+    /// props read against the policy's type — so the applicant's first round
+    /// does not wait for any of it, and a session that cannot run is marked so
+    /// before anyone connects. The response does not wait for it. The same as
     /// `POST /api/v1/sessions/{id}/warmup` on the session once it is created.
     #[serde(default)]
     pub warmup: bool,
@@ -350,8 +353,8 @@ async fn create(
     // will build the cwasm, echoed to the consumer alongside the policy.
     let plugin_views: Vec<PluginView> = plugins.iter().map(PluginView::from_pin).collect();
 
-    // Held to their size here, before persistence; whether they fit the record
-    // the policy declares is checked where the policy runs.
+    // Held to their size here, before persistence; whether they fit the type
+    // the policy declares is read when the session is prepared.
     let props = props::encode(body.props.as_ref()).ok_or(StatusCode::BAD_REQUEST)?;
 
     let session_id = generate_session_id();
@@ -417,8 +420,8 @@ async fn create(
         captured_media: Vec::new(),
         // Set with `Completed`, when the policy gives it.
         decision: None,
-        // Asked before the first round, not here: see `applicant::round`.
-        pull_allowed: false,
+        // Prepared before the first round, not here: see `crate::init`.
+        prepared: None,
         // Set with `InitFailed`, if preparing the session fails: see `crate::init`.
         init_error: None,
     };
@@ -456,19 +459,22 @@ async fn create(
         .vouch_unchecked::<Covert, _>(reason!(
             "no policy has run at /create — the single metadata op is fixed, not policy bandwidth"
         ));
-    state
+    let version = state
         .session_store
         .write(sid, expected_version, ops)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // After the write, so a warmup never compiles for a session that does not
+    // After the write, so a warmup never prepares a session that does not
     // exist; not awaited, so the response does not wait for the compile.
-    if body.warmup
-        && let Some(composition) = Composition::of(&metadata)
-    {
-        let compositions = state.compositions.clone();
-        tokio::spawn(async move { compositions.warm(composition).await });
+    if body.warmup {
+        init::warm_in_background(
+            state.compositions.clone(),
+            state.session_store.clone(),
+            session_id.clone(),
+            version,
+            metadata,
+        );
     }
 
     Ok(Json(CreateSessionResponse {

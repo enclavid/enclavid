@@ -77,6 +77,19 @@ export async function submitInput(
   return parseOrThrow(res);
 }
 
+// Asks for the session to be made ready to run while the applicant is
+// still on their way to /connect — reading the welcome, drawing their
+// key — so the first round does not wait for it. Nothing it answers
+// changes what the page does, so it is not awaited for anything and
+// its failures are dropped.
+export async function warmup(sessionId: string): Promise<void> {
+  try {
+    await fetch(endpoint(sessionId, "/warmup"), { method: "POST" });
+  } catch {
+    // Unreachable now: /connect says so itself if it still is.
+  }
+}
+
 export async function resetState(sessionId: string): Promise<void> {
   const res = await fetch(endpoint(sessionId, "/state"), {
     method: "DELETE",

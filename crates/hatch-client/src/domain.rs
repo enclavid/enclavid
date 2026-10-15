@@ -22,6 +22,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub use engine_types::compile::{Artifact, CompileFault, InterfaceName, is_wit_name};
+pub use engine_types::props::PropsProblem;
 
 use crate::error::BridgeError;
 
@@ -104,8 +105,8 @@ pub enum CameraFacing {
 #[serde(default)]
 pub struct SessionMetadata {
     pub policy_ref: String,
-    /// The props the consumer gave the session: a JSON object, empty when it
-    /// gave none. The policy reads them as the record it declares for them.
+    /// The props the consumer gave the session: a JSON value, empty when it
+    /// gave none. The policy reads them as the type it declares for them.
     pub props: Vec<u8>,
     pub client: Option<Client>,
     pub status: SessionStatus,
@@ -135,11 +136,17 @@ pub struct SessionMetadata {
     /// size of every sealed write, and must not read the verdict off it.
     #[serde(with = "decision_byte")]
     pub decision: Option<Decision>,
-    /// Whether the registry has let this session's bearers pull every artifact
-    /// it pins. Asked before each round until one round's write records it, and
-    /// never after: an api restart or a reset does not ask again. One byte
-    /// either way, so the host does not read it off the metadata's size.
-    pub pull_allowed: bool,
+    /// What preparing the session to run settled: the registry let its bearers
+    /// pull every artifact it pins, its composition compiled, and its props are
+    /// read as the type the composition declares. `None` until one round's
+    /// write records it; prepared before each round until then, and never after:
+    /// an api restart or a reset does not prepare it again.
+    ///
+    /// In one frame whatever the props are: the host sees the size of every
+    /// sealed write, and the length of the props as read is their type's and
+    /// their own. What the size says is only whether the session was prepared.
+    #[serde(with = "prepared_frame")]
+    pub prepared: Option<Prepared>,
     /// Why the session could not be prepared to run, written with
     /// [`SessionStatus::InitFailed`]. In one frame whatever it says: the host
     /// sees the size of every sealed write, and which part of the consumer's
@@ -148,13 +155,25 @@ pub struct SessionMetadata {
     pub init_error: Option<InitError>,
 }
 
+/// What preparing a session settled, kept for every round after.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Prepared {
+    /// The props as the policy reads them, in WAVE — the component model's own
+    /// value encoding — as the execution-worker wrote them when it read them
+    /// against the type the composition declares, and reads them back every
+    /// round; `None` for a composition that declares none.
+    pub props: Option<String>,
+}
+
 /// Why a session could not be prepared to run: something the consumer set up for
 /// it does not work, and asking again will not change that.
 ///
 /// Decided before any of the policy's code runs — by api from the pins, the
-/// bearers and the keys, or by the compile-worker from the pinned bytes. Nothing
-/// in it is the policy's to choose, which is what lets the consumer read it
-/// whole: a round, where the policy runs, never produces one.
+/// bearers and the keys, by the compile-worker from the pinned bytes, or by the
+/// execution-worker reading the props against the type the composition
+/// declares, in an answer api checks against the props it holds. Nothing in it
+/// is the policy's to choose, which is what lets the consumer read it whole: a
+/// round, where the policy runs, never produces one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InitError {
     /// An artifact the session pins could not be pulled.
@@ -164,6 +183,8 @@ pub enum InitError {
     },
     /// The compile refused the composition, for the reason it gave.
     Compile(CompileFault),
+    /// The session's props do not fit the type its composition declares.
+    Props(PropsFault),
 }
 
 /// What stood in the way of pulling an artifact.
@@ -190,6 +211,54 @@ pub enum PullProblem {
     KeyDoesNotOpen,
     /// The KBS refused to release the key, or answered with none it could.
     KeyNotReleased,
+}
+
+/// Where props do not fit the type the policy declares, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PropsFault {
+    /// The place, as the props spell it: `props.inner.flag`, `props.tags[1]`.
+    /// An unknown key is the last segment; a missing field is the object it is
+    /// missing from. At most [`MAX_PROPS_AT_BYTES`], cut on a character past
+    /// it.
+    pub at: String,
+    pub problem: PropsProblem,
+}
+
+/// The longest [`PropsFault::at`].
+pub const MAX_PROPS_AT_BYTES: usize = 256;
+
+/// The bytes a [`Prepared`] is kept in, whatever its props: props as long as a
+/// round carries, and room for the CBOR around them.
+pub const PREPARED_FRAME: usize = engine_types::limits::MAX_PROPS_BYTES + 64;
+
+/// [`SessionMetadata::prepared`] on the wire: `null`, or its CBOR in a byte
+/// string of [`PREPARED_FRAME`] bytes, zeros after it.
+mod prepared_frame {
+    use serde::de::Error as _;
+    use serde::ser::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::{PREPARED_FRAME, Prepared};
+
+    pub fn serialize<S: Serializer>(prepared: &Option<Prepared>, s: S) -> Result<S::Ok, S::Error> {
+        let Some(prepared) = prepared else {
+            return s.serialize_none();
+        };
+        let mut frame = Vec::new();
+        ciborium::into_writer(prepared, &mut frame).map_err(S::Error::custom)?;
+        if frame.len() > PREPARED_FRAME {
+            return Err(S::Error::custom("props past their frame"));
+        }
+        frame.resize(PREPARED_FRAME, 0);
+        s.serialize_some(serde_bytes::Bytes::new(&frame))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Prepared>, D::Error> {
+        // One value is read off the front; the zeros after it are not looked at.
+        Option::<serde_bytes::ByteBuf>::deserialize(d)?
+            .map(|frame| ciborium::from_reader(frame.as_slice()).map_err(D::Error::custom))
+            .transpose()
+    }
 }
 
 /// The bytes an [`InitError`] is kept in, whatever it says.
@@ -734,15 +803,27 @@ mod decision_tests {
         }
     }
 
-    /// Nor does the record that the registry let the session pull.
+    /// What preparing a session settled is kept as it was settled — without
+    /// props, with short ones and with the longest a round carries — and the
+    /// metadata is as long whichever it holds.
     #[test]
-    fn the_pull_mark_does_not_change_the_metadatas_size() {
-        let allowed = encode(&SessionMetadata {
-            pull_allowed: true,
+    fn what_preparing_settled_round_trips_at_one_length() {
+        let with = |props: Option<String>| SessionMetadata {
+            prepared: Some(Prepared { props }),
             ..Default::default()
-        })
-        .expect("metadata encodes");
-        assert_eq!(allowed.len(), sealed(None).len());
+        };
+        let longest = "w".repeat(engine_types::limits::MAX_PROPS_BYTES);
+        let all = [None, Some("{min-age: 18}".to_owned()), Some(longest)].map(with);
+        let lengths: Vec<usize> = all
+            .iter()
+            .map(|metadata| {
+                let encoded = encode(metadata).unwrap();
+                let back: SessionMetadata = decode(&encoded).unwrap();
+                assert_eq!(back.prepared, metadata.prepared);
+                encoded.len()
+            })
+            .collect();
+        assert!(lengths.iter().all(|&l| l == lengths[0]), "{lengths:?}");
     }
 
     fn init_errors() -> Vec<InitError> {
@@ -791,7 +872,30 @@ mod decision_tests {
                 CompileFault::OutOfMemory,
             ])
             .map(InitError::Compile);
-        pulls.chain(compiles).collect()
+        // Every problem, at the shortest place and at the longest.
+        let props = [
+            PropsProblem::ShouldBeBool,
+            PropsProblem::ShouldBeWholeNumber,
+            PropsProblem::ShouldBeNumber,
+            PropsProblem::ShouldBeOneCharacter,
+            PropsProblem::ShouldBeString,
+            PropsProblem::ShouldBeArray,
+            PropsProblem::ShouldBeObject,
+            PropsProblem::Unholdable,
+            PropsProblem::NotACase,
+            PropsProblem::OutOfRange,
+            PropsProblem::UnknownField,
+            PropsProblem::Missing,
+            PropsProblem::NotDeclared,
+            PropsProblem::NotJson,
+            PropsProblem::TooLong,
+        ]
+        .into_iter()
+        .flat_map(|problem| {
+            ["props".to_string(), "ж".repeat(MAX_PROPS_AT_BYTES / 2)]
+                .map(|at| InitError::Props(PropsFault { at, problem }))
+        });
+        pulls.chain(compiles).chain(props).collect()
     }
 
     fn failed(init_error: InitError) -> Vec<u8> {

@@ -19,7 +19,7 @@ use crate::media_store::MediaStore;
 /// hold it to (the round's max, `admission::DEFAULT_ROUND_MAX_BYTES`); fuel
 /// is set on the Store directly.
 pub struct HostState {
-    /// The props the consumer gave the session, as the record the policy
+    /// The props the consumer gave the session, as the type the policy
     /// declares for them, which `enclavid:host-ext/policy-props.get`
     /// returns. Constant for the session; the policy may read it any round.
     /// `None` for a policy that declares none.

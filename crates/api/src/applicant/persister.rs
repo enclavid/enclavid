@@ -47,9 +47,9 @@ use secrecy::{ExposeSecret, SecretBox};
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
 use enclavid_crypto::seal_to_recipient;
 use hatch_client::{
-    AppendDisclosure, Decision, DisplayField, Event, Prompt, SessionMetadata, SessionState,
-    SessionStatus, SessionStore, SetMedia, SetMetadata, SetState, WriteField, boundary,
-    encode_padded,
+    AppendDisclosure, Decision, DisplayField, Event, Prepared, Prompt, SessionMetadata,
+    SessionState, SessionStatus, SessionStore, SetMedia, SetMetadata, SetState, WriteField,
+    boundary, encode_padded,
 };
 // `CallbackError` replaces the old wasmtime `RunError` as the persist error,
 // keeping api free of the runtime.
@@ -83,11 +83,15 @@ pub(super) struct SessionPersister {
     pub current_version: AtomicU64,
     /// Mutable copy of session metadata. We update
     /// `disclosure_count` and the `disclosure_entry_hashes` set-commitment
-    /// leaf list whenever a round seals a disclosure, and `pull_allowed` on the
+    /// leaf list whenever a round seals a disclosure, and `prepared` on the
     /// session's first write, and rewrite metadata atomically alongside the
     /// state + append ops. Other metadata fields stay constant across the
     /// session lifetime; this is purely a bookkeeping wrapper.
     pub metadata: Mutex<SessionMetadata>,
+    /// What preparing the session settled before this round ran — read from
+    /// the session, or settled for this round when the session holds none yet.
+    /// The round's first write records it.
+    prepared: Prepared,
     /// The fields this round may seal, decided by THIS side before the worker
     /// ran — from the pre-round `current_prompt` and the accepted event, the
     /// same pair `/input` already bound the applicant's echoed digest to.
@@ -196,6 +200,7 @@ impl SessionPersister {
         client_disclosure_pubkey: String,
         version: u64,
         metadata: SessionMetadata,
+        prepared: Prepared,
         consent: &RoundConsent,
         captures: &RoundCaptures,
         awaiting: &RoundAwaiting,
@@ -208,6 +213,7 @@ impl SessionPersister {
             client_disclosure_pubkey,
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata),
+            prepared,
             consented: Arc::downgrade(consent),
             captures: Arc::downgrade(captures),
             awaiting: Arc::downgrade(awaiting),
@@ -305,10 +311,12 @@ impl SessionPersister {
         // and a later successful one in the same round left the chain short of
         // its own count, and the consumer's pull 500s on that mismatch forever.
         let mut working = metadata.clone();
-        // A round reaches here only once the registry let the session pull what
-        // it pins (`SessionRunCtx::run`), so the first write to land says so,
-        // and no later round asks again.
-        working.pull_allowed = true;
+        // A round reaches here only once the session was prepared to run
+        // (`SessionRunCtx::run`), so the first write to land records what that
+        // settled, and no later round prepares it again.
+        if working.prepared.is_none() {
+            working.prepared = Some(self.prepared.clone());
+        }
         // A round that finished commits its decision in this same write as its
         // state: a reply lost after it — the child killed, a leg gone — leaves a
         // session that reads as completed, not one whose state has finished while
@@ -351,13 +359,13 @@ impl SessionPersister {
             // Rewrite metadata when this commit finished the session (status and
             // decision), emitted a disclosure (extends the disclosure-hash chain),
             // captured media (appends to the gate set) OR is the session's first
-            // to land since the registry let it pull. Plain rounds stay
-            // SetState-only, keeping the payload small.
+            // to land since it was prepared. Plain rounds stay SetState-only,
+            // keeping the payload small.
             let set_metadata_holder;
             if decision.is_some()
                 || !appends.is_empty()
                 || !media_ops.is_empty()
-                || !metadata.pull_allowed
+                || metadata.prepared.is_none()
             {
                 set_metadata_holder = self.build_metadata_op(&mut working, &appends);
                 ops.push(&set_metadata_holder);
@@ -506,7 +514,8 @@ impl SessionPersister {
     /// the status and decision, which the caller set before this). AuthN is
     /// closed inside hatch-client by the AEAD-seal under `tee_seal_key`. Called
     /// when this commit finished the session, emitted disclosures, captured
-    /// media or is the first to record the pull mark; `appends` may be empty.
+    /// media or is the first to record what preparing the session settled;
+    /// `appends` may be empty.
     fn build_metadata_op<'m>(
         &self,
         metadata: &'m mut SessionMetadata,
@@ -540,8 +549,9 @@ impl SessionPersister {
                      by 32 B per frame, a count the host reads off the SetMedia ops in this same \
                      batch anyway. On the round that finishes it carries the status and the \
                      decision's one byte: a size delta fixed per transition, whichever decision. \
-                     The pull mark is one byte either way, written by the session's first \
-                     committed round whatever the policy did"
+                     What preparing the session settled rides in one fixed frame whatever the \
+                     props, written by the session's first committed round whatever the policy \
+                     did: a size delta fixed for that transition too"
                 )),
         )
     }

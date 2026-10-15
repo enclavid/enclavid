@@ -45,6 +45,13 @@ fn all_plugins() -> Vec<engine_executor::PluginInstance> {
 /// Unique suffix so concurrent tests don't collide on the cwasm temp file.
 static TEST_CWASM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The test policy's props when the consumer gives none, as a preparation
+/// writes them: its record in WAVE, every field an option and none of them
+/// given.
+fn no_props() -> ByteBuf {
+    ByteBuf::from(b"{:}".to_vec())
+}
+
 /// Write a bundle's cwasm to a temp file and build the mmap-delivery
 /// [`BundleRef`] the child now expects (Stage A) — the supervisor does this per
 /// composition; the test does it inline. The file leaks (ephemeral test tmp).
@@ -165,7 +172,7 @@ async fn spawned_child_primes_runs_relays_then_exits() {
         .run(
             SessionState::default(),
             Event::Start,
-            ByteBuf::new(),
+            no_props(),
             DEFAULT_ROUND_FUEL,
             cb_client,
         )
@@ -182,6 +189,46 @@ async fn spawned_child_primes_runs_relays_then_exits() {
     );
 
     // Dropping the client ends the child's serve loop → the PROCESS exits.
+    drop(client);
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+        .await
+        .expect("child must exit promptly after its client is dropped")
+        .expect("wait for child");
+    assert!(status.success(), "child exits cleanly, got {status:?}");
+}
+
+/// A preparation THROUGH the spawned process: primed, it reads props against
+/// the test policy's record — as WAVE when they fit, as where and why when they
+/// do not — and nothing of the policy runs.
+#[tokio::test]
+async fn a_spawned_child_reads_props_without_running_the_policy() {
+    use engine_rpc::PropsRead;
+    use engine_types::props::{PropsProblem, PropsRefusal, Step};
+
+    let bundle = real_bundle();
+    let (mut child, client) = spawn_child().await;
+    client
+        .prime(to_bundle_ref(&bundle))
+        .await
+        .expect("prime real bundle");
+
+    let read = |json: &'static [u8]| client.read_props(ByteBuf::from(json.to_vec()));
+    assert_eq!(
+        read(br#"{"state-bloat": 7}"#).await.expect("read"),
+        PropsRead::Read(Some("{state-bloat: some(7)}".into()))
+    );
+    assert_eq!(
+        read(b"").await.expect("read"),
+        PropsRead::Read(Some("{:}".into()))
+    );
+    assert_eq!(
+        read(br#"{"stateBloat": 7}"#).await.expect("read"),
+        PropsRead::Refused(PropsRefusal {
+            path: vec![Step::Key("stateBloat".into())],
+            problem: PropsProblem::UnknownField,
+        })
+    );
+
     drop(client);
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
@@ -253,7 +300,7 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
         .run(
             SessionState::default(),
             Event::Start,
-            ByteBuf::new(),
+            no_props(),
             DEFAULT_ROUND_FUEL,
             cb_client,
         )
@@ -482,7 +529,7 @@ async fn measure_per_round_cost() {
             .run(
                 SessionState::default(),
                 Event::Start,
-                ByteBuf::new(),
+                no_props(),
                 DEFAULT_ROUND_FUEL,
                 cb_client,
             )

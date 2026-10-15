@@ -2,7 +2,7 @@
 //! the value api keeps as the session's init error. Components are built from
 //! WIT alone.
 
-use engine_compiler::Compiler;
+use engine_compiler::{BundleParts, Compiler};
 use engine_types::compile::{Artifact, CompileFault, InterfaceName};
 use engine_types::composition::PluginInstance;
 use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
@@ -48,9 +48,9 @@ fn exporting(export: &str, packages: &str) -> Vec<u8> {
 
 const API: &str = "package test:api@0.1.0 { interface api { ping: func(); } }";
 
-/// The fault the compile refuses `policy` with `plugins` for, `None` if it
-/// compiles. An error that names no fault is not a refusal, and fails the test.
-fn refusal(policy: Vec<u8>, plugins: Vec<Vec<u8>>) -> Option<CompileFault> {
+/// `policy` with `plugins` compiled, or the fault the compile refuses it for. An
+/// error that names no fault is not a refusal, and fails the test.
+fn compile(policy: Vec<u8>, plugins: Vec<Vec<u8>>) -> Result<BundleParts, CompileFault> {
     let plugins = plugins
         .into_iter()
         .enumerate()
@@ -59,17 +59,20 @@ fn refusal(policy: Vec<u8>, plugins: Vec<Vec<u8>>) -> Option<CompileFault> {
             wasm,
         })
         .collect();
-    match Compiler::new()
+    Compiler::new()
         .expect("a compiler")
         .compile_to_parts(policy, plugins)
-    {
-        Ok(_) => None,
-        Err(e) => Some(
+        .map_err(|e| {
             e.downcast_ref::<CompileFault>()
                 .unwrap_or_else(|| panic!("a failure that names no fault: {e:?}"))
-                .clone(),
-        ),
-    }
+                .clone()
+        })
+}
+
+/// The fault the compile refuses `policy` with `plugins` for, `None` if it
+/// compiles.
+fn refusal(policy: Vec<u8>, plugins: Vec<Vec<u8>>) -> Option<CompileFault> {
+    compile(policy, plugins).err()
 }
 
 fn name(s: &str) -> InterfaceName {
@@ -189,4 +192,88 @@ fn a_plugin_exporting_a_host_interface_is_refused() {
             "test:plugin0".into()
         )))
     );
+}
+
+/// A policy whose props interface holds `body`.
+fn with_props(body: &str) -> Vec<u8> {
+    importing(
+        "enclavid:host-ext/policy-props@0.1.0",
+        &format!("package enclavid:host-ext@0.1.0 {{ interface policy-props {{ {body} }} }}"),
+    )
+}
+
+/// A `get` returning a value of any shape — a record of what props hold, with
+/// aliases, enums, records nested in lists and types used from another
+/// interface, or a value that is no record at all — is what the host serves,
+/// and compiles. Whether the props fit it is read when a session is prepared.
+#[test]
+fn props_of_any_value_the_host_serves_compile() {
+    let policy = with_props(
+        "enum mode { strict, lenient }
+         type age = u8;
+         record person { name: string }
+         record props {
+             min-age: age,
+             mode: option<mode>,
+             people: list<person>,
+             pair: option<tuple<u8, u8>>,
+         }
+         get: func() -> props;",
+    );
+    assert_eq!(refusal(policy, vec![]), None);
+
+    let used = importing(
+        "enclavid:host-ext/policy-props@0.1.0",
+        "package enclavid:host-ext@0.1.0 {
+             interface shapes { record point { x: u32, y: u32 } }
+             interface policy-props {
+                 use shapes.{point};
+                 record props { at: point, path: list<point> }
+                 get: func() -> props;
+             }
+         }",
+    );
+    assert_eq!(refusal(used, vec![]), None);
+
+    for body in ["get: func() -> u32;", "get: func() -> list<string>;"] {
+        assert_eq!(refusal(with_props(body), vec![]), None, "{body}");
+    }
+}
+
+/// The host serves `get` taking nothing and returning a value, and nothing else
+/// in the interface; a policy importing it as anything else is refused.
+#[test]
+fn props_imported_as_what_the_host_does_not_serve_are_refused() {
+    let host_types = "package enclavid:host@0.1.0 { interface types { resource icon-ref; } }";
+    let returns_a_handle = importing(
+        "enclavid:host-ext/policy-props@0.1.0",
+        &format!(
+            "{host_types}
+             package enclavid:host-ext@0.1.0 {{
+                 interface policy-props {{
+                     use enclavid:host/types@0.1.0.{{icon-ref}};
+                     get: func() -> icon-ref;
+                 }}
+             }}"
+        ),
+    );
+    let bodies = [
+        "record props { a: u8 } get: func(x: u8) -> props;",
+        "get: func();",
+        "record props { a: u8 } get: func() -> props; other: func();",
+        "resource token; record props { a: u8 } get: func() -> props;",
+    ];
+    for (policy, what) in bodies
+        .map(|body| (with_props(body), body))
+        .into_iter()
+        .chain([(returns_a_handle, "get: func() -> icon-ref;")])
+    {
+        assert_eq!(
+            refusal(policy, vec![]),
+            Some(CompileFault::Mismatched(name(
+                "enclavid:host-ext/policy-props@0.1.0"
+            ))),
+            "{what}"
+        );
+    }
 }

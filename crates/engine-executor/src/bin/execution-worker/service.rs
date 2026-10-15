@@ -4,6 +4,7 @@
 use std::fs::File;
 use std::os::fd::AsFd;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed, Untrusted};
@@ -11,7 +12,8 @@ use engine_executor::{Event, SessionState};
 use engine_rpc::{
     BundleMeta, BundleRef, BundleStream, ByteBuf, CallbackServiceClient,
     ChildCallbacksServerShared, ChildService, ChildServiceClient, CompatToken, CompositionKey,
-    ExecError, ExecutorServiceUntrusted, Padded, RunOutcome, RunReply, RunRequest, RunStatus,
+    ExecError, ExecutorServiceUntrusted, Padded, PrepareOutcome, PrepareReply, PrepareRequest,
+    Preparing, PropsRead, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 use engine_supervisor::{ChildRunner, Exit, ExitCause, SupervisorError};
 use remoc::codec::Ciborium;
@@ -54,22 +56,26 @@ fn runner_failure(e: SupervisorError) -> ExecError {
     }
 }
 
-/// The round's answer, from what the runner returned.
+/// A child's answer — a round's, or a preparation's — from what the runner
+/// returned.
 ///
 /// A child's own `Busy` is answered `Unknown`. By the time a child replies it has
-/// run — it may have changed the session through `session_change` — so it is the
-/// one party that cannot truthfully say nothing ran, and `Busy` tells api exactly
-/// that. Only a failure this supervisor decided before spawning may carry it.
+/// run — a round's may have changed the session through `session_change` — so it
+/// is the one party that cannot truthfully say nothing ran, and `Busy` tells api
+/// exactly that. Only a failure this supervisor decided before spawning may carry
+/// it.
 ///
 /// A child that died without answering reaches here as `Unknown` — the leg to it
-/// closed — and the kernel's record of its life says whether the round itself
-/// was the cause: killed at its own max, with the children's total never
-/// reached meanwhile, is the policy's, the same as a trap; anything else stays
-/// `Unknown`. Only then is the exit waited for, and never long: see
-/// [`Exit::cause`]. A reply the child did send is kept whatever became of it.
-async fn child_reply(
-    outcome: Result<(Result<RunStatus, ExecError>, Exit), SupervisorError>,
-) -> Result<RunStatus, ExecError> {
+/// closed — and the kernel's record of its life says whether its work was the
+/// cause: killed at its own max, with the children's total never reached
+/// meanwhile, is the composition's, the same as a trap — what a child holds
+/// besides the engine is the consumer's composition and, in a round, its policy's
+/// state; anything else stays `Unknown`. Only then is the exit waited for, and
+/// never long: see [`Exit::cause`]. A reply the child did send is kept whatever
+/// became of it.
+async fn child_reply<T>(
+    outcome: Result<(Result<T, ExecError>, Exit), SupervisorError>,
+) -> Result<T, ExecError> {
     match outcome {
         Ok((Err(ExecError::Busy), _)) => Err(ExecError::Unknown),
         Ok((Err(ExecError::Unknown), exit)) => match exit.cause().await {
@@ -152,7 +158,15 @@ impl Supervisor {
     /// a byte is read (see [`Bundles::reserve`]). Everything a round waits for
     /// here — another's fill, room — it waits for no longer than the capacity
     /// wait in all, then answers busy.
-    async fn cache_bundle(&self, slot: Slot, bundle: BundleStream) -> Result<Lease, ExecError> {
+    ///
+    /// A preparation fills `ahead` of the rounds it is for: the entry is marked
+    /// so, and asked for on their behalf ([`Bundles::ask_for`]).
+    async fn cache_bundle(
+        &self,
+        slot: Slot,
+        bundle: BundleStream,
+        ahead: bool,
+    ) -> Result<Lease, ExecError> {
         let deadline = Instant::now() + self.capacity_wait;
         // Found kept, this round's stream is never read. Its writer sees the end
         // close, which costs it nothing — the round's outcome is the reply.
@@ -196,8 +210,13 @@ impl Supervisor {
             embedded_imports: embedded_imports.into(),
             catalogs: catalogs.into(),
             used: LastUsed::now(),
+            warmed: AtomicBool::new(ahead),
         };
-        self.bundles.keep(fill, room, entry)
+        let lease = self.bundles.keep(fill, room, entry)?;
+        if ahead {
+            self.bundles.ask_for(&slot);
+        }
+        Ok(lease)
     }
 
     /// Spawn a fresh disposable child, prime it with the leased entry's cwasm
@@ -275,6 +294,42 @@ impl Supervisor {
         // beside how the child ended; a runner-level failure becomes `Busy` if the
         // round was never admitted, and a fail-safe `Unknown` otherwise (api 5xx
         // → applicant retry).
+        child_reply(outcome).await
+    }
+
+    /// What a preparation asks of the leased entry. Holding it is done: the
+    /// lease was taken. Reading the props takes a fresh disposable child, as a
+    /// round does — primed the same way, admitted and deadline-guarded the same
+    /// way — that reads them against the type the composition declares and
+    /// never instantiates the policy.
+    async fn prepare_in_child(
+        &self,
+        lease: Lease,
+        preparing: Preparing,
+    ) -> Result<PropsRead, ExecError> {
+        let props = match preparing {
+            Preparing::Hold => return Ok(PropsRead::NotRead),
+            Preparing::Read(props) => props,
+        };
+        let entry = lease.entry().clone();
+        let cwasm_fd = entry.cwasm.as_fd();
+        let (embedded_imports, catalogs) = (entry.embedded_imports.clone(), entry.catalogs.clone());
+        let outcome = self
+            .runner
+            .run(
+                Some(cwasm_fd),
+                lease,
+                move |client: ChildServiceClient<Ciborium>| async move {
+                    let bundle_ref = BundleRef {
+                        cwasm_path: Cwasm::path_in_child(),
+                        embedded_imports,
+                        catalogs,
+                    };
+                    client.prime(bundle_ref).await?;
+                    client.read_props(ByteBuf::from(props)).await
+                },
+            )
+            .await;
         child_reply(outcome).await
     }
 }
@@ -373,9 +428,9 @@ impl Slot {
 ///     a digest rendering and nothing else.
 ///   * `session_state` — `Padded`'s exact-frame decode: a frame of any other size
 ///     is refused outright.
-///   * `props` — the byte bound in its decoder. LOOSER than api's own ingress
-///     cap, deliberately, so a legitimate round is never refused here; what
-///     matters to this role is that the props are finite, not that they match.
+///   * `props` — `Padded`'s exact-frame decode, and the byte bound where the
+///     frame opens; what matters to this role is that the props are finite, not
+///     that they match.
 ///   * `event` — the frame count and clip budget in `Clip`'s decoder, likewise.
 ///
 /// None of that is a check on AUTHENTICITY and none of it is claimed as one —
@@ -389,6 +444,47 @@ fn open_round(req: Untrusted<RunRequest, (AuthN,)>) -> RunRequest {
          bounded by its own decoder, which is what makes that range a finite one"
     ))
     .into_inner()
+}
+
+/// Take a preparation's inputs out of the scope this role named: INDIFFERENT,
+/// for the reason [`open_round`] gives, over fewer fields — the key, and the
+/// props JSON held to the same byte bound.
+fn open_preparation(req: Untrusted<PrepareRequest, (AuthN,)>) -> PrepareRequest {
+    req.trust_unchecked::<AuthN, _>(enclavid_boundary::reason!(
+        "indifferent: nothing derived from a preparation leaves the caller's own \
+         partition — the slot it names is inside it, the props are read in a \
+         disposable child, and the answer goes back only to whoever asked; the key \
+         and the props were bounded by their own decoders"
+    ))
+    .into_inner()
+}
+
+/// Take a bundle a caller streams in out of the scope this role named.
+///
+/// NO KIND FITS, and that is the honest answer rather than a gap to be filled.
+/// Nothing here re-derives these bytes — this role holds no Cranelift by design.
+/// Nothing binds them: the stream's length and digest are the caller's own word
+/// about its own bytes, its word twice, and there is no second party on this hop
+/// to have established one. The range is not harmless; it is native code. And
+/// they are not contained to their author, because a later cache-only `run`
+/// under the same key serves them again.
+///
+/// What bounds it is structural and is named here so a reader can weigh it: the
+/// entry lands in the CALLER's own partition and no other caller can reach it,
+/// the bytes are refused unless they arrive at their declared length and digest
+/// and the sealed file reads as a serialized component, and the deserialization
+/// runs in a disposable per-round child behind an address-space boundary. A
+/// standing accepted risk, which is what it should look like on every audit.
+fn open_bundle(bundle: Untrusted<BundleStream, (AuthN,)>) -> BundleStream {
+    bundle
+        .trust_unchecked::<AuthN, _>(reason!(
+            "no kind fits — an accepted risk: no key or pin covers these bytes, \
+             their length and digest are the sender's own word, and the range is \
+             native code. Contained by the caller's own L1 partition and a \
+             disposable child around the deserialize; admitted only whole, \
+             digest-matched and component-shaped"
+        ))
+        .into_inner()
 }
 
 /// What is still open on a value this role is about to release to its caller.
@@ -490,6 +586,40 @@ fn outbound_reply(status: &RunStatus) -> Result<Exposed<RunReply, ()>, ExecError
     })
 }
 
+/// Mint what a preparation read as a released, constant-size frame. `Covert` is
+/// TRANSFORMED, as a round's status is: whether the props were read or refused,
+/// and how long they are once read, are what the frame hides — and what a child
+/// that broke out would choose.
+fn outbound_prepared(read: &PropsRead) -> Result<Exposed<PrepareOutcome, ()>, ExecError> {
+    to_caller(read).vouch::<Covert, _, _, _, _>(|r| {
+        Padded::seal(r).map(PrepareOutcome::Prepared).map_err(|e| {
+            debug!("framing what the preparation read: {e}");
+            ExecError::Unknown
+        })
+    })
+}
+
+/// Mint a preparation's cache miss, BOUNDED as [`outbound_cache_miss`] is.
+fn outbound_prepare_miss(compat_token: CompatToken) -> Exposed<PrepareOutcome, ()> {
+    to_caller(PrepareOutcome::CacheMiss { compat_token }).vouch_unchecked::<Covert, _>(reason!(
+        "bounded: a variant plus this build's own ABI id, capped at 64 characters of \
+         a fixed alphabet and identical on every miss this image serves"
+    ))
+}
+
+/// Mint a preparation's post-miss reply: the frame of [`outbound_prepared`] in
+/// the envelope of a call that always prepares.
+fn outbound_prepare_reply(read: &PropsRead) -> Result<Exposed<PrepareReply, ()>, ExecError> {
+    to_caller(read).vouch::<Covert, _, _, _, _>(|r| {
+        Padded::seal(r)
+            .map(|props| PrepareReply { props })
+            .map_err(|e| {
+                debug!("framing what the preparation read: {e}");
+                ExecError::Unknown
+            })
+    })
+}
+
 impl ExecutorServiceUntrusted for Caller {
     /// What this role does not know about its caller.
     ///
@@ -531,7 +661,13 @@ impl ExecutorServiceUntrusted for Caller {
             // failure — the first is `Unknown` by the conversion's own default.
             Some(lease) => self
                 .sup
-                .run_in_child(lease, session_state.open()?, event, props, callbacks)
+                .run_in_child(
+                    lease.for_round(),
+                    session_state.open()?,
+                    event,
+                    props.open()?.0,
+                    callbacks,
+                )
                 .await
                 .and_then(|status| outbound_ran(&status)),
             // Miss: the worker returns ONLY its ABI id — it never names the key.
@@ -559,39 +695,65 @@ impl ExecutorServiceUntrusted for Caller {
             session_state,
             event,
         } = open_round(req);
-        // NO KIND FITS, and that is the honest answer rather than a gap to be
-        // filled. Nothing here re-derives these bytes — this role holds no
-        // Cranelift by design. Nothing binds them: the stream's length and digest
-        // are the caller's own word about its own bytes, its word twice, and there
-        // is no second party on this hop to have established one. The range is not
-        // harmless; it is native code. And they are not contained to their author,
-        // because a later cache-only `run` under the same key serves them again.
-        //
-        // What bounds it is structural and is named here so a reader can weigh it:
-        // the entry lands in the CALLER's own partition and no other caller can
-        // reach it, the bytes are refused unless they arrive at their declared
-        // length and digest and the sealed file reads as a serialized component,
-        // and the deserialization runs in a disposable per-round child behind an
-        // address-space boundary. A standing accepted risk, which is what it should
-        // look like on every audit.
-        let bundle = bundle
-            .trust_unchecked::<AuthN, _>(reason!(
-                "no kind fits — an accepted risk: no key or pin covers these bytes, \
-                 their length and digest are the sender's own word, and the range is \
-                 native code. Contained by the caller's own L1 partition and a \
-                 disposable child around the deserialize; admitted only whole, \
-                 digest-matched and component-shaped"
-            ))
-            .into_inner();
         let lease = self
             .sup
-            .cache_bundle(self.slot(&composition_key), bundle)
-            .await?;
+            .cache_bundle(self.slot(&composition_key), open_bundle(bundle), false)
+            .await?
+            .for_round();
         let status = self
             .sup
-            .run_in_child(lease, session_state.open()?, event, props, callbacks)
+            .run_in_child(
+                lease,
+                session_state.open()?,
+                event,
+                props.open()?.0,
+                callbacks,
+            )
             .await?;
         outbound_reply(&status)
+    }
+
+    /// A preparation on the L1-cache path: hold the composition if it is cached
+    /// — and read the props, if asked, in a child that runs none of the policy —
+    /// else report the miss, as [`run`](Self::run) does.
+    async fn prepare(
+        &self,
+        req: Untrusted<PrepareRequest, Self::Scope>,
+    ) -> Result<Exposed<PrepareOutcome, ()>, ExecError> {
+        let _round = round_place(&self.sup.rounds)?;
+        let PrepareRequest {
+            composition_key,
+            preparing,
+        } = open_preparation(req);
+        match self.sup.bundles.lease(&self.slot(&composition_key)) {
+            Some(lease) => self
+                .sup
+                .prepare_in_child(lease, preparing)
+                .await
+                .and_then(|read| outbound_prepared(&read)),
+            None => Ok(outbound_prepare_miss(self.sup.compat_token.clone())),
+        }
+    }
+
+    /// A preparation on the post-miss path: file the bundle in L1 under the
+    /// caller's key, ahead of the rounds it is for, then prepare as
+    /// [`prepare`](Self::prepare) does.
+    async fn prepare_with_bundle(
+        &self,
+        req: Untrusted<PrepareRequest, Self::Scope>,
+        bundle: Untrusted<BundleStream, Self::Scope>,
+    ) -> Result<Exposed<PrepareReply, ()>, ExecError> {
+        let _round = round_place(&self.sup.rounds)?;
+        let PrepareRequest {
+            composition_key,
+            preparing,
+        } = open_preparation(req);
+        let lease = self
+            .sup
+            .cache_bundle(self.slot(&composition_key), open_bundle(bundle), true)
+            .await?;
+        let read = self.sup.prepare_in_child(lease, preparing).await?;
+        outbound_prepare_reply(&read)
     }
 }
 
@@ -606,7 +768,14 @@ mod tests {
     use engine_rpc::{ExecError, RunStatus};
     use engine_supervisor::{Exit, ExitCause, SpawnError, SupervisorError};
 
-    use super::{child_reply, round_place, runner_failure};
+    use super::{round_place, runner_failure};
+
+    /// [`super::child_reply`] for a round's answer.
+    async fn child_reply(
+        outcome: Result<(Result<RunStatus, ExecError>, Exit), SupervisorError>,
+    ) -> Result<RunStatus, ExecError> {
+        super::child_reply(outcome).await
+    }
 
     /// Every place taken: the next round answers busy without waiting, and a
     /// place handed back is free for the round after it.

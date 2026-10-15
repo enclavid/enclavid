@@ -27,9 +27,10 @@ pub use transport::HatchClient;
 pub use domain::{
     Action, Artifact, CameraFacing, CaptureGuide, CaptureStep, Client, ClientAccess, Clip,
     CompileFault, Decision, DisplayField, Event, GuideNone, GuideOval, GuideRect, InitError,
-    InterfaceName, KbsKey, Key, Localized, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MediaResult, MediaSpec,
-    PluginPin, Prompt, PullProblem, SessionMetadata, SessionState, SessionStatus, Translation,
-    capture_guide, is_wit_name,
+    InterfaceName, KbsKey, Key, Localized, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MAX_PROPS_AT_BYTES,
+    MediaResult, MediaSpec, PREPARED_FRAME, PluginPin, Prepared, Prompt, PropsFault, PropsProblem,
+    PullProblem, SessionMetadata, SessionState, SessionStatus, Translation, capture_guide,
+    is_wit_name,
 };
 pub use hatch_protocol::{AuthorizeRequest, BlobRequest, ClientOperation, ManifestRequest};
 pub use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};

@@ -39,6 +39,10 @@ use engine_executor::{
 use hatch_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use xtask::fixtures;
 
+/// The test policy's props when the consumer gives none, as api writes them:
+/// its record in WAVE, every field an option and none of them given.
+const NO_PROPS: &[u8] = b"{:}";
+
 /// End-to-end test harness mirroring the old in-process `Runner` facade: a
 /// [`Compiler`] + [`Executor`] on SEPARATE engines, bridged by serialized
 /// cwasm — exactly the production path (compose over there, deserialize +
@@ -95,11 +99,11 @@ impl TestRunner {
     /// prime-once / run-many path.
     fn prime(
         &self,
-        component: &Component,
-        embedded_imports: &[EmbeddedImport],
+        fused: &Fused,
         embedded: Arc<EmbeddedRegistry>,
     ) -> RunResult<PrimedComposition> {
-        self.executor.prime(component, embedded_imports, embedded)
+        self.executor
+            .prime(&fused.component, &fused.embedded_imports, embedded)
     }
 
     async fn run(
@@ -237,18 +241,6 @@ impl SessionListener for PersistListener {
             Ok(())
         })
     }
-}
-
-/// The compiler and the runtime name one cwasm ABI. api keeps a compile in L2
-/// under the compiler's token and looks it up under the runtime's, so tokens
-/// that differed would make every compile a miss — or, for a token that stayed
-/// while the ABI under it moved, a load the runtime refuses.
-#[test]
-fn the_compiler_and_the_runtime_name_one_cwasm_abi() {
-    assert_eq!(
-        engine_compiler::compat_token(),
-        engine_executor::compat_token()
-    );
 }
 
 /// The fleet's own compile — catalogs, fusion, the check that nothing it
@@ -389,7 +381,7 @@ async fn reload_by_ref_misses() {
     };
     let round = |session, event: Event| {
         listener.capture(&event);
-        h.runner.run(&h.primed, session, event, b"", inputs())
+        h.runner.run(&h.primed, session, event, NO_PROPS, inputs())
     };
 
     let (_s, session) = round(Session::default(), Event::Start).await.unwrap();
@@ -422,9 +414,9 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
             loads: loads.clone(),
         });
         let props: &[u8] = if read_bytes {
-            b""
+            NO_PROPS
         } else {
-            br#"{"skip-passport-read": true}"#
+            b"{skip-passport-read: some(true)}"
         };
         let inputs = || RunInputs {
             listener: listener.clone(),
@@ -513,16 +505,20 @@ async fn empty_selfie_clip_is_retryable_via_plugin() {
     }
 }
 
-/// Props that do not fit the record the policy declares fail the round before
-/// the policy runs: nothing it could do with half its props is reached, and
-/// nothing is persisted.
+/// Props that do not read as the record the policy declares fail the round
+/// before the policy runs: nothing it could do with half its props is reached,
+/// and nothing is persisted. api never sends such props — it read them against
+/// the same record when it prepared the session — but a round's peer is any
+/// attested guest, and none the policy has.
 #[tokio::test]
-async fn props_that_do_not_fit_the_policys_record_fail_the_round() {
+async fn props_that_do_not_read_as_the_policys_record_fail_the_round() {
     let h = Harness::new();
     for props in [
-        r#"{"state-bloat": -1}"#,
-        r#"{"state-bloat": "big"}"#,
-        r#"{"stateBloat": 1}"#,
+        "{state-bloat: some(-1)}",
+        r#"{state-bloat: some("big")}"#,
+        "{stateBloat: some(1)}",
+        r#"{"state-bloat": 1}"#,
+        "",
     ] {
         let listener = Arc::new(PersistListener::default());
         let result = h
@@ -549,7 +545,7 @@ async fn oversized_state_traps() {
     // over the cap — the runtime must trap the round rather than seal an
     // over-cap (clip-smuggling) state.
     let over = engine_executor::limits::POLICY_MAX_STATE_BYTES + 1;
-    let props = format!(r#"{{"state-bloat": {over}}}"#);
+    let props = format!("{{state-bloat: some({over})}}");
 
     let result = h
         .runner
@@ -644,11 +640,7 @@ async fn static_fused_artifact_resolves_strictly() {
     // consent screen resolves DF (merged) — all through the static
     // artifact with no runtime fusion.
     let primed = runner
-        .prime(
-            &composition.component,
-            &composition.embedded_imports,
-            embedded.clone(),
-        )
+        .prime(&composition, embedded.clone())
         .expect("prime static composition");
     let inputs = || RunInputs {
         listener: listener.clone(),
@@ -657,7 +649,7 @@ async fn static_fused_artifact_resolves_strictly() {
     };
     let round = |session, event: Event| {
         listener.capture(&event);
-        runner.run(&primed, session, event, b"", inputs())
+        runner.run(&primed, session, event, NO_PROPS, inputs())
     };
     let (status, session) = round(Session::default(), Event::Start)
         .await
@@ -787,11 +779,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let listener = Arc::new(PersistListener::default());
 
     let primed = runner
-        .prime(
-            &composition.component,
-            &composition.embedded_imports,
-            embedded.clone(),
-        )
+        .prime(&composition, embedded.clone())
         .expect("prime hybrid composition");
     let inputs = || RunInputs {
         listener: listener.clone(),
@@ -801,7 +789,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     // start → media(passport) → media(selfie) → consent-disclosure.
     let round = |session, event: Event| {
         listener.capture(&event);
-        runner.run(&primed, session, event, b"", inputs())
+        runner.run(&primed, session, event, NO_PROPS, inputs())
     };
     let (status, session) = round(Session::default(), Event::Start)
         .await
@@ -893,11 +881,7 @@ impl Harness {
         let embedded = Arc::new(builder.build());
 
         let primed = runner
-            .prime(
-                &composition.component,
-                &composition.embedded_imports,
-                embedded.clone(),
-            )
+            .prime(&composition, embedded.clone())
             .expect("prime composition");
 
         Self {
@@ -926,7 +910,13 @@ impl Harness {
         // the orchestrator's order, and the reason it needs nothing back.
         listener.capture(&event);
         self.runner
-            .run(&self.primed, session, event, b"", self.inputs(listener))
+            .run(
+                &self.primed,
+                session,
+                event,
+                NO_PROPS,
+                self.inputs(listener),
+            )
             .await
             .expect("reducer round")
     }

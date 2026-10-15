@@ -34,17 +34,23 @@ wasmtime = { version = "46", default-features = false, features = [
     "runtime",
     "std",
     "async",
+    # WAVE, the component model's own value encoding: a session's props are
+    # read against the type the component declares and written in it, and
+    # every round reads them back from it. An API, not a codegen setting, so
+    # the `Config` the cwasm header records is the compiler's still.
+    "wave",
 ] }
 
 # Content-addresses each captured frame (`convert::event_to_wit`) so the
 # blob store keys blobs by BLAKE3 hash.
 blake3 = "1"
-# Reads the consumer's props, a JSON object, into the record the policy
-# declares for them (`props`), with a serde seed carrying the record's type;
-# serde_path_to_error says where in them a read failed.
-serde = "1"
+# The consumer's props arrive as the JSON value it gave the session, read
+# against the type the policy declares (`props::read`).
 serde_json = "1"
-serde_path_to_error = "0.1"
+# The semver track an import name is looked up on — the linker's own rule,
+# which `props::declared` finds the props' interface by. wasmtime's own
+# dependency, at its version; no codegen.
+wasmtime-environ = { version = "46", default-features = false, features = ["component-model"] }
 
 # --- execution-worker bin deps (optional) — pulled ONLY by the `worker`
 # feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable
@@ -203,8 +209,8 @@ engine-compiler = { path = "../engine-compiler" }
 # load_copies.rs builds a component carrying a large data segment, to see what
 # loading its cwasm copies.
 wasm-encoder = "0.247"
-# The props tests build a component from WIT alone, one per record type they
-# read props into.
+# The props tests, and the runner's test that the host serves every interface
+# the compile counts as its own, build components from WIT alone.
 wit-component = { version = "0.247", features = ["dummy-module"] }
 wit-parser = "0.247"
 # fake_capture emits a real JPEG so the face-age plugin's in-sandbox

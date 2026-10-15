@@ -163,8 +163,6 @@ rollback is an accepted residual of the host-holds-all-state model.
                 StatusCode::NOT_FOUND
             })?;
 
-        let props = metadata.props.clone();
-
         let session_state = state_opt
             .trust_unchecked::<Replay, _>(reason!(
                 r#"
@@ -247,7 +245,6 @@ persist; same containment as above.
             disclosure_pubkey,
             version,
             media_store,
-            props,
             composition_key,
             metadata,
         })
@@ -259,8 +256,9 @@ persist; same containment as above.
 /// artifacts (nothing session-specific), so it (a) names the fused component in
 /// the execution-worker's L1 cache — every session pinning the same policy +
 /// plugins shares ONE compile — and (b) keys the orchestrator's L2 (paired with
-/// the worker's `compat_token`). NO pull or compile happens here; that is lazy,
-/// driven by `run_resolved` when the worker reports an L1 miss.
+/// the worker's `compat_token`). NO pull or compile happens here; that comes
+/// when the worker reports an L1 miss, to a session's preparation
+/// (`crate::init::prepare`) or to a round (`run_resolved`).
 fn session_composition_key(
     session_id: &str,
     metadata: &SessionMetadata,

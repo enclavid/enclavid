@@ -81,6 +81,8 @@ path = "src/main.rs"
 # with — which means the compiler and the shared fixture pipeline.
 engine-compiler = { path = "../engine-compiler" }
 xtask = { path = "../../xtask" }
+# What a props refusal is made of, which the preparation test reads back.
+engine-types = { path = "../engine-types" }
 # The test plays the supervisor, so IT needs the parent half. That is also why
 # the test does NOT spawn this package's own `CARGO_BIN_EXE` binary: this
 # dev-dependency unifies `parent` into it. `xtask::child_binary` runs the

@@ -31,7 +31,6 @@ use std::future::Future;
 
 use enclavid_boundary::{Open, Untrusted};
 
-use crate::CompatToken;
 use crate::adapter::Untrusting;
 use crate::compile::{CompileError, CompileReply, CompileRequest, CompilerService};
 
@@ -57,11 +56,6 @@ pub trait CompilerServiceUntrusted {
         &self,
         req: Untrusted<CompileRequest, Self::Scope>,
     ) -> impl Future<Output = Result<CompileReply, CompileError>> + Send;
-
-    /// The ABI id of the cwasm this worker compiles. See the raw
-    /// `CompilerService::compat_token`; it takes nothing, so there is nothing
-    /// to wrap.
-    fn compat_token(&self) -> impl Future<Output = Result<CompatToken, CompileError>> + Send;
 }
 
 /// A shared service is still one: the supervisor is `Arc`-held because its pool and
@@ -79,10 +73,6 @@ where
     ) -> impl Future<Output = Result<CompileReply, CompileError>> + Send {
         (**self).compile(req)
     }
-
-    fn compat_token(&self) -> impl Future<Output = Result<CompatToken, CompileError>> + Send {
-        (**self).compat_token()
-    }
 }
 
 /// Serves a [`CompilerServiceUntrusted`] as a [`CompilerService`], wrapping the
@@ -95,9 +85,5 @@ where
 {
     async fn compile(&self, req: CompileRequest) -> Result<CompileReply, CompileError> {
         self.0.compile(Untrusted::new(req)).await
-    }
-
-    async fn compat_token(&self) -> Result<CompatToken, CompileError> {
-        self.0.compat_token().await
     }
 }

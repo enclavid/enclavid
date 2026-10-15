@@ -16,6 +16,9 @@
 //! compiling on an L2 miss (OCI pull + compile-worker) and sealing the result
 //! into L2 — and calls [`ExecutorService::run_with_bundle`]. The bundle streams
 //! beside that call ([`BundleStream`]), so the request is the round alone.
+//! Preparing a session ([`ExecutorService::prepare`]) takes the same two paths
+//! with no round: it fills the L1 ahead of the session's rounds, and reads the
+//! session's props against the type the composition declares for them.
 //!
 //! The direction is the point. A callback the worker could call to ask for a
 //! composition would be a probe surface on the key-holding side, driven by the
@@ -26,6 +29,7 @@
 use serde::{Deserialize, Serialize};
 pub use serde_bytes::ByteBuf;
 
+use engine_types::props::PropsRefusal;
 use hatch_client::{Decision, Event, Prompt, SessionState};
 
 use crate::BundleRef;
@@ -202,10 +206,10 @@ impl From<CallbackError> for ExecError {
 /// one side does not know is version skew and must fail closed rather than be
 /// silently dropped into a round that then runs on a partial request.
 ///
-/// Every field is bounded by its own decoder — the key by its shape, the props by
-/// count and bytes, the state by its exact frame, the event's frames by the
-/// ingress budget. That is what lets the serving role write a discharge that names
-/// a check instead of naming its caller.
+/// Every field is bounded by its own decoder — the key by its shape, the props and
+/// the state by their exact frames, the event's frames by the ingress budget. That
+/// is what lets the serving role write a discharge that names a check instead of
+/// naming its caller.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRequest {
@@ -214,20 +218,25 @@ pub struct RunRequest {
     /// serves under this key and never names a key back, so it cannot steer which
     /// slot a compile lands in (L2 cache-poisoning defence).
     pub composition_key: CompositionKey,
-    /// The props the consumer gave the session: the JSON object as api keeps
-    /// it, empty when it gave none. The worker reads it into the record the
-    /// policy declares for it. Bounded on decode — see the `props` module below.
-    #[serde(with = "props")]
-    pub props: Vec<u8>,
+    /// FRAMED: the props, whose length as read is their type's and their own.
+    /// See [`RoundProps`].
+    pub props: Padded<RoundProps>,
     /// FRAMED: `state` and `current_prompt` are both policy-chosen lengths, and a
     /// host process splices this hop byte-for-byte. See [`Padded`].
     pub session_state: Padded<SessionState>,
     pub event: Event,
 }
 
-/// What a round request carries besides the clip's bytes, the state frame and the
-/// bundle header: the key, the props, the frames' and the event's CBOR heads, and
-/// remoc's own envelope with the reply, callback and two bundle-stream ports. About
+/// The props the consumer gave the session, as a preparation read them against
+/// the type the policy declares ([`PropsRead::Read`]): a value of it in WAVE,
+/// empty for a composition that declares none. The worker reads them back into
+/// that value. Bounded on decode — see the `props` module below.
+#[derive(Serialize, Deserialize)]
+pub struct RoundProps(#[serde(with = "props")] pub Vec<u8>);
+
+/// What a round request carries besides the clip's bytes, the two frames and the
+/// bundle header: the key, the frames' and the event's CBOR heads, and remoc's
+/// own envelope with the reply, callback and two bundle-stream ports — some
 /// 10 KiB with every field at its bound; the rest is margin.
 pub(crate) const RUN_REQUEST_HEADROOM: usize = 64 * 1024;
 
@@ -238,18 +247,19 @@ pub(crate) const RUN_REQUEST_HEADROOM: usize = 64 * 1024;
 const _: () = assert!(
     hatch_client::MAX_CLIP_BYTES
         + <SessionState as Framed>::FRAME
+        + <RoundProps as Framed>::FRAME
         + crate::stream::BUNDLE_HEADER_MAX_ENCODED
         + RUN_REQUEST_HEADROOM
         <= remoc::rch::DEFAULT_MAX_ITEM_SIZE,
     "a round request at its bounds no longer fits one remoc item"
 );
 
-/// The codec for [`RunRequest::props`]: one byte string out, a bounded one in.
+/// The codec for the props on this hop — [`RoundProps`] and
+/// [`Preparing::Read`]: one byte string out, a bounded one in.
 ///
-/// The bound exists on this side because the worker cannot see api's ingress cap
-/// and must not assume its caller is api: the leaves accept any attested guest.
-/// The number is `engine_types::limits`' restatement of api's `MAX_PROPS_SIZE`,
-/// and why it is looser is written there.
+/// The bound exists on this side because the worker cannot see api's checks and
+/// must not assume its caller is api: the leaves accept any attested guest. The
+/// number, and what it rests on, is `engine_types::limits::MAX_PROPS_BYTES`.
 mod props {
     use engine_types::limits::MAX_PROPS_BYTES;
     use serde::Deserialize;
@@ -310,6 +320,69 @@ pub enum RunOutcome {
         /// it with the key it computed to address an L2 blob. See the type.
         compat_token: CompatToken,
     },
+}
+
+/// A session's preparation on the wire: the composition to hold, and what to
+/// read against it.
+///
+/// No round, and nothing of one: no state, no event, no callbacks. What the
+/// worker does with it is load the composition and read the type it declares
+/// — the policy never runs — so the answer is a function of the composition and
+/// these props alone, both the consumer's.
+///
+/// `deny_unknown_fields` for the reason [`RunRequest`] carries it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareRequest {
+    /// Names the composition, as on [`RunRequest::composition_key`].
+    pub composition_key: CompositionKey,
+    pub preparing: Preparing,
+}
+
+/// What a preparation asks for besides the composition held.
+#[derive(Clone, Serialize, Deserialize)]
+pub enum Preparing {
+    /// Only that: the session's props were read when it was first prepared.
+    Hold,
+    /// The props the consumer gave the session, the JSON value as api keeps
+    /// it, empty when it gave none, to read as the type the composition
+    /// declares. Bounded on decode, as a round's are.
+    Read(#[serde(with = "props")] Vec<u8>),
+}
+
+/// What a preparation read, framed: the variant and the WAVE's length are what
+/// differ between the answers, and this is the hop the host counts.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PropsRead {
+    /// Nothing was asked to be read ([`Preparing::Hold`]).
+    NotRead,
+    /// The props as the type the composition declares, in WAVE — what every
+    /// round of the session is handed — or `None` for a composition that
+    /// declares none.
+    Read(Option<String>),
+    /// Where the props do not fit that type, and why.
+    Refused(PropsRefusal),
+}
+
+/// The result of `ExecutorService::prepare`, the cache-only path, as
+/// [`RunOutcome`] is `run`'s: the composition was held, or it is NOT cached and
+/// the orchestrator resolves it under its own key for
+/// `prepare_with_bundle`.
+#[derive(Serialize, Deserialize)]
+pub enum PrepareOutcome {
+    Prepared(Padded<PropsRead>),
+    CacheMiss {
+        /// As on [`RunOutcome::CacheMiss`].
+        compat_token: CompatToken,
+    },
+}
+
+/// The result of `ExecutorService::prepare_with_bundle`, which always holds the
+/// composition it is handed.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareReply {
+    pub props: Padded<PropsRead>,
 }
 
 /// The orchestrator-served CALLBACK boundary the keyless execution-worker calls
@@ -397,6 +470,20 @@ pub trait ExecutorService {
         bundle: BundleStream,
         callbacks: CallbackServiceClient<remoc::codec::Ciborium>,
     ) -> Result<RunReply, ExecError>;
+
+    /// Hold the composition for the session's rounds, and read its props when
+    /// asked — no round: see [`PrepareRequest`]. The L1-cache path, as
+    /// [`run`](ExecutorService::run) is: [`PrepareOutcome::CacheMiss`] on a miss.
+    async fn prepare(&self, req: PrepareRequest) -> Result<PrepareOutcome, ExecError>;
+
+    /// The post-miss path, as [`run_with_bundle`](ExecutorService::run_with_bundle)
+    /// is: the bundle streams beside the request, and the worker files it in L1
+    /// and prepares.
+    async fn prepare_with_bundle(
+        &self,
+        req: PrepareRequest,
+        bundle: BundleStream,
+    ) -> Result<PrepareReply, ExecError>;
 }
 
 /// The supervisor↔child seam (INTERNAL to the execution-worker host — remoc over
@@ -446,6 +533,11 @@ pub trait ChildService {
         fuel: u64,
         callbacks: ChildCallbacksClient<remoc::codec::Ciborium>,
     ) -> Result<RunStatus, ExecError>;
+
+    /// Read the consumer's props, the JSON value, as the type the primed
+    /// composition declares, instead of a round: the policy is never
+    /// instantiated. A child does one or the other, then goes.
+    async fn read_props(&self, props: ByteBuf) -> Result<PropsRead, ExecError>;
 }
 
 /// The supervisor-served callback boundary a per-round engine-executor-child calls BACK
@@ -556,9 +648,76 @@ mod execute_tests {
                     .map_err(ExecError::from)?,
             })
         }
+
+        /// Cache-only, like `run`: always a miss.
+        async fn prepare(&self, _req: PrepareRequest) -> Result<PrepareOutcome, ExecError> {
+            Ok(PrepareOutcome::CacheMiss {
+                compat_token: CompatToken::parse("test-token").expect("a legal token shape"),
+            })
+        }
+
+        /// Reads the bundle, then answers what it was asked: nothing read, or
+        /// the props it was handed back as their own WAVE.
+        async fn prepare_with_bundle(
+            &self,
+            req: PrepareRequest,
+            bundle: BundleStream,
+        ) -> Result<PrepareReply, ExecError> {
+            bundle
+                .receive(
+                    &mut Vec::new(),
+                    crate::DEFAULT_BUNDLE_STREAM_DEADLINE,
+                    crate::DEFAULT_BUNDLE_STREAM_IDLE,
+                )
+                .await
+                .map_err(|_| ExecError::Unknown)?;
+            let read = match req.preparing {
+                Preparing::Hold => PropsRead::NotRead,
+                Preparing::Read(json) => PropsRead::Read(Some(
+                    String::from_utf8(json).map_err(|_| ExecError::Unknown)?,
+                )),
+            };
+            Ok(PrepareReply {
+                props: Padded::seal(&read).map_err(ExecError::from)?,
+            })
+        }
     }
 
     type ExecCli = ExecutorServiceClient<Ciborium>;
+
+    /// A preparation takes a round's two paths with no round: a miss naming
+    /// only the worker's ABI id, then the bundle the orchestrator resolved, and
+    /// an answer that comes back unframed through the door.
+    #[tokio::test]
+    async fn a_preparation_misses_then_takes_the_bundle() {
+        let (client, _cb) = serve_mock::<ExecCli>().await;
+        let request = |preparing| PrepareRequest {
+            composition_key: CompositionKey::from_digest([0x11; 32]),
+            preparing,
+        };
+        assert!(matches!(
+            client.prepare(request(Preparing::Hold)).await,
+            Ok(PrepareOutcome::CacheMiss { .. })
+        ));
+        for (preparing, read) in [
+            (Preparing::Hold, PropsRead::NotRead),
+            (
+                Preparing::Read(b"{min-age: 18}".to_vec()),
+                PropsRead::Read(Some("{min-age: 18}".into())),
+            ),
+        ] {
+            let (stream, writer) = BundleStream::split(
+                crate::BundleSource::whole(crate::bundle::sample_bundle())
+                    .expect("the sample splits"),
+            );
+            let (reply, ()) = tokio::join!(
+                client.prepare_with_bundle(request(preparing), stream),
+                writer
+            );
+            let PrepareReply { props } = reply.expect("the preparation answers");
+            assert_eq!(props.open().expect("the frame decodes"), read);
+        }
+    }
 
     /// `run()` crosses to the worker WITH a callback client; on an L1 miss the
     /// worker returns `CacheMiss` (naming only its ABI id), the orchestrator
@@ -611,7 +770,7 @@ mod execute_tests {
 
         let mk_req = || RunRequest {
             composition_key: CompositionKey::from_digest([0x11; 32]),
-            props: br#"{"age":30}"#.to_vec(),
+            props: Padded::seal(&RoundProps(b"{age: 30}".to_vec())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Start,
         };
@@ -656,7 +815,7 @@ mod execute_tests {
     fn a_request() -> RunRequest {
         RunRequest {
             composition_key: CompositionKey::from_digest([0x11; 32]),
-            props: Vec::new(),
+            props: Padded::seal(&RoundProps(Vec::new())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Start,
         }
@@ -847,6 +1006,18 @@ mod execute_tests {
                 .await
                 .map_err(|_| ExecError::Unknown)?;
             Err(ExecError::Unknown)
+        }
+
+        async fn prepare(&self, req: PrepareRequest) -> Result<PrepareOutcome, ExecError> {
+            MockExecutor.prepare(req).await
+        }
+
+        async fn prepare_with_bundle(
+            &self,
+            req: PrepareRequest,
+            bundle: BundleStream,
+        ) -> Result<PrepareReply, ExecError> {
+            MockExecutor.prepare_with_bundle(req, bundle).await
         }
     }
 
@@ -1047,6 +1218,15 @@ mod request_bound_tests {
         Padded::seal(&SessionState::default()).expect("the default state fits its frame")
     }
 
+    /// `props` in their frame as the wire carries it, however long they are:
+    /// the encoded props, zeros after them to the frame's length.
+    fn props_frame(props: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        ciborium::into_writer(&RoundProps(props.to_vec()), &mut b).expect("props encode");
+        b.resize(<RoundProps as Framed>::FRAME.max(b.len()), 0);
+        b
+    }
+
     fn decode(req: &LooseRequest<'_>) -> Result<RunRequest, ()> {
         let mut b = Vec::new();
         ciborium::into_writer(req, &mut b).expect("the loose shape encodes");
@@ -1069,23 +1249,38 @@ mod request_bound_tests {
     #[test]
     fn the_ordinary_round_decodes() {
         let key = a_key();
-        let props = br#"{"age":30}"#;
-        let req = decode(&loose(&key, props, Event::Start)).expect("a legal round decodes");
+        let props = props_frame(b"{age: 30}");
+        let req = decode(&loose(&key, &props, Event::Start)).expect("a legal round decodes");
         assert_eq!(req.composition_key.as_str(), key);
-        assert_eq!(req.props, props);
+        assert_eq!(req.props.open().expect("the props open").0, b"{age: 30}");
     }
 
     #[test]
     fn a_key_that_is_not_a_digest_rendering_is_refused() {
-        assert!(decode(&loose("whatever-i-like", b"", Event::Start)).is_err());
+        let props = props_frame(b"");
+        assert!(decode(&loose("whatever-i-like", &props, Event::Start)).is_err());
     }
 
+    /// The props cross only in their frame: one of any other length is refused
+    /// with the request.
+    #[test]
+    fn props_out_of_their_frame_are_refused() {
+        let mut short = props_frame(b"");
+        short.pop();
+        assert!(decode(&loose(&a_key(), &short, Event::Start)).is_err());
+        assert!(decode(&loose(&a_key(), b"{age: 30}", Event::Start)).is_err());
+    }
+
+    /// Props past the byte bound fit the frame's slack, and are refused where
+    /// the frame opens.
     #[test]
     fn props_over_the_byte_bound_are_refused() {
-        let at_bound = vec![b'x'; MAX_PROPS_BYTES];
-        assert!(decode(&loose(&a_key(), &at_bound, Event::Start)).is_ok());
-        let over = vec![b'x'; MAX_PROPS_BYTES + 1];
-        assert!(decode(&loose(&a_key(), &over, Event::Start)).is_err());
+        let at_bound = props_frame(&vec![b'x'; MAX_PROPS_BYTES]);
+        let req = decode(&loose(&a_key(), &at_bound, Event::Start)).expect("a legal round");
+        assert!(req.props.open().is_ok());
+        let over = props_frame(&vec![b'x'; MAX_PROPS_BYTES + 1]);
+        let req = decode(&loose(&a_key(), &over, Event::Start)).expect("a frame of its length");
+        assert!(req.props.open().is_err());
     }
 
     /// The event's frames are bounded by their own type, and the request decoder
@@ -1098,7 +1293,8 @@ mod request_bound_tests {
                 frames: vec![vec![1u8]; MAX_CLIP_FRAMES + 1],
             },
         });
-        assert!(decode(&loose(&a_key(), b"", event)).is_err());
+        let props = props_frame(b"");
+        assert!(decode(&loose(&a_key(), &props, event)).is_err());
     }
 
     /// Version skew fails closed rather than running a round on a request this
@@ -1114,11 +1310,12 @@ mod request_bound_tests {
             future_field: u32,
         }
         let key = a_key();
+        let props = props_frame(b"");
         let mut b = Vec::new();
         ciborium::into_writer(
             &Plus {
                 composition_key: &key,
-                props: Bytes::new(b""),
+                props: Bytes::new(&props),
                 session_state: frame(),
                 event: Event::Start,
                 future_field: 1,
@@ -1127,6 +1324,63 @@ mod request_bound_tests {
         )
         .expect("the loose shape encodes");
         assert!(ciborium::from_reader::<RunRequest, _>(&b[..]).is_err());
+    }
+
+    /// A preparation's stand-in, as `LooseRequest` is a round's.
+    #[derive(Serialize)]
+    struct LoosePreparation<'a> {
+        composition_key: &'a str,
+        preparing: LoosePreparing<'a>,
+    }
+
+    #[derive(Serialize)]
+    enum LoosePreparing<'a> {
+        Hold,
+        Read(&'a Bytes),
+    }
+
+    fn prepare(key: &str, preparing: LoosePreparing<'_>) -> Result<PrepareRequest, ()> {
+        let mut b = Vec::new();
+        ciborium::into_writer(
+            &LoosePreparation {
+                composition_key: key,
+                preparing,
+            },
+            &mut b,
+        )
+        .expect("the loose shape encodes");
+        ciborium::from_reader(&b[..]).map_err(|_| ())
+    }
+
+    /// What a preparation's decoder refuses: props past the byte bound, a key
+    /// that is no digest's rendering, and a field this build does not know.
+    #[test]
+    fn a_preparation_is_held_to_the_rounds_bounds() {
+        let at_bound = vec![b'x'; MAX_PROPS_BYTES];
+        let over = vec![b'x'; MAX_PROPS_BYTES + 1];
+        assert!(prepare(&a_key(), LoosePreparing::Hold).is_ok());
+        assert!(prepare(&a_key(), LoosePreparing::Read(Bytes::new(&at_bound))).is_ok());
+        assert!(prepare(&a_key(), LoosePreparing::Read(Bytes::new(&over))).is_err());
+        assert!(prepare("whatever-i-like", LoosePreparing::Hold).is_err());
+
+        #[derive(Serialize)]
+        struct Plus<'a> {
+            composition_key: &'a str,
+            preparing: LoosePreparing<'a>,
+            future_field: u32,
+        }
+        let key = a_key();
+        let mut b = Vec::new();
+        ciborium::into_writer(
+            &Plus {
+                composition_key: &key,
+                preparing: LoosePreparing::Hold,
+                future_field: 1,
+            },
+            &mut b,
+        )
+        .expect("the loose shape encodes");
+        assert!(ciborium::from_reader::<PrepareRequest, _>(&b[..]).is_err());
     }
 }
 

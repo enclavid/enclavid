@@ -49,7 +49,11 @@ use remoc::rtc::ServerShared;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[cfg(feature = "execute")]
-use crate::execute::{ExecutorServiceClient, ExecutorServiceServerShared, RunOutcome};
+use crate::execute::{ExecutorServiceClient, ExecutorServiceServerShared, PropsRead, RunOutcome};
+#[cfg(feature = "execute")]
+use crate::keys::CompatToken;
+#[cfg(feature = "execute")]
+use enclavid_boundary::Untrusted;
 
 /// How many requests a served leg lets wait to be taken, unless the role says
 /// otherwise ([`serve_executor`], [`serve_compiler`]). api's rounds and compiles
@@ -231,6 +235,16 @@ pub struct ExecutorLeg {
     callback_buffer: usize,
 }
 
+/// What a cache-only preparation answered, each half the worker's word under
+/// the scope `S` the caller judges it by.
+#[cfg(feature = "execute")]
+pub enum Preparation<S> {
+    /// The composition is held, and this is what was read.
+    Read(Untrusted<PropsRead, S>),
+    /// It is not cached; the worker's cwasm ABI id, to resolve it under.
+    CacheMiss(Untrusted<CompatToken, S>),
+}
+
 /// The doors.
 ///
 /// Not behind a feature. A contract that says what may cross a hop is not
@@ -242,15 +256,15 @@ pub struct ExecutorLeg {
 mod doors {
     use std::sync::Arc;
 
-    use super::{ExecutorLeg, RunOutcome};
+    use super::{ExecutorLeg, Preparation, RunOutcome};
     use crate::adapter::Untrusting;
     use crate::execute::{
-        CallbackServiceClient, CallbackServiceServerShared, ExecError, ExecutorService, RunReply,
-        RunRequest, RunStatus,
+        CallbackServiceClient, CallbackServiceServerShared, ExecError, ExecutorService,
+        PrepareOutcome, PrepareReply, PrepareRequest, PropsRead, RunReply, RunRequest, RunStatus,
     };
     use crate::stream::BundleStream;
     use crate::untrusted_execute::CallbackServiceUntrusted;
-    use enclavid_boundary::{Exposed, Untrusted};
+    use enclavid_boundary::{Exposed, Open, Untrusted};
     use remoc::codec::Ciborium;
     use remoc::rtc::ServerShared;
 
@@ -360,6 +374,44 @@ mod doors {
             };
             reply
                 .and_then(|RunReply { status }| status.open().map_err(Into::into))
+                .map(Untrusted::new)
+        }
+
+        /// The cache-only attempt at preparing a session. `req` arrives fully
+        /// vouched, as a round's does; the reply arrives under `S`, the scope the
+        /// caller judges this leg's word by — there are no callbacks on this
+        /// call to have named it. Unframed, and taken apart by its variant, so
+        /// that each half is judged on its own grounds: the two lead to different
+        /// paths, and neither is acted on before it is judged.
+        pub async fn prepare<S: Open>(
+            &self,
+            req: Exposed<PrepareRequest, ()>,
+        ) -> Result<Preparation<S>, ExecError> {
+            Ok(match self.client.prepare(req.into_inner()).await? {
+                PrepareOutcome::Prepared(read) => Preparation::Read(Untrusted::new(read.open()?)),
+                PrepareOutcome::CacheMiss { compat_token } => {
+                    Preparation::CacheMiss(Untrusted::new(compat_token))
+                }
+            })
+        }
+
+        /// The post-miss attempt at preparing a session, with the bundle the
+        /// caller resolved under its own key, which crosses as a round's does
+        /// (see [`run_with_bundle`](Self::run_with_bundle)). Unframes the reply.
+        pub async fn prepare_with_bundle<S: Open>(
+            &self,
+            req: Exposed<PrepareRequest, ()>,
+            bundle: crate::BundleSource,
+        ) -> Result<Untrusted<PropsRead, S>, ExecError> {
+            let (stream, writer) = BundleStream::split(bundle);
+            let mut call =
+                std::pin::pin!(self.client.prepare_with_bundle(req.into_inner(), stream));
+            let reply = tokio::select! {
+                reply = &mut call => reply,
+                () = writer => call.await,
+            };
+            reply
+                .and_then(|PrepareReply { props }| props.open().map_err(Into::into))
                 .map(Untrusted::new)
         }
     }
@@ -496,23 +548,6 @@ impl<S: enclavid_boundary::Open> CompilerLeg<S> {
             .map(enclavid_boundary::Untrusted::new)
             .map_err(enclavid_boundary::Untrusted::new)
     }
-
-    /// The ABI id of the cwasm the worker compiles, as the peer's word: it
-    /// names its own runtime, which this side cannot inspect. Its failure is
-    /// the peer's word too.
-    pub async fn compat_token(
-        &self,
-    ) -> Result<
-        enclavid_boundary::Untrusted<crate::CompatToken, S>,
-        enclavid_boundary::Untrusted<crate::CompileError, S>,
-    > {
-        use crate::compile::CompilerService as _;
-        self.0
-            .compat_token()
-            .await
-            .map(enclavid_boundary::Untrusted::new)
-            .map_err(enclavid_boundary::Untrusted::new)
-    }
 }
 
 /// The execute door end to end: `connect_executor` on one side, `serve_executor`
@@ -531,8 +566,8 @@ mod door_tests {
     };
     use crate::bundle::{CompiledBundle, sample_bundle};
     use crate::execute::{
-        CallbackError, CallbackServiceClient, ExecError, RunOutcome, RunReply, RunRequest,
-        RunStatus,
+        CallbackError, CallbackServiceClient, ExecError, PrepareOutcome, PrepareReply,
+        PrepareRequest, RunOutcome, RunReply, RunRequest, RunStatus,
     };
     use crate::keys::CompositionKey;
     use crate::padded::{Framed, Padded};
@@ -593,6 +628,21 @@ mod door_tests {
             Ok(Exposed::<_, (AuthN,)>::new(reply)
                 .vouch_unchecked::<AuthN, _>(reason!("test fixture")))
         }
+
+        async fn prepare(
+            &self,
+            _req: Untrusted<PrepareRequest, Self::Scope>,
+        ) -> Result<Exposed<PrepareOutcome, ()>, ExecError> {
+            Err(ExecError::Unknown)
+        }
+
+        async fn prepare_with_bundle(
+            &self,
+            _req: Untrusted<PrepareRequest, Self::Scope>,
+            _bundle: Untrusted<BundleStream, Self::Scope>,
+        ) -> Result<Exposed<PrepareReply, ()>, ExecError> {
+            Err(ExecError::Unknown)
+        }
     }
 
     struct NoCallbacks;
@@ -633,7 +683,7 @@ mod door_tests {
     fn round(event: Event) -> Exposed<RunRequest, ()> {
         Exposed::<_, (AuthN,)>::new(RunRequest {
             composition_key: CompositionKey::from_digest([0x22; 32]),
-            props: Vec::new(),
+            props: Padded::seal(&crate::execute::RoundProps(Vec::new())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event,
         })

@@ -38,8 +38,8 @@ use remoc::codec::Ciborium;
 
 use crate::adapter::Untrusting;
 use crate::execute::{
-    CallbackError, CallbackService, CallbackServiceClient, ExecError, ExecutorService, RunOutcome,
-    RunReply, RunRequest,
+    CallbackError, CallbackService, CallbackServiceClient, ExecError, ExecutorService,
+    PrepareOutcome, PrepareReply, PrepareRequest, RunOutcome, RunReply, RunRequest,
 };
 use crate::padded::Padded;
 use crate::stream::BundleStream;
@@ -153,6 +153,22 @@ pub trait ExecutorServiceUntrusted {
         bundle: Untrusted<BundleStream, Self::Scope>,
         callbacks: CallbackServiceClient<Ciborium>,
     ) -> impl Future<Output = Result<Exposed<RunReply, ()>, ExecError>> + Send;
+
+    /// The L1-cache path of a preparation. See the raw
+    /// `ExecutorService::prepare`.
+    fn prepare(
+        &self,
+        req: Untrusted<PrepareRequest, Self::Scope>,
+    ) -> impl Future<Output = Result<Exposed<PrepareOutcome, ()>, ExecError>> + Send;
+
+    /// The post-miss path of a preparation. See the raw
+    /// `ExecutorService::prepare_with_bundle`; the bundle is wrapped apart for
+    /// the reason [`run_with_bundle`](Self::run_with_bundle)'s is.
+    fn prepare_with_bundle(
+        &self,
+        req: Untrusted<PrepareRequest, Self::Scope>,
+        bundle: Untrusted<BundleStream, Self::Scope>,
+    ) -> impl Future<Output = Result<Exposed<PrepareReply, ()>, ExecError>> + Send;
 }
 
 /// A shared service is still one: the worker's L1 and child pool outlive any one
@@ -179,6 +195,21 @@ where
         callbacks: CallbackServiceClient<Ciborium>,
     ) -> impl Future<Output = Result<Exposed<RunReply, ()>, ExecError>> + Send {
         (**self).run_with_bundle(req, bundle, callbacks)
+    }
+
+    fn prepare(
+        &self,
+        req: Untrusted<PrepareRequest, Self::Scope>,
+    ) -> impl Future<Output = Result<Exposed<PrepareOutcome, ()>, ExecError>> + Send {
+        (**self).prepare(req)
+    }
+
+    fn prepare_with_bundle(
+        &self,
+        req: Untrusted<PrepareRequest, Self::Scope>,
+        bundle: Untrusted<BundleStream, Self::Scope>,
+    ) -> impl Future<Output = Result<Exposed<PrepareReply, ()>, ExecError>> + Send {
+        (**self).prepare_with_bundle(req, bundle)
     }
 }
 
@@ -232,6 +263,24 @@ where
     ) -> Result<RunReply, ExecError> {
         self.0
             .run_with_bundle(Untrusted::new(req), Untrusted::new(bundle), callbacks)
+            .await
+            .map(Exposed::into_inner)
+    }
+
+    async fn prepare(&self, req: PrepareRequest) -> Result<PrepareOutcome, ExecError> {
+        self.0
+            .prepare(Untrusted::new(req))
+            .await
+            .map(Exposed::into_inner)
+    }
+
+    async fn prepare_with_bundle(
+        &self,
+        req: PrepareRequest,
+        bundle: BundleStream,
+    ) -> Result<PrepareReply, ExecError> {
+        self.0
+            .prepare_with_bundle(Untrusted::new(req), Untrusted::new(bundle))
             .await
             .map(Exposed::into_inner)
     }

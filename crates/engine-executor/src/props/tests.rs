@@ -4,9 +4,11 @@ use engine_compiler::Compiler;
 use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
 use wit_parser::{ManglingAndAbi, Resolve};
 
-/// The type of `get` in a component whose `policy-props` interface holds
-/// `body` — its types and its `get`.
-fn get_in(body: &str) -> ComponentFunc {
+use PropsProblem as P;
+
+/// The type of `get` in a component whose `policy-props` package holds
+/// `package` — the interface and any it uses.
+fn get_in_package(package: &str) -> ComponentFunc {
     let wit = format!(
         "package test:policy;
 
@@ -14,11 +16,7 @@ fn get_in(body: &str) -> ComponentFunc {
              import {INTERFACE};
          }}
 
-         package enclavid:host-ext@0.1.0 {{
-             interface policy-props {{
-                 {body}
-             }}
-         }}"
+         {package}"
     );
     let mut resolve = Resolve::default();
     let package = resolve
@@ -43,37 +41,48 @@ fn get_in(body: &str) -> ComponentFunc {
     declared(&component, component.engine()).expect("the component imports `get`")
 }
 
-/// `get` returning `record props { <fields> }`, beside `types`.
+/// `get` returning `record props { fields }`, beside `types`.
 fn props_with(types: &str, fields: &str) -> ComponentFunc {
-    get_in(&format!(
-        "{types}
-         record props {{ {fields} }}
-         get: func() -> props;"
+    get_in_package(&format!(
+        "package enclavid:host-ext@0.1.0 {{
+             interface policy-props {{
+                 {types}
+                 record props {{ {fields} }}
+                 get: func() -> props;
+             }}
+         }}"
     ))
 }
 
-fn read(get: &ComponentFunc, json: &str) -> Result<Val> {
-    value(Some(get), json.as_bytes()).map(|props| props.expect("a policy with props gets some"))
+/// `json` read as the record `get` returns — and the WAVE read back as that
+/// record, as a round reads it, so what is written is what a round gets.
+fn fits(get: &ComponentFunc, json: &str) -> String {
+    let wave = read(Some(get), json.as_bytes())
+        .unwrap_or_else(|refusal| panic!("{json}: {refusal:?}"))
+        .expect("a policy with props gets some");
+    let back = value(Some(get), wave.as_bytes())
+        .unwrap_or_else(|e| panic!("{wave}: {e}"))
+        .expect("a policy with props gets some");
+    assert_eq!(back.to_wave().unwrap(), wave);
+    wave
 }
 
-fn refusal(get: &ComponentFunc, json: &str) -> String {
-    match read(get, json) {
+fn refusal(get: &ComponentFunc, json: &str) -> PropsRefusal {
+    match read(Some(get), json.as_bytes()) {
         Ok(props) => panic!("{json} read as {props:?}"),
-        Err(e) => e.to_string(),
+        Err(refusal) => refusal,
     }
 }
 
-fn record(fields: &[(&str, Val)]) -> Val {
-    Val::Record(
-        fields
-            .iter()
-            .map(|(name, value)| (name.to_string(), value.clone()))
-            .collect(),
-    )
+fn key(k: &str) -> Step {
+    Step::Key(k.into())
 }
 
-fn some(value: Val) -> Val {
-    Val::Option(Some(Box::new(value)))
+fn at(path: &[Step], problem: PropsProblem) -> PropsRefusal {
+    PropsRefusal {
+        path: path.to_vec(),
+        problem,
+    }
 }
 
 #[test]
@@ -92,49 +101,24 @@ fn json_becomes_the_record_the_policy_declares() {
          limit: s64,
          people: list<person>",
     );
-    let props = read(
-        &get,
-        r#"{
-            "people": [{"name": "A"}, {"name": "B", "age": 30}],
-            "min-age": 18,
-            "country": "DE",
-            "mode": "lenient",
-            "ratio": 0.5,
-            "scale": 2,
-            "initial": "Ж",
-            "strict": true,
-            "limit": -9007199254740993
-        }"#,
-    )
-    .expect("the props fit");
-    // In the record's own order, whatever the JSON's, and an option left out is
-    // `none`.
+    // In the record's own order, whatever the JSON's; an option left out is
+    // `none`, which WAVE leaves out too.
     assert_eq!(
-        props,
-        record(&[
-            ("min-age", Val::U8(18)),
-            ("country", Val::String("DE".into())),
-            ("expected-name", Val::Option(None)),
-            ("mode", Val::Enum("lenient".into())),
-            ("ratio", Val::Float64(0.5)),
-            ("scale", Val::Float32(2.0)),
-            ("initial", Val::Char('Ж')),
-            ("strict", Val::Bool(true)),
-            ("limit", Val::S64(-9007199254740993)),
-            (
-                "people",
-                Val::List(vec![
-                    record(&[
-                        ("name", Val::String("A".into())),
-                        ("age", Val::Option(None)),
-                    ]),
-                    record(&[
-                        ("name", Val::String("B".into())),
-                        ("age", some(Val::U8(30))),
-                    ]),
-                ]),
-            ),
-        ])
+        fits(
+            &get,
+            r#"{
+                "people": [{"name": "A"}, {"name": "B", "age": 30}],
+                "min-age": 18,
+                "country": "DE",
+                "mode": "lenient",
+                "ratio": 0.5,
+                "scale": 2,
+                "initial": "Ж",
+                "strict": true,
+                "limit": -9007199254740993
+            }"#
+        ),
+        r#"{min-age: 18, country: "DE", mode: lenient, ratio: 0.5, scale: 2, initial: 'Ж', strict: true, limit: -9007199254740993, people: [{name: "A"}, {name: "B", age: some(30)}]}"#
     );
 }
 
@@ -142,39 +126,38 @@ fn json_becomes_the_record_the_policy_declares() {
 fn null_is_none_and_a_value_is_some() {
     let get = props_with("", "note: option<string>, count: option<u32>");
     assert_eq!(
-        read(&get, r#"{"note": null, "count": 3}"#).unwrap(),
-        record(&[("note", Val::Option(None)), ("count", some(Val::U32(3)))])
+        fits(&get, r#"{"note": null, "count": 3}"#),
+        "{count: some(3)}"
     );
 }
 
 #[test]
 fn no_props_read_as_an_empty_object() {
     let optional = props_with("", "note: option<string>");
-    let none = record(&[("note", Val::Option(None))]);
-    assert_eq!(value(Some(&optional), b"").unwrap(), Some(none.clone()));
-    assert_eq!(value(Some(&optional), b"{}").unwrap(), Some(none));
+    assert_eq!(fits(&optional, ""), "{:}");
+    assert_eq!(fits(&optional, "{}"), "{:}");
 
     let required = props_with("", "country: string");
-    let e = value(Some(&required), b"").unwrap_err().to_string();
-    assert!(e.contains("props: `country` is missing"), "{e}");
+    assert_eq!(read(Some(&required), b""), Err(at(&[], P::Missing)));
 }
 
 #[test]
 fn a_field_is_named_as_the_wit_spells_it() {
     let get = props_with("", "min-age: u8");
-    let e = refusal(&get, r#"{"minAge": 18}"#);
-    assert!(e.contains("props: `minAge` is not a field"), "{e}");
     assert_eq!(
-        read(&get, r#"{"min-age": 18}"#).unwrap(),
-        record(&[("min-age", Val::U8(18))])
+        refusal(&get, r#"{"minAge": 18}"#),
+        at(&[key("minAge")], P::UnknownField)
     );
+    assert_eq!(fits(&get, r#"{"min-age": 18}"#), "{min-age: 18}");
 }
 
 #[test]
 fn a_key_the_record_lacks_is_refused() {
     let get = props_with("", "country: string, extra: option<string>");
-    let e = refusal(&get, r#"{"country": "DE", "typo": "x"}"#);
-    assert!(e.contains("props: `typo` is not a field"), "{e}");
+    assert_eq!(
+        refusal(&get, r#"{"country": "DE", "typo": "x"}"#),
+        at(&[key("typo")], P::UnknownField)
+    );
 }
 
 #[test]
@@ -186,8 +169,11 @@ fn an_integer_must_fit_its_type() {
         r#"{"age": 18.5}"#,
         r#"{"age": 18.0}"#,
     ] {
-        let e = refusal(&get, json);
-        assert!(e.contains("props.age: not a whole number"), "{json}: {e}");
+        assert_eq!(
+            refusal(&get, json),
+            at(&[key("age")], P::OutOfRange),
+            "{json}"
+        );
     }
 }
 
@@ -203,60 +189,82 @@ fn a_wrong_shape_names_what_was_expected() {
          count: option<u32>",
     );
     for (json, says) in [
+        (r#"{"mode": "loose"}"#, at(&[key("mode")], P::NotACase)),
+        (r#"{"mode": 1}"#, at(&[key("mode")], P::ShouldBeString)),
         (
-            r#"{"mode": "loose"}"#,
-            "props.mode: not one of the enum's cases",
+            r#"{"initial": "ab"}"#,
+            at(&[key("initial")], P::ShouldBeOneCharacter),
         ),
-        (r#"{"mode": 1}"#, "props.mode: should be a string"),
-        (r#"{"initial": "ab"}"#, "props.initial: not one character"),
         (
             r#"{"inner": {"flag": "yes"}}"#,
-            "props.inner.flag: should be true or false",
+            at(&[key("inner"), key("flag")], P::ShouldBeBool),
         ),
-        (r#"{"inner": {}}"#, "props.inner: `flag` is missing"),
-        (r#"{"inner": []}"#, "props.inner: should be an object"),
-        (r#"{"tags": ["a", 2]}"#, "props.tags[1]: should be a string"),
-        (r#"{"tags": "a"}"#, "props.tags: should be an array"),
-        (r#"{"count": "3"}"#, "props.count: should be a whole number"),
+        // Missing from `inner`, which is where it is said to be.
+        (r#"{"inner": {}}"#, at(&[key("inner")], P::Missing)),
+        (r#"{"inner": []}"#, at(&[key("inner")], P::ShouldBeObject)),
+        (
+            r#"{"tags": ["a", 2]}"#,
+            at(&[key("tags"), Step::Index(1)], P::ShouldBeString),
+        ),
+        (r#"{"tags": "a"}"#, at(&[key("tags")], P::ShouldBeArray)),
+        (
+            r#"{"count": "3"}"#,
+            at(&[key("count")], P::ShouldBeWholeNumber),
+        ),
     ] {
-        let e = refusal(&get, json);
-        assert!(e.contains(says), "{json}: {e}");
+        assert_eq!(refusal(&get, json), says, "{json}");
     }
 }
 
 #[test]
 fn a_refusal_never_carries_a_value() {
     let get = props_with("", "expected-name: u8");
-    let e = refusal(&get, r#"{"expected-name": "Jane Q. Citizen"}"#);
-    assert!(!e.contains("Jane"), "{e}");
+    let refusal = refusal(&get, r#"{"expected-name": "Jane Q. Citizen"}"#);
+    assert!(!format!("{refusal:?}").contains("Jane"), "{refusal:?}");
 }
 
 #[test]
 fn a_type_props_cannot_hold_is_refused_where_a_value_of_it_is_given() {
-    for (types, field, json) in [
-        ("", "pair: option<tuple<u8, u8>>", r#"{"pair": [1, 2]}"#),
+    for (types, field, json, path) in [
         (
-            "variant choice { a, b(u8) }",
-            "choice: option<choice>",
-            r#"{"choice": "a"}"#,
+            "",
+            "pair: option<tuple<u8, u8>>",
+            r#"{"pair": [1, 2]}"#,
+            vec![key("pair")],
         ),
         (
             "variant choice { a, b(u8) }",
             "choice: option<choice>",
-            r#"{"choice": {"b": 1}}"#,
+            r#"{"choice": "a"}"#,
+            vec![key("choice")],
         ),
         (
             "flags perms { read }",
             "perms: option<perms>",
             r#"{"perms": ["read"]}"#,
+            vec![key("perms")],
         ),
-        ("", "outcome: option<result<u8>>", r#"{"outcome": 1}"#),
-        ("", "pairs: list<tuple<u8, u8>>", r#"{"pairs": [[1, 2]]}"#),
-        ("", "pair: tuple<u8, u8>", r#"{"pair": null}"#),
+        (
+            "",
+            "outcome: option<result<u8>>",
+            r#"{"outcome": 1}"#,
+            vec![key("outcome")],
+        ),
+        (
+            "",
+            "pairs: list<tuple<u8, u8>>",
+            r#"{"pairs": [[1, 2]]}"#,
+            vec![key("pairs"), Step::Index(0)],
+        ),
+        (
+            "",
+            "pair: tuple<u8, u8>",
+            r#"{"pair": null}"#,
+            vec![key("pair")],
+        ),
     ] {
         let get = props_with(types, field);
-        let e = refusal(&get, json);
-        assert!(e.contains("a type props cannot hold"), "{json}: {e}");
+        assert_eq!(refusal(&get, json), at(&path, P::Unholdable), "{json}");
     }
 }
 
@@ -268,56 +276,137 @@ fn a_field_of_a_type_props_cannot_hold_left_out_is_none_or_missing() {
     );
     // The props never reach either type: an optional field is `none`, and an
     // empty list holds nothing of its element's type.
-    assert_eq!(
-        read(&get, r#"{"pairs": []}"#).unwrap(),
-        record(&[("pair", Val::Option(None)), ("pairs", Val::List(vec![]))])
-    );
+    assert_eq!(fits(&get, r#"{"pairs": []}"#), "{pairs: []}");
 
     let required = props_with("", "pair: tuple<u8, u8>");
-    let e = refusal(&required, "{}");
-    assert!(e.contains("props: `pair` is missing"), "{e}");
-}
-
-#[test]
-fn get_must_return_one_record() {
-    let get = get_in("get: func() -> u32;");
-    let e = value(Some(&get), b"{}").unwrap_err().to_string();
-    assert!(e.contains("does not return one record"), "{e}");
-
-    let get = get_in("record props { a: u8 } get: func(x: u8) -> props;");
-    let e = value(Some(&get), b"{}").unwrap_err().to_string();
-    assert!(e.contains("takes parameters"), "{e}");
+    assert_eq!(refusal(&required, "{}"), at(&[], P::Missing));
 }
 
 #[test]
 fn a_policy_without_props_takes_none() {
-    assert_eq!(value(None, b"").unwrap(), None);
-    assert_eq!(value(None, b"{}").unwrap(), None);
-    let e = value(None, br#"{"country": "DE"}"#)
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("does not import"), "{e}");
+    assert_eq!(read(None, b""), Ok(None));
+    assert_eq!(read(None, b"{}"), Ok(None));
+    for json in [r#"{"country": "DE"}"#, "[]", "1", "\"x\""] {
+        assert_eq!(
+            read(None, json.as_bytes()),
+            Err(at(&[], P::NotDeclared)),
+            "{json}"
+        );
+    }
+    assert_eq!(read(None, b"not json"), Err(at(&[], P::NotJson)));
 }
 
 #[test]
-fn a_key_given_twice_is_refused() {
-    let get = props_with("", "country: string");
-    let e = refusal(&get, r#"{"country": "DE", "country": "FR"}"#);
-    assert!(e.contains("props: `country` is given twice"), "{e}");
-}
-
-#[test]
-fn props_that_are_not_one_object_are_refused() {
+fn props_for_a_record_that_are_no_object_are_refused() {
     let get = props_with("", "note: option<string>");
     for json in ["[]", "1", "\"x\"", "null"] {
-        let e = value(Some(&get), json.as_bytes()).unwrap_err().to_string();
-        assert!(e.contains("props: should be an object"), "{json}: {e}");
+        assert_eq!(refusal(&get, json), at(&[], P::ShouldBeObject), "{json}");
     }
     for json in ["not json", "{} {}", r#"{"note": "a""#] {
-        assert!(value(Some(&get), json.as_bytes()).is_err(), "{json}");
+        assert_eq!(refusal(&get, json), at(&[], P::NotJson), "{json}");
     }
-    for json in ["[]", "1", "not json"] {
-        let e = value(None, json.as_bytes()).unwrap_err().to_string();
-        assert!(e.contains("not a JSON object"), "{json}: {e}");
+}
+
+/// `get` returning `ty`, beside `types`.
+fn returning(types: &str, ty: &str) -> ComponentFunc {
+    get_in_package(&format!(
+        "package enclavid:host-ext@0.1.0 {{
+             interface policy-props {{
+                 {types}
+                 get: func() -> {ty};
+             }}
+         }}"
+    ))
+}
+
+/// Props of a type that is no record are the JSON value of that type itself.
+#[test]
+fn props_of_any_type_are_its_json_value() {
+    for (types, ty, json, wave) in [
+        ("", "u32", "5", "5"),
+        ("", "string", r#""DE""#, r#""DE""#),
+        ("", "list<string>", r#"["a", "b"]"#, r#"["a", "b"]"#),
+        (
+            "enum mode { strict, lenient }",
+            "mode",
+            r#""strict""#,
+            "strict",
+        ),
+        ("", "option<u32>", "7", "some(7)"),
+        ("", "option<u32>", "null", "none"),
+    ] {
+        assert_eq!(fits(&returning(types, ty), json), wave, "{ty} {json}");
     }
+    assert_eq!(refusal(&returning("", "u8"), "256"), at(&[], P::OutOfRange));
+    assert_eq!(
+        refusal(&returning("", "u32"), r#"{"a": 1}"#),
+        at(&[], P::ShouldBeWholeNumber)
+    );
+}
+
+/// Props not given are `null` to a type that is no record: `none` to an
+/// option, and refused where a value is required.
+#[test]
+fn props_not_given_are_null_to_a_type_that_is_no_record() {
+    assert_eq!(fits(&returning("", "option<u32>"), ""), "none");
+    assert_eq!(
+        read(Some(&returning("", "u32")), b""),
+        Err(at(&[], P::ShouldBeWholeNumber))
+    );
+    assert_eq!(
+        read(Some(&returning("", "list<string>")), b""),
+        Err(at(&[], P::ShouldBeArray))
+    );
+}
+
+/// A record whose types come from another interface reads as well.
+#[test]
+fn a_record_using_another_interfaces_types_reads() {
+    let get = get_in_package(
+        "package enclavid:host-ext@0.1.0 {
+             interface shapes { record point { x: u32, y: u32 } }
+             interface policy-props {
+                 use shapes.{point};
+                 record props { at: point, path: list<point> }
+                 get: func() -> props;
+             }
+         }",
+    );
+    assert_eq!(
+        fits(&get, r#"{"at": {"x": 1, "y": 2}, "path": []}"#),
+        "{at: {x: 1, y: 2}, path: []}"
+    );
+}
+
+/// A field named as a WAVE keyword is written so WAVE reads it back.
+#[test]
+fn a_field_named_as_a_keyword_reads_back() {
+    let get = props_with(
+        "enum answer { %true, %none }",
+        "%none: option<u8>, ok: answer",
+    );
+    fits(&get, r#"{"none": 1, "ok": "true"}"#);
+}
+
+/// Props whose WAVE is past what a round carries are refused as too long at
+/// the props themselves, however short their JSON: each `1e-300` is three
+/// hundred digits written out.
+#[test]
+fn props_past_what_a_round_carries_are_too_long() {
+    let get = returning("", "list<f64>");
+    let json = format!("[{}]", vec!["1e-300"; 30].join(", "));
+    assert!(json.len() < 256);
+    assert_eq!(refusal(&get, &json), at(&[], P::TooLong));
+}
+
+/// Every float a JSON number spells is written so WAVE reads it back, at its
+/// longest well within what a round carries.
+#[test]
+fn floats_read_back_however_they_are_spelled() {
+    let get = props_with("", "tiny: f64, huge: f32, small: list<f64>");
+    let wave = fits(
+        &get,
+        r#"{"tiny": 1e-300, "huge": 3.4e38, "small": [5e-324, -0.0, 1.7976931348623157e308]}"#,
+    );
+    assert!(wave.len() < MAX_PROPS_BYTES, "{}", wave.len());
 }

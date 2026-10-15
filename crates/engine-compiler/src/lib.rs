@@ -18,6 +18,7 @@
 mod compose;
 mod decls;
 mod hash;
+mod props;
 
 // This role's own supervisor↔child hop. Behind a feature because the pure library
 // — used by tests and by the child — stays free of rpc/remoc, and because a crate
@@ -149,7 +150,8 @@ impl Compiler {
     /// refusal. Before any section is parsed, one whose embedded sections are
     /// past `MAX_EMBEDDED_SECTION_BYTES`; then one whose catalogs break their
     /// format, that does not fuse, or that, fused, still imports what nothing
-    /// serves (`compose::served`). [`compose`](Self::compose) and
+    /// serves (`compose::served`) or declares props the host cannot serve
+    /// (`props::declared`). [`compose`](Self::compose) and
     /// [`fuse`](Self::fuse), which tests and tooling call directly, hold none of
     /// this.
     pub fn compile_to_parts(
@@ -246,18 +248,6 @@ fn lent(plugins: &[PluginInstance]) -> Vec<PluginInstance> {
             wasm: p.wasm.clone(),
         })
         .collect()
-}
-
-/// The ABI id of the cwasm this compiler produces: what L2 keeps a compile
-/// under, so a runtime of another wasmtime never addresses it. The same string
-/// `engine_executor::compat_token` derives for the runtime that loads it — the
-/// two crates link the same wasmtime and build their engines from the same
-/// [`engine_config`], and the executor's `happy_path` test holds them equal.
-pub fn compat_token() -> String {
-    format!(
-        "wt{}-cm-fuel",
-        wasmtime::ModuleVersionStrategy::WasmtimeVersion.as_str()
-    )
 }
 
 /// The wasmtime [`Config`] both fleet halves build their [`Engine`] from.

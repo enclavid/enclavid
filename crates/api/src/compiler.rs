@@ -17,14 +17,13 @@ use futures::stream::BoxStream;
 
 use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
 use engine_rpc::{
-    COMPILE_STREAM_DEADLINE, COMPILE_STREAM_IDLE, CompatToken, CompileError, CompileReply,
-    CompileSource, CompilerLeg, MAX_BUNDLE_META_BYTES,
+    COMPILE_STREAM_DEADLINE, COMPILE_STREAM_IDLE, CompileError, CompileReply, CompileSource,
+    CompilerLeg, MAX_BUNDLE_META_BYTES,
 };
 use fleet_stream::Incoming;
 use fleet_transport::LegFailure;
 use futures::{StreamExt, TryStreamExt};
 use safe_logger::debug;
-use tokio::sync::OnceCell;
 
 /// The COMPILE boundary: a client for a compile-worker's `engine_rpc::CompilerService`.
 /// Given already-pulled artifact bytes (the orchestrator owns the OCI pull +
@@ -65,10 +64,6 @@ fn outbound_compile_request(source: CompileSource) -> Exposed<CompileSource, ()>
 
 pub struct Compiler {
     leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileScope>>>>,
-    /// The compile-worker's ABI id, asked once and kept: api pins the worker's
-    /// measurement, so the build behind the leg — its runtime with it — cannot
-    /// change while this process runs, however often the leg is re-dialled.
-    compat_token: OnceCell<CompatToken>,
 }
 
 /// What a compile gives back, and what L2 keeps of it (`crate::cwasm_cache`):
@@ -88,36 +83,7 @@ impl Compiler {
     pub fn new(
         leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileScope>>>>,
     ) -> Self {
-        Self {
-            leg,
-            compat_token: OnceCell::new(),
-        }
-    }
-
-    /// The ABI id of the cwasm the compile-worker produces: the token L2 keeps
-    /// a compile under when no round's miss names one. Asked of the worker the
-    /// first time and kept; a down leg, or the worker's failure, is
-    /// `CompileError::Failed` and is asked again next time.
-    pub async fn compat_token(&self) -> Result<CompatToken, CompileError> {
-        self.compat_token
-            .get_or_try_init(|| async {
-                let client = self.leg.get().ok_or_else(|| {
-                    debug!("compat_token: the compile-worker leg is down");
-                    CompileError::Failed
-                })?;
-                let token: Untrusted<CompatToken, CompileScope> =
-                    client.compat_token().await.map_err(refusal)?;
-                Ok(token
-                    .trust_unchecked::<Asserted, _>(reason!(
-                        "contained: it names only the slot a compile is filed under, \
-                         inside the composition namespace api computed; no round loads \
-                         by it — each looks up by the token its own executor named — so \
-                         a wrong one only files a compile where no round looks"
-                    ))
-                    .into_inner())
-            })
-            .await
-            .cloned()
+        Self { leg }
     }
 
     /// Compile the components `source` streams on the worker. A transport
@@ -306,10 +272,6 @@ mod tests {
                 body,
             })
         }
-
-        async fn compat_token(&self) -> Result<engine_rpc::CompatToken, CompileError> {
-            engine_rpc::CompatToken::parse("test-token").map_err(|_| CompileError::Failed)
-        }
     }
 
     async fn read(compiled: Compiled) -> Vec<Result<Bytes, ()>> {
@@ -363,19 +325,6 @@ mod tests {
         assert_eq!(compiled.meta, b"meta");
         assert_eq!(compiled.cwasm_len, 2);
         assert_eq!(read(compiled).await, vec![Ok(Bytes::from_static(&[5, 1]))]);
-
-        // The worker's ABI id, asked once and kept: a leg that goes down after
-        // still answers it, the build behind the leg being pinned.
-        assert_eq!(
-            compiler.compat_token().await.unwrap().as_str(),
-            "test-token"
-        );
-        leg.set(None);
-        assert_eq!(
-            compiler.compat_token().await.unwrap().as_str(),
-            "test-token"
-        );
-        leg.set(Some(client.clone()));
 
         // A cwasm that is not the one it was named ends in an error, never in a
         // quiet end a reader passing it on would finish on.

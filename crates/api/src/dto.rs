@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 
 use hatch_client::{
     Artifact, CompileFault, Decision, DisplayField as ProtoDisplayField, InitError, Localized,
-    PromptDisclosure, PullProblem, SessionStatus,
+    PromptDisclosure, PropsProblem, PullProblem, SessionStatus,
 };
 
 use crate::locale::Locale;
@@ -70,10 +70,13 @@ impl From<Decision> for DecisionView {
 }
 
 /// Why a session could not be prepared to run, as the consumer reads it in the
-/// session's view: `{"kind": "pull", "artifact": …, "problem": …}`, or
+/// session's view: `{"kind": "pull", "artifact": …, "problem": …}`;
 /// `{"kind": "compile", "problem": …}` with what the problem names beside it —
 /// an artifact, a plugin by the package it is pinned under, or an import by the
-/// interface name it is imported under. Each problem is one of a fixed set.
+/// interface name it is imported under; or `{"kind": "props", "at": …,
+/// "problem": …}`, `at` the place in the props as they spell it
+/// (`props.people[1].name`) — for `missing`, the object a required field is
+/// missing from. Each problem is one of a fixed set.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InitErrorView {
@@ -82,6 +85,10 @@ pub enum InitErrorView {
         problem: PullProblemView,
     },
     Compile(CompileProblemView),
+    Props {
+        at: String,
+        problem: PropsProblemView,
+    },
 }
 
 impl From<&InitError> for InitErrorView {
@@ -91,6 +98,10 @@ impl From<&InitError> for InitErrorView {
             InitError::Pull { artifact, problem } => InitErrorView::Pull {
                 artifact: artifact.into(),
                 problem: (*problem).into(),
+            },
+            InitError::Props(fault) => InitErrorView::Props {
+                at: fault.at.clone(),
+                problem: fault.problem.into(),
             },
         }
     }
@@ -177,6 +188,49 @@ impl From<PullProblem> for PullProblemView {
             PullProblem::NotEncrypted => PullProblemView::NotEncrypted,
             PullProblem::KeyDoesNotOpen => PullProblemView::KeyDoesNotOpen,
             PullProblem::KeyNotReleased => PullProblemView::KeyNotReleased,
+        }
+    }
+}
+
+/// See [`PropsProblem`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PropsProblemView {
+    ShouldBeBool,
+    ShouldBeWholeNumber,
+    ShouldBeNumber,
+    ShouldBeOneCharacter,
+    ShouldBeString,
+    ShouldBeArray,
+    ShouldBeObject,
+    Unholdable,
+    NotACase,
+    OutOfRange,
+    UnknownField,
+    Missing,
+    NotDeclared,
+    NotJson,
+    TooLong,
+}
+
+impl From<PropsProblem> for PropsProblemView {
+    fn from(p: PropsProblem) -> Self {
+        match p {
+            PropsProblem::ShouldBeBool => Self::ShouldBeBool,
+            PropsProblem::ShouldBeWholeNumber => Self::ShouldBeWholeNumber,
+            PropsProblem::ShouldBeNumber => Self::ShouldBeNumber,
+            PropsProblem::ShouldBeOneCharacter => Self::ShouldBeOneCharacter,
+            PropsProblem::ShouldBeString => Self::ShouldBeString,
+            PropsProblem::ShouldBeArray => Self::ShouldBeArray,
+            PropsProblem::ShouldBeObject => Self::ShouldBeObject,
+            PropsProblem::Unholdable => Self::Unholdable,
+            PropsProblem::NotACase => Self::NotACase,
+            PropsProblem::OutOfRange => Self::OutOfRange,
+            PropsProblem::UnknownField => Self::UnknownField,
+            PropsProblem::Missing => Self::Missing,
+            PropsProblem::NotDeclared => Self::NotDeclared,
+            PropsProblem::NotJson => Self::NotJson,
+            PropsProblem::TooLong => Self::TooLong,
         }
     }
 }
@@ -576,6 +630,17 @@ mod tests {
         assert_eq!(
             view(InitError::Compile(CompileFault::OutOfMemory)),
             serde_json::json!({ "kind": "compile", "problem": "out_of_memory" })
+        );
+        assert_eq!(
+            view(InitError::Props(hatch_client::PropsFault {
+                at: "props.people[1].name".into(),
+                problem: hatch_client::PropsProblem::ShouldBeString,
+            })),
+            serde_json::json!({
+                "kind": "props",
+                "at": "props.people[1].name",
+                "problem": "should_be_string",
+            })
         );
     }
 }

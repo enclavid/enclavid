@@ -31,6 +31,7 @@ use engine_types::compile::{Artifact, CompileFault, HOST_INTERFACES};
 use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstance};
 
 use crate::decls::unreadable;
+use crate::props;
 use crate::{embedded_import_name, load_embedded, load_embedded_nested, top_level_imports};
 
 /// Namespace prefix of a strict per-component embedded import that a
@@ -212,9 +213,11 @@ fn encoding(e: EncodeError) -> wasmtime::Error {
 /// execution-worker's linker refuses it before one does.
 ///
 /// Read as a wac package, which validates everything but the function bodies,
-/// and kept as one, so the bytes are compiled from where they are. `plugged`
-/// says whether there was a fusion: without one the bytes are the policy's
-/// own, and bytes that do not read are the policy not being a component.
+/// and kept as one, so the bytes are compiled from where they are. Props it
+/// declares in a shape the host cannot serve are refused too
+/// ([`props::declared`]). `plugged` says whether there was a fusion: without one
+/// the bytes are the policy's own, and bytes that do not read are the policy not
+/// being a component.
 pub(crate) fn served(bytes: Vec<u8>, plugged: bool) -> wasmtime::Result<Package> {
     let mut types = Types::default();
     let package = Package::from_bytes("enclavid:fused", None, bytes, &mut types).map_err(|e| {
@@ -236,27 +239,32 @@ pub(crate) fn served(bytes: Vec<u8>, plugged: bool) -> wasmtime::Result<Package>
             );
         }
     }
+    props::declared(&types, &package).map_err(wasmtime::Error::new)?;
     Ok(package)
 }
 
-/// Whether the host serves `name`: one of [`HOST_INTERFACES`] exactly, or a
-/// semver-compatible version of one — the rule wasmtime's linker looks a name
-/// up by.
+/// Whether the host serves `name`: one of [`HOST_INTERFACES`].
 fn served_by_host(name: &str) -> bool {
-    let track = alternate_lookup_key(name).map(|(key, _)| key);
-    HOST_INTERFACES.iter().any(|host| {
-        *host == name
-            || track.is_some_and(|track| {
-                alternate_lookup_key(host).is_some_and(|(key, _)| key == track)
-            })
-    })
+    HOST_INTERFACES
+        .iter()
+        .any(|host| same_interface(name, host))
+}
+
+/// Whether an import `name` is the interface `host` serves: `host` exactly, or a
+/// semver-compatible version of it — the rule wasmtime's linker looks a name up
+/// by.
+pub(crate) fn same_interface(name: &str, host: &str) -> bool {
+    name == host
+        || alternate_lookup_key(name).is_some_and(|(track, _)| {
+            alternate_lookup_key(host).is_some_and(|(key, _)| key == track)
+        })
 }
 
 /// Whether an import has to be served to instantiate: a function, a component,
 /// a module, a resource of its own, or an interface holding any of those. An
 /// interface of value types, and of resources aliased from another, needs
 /// nothing — as wasmtime's linker sees it.
-fn needs_serving(types: &Types, kind: &ItemKind) -> bool {
+pub(crate) fn needs_serving(types: &Types, kind: &ItemKind) -> bool {
     match kind {
         ItemKind::Instance(id) => types[*id]
             .exports

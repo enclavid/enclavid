@@ -124,7 +124,7 @@ use serde::ser::{Serialize, Serializer};
 
 use hatch_client::{Decision, SessionState};
 
-use crate::execute::{CallbackError, ExecError, RunStatus};
+use crate::execute::{CallbackError, ExecError, PropsRead, RoundProps, RunStatus};
 
 /// A value that did not fit the constant frame its type must occupy, or a frame
 /// that did not decode.
@@ -295,6 +295,24 @@ impl Framed for Option<Decision> {
     const FRAME: usize = 32;
 }
 
+impl Framed for RoundProps {
+    /// A round's props at one length, whatever they hold: as read, their length
+    /// is their type's and their own, and every round carries them. The bytes
+    /// above the bound are the CBOR heads around them.
+    const FRAME: usize = engine_types::limits::MAX_PROPS_BYTES + 16;
+}
+
+impl Framed for PropsRead {
+    /// Whatever a preparation read, at one length: the props in WAVE, at most
+    /// `MAX_PROPS_BYTES`, or where they did not fit — the keys on that path the
+    /// props' own, out of JSON held to the same bound — or nothing. Unframed, it
+    /// would say whether the props fit and how long they are once read. The 4 KiB
+    /// above the bound is the variants' names and the CBOR heads: a dozen bytes a
+    /// step, and a path no deeper than the JSON nests, which `serde_json` reads
+    /// to 128 levels and no further.
+    const FRAME: usize = engine_types::limits::MAX_PROPS_BYTES + 4 * 1024;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +429,41 @@ mod tests {
             current_prompt: None,
         };
         Padded::seal(&at_cap).expect("a state at POLICY_MAX_STATE_BYTES must fit its frame");
+    }
+
+    /// Whatever a preparation read crosses at one length, and comes back as
+    /// itself: nothing, props at their bound, or a refusal as deep as JSON is
+    /// read to nest, whose keys hold all the props' bytes.
+    #[test]
+    fn every_reading_crosses_at_one_length() {
+        use engine_types::limits::MAX_PROPS_BYTES;
+        use engine_types::props::{PropsProblem, PropsRefusal, Step};
+
+        // `serde_json`'s nesting limit.
+        const DEEPEST: usize = 128;
+        let key = "k".repeat(MAX_PROPS_BYTES / DEEPEST);
+        let all = [
+            PropsRead::NotRead,
+            PropsRead::Read(None),
+            PropsRead::Read(Some("w".repeat(MAX_PROPS_BYTES))),
+            PropsRead::Refused(PropsRefusal {
+                path: vec![Step::Key(key); DEEPEST],
+                problem: PropsProblem::ShouldBeOneCharacter,
+            }),
+            PropsRead::Refused(PropsRefusal {
+                path: vec![Step::Index(u32::MAX); DEEPEST],
+                problem: PropsProblem::Unholdable,
+            }),
+        ];
+        let mut lengths = Vec::new();
+        for read in all {
+            let framed = Padded::seal(&read).expect("fits the frame");
+            assert_eq!(framed.open().expect("decodes"), read);
+            let mut wire = Vec::new();
+            ciborium::into_writer(&framed, &mut wire).expect("encodes");
+            lengths.push(wire.len());
+        }
+        assert!(lengths.iter().all(|&l| l == lengths[0]), "{lengths:?}");
     }
 
     #[test]

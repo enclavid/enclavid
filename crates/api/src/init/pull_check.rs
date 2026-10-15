@@ -4,28 +4,27 @@ use axum::http::StatusCode;
 
 use hatch_client::{Artifact, Client, SessionMetadata};
 
-use crate::compositions::{consumer, pull_failure};
+use crate::compositions::{Compositions, consumer, pull_failure};
 use crate::init::Unavailable;
 use crate::policy_pull;
-use crate::state::AppState;
 
 /// Ask the registry whether this session's bearers may pull every artifact it
-/// pins — before every round until one round's write records
-/// [`SessionMetadata::pull_allowed`], and never after. A cached compile is
-/// served with no pull behind it and its key holds no bearer (see
+/// pins — as part of preparing the session ([`super::prepare`]). A cached
+/// compile is served with no pull behind it and its key holds no bearer (see
 /// [`composition_key`](crate::compositions::composition_key)), so this is what
-/// keeps a session from running an artifact its consumer could not obtain. The
-/// mark spares the session this check only: a later round whose composition has
-/// left every cache still pulls, with the bearers the session was created with.
+/// keeps a session from running an artifact its consumer could not obtain. Once
+/// a round's write records the session prepared, this is not asked again: a
+/// later round whose composition has left every cache still pulls, with the
+/// bearers the session was created with.
 ///
 /// One manifest per artifact, concurrently as far as the consumer's turns
 /// allow, each checked against its pin. An artifact refused is the session's
 /// init error, the first such in pin order; otherwise one that got no answer is
 /// 503, the same request later ([`pull_failure`]). The answer depends on the
 /// pins, the bearers and the registries, never on what the caches hold. The
-/// hatch sees the refs and the bearers, and when the session's first round ran.
+/// hatch sees the refs and the bearers, and when the session was prepared.
 pub(super) async fn check_pull(
-    state: &AppState,
+    compositions: &Compositions,
     session_id: &str,
     metadata: &SessionMetadata,
 ) -> Result<(), Unavailable> {
@@ -33,7 +32,6 @@ pub(super) async fn check_pull(
         safe_logger::debug!("check_pull: metadata.client missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let compositions = &state.compositions;
     let turns = &compositions.consumer_turns.of(consumer(client));
     let artifacts = artifacts_with_bearers(&metadata.policy_ref, client);
     let manifests = artifacts

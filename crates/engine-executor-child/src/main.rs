@@ -5,7 +5,9 @@
 //! Lifecycle (one round, then die): the supervisor spawns this process with one
 //! end of a socketpair on **fd 0**, [`prime`](engine_rpc::ChildService::prime)s
 //! it once with the compiled bundle (deserialize + build the reusable
-//! `InstancePre`), drives exactly one [`run`](engine_rpc::ChildService::run), then
+//! `InstancePre`), drives exactly one [`run`](engine_rpc::ChildService::run) — or,
+//! preparing a session, one [`read_props`](engine_rpc::ChildService::read_props),
+//! which never instantiates the policy — then
 //! drops its client — this process's `serve` loop ends and it exits. A fresh
 //! child is spawned for the next round. So a wasmtime sandbox ESCAPE is confined
 //! to ONE round's plaintext (one applicant), and `Component::deserialize` (an
@@ -133,6 +135,20 @@ impl ChildService for Child {
             .map_err(round_failure)?;
 
         Ok(to_wire_status(status))
+    }
+
+    async fn read_props(
+        &self,
+        props: engine_rpc::ByteBuf,
+    ) -> Result<engine_rpc::PropsRead, ExecError> {
+        let primed = self.primed.get().ok_or_else(|| {
+            debug!("engine-executor-child: props read before prime");
+            ExecError::Unknown
+        })?;
+        Ok(match self.executor.read_props(primed, &props) {
+            Ok(read) => engine_rpc::PropsRead::Read(read),
+            Err(refusal) => engine_rpc::PropsRead::Refused(refusal),
+        })
     }
 }
 

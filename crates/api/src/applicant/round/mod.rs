@@ -6,12 +6,10 @@
 //!                  what it committed
 //! extract.rs     ← loading the session for a round; one that has ended is
 //!                  answered there and runs nothing
-//! pull_check.rs  ← whether the session's bearers may pull what it pins
 //! resolve.rs     ← a worker's cache miss: the composition from L2, or compiled
 //! ```
 
 mod extract;
-mod pull_check;
 mod resolve;
 
 use std::sync::Arc;
@@ -23,7 +21,7 @@ use enclavid_boundary::{Asserted, reason};
 use engine_rpc::{CompositionKey, ExecError, RunOutcome, RunRequest, RunStatus};
 use hatch_client::{Decision, Event, Prompt, SessionMetadata, SessionState};
 
-use crate::init::Unavailable;
+use crate::init::{self, Unavailable};
 use crate::locale::Locale;
 use crate::state::AppState;
 
@@ -32,7 +30,6 @@ use super::media_store::HatchMediaStore;
 use super::persister::{self, RoundAwaiting, SessionPersister};
 use super::views::{SessionProgress, progress_from};
 
-use pull_check::check_pull;
 use resolve::run_resolved;
 
 /// Pre-flight context shared by `/connect` and `/input`. The extractor
@@ -75,8 +72,6 @@ pub(super) struct SessionRunCtx {
     /// [`CallbackServer`] the keyless worker calls back into. Holds the seal key
     /// + a `Weak` to the applicant token.
     media_store: Arc<HatchMediaStore>,
-    /// The props the consumer gave the session, as api kept them at creation.
-    props: Vec<u8>,
     /// Composition cache key — names the fused component in the execution-worker's
     /// L1 cache, and (with the worker's `compat_token`) keys the orchestrator's
     /// L2. Passed to the worker on the run; named back in its cache-miss reply.
@@ -115,21 +110,29 @@ impl SessionRunCtx {
             disclosure_pubkey,
             version,
             media_store,
-            props,
             composition_key,
             metadata,
             ..
         } = self;
         // Before anything runs: the worker may serve this composition from a
-        // cache, with no pull behind it. Until a round's write records the
-        // answer ([`SessionPersister::persist`]), every round asks.
-        if !metadata.pull_allowed
-            && let Err(e) = check_pull(&state, &session_id, &metadata).await
-        {
-            return Err(e
-                .settle(&state.session_store, &session_id, version, &metadata)
-                .await);
-        }
+        // cache, with no pull behind it, and the props the round is given must
+        // be ones it can be. Until a round's write records the session prepared
+        // ([`SessionPersister::persist`]), every round prepares it.
+        let prepared = match &metadata.prepared {
+            Some(prepared) => prepared.clone(),
+            None => match init::prepare(&state.compositions, &session_id, &metadata).await {
+                Ok(prepared) => prepared,
+                Err(e) => {
+                    return Err(e
+                        .settle(&state.session_store, &session_id, version, &metadata)
+                        .await);
+                }
+            },
+        };
+        // The props as the policy reads them, which every round is handed, in
+        // their frame.
+        let props = crate::executor::outbound_round_props(prepared.props.as_deref())
+            .map_err(|e| classify_run_error(&session_id, &e))?;
         // The persister derives what this round may seal from the event and the
         // pre-round prompt, both of which are ours — see
         // [`SessionPersister::for_round`]. So the round's one seal is settled
@@ -156,6 +159,7 @@ impl SessionRunCtx {
             disclosure_pubkey,
             version,
             metadata.clone(),
+            prepared,
             &consent,
             &captures,
             &awaiting,
@@ -190,9 +194,9 @@ impl SessionRunCtx {
             // own L1, or reports a miss — no bundle crosses on this call.
             //
             // `map` carries the scope through: the concerns were answered about
-            // the state, and assembling the request around it addresses none of
-            // them and reopens none, so the receipt the door demands is the one
-            // the mint wrote.
+            // the state, and about the props by their own mint, and assembling
+            // the request around them addresses none of them and reopens none, so
+            // the receipt the door demands is the one the state's mint wrote.
             let req = session_state.clone().map(|session_state| RunRequest {
                 composition_key: composition_key.clone(),
                 props: props.clone(),

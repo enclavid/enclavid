@@ -6,7 +6,10 @@
 //! [`Lease`] on it — until that round's child has exited, not just until it
 //! answers. An entry no round holds stays as well, for the next round of its
 //! composition, and goes when another needs its room or once no round has used
-//! it for the idle time the host set, at most [`MAX_IDLE`].
+//! it for the idle time the host set, at most [`MAX_IDLE`]. A session's
+//! preparation fills an entry the same way, ahead of the rounds it is for; how
+//! many of those went before a round used them is counted, for the host to read
+//! how well entries filled ahead are kept.
 //!
 //! The map, the order entries go in, the weights and one fill per composition
 //! are `quick_cache`'s. What is here is the rest of the budget: the room a
@@ -14,6 +17,7 @@
 //! the cache makes it by evicting what no round is using, and the wait when
 //! rounds are using everything.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -80,6 +84,9 @@ pub(crate) struct CompositionEntry {
     pub(crate) catalogs: Arc<[CatalogEntry]>,
     /// When a round last took or let go of this entry.
     pub(crate) used: LastUsed,
+    /// Filled by a preparation, ahead of its session's rounds, and no round has
+    /// held it since: what [`Bundles::warmed_evicted`] counts when it goes.
+    pub(crate) warmed: AtomicBool,
 }
 
 /// When a round last took or let go of an entry: what [`Bundles::evict_idle`]
@@ -143,18 +150,28 @@ impl Weighter<Slot, Arc<CompositionEntry>> for ByCharge {
 }
 
 /// Keeps every entry a round is using: one something holds besides the cache.
+/// And counts the entries a preparation filled that went before any round used
+/// them.
 ///
 /// The count is read as the cache evicts, under its shard's write lock, and a
 /// round takes its reference under the same shard's read lock — so an entry is
 /// never evicted between a round finding it and the round holding it.
 #[derive(Clone)]
-pub(crate) struct InUse;
+pub(crate) struct InUse {
+    warmed_evicted: Arc<AtomicU64>,
+}
 
 impl Lifecycle<Slot, Arc<CompositionEntry>> for InUse {
     type RequestState = ();
 
     fn is_pinned(&self, _slot: &Slot, entry: &Arc<CompositionEntry>) -> bool {
         Arc::strong_count(entry) > 1
+    }
+
+    fn on_evict(&self, _state: &mut (), _slot: Slot, entry: Arc<CompositionEntry>) {
+        if entry.warmed.load(Ordering::Relaxed) {
+            self.warmed_evicted.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -186,6 +203,9 @@ pub(crate) struct Bundles {
     /// Told whenever a lease or a reservation is given back: what a fill
     /// waiting for room wakes to.
     released: Arc<Notify>,
+    /// How many entries a preparation filled went before any round used them
+    /// — for room or for idling — since this was last read.
+    warmed_evicted: Arc<AtomicU64>,
 }
 
 impl Bundles {
@@ -209,13 +229,24 @@ impl Bundles {
                     reason!("a constant of the measured build, naming no runtime input")
                 )
             });
+        let warmed_evicted = Arc::new(AtomicU64::new(0));
+        let lifecycle = InUse {
+            warmed_evicted: warmed_evicted.clone(),
+        };
         Self {
-            entries: Cache::with_options(options, weigh, DefaultHashBuilder::default(), InUse),
+            entries: Cache::with_options(options, weigh, DefaultHashBuilder::default(), lifecycle),
             budget,
             weigh,
             reserved: Mutex::new(0),
             released: Arc::new(Notify::new()),
+            warmed_evicted,
         }
+    }
+
+    /// How many entries a preparation filled went before any round used them,
+    /// since the last time this was asked.
+    pub(crate) fn warmed_evicted(&self) -> u64 {
+        self.warmed_evicted.swap(0, Ordering::Relaxed)
     }
 
     /// A lease on the entry under `slot`, if one is kept.
@@ -335,9 +366,23 @@ impl Bundles {
     pub(crate) fn evict_idle(&self, idle: Duration) {
         let now = Instant::now();
         self.entries.retain(|_, entry| {
-            Arc::strong_count(entry) > 1 || now.saturating_duration_since(entry.used.at()) < idle
+            let kept = Arc::strong_count(entry) > 1
+                || now.saturating_duration_since(entry.used.at()) < idle;
+            if !kept && entry.warmed.load(Ordering::Relaxed) {
+                self.warmed_evicted.fetch_add(1, Ordering::Relaxed);
+            }
+            kept
         });
         self.released.notify_waiters();
+    }
+
+    /// Count the entry under `slot` as asked for once more, as a later round's
+    /// look-up would. An entry the cache has not been asked for since it came in
+    /// is the first it lets go of when it needs room; one asked for is kept that
+    /// time. A preparation fills an entry for rounds still to come, so it is
+    /// asked for on their behalf.
+    pub(crate) fn ask_for(&self, slot: &Slot) {
+        let _ = self.entries.get(slot);
     }
 
     fn leased(&self, entry: Arc<CompositionEntry>) -> Lease {
@@ -369,6 +414,13 @@ pub(crate) struct Lease {
 impl Lease {
     pub(crate) fn entry(&self) -> &Arc<CompositionEntry> {
         &self.entry
+    }
+
+    /// This lease as a round's: the entry is no longer one only a preparation
+    /// has used.
+    pub(crate) fn for_round(self) -> Self {
+        self.entry.warmed.store(false, Ordering::Relaxed);
+        self
     }
 }
 
@@ -412,6 +464,7 @@ impl Drop for Room<'_> {
 mod tests {
     use std::fs::File;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use engine_executor::admission::DEFAULT_BUNDLE_CACHE_ENTRIES;
@@ -448,22 +501,36 @@ mod tests {
             embedded_imports: Vec::new().into(),
             catalogs: Vec::new().into(),
             used: LastUsed::now(),
+            warmed: AtomicBool::new(false),
         }
     }
 
     /// Fill `name` with an entry charged `ENTRY`, as a round does, and hand back
     /// that round's lease.
     async fn fill(bundles: &Bundles, name: &str) -> Lease {
+        fill_with(bundles, name, entry(ENTRY)).await
+    }
+
+    async fn fill_with(bundles: &Bundles, name: &str, entry: CompositionEntry) -> Lease {
         let Ok(Claim::Fill(fill)) = bundles.claim(&slot(name), Instant::now() + WAIT).await else {
             panic!("{name} is neither kept nor being filled");
         };
         let room = bundles
-            .reserve(ENTRY, 0, Instant::now() + WAIT)
+            .reserve(entry.charged, 0, Instant::now() + WAIT)
             .await
             .expect("there is room");
-        bundles
-            .keep(fill, room, entry(ENTRY))
-            .expect("the claim is kept")
+        bundles.keep(fill, room, entry).expect("the claim is kept")
+    }
+
+    /// Fill `name` with an entry charged `charged` as a preparation does, asked
+    /// for on behalf of the rounds to come when `asked`, and let go of it.
+    async fn fill_ahead(bundles: &Bundles, name: &str, charged: u64, asked: bool) {
+        let warmed = entry(charged);
+        warmed.warmed.store(true, Ordering::Relaxed);
+        drop(fill_with(bundles, name, warmed).await);
+        if asked {
+            bundles.ask_for(&slot(name));
+        }
     }
 
     fn kept(bundles: &Bundles, name: &str) -> bool {
@@ -631,5 +698,42 @@ mod tests {
         let lease = fill(&bundles, "a").await;
         let again = bundles.lease(&slot("a")).expect("a is kept");
         assert!(Arc::ptr_eq(lease.entry(), again.entry()));
+    }
+
+    /// In a cache full of entries rounds filled, an entry a preparation filled
+    /// and asked for outlasts the entries no round asked for since, when the
+    /// next fill needs room. Not asked for, it is the first to go — and is
+    /// counted as gone unused.
+    #[tokio::test]
+    async fn an_entry_asked_for_ahead_of_its_rounds_outlasts_ones_nobody_asked_for() {
+        const SMALL: u64 = BUDGET / 8;
+        let rounds: Vec<String> = (0..7).map(|i| format!("round{i}")).collect();
+        for asked in [true, false] {
+            let bundles = cache();
+            for name in &rounds {
+                drop(fill_with(&bundles, name, entry(SMALL)).await);
+            }
+            fill_ahead(&bundles, "ahead", SMALL, asked).await;
+            drop(fill_with(&bundles, "next", entry(SMALL)).await);
+            assert_eq!(present(&bundles, "ahead"), asked, "asked: {asked}");
+            assert_eq!(present(&bundles, "round0"), !asked, "asked: {asked}");
+            assert_eq!(bundles.warmed_evicted(), u64::from(!asked));
+            assert_eq!(bundles.warmed_evicted(), 0, "the count is read once");
+        }
+    }
+
+    /// An entry filled ahead that goes idle unused is counted; one a round took
+    /// in the meantime is not.
+    #[tokio::test(start_paused = true)]
+    async fn an_entry_filled_ahead_is_counted_only_while_no_round_took_it() {
+        const IDLE: Duration = MAX_IDLE;
+        let bundles = cache();
+        fill_ahead(&bundles, "unused", ENTRY, true).await;
+        fill_ahead(&bundles, "used", ENTRY, true).await;
+        drop(bundles.lease(&slot("used")).expect("kept").for_round());
+        tokio::time::advance(IDLE + Duration::from_secs(1)).await;
+        bundles.evict_idle(IDLE);
+        assert!(!present(&bundles, "unused") && !present(&bundles, "used"));
+        assert_eq!(bundles.warmed_evicted(), 1);
     }
 }
