@@ -35,13 +35,14 @@ fn wit_files(dir: &Path) -> Vec<String> {
 fn the_typescript_template_carries_the_wit_it_copies() {
     let repo = repo();
     let deps = repo.join("templates/policy-ts-qjs/wit/deps");
-    // A copy of a whole directory, or of the one file named.
+    // A copy of a whole directory, or of the one file named. WASI's copy is not
+    // among them: it is the registry's, and the host serves any 0.2.x of it on
+    // its semver track.
     for (copy, source, only) in [
         ("host", "wit/host", None),
         ("policy", "wit/policy", None),
         ("shared-types", "wit/shared-types", None),
         ("well-known", "plugins/well-known/wit", Some("world.wit")),
-        ("wasi-random", "wit/wasi", Some("random.wit")),
     ] {
         let copy = deps.join(copy);
         let source = repo.join(source);

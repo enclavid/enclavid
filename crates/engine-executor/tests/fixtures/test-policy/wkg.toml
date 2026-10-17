@@ -9,6 +9,6 @@
 "enclavid:face-detect" = { path = "../../../../../plugins/face-detect/wit" }
 "enclavid:vision" = { path = "../../../../../plugins/vision/wit" }
 "enclavid:host-ext" = { path = "props" }
-"wasi:clocks" = { path = "../../../../../wit/wasi/clocks.wit" }
-"wasi:io" = { path = "../../../../../wit/wasi/io.wit" }
-"wasi:random" = { path = "../../../../../wit/wasi/random.wit" }
+"wasi:clocks" = { path = "../../wit/wasi/clocks.wit" }
+"wasi:io" = { path = "../../wit/wasi/io.wit" }
+"wasi:random" = { path = "../../wit/wasi/random.wit" }

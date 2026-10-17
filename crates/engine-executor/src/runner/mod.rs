@@ -462,24 +462,22 @@ mod tests {
         use wit_parser::{ManglingAndAbi, Resolve};
 
         let mut resolve = Resolve::default();
-        // A package each: a directory, or one of `wasi/`'s files, each after
-        // those it uses.
+        // A package each, after those it uses: WASI 0.2.12 as the registry
+        // publishes it, which the host serves from wasmtime-wasi, then the
+        // repository's own.
         for package in [
-            "wasi/io.wit",
-            "wasi/clocks.wit",
-            "wasi/random.wit",
-            "wasi/filesystem.wit",
-            "wasi/sockets.wit",
-            "wasi/cli.wit",
-            "host",
-            "shared-types",
-            "policy",
+            "tests/wit/wasi/io.wit",
+            "tests/wit/wasi/clocks.wit",
+            "tests/wit/wasi/random.wit",
+            "tests/wit/wasi/filesystem.wit",
+            "tests/wit/wasi/sockets.wit",
+            "tests/wit/wasi/cli.wit",
+            "../../wit/host",
+            "../../wit/shared-types",
+            "../../wit/policy",
         ] {
             resolve
-                .push_path(format!(
-                    "{}/../../wit/{package}",
-                    env!("CARGO_MANIFEST_DIR")
-                ))
+                .push_path(format!("{}/{package}", env!("CARGO_MANIFEST_DIR")))
                 .expect("the repository's WIT parses");
         }
         let (version, body) = props;
