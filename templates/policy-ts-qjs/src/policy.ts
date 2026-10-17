@@ -7,6 +7,7 @@
 // keep for the next round and what to do now: show the applicant something
 // (`render`), or end the session with a decision (`finish`).
 import "./global.js";
+import "./random.js";
 import "fast-text-encoding";
 import { definePolicy, withStart } from "@enclavid/policy";
 import type { Action, Event } from "enclavid:policy/types@0.1.0";

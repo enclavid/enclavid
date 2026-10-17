@@ -35,17 +35,19 @@ fn wit_files(dir: &Path) -> Vec<String> {
 fn the_typescript_template_carries_the_wit_it_copies() {
     let repo = repo();
     let deps = repo.join("templates/policy-ts-qjs/wit/deps");
-    for (copy, source) in [
-        ("host", "wit/host"),
-        ("policy", "wit/policy"),
-        ("shared-types", "wit/shared-types"),
-        ("well-known", "plugins/well-known/wit"),
+    // A copy of a whole directory, or of the one file named.
+    for (copy, source, only) in [
+        ("host", "wit/host", None),
+        ("policy", "wit/policy", None),
+        ("shared-types", "wit/shared-types", None),
+        ("well-known", "plugins/well-known/wit", Some("world.wit")),
+        ("wasi-random", "wit/wasi", Some("random.wit")),
     ] {
         let copy = deps.join(copy);
         let source = repo.join(source);
         let names = wit_files(&copy);
-        if source.ends_with("plugins/well-known/wit") {
-            assert_eq!(names, ["world.wit"], "{}", copy.display());
+        if let Some(only) = only {
+            assert_eq!(names, [only], "{}", copy.display());
         } else {
             assert_eq!(
                 names,

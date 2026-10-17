@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "types": "jco guest-types wit --world-name policy --variants-inline-cases -q -o types",
-    "build": "node -e \"for (const d of ['dist', 'types']) require('node:fs').rmSync(d, { recursive: true, force: true })\" && jco guest-types wit --world-name policy --variants-inline-cases -q -o types && tsc && componentize-qjs --wit wit --world policy --js dist/policy.js --module-root . --stub-wasi --sync --opt-size -o dist/policy.component.wasm && enclavid policy embed dist/policy.component.wasm --i18n i18n.json --disclosure-fields disclosure-fields.json -o dist/policy.wasm"
+    "build": "node -e \"for (const d of ['dist', 'types']) require('node:fs').rmSync(d, { recursive: true, force: true })\" && jco guest-types wit --world-name policy --variants-inline-cases -q -o types && tsc && componentize-qjs --wit wit --world policy --js dist/policy.js --module-root . --sync --opt-size -o dist/policy.component.wasm && enclavid policy embed dist/policy.component.wasm --i18n i18n.json --disclosure-fields disclosure-fields.json -o dist/policy.wasm"
   },
   "dependencies": {
     "@enclavid/policy": "^0.1.0",
