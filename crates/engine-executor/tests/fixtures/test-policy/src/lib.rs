@@ -109,6 +109,40 @@ fn skip_passport_read() -> bool {
         .unwrap_or(false)
 }
 
+/// The optional `wasi-probe` prop. When set, genesis returns what the round's
+/// WASI clocks and randomness read instead of the step. Absent on every real
+/// flow.
+fn wasi_probe() -> bool {
+    enclavid::host_ext::policy_props::get()
+        .wasi_probe
+        .unwrap_or(false)
+}
+
+/// What the round's WASI imports read, as a state: the wall clock's second,
+/// the monotonic clock before and after it (8 bytes each, big endian), asking
+/// whether a deadline one nanosecond ahead is ready, then waiting a second, and
+/// what that ask and a second one after the wait answered (a byte each), and 16
+/// random bytes.
+fn probe_state() -> Vec<u8> {
+    use wasi::clocks::{monotonic_clock, wall_clock};
+
+    let wall = wall_clock::now().seconds;
+    let before = monotonic_clock::now();
+    let ahead = monotonic_clock::subscribe_duration(1);
+    let ready_before = ahead.ready();
+    monotonic_clock::subscribe_duration(1_000_000_000).block();
+    let after = monotonic_clock::now();
+    let ready_after = ahead.ready();
+
+    let mut state = Vec::new();
+    for n in [wall, before, after] {
+        state.extend_from_slice(&n.to_be_bytes());
+    }
+    state.extend([u8::from(ready_before), u8::from(ready_after)]);
+    state.extend(wasi::random::random::get_random_bytes(16));
+    state
+}
+
 fn build_consent(age_years: i32) -> Disclosure {
     Disclosure {
         // Canonical KYC fields built by the plugin: labels resolve from
@@ -152,11 +186,13 @@ impl Guest for TestPolicy {
             // Genesis → ask for the passport photo page. When the props
             // carry `state-bloat = N` the policy returns an N-byte blob
             // instead of the 1-byte step, so the harness can exercise the
-            // engine's POLICY_MAX_STATE_BYTES cap; absent the prop this is
+            // engine's POLICY_MAX_STATE_BYTES cap; with `wasi-probe` it is
+            // what the round's clocks and randomness read; absent both this is
             // the normal 1-byte step.
             (STEP_START, Event::Start) => {
                 let state = match bloat_bytes() {
                     Some(n) => vec![0u8; n],
+                    None if wasi_probe() => probe_state(),
                     None => state_at(STEP_AWAIT_PASSPORT),
                 };
                 (state, Action::Render(Prompt::Media(capture::passport())))

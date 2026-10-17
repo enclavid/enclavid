@@ -104,6 +104,7 @@ impl ChildService for Child {
         session_state: SessionState,
         event: Event,
         props: engine_rpc::ByteBuf,
+        seed: engine_rpc::RoundSeed,
         fuel: u64,
         callbacks: ChildCallbacksClient<Ciborium>,
     ) -> Result<engine_rpc::RunStatus, ExecError> {
@@ -126,6 +127,7 @@ impl ChildService for Child {
             listener,
             media_store,
             fuel,
+            seed: seed.0,
         };
 
         let (status, _next_state) = self

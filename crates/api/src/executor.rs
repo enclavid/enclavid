@@ -27,8 +27,8 @@
 use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
 use engine_rpc::{
     BundleSource, CallbackServiceUntrusted, CompositionKey, ExecError, ExecutorLeg, Padded,
-    Preparation, PrepareRequest, Preparing, PropsRead, RoundProps, RunOutcome, RunRequest,
-    RunStatus,
+    Preparation, PrepareRequest, Preparing, PropsRead, RoundProps, RoundSeed, RunOutcome,
+    RunRequest, RunStatus,
 };
 use fleet_transport::LegFailure;
 use hatch_client::SessionState;
@@ -104,6 +104,31 @@ pub(crate) fn outbound_round_props(props: Option<&str>) -> Result<Padded<RoundPr
         ))
         .vouch::<Covert, _, _, _, _>(|props| Padded::seal(&props))?
         .into_inner())
+}
+
+/// Mint a round's seed ([`crate::round_seed`]) for the worker that runs the
+/// round, the only way one reaches an execution-worker.
+///
+/// `AuthN` is IDENTIFIED, as for the state. `AuthZ` is MATCHED: the seed is the
+/// round's, and the leg's one pinned peer is the worker the round runs on.
+/// `Covert` is NOT-CHOSEN: api derived it from a key only it holds, and it crosses
+/// as 32 bytes whatever they are.
+pub(crate) fn outbound_round_seed(seed: [u8; 32]) -> RoundSeed {
+    let framed: ToWorker<RoundSeed> = Exposed::new(RoundSeed(seed));
+    framed
+        .vouch_unchecked::<AuthN, _>(reason!(
+            "identified: this leg dials ONE compile-time-pinned measurement, and the \
+             handshake fails before a byte moves if the peer is not it"
+        ))
+        .vouch_unchecked::<AuthZ, _>(reason!(
+            "matched: the seed is this round's, and the one peer this leg pins is the \
+             worker the round runs on"
+        ))
+        .vouch_unchecked::<Covert, _>(reason!(
+            "not-chosen: api derives it from a key only api holds, and it is 32 bytes \
+             in every round"
+        ))
+        .into_inner()
 }
 
 /// The EXECUTE boundary: a client for an execution-worker's

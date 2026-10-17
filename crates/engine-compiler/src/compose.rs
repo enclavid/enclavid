@@ -464,8 +464,13 @@ fn strict_iface(name: &str) -> Option<EmbeddedIface> {
 /// denylist to drift. `embedded-slot:*` are the synthetic per-catalog twins
 /// fusion itself derives from the `embedded-i18n` / `embedded-icons`
 /// imports, host-owned by construction.
+///
+/// All of `wasi:` is reserved too. The host serves the clocks and randomness
+/// as the round's own values, and a plugin satisfying them would hand the
+/// policy a clock or a random stream of its own choosing; the rest it serves
+/// empty or not at all, so a plugin has no business with any of it.
 fn is_host_reserved(name: &str) -> bool {
-    if name.starts_with(EMBEDDED_SLOT_PREFIX) {
+    if name.starts_with(EMBEDDED_SLOT_PREFIX) || name.starts_with("wasi:") {
         return true;
     }
     name.strip_prefix("enclavid:")
@@ -522,6 +527,11 @@ mod tests {
         // Synthetic per-catalog twins fusion derives from the embedded
         // imports (`embedded_import_name`): host-owned by construction.
         assert!(is_host_reserved("embedded-slot:h0123456789abcdef/i18n"));
+        // Every `wasi:` interface: the served clocks and randomness, and the
+        // ones nothing serves.
+        assert!(is_host_reserved("wasi:clocks/wall-clock@0.2.12"));
+        assert!(is_host_reserved("wasi:random/random@0.2.0"));
+        assert!(is_host_reserved("wasi:filesystem/types@0.2.12"));
     }
 
     #[test]

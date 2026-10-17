@@ -40,5 +40,11 @@ world policy {
     import enclavid:host/embedded-i18n@0.1.0;
     import enclavid:host/embedded-disclosure-fields@0.1.0;
     import enclavid:host-ext/policy-props@0.1.0;
+
+    // The round's time and randomness, as the host serves them: read only
+    // under the `wasi-probe` prop.
+    import wasi:clocks/wall-clock@0.2.12;
+    import wasi:clocks/monotonic-clock@0.2.12;
+    import wasi:random/random@0.2.12;
     export enclavid:policy/policy@0.1.0;
 }

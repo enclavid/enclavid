@@ -323,6 +323,7 @@ mod tests {
         let state = SessionState {
             state: vec![7u8; 4096],
             current_prompt: None,
+            rounds: 3,
         };
         let padded = Padded::seal(&state).expect("fits the frame");
         assert_eq!(padded.open().expect("decodes"), state);
@@ -332,14 +333,11 @@ mod tests {
     /// whatever the policy put in the value.
     #[test]
     fn encoded_length_does_not_vary_with_content() {
-        let small = Padded::seal(&SessionState {
-            state: Vec::new(),
-            current_prompt: None,
-        })
-        .expect("fits");
+        let small = Padded::seal(&SessionState::default()).expect("fits");
         let large = Padded::seal(&SessionState {
             state: vec![0xAB; 512 * 1024],
             current_prompt: None,
+            rounds: u64::MAX,
         })
         .expect("fits");
 
@@ -406,8 +404,8 @@ mod tests {
             ..Default::default()
         });
         Padded::seal(&SessionState {
-            state: Vec::new(),
             current_prompt: Some(prompt.clone()),
+            ..Default::default()
         })
         .expect("a small state with a large prompt seals, as it does at rest");
         Padded::seal(&RunStatus::AwaitingInput(prompt))
@@ -427,6 +425,7 @@ mod tests {
                 .map(|i| (i % 256) as u8)
                 .collect(),
             current_prompt: None,
+            rounds: u64::MAX,
         };
         Padded::seal(&at_cap).expect("a state at POLICY_MAX_STATE_BYTES must fit its frame");
     }
@@ -470,7 +469,7 @@ mod tests {
     fn an_encoding_over_the_frame_traps_the_send() {
         let over = SessionState {
             state: vec![0u8; SessionState::FRAME + 1],
-            current_prompt: None,
+            ..Default::default()
         };
         assert!(Padded::seal(&over).is_err());
     }

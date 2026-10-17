@@ -378,6 +378,7 @@ async fn reload_by_ref_misses() {
         listener: listener.clone(),
         media_store: empty_store.clone(),
         fuel: DEFAULT_ROUND_FUEL,
+        seed: [0; 32],
     };
     let round = |session, event: Event| {
         listener.capture(&event);
@@ -422,6 +423,7 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
             listener: listener.clone(),
             media_store: store.clone(),
             fuel: DEFAULT_ROUND_FUEL,
+            seed: [0; 32],
         };
         let round = |session, event: Event| {
             listener.capture(&event);
@@ -572,6 +574,69 @@ async fn oversized_state_traps() {
     );
 }
 
+/// The round's WASI clocks and randomness as the policy reads them (the
+/// `wasi-probe` prop): the wall clock is the second the round started; the
+/// monotonic clock starts there, and a deadline asked about — checked or waited
+/// on — moves it there at once and is ready; the random bytes are the seed's —
+/// the same again for the same seed, others for another. And the state the
+/// round leaves counts it.
+#[tokio::test]
+async fn a_round_reads_its_own_time_and_its_seeds_randomness() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let h = Harness::new();
+    let listener = Arc::new(PersistListener::default());
+    let genesis = |seed: [u8; 32]| {
+        let inputs = RunInputs {
+            seed,
+            ..h.inputs(&listener)
+        };
+        h.runner.run(
+            &h.primed,
+            Session::default(),
+            Event::Start,
+            b"{wasi-probe: some(true)}",
+            inputs,
+        )
+    };
+    let now = || {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+
+    let started = now();
+    let (_, first) = genesis([1; 32]).await.expect("the round runs");
+    let ended = now();
+    let (_, again) = genesis([1; 32]).await.expect("the round runs");
+    let (_, other) = genesis([2; 32]).await.expect("the round runs");
+
+    let read = |at: usize| u64::from_be_bytes(first.state[at..at + 8].try_into().unwrap());
+    let (wall, before, after) = (read(0), read(8), read(16));
+    assert!(
+        (started..=ended).contains(&wall),
+        "{wall} outside {started}..={ended}"
+    );
+    assert_eq!(before, wall * 1_000_000_000);
+    assert_eq!(
+        after,
+        before + 1 + 1_000_000_000,
+        "asking moves the clock to the deadline, and so does a wait, at once"
+    );
+    assert_eq!(
+        first.state[24..26],
+        [1, 1],
+        "a deadline asked about is ready"
+    );
+
+    let random = |session: &Session| session.state[26..].to_vec();
+    assert_eq!(random(&first).len(), 16);
+    assert_eq!(random(&first), random(&again));
+    assert_ne!(random(&first), random(&other));
+    assert_eq!(first.rounds, 1);
+}
+
 /// STATIC-strict consumption: fuse policy + well-known into a
 /// self-contained artifact (what `enclavid link` would ship), then feed
 /// it back with NO runtime plugins. The engine must reconstruct the
@@ -646,6 +711,7 @@ async fn static_fused_artifact_resolves_strictly() {
         listener: listener.clone(),
         media_store: listener.media_store(),
         fuel: DEFAULT_ROUND_FUEL,
+        seed: [0; 32],
     };
     let round = |session, event: Event| {
         listener.capture(&event);
@@ -785,6 +851,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
         listener: listener.clone(),
         media_store: listener.media_store(),
         fuel: DEFAULT_ROUND_FUEL,
+        seed: [0; 32],
     };
     // start → media(passport) → media(selfie) → consent-disclosure.
     let round = |session, event: Event| {
@@ -896,6 +963,7 @@ impl Harness {
             listener: listener.clone(),
             media_store: listener.media_store(),
             fuel: DEFAULT_ROUND_FUEL,
+            seed: [0; 32],
         }
     }
 

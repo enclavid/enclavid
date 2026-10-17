@@ -225,7 +225,17 @@ pub struct RunRequest {
     /// host process splices this hop byte-for-byte. See [`Padded`].
     pub session_state: Padded<SessionState>,
     pub event: Event,
+    /// What the round's randomness is drawn from. See [`RoundSeed`].
+    pub seed: RoundSeed,
 }
+
+/// The seed of a round's random stream, which every `wasi:random` call of the
+/// round draws from. api derives it from a key only it holds, for one session
+/// and one count of rounds, so a round run again draws what it drew before and
+/// no other round's can be told from it. One CBOR byte string of 32 bytes, the
+/// same length whatever the bytes. No `Debug`: it is a secret of the round.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct RoundSeed(#[serde(with = "serde_bytes")] pub [u8; 32]);
 
 /// The props the consumer gave the session, as a preparation read them against
 /// the type the policy declares ([`PropsRead::Read`]): a value of it in WAVE,
@@ -514,9 +524,9 @@ pub trait ChildService {
 
     /// Drive one reducer round against the primed composition.
     /// `session_state`/`event`/`props` are the round's already-decrypted inputs
-    /// (the seal key never reaches this process), and `fuel` is what the round
-    /// may burn — the supervisor's setting, the same for every round it runs.
-    /// `callbacks` points at the
+    /// (the seal key never reaches this process), `seed` is api's for the round,
+    /// and `fuel` is what the round may burn — the supervisor's setting, the same
+    /// for every round it runs. `callbacks` points at the
     /// SUPERVISOR's relay, which forwards `media_load` / `session_change` on to
     /// api — so this keyless process rehydrates blobs + persists state without
     /// the seal key, and with no way to ask for a composition at all.
@@ -530,6 +540,7 @@ pub trait ChildService {
         session_state: SessionState,
         event: Event,
         props: ByteBuf,
+        seed: RoundSeed,
         fuel: u64,
         callbacks: ChildCallbacksClient<remoc::codec::Ciborium>,
     ) -> Result<RunStatus, ExecError>;
@@ -773,6 +784,7 @@ mod execute_tests {
             props: Padded::seal(&RoundProps(b"{age: 30}".to_vec())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Start,
+            seed: RoundSeed([0x33; 32]),
         };
 
         // Phase 1: cache-only run → miss, and NOTHING runs (no callbacks fire).
@@ -818,6 +830,7 @@ mod execute_tests {
             props: Padded::seal(&RoundProps(Vec::new())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Start,
+            seed: RoundSeed([0x33; 32]),
         }
     }
 
@@ -1212,7 +1225,11 @@ mod request_bound_tests {
         props: &'a Bytes,
         session_state: Padded<SessionState>,
         event: Event,
+        seed: &'a Bytes,
     }
+
+    /// A seed of its one length.
+    const SEED: &[u8] = &[0x5A; 32];
 
     fn frame() -> Padded<SessionState> {
         Padded::seal(&SessionState::default()).expect("the default state fits its frame")
@@ -1239,6 +1256,7 @@ mod request_bound_tests {
             props: Bytes::new(props),
             session_state: frame(),
             event,
+            seed: Bytes::new(SEED),
         }
     }
 
@@ -1297,6 +1315,22 @@ mod request_bound_tests {
         assert!(decode(&loose(&a_key(), &props, event)).is_err());
     }
 
+    /// The seed crosses at its one length, so a request carrying any other is
+    /// refused rather than run on a stream nobody derived.
+    #[test]
+    fn a_seed_of_any_other_length_is_refused() {
+        let (key, props) = (a_key(), props_frame(b""));
+        let req = decode(&loose(&key, &props, Event::Start)).expect("a legal round");
+        assert_eq!(req.seed.0[..], *SEED);
+        for seed in [&SEED[..31], &[0x5A; 33][..], &[]] {
+            let req = LooseRequest {
+                seed: Bytes::new(seed),
+                ..loose(&key, &props, Event::Start)
+            };
+            assert!(decode(&req).is_err(), "a {}-byte seed decoded", seed.len());
+        }
+    }
+
     /// Version skew fails closed rather than running a round on a request this
     /// build only partly understood.
     #[test]
@@ -1307,6 +1341,7 @@ mod request_bound_tests {
             props: &'a Bytes,
             session_state: Padded<SessionState>,
             event: Event,
+            seed: &'a Bytes,
             future_field: u32,
         }
         let key = a_key();
@@ -1318,6 +1353,7 @@ mod request_bound_tests {
                 props: Bytes::new(&props),
                 session_state: frame(),
                 event: Event::Start,
+                seed: Bytes::new(SEED),
                 future_field: 1,
             },
             &mut b,

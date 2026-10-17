@@ -348,6 +348,12 @@ pub struct SessionState {
     /// The prompt the runtime is currently awaiting input for, if any.
     /// `None` before the first render and after a `finish`.
     pub current_prompt: Option<Prompt>,
+    /// How many rounds the session has run: 0 at genesis, one more in the
+    /// state each round leaves. api derives the round's random seed from it,
+    /// and it is sealed together with the policy's state, so a state handed back
+    /// again — whoever hands it — brings the same seed with it, and the round it
+    /// starts draws what it drew the first time.
+    pub rounds: u64,
 }
 
 // ---------------------------------------------------------------------

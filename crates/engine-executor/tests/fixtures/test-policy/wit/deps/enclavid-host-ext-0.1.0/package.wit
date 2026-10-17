@@ -4,7 +4,7 @@ package enclavid:host-ext@0.1.0;
 /// policy's own. Kept out of `wit/` and vendored into `wit/deps` by `wkg`,
 /// which reads a package it does not find in a registry only from a path.
 interface policy-props {
-  /// Both are harness knobs, absent on every real flow.
+  /// All are harness knobs, absent on every real flow.
   record props {
     /// Return a state blob of this many bytes from genesis, to drive the
     /// engine's POLICY_MAX_STATE_BYTES cap.
@@ -12,6 +12,9 @@ interface policy-props {
     /// Rehydrate the passport handle on the selfie round without reading
     /// its bytes, to prove the pull is lazy.
     skip-passport-read: option<bool>,
+    /// Return what the round's WASI clocks and randomness read as the
+    /// state from genesis, for the harness to check.
+    wasi-probe: option<bool>,
   }
 
   get: func() -> props;

@@ -5,12 +5,14 @@ use wasmtime::component::{ResourceTable, Val};
 use crate::embedded::EmbeddedRegistry;
 use crate::listener::SessionListener;
 use crate::media_store::MediaStore;
+use crate::round::Round;
 
 /// Data placed into wasmtime `Store<HostState>` for the duration of one
 /// `handle` call. The policy is a pure reducer, so this state carries
 /// only ambient read surfaces (the session's props, the
-/// `enclavid:embedded/*` registry) plus the runtime plumbing (the
-/// media store). No replay log, no per-call disclosure buffer — the
+/// `enclavid:embedded/*` registry, the round's time and randomness) plus
+/// the runtime plumbing (the media store). No replay log, no per-call
+/// disclosure buffer — the
 /// runner fires the listener once the round is over, not from a
 /// host-fn body.
 ///
@@ -46,20 +48,26 @@ pub struct HostState {
     /// blob by its content ref mid-`handle`. `Arc<dyn>` so the host fn can
     /// clone it out before the `.await` (releasing the borrow of `self`).
     pub media_store: Arc<dyn MediaStore>,
+    /// The WASI the round is served: its clocks, its random stream, and the
+    /// empty rest. See [`crate::round`].
+    pub round: Round,
 }
 
 /// Per-run inputs handed to [`Executor::run`](crate::Executor::run) once per
 /// round: the `listener` that ties this run to the caller's persistence layer,
-/// the `media_store` that rehydrates stored blobs, and the `fuel` the round may
+/// the `media_store` that rehydrates stored blobs, the `fuel` the round may
 /// burn ([`DEFAULT_ROUND_FUEL`](crate::DEFAULT_ROUND_FUEL) unless the host says
-/// otherwise). The composition-wide `EmbeddedRegistry` is NOT here — it is
-/// immutable across a composition's rounds, so it is built into the
+/// otherwise), and the `seed` its randomness is drawn from. The
+/// composition-wide `EmbeddedRegistry` is NOT here — it is immutable across a
+/// composition's rounds, so it is built into the
 /// [`PrimedComposition`](crate::PrimedComposition) at
 /// [`prime`](crate::Executor::prime) time and read from there.
 pub struct RunInputs {
     pub listener: Arc<dyn SessionListener>,
     pub media_store: Arc<dyn MediaStore>,
     pub fuel: u64,
+    /// What api derived for this session and round; see [`crate::round`].
+    pub seed: [u8; 32],
 }
 
 impl HostState {
@@ -67,12 +75,14 @@ impl HostState {
         props: Option<Val>,
         embedded: Arc<EmbeddedRegistry>,
         media_store: Arc<dyn MediaStore>,
+        round: Round,
     ) -> Self {
         Self {
             props,
             embedded,
             table: ResourceTable::new(),
             media_store,
+            round,
         }
     }
 }

@@ -21,6 +21,8 @@
 //!   ↓ uses
 //! state/       ← Store<T> data layer (HostState, RunInputs)
 //! props        ← the consumer's props as the type the policy declares
+//! round        ← the WASI a round is served: its own time and randomness, and
+//!                the empty rest toolchains' runtimes import
 //! listener     ← outbound contract (SessionListener trait, SessionChange);
 //!                fired once per round, carrying the state and, on the
 //!                round that finishes, the decision
@@ -56,6 +58,7 @@ mod listener;
 mod media;
 mod media_store;
 mod props;
+mod round;
 mod runner;
 mod sanitize;
 mod state;
@@ -116,6 +119,8 @@ wasmtime::component::bindgen!({
             export enclavid:policy/policy@0.1.0;
         }
     "#,
+    // WASI is not in this world: it is linked from wasmtime-wasi's own
+    // bindings, see `round`.
     path: [
         "../../wit/host",
         "../../wit/shared-types",

@@ -7,6 +7,7 @@ use hatch_client::{CacheStore, HatchClient, KbsClient, RegistryClient, SessionSt
 use crate::compiler::{Compiler, connect_compile_worker};
 use crate::compositions::Compositions;
 use crate::executor::{Executor, connect_execution_worker};
+use crate::round_seed::RoundSeeds;
 use crate::shuffle::ShuffleKey;
 use crate::turns::ConsumerTurns;
 
@@ -39,16 +40,21 @@ pub struct AppState {
     /// into `engine::RunInputs`. See [`crate::shuffle`] for the
     /// derivation contract and threat model.
     pub shuffle_key: Arc<ShuffleKey>,
+    /// Each round's random seed is derived from this key, the session id and
+    /// how many rounds the session has run. See [`crate::round_seed`].
+    pub round_seeds: Arc<RoundSeeds>,
 }
 
 impl AppState {
     /// `settings` says how long the hatch has to answer a pull and a KBS leg.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_store: Arc<SessionStore>,
         hatch: HatchClient,
         compiler: Arc<Compiler>,
         executor: Arc<Executor>,
         shuffle_key: Arc<ShuffleKey>,
+        round_seeds: Arc<RoundSeeds>,
         cache_store: CacheStore,
         settings: &crate::settings::Settings,
     ) -> Self {
@@ -76,6 +82,7 @@ impl AppState {
             executor,
             session_store,
             shuffle_key,
+            round_seeds,
         }
     }
 
@@ -93,6 +100,7 @@ impl AppState {
         session_store: Arc<SessionStore>,
         cache_store: CacheStore,
         shuffle_key: Arc<ShuffleKey>,
+        round_seeds: Arc<RoundSeeds>,
         attestor: Arc<dyn enclavid_attestation::Attestor>,
         api_health: Arc<crate::health::ApiHealth>,
         settings: &crate::settings::Settings,
@@ -148,6 +156,7 @@ impl AppState {
             compiler,
             executor,
             shuffle_key,
+            round_seeds,
             cache_store,
             settings,
         )

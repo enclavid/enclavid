@@ -686,6 +686,7 @@ mod door_tests {
             props: Padded::seal(&crate::execute::RoundProps(Vec::new())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event,
+            seed: crate::execute::RoundSeed([0x22; 32]),
         })
         .vouch_unchecked::<AuthN, _>(reason!("test fixture"))
     }

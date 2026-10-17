@@ -228,7 +228,7 @@ impl BundleStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execute::{RUN_REQUEST_HEADROOM, RoundProps, RunRequest};
+    use crate::execute::{RUN_REQUEST_HEADROOM, RoundProps, RoundSeed, RunRequest};
     use crate::keys::CompositionKey;
     use crate::padded::{Framed, Padded};
     use hatch_client::{Clip, Event, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MediaResult, SessionState};
@@ -291,6 +291,7 @@ mod tests {
                     frames: vec![vec![0xFF; MAX_CLIP_BYTES / MAX_CLIP_FRAMES]; MAX_CLIP_FRAMES],
                 },
             }),
+            seed: RoundSeed([0xFF; 32]),
         };
         let mut b = Vec::new();
         ciborium::into_writer(&(&req, &widest_header()), &mut b).unwrap();

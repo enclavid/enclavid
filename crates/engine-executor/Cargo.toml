@@ -51,6 +51,16 @@ serde_json = "1"
 # which `props::declared` finds the props' interface by. wasmtime's own
 # dependency, at its version; no codegen.
 wasmtime-environ = { version = "46", default-features = false, features = ["component-model"] }
+# WASI 0.2 for what toolchains' runtimes import and a round has no use for: an
+# empty environment, stdio that reads nothing and writes nowhere, a filesystem
+# with nothing opened (`round`). Only `p2`: no preview 1, no async preview 3.
+# Its clocks are never linked (they read real time) and neither are sockets.
+wasmtime-wasi = { version = "46", default-features = false, features = ["p2"] }
+# `wasi:io`'s own bindings and its `Pollable`, which the round's deadlines are.
+wasmtime-wasi-io = { version = "46", default-features = false, features = ["std"] }
+# The round's random stream, seeded with what api derived for the session and
+# round: `StdRng`, at the version WASI's random takes.
+rand = { version = "0.10", default-features = false, features = ["std_rng"] }
 
 # --- execution-worker bin deps (optional) — pulled ONLY by the `worker`
 # feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable

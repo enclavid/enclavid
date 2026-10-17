@@ -37,6 +37,7 @@ use crate::Host_Pre as GeneratedHostPre;
 use crate::embedded::{Icon, IconRef, Localized, LocalizedRef, undeclared_trap};
 use crate::limits::POLICY_MAX_STATE_BYTES;
 use crate::listener::SessionChange;
+use crate::round::Round;
 use crate::state::{HostState, RunInputs};
 
 pub use status::RunStatus;
@@ -178,6 +179,7 @@ impl Executor {
     ) -> wasmtime::Result<PrimedComposition> {
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
         GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
+        crate::round::add_to_linker(&mut linker)?;
         register_strict_embedded(&mut linker, embedded_imports, &embedded)?;
         let props = crate::props::declared(component, &self.engine);
         if props.is_some() {
@@ -236,9 +238,11 @@ impl Executor {
         // Instantiate the primed composition and call `handle` ONCE. The Linker
         // (imports) was built + type-checked in `prime`; here we only mint a
         // fresh `Store` (the per-round `HostState`) and instantiate against it.
+        // The round's time is read here, before any of the component runs.
+        let round = Round::starting_now(inputs.seed);
         let mut store = Store::new(
             &self.engine,
-            HostState::new(props, embedded.clone(), media_store),
+            HostState::new(props, embedded.clone(), media_store, round),
         );
         store.set_fuel(inputs.fuel)?;
         let bindings = primed.pre.instantiate_async(&mut store).await?;
@@ -269,6 +273,7 @@ impl Executor {
         let mut next_session = SessionState {
             state: new_state,
             current_prompt: None,
+            rounds: session.rounds + 1,
         };
         let status = match wit_action {
             crate::enclavid::policy::types::Action::Render(prompt) => {
@@ -457,9 +462,21 @@ mod tests {
         use wit_parser::{ManglingAndAbi, Resolve};
 
         let mut resolve = Resolve::default();
-        for package in ["host", "shared-types", "policy"] {
+        // A package each: a directory, or one of `wasi/`'s files, each after
+        // those it uses.
+        for package in [
+            "wasi/io.wit",
+            "wasi/clocks.wit",
+            "wasi/random.wit",
+            "wasi/filesystem.wit",
+            "wasi/sockets.wit",
+            "wasi/cli.wit",
+            "host",
+            "shared-types",
+            "policy",
+        ] {
             resolve
-                .push_dir(format!(
+                .push_path(format!(
                     "{}/../../wit/{package}",
                     env!("CARGO_MANIFEST_DIR")
                 ))

@@ -104,7 +104,7 @@ pub use execute::{
     ByteBuf, CallbackError, CallbackService, CallbackServiceClient, ChildCallbacks,
     ChildCallbacksClient, ChildCallbacksServerShared, ChildService, ChildServiceClient,
     ChildServiceServerShared, ExecError, PrepareOutcome, PrepareReply, PrepareRequest, Preparing,
-    PropsRead, RoundProps, RunOutcome, RunReply, RunRequest, RunStatus,
+    PropsRead, RoundProps, RoundSeed, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 
 // Both ends of the execute hop, and the doors on the calling end.

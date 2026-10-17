@@ -133,6 +133,13 @@ impl SessionRunCtx {
         // their frame.
         let props = crate::executor::outbound_round_props(prepared.props.as_deref())
             .map_err(|e| classify_run_error(&session_id, &e))?;
+        // The round's randomness, a function of the session and of the count of
+        // rounds sealed with the state it starts from — see `crate::round_seed`.
+        let seed = crate::executor::outbound_round_seed(
+            state
+                .round_seeds
+                .for_round(&session_id, session_state.rounds),
+        );
         // The persister derives what this round may seal from the event and the
         // pre-round prompt, both of which are ours — see
         // [`SessionPersister::for_round`]. So the round's one seal is settled
@@ -202,6 +209,7 @@ impl SessionRunCtx {
                 props: props.clone(),
                 session_state,
                 event: event.clone(),
+                seed,
             });
             // The reply is the worker's word as much as anything it pushes back,
             // so it arrives under the same scope and has to be judged before it
@@ -243,6 +251,7 @@ impl SessionRunCtx {
                         props,
                         session_state,
                         event,
+                        seed,
                     });
                     run_resolved(
                         &state,

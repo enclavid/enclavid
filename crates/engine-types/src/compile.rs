@@ -13,12 +13,37 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// per-catalog `embedded-slot:` twins fusion names itself. An import a
 /// composition still has once fused must be one of these — or one that needs
 /// nothing served, an interface of types alone — or no round of it can run.
-pub const HOST_INTERFACES: [&str; 5] = [
+///
+/// Of WASI, the clocks and randomness as values of the round, and what
+/// toolchains' runtimes import beside them, served empty: the environment,
+/// stdio, the filesystem with nothing opened. Nothing of `wasi:sockets` or
+/// `wasi:http`, so a composition importing them is refused.
+pub const HOST_INTERFACES: [&str; 25] = [
     "enclavid:host/types@0.1.0",
     "enclavid:host/embedded-disclosure-fields@0.1.0",
     "enclavid:host/embedded-i18n@0.1.0",
     "enclavid:host/embedded-icons@0.1.0",
     POLICY_PROPS,
+    "wasi:clocks/wall-clock@0.2.12",
+    "wasi:clocks/monotonic-clock@0.2.12",
+    "wasi:random/random@0.2.12",
+    "wasi:random/insecure@0.2.12",
+    "wasi:random/insecure-seed@0.2.12",
+    "wasi:io/error@0.2.12",
+    "wasi:io/poll@0.2.12",
+    "wasi:io/streams@0.2.12",
+    "wasi:filesystem/types@0.2.12",
+    "wasi:filesystem/preopens@0.2.12",
+    "wasi:cli/environment@0.2.12",
+    "wasi:cli/exit@0.2.12",
+    "wasi:cli/stdin@0.2.12",
+    "wasi:cli/stdout@0.2.12",
+    "wasi:cli/stderr@0.2.12",
+    "wasi:cli/terminal-input@0.2.12",
+    "wasi:cli/terminal-output@0.2.12",
+    "wasi:cli/terminal-stdin@0.2.12",
+    "wasi:cli/terminal-stdout@0.2.12",
+    "wasi:cli/terminal-stderr@0.2.12",
 ];
 
 /// The interface a policy imports to read its props.
