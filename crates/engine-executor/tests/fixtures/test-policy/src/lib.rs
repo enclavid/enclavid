@@ -124,7 +124,7 @@ fn wasi_probe() -> bool {
 /// what that ask and a second one after the wait answered (a byte each), and 16
 /// random bytes.
 fn probe_state() -> Vec<u8> {
-    use wasi::clocks::{monotonic_clock, wall_clock};
+    use wasip2::clocks::{monotonic_clock, wall_clock};
 
     let wall = wall_clock::now().seconds;
     let before = monotonic_clock::now();
@@ -139,7 +139,7 @@ fn probe_state() -> Vec<u8> {
         state.extend_from_slice(&n.to_be_bytes());
     }
     state.extend([u8::from(ready_before), u8::from(ready_after)]);
-    state.extend(wasi::random::random::get_random_bytes(16));
+    state.extend(wasip2::random::random::get_random_bytes(16));
     state
 }
 
