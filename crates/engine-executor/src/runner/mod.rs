@@ -27,7 +27,7 @@
 mod convert;
 mod status;
 
-use hatch_client::{Event, SessionState};
+use session_types::{Event, SessionState};
 use wasmtime::component::types::ComponentFunc;
 use wasmtime::component::{Component, Linker, Resource};
 use wasmtime::{Config, Engine, Store};
@@ -239,7 +239,7 @@ impl Executor {
         // (imports) was built + type-checked in `prime`; here we only mint a
         // fresh `Store` (the per-round `HostState`) and instantiate against it.
         // The round's time is read here, before any of the component runs.
-        let round = Round::starting_now(inputs.seed);
+        let round = Round::starting_now();
         let mut store = Store::new(
             &self.engine,
             HostState::new(props, embedded.clone(), media_store, round),
@@ -259,7 +259,7 @@ impl Executor {
         // under POLICY_MAX_STATE_BYTES so raw media clips can't be
         // smuggled into the sealed mailbox. A breach traps the round. (The
         // size covert channel is closed separately by constant-size padding
-        // wherever the bytes are observable — hatch-client `SetState` at rest,
+        // wherever the bytes are observable — storage-client `SetState` at rest,
         // `engine_rpc::Padded` on the api hop.)
         if new_state.len() > POLICY_MAX_STATE_BYTES {
             return Err(wasmtime::Error::msg(format!(
@@ -273,7 +273,6 @@ impl Executor {
         let mut next_session = SessionState {
             state: new_state,
             current_prompt: None,
-            rounds: session.rounds + 1,
         };
         let status = match wit_action {
             crate::enclavid::policy::types::Action::Render(prompt) => {

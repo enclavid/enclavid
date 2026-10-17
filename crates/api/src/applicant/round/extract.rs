@@ -12,9 +12,8 @@ use secrecy::ExposeSecret;
 
 use enclavid_boundary::{AuthN, AuthZ, Replay, reason};
 use engine_rpc::CompositionKey;
-use hatch_client::{
-    Metadata, SessionMetadata, SessionStatus, State as StateField, outbound_session_id,
-};
+use session_types::{SessionMetadata, SessionStatus};
+use storage_client::{Metadata, State as StateField};
 
 use crate::applicant::auth::CallerKey;
 use crate::applicant::media_store::HatchMediaStore;
@@ -102,7 +101,7 @@ impl SessionRunCtx {
         let ((metadata_untrusted, state_opt), version) = state
             .session_store
             .read(
-                outbound_session_id(&session_id),
+                &session_id,
                 (
                     Metadata,
                     StateField {
@@ -115,12 +114,14 @@ impl SessionRunCtx {
                 // A state blob that won't open under this bearer is a wrong key /
                 // different-device claim (the inner AEAD layer is keyed by the
                 // applicant token) — the durable, cryptographic first-claim guard.
-                // Metadata is sealed under tee_seal_key (NOT the applicant token),
-                // so a Crypto error here is unambiguously the State field. Surface
-                // it as 403 so the frontend offers `/reset`; everything else
-                // (transport, codec) is a real 500. An ABSENT state is `Ok(None)`,
-                // not an error, so a first `/connect` still proceeds.
-                if matches!(e, hatch_client::BridgeError::Crypto(_)) {
+                // Surface it as 403 so the frontend offers `/reset`; everything
+                // else (transport, codec) is a real 500. A Crypto error is also
+                // what a host gets by altering the metadata or the state's outer
+                // layer, both sealed under tee_seal_key: it then reads as the
+                // wrong device, which costs the session no more than the host
+                // deleting the state would. An ABSENT state is `Ok(None)`, not an
+                // error, so a first `/connect` still proceeds.
+                if matches!(e, storage_client::StoreError::Crypto(_)) {
                     return StatusCode::FORBIDDEN;
                 }
                 safe_logger::debug!(
@@ -277,7 +278,7 @@ fn session_composition_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hatch_client::{Artifact, Decision, InitError, PullProblem};
+    use session_types::{Artifact, Decision, InitError, PullProblem};
 
     /// What an ended session is answered with in place of a round, `None` for
     /// one that runs on.

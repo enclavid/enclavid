@@ -122,7 +122,7 @@ use std::marker::PhantomData;
 use serde::de::{self, Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
 
-use hatch_client::{Decision, SessionState};
+use session_types::{Decision, SessionState};
 
 use crate::execute::{CallbackError, ExecError, PropsRead, RoundProps, RunStatus};
 
@@ -266,7 +266,7 @@ impl Framed for SessionState {
     /// policy-chosen lengths — the opaque `state` blob and `current_prompt`. One
     /// constant for both places the value is observable keeps them from drifting
     /// apart, which is how this hop came to be unpadded in the first place.
-    const FRAME: usize = hatch_client::SEALED_STATE_PLAINTEXT_BYTES;
+    const FRAME: usize = session_types::SEALED_STATE_PLAINTEXT_BYTES;
 }
 
 impl Framed for RunStatus {
@@ -316,14 +316,13 @@ impl Framed for PropsRead {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hatch_client::{Localized, Prompt, Translation};
+    use session_types::{Localized, Prompt, Translation};
 
     #[test]
     fn round_trips_through_the_frame() {
         let state = SessionState {
             state: vec![7u8; 4096],
             current_prompt: None,
-            rounds: 3,
         };
         let padded = Padded::seal(&state).expect("fits the frame");
         assert_eq!(padded.open().expect("decodes"), state);
@@ -337,7 +336,6 @@ mod tests {
         let large = Padded::seal(&SessionState {
             state: vec![0xAB; 512 * 1024],
             current_prompt: None,
-            rounds: u64::MAX,
         })
         .expect("fits");
 
@@ -394,7 +392,7 @@ mod tests {
     #[test]
     fn a_prompt_that_seals_into_the_state_frame_also_sends_in_the_reply() {
         let big = "x".repeat(SessionState::FRAME / 2);
-        let prompt = Prompt::ConsentDisclosure(hatch_client::PromptDisclosure {
+        let prompt = Prompt::ConsentDisclosure(session_types::Disclosure {
             reason: Localized {
                 translations: vec![Translation {
                     language: "en".into(),
@@ -425,7 +423,6 @@ mod tests {
                 .map(|i| (i % 256) as u8)
                 .collect(),
             current_prompt: None,
-            rounds: u64::MAX,
         };
         Padded::seal(&at_cap).expect("a state at POLICY_MAX_STATE_BYTES must fit its frame");
     }

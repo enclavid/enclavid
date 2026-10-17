@@ -66,7 +66,7 @@
 //! host at launch, outside its measurement, and reads them once. The
 //! numbers that describe what the code holds are constants.
 
-use hatch_client::{MAX_CLIP_BYTES, SEALED_STATE_PLAINTEXT_BYTES};
+use session_types::{MAX_CLIP_BYTES, SEALED_STATE_PLAINTEXT_BYTES};
 
 /// Bound on L1 ENTRIES unless the host says otherwise (the
 /// `bundle-cache-entries` setting), enforced through the charge rather than

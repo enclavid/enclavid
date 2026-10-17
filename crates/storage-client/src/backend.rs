@@ -6,7 +6,7 @@
 //!
 //! The concrete implementation is `SessionCvmBackend` / `CacheCvmBackend` (in
 //! `api`) — remoc clients to the trusted storage-CVM over RA-TLS. It lives in
-//! `api` (not here) so hatch-client stays remoc-free.
+//! `api`, which owns the leg it runs over.
 //!
 //! The seam is boundary-UNAWARE on purpose: it never sees `Exposed`/`Untrusted`,
 //! so nothing here can bypass the egress gate — the stores cross the boundary
@@ -15,22 +15,22 @@
 use bytes::Bytes;
 use futures::stream::BoxStream;
 
-use hatch_protocol::{ReadRequest, Slot, WriteRequest};
+use storage_rpc::{ReadRequest, Slot, WriteRequest};
 
-use crate::error::BridgeError;
+use crate::error::StoreError;
 
 /// A blob's pieces as they cross the cache seam, in order. An error ends the
 /// blob, and what came before it is not the blob.
-pub type BlobPieces = BoxStream<'static, Result<Bytes, BridgeError>>;
+pub type BlobPieces = BoxStream<'static, Result<Bytes, StoreError>>;
 
-/// Transport for the per-session KV. Moves already-serialized `hatch-protocol`
-/// DTOs; the store above closes all trust concerns.
+/// Transport for the per-session KV. Moves the `storage-rpc` DTOs; the store
+/// above closes all trust concerns.
 #[async_trait::async_trait]
 pub trait SessionBackend: Send + Sync {
     /// Read raw slots + version. `version == 0` ⇒ session absent.
-    async fn read_raw(&self, id: &str, req: ReadRequest) -> Result<(Vec<Slot>, u64), BridgeError>;
+    async fn read_raw(&self, id: &str, req: ReadRequest) -> Result<(Vec<Slot>, u64), StoreError>;
 
-    /// Atomic CAS write. `Ok(new_version)` | `Err(BridgeError::VersionMismatch)`.
+    /// Atomic CAS write. `Ok(new_version)` | `Err(StoreError::VersionMismatch)`.
     /// `deadline_unix_secs` threads the TEE-side absolute TTL INSIDE the channel
     /// — the storage-CVM sweeper enforces it (set once at create; `None` on
     /// updates so the deadline is never refreshed).
@@ -39,9 +39,9 @@ pub trait SessionBackend: Send + Sync {
         id: &str,
         req: WriteRequest,
         deadline_unix_secs: Option<u64>,
-    ) -> Result<u64, BridgeError>;
+    ) -> Result<u64, StoreError>;
 
-    async fn exists(&self, id: &str) -> Result<bool, BridgeError>;
+    async fn exists(&self, id: &str) -> Result<bool, StoreError>;
 }
 
 /// Transport for the L2 cwasm cache. Moves opaque sealed blobs keyed by the
@@ -57,14 +57,14 @@ pub trait CacheBackend: Send + Sync {
         blob_name: &str,
         length: u64,
         pieces: BlobPieces,
-    ) -> Result<(), BridgeError>;
+    ) -> Result<(), StoreError>;
 
     /// The blob under `blob_name` as its length and its pieces, the pieces held
     /// to the length. `Ok(None)` = miss (absent blob).
-    async fn load(&self, blob_name: &str) -> Result<Option<(u64, BlobPieces)>, BridgeError>;
+    async fn load(&self, blob_name: &str) -> Result<Option<(u64, BlobPieces)>, StoreError>;
 
     /// Drop the blob under `blob_name`, if there is one.
-    async fn remove(&self, blob_name: &str) -> Result<(), BridgeError>;
+    async fn remove(&self, blob_name: &str) -> Result<(), StoreError>;
 }
 
 #[cfg(test)]
@@ -91,7 +91,7 @@ pub(crate) mod tests {
             blob_name: &str,
             length: u64,
             pieces: BlobPieces,
-        ) -> Result<(), BridgeError> {
+        ) -> Result<(), StoreError> {
             let blob: Vec<u8> = pieces
                 .try_fold(Vec::new(), |mut all, p| async move {
                     all.extend_from_slice(&p);
@@ -110,7 +110,7 @@ pub(crate) mod tests {
             Ok(())
         }
 
-        async fn load(&self, blob_name: &str) -> Result<Option<(u64, BlobPieces)>, BridgeError> {
+        async fn load(&self, blob_name: &str) -> Result<Option<(u64, BlobPieces)>, StoreError> {
             let Some(blob) = self.blobs.lock().unwrap().get(blob_name).cloned() else {
                 return Ok(None);
             };
@@ -124,7 +124,7 @@ pub(crate) mod tests {
             )))
         }
 
-        async fn remove(&self, blob_name: &str) -> Result<(), BridgeError> {
+        async fn remove(&self, blob_name: &str) -> Result<(), StoreError> {
             self.blobs.lock().unwrap().remove(blob_name);
             Ok(())
         }

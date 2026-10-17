@@ -42,7 +42,7 @@ use enclavid_crypto::sealed_stream::{self, Opener, SEGMENT_BYTES, Sealer};
 
 use crate::backend::{BlobPieces, CacheBackend};
 use crate::boundary;
-use crate::error::BridgeError;
+use crate::error::StoreError;
 use enclavid_boundary::reason;
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay};
 
@@ -109,7 +109,7 @@ impl CacheStore {
         cache_id: &str,
         length: u64,
         plain: BlobPieces,
-    ) -> Result<(), BridgeError> {
+    ) -> Result<(), StoreError> {
         let (sealer, header) = Sealer::new(self.keys.seal_key.expose_secret(), cache_id.as_bytes());
         let sealed = seal(header, sealer, length, plain);
         // Cross the outbound boundary: the sealed stream's three concerns
@@ -141,7 +141,7 @@ impl CacheStore {
     /// The blob for `cache_id`, opened: its plaintext length and its plaintext
     /// pieces. `Ok(None)` = miss; `Err` only on genuine transport failure. A
     /// blob that does not open ends its pieces in an error (see the module doc).
-    pub async fn load(&self, cache_id: &str) -> Result<Option<(u64, BlobPieces)>, BridgeError> {
+    pub async fn load(&self, cache_id: &str) -> Result<Option<(u64, BlobPieces)>, StoreError> {
         let Some((sealed_len, sealed)) = self.backend.load(&self.keys.blob_name(cache_id)).await?
         else {
             return Ok(None);
@@ -174,7 +174,7 @@ impl CacheStore {
     }
 
     /// Drop the blob for `cache_id`, if there is one.
-    pub async fn remove(&self, cache_id: &str) -> Result<(), BridgeError> {
+    pub async fn remove(&self, cache_id: &str) -> Result<(), StoreError> {
         self.backend.remove(&self.keys.blob_name(cache_id)).await
     }
 }
@@ -277,8 +277,8 @@ fn open(opener: Opener, length: u64, sealed: BlobPieces) -> BlobPieces {
     .boxed()
 }
 
-fn uneven(than: &str) -> BridgeError {
-    BridgeError::Codec(format!("a cache blob {than} than its length"))
+fn uneven(than: &str) -> StoreError {
+    StoreError::Codec(format!("a cache blob {than} than its length"))
 }
 
 #[cfg(test)]
@@ -300,7 +300,7 @@ mod tests {
         futures::stream::iter(pieces).boxed()
     }
 
-    async fn read(pieces: BlobPieces) -> Result<Vec<u8>, BridgeError> {
+    async fn read(pieces: BlobPieces) -> Result<Vec<u8>, StoreError> {
         pieces
             .try_fold(Vec::new(), |mut all, p| async move {
                 all.extend_from_slice(&p);

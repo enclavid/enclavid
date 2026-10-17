@@ -5,22 +5,20 @@
 //! their load profiles diverge:
 //!
 //!   * [`SessionStoreService`] — per-session state / media / disclosures, backed
-//!     by one SQLite file per record (write-heavy, CAS, TTL). Replaces the
-//!     hatch `/sessions/*` + Redis path.
+//!     by one SQLite file per record (write-heavy, CAS, TTL).
 //!   * [`CacheService`] — the L2 compiled-artifact (cwasm) cache, backed by
-//!     `object_store` (write-once, read-mostly). Replaces the hatch `/cache/*`
-//!     path.
+//!     `object_store` (write-once, read-mostly).
 //!
 //! The storage-CVM is a **blind ciphertext KV**: every payload is already
-//! AEAD-sealed under `tee_seal_key` TEE-side (in hatch-client's `SessionStore` /
-//! `CacheStore`), so the CVM never holds a key or plaintext PII. RA-TLS is the
+//! AEAD-sealed under `tee_seal_key` TEE-side (in storage-client's `SessionStore`
+//! / `CacheStore`), so the CVM never holds a key or plaintext PII. RA-TLS is the
 //! second layer that hides the access pattern + key from the untrusted host.
 //!
 //! A SEPARATE crate from `engine-rpc` on purpose: the storage-CVM is a distinct
 //! fleet role with its own measured image; it must not link the engine
-//! compile/execute contract. The session-store wire DTOs are reused verbatim
-//! from `hatch-protocol` as the remoc payloads, so the CVM and the legacy hatch
-//! path speak the same shapes.
+//! compile/execute contract. The session store's payloads are in [`session`].
+
+mod session;
 
 use std::time::Duration;
 
@@ -28,7 +26,11 @@ use remoc::codec::Ciborium;
 use serde::{Deserialize, Serialize};
 
 use fleet_stream::{StreamLen, bin};
-use hatch_protocol::{ReadRequest, ReadResponse, WriteRequest, WriteResponse};
+
+pub use session::{
+    BlobField, BlobWrite, FieldSelector, ListAppend, ListField, ListSlot, MediaWrite, Op,
+    ReadRequest, ReadResponse, ScalarSlot, Slot, WriteRequest, WriteResponse,
+};
 
 /// The longest blob the cache takes or gives, in bytes: 2 GiB.
 ///
@@ -64,7 +66,7 @@ pub struct CacheBlob {
 /// A session-store RPC failure. `VersionMismatch` is the CAS precondition (the
 /// session's stored version did not match `expected_version`, or a must-not-exist
 /// create found an existing session) — the api client maps it back to
-/// `BridgeError::VersionMismatch` (the same 412 the hatch path produced).
+/// `StoreError::VersionMismatch`.
 /// `Internal` is an opaque store / transport failure. This is the SESSION error:
 /// the L2 cache has no CAS, so `VersionMismatch` lives only here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +109,7 @@ impl From<remoc::rtc::CallError> for CacheError {
 }
 
 /// Per-session state / media / disclosures. Method payloads are the
-/// `hatch-protocol` wire DTOs reused verbatim. `deadline_unix_secs` on
+/// [`session`] DTOs. `deadline_unix_secs` on
 /// [`write`](SessionStoreService::write) threads the sliding TTL INSIDE the
 /// RA-TLS channel (the plaintext host STATUS byte is gone) — the CVM commits it
 /// atomically with the version bump and its sweeper enforces it.

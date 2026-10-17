@@ -16,7 +16,7 @@
 //! the session needs: what the round reached is read back, not re-run.
 //!
 //! Why encryption lives here, not in the executor: state and metadata are
-//! already sealed transparently inside hatch-client (`SetState` /
+//! already sealed transparently inside storage-client (`SetState` /
 //! `SetMetadata` AEAD with `tee_seal_key`/`applicant_session_token`). Disclosures use
 //! a different scheme (age to the consumer's `client_disclosure_pubkey`)
 //! but the architectural slot is the same — the orchestrator owns "I/O +
@@ -46,10 +46,12 @@ use secrecy::{ExposeSecret, SecretBox};
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
 use enclavid_crypto::seal_to_recipient;
-use hatch_client::{
-    AppendDisclosure, Decision, DisplayField, Event, Prepared, Prompt, SessionMetadata,
-    SessionState, SessionStatus, SessionStore, SetMedia, SetMetadata, SetState, WriteField,
-    boundary, encode_padded,
+use session_types::{
+    Decision, DisplayField, Event, Prepared, Prompt, SessionMetadata, SessionState, SessionStatus,
+};
+use storage_client::{
+    AppendDisclosure, SessionStore, SetMedia, SetMetadata, SetState, WriteField, boundary,
+    encode_padded, outbound_fields,
 };
 // `CallbackError` replaces the old wasmtime `RunError` as the persist error,
 // keeping api free of the runtime.
@@ -434,7 +436,7 @@ impl SessionPersister {
     }
 
     /// Build the `SetState` op from the engine's opaque state blob.
-    /// AuthN is closed inside hatch-client by the double AEAD-seal (inner
+    /// AuthN is closed inside storage-client by the double AEAD-seal (inner
     /// under `applicant_session_token`, outer under `tee_seal_key`); AuthZ
     /// vouched here; Covert CLOSED here by `encode_padded`, which encodes the
     /// `SessionState` and pads it to a constant plaintext frame so the sealed
@@ -474,7 +476,7 @@ impl SessionPersister {
     /// recorded — every one of them, unconditionally ("always store"), so
     /// write-presence carries no policy bandwidth. That used to rest on the
     /// runtime reporting its captures honestly; the set is now api's own, so it
-    /// rests on nothing. AuthN is closed inside hatch-client by the double
+    /// rests on nothing. AuthN is closed inside storage-client by the double
     /// AEAD-seal (inner under `applicant_session_token`, outer under
     /// `tee_seal_key`, AAD = session_id||blob_hash); AuthZ + Covert vouched here.
     /// Covert is NOT padded (unlike state): what a frame's length reveals is the
@@ -512,7 +514,7 @@ impl SessionPersister {
     /// build the `SetMetadata` op carrying the updated metadata (disclosure
     /// chain AND the captured-media gate set and, on the round that finishes,
     /// the status and decision, which the caller set before this). AuthN is
-    /// closed inside hatch-client by the AEAD-seal under `tee_seal_key`. Called
+    /// closed inside storage-client by the AEAD-seal under `tee_seal_key`. Called
     /// when this commit finished the session, emitted disclosures, captured
     /// media or is the first to record what preparing the session settled;
     /// `appends` may be empty.
@@ -556,34 +558,21 @@ impl SessionPersister {
         )
     }
 
-    /// Vouch the write envelope (session id + version + op set) and
-    /// commit it at the current expected version, advancing
-    /// `current_version` on success. The version verdict is host-
-    /// supplied (a CAS token only): a lying host self-limits to DoS / a
-    /// stomped concurrent winner, with no data-leak path.
+    /// Vouch the op set and commit it at the current expected version,
+    /// advancing `current_version` on success. The version verdict is the
+    /// store's (a CAS token only): a store that lied about it self-limits to
+    /// DoS / a stomped concurrent winner, with no data-leak path.
     async fn commit_ops(&self, ops: &[&dyn WriteField]) -> Result<(), CallbackError> {
         let expected = self.current_version.load(Ordering::SeqCst);
-        let (session_id, expected_version) =
-            boundary::outbound::to_untrusted((self.session_id.as_str(), Some(expected)))
-                .vouch_unchecked::<AuthN, _>(reason!(
-                    "session id + version: public host identifiers, not TEE secrets"
-                ))
-                .vouch_unchecked::<AuthZ, _>(reason!("fed back to the host that owns them"))
-                .vouch_unchecked::<Covert, _>(reason!(
-                    "fixed-shape UUID + host's own counter — no policy bandwidth"
-                ))
-                .distribute();
-        let ops = boundary::outbound::to_untrusted(ops)
-            .vouch_unchecked::<AuthN, _>(reason!(
-                "recipe set; each field's content is sealed in its own build_op"
-            ))
-            .vouch_unchecked::<AuthZ, _>(reason!("each op writes its own session key"))
-            .vouch_unchecked::<Covert, _>(reason!(
-                "op count fuel-bounded; per-field covert closed in build_op"
-            ));
+        let ops = outbound_fields(ops).vouch_unchecked::<Covert, _>(reason!(
+            "bounded: one state op; one metadata op when the round finished, disclosed, \
+             captured or is the first since preparing — the bit a finishing round gives \
+             anyway; at most one disclosure; one media op per frame the applicant \
+             uploaded, a count the policy does not choose"
+        ));
         let new_version = self
             .session_store
-            .write(session_id, expected_version, ops)
+            .write(&self.session_id, Some(expected), ops)
             .await
             .map_err(|e| {
                 // The cause, on the inward tier, before the error flows back over
@@ -717,7 +706,7 @@ fn pad_envelope(bytes: &mut Vec<u8>) -> Result<(), CallbackError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hatch_client::{Clip, DisplayField, MediaResult};
+    use session_types::{Clip, DisplayField, MediaResult};
 
     fn media_round(frames: Vec<&[u8]>) -> Event {
         Event::Media(MediaResult {

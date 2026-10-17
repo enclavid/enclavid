@@ -22,7 +22,8 @@ use axum::http::StatusCode;
 use axum::routing::{MethodRouter, post};
 
 use enclavid_boundary::{AuthZ, Replay, reason};
-use hatch_client::{Metadata, SessionStatus, outbound_session_id};
+use session_types::SessionStatus;
+use storage_client::Metadata;
 
 use crate::init;
 use crate::state::AppState;
@@ -33,10 +34,7 @@ pub(super) fn post_warmup() -> MethodRouter<Arc<AppState>> {
 }
 
 async fn warmup(Path(session_id): Path<String>, State(state): State<Arc<AppState>>) -> StatusCode {
-    let Ok(((metadata,), version)) = state
-        .session_store
-        .read(outbound_session_id(&session_id), (Metadata,))
-        .await
+    let Ok(((metadata,), version)) = state.session_store.read(&session_id, (Metadata,)).await
     else {
         return StatusCode::INTERNAL_SERVER_ERROR;
     };

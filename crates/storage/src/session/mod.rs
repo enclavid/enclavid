@@ -27,8 +27,7 @@ mod db_meta;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use hatch_protocol::{ReadRequest, ReadResponse, WriteRequest, WriteResponse};
-use storage_rpc::SessionError;
+use storage_rpc::{ReadRequest, ReadResponse, SessionError, WriteRequest, WriteResponse};
 
 use db_blobs::DbBlobs;
 use db_meta::DbMeta;
@@ -162,11 +161,11 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_BUSY_TIMEOUT, SessionStore};
-    use hatch_protocol::{
+    use storage_rpc::SessionError;
+    use storage_rpc::{
         BlobField, BlobWrite, FieldSelector, ListAppend, ListField, ListSlot, MediaWrite, Op,
         ReadRequest, ScalarSlot, Slot, WriteRequest,
     };
-    use storage_rpc::SessionError;
 
     fn tmp_store() -> (tempfile::TempDir, SessionStore) {
         let dir = tempfile::tempdir().unwrap();

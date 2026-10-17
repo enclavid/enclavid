@@ -5,9 +5,9 @@ use axum::http::StatusCode;
 use axum::routing::{MethodRouter, delete};
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
-use hatch_client::{
-    BridgeError, DropApplicantData, Metadata, SessionStatus, SetMetadata, WriteField, boundary,
-    outbound_session_id,
+use session_types::SessionStatus;
+use storage_client::{
+    DropApplicantData, Metadata, SetMetadata, StoreError, WriteField, boundary, outbound_fields,
 };
 
 use crate::state::AppState;
@@ -46,7 +46,7 @@ async fn reset(
 ) -> Result<StatusCode, StatusCode> {
     let ((metadata_untrusted,), version) = state
         .session_store
-        .read(outbound_session_id(&session_id), (Metadata,))
+        .read(&session_id, (Metadata,))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -113,27 +113,18 @@ async fn reset(
     // whole, and what the round committed stays. There is no moment at which
     // the metadata is reset and the data is not, or the other way round.
     let fields: [&dyn WriteField; 2] = [&set_metadata, &DropApplicantData];
-    let expected_version = boundary::outbound::to_untrusted(Some(version))
-        .vouch_unchecked::<AuthN, _>(reason!("the host's own counter, handed back to it"))
-        .vouch_unchecked::<AuthZ, _>(reason!("a CAS token; no release decision hangs on it"))
-        .vouch_unchecked::<Covert, _>(reason!(
-            "a host-minted integer this process only echoes — no policy bandwidth"
-        ));
-    let fields = boundary::outbound::to_untrusted(&fields[..])
-        .vouch_unchecked::<AuthN, _>(reason!("two fields, each closed in its own build_op"))
-        .vouch_unchecked::<AuthZ, _>(reason!("it writes this session's own key"))
-        .vouch_unchecked::<Covert, _>(reason!(
-            "a fixed pair, so the count says only that a reset happened"
-        ));
+    let fields = outbound_fields(&fields).vouch_unchecked::<Covert, _>(reason!(
+        "a fixed pair, so the count says only that a reset happened"
+    ));
     match state
         .session_store
-        .write(outbound_session_id(&session_id), expected_version, fields)
+        .write(&session_id, Some(version), fields)
         .await
     {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
         // The session moved since the read: a round committed, maybe the one
         // that completed it. Nothing was reset; asking again reads it afresh.
-        Err(BridgeError::VersionMismatch) => Err(StatusCode::CONFLICT),
+        Err(StoreError::VersionMismatch) => Err(StatusCode::CONFLICT),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }

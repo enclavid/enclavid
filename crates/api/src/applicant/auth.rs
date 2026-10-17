@@ -10,7 +10,7 @@
 //! not by a lookup: session state is sealed under the applicant token, so a
 //! mismatched bearer fails to open it at the state read in the extractor,
 //! which surfaces as **403** (see `round::extract` +
-//! `BridgeError::Crypto`). The frontend treats that 403 as "wrong key /
+//! `StoreError::Crypto`). The frontend treats that 403 as "wrong key /
 //! different device" and offers `/reset`. First-claim is implicit: a fresh
 //! session has no state, so the first `/connect` establishes it under
 //! whatever key is presented; `/reset` deletes the state, making the

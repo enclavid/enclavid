@@ -8,7 +8,8 @@ use base64ct::{Base64, Encoding};
 use serde::Serialize;
 
 use enclavid_boundary::{AuthN, AuthZ, Replay, reason};
-use hatch_client::{Disclosure, Metadata, SessionStatus, outbound_session_id};
+use session_types::SessionStatus;
+use storage_client::{Disclosure, Metadata};
 
 use crate::client_state::ClientState;
 use crate::disclosure_commit;
@@ -59,7 +60,7 @@ async fn read(
     // deliberately NOT detected (list order is meaningless now).
     let ((metadata_untrusted, disclosures), _version) = state
         .session_store
-        .read(outbound_session_id(&session_id), (Metadata, Disclosure))
+        .read(&session_id, (Metadata, Disclosure))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

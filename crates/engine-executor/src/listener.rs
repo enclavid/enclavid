@@ -24,7 +24,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use hatch_client::{Decision, SessionState};
+use session_types::{Decision, SessionState};
 
 /// Delivered to the listener once per `handle` round: the post-round state
 /// snapshot and, if the round finished, its decision.

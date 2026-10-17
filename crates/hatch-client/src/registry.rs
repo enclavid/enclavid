@@ -15,10 +15,11 @@
 
 use std::time::Duration;
 
+use bytes::Bytes;
+use futures::stream::BoxStream;
 use hatch_protocol::{BlobRequest, ManifestRequest, ManifestResponse};
 use hyper::StatusCode;
 
-use crate::backend::BlobPieces;
 use crate::boundary;
 use crate::error::BridgeError;
 use crate::transport::HatchClient;
@@ -37,6 +38,10 @@ use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 /// already is: a larger artifact takes longer to pull, and a longer deadline
 /// holds a waiting round's captures longer.
 pub const DEFAULT_PULL_DEADLINE: Duration = Duration::from_secs(60);
+
+/// A blob's pieces as the hatch streams them, in order. An error ends the
+/// blob, and what came before it is not the blob.
+pub type BlobPieces = BoxStream<'static, Result<Bytes, BridgeError>>;
 
 /// How long a blob's stream may go without a new byte: the hatch's own wait
 /// between two reads from the registry, and a little over.

@@ -24,10 +24,8 @@ use axum::http::StatusCode;
 use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Replay, Untrusted, reason};
 use engine_rpc::{ExecError, Preparation, Preparing, PropsRead};
 use engine_types::limits::MAX_PROPS_BYTES;
-use hatch_client::{
-    InitError, Prepared, SessionMetadata, SessionStatus, SessionStore, SetMetadata, WriteField,
-    boundary, outbound_session_id,
-};
+use session_types::{InitError, Prepared, SessionMetadata, SessionStatus};
+use storage_client::{SessionStore, SetMetadata, WriteField, boundary, outbound_fields};
 
 use crate::compositions::{Composition, Compositions};
 use crate::executor::outbound_preparation;
@@ -284,20 +282,9 @@ pub async fn record(
             )),
     );
     let fields: [&dyn WriteField; 1] = [&set_metadata];
-    let expected_version = boundary::outbound::to_untrusted(Some(version))
-        .vouch_unchecked::<AuthN, _>(reason!("the host's own counter, handed back to it"))
-        .vouch_unchecked::<AuthZ, _>(reason!("a CAS token; no release decision hangs on it"))
-        .vouch_unchecked::<Covert, _>(reason!(
-            "a host-minted integer this process only echoes — no policy bandwidth"
-        ));
-    let fields = boundary::outbound::to_untrusted(&fields[..])
-        .vouch_unchecked::<AuthN, _>(reason!("one field, closed in its own build_op"))
-        .vouch_unchecked::<AuthZ, _>(reason!("it writes this session's own key"))
-        .vouch_unchecked::<Covert, _>(reason!("a single fixed field"));
-    if let Err(e) = store
-        .write(outbound_session_id(session_id), expected_version, fields)
-        .await
-    {
+    let fields =
+        outbound_fields(&fields).vouch_unchecked::<Covert, _>(reason!("a single fixed field"));
+    if let Err(e) = store.write(session_id, Some(version), fields).await {
         safe_logger::debug!("init: {session_id} was not marked as failed: {e}");
     }
 }

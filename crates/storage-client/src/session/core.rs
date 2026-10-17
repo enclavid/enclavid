@@ -3,12 +3,10 @@
 //! file impls `ReadField` / `WriteField` for its own markers using
 //! the helpers exposed here.
 
-use hatch_protocol::{FieldSelector, Op, ReadRequest, Slot};
+use storage_rpc::{FieldSelector, Op, ReadRequest, Slot};
 
-use crate::boundary;
-use crate::error::BridgeError;
-use enclavid_boundary::reason;
-use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed, Replay, Untrusted};
+use crate::error::StoreError;
+use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 use super::Ctx;
 use super::SessionStore;
@@ -17,28 +15,28 @@ use super::SessionStore;
 
 /// Decode a single field from a host-returned slot. The slot's oneof
 /// shape (scalar vs list) is determined by the marker's selector;
-/// decoding mismatch surfaces as a `BridgeError::Transport`.
+/// decoding mismatch surfaces as a `StoreError::Transport`.
 ///
 /// `Output` is the field's typed return wrapped in an `Untrusted<_, S>`
 /// whose scope `S` lists exactly the concerns a caller still needs to
 /// address for THAT field. AEAD-verified fields (Metadata, State)
 /// have AuthN already cleared inside `decode`, so their scope omits
-/// it; host-plaintext fields (Status) leave AuthN open. Per-field
-/// scopes mean the caller's peel-pattern stays minimal — only the
+/// it; disclosures, sealed to the consumer rather than to this side,
+/// leave it open. Per-field scopes mean the caller's peel-pattern stays minimal — only the
 /// concerns the field actually has, no ceremony for what's already
 /// known.
 pub trait ReadField: Sized {
     type Output;
     fn selector(&self) -> FieldSelector;
-    fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError>;
+    fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, StoreError>;
 }
 
 /// Single field-op for the `/write` request. Implementors carry the
 /// value being written; `ctx` provides keys + AAD for any encryption
-/// step. Both scalar-field markers (`SetStatus`, `SetMetadata`,
-/// `SetState`) and list-append markers (`AppendDisclosure`) implement
-/// this trait — they emit the right `Op::Blob` or `Op::ListAppend`
-/// shape so the SessionStore client stays uniform across both kinds.
+/// step. Scalar-field markers (`SetMetadata`, `SetState`), media
+/// (`SetMedia`), list appends (`AppendDisclosure`) and the reset
+/// (`DropApplicantData`) all implement this trait — each emits its own
+/// `Op` shape so the SessionStore client stays uniform across them.
 ///
 /// `build_op` returns `Exposed<Op, ()>`: a fully-vouched outbound
 /// wrapper. Inside the body the implementation constructs an
@@ -61,24 +59,24 @@ pub trait ReadField: Sized {
 /// `Send + Sync` supertraits keep the trait-object usable across
 /// async-await boundaries (axum requires `Send` futures).
 pub trait WriteField: Send + Sync {
-    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, BridgeError>;
+    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, StoreError>;
 }
 
 // ---------- slot / op helpers ----------
 
-pub(super) fn unwrap_scalar(slot: Slot) -> Result<Option<Vec<u8>>, BridgeError> {
+pub(super) fn unwrap_scalar(slot: Slot) -> Result<Option<Vec<u8>>, StoreError> {
     match slot {
         Slot::Scalar(s) => Ok(s.value),
-        Slot::List(_) => Err(BridgeError::Transport(
+        Slot::List(_) => Err(StoreError::Transport(
             "expected scalar slot, got list".to_string(),
         )),
     }
 }
 
-pub(super) fn unwrap_list(slot: Slot) -> Result<Vec<Vec<u8>>, BridgeError> {
+pub(super) fn unwrap_list(slot: Slot) -> Result<Vec<Vec<u8>>, StoreError> {
     match slot {
         Slot::List(l) => Ok(l.items),
-        Slot::Scalar(_) => Err(BridgeError::Transport(
+        Slot::Scalar(_) => Err(StoreError::Transport(
             "expected list slot, got scalar".to_string(),
         )),
     }
@@ -86,20 +84,13 @@ pub(super) fn unwrap_list(slot: Slot) -> Result<Vec<Vec<u8>>, BridgeError> {
 
 // ---------- read request ----------
 
-/// Build the vouched read request from a tuple's selectors. The
-/// selectors are field-kind enum tags chosen by the caller's marker
-/// tuple — not external secret data — so hatch-client (their producer)
-/// legitimately vouches their release here, before handing the
-/// `Exposed<ReadRequest>` to `read_raw`.
-pub(super) fn read_request(selectors: Vec<FieldSelector>) -> Exposed<ReadRequest, ()> {
-    boundary::outbound::to_untrusted(ReadRequest { fields: selectors })
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "selectors are field-kind tags only — no TEE data leaves"
-        ))
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "a read releases no TEE data; it names fields to fetch"
-        ))
-        .vouch_unchecked::<Covert, _>(reason!("selector set bounded by field-enum cardinality"))
+/// The read request for a tuple's selectors. It crosses as a plain value, as
+/// the id it reads under does (see [`SessionStore`]): the selectors are
+/// field-kind tags the caller's marker tuple picks, bounded by the selector
+/// enum. The one that carries more is a media read's, and what it carries is
+/// the blob's HKDF name — the name the volume already holds it under.
+pub(super) fn read_request(selectors: Vec<FieldSelector>) -> ReadRequest {
+    ReadRequest { fields: selectors }
 }
 
 // ---------- ReadTuple ----------
@@ -118,8 +109,8 @@ pub trait ReadTuple {
     async fn fetch(
         self,
         store: &SessionStore,
-        id: Exposed<&str>,
-    ) -> Result<(Self::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError>;
+        id: &str,
+    ) -> Result<(Self::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), StoreError>;
 }
 
 macro_rules! impl_read_tuple {
@@ -130,12 +121,9 @@ macro_rules! impl_read_tuple {
             async fn fetch(
                 self,
                 store: &SessionStore,
-                id: Exposed<&str>,
-            ) -> Result<(Self::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), BridgeError> {
-                // `as_inner` reads the vouched id for the per-blob AAD (an
-                // internal crypto binding, not a host release); `read_raw`
-                // does the URL release via `into_inner`.
-                let ctx = Ctx { tee_seal_key: store.tee_seal_key(), session_id: *id.as_inner() };
+                id: &str,
+            ) -> Result<(Self::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), StoreError> {
+                let ctx = Ctx { tee_seal_key: store.tee_seal_key(), session_id: id };
                 let selectors = vec![$(self.$idx.selector()),+];
                 let (raw, version) = store.read_raw(id, read_request(selectors)).await?;
                 let mut iter = raw.into_iter();

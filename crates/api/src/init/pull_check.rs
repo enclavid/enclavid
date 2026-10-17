@@ -2,7 +2,7 @@
 
 use axum::http::StatusCode;
 
-use hatch_client::{Artifact, Client, SessionMetadata};
+use session_types::{Artifact, Client, SessionMetadata};
 
 use crate::compositions::{Compositions, consumer, pull_failure};
 use crate::init::Unavailable;
@@ -83,7 +83,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use hatch_client::PluginPin;
+    use session_types::PluginPin;
 
     fn pin(package: &str, impl_ref: &str) -> PluginPin {
         PluginPin {

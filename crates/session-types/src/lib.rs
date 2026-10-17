@@ -2,8 +2,8 @@
 //!
 //! These are TEE-internal: built / matched / converted to-and-from WIT
 //! by the engine and api, then CBOR-encoded ([`encode`]) and AEAD-sealed
-//! before they leave the enclave as opaque bytes. The hatch never sees
-//! them — they ride inside `BlobField::{Metadata,State}` `value` bytes.
+//! before they leave the enclave as opaque bytes. The storage-CVM never
+//! sees them — they ride inside `BlobField::{Metadata,State}` `value` bytes.
 //!
 //! **Schema evolution (at-rest, up to ~a week per session):** every
 //! struct is `#[derive(Default)] #[serde(default)]`, so a missing field
@@ -24,22 +24,33 @@ use serde::{Deserialize, Serialize};
 pub use engine_types::compile::{Artifact, CompileFault, InterfaceName, is_wit_name};
 pub use engine_types::props::PropsProblem;
 
-use crate::error::BridgeError;
-
 // ---------------------------------------------------------------------
 // CBOR codec for sealed domain blobs
 // ---------------------------------------------------------------------
 
+/// A domain value that would not encode, or bytes that would not decode
+/// as one.
+#[derive(Debug)]
+pub struct CodecError(pub String);
+
+impl std::fmt::Display for CodecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "session-types codec error: {}", self.0)
+    }
+}
+
+impl std::error::Error for CodecError {}
+
 /// CBOR-encode a domain value (pre-AEAD-seal).
-pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, BridgeError> {
+pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
     let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf).map_err(|e| BridgeError::Codec(e.to_string()))?;
+    ciborium::into_writer(value, &mut buf).map_err(|e| CodecError(e.to_string()))?;
     Ok(buf)
 }
 
 /// CBOR-decode a domain value (post-AEAD-open).
-pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, BridgeError> {
-    ciborium::from_reader(bytes).map_err(|e| BridgeError::Codec(e.to_string()))
+pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
+    ciborium::from_reader(bytes).map_err(|e| CodecError(e.to_string()))
 }
 
 // ---------------------------------------------------------------------
@@ -48,7 +59,6 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, BridgeError> {
 
 /// Session lifecycle state. Single creation step (POST /sessions does
 /// the full setup atomically), no PendingInit / FailedInit pre-states.
-/// Explicit discriminants back the plaintext STATUS byte ([`to_byte`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionStatus {
     #[default]
@@ -62,27 +72,6 @@ pub enum SessionStatus {
     InitFailed = 3,
     /// Idle TTL elapsed without applicant interaction.
     Expired = 4,
-}
-
-impl SessionStatus {
-    /// Compact single-byte form for the plaintext `BlobField::Status`
-    /// field (the hatch indexes TTL/cleanup on it). CBOR encodes the
-    /// enum by name inside sealed metadata; this is the separate
-    /// host-visible representation.
-    pub fn to_byte(self) -> u8 {
-        self as u8
-    }
-
-    pub fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0 => Some(Self::Unspecified),
-            1 => Some(Self::Running),
-            2 => Some(Self::Completed),
-            3 => Some(Self::InitFailed),
-            4 => Some(Self::Expired),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +308,22 @@ mod decision_byte {
     }
 }
 
+/// Constant plaintext size the encoded `SessionState` is padded to before
+/// sealing, so the host-observable ciphertext size is FIXED every round —
+/// closing the size covert channel for BOTH `state` and `current_prompt`
+/// (the policy controls their sizes; a colluding host could otherwise relay
+/// the length). Trust-contract constant: an encoded `SessionState` larger
+/// than this traps the write (re-attest on change).
+///
+/// Must cover the max encoding — the policy `state` (≤ engine
+/// `POLICY_MAX_STATE_BYTES`, 1 MiB) plus the largest resolved prompt plus CBOR
+/// overhead; the 256 KiB over the state cap is that prompt/overhead headroom.
+/// Because the padding is unconditional this is also the *floor* cost of every
+/// state write: each round seals exactly this many plaintext bytes regardless of
+/// how little real state the policy carries. Raising `POLICY_MAX_STATE_BYTES`
+/// raises this frame — and thus every write's seal cost — in lockstep.
+pub const SEALED_STATE_PLAINTEXT_BYTES: usize = 1024 * 1024 + 256 * 1024;
+
 /// Internal session state for the policy reducer (`BlobField::State`).
 /// Double-AEAD-sealed (applicant key inner, tee_seal_key outer).
 ///
@@ -348,12 +353,6 @@ pub struct SessionState {
     /// The prompt the runtime is currently awaiting input for, if any.
     /// `None` before the first render and after a `finish`.
     pub current_prompt: Option<Prompt>,
-    /// How many rounds the session has run: 0 at genesis, one more in the
-    /// state each round leaves. api derives the round's random seed from it,
-    /// and it is sealed together with the policy's state, so a state handed back
-    /// again — whoever hands it — brings the same seed with it, and the round it
-    /// starts draws what it drew the first time.
-    pub rounds: u64,
 }
 
 // ---------------------------------------------------------------------

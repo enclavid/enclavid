@@ -23,9 +23,8 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
 use enclavid_crypto::ocicrypt::{self, LayerDecryptor};
-use hatch_client::{
-    BlobPieces, BlobRequest, Key, ManifestRequest, PullProblem, RegistryClient, boundary,
-};
+use hatch_client::{BlobPieces, BlobRequest, ManifestRequest, RegistryClient, boundary};
+use session_types::{Key, PullProblem};
 
 use crate::keyprovider::{self, KbsContext, KeyFailure};
 use crate::turns::Turns;
@@ -494,7 +493,7 @@ fn extract_digest(policy_ref: &str) -> Option<&str> {
 mod tests {
     use std::sync::Arc;
 
-    use hatch_client::Key;
+    use session_types::Key;
     use tokio::sync::Semaphore;
 
     use super::*;

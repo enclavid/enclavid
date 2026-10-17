@@ -48,26 +48,23 @@ pub struct HostState {
     /// blob by its content ref mid-`handle`. `Arc<dyn>` so the host fn can
     /// clone it out before the `.await` (releasing the borrow of `self`).
     pub media_store: Arc<dyn MediaStore>,
-    /// The WASI the round is served: its clocks, its random stream, and the
+    /// The WASI the round is served: its clocks, its random streams, and the
     /// empty rest. See [`crate::round`].
     pub round: Round,
 }
 
 /// Per-run inputs handed to [`Executor::run`](crate::Executor::run) once per
 /// round: the `listener` that ties this run to the caller's persistence layer,
-/// the `media_store` that rehydrates stored blobs, the `fuel` the round may
+/// the `media_store` that rehydrates stored blobs, and the `fuel` the round may
 /// burn ([`DEFAULT_ROUND_FUEL`](crate::DEFAULT_ROUND_FUEL) unless the host says
-/// otherwise), and the `seed` its randomness is drawn from. The
-/// composition-wide `EmbeddedRegistry` is NOT here — it is immutable across a
-/// composition's rounds, so it is built into the
+/// otherwise). The composition-wide `EmbeddedRegistry` is NOT here — it is
+/// immutable across a composition's rounds, so it is built into the
 /// [`PrimedComposition`](crate::PrimedComposition) at
 /// [`prime`](crate::Executor::prime) time and read from there.
 pub struct RunInputs {
     pub listener: Arc<dyn SessionListener>,
     pub media_store: Arc<dyn MediaStore>,
     pub fuel: u64,
-    /// What api derived for this session and round; see [`crate::round`].
-    pub seed: [u8; 32],
 }
 
 impl HostState {

@@ -1,49 +1,19 @@
 mod auth;
-mod backend;
 pub mod boundary;
-mod cache;
 mod error;
 mod kbs;
 mod kds;
 mod registry;
-mod session;
 mod transport;
 
-// Sealed session-domain types — hand-written serde structs, CBOR at
-// rest. No protobuf anywhere in the project.
-mod domain;
-
 pub use auth::{AuthClient, AuthVerdict, DEFAULT_AUTHORIZE_DEADLINE, Principal};
-pub use backend::{BlobPieces, CacheBackend, SessionBackend};
-pub use cache::CacheStore;
-// The hatch's own outbound mint. The VOCABULARY it is written in is not
-// re-exported: `Untrusted`/`Exposed`/the markers/`reason!` come from
-// `enclavid-boundary` directly, so one word has one path.
-pub use boundary::outbound::outbound_session_id;
 pub use error::BridgeError;
 pub use transport::HatchClient;
 // Wire DTO re-exports — the operation selector and the OCI pull
 // response now come from the shared `hatch-protocol` crate.
-pub use domain::{
-    Action, Artifact, CameraFacing, CaptureGuide, CaptureStep, Client, ClientAccess, Clip,
-    CompileFault, Decision, DisplayField, Event, GuideNone, GuideOval, GuideRect, InitError,
-    InterfaceName, KbsKey, Key, Localized, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MAX_PROPS_AT_BYTES,
-    MediaResult, MediaSpec, PREPARED_FRAME, PluginPin, Prepared, Prompt, PropsFault, PropsProblem,
-    PullProblem, SessionMetadata, SessionState, SessionStatus, Translation, capture_guide,
-    is_wit_name,
-};
 pub use hatch_protocol::{AuthorizeRequest, BlobRequest, ClientOperation, ManifestRequest};
 pub use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
 pub use hatch_protocol::{VcekRequest, VcekResponse};
 pub use kbs::{DEFAULT_RELAY_DEADLINE, KbsClient};
 pub use kds::{DEFAULT_VCEK_DEADLINE, KdsClient};
-pub use registry::{DEFAULT_PULL_DEADLINE, RegistryClient};
-// Disclosure carried by `Prompt::ConsentDisclosure`. Re-exported under
-// a qualified name so it doesn't collide with the session-store
-// `session::Disclosure` wire type below.
-pub use domain::Disclosure as PromptDisclosure;
-pub use session::{
-    AppendDisclosure, Ctx, Disclosure, DropApplicantData, Metadata, ReadField, ReadTuple,
-    SEALED_STATE_PLAINTEXT_BYTES, SessionStore, SetMedia, SetMetadata, SetPrincipal, SetState,
-    SetStatus, State, Status, WriteField, encode_padded,
-};
+pub use registry::{BlobPieces, DEFAULT_PULL_DEADLINE, RegistryClient};

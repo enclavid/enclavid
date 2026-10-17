@@ -55,9 +55,11 @@ use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 
 use enclavid_boundary::Asserted;
-use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed, Replay, reason};
+use enclavid_boundary::{Exposed, Replay, reason};
 use engine_rpc::CallbackError;
-use hatch_client::{SessionStore, boundary, outbound_session_id};
+use storage_client::SessionStore;
+
+use crate::executor::outbound_blob;
 
 use super::callbacks::FromWorker;
 use secrecy::{ExposeSecret, SecretBox};
@@ -143,10 +145,9 @@ impl HatchMediaStore {
             );
             CallbackError
         })?;
-        let id = outbound_session_id(&self.session_id);
         let loaded = self
             .session_store
-            .load_media(id, &blob_hash, token.expose_secret())
+            .load_media(&self.session_id, &blob_hash, token.expose_secret())
             .await
             .map_err(|e| {
                 safe_logger::debug!("media load failed: {e}");
@@ -163,41 +164,4 @@ impl HatchMediaStore {
             .into_inner();
         Ok(outbound_blob(loaded))
     }
-}
-
-/// Mint a rehydrated blob as a released value — the ONE thing api hands back to
-/// the process that runs adversary-authored wasm, and the only value on this leg
-/// that is not framed.
-///
-/// These are the applicant's own pixels, going out over the hop the host splices.
-/// Three answers, and the last is the one worth reading twice because it is why
-/// there is no frame here:
-///
-///   * `AuthN` — the hop is mutual RA-TLS to a pinned measurement, so the host
-///     that splices it carries ciphertext.
-///   * `AuthZ` — SCOPED, by the captured-hash gate rather than by a sentence: the
-///     only blobs nameable are ones this session stored, and a hash outside that
-///     set never reaches a store read at all.
-///   * `Covert` — ALREADY-HELD. Media is sealed to the host WITHOUT padding, under
-///     an HKDF name derived from `(session, hash)`, so the host held this blob's
-///     exact length and saw the read before this hop carried anything.
-///
-/// The residual under that last one is real and bounded: WHICH of this session's
-/// own blobs a round fetched. The gate bounds the set, the worker's per-run memo
-/// bounds repeats within a round, and the applicant's round count bounds the rest.
-fn outbound_blob(loaded: Option<Vec<u8>>) -> Exposed<Option<Vec<u8>>, ()> {
-    boundary::outbound::to_untrusted(loaded)
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "identified: mutual RA-TLS to a pinned measurement, so the host that \
-             splices this hop carries ciphertext"
-        ))
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "scoped: the captured-hash gate admits only blobs THIS session stored, so \
-             the set this peer can name is the applicant's own frames and nothing else"
-        ))
-        .vouch_unchecked::<Covert, _>(reason!(
-            "already-held: media is sealed to the host WITHOUT padding under an HKDF \
-             name derived from (session, hash), so it held this blob's exact length \
-             and saw the read before this hop carried anything"
-        ))
 }

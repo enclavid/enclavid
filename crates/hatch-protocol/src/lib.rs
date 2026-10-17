@@ -1,29 +1,15 @@
-//! Wire DTOs shared across two transports:
-//!   * the host-side `hatch` over HTTP-over-vsock — the EGRESS envelopes
-//!     (`AuthorizeRequest`, `ManifestRequest`, `BlobRequest`, `KbsRelayRequest`,
-//!     `VcekRequest`);
-//!   * the trusted `storage-CVM` over RA-TLS/remoc — the session-store
-//!     DTOs (`ReadRequest` / `WriteRequest` / `Slot` / …), reused verbatim
-//!     as the `storage-rpc::SessionStoreService` payloads.
-//!
-//! They are NOT the sealed domain types: `SessionMetadata` /
-//! `SessionState` are CBOR-encoded TEE-side (see
-//! `hatch-client::domain`) then AEAD-sealed, and neither the hatch nor
-//! the storage-CVM ever sees anything but the opaque `value` bytes
-//! carried inside these envelopes — both have zero knowledge of what the
-//! sealed bytes mean.
+//! Wire DTOs of the host-side `hatch` over HTTP-over-vsock — the EGRESS
+//! envelopes (`AuthorizeRequest`, `ManifestRequest`, `BlobRequest`,
+//! `KbsRelayRequest`, `VcekRequest`).
 //!
 //! Bodies are encoded with CBOR (see [`encode`]/[`decode`]). CBOR's named
-//! fields give schema evolution across independent deploys. On the hatch
-//! HTTP path, control-flow outcomes ride status codes:
+//! fields give schema evolution across independent deploys. Control-flow
+//! outcomes ride status codes:
 //!   - 401 Unauthorized        — bad credential
 //!   - 403 Forbidden           — credential valid, operation not permitted
 //!   - 429 Too Many Requests   — the principal is past its rate for the operation
 //!   - 404 Not Found           — OCI manifest absent
 //!   - 400 / 500               — malformed request / internal error
-//!
-//! On the storage-CVM path the same outcomes ride `storage-rpc`'s typed
-//! `SessionError` (e.g. `VersionMismatch` for a CAS conflict) instead.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -99,24 +85,7 @@ pub struct RateLimited {
 
 // Every byte field below is a CBOR byte string. ciborium writes a bare
 // `Vec<u8>` element by element — two bytes for every byte over 0x17 — so
-// sealed bytes cost about 1.9x their length on the wire, and on the storage
-// leg that was enough to push one round's write past remoc's item limit.
-
-/// `Vec<Vec<u8>>` as a sequence of byte strings: `serde_bytes` covers one
-/// buffer, not a list of them.
-mod byte_list {
-    pub fn serialize<S: serde::Serializer>(items: &[Vec<u8>], s: S) -> Result<S::Ok, S::Error> {
-        s.collect_seq(items.iter().map(|item| serde_bytes::Bytes::new(item)))
-    }
-
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Vec<u8>>, D::Error> {
-        let items: Vec<serde_bytes::ByteBuf> = serde::Deserialize::deserialize(d)?;
-        Ok(items
-            .into_iter()
-            .map(serde_bytes::ByteBuf::into_vec)
-            .collect())
-    }
-}
+// opaque bytes would cost about 1.9x their length on the wire.
 
 // ---------------------------------------------------------------------
 // OCI pull: a manifest (POST /oci/manifest), then the one blob of it the
@@ -249,150 +218,6 @@ pub struct VcekResponse {
     pub certificate: Vec<u8>,
 }
 
-// ---------------------------------------------------------------------
-// Session store — the `storage-rpc::SessionStoreService` payloads (remoc
-// to the storage-CVM over RA-TLS):
-//   read(id, ReadRequest)   -> ReadResponse
-//   write(id, WriteRequest, deadline) -> WriteResponse | SessionError::VersionMismatch
-//   exists(id)              -> bool
-// (These were formerly the hatch `/sessions/*` HTTP routes; that path was
-// retired when durable state moved into the storage-CVM.)
-// ---------------------------------------------------------------------
-
-/// Scalar fields — one value per (session, field). All four are opaque
-/// ciphertext to the storage-CVM. STATUS + PRINCIPAL are legacy markers
-/// no longer emitted (blind-CVM: host lifecycle hooks dropped); METADATA +
-/// STATE carry the AEAD-sealed session payloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BlobField {
-    Status,
-    Metadata,
-    State,
-    Principal,
-}
-
-/// List fields — a per-(session, field) collection of values. The disclosure
-/// field is an UNORDERED SET (see [`ListField::Disclosure`]); the store may
-/// return entries in any order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ListField {
-    /// Age-sealed disclosure entries (opaque ciphertext to the hatch), as an
-    /// UNORDERED SET — the TEE commits to the set, not the order, so order is
-    /// neither preserved nor meaningful.
-    Disclosure,
-}
-
-/// Selector for one field in a read. Picks scalar, list, or keyed-media
-/// shape. (Not `Copy` — the `Media` variant carries its blob-hash key.)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum FieldSelector {
-    Blob(BlobField),
-    List(ListField),
-    /// One media blob, keyed by its content hash (32-byte BLAKE3). Lives in
-    /// a per-session media hash (`session:{id}:media`), separate from the
-    /// scalar fields; reads return a `Slot::Scalar` (absent → `None`).
-    Media(#[serde(with = "serde_bytes")] Vec<u8>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadRequest {
-    /// Fields to read. **Empty = version probe**: the response carries
-    /// the current version and no slots (used to read the version
-    /// without paying any field bandwidth).
-    pub fields: Vec<FieldSelector>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadResponse {
-    /// Same length + order as `ReadRequest.fields`; each slot's variant
-    /// matches the selector's kind at that index.
-    pub slots: Vec<Slot>,
-    /// Current session version; 0 if the session does not exist.
-    pub version: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Slot {
-    Scalar(ScalarSlot),
-    List(ListSlot),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScalarSlot {
-    /// `None` = field absent; `Some(empty)` = present-but-empty. The
-    /// distinction is load-bearing: a default-valued `SessionMetadata`
-    /// serializes to empty bytes, and must not read back as "absent".
-    #[serde(with = "serde_bytes")]
-    pub value: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ListSlot {
-    /// All entries. Order is UNSPECIFIED (the disclosure field is a set);
-    /// consumers must not rely on position. Empty when absent or never written.
-    #[serde(with = "byte_list")]
-    pub items: Vec<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WriteRequest {
-    /// Ops applied atomically (single Redis EVAL). Mixing scalar writes
-    /// and list appends in one call is the common case (state update +
-    /// accumulated disclosure entries).
-    pub ops: Vec<Op>,
-    /// Optimistic-concurrency gate. `Some(v)` applies only if the
-    /// session's current version == v (else 412). `None` means "the
-    /// session must not exist yet" (used by session creation).
-    pub expected_version: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Op {
-    /// Replace a scalar field's value.
-    Blob(BlobWrite),
-    /// Append to a list field.
-    ListAppend(ListAppend),
-    /// Write one media blob under its content-hash key into the per-session
-    /// media hash. Idempotent — the key IS the content, so a re-write is a
-    /// no-op-equivalent overwrite of identical bytes.
-    MediaWrite(MediaWrite),
-    /// Drop the state, every media blob and every disclosure, keeping the
-    /// session's metadata and version — the `/reset` path. In order with the
-    /// ops beside it, so under the same version check and in the same commit.
-    Reset,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlobWrite {
-    pub field: BlobField,
-    #[serde(with = "serde_bytes")]
-    pub value: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MediaWrite {
-    /// Content-hash key (32-byte BLAKE3 of the sealed blob's plaintext).
-    #[serde(with = "serde_bytes")]
-    pub blob_key: Vec<u8>,
-    /// Sealed blob bytes (double-AEAD ciphertext).
-    #[serde(with = "serde_bytes")]
-    pub value: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListAppend {
-    pub field: ListField,
-    #[serde(with = "serde_bytes")]
-    pub value: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WriteResponse {
-    /// Session version after the write. Callers chain subsequent writes
-    /// by feeding this back as the next `expected_version`.
-    pub new_version: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,42 +230,6 @@ mod tests {
 
     #[test]
     fn a_sealed_byte_crosses_as_one_byte() {
-        let write = WriteRequest {
-            ops: vec![
-                Op::Blob(BlobWrite {
-                    field: BlobField::State,
-                    value: sealed(),
-                }),
-                Op::MediaWrite(MediaWrite {
-                    blob_key: vec![0xff; 32],
-                    value: sealed(),
-                }),
-                Op::ListAppend(ListAppend {
-                    field: ListField::Disclosure,
-                    value: sealed(),
-                }),
-            ],
-            expected_version: Some(1),
-        };
-        assert!(encode(&write).unwrap().len() < 3 * sealed().len() + 256);
-
-        let read = ReadResponse {
-            slots: vec![
-                Slot::Scalar(ScalarSlot {
-                    value: Some(sealed()),
-                }),
-                Slot::Scalar(ScalarSlot { value: None }),
-                Slot::List(ListSlot {
-                    items: vec![sealed(), Vec::new()],
-                }),
-            ],
-            version: 1,
-        };
-        let wire = encode(&read).unwrap();
-        assert!(wire.len() < 2 * sealed().len() + 256);
-        let back: ReadResponse = decode(&wire).unwrap();
-        assert_eq!(back.slots, read.slots);
-
         let pulled = ManifestResponse { manifest: sealed() };
         assert!(encode(&pulled).unwrap().len() < 2 * sealed().len() + 256);
     }

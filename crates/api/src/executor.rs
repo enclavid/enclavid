@@ -27,108 +27,121 @@
 use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
 use engine_rpc::{
     BundleSource, CallbackServiceUntrusted, CompositionKey, ExecError, ExecutorLeg, Padded,
-    Preparation, PrepareRequest, Preparing, PropsRead, RoundProps, RoundSeed, RunOutcome,
-    RunRequest, RunStatus,
+    Preparation, PrepareRequest, Preparing, PropsRead, RoundProps, RunOutcome, RunRequest,
+    RunStatus,
 };
 use fleet_transport::LegFailure;
-use hatch_client::SessionState;
 use safe_logger::debug;
+use session_types::{Event, SessionState};
 
-/// What is still open on a value api is about to release to a worker CVM.
+/// What is still open on a value api is about to release to the
+/// execution-worker.
 ///
-/// Declared here rather than taken from `hatch_client::boundary::outbound`: that
-/// facade is the TEE↔host wire perimeter and owns the answers that crossing
-/// raises. A scope is a property of the CHANNEL, so this leg names its own.
+/// Declared here rather than taken from a client's `boundary::outbound`: those
+/// facades are the host's, whose every byte the host reads. A scope is a property
+/// of the CHANNEL, so this leg names its own.
 type ToWorker<T> = Exposed<T, (AuthN, AuthZ, Covert)>;
 
-/// Mint the round's prior state as a fully-vouched, constant-size frame — the
-/// only way a `SessionState` reaches an execution-worker.
+/// Open a value for the execution-worker with the leg's own answer given, so
+/// what is left is what differs per message.
 ///
-/// NOT a generic "anything crossing to a worker" mint, on the same reasoning as
-/// `outbound_session_id`: it is specific to this value so the audited answers live
-/// in one place (grep `outbound_round_state(`) instead of being restated at each
-/// call, where they would be the same two sentences forever.
+/// `AuthN` is IDENTIFIED, and it is the same for everything this leg carries — a
+/// round, a preparation, a blob a round asked for: the leg dials one
+/// compile-time-pinned measurement, and that peer keeps what it is handed in its
+/// own memory, where the host that splices the hop cannot read it.
 ///
-/// `AuthN` is IDENTIFIED and `AuthZ` is NO-SECRET, and the two rest on different
-/// facts even though both are settled once for the whole leg. `AuthN`'s is the
-/// dial: one compile-time-pinned measurement, checked at the handshake. `AuthZ`'s
-/// is what this VALUE is — the peer's own prior output, which it wrote on the
-/// previous round's `session_change` and is now being handed back.
+/// `AuthZ` and `Covert` stay open. What may go to the code that runs a consumer's
+/// policy, and what a value's shape can carry, are answered value by value, by the
+/// mints below. Private to this module, so its receipt reaches no other door.
+fn to_worker<T>(value: T) -> Exposed<T, (AuthZ, Covert)> {
+    let open: ToWorker<T> = Exposed::new(value);
+    open.vouch_unchecked::<AuthN, _>(reason!(
+        "identified: this leg dials ONE compile-time-pinned measurement, the handshake \
+         fails before a byte moves if the peer is not it, and the peer keeps what it \
+         is handed in its own memory"
+    ))
+}
+
+/// Mint a round's request — the only way one reaches an execution-worker, and
+/// the receipt `ExecutorLeg::run` and `run_with_bundle` demand.
 ///
-/// `Covert` is the only axis that differs per value, and it is the only one
-/// discharged by doing the work rather than by naming a fact: the peel's codomain
-/// IS the wire type, so a caller cannot get a `RunRequest` field out of this
-/// without the padding having happened.
+/// One mint for the whole message, so every field it carries is answered here
+/// and none rides in on another's receipt.
 ///
-/// The wrapper is RETURNED rather than unwrapped here, and that is what keeps it
-/// from being decoration. `ExecutorLeg::run` demands `Exposed<RunRequest, ()>`,
-/// and that type cannot be constructed — only arrived at, by peeling every
-/// concern this mint opened — so the receipt has to survive across the crate line
-/// to the door.
-pub(crate) fn outbound_round_state(
+/// `AuthZ` takes one answer for the four fields, and it names the kind of each:
+///
+///   * the state, the props and the key are NO-SECRET: the state is what this
+///     peer wrote on the session's previous round, or the empty one genesis
+///     starts from; the props are what its preparation read; the key names the
+///     composition it is handed on every miss;
+///   * the event is MATCHED, upstream: it is the reply sent under the bearer that
+///     opened this session's state (`round::extract`), and it goes to the runner
+///     of this session's policy, whose prompt it answers.
+///
+/// `Covert` is closed by the work for the two fields whose length the policy
+/// chooses — the state, and the props as read against its type: the peel's
+/// codomain IS the wire type, so no `RunRequest` exists whose frames skipped the
+/// padding. The other two are not framed, and the reason for each is that
+/// nobody with something to hide chose its shape:
+///
+///   * the event is `Start`, a consent reply of one bit, or the applicant's own
+///     capture, whose length the host watched arrive as the request it came in;
+///   * the key is 64 hex characters api computed before any round ran.
+pub(crate) fn outbound_round(
+    composition_key: &CompositionKey,
     state: &SessionState,
-) -> Result<Exposed<Padded<SessionState>, ()>, ExecError> {
-    let framed: ToWorker<&SessionState> = Exposed::new(state);
-    Ok(framed
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "identified: this leg dials ONE compile-time-pinned measurement, and the \
-             handshake fails before a byte moves if the peer is not it"
-        ))
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "no-secret: this is the peer's OWN prior output coming back — it authored \
-             these bytes on the previous round's session_change, so the release \
-             hands it nothing it did not already hold"
-        ))
-        .vouch::<Covert, _, _, _, _>(Padded::seal)?)
-}
-
-/// Mint a round's props — the WAVE its session's preparation wrote, `None` for a
-/// composition that declares none — as a constant-size frame, the only way they
-/// reach an execution-worker.
-///
-/// `AuthN` is IDENTIFIED, as for the state. `AuthZ` is NO-SECRET: the worker's
-/// own output, from the preparation, handed back to the same peer. `Covert` is
-/// TRANSFORMED, done by the peel: as read, the props' length is their type's
-/// and their own.
-pub(crate) fn outbound_round_props(props: Option<&str>) -> Result<Padded<RoundProps>, ExecError> {
+    props: Option<&str>,
+    event: Event,
+) -> Result<Exposed<RunRequest, ()>, ExecError> {
     let props = RoundProps(props.map(str::as_bytes).unwrap_or_default().to_vec());
-    let framed: ToWorker<RoundProps> = Exposed::new(props);
-    Ok(framed
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "identified: this leg dials ONE compile-time-pinned measurement, and the \
-             handshake fails before a byte moves if the peer is not it"
-        ))
+    Ok(to_worker((composition_key, state, props, event))
         .vouch_unchecked::<AuthZ, _>(reason!(
-            "no-secret: the props as a preparation's worker wrote them, handed back to \
-             the same peer"
+            "no-secret for the state, the props and the key — this peer's own prior \
+             output or the empty genesis state, what its preparation read, and the key \
+             it is handed on every miss; matched for the event — the reply sent under \
+             the bearer that opened this session's state, to the runner of the policy \
+             whose prompt it answers"
         ))
-        .vouch::<Covert, _, _, _, _>(|props| Padded::seal(&props))?
-        .into_inner())
+        .vouch::<Covert, _, _, _, _>(|(composition_key, state, props, event)| {
+            Ok::<_, engine_rpc::FrameError>(RunRequest {
+                composition_key: composition_key.clone(),
+                props: Padded::seal(&props)?,
+                session_state: Padded::seal(state)?,
+                event,
+            })
+        })?)
 }
 
-/// Mint a round's seed ([`crate::round_seed`]) for the worker that runs the
-/// round, the only way one reaches an execution-worker.
+/// Mint a rehydrated blob as a released value — the ONE thing api hands back to
+/// the process that runs adversary-authored wasm, and the only value on this leg
+/// that is not framed. `crate::applicant::media_store` calls it once its
+/// captured-hash gate has admitted the hash.
 ///
-/// `AuthN` is IDENTIFIED, as for the state. `AuthZ` is MATCHED: the seed is the
-/// round's, and the leg's one pinned peer is the worker the round runs on.
-/// `Covert` is NOT-CHOSEN: api derived it from a key only it holds, and it crosses
-/// as 32 bytes whatever they are.
-pub(crate) fn outbound_round_seed(seed: [u8; 32]) -> RoundSeed {
-    let framed: ToWorker<RoundSeed> = Exposed::new(RoundSeed(seed));
-    framed
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "identified: this leg dials ONE compile-time-pinned measurement, and the \
-             handshake fails before a byte moves if the peer is not it"
-        ))
+/// These are the applicant's own pixels, going out over the hop the host splices,
+/// whose `AuthN` the leg answers ([`to_worker`]). Two answers here, and the last
+/// is the one worth reading twice because it is why there is no frame:
+///
+///   * `AuthZ` — SCOPED, by the captured-hash gate rather than by a sentence: the
+///     only blobs nameable are ones this session stored, and a hash outside that
+///     set never reaches a store read at all.
+///   * `Covert` — ALREADY-HELD. Media is sealed to the host WITHOUT padding, under
+///     an HKDF name derived from `(session, hash)`, so the host held this blob's
+///     exact length and saw the read before this hop carried anything.
+///
+/// The residual under that last one is real and bounded: WHICH of this session's
+/// own blobs a round fetched. The gate bounds the set, the worker's per-run memo
+/// bounds repeats within a round, and the applicant's round count bounds the rest.
+pub(crate) fn outbound_blob(loaded: Option<Vec<u8>>) -> Exposed<Option<Vec<u8>>, ()> {
+    to_worker(loaded)
         .vouch_unchecked::<AuthZ, _>(reason!(
-            "matched: the seed is this round's, and the one peer this leg pins is the \
-             worker the round runs on"
+            "scoped: the captured-hash gate admits only blobs THIS session stored, so \
+             the set this peer can name is the applicant's own frames and nothing else"
         ))
         .vouch_unchecked::<Covert, _>(reason!(
-            "not-chosen: api derives it from a key only api holds, and it is 32 bytes \
-             in every round"
+            "already-held: media is sealed to the host WITHOUT padding under an HKDF \
+             name derived from (session, hash), so it held this blob's exact length \
+             and saw the read before this hop carried anything"
         ))
-        .into_inner()
 }
 
 /// The EXECUTE boundary: a client for an execution-worker's
@@ -217,31 +230,28 @@ impl Executor {
 /// Mint a session's preparation as a fully-vouched request — the only way one
 /// reaches an execution-worker.
 ///
-/// `AuthN` is IDENTIFIED, as for a round. `AuthZ` is NO-SECRET: the props are
-/// the ones every round of the session hands this same peer, as WAVE once
-/// read, and the key names the composition it is handed on every miss.
-/// `Covert` is ALREADY-HELD: the props are the consumer's JSON, whose length
-/// the host saw on the request that created the session, and nothing of the
-/// applicant's is in it — a session is prepared before any of its rounds.
+/// `AuthZ` is NO-SECRET: the props are the ones every round of the session hands
+/// this same peer, as WAVE once read, and the key names the composition it is
+/// handed on every miss. `Covert` is ALREADY-HELD: the props are the consumer's
+/// JSON, whose length the host saw on the request that created the session, and
+/// nothing of the applicant's is in it — a session is prepared before any of its
+/// rounds. The key beside them is 64 hex characters, whatever it names.
 pub(crate) fn outbound_preparation(
     composition_key: &CompositionKey,
     preparing: Preparing,
 ) -> Exposed<PrepareRequest, ()> {
-    let open: ToWorker<PrepareRequest> = Exposed::new(PrepareRequest {
+    to_worker(PrepareRequest {
         composition_key: composition_key.clone(),
         preparing,
-    });
-    open.vouch_unchecked::<AuthN, _>(reason!(
-        "identified: this leg dials ONE compile-time-pinned measurement, and the \
-         handshake fails before a byte moves if the peer is not it"
-    ))
+    })
     .vouch_unchecked::<AuthZ, _>(reason!(
         "no-secret: the props every round of this session hands the same peer, and \
          the key it is handed on every miss"
     ))
     .vouch_unchecked::<Covert, _>(reason!(
         "already-held: the consumer's own props, whose length the host saw when the \
-         session was created; nothing of an applicant's is in them"
+         session was created, beside a key of fixed length; nothing of an applicant's \
+         is in either"
     ))
 }
 

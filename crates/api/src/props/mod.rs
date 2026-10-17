@@ -14,7 +14,7 @@ use std::fmt::Write;
 use serde_json::{Map, Value as Json};
 
 use engine_types::props::{PropsProblem, PropsRefusal, Step};
-use hatch_client::{MAX_PROPS_AT_BYTES, PropsFault};
+use session_types::{MAX_PROPS_AT_BYTES, PropsFault};
 
 use crate::limits::MAX_PROPS_SIZE;
 

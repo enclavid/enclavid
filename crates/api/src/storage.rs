@@ -1,13 +1,12 @@
-//! The STORAGE boundary: hatch-client `SessionBackend` / `CacheBackend` seams
+//! The STORAGE boundary: storage-client `SessionBackend` / `CacheBackend` seams
 //! implemented over remoc clients to the trusted storage-CVM, dialed under mutual
 //! RA-TLS exactly like the compile/execution workers (see [`crate::executor`]).
 //!
 //! Not selected by anything: these are the backends api dials at boot, full
 //! stop. There is no runtime switch and no second implementation to switch to —
 //! `main::build_storage_backends` constructs them unconditionally. The backends
-//! live HERE (not in hatch-client) so hatch-client stays remoc-free; api already
-//! links remoc + RA-TLS for the workers. All crypto stays in hatch-client's `SessionStore` /
-//! `CacheStore` — these move opaque sealed DTOs only.
+//! live HERE, beside the leg they run over. All crypto stays in storage-client's
+//! `SessionStore` / `CacheStore` — these move opaque sealed DTOs only.
 
 use std::sync::Arc;
 
@@ -17,20 +16,20 @@ use remoc::rtc::Client as _;
 
 use fleet_stream::{Incoming, StreamLen, bin};
 use fleet_transport::LegFailure;
-use hatch_client::{BlobPieces, BridgeError, CacheBackend, SessionBackend};
-use hatch_protocol::{ReadRequest, Slot, WriteRequest};
 use safe_logger::debug;
+use storage_client::{BlobPieces, CacheBackend, SessionBackend, StoreError};
 use storage_rpc::{
     CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheService, CacheServiceClient,
-    SessionError, SessionStoreService, SessionStoreServiceClient, StorageClients,
+    ReadRequest, SessionError, SessionStoreService, SessionStoreServiceClient, Slot,
+    StorageClients, WriteRequest,
 };
 
-/// Fold any storage-tier RPC error into the hatch-client transport error the
-/// stores expect. `SessionError::VersionMismatch` is handled inline on `write`
-/// (it must map to the dedicated `BridgeError::VersionMismatch` the CAS callers
+/// Fold any storage-tier RPC error into the transport error the stores
+/// expect. `SessionError::VersionMismatch` is handled inline on `write`
+/// (it must map to the dedicated `StoreError::VersionMismatch` the CAS callers
 /// branch on); everything else — including every `CacheError` — folds here.
-fn to_bridge(e: impl std::fmt::Display) -> BridgeError {
-    BridgeError::Transport(format!("storage-cvm: {e}"))
+fn to_store(e: impl std::fmt::Display) -> StoreError {
+    StoreError::Transport(format!("storage-cvm: {e}"))
 }
 
 /// `SessionBackend` over the storage-CVM's `SessionStoreService`.
@@ -46,21 +45,21 @@ impl SessionCvmBackend {
     /// The client, or the leg's own failure. A request during an outage fails
     /// rather than waits — the health port is already saying which leg is down,
     /// and how long to wait for it is the host's call.
-    fn client(&self) -> Result<SessionStoreServiceClient<Ciborium>, BridgeError> {
+    fn client(&self) -> Result<SessionStoreServiceClient<Ciborium>, StoreError> {
         self.leg
             .get()
-            .ok_or_else(|| BridgeError::Transport("storage-cvm: the leg is down".into()))
+            .ok_or_else(|| StoreError::Transport("storage-cvm: the leg is down".into()))
     }
 }
 
 #[async_trait::async_trait]
 impl SessionBackend for SessionCvmBackend {
-    async fn read_raw(&self, id: &str, req: ReadRequest) -> Result<(Vec<Slot>, u64), BridgeError> {
+    async fn read_raw(&self, id: &str, req: ReadRequest) -> Result<(Vec<Slot>, u64), StoreError> {
         let r = self
             .client()?
             .read(id.to_string(), req)
             .await
-            .map_err(to_bridge)?;
+            .map_err(to_store)?;
         Ok((r.slots, r.version))
     }
 
@@ -69,23 +68,23 @@ impl SessionBackend for SessionCvmBackend {
         id: &str,
         req: WriteRequest,
         deadline_unix_secs: Option<u64>,
-    ) -> Result<u64, BridgeError> {
+    ) -> Result<u64, StoreError> {
         match self
             .client()?
             .write(id.to_string(), req, deadline_unix_secs)
             .await
         {
             Ok(r) => Ok(r.new_version),
-            Err(SessionError::VersionMismatch) => Err(BridgeError::VersionMismatch),
-            Err(e) => Err(to_bridge(e)),
+            Err(SessionError::VersionMismatch) => Err(StoreError::VersionMismatch),
+            Err(e) => Err(to_store(e)),
         }
     }
 
-    async fn exists(&self, id: &str) -> Result<bool, BridgeError> {
+    async fn exists(&self, id: &str) -> Result<bool, StoreError> {
         self.client()?
             .exists(id.to_string())
             .await
-            .map_err(to_bridge)
+            .map_err(to_store)
     }
 }
 
@@ -102,10 +101,10 @@ impl CacheCvmBackend {
         Self { leg }
     }
 
-    fn client(&self) -> Result<CacheServiceClient<Ciborium>, BridgeError> {
+    fn client(&self) -> Result<CacheServiceClient<Ciborium>, StoreError> {
         self.leg
             .get()
-            .ok_or_else(|| BridgeError::Transport("storage-cvm: the leg is down".into()))
+            .ok_or_else(|| StoreError::Transport("storage-cvm: the leg is down".into()))
     }
 }
 
@@ -116,9 +115,9 @@ impl CacheBackend for CacheCvmBackend {
         blob_name: &str,
         length: u64,
         pieces: BlobPieces,
-    ) -> Result<(), BridgeError> {
+    ) -> Result<(), StoreError> {
         let length = StreamLen::new(length).ok_or_else(|| {
-            BridgeError::Transport(
+            StoreError::Transport(
                 "storage-cvm: a blob past what the leg carries; not stored".into(),
             )
         })?;
@@ -133,32 +132,32 @@ impl CacheBackend for CacheCvmBackend {
             reply = &mut call => reply,
             _ = fleet_stream::send_from(tx, pieces) => call.await,
         };
-        reply.map_err(to_bridge)
+        reply.map_err(to_store)
     }
 
-    async fn load(&self, blob_name: &str) -> Result<Option<(u64, BlobPieces)>, BridgeError> {
+    async fn load(&self, blob_name: &str) -> Result<Option<(u64, BlobPieces)>, StoreError> {
         let Some(blob) = self
             .client()?
             .load(blob_name.to_string())
             .await
-            .map_err(to_bridge)?
+            .map_err(to_store)?
         else {
             return Ok(None);
         };
         let length = blob.length.get();
         let pieces = Incoming::open(blob.body, length, CACHE_STREAM_IDLE)
             .await
-            .map_err(to_bridge)?
+            .map_err(to_store)?
             .into_pieces(CACHE_STREAM_DEADLINE, None)
-            .map_err(to_bridge);
+            .map_err(to_store);
         Ok(Some((length, pieces.boxed())))
     }
 
-    async fn remove(&self, blob_name: &str) -> Result<(), BridgeError> {
+    async fn remove(&self, blob_name: &str) -> Result<(), StoreError> {
         self.client()?
             .remove(blob_name.to_string())
             .await
-            .map_err(to_bridge)
+            .map_err(to_store)
     }
 }
 

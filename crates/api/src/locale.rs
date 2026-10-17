@@ -24,7 +24,7 @@ use axum::http::StatusCode;
 use axum::http::header::ACCEPT_LANGUAGE;
 use axum::http::request::Parts;
 
-use hatch_client::Translation;
+use session_types::Translation;
 
 const DEFAULT_LOCALE: &str = "en";
 

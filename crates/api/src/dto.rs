@@ -26,9 +26,10 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use hatch_client::{
-    Artifact, CompileFault, Decision, DisplayField as ProtoDisplayField, InitError, Localized,
-    PromptDisclosure, PropsProblem, PullProblem, SessionStatus,
+use session_types::{
+    Artifact, CompileFault, Decision, Disclosure as PromptDisclosure,
+    DisplayField as ProtoDisplayField, InitError, Localized, PropsProblem, PullProblem,
+    SessionStatus,
 };
 
 use crate::locale::Locale;
@@ -289,7 +290,7 @@ pub struct PluginView {
 impl PluginView {
     /// Build a view from a sealed plugin pin, extracting the digest from its
     /// pinned ref.
-    pub fn from_pin(pin: &hatch_client::PluginPin) -> Self {
+    pub fn from_pin(pin: &session_types::PluginPin) -> Self {
         Self {
             package: pin.package.clone(),
             reference: pin.impl_ref.clone(),
@@ -303,7 +304,7 @@ impl PluginView {
 /// Serde "remote" definition for the proto-generated `SessionStatus`
 /// enum. Variants must mirror the foreign enum exactly; serde uses
 /// this shadow type only as a description of how to serialize the
-/// real `SessionStatus` (declared in hatch-client). Lets the JSON
+/// real `SessionStatus` (declared in session-types). Lets the JSON
 /// wire shape live in the api crate without an orphan-rule wrapper
 /// or a transport-layer serde-aware build.rs.
 ///
@@ -450,7 +451,7 @@ pub fn consent_disclosure_digest(d: &PromptDisclosure) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hatch_client::{PromptDisclosure, Translation};
+    use session_types::{Disclosure as PromptDisclosure, Translation};
 
     fn loc(text: &str) -> Localized {
         Localized {
@@ -590,7 +591,7 @@ mod tests {
         assert!(lengths.windows(2).all(|w| w[0] == w[1]), "{lengths:?}");
     }
 
-    use hatch_client::InterfaceName;
+    use session_types::InterfaceName;
 
     /// An init error reads as it was kept: a plugin by its package, an import
     /// by its interface name, the problem by its name.
@@ -632,9 +633,9 @@ mod tests {
             serde_json::json!({ "kind": "compile", "problem": "out_of_memory" })
         );
         assert_eq!(
-            view(InitError::Props(hatch_client::PropsFault {
+            view(InitError::Props(session_types::PropsFault {
                 at: "props.people[1].name".into(),
-                problem: hatch_client::PropsProblem::ShouldBeString,
+                problem: session_types::PropsProblem::ShouldBeString,
             })),
             serde_json::json!({
                 "kind": "props",

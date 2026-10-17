@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use secrecy::SecretBox;
 
-use hatch_client::{CacheStore, HatchClient, KbsClient, RegistryClient, SessionStore};
+use hatch_client::{HatchClient, KbsClient, RegistryClient};
+use storage_client::{CacheStore, SessionStore};
 
 use crate::compiler::{Compiler, connect_compile_worker};
 use crate::compositions::Compositions;
 use crate::executor::{Executor, connect_execution_worker};
-use crate::round_seed::RoundSeeds;
 use crate::shuffle::ShuffleKey;
 use crate::turns::ConsumerTurns;
 
@@ -16,7 +16,7 @@ use crate::turns::ConsumerTurns;
 /// `SecretBox` provides zeroization on drop and redacts from Debug output.
 /// Sourced fresh from the request bearer by [`super::applicant::auth`]; not
 /// cached — a wrong key is rejected cryptographically at the state read
-/// (`BridgeError::Crypto` → 403), so there is no first-claim table to keep.
+/// (`StoreError::Crypto` → 403), so there is no first-claim table to keep.
 pub type ApplicantSessionToken = SecretBox<Vec<u8>>;
 
 pub struct AppState {
@@ -40,21 +40,16 @@ pub struct AppState {
     /// into `engine::RunInputs`. See [`crate::shuffle`] for the
     /// derivation contract and threat model.
     pub shuffle_key: Arc<ShuffleKey>,
-    /// Each round's random seed is derived from this key, the session id and
-    /// how many rounds the session has run. See [`crate::round_seed`].
-    pub round_seeds: Arc<RoundSeeds>,
 }
 
 impl AppState {
     /// `settings` says how long the hatch has to answer a pull and a KBS leg.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_store: Arc<SessionStore>,
         hatch: HatchClient,
         compiler: Arc<Compiler>,
         executor: Arc<Executor>,
         shuffle_key: Arc<ShuffleKey>,
-        round_seeds: Arc<RoundSeeds>,
         cache_store: CacheStore,
         settings: &crate::settings::Settings,
     ) -> Self {
@@ -82,11 +77,10 @@ impl AppState {
             executor,
             session_store,
             shuffle_key,
-            round_seeds,
         }
     }
 
-    /// Connect to hatch-client + both engine workers and build state. BOTH the
+    /// Connect to the hatch + both engine workers and build state. BOTH the
     /// COMPILE and EXECUTE boundaries are remote clients dialed here — the
     /// workers are separate processes/CVMs started by infrastructure (like the
     /// hatch), NOT spawned by api. api itself links neither Cranelift nor the
@@ -100,7 +94,6 @@ impl AppState {
         session_store: Arc<SessionStore>,
         cache_store: CacheStore,
         shuffle_key: Arc<ShuffleKey>,
-        round_seeds: Arc<RoundSeeds>,
         attestor: Arc<dyn enclavid_attestation::Attestor>,
         api_health: Arc<crate::health::ApiHealth>,
         settings: &crate::settings::Settings,
@@ -156,7 +149,6 @@ impl AppState {
             compiler,
             executor,
             shuffle_key,
-            round_seeds,
             cache_store,
             settings,
         )

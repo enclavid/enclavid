@@ -26,7 +26,7 @@ use remoc::rtc::ServerShared;
 
 use engine_rpc::{
     BundleRef, ByteBuf, CallbackError, CatalogEntry, ChildCallbacks, ChildCallbacksServerShared,
-    ChildService, ChildServiceClient, CompiledBundle, ExecError, RoundSeed, RunStatus,
+    ChildService, ChildServiceClient, CompiledBundle, ExecError, RunStatus,
 };
 
 /// The plugins the policy imports, from the shared fixture catalog — the same
@@ -173,7 +173,6 @@ async fn spawned_child_primes_runs_relays_then_exits() {
             SessionState::default(),
             Event::Start,
             no_props(),
-            RoundSeed([0; 32]),
             DEFAULT_ROUND_FUEL,
             cb_client,
         )
@@ -302,7 +301,6 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
             SessionState::default(),
             Event::Start,
             no_props(),
-            RoundSeed([0; 32]),
             DEFAULT_ROUND_FUEL,
             cb_client,
         )
@@ -532,7 +530,6 @@ async fn measure_per_round_cost() {
                 SessionState::default(),
                 Event::Start,
                 no_props(),
-                RoundSeed([0; 32]),
                 DEFAULT_ROUND_FUEL,
                 cb_client,
             )

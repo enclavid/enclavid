@@ -5,17 +5,17 @@
 //! engine-side, before the entry is staged for commit). Order is neither
 //! preserved by the store nor relied upon — the api commits to the set.
 
-use hatch_protocol::{FieldSelector, ListAppend, ListField, Op, Slot};
+use storage_rpc::{FieldSelector, ListAppend, ListField, Op, Slot};
 
 use crate::boundary;
-use crate::error::BridgeError;
+use crate::error::StoreError;
 use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 use super::Ctx;
 use super::core::{ReadField, WriteField, unwrap_list};
 
 /// Read marker: per-session disclosure set. Output is
-/// `Untrusted<Vec<Vec<u8>>, (AuthN, AuthZ, Replay)>` — hatch-client
+/// `Untrusted<Vec<Vec<u8>>, (AuthN, AuthZ, Replay)>` — storage-client
 /// does no decryption work (items are sealed for the consumer), so
 /// **no** concern gets closed at this layer. The caller is expected
 /// to verify the per-session disclosure SET COMMITMENT (closes AuthN +
@@ -32,7 +32,7 @@ pub struct Disclosure;
 /// boundary (the vouch chain in `api::applicant::persister`). The bytes are
 /// already
 /// age-sealed to the consumer's `client_disclosure_pubkey`, with
-/// field order HKDF'd-shuffle'd inside the envelope; hatch-client
+/// field order HKDF'd-shuffle'd inside the envelope; storage-client
 /// does no further sealing work — `build_op` just rewraps as a typed
 /// `ListAppend` op for the wire send.
 pub struct AppendDisclosure(pub Exposed<Vec<u8>, ()>);
@@ -44,9 +44,9 @@ impl ReadField for Disclosure {
         FieldSelector::List(ListField::Disclosure)
     }
 
-    fn decode(self, slot: Slot, _ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
+    fn decode(self, slot: Slot, _ctx: &Ctx<'_>) -> Result<Self::Output, StoreError> {
         // No work-backed trust step lives here — items are age-sealed
-        // for the consumer (not the TEE), so hatch-client has neither
+        // for the consumer (not the TEE), so storage-client has neither
         // the key nor the structural check to close any concern.
         // Caller verifies the disclosure-hash chain (AuthN + Replay)
         // and peels AuthZ with channel-specific rationale.
@@ -55,7 +55,7 @@ impl ReadField for Disclosure {
 }
 
 impl WriteField for AppendDisclosure {
-    fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, BridgeError> {
+    fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, StoreError> {
         // Bytes arrived pre-vouched from `api::applicant::persister`
         // (Covert → HKDF'd shuffle, AuthZ → the applicant accepted this
         // screen, AuthN → age-seal to client disclosure pubkey).

@@ -2,13 +2,13 @@
 //! disclosures — dropped as one op, the `/reset` path. A write field like the
 //! rest, so it commits under the version the caller read the session at.
 
-use hatch_protocol::Op;
+use storage_rpc::Op;
 
 use enclavid_boundary::reason;
 use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed};
 
 use crate::boundary;
-use crate::error::BridgeError;
+use crate::error::StoreError;
 
 use super::Ctx;
 use super::core::WriteField;
@@ -18,7 +18,7 @@ use super::core::WriteField;
 pub struct DropApplicantData;
 
 impl WriteField for DropApplicantData {
-    fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, BridgeError> {
+    fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, StoreError> {
         Ok(boundary::outbound::to_untrusted(Op::Reset)
             .vouch_unchecked::<AuthN, _>(reason!("carries no bytes, only that the data goes"))
             .vouch_unchecked::<AuthZ, _>(reason!("drops this session's own data"))

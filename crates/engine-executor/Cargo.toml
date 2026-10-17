@@ -23,7 +23,7 @@ repository.workspace = true
 # invocation, gets no outward half through this edge either.
 safe-logger = { path = "../safe-logger" }
 engine-types = { path = "../engine-types" }
-hatch-client = { path = "../hatch-client" }
+session-types = { path = "../session-types" }
 
 # RUNTIME only — NO `cranelift`. `Component::deserialize` + instantiate +
 # run need the runtime; codegen (`Component::new`) lives in engine-compiler.
@@ -58,9 +58,10 @@ wasmtime-environ = { version = "46", default-features = false, features = ["comp
 wasmtime-wasi = { version = "46", default-features = false, features = ["p2"] }
 # `wasi:io`'s own bindings and its `Pollable`, which the round's deadlines are.
 wasmtime-wasi-io = { version = "46", default-features = false, features = ["std"] }
-# The round's random stream, seeded with what api derived for the session and
-# round: `StdRng`, at the version WASI's random takes.
-rand = { version = "0.10", default-features = false, features = ["std_rng"] }
+# Named by the library only for the `AsyncWrite` in the stdio trait it
+# implements (`round`), so with no features: wasmtime-wasi pulls tokio in
+# anyway, and what the worker runs on it, it asks for itself (`worker`).
+tokio = { version = "1", default-features = false }
 
 # --- execution-worker bin deps (optional) — pulled ONLY by the `worker`
 # feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable
@@ -81,17 +82,6 @@ engine-supervisor = { path = "../engine-supervisor", optional = true }
 remoc = { version = "0.18", default-features = false, features = [
     "rtc",
     "codec-ciborium",
-], optional = true }
-tokio = { version = "1", features = [
-    "macros",
-    "rt-multi-thread",
-    "net",
-    "io-util",
-    # `process` — the supervisor spawns per-round `engine-executor-child` processes;
-    # `sync` — the bounded-children `Semaphore`; `time` — the round deadlines.
-    "process",
-    "sync",
-    "time",
 ], optional = true }
 # The L1's map: eviction order, a weigher, a hook that keeps an entry a round is
 # using, and one fill per composition however many rounds miss on it at once.
@@ -147,7 +137,15 @@ worker = [
     "dep:enclavid-boundary",
     "dep:engine-supervisor",
     "dep:remoc",
-    "dep:tokio",
+    "tokio/macros",
+    "tokio/rt-multi-thread",
+    "tokio/net",
+    "tokio/io-util",
+    # `process` — the supervisor spawns per-round `engine-executor-child` processes;
+    # `sync` — the bounded-children `Semaphore`; `time` — the round deadlines.
+    "tokio/process",
+    "tokio/sync",
+    "tokio/time",
     "dep:quick_cache",
     "dep:enclavid-ra-tls",
     "dep:fleet-transport",

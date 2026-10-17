@@ -257,8 +257,6 @@ fn bridge_stage(e: &hatch_client::BridgeError) -> &'static str {
     match e {
         B::Transport(_) => "transport",
         B::Codec(_) => "codec",
-        B::Crypto(_) => "crypto",
-        B::VersionMismatch => "version",
         B::NotFound => "not-found",
         B::Refused => "refused",
     }
@@ -320,7 +318,10 @@ pub async fn build_attestor(
             Err(e) if attempt < vcek_retries => {
                 safe_logger::warn!(
                     "api: endorsement fetch failed at {}; retrying",
-                    safe_logger::safe(&bridge_stage(&e), reason!("one of five fixed labels")),
+                    safe_logger::safe(
+                        &bridge_stage(&e),
+                        reason!("one of the fixed labels bridge_stage names")
+                    ),
                     reason!("a constant, at startup before any session exists")
                 );
                 safe_logger::debug!("  cause: {e}");

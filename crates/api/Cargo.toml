@@ -69,12 +69,13 @@ engine-rpc = { path = "../engine-rpc", default-features = false, features = [
 ] }
 # The boundary vocabulary itself, taken from the leaf crate rather than through
 # a re-export: `Asserted` is how api judges its WORKER legs, and the hatch client
-# has no business carrying a marker for a channel it does not own. The markers
-# hatch-client's own boundary functions clear (`AuthN`/`Replay`/…) still come
-# through it, where the crossing that closes them lives.
+# has no business carrying a marker for a channel it does not own.
 enclavid-boundary = { path = "../boundary" }
 hatch-client = { path = "../hatch-client" }
 hatch-protocol = { path = "../hatch-protocol" }
+# The session's own types, and the client that seals them into the storage-CVM.
+session-types = { path = "../session-types" }
+storage-client = { path = "../storage-client" }
 # The intra-fleet byte stream (TCP or vsock, chosen with this crate's `vsock`).
 fleet-transport = { path = "../fleet-transport" }
 # The one channel this role may speak on, and the capture that keeps everything
@@ -92,7 +93,7 @@ storage-rpc = { path = "../storage-rpc" }
 # to a worker as one, a piece at a time.
 fleet-stream = { path = "../fleet-stream" }
 bytes = "1"
-# Object-safe async impls of the hatch-client `SessionBackend` / `CacheBackend`
+# Object-safe async impls of the storage-client `SessionBackend` / `CacheBackend`
 # seams for the storage-CVM clients.
 async-trait = "0.1"
 enclavid-crypto = { path = "../crypto" }

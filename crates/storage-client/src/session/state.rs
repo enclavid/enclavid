@@ -8,11 +8,11 @@
 //! `/connect` and the policy runs at least one round; before that the
 //! field is absent (`Option::None` from the read marker).
 
-use hatch_protocol::{BlobField, BlobWrite, FieldSelector, Op, Slot};
+use session_types::{SEALED_STATE_PLAINTEXT_BYTES, SessionState};
+use storage_rpc::{BlobField, BlobWrite, FieldSelector, Op, Slot};
 
 use crate::boundary;
-use crate::domain::{self, SessionState};
-use crate::error::BridgeError;
+use crate::error::StoreError;
 use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 use enclavid_crypto::aead;
@@ -20,32 +20,16 @@ use enclavid_crypto::aead;
 use super::Ctx;
 use super::core::{ReadField, WriteField, unwrap_scalar};
 
-/// Constant plaintext size the encoded `SessionState` is padded to before
-/// sealing, so the host-observable ciphertext size is FIXED every round —
-/// closing the size covert channel for BOTH `state` and `current_prompt`
-/// (the policy controls their sizes; a colluding host could otherwise relay
-/// the length). Trust-contract constant: an encoded `SessionState` larger
-/// than this traps the write (re-attest on change).
-///
-/// Must cover the max encoding — the policy `state` (≤ engine
-/// `POLICY_MAX_STATE_BYTES`, 1 MiB) plus the largest resolved prompt plus CBOR
-/// overhead; the 256 KiB over the state cap is that prompt/overhead headroom.
-/// Because the padding is unconditional this is also the *floor* cost of every
-/// state write: each round seals exactly this many plaintext bytes regardless of
-/// how little real state the policy carries. Raising `POLICY_MAX_STATE_BYTES`
-/// raises this frame — and thus every write's seal cost — in lockstep.
-pub const SEALED_STATE_PLAINTEXT_BYTES: usize = 1024 * 1024 + 256 * 1024;
-
 /// Encode `state` and pad it with trailing zeros to
 /// [`SEALED_STATE_PLAINTEXT_BYTES`], so the sealed ciphertext is a fixed size
 /// regardless of content. `ciborium::from_reader` reads exactly one value and
-/// ignores the trailing padding, so [`domain::decode`] needs NO un-pad — the
-/// padding is write-only, transparent on read. Errors (traps the write) if
+/// ignores the trailing padding, so [`session_types::decode`] needs NO un-pad —
+/// the padding is write-only, transparent on read. Errors (traps the write) if
 /// the encoding already exceeds the frame.
-pub fn encode_padded(state: &SessionState) -> Result<Vec<u8>, BridgeError> {
-    let mut bytes = domain::encode(state)?;
+pub fn encode_padded(state: &SessionState) -> Result<Vec<u8>, StoreError> {
+    let mut bytes = session_types::encode(state)?;
     if bytes.len() > SEALED_STATE_PLAINTEXT_BYTES {
-        return Err(BridgeError::Codec(format!(
+        return Err(StoreError::Codec(format!(
             "encoded SessionState is {} bytes, over the {SEALED_STATE_PLAINTEXT_BYTES}-byte \
              sealed-state frame",
             bytes.len(),
@@ -85,22 +69,22 @@ impl ReadField for State<'_> {
         FieldSelector::Blob(BlobField::State)
     }
 
-    fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
+    fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, StoreError> {
         let Some(b) = unwrap_scalar(slot)? else {
             return Ok(Untrusted::new(None));
         };
         let decoded: Untrusted<SessionState, (Replay,)> = boundary::inbound::from_untrusted(b)
             .trust::<AuthN, _, _, _, _>(|raw| aead::open(&raw, ctx.tee_seal_key, ctx.aad()))?
-            .trust::<AuthZ, _, _, _, _>(|outer| {
+            .trust::<AuthZ, _, _, _, _>(|outer| -> Result<_, StoreError> {
                 let inner = aead::open(&outer, self.applicant_session_token, ctx.aad())?;
-                domain::decode::<SessionState>(&inner)
+                Ok(session_types::decode::<SessionState>(&inner)?)
             })?;
         Ok(decoded.map(Some))
     }
 }
 
 impl WriteField for SetState<'_> {
-    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, BridgeError> {
+    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, StoreError> {
         // AuthZ + Covert (constant-size padding via `encode_padded`) are
         // pre-vouched at the construction site; `state` is already the encoded
         // + padded plaintext. Host-bridge closes AuthN with the double-AEAD
@@ -108,7 +92,7 @@ impl WriteField for SetState<'_> {
         // Each layer gets its own random nonce; AAD identical so cross-session
         // copies fail at the outer layer.
         let sealed = self.state.clone().vouch::<AuthN, _, _, _, _>(
-            |plaintext| -> Result<Vec<u8>, BridgeError> {
+            |plaintext| -> Result<Vec<u8>, StoreError> {
                 let inner = aead::seal(&plaintext, self.applicant_session_token, ctx.aad())?;
                 aead::seal(&inner, ctx.tee_seal_key, ctx.aad()).map_err(Into::into)
             },
@@ -139,7 +123,7 @@ mod tests {
         for s in [SessionState::default(), with_state] {
             let padded = encode_padded(&s).unwrap();
             assert_eq!(padded.len(), SEALED_STATE_PLAINTEXT_BYTES, "constant size");
-            let decoded: SessionState = domain::decode(&padded).unwrap();
+            let decoded: SessionState = session_types::decode(&padded).unwrap();
             assert_eq!(decoded, s, "decode ignores trailing padding");
         }
     }

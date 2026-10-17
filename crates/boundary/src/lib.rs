@@ -7,10 +7,11 @@
 //! one crate, inspectable together. Out again now, because the TEE
 //! grew a second way to speak: the serial port that `safe-logger`
 //! writes to. Two channels with nothing in common but this vocabulary,
-//! so the vocabulary belongs below both. The facades did not move;
-//! `hatch-client` re-exports these types, and `safe-logger` — which
-//! opens its channel before anything else in a role exists — can
-//! depend on them without depending on a wire client.
+//! so the vocabulary belongs below both. The facades stay with the
+//! clients that cross — `hatch-client` for the hatch, `storage-client`
+//! for the storage volume — and `safe-logger`, which opens its channel
+//! before anything else in a role exists, can depend on the vocabulary
+//! without depending on a wire client.
 //!
 //! `Untrusted<T, S>` — INBOUND. Carries a tuple-typed scope `S`
 //! listing the open trust concerns for the value; what each one asks
@@ -271,8 +272,9 @@ impl<T, S> Untrusted<T, S> {
     /// no `pub(crate)` that could span them. Hidden because nothing outside those
     /// facades should ever find it: the guard here is against a wrong turn, not
     /// against someone with commit access, and the named entry points —
-    /// `hatch_client::boundary::inbound::from_untrusted` for the wire — are what a
-    /// reviewer greps.
+    /// `hatch_client::boundary::inbound::from_untrusted` for the hatch wire,
+    /// `storage_client::boundary::inbound::from_untrusted` for the storage
+    /// volume — are what a reviewer greps.
     #[doc(hidden)]
     pub fn new(value: T) -> Self
     where

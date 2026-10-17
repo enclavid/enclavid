@@ -33,8 +33,8 @@
 use std::future::Future;
 
 use enclavid_boundary::{Exposed, Open, Untrusted};
-use hatch_client::{Decision, SessionState};
 use remoc::codec::Ciborium;
+use session_types::{Decision, SessionState};
 
 use crate::adapter::Untrusting;
 use crate::execute::{

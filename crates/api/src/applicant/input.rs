@@ -4,7 +4,7 @@ use axum::extract::{DefaultBodyLimit, Multipart, Path};
 use axum::http::StatusCode;
 use axum::routing::{MethodRouter, post};
 
-use hatch_client::{
+use session_types::{
     Clip, Event, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MediaResult, Prompt, SessionState,
 };
 

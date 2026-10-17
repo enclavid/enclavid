@@ -8,7 +8,7 @@ repository.workspace = true
 # The trusted storage-CVM: an attested, RA-TLS-fronted embedded KV that replaces
 # the untrusted host's Redis (session state) + object_store cache (L2 cwasm). It
 # is a BLIND ciphertext store — every payload arrives already AEAD-sealed under
-# `tee_seal_key` (TEE-side, in hatch-client), so the CVM never holds a key or
+# `tee_seal_key` (TEE-side, in storage-client), so the CVM never holds a key or
 # plaintext PII. Serves both `storage-rpc` services over one RA-TLS/remoc
 # connection. It accepts any attested guest and partitions records by the digest
 # the peer proved, rather than trusting that only api calls (`crate::scope`). The
@@ -27,7 +27,6 @@ path = "src/lib.rs"
 # reason and reach the port; `debug!` needs none and is not built in production.
 safe-logger = { path = "../safe-logger", features = ["device"] }
 storage-rpc = { path = "../storage-rpc" }
-hatch-protocol = { path = "../hatch-protocol" }
 # The RA-TLS backend is chosen here, not by ra-tls — see the `[features]` axis.
 # The hardware arm exists now: a blind CVM still cannot reach AMD for the
 # certificate that would endorse it, so it mints without one and api, which can

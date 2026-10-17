@@ -68,9 +68,6 @@ pub use embedded::{
     EmbeddedRegistryBuilder, Icon, IconStore, Localized, LocalizedStore, RefKind, RefStore,
     Translation,
 };
-pub use hatch_client::{
-    Action, Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
-};
 pub use listener::{SessionChange, SessionListener};
 pub use media_store::MediaStore;
 pub use runner::{
@@ -82,6 +79,9 @@ pub use runner::{
 /// translation values at resolve time (lazy validation strategy —
 /// see `runner::load_manifest` docs).
 pub use sanitize::sanitize_text_value;
+pub use session_types::{
+    Action, Decision, Event, MediaResult, Prompt, SessionMetadata, SessionState,
+};
 pub use state::RunInputs;
 /// Re-exports for API callers so they can implement `SessionListener` and
 /// build futures with the right error type without depending on

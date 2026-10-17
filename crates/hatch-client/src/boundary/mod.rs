@@ -1,14 +1,14 @@
-//! TEE ↔ host wire perimeter — one place that names every data
-//! shape crossing the boundary, with its concern scope and audit
-//! reason. Anywhere outside this module that needs to wrap
-//! something as `Untrusted` / `Exposed` for the wire goes
+//! TEE ↔ hatch wire perimeter — one place that names every data
+//! shape crossing to the hatch and back, with its concern scope and
+//! audit reason. Anywhere outside this module that needs to wrap
+//! something as `Untrusted` / `Exposed` for the hatch wire goes
 //! through a function here.
 //!
 //! ```text
 //!                  +--- boundary::outbound ---+
 //!                  | one fn per data shape    |
-//!  trusted code -->| typed → Exposed<T, S>    | --> SessionStore::write
-//!                  | S declared per channel   |     wire send
+//!  trusted code -->| typed → Exposed<T, S>    | --> wire send
+//!                  | S declared per channel   |
 //!                  +--------------------------+
 //!
 //!                  +--- boundary::inbound ----+
@@ -28,15 +28,14 @@
 //!   * `vouch::<X,` / `vouch_unchecked::<X,` — how each outbound
 //!     concern gets closed (seal, sanitise, blanket-vouch).
 //!
-//! This module is ONE perimeter, not the only one. It owns the
-//! hatch wire — the data shapes hatch-client knows about (state /
-//! metadata / status / principal / version / disclosure list) — and
-//! it owns the concerns that crossing raises, which is why the
-//! markers it clears are re-exported here.
+//! This module is ONE perimeter, not the only one. It owns the hatch's
+//! requests and replies, and the concerns that crossing raises.
 //!
 //! A role that speaks on other channels declares those itself,
 //! against the same vocabulary taken from `enclavid-boundary`
-//! directly: api judges its execution-worker leg `Asserted` in
+//! directly: what the storage-CVM keeps is `storage_client::boundary`,
+//! api opens its worker legs with `to_worker` / `to_compiler` and
+//! judges what the execution-worker sends back `Asserted` in
 //! `api::applicant::callbacks`, and the serial port is `safe-logger`
 //! (release point `safe_logger::line`, grep term `log!`). A scope is
 //! a property of the CHANNEL, not of the bytes, so each perimeter
@@ -48,8 +47,7 @@
 //! channel should not arrive through whichever crate a caller happened to be
 //! holding, and a second path is how a marker for one leg ends up looking like it
 //! belongs to another. What this module owns is the hatch's own facades —
-//! `from_untrusted` / `to_untrusted` / `outbound_session_id` — and the answers
-//! that crossing raises.
+//! `from_untrusted` / `to_untrusted` — and the answers that crossing raises.
 
 pub mod inbound;
 pub mod outbound;

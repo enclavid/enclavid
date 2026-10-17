@@ -32,7 +32,8 @@ use axum::response::{IntoResponse, Response};
 use base64ct::{Base64, Encoding};
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, Untrusted, reason};
-use hatch_client::{AuthVerdict, AuthorizeRequest, ClientOperation, SessionMetadata, boundary};
+use hatch_client::{AuthVerdict, AuthorizeRequest, ClientOperation, boundary};
+use session_types::SessionMetadata;
 
 use crate::client_state::ClientState;
 
@@ -47,7 +48,8 @@ pub(super) const SESSION_TOKEN_HEADER: HeaderName = HeaderName::from_static("x-s
 /// means the host's auth scheme didn't produce a principal (Allowed
 /// but anonymous; not currently used in MVP but the type allows for
 /// it). TEE doesn't act on the value — it's pure attribution data
-/// the create handler forwards to host-side storage via `SetPrincipal`.
+/// the create handler keeps in the session's sealed metadata
+/// (`client.access.principal`).
 #[derive(Clone, Debug)]
 pub(super) struct Principal(pub Option<String>);
 

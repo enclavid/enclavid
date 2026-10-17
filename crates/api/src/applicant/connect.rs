@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use axum::routing::{MethodRouter, post};
 
-use hatch_client::{Event, SessionState};
+use session_types::{Event, SessionState};
 
 use crate::state::AppState;
 

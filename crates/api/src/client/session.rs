@@ -6,7 +6,8 @@ use axum::response::Response;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use hatch_client::{Metadata, SessionStatus, outbound_session_id};
+use session_types::SessionStatus;
+use storage_client::Metadata;
 
 use crate::client_state::ClientState;
 use crate::dto::{self, DecisionView, InitErrorView, ResolvedPolicyView};
@@ -69,7 +70,7 @@ async fn read(
     // (entries can be tens of KB) just to compute a counter.
     let ((metadata_untrusted,), _version) = state
         .session_store
-        .read(outbound_session_id(&session_id), (Metadata,))
+        .read(&session_id, (Metadata,))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

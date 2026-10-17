@@ -104,7 +104,6 @@ impl ChildService for Child {
         session_state: SessionState,
         event: Event,
         props: engine_rpc::ByteBuf,
-        seed: engine_rpc::RoundSeed,
         fuel: u64,
         callbacks: ChildCallbacksClient<Ciborium>,
     ) -> Result<engine_rpc::RunStatus, ExecError> {
@@ -127,7 +126,6 @@ impl ChildService for Child {
             listener,
             media_store,
             fuel,
-            seed: seed.0,
         };
 
         let (status, _next_state) = self
@@ -284,7 +282,7 @@ impl MediaStore for RelayMediaStore {
 }
 
 /// Map the engine's `RunStatus` to the wire mirror (both wrap the same
-/// hatch_client `Prompt` / `Decision`).
+/// session_types `Prompt` / `Decision`).
 fn to_wire_status(s: RunStatus) -> engine_rpc::RunStatus {
     match s {
         RunStatus::AwaitingInput(p) => engine_rpc::RunStatus::AwaitingInput(p),

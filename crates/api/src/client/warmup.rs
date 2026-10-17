@@ -22,7 +22,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{MethodRouter, post};
 
-use hatch_client::{Metadata, SessionStatus, outbound_session_id};
+use session_types::SessionStatus;
+use storage_client::Metadata;
 
 use crate::client_state::ClientState;
 use crate::init;
@@ -43,7 +44,7 @@ async fn warmup(
 ) -> Result<StatusCode, StatusCode> {
     let ((metadata_untrusted,), version) = state
         .session_store
-        .read(outbound_session_id(&session_id), (Metadata,))
+        .read(&session_id, (Metadata,))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let metadata = trust_metadata(metadata_untrusted, &presented_token, &presented_principal)?;

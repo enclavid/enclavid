@@ -87,7 +87,7 @@ const _: () = assert!(
     "the props cap admits more bytes than the worker will accept"
 );
 const _: () = assert!(
-    APPLICANT_INPUT_BODY_LIMIT <= hatch_client::MAX_CLIP_BYTES,
+    APPLICANT_INPUT_BODY_LIMIT <= session_types::MAX_CLIP_BYTES,
     "a legal applicant body can exceed the clip budget the worker will accept"
 );
 
@@ -103,7 +103,7 @@ const WIRE_HEADROOM: usize = 1024 * 1024;
 // redialled. So a clip api admits must fit, or the 413 the applicant should have
 // had becomes a dropped leg.
 const _: () = assert!(
-    hatch_client::MAX_CLIP_BYTES + hatch_client::SEALED_STATE_PLAINTEXT_BYTES + WIRE_HEADROOM
+    session_types::MAX_CLIP_BYTES + session_types::SEALED_STATE_PLAINTEXT_BYTES + WIRE_HEADROOM
         <= remoc::rch::DEFAULT_MAX_ITEM_SIZE,
     "the largest clip with the state frame no longer fits one remoc item"
 );
@@ -113,7 +113,7 @@ const _: () = assert!(
 // that the cap still BINDS, i.e. is well below what a legal body could carry at
 // some tens of bytes a part. A count raised past that would be decoration.
 const _: () = assert!(
-    hatch_client::MAX_CLIP_FRAMES > 0
-        && hatch_client::MAX_CLIP_FRAMES * 32 < APPLICANT_INPUT_BODY_LIMIT,
+    session_types::MAX_CLIP_FRAMES > 0
+        && session_types::MAX_CLIP_FRAMES * 32 < APPLICANT_INPUT_BODY_LIMIT,
     "the frame count cap no longer binds — a legal body cannot reach it"
 );

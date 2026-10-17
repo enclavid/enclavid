@@ -61,7 +61,7 @@
 ///
 /// The host-observable size covert channel this blob would otherwise feed is NOT
 /// bounded here; it is CLOSED by constant-size padding to
-/// `hatch_client::SEALED_STATE_PLAINTEXT_BYTES` at BOTH places the host can count
+/// `session_types::SEALED_STATE_PLAINTEXT_BYTES` at BOTH places the host can count
 /// bytes — the seal boundary, where every sealed `SessionState` is a fixed-size
 /// ciphertext, and the api↔execution-worker hop, where `engine_rpc::Padded` frames
 /// the same value in both directions. This cap is therefore the data-min ceiling
@@ -84,7 +84,7 @@ pub const POLICY_MAX_STATE_BYTES: usize = 1024 * 1024;
 // The WAVE's length is the type's and the props' own, and the host would count
 // it on every hop and every write it crossed, so it crosses and rests in a frame
 // of this size: `engine_rpc::RoundProps` on the round's hop,
-// `hatch_client::PREPARED_FRAME` in the sealed metadata. Hence a small bound —
+// `session_types::PREPARED_FRAME` in the sealed metadata. Hence a small bound —
 // past what 1 KiB of JSON comes to for any but a contrived type.
 //
 // The worker holds both to it because it cannot see api's checks and must not

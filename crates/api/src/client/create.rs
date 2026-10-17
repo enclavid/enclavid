@@ -13,11 +13,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use enclavid_attestation::ReportData;
-use enclavid_boundary::{AuthN, AuthZ, Covert, reason};
-use hatch_client::{
-    Client, ClientAccess, Key, PluginPin, SessionMetadata, SessionStatus, SetMetadata, WriteField,
-    boundary, is_wit_name,
+use enclavid_boundary::{AuthZ, Covert, reason};
+use session_types::{
+    Client, ClientAccess, Key, PluginPin, SessionMetadata, SessionStatus, is_wit_name,
 };
+use storage_client::{SetMetadata, WriteField, boundary, outbound_fields};
 
 use crate::client_state::ClientState;
 use crate::dto::{PluginView, ResolvedPolicyView};
@@ -126,7 +126,7 @@ pub struct PluginRequest {
 /// (`"key": { "kbs": { endpoint } }`). The KBS resource URI naming the key
 /// lives in the artifact's digest-pinned `enc.keys.*` annotation, so the
 /// client supplies only which KBS to dial. Converted to the sealed
-/// [`hatch_client::Key`] before persistence (the secrets then only ride
+/// [`session_types::Key`] before persistence (the secrets then only ride
 /// inside AEAD-sealed metadata).
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -146,8 +146,8 @@ pub struct KbsKeyRequest {
 impl KeyRequest {
     /// Convert to the sealed domain form, decoding base64 key material.
     /// `None` ⇒ not encrypted. Bad base64 ⇒ `Err(BAD_REQUEST)`.
-    fn into_domain(this: Option<Self>) -> Result<Option<hatch_client::Key>, StatusCode> {
-        use hatch_client::{KbsKey, Key};
+    fn into_domain(this: Option<Self>) -> Result<Option<session_types::Key>, StatusCode> {
+        use session_types::{KbsKey, Key};
         Ok(match this {
             None => None,
             Some(KeyRequest::Inline(key)) => {
@@ -323,7 +323,7 @@ pub(super) fn post_create() -> MethodRouter<Arc<ClientState>> {
 /// 2. Mint attestation quote binding (session_id, policy_digest) to
 ///    this TEE measurement. Per-instance TLS-cert-to-attestation
 ///    binding handles "is this the right TEE?" out of band.
-/// 3. Atomically write metadata + Status:Running to the host store.
+/// 3. Write the sealed metadata, its status Running, to the store.
 ///
 /// The persisted metadata blob is AEAD'd with the TEE-side key,
 /// AAD=session_id, so the host sees opaque bytes only.
@@ -402,8 +402,7 @@ async fn create(
         policy_ref: policy_ref.clone(),
         props,
         client: Some(client_block),
-        // TEE-trusted lifecycle status — the sole copy now (the plaintext
-        // host-facing BlobField::Status byte is no longer emitted).
+        // TEE-trusted lifecycle status — the sole copy there is.
         status: SessionStatus::Running,
         created_at,
         // Persister increments this atomically with each
@@ -441,27 +440,12 @@ async fn create(
             )),
     );
     let ops: Vec<&dyn WriteField> = vec![&set_metadata];
-    let (sid, expected_version) =
-        boundary::outbound::to_untrusted((session_id.as_str(), None::<u64>))
-            .vouch_unchecked::<AuthN, _>(reason!(
-                "session id + version: public host identifiers, not TEE secrets"
-            ))
-            .vouch_unchecked::<AuthZ, _>(reason!("fed back to the host that owns them"))
-            .vouch_unchecked::<Covert, _>(reason!(
-                "fixed-shape UUID + no CAS precondition — no policy bandwidth"
-            ))
-            .distribute();
-    let ops = boundary::outbound::to_untrusted(&ops[..])
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "recipe set; each field's content is sealed in its own build_op"
-        ))
-        .vouch_unchecked::<AuthZ, _>(reason!("each op writes its own session key"))
-        .vouch_unchecked::<Covert, _>(reason!(
-            "no policy has run at /create — the single metadata op is fixed, not policy bandwidth"
-        ));
+    let ops = outbound_fields(&ops).vouch_unchecked::<Covert, _>(reason!(
+        "no policy has run at /create — the single metadata op is fixed, not policy bandwidth"
+    ));
     let version = state
         .session_store
-        .write(sid, expected_version, ops)
+        .write(&session_id, None, ops)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

@@ -15,11 +15,12 @@
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
-use hatch_client::{
-    CameraFacing, CaptureGuide, CaptureStep, MediaSpec, Prompt, PromptDisclosure, capture_guide,
+use session_types::{
+    CameraFacing, CaptureGuide, CaptureStep, Disclosure as PromptDisclosure, MediaSpec, Prompt,
+    capture_guide,
 };
 // The run outcome comes back from the execution-worker as the `engine_rpc::RunStatus`
-// wire mirror (it wraps the same hatch_client `Prompt` / `Decision`).
+// wire mirror (it wraps the same session_types `Prompt` / `Decision`).
 use engine_rpc::RunStatus;
 
 use crate::dto::{self, DecisionView};
@@ -155,7 +156,7 @@ pub enum CameraFacingView {
     Any,
 }
 
-/// Mirrors `hatch_client::CaptureGuide` (proto oneof). Tagged
+/// Mirrors `session_types::CaptureGuide` (proto oneof). Tagged
 /// JSON enum so the frontend can dispatch via the `kind` field.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

@@ -16,37 +16,12 @@ vsock = ["dep:tokio-vsock", "dep:tower-service", "dep:fleet-transport", "fleet-t
 [dependencies]
 # Shared HTTP-over-vsock wire DTOs (CBOR-encoded).
 hatch-protocol = { path = "../hatch-protocol" }
-# Object-safe async seam under SessionStore / CacheStore so the wire transport
-# (hatch HTTP today, storage-CVM remoc tomorrow) swaps behind an `Arc<dyn _>`
-# without generics rippling through api's AppState.
-async-trait = "0.1"
-# `Stream`, what a cache blob crosses the seam as, sealed and opened a piece
-# at a time.
+# `Stream`, what a pulled blob crosses as, a piece at a time.
 futures = { version = "0.3", default-features = false, features = ["std"] }
-# Serde + CBOR for the sealed domain types (see src/domain.rs). Same
-# codec as the wire envelope — zero protobuf in the project.
-serde = { version = "1", features = ["derive"] }
-# One CBOR byte string for the policy's opaque state blob, not an array of
-# integers — see `SessionState::state`, where the difference decides whether a
-# legal max-cap state fits its constant frame at all.
-serde_bytes = "0.11"
-ciborium = "0.2"
-# Hex encoding of the identity-hiding L2 cache blob name (HKDF label).
-hex = "0.4"
-# Crypto primitives (symmetric AEAD session seals + age recipient seals)
-# live in their own leaf crate.
-enclavid-crypto = { path = "../crypto" }
 # The concern vocabulary the `boundary` facades are built from. A leaf crate
 # because `safe-logger` needs the same words for the serial-port crossing and
 # must not pull a wire client in to get them.
 enclavid-boundary = { path = "../boundary" }
-# The compile's refusal, kept whole in sealed metadata as the session's init
-# error. A wasmtime-free leaf.
-engine-types = { path = "../engine-types" }
-# Wraps the raw `tee_seal_key` master + its HKDF subkeys: zeroize-on-drop and
-# Debug-redaction, with `expose_secret()` making every key use explicit. Same
-# version + idiom the api already uses for the applicant token.
-secrecy = "0.10"
 # Pooled HTTP/1.1 client (hyper-util `legacy::Client`) with a cfg-split
 # connector: built-in `HttpConnector` for TCP (dev), a custom vsock
 # connector for the attested build. Same client type both ways; only
@@ -66,7 +41,3 @@ tokio-vsock = { version = "0.7", optional = true }
 fleet-transport = { path = "../fleet-transport", optional = true }
 # `tower_service::Service<Uri>` impl for the vsock connector.
 tower-service = { version = "0.3", optional = true }
-
-[dev-dependencies]
-# `#[tokio::test]` for the async seam tests.
-tokio = { version = "1", features = ["macros", "rt"] }

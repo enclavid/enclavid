@@ -21,10 +21,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use engine_rpc::{BundleSource, CompatToken, CompileError, CompileSource, CompositionKey};
-use hatch_client::{
-    Artifact, CacheStore, Client, CompileFault, InitError, KbsClient, Key, PluginPin, PullProblem,
-    RegistryClient, SessionMetadata,
+use hatch_client::{KbsClient, RegistryClient};
+use session_types::{
+    Artifact, Client, CompileFault, InitError, Key, PluginPin, PullProblem, SessionMetadata,
 };
+use storage_client::CacheStore;
 
 use crate::compiler::{Compiled, Compiler};
 use crate::cwasm_cache;

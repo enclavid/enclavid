@@ -24,7 +24,7 @@ use rusqlite::{
 };
 use sha2::{Digest, Sha256};
 
-use hatch_protocol::{
+use storage_rpc::{
     BlobField, FieldSelector, ListField, ListSlot, Op, ReadRequest, ReadResponse, ScalarSlot, Slot,
     WriteResponse,
 };
@@ -32,7 +32,7 @@ use hatch_protocol::{
 use super::StoreErr;
 
 /// Per-session schema. `meta` holds the CAS version in its sole row (k=1);
-/// `scalars` the four `BlobField`s by [`blob_tag`]; `media` the double-AEAD blobs
+/// `scalars` the `BlobField`s by [`blob_tag`]; `media` the double-AEAD blobs
 /// by content hash; `disclosure` the age-sealed entries as a SET (rowid order is
 /// not meaningful — the api commits to the set, not the order). `IF NOT EXISTS`
 /// so re-opening / a crash-empty file is idempotent.
@@ -213,10 +213,8 @@ impl DbBlobs {
 /// on-disk encoding does not depend on the enum's declaration order.
 fn blob_tag(f: BlobField) -> u8 {
     match f {
-        BlobField::Status => 0,
         BlobField::Metadata => 1,
         BlobField::State => 2,
-        BlobField::Principal => 3,
     }
 }
 

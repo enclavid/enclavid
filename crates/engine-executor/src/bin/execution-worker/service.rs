@@ -13,7 +13,7 @@ use engine_rpc::{
     BundleMeta, BundleRef, BundleStream, ByteBuf, CallbackServiceClient,
     ChildCallbacksServerShared, ChildService, ChildServiceClient, CompatToken, CompositionKey,
     ExecError, ExecutorServiceUntrusted, Padded, PrepareOutcome, PrepareReply, PrepareRequest,
-    Preparing, PropsRead, RoundSeed, RunOutcome, RunReply, RunRequest, RunStatus,
+    Preparing, PropsRead, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 use engine_supervisor::{ChildRunner, Exit, ExitCause, SupervisorError};
 use remoc::codec::Ciborium;
@@ -232,7 +232,6 @@ impl Supervisor {
         session_state: SessionState,
         event: Event,
         props: Vec<u8>,
-        seed: RoundSeed,
         callbacks: CallbackServiceClient<Ciborium>,
     ) -> Result<RunStatus, ExecError> {
         let entry = lease.entry().clone();
@@ -283,7 +282,6 @@ impl Supervisor {
                             session_state,
                             event,
                             ByteBuf::from(props),
-                            seed,
                             fuel,
                             relay_client,
                         )
@@ -654,7 +652,6 @@ impl ExecutorServiceUntrusted for Caller {
             props,
             session_state,
             event,
-            seed,
         } = open_round(req);
         match self.sup.bundles.lease(&self.slot(&composition_key)) {
             // The frame comes off HERE, at the api hop, and goes back on in the
@@ -669,7 +666,6 @@ impl ExecutorServiceUntrusted for Caller {
                     session_state.open()?,
                     event,
                     props.open()?.0,
-                    seed,
                     callbacks,
                 )
                 .await
@@ -698,7 +694,6 @@ impl ExecutorServiceUntrusted for Caller {
             props,
             session_state,
             event,
-            seed,
         } = open_round(req);
         let lease = self
             .sup
@@ -712,7 +707,6 @@ impl ExecutorServiceUntrusted for Caller {
                 session_state.open()?,
                 event,
                 props.open()?.0,
-                seed,
                 callbacks,
             )
             .await?;

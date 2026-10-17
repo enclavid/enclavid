@@ -1,0 +1,22 @@
+[package]
+name = "session-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The session's own types: what the policy is handed and returns (`Event`,
+# `Prompt`, `Decision`, …) and what api keeps of a session (`SessionMetadata`,
+# `SessionState`). Values only — no transport, no keys, no store — so the
+# engine's contract and its workers can name them without linking a client
+# for either the hatch or the storage-CVM.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# One CBOR byte string for the policy's opaque state blob and the frames, not
+# an array of integers — see `SessionState::state`, where the difference
+# decides whether a legal max-cap state fits its constant frame at all.
+serde_bytes = "0.11"
+ciborium = "0.2"
+# The compile's refusal and the props' problems, kept whole in the metadata as
+# the session's init error. A wasmtime-free leaf.
+engine-types = { path = "../engine-types" }

@@ -1,9 +1,8 @@
 // QuickJS seeds `Math.random` once, when the policy is built, so every session
 // would draw the same numbers; and it has no `crypto`. Both draw here from
-// `wasi:random`, the round's own randomness: the host derives it for each
-// session and round, so it is unpredictable to anyone outside the enclave, and
-// a round that runs again draws what it drew before. A module of its own,
-// imported before anything that draws.
+// `wasi:random`, the round's own randomness: fresh for every round from the
+// enclave's own generator, so it is unpredictable to anyone outside it. A
+// module of its own, imported before anything that draws.
 import { getRandomBytes } from "wasi:random/random@0.2.12";
 
 declare global {
@@ -26,8 +25,24 @@ Math.random = () => {
   return bits / 2 ** 53;
 };
 
+// What Web Crypto fills: integer typed arrays, not floats or a DataView.
+const integerArrays = [
+  Int8Array,
+  Uint8Array,
+  Uint8ClampedArray,
+  Int16Array,
+  Uint16Array,
+  Int32Array,
+  Uint32Array,
+  BigInt64Array,
+  BigUint64Array,
+];
+
 globalThis.crypto = {
   getRandomValues(array) {
+    if (!integerArrays.some((kind) => array instanceof kind)) {
+      throw new TypeError("getRandomValues takes an integer typed array");
+    }
     if (array.byteLength > 65536) {
       throw new RangeError("getRandomValues takes at most 65536 bytes");
     }

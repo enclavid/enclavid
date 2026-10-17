@@ -21,10 +21,10 @@ use std::sync::Arc;
 
 use wasmtime::component::{Resource, ResourceTable};
 
-use hatch_client::{
+use session_types::{
     CameraFacing as DCameraFacing, CaptureGuide as DCaptureGuide, CaptureStep as DCaptureStep,
-    Decision as DDecision, DisplayField as DDisplayField, Event, GuideNone, GuideOval, GuideRect,
-    Localized as DLocalized, MediaSpec as DMediaSpec, Prompt, PromptDisclosure as DDisclosure,
+    Decision as DDecision, Disclosure as DDisclosure, DisplayField as DDisplayField, Event,
+    GuideNone, GuideOval, GuideRect, Localized as DLocalized, MediaSpec as DMediaSpec, Prompt,
     Translation as DTranslation, capture_guide,
 };
 

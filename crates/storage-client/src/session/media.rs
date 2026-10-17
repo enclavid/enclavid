@@ -12,11 +12,11 @@
 //! the policy's `blob::from-blob-ref` rehydrate — a miss returns `None`, which
 //! the engine turns into a TRAP (a fabricated ref is never a legitimate
 //! outcome). The api layer fronts this read with a pull-through cache + an
-//! in-TEE captured-hash gate, so most reads never reach the hatch.
+//! in-TEE captured-hash gate, so most reads never reach the store.
 
-use hatch_protocol::{MediaWrite, Op};
+use storage_rpc::{MediaWrite, Op};
 
-use crate::error::BridgeError;
+use crate::error::StoreError;
 use enclavid_boundary::{AuthN, Exposed};
 
 use enclavid_crypto::{aead, derive_key};
@@ -77,7 +77,7 @@ pub struct SetMedia<'a> {
 }
 
 impl WriteField for SetMedia<'_> {
-    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, BridgeError> {
+    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, StoreError> {
         // AuthZ + Covert are pre-vouched at the construction site. Host-bridge
         // closes AuthN with the double-AEAD seal: inner under
         // applicant_session_token, outer under tee_seal_key. Each layer gets
@@ -90,7 +90,7 @@ impl WriteField for SetMedia<'_> {
         // double-AEAD's cross-session / cross-key protection is unchanged.
         let blob_key = media_field_name(ctx.tee_seal_key, ctx.session_id, &self.blob_hash);
         let sealed = self.bytes.clone().vouch::<AuthN, _, _, _, _>(
-            |plaintext| -> Result<Vec<u8>, BridgeError> {
+            |plaintext| -> Result<Vec<u8>, StoreError> {
                 let inner = aead::seal(&plaintext, self.applicant_session_token, &aad)?;
                 aead::seal(&inner, ctx.tee_seal_key, &aad).map_err(Into::into)
             },

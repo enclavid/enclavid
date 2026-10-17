@@ -1,7 +1,7 @@
 //! L2 cwasm-cache: best-effort store / open of a compiled bundle.
 //!
 //! This is the fleet's DURABLE cache tier and the orchestrator's ONLY compiled
-//! artifact store — [`hatch_client::CacheStore`], sealed under `tee_seal_key`,
+//! artifact store — [`storage_client::CacheStore`], sealed under `tee_seal_key`,
 //! over the storage-CVM backend api dials at boot. It survives a TEE restart.
 //! There is no api-side in-RAM component cache; the sole in-memory L1 lives on
 //! the execution-worker, which on a miss says so (`RunOutcome::CacheMiss`) and
@@ -66,7 +66,7 @@ use futures::{StreamExt, TryStreamExt};
 use engine_rpc::{
     BundleSource, CompatToken, CompositionKey, MAX_BUNDLE_META_BYTES, MAX_CWASM_BYTES,
 };
-use hatch_client::{BlobPieces, BridgeError, CacheStore};
+use storage_client::{BlobPieces, CacheStore, StoreError};
 
 use crate::compiler::Compiled;
 
@@ -103,7 +103,7 @@ impl Front {
     /// The front of an entry `length` bytes long, from `start`, its first bytes
     /// — the digest's string and the metadata's head in full. Held to the bounds
     /// the execute hop takes.
-    fn read(start: &[u8], length: u64) -> Result<Self, BridgeError> {
+    fn read(start: &[u8], length: u64) -> Result<Self, StoreError> {
         let digest = string_at(start, 0)?;
         let cwasm_sha256 = start
             .get(digest.clone())
@@ -127,7 +127,7 @@ impl Front {
 /// Where the byte string whose CBOR head is at `at` in `start` lies — the head
 /// read by ciborium's own decoder, which is what knows how long a head is and
 /// what it says. The string itself may run past `start`.
-fn string_at(start: &[u8], at: usize) -> Result<Range<usize>, BridgeError> {
+fn string_at(start: &[u8], at: usize) -> Result<Range<usize>, StoreError> {
     let mut decoder = ciborium_ll::Decoder::from(start.get(at..).unwrap_or_default());
     match decoder.pull() {
         Ok(ciborium_ll::Header::Bytes(Some(len))) => {
@@ -147,8 +147,8 @@ fn string_head(len: usize) -> Vec<u8> {
     head
 }
 
-fn not_an_entry() -> BridgeError {
-    BridgeError::Codec("an L2 entry not laid out as one".into())
+fn not_an_entry() -> StoreError {
+    StoreError::Codec("an L2 entry not laid out as one".into())
 }
 
 /// Opaque cache key: the composition hash scoped by the runtime ABI
@@ -179,7 +179,7 @@ pub async fn store(
     let pieces = futures::stream::iter([Ok(Bytes::from(front)), Ok(Bytes::from(compiled.meta))])
         .chain(
             compiled.cwasm.map_err(|()| {
-                BridgeError::Transport("the cwasm stopped part-way; not stored".into())
+                StoreError::Transport("the cwasm stopped part-way; not stored".into())
             }),
         );
     if let Err(e) = cache
@@ -241,7 +241,7 @@ pub async fn open(
     let cwasm = cwasm
         .try_filter(|piece| std::future::ready(!piece.is_empty()))
         .inspect_err(move |e| {
-            if matches!(e, BridgeError::Crypto(_) | BridgeError::Codec(_)) {
+            if matches!(e, StoreError::Crypto(_) | StoreError::Codec(_)) {
                 flag.store(true, Ordering::Relaxed);
             }
         });
@@ -259,7 +259,7 @@ pub async fn open(
 async fn split(
     mut pieces: BlobPieces,
     length: u64,
-) -> Result<(Vec<u8>, Front, BlobPieces), BridgeError> {
+) -> Result<(Vec<u8>, Front, BlobPieces), StoreError> {
     let mut rest = Bytes::new();
     let first = FIRST_READ.min(usize::try_from(length).unwrap_or(usize::MAX));
     let first = Bytes::from(take(&mut pieces, &mut rest, first).await?);
@@ -293,14 +293,14 @@ pub async fn remove(
 
 /// The first `n` bytes of `pieces`, with `rest` what the last piece read held
 /// past them.
-async fn take(pieces: &mut BlobPieces, rest: &mut Bytes, n: usize) -> Result<Vec<u8>, BridgeError> {
+async fn take(pieces: &mut BlobPieces, rest: &mut Bytes, n: usize) -> Result<Vec<u8>, StoreError> {
     let mut out = Vec::with_capacity(n);
     while out.len() < n {
         if rest.is_empty() {
             *rest = pieces
                 .next()
                 .await
-                .ok_or_else(|| BridgeError::Codec("an L2 entry shorter than it says".into()))??;
+                .ok_or_else(|| StoreError::Codec("an L2 entry shorter than it says".into()))??;
             continue;
         }
         let part = rest.split_to((n - out.len()).min(rest.len()));
@@ -388,33 +388,33 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl hatch_client::CacheBackend for Blobs {
+    impl storage_client::CacheBackend for Blobs {
         async fn store(
             &self,
             name: &str,
             length: u64,
             pieces: BlobPieces,
-        ) -> Result<(), BridgeError> {
+        ) -> Result<(), StoreError> {
             let blob = read(pieces).await?;
             assert_eq!(blob.len() as u64, length);
             self.held.lock().unwrap().insert(name.to_string(), blob);
             Ok(())
         }
 
-        async fn load(&self, name: &str) -> Result<Option<(u64, BlobPieces)>, BridgeError> {
+        async fn load(&self, name: &str) -> Result<Option<(u64, BlobPieces)>, StoreError> {
             let Some(blob) = self.held.lock().unwrap().get(name).cloned() else {
                 return Ok(None);
             };
             Ok(Some((blob.len() as u64, pieces(&blob, 4096))))
         }
 
-        async fn remove(&self, name: &str) -> Result<(), BridgeError> {
+        async fn remove(&self, name: &str) -> Result<(), StoreError> {
             self.held.lock().unwrap().remove(name);
             Ok(())
         }
     }
 
-    async fn read(pieces: BlobPieces) -> Result<Vec<u8>, BridgeError> {
+    async fn read(pieces: BlobPieces) -> Result<Vec<u8>, StoreError> {
         pieces
             .try_fold(Vec::new(), |mut all, p| async move {
                 all.extend_from_slice(&p);

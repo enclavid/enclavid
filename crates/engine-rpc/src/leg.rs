@@ -555,10 +555,10 @@ impl<S: enclavid_boundary::Open> CompilerLeg<S> {
 #[cfg(all(test, feature = "execute"))]
 mod door_tests {
     use enclavid_boundary::{AuthN, Exposed, Untrusted, reason};
-    use hatch_client::{
+    use remoc::codec::Ciborium;
+    use session_types::{
         Clip, Decision, Event, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MediaResult, SessionState,
     };
-    use remoc::codec::Ciborium;
 
     use super::{
         DEFAULT_CALLBACK_REQUEST_BUFFER, DEFAULT_REQUEST_BUFFER, ExecutorLeg, connect_executor,
@@ -686,7 +686,6 @@ mod door_tests {
             props: Padded::seal(&crate::execute::RoundProps(Vec::new())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event,
-            seed: crate::execute::RoundSeed([0x22; 32]),
         })
         .vouch_unchecked::<AuthN, _>(reason!("test fixture"))
     }

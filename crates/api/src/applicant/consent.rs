@@ -7,7 +7,7 @@
 
 use axum::http::StatusCode;
 
-use hatch_client::{DisplayField, Event, Prompt, PromptDisclosure};
+use session_types::{Disclosure as PromptDisclosure, DisplayField, Event, Prompt};
 
 use crate::dto;
 
@@ -75,7 +75,7 @@ mod tests {
     use super::*;
     use crate::applicant::views::{RequestView, consent_view};
     use crate::locale::Locale;
-    use hatch_client::MediaSpec;
+    use session_types::MediaSpec;
 
     /// The digest exactly as the applicant's browser receives it — read off the
     /// rendered screen, not recomputed. Taking it from anywhere else would make

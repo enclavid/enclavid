@@ -18,8 +18,9 @@ use std::collections::HashMap;
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, Untrusted, reason};
 use enclavid_crypto::ocicrypt::{self, PrivateLayerBlockCipherOptions};
 use enclavid_kbs_client::{RcarSession, SampleEvidence, TeeKeyPair};
-use hatch_client::{KbsClient, Key, boundary};
+use hatch_client::{KbsClient, boundary};
 use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
+use session_types::Key;
 
 /// Context the [`Key::Kbs`] path needs: the hatch relay client that
 /// couriers each RCAR leg to the author's KBS.

@@ -28,7 +28,7 @@
 //!   * `execute` → `ExecutorService` + `CallbackService` + the execute wire
 //!     types (`RunRequest`, `RunReply`, `RunStatus`, `ExecError`,
 //!     `CallbackError`) + `BundleStream` — the bundle a `run_with_bundle`
-//!     carries, streamed beside the request; pulls `hatch-client` and
+//!     carries, streamed beside the request; pulls `session-types` and
 //!     `fleet-stream`.
 //!
 //! The compiled artifact ([`CompiledBundle`] / [`CatalogEntry`]) is SHARED: it
@@ -104,7 +104,7 @@ pub use execute::{
     ByteBuf, CallbackError, CallbackService, CallbackServiceClient, ChildCallbacks,
     ChildCallbacksClient, ChildCallbacksServerShared, ChildService, ChildServiceClient,
     ChildServiceServerShared, ExecError, PrepareOutcome, PrepareReply, PrepareRequest, Preparing,
-    PropsRead, RoundProps, RoundSeed, RunOutcome, RunReply, RunRequest, RunStatus,
+    PropsRead, RoundProps, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 
 // Both ends of the execute hop, and the doors on the calling end.

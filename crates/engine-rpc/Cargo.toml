@@ -8,7 +8,7 @@ repository.workspace = true
 # The intra-fleet RPC contract, split under two features so a single-role
 # worker links only its half. A compile-worker builds
 # `--no-default-features --features compile` (no executor contract, no
-# hatch-client); an execution-worker uses `execute` (no compiler contract,
+# session-types); an execution-worker uses `execute` (no compiler contract,
 # no engine-types). `default` enables both so whole-workspace dev builds
 # compile + test the whole contract; per-CVM artifact builds narrow it.
 [features]
@@ -27,7 +27,7 @@ compile = [
 ]
 execute = [
     "dep:engine-types",
-    "dep:hatch-client",
+    "dep:session-types",
     "dep:remoc",
     "dep:enclavid-boundary",
     "dep:fleet-stream",
@@ -63,7 +63,7 @@ remoc = { version = "0.18", default-features = false, features = [
 # Compile-side wire types (EmbeddedImport, ComponentDecls, PluginInstance).
 engine-types = { path = "../engine-types", optional = true }
 # Execute-side wire types (Event, SessionState).
-hatch-client = { path = "../hatch-client", optional = true }
+session-types = { path = "../session-types", optional = true }
 # The concern vocabulary. Not optional-by-consumer: a contract that says what may
 # cross a hop is not separable from the words it says it in, and BOTH ends need
 # them — the caller to close its concerns before a door will take a value, the

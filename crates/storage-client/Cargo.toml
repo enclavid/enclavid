@@ -1,0 +1,35 @@
+[package]
+name = "storage-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# api's client of the storage-CVM: the session store and the L2 cache, with
+# every seal and open done here. What crosses is moved by a backend api
+# implements over the storage leg; this crate names no transport.
+[dependencies]
+# The wire DTOs a backend moves (ReadRequest / WriteRequest / Slot / Op / …).
+storage-rpc = { path = "../storage-rpc" }
+# What the store seals: the session's own types.
+session-types = { path = "../session-types" }
+# Object-safe async seam under SessionStore / CacheStore, so the backend swaps
+# behind an `Arc<dyn _>` without generics rippling through api's AppState.
+async-trait = "0.1"
+# `Stream`, what a cache blob crosses the seam as, sealed and opened a piece
+# at a time.
+futures = { version = "0.3", default-features = false, features = ["std"] }
+bytes = "1"
+# Hex encoding of the identity-hiding L2 cache blob name (HKDF label).
+hex = "0.4"
+# Crypto primitives (symmetric AEAD session seals + sealed streams).
+enclavid-crypto = { path = "../crypto" }
+# The concern vocabulary the `boundary` facades are built from.
+enclavid-boundary = { path = "../boundary" }
+# Wraps the raw `tee_seal_key` master + its HKDF subkeys: zeroize-on-drop and
+# Debug-redaction, with `expose_secret()` making every key use explicit.
+secrecy = "0.10"
+
+[dev-dependencies]
+# `#[tokio::test]` for the async seam tests.
+tokio = { version = "1", features = ["macros", "rt"] }

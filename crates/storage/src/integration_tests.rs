@@ -12,7 +12,7 @@ use remoc::rtc::ServerShared;
 use tokio::io::split;
 
 use fleet_stream::{Incoming, StreamError, StreamLen, bin};
-use hatch_protocol::{
+use storage_rpc::{
     BlobField, BlobWrite, FieldSelector, MediaWrite, Op, ReadRequest, ScalarSlot, Slot,
     WriteRequest,
 };

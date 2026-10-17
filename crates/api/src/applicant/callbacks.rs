@@ -52,7 +52,7 @@ use std::sync::Arc;
 
 use enclavid_boundary::{Asserted, Exposed, Untrusted, reason};
 use engine_rpc::{CallbackError, CallbackServiceUntrusted, Padded};
-use hatch_client::{Decision, SessionState};
+use session_types::{Decision, SessionState};
 
 use super::media_store::HatchMediaStore;
 use super::persister::SessionPersister;

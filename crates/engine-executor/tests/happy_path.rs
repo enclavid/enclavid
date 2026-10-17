@@ -36,7 +36,7 @@ use engine_executor::{
     PluginInstance, PrimedComposition, RunInputs, RunResult, RunStatus, SessionChange,
     SessionListener,
 };
-use hatch_client::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
+use session_types::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use xtask::fixtures;
 
 /// The test policy's props when the consumer gives none, as api writes them:
@@ -378,7 +378,6 @@ async fn reload_by_ref_misses() {
         listener: listener.clone(),
         media_store: empty_store.clone(),
         fuel: DEFAULT_ROUND_FUEL,
-        seed: [0; 32],
     };
     let round = |session, event: Event| {
         listener.capture(&event);
@@ -423,7 +422,6 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
             listener: listener.clone(),
             media_store: store.clone(),
             fuel: DEFAULT_ROUND_FUEL,
-            seed: [0; 32],
         };
         let round = |session, event: Event| {
             listener.capture(&event);
@@ -577,26 +575,21 @@ async fn oversized_state_traps() {
 /// The round's WASI clocks and randomness as the policy reads them (the
 /// `wasi-probe` prop): the wall clock is the second the round started; the
 /// monotonic clock starts there, and a deadline asked about — checked or waited
-/// on — moves it there at once and is ready; the random bytes are the seed's —
-/// the same again for the same seed, others for another. And the state the
-/// round leaves counts it.
+/// on — moves it there at once and is ready; the random bytes are fresh, so the
+/// same round run again draws others.
 #[tokio::test]
-async fn a_round_reads_its_own_time_and_its_seeds_randomness() {
+async fn a_round_reads_its_own_time_and_fresh_randomness() {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let h = Harness::new();
     let listener = Arc::new(PersistListener::default());
-    let genesis = |seed: [u8; 32]| {
-        let inputs = RunInputs {
-            seed,
-            ..h.inputs(&listener)
-        };
+    let genesis = || {
         h.runner.run(
             &h.primed,
             Session::default(),
             Event::Start,
             b"{wasi-probe: some(true)}",
-            inputs,
+            h.inputs(&listener),
         )
     };
     let now = || {
@@ -607,10 +600,9 @@ async fn a_round_reads_its_own_time_and_its_seeds_randomness() {
     };
 
     let started = now();
-    let (_, first) = genesis([1; 32]).await.expect("the round runs");
+    let (_, first) = genesis().await.expect("the round runs");
     let ended = now();
-    let (_, again) = genesis([1; 32]).await.expect("the round runs");
-    let (_, other) = genesis([2; 32]).await.expect("the round runs");
+    let (_, again) = genesis().await.expect("the round runs");
 
     let read = |at: usize| u64::from_be_bytes(first.state[at..at + 8].try_into().unwrap());
     let (wall, before, after) = (read(0), read(8), read(16));
@@ -632,9 +624,7 @@ async fn a_round_reads_its_own_time_and_its_seeds_randomness() {
 
     let random = |session: &Session| session.state[26..].to_vec();
     assert_eq!(random(&first).len(), 16);
-    assert_eq!(random(&first), random(&again));
-    assert_ne!(random(&first), random(&other));
-    assert_eq!(first.rounds, 1);
+    assert_ne!(random(&first), random(&again));
 }
 
 /// STATIC-strict consumption: fuse policy + well-known into a
@@ -711,7 +701,6 @@ async fn static_fused_artifact_resolves_strictly() {
         listener: listener.clone(),
         media_store: listener.media_store(),
         fuel: DEFAULT_ROUND_FUEL,
-        seed: [0; 32],
     };
     let round = |session, event: Event| {
         listener.capture(&event);
@@ -851,7 +840,6 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
         listener: listener.clone(),
         media_store: listener.media_store(),
         fuel: DEFAULT_ROUND_FUEL,
-        seed: [0; 32],
     };
     // start → media(passport) → media(selfie) → consent-disclosure.
     let round = |session, event: Event| {
@@ -963,7 +951,6 @@ impl Harness {
             listener: listener.clone(),
             media_store: listener.media_store(),
             fuel: DEFAULT_ROUND_FUEL,
-            seed: [0; 32],
         }
     }
 

@@ -17,7 +17,6 @@ mod limits;
 mod locale;
 mod policy_pull;
 mod props;
-mod round_seed;
 mod semaphores;
 mod settings;
 mod shuffle;
@@ -30,8 +29,8 @@ mod turns;
 use std::sync::Arc;
 
 use enclavid_attestation::Attestor;
-use hatch_client::{CacheBackend, CacheStore, SessionBackend, SessionStore};
 use safe_logger::{debug, info, reason};
+use storage_client::{CacheBackend, CacheStore, SessionBackend, SessionStore};
 
 use crate::client_state::ClientState;
 use crate::state::AppState;
@@ -164,7 +163,7 @@ async fn main() {
         });
     }
 
-    // SessionStore is hatch-client's per-session typed-field store. It is
+    // SessionStore is storage-client's per-session typed-field store. It is
     // transport-agnostic — it holds an `Arc<dyn SessionBackend>`, and the
     // backend built above dials the storage-CVM over RA-TLS. Shared between
     // the client API (writes metadata/status on /create and /init) and the
@@ -182,8 +181,6 @@ async fn main() {
     // don't reuse the AEAD key directly for `DisplayField` shuffle
     // PRNG seeding — see `crate::shuffle` for the threat model.
     let shuffle_key = Arc::new(shuffle::ShuffleKey::from_tee_seal_key(&tee_seal_key));
-    // And the key each round's random seed is derived from — see `round_seed`.
-    let round_seeds = Arc::new(round_seed::RoundSeeds::from_tee_seal_key(&tee_seal_key));
 
     // Storage backends for the session KV + L2 cwasm cache: the trusted
     // storage-CVM over RA-TLS. This is api's ONLY durable-state backend — host
@@ -226,7 +223,6 @@ async fn main() {
             session_store.clone(),
             cache_store,
             shuffle_key,
-            round_seeds,
             attestor.clone(),
             api_health.clone(),
             &settings,

@@ -3,11 +3,11 @@
 //! client disclosure pubkey, input claims, client_ref). AEAD'd with
 //! `tee_seal_key`; AAD = session_id binds it to the session that wrote it.
 
-use hatch_protocol::{BlobField, BlobWrite, FieldSelector, Op, Slot};
+use session_types::SessionMetadata;
+use storage_rpc::{BlobField, BlobWrite, FieldSelector, Op, Slot};
 
 use crate::boundary;
-use crate::domain::{self, SessionMetadata};
-use crate::error::BridgeError;
+use crate::error::StoreError;
 use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 use enclavid_crypto::aead;
@@ -25,7 +25,7 @@ pub struct Metadata;
 
 /// Write marker: replace session metadata with a freshly-encoded
 /// blob. Payload is `Exposed<&SessionMetadata, (AuthN,)>` — caller
-/// pre-vouches AuthZ + Covert at the construction site; hatch-client
+/// pre-vouches AuthZ + Covert at the construction site; storage-client
 /// closes AuthN via AEAD-seal under `tee_seal_key`.
 pub struct SetMetadata<'a>(pub Exposed<&'a SessionMetadata, (AuthN,)>);
 
@@ -36,29 +36,32 @@ impl ReadField for Metadata {
         FieldSelector::Blob(BlobField::Metadata)
     }
 
-    fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, BridgeError> {
+    fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, StoreError> {
         let Some(b) = unwrap_scalar(slot)? else {
             return Ok(Untrusted::new(None));
         };
         let decoded: Untrusted<SessionMetadata, (AuthZ, Replay)> =
-            boundary::inbound::from_untrusted(b).trust::<AuthN, _, _, _, _>(|raw| {
-                let plaintext = aead::open(&raw, ctx.tee_seal_key, ctx.aad())?;
-                domain::decode::<SessionMetadata>(&plaintext)
-            })?;
+            boundary::inbound::from_untrusted(b).trust::<AuthN, _, _, _, _>(
+                |raw| -> Result<_, StoreError> {
+                    let plaintext = aead::open(&raw, ctx.tee_seal_key, ctx.aad())?;
+                    Ok(session_types::decode::<SessionMetadata>(&plaintext)?)
+                },
+            )?;
         Ok(decoded.map(Some))
     }
 }
 
 impl WriteField for SetMetadata<'_> {
-    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, BridgeError> {
+    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, StoreError> {
         // AuthZ + Covert pre-vouched at the construction site.
         // Host-bridge closes AuthN with the cryptographic work it
         // owns the key for (tee_seal_key + session_id AAD).
         let sealed =
             self.0
                 .clone()
-                .vouch::<AuthN, _, _, _, _>(|m| -> Result<Vec<u8>, BridgeError> {
-                    aead::seal(&domain::encode(m)?, ctx.tee_seal_key, ctx.aad()).map_err(Into::into)
+                .vouch::<AuthN, _, _, _, _>(|m| -> Result<Vec<u8>, StoreError> {
+                    aead::seal(&session_types::encode(m)?, ctx.tee_seal_key, ctx.aad())
+                        .map_err(Into::into)
                 })?;
         Ok(sealed.map(|value| {
             Op::Blob(BlobWrite {

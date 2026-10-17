@@ -18,8 +18,8 @@ use axum::http::StatusCode;
 use secrecy::SecretBox;
 
 use enclavid_boundary::{Asserted, reason};
-use engine_rpc::{CompositionKey, ExecError, RunOutcome, RunRequest, RunStatus};
-use hatch_client::{Decision, Event, Prompt, SessionMetadata, SessionState};
+use engine_rpc::{CompositionKey, ExecError, RunOutcome, RunStatus};
+use session_types::{Decision, Event, Prompt, SessionMetadata, SessionState};
 
 use crate::init::{self, Unavailable};
 use crate::locale::Locale;
@@ -129,17 +129,6 @@ impl SessionRunCtx {
                 }
             },
         };
-        // The props as the policy reads them, which every round is handed, in
-        // their frame.
-        let props = crate::executor::outbound_round_props(prepared.props.as_deref())
-            .map_err(|e| classify_run_error(&session_id, &e))?;
-        // The round's randomness, a function of the session and of the count of
-        // rounds sealed with the state it starts from — see `crate::round_seed`.
-        let seed = crate::executor::outbound_round_seed(
-            state
-                .round_seeds
-                .for_round(&session_id, session_state.rounds),
-        );
         // The persister derives what this round may seal from the event and the
         // pre-round prompt, both of which are ours — see
         // [`SessionPersister::for_round`]. So the round's one seal is settled
@@ -154,6 +143,17 @@ impl SessionRunCtx {
         // The applicant's own frames, content-addressed here. Sent to the worker
         // in the event below and never taken back from it.
         let captures = persister::round_captures(&event);
+        // The round's request, framed ONCE for both phases: the peel that closes
+        // `Covert` produces the wire value, so the retry below re-sends the same
+        // constant-size frames rather than re-encoding identical ones. The props
+        // are the ones every round is handed, as the policy reads them.
+        let req = crate::executor::outbound_round(
+            &composition_key,
+            &session_state,
+            prepared.props.as_deref(),
+            event,
+        )
+        .map_err(|e| classify_run_error(&session_id, &e))?;
         // Where this round's write leaves the session, once it lands. Held here
         // on the terms the consent is.
         let awaiting = RoundAwaiting::default();
@@ -190,33 +190,16 @@ impl SessionRunCtx {
             media_store,
         };
 
-        // Framed ONCE for both phases: the peel that closes `Covert` produces the
-        // wire value, so the retry below re-sends the same constant-size frame
-        // rather than re-encoding an identical one.
-        let session_state = crate::executor::outbound_round_state(&session_state)
-            .map_err(|e| classify_run_error(&session_id, &e))?;
-
         let reply = async {
             // Phase 1: cache-only run. The worker serves the composition from its
             // own L1, or reports a miss — no bundle crosses on this call.
             //
-            // `map` carries the scope through: the concerns were answered about
-            // the state, and about the props by their own mint, and assembling
-            // the request around them addresses none of them and reopens none, so
-            // the receipt the door demands is the one the state's mint wrote.
-            let req = session_state.clone().map(|session_state| RunRequest {
-                composition_key: composition_key.clone(),
-                props: props.clone(),
-                session_state,
-                event: event.clone(),
-                seed,
-            });
             // The reply is the worker's word as much as anything it pushes back,
             // so it arrives under the same scope and has to be judged before it
             // is used.
             let status = match state
                 .executor
-                .run(req, callbacks.clone())
+                .run(req.clone(), callbacks.clone())
                 .await
                 .map_err(|e| classify_run_error(&session_id, &e))?
                 // CONTAINED, and the reason has to cover BOTH arms — an earlier
@@ -246,13 +229,6 @@ impl SessionRunCtx {
                     // one that could not be prepared ([`crate::init`]). Phase 2:
                     // re-drive WITH the bundle via `run_with_bundle`, which
                     // always runs (no second miss).
-                    let req = session_state.map(|session_state| RunRequest {
-                        composition_key: composition_key.clone(),
-                        props,
-                        session_state,
-                        event,
-                        seed,
-                    });
                     run_resolved(
                         &state,
                         &composition_key,
@@ -357,7 +333,7 @@ fn classify_run_error(session_id: &str, e: &ExecError) -> StatusCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hatch_client::MediaSpec;
+    use session_types::MediaSpec;
 
     /// A worker with no room is the one failure that says "the same request,
     /// later" — an empty 503, nothing for a policy to have chosen.

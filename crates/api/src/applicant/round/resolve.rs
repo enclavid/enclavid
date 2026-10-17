@@ -7,7 +7,7 @@ use enclavid_boundary::{Exposed, Untrusted};
 use engine_rpc::{
     CallbackServiceUntrusted, CompatToken, CompositionKey, ExecError, RunRequest, RunStatus,
 };
-use hatch_client::SessionMetadata;
+use session_types::SessionMetadata;
 
 use crate::compositions::Composition;
 use crate::init::Unavailable;

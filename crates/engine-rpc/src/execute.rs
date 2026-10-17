@@ -1,7 +1,7 @@
 //! Execute boundary — run + mid-call callbacks (the bidirectional case).
 //!
 //! Gated behind the `execute` feature: an execution-worker built with only
-//! this feature links the executor + callback contract + `hatch-client` +
+//! this feature links the executor + callback contract + `session-types` +
 //! `engine-types` (the run needs the composition catalogs), and NOT the
 //! compiler contract — least-knowledge for its measured image, and NO Cranelift.
 //!
@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 pub use serde_bytes::ByteBuf;
 
 use engine_types::props::PropsRefusal;
-use hatch_client::{Decision, Event, Prompt, SessionState};
+use session_types::{Decision, Event, Prompt, SessionState};
 
 use crate::BundleRef;
 use crate::keys::{CompatToken, CompositionKey};
@@ -38,7 +38,7 @@ use crate::padded::{Framed, Padded};
 use crate::stream::BundleStream;
 
 /// serde mirror of the engine's `RunStatus` — one round's outcome. Wraps the
-/// hatch_client domain `Prompt`/`Decision` (already serde; both are sealed
+/// session-types domain `Prompt`/`Decision` (already serde; both are sealed
 /// into `SessionState`). The worker maps `engine_executor::RunStatus` into this
 /// at the boundary; the orchestrator projects it into the applicant view, and
 /// checks a terminal one against the decision the round committed, without
@@ -210,7 +210,10 @@ impl From<CallbackError> for ExecError {
 /// the state by their exact frames, the event's frames by the ingress budget. That
 /// is what lets the serving role write a discharge that names a check instead of
 /// naming its caller.
-#[derive(Serialize, Deserialize)]
+///
+/// `Clone` so a round framed once can be sent again after a cache miss, the
+/// same frames rather than an identical re-encoding.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRequest {
     /// Names the fused component in the worker's L1 cache. Computed by the
@@ -225,17 +228,7 @@ pub struct RunRequest {
     /// host process splices this hop byte-for-byte. See [`Padded`].
     pub session_state: Padded<SessionState>,
     pub event: Event,
-    /// What the round's randomness is drawn from. See [`RoundSeed`].
-    pub seed: RoundSeed,
 }
-
-/// The seed of a round's random stream, which every `wasi:random` call of the
-/// round draws from. api derives it from a key only it holds, for one session
-/// and one count of rounds, so a round run again draws what it drew before and
-/// no other round's can be told from it. One CBOR byte string of 32 bytes, the
-/// same length whatever the bytes. No `Debug`: it is a secret of the round.
-#[derive(Clone, Copy, Serialize, Deserialize)]
-pub struct RoundSeed(#[serde(with = "serde_bytes")] pub [u8; 32]);
 
 /// The props the consumer gave the session, as a preparation read them against
 /// the type the policy declares ([`PropsRead::Read`]): a value of it in WAVE,
@@ -255,7 +248,7 @@ pub(crate) const RUN_REQUEST_HEADROOM: usize = 64 * 1024;
 // beside the call — so what has to fit is the round itself plus the header naming
 // the bundle. `run` sends the same request without the header.
 const _: () = assert!(
-    hatch_client::MAX_CLIP_BYTES
+    session_types::MAX_CLIP_BYTES
         + <SessionState as Framed>::FRAME
         + <RoundProps as Framed>::FRAME
         + crate::stream::BUNDLE_HEADER_MAX_ENCODED
@@ -524,9 +517,9 @@ pub trait ChildService {
 
     /// Drive one reducer round against the primed composition.
     /// `session_state`/`event`/`props` are the round's already-decrypted inputs
-    /// (the seal key never reaches this process), `seed` is api's for the round,
-    /// and `fuel` is what the round may burn — the supervisor's setting, the same
-    /// for every round it runs. `callbacks` points at the
+    /// (the seal key never reaches this process), and `fuel` is what the round
+    /// may burn — the supervisor's setting, the same for every round it runs.
+    /// `callbacks` points at the
     /// SUPERVISOR's relay, which forwards `media_load` / `session_change` on to
     /// api — so this keyless process rehydrates blobs + persists state without
     /// the seal key, and with no way to ask for a composition at all.
@@ -540,7 +533,6 @@ pub trait ChildService {
         session_state: SessionState,
         event: Event,
         props: ByteBuf,
-        seed: RoundSeed,
         fuel: u64,
         callbacks: ChildCallbacksClient<remoc::codec::Ciborium>,
     ) -> Result<RunStatus, ExecError>;
@@ -784,7 +776,6 @@ mod execute_tests {
             props: Padded::seal(&RoundProps(b"{age: 30}".to_vec())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Start,
-            seed: RoundSeed([0x33; 32]),
         };
 
         // Phase 1: cache-only run → miss, and NOTHING runs (no callbacks fire).
@@ -830,7 +821,6 @@ mod execute_tests {
             props: Padded::seal(&RoundProps(Vec::new())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Start,
-            seed: RoundSeed([0x33; 32]),
         }
     }
 
@@ -1213,9 +1203,9 @@ mod execute_tests {
 mod request_bound_tests {
     use super::*;
     use engine_types::limits::MAX_PROPS_BYTES;
-    use hatch_client::{Clip, MAX_CLIP_FRAMES, MediaResult};
     use serde::Serialize;
     use serde_bytes::Bytes;
+    use session_types::{Clip, MAX_CLIP_FRAMES, MediaResult};
 
     /// A stand-in with the same field names and no bounds, so a test can put on
     /// the wire what the real type will not produce.
@@ -1225,11 +1215,7 @@ mod request_bound_tests {
         props: &'a Bytes,
         session_state: Padded<SessionState>,
         event: Event,
-        seed: &'a Bytes,
     }
-
-    /// A seed of its one length.
-    const SEED: &[u8] = &[0x5A; 32];
 
     fn frame() -> Padded<SessionState> {
         Padded::seal(&SessionState::default()).expect("the default state fits its frame")
@@ -1256,7 +1242,6 @@ mod request_bound_tests {
             props: Bytes::new(props),
             session_state: frame(),
             event,
-            seed: Bytes::new(SEED),
         }
     }
 
@@ -1315,22 +1300,6 @@ mod request_bound_tests {
         assert!(decode(&loose(&a_key(), &props, event)).is_err());
     }
 
-    /// The seed crosses at its one length, so a request carrying any other is
-    /// refused rather than run on a stream nobody derived.
-    #[test]
-    fn a_seed_of_any_other_length_is_refused() {
-        let (key, props) = (a_key(), props_frame(b""));
-        let req = decode(&loose(&key, &props, Event::Start)).expect("a legal round");
-        assert_eq!(req.seed.0[..], *SEED);
-        for seed in [&SEED[..31], &[0x5A; 33][..], &[]] {
-            let req = LooseRequest {
-                seed: Bytes::new(seed),
-                ..loose(&key, &props, Event::Start)
-            };
-            assert!(decode(&req).is_err(), "a {}-byte seed decoded", seed.len());
-        }
-    }
-
     /// Version skew fails closed rather than running a round on a request this
     /// build only partly understood.
     #[test]
@@ -1341,7 +1310,6 @@ mod request_bound_tests {
             props: &'a Bytes,
             session_state: Padded<SessionState>,
             event: Event,
-            seed: &'a Bytes,
             future_field: u32,
         }
         let key = a_key();
@@ -1353,7 +1321,6 @@ mod request_bound_tests {
                 props: Bytes::new(&props),
                 session_state: frame(),
                 event: Event::Start,
-                seed: Bytes::new(SEED),
                 future_field: 1,
             },
             &mut b,

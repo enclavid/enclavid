@@ -14,7 +14,8 @@
 use std::sync::Arc;
 
 use enclavid_attestation::Attestor;
-use hatch_client::{AuthClient, HatchClient, SessionStore};
+use hatch_client::{AuthClient, HatchClient};
+use storage_client::SessionStore;
 
 use crate::compositions::Compositions;
 

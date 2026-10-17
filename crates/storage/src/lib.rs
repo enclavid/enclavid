@@ -24,10 +24,9 @@ mod integration_tests;
 use std::sync::Arc;
 
 use fleet_stream::{Incoming, StreamLen, bin};
-use hatch_protocol::{ReadRequest, ReadResponse, WriteRequest, WriteResponse};
 use storage_rpc::{
-    CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheError, CacheService, SessionError,
-    SessionStoreService,
+    CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheError, CacheService, ReadRequest,
+    ReadResponse, SessionError, SessionStoreService, WriteRequest, WriteResponse,
 };
 
 pub use cache::CacheBlobs;

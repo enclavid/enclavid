@@ -35,31 +35,37 @@ pub type CompileScope = (Asserted,);
 
 /// What is still open on a value api is about to release to the compile-worker.
 ///
-/// Its own alias rather than hatch-client's: that facade is the TEE↔host wire
-/// perimeter, and a scope is a property of the CHANNEL, so this leg names its own.
+/// Its own alias rather than a client's: those facades are the host's, whose
+/// every byte the host reads, and a scope is a property of the CHANNEL, so this
+/// leg names its own.
 type ToCompiler<T> = Exposed<T, (AuthN, AuthZ, Covert)>;
 
-/// Mint one compile's inputs as a fully-vouched request — the only way artifacts
-/// reach a compile-worker.
-///
-/// Specific to this value rather than a generic "anything crossing" mint, on the
-/// `outbound_session_id` precedent: the audited answers live in one place (grep
-/// `outbound_compile_request(`) instead of being restated at each call, where they
-/// would be the same three sentences forever.
-fn outbound_compile_request(source: CompileSource) -> Exposed<CompileSource, ()> {
-    let open: ToCompiler<CompileSource> = Exposed::new(source);
+/// Open a value for the compile-worker with the leg's own answer given, as
+/// `crate::executor::to_worker` does for the execution-worker: `AuthN` is
+/// IDENTIFIED for everything this leg carries, and what is left differs per
+/// message.
+fn to_compiler<T>(value: T) -> Exposed<T, (AuthZ, Covert)> {
+    let open: ToCompiler<T> = Exposed::new(value);
     open.vouch_unchecked::<AuthN, _>(reason!(
-        "identified: this leg dials ONE compile-time-pinned measurement, and the \
-         handshake fails before a byte moves if the peer is not it"
+        "identified: this leg dials ONE compile-time-pinned measurement, the handshake \
+         fails before a byte moves if the peer is not it, and the peer keeps nothing \
+         past the compile it is handed"
     ))
-    .vouch_unchecked::<AuthZ, _>(reason!(
-        "no-secret: the consumer's own artifacts, going to the code that exists to \
-         compile them; the recipient is handed nothing it is not being asked to read"
-    ))
-    .vouch_unchecked::<Covert, _>(reason!(
-        "already-held: the HOST performed the OCI pull that produced these bytes, so \
-         their length is a quantity it measured itself"
-    ))
+}
+
+/// Mint one compile's inputs as a fully-vouched request — the only way artifacts
+/// reach a compile-worker. Specific to this value, so the audited answers live in
+/// one place (grep `outbound_compile_request(`).
+fn outbound_compile_request(source: CompileSource) -> Exposed<CompileSource, ()> {
+    to_compiler(source)
+        .vouch_unchecked::<AuthZ, _>(reason!(
+            "no-secret: the consumer's own artifacts, going to the code that exists to \
+             compile them; the recipient is handed nothing it is not being asked to read"
+        ))
+        .vouch_unchecked::<Covert, _>(reason!(
+            "already-held: the HOST performed the OCI pull that produced these bytes, so \
+             their length is a quantity it measured itself"
+        ))
 }
 
 pub struct Compiler {

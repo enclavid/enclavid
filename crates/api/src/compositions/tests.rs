@@ -86,7 +86,7 @@ fn composition_key_length_prefixed_no_delimiter_collision() {
 
 #[test]
 fn composition_key_partitions_by_decryption_authority() {
-    use hatch_client::KbsKey;
+    use session_types::KbsKey;
     let plugins = [pin("p", "r")];
     let none = composition_key("policy", None, &plugins);
     let inline_a = composition_key("policy", Some(&Key::Inline(vec![1, 2, 3])), &plugins);

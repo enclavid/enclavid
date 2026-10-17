@@ -79,6 +79,6 @@ round it runs in.
 - `Date.now()` and `new Date()` are the second the round started, the same for
   the whole round.
 - `Math.random()` and `crypto.getRandomValues()` draw from the round's
-  randomness (`src/random.ts`). It is unpredictable to anyone outside the
-  enclave; a round that runs again draws the same.
+  randomness (`src/random.ts`). It is fresh for every round and unpredictable
+  to anyone outside the enclave; a round that runs again draws anew.
 - `TextEncoder` and `TextDecoder` come from the `fast-text-encoding` polyfill.

@@ -7,7 +7,8 @@ use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
 use enclavid_boundary::{AuthZ, Replay, reason};
-use hatch_client::{Metadata, SessionStatus, outbound_session_id};
+use session_types::SessionStatus;
+use storage_client::Metadata;
 
 use crate::dto;
 use crate::state::AppState;
@@ -32,16 +33,14 @@ pub(super) fn get_status() -> MethodRouter<Arc<AppState>> {
 /// Frontend uses this as the first request to decide which UI flow
 /// to run (continue running session / show "done" / show "ended").
 /// We read the encrypted metadata (AEAD-bound to session_id) and
-/// surface its `status` field — the host-plaintext `BlobField::Status`
-/// is a TTL hint only and a lying host can flip it freely, so we
-/// ignore it for any applicant-visible decision.
+/// surface its `status` field, the only copy of the status there is.
 async fn status(
     Path(session_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<StatusResponse>, StatusCode> {
     let ((metadata_opt,), _version) = state
         .session_store
-        .read(outbound_session_id(&session_id), (Metadata,))
+        .read(&session_id, (Metadata,))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

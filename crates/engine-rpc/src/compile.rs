@@ -4,7 +4,7 @@
 //! Gated behind the `compile` feature: a compile-worker (or the
 //! orchestrator's compile client) built with only this feature links the
 //! compiler contract + `engine-types`, and NOT the executor contract or
-//! `hatch-client` — least-knowledge for its measured image.
+//! `session-types` — least-knowledge for its measured image.
 //!
 //! Nothing large rides inside a call. A compile's components cross beside its
 //! request, as ONE stream — the policy, then each plugin in composition order —
