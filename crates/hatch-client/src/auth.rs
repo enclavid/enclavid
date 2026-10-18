@@ -78,7 +78,7 @@ pub enum AuthVerdict {
 /// credential that was valid.
 ///
 /// So this is a backstop against a host that stops answering, not a latency
-/// budget. Same relationship `DEFAULT_VCEK_DEADLINE` has to the bounds in `kds`.
+/// budget.
 pub const DEFAULT_AUTHORIZE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// Client for the hatch `/authorize` endpoint over the shared hatch

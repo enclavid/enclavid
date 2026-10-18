@@ -139,11 +139,10 @@ compile_error!(
 /// What that costs here: L1 entries are partitioned by the digest the peer proved, so one caller cannot reach another's (see `Caller`). That is the property to keep whole, since it
 /// is the one carrying the weight the pin would have carried.
 ///
-/// Minting is `mint_only`: this guest has no egress, so it cannot fetch the
-/// certificate that would endorse its own report. It sends the report bare and
-/// api, which reaches AMD through the hatch, verifies it against its own copy of
-/// the same chip's — which proves more than a self-endorsed quote would, not
-/// less.
+/// Minting is `mint_only`: this guest's launch gives it no certificate that
+/// would endorse its own report. It sends the report bare and api, whose launch
+/// gives it this chip's, verifies it against that copy — which proves more than
+/// a self-endorsed quote would, not less.
 #[cfg(feature = "sev-snp")]
 fn fleet_identity() -> (
     std::sync::Arc<dyn enclavid_attestation::Attestor>,

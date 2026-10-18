@@ -89,8 +89,7 @@ async fn main() {
         });
     }
 
-    // Where each leg is dialed, the hatch's first: the attestation below needs
-    // it. Read from the launch, which talks to nothing.
+    // Where each leg is dialed. Read from the launch, which talks to nothing.
     let legs = fleet::legs::load();
     let address_out = legs.hatch;
 
@@ -100,9 +99,7 @@ async fn main() {
     // somewhere fit to serve and holds the endorsement that lets it prove so.
     // A guest that answers no to either must reach nothing and serve nobody,
     // so nothing that talks to anything may precede it.
-    let attestor: Arc<dyn Attestor> =
-        endorsement::build_attestor(&address_out, settings.vcek_deadline, settings.vcek_retries)
-            .await;
+    let attestor: Arc<dyn Attestor> = endorsement::build_attestor();
     info!(
         "api: attested",
         reason!(

@@ -5,16 +5,16 @@
 //!
 //! ```text
 //! 1. read the firmware's report about this launch   no certificate needed
-//! 2. refuse to continue if the platform is unfit    no network needed
-//! 3. name and fetch the endorsing certificate       through the hatch
+//! 2. refuse to continue if the platform is unfit    before the host's word
+//! 3. read the endorsing certificate                 the launch's, from fw_cfg
 //! 4. construct the attestor, which self-checks      mints, then verifies
 //! ```
 //!
 //! Step 2 comes before step 3 deliberately. The channel carrying the report to
 //! the guest is authenticated under a key the hypervisor does not hold, so a
 //! guest can learn the conditions of its own launch without any certificate at
-//! all — and a guest launched somewhere it refuses to run should discover that
-//! even when it cannot reach anything.
+//! all — and a guest launched somewhere it refuses to run should say so, not
+//! that the host gave it no certificate.
 
 use std::sync::Arc;
 
@@ -52,11 +52,7 @@ compile_error!(
 /// and each process generates a fresh one, so two processes built this way could never
 /// attest each other. [`fleet_attestor`] supplies the shared dev identity instead.
 #[cfg(feature = "dev-attestation")]
-pub async fn build_attestor(
-    _address_out: &str,
-    _vcek_deadline: std::time::Duration,
-    _vcek_retries: usize,
-) -> Arc<dyn Attestor> {
+pub fn build_attestor() -> Arc<dyn Attestor> {
     Arc::new(enclavid_attestation::SnpDevAttestor::new_random())
 }
 
@@ -229,122 +225,62 @@ pub fn inbound_server_config(
     enclavid_ra_tls::public_server_config(fleet_attestor(attestor))
 }
 
-/// Waits between fetch attempts, ramping to the last and staying there. The
-/// certificate is the one thing this guest cannot serve without, so a briefly
-/// unreachable key service should not cost a restart — but the wait is bounded,
-/// because past that point the platform is the problem and hanging is worse than
-/// stopping.
+/// Where the launch gives this guest its endorsement: the certificate AMD
+/// issues this chip at its reported platform TCB, in DER, as fw_cfg
+/// `opt/com.enclavid/vcek`. The host fetches it from AMD's key distribution
+/// service and keeps it, once per chip and TCB, so a guest's start waits on
+/// nothing outside the machine.
 #[cfg(feature = "sev-snp")]
-const RETRY_DELAYS: [std::time::Duration; 5] = [
-    std::time::Duration::from_secs(1),
-    std::time::Duration::from_secs(2),
-    std::time::Duration::from_secs(5),
-    std::time::Duration::from_secs(15),
-    std::time::Duration::from_secs(30),
-];
+const VCEK_ENTRY: &str = "/sys/firmware/qemu_fw_cfg/by_name/opt/com.enclavid/vcek/raw";
 
-/// How many times a failed fetch is tried again, unless the host says otherwise
-/// (the `vcek-retries` setting): once per rung above, some 53 s of waiting in
-/// all. More rungs repeat the last.
-pub const DEFAULT_VCEK_RETRIES: usize = 5;
-
-/// What a hatch failure is called on the public log. Exhaustive on purpose: a
-/// new `BridgeError` variant will not compile until someone names it, which is
-/// the point — the label is what the host sees, and nothing else does.
+/// Far above a VCEK, some 1.4 KB. One byte more is read, so a longer entry is
+/// seen to be longer rather than cut to fit.
 #[cfg(feature = "sev-snp")]
-fn bridge_stage(e: &hatch_client::BridgeError) -> &'static str {
-    use hatch_client::BridgeError as B;
-    match e {
-        B::Transport(_) => "transport",
-        B::Codec(_) => "codec",
-        B::NotFound => "not-found",
-        B::Refused => "refused",
-    }
-}
+const MAX_VCEK_BYTES: usize = 16 * 1024;
 
 #[cfg(feature = "sev-snp")]
-pub async fn build_attestor(
-    address_out: &str,
-    vcek_deadline: std::time::Duration,
-    vcek_retries: usize,
-) -> Arc<dyn Attestor> {
+pub fn build_attestor() -> Arc<dyn Attestor> {
+    use std::io::Read;
+
     use enclavid_attestation::{MILAN_ASK, SnpAttestor, vcek_identity};
-    use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
-    use hatch_client::{HatchClient, KdsClient, VcekRequest, boundary};
+    use enclavid_boundary::{AuthN, AuthZ, Replay, Untrusted, reason};
 
     // Steps 1 and 2: what the hardware says about this launch, and whether this
     // build is willing to run here at all.
-    let identity = vcek_identity().expect(
+    vcek_identity().expect(
         "refusing to run on this platform: the guest's own attestation report was \
          unreadable, or it describes a launch this build does not accept (debug \
          enabled, a migration agent, a VMPL other than 0, or platform firmware \
          below the floor compiled into enclavid-attestation)",
     );
 
-    let request = VcekRequest {
-        product_line: identity.product_line.to_string(),
-        chip_id: identity.chip_id,
-        bootloader_spl: identity.bootloader_spl,
-        tee_spl: identity.tee_spl,
-        snp_spl: identity.snp_spl,
-        microcode_spl: identity.microcode_spl,
-    };
-
-    let hatch = HatchClient::new(address_out)
-        .await
-        .expect("failed to connect to hatch");
-    let kds = KdsClient::new(hatch, vcek_deadline);
-
-    // Step 3. Retrying here rather than host-side: the TEE is the only party
-    // that can decide to abort, and it can only decide that if it sees the
-    // failures.
-    let mut attempt = 0usize;
-    let response = loop {
-        let exposed = boundary::outbound::to_untrusted(request.clone())
-            .vouch_unchecked::<AuthN, _>(reason!(
-                "the request names a public certificate — the chip identity and platform \
-                 version numbers the host already knows, since it launched this guest"
-            ))
-            .vouch_unchecked::<AuthZ, _>(reason!(
-                "fetching our own endorsement from AMD IS the courier op"
-            ))
-            .vouch_unchecked::<Covert, _>(reason!(
-                "every field is read verbatim from the firmware's report at startup, before \
-                 any policy or applicant input exists in this process"
-            ));
-
-        match kds.vcek(exposed).await {
-            Ok(response) => break response,
-            Err(e) if attempt < vcek_retries => {
-                safe_logger::warn!(
-                    "api: endorsement fetch failed at {}; retrying",
-                    safe_logger::safe(
-                        &bridge_stage(&e),
-                        reason!("one of the fixed labels bridge_stage names")
-                    ),
-                    reason!("a constant, at startup before any session exists")
-                );
-                safe_logger::debug!("  cause: {e}");
-                let last = RETRY_DELAYS[RETRY_DELAYS.len() - 1];
-                tokio::time::sleep(RETRY_DELAYS.get(attempt).copied().unwrap_or(last)).await;
-                attempt += 1;
-            }
-            Err(e) => panic!(
-                "could not obtain this chip's endorsement certificate: {e}. Without it \
-                 nothing can verify a quote this guest mints, so it will not serve."
-            ),
-        }
-    };
+    // Step 3: the certificate, as the host gave it — every concern open.
+    let mut certificate = Vec::new();
+    std::fs::File::open(VCEK_ENTRY)
+        .and_then(|entry| {
+            entry
+                .take(MAX_VCEK_BYTES as u64 + 1)
+                .read_to_end(&mut certificate)
+        })
+        .expect(
+            "this launch gave no endorsement certificate as fw_cfg opt/com.enclavid/vcek: \
+             without it nothing can verify a quote this guest mints, so it will not serve",
+        );
+    assert!(
+        certificate.len() <= MAX_VCEK_BYTES,
+        "the endorsement certificate this launch gave is past {MAX_VCEK_BYTES} bytes"
+    );
+    let certificate: Untrusted<Vec<u8>, (AuthN, AuthZ, Replay)> = Untrusted::new(certificate);
 
     // Step 4. `AuthN` is closed by the construction itself, not asserted: the
     // constructor verifies the AMD chain against the compiled-in root and then
     // requires the certificate to verify a report this chip has just produced.
     // A certificate for another machine, or for a superseded platform TCB,
     // fails that and never becomes an attestor.
-    let attestor = response
-        .trust::<AuthN, _, _, _, _>(|response| SnpAttestor::new(MILAN_ASK, &response.certificate))
+    let attestor = certificate
+        .trust::<AuthN, _, _, _, _>(|certificate| SnpAttestor::new(MILAN_ASK, &certificate))
         .expect(
-            "the certificate the hatch returned does not endorse this chip at this \
+            "the certificate this launch gave does not endorse this chip at this \
              platform TCB",
         )
         .trust_unchecked::<AuthZ, _>(reason!(

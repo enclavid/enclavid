@@ -3,7 +3,8 @@
 # over — plus only what the host decides: memory, the vsock CID, a disk, where
 # the serial console goes, and fw_cfg entries for a guest that reads them.
 #
-#   [FW_CFG="name=value ..."] enclavid-boot-cvm NAME IMAGE CID MEMORY [DISK SIZE]
+#   [FW_CFG="name=value ..."] [FW_CFG_FILES="name=path ..."] \
+#     enclavid-boot-cvm NAME IMAGE CID MEMORY [DISK SIZE]
 #
 # NAME is this guest's among the host's — a release's api is one of several —
 # and names only its console.
@@ -16,6 +17,12 @@ fwcfg=()
 read -ra entries <<<"${FW_CFG:-}"
 for entry in "${entries[@]}"; do
   fwcfg+=(-fw_cfg "name=opt/com.enclavid/${entry%%=*},string=${entry#*=}")
+done
+# The same, with the entry's contents read from a file as the guest boots: api
+# its endorsement certificate.
+read -ra files <<<"${FW_CFG_FILES:-}"
+for entry in "${files[@]}"; do
+  fwcfg+=(-fw_cfg "name=opt/com.enclavid/${entry%%=*},file=${entry#*=}")
 done
 
 disk=()

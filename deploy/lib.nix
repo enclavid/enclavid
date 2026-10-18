@@ -56,11 +56,15 @@ rec {
     text = "QEMU=${lib.escapeShellArg qemu}\n" + builtins.readFile ./bin/boot-cvm.sh;
   };
 
-  cvmService = { name, image, qemu, cid, memory, disk ? null, environment ? { } }: {
+  # A guest's unit. `files` are fw_cfg entries read from a file as it boots,
+  # by name; `needs` the units it starts after and pulls in — without taking a
+  # restart of one as a reason to restart.
+  cvmService = { name, image, qemu, cid, memory, disk ? null, environment ? { }, files ? { }, needs ? [ ] }: {
     description = "Enclavid confidential VM: ${name}";
     wantedBy = [ "enclavid-fleet.target" ];
     partOf = [ "enclavid-fleet.target" ];
-    after = [ "enclavid-host.target" ];
+    after = [ "enclavid-host.target" ] ++ needs;
+    wants = needs;
     enableDefaultPath = false;
     # A guest that cannot come up is tried five times, then left failed for a
     # person to look at rather than rebooted for ever. Its application ending
@@ -68,7 +72,9 @@ rec {
     # every exit is a failure here, and only a stop is not.
     startLimitIntervalSec = 300;
     startLimitBurst = 5;
-    inherit environment;
+    environment = environment // lib.optionalAttrs (files != { }) {
+      FW_CFG_FILES = lib.concatStringsSep " " (lib.mapAttrsToList (entry: path: "${entry}=${path}") files);
+    };
     serviceConfig = {
       Type = "exec";
       ExecStart = lib.concatStringsSep " " (
@@ -150,6 +156,37 @@ rec {
       CapabilityBoundingSet = "";
       NoNewPrivileges = true;
       MemoryMax = "256M";
+    };
+  };
+
+  # Where the host keeps the certificate AMD issues its chip — the one api is
+  # given at launch — and the unit keeping it there: see bin/vcek.sh.
+  vcekPath = "/var/lib/enclavid/vcek/vcek.der";
+  vcekService = {
+    description = "Enclavid: keep the certificate AMD issues this chip";
+    wantedBy = [ "enclavid-host.target" ];
+    partOf = [ "enclavid-host.target" ];
+    before = [ "enclavid-host.target" ];
+    enableDefaultPath = false;
+    # The certificate's own roots, not whatever the host's are.
+    environment.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = lib.getExe (pkgs.writeShellApplication {
+        name = "enclavid-vcek";
+        runtimeInputs = [ pkgs.coreutils pkgs.curl pkgs.openssl pkgs.snphost ];
+        text = builtins.readFile ./bin/vcek.sh;
+      });
+      # Five tries at AMD of half a minute each, and the waits between.
+      TimeoutStartSec = 300;
+      StateDirectory = "enclavid/vcek";
+      # Root for /dev/sev, which names the chip and its TCB, and nothing of the
+      # host's but that and its own directory to write.
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      PrivateTmp = true;
+      NoNewPrivileges = true;
     };
   };
 

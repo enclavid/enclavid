@@ -89,6 +89,7 @@ checkout: the gateway's guest, and api with the three guests it reaches.
 | `enclavid-certificate-main` | keeps the gateway on an issued certificate, with `acme.issue` |
 | `enclavid-relay-*` | the links between the guests, from the host into them, and from them to their NTS servers |
 | `enclavid-hatch` | what the guests reach outside: token checks, registry pulls |
+| `enclavid-vcek` | keeps the certificate AMD issues this chip, which api is given at launch |
 | `enclavid-fleet.target`, `enclavid-host.target` | all of the above |
 
 Callers reach the gateway on `tcp:0.0.0.0:443` by default. On the host itself,
@@ -121,10 +122,10 @@ Each guest's own log is its serial console, in
 dependencies log.
 
 The hatch fetches what consumers name — their registries, and wherever a
-registry's token service or its redirects lead; their key brokers — and AMD's
-certificates for the chip, from this host's network. Whatever this host
-reaches, a consumer can have it fetch, this host's own ports among them, and
-whatever it reaches sees this host's address. It runs as a user of its own
+registry's token service or its redirects lead; their key brokers — from this
+host's network. Whatever this host reaches, a consumer can have it fetch, this
+host's own ports among them, and whatever it reaches sees this host's address.
+It runs as a user of its own
 with no privilege, opens IP and vsock sockets and no other, and of the host's
 files sees only its program's closure in the store, the CA bundle and its
 resolver's, read-only, in a root that holds nothing else. Over vsock it
@@ -151,6 +152,15 @@ arrives. Every guest on the host shares these units, so each lets one guest
 hold at most a few connections at once, lets a quiet one go, and spaces out
 the packets one connection sends; and they run as a user of their own, with
 no capability and bounded memory.
+
+What lets anyone check a quote api mints is the certificate AMD issues this
+chip at its firmware's reported versions, the VCEK. `enclavid-vcek` fetches it
+from AMD's key distribution service, from this host's network, once per chip
+and versions, and keeps it in `/var/lib/enclavid/vcek`; api is given it at
+every launch. A firmware update makes it fetch the next one. With AMD out of
+reach, the one already kept serves; with none kept, api does not start. api
+checks it against the AMD root compiled in, so what this host keeps decides
+only whether api starts.
 
 ## Certificates
 

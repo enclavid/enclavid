@@ -65,7 +65,8 @@ flowchart LR
   end
 
   subgraph host["Untrusted host"]
-    hatch["hatch<br/>token checks · OCI pull · KBS relay · AMD VCEK fetch"]
+    hatch["hatch<br/>token checks · OCI pull · KBS relay"]
+    vcek["AMD VCEK<br/>fetched once per chip and TCB, kept"]
     relays["time relays<br/>blind byte carriers"]
   end
 
@@ -79,7 +80,8 @@ flowchart LR
   api -->|vsock| hatch
   hatch --> registry
   hatch --> kbs
-  hatch --> kds
+  vcek --> kds
+  vcek -->|"fw_cfg, at launch"| api
   tee -->|"vsock, every enclave"| relays
   relays --> nts
 ```
@@ -107,8 +109,11 @@ Trust boundaries:
   a key or plaintext.
 - **TEE ↔ untrusted host (`hatch`)** — the enclaves have no NIC; their outbound
   I/O goes through an HTTP-over-vsock service on the host (token checks, OCI
-  pulls, the KBS relay, VCEK fetches from AMD's key service). The host is
-  untrusted on content: artifacts are digest-pinned and checked TEE-side.
+  pulls, the KBS relay). The host is untrusted on content: artifacts are
+  digest-pinned and checked TEE-side. The certificate AMD issues the chip — the
+  one a quote is checked by — the host fetches from AMD's key service once per
+  chip and firmware version, keeps, and gives api at launch; api checks it
+  against the AMD root compiled in.
 - **Every enclave ↔ NTS servers** — each enclave keeps its own clock from
   Network Time Security servers, reached through blind relays on the host. The
   key exchange is TLS ending in the enclave, against roots compiled into it;

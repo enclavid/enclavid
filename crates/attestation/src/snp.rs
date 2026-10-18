@@ -118,11 +118,10 @@ impl TcbFloor {
 /// already holds was produced by that same chip at that same TCB — where a
 /// self-endorsed quote proves only "some AMD part somewhere".
 ///
-/// It exists because a guest with no egress cannot fetch its own VCEK, and the
-/// three fleet leaves are exactly that by design. They mint certless; api, which
-/// reaches AMD's key service through the hatch, supplies the endorsement from
-/// its own copy. Same host, same chip, so the copy is the right one — and if it
-/// is not, the signature simply does not verify, which is the answer we want.
+/// It exists because only api's launch gives it this chip's VCEK. The three
+/// fleet leaves mint certless; api supplies the endorsement from its own copy.
+/// Same host, same chip, so the copy is the right one — and if it is not, the
+/// signature simply does not verify, which is the answer we want.
 #[derive(Serialize, Deserialize)]
 struct SnpEnvelope {
     #[serde(with = "serde_bytes")]

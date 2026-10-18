@@ -167,7 +167,7 @@ line change the measurement when they change.
 
 | port | reached by | carries | where it is set |
 |---|---|---|---|
-| 8000 | api → host | the hatch: authorization, OCI pulls, the KBS relay, VCEK | the launch, fw_cfg |
+| 8000 | api → host | the hatch: authorization, OCI pulls, the KBS relay | the launch, fw_cfg |
 | 8001 | api → host | the storage-CVM | the launch, fw_cfg |
 | 8002 | api → host | the compile-worker | the launch, fw_cfg |
 | 8003 | api → host | the execution-worker | the launch, fw_cfg |

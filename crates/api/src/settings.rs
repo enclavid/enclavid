@@ -62,13 +62,6 @@ pub struct Settings {
     /// How long the hatch has to answer one relayed KBS leg
     /// (`kbs-deadline-secs`).
     pub kbs_deadline: Duration,
-    /// How long the hatch has to answer a certificate request
-    /// (`vcek-deadline-secs`).
-    pub vcek_deadline: Duration,
-    /// How many times a failed certificate request is tried again before the
-    /// guest stops (`vcek-retries`, `crate::endorsement::DEFAULT_VCEK_RETRIES`).
-    /// Zero is a choice: the first failure stops it.
-    pub vcek_retries: usize,
     /// How often the hatch bit is probed (`hatch-probe-secs`).
     pub hatch_probe: Duration,
     /// How long one probe waits (`hatch-probe-deadline-secs`).
@@ -87,9 +80,8 @@ pub struct Settings {
 /// The host's settings for api, or no boot: a key api does not know, one given
 /// twice, or a value that is not a number above zero stops it rather than
 /// falling back to a default — a zero TTL would sweep every session as it is
-/// made, and a zero deadline would fail every call it bounds. `vcek-retries`
-/// may be zero, and the leg's port limit and chunk are held to what chmux runs
-/// with ([`LegSettings::refusal`]).
+/// made, and a zero deadline would fail every call it bounds. The leg's port
+/// limit and chunk are held to what chmux runs with ([`LegSettings::refusal`]).
 pub fn load() -> Settings {
     let mut launch = Launch::load("api").unwrap_or_else(|e| refused(e));
     let leg = LegSettings::default();
@@ -126,16 +118,6 @@ pub fn load() -> Settings {
             &mut launch,
             "kbs-deadline-secs",
             hatch_client::DEFAULT_RELAY_DEADLINE,
-        ),
-        vcek_deadline: secs(
-            &mut launch,
-            "vcek-deadline-secs",
-            hatch_client::DEFAULT_VCEK_DEADLINE,
-        ),
-        vcek_retries: parsed(
-            &mut launch,
-            "vcek-retries",
-            crate::endorsement::DEFAULT_VCEK_RETRIES,
         ),
         hatch_probe: secs(&mut launch, "hatch-probe-secs", DEFAULT_HATCH_PROBE),
         hatch_probe_deadline: secs(

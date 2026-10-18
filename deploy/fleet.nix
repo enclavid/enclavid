@@ -237,7 +237,7 @@ let
   };
 
   releaseServices = r: lib.listToAttrs (map
-    (role: lib.nameValuePair "enclavid-${r.name}-${role}" (fleet.cvmService {
+    (role: lib.nameValuePair "enclavid-${r.name}-${role}" (fleet.cvmService ({
       name = "${r.name}-${role}";
       image = r.built.image role;
       inherit (r.built) qemu;
@@ -253,7 +253,11 @@ let
       environment =
         let entries = lib.optional (role == "api") (legPorts r) ++ settingsEntry role;
         in lib.optionalAttrs (entries != [ ]) { FW_CFG = lib.concatStringsSep " " entries; };
-    }))
+    } // lib.optionalAttrs (role == "api") {
+      # The certificate its quotes are checked by, as the host keeps it.
+      files.vcek = fleet.vcekPath;
+      needs = [ "enclavid-vcek.service" ];
+    })))
     roles);
 
   # A gateway keeps no configuration across a start: while it is up, its table
@@ -615,6 +619,7 @@ in
     enclavid.units =
       lib.concatMap (g: [ "enclavid-gateway-${g.name}.service" "enclavid-gateway-${g.name}-push.service" ]) gateways
       ++ lib.optional sharedHatch "enclavid-hatch.service"
+      ++ lib.optional (local != [ ]) "enclavid-vcek.service"
       ++ lib.concatMap (r: map (role: "enclavid-${r.name}-${role}.service") roles) local
       ++ map (name: "enclavid-relay-${name}.service") (lib.attrNames relays);
     enclavid.memory = map (_: cfg.cvms.gateway.memory) gateways
@@ -704,6 +709,7 @@ in
 
     systemd.services = lib.mkMerge ([
       (lib.mapAttrs' (name: r: lib.nameValuePair "enclavid-relay-${name}" (fleet.relayService name r)) relays)
+      (lib.mkIf (local != [ ]) { enclavid-vcek = fleet.vcekService; })
       (lib.mkIf sharedHatch {
         enclavid-hatch = fleet.hatchService {
           name = "shared";

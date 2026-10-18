@@ -57,9 +57,8 @@ const JWKS_TTL: Duration = Duration::from_secs(600);
 /// issuer one fetch per this long, and a key rotated in is taken within it.
 const REFETCH_AFTER: Duration = Duration::from_secs(60);
 
-/// Bounds on each fetch from the issuer. Mirrors the pair in `kds`. `timeout`
-/// covers the whole request including connect, so one fetch costs at most
-/// `REQUEST_TIMEOUT`.
+/// Bounds on each fetch from the issuer. `timeout` covers the whole request
+/// including connect, so one fetch costs at most `REQUEST_TIMEOUT`.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 

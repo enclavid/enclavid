@@ -159,6 +159,17 @@ measurement (`crates/api/src/fleet/legs.rs`):
 
 An api launched without them says which one is missing and stops.
 
+And it is given the certificate AMD issues this chip at its reported TCB — the
+VCEK, in DER — which is what lets anyone check a quote it mints
+(`crates/api/src/endorsement.rs`). It is public, and api checks it against the
+AMD root compiled in and against a report the chip has just made, so the host
+choosing it chooses only whether api starts. `snphost show vcek-url` names it;
+fetch it once per chip and TCB and keep it:
+
+```sh
+  -fw_cfg name=opt/com.enclavid/vcek,file=/var/lib/enclavid/vcek/vcek.der \
+```
+
 What each measurement-relevant part is doing:
 
 - **`kernel-hashes=on`** — without it the kernel, the initramfs and the command
@@ -250,8 +261,6 @@ What each measurement-relevant part is doing:
   | | `registry-requests-per-consumer` | 4 |
   | | `authorize-deadline-secs` | 25 |
   | | `kbs-deadline-secs` | 20 |
-  | | `vcek-deadline-secs` | 30 |
-  | | `vcek-retries` | 5, `0` for none |
   | | `hatch-probe-secs` | 10 |
   | | `hatch-probe-deadline-secs` | 5, under the period |
   | | `callback-request-buffer` | 4 |

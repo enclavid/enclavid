@@ -11,9 +11,8 @@
 //! here: it moved into the trusted RA-TLS storage-CVM (`crates/storage`),
 //! so the hatch holds no session state at all and only fronts external
 //! egress. What it does hold is public material it fetched on someone's
-//! behalf and can refetch at any time — the issuer's JWKS, and the AMD
-//! certificate endorsing this machine's chip. Replaces the former
-//! `enclavid-host` gRPC server.
+//! behalf and can refetch at any time — the issuer's JWKS. Replaces the
+//! former `enclavid-host` gRPC server.
 //!
 //! Endpoints:
 //!   GET    /health                (liveness only — see the route table)
@@ -21,12 +20,10 @@
 //!   POST   /oci/manifest          (ManifestRequest -> ManifestResponse | 404)
 //!   POST   /oci/blob              (BlobRequest -> the blob, streamed | 404)
 //!   POST   /kbs/relay             (KbsRelayRequest -> KbsRelayResponse)
-//!   POST   /kds/vcek              (VcekRequest -> VcekResponse | 404)
 
 mod auth;
 mod error;
 mod kbs;
-mod kds;
 mod oci;
 mod rate_limit;
 mod transport;
@@ -45,7 +42,6 @@ use crate::rate_limit::RateLimits;
 pub struct AppState {
     pub auth: AuthState,
     pub rate_limits: Arc<RateLimits>,
-    pub vcek: kds::VcekCache,
     /// The manifests fetched at once, one permit each.
     pub manifests: Arc<Semaphore>,
     /// The blobs streamed at once, one permit each.
@@ -72,7 +68,6 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         auth,
         rate_limits: Arc::new(RateLimits::from_env()?),
-        vcek: kds::VcekCache::default(),
         manifests: Arc::new(Semaphore::new(oci::concurrent(
             "HATCH_CONCURRENT_MANIFESTS",
             oci::DEFAULT_CONCURRENT_MANIFESTS,
@@ -91,8 +86,8 @@ async fn main() -> anyhow::Result<()> {
         // can observe, since whatever supervises this process already knows the
         // second half better than any probe could report it.
         //
-        // It must stay free of the issuer, the registry, the key broker and
-        // AMD. Those are other people's uptime; reaching them from here would
+        // It must stay free of the issuer, the registry and the key broker.
+        // Those are other people's uptime; reaching them from here would
         // turn a fact about one hop into a claim about theirs, and would make a
         // guest's fixed-cadence probe into fixed-cadence traffic to third
         // parties.
@@ -101,7 +96,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/oci/manifest", post(oci::manifest))
         .route("/oci/blob", post(oci::blob))
         .route("/kbs/relay", post(kbs::relay))
-        .route("/kds/vcek", post(kds::vcek))
         .with_state(state);
 
     tracing::info!(addr = %listen_addr, "starting hatch HTTP server");
