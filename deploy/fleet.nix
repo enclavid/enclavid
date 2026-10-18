@@ -19,15 +19,10 @@ let
   gatewayHere = gateways != [ ];
   roles = [ "api" "storage" "compile-worker" "execution-worker" ];
 
-  # Where a release's guests are, from its index: context IDs from 3 + 10 ×
-  # index, host ports from their base + 100 × index. Index 0 has the numbers a
-  # single release has always had.
-  cidOf = r: role: toString (r.index * 10 + {
-    api = 3;
-    storage = 4;
-    execution-worker = 5;
-    compile-worker = 6;
-  }.${role});
+  # Where a release's guests are, from its index: context IDs as `fleet.cidOf`
+  # gives them, host ports from their base + 100 × index. Index 0 has the
+  # numbers a single release has always had.
+  inherit (fleet) cidOf;
   portOf = r: base: toString (base + 100 * r.index);
 
   # The ports the guests listen on are on their measured command lines. Each is
@@ -38,10 +33,14 @@ let
   # carrying nothing. The ports api's legs dial are not on its command line:
   # they are handed to it at launch, from these same relays and its hatch.
   apiPort = { client = "8443"; applicant = "8444"; };
-  releaseRelays = r: {
-    storage = { listen = "vsock:${portOf r 8001}"; to = "vsock:${cidOf r "storage"}:8001"; };
-    compile = { listen = "vsock:${portOf r 8002}"; to = "vsock:${cidOf r "compile-worker"}:8002"; };
-    exec = { listen = "vsock:${portOf r 8003}"; to = "vsock:${cidOf r "execution-worker"}:8003"; };
+  # A vsock relay takes calls only from the guests meant to dial it: any other
+  # guest on the host — one that has broken out of what it runs, say — reaches
+  # nothing through it.
+  onlyFrom = cids: lib.concatMap (cid: [ "--from" cid ]) cids;
+  releaseRelays = r: let fromApi = onlyFrom [ (cidOf r "api") ]; in {
+    storage = { listen = "vsock:${portOf r 8001}"; to = "vsock:${cidOf r "storage"}:8001"; flags = fromApi; };
+    compile = { listen = "vsock:${portOf r 8002}"; to = "vsock:${cidOf r "compile-worker"}:8002"; flags = fromApi; };
+    exec = { listen = "vsock:${portOf r 8003}"; to = "vsock:${cidOf r "execution-worker"}:8003"; flags = fromApi; };
     health = { listen = "tcp:127.0.0.1:${portOf r 18445}"; to = "vsock:${cidOf r "api"}:8445"; };
   } // lib.optionalAttrs (r.entrances != null) {
     # Where a gateway on another host reaches this release's api: over the
@@ -58,10 +57,12 @@ let
     client = {
       listen = "vsock:${portOf r 9443}";
       to = if r.entrances == null then "vsock:${cidOf r "api"}:${apiPort.client}" else entrance r 19443;
+      flags = onlyFrom (map gatewayCid gateways);
     };
     applicant = {
       listen = "vsock:${portOf r 9444}";
       to = if r.entrances == null then "vsock:${cidOf r "api"}:${apiPort.applicant}" else entrance r 19444;
+      flags = onlyFrom (map gatewayCid gateways);
     };
   };
   # Where a gateway is, from its index: the context ID 7 + 10 × index — a
@@ -94,7 +95,8 @@ let
   timeServers = lib.unique (lib.concatMap (x: fleet.timeServers x.src) (local ++ gateways));
   # Every guest here shares these relays, so none may hold more than a few of
   # their connections at once: a guest asks each server one packet at a time,
-  # on a connection of its own, and has one key exchange with it at most.
+  # on a connection of its own, and has one key exchange with it at most. Any
+  # guest may take them: they reach the servers named here and nothing else.
   timeRelayFlags = [ "--per-guest" "8" ];
   timeRelays = lib.listToAttrs (lib.concatMap
     (s: [
@@ -113,6 +115,10 @@ let
     ])
     timeServers);
   relays = releaseSide // perGateway // timeRelays;
+  # The apis here that reach outside through the fleet's own hatch — the only
+  # guests it takes calls from. With none, it does not run.
+  sharedHatchCallers = map (r: cidOf r "api") (lib.filter (r: r.hatchPort == fleet.hatchPort) local);
+  sharedHatch = sharedHatchCallers != [ ];
   # A certificate run arms every gateway here, the one listening where callers
   # reach — `public.listen` — above all: the issuer's validator comes to it.
   configs = gs: lib.concatMapStringsSep "," (g: "http://${fleet.gatewayConfig g.index}") gs;
@@ -608,13 +614,13 @@ in
       (map (g: (gatewayRelays g).health) gateways ++ map (r: (releaseRelays r).health) local);
     enclavid.units =
       lib.concatMap (g: [ "enclavid-gateway-${g.name}.service" "enclavid-gateway-${g.name}-push.service" ]) gateways
-      ++ lib.optional (local != [ ]) "enclavid-hatch.service"
+      ++ lib.optional sharedHatch "enclavid-hatch.service"
       ++ lib.concatMap (r: map (role: "enclavid-${r.name}-${role}.service") roles) local
       ++ map (name: "enclavid-relay-${name}.service") (lib.attrNames relays);
     enclavid.memory = map (_: cfg.cvms.gateway.memory) gateways
       ++ lib.concatMap (_: map (role: cfg.cvms.${role}.memory) roles) local;
     enclavid.qemus = lib.unique (map (g: g.built.qemu) gateways ++ map (r: r.built.qemu) local);
-    enclavid.vsockPorts = lib.optional (local != [ ]) (toString fleet.hatchPort)
+    enclavid.vsockPorts = lib.optional sharedHatch (toString fleet.hatchPort)
       ++ map (r: lib.removePrefix "vsock:" r.listen) (lib.filter (r: lib.hasPrefix "vsock:" r.listen) (lib.attrValues relays));
 
     # system-manager would otherwise take over /etc/passwd and /etc/group.
@@ -698,22 +704,23 @@ in
 
     systemd.services = lib.mkMerge ([
       (lib.mapAttrs' (name: r: lib.nameValuePair "enclavid-relay-${name}" (fleet.relayService name r)) relays)
-      (lib.mkIf (local != [ ]) {
+      (lib.mkIf sharedHatch {
         enclavid-hatch = fleet.hatchService {
           name = "shared";
           port = fleet.hatchPort;
           src = ../.;
           settings = cfg.hatch;
+          from = sharedHatchCallers;
         };
       })
     ] ++ map releaseServices local ++ map gatewayServices gateways);
-    systemd.packages = lib.optional (local != [ ]) (fleet.hatchRoot {
+    systemd.packages = lib.optional sharedHatch (fleet.hatchRoot {
       unit = "enclavid-hatch.service";
       src = ../.;
     });
     # The hatch's root has to exist before it starts, and owned by root: one
     # it could write to would be a root it could change.
-    systemd.tmpfiles.settings = lib.mkIf (local != [ ]) {
+    systemd.tmpfiles.settings = lib.mkIf sharedHatch {
       "10-enclavid-hatch"."${fleet.hatchRootPath "shared"}".d = {
         mode = "0755";
         user = "root";

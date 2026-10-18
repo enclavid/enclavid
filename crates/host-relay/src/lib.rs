@@ -309,6 +309,18 @@ fn resolve(addr: &str) -> Result<SocketAddr, String> {
         .ok_or_else(|| format!("`{addr}` resolved to no address"))
 }
 
+/// A guest's context ID, as a caller a listener takes calls from. Below 3 are
+/// the hypervisor, the local loopback and the host, and `u32::MAX` is the ANY
+/// sentinel: none of them is a guest, so naming one is a mistake.
+pub fn parse_guest(s: &str) -> Result<u32, String> {
+    match s.parse::<u32>() {
+        Ok(cid) if (3..u32::MAX).contains(&cid) => Ok(cid),
+        _ => Err(format!(
+            "`{s}` is not a guest's context ID (3 to 4294967294)"
+        )),
+    }
+}
+
 /// A bound listener, whatever transport it came from.
 pub enum Listener {
     Unix(UnixListener),
@@ -792,6 +804,16 @@ mod tests {
             "udp:not a host:1",
         ] {
             assert!(Destination::parse(bad).is_err(), "`{bad}` should not parse");
+        }
+    }
+
+    #[test]
+    fn a_caller_is_named_by_a_guests_context_id() {
+        assert_eq!(parse_guest("3"), Ok(3));
+        assert_eq!(parse_guest("4294967294"), Ok(4294967294));
+        // The hypervisor, the loopback, the host, the ANY sentinel.
+        for bad in ["0", "1", "2", "4294967295", "", "-3", "api", " 3"] {
+            assert!(parse_guest(bad).is_err(), "`{bad}` should not parse");
         }
     }
 

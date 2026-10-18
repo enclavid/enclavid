@@ -107,6 +107,14 @@ systemctl status 'enclavid-*'
 journalctl -u enclavid-gateway-main-push
 ```
 
+Every link a guest dials on the host into another guest, and the hatch, takes
+calls only from the guests meant to dial it, by their context IDs: storage and
+both workers from their api alone, api's two surfaces from the gateways, the
+hatch from the apis that reach outside through it. Any other guest on the host
+— one that has broken out of what it runs, say — reaches nothing through them.
+The NTS relays below take any guest: they reach their servers and nothing
+else.
+
 Each guest's own log is its serial console, in
 `/var/log/enclavid/main-ROLE.serial` and `gateway-main.serial`; with
 `variant = "debug"` it carries the kernel's console too, and what the guests'

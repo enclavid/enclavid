@@ -5,6 +5,16 @@ rec {
   # The port on the host the fleet's own hatch listens on.
   hatchPort = 8000;
 
+  # A release's guest's vsock context ID, from the release's index: 3 + 10 ×
+  # index onward, so a release's guests take 3 to 6 of every ten. Index 0 has
+  # the numbers a single release has always had.
+  cidOf = r: role: toString (r.index * 10 + {
+    api = 3;
+    storage = 4;
+    execution-worker = 5;
+    compile-worker = 6;
+  }.${role});
+
   # A command line as the words the kernel splits it into, so a setting is
   # matched whole: 8001 is not found inside 80011.
   words = text: lib.filter (word: word != "") (lib.splitString " " (lib.removeSuffix "\n" text));
@@ -165,11 +175,11 @@ rec {
         >$out/lib/systemd/system/${unit}.d/root.conf
     '';
 
-  # A hatch built from `src`'s own tree, listening on `port`, checking
-  # consumers' tokens, and how often each asks, as `settings` —
-  # `enclavid.hatch` — says. It keeps nothing
+  # A hatch built from `src`'s own tree, listening on `port` for the guests
+  # `from` names by context ID, checking consumers' tokens, and how often each
+  # asks, as `settings` — `enclavid.hatch` — says. It keeps nothing
   # it could not fetch again, so it is started again however often it ends.
-  hatchService = { name, port, src, settings }: {
+  hatchService = { name, port, src, settings, from }: {
     description = "Enclavid hatch ${name}: what the guests reach outside";
     wantedBy = [ "enclavid-host.target" ];
     partOf = [ "enclavid-host.target" ];
@@ -177,6 +187,7 @@ rec {
     startLimitIntervalSec = 0;
     environment = {
       HATCH_LISTEN_ADDR = toString port;
+      HATCH_FROM = lib.concatStringsSep "," from;
       # The registry client checks servers against the system's CA bundle,
       # and the host's own is out of its sight: this one, which hatchRoot
       # binds in.

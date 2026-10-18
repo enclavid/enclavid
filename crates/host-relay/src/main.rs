@@ -13,9 +13,10 @@
 //! host-relay --listen unix:/run/enclavid/api.vsock_1024 \
 //!            --to     tcp:127.0.0.1:8000
 //!
-//! # the same links on a VMM that gives the host real AF_VSOCK
+//! # the same links on a VMM that gives the host real AF_VSOCK, the second
+//! # taking only the api guest's calls
 //! host-relay --listen tcp:127.0.0.1:8443 --to vsock:3:443
-//! host-relay --listen vsock:1027         --to vsock:4:1024
+//! host-relay --listen vsock:1027 --from 3 --to vsock:4:1024
 //!
 //! # inbound, accepting callers itself, so it names each one to the guest
 //! host-relay --listen tcp:0.0.0.0:443 --proxy-protocol --to vsock:5:443
@@ -83,6 +84,13 @@ struct Args {
     /// listener — nothing else says which guest dialled. Unset, no limit.
     #[arg(long)]
     per_guest: Option<usize>,
+
+    /// Take calls only from this guest, by its context ID; given again, from
+    /// each one named. A call from any other is closed as it arrives. Needs a
+    /// `vsock:` listener — nothing else says which guest dialled. Unset, from
+    /// any.
+    #[arg(long, value_parser = host_relay::parse_guest)]
+    from: Vec<u32>,
 }
 
 fn parse_octal(s: &str) -> Result<u32, String> {
@@ -113,6 +121,12 @@ async fn main() -> ExitCode {
     if args.per_guest.is_some() && !matches!(args.listen, Endpoint::Vsock(_)) {
         eprintln!(
             "host-relay: --per-guest needs a vsock: listener; nothing else says which guest dialled"
+        );
+        return ExitCode::FAILURE;
+    }
+    if !args.from.is_empty() && !matches!(args.listen, Endpoint::Vsock(_)) {
+        eprintln!(
+            "host-relay: --from needs a vsock: listener; nothing else says which guest dialled"
         );
         return ExitCode::FAILURE;
     }
@@ -195,6 +209,12 @@ async fn main() -> ExitCode {
                             open.remove(&guest);
                         }
                     }
+                }
+                // Dropping it closes it, as the guest will see.
+                if !args.from.is_empty() && !guest.is_some_and(|g| args.from.contains(&g)) {
+                    let named = guest.map_or_else(|| "unnamed".to_owned(), |g| g.to_string());
+                    eprintln!("host-relay: refused a call from guest {named}");
+                    continue;
                 }
                 let counted = guest.filter(|_| args.per_guest.is_some());
                 if let (Some(most), Some(guest)) = (args.per_guest, counted) {

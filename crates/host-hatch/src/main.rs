@@ -105,8 +105,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     tracing::info!(addr = %listen_addr, "starting hatch HTTP server");
-    transport::serve(app, &listen_addr).await;
-    Ok(())
+    transport::serve(app, &listen_addr).await
 }
 
 /// See the route table for what this does and does not claim. A literal: there
