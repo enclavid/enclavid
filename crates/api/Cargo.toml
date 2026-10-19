@@ -6,9 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# Default: TCP listener + TCP HTTP connection to the hatch (development /
+# Default: TCP listeners and TCP legs, the hatch's among them (development /
 # cross-provider). Enable `vsock` for the attested production build: vsock
-# listener + vsock connection to the hatch. Mutually exclusive at the binary level.
+# listeners and legs. Mutually exclusive at the binary level.
 #
 # The attestation backend is a second, independent axis. Cargo features are
 # additive — enabling `sev-snp` alongside `dev-attestation` would leave the
@@ -20,7 +20,7 @@ default = ["dev-attestation"]
 # whether the two serving surfaces terminate RA-TLS: a developer box has no host
 # between the caller and this process, an attested launch does. See
 # `crate::transport`.
-vsock = ["hatch-client/vsock", "fleet-transport/vsock", "dep:hyper-util", "dep:hyper", "dep:timesync"]
+vsock = ["fleet-transport/vsock", "dep:hyper-util", "dep:hyper", "dep:timesync"]
 # Software backends, no hardware. Two of them, for two different jobs: `snp-dev`
 # gives session quotes the real SEV-SNP report FORMAT so policy and KBS code sees
 # the fields it will in production, while `mock` supplies the ONE shared identity
@@ -72,7 +72,8 @@ engine-rpc = { path = "../engine-rpc", default-features = false, features = [
 # has no business carrying a marker for a channel it does not own.
 enclavid-boundary = { path = "../boundary" }
 hatch-client = { path = "../hatch-client" }
-hatch-protocol = { path = "../hatch-protocol" }
+# The contract with the hatch-CVM, for the leg api keeps connected to it.
+hatch-rpc = { path = "../hatch-rpc" }
 # The session's own types, and the client that seals them into the storage-CVM.
 session-types = { path = "../session-types" }
 storage-client = { path = "../storage-client" }

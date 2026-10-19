@@ -13,6 +13,7 @@
 //! used — so fetching and checking them would add a pull and nothing else.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -159,6 +160,7 @@ pub struct WasmLayer {
     digest: String,
     size: u64,
     decrypt: Option<LayerDecryptor>,
+    within: Option<Duration>,
 }
 
 /// Fetch and check an artifact's manifest, and pick its wasm layer: a
@@ -166,7 +168,8 @@ pub struct WasmLayer {
 /// is obtained here. `key` is what the session pins for this artifact; a key
 /// for a plaintext layer is refused rather than ignored, so no cleartext is
 /// served where encryption was expected. The manifest, and later the layer,
-/// each take one of `turns` for as long as they are fetched.
+/// each take one of `turns` for as long as they are fetched, and each pull
+/// `within` where the session's terms name a deadline.
 pub async fn wasm_layer(
     registry: &RegistryClient,
     turns: &Turns,
@@ -174,8 +177,9 @@ pub async fn wasm_layer(
     registry_auth: &[u8],
     key: Option<&Key>,
     kbs_ctx: Option<&KbsContext<'_>>,
+    within: Option<Duration>,
 ) -> Result<WasmLayer, PullError> {
-    let manifest = manifest(registry, turns, artifact_ref, registry_auth).await?;
+    let manifest = manifest(registry, turns, artifact_ref, registry_auth, within).await?;
     let manifest: OciManifest =
         serde_json::from_slice(&manifest).map_err(|e| PullError::ManifestParse(e.to_string()))?;
 
@@ -203,21 +207,40 @@ pub async fn wasm_layer(
             digest: descriptor.digest,
             size: descriptor.size,
             decrypt,
+            within,
         });
     }
     Err(PullError::NoWasmLayer)
+}
+
+/// The length of an artifact's wasm layer, read off its verified manifest: the
+/// layer [`wasm_layer`] would pick, plaintext or encrypted, whose plaintext an
+/// AES-CTR layer shares the length of.
+pub fn wasm_layer_size(manifest: &[u8]) -> Result<u64, PullError> {
+    let manifest: OciManifest =
+        serde_json::from_slice(manifest).map_err(|e| PullError::ManifestParse(e.to_string()))?;
+    manifest
+        .layers
+        .iter()
+        .find(|d| {
+            d.media_type == WASM_LAYER
+                || d.media_type.strip_suffix(ocicrypt::ENCRYPTED_MEDIA_SUFFIX) == Some(WASM_LAYER)
+        })
+        .map(|d| d.size)
+        .ok_or(PullError::NoWasmLayer)
 }
 
 /// An artifact's manifest, fetched with `registry_auth` and checked to be the
 /// one `artifact_ref` pins. Getting it is also the registry's word that this
 /// bearer may pull the artifact: the registry grants pull per repository, so
 /// the same bearer fetches the manifest and every blob in it. Fetched on one of
-/// `turns`.
+/// `turns`, `within` where the session's terms name a deadline.
 pub async fn manifest(
     registry: &RegistryClient,
     turns: &Turns,
     artifact_ref: &str,
     registry_auth: &[u8],
+    within: Option<Duration>,
 ) -> Result<Vec<u8>, PullError> {
     let artifact_digest = extract_digest(artifact_ref)
         .ok_or_else(|| PullError::InvalidRef(artifact_ref.to_string()))?;
@@ -237,7 +260,7 @@ pub async fn manifest(
         "both consumer-supplied at session create, not policy-controlled"
     ));
     Ok(registry
-        .manifest(req)
+        .manifest(req, within)
         .await
         .map_err(classify_transport_error)?
         .trust::<AuthN, _, _, _, _>(|manifest| {
@@ -254,9 +277,10 @@ pub async fn manifest(
         })?
         .trust_unchecked::<AuthZ, _>(reason!(
             "names no kind — ACCEPTED RISK: the registry decides with the consumer's \
-             bearer, and its refusal binds only as far as the host relays it, so a host \
-             can answer yes in its place. That host holds every layer and bearer it \
-             couriers, so what it lets through is what it could serve on a pull"
+             bearer, and its refusal binds only as far as the hatch hears it — over TLS \
+             that ends in the hatch for an https registry, but a plain-http one is the \
+             host's to answer, and a host that answers yes in its place serves only what \
+             it could serve on a pull"
         ))
         .trust_unchecked::<Replay, _>(reason!(
             "content-addressed by digest — bit-identical responses for the same digest"
@@ -289,12 +313,17 @@ impl WasmLayer {
             digest,
             size,
             decrypt,
+            within,
         } = self;
         let fetch = async move {
+            // Past what the hatch streams, the layer is not one a composition
+            // carries.
+            let length = fleet_stream::StreamLen::new(size).ok_or(PullError::LayerSize)?;
             let turn = turns.take().await.ok_or(PullError::Busy)?;
             let req = boundary::outbound::to_untrusted(BlobRequest {
                 reference,
                 digest: digest.clone(),
+                size: length,
                 registry_auth,
             })
             .vouch_unchecked::<AuthN, _>(reason!(
@@ -309,7 +338,7 @@ impl WasmLayer {
                  not policy-controlled"
             ));
             let pieces = registry
-                .blob(req)
+                .blob(req, within)
                 .await
                 .map_err(classify_transport_error)?
                 .trust_unchecked::<AuthN, _>(reason!(
@@ -679,6 +708,40 @@ mod tests {
             encrypted.strip_suffix(ocicrypt::ENCRYPTED_MEDIA_SUFFIX),
             Some(WASM_LAYER)
         );
+    }
+
+    fn manifest_of(layers: &[(&str, u64)]) -> Vec<u8> {
+        let layers: Vec<_> = layers
+            .iter()
+            .map(|(media_type, size)| {
+                serde_json::json!({
+                    "mediaType": media_type,
+                    "digest": "sha256:00",
+                    "size": size,
+                })
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({ "layers": layers })).unwrap()
+    }
+
+    /// The size the terms are held to is the wasm layer's, plaintext or
+    /// encrypted, whatever other layers the artifact carries.
+    #[test]
+    fn the_size_is_the_wasm_layers() {
+        let encrypted = format!("{WASM_LAYER}{}", ocicrypt::ENCRYPTED_MEDIA_SUFFIX);
+        let config = ("application/vnd.wasm.config.v0+json", 7);
+        for wasm in [WASM_LAYER, encrypted.as_str()] {
+            let manifest = manifest_of(&[config, (wasm, 4096)]);
+            assert_eq!(wasm_layer_size(&manifest).unwrap(), 4096, "{wasm}");
+        }
+        assert!(matches!(
+            wasm_layer_size(&manifest_of(&[config])),
+            Err(PullError::NoWasmLayer)
+        ));
+        assert!(matches!(
+            wasm_layer_size(b"not json"),
+            Err(PullError::ManifestParse(_))
+        ));
     }
 
     /// A ref written with the scheme to reach its registry by finds the

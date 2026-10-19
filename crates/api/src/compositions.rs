@@ -23,7 +23,7 @@ use tokio::sync::Semaphore;
 use engine_rpc::{BundleSource, CompatToken, CompileError, CompileSource, CompositionKey};
 use hatch_client::{KbsClient, RegistryClient};
 use session_types::{
-    Artifact, Client, CompileFault, InitError, Key, PluginPin, PullProblem, SessionMetadata,
+    Artifact, Client, CompileFault, InitError, Key, PluginPin, PullProblem, SessionMetadata, Terms,
 };
 use storage_client::CacheStore;
 
@@ -47,6 +47,9 @@ pub struct Composition {
     pub registry_auth: HashMap<String, Vec<u8>>,
     /// The consumer whose turns the pulls take ([`crate::turns`]).
     pub consumer: String,
+    /// The session's terms: how large the composition and its compiled code may
+    /// be, and how long a pull may take.
+    pub terms: Terms,
 }
 
 impl Composition {
@@ -60,13 +63,32 @@ impl Composition {
             plugins: client.plugins.clone(),
             registry_auth: client.registry_auth.clone(),
             consumer: consumer(client).to_owned(),
+            terms: metadata.terms,
         })
+    }
+
+    /// Whether compiled code of `cwasm_len` bytes is within the session's terms.
+    fn holds(&self, cwasm_len: u64) -> Result<(), Unavailable> {
+        if cwasm_len > max_cwasm_bytes(&self.terms) {
+            safe_logger::debug!("compile: {cwasm_len} bytes of cwasm, past the session's terms");
+            return Err(Unavailable::Init(InitError::Compile(
+                CompileFault::TooLarge,
+            )));
+        }
+        Ok(())
     }
 
     /// Its content address — see [`composition_key`].
     pub fn key(&self) -> CompositionKey {
         composition_key(&self.policy_ref, self.policy_key.as_ref(), &self.plugins)
     }
+}
+
+/// The most compiled code a session held to `terms` may run, in bytes — what
+/// the execution-worker is told with each of its rounds and preparations, so
+/// that an entry it keeps for another session is held to this one's terms too.
+pub fn max_cwasm_bytes(terms: &Terms) -> u64 {
+    Terms::within(terms.cwasm_bytes, engine_rpc::MAX_CWASM_BYTES)
 }
 
 /// The consumer a session's pulls count against ([`crate::turns`]): the
@@ -197,6 +219,9 @@ impl Compositions {
         }
         if let Some(hit) = hit {
             let cwasm_cache::Hit { source, found_bad } = hit;
+            // Compiled for another session, perhaps another consumer's: held to
+            // this one's terms all the same.
+            composition.holds(source.cwasm_len())?;
             let reply = send(source).await;
             if found_bad.get() {
                 cwasm_cache::remove(&self.cache_store, key, compat_token).await;
@@ -209,6 +234,7 @@ impl Compositions {
             cwasm_sha256,
             cwasm,
         } = self.compile(composition, for_whom).await?;
+        composition.holds(cwasm_len)?;
         let (feed, to_worker, to_cache) = crate::tee::tee(cwasm);
         let source = BundleSource::streamed(cwasm_len, cwasm_sha256, meta.clone(), to_worker)
             .ok_or_else(|| {
@@ -268,6 +294,10 @@ impl Compositions {
         // the consumer's other sessions together hold no more of the hatch than
         // their share.
         let turns = &self.consumer_turns.of(&composition.consumer);
+        let within = composition
+            .terms
+            .pull_deadline_secs
+            .map(std::time::Duration::from_secs);
 
         // Every manifest first, concurrently, with every key it needs: all that
         // can be refused before a byte of wasm moves, so the /connect critical
@@ -279,6 +309,7 @@ impl Compositions {
             policy_bearer,
             composition.policy_key.as_ref(),
             Some(&kbs_ctx),
+            within,
         );
         let plugin_futs = composition.plugins.iter().map(|pin| {
             let bearer = policy_pull::bearer_for_ref(&composition.registry_auth, &pin.impl_ref);
@@ -292,6 +323,7 @@ impl Compositions {
                     bearer,
                     pin.key.as_ref(),
                     Some(kbs_ctx),
+                    within,
                 )
                 .await
                 .map(|layer| (pin.package.clone(), layer))
@@ -329,10 +361,28 @@ impl Compositions {
         // failure; marked here, so it is answered as the pull failure it is, as a
         // manifest's would be.
         let policy_length = policy.length();
-        let lengths = plugins
+        let lengths: Vec<_> = plugins
             .iter()
             .map(|(package, layer)| (package.clone(), layer.length()))
             .collect();
+        // Before a byte of wasm moves: a composition past the session's terms is
+        // refused as too large, as one past what the compile carries is.
+        let size = lengths.iter().fold(policy_length, |sum, (_, length)| {
+            sum.saturating_add(*length)
+        });
+        if size
+            > Terms::within(
+                composition.terms.components_bytes,
+                engine_rpc::MAX_COMPONENTS_BYTES,
+            )
+        {
+            safe_logger::debug!(
+                "compile: {size} bytes of components, past the terms for {for_whom}"
+            );
+            return Err(Unavailable::Init(InitError::Compile(
+                CompileFault::TooLarge,
+            )));
+        }
         let pull_failed = Arc::new(std::sync::OnceLock::new());
         let marked = pull_failed.clone();
         let layers = std::iter::once((Artifact::Policy, policy)).chain(

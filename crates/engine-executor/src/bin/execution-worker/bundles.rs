@@ -68,6 +68,9 @@ pub(crate) struct CompositionEntry {
     /// The cwasm, sealed and found to be a component ([`Cwasm`]); handed to the
     /// child by fd.
     pub(crate) cwasm: Cwasm,
+    /// The cwasm's length as it streamed in: what a request's ceiling on the
+    /// compiled code is held against ([`Lease::within`]).
+    pub(crate) cwasm_len: u64,
     /// What this whole entry is charged, in bytes ([`entry_charge`] of the lengths
     /// both blobs streamed in at), so the two metadata fields below are charged
     /// too, subject to the per-entry floor in [`engine_executor::admission`] that
@@ -416,6 +419,11 @@ impl Lease {
         &self.entry
     }
 
+    /// This lease, if its entry's cwasm is no longer than `max_cwasm_bytes`.
+    pub(crate) fn within(self, max_cwasm_bytes: u64) -> Option<Self> {
+        (self.entry.cwasm_len <= max_cwasm_bytes).then_some(self)
+    }
+
     /// This lease as a round's: the entry is no longer one only a preparation
     /// has used.
     pub(crate) fn for_round(self) -> Self {
@@ -497,6 +505,7 @@ mod tests {
     fn entry(charged: u64) -> CompositionEntry {
         CompositionEntry {
             cwasm: Cwasm::unchecked(File::open("/dev/null").expect("/dev/null opens")),
+            cwasm_len: charged,
             charged,
             embedded_imports: Vec::new().into(),
             catalogs: Vec::new().into(),
@@ -698,6 +707,22 @@ mod tests {
         let lease = fill(&bundles, "a").await;
         let again = bundles.lease(&slot("a")).expect("a is kept");
         assert!(Arc::ptr_eq(lease.entry(), again.entry()));
+    }
+
+    /// A kept entry is a session's only if its cwasm is within that session's
+    /// ceiling; past it, the entry stays for the sessions it is within.
+    #[tokio::test]
+    async fn an_entry_past_a_ceiling_is_not_leased_under_it() {
+        let bundles = cache();
+        drop(fill(&bundles, "a").await);
+        let under = |max| {
+            bundles
+                .lease(&slot("a"))
+                .and_then(|lease| lease.within(max))
+        };
+        assert!(under(ENTRY).is_some());
+        assert!(under(ENTRY - 1).is_none());
+        assert!(present(&bundles, "a"));
     }
 
     /// In a cache full of entries rounds filled, an entry a preparation filled

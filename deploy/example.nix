@@ -6,11 +6,8 @@
       verify = "verify.example.com";
       api = "api.example.com";
     };
-    hatch = {
-      auth = "oidc";
-      issuer = "https://auth.example.com";
-      audience = "https://api.example.com";
-      principalClaim = "org_id";
-    };
+    # The hook that says who may call api as a consumer, listening on this
+    # host: crates/hatch/hooks.openapi.yaml. "none" lets anyone who reaches api.
+    hatch.authorize = "tcp:127.0.0.1:9100";
   };
 }

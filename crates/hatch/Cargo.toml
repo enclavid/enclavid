@@ -1,0 +1,87 @@
+[package]
+name = "enclavid-hatch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The hatch-CVM: the fleet's one way out. LISTENS for api over mutual RA-TLS and
+# serves `hatch-rpc`: it fetches what api names from consumers' registries and
+# key brokers through the one network interface in the fleet, and asks the
+# operator's hooks (hooks.openapi.yaml) who a consumer is and what it may do.
+# It holds no applicant data and no seal key. The lib exposes the parts that
+# are testable without a leg.
+
+[[bin]]
+name = "hatch-cvm"
+path = "src/bin/hatch-cvm.rs"
+
+[lib]
+name = "enclavid_hatch"
+path = "src/lib.rs"
+
+[dependencies]
+# The guest's one channel to the host: `info!`/`warn!`/`error!` carry a written
+# reason and reach the port; `debug!` needs none and is not built in production.
+safe-logger = { path = "../safe-logger", features = ["device"] }
+hatch-rpc = { path = "../hatch-rpc" }
+fleet-stream = { path = "../fleet-stream" }
+# The RA-TLS backend is chosen here, not by ra-tls — see the `[features]` axis.
+enclavid-ra-tls = { path = "../ra-tls" }
+fleet-transport = { path = "../fleet-transport" }
+enclavid-attestation = { path = "../attestation", default-features = false }
+# The guard on the guest's clock (`timesync::guard`), in the attested build:
+# every certificate a registry or a broker presents is checked by it.
+timesync = { path = "../timesync", optional = true }
+
+remoc = { version = "0.18", default-features = false, features = [
+    "rtc",
+    "codec-ciborium",
+] }
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+] }
+
+# A registry's pulls. Names are resolved in-process by hickory, which reads
+# /etc/resolv.conf: a static glibc resolves none.
+oci-client = { version = "0.16", default-features = false, features = ["rustls-tls", "hickory-dns"] }
+# A key broker's legs, through the same client oci-client builds on.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "hickory-dns"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+bytes = "1"
+
+# The hooks: plain HTTP and JSON over a stream to the host.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# The hooks' contract, hooks.openapi.yaml, is rendered from the types the hatch
+# speaks them in, in a test that keeps the file the rendering — so the contract
+# is this code's, and nothing of it is in the measured build.
+utoipa = { version = "6", features = ["yaml"] }
+# The contract file is read in the tests, so its examples are what the types
+# are held to.
+serde_yaml = "0.9"
+axum = "0.8"
+# A stalled stream's deadline, met without waiting it out.
+tokio = { version = "1", features = ["test-util"] }
+
+[features]
+# As every guest role has it: the attestation backend is a choice rather than an
+# addition, so the attested build turns the default OFF:
+#   cargo build -p enclavid-hatch --no-default-features --features sev-snp,vsock
+default = ["dev-attestation"]
+dev-attestation = ["enclavid-attestation/mock"]
+# Real hardware attestation, minting without an endorsement of its own: api's
+# report carries the chain this guest checks it by.
+sev-snp = ["enclavid-attestation/sev-snp"]
+# The attested build: api and the hooks over vsock instead of TCP.
+vsock = ["fleet-transport/vsock", "dep:timesync"]
+# Compiles the `debug!` sites in. OFF in the measured build.
+debug = ["safe-logger/debug"]

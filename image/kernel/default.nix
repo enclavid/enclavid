@@ -10,6 +10,7 @@
 #   nix-build image/kernel -A compile-worker     # the compile-worker
 #   nix-build image/kernel -A execution-worker   # the execution-worker
 #   nix-build image/kernel -A storage            # the storage CVM
+#   nix-build image/kernel -A hatch              # the hatch CVM
 #   cat result/bzImage.sha256
 #
 # A reviewer verifies a published measurement by running exactly that and
@@ -105,4 +106,6 @@ in
   # Diskless, plus the memory controller its supervisor holds the per-round
   # children to — see memcg.config.
   execution-worker = kernelFor "execution-worker" "diskless" [ ./memcg.config ];
+  # Diskless, plus the one network interface in the fleet — see net.config.
+  hatch = kernelFor "hatch" "diskless" [ ./net.config ];
 }

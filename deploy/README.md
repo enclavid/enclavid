@@ -8,7 +8,7 @@ host-side programs and the gateway's configuration cannot come from different
 places.
 
 It is a starting point. It has a default for everything except what only you
-can know — your public names, and how your consumers' tokens are checked.
+can know — your public names, and who may call api as a consumer.
 
 ## What you need
 
@@ -36,12 +36,7 @@ Describe your host, starting from `example.nix`:
       verify = "verify.example.com";   # where applicants are sent
       api = "api.example.com";         # where consumers call
     };
-    hatch = {
-      auth = "oidc";
-      issuer = "https://auth.example.com";
-      audience = "https://api.example.com";
-      principalClaim = "org_id";         # the claim naming the consumer's organization
-    };
+    hatch.authorize = "tcp:127.0.0.1:9100";  # your hook, or "none": see below
   };
 }
 ```
@@ -79,16 +74,16 @@ in `fleet.nix`, with its default and what it does.
 ## What runs
 
 The gateway and the release it serves, both `main` and built from this
-checkout: the gateway's guest, and api with the three guests it reaches.
+checkout: the gateway's guest, and api with the four guests it reaches.
 
 | unit | what it is |
 | --- | --- |
-| `enclavid-main-api`, `…-storage`, `…-compile-worker`, `…-execution-worker` | the release's guests |
+| `enclavid-main-api`, `…-storage`, `…-compile-worker`, `…-execution-worker`, `…-hatch` | the release's guests |
+| `enclavid-main-hatch-net` | the hatch's network interface, on this host's network |
 | `enclavid-gateway-main` | the gateway's guest |
 | `enclavid-gateway-main-push` | pushes the gateway its configuration after every start of the gateway |
 | `enclavid-certificate-main` | keeps the gateway on an issued certificate, with `acme.issue` |
-| `enclavid-relay-*` | the links between the guests, from the host into them, and from them to their NTS servers |
-| `enclavid-hatch` | what the guests reach outside: token checks, registry pulls |
+| `enclavid-relay-*` | the links between the guests, from the host into them, from the hatch to your hooks, and from the guests to their NTS servers |
 | `enclavid-vcek` | keeps the certificate AMD issues this chip, which api is given at launch |
 | `enclavid-fleet.target`, `enclavid-host.target` | all of the above |
 
@@ -108,37 +103,38 @@ systemctl status 'enclavid-*'
 journalctl -u enclavid-gateway-main-push
 ```
 
-Every link a guest dials on the host into another guest, and the hatch, takes
-calls only from the guests meant to dial it, by their context IDs: storage and
-both workers from their api alone, api's two surfaces from the gateways, the
-hatch from the apis that reach outside through it. Any other guest on the host
-— one that has broken out of what it runs, say — reaches nothing through them.
-The NTS relays below take any guest: they reach their servers and nothing
-else.
+Every link a guest dials on the host takes calls only from the guests meant to
+dial it, by their context IDs: storage, both workers and the hatch from their
+api alone, api's two surfaces from the gateways, your hooks from the hatch. Any
+other guest on the host — one that has broken out of what it runs, say —
+reaches nothing through them. The NTS relays below take any guest: they reach
+their servers and nothing else.
 
 Each guest's own log is its serial console, in
 `/var/log/enclavid/main-ROLE.serial` and `gateway-main.serial`; with
 `variant = "debug"` it carries the kernel's console too, and what the guests'
 dependencies log.
 
-The hatch fetches what consumers name — their registries, and wherever a
-registry's token service or its redirects lead; their key brokers — from this
-host's network. Whatever this host reaches, a consumer can have it fetch, this
-host's own ports among them, and whatever it reaches sees this host's address.
-It runs as a user of its own
-with no privilege, opens IP and vsock sockets and no other, and of the host's
-files sees only its program's closure in the store, the CA bundle and its
-resolver's, read-only, in a root that holds nothing else. Over vsock it
-reaches what any local account reaches.
+The hatch is the guest that reaches outside for the others. It fetches what
+consumers name — their registries, and wherever a registry's token service or
+its redirects lead; their key brokers — and asks your hooks. It is the one
+guest with a network interface, carried by `enclavid-main-hatch-net`, a passt
+on this host: each connection the hatch opens, TCP or UDP over IPv4, is opened
+from this host's network, and none is taken in. Whatever this host reaches, a
+consumer can have the hatch fetch — this host's own addresses among them,
+though not its loopback — and whatever it reaches sees this host's address.
+Names are looked up at this host's own resolver, which the hatch reaches at
+one address and its DNS ports, or at `hatch.nameserver`. TLS to what it
+fetches ends inside the hatch, against the roots in its measurement, and api
+pins the hatch's measurement as it does every guest's it dials — so what the
+hatch carries for a session is not this host's to read, but for which
+registries and brokers it reaches, and how much. A registry or broker the
+consumer writes `http://` is the exception: it is reached in the clear, and api
+sends a bearer to none — a session naming one for it is refused.
 
-It also counts how often each consumer asks. A principal — the organization
-its token names, or with `auth = "none"` the one `principal` — may create
-sessions, read them and pull their disclosures at the rates
-`hatch.perMinute` sets — unset, 60, 600 and 120 a minute; past them, api
-answers 429 with `Retry-After`. With `auth = "none"` every caller is that one
-principal, so a rate is the host's and anyone can spend it for everyone; `-1`
-leaves an operation unlimited. The count is kept in the hatch's memory: it
-starts afresh when the hatch does, and each host keeps its own.
+The passt runs as a user of its own, given `CAP_SYS_ADMIN` to build its own
+sandbox where unprivileged users may not make user namespaces; it drops that,
+and every other capability, once the sandbox is made.
 
 Every guest keeps its own clock from NTS servers, and starts its application
 only once three of them agree. The `enclavid-relay-time-*` units carry that
@@ -161,6 +157,40 @@ every launch. A firmware update makes it fetch the next one. With AMD out of
 reach, the one already kept serves; with none kept, api does not start. api
 checks it against the AMD root compiled in, so what this host keeps decides
 only whether api starts.
+
+## Who may call api, and how much
+
+Neither is built in: the hatch asks two hooks, small HTTP services you run on
+this host, as `crates/hatch/hooks.openapi.yaml` describes them. Each is reached
+through a relay that takes calls from the hatch alone, at the address its
+option names.
+
+- `hatch.authorize`, which has no default: `"none"`, or your hook. The hatch
+  hands it the `Authorization` header of every call to api, and has back the
+  principal the caller is, or a refusal — api answers 401 for a credential the
+  hook does not take and 403 for one it takes that may not call. A session is
+  kept under its principal, and only calls the hook says are the same
+  principal read it back, each with the session's own token. With `"none"`
+  anyone who reaches api may call it, no credential is asked for, and a
+  session's token alone guards reading it.
+- `hatch.limits`, `null` by default for none. Asked at every session created,
+  and every warmup a consumer asks for, with its principal: whether it may go
+  on, and the terms the session is held to — how large its policy and plugins
+  may be, before and after they are compiled; how long it lives; how long a
+  pull may take. An applicant's preparing of a session asks nothing. How often
+  a consumer may create sessions is the hook's to count, wherever it keeps the
+  count — one store for several hosts makes one rate for all of them — and
+  when it refuses, api answers 429 with the `Retry-After` it gives. With
+  `authorize = "none"` every caller asks as no principal, so such a rate is
+  one, shared by all of them: anyone can spend it for everyone. A session
+  keeps the terms it was created under, and a term past the fleet's own
+  ceiling is the ceiling.
+
+A hook that does not answer within the hatch's `hook-deadline-secs` — a launch
+setting, 10 by default — has the call answered 503, to be made again later.
+What a hook answers is your word, which the hatch takes as it is: you run it,
+and decide who may call in any case. What it cannot do is read a session —
+that takes the session's own token, which api gives its creator alone.
 
 ## Certificates
 
@@ -317,6 +347,6 @@ The storage disk, `/var/lib/enclavid/main/storage.img`, is left in place.
 ## Not here
 
 Several hosts, a new release run beside the old one while its sessions finish,
-and a network for the hatch that reaches nothing of this host, are yours to
-add — on the blocks in `lib.nix`, which every module is given as `fleet`, and
-the units they make.
+and a network for the hatch that reaches nothing of this host — its passt run
+in a network of its own — are yours to add, on the blocks in `lib.nix`, which
+every module is given as `fleet`, and the units they make.

@@ -6,7 +6,7 @@ each reproduces byte for byte:
 | input | where | verify |
 |---|---|---|
 | firmware | `ovmf/` — our own edk2 platform, see its README | `nix-build image/ovmf --check` |
-| kernel | `kernel/` | `nix-build image/kernel -A base\|compile-worker\|execution-worker\|storage --check` |
+| kernel | `kernel/` | `nix-build image/kernel -A base\|compile-worker\|execution-worker\|hatch\|storage --check` |
 | PID 1 | `init/` (dinit, busybox) + `init/services/` | `nix-build image/init -A dinit -A busybox --check` |
 | initramfs | `initramfs/` | `nix-build image/initramfs --check` |
 | cmdline | `cmdline/<role>/<variant>` | the file is the value |
@@ -14,14 +14,17 @@ each reproduces byte for byte:
 `app/` builds the role binary the initramfs wraps.
 
 Two of the five are shared rather than per-role. The firmware is one image for
-everyone. The kernel comes in four variants, named for the roles they boot and
+everyone. The kernel comes in five variants, named for the roles they boot and
 built from fragments named for what they turn on or off: `base` for api and the
-gateway; `compile-worker`; `execution-worker`; and `storage`, for the one role
-that owns a disk. All but `storage` are `diskless`. The two workers'
-variants add the kernel's memory controller — each supervisor holds its
-disposable children, a round or a compile each, to their memory with it, and no
-other role confines anything that way, so no other kernel carries it (see
-`kernel/memcg.config`).
+gateway; `compile-worker`; `execution-worker`; `hatch`, for the one role with a
+network interface; and `storage`, for the one role that owns a disk. All but
+`storage` are `diskless`. The two workers' variants add the kernel's memory
+controller — each supervisor holds its disposable children, a round or a
+compile each, to their memory with it, and no other role confines anything
+that way, so no other kernel carries it (see `kernel/memcg.config`). The
+hatch's adds IPv4, the virtio NIC and the kernel's DHCP client, and nothing
+more beneath them (see `kernel/net.config`): every other kernel has no IP stack
+at all, so that it reaches no network is a property its measurement shows.
 Everything else — PID 1's services, the initramfs that carries the role binary,
 and the command line — is the role's own, and that is enough to give each its
 own measurement.
@@ -37,12 +40,12 @@ The application finishing, dying, or its clock no longer being kept all end the
 same way: a run that cannot continue should stop existing.
 
 No application keeps root's capabilities; each holds only those its role's
-`app` file names: none for api and storage, one for the gateway, and four for
-each worker's supervisor, which it uses to give each disposable child an
-identity of its own. api, storage and the gateway run as a user of their own,
-`app` (1000), handed by `app-files` just what they open — the log device, the
-attestation device, the launch settings, storage's volume — so they own
-nothing else of root's. The workers' supervisors stay root, under `noroot`
+`app` file names: none for api, storage and the hatch, one for the gateway,
+and four for each worker's supervisor, which it uses to give each disposable
+child an identity of its own. api, storage, the hatch and the gateway run as a
+user of their own, `app` (1000), handed by `app-files` just what they open —
+the log device, the attestation device, the launch settings, storage's volume
+— so they own nothing else of root's. The workers' supervisors stay root, under `noroot`
 securebits, locked, so that being root brings no capability into an exec: a
 process that can give its children identities could be root again whenever
 it liked, so a user of its own would bound nothing. The two workers mount
@@ -121,8 +124,16 @@ except the two workers' disposable children — a round or a compile each —
 which run as identities of their own. The kernel accepts `sysctl.*` on its
 command line, so the floor is measured rather than provisioned.
 
+`ip=dhcp`, on the hatch's lines alone, has the kernel configure its one
+interface before PID 1 runs, from the DHCP answer of the host's end of it.
+Nothing in userspace configures the network, so nothing there could change it.
+The resolver is not taken from that answer: the image's own /etc/resolv.conf
+names 10.0.2.3, the address the far end of a hatch's interface serves names
+at, so it is measured with the rest.
+
 `init_on_free=1` is on every line of the roles that hold plaintext — api, the
-gateway that terminates client TLS, and the two workers. The kernel zeroes each
+gateway that terminates client TLS, the hatch that ends TLS to registries and
+key brokers, and the two workers. The kernel zeroes each
 page as it is freed: a killed child's memory, a released cwasm, a request
 buffer api let go of. Without it a freed page keeps what it held until
 something reuses it, so whoever reached the guest's kernel would read past
@@ -167,24 +178,27 @@ line change the measurement when they change.
 
 | port | reached by | carries | where it is set |
 |---|---|---|---|
-| 8000 | api → host | the hatch: authorization, OCI pulls, the KBS relay | the launch, fw_cfg |
 | 8001 | api → host | the storage-CVM | the launch, fw_cfg |
 | 8002 | api → host | the compile-worker | the launch, fw_cfg |
 | 8003 | api → host | the execution-worker | the launch, fw_cfg |
+| 8004 | api → host | the hatch: authorization, OCI pulls, the KBS relay | the launch, fw_cfg |
+| 8005 | hatch → host | the operator's authorization hook | the hatch's launch settings |
+| 8006 | hatch → host | the operator's limits hook | the hatch's launch settings |
 | 8443 | host → api | the consumer-facing surface | command line |
 | 8444 | host → api | the applicant-facing surface | command line |
 
 Each outbound port needs something on the host listening there and splicing
-onward to the peer guest; the guest neither knows nor can discover which one.
+onward to the peer guest, or to the hook; the guest neither knows nor can
+discover which one.
 
 The ports api dials are not on its command line: the host hands them to api
 at launch as fw_cfg entries (`crates/api/src/fleet/legs.rs`), and the numbers
 above are only the ones `deploy/` uses. Putting them in the image bound
 nothing — the host decides where a port leads whatever api dials; what
-decides whether api talks to a peer is the measurement it pins for that leg,
-and the hatch is believed in nothing it returns. Out of the measurement, they
-let two releases run side by side on one host, each api reaching its own peers
-and its own hatch or a shared one.
+decides whether api talks to a peer is the measurement it pins for that leg.
+Out of the measurement, they let two releases run side by side on one host,
+each api reaching its own peers. The hatch's hooks are the host's own, and a
+hook the host gives no port for the hatch does not ask.
 
 **`production` says `console=null`, and the token is load-bearing.** Omitting
 `console=` does NOT produce a silent kernel — it produces a kernel that enables

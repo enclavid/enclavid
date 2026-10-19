@@ -68,12 +68,13 @@ fn to_worker<T>(value: T) -> Exposed<T, (AuthZ, Covert)> {
 /// One mint for the whole message, so every field it carries is answered here
 /// and none rides in on another's receipt.
 ///
-/// `AuthZ` takes one answer for the four fields, and it names the kind of each:
+/// `AuthZ` takes one answer for the five fields, and it names the kind of each:
 ///
-///   * the state, the props and the key are NO-SECRET: the state is what this
-///     peer wrote on the session's previous round, or the empty one genesis
-///     starts from; the props are what its preparation read; the key names the
-///     composition it is handed on every miss;
+///   * the state, the props, the key and the ceiling are NO-SECRET: the state is
+///     what this peer wrote on the session's previous round, or the empty one
+///     genesis starts from; the props are what its preparation read; the key
+///     names the composition it is handed on every miss; the ceiling is the
+///     session's terms;
 ///   * the event is MATCHED, upstream: it is the reply sent under the bearer that
 ///     opened this session's state (`round::extract`), and it goes to the runner
 ///     of this session's policy, whose prompt it answers.
@@ -81,35 +82,43 @@ fn to_worker<T>(value: T) -> Exposed<T, (AuthZ, Covert)> {
 /// `Covert` is closed by the work for the two fields whose length the policy
 /// chooses — the state, and the props as read against its type: the peel's
 /// codomain IS the wire type, so no `RunRequest` exists whose frames skipped the
-/// padding. The other two are not framed, and the reason for each is that
+/// padding. The other three are not framed, and the reason for each is that
 /// nobody with something to hide chose its shape:
 ///
 ///   * the event is `Start`, a consent reply of one bit, or the applicant's own
 ///     capture, whose length the host watched arrive as the request it came in;
-///   * the key is 64 hex characters api computed before any round ran.
+///   * the key is 64 hex characters api computed before any round ran;
+///   * the ceiling is the session's terms, which the operator's limits gave at
+///     its creation.
 pub(crate) fn outbound_round(
     composition_key: &CompositionKey,
+    max_cwasm_bytes: u64,
     state: &SessionState,
     props: Option<&str>,
     event: Event,
 ) -> Result<Exposed<RunRequest, ()>, ExecError> {
     let props = RoundProps(props.map(str::as_bytes).unwrap_or_default().to_vec());
-    Ok(to_worker((composition_key, state, props, event))
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "no-secret for the state, the props and the key — this peer's own prior \
-             output or the empty genesis state, what its preparation read, and the key \
-             it is handed on every miss; matched for the event — the reply sent under \
-             the bearer that opened this session's state, to the runner of the policy \
-             whose prompt it answers"
-        ))
-        .vouch::<Covert, _, _, _, _>(|(composition_key, state, props, event)| {
-            Ok::<_, engine_rpc::FrameError>(RunRequest {
-                composition_key: composition_key.clone(),
-                props: Padded::seal(&props)?,
-                session_state: Padded::seal(state)?,
-                event,
-            })
-        })?)
+    Ok(
+        to_worker((composition_key, max_cwasm_bytes, state, props, event))
+            .vouch_unchecked::<AuthZ, _>(reason!(
+                "no-secret for the state, the props, the key and the ceiling — this \
+                 peer's own prior output or the empty genesis state, what its preparation \
+                 read, the key it is handed on every miss, and the session's terms; \
+                 matched for the event — the reply sent under the bearer that opened this \
+                 session's state, to the runner of the policy whose prompt it answers"
+            ))
+            .vouch::<Covert, _, _, _, _>(
+                |(composition_key, max_cwasm_bytes, state, props, event)| {
+                    Ok::<_, engine_rpc::FrameError>(RunRequest {
+                        composition_key: composition_key.clone(),
+                        max_cwasm_bytes,
+                        props: Padded::seal(&props)?,
+                        session_state: Padded::seal(state)?,
+                        event,
+                    })
+                },
+            )?,
+    )
 }
 
 /// Mint a rehydrated blob as a released value — the ONE thing api hands back to
@@ -231,27 +240,31 @@ impl Executor {
 /// reaches an execution-worker.
 ///
 /// `AuthZ` is NO-SECRET: the props are the ones every round of the session hands
-/// this same peer, as WAVE once read, and the key names the composition it is
-/// handed on every miss. `Covert` is ALREADY-HELD: the props are the consumer's
-/// JSON, whose length the host saw on the request that created the session, and
-/// nothing of the applicant's is in it — a session is prepared before any of its
-/// rounds. The key beside them is 64 hex characters, whatever it names.
+/// this same peer, as WAVE once read, the key names the composition it is handed
+/// on every miss, and the ceiling is the session's terms. `Covert` is
+/// ALREADY-HELD: the props are the consumer's JSON, whose length the host saw on
+/// the request that created the session, and nothing of the applicant's is in
+/// it — a session is prepared before any of its rounds. The key beside them is
+/// 64 hex characters, whatever it names, and the ceiling what the operator's
+/// limits gave.
 pub(crate) fn outbound_preparation(
     composition_key: &CompositionKey,
+    max_cwasm_bytes: u64,
     preparing: Preparing,
 ) -> Exposed<PrepareRequest, ()> {
     to_worker(PrepareRequest {
         composition_key: composition_key.clone(),
+        max_cwasm_bytes,
         preparing,
     })
     .vouch_unchecked::<AuthZ, _>(reason!(
-        "no-secret: the props every round of this session hands the same peer, and \
-         the key it is handed on every miss"
+        "no-secret: the props every round of this session hands the same peer, the \
+         key it is handed on every miss, and the session's terms"
     ))
     .vouch_unchecked::<Covert, _>(reason!(
         "already-held: the consumer's own props, whose length the host saw when the \
-         session was created, beside a key of fixed length; nothing of an applicant's \
-         is in either"
+         session was created, beside a key of fixed length and the ceiling the \
+         operator's limits gave; nothing of an applicant's is in any"
     ))
 }
 

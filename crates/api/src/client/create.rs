@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{MethodRouter, post};
 use base64ct::{Base64, Encoding};
@@ -29,7 +29,9 @@ use crate::limits::{
 use crate::policy_pull;
 use crate::props;
 
-use super::auth::Principal;
+use hatch_client::SessionTerms;
+
+use super::auth::{Principal, Terms};
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
@@ -58,11 +60,9 @@ pub struct CreateSessionRequest {
     /// Applies uniformly to the policy ref AND every plugin's
     /// `impl_ref`.
     ///
-    /// Missing hostname / empty value ⇒ anonymous pull. When the
-    /// whole map is absent / empty AND an inbound `Authorization`
-    /// header is present on this request, the inbound header is
-    /// applied to the policy registry's hostname as a back-compat
-    /// convenience for the common "same credential everywhere" case.
+    /// Missing hostname / empty value ⇒ anonymous pull. The
+    /// `Authorization` this request is made with is never taken for a
+    /// registry: a registry gets only the bearer named for it here.
     ///
     /// Total serialized size bounded by [`MAX_REGISTRY_AUTH_LEN`]
     /// (sum of all values) to keep session metadata blobs cheap.
@@ -187,7 +187,6 @@ fn pins(
     plugin_requests: Vec<PluginRequest>,
     registry_auth_requests: BTreeMap<String, String>,
     policy_key: Option<KeyRequest>,
-    headers: &HeaderMap,
 ) -> Result<Pins, StatusCode> {
     // Validate the ref shape up-front — tag-form (no `@sha256:`) or
     // bad-algo refs trap here with a clean 400, instead of failing
@@ -198,24 +197,16 @@ fn pins(
         .map(|(_, d)| d.to_string())
         .ok_or(StatusCode::BAD_REQUEST)?;
 
-    // Build the hostname-keyed bearer map. Body-supplied `registry_auth`
-    // is the authoritative source — caller specifies which hostname
-    // gets which bearer (covers heterogeneous "policy in our Angos,
-    // plugin in ghcr" deployments). When the body map is empty AND an
-    // inbound `Authorization` header is present, fall back to using
-    // that header as the bearer for the policy registry only — common
-    // case where the same credential serves both the API call and the
-    // policy pull. Length-bound the SUM of values so a malicious
+    // The hostname-keyed bearer map, as the body names it — which hostname
+    // gets which bearer (covers heterogeneous "policy in our Angos, plugin in
+    // ghcr" deployments). Only as it names it: the credential this request is
+    // made with is for this API, and is never handed to a registry, which is
+    // whoever the pins name. Length-bound the SUM of values so a malicious
     // consumer can't bloat session metadata.
-    let mut registry_auth: HashMap<String, Vec<u8>> = HashMap::new();
-    if !registry_auth_requests.is_empty() {
-        for (host, bearer) in registry_auth_requests {
-            registry_auth.insert(host, bearer.into_bytes());
-        }
-    } else if let Some(hv) = headers.get(header::AUTHORIZATION) {
-        let policy_host = policy_pull::registry_hostname(&policy).ok_or(StatusCode::BAD_REQUEST)?;
-        registry_auth.insert(policy_host.to_string(), hv.as_bytes().to_vec());
-    }
+    let registry_auth: HashMap<String, Vec<u8>> = registry_auth_requests
+        .into_iter()
+        .map(|(host, bearer)| (host, bearer.into_bytes()))
+        .collect();
     let total_bearer_bytes: usize = registry_auth.values().map(Vec::len).sum();
     if total_bearer_bytes > MAX_REGISTRY_AUTH_LEN {
         return Err(StatusCode::BAD_REQUEST);
@@ -253,6 +244,17 @@ fn pins(
             })
         })
         .collect::<Result<_, StatusCode>>()?;
+
+    // A registry written `http://` is reached in the clear, across the host's
+    // network: a bearer for it would cross there too, readable by the host. So
+    // plain HTTP is for anonymous pulls alone, and a bearer the consumer names
+    // for one is refused.
+    let in_clear = |r: &str| {
+        r.starts_with("http://") && !policy_pull::bearer_for_ref(&registry_auth, r).is_empty()
+    };
+    if in_clear(&policy) || plugins.iter().any(|p| in_clear(&p.impl_ref)) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     Ok(Pins {
         policy_ref: policy,
@@ -311,6 +313,29 @@ pub struct CreateSessionResponse {
     pub attestation: AttestationView,
 }
 
+/// The terms the consumer's limits asked for, each held to the fleet's own
+/// ceiling: what this build compiles and runs at most, how long the store keeps
+/// a session (`ttl`, `None` for no end), how long a pull may take
+/// (`pull_deadline`). A term asked for above its ceiling is the ceiling; one
+/// not asked for stays the fleet's own.
+fn held(
+    asked: SessionTerms,
+    ttl: Option<u64>,
+    pull_deadline: std::time::Duration,
+) -> session_types::Terms {
+    let under =
+        |term: Option<u64>, ceiling: Option<u64>| term.map(|t| ceiling.map_or(t, |c| t.min(c)));
+    session_types::Terms {
+        components_bytes: under(
+            asked.components_bytes,
+            Some(engine_rpc::MAX_COMPONENTS_BYTES),
+        ),
+        cwasm_bytes: under(asked.cwasm_bytes, Some(engine_rpc::MAX_CWASM_BYTES)),
+        session_ttl_secs: under(asked.session_ttl_secs, ttl),
+        pull_deadline_secs: under(asked.pull_deadline_secs, Some(pull_deadline.as_secs())),
+    }
+}
+
 /// Route factory: bare `post(handler)` MethodRouter. Auth is attached
 /// at the router level via `.layer(auth(op))` — see `client::router`.
 pub(super) fn post_create() -> MethodRouter<Arc<ClientState>> {
@@ -330,7 +355,7 @@ pub(super) fn post_create() -> MethodRouter<Arc<ClientState>> {
 async fn create(
     State(state): State<Arc<ClientState>>,
     Principal(principal): Principal,
-    headers: HeaderMap,
+    Terms(asked): Terms,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, StatusCode> {
     let pins = pins(
@@ -338,7 +363,6 @@ async fn create(
         body.plugins,
         body.registry_auth,
         body.policy_key,
-        &headers,
     )?;
     let Pins {
         policy_ref,
@@ -423,6 +447,7 @@ async fn create(
         prepared: None,
         // Set with `InitFailed`, if preparing the session fails: see `crate::init`.
         init_error: None,
+        terms: held(asked, state.session_store.ttl_secs(), state.pull_deadline),
     };
     // Write ONLY the sealed metadata. The plaintext STATUS byte and PRINCIPAL
     // host hooks are gone: TTL is enforced inside the storage-CVM (its sweeper,
@@ -443,11 +468,13 @@ async fn create(
     let ops = outbound_fields(&ops).vouch_unchecked::<Covert, _>(reason!(
         "no policy has run at /create — the single metadata op is fixed, not policy bandwidth"
     ));
-    let version = state
-        .session_store
-        .write(&session_id, None, ops)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // A session lives as long as its terms say, where they say: its deadline
+    // is set by this write, once.
+    let version = match metadata.terms.session_ttl_secs {
+        Some(ttl) => state.session_store.create(&session_id, ttl, ops).await,
+        None => state.session_store.write(&session_id, None, ops).await,
+    }
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // After the write, so a warmup never prepares a session that does not
     // exist; not awaited, so the response does not wait for the compile.
@@ -490,4 +517,125 @@ fn generate_client_session_token() -> SecretBox<Vec<u8>> {
     let mut bytes = vec![0u8; CLIENT_SESSION_TOKEN_BYTES];
     OsRng.fill_bytes(&mut bytes);
     SecretBox::new(Box::new(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    const PULL: Duration = Duration::from_secs(30);
+
+    fn pinned(at: &str) -> String {
+        format!("{at}/team/p@sha256:{}", "ab".repeat(32))
+    }
+
+    /// A bearer is never pinned to a registry reached in the clear: plain HTTP
+    /// is for anonymous pulls, and a bearer over TLS stands, as it was named.
+    #[test]
+    fn a_bearer_is_never_sent_in_the_clear() {
+        let plugin = |impl_ref: String| PluginRequest {
+            package: "vendor:plugin@0.1.0".into(),
+            impl_ref,
+            key: None,
+        };
+        let auth = |host: &str| BTreeMap::from([(host.to_string(), "Bearer t".to_string())]);
+        let ask = |policy: String, plugins, registry_auth| {
+            pins(policy, plugins, registry_auth, None).map(|pins| pins.registry_auth)
+        };
+        // Plain HTTP with a bearer the consumer names for its host: the
+        // policy's, or a plugin's.
+        assert_eq!(
+            ask(pinned("http://r.example"), vec![], auth("r.example")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            ask(
+                pinned("s.example"),
+                vec![plugin(pinned("http://r.example"))],
+                auth("r.example")
+            ),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // Over TLS with a bearer, and in the clear without one, both stand.
+        let named = Ok(HashMap::from([(
+            "r.example".to_string(),
+            b"Bearer t".to_vec(),
+        )]));
+        assert_eq!(ask(pinned("r.example"), vec![], auth("r.example")), named);
+        assert_eq!(
+            ask(pinned("https://r.example"), vec![], auth("r.example")),
+            named
+        );
+        assert!(
+            ask(
+                pinned("http://r.example"),
+                vec![plugin(pinned("s.example"))],
+                auth("s.example")
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            ask(pinned("http://r.example"), vec![], BTreeMap::new()),
+            Ok(HashMap::new())
+        );
+    }
+
+    /// A term asked for past the fleet's ceiling is the ceiling.
+    #[test]
+    fn a_term_past_its_ceiling_is_the_ceiling() {
+        let asked = SessionTerms {
+            components_bytes: Some(u64::MAX),
+            cwasm_bytes: Some(u64::MAX),
+            session_ttl_secs: Some(u64::MAX),
+            pull_deadline_secs: Some(u64::MAX),
+        };
+        assert_eq!(
+            held(asked, Some(3600), PULL),
+            session_types::Terms {
+                components_bytes: Some(engine_rpc::MAX_COMPONENTS_BYTES),
+                cwasm_bytes: Some(engine_rpc::MAX_CWASM_BYTES),
+                session_ttl_secs: Some(3600),
+                pull_deadline_secs: Some(30),
+            }
+        );
+    }
+
+    /// A term asked for under its ceiling stands as asked; where the store keeps
+    /// sessions with no end, any TTL asked for stands.
+    #[test]
+    fn a_term_under_its_ceiling_stands() {
+        let asked = SessionTerms {
+            components_bytes: Some(1),
+            cwasm_bytes: Some(2),
+            session_ttl_secs: Some(u64::MAX),
+            pull_deadline_secs: Some(4),
+        };
+        assert_eq!(
+            held(asked, None, PULL),
+            session_types::Terms {
+                components_bytes: Some(1),
+                cwasm_bytes: Some(2),
+                session_ttl_secs: Some(u64::MAX),
+                pull_deadline_secs: Some(4),
+            }
+        );
+    }
+
+    /// A term not asked for stays the fleet's own: none is written into the
+    /// session.
+    #[test]
+    fn a_term_not_asked_for_stays_the_fleets() {
+        let asked = SessionTerms {
+            components_bytes: None,
+            cwasm_bytes: None,
+            session_ttl_secs: None,
+            pull_deadline_secs: None,
+        };
+        assert_eq!(
+            held(asked, Some(3600), PULL),
+            session_types::Terms::default()
+        );
+    }
 }

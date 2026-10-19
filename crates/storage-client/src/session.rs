@@ -131,12 +131,18 @@ impl SessionStore {
         self.tee_seal_key.expose_secret().as_slice()
     }
 
-    /// The absolute deadline (unix secs) for a session created NOW, or `None` when
-    /// no TTL is configured. Computed TEE-side and passed inside the RA-TLS channel
-    /// ONLY on the create write (see [`write`](Self::write)); subsequent writes
-    /// pass `None` so the deadline is never moved.
-    fn create_deadline(&self) -> Option<u64> {
-        self.ttl_secs.map(|ttl| {
+    /// How long a session lives, as this store was given it: what a session's
+    /// own terms are held under.
+    pub fn ttl_secs(&self) -> Option<u64> {
+        self.ttl_secs
+    }
+
+    /// The absolute deadline (unix secs) for a session created NOW to live
+    /// `ttl` — `None` for no TTL. Computed TEE-side and passed inside the RA-TLS
+    /// channel ONLY on the create write (see [`write`](Self::write)); subsequent
+    /// writes pass `None` so the deadline is never moved.
+    fn deadline(ttl: Option<u64>) -> Option<u64> {
+        ttl.map(|ttl| {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -185,6 +191,29 @@ impl SessionStore {
         expected_version: Option<u64>,
         fields: Exposed<&[&dyn WriteField]>,
     ) -> Result<Untrusted<u64, (AuthN, AuthZ, Replay)>, StoreError> {
+        self.write_living(id, expected_version, self.ttl_secs, fields)
+            .await
+    }
+
+    /// The create write — [`write`](Self::write) with `expected_version` `None`
+    /// — for a session that lives `ttl_secs` rather than this store's own TTL:
+    /// its own terms'.
+    pub async fn create(
+        &self,
+        id: &str,
+        ttl_secs: u64,
+        fields: Exposed<&[&dyn WriteField]>,
+    ) -> Result<Untrusted<u64, (AuthN, AuthZ, Replay)>, StoreError> {
+        self.write_living(id, None, Some(ttl_secs), fields).await
+    }
+
+    async fn write_living(
+        &self,
+        id: &str,
+        expected_version: Option<u64>,
+        ttl: Option<u64>,
+        fields: Exposed<&[&dyn WriteField]>,
+    ) -> Result<Untrusted<u64, (AuthN, AuthZ, Replay)>, StoreError> {
         let fields = fields.into_inner();
         let ctx = Ctx {
             tee_seal_key: self.tee_seal_key(),
@@ -199,7 +228,7 @@ impl SessionStore {
         // must-not-exist); on every subsequent update pass `None` so the fixed
         // `created_at + ttl` cap is never moved.
         let deadline = if expected_version.is_none() {
-            self.create_deadline()
+            Self::deadline(ttl)
         } else {
             None
         };

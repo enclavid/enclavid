@@ -1,0 +1,218 @@
+openapi: 3.1.0
+info:
+  title: Enclavid hatch hooks
+  description: |-
+    What the hatch asks the operator: who a request to the consumer API is from, and what a consumer may do.
+
+    Each hook is switched on by a launch setting of the hatch naming the vsock port it reaches the hook on — `authorize-hook-port`, `limits-hook-port` — and a hook not switched on is never asked. Without the authorization hook every request is let through and every caller is the same one, with no principal; without the limits hook a consumer may create sessions as often as it asks, and its sessions are held to the fleet's own terms. The hatch keeps nothing of what a hook answers: a rate is the limits hook's to count.
+
+    The hatch reaches a hook through a relay on the host, which takes calls from the hatch alone and carries them to wherever the hook listens — localhost, say. So a hook is plain HTTP and JSON, in any language, and knows nothing of vsock; no other guest reaches it, but whatever on the host reaches the address it listens at reaches it too, which is the operator's to keep. The hatch reads at most 16 KiB of an answer.
+
+    What a hook answers is the operator's word, and it decides only what the operator decides anyway: who may use the service, and how much of it. It is never told which session a request names, and nothing it answers reaches an applicant or the policy.
+
+    Rendered from the hatch's own types (crates/hatch/src/hooks.rs), whose tests keep this file the rendering: change those, not this.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  version: '1'
+servers:
+- url: /
+paths:
+  /v1/authorize:
+    post:
+      tags: []
+      summary: Who a request to the consumer API is from.
+      description: |-
+        Asked for every request to the consumer API — a creation, a read of a
+        session, a pull of its disclosures — with the request's credential and its
+        operation, and nothing else.
+
+        Any answer but these three — another status, a body that is not one below,
+        no answer within the hatch's wait — fails the request.
+      operationId: authorize
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizeRequest'
+            examples:
+              creation:
+                value:
+                  authorization_header: Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IjEifQ.e30.c2ln
+                  operation: session-create
+        required: true
+      responses:
+        '200':
+          description: The credential holds for the operation, and names this principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorizeResponse'
+              examples:
+                consumer:
+                  value:
+                    principal: org-1
+        '401':
+          description: The credential is missing, malformed or refused.
+        '403':
+          description: The credential holds, but not for this operation.
+  /v1/limits:
+    post:
+      tags: []
+      summary: What a consumer may do.
+      description: |-
+        Asked at every creation of a session — and every warmup the consumer asks
+        for, which spends what a creation does — after the authorization, with the
+        principal it named, and nothing else. An applicant's preparing of a session
+        asks nothing. Each ask is a creation asked for, whether or not it goes on to
+        be made: a hook that keeps a rate counts them, and refuses one past it. The
+        hatch counts nothing. Without the authorization hook every ask names no
+        principal, so a rate the hook keeps is one shared by every caller.
+
+        The terms are the new session's, held each to the fleet's own ceiling and
+        kept for the session's life, whatever this hook answers later.
+
+        Any answer but these two, or none within the hatch's wait, fails the
+        creation.
+      operationId: limits
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LimitsRequest'
+            examples:
+              consumer:
+                value:
+                  principal: org-1
+        required: true
+      responses:
+        '200':
+          description: The creation may go on, its session held to these terms.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Limits'
+              examples:
+                limited:
+                  value:
+                    terms:
+                      components_bytes: 104857600
+                      cwasm_bytes: 268435456
+                      pull_deadline_secs: 60
+                      session_ttl_secs: 86400
+                unlimited:
+                  value: {}
+        '429':
+          description: The consumer has created sessions as often as it may for now.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimited'
+              examples:
+                past its rate:
+                  value:
+                    retry_after_secs: 20
+components:
+  schemas:
+    AuthorizeRequest:
+      type: object
+      required:
+      - authorization_header
+      - operation
+      properties:
+        authorization_header:
+          type: string
+          description: The request's `Authorization` header, verbatim — empty where it has none.
+        operation:
+          $ref: '#/components/schemas/Operation'
+      additionalProperties: false
+    AuthorizeResponse:
+      type: object
+      required:
+      - principal
+      properties:
+        principal:
+          type: string
+          description: |-
+            Who the request is from: the consumer, as the operator names it. Every
+            session keeps the principal that created it, and only that principal
+            reads it.
+          maxLength: 256
+          minLength: 1
+      additionalProperties: false
+    Limits:
+      type: object
+      description: |-
+        The creation may go on. Anything left out is not limited by the hook: the
+        fleet's own term.
+      properties:
+        terms:
+          $ref: '#/components/schemas/SessionTerms'
+          description: The terms its new session is held to.
+      additionalProperties: false
+    LimitsRequest:
+      type: object
+      required:
+      - principal
+      properties:
+        principal:
+          type:
+          - string
+          - 'null'
+          description: |-
+            The principal the authorization named — `null` where the authorization
+            hook is off.
+          maxLength: 256
+      additionalProperties: false
+    Operation:
+      type: string
+      description: |-
+        `session-create` is a creation, and a warmup of a session, which spends
+        what a creation does; `session-read` a read of a session; `data-read` a
+        pull of its disclosures.
+      enum:
+      - session-create
+      - session-read
+      - data-read
+    RateLimited:
+      type: object
+      description: The consumer has created sessions as often as the hook lets it for now.
+      required:
+      - retry_after_secs
+      properties:
+        retry_after_secs:
+          type: integer
+          format: int64
+          description: |-
+            How long until it may create one again, in seconds; the consumer is
+            told the same, as `Retry-After`.
+          maximum: 4294967295
+          minimum: 1
+      additionalProperties: false
+    SessionTerms:
+      type: object
+      description: Each held to the fleet's own ceiling; one left out is the fleet's own.
+      properties:
+        components_bytes:
+          type: integer
+          format: int64
+          description: The policy and its plugins together, in bytes.
+          minimum: 1
+        cwasm_bytes:
+          type: integer
+          format: int64
+          description: The composition compiled, in bytes.
+          minimum: 1
+        pull_deadline_secs:
+          type: integer
+          format: int64
+          description: How long one pull from a registry may take, in seconds.
+          minimum: 1
+        session_ttl_secs:
+          type: integer
+          format: int64
+          description: How long the session lives, in seconds.
+          minimum: 1
+      additionalProperties: false
+security:
+- {}

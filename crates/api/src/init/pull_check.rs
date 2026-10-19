@@ -1,8 +1,11 @@
 //! Whether a session's bearers may pull every artifact it pins.
 
+use std::time::Duration;
+
 use axum::http::StatusCode;
 
-use session_types::{Artifact, Client, SessionMetadata};
+use engine_rpc::MAX_COMPONENTS_BYTES;
+use session_types::{Artifact, Client, CompileFault, InitError, SessionMetadata, Terms};
 
 use crate::compositions::{Compositions, consumer, pull_failure};
 use crate::init::Unavailable;
@@ -18,11 +21,17 @@ use crate::policy_pull;
 /// bearers the session was created with.
 ///
 /// One manifest per artifact, concurrently as far as the consumer's turns
-/// allow, each checked against its pin. An artifact refused is the session's
+/// allow, each checked against its pin, each pulled within the session's own
+/// deadline where its terms name one. An artifact refused is the session's
 /// init error, the first such in pin order; otherwise one that got no answer is
 /// 503, the same request later ([`pull_failure`]). The answer depends on the
 /// pins, the bearers and the registries, never on what the caches hold. The
 /// hatch sees the refs and the bearers, and when the session was prepared.
+///
+/// The manifests also say how large the composition is: its wasm layers
+/// together past what the session's terms allow are refused here, hit or miss,
+/// as too large — so a composition that some other consumer's session compiled
+/// does not run where its consumer's terms would not have compiled it.
 pub(super) async fn check_pull(
     compositions: &Compositions,
     session_id: &str,
@@ -33,28 +42,44 @@ pub(super) async fn check_pull(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let turns = &compositions.consumer_turns.of(consumer(client));
+    let within = metadata.terms.pull_deadline_secs.map(Duration::from_secs);
     let artifacts = artifacts_with_bearers(&metadata.policy_ref, client);
     let manifests = artifacts
         .into_iter()
         .map(|(artifact, artifact_ref, bearer)| async move {
-            policy_pull::manifest(&compositions.registry, turns, artifact_ref, bearer)
+            policy_pull::manifest(&compositions.registry, turns, artifact_ref, bearer, within)
                 .await
+                .and_then(|manifest| policy_pull::wasm_layer_size(&manifest))
                 .map_err(|e| (artifact, artifact_ref, e))
         });
     let mut failed = None;
+    let mut size = 0u64;
     for res in futures::future::join_all(manifests).await {
-        if let Err((artifact, artifact_ref, e)) = res {
-            safe_logger::debug!("check_pull: {artifact_ref} failed for session {session_id}: {e}");
-            // A refusal stands whatever else went unanswered.
-            if !matches!(failed, Some(Unavailable::Init(_))) {
-                failed = Some(pull_failure(artifact, &e));
+        match res {
+            Ok(layer) => size = size.saturating_add(layer),
+            Err((artifact, artifact_ref, e)) => {
+                safe_logger::debug!(
+                    "check_pull: {artifact_ref} failed for session {session_id}: {e}"
+                );
+                // A refusal stands whatever else went unanswered.
+                if !matches!(failed, Some(Unavailable::Init(_))) {
+                    failed = Some(pull_failure(artifact, &e));
+                }
             }
         }
     }
-    match failed {
-        Some(e) => Err(e),
-        None => Ok(()),
+    if let Some(e) = failed {
+        return Err(e);
     }
+    if size > Terms::within(metadata.terms.components_bytes, MAX_COMPONENTS_BYTES) {
+        safe_logger::debug!(
+            "check_pull: {size} bytes of components, past the terms of {session_id}"
+        );
+        return Err(Unavailable::Init(InitError::Compile(
+            CompileFault::TooLarge,
+        )));
+    }
+    Ok(())
 }
 
 /// Every artifact a session pins — the policy, then each plugin — with its ref

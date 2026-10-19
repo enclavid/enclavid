@@ -32,7 +32,7 @@ use axum::response::{IntoResponse, Response};
 use base64ct::{Base64, Encoding};
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, Untrusted, reason};
-use hatch_client::{AuthVerdict, AuthorizeRequest, ClientOperation, boundary};
+use hatch_client::{AuthVerdict, AuthorizeRequest, ClientOperation, SessionTerms, boundary};
 use session_types::SessionMetadata;
 
 use crate::client_state::ClientState;
@@ -68,6 +68,29 @@ where
             // wiring bug, not a runtime auth failure. Surfacing as 500
             // makes sure such bugs are loud rather than silently treated
             // as "no auth required".
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+/// The terms the hatch says this request's consumer holds a new session to —
+/// its limits hook's, for a creation, and empty otherwise. Attached by `enforce`
+/// beside the principal; the create handler holds them to the fleet's ceilings
+/// and seals them in.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Terms(pub SessionTerms);
+
+impl<S> FromRequestParts<S> for Terms
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        // As for `Principal`: absent means the protective layer did not run.
+        parts
+            .extensions
+            .get::<Terms>()
+            .copied()
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
     }
 }
@@ -225,8 +248,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Auth middleware body. Reads the operation from request extensions
 /// (placed there by the outer `Extension(op)` layer in the per-route
 /// `ServiceBuilder` stack) and forwards the Authorization header to the
-/// host-side Auth service. On success injects `Principal(principal)`
-/// for the handler to extract.
+/// hatch, which asks the operator's hooks. On success injects
+/// `Principal(principal)` and `Terms(terms)` for the handler to extract.
 pub(super) async fn enforce(
     State(state): State<Arc<ClientState>>,
     Extension(op): Extension<ClientOperation>,
@@ -239,28 +262,26 @@ pub(super) async fn enforce(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
 
-    // Identity verification is delegated to the host: the TEE has no
-    // network stack and no way to validate a credential itself. The
-    // host receives the Authorization header, talks to the identity
-    // provider, and tells us the tenant this credential belongs to.
-    // We accept its word.
+    // Identity verification is the operator's: api hands the Authorization
+    // header to the hatch — our own pinned build — and the hatch asks the
+    // operator's authorization hook, which knows the identity provider, who
+    // the credential belongs to. We accept its word, because it is the word
+    // of the party who decides who may use the service in any case.
     //
-    // What goes wrong if the host lies:
+    // What goes wrong if the operator lies:
     //
-    //   1. Host claims an invalid credential is authentic → a fake
-    //      caller reaches /sessions create.
-    //   2. Host claims a valid credential belongs to tenant X when
-    //      it actually belongs to Y → attempted impersonation.
-    //   3. Host denies valid credentials, or says their tenant is past
-    //      its rate → denial of service.
+    //   1. It claims an invalid credential is authentic → a fake caller
+    //      reaches /sessions create.
+    //   2. It claims a valid credential belongs to tenant X when it
+    //      actually belongs to Y → attempted impersonation.
+    //   3. It denies valid credentials, or says their tenant is past its
+    //      rate → denial of service.
     //
-    // The TEE has no independent crypto check on the verdict, so a
-    // compromised host can mint sessions on behalf of any tenant.
-    // Bounded only by operational mitigations:
-    //   - Rate limit per tenant on session creation.
-    //   - Audit log every authorize outcome to an append-only sink.
-    //   - Alert on bursts of /sessions failures or unusual
-    //     tenant-create patterns (signature of a host substitution).
+    // The TEE has no independent crypto check on the verdict, so an operator
+    // can mint sessions on behalf of any tenant — as the issuer of its
+    // tokens, it could anyway. What it cannot do is read one: a session is
+    // read only with its own token, which this enclave minted for its
+    // creator and the host never sees.
     //
     // Attestation still protects against spoofed session_ids: the
     // quote binds (session_id, policy_digest) to TEE measurement,
@@ -283,17 +304,20 @@ pub(super) async fn enforce(
     .vouch_unchecked::<Covert, _>(reason!(
         "client-supplied header + fixed-enum op — no policy bandwidth"
     ));
+    // No answer — the hatch out of reach, or a hook that did not answer it in
+    // time — is the same request later.
     let verdict = state
         .auth
         .authorize(authorize_req)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .trust_unchecked::<AuthN, _>(reason!(
             r#"
-TEE has nothing to verify a credential against — host parses
-tokens, TEE never sees them. A lying host can claim an invalid
-credential is valid or substitute a different principal. Bounded
-only by host-side rate-limit + audit log.
+TEE has nothing to verify a credential against — the operator's
+hook parses tokens, and the operator issues them. A lying operator
+can claim an invalid credential is valid or substitute a different
+principal; it decides who may use the service in any case, and no
+session is read without its own token, which it never sees.
         "#
         ))
         .trust_unchecked::<AuthZ, _>(reason!(
@@ -305,14 +329,17 @@ there is no second access decision to gate on top of it.
         .trust_unchecked::<Replay, _>(reason!(
             r#"
 Stale verdict (yesterday's answer for today's request — e.g.
-accepting a since-revoked credential) caps at host-side
-operational mitigations (rate-limit + audit log). Same residual
-risk as the AuthN trust gate above.
+accepting a since-revoked credential) is the operator's to avoid,
+as the issuer that revokes it. Same residual risk as the AuthN
+trust gate above.
         "#
         ))
         .into_inner();
     let principal = match verdict {
-        AuthVerdict::Allowed { principal } => principal.map(|p| p.0),
+        AuthVerdict::Allowed { principal, terms } => {
+            req.extensions_mut().insert(Terms(terms));
+            principal.map(|p| p.0)
+        }
         AuthVerdict::Unauthenticated => return Err(StatusCode::UNAUTHORIZED),
         AuthVerdict::PermissionDenied => return Err(StatusCode::FORBIDDEN),
         AuthVerdict::RateLimited { retry_after_secs } => {

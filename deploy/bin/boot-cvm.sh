@@ -1,10 +1,20 @@
 # Boot one confidential VM exactly as its image says — the image's own QEMU
 # arguments and kernel command line, which its launch measurement was computed
-# over — plus only what the host decides: memory, the vsock CID, a disk, where
-# the serial console goes, and fw_cfg entries for a guest that reads them.
+# over — plus only what the host decides: memory, the vsock CID, a disk, a
+# network interface, where the serial console goes, and fw_cfg entries for a
+# guest that reads them. Nothing else: no device QEMU would add of its own
+# (`-nodefaults`) — above all no network card of its own, which would carry a
+# guest's traffic to the host's network and loopback whatever the guest's
+# kernel can drive.
 #
-#   [FW_CFG="name=value ..."] [FW_CFG_FILES="name=path ..."] \
+#   [FW_CFG="name=value ..."] [FW_CFG_FILES="name=path ..."] [NIC=SOCKET] \
 #     enclavid-boot-cvm NAME IMAGE CID MEMORY [DISK SIZE]
+#
+# NIC is the socket of a passt (or any peer speaking QEMU's stream netdev) the
+# guest's one network interface is carried over — for the hatch, the only role
+# whose kernel has one. Every other guest is given none. QEMU dials it until it
+# answers, and again whenever it goes: the peer may start after the guest, or
+# start again under it.
 #
 # NAME is this guest's among the host's — a release's api is one of several —
 # and names only its console.
@@ -25,6 +35,11 @@ for entry in "${files[@]}"; do
   fwcfg+=(-fw_cfg "name=opt/com.enclavid/${entry%%=*},file=${entry#*=}")
 done
 
+nic=()
+if [ -n "${NIC:-}" ]; then
+  nic=(-netdev "stream,id=nic,server=off,addr.type=unix,addr.path=$NIC,reconnect-ms=1000" -device "virtio-net-pci,netdev=nic")
+fi
+
 disk=()
 if [ $# -ge 6 ]; then
   # Made under another name and put in place only once formatted: a volume
@@ -44,8 +59,8 @@ log=/var/log/enclavid/$name.serial
 [ ! -e "$log" ] || mv -f "$log" "$log.1"
 
 read -ra args <<<"$(tr '\n' ' ' <"$image/qemu-args")"
-exec "$QEMU" -enable-kvm "${args[@]}" \
+exec "$QEMU" -enable-kvm -nodefaults "${args[@]}" \
   -m "$memory" -object "memory-backend-memfd,id=ram0,size=$memory,share=true,prealloc=false" \
-  -device "vhost-vsock-pci,guest-cid=$cid" "${disk[@]}" "${fwcfg[@]}" \
+  -device "vhost-vsock-pci,guest-cid=$cid" "${nic[@]}" "${disk[@]}" "${fwcfg[@]}" \
   -kernel "$image/bzImage" -initrd "$image/initramfs.cpio.gz" -append "$(cat "$image/cmdline")" \
   -display none -monitor none -serial "file:$log" -no-reboot

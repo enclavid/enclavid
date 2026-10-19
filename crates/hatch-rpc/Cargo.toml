@@ -1,0 +1,24 @@
+[package]
+name = "hatch-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The contract between api and the hatch-CVM: remote trait calls (remoc `rtc`)
+# over an RA-TLS leg, as storage-rpc is for the storage-CVM — both ends are our
+# own attested Rust CVMs. What the hatch asks of the operator is a contract of
+# its own, plain HTTP and JSON (hooks.openapi.yaml in crates/hatch), which any
+# language can serve. Deps are remoc, serde and the fleet-stream leaf only.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# One CBOR byte string per opaque field, not an array of integers.
+serde_bytes = "0.11"
+remoc = { version = "0.18", default-features = false, features = [
+    "rtc",
+    "codec-ciborium",
+] }
+# The connection config every fleet leg is brought up with, and the stream a
+# blob crosses as.
+fleet-stream = { path = "../fleet-stream" }

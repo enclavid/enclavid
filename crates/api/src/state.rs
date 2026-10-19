@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use secrecy::SecretBox;
 
-use hatch_client::{HatchClient, KbsClient, RegistryClient};
+use hatch_client::{KbsClient, Link, RegistryClient};
 use storage_client::{CacheStore, SessionStore};
 
 use crate::compiler::{Compiler, connect_compile_worker};
@@ -46,18 +46,16 @@ impl AppState {
     /// `settings` says how long the hatch has to answer a pull and a KBS leg.
     pub fn new(
         session_store: Arc<SessionStore>,
-        hatch: HatchClient,
+        hatch: Arc<dyn Link>,
         compiler: Arc<Compiler>,
         executor: Arc<Executor>,
         shuffle_key: Arc<ShuffleKey>,
         cache_store: CacheStore,
         settings: &crate::settings::Settings,
     ) -> Self {
-        // Registry + KBS share the hatch connection (cheap Clone: hyper Client is
-        // Arc-backed) — these are EXTERNAL egress and stay on the hatch
-        // regardless of the storage backend. The L2 `cache_store` is built by the
-        // caller (`main`) on the selected cache backend (hatch object_store or the
-        // storage-CVM) and sealed under an HKDF subkey of `tee_seal_key`.
+        // Registry + KBS share the hatch leg — they are EXTERNAL egress. The L2
+        // `cache_store` is built by the caller (`main`) on the storage-CVM and
+        // sealed under an HKDF subkey of `tee_seal_key`.
         let kbs = KbsClient::new(hatch.clone(), settings.kbs_deadline);
         // Both boundaries are remote clients connected by the caller (`init`):
         // `compiler` → the compile-worker, `executor` → the execution-worker.
@@ -80,15 +78,15 @@ impl AppState {
         }
     }
 
-    /// Connect to the hatch + both engine workers and build state. BOTH the
-    /// COMPILE and EXECUTE boundaries are remote clients dialed here — the
-    /// workers are separate processes/CVMs started by infrastructure (like the
-    /// hatch), NOT spawned by api. api itself links neither Cranelift nor the
-    /// wasmtime runtime. The two addresses are `crate::fleet::legs`'; how they
-    /// are dialed and held up is `settings`'.
+    /// Connect to both engine workers and build state over the `hatch` leg
+    /// `main` holds. BOTH the COMPILE and EXECUTE boundaries are remote clients
+    /// dialed here — the workers are separate CVMs started by infrastructure,
+    /// NOT spawned by api. api itself links neither Cranelift nor the wasmtime
+    /// runtime. The two addresses are `crate::fleet::legs`'; how they are
+    /// dialed and held up is `settings`'.
     #[allow(clippy::too_many_arguments)]
     pub async fn init(
-        transport_out: &str,
+        hatch: Arc<dyn Link>,
         compile_addr: String,
         exec_addr: String,
         session_store: Arc<SessionStore>,
@@ -98,9 +96,6 @@ impl AppState {
         api_health: Arc<crate::health::ApiHealth>,
         settings: &crate::settings::Settings,
     ) -> Self {
-        let hatch = HatchClient::new(transport_out)
-            .await
-            .expect("failed to connect to hatch");
         let tuning = settings.leg;
         let compile_leg = crate::fleet::Leg::new();
         {

@@ -221,6 +221,11 @@ pub struct RunRequest {
     /// serves under this key and never names a key back, so it cannot steer which
     /// slot a compile lands in (L2 cache-poisoning defence).
     pub composition_key: CompositionKey,
+    /// The most compiled code the session's terms allow, in bytes. The worker
+    /// answers an entry in its L1 past it as a miss, so the orchestrator holds
+    /// the composition to the session's terms as it does one from L2 or a
+    /// compile: an entry another session filled is that session's size.
+    pub max_cwasm_bytes: u64,
     /// FRAMED: the props, whose length as read is their type's and their own.
     /// See [`RoundProps`].
     pub props: Padded<RoundProps>,
@@ -238,7 +243,7 @@ pub struct RunRequest {
 pub struct RoundProps(#[serde(with = "props")] pub Vec<u8>);
 
 /// What a round request carries besides the clip's bytes, the two frames and the
-/// bundle header: the key, the frames' and the event's CBOR heads, and remoc's
+/// bundle header: the key, the ceiling, the frames' and the event's CBOR heads, and remoc's
 /// own envelope with the reply, callback and two bundle-stream ports — some
 /// 10 KiB with every field at its bound; the rest is margin.
 pub(crate) const RUN_REQUEST_HEADROOM: usize = 64 * 1024;
@@ -339,6 +344,8 @@ pub enum RunOutcome {
 pub struct PrepareRequest {
     /// Names the composition, as on [`RunRequest::composition_key`].
     pub composition_key: CompositionKey,
+    /// As on [`RunRequest::max_cwasm_bytes`].
+    pub max_cwasm_bytes: u64,
     pub preparing: Preparing,
 }
 
@@ -696,6 +703,7 @@ mod execute_tests {
         let (client, _cb) = serve_mock::<ExecCli>().await;
         let request = |preparing| PrepareRequest {
             composition_key: CompositionKey::from_digest([0x11; 32]),
+            max_cwasm_bytes: crate::MAX_CWASM_BYTES,
             preparing,
         };
         assert!(matches!(
@@ -773,6 +781,7 @@ mod execute_tests {
 
         let mk_req = || RunRequest {
             composition_key: CompositionKey::from_digest([0x11; 32]),
+            max_cwasm_bytes: crate::MAX_CWASM_BYTES,
             props: Padded::seal(&RoundProps(b"{age: 30}".to_vec())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Start,
@@ -818,6 +827,7 @@ mod execute_tests {
     fn a_request() -> RunRequest {
         RunRequest {
             composition_key: CompositionKey::from_digest([0x11; 32]),
+            max_cwasm_bytes: crate::MAX_CWASM_BYTES,
             props: Padded::seal(&RoundProps(Vec::new())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Start,
@@ -1202,6 +1212,7 @@ mod execute_tests {
 #[cfg(test)]
 mod request_bound_tests {
     use super::*;
+    use crate::MAX_CWASM_BYTES;
     use engine_types::limits::MAX_PROPS_BYTES;
     use serde::Serialize;
     use serde_bytes::Bytes;
@@ -1212,6 +1223,7 @@ mod request_bound_tests {
     #[derive(Serialize)]
     struct LooseRequest<'a> {
         composition_key: &'a str,
+        max_cwasm_bytes: u64,
         props: &'a Bytes,
         session_state: Padded<SessionState>,
         event: Event,
@@ -1239,6 +1251,7 @@ mod request_bound_tests {
     fn loose<'a>(key: &'a str, props: &'a [u8], event: Event) -> LooseRequest<'a> {
         LooseRequest {
             composition_key: key,
+            max_cwasm_bytes: MAX_CWASM_BYTES,
             props: Bytes::new(props),
             session_state: frame(),
             event,
@@ -1307,6 +1320,7 @@ mod request_bound_tests {
         #[derive(Serialize)]
         struct Plus<'a> {
             composition_key: &'a str,
+            max_cwasm_bytes: u64,
             props: &'a Bytes,
             session_state: Padded<SessionState>,
             event: Event,
@@ -1318,6 +1332,7 @@ mod request_bound_tests {
         ciborium::into_writer(
             &Plus {
                 composition_key: &key,
+                max_cwasm_bytes: MAX_CWASM_BYTES,
                 props: Bytes::new(&props),
                 session_state: frame(),
                 event: Event::Start,
@@ -1333,6 +1348,7 @@ mod request_bound_tests {
     #[derive(Serialize)]
     struct LoosePreparation<'a> {
         composition_key: &'a str,
+        max_cwasm_bytes: u64,
         preparing: LoosePreparing<'a>,
     }
 
@@ -1347,6 +1363,7 @@ mod request_bound_tests {
         ciborium::into_writer(
             &LoosePreparation {
                 composition_key: key,
+                max_cwasm_bytes: MAX_CWASM_BYTES,
                 preparing,
             },
             &mut b,
@@ -1369,6 +1386,7 @@ mod request_bound_tests {
         #[derive(Serialize)]
         struct Plus<'a> {
             composition_key: &'a str,
+            max_cwasm_bytes: u64,
             preparing: LoosePreparing<'a>,
             future_field: u32,
         }
@@ -1377,6 +1395,7 @@ mod request_bound_tests {
         ciborium::into_writer(
             &Plus {
                 composition_key: &key,
+                max_cwasm_bytes: MAX_CWASM_BYTES,
                 preparing: LoosePreparing::Hold,
                 future_field: 1,
             },

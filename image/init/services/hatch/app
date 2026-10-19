@@ -1,0 +1,24 @@
+# The application: the hatch. Each role's initramfs provides its own binary
+# under this one name, so PID 1 needs no configuration and there is nothing to
+# mis-set.
+#
+# Started once the clock is synchronised (see `timesync`), and stopped if the
+# keeper ends. When it ends — cleanly or not — the guest ends with it (see
+# `boot`).
+#
+# It runs as a user of its own, `app` (1000, image/initramfs), handed what it
+# opens by `app-files`. It holds no capability: it listens on vsock ports above
+# the reserved ones and opens connections outside, neither of which takes one.
+# Its network was configured by the kernel before PID 1 ran (`ip=dhcp`), so
+# there is nothing about it left to change, and nothing here could change it.
+#
+# Its stdin, stdout and stderr are the console, as a process PID 1 starts has
+# always had here: `console=null` on a production command line discards them,
+# and the `debug` one puts a real console on the serial port. What may reach the
+# host goes to the log device by name (crates/safe-logger), never through these.
+type = process
+command = /bin/app
+depends-on: timesync
+restart = false
+run-as = app
+options: shares-console

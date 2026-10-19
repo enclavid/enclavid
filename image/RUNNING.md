@@ -146,18 +146,47 @@ object — including the ID block, which is why `idKeys` is not optional. The
 second line is what the digest does not cover and an operator has to choose:
 memory size, the vsock CID, any drive, where the serial goes.
 
-api is also told, at launch, the host port each of its legs dials — the
-hatch's and its three peers', one fw_cfg entry per leg, outside the
-measurement (`crates/api/src/fleet/legs.rs`):
+api is also told, at launch, the host port each of its legs dials — one fw_cfg
+entry for each of its four peers, outside the measurement
+(`crates/api/src/fleet/legs.rs`):
 
 ```sh
-  -fw_cfg name=opt/com.enclavid/hatch-port,string=8000 \
   -fw_cfg name=opt/com.enclavid/storage-port,string=8001 \
   -fw_cfg name=opt/com.enclavid/compile-worker-port,string=8002 \
   -fw_cfg name=opt/com.enclavid/execution-worker-port,string=8003 \
+  -fw_cfg name=opt/com.enclavid/hatch-port,string=8004 \
 ```
 
 An api launched without them says which one is missing and stops.
+
+The hatch is the one role launched with a network interface, carried over a
+unix socket to a [passt](https://passt.top) on the host, which opens the
+connections the guest opens and takes none in. QEMU dials it until it answers,
+and again whenever it goes:
+
+```sh
+passt --foreground --socket $SOCK --ipv4-only --no-icmp \
+  --tcp-ports none --udp-ports none \
+  --address 10.0.2.15 --netmask 24 --gateway 10.0.2.2 \
+  --map-host-loopback none --map-guest-addr none --search none \
+  --dns-forward 10.0.2.3
+
+# and on the hatch's QEMU line
+  -netdev stream,id=nic,server=off,addr.type=unix,addr.path=$SOCK,reconnect-ms=1000 \
+  -device virtio-net-pci,netdev=nic \
+```
+
+The kernel takes its address from passt's DHCP answer before PID 1 runs
+(`ip=dhcp` on its command line). Its resolver is the image's own: 10.0.2.3,
+which `--dns-forward` carries on the DNS ports, and nothing else, to the host's
+own resolver, the first in its /etc/resolv.conf — or, with
+`--dns 10.0.2.3 --dns-host ADDRESS`, to that one. A `--dns` without
+`--dns-host` carries them nowhere: given a resolver to hand out, passt reads
+none of the host's. The guest's resolver is that one
+address whichever network passt is on, so a passt started again elsewhere
+needs nothing new of the guest. The hooks it asks are named by its
+launch settings below: the host port of each, which a relay on the host
+carries to the operator's service. A hook given no port is not asked.
 
 And it is given the certificate AMD issues this chip at its reported TCB — the
 VCEK, in DER — which is what lets anyone check a quote it mints
@@ -179,8 +208,8 @@ What each measurement-relevant part is doing:
 - **`-cpu EPYC-Milan-v2` and `-smp N`** — the VMSA pages are measured, one per
   vCPU, so both the type and the count enter the digest. The count is each
   role's own (`roles.<role>.vcpus` in `default.nix`: api, storage and the
-  compile-worker 4, the execution-worker 8, the gateway 2). See the open
-  question below.
+  compile-worker 4, the execution-worker 8, the gateway and the hatch 2). See
+  the open question below.
 - **`policy=0x30000`** — bits 16 and 17. Bit 17 is reserved and must be set; bit
   16 is `SMT_ALLOWED`, so this guest agrees to run on a host with SMT enabled.
   Debug (bit 19) and migration-agent (bit 18) are clear, which is what
@@ -188,8 +217,9 @@ What each measurement-relevant part is doing:
   field of every report, so it is a security constant that currently lives
   nowhere but a command line.
 - **`-m`** — memory size is *not* a measurement input. Roles may differ freely;
-  the defaults below are chosen for 2G for storage, 3G for api, 8G for the
-  compile-worker and 10G for the execution-worker. The execution-worker sizes
+  the defaults below are chosen for 2G for storage, 3G for api, 1G for the
+  hatch, 8G for the compile-worker and 10G for the execution-worker. The
+  execution-worker sizes
   itself from its memory: it reserves its bundle cache (which the bundles
   streaming into it share), a base, and a share in itself for each child its
   child bound allows, and gives the rest to its round children as one total.
@@ -261,10 +291,14 @@ What each measurement-relevant part is doing:
   | | `registry-requests-per-consumer` | 4 |
   | | `authorize-deadline-secs` | 25 |
   | | `kbs-deadline-secs` | 20 |
-  | | `hatch-probe-secs` | 10 |
-  | | `hatch-probe-deadline-secs` | 5, under the period |
   | | `callback-request-buffer` | 4 |
-  | all four | `leg-timeout-secs` | 20 |
+  | hatch | `concurrent-manifests` | 128 |
+  | | `concurrent-blobs` | 8 |
+  | | `authorize-hook-port` | none: no authorization |
+  | | `limits-hook-port` | none: no limits |
+  | | `hook-deadline-secs` | 10 |
+  | | `request-buffer` | 16 |
+  | all five | `leg-timeout-secs` | 20 |
   | | `leg-max-ports` | 256 |
   | | `leg-chunk-bytes` | 65536 |
   | | `leg-receive-bytes` | 8388608 |
@@ -288,10 +322,11 @@ exist before the guest that dials through them is useful.
    three of them agree on the time, so without these no guest starts its
    application — its console says which servers it cannot reach, and after the
    keeper's ten minutes (`start-timeout`) the guest powers off.
-1. Start the three leaves. Each answers `{"healthy":false}` on its health port
-   from the moment it binds, and `{"healthy":true}` once it is listening.
-2. Start one relay per leg and the hatch.
-3. Start api. It dials all three legs before it binds either serving port, and
+1. Start the four leaves, the hatch with its passt. Each answers
+   `{"healthy":false}` on its health port from the moment it binds, and
+   `{"healthy":true}` once it is listening.
+2. Start one relay per leg, and one per hook the hatch is given a port for.
+3. Start api. It dials all four legs before it binds either serving port, and
    it waits without a bound — so a leg that never comes up shows as an api that
    never becomes ready, not as one that exits.
 
@@ -301,14 +336,17 @@ host-relay --listen vsock:7100 --to tcp:time.cloudflare.com:4460
 host-relay --listen vsock:7101 --to udp:time.cloudflare.com:123
 # …
 
-host-relay --listen vsock:8001 --to vsock:$STORAGE_CID:8001
-host-relay --listen vsock:8002 --to vsock:$COMPILE_CID:8002
-host-relay --listen vsock:8003 --to vsock:$EXEC_CID:8003
+host-relay --listen vsock:8001 --from $API_CID --to vsock:$STORAGE_CID:8001
+host-relay --listen vsock:8002 --from $API_CID --to vsock:$COMPILE_CID:8002
+host-relay --listen vsock:8003 --from $API_CID --to vsock:$EXEC_CID:8003
+host-relay --listen vsock:8004 --from $API_CID --to vsock:$HATCH_CID:8004
 
-HATCH_LISTEN_ADDR=8000 HATCH_AUTH=none HATCH_AUTH_PRINCIPAL=guest host-hatch
+# with `authorize-hook-port=8005` in the hatch's settings
+host-relay --listen vsock:8005 --from $HATCH_CID --to tcp:127.0.0.1:9100
 ```
 
-`HATCH_AUTH=none` is the dev posture. Outside `sev-snp` a dev api also needs
+A hatch with no hook ports authorizes no one and limits nothing: the dev
+posture, every session no one's. Outside `sev-snp` a dev api also needs
 `ENCLAVID_TEE_KEY=<64 hex chars>`, because the sealing key is then not derived
 from the chip — but it has to be IN the cmdline file, not appended at launch, or
 the guest's measurement stops matching what was computed for it.
@@ -325,10 +363,11 @@ list them.
 | 8011 | storage |
 | 8012 | compile-worker |
 | 8013 | execution-worker |
+| 8014 | hatch |
 
 `connect`, read to EOF, send nothing — the port never reads, and a prober that
 speaks first can have its own answer reset away. api's answer carries its fleet
-peers and the hatch alongside its own bool; a leaf's is the bool alone. Whether
+peers, the hatch among them, alongside its own bool; a leaf's is the bool alone. Whether
 any of that means *ready* is the reader's conclusion, not the guest's claim —
 `crates/fleet-transport/src/health.rs` argues the split.
 
@@ -336,21 +375,21 @@ any of that means *ready* is the reader's conclusion, not the guest's claim —
 
     nix-build image -A measurements.storage    # the launch digest, needs no keys
     nix-build image -A images.storage --arg idKeys $KEYS   # + cmdline + qemu-args
-    nix-build image -A images.api    --arg idKeys $KEYS    # pinned to the three leaves
+    nix-build image -A images.api    --arg idKeys $KEYS    # pinned to the four leaves
 
 `idKeys` is a directory of `id.pem` and `author.pem` (EC P-384). Anything that
 writes a launch line needs them, because the line carries an ID block asserting
 its own digest; `measurements.*` does not.
 
 `image/default.nix` is where a build starts. It owns the ordering api's
-`endorsement.rs` depends on — the three leaves are built and measured, then api
+`endorsement.rs` depends on — the four leaves are built and measured, then api
 is built from their digests — and it generates the launch flags and the digest
 from ONE set of parameters, so the two cannot disagree.
 
 Each image carries a `qemu-args` file with the flags the measurement covers.
 Splice it in verbatim and add only what the digest does not describe: memory,
 the vsock CID, any drive, where the serial goes — and, for api, its legs'
-ports as fw_cfg entries.
+ports as fw_cfg entries; for the hatch, its network interface.
 
     I=$(nix-build image -A images.storage-debug --no-out-link)
     qemu-system-x86_64 -enable-kvm $(cat $I/qemu-args | tr '\n' ' ') \
@@ -366,8 +405,8 @@ to add `ENCLAVID_TEE_KEY` — produces a guest whose measurement nothing pins, a
 the only symptom is api refusing every peer. Under `sev-snp` the seal key comes
 from the chip, so that variable is not needed and must not be added.
 
-Production and debug are separate fleets end to end: `api-debug` pins the three
-`*-debug` leaves, `api` pins the three production ones. Mixing them is a refused
+Production and debug are separate fleets end to end: `api-debug` pins the four
+`*-debug` leaves, `api` pins the four production ones. Mixing them is a refused
 handshake, correctly.
 
 ## What this has been shown to do

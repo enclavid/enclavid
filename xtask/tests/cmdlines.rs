@@ -27,12 +27,14 @@ const EVERY_GUEST: [&str; 7] = [
 ];
 
 /// Each role, and whether it holds plaintext. Those that do scrub what they
-/// free; storage holds only sealed bytes and is left out.
-const ROLES: [(&str, bool); 5] = [
+/// free; storage holds only sealed bytes and is left out. The hatch holds the
+/// consumers' credentials and bearers it carries.
+const ROLES: [(&str, bool); 6] = [
     ("api", true),
     ("compile-worker", true),
     ("execution-worker", true),
     ("gateway", true),
+    ("hatch", true),
     ("storage", false),
 ];
 

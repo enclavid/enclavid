@@ -149,6 +149,7 @@ impl SessionRunCtx {
         // are the ones every round is handed, as the policy reads them.
         let req = crate::executor::outbound_round(
             &composition_key,
+            crate::compositions::max_cwasm_bytes(&metadata.terms),
             &session_state,
             prepared.props.as_deref(),
             event,

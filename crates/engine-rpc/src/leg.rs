@@ -683,6 +683,7 @@ mod door_tests {
     fn round(event: Event) -> Exposed<RunRequest, ()> {
         Exposed::<_, (AuthN,)>::new(RunRequest {
             composition_key: CompositionKey::from_digest([0x22; 32]),
+            max_cwasm_bytes: crate::MAX_CWASM_BYTES,
             props: Padded::seal(&crate::execute::RoundProps(Vec::new())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event,

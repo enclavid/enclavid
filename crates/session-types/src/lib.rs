@@ -142,6 +142,33 @@ pub struct SessionMetadata {
     /// setup failed, and how, is not the host's to read.
     #[serde(with = "init_error_frame")]
     pub init_error: Option<InitError>,
+    /// What the session is held to, as its consumer's limits gave them at the
+    /// creation, each already held to the fleet's own ceiling.
+    pub terms: Terms,
+}
+
+/// A session's terms: each `None` where its consumer's limits gave none, and the
+/// fleet's own then. Set once, at the creation, and kept for the session's
+/// life whatever the consumer's limits say later.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Terms {
+    /// The policy and its plugins together, in bytes.
+    pub components_bytes: Option<u64>,
+    /// The composition compiled, in bytes.
+    pub cwasm_bytes: Option<u64>,
+    /// How long the session lives, in seconds — its deadline is set once, from
+    /// the creation.
+    pub session_ttl_secs: Option<u64>,
+    /// How long one pull from a registry may take, in seconds.
+    pub pull_deadline_secs: Option<u64>,
+}
+
+impl Terms {
+    /// `term`, or `ceiling` where it names none — and never past `ceiling`.
+    pub fn within(term: Option<u64>, ceiling: u64) -> u64 {
+        term.map_or(ceiling, |t| t.min(ceiling))
+    }
 }
 
 /// What preparing a session settled, kept for every round after.
@@ -776,6 +803,28 @@ mod clip_tests {
         let bytes = encode(&Empty {}).expect("an empty map encodes");
         let back: Clip = decode(&bytes).expect("an absent field defaults");
         assert!(back.frames.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod terms_tests {
+    use super::*;
+
+    /// A term is never past its ceiling, and is the ceiling where it names none.
+    #[test]
+    fn a_term_is_held_within_its_ceiling() {
+        assert_eq!(Terms::within(None, 10), 10);
+        assert_eq!(Terms::within(Some(3), 10), 3);
+        assert_eq!(Terms::within(Some(30), 10), 10);
+    }
+
+    /// Terms with none of their fields written read as the fleet's own.
+    #[test]
+    fn absent_terms_are_the_fleets() {
+        #[derive(Serialize)]
+        struct Empty {}
+        let back: Terms = decode(&encode(&Empty {}).unwrap()).unwrap();
+        assert_eq!(back, Terms::default());
     }
 }
 

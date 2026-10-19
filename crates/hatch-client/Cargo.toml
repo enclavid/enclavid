@@ -5,39 +5,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-# Default is TCP transport (works on all platforms, used for dev / CI /
-# cross-provider deployment). Enable `vsock` for the attested production
-# build — replaces the TCP connect with a vsock connect; no IP stack
-# needed in the TEE kernel. The two are mutually exclusive.
-default = []
-vsock = ["dep:tokio-vsock", "dep:tower-service", "dep:fleet-transport", "fleet-transport/vsock"]
-
 [dependencies]
-# Shared HTTP-over-vsock wire DTOs (CBOR-encoded).
-hatch-protocol = { path = "../hatch-protocol" }
-# `Stream`, what a pulled blob crosses as, a piece at a time.
+# The contract with the hatch-CVM, whose remoc client the typed clients here
+# call through.
+hatch-rpc = { path = "../hatch-rpc" }
+# A blob's stream beside its reply, read a piece at a time.
+fleet-stream = { path = "../fleet-stream" }
 futures = { version = "0.3", default-features = false, features = ["std"] }
+bytes = "1"
 # The concern vocabulary the `boundary` facades are built from. A leaf crate
 # because `safe-logger` needs the same words for the serial-port crossing and
 # must not pull a wire client in to get them.
 enclavid-boundary = { path = "../boundary" }
-# Pooled HTTP/1.1 client (hyper-util `legacy::Client`) with a cfg-split
-# connector: built-in `HttpConnector` for TCP (dev), a custom vsock
-# connector for the attested build. Same client type both ways; only
-# the connector differs. Connection reuse comes free from the pool.
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
-http-body-util = "0.1"
-bytes = "1"
-# `time` for the one deadline every hatch call runs under — see
-# `HatchClient::request`. This hop has no TLS, no keepalive and no multiplexer
-# beneath it, so that timeout is the only thing bounding a stalled host.
-tokio = { version = "1", features = ["net", "rt", "time"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-tokio-vsock = { version = "0.7", optional = true }
-# The fleet's one setter of a vsock socket's buffer (`set_vsock_buffer`).
-fleet-transport = { path = "../fleet-transport", optional = true }
-# `tower_service::Service<Uri>` impl for the vsock connector.
-tower-service = { version = "0.3", optional = true }
+# `time` for the one deadline every hatch call runs under: a remoc call has none
+# of its own.
+tokio = { version = "1", features = ["time"] }

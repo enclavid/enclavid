@@ -18,8 +18,7 @@ use std::collections::HashMap;
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, Untrusted, reason};
 use enclavid_crypto::ocicrypt::{self, PrivateLayerBlockCipherOptions};
 use enclavid_kbs_client::{RcarSession, SampleEvidence, TeeKeyPair};
-use hatch_client::{KbsClient, boundary};
-use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
+use hatch_client::{KbsClient, KbsRequest, KbsResponse, boundary};
 use session_types::Key;
 
 /// Context the [`Key::Kbs`] path needs: the hatch relay client that
@@ -212,8 +211,8 @@ async fn relay(
     path: &str,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
-) -> Result<Untrusted<KbsRelayResponse, (AuthN, AuthZ, Replay)>, KeyError> {
-    let req = KbsRelayRequest {
+) -> Result<Untrusted<KbsResponse, (AuthN, AuthZ, Replay)>, KeyError> {
+    let req = KbsRequest {
         endpoint: endpoint.to_string(),
         method: method.to_string(),
         path: path.to_string(),
@@ -246,7 +245,7 @@ fn json_headers() -> Vec<(String, String)> {
 /// A leg that did not answer 200 releases nothing. A KBS that was overloaded,
 /// timed out or failed on its side may answer later; any other status is its
 /// answer.
-fn require_ok(resp: &KbsRelayResponse, leg: &str) -> Result<(), KeyError> {
+fn require_ok(resp: &KbsResponse, leg: &str) -> Result<(), KeyError> {
     if resp.status == 200 {
         return Ok(());
     }
@@ -368,7 +367,7 @@ mod tests {
     /// the key later; any other answer but 200 is its refusal.
     #[test]
     fn a_leg_that_failed_on_the_kbs_side_may_pass_later() {
-        let leg = |status| KbsRelayResponse {
+        let leg = |status| KbsResponse {
             status,
             headers: Vec::new(),
             body: Vec::new(),

@@ -161,20 +161,32 @@ impl Supervisor {
     ///
     /// A preparation fills `ahead` of the rounds it is for: the entry is marked
     /// so, and asked for on their behalf ([`Bundles::ask_for`]).
+    ///
+    /// Neither a bundle nor a kept entry with more cwasm than `max_cwasm_bytes`
+    /// is leased: api holds what it sends to the session's terms, and an entry
+    /// kept under the same key is the same pins' compile, so either is a fault.
     async fn cache_bundle(
         &self,
         slot: Slot,
         bundle: BundleStream,
+        max_cwasm_bytes: u64,
         ahead: bool,
     ) -> Result<Lease, ExecError> {
         let deadline = Instant::now() + self.capacity_wait;
+        let past_ceiling = || {
+            debug!("cache_bundle: more cwasm than the request's ceiling");
+            ExecError::Unknown
+        };
         // Found kept, this round's stream is never read. Its writer sees the end
         // close, which costs it nothing — the round's outcome is the reply.
         let fill = match self.bundles.claim(&slot, deadline).await? {
-            Claim::Kept(lease) => return Ok(lease),
+            Claim::Kept(lease) => return lease.within(max_cwasm_bytes).ok_or_else(past_ceiling),
             Claim::Fill(fill) => fill,
         };
         let (cwasm_declared, meta_declared) = bundle.declared();
+        if cwasm_declared > max_cwasm_bytes {
+            return Err(past_ceiling());
+        }
         let room = self
             .bundles
             .reserve(cwasm_declared, meta_declared, deadline)
@@ -206,6 +218,7 @@ impl Supervisor {
         } = meta;
         let entry = CompositionEntry {
             cwasm,
+            cwasm_len,
             charged: entry_charge(cwasm_len, meta_len),
             embedded_imports: embedded_imports.into(),
             catalogs: catalogs.into(),
@@ -432,6 +445,8 @@ impl Slot {
 ///     frame opens; what matters to this role is that the props are finite, not
 ///     that they match.
 ///   * `event` — the frame count and clip budget in `Clip`'s decoder, likewise.
+///   * `max_cwasm_bytes` — any number: it only decides whether the caller's own
+///     entry is a hit or a miss, and refuses a bundle of more.
 ///
 /// None of that is a check on AUTHENTICITY and none of it is claimed as one —
 /// `engine_rpc::keys` says as much about its own types. The thing that would make
@@ -447,8 +462,8 @@ fn open_round(req: Untrusted<RunRequest, (AuthN,)>) -> RunRequest {
 }
 
 /// Take a preparation's inputs out of the scope this role named: INDIFFERENT,
-/// for the reason [`open_round`] gives, over fewer fields — the key, and the
-/// props JSON held to the same byte bound.
+/// for the reason [`open_round`] gives, over fewer fields — the key, the
+/// ceiling, and the props JSON held to the same byte bound.
 fn open_preparation(req: Untrusted<PrepareRequest, (AuthN,)>) -> PrepareRequest {
     req.trust_unchecked::<AuthN, _>(enclavid_boundary::reason!(
         "indifferent: nothing derived from a preparation leaves the caller's own \
@@ -641,6 +656,10 @@ impl ExecutorServiceUntrusted for Caller {
     /// The L1-cache path: run the composition if it is cached, else report the miss
     /// so the orchestrator resolves the bundle (under ITS OWN key) and re-drives via
     /// [`run_with_bundle`](Self::run_with_bundle). No bundle crosses on this call.
+    ///
+    /// An entry with more cwasm than the request's ceiling is a miss too: it was
+    /// filled for another session, and the orchestrator holds the bundle it
+    /// resolves to this one's terms.
     async fn run(
         &self,
         req: Untrusted<RunRequest, Self::Scope>,
@@ -649,11 +668,13 @@ impl ExecutorServiceUntrusted for Caller {
         let _round = round_place(&self.sup.rounds)?;
         let RunRequest {
             composition_key,
+            max_cwasm_bytes,
             props,
             session_state,
             event,
         } = open_round(req);
-        match self.sup.bundles.lease(&self.slot(&composition_key)) {
+        let kept = self.sup.bundles.lease(&self.slot(&composition_key));
+        match kept.and_then(|lease| lease.within(max_cwasm_bytes)) {
             // The frame comes off HERE, at the api hop, and goes back on in the
             // mint: everything between is inside this CVM, where no host counts
             // bytes. `open()` is api's frame and the mint's `seal()` is the
@@ -691,13 +712,19 @@ impl ExecutorServiceUntrusted for Caller {
         let _round = round_place(&self.sup.rounds)?;
         let RunRequest {
             composition_key,
+            max_cwasm_bytes,
             props,
             session_state,
             event,
         } = open_round(req);
         let lease = self
             .sup
-            .cache_bundle(self.slot(&composition_key), open_bundle(bundle), false)
+            .cache_bundle(
+                self.slot(&composition_key),
+                open_bundle(bundle),
+                max_cwasm_bytes,
+                false,
+            )
             .await?
             .for_round();
         let status = self
@@ -723,9 +750,11 @@ impl ExecutorServiceUntrusted for Caller {
         let _round = round_place(&self.sup.rounds)?;
         let PrepareRequest {
             composition_key,
+            max_cwasm_bytes,
             preparing,
         } = open_preparation(req);
-        match self.sup.bundles.lease(&self.slot(&composition_key)) {
+        let kept = self.sup.bundles.lease(&self.slot(&composition_key));
+        match kept.and_then(|lease| lease.within(max_cwasm_bytes)) {
             Some(lease) => self
                 .sup
                 .prepare_in_child(lease, preparing)
@@ -746,11 +775,17 @@ impl ExecutorServiceUntrusted for Caller {
         let _round = round_place(&self.sup.rounds)?;
         let PrepareRequest {
             composition_key,
+            max_cwasm_bytes,
             preparing,
         } = open_preparation(req);
         let lease = self
             .sup
-            .cache_bundle(self.slot(&composition_key), open_bundle(bundle), true)
+            .cache_bundle(
+                self.slot(&composition_key),
+                open_bundle(bundle),
+                max_cwasm_bytes,
+                true,
+            )
             .await?;
         let read = self.sup.prepare_in_child(lease, preparing).await?;
         outbound_prepare_reply(&read)

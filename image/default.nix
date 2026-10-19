@@ -2,7 +2,7 @@
 #
 #   nix-build image -A images.storage        # kernel + initramfs + cmdline
 #   nix-build image -A measurements.storage  # the launch digest of exactly that
-#   nix-build image -A images.api            # api, pinned to the three above
+#   nix-build image -A images.api            # api, pinned to the four leaves
 #
 # Until this file existed, a role's image was assembled by hand and its digest
 # computed by a second hand-written command, from arguments that had to agree.
@@ -14,10 +14,10 @@
 # `launch` set below, so they cannot disagree.
 #
 # The ordering this file expresses is the one api's `endorsement.rs` depends on:
-# the three leaves are built and measured, and api is built from their digests.
+# the four leaves are built and measured, and api is built from their digests.
 # It is a fact of the trust direction, not a build-system detail — api pins which
 # image each peer is, and no leaf pins api back, because api's own digest is a
-# function of the three it pins.
+# function of the four it pins.
 #
 # The gateway is outside that ordering: it pins nothing, so it is built from
 # source alone and api moves under it freely.
@@ -126,6 +126,24 @@ let
       vcpus = 8;
       siblings = [ "engine-executor-child" ];
     };
+    # The fleet's one way out: the only role with a network interface. Two: its
+    # work is waiting on registries and brokers, and a stream crossing it is one
+    # TLS in and one out.
+    #
+    # It checks the certificates registries and brokers present against the CA
+    # bundle carried here, which is measured with it, and asks its interface's
+    # far end for names at 10.0.2.3 — the one address a hatch's network serves
+    # them at, written here rather than read from the kernel's DHCP record,
+    # which carries a line its resolver refuses the whole file for.
+    hatch = {
+      kernel = kernel.hatch;
+      binary = "hatch-cvm";
+      vcpus = 2;
+      files = {
+        "etc/ssl/certs/ca-certificates.crt" = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+        "etc/resolv.conf" = pkgs.writeText "resolv.conf" "nameserver 10.0.2.3\n";
+      };
+    };
     # Terminates client TLS and dials api over RA-TLS — but pins NOTHING, so it
     # is built like a leaf, from source alone.
     #
@@ -164,6 +182,7 @@ let
       siblings = lib.listToAttrs (map
         (s: lib.nameValuePair s (app + "/${s}"))
         (spec.siblings or [ ]));
+      files = spec.files or { };
     };
 
   cmdlineFor = role: variant: ./cmdline + "/${role}/${variant}";
@@ -267,7 +286,7 @@ let
       sed -i 's/^      //' $out/qemu-args
     '';
 
-  # Which app set a role is built from. The three leaves need nothing from
+  # Which app set a role is built from. The four leaves need nothing from
   # anyone; api needs the leaves' digests, so it gets an app set that has them.
   #
   # Both variants' digests are handed over at once because one `image/app` call
@@ -282,7 +301,7 @@ let
       (map (v: lib.nameValuePair v (measurementsFor v)) variants);
   };
 
-  leaves = [ "storage" "compile-worker" "execution-worker" ];
+  leaves = [ "storage" "compile-worker" "execution-worker" "hatch" ];
 
   measurementsFor = variant:
     lib.listToAttrs (map (r: lib.nameValuePair r (measure r variant)) leaves);

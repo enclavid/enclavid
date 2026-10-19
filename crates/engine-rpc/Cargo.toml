@@ -53,7 +53,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "macros", "
 # codec a connection happens to be configured with.
 ciborium = "0.2"
 # remoc = remote trait calls (rtc) over any AsyncRead+AsyncWrite, CBOR codec
-# (ciborium — same as hatch-protocol), no OpenTelemetry. Optional: only the
+# (ciborium), no OpenTelemetry. Optional: only the
 # rtc traits need it, so a features-less build is remoc-free. See
 # project_fleet_rpc_substrate.
 remoc = { version = "0.18", default-features = false, features = [

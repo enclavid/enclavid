@@ -10,6 +10,7 @@ mod dto;
 mod endorsement;
 mod executor;
 mod fleet;
+mod hatch;
 mod health;
 mod init;
 mod keyprovider;
@@ -52,8 +53,8 @@ async fn main() {
         reason!("a constant, emitted before this process holds anything at all")
     );
 
-    // How long and how often to wait on each leg and on the hatch, and how to
-    // hold each leg up — read from the launch, which talks to nothing, and first,
+    // How long and how often to wait on each leg, and how to hold each leg up —
+    // read from the launch, which talks to nothing, and first,
     // because the health port below is one of the listeners they set.
     let settings = settings::load();
 
@@ -91,7 +92,6 @@ async fn main() {
 
     // Where each leg is dialed. Read from the launch, which talks to nothing.
     let legs = fleet::legs::load();
-    let address_out = legs.hatch;
 
     // The attestation backend, chosen at compile time — see `endorsement`.
     // FIRST, ahead of the storage-CVM dial below and both listeners: under
@@ -108,57 +108,23 @@ async fn main() {
         )
     );
 
-    // The hatch bit, on a clock of its own.
-    //
-    // Fixed cadence is the whole design, not an implementation choice. A bit set
-    // from the outcome of REAL calls would flip only when an applicant-driven
-    // call failed — and since the host is the far end of this hop, it is the
-    // party that failed it, so polling that bit would tell it when a session was
-    // active. A ticker says the same thing about the hop while saying nothing
-    // about who is using it.
-    //
-    // It reports the LEG, not the hatch. Whether that process is up is something
-    // whatever supervises it knows better than any probe here; whether this
-    // guest can reach it is a fact only this guest holds.
-    //
-    // A failure changes nothing but the bit. The hatch is on the cold-start path
-    // (`/authorize` for the consumer surface, `/oci/*` and `/kbs/relay` from
-    // `Compositions::compile`), and an applicant round on a warm composition
-    // never touches it — so withdrawing this guest over a hatch fault would end
-    // sessions that are running correctly. What to do about it is the host's
-    // call, made from the whole answer.
-    //
-    // AFTER the attestation above, and not for convenience: the rule stated
-    // there is that nothing which talks to anything may precede it, and a
-    // ticker that starts earlier would be exactly such a thing. The bit answers
-    // false until the first pass, which is what every other field does too.
-    {
-        let probe = hatch_client::HatchClient::new(&address_out)
-            .await
-            .unwrap_or_else(|e| {
-                debug!("{e}");
-                safe_logger::error_and_panic!(
-                    "api: the hatch leg's address is not one this build can dial. Stopping.",
-                    reason!("a constant about an address the host itself supplied")
-                )
-            });
-        let api_health = api_health.clone();
-        let (every, within) = (settings.hatch_probe, settings.hatch_probe_deadline);
-        tokio::spawn(async move {
-            // `interval` fires once immediately, so the first probe runs now
-            // rather than one period from now. `Delay` on a missed tick because
-            // the cadence is what carries the meaning: catching up on skipped
-            // ticks would bunch probes together and turn a clock into a
-            // reaction.
-            let mut tick = tokio::time::interval(every);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                let up = probe.probe(within).await.is_ok();
-                api_health.set_hatch(up);
-            }
-        });
-    }
+    // The hatch leg: api's way out, dialed and pinned like every other leg, and
+    // waited for as storage is — the consumer surface authorizes every request
+    // through it, so nothing serves before it answers. A loss later fails what
+    // needs it, a consumer's request or a cold compile, and nothing else: an
+    // applicant round on a warm composition never touches it, so withdrawing
+    // this guest over a hatch fault would end sessions that are running
+    // correctly. What to do about it is the host's call, made from the whole
+    // health answer.
+    let hatch = build_hatch_link(
+        legs.hatch,
+        attestor.clone(),
+        api_health.clone(),
+        settings.leg_dial,
+        settings.leg,
+    )
+    .await;
+    info!("api: hatch connected", reason!("a constant"));
 
     // SessionStore is storage-client's per-session typed-field store. It is
     // transport-agnostic — it holds an `Arc<dyn SessionBackend>`, and the
@@ -214,7 +180,7 @@ async fn main() {
 
     let applicant_state = Arc::new(
         AppState::init(
-            &address_out,
+            hatch.clone(),
             legs.compile_worker,
             legs.execution_worker,
             session_store.clone(),
@@ -226,16 +192,14 @@ async fn main() {
         )
         .await,
     );
-    let client_state = Arc::new(
-        ClientState::init(
-            &address_out,
-            session_store,
-            attestor,
-            applicant_state.compositions.clone(),
-            settings.authorize_deadline,
-        )
-        .await,
-    );
+    let client_state = Arc::new(ClientState::new(
+        hatch,
+        session_store,
+        attestor,
+        applicant_state.compositions.clone(),
+        settings.authorize_deadline,
+        settings.pull_deadline,
+    ));
 
     let client_app = client::router(client_state);
     let applicant_app = applicant::router(applicant_state);
@@ -284,8 +248,7 @@ async fn main() {
     // `healthy` goes true HERE, and this is the only place it can: both
     // surfaces are bound, which is the same claim a leaf's bool makes before
     // its accept loop. It is also the last field the host is waiting on before
-    // it concludes ready — the peers went true as each leg came up, and the
-    // hatch bit on the ticker's first pass.
+    // it concludes ready — the peers went true as each leg came up.
     //
     // A bind that fails panics the task above, and that panic does NOT end this
     // process: nothing sets `panic = "abort"`, and `install_panic` only adds a
@@ -357,6 +320,35 @@ async fn build_storage_backends(
     let session: Arc<dyn SessionBackend> = Arc::new(storage::SessionCvmBackend::new(session_leg));
     let cache: Arc<dyn CacheBackend> = Arc::new(storage::CacheCvmBackend::new(cache_leg));
     (session, cache)
+}
+
+/// Dial the hatch-CVM over RA-TLS and hand back the link the typed hatch
+/// clients call through. `addr` is `crate::fleet::legs`'; it is dialed as `how`
+/// says, and this end of the leg held up as `leg` does.
+async fn build_hatch_link(
+    addr: String,
+    attestor: Arc<dyn Attestor>,
+    api_health: Arc<health::ApiHealth>,
+    how: fleet::Dial,
+    leg: hatch_rpc::LegSettings,
+) -> Arc<dyn hatch_client::Link> {
+    let link = fleet::Leg::new();
+    {
+        let link = link.clone();
+        fleet::supervise(
+            health::Peer::Hatch,
+            addr.clone(),
+            how,
+            api_health,
+            move || {
+                let (addr, attestor) = (addr.clone(), attestor.clone());
+                async move { hatch::connect_hatch(&addr, attestor, leg).await }
+            },
+            move |client| link.set(client),
+        )
+        .await;
+    }
+    link
 }
 
 /// The 32-byte secret every sealed byte this process writes is sealed under.

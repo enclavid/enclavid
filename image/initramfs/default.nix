@@ -10,6 +10,7 @@
 #   /bin/timesync   the clock keeper, the same in every role (crates/timesync)
 #   /bin/app        the role's application — api, storage-cvm, …
 #   /bin/<sibling>  binaries the application execs, under the names it uses
+#   the files a role reads besides — the hatch's CA bundle and resolver
 #   /dev/console    the console dinit writes to, and
 #   /dev/null       what it gives every service as stdin, both before any of
 #                   them has mounted /dev — the mount of /dev among them
@@ -40,6 +41,9 @@
   # executable, so the name is what matters and `/bin/app` is not enough on its
   # own. Empty for a role that spawns nothing.
 , siblings ? { }
+  # Files the role reads, keyed by where they go — the hatch's CA bundle, say.
+  # Empty for a role that reads none.
+, files ? { }
 }:
 let
   nixpkgs = builtins.fetchTarball {
@@ -79,6 +83,9 @@ pkgs.runCommand "enclavid-initramfs-${name}"
   install -m 0755 ${app}                   root/bin/app
   ${pkgs.lib.concatStringsSep "\n  " (
     pkgs.lib.mapAttrsToList (n: path: "install -m 0755 ${path} root/bin/${n}") siblings
+  )}
+  ${pkgs.lib.concatStringsSep "\n  " (
+    pkgs.lib.mapAttrsToList (at: path: "install -D -m 0644 ${path} root/${at}") files
   )}
 
   mkdir -p $out

@@ -2,17 +2,16 @@
 # module beside fleet.nix builds on them rather than copying them.
 { lib, pkgs, idKeys, host }:
 rec {
-  # The port on the host the fleet's own hatch listens on.
-  hatchPort = 8000;
-
   # A release's guest's vsock context ID, from the release's index: 3 + 10 ×
-  # index onward, so a release's guests take 3 to 6 of every ten. Index 0 has
-  # the numbers a single release has always had.
+  # index onward, so a release's guests take 3 to 6 and 8 of every ten — a
+  # gateway's is the 7 between. Index 0 has the numbers a single release has
+  # always had.
   cidOf = r: role: toString (r.index * 10 + {
     api = 3;
     storage = 4;
     execution-worker = 5;
     compile-worker = 6;
+    hatch = 8;
   }.${role});
 
   # A command line as the words the kernel splits it into, so a setting is
@@ -57,9 +56,10 @@ rec {
   };
 
   # A guest's unit. `files` are fw_cfg entries read from a file as it boots,
-  # by name; `needs` the units it starts after and pulls in — without taking a
-  # restart of one as a reason to restart.
-  cvmService = { name, image, qemu, cid, memory, disk ? null, environment ? { }, files ? { }, needs ? [ ] }: {
+  # by name; `nic` the socket its network interface is carried over, for the
+  # one role that has one; `needs` the units it starts after and pulls in —
+  # without taking a restart of one as a reason to restart.
+  cvmService = { name, image, qemu, cid, memory, disk ? null, environment ? { }, files ? { }, nic ? null, needs ? [ ] }: {
     description = "Enclavid confidential VM: ${name}";
     wantedBy = [ "enclavid-fleet.target" ];
     partOf = [ "enclavid-fleet.target" ];
@@ -74,7 +74,7 @@ rec {
     startLimitBurst = 5;
     environment = environment // lib.optionalAttrs (files != { }) {
       FW_CFG_FILES = lib.concatStringsSep " " (lib.mapAttrsToList (entry: path: "${entry}=${path}") files);
-    };
+    } // lib.optionalAttrs (nic != null) { NIC = nic; };
     serviceConfig = {
       Type = "exec";
       ExecStart = lib.concatStringsSep " " (
@@ -190,119 +190,81 @@ rec {
     };
   };
 
-  # The program a hatch runs, from `src`'s own tree.
-  hatchProgram = src:
-    let built = import (within src "image") { inherit idKeys; };
-    in (import (within src "deploy/host.nix") { inherit (built) pkgs; }).host-hatch;
-
-  # The directory the hatch `name` runs in as its root. The service manager
-  # needs it to exist before the hatch starts, so the fleet declares it.
-  hatchRootPath = name: "/var/lib/enclavid/hatch-${name}-root";
-
-  # What the hatch `unit`, built from `src`'s tree, sees of the store: its
-  # program's closure and the CA bundle, each bound into its empty root by a
-  # drop-in, and nothing else. The list is the closure's own, written when the
-  # drop-in is built, so evaluating the fleet builds nothing. Every hatch unit
-  # takes one — without it, its root holds no program to run.
-  hatchRoot = { unit, src }: pkgs.runCommand "${unit}-root"
-    { closure = pkgs.closureInfo { rootPaths = [ (hatchProgram src) pkgs.cacert ]; }; }
-    ''
-      mkdir -p $out/lib/systemd/system/${unit}.d
-      { echo '[Service]'; sed 's/^/BindReadOnlyPaths=/' $closure/store-paths; } \
-        >$out/lib/systemd/system/${unit}.d/root.conf
-    '';
-
-  # A hatch built from `src`'s own tree, listening on `port` for the guests
-  # `from` names by context ID, checking consumers' tokens, and how often each
-  # asks, as `settings` — `enclavid.hatch` — says. It keeps nothing
-  # it could not fetch again, so it is started again however often it ends.
-  hatchService = { name, port, src, settings, from }: {
-    description = "Enclavid hatch ${name}: what the guests reach outside";
+  # Where the network interface of the hatch guest `name` is carried, and the
+  # unit carrying it: a passt, which opens on this host's network the
+  # connections the guest opens — TCP and UDP over IPv4 — and takes none in.
+  # The guest is 10.0.2.15, its gateway 10.0.2.2, and neither address is
+  # mapped to anything of this host: the host's loopback is out of the guest's
+  # reach, but for a resolver. The guest asks 10.0.2.3 for names, whatever
+  # answers: passt carries what it sends there on ports 53 and 853, and nothing
+  # else, to `nameserver`, or, where null, to this host's own resolver — the
+  # first in its /etc/resolv.conf, loopback or not, which passt reads as it
+  # starts only when told no resolver to hand out itself. So the guest's
+  # resolver is the same address whatever network its passt is on, and a passt
+  # started again on another one resolves through that one at once.
+  netSocket = name: "/run/enclavid-${name}-net/sock";
+  netService = { name, nameserver }: {
+    description = "Enclavid: the network of the hatch ${name}";
     wantedBy = [ "enclavid-host.target" ];
     partOf = [ "enclavid-host.target" ];
     enableDefaultPath = false;
     startLimitIntervalSec = 0;
-    environment = {
-      HATCH_LISTEN_ADDR = toString port;
-      HATCH_FROM = lib.concatStringsSep "," from;
-      # The registry client checks servers against the system's CA bundle,
-      # and the host's own is out of its sight: this one, which hatchRoot
-      # binds in.
-      SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-    } // lib.mapAttrs (_: toString) (lib.filterAttrs (_: n: n != null) {
-      HATCH_SESSION_CREATE_PER_MINUTE = settings.perMinute.sessionCreate;
-      HATCH_SESSION_READ_PER_MINUTE = settings.perMinute.sessionRead;
-      HATCH_DATA_READ_PER_MINUTE = settings.perMinute.dataRead;
-      HATCH_CONCURRENT_MANIFESTS = settings.concurrent.manifests;
-      HATCH_CONCURRENT_BLOBS = settings.concurrent.blobs;
-    }) // (
-      if settings.auth == "oidc" then {
-        HATCH_AUTH = "oidc";
-        HATCH_AUTH_OIDC_ISSUER = settings.issuer;
-        HATCH_AUTH_OIDC_AUDIENCE = settings.audience;
-        HATCH_AUTH_OIDC_PRINCIPAL_CLAIM = settings.principalClaim;
-      } else {
-        HATCH_AUTH = "none";
-        HATCH_AUTH_PRINCIPAL = settings.principal;
-      }
-    );
     serviceConfig = {
       Type = "exec";
-      ExecStart = lib.getExe' (hatchProgram src) "host-hatch";
-      Restart = "on-failure";
+      ExecStart = lib.concatStringsSep " " ([
+        (lib.getExe' pkgs.passt "passt")
+        "--foreground"
+        "--quiet"
+        "--socket"
+        (netSocket name)
+        "--ipv4-only"
+        "--no-icmp"
+        "--tcp-ports"
+        "none"
+        "--udp-ports"
+        "none"
+        "--address"
+        "10.0.2.15"
+        "--netmask"
+        "24"
+        "--gateway"
+        "10.0.2.2"
+        "--map-host-loopback"
+        "none"
+        "--map-guest-addr"
+        "none"
+        "--search"
+        "none"
+        "--dns-forward"
+        "10.0.2.3"
+      ] ++ lib.optionals (nameserver != null) [ "--dns" "10.0.2.3" "--dns-host" nameserver ]);
+      # The guest reconnects to a passt started again, at the same addresses.
+      Restart = "always";
       RestartSec = 1;
       StandardInput = "null";
-      # Nothing of the host beyond what a hatch uses: a user of its own, no
-      # privilege, and no way to gain one or to leave its namespaces; sockets
-      # of the three families it opens and no other, so no unix or netlink
-      # socket of anything here; and of the host's files only those it reads,
-      # read-only — its program's closure, the CA bundle, its resolver's — in
-      # a root that holds nothing else, so whatever the host keeps, now or
-      # later, is not there for it.
+      # A user of its own, given the one capability passt's own sandbox needs
+      # on a host that keeps unprivileged users from making user namespaces; it
+      # drops that, and every other, once the sandbox is made.
       DynamicUser = true;
-      CapabilityBoundingSet = "";
-      RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_VSOCK" ];
-      # The families are checked on the native socket call, which the 32-bit
-      # one and io_uring would go round: neither is left to it.
+      AmbientCapabilities = "CAP_SYS_ADMIN";
+      CapabilityBoundingSet = "CAP_SYS_ADMIN";
+      RuntimeDirectory = "enclavid-${name}-net";
+      # And bounds of its own beside passt's: sockets of the families it opens
+      # and no other — no vsock, which no network namespace holds, so a passt
+      # turned by what it carries reaches no guest and no relay — no privilege
+      # to gain, nothing of the kernel's to change, and memory past which only
+      # it is stopped. Its sandbox, which makes namespaces of its own, is left to
+      # it.
+      RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+      NoNewPrivileges = true;
       SystemCallArchitectures = "native";
-      SystemCallFilter = [ "@system-service" "~@privileged @resources @aio" ];
-      SystemCallErrorNumber = "EPERM";
-      RestrictNamespaces = true;
       LockPersonality = true;
-      MemoryDenyWriteExecute = true;
-      RestrictRealtime = true;
       PrivateDevices = true;
-      PrivateIPC = true;
-      ProtectHome = true;
-      ProtectHostname = true;
-      ProtectClock = true;
       ProtectKernelTunables = true;
       ProtectKernelModules = true;
       ProtectKernelLogs = true;
       ProtectControlGroups = true;
-      ProtectProc = "invisible";
-      ProcSubset = "pid";
-      # Its root: a directory of its own on the host, holding nothing but the
-      # mount points the service manager makes there, under a tmpfs that hides
-      # even those from the hatch. Not a copy made for each run
-      # (`RootEphemeral=`): the service manager deletes that under a running
-      # service on any daemon-reload, and every file the hatch opens after it
-      # is missing. Nor a directory in the store, where those mount points
-      # would be left behind. And not the tmpfs alone: `DynamicUser=` brings
-      # `ProtectSystem=strict`, whose read-only view of the host's whole `/`
-      # takes the tmpfs's place unless a root of its own is given.
-      RootDirectory = hatchRootPath name;
-      TemporaryFileSystem = "/:ro";
-      MountAPIVFS = true;
-      BindReadOnlyPaths = [ "/etc/resolv.conf" ];
-      # What a consumer names is fetched by the hatch itself, never through a
-      # proxy the service manager's environment might name.
-      UnsetEnvironment = [ "HTTP_PROXY" "http_proxy" "HTTPS_PROXY" "https_proxy" "ALL_PROXY" "all_proxy" "NO_PROXY" "no_proxy" ];
-      # By default 128 manifests at once of at most 256 KiB each, 32 MiB in
-      # all, and eight blobs passed through a piece at a time, beside a hatch
-      # at rest of some 50 MiB, with room besides: past it, the hatch alone is
-      # stopped and started again, never a guest beside it.
-      MemoryMax = "1G";
+      MemoryMax = "256M";
     };
   };
 }

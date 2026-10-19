@@ -1,25 +1,24 @@
-//! Client wrapper for the hatch `/kbs/relay` endpoint.
+//! Client for the hatch's KBS relay.
 //!
-//! The TEE has no outbound network, so it reaches an artifact-key broker
-//! (KBS) through the hatch as a semantic HTTP proxy. This is the thin
-//! transport primitive: it forwards ONE handshake/key-release leg and
-//! returns the KBS response. The KBS attestation state machine (RCAR:
-//! auth → challenge → attestation → resource), the ephemeral `TeeKeyPair`,
-//! and the JWE response unwrap live one layer up in the api keyprovider —
-//! this client just couriers bytes.
+//! api reaches an artifact-key broker (KBS) through the hatch. This is the thin
+//! transport primitive: it forwards ONE handshake/key-release leg and returns
+//! the broker's answer. The attestation state machine (RCAR: auth → challenge →
+//! attestation → resource), the ephemeral `TeeKeyPair` and the JWE unwrap live
+//! one layer up in the api keyprovider — this client just couriers bytes.
 //!
-//! Trust model: the hatch can drop or stall a leg, but cannot forge the
-//! released secret — it is JWE-wrapped to the TEE's ephemeral key, so only
-//! the enclave can unwrap it. Caller MUST verify via `.trust(...)` at the
-//! keyprovider layer (the unwrap closes AuthN; the RCAR challenge nonce
-//! closes Replay).
+//! Trust model: the broker's answer can be dropped or stalled on the way, but
+//! the released secret cannot be forged — it is JWE-wrapped to api's ephemeral
+//! key, so only the enclave can unwrap it. The caller MUST verify via
+//! `.trust(...)` at the keyprovider layer (the unwrap closes AuthN; the RCAR
+//! challenge nonce closes Replay).
 
-use hatch_protocol::{KbsRelayRequest, KbsRelayResponse};
-use hyper::StatusCode;
+use std::sync::Arc;
+
+use hatch_rpc::{HatchService, KbsRequest, KbsResponse};
 
 use crate::boundary;
 use crate::error::BridgeError;
-use crate::transport::HatchClient;
+use crate::link::{Link, hatch, within};
 use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 /// How long the hatch has to answer ONE relayed leg, unless the host says
@@ -31,38 +30,36 @@ use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 /// unbounded wait here parks a round that is holding that round's captures.
 pub const DEFAULT_RELAY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Client for the hatch `/kbs/relay` endpoint over the shared hatch
-/// connection.
+/// Client for the hatch's KBS relay.
 #[derive(Clone)]
 pub struct KbsClient {
-    hatch: HatchClient,
+    link: Arc<dyn Link>,
     deadline: std::time::Duration,
 }
 
 impl KbsClient {
     /// A client whose every relayed leg the hatch has `deadline` to answer.
-    pub fn new(hatch: HatchClient, deadline: std::time::Duration) -> Self {
-        Self { hatch, deadline }
+    pub fn new(link: Arc<dyn Link>, deadline: std::time::Duration) -> Self {
+        Self { link, deadline }
     }
 
-    /// Forward one KBS leg through the hatch. The request is vouched by
-    /// the keyprovider producer (it holds the untrusted `endpoint` and the
-    /// HPKE/JWE-protected payload); we just release it. The response is
-    /// `Untrusted` — the keyprovider verifies it by unwrapping the JWE
-    /// with the ephemeral key.
+    /// Forward one KBS leg through the hatch. The request is vouched by the
+    /// keyprovider producer (it holds the untrusted `endpoint` and the
+    /// JWE-protected payload); we just release it. The response is
+    /// `Untrusted` — the keyprovider verifies it by unwrapping the JWE with the
+    /// ephemeral key.
     pub async fn relay(
         &self,
-        req: Exposed<KbsRelayRequest>,
-    ) -> Result<Untrusted<KbsRelayResponse, (AuthN, AuthZ, Replay)>, BridgeError> {
-        let bytes = hatch_protocol::encode(&req.into_inner())?;
-        let resp = self.hatch.post("/kbs/relay", bytes, self.deadline).await?;
-
-        match resp.status {
-            StatusCode::OK => {
-                let r: KbsRelayResponse = hatch_protocol::decode(&resp.body)?;
-                Ok(boundary::inbound::from_untrusted(r))
-            }
-            s => Err(BridgeError::Transport(format!("kbs relay: status {s}"))),
-        }
+        req: Exposed<KbsRequest>,
+    ) -> Result<Untrusted<KbsResponse, (AuthN, AuthZ, Replay)>, BridgeError> {
+        let hatch = hatch(self.link.as_ref())?;
+        let response = within(self.deadline, "kbs relay", async {
+            hatch
+                .kbs(req.into_inner())
+                .await
+                .map_err(|e| BridgeError::Transport(e.to_string()))
+        })
+        .await?;
+        Ok(boundary::inbound::from_untrusted(response))
     }
 }

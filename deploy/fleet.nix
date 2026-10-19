@@ -1,8 +1,8 @@
 # The fleet as a system-manager module: the gateway, the release it serves —
-# api and the three guests it reaches, with the host side they all reach — and
+# api and the four guests it reaches, with the host side they all reach — and
 # the gateway's configuration. Everything has a default for one host running
 # this checkout, except what only its operator can know: the public names, and
-# how consumers' tokens are checked. See example.nix.
+# how consumers are authorized. See example.nix.
 { config, lib, pkgs, fleet, ... }:
 let
   cfg = config.enclavid;
@@ -17,7 +17,7 @@ let
     (name: g: g // { inherit name; built = fleet.release cfg.variant g.src; })
     cfg.gateways;
   gatewayHere = gateways != [ ];
-  roles = [ "api" "storage" "compile-worker" "execution-worker" ];
+  roles = [ "api" "storage" "compile-worker" "execution-worker" "hatch" ];
 
   # Where a release's guests are, from its index: context IDs as `fleet.cidOf`
   # gives them, host ports from their base + 100 × index. Index 0 has the
@@ -30,8 +30,9 @@ let
   # `apiPort`, which both ways of reaching them use — and the settings a
   # command line must carry are made from these and checked against the lines,
   # so a change to one that the other misses fails the build instead of
-  # carrying nothing. The ports api's legs dial are not on its command line:
-  # they are handed to it at launch, from these same relays and its hatch.
+  # carrying nothing. The ports api's legs dial, and those of the hooks the
+  # hatch asks, are not on a command line: they are handed to the guest at
+  # launch, from these same relays.
   apiPort = { client = "8443"; applicant = "8444"; };
   # A vsock relay takes calls only from the guests meant to dial it: any other
   # guest on the host — one that has broken out of what it runs, say — reaches
@@ -41,8 +42,9 @@ let
     storage = { listen = "vsock:${portOf r 8001}"; to = "vsock:${cidOf r "storage"}:8001"; flags = fromApi; };
     compile = { listen = "vsock:${portOf r 8002}"; to = "vsock:${cidOf r "compile-worker"}:8002"; flags = fromApi; };
     exec = { listen = "vsock:${portOf r 8003}"; to = "vsock:${cidOf r "execution-worker"}:8003"; flags = fromApi; };
+    hatch = { listen = "vsock:${portOf r 8004}"; to = "vsock:${cidOf r "hatch"}:8004"; flags = fromApi; };
     health = { listen = "tcp:127.0.0.1:${portOf r 18445}"; to = "vsock:${cidOf r "api"}:8445"; };
-  } // lib.optionalAttrs (r.entrances != null) {
+  } // hookRelays r // lib.optionalAttrs (r.entrances != null) {
     # Where a gateway on another host reaches this release's api: over the
     # network, to a relay here, and on into the guest. Nothing is opened on the
     # way — the gateway's leg is RA-TLS to api itself.
@@ -50,6 +52,19 @@ let
     applicant-entrance = { listen = entrance r 19444; to = "vsock:${cidOf r "api"}:${apiPort.applicant}"; };
   };
   entrance = r: base: "tcp:${r.entrances}:${portOf r base}";
+  # The hooks a release's hatch asks — those `hatch` names, and no other —
+  # each through a relay that takes calls from that hatch alone.
+  hookRelays = r:
+    let
+      hook = base: to: {
+        listen = "vsock:${portOf r base}";
+        inherit to;
+        flags = onlyFrom [ (cidOf r "hatch") ];
+        unprivileged = true;
+      };
+    in
+    lib.optionalAttrs (cfg.hatch.authorize != "none") { authorize-hook = hook 8005 cfg.hatch.authorize; }
+    // lib.optionalAttrs (cfg.hatch.limits != null) { limits-hook = hook 8006 cfg.hatch.limits; };
   # How the gateways here reach a release's api: straight into its guest on
   # this host, or to its entrances wherever they are. One relay each, which
   # every gateway dials.
@@ -115,10 +130,6 @@ let
     ])
     timeServers);
   relays = releaseSide // perGateway // timeRelays;
-  # The apis here that reach outside through the fleet's own hatch — the only
-  # guests it takes calls from. With none, it does not run.
-  sharedHatchCallers = map (r: cidOf r "api") (lib.filter (r: r.hatchPort == fleet.hatchPort) local);
-  sharedHatch = sharedHatchCallers != [ ];
   # A certificate run arms every gateway here, the one listening where callers
   # reach — `public.listen` — above all: the issuer's validator comes to it.
   configs = gs: lib.concatMapStringsSep "," (g: "http://${fleet.gatewayConfig g.index}") gs;
@@ -127,8 +138,10 @@ let
   arming = lib.optionals (reached != [ ]) [ "--reached" (configs reached) ]
     ++ lib.optionals (unreached != [ ]) [ "--also" (configs unreached) ];
 
-  # A hatch's allowance a minute: a count it holds as one, or -1 for none.
-  perMinute = types.nullOr (types.either (types.enum [ (-1) ]) (types.ints.between 1 4294967295));
+  # Where a hook answers, as host-relay names an address it dials.
+  # On this host's loopback and nowhere else: a hook is asked in plain HTTP,
+  # with a consumer's credential in the call.
+  hookAddress = types.strMatching "tcp:127\\.0\\.0\\.1:[0-9]{1,5}";
 
   # The guest's own port a relay reaches: the last field of its `to`.
   into = relay: lib.last (lib.splitString ":" relay.to);
@@ -141,6 +154,7 @@ let
     storage = [ "ENCLAVID_STORAGE_LISTEN=${into storage}" ];
     compile-worker = [ "ENCLAVID_COMPILE_WORKER_LISTEN=${into compile}" ];
     execution-worker = [ "ENCLAVID_EXECUTION_WORKER_LISTEN=${into exec}" ];
+    hatch = [ "ENCLAVID_HATCH_LISTEN=${into hatch}" ];
   };
   gatewayCarried = g:
     let relay = gatewayRelays g;
@@ -153,16 +167,22 @@ let
   # A role's launch settings as the one fw_cfg entry its guest reads them from
   # (crates/fleet-transport/src/launch.rs): `settings=key=value;…`. None set,
   # none sent, and the guest takes its own defaults.
-  settingsEntry = role:
-    let given = cfg.cvms.${role}.settings;
+  settingsEntry = r: role:
+    let given = cfg.cvms.${role}.settings // lib.optionalAttrs (role == "hatch") (hookSettings r);
     in lib.optional (given != { }) ("settings=" + lib.concatStringsSep ";"
       (lib.mapAttrsToList (key: value: "${key}=${toString value}") given));
 
-  # What a release's api legs dial: its hatch's port, and the port each peer's
-  # relay listens on, as fw_cfg entries (crates/api/src/fleet/legs.rs) — so a
-  # relay, or the hatch, and the dial that reaches it are one definition.
+  # The hatch's settings the fleet gives it itself: the port each hook's relay
+  # listens on. A hook it is given no port for, it does not ask.
+  hookSettings = r: lib.mapAttrs'
+    (name: relay: lib.nameValuePair "${name}-port" (lib.removePrefix "vsock:" relay.listen))
+    (hookRelays r);
+
+  # What a release's api legs dial: the port each peer's relay listens on, as
+  # fw_cfg entries (crates/api/src/fleet/legs.rs) — so a relay and the dial
+  # that reaches it are one definition.
   legPorts = r: with releaseRelays r; lib.concatStringsSep " " [
-    "hatch-port=${toString r.hatchPort}"
+    "hatch-port=${lib.removePrefix "vsock:" hatch.listen}"
     "storage-port=${lib.removePrefix "vsock:" storage.listen}"
     "compile-worker-port=${lib.removePrefix "vsock:" compile.listen}"
     "execution-worker-port=${lib.removePrefix "vsock:" exec.listen}"
@@ -251,14 +271,23 @@ let
         inherit (cfg.cvms.storage.disk) size;
       } else null;
       environment =
-        let entries = lib.optional (role == "api") (legPorts r) ++ settingsEntry role;
+        let entries = lib.optional (role == "api") (legPorts r) ++ settingsEntry r role;
         in lib.optionalAttrs (entries != [ ]) { FW_CFG = lib.concatStringsSep " " entries; };
     } // lib.optionalAttrs (role == "api") {
       # The certificate its quotes are checked by, as the host keeps it.
       files.vcek = fleet.vcekPath;
       needs = [ "enclavid-vcek.service" ];
+    } // lib.optionalAttrs (role == "hatch") {
+      nic = fleet.netSocket "${r.name}-hatch";
+      needs = [ "enclavid-${r.name}-hatch-net.service" ];
     })))
-    roles);
+    roles)
+  // {
+    "enclavid-${r.name}-hatch-net" = fleet.netService {
+      name = "${r.name}-hatch";
+      inherit (cfg.hatch) nameserver;
+    };
+  };
 
   # A gateway keeps no configuration across a start: while it is up, its table
   # is pushed — again after every start, since the push is bound to it; and
@@ -380,65 +409,39 @@ in
       };
     };
     hatch = {
-      auth = mkOption {
-        type = types.enum [ "oidc" "none" ];
+      authorize = mkOption {
+        type = types.either (types.enum [ "none" ]) hookAddress;
+        example = "tcp:127.0.0.1:9100";
         description = ''
-          How consumers' tokens are checked: against an OIDC issuer, or not at
-          all, with every request taken to be `principal` — for development only.
+          Who may call api as a consumer: `"none"`, for anyone who reaches it,
+          with no credential asked for and every session created as no one's;
+          or the address of the hook that says, from the `Authorization`
+          header each call brings — `crates/hatch/hooks.openapi.yaml`. The
+          principal it names is the one a session is kept under, and only
+          calls naming it read the session back.
         '';
       };
-      issuer = mkOption { type = types.nullOr types.str; default = null; };
-      audience = mkOption { type = types.nullOr types.str; default = null; };
-      principalClaim = mkOption {
-        type = types.nullOr types.str;
+      limits = mkOption {
+        type = types.nullOr hookAddress;
         default = null;
-        example = "urn:zitadel:iam:user:resourceowner:id";
+        example = "tcp:127.0.0.1:9101";
         description = ''
-          With `auth = "oidc"`, the token claim naming the consumer's
-          organization — the principal requests are counted and sessions kept
-          under. Each issuer names it its own way.
+          The address of the hook that gives each principal's limits, asked at
+          every session created: whether it may go on — the hook counts how
+          often — and the terms the session is held to. Null for none: sessions
+          are created as fast as they are asked for, and held to the fleet's
+          own ceilings.
         '';
       };
-      principal = mkOption { type = types.nullOr types.str; default = null; };
-      # How often one principal may ask for each, a minute, all at once if
-      # need be; -1 for no limit, null for the hatch's own. With
-      # `auth = "none"` every request is the one principal, credential or
-      # none, so a limit is the host's, and anyone can spend it for everyone.
-      perMinute = {
-        sessionCreate = mkOption {
-          type = perMinute;
-          default = null;
-          description = ''
-            Sessions one principal may create a minute; the hatch's own is 60.
-            Every session is later fetched and compiled for its applicant, so
-            this is also what a consumer may have the guests do.
-          '';
-        };
-        sessionRead = mkOption {
-          type = perMinute;
-          default = null;
-          description = "Reads of a session's state one principal may make a minute; the hatch's own is 600.";
-        };
-        dataRead = mkOption {
-          type = perMinute;
-          default = null;
-          description = "Pulls of a session's disclosures one principal may make a minute; the hatch's own is 120.";
-        };
-      };
-      # How many registry fetches the hatch has under way at once, for every
-      # guest on the host together; null for the hatch's own. How many of them
-      # one consumer's sessions may have is api's `registry-requests-per-consumer`.
-      concurrent = {
-        manifests = mkOption {
-          type = types.nullOr types.ints.positive;
-          default = null;
-          description = "Manifests fetched at once; the hatch's own is 128, each at most 256 KiB.";
-        };
-        blobs = mkOption {
-          type = types.nullOr types.ints.positive;
-          default = null;
-          description = "Blobs streamed at once, each for as long as its stream runs; the hatch's own is 8.";
-        };
+      nameserver = mkOption {
+        type = types.nullOr (types.strMatching "([0-9]{1,3}[.]){3}[0-9]{1,3}");
+        default = null;
+        example = "192.0.2.53";
+        description = ''
+          The resolver the hatch looks up the registries and key brokers
+          consumers name at, as an IPv4 address its network reaches. Null for
+          this host's own, the first in its /etc/resolv.conf.
+        '';
       };
     };
     variant = mkOption {
@@ -521,6 +524,7 @@ in
       compile-worker = cvm "compile-worker" { memory = "8G"; };
       execution-worker = cvm "execution-worker" { memory = "10G"; };
       api = cvm "api" { memory = "3G"; };
+      hatch = cvm "hatch" { memory = "1G"; };
       gateway = cvm "gateway" { memory = "2G"; };
     };
 
@@ -549,11 +553,6 @@ in
             type = types.bool;
             default = false;
             description = "Whether the gateway refuses its build new sessions, while its links still route.";
-          };
-          hatchPort = mkOption {
-            type = types.port;
-            default = fleet.hatchPort;
-            description = "The port of the hatch its api reaches outside through.";
           };
           guests = mkOption {
             type = types.bool;
@@ -618,15 +617,14 @@ in
       (map (g: (gatewayRelays g).health) gateways ++ map (r: (releaseRelays r).health) local);
     enclavid.units =
       lib.concatMap (g: [ "enclavid-gateway-${g.name}.service" "enclavid-gateway-${g.name}-push.service" ]) gateways
-      ++ lib.optional sharedHatch "enclavid-hatch.service"
       ++ lib.optional (local != [ ]) "enclavid-vcek.service"
-      ++ lib.concatMap (r: map (role: "enclavid-${r.name}-${role}.service") roles) local
+      ++ lib.concatMap (r: map (role: "enclavid-${r.name}-${role}.service") roles ++ [ "enclavid-${r.name}-hatch-net.service" ]) local
       ++ map (name: "enclavid-relay-${name}.service") (lib.attrNames relays);
     enclavid.memory = map (_: cfg.cvms.gateway.memory) gateways
       ++ lib.concatMap (_: map (role: cfg.cvms.${role}.memory) roles) local;
     enclavid.qemus = lib.unique (map (g: g.built.qemu) gateways ++ map (r: r.built.qemu) local);
-    enclavid.vsockPorts = lib.optional sharedHatch (toString fleet.hatchPort)
-      ++ map (r: lib.removePrefix "vsock:" r.listen) (lib.filter (r: lib.hasPrefix "vsock:" r.listen) (lib.attrValues relays));
+    enclavid.vsockPorts =
+      map (r: lib.removePrefix "vsock:" r.listen) (lib.filter (r: lib.hasPrefix "vsock:" r.listen) (lib.attrValues relays));
 
     # system-manager would otherwise take over /etc/passwd and /etc/group.
     services.userborn.enable = false;
@@ -667,13 +665,8 @@ in
           message = "enclavid.releases: with the gateway on another host, a release's api is reached at its entrances";
         }
         {
-          assertion = cfg.hatch.auth != "oidc"
-            || (cfg.hatch.issuer != null && cfg.hatch.audience != null && cfg.hatch.principalClaim != null);
-          message = "enclavid.hatch: auth = \"oidc\" needs issuer, audience and principalClaim";
-        }
-        {
-          assertion = cfg.hatch.auth != "none" || cfg.hatch.principal != null;
-          message = "enclavid.hatch: auth = \"none\" needs principal";
+          assertion = !(cfg.cvms.hatch.settings ? authorize-hook-port || cfg.cvms.hatch.settings ? limits-hook-port);
+          message = "enclavid.cvms.hatch.settings: the hooks' ports are the fleet's, from hatch.authorize and hatch.limits";
         }
         {
           assertion = lib.all (r: builtins.match "[a-z0-9-]{1,32}" r.name != null) releases;
@@ -699,7 +692,7 @@ in
         {
           assertion = lib.allUnique cfg.vsockPorts
             && lib.allUnique (map (r: r.listen) (lib.filter (r: lib.hasPrefix "tcp:" r.listen) (lib.attrValues relays)));
-          message = "enclavid: two of the relays and hatches listen on one host port";
+          message = "enclavid: two of the relays listen on one host port";
         }
         {
           assertion = !issue.enable || issue.acceptTerms;
@@ -710,29 +703,7 @@ in
     systemd.services = lib.mkMerge ([
       (lib.mapAttrs' (name: r: lib.nameValuePair "enclavid-relay-${name}" (fleet.relayService name r)) relays)
       (lib.mkIf (local != [ ]) { enclavid-vcek = fleet.vcekService; })
-      (lib.mkIf sharedHatch {
-        enclavid-hatch = fleet.hatchService {
-          name = "shared";
-          port = fleet.hatchPort;
-          src = ../.;
-          settings = cfg.hatch;
-          from = sharedHatchCallers;
-        };
-      })
     ] ++ map releaseServices local ++ map gatewayServices gateways);
-    systemd.packages = lib.optional sharedHatch (fleet.hatchRoot {
-      unit = "enclavid-hatch.service";
-      src = ../.;
-    });
-    # The hatch's root has to exist before it starts, and owned by root: one
-    # it could write to would be a root it could change.
-    systemd.tmpfiles.settings = lib.mkIf sharedHatch {
-      "10-enclavid-hatch"."${fleet.hatchRootPath "shared"}".d = {
-        mode = "0755";
-        user = "root";
-        group = "root";
-      };
-    };
 
     # Every six hours, which is how often Let's Encrypt asks to be asked when a
     # certificate should be renewed — an early renewal it asks for ahead of
@@ -754,7 +725,7 @@ in
     # does not change when the fleet does — and a target is never restarted
     # under the units that are part of it.
     systemd.targets = {
-      enclavid-host.description = "Enclavid host side: the relays and the hatches";
+      enclavid-host.description = "Enclavid host side: the relays and the hatches' networks";
       enclavid-fleet = {
         description = "Enclavid fleet: the confidential VMs, and the host side they reach";
         wants = [ "enclavid-host.target" ];

@@ -25,25 +25,6 @@ use crate::fleet::Dial;
 /// consumer to pull disclosures after completion.
 const DEFAULT_SESSION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
-/// How often api asks the hatch whether this guest can still reach it, unless
-/// the host says otherwise (`hatch-probe-secs`).
-///
-/// A clock, not a reaction: it runs at this rate whether or not anyone is being
-/// verified, which is exactly what keeps the bit from reporting session
-/// activity. The host choosing the rate changes nothing about that — it is one
-/// rate for the life of the guest. Ten seconds because it is the same order as
-/// chmux's own keepalive on the fleet legs, so every field of the answer ages at
-/// one rate and a host polling it needs one cadence in mind rather than three.
-const DEFAULT_HATCH_PROBE: Duration = Duration::from_secs(10);
-
-/// How long one probe waits before calling it a miss, unless the host says
-/// otherwise (`hatch-probe-deadline-secs`).
-///
-/// Shorter than the interval, and the boot refuses one that is not, so a
-/// stalled hatch cannot make probes overlap: at most one is ever in flight, and
-/// the bit is never older than one interval plus this.
-const DEFAULT_HATCH_PROBE_DEADLINE: Duration = Duration::from_secs(5);
-
 /// api's settings, as the host gave them or as this build defaults them.
 pub struct Settings {
     pub session_ttl_secs: u64,
@@ -62,10 +43,6 @@ pub struct Settings {
     /// How long the hatch has to answer one relayed KBS leg
     /// (`kbs-deadline-secs`).
     pub kbs_deadline: Duration,
-    /// How often the hatch bit is probed (`hatch-probe-secs`).
-    pub hatch_probe: Duration,
-    /// How long one probe waits (`hatch-probe-deadline-secs`).
-    pub hatch_probe_deadline: Duration,
     /// How many of a round's callbacks may wait for its server
     /// (`callback-request-buffer`).
     pub callback_request_buffer: usize,
@@ -119,12 +96,6 @@ pub fn load() -> Settings {
             "kbs-deadline-secs",
             hatch_client::DEFAULT_RELAY_DEADLINE,
         ),
-        hatch_probe: secs(&mut launch, "hatch-probe-secs", DEFAULT_HATCH_PROBE),
-        hatch_probe_deadline: secs(
-            &mut launch,
-            "hatch-probe-deadline-secs",
-            DEFAULT_HATCH_PROBE_DEADLINE,
-        ),
         callback_request_buffer: number(
             &mut launch,
             "callback-request-buffer",
@@ -143,13 +114,6 @@ pub fn load() -> Settings {
         )),
     };
     launch.finish().unwrap_or_else(|e| refused(e));
-    if settings.hatch_probe_deadline >= settings.hatch_probe {
-        safe_logger::error_and_panic!(
-            "api: a hatch probe must end before the next one starts — its deadline under \
-             its period. Stopping.",
-            reason!("a constant, emitted once at boot before any request exists")
-        );
-    }
     if let Some(refusal) = settings.leg.refusal() {
         safe_logger::error_and_panic!(
             "api: {} cannot hold a leg up. Stopping.",

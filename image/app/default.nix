@@ -15,9 +15,11 @@
 # every block past 128 KiB with a fresh mmap and munmap, and a cold session's
 # compile, transfer and store spent a quarter more CPU on it, the compile a
 # third more. Nothing here uses what glibc cannot do statically — name service
-# lookups, dlopen, iconv — since a guest resolves no names and loads nothing.
+# lookups, dlopen, iconv — since a guest loads nothing, and the one that
+# resolves names, the hatch, resolves them in-process (hickory), never through
+# glibc.
 #
-# `measurements` is the three leaves' launch digests, and only api's part reads
+# `measurements` is the four leaves' launch digests, and only api's part reads
 # them — the gateway pins nothing, so it needs none. It is an argument rather
 # than something computed here because computing them needs the leaves' images,
 # which need this file; `image/default.nix` owns that ordering and is where a
@@ -141,7 +143,7 @@ builtins.foldl' (a: b: a // b) { } [
   #
   # api is also the one role written out per variant rather than through
   # `withDebug`, because the two differ by more than a feature: each pins the
-  # three leaf images of ITS OWN variant. A production api that pinned debug
+  # four leaf images of ITS OWN variant. A production api that pinned debug
   # leaves would refuse every peer it was given, correctly and confusingly.
   (let
     apiPart = variant: {
@@ -155,13 +157,14 @@ builtins.foldl' (a: b: a // b) { } [
       # characters, so `$(cat …)` has to be the whole of it.
       preBuild =
         let m = measurements.${variant} or (throw
-          "image/app: api is built from the three leaf measurements, and none were \
+          "image/app: api is built from the four leaf measurements, and none were \
            given. Build it through `image/default.nix`, which measures the leaves \
            first — `nix-build image -A images.api`.");
         in ''
           export ENCLAVID_MEASUREMENT_STORAGE=$(cat ${m.storage})
           export ENCLAVID_MEASUREMENT_COMPILE_WORKER=$(cat ${m.compile-worker})
           export ENCLAVID_MEASUREMENT_EXECUTION_WORKER=$(cat ${m.execution-worker})
+          export ENCLAVID_MEASUREMENT_HATCH=$(cat ${m.hatch})
           export ENCLAVID_FRONTEND_DIST=${import ../../frontend { inherit pkgs; }}
         '';
     };
@@ -200,6 +203,27 @@ builtins.foldl' (a: b: a // b) { } [
       binaries = [ "storage-cvm" ];
       noDefaultFeatures = true;
       features = [ "vsock" "sev-snp" ];
+    }];
+  })
+
+  # The hatch: the fleet's one way out, and the one role whose kernel has a
+  # network interface. `vsock` for its leg to api and its hooks on the host;
+  # what it fetches goes out through the interface. `sev-snp` off the defaults
+  # — see the storage part above.
+  (withDebug "hatch" {
+    pname = "enclavid-app-hatch";
+    parts = [{
+      package = "enclavid-hatch";
+      binaries = [ "hatch-cvm" ];
+      noDefaultFeatures = true;
+      features = [ "vsock" "sev-snp" ];
+      # The TLS its HTTP client speaks is aws-lc's, whose build links and runs a
+      # test program as statically as the binary will be — and the static libc
+      # is on rustc's search path alone. It reads LDFLAGS for that link, which
+      # nothing else in the build does.
+      preBuild = ''
+        export LDFLAGS="-L${pkgs.glibc.static}/lib"
+      '';
     }];
   })
 

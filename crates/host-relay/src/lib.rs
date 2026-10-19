@@ -159,8 +159,8 @@ pub enum Destination {
     /// `vsock:<cid>:<port>` — a listener inside a CVM over real `AF_VSOCK`. No
     /// preamble: the kernel carries the address.
     Vsock { cid: u32, port: u32 },
-    /// `tcp:<addr>` — a plain listener on the host or past it: `host-hatch`, a
-    /// release's entrances, an NTS server's key exchange.
+    /// `tcp:<addr>` — a plain listener on the host or past it: the hatch's
+    /// hooks, a release's entrances, an NTS server's key exchange.
     Tcp(String),
     /// `udp:<addr>` — a datagram service, such as an NTS server's time packets,
     /// at the address its name resolved to when the relay started. Each of its

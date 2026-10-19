@@ -68,6 +68,11 @@ pub struct BundleSource {
 }
 
 impl BundleSource {
+    /// The cwasm's length, as the bundle names it.
+    pub fn cwasm_len(&self) -> u64 {
+        self.header.cwasm.length()
+    }
+
     /// A bundle held whole. `None` if its metadata does not encode, or either
     /// blob is past what the hop accepts — which a round cannot fix.
     ///
@@ -279,6 +284,7 @@ mod tests {
     fn a_round_request_at_its_bounds_fits_its_budget() {
         let req = RunRequest {
             composition_key: CompositionKey::from_digest([0xFF; 32]),
+            max_cwasm_bytes: u64::MAX,
             props: Padded::seal(&RoundProps(vec![
                 0xFF;
                 engine_types::limits::MAX_PROPS_BYTES

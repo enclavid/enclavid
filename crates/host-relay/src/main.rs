@@ -9,9 +9,9 @@
 //! host-relay --listen unix:/run/enclavid/api.vsock_1027 \
 //!            --to     hybrid:/run/enclavid/exec-1.vsock:1024
 //!
-//! # the api CVM -> host-hatch, the semantic egress gateway
-//! host-relay --listen unix:/run/enclavid/api.vsock_1024 \
-//!            --to     tcp:127.0.0.1:8000
+//! # the hatch CVM -> the operator's authorization hook on the host
+//! host-relay --listen unix:/run/enclavid/hatch.vsock_8005 \
+//!            --to     tcp:127.0.0.1:9100
 //!
 //! # the same links on a VMM that gives the host real AF_VSOCK, the second
 //! # taking only the api guest's calls

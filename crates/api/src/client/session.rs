@@ -6,7 +6,7 @@ use axum::response::Response;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use session_types::SessionStatus;
+use session_types::{SessionStatus, Terms};
 use storage_client::Metadata;
 
 use crate::client_state::ClientState;
@@ -47,6 +47,42 @@ pub struct SessionView {
     /// `init_failed`: what in the consumer's own setup to change.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub init_error: Option<InitErrorView>,
+    /// What the session is held to: its consumer's limits as they stood at the
+    /// creation, held to the fleet's ceilings, and the fleet's own where they
+    /// named none.
+    pub terms: TermsView,
+}
+
+/// A session's terms as they apply: each a number.
+#[derive(Serialize)]
+pub struct TermsView {
+    /// The policy and its plugins together, in bytes.
+    pub components_bytes: u64,
+    /// The composition compiled, in bytes.
+    pub cwasm_bytes: u64,
+    /// How long the session lives from its creation, in seconds; `null` where
+    /// nothing removes it.
+    pub session_ttl_secs: Option<u64>,
+    /// How long one pull from a registry may take, in seconds.
+    pub pull_deadline_secs: u64,
+}
+
+impl TermsView {
+    fn of(terms: &Terms, state: &ClientState) -> Self {
+        let ttl = state.session_store.ttl_secs();
+        Self {
+            components_bytes: Terms::within(
+                terms.components_bytes,
+                engine_rpc::MAX_COMPONENTS_BYTES,
+            ),
+            cwasm_bytes: Terms::within(terms.cwasm_bytes, engine_rpc::MAX_CWASM_BYTES),
+            session_ttl_secs: terms.session_ttl_secs.or(ttl),
+            pull_deadline_secs: Terms::within(
+                terms.pull_deadline_secs,
+                state.pull_deadline.as_secs(),
+            ),
+        }
+    }
 }
 
 /// Route factory: bare `get(handler)` MethodRouter. Auth attached at
@@ -109,6 +145,7 @@ async fn read(
 
     let decision = metadata.decision.map(DecisionView::from);
     let init_error = metadata.init_error.as_ref().map(InitErrorView::from);
+    let terms = TermsView::of(&metadata.terms, &state);
     let view = SessionView {
         session_id,
         status,
@@ -126,6 +163,7 @@ async fn read(
         created_at: metadata.created_at,
         decision,
         init_error,
+        terms,
     };
     Ok(dto::json_hiding_decision(&view, decision))
 }

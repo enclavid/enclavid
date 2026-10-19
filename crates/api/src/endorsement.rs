@@ -133,11 +133,12 @@ mod pinned {
     pub const STORAGE: &str = checked(env!("ENCLAVID_MEASUREMENT_STORAGE"));
     pub const COMPILE_WORKER: &str = checked(env!("ENCLAVID_MEASUREMENT_COMPILE_WORKER"));
     pub const EXECUTION_WORKER: &str = checked(env!("ENCLAVID_MEASUREMENT_EXECUTION_WORKER"));
+    pub const HATCH: &str = checked(env!("ENCLAVID_MEASUREMENT_HATCH"));
 }
 
 /// One measurement per leg, and never a set.
 ///
-/// A single pinned set across all three would be a set-union: the storage-CVM's
+/// A single pinned set across all of them would be a set-union: the storage-CVM's
 /// digest would satisfy a dial to the execution-worker, because the verifier
 /// only asks whether the presented measurement is in the list. That matters
 /// most on exactly the leg where it would be cheapest to abuse —
@@ -173,6 +174,7 @@ pub fn pinned_for(peer: crate::health::Peer) -> Option<&'static str> {
             crate::health::Peer::Storage => pinned::STORAGE,
             crate::health::Peer::CompileWorker => pinned::COMPILE_WORKER,
             crate::health::Peer::ExecutionWorker => pinned::EXECUTION_WORKER,
+            crate::health::Peer::Hatch => pinned::HATCH,
         })
     }
     #[cfg(not(feature = "sev-snp"))]
@@ -208,7 +210,7 @@ pub fn fleet_client_config(
 /// surface, not a fleet leg: api's inbound was reachable from outside before the
 /// gateway existed and still is.
 ///
-/// This is where it differs from the three legs api DIALS. Those have a closed
+/// This is where it differs from the four legs api DIALS. Those have a closed
 /// set of peers, all of them ours, so [`fleet_client_config`] both proves and
 /// demands. Here there is no such set, and pinning is doubly unavailable anyway:
 /// the gateway's digest is a function of api's, so api cannot hold it.

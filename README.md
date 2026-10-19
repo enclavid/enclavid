@@ -52,20 +52,22 @@ flowchart LR
   consumer["Consumer API<br/>(bank / exchange)"]
   applicant["Applicant<br/>(browser)"]
 
-  subgraph tee["AMD SEV-SNP confidential VMs — no NIC; vsock, and a sealed-data disk for storage"]
+  subgraph tee["AMD SEV-SNP confidential VMs — vsock, a sealed-data disk for storage, a NIC for the hatch alone"]
     gateway["gateway<br/>public TLS terminates here"]
     api["api — orchestrator"]
     comp["compile-worker<br/>(Cranelift)"]
     exec["execution-worker<br/>(WASM policy + plugins)"]
     storage[("storage<br/>ciphertext only")]
+    hatch["hatch<br/>OCI pull · KBS relay"]
     gateway -->|"RA-TLS, api proves the build<br/>the consumer names"| api
     api <-->|RA-TLS| comp
     api <-->|RA-TLS| exec
     api <-->|RA-TLS| storage
+    api <-->|RA-TLS| hatch
   end
 
   subgraph host["Untrusted host"]
-    hatch["hatch<br/>token checks · OCI pull · KBS relay"]
+    hooks["operator's hooks<br/>authorize · limits"]
     vcek["AMD VCEK<br/>fetched once per chip and TCB, kept"]
     relays["time relays<br/>blind byte carriers"]
   end
@@ -77,9 +79,9 @@ flowchart LR
 
   consumer -->|TLS| gateway
   applicant -->|TLS| gateway
-  api -->|vsock| hatch
-  hatch --> registry
-  hatch --> kbs
+  hatch -->|vsock| hooks
+  hatch -->|"TLS, over the host's network"| registry
+  hatch -->|TLS| kbs
   vcek --> kds
   vcek -->|"fw_cfg, at launch"| api
   tee -->|"vsock, every enclave"| relays
@@ -107,13 +109,21 @@ Trust boundaries:
   durable session state (and a cache of compiled policies) as
   **encrypted-only data**: everything is sealed enclave-side, so it never holds
   a key or plaintext.
-- **TEE ↔ untrusted host (`hatch`)** — the enclaves have no NIC; their outbound
-  I/O goes through an HTTP-over-vsock service on the host (token checks, OCI
-  pulls, the KBS relay). The host is untrusted on content: artifacts are
-  digest-pinned and checked TEE-side. The certificate AMD issues the chip — the
-  one a quote is checked by — the host fetches from AMD's key service once per
-  chip and firmware version, keeps, and gives api at launch; api checks it
-  against the AMD root compiled in.
+- **api → the hatch → the outside** — no enclave has a NIC but the hatch, an
+  attested enclave api pins as it does its workers. The hatch fetches
+  artifacts and relays to a consumer's KBS over the host's network, with TLS
+  ending inside it, so the host carries ciphertext — save for a registry or
+  broker the consumer writes `http://`, which is reached in the clear, and only
+  ever without a bearer. The host still sees which registries and brokers are
+  reached, and how much moves. Artifacts are digest-pinned and checked TEE-side
+  whatever the registry serves. Who may call api, and how
+  much, is the operator's: the hatch asks its hooks on the host — authorization
+  and limits, a plain HTTP contract (`crates/hatch/hooks.openapi.yaml`) — and
+  takes their word, which decides who may create a session but reads none.
+- **Host → api, at launch** — the certificate AMD issues the chip, the one a
+  quote is checked by, the host fetches from AMD's key service once per chip
+  and firmware version, keeps, and gives api at launch; api checks it against
+  the AMD root compiled in.
 - **Every enclave ↔ NTS servers** — each enclave keeps its own clock from
   Network Time Security servers, reached through blind relays on the host. The
   key exchange is TLS ending in the enclave, against roots compiled into it;
@@ -223,10 +233,10 @@ that: the verification plugins are placeholders so far.
 
 ### Hardening
 
-- **Host egress** — the hatch's outbound requests, registry pulls and the KBS
+- **Hatch egress** — the hatch's outbound requests, registry pulls and the KBS
   relay alike, restricted to public addresses over HTTPS, re-checked on every
   redirect and token request, with size limits and a fixed request shape for
-  the relay, so a consumer cannot steer the host at its own network.
+  the relay, so a consumer cannot steer it at the host's own network.
 - **Applicant key storage** — derived from a passkey where the browser supports
   it rather than kept in web storage, portable across the applicant's devices,
   and gone once the session ends.

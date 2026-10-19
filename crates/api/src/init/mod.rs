@@ -27,7 +27,7 @@ use engine_types::limits::MAX_PROPS_BYTES;
 use session_types::{InitError, Prepared, SessionMetadata, SessionStatus};
 use storage_client::{SessionStore, SetMetadata, WriteField, boundary, outbound_fields};
 
-use crate::compositions::{Composition, Compositions};
+use crate::compositions::{Composition, Compositions, max_cwasm_bytes};
 use crate::executor::outbound_preparation;
 
 use pull_check::check_pull;
@@ -74,9 +74,14 @@ async fn hold(
     preparing: Preparing,
 ) -> Result<Untrusted<PropsRead, (Asserted,)>, Unavailable> {
     let key = composition.key();
+    let max_cwasm_bytes = max_cwasm_bytes(&composition.terms);
     let executor = &compositions.executor;
     let compat_token = match executor
-        .prepare(outbound_preparation(&key, preparing.clone()))
+        .prepare(outbound_preparation(
+            &key,
+            max_cwasm_bytes,
+            preparing.clone(),
+        ))
         .await
         .map_err(|e| unprepared(session_id, &e))?
     {
@@ -91,7 +96,10 @@ async fn hold(
     };
     compositions
         .with_bundle(composition, &key, &compat_token, session_id, |source| {
-            executor.prepare_with_bundle(outbound_preparation(&key, preparing), source)
+            executor.prepare_with_bundle(
+                outbound_preparation(&key, max_cwasm_bytes, preparing),
+                source,
+            )
         })
         .await?
         .map_err(|e| unprepared(session_id, &e).into())
