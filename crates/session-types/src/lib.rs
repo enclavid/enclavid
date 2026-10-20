@@ -213,8 +213,8 @@ pub enum PullProblem {
     /// What the registry served is not what the pin names: another digest, or
     /// a layer of another length.
     NotAsPinned,
-    /// Its manifest does not parse, or its encrypted layer lacks the
-    /// annotations decrypting it takes.
+    /// Its manifest does not parse or is past what is read, or its encrypted
+    /// layer lacks the annotations decrypting it takes.
     Malformed,
     /// Its manifest has no `application/wasm` layer, plain or encrypted.
     NoWasmLayer,

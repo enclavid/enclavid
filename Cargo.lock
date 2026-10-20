@@ -1664,6 +1664,8 @@ dependencies = [
  "axum",
  "bytes",
  "enclavid-attestation",
+ "enclavid-boundary",
+ "enclavid-boundary-macros",
  "enclavid-ra-tls",
  "fleet-stream",
  "fleet-transport",
@@ -1673,7 +1675,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "oci-client",
- "remoc",
  "reqwest 0.13.3",
  "safe-logger",
  "serde",
@@ -1761,6 +1762,7 @@ dependencies = [
  "bytes",
  "enclavid-attestation",
  "enclavid-boundary",
+ "enclavid-boundary-macros",
  "enclavid-embedded",
  "enclavid-ra-tls",
  "engine-rpc",
@@ -2333,6 +2335,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "enclavid-boundary",
+ "enclavid-boundary-macros",
  "fleet-stream",
  "futures",
  "hatch-rpc",
@@ -2343,10 +2346,13 @@ dependencies = [
 name = "hatch-rpc"
 version = "0.1.0"
 dependencies = [
+ "enclavid-boundary",
+ "enclavid-boundary-macros",
  "fleet-stream",
  "remoc",
  "serde",
  "serde_bytes",
+ "tokio",
 ]
 
 [[package]]

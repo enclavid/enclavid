@@ -27,6 +27,7 @@ use session_types::{
 };
 use storage_client::CacheStore;
 
+use crate::boundary::Hatch;
 use crate::compiler::{Compiled, Compiler};
 use crate::cwasm_cache;
 use crate::executor::Executor;
@@ -110,10 +111,10 @@ pub struct Compositions {
     compiler: Arc<Compiler>,
     /// L2 — see [`crate::cwasm_cache`].
     pub cache_store: CacheStore,
-    pub registry: RegistryClient,
+    pub registry: RegistryClient<Hatch>,
     pub consumer_turns: ConsumerTurns,
     /// Couriers each Trustee RCAR leg of the `kbs` key path through the hatch.
-    kbs: KbsClient,
+    kbs: KbsClient<Hatch>,
     /// One permit per composition and consumer — see [`Self::compile_lock`].
     compile_locks: Semaphores<(CompositionKey, String)>,
     /// One warmup at a time per session (`crate::init::warm`): one asked for
@@ -126,9 +127,9 @@ impl Compositions {
         executor: Arc<Executor>,
         compiler: Arc<Compiler>,
         cache_store: CacheStore,
-        registry: RegistryClient,
+        registry: RegistryClient<Hatch>,
         consumer_turns: ConsumerTurns,
-        kbs: KbsClient,
+        kbs: KbsClient<Hatch>,
     ) -> Self {
         Self {
             executor,

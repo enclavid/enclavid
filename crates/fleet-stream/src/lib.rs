@@ -37,11 +37,12 @@
 //! [`send_from`].
 //!
 //! It also holds the connection every such stream runs over: the one remoc config
-//! both leg contracts build from, and what a role sets of it ([`LegSettings`]).
+//! every leg contract builds from, what a role sets of it ([`LegSettings`]), and
+//! the handle that says a leg is over ([`leg_end`]).
 
 mod leg;
 
-pub use leg::{LegSettings, connection_cfg};
+pub use leg::{LegSettings, connection_cfg, leg_end};
 
 use std::time::Duration;
 

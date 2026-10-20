@@ -31,10 +31,11 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64ct::{Base64, Encoding};
 
-use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, Untrusted, reason};
-use hatch_client::{AuthVerdict, AuthorizeRequest, ClientOperation, SessionTerms, boundary};
+use enclavid_boundary::{AuthN, AuthZ, Replay, Untrusted, reason};
+use hatch_client::{AuthVerdict, AuthorizeRequest, ClientOperation, SessionTerms};
 use session_types::SessionMetadata;
 
+use crate::boundary::Hatch;
 use crate::client_state::ClientState;
 
 /// Per-session capability header. Carries the `client_session_token`
@@ -292,23 +293,10 @@ pub(super) async fn enforce(
     //
     // See architecture.md → Network Isolation → "External content fetch"
     // for the full threat-model write-up.
-    let authorize_req = boundary::outbound::to_untrusted(AuthorizeRequest {
+    let authorize_req = Hatch::expose(AuthorizeRequest {
         authorization_header: auth_header.to_string(),
         operation: op,
-    })
-    .vouch(reason!(
-        AuthN::Indifferent,
-        "a credential the operator issued, read by the operator's own hook: the reader \
-         is the party it came from"
-    ))
-    .vouch(reason!(
-        AuthZ::NoSecret,
-        "the hook is handed a credential its operator issued, to say whether it holds"
-    ))
-    .vouch(reason!(
-        Covert::NotChosen,
-        "client-supplied header + fixed-enum op — no policy bandwidth"
-    ));
+    });
     // No answer — the hatch out of reach, or a hook that did not answer it in
     // time — is the same request later.
     let verdict = state
@@ -321,26 +309,12 @@ pub(super) async fn enforce(
             r#"
 TEE has nothing to verify a credential against — the operator's
 hook parses tokens, and the operator issues them. A lying operator
-can claim an invalid credential is valid or substitute a different
-principal; it decides who may use the service in any case, and no
-session is read without its own token, which it never sees.
-        "#
-        ))
-        .trust(reason!(
-            AuthZ::NoPrincipal,
-            r#"
-A return value on this side's own call: the AuthVerdict IS the
-authorisation answer for this request — there is no second access
-decision to gate on top of it.
-        "#
-        ))
-        .trust_accept_risk(reason!(
-            Replay::AcceptedRisk,
-            r#"
-Stale verdict (yesterday's answer for today's request — e.g.
-accepting a since-revoked credential) is the operator's to avoid,
-as the issuer that revokes it. Same residual risk as the AuthN
-trust gate above.
+can claim an invalid credential is valid, substitute a different
+principal, or keep accepting one it has revoked; it decides who may
+use the service in any case, and no session is read without its own
+token, which it never sees. The terms it gives are its own to set,
+each held to the fleet's ceiling where one is set before it is
+sealed, and a rate refusal is one it could make anyway.
         "#
         ))
         .into_inner();

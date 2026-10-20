@@ -69,6 +69,8 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde_bytes = { version = "0.11", optional = true }
 fleet-stream = { path = "../fleet-stream", optional = true }
 enclavid-boundary = { path = "../boundary", optional = true }
+# `boundary!`: the supervisor's end of the api leg, declared. Build-time only.
+enclavid-boundary-macros = { path = "../boundary-macros", optional = true }
 # Shared disposable-child process-isolation plumbing (spawn + concurrency bound +
 # compile deadline + release); the execution-worker rides the same crate. The
 # compile-worker is its SIMPLER consumer — no cache, no callbacks.
@@ -122,9 +124,10 @@ worker = [
     # The supervisor drives the child over the seam, so it needs the client the
     # seam's trait generates.
     "child-seam",
-    # The supervisor names its own scope on what api sends it, so it reaches the
+    # The supervisor declares its own end of the api leg, so it reaches the
     # vocabulary directly rather than through whoever happens to re-export it.
     "dep:enclavid-boundary",
+    "dep:enclavid-boundary-macros",
     "dep:engine-supervisor",
     "dep:tokio",
     "dep:enclavid-ra-tls",

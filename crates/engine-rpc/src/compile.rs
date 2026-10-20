@@ -323,6 +323,10 @@ pub struct CompileReply {
 ///
 /// `&self` so the client is clonable and the server can run compiles in
 /// parallel (`RemoteCompilerServerShared`).
+///
+/// `#[protocol]` writes what its ends declare (`RemoteCompilerCalls` /
+/// `RemoteCompilerServes`) and how its server receives (`RemoteCompilerAt`).
+#[enclavid_boundary_macros::protocol]
 #[remoc::rtc::remote]
 pub trait RemoteCompiler {
     async fn compile(&self, req: CompileRequest) -> Result<CompileReply, CompileError>;

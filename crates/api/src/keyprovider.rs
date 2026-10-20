@@ -15,16 +15,18 @@
 
 use std::collections::HashMap;
 
-use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, Untrusted, reason};
+use enclavid_boundary::{AuthN, Untrusted, reason};
 use enclavid_crypto::ocicrypt::{self, PrivateLayerBlockCipherOptions};
 use enclavid_kbs_client::{RcarSession, SampleEvidence, TeeKeyPair};
-use hatch_client::{KbsClient, KbsRequest, KbsResponse, boundary};
+use hatch_client::{KbsClient, KbsRequest, KbsResponse};
 use session_types::Key;
+
+use crate::boundary::Hatch;
 
 /// Context the [`Key::Kbs`] path needs: the hatch relay client that
 /// couriers each RCAR leg to the author's KBS.
 pub struct KbsContext<'a> {
-    pub kbs: &'a KbsClient,
+    pub kbs: &'a KbsClient<Hatch>,
 }
 
 /// Failure obtaining the layer key: which kind, and what went wrong for the
@@ -87,7 +89,7 @@ pub async fn obtain_priv_opts(
 /// Drive the 3-leg Trustee RCAR handshake to release the layer key.
 ///
 /// The TEE has no outbound network, so each leg is couriered through the
-/// hatch `/kbs/relay`; the hatch is a dumb forwarder threading the
+/// hatch's `kbs` call; the hatch is a dumb forwarder threading the
 /// `kbs-session-id` cookie's bytes only. The released resource is JWE-
 /// sealed to a per-pull ephemeral key minted here, so the hatch never
 /// sees the key material even though it carries every byte.
@@ -99,10 +101,11 @@ async fn kbs_release(
     let resource_path = resource_path(resource)?;
 
     // Per-pull ephemeral keypair. Its public half is bound into the RCAR
-    // report_data; the KBS wraps the released resource's CEK to it. Dev
-    // presents CoCo `sample` evidence — the Trustee sample verifier checks
-    // only the report_data binding, no hardware signature; a real SEV-SNP
-    // deployment swaps in an SNP evidence provider here.
+    // report_data; the KBS wraps the released resource's CEK to it. The
+    // evidence is CoCo `sample` evidence: the Trustee sample verifier checks
+    // only the report_data binding, with no hardware signature behind it, so a
+    // broker that releases on it releases to anyone. That is why the measured
+    // build takes no broker-released key when a session is created.
     let mut session = RcarSession::new(
         TeeKeyPair::generate()
             .map_err(|e| KeyError::new(KeyFailure::Unanswered, format!("ephemeral key: {e}")))?,
@@ -125,16 +128,8 @@ async fn kbs_release(
     .trust(reason!(
         AuthN::Indifferent,
         "RCAR handshake plumbing carries no secret; the only released secret is the \
-         resource, JWE-sealed to our ephemeral key at leg 3 — tampered handshake bytes \
-         only break that unwrap and fail closed"
-    ))
-    .trust(reason!(
-        AuthZ::NoPrincipal,
-        "the KBS, not the TEE, authorizes release (resource policy + token)"
-    ))
-    .trust(reason!(
-        Replay::Harmless,
-        "a stale challenge only breaks the report_data binding and fails the leg-3 unwrap"
+         resource, JWE-sealed to our ephemeral key at leg 3 — tampered or stale \
+         handshake bytes only break that unwrap and fail closed"
     ))
     .into_inner();
     require_ok(&resp, "auth")?;
@@ -160,16 +155,8 @@ async fn kbs_release(
     .await?
     .trust(reason!(
         AuthN::Indifferent,
-        "handshake plumbing; release secrecy is enforced at the leg-3 JWE unwrap"
-    ))
-    .trust(reason!(
-        AuthZ::NoPrincipal,
-        "the KBS verifies the evidence and gates the token, not the TEE"
-    ))
-    .trust(reason!(
-        Replay::Harmless,
-        "attestation binds this handshake's fresh nonce; a replayed token can't unwrap \
-         the resource sealed to our per-pull ephemeral key"
+        "handshake plumbing; release secrecy is enforced at the leg-3 JWE unwrap, which a \
+         token from another handshake cannot pass"
     ))
     .into_inner();
     require_ok(&resp, "attest")?;
@@ -184,34 +171,28 @@ async fn kbs_release(
         Vec::new(),
     )
     .await?
-    // AuthN is closed by the JWE unwrap: only this enclave's per-pull
-    // ephemeral secret opens the released resource.
+    // AuthN is closed by the JWE unwrap: only this enclave's per-pull secret,
+    // bound in this handshake's report_data, opens the release, so one from an
+    // earlier pull opens under none; and only a holder of this handshake's
+    // public key could have wrapped it — over TLS, the broker. Which key is the
+    // layer's is settled where the layer ends, by its HMAC against its pinned
+    // options.
     .trust_with(AuthN::Verified, |r| {
         require_ok(&r, "resource")?;
         session
             .unwrap_resource(&r.body)
             .map_err(|e| KeyError::new(KeyFailure::NotReleased, format!("jwe unwrap: {e}")))
     })?
-    .trust(reason!(
-        AuthZ::NoPrincipal,
-        "the KBS enforces release authorization via its resource policy (Rego) + token; \
-         the TEE only consumes the sealed result"
-    ))
-    .trust(reason!(
-        Replay::Fresh,
-        "the resource is JWE-sealed to a per-pull ephemeral key bound in this handshake's \
-         report_data; a replayed blob from a prior pull cannot open under the fresh secret"
-    ))
     .into_inner();
 
     ocicrypt::privopts_from_json(&priv_json)
         .map_err(|e| KeyError::new(KeyFailure::NotReleased, e.to_string()))
 }
 
-/// Vouch and relay one RCAR leg through the hatch. The leg body is public
-/// RCAR material (our ephemeral pubkey, sample evidence, the session
-/// cookie); the hatch forwards it verbatim and returns the KBS response
-/// `Untrusted` for the caller to peel per-leg.
+/// Relay one RCAR leg through the hatch, which forwards it verbatim: answered by
+/// [`Hatch`]'s declaration and, for who reads it, by the scheme of the broker
+/// the consumer named. The KBS response comes back open on `AuthN`, for the
+/// caller to answer per leg.
 async fn relay(
     ctx: &KbsContext<'_>,
     endpoint: &str,
@@ -219,33 +200,34 @@ async fn relay(
     path: &str,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
-) -> Result<Untrusted<KbsResponse, (AuthN, AuthZ, Replay)>, KeyError> {
-    let req = KbsRequest {
+) -> Result<Untrusted<KbsResponse, (AuthN,), Hatch>, KeyError> {
+    let req = Hatch::expose(KbsRequest {
         endpoint: endpoint.to_string(),
         method: method.to_string(),
         path: path.to_string(),
         headers,
         body,
+    });
+    // A session's broker is written `http://` or `https://`: anything else is
+    // refused when the session is created.
+    let req = if endpoint.starts_with("http://") {
+        req.vouch_accept_risk(reason!(
+            AuthN::AcceptedRisk,
+            "a broker its consumer wrote `http://` is reached in the clear, so the host \
+             reads the handshake and which key it asks for, and can answer it; a key it \
+             wrapped opens nothing, since the layer's HMAC against its pinned options \
+             settles which key is the layer's"
+        ))
+    } else {
+        req.vouch(reason!(
+            AuthN::Identified,
+            "read by the hatch this leg pins and sent on over TLS that ends inside it, to \
+             the broker the consumer named: what is not public in it — the session cookie, \
+             the resource the artifact's pinned manifest names — reaches that broker alone"
+        ))
     };
-    let exposed = boundary::outbound::to_untrusted(req)
-        .vouch(reason!(
-            AuthN::Indifferent,
-            "the leg carries only public RCAR material — our ephemeral pubkey, the sample \
-             evidence, the session cookie; no TEE secret"
-        ))
-        .vouch(reason!(
-            AuthZ::Matched,
-            "the handshake for the artifact's key goes to the KBS the consumer named for \
-             it at session create — the party that releases that key, and the one it is for"
-        ))
-        .vouch(reason!(
-            Covert::NotChosen,
-            "endpoint is client-supplied at session create and the resource URI is the \
-             artifact's digest-pinned annotation — neither is policy-controlled; leg shape \
-             is fixed by the RCAR protocol"
-        ));
     ctx.kbs
-        .relay(exposed)
+        .relay(req)
         .await
         .map_err(|e| KeyError::new(KeyFailure::Unanswered, format!("kbs relay: {e}")))
 }

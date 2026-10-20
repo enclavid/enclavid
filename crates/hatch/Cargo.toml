@@ -26,6 +26,12 @@ path = "src/lib.rs"
 safe-logger = { path = "../safe-logger", features = ["device"] }
 hatch-rpc = { path = "../hatch-rpc" }
 fleet-stream = { path = "../fleet-stream" }
+# The concern vocabulary. The hatch names its own scope on what api sends it —
+# it accepts any attested guest, so it has something open to say — and reaches
+# the words directly rather than through whoever happens to re-export them.
+enclavid-boundary = { path = "../boundary" }
+# `boundary!`: the hatch's end of the api leg, declared. Build-time only.
+enclavid-boundary-macros = { path = "../boundary-macros" }
 # The RA-TLS backend is chosen here, not by ra-tls — see the `[features]` axis.
 enclavid-ra-tls = { path = "../ra-tls" }
 fleet-transport = { path = "../fleet-transport" }
@@ -34,10 +40,6 @@ enclavid-attestation = { path = "../attestation", default-features = false }
 # every certificate a registry or a broker presents is checked by it.
 timesync = { path = "../timesync", optional = true }
 
-remoc = { version = "0.18", default-features = false, features = [
-    "rtc",
-    "codec-ciborium",
-] }
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = { version = "0.26", default-features = false, features = [
     "ring",

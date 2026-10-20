@@ -20,7 +20,7 @@
 //!
 //! ## Why this leg is judged `Asserted`, and not by one of the other four
 //!
-//! api types its hatch and storage legs as untrusted and left the worker legs
+//! api typed its hatch and storage legs as untrusted and left the worker legs
 //! bare — the ones reaching the process that runs adversary-authored wasm. Four
 //! defects found by review turned out to be one defect four times, all there.
 //! None of the existing markers asks the question they turned on:

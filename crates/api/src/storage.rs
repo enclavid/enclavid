@@ -164,7 +164,7 @@ impl CacheBackend for CacheCvmBackend {
 /// Dial the storage-CVM at `addr`, RA-TLS-handshake + remoc-frame it, and receive
 /// BOTH service clients on the base channel. Mirrors `connect_execution_worker`,
 /// down to the handle it returns: it finishes when the leg is over, which is the
-/// connection ending or either client's channel closing (`engine_rpc::leg_end`).
+/// connection ending or either client's channel closing (`fleet_stream::leg_end`).
 /// `leg` is this end of the connection.
 pub async fn connect_storage(
     addr: &str,
@@ -226,7 +226,7 @@ pub async fn connect_storage(
     // Two request channels on the one connection, and the leg is over when
     // either closes: they are installed and torn down together.
     let (session_closed, cache_closed) = (clients.session.closed(), clients.cache.closed());
-    let ended = engine_rpc::leg_end(driver, async move {
+    let ended = fleet_stream::leg_end(driver, async move {
         tokio::select! {
             () = session_closed => {}
             () = cache_closed => {}

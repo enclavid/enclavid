@@ -37,8 +37,8 @@ pub fn client() -> Result<reqwest::Client, reqwest::Error> {
 /// Send one leg and read its answer.
 pub async fn relay(client: &reqwest::Client, req: KbsRequest) -> Result<KbsResponse, KbsError> {
     let url = join_url(&req.endpoint, &req.path)?;
-    let method = Method::from_bytes(req.method.as_bytes())
-        .map_err(|_| KbsError(format!("invalid method: {}", req.method)))?;
+    let method =
+        Method::from_bytes(req.method.as_bytes()).map_err(|_| KbsError("invalid method".into()))?;
 
     let mut builder = client.request(method, url).body(req.body);
     for (k, v) in &req.headers {

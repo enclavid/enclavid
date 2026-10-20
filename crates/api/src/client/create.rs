@@ -158,7 +158,19 @@ impl KeyRequest {
                 Some(Key::Inline(key))
             }
             Some(KeyRequest::Kbs { kbs }) => {
-                if kbs.endpoint.is_empty() {
+                // The evidence api presents a broker carries no hardware signature
+                // (`keyprovider`), and a broker that releases on it releases to
+                // anyone: the measured build takes no broker-released key.
+                if cfg!(feature = "sev-snp") {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                // A broker is reached over http(s), as the hatch reaches it: an
+                // endpoint written any other way is one no handshake ever answers.
+                let host = kbs
+                    .endpoint
+                    .strip_prefix("https://")
+                    .or_else(|| kbs.endpoint.strip_prefix("http://"));
+                if host.is_none_or(str::is_empty) {
                     return Err(StatusCode::BAD_REQUEST);
                 }
                 Some(Key::Kbs(KbsKey {
@@ -583,6 +595,32 @@ mod tests {
             ask(pinned("http://r.example"), vec![], BTreeMap::new()),
             Ok(HashMap::new())
         );
+    }
+
+    /// A broker's key names a broker reached over http(s); the measured build
+    /// takes none.
+    #[test]
+    fn a_brokers_key_names_a_broker_it_can_reach() {
+        let kbs = |endpoint: &str| {
+            KeyRequest::into_domain(Some(KeyRequest::Kbs {
+                kbs: KbsKeyRequest {
+                    endpoint: endpoint.into(),
+                },
+            }))
+        };
+        for unreachable in ["", "kbs.example:8080", "ftp://kbs.example", "https://"] {
+            assert!(
+                matches!(kbs(unreachable), Err(StatusCode::BAD_REQUEST)),
+                "{unreachable}"
+            );
+        }
+        for reachable in ["https://kbs.example:8080", "http://kbs.example"] {
+            assert_eq!(
+                kbs(reachable).is_ok(),
+                !cfg!(feature = "sev-snp"),
+                "{reachable}"
+            );
+        }
     }
 
     /// A term asked for past the fleet's ceiling is the ceiling.

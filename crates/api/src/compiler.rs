@@ -15,7 +15,7 @@
 use bytes::Bytes;
 use futures::stream::BoxStream;
 
-use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
+use enclavid_boundary::{Asserted, reason};
 use engine_rpc::{
     COMPILE_STREAM_DEADLINE, COMPILE_STREAM_IDLE, CompileError, CompileReply, CompileSource,
     CompilerLeg, MAX_BUNDLE_META_BYTES,
@@ -25,53 +25,16 @@ use fleet_transport::LegFailure;
 use futures::{StreamExt, TryStreamExt};
 use safe_logger::debug;
 
-/// The COMPILE boundary: a client for a compile-worker's `engine_rpc::RemoteCompiler`.
-/// Given already-pulled artifact bytes (the orchestrator owns the OCI pull +
-/// registry auth), the worker fuses + Cranelift-compiles + parses sections into
-/// a [`Compiled`]. The client is a cheap remoc handle (`Send + Sync`);
-/// concurrent `/connect` compiles multiplex over the one connection.
-/// How api judges the compile hop's answers — see [`Compiler::compile`].
-pub type CompileScope = (Asserted,);
+use crate::boundary::CompileWorker;
 
-/// What is still open on a value api is about to release to the compile-worker.
-///
-/// Its own alias rather than a client's: those facades are the host's, whose
-/// every byte the host reads, and a scope is a property of the CHANNEL, so this
-/// leg names its own.
-type ToCompiler<T> = Exposed<T, (AuthN, AuthZ, Covert)>;
-
-/// Open a value for the compile-worker with the leg's own answer given: `AuthN`
-/// is IDENTIFIED for everything this leg carries, and what is left differs per
-/// message.
-fn to_compiler<T>(value: T) -> Exposed<T, (AuthZ, Covert)> {
-    let open: ToCompiler<T> = Exposed::new(value);
-    open.vouch(reason!(
-        AuthN::Identified,
-        "this leg dials ONE compile-time-pinned measurement, the handshake fails \
-         before a byte moves if the peer is not it, and the peer keeps nothing past \
-         the compile it is handed"
-    ))
-}
-
-/// Mint one compile's inputs as a fully-vouched request — the only way artifacts
-/// reach a compile-worker. Specific to this value, so the audited answers live in
-/// one place (grep `outbound_compile_request(`).
-fn outbound_compile_request(source: CompileSource) -> Exposed<CompileSource, ()> {
-    to_compiler(source)
-        .vouch(reason!(
-            AuthZ::NoSecret,
-            "the consumer's own artifacts, going to the code that exists to compile \
-             them; the recipient is handed nothing it is not being asked to read"
-        ))
-        .vouch(reason!(
-            Covert::AlreadyHeld,
-            "the HOST performed the OCI pull that produced these bytes, so their \
-             length is a quantity it measured itself"
-        ))
-}
-
+/// The COMPILE boundary: a client for a compile-worker's `engine_rpc::RemoteCompiler`,
+/// held at api's end of the leg ([`CompileWorker`]), whose declaration answers
+/// for what crosses it. Given already-pulled artifact bytes (the orchestrator owns
+/// the OCI pull + registry auth), the worker fuses + Cranelift-compiles + parses
+/// sections into a [`Compiled`]. The client is a cheap remoc handle (`Send +
+/// Sync`); concurrent `/connect` compiles multiplex over the one connection.
 pub struct Compiler {
-    leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileScope>>>>,
+    leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileWorker>>>>,
 }
 
 /// What a compile gives back, and what L2 keeps of it (`crate::cwasm_cache`):
@@ -89,23 +52,21 @@ pub struct Compiled {
 
 impl Compiler {
     pub fn new(
-        leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileScope>>>>,
+        leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<CompilerLeg<CompileWorker>>>>,
     ) -> Self {
         Self { leg }
     }
 
     /// Compile the components `source` streams on the worker. A transport
     /// failure, or a leg that is down, surfaces as `CompileError::Failed`; the
-    /// worker's own answer, `Refused` included, comes back as it was sent.
+    /// worker's own answer, `Refused` included, comes back as it was sent — api's
+    /// end declares on what grounds a refusal is let through.
     pub async fn compile(&self, source: CompileSource) -> Result<Compiled, CompileError> {
         let client = self.leg.get().ok_or_else(|| {
             debug!("compile: the compile-worker leg is down");
             CompileError::Failed
         })?;
-        let reply: Untrusted<CompileReply, CompileScope> = client
-            .compile(outbound_compile_request(source))
-            .await
-            .map_err(refusal)?;
+        let reply = client.compile(source).await?;
         // An accepted risk, and the honest form of it: there is NO check available
         // here.
         //
@@ -161,20 +122,6 @@ impl Compiler {
     }
 }
 
-/// The compile-worker's failure, taken as it gave it. A refusal is what api keeps
-/// as the session's init error and the consumer reads, so this is where the
-/// worker's word about it is let through, and on what grounds.
-fn refusal(e: Untrusted<CompileError, CompileScope>) -> CompileError {
-    e.trust(reason!(
-        Asserted::Bounded,
-        "a value of a fixed set whose only text is a name held to the WIT alphabet \
-         and 128 bytes as it is decoded, read only by the consumer that pinned this \
-         composition, about its own artifacts and imports; a compile child its \
-         composition turned picks no more than that per compile"
-    ))
-    .into_inner()
-}
-
 /// Connect to a compile-worker already listening at `addr` and hand back the leg.
 /// The worker is brought up at boot, not by api. The dial is mutual RA-TLS — TCP by
 /// default, vsock under that feature — and `engine_rpc::connect_compiler` takes the
@@ -186,7 +133,7 @@ pub async fn connect_compile_worker(
     leg: engine_rpc::LegSettings,
 ) -> Result<
     (
-        std::sync::Arc<CompilerLeg<CompileScope>>,
+        std::sync::Arc<CompilerLeg<CompileWorker>>,
         tokio::task::JoinHandle<()>,
     ),
     LegFailure,
@@ -240,34 +187,50 @@ pub async fn connect_compile_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use enclavid_boundary::AuthN;
+    use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed, Untrusted};
+    use enclavid_boundary_macros::boundary;
     use engine_rpc::CompileRequest;
     use fleet_stream::{BlobHeader, bin};
+
+    boundary! {
+        /// The compile-worker's end, for the test: every concern answered.
+        TestWorker {
+            serves: [engine_rpc::RemoteCompiler],
+            observer: Test,
+        }
+        in (AuthN,) {
+            /// test fixture
+            _: AuthN::Indifferent,
+            CompileRequest,
+        }
+        out (AuthZ, Covert) {
+            /// test fixture
+            _: AuthZ::NoSecret,
+            /// test fixture
+            _: Covert::Bounded,
+            CompileReply,
+            CompileError,
+        }
+    }
 
     // A minimal in-process server, so the Compiler client's rpc plumbing is
     // exercised without a real worker (the transport factory
     // `connect_compile_worker` is the thin, hand-reviewed piece).
     //
-    // It implements the UNTRUSTED view because that is the only implementable
-    // shape: engine-rpc exports no raw server, so a test cannot serve this
-    // contract by a route production code could not take either.
+    // It implements the contract as served at a declared end because that is the
+    // only implementable shape: engine-rpc exports no raw server, so a test cannot
+    // serve this contract by a route production code could not take either.
     //
     // Its cwasm is the policy's length and the plugin count; for the policy
     // `lie` it names one cwasm and sends another.
     struct MockService;
 
-    impl engine_rpc::RemoteCompilerUntrusted for MockService {
-        type Scope = (AuthN,);
-
+    impl engine_rpc::RemoteCompilerAt<TestWorker> for MockService {
         async fn compile(
             &self,
-            req: Untrusted<CompileRequest, Self::Scope>,
-        ) -> Result<CompileReply, CompileError> {
+            req: Untrusted<CompileRequest, (), TestWorker>,
+        ) -> Result<Exposed<CompileReply, (), TestWorker>, CompileError> {
             let (policy, plugins) = req
-                .trust(reason!(
-                    AuthN::Indifferent,
-                    "test fixture, answered as the compile-worker answers it"
-                ))
                 .into_inner()
                 .receive()
                 .await
@@ -280,11 +243,11 @@ mod tests {
             let sent = if policy == b"lie" { vec![9, 9] } else { cwasm };
             let (tx, body) = bin::channel();
             tokio::spawn(fleet_stream::send(tx, sent));
-            Ok(CompileReply {
+            Ok(TestWorker::expose(CompileReply {
                 meta: b"meta".to_vec(),
                 cwasm: header,
                 body,
-            })
+            }))
         }
     }
 
@@ -311,7 +274,7 @@ mod tests {
         // Worker end: serve the mock through the contract's own serve half.
         let settings = engine_rpc::LegSettings::default();
         let server = tokio::spawn(async move {
-            let _ = engine_rpc::serve_compiler(
+            let _ = engine_rpc::serve_compiler::<TestWorker, _, _, _>(
                 a_r,
                 a_w,
                 MockService,
@@ -323,7 +286,7 @@ mod tests {
 
         // Orchestrator end: take the leg, wrap in Compiler.
         let (leg_client, _driver) =
-            engine_rpc::connect_compiler::<CompileScope, _, _>(b_r, b_w, &settings)
+            engine_rpc::connect_compiler::<CompileWorker, _, _>(b_r, b_w, &settings)
                 .await
                 .expect("connect");
         let client = std::sync::Arc::new(leg_client);

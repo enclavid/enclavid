@@ -6,21 +6,22 @@
 //! attestation → resource), the ephemeral `TeeKeyPair` and the JWE unwrap live
 //! one layer up in the api keyprovider — this client just couriers bytes.
 //!
-//! Trust model: the broker's answer can be dropped or stalled on the way, but
-//! the released secret cannot be forged — it is JWE-wrapped to api's ephemeral
-//! key, so only the enclave can unwrap it. The caller MUST verify via
-//! `.trust_with(AuthN::Verified, …)` at the keyprovider layer — the unwrap closes
-//! AuthN — and the per-pull ephemeral key, bound into the handshake's report
-//! data, is what closes Replay.
+//! Trust model: the broker's answer can be dropped or stalled on the way. The
+//! released key is JWE-wrapped to api's per-pull ephemeral key, bound into the
+//! handshake's report data, so only the enclave can unwrap it and an answer from
+//! another pull opens under none; that it is the layer's key is settled where the
+//! layer ends, by its HMAC against the options its pinned manifest carries. The
+//! caller MUST verify via `.trust_with(AuthN::Verified, …)` at the keyprovider
+//! layer.
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 
-use hatch_rpc::{KbsRequest, KbsResponse, RemoteHatch};
+use enclavid_boundary::{Exposed, Receives, Untrusted};
+use hatch_rpc::{KbsRequest, KbsResponse, RemoteHatchCalls};
 
-use crate::boundary;
 use crate::error::BridgeError;
 use crate::link::{Link, hatch, within};
-use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 
 /// How long the hatch has to answer ONE relayed leg, unless the host says
 /// otherwise (api's `kbs-deadline-secs` setting).
@@ -31,36 +32,52 @@ use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
 /// unbounded wait here parks a round that is holding that round's captures.
 pub const DEFAULT_RELAY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Client for the hatch's KBS relay.
-#[derive(Clone)]
-pub struct KbsClient {
-    link: Arc<dyn Link>,
+/// Client for the hatch's KBS relay, held at end `B` of the hatch leg, whose
+/// declaration says what is open on each value that crosses it.
+pub struct KbsClient<B> {
+    link: Arc<dyn Link<B>>,
     deadline: std::time::Duration,
+    _end: PhantomData<fn() -> B>,
 }
 
-impl KbsClient {
-    /// A client whose every relayed leg the hatch has `deadline` to answer.
-    pub fn new(link: Arc<dyn Link>, deadline: std::time::Duration) -> Self {
-        Self { link, deadline }
+impl<B> Clone for KbsClient<B> {
+    fn clone(&self) -> Self {
+        Self {
+            link: self.link.clone(),
+            deadline: self.deadline,
+            _end: PhantomData,
+        }
     }
+}
 
-    /// Forward one KBS leg through the hatch. The request is vouched by the
-    /// keyprovider producer (it holds the untrusted `endpoint` and the
-    /// JWE-protected payload); we just release it. The response is
-    /// `Untrusted` — the keyprovider verifies it by unwrapping the JWE with the
-    /// ephemeral key.
+impl<B> KbsClient<B> {
+    /// A client whose every relayed leg the hatch has `deadline` to answer.
+    pub fn new(link: Arc<dyn Link<B>>, deadline: std::time::Duration) -> Self {
+        Self {
+            link,
+            deadline,
+            _end: PhantomData,
+        }
+    }
+}
+
+impl<B: RemoteHatchCalls + 'static> KbsClient<B> {
+    /// Forward one KBS leg through the hatch. `req` arrives answered, as an
+    /// authorization's does; the response comes back open on what `B` left open
+    /// on it — the keyprovider verifies it by unwrapping the JWE with the
+    /// ephemeral key. A failure comes back as `BridgeError`, from an error `B`'s
+    /// declaration answered in full.
     pub async fn relay(
         &self,
-        req: Exposed<KbsRequest>,
-    ) -> Result<Untrusted<KbsResponse, (AuthN, AuthZ, Replay)>, BridgeError> {
+        req: Exposed<KbsRequest, (), B>,
+    ) -> Result<Untrusted<KbsResponse, <B as Receives<KbsResponse>>::Open, B>, BridgeError> {
         let hatch = hatch(self.link.as_ref())?;
-        let response = within(self.deadline, "kbs relay", async {
+        within(self.deadline, "kbs relay", async {
             hatch
-                .kbs(req.into_inner())
+                .kbs(req)
                 .await
                 .map_err(|e| BridgeError::Transport(e.to_string()))
         })
-        .await?;
-        Ok(boundary::inbound::from_untrusted(response))
+        .await
     }
 }

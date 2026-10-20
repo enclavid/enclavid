@@ -1,19 +1,19 @@
 //! The execute hop, owned end to end.
 //!
-//! `hatch-client` is legible because two things hold together. One named mint
-//! gives a value its full concern set, and ONE function — `pub(crate)` in a crate
-//! its callers are outside of — is the only way bytes reach the socket. The second
-//! is what makes the first more than a habit: you may forget to mint, but you
-//! cannot route around the door.
+//! A leg is a boundary when two things hold together. A value crosses at a
+//! declared end, which leaves open on it exactly what that end's declaration does
+//! not answer, and the only way bytes reach the socket is a door that takes it so.
+//! The second is what makes the first more than a habit: you may forget to answer,
+//! but you cannot route around the door.
 //!
 //! The execute hop had neither. api dialled, received the generated
 //! `RemoteExecutorClient`, and called it. Nothing stood between a value and the
 //! wire, so a wrapper api applied on its own way out was api reassuring itself
 //! about a crossing it owned both ends of — ritual, not a boundary.
 //!
-//! This module is the missing half. The generated client is no longer re-exported,
-//! so no crate outside this one can NAME one — and the only shape left to reach for
-//! is the door, whose methods say what must already be closed.
+//! This module is the door. The generated client is not re-exported, so no crate
+//! outside this one can NAME one — and the only shape left to reach for is the
+//! door, whose methods say what must already be closed.
 //!
 //! Nameability, not containment, and the difference is worth stating because the
 //! stronger claim is tempting. `#[remoc::rtc::remote]` derives the wire form from a
@@ -35,15 +35,17 @@
 //!
 //! ## The compile hop
 //!
-//! It has no door YET, and the reason it long had none has gone: the compile-worker
-//! used to drive its own child over this same `RemoteCompiler`, so its client could
-//! not be withheld from the crate's surface without walling off a hop inside one
-//! CVM. That seam now lives with the role that owns both its ends
+//! The same shape: [`CompilerLeg`] at the calling end, [`serve_compiler`] at the
+//! serving one, each generic over the end its role declares. It long had no door,
+//! because the compile-worker drove its own child over this same `RemoteCompiler`,
+//! so its client could not be withheld from the crate's surface without walling
+//! off a hop inside one CVM. That seam lives with the role that owns both its ends
 //! (`engine_compiler::RemoteCompileChild`), and `RemoteCompilerClient` is
 //! api-facing only.
 
 use std::sync::Arc;
 
+use fleet_stream::leg_end;
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -104,30 +106,6 @@ impl std::fmt::Display for LegError {
 }
 impl std::error::Error for LegError {}
 
-/// The handle a caller awaits to learn its leg is over.
-///
-/// A leg is over when its connection ends, and also when the channel its calls go
-/// out on closes under a connection that lives on. remoc closes a request channel
-/// for good on any failed send — an item past its size limit, say, which fails
-/// before a byte of it is sent — and leaves the multiplexer up and pinging. A
-/// caller watching only the connection would go on handing out a client whose
-/// every call fails, and report the leg up while it did.
-///
-/// `closed` is that channel's end: one client's `closed()`, or the first of
-/// several when a leg carries more than one. When it fires the connection is
-/// dropped here, so the peer sees the leg end as well and a redial starts clean.
-pub fn leg_end(
-    mut driver: tokio::task::JoinHandle<()>,
-    closed: impl std::future::Future<Output = ()> + Send + 'static,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        tokio::select! {
-            _ = &mut driver => {}
-            () = closed => driver.abort(),
-        }
-    })
-}
-
 /// Serve the execute contract on an already-attested stream until the peer goes
 /// away — the WORKER's half of the hop.
 ///
@@ -184,7 +162,7 @@ where
 /// the CALLER's half.
 ///
 /// Returns the leg plus a handle that finishes when the leg is over — its
-/// connection ended or its request channel closed, see [`leg_end`]. The caller
+/// connection ended or its request channel closed, see `fleet_stream::leg_end`. The caller
 /// owns it: how a dead leg is reported and redialled is the caller's policy and
 /// none of this crate's business. Noticing it is this crate's, because the
 /// channel belongs to a client nothing outside it can name.
@@ -499,17 +477,18 @@ mod doors {
 /// Serve the compile contract on an already-attested stream until the peer goes
 /// away — the WORKER's half.
 ///
-/// Takes the UNTRUSTED view, never the raw trait: the raw server type is not
-/// exported, so within this workspace there is no second shape to implement by
-/// mistake. What arrives therefore arrives under a scope the serving role named,
-/// which on this hop is the point — the leaves run `AcceptAny`, so the caller is a
-/// genuine SNP guest and not identifiably api.
+/// Takes the contract as its server sees it at end `B` — a
+/// [`RemoteCompilerAt`](crate::RemoteCompilerAt) — never the raw trait: the raw
+/// server type is not exported, so there is no unwrapped shape to implement. This
+/// end accepts any attested guest, so what arrives arrives from a genuine SNP
+/// guest and not identifiably from api, and `B`'s declaration is where the
+/// serving role says what that leaves open.
 ///
 /// `request_buffer` is how many requests may wait to be taken, as on
 /// `serve_executor` — not how many run at once — and `leg` what the role sets of
 /// its end of the connection.
 #[cfg(feature = "compile")]
-pub async fn serve_compiler<S, R, W>(
+pub async fn serve_compiler<B, S, R, W>(
     read: R,
     write: W,
     service: S,
@@ -517,12 +496,12 @@ pub async fn serve_compiler<S, R, W>(
     leg: &crate::LegSettings,
 ) -> Result<(), LegError>
 where
-    S: crate::untrusted_compile::RemoteCompilerUntrusted + Send + Sync + 'static,
-    S::Scope: Send,
+    B: crate::compile::RemoteCompilerServes + 'static,
+    S: crate::compile::RemoteCompilerAt<B> + Send + Sync + 'static,
     R: AsyncRead + Send + Sync + Unpin + 'static,
     W: AsyncWrite + Send + Sync + Unpin + 'static,
 {
-    use crate::compile::{RemoteCompilerClient, RemoteCompilerServerShared};
+    use crate::compile::{RemoteCompilerAdapter, RemoteCompilerClient, RemoteCompilerServerShared};
     type Cli = RemoteCompilerClient<Ciborium>;
 
     let (conn, mut tx, _rx) =
@@ -532,7 +511,7 @@ where
     tokio::spawn(conn);
 
     let (server, client) = RemoteCompilerServerShared::<_, Ciborium>::new(
-        Arc::new(crate::adapter::Untrusting(service)),
+        Arc::new(RemoteCompilerAdapter::<S, B>::new(service)),
         request_buffer,
     );
     tx.send(client).await.map_err(|_| LegError::Clients)?;
@@ -544,18 +523,16 @@ where
 /// The handle it returns finishes when the leg is over, as [`connect_executor`]'s
 /// does.
 ///
-/// `S` is how the caller judges what comes BACK, named once here rather than at
-/// each call, because a scope is a property of the channel and this channel has
-/// exactly one answer for every bundle that ever crosses it. `leg` is what the
-/// caller sets of its end of the connection.
+/// `B` is the caller's end of the hop, whose declaration says what is open on
+/// each value that crosses it. `leg` is what the caller sets of its end of the
+/// connection.
 #[cfg(feature = "compile")]
-pub async fn connect_compiler<S, R, W>(
+pub async fn connect_compiler<B, R, W>(
     read: R,
     write: W,
     leg: &crate::LegSettings,
-) -> Result<(CompilerLeg<S>, tokio::task::JoinHandle<()>), LegError>
+) -> Result<(CompilerLeg<B>, tokio::task::JoinHandle<()>), LegError>
 where
-    S: enclavid_boundary::Open,
     R: AsyncRead + Send + Sync + Unpin + 'static,
     W: AsyncWrite + Send + Sync + Unpin + 'static,
 {
@@ -575,43 +552,59 @@ where
         .map_err(|_| LegError::Clients)?
         .ok_or(LegError::Closed)?;
     let ended = leg_end(driver, remoc::rtc::Client::closed(&client));
-    Ok((CompilerLeg(client, std::marker::PhantomData), ended))
+    Ok((
+        CompilerLeg {
+            client,
+            _end: std::marker::PhantomData,
+        },
+        ended,
+    ))
 }
 
-/// The only handle on the compile hop that exists outside this crate.
+/// The only handle on the compile hop that exists outside this crate, held at
+/// end `B`.
 ///
-/// `S` is the scope the holder judges the hop's ANSWERS under — declared once, at
-/// the dial, because the question a returned bundle raises does not vary call to
-/// call.
+/// It holds the generated client, which nothing else can name. What a caller must
+/// have closed before its components cross, and what comes back open, are stated
+/// by `B`'s declaration, the one place the caller says how it judges this leg.
 #[cfg(feature = "compile")]
-pub struct CompilerLeg<S>(
-    crate::compile::RemoteCompilerClient<Ciborium>,
-    std::marker::PhantomData<S>,
-);
+pub struct CompilerLeg<B> {
+    client: crate::compile::RemoteCompilerClient<Ciborium>,
+    _end: std::marker::PhantomData<fn() -> B>,
+}
 
 #[cfg(feature = "compile")]
-impl<S: enclavid_boundary::Open> CompilerLeg<S> {
+impl<B: crate::compile::RemoteCompilerCalls + 'static> CompilerLeg<B> {
     /// Compile, and hand back the bundle as the peer's word.
     ///
-    /// `req` arrives at `Exposed<_, ()>` — every concern the caller's mint opened has
-    /// been answered somewhere. A receipt, not a proof: see `Exposed::map`. Its
-    /// components stream beside the call, written here while it is awaited.
+    /// The request crosses answered by `B`'s declaration alone, which the bound
+    /// demands: the door splits `source` into the request and the stream its
+    /// components go in itself, so there is no later point at which a sender
+    /// could answer for it. The components stream beside the call, written here
+    /// while it is awaited.
     ///
-    /// The answer comes back `Untrusted`, a refusal as much as a bundle. Nothing
-    /// binds a bundle to the question — this side cannot re-derive it (it carries
-    /// no Cranelift, by design) and a digest the peer also chose would be its word
-    /// twice — and a refusal names interfaces and packages the peer picked. The
-    /// wrapper is where that gets said rather than assumed.
+    /// The bundle comes back open on what `B` left open on it. Nothing binds it to
+    /// the question — this side cannot re-derive it (it carries no Cranelift, by
+    /// design) and a digest the peer also chose would be its word twice. A refusal
+    /// comes back as it is: `B`'s declaration answered it in full.
     pub async fn compile(
         &self,
-        req: enclavid_boundary::Exposed<crate::compile::CompileSource, ()>,
+        source: crate::compile::CompileSource,
     ) -> Result<
-        enclavid_boundary::Untrusted<crate::CompileReply, S>,
-        enclavid_boundary::Untrusted<crate::CompileError, S>,
-    > {
+        enclavid_boundary::Untrusted<
+            crate::CompileReply,
+            <B as enclavid_boundary::Receives<crate::CompileReply>>::Open,
+            B,
+        >,
+        crate::CompileError,
+    >
+    where
+        B: enclavid_boundary::Sends<crate::compile::CompileRequest, Open = ()>,
+    {
         use crate::compile::RemoteCompiler as _;
-        let (request, writer) = req.into_inner().split();
-        let mut call = std::pin::pin!(self.0.compile(request));
+        let (request, writer) = source.split();
+        let request = enclavid_boundary::outbound::<B, _>(request).into_inner();
+        let mut call = std::pin::pin!(self.client.compile(request));
         // The reply comes once the components were read, or once the worker
         // gave up on them; the writer is never the outcome. Driven here rather
         // than spawned, so it cannot outlive the call however the call ends.
@@ -619,9 +612,7 @@ impl<S: enclavid_boundary::Open> CompilerLeg<S> {
             reply = &mut call => reply,
             () = writer => call.await,
         };
-        reply
-            .map(enclavid_boundary::Untrusted::new)
-            .map_err(enclavid_boundary::Untrusted::new)
+        reply.map(enclavid_boundary::inbound::<B, _>)
     }
 }
 
@@ -1009,59 +1000,5 @@ mod door_tests {
             leg.run_with_bundle(round(Event::Start), bundle, NoCallbacks)
                 .await
         ));
-    }
-}
-
-#[cfg(test)]
-mod leg_end_tests {
-    use std::time::Duration;
-
-    use tokio::sync::oneshot;
-
-    use super::leg_end;
-
-    /// Says so when the task holding it is dropped — aborted, here.
-    struct Dropped(Option<oneshot::Sender<()>>);
-    impl Drop for Dropped {
-        fn drop(&mut self) {
-            if let Some(tx) = self.0.take() {
-                let _ = tx.send(());
-            }
-        }
-    }
-
-    const PATIENCE: Duration = Duration::from_secs(10);
-
-    #[tokio::test]
-    async fn a_closed_channel_ends_the_leg_and_drops_its_connection() {
-        let (dropped_tx, dropped_rx) = oneshot::channel();
-        let driver = tokio::spawn(async move {
-            let _held = Dropped(Some(dropped_tx));
-            std::future::pending::<()>().await;
-        });
-        let (close_tx, close_rx) = oneshot::channel::<()>();
-        let ended = leg_end(driver, async move {
-            let _ = close_rx.await;
-        });
-
-        close_tx.send(()).unwrap();
-        tokio::time::timeout(PATIENCE, ended)
-            .await
-            .expect("the leg ends")
-            .unwrap();
-        tokio::time::timeout(PATIENCE, dropped_rx)
-            .await
-            .expect("the connection is dropped")
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn the_connection_ending_ends_the_leg() {
-        let driver = tokio::spawn(async {});
-        let ended = leg_end(driver, std::future::pending());
-        tokio::time::timeout(PATIENCE, ended)
-            .await
-            .expect("the leg ends")
-            .unwrap();
     }
 }

@@ -16,6 +16,12 @@
 //! A fresh registry client per call: oci-client caches the first auth value it
 //! sees with no way to drop it, so a client per call keeps one consumer's
 //! bearer from another's pull.
+//!
+//! A bearer goes only over TLS: one for a registry written `http://` is
+//! refused, as api refuses it when a session is created. The client follows a
+//! registry's redirects as reqwest does by default, which oci-client gives no way
+//! to change, so a registry that redirects to plain http on its own host and
+//! port has the bearer sent on in the clear.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,7 +84,7 @@ impl Pulls {
     pub async fn manifest(&self, req: ManifestRequest) -> Result<Manifest, PullError> {
         let (protocol, reference) = scheme(&req.reference);
         let reference = parse_ref(reference)?;
-        let auth = build_auth(&req.registry_auth)?;
+        let auth = build_auth(&protocol, &req.registry_auth)?;
         let client = build_client(protocol)?;
 
         let manifest = timeout(MANIFEST_TIMEOUT, async {
@@ -95,9 +101,7 @@ impl Pulls {
         .await
         .map_err(|_| PullError::Failed("manifest: timed out".into()))??;
         if manifest.len() > MANIFEST_BYTES {
-            return Err(PullError::Failed(format!(
-                "a manifest past {MANIFEST_BYTES} bytes"
-            )));
+            return Err(PullError::TooLarge);
         }
         Ok(Manifest(manifest.to_vec()))
     }
@@ -111,7 +115,7 @@ impl Pulls {
         let (protocol, reference) = scheme(&req.reference);
         let reference = parse_ref(reference)?;
         let digest = parse_digest(&req.digest)?;
-        let auth = build_auth(&req.registry_auth)?;
+        let auth = build_auth(&protocol, &req.registry_auth)?;
         let client = build_client(protocol)?;
 
         let end = Instant::now() + BLOB_TIMEOUT;
@@ -123,7 +127,10 @@ impl Pulls {
             client
                 .auth(&reference, &auth, oci_client::RegistryOperation::Pull)
                 .await
-                .map_err(classify)?;
+                .map_err(|e| {
+                    debug!("registry auth for {reference}: {e}");
+                    classify(e)
+                })?;
             let stream = client
                 .pull_blob_stream(&reference, digest)
                 .await
@@ -194,9 +201,11 @@ where
 
 /// A registry refusing the bearer → `Refused`; a 404, or an error envelope
 /// saying the manifest, blob or repository is unknown → `NotFound`; so api can
-/// tell both from a registry that did not answer. Read off the error's fields,
-/// never its rendering: a rendering spells the envelope's codes as Rust names,
-/// and carries the digest, which can hold any run of digits.
+/// tell both from a registry that did not answer, which is a fixed text: the
+/// error's own carries the URL and whatever the registry wrote, and goes to the
+/// debug log instead. Read off the error's fields, never its rendering: a
+/// rendering spells the envelope's codes as Rust names, and carries the digest,
+/// which can hold any run of digits.
 fn classify(e: OciDistributionError) -> PullError {
     let any_code = |envelope: &oci_client::errors::OciEnvelope, codes: &[OciErrorCode]| {
         envelope.errors.iter().any(|e| codes.contains(&e.code))
@@ -227,7 +236,7 @@ fn classify(e: OciDistributionError) -> PullError {
     } else if unknown {
         PullError::NotFound
     } else {
-        PullError::Failed(format!("pull: {e}"))
+        PullError::Failed("the registry did not answer as one does".into())
     }
 }
 
@@ -254,10 +263,14 @@ fn parse_digest(digest: &str) -> Result<&str, PullError> {
 }
 
 /// The opaque bearer as oci-client's typed `RegistryAuth`: empty → anonymous,
-/// `Bearer <token>` → that token, and nothing else.
-fn build_auth(registry_auth: &[u8]) -> Result<RegistryAuth, PullError> {
+/// `Bearer <token>` → that token, and nothing else — and no bearer at all for a
+/// registry reached over `protocol` in the clear.
+fn build_auth(protocol: &ClientProtocol, registry_auth: &[u8]) -> Result<RegistryAuth, PullError> {
     if registry_auth.is_empty() {
         return Ok(RegistryAuth::Anonymous);
+    }
+    if matches!(protocol, ClientProtocol::Http) {
+        return Err(PullError::Refused);
     }
     let s = std::str::from_utf8(registry_auth)
         .map_err(|_| PullError::Refused)?
@@ -289,7 +302,10 @@ fn build_client(protocol: ClientProtocol) -> Result<Client, PullError> {
         read_timeout: Some(READ_TIMEOUT),
         ..Default::default()
     })
-    .map_err(|e| PullError::Failed(format!("registry client: {e}")))
+    .map_err(|e| {
+        debug!("registry client: {e}");
+        PullError::Failed("no registry client".into())
+    })
 }
 
 #[cfg(test)]
@@ -418,13 +434,28 @@ mod tests {
         }
     }
 
-    /// Only a bearer, or none, is sent to a registry.
+    /// Only a bearer, or none, is sent to a registry, and a bearer only over TLS.
     #[test]
     fn a_registry_is_sent_a_bearer_or_nothing() {
-        assert!(matches!(build_auth(b"").unwrap(), RegistryAuth::Anonymous));
-        assert!(matches!(build_auth(b"Bearer t").unwrap(), RegistryAuth::Bearer(t) if t == "t"));
+        let tls = ClientProtocol::Https;
+        assert!(matches!(
+            build_auth(&tls, b"").unwrap(),
+            RegistryAuth::Anonymous
+        ));
+        assert!(
+            matches!(build_auth(&tls, b"Bearer t").unwrap(), RegistryAuth::Bearer(t) if t == "t")
+        );
         for refused in [&b"Basic dTpw"[..], b"t", &[0xff, 0xfe]] {
-            assert!(build_auth(refused).is_err());
+            assert!(build_auth(&tls, refused).is_err());
         }
+        let clear = ClientProtocol::Http;
+        assert!(matches!(
+            build_auth(&clear, b"").unwrap(),
+            RegistryAuth::Anonymous
+        ));
+        assert!(matches!(
+            build_auth(&clear, b"Bearer t"),
+            Err(PullError::Refused)
+        ));
     }
 }

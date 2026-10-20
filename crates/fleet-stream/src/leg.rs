@@ -1,11 +1,12 @@
-//! The one remoc connection config every fleet leg is brought up with.
+//! The one remoc connection config every fleet leg is brought up with, and how
+//! a caller learns its leg is over.
 //!
-//! Both contracts that bring a leg up — the engine's and the storage tier's —
-//! build from [`connection_cfg`], so the two ends of every leg agree on the parts
-//! that are facts of this code, and each role sets the parts that are its
-//! deployment's from its own launch settings ([`LegSettings`]). The two ends need
-//! not agree on those: chmux announces each end's own in its hello and the other
-//! end fits to it (see the fields).
+//! Every contract that brings a leg up — the engine's, the storage tier's, the
+//! hatch's — builds from [`connection_cfg`], so the two ends of every leg agree on
+//! the parts that are facts of this code, and each role sets the parts that are
+//! its deployment's from its own launch settings ([`LegSettings`]). The two ends
+//! need not agree on those: chmux announces each end's own in its hello and the
+//! other end fits to it (see the fields).
 
 use std::time::Duration;
 
@@ -133,6 +134,84 @@ pub fn connection_cfg(leg: &LegSettings) -> remoc::Cfg {
     cfg.flush_delay = Duration::ZERO;
     cfg.max_received_ports = 64;
     cfg
+}
+
+/// The handle a caller awaits to learn its leg is over.
+///
+/// A leg is over when its connection ends, and also when the channel its calls go
+/// out on closes under a connection that lives on. remoc closes a request channel
+/// for good on any failed send — an item past its size limit, say, which fails
+/// before a byte of it is sent — and leaves the multiplexer up and pinging. A
+/// caller watching only the connection would go on handing out a client whose
+/// every call fails, and report the leg up while it did.
+///
+/// `closed` is that channel's end: one client's `closed()`, or the first of
+/// several when a leg carries more than one. When it fires the connection is
+/// dropped here, so the peer sees the leg end as well and a redial starts clean.
+pub fn leg_end(
+    mut driver: tokio::task::JoinHandle<()>,
+    closed: impl std::future::Future<Output = ()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = &mut driver => {}
+            () = closed => driver.abort(),
+        }
+    })
+}
+
+#[cfg(test)]
+mod leg_end_tests {
+    use std::time::Duration;
+
+    use tokio::sync::oneshot;
+
+    use super::leg_end;
+
+    /// Says so when the task holding it is dropped — aborted, here.
+    struct Dropped(Option<oneshot::Sender<()>>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    #[tokio::test]
+    async fn a_closed_channel_ends_the_leg_and_drops_its_connection() {
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let driver = tokio::spawn(async move {
+            let _held = Dropped(Some(dropped_tx));
+            std::future::pending::<()>().await;
+        });
+        let (close_tx, close_rx) = oneshot::channel::<()>();
+        let ended = leg_end(driver, async move {
+            let _ = close_rx.await;
+        });
+
+        close_tx.send(()).unwrap();
+        tokio::time::timeout(PATIENCE, ended)
+            .await
+            .expect("the leg ends")
+            .unwrap();
+        tokio::time::timeout(PATIENCE, dropped_rx)
+            .await
+            .expect("the connection is dropped")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_connection_ending_ends_the_leg() {
+        let driver = tokio::spawn(async {});
+        let ended = leg_end(driver, std::future::pending());
+        tokio::time::timeout(PATIENCE, ended)
+            .await
+            .expect("the leg ends")
+            .unwrap();
+    }
 }
 
 #[cfg(test)]

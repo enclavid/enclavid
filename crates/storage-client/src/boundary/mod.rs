@@ -6,10 +6,11 @@
 //! `SessionStore`). For what is kept, the volume is the host's, so the scopes
 //! here are the host's: every concern open, answered at the use site.
 //!
-//! The same shape as `hatch_client::boundary`, and a facade of its own
-//! because a scope is a property of the CHANNEL: the hatch's requests and
-//! this volume are two channels to one untrusted party, and each perimeter
-//! names its own.
+//! A facade of its own because a scope is a property of the CHANNEL: this
+//! volume is the host's, while the hatch leg reaches a CVM api pins, which hands
+//! each request on to the operator's hooks, a registry or a broker. Each names
+//! its own scope — the hatch leg in the `boundary!` declarations of its two ends
+//! (`api::boundary`, `enclavid_hatch::boundary`).
 //!
 //! Reviewer grep guide:
 //!

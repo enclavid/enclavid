@@ -22,11 +22,12 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::OwnedSemaphorePermit;
 
-use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
+use enclavid_boundary::{AuthN, AuthZ, Exposed, Sends, reason};
 use enclavid_crypto::ocicrypt::{self, LayerDecryptor};
-use hatch_client::{BlobPieces, BlobRequest, ManifestRequest, RegistryClient, boundary};
+use hatch_client::{BlobPieces, BlobRequest, ManifestRequest, RegistryClient};
 use session_types::{Key, PullProblem};
 
+use crate::boundary::Hatch;
 use crate::keyprovider::{self, KbsContext, KeyFailure};
 use crate::turns::Turns;
 
@@ -74,6 +75,10 @@ pub enum PullError {
     /// bearer, most often.
     #[error("the registry refused the pull")]
     Refused,
+    /// What the registry serves for the pin is past what the hatch reads: a
+    /// manifest past its bound, the same every time the pin is asked for.
+    #[error("the manifest is past what the hatch reads")]
+    TooLarge,
     /// The consumer's other pulls held every turn it has for as long as this
     /// one could wait ([`crate::turns`]).
     #[error("no turn for this consumer's pull in time")]
@@ -103,7 +108,7 @@ impl PullError {
             | Self::ManifestDigest { .. }
             | Self::LayerDigest { .. }
             | Self::LayerSize => PullProblem::NotAsPinned,
-            Self::ManifestParse(_) | Self::Encryption(_) => PullProblem::Malformed,
+            Self::ManifestParse(_) | Self::Encryption(_) | Self::TooLarge => PullProblem::Malformed,
             Self::NoWasmLayer => PullProblem::NoWasmLayer,
             Self::KeyMissing => PullProblem::KeyMissing,
             Self::NotEncrypted => PullProblem::NotEncrypted,
@@ -120,6 +125,7 @@ fn classify_transport_error(e: hatch_client::BridgeError) -> PullError {
     match e {
         hatch_client::BridgeError::NotFound => PullError::NotFound,
         hatch_client::BridgeError::Refused => PullError::Refused,
+        hatch_client::BridgeError::TooLarge => PullError::TooLarge,
         other => PullError::Transport(format!("{other:?}")),
     }
 }
@@ -153,7 +159,7 @@ struct OciDescriptor {
 /// `enclavid:embedded.i18n.v1`) live inside the wasm as component-level custom
 /// sections, which the compiler extracts. No sidecar layer.
 pub struct WasmLayer {
-    registry: RegistryClient,
+    registry: RegistryClient<Hatch>,
     turns: Turns,
     reference: String,
     registry_auth: Vec<u8>,
@@ -171,7 +177,7 @@ pub struct WasmLayer {
 /// each take one of `turns` for as long as they are fetched, and each pull
 /// `within` where the session's terms name a deadline.
 pub async fn wasm_layer(
-    registry: &RegistryClient,
+    registry: &RegistryClient<Hatch>,
     turns: &Turns,
     artifact_ref: &str,
     registry_auth: &[u8],
@@ -236,7 +242,7 @@ pub fn wasm_layer_size(manifest: &[u8]) -> Result<u64, PullError> {
 /// the same bearer fetches the manifest and every blob in it. Fetched on one of
 /// `turns`, `within` where the session's terms name a deadline.
 pub async fn manifest(
-    registry: &RegistryClient,
+    registry: &RegistryClient<Hatch>,
     turns: &Turns,
     artifact_ref: &str,
     registry_auth: &[u8],
@@ -245,25 +251,13 @@ pub async fn manifest(
     let artifact_digest = extract_digest(artifact_ref)
         .ok_or_else(|| PullError::InvalidRef(artifact_ref.to_string()))?;
     let _turn = turns.take().await.ok_or(PullError::Busy)?;
-    let req = boundary::outbound::to_untrusted(ManifestRequest {
-        reference: artifact_ref.to_string(),
-        registry_auth: registry_auth.to_vec(),
-    })
-    .vouch(reason!(
-        AuthN::Identified,
-        "the consumer's bearer, read by the hatch this leg pins and sent on over TLS \
-         that ends inside it; a bearer for a plain-http registry, where it would cross \
-         in the host's sight, is refused when the session is created"
-    ))
-    .vouch(reason!(
-        AuthZ::NoSecret,
-        "the registry is handed the bearer it accepts for its own repository, and a \
-         ref to a manifest it hosts"
-    ))
-    .vouch(reason!(
-        Covert::NotChosen,
-        "both consumer-supplied at session create, not policy-controlled"
-    ));
+    let req = to_registry(
+        artifact_ref,
+        ManifestRequest {
+            reference: artifact_ref.to_string(),
+            registry_auth: registry_auth.to_vec(),
+        },
+    );
     Ok(registry
         .manifest(req, within)
         .await
@@ -287,11 +281,33 @@ pub async fn manifest(
              registry, but a plain-http one is the host's to answer, and a host that \
              answers yes in its place serves only what it could serve on a pull"
         ))
-        .trust(reason!(
-            Replay::Idempotent,
-            "content-addressed by digest — bit-identical responses for the same digest"
-        ))
         .into_inner())
+}
+
+/// `req` for the registry `reference` names, answered for `AuthN` by the scheme
+/// its consumer wrote — as the hatch reaches it.
+fn to_registry<T>(reference: &str, req: T) -> Exposed<T, (), Hatch>
+where
+    Hatch: Sends<T, Open = (AuthN,)>,
+{
+    let req = Hatch::expose(req);
+    if reference.starts_with("http://") {
+        req.vouch_accept_risk(reason!(
+            AuthN::AcceptedRisk,
+            "a registry its consumer wrote `http://` is reached in the clear, so the host \
+             reads which artifact the request names, and its bytes; the consumer chose it, \
+             and no bearer goes with it — one is refused for it when the session is \
+             created, and by the hatch"
+        ))
+    } else {
+        req.vouch(reason!(
+            AuthN::Identified,
+            "the consumer's reference and bearer, read by the hatch this leg pins and sent \
+             on over TLS that ends inside it; only the registry can send the bearer on in \
+             the clear, by redirecting to plain http on its own host and port, which the \
+             hatch's client follows"
+        ))
+    }
 }
 
 impl WasmLayer {
@@ -326,27 +342,15 @@ impl WasmLayer {
             // carries.
             let length = fleet_stream::StreamLen::new(size).ok_or(PullError::LayerSize)?;
             let turn = turns.take().await.ok_or(PullError::Busy)?;
-            let req = boundary::outbound::to_untrusted(BlobRequest {
-                reference,
-                digest: digest.clone(),
-                size: length,
-                registry_auth,
-            })
-            .vouch(reason!(
-                AuthN::Identified,
-                "the consumer's bearer, read by the hatch this leg pins and sent on over \
-                 TLS that ends inside it, as the manifest's was"
-            ))
-            .vouch(reason!(
-                AuthZ::NoSecret,
-                "the registry is handed the bearer it accepts for its own repository, and \
-                 a digest from a manifest it hosts"
-            ))
-            .vouch(reason!(
-                Covert::NotChosen,
-                "every part is consumer-supplied or read from the consumer's own manifest, \
-                 not policy-controlled"
-            ));
+            let req = to_registry(
+                &reference,
+                BlobRequest {
+                    reference: reference.clone(),
+                    digest: digest.clone(),
+                    size: length,
+                    registry_auth,
+                },
+            );
             let pieces = registry
                 .blob(req, within)
                 .await
@@ -362,10 +366,6 @@ impl WasmLayer {
                      repository with the consumer's bearer, and for a plain-http registry \
                      the host answers in its place — the bytes are held to the pinned digest \
                      either way"
-                ))
-                .trust(reason!(
-                    Replay::Idempotent,
-                    "content-addressed by digest — bit-identical responses for the same digest"
                 ))
                 .into_inner();
             Ok::<_, PullError>(pieces)
@@ -668,6 +668,7 @@ mod tests {
         for (e, problem) in [
             (PullError::NotFound, PullProblem::NotFound),
             (PullError::Refused, PullProblem::Refused),
+            (PullError::TooLarge, PullProblem::Malformed),
             (PullError::LayerSize, PullProblem::NotAsPinned),
             (PullError::NoWasmLayer, PullProblem::NoWasmLayer),
             (PullError::KeyMissing, PullProblem::KeyMissing),

@@ -9,12 +9,14 @@
 //!     consumer may do, asked of the hooks the launch switched on;
 //!   * [`oci`] and [`kbs`] — what api names outside: a registry's pulls, a key
 //!     broker's legs;
-//!   * [`service`] — the `RemoteHatch` all of that is served as.
+//!   * [`service`] — the `RemoteHatch` all of that is served as, at this role's
+//!     end of the leg, which [`boundary`] declares.
 //!
-//! The interface carries what consumers name and nothing of the operator's:
-//! the hooks are reached over vsock, so no address a consumer writes — a name,
-//! a literal, a redirect — leads to one.
+//! The interface carries what consumers name and nothing of the operator's: in
+//! the measured build the hooks are reached over vsock, so no address a
+//! consumer writes — a name, a literal, a redirect — leads to one.
 
+pub mod boundary;
 pub mod hooks;
 pub mod kbs;
 pub mod oci;

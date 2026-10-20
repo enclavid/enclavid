@@ -30,6 +30,8 @@
 //! supervisor↔child hop is a private per-child socketpair (never leaves this
 //! host).
 
+mod boundary;
+
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::os::fd::AsFd;
@@ -43,12 +45,14 @@ use engine_supervisor::{
 use fleet_stream::bin;
 use remoc::codec::Ciborium;
 
-use enclavid_boundary::{AuthN, Untrusted};
+use enclavid_boundary::{Covert, Exposed, Untrusted};
 use engine_compiler::{ChildCompiled, RemoteCompileChild, RemoteCompileChildClient};
 use engine_rpc::{
     COMPILE_STREAM_DEADLINE, CompileError, CompileFault, CompileReply, CompileRequest, LegSettings,
-    MAX_BUNDLE_META_BYTES, RemoteCompilerUntrusted,
+    MAX_BUNDLE_META_BYTES, RemoteCompilerAt,
 };
+
+use crate::boundary::AnyCaller;
 use fleet_transport::LegFailure;
 use fleet_transport::launch::{LaunchError, Settings};
 use safe_logger::{debug, info, reason, safe, warn};
@@ -117,48 +121,15 @@ struct Supervisor {
     cwasm_read: NonZeroUsize,
 }
 
-impl RemoteCompilerUntrusted for Supervisor {
-    /// What this role does not know about its caller.
-    ///
-    /// `AuthN` and nothing else. The listener runs `AcceptAny` — it cannot pin api
-    /// without a cycle — so a completed handshake proves a genuine SNP guest on this
-    /// part and NOT that it is api. That is the one question open here, and it is
-    /// open in a way it never is on api's side of the same wire.
-    ///
-    /// Not `AuthZ`: this role holds no resource a caller could reach past another's,
-    /// and what a caller can spend is compute, answered by the deadline, the
-    /// compile's memory max and the runner rather than by a judgement. Not `Replay`:
-    /// no request outlives its own call, so there is no version for one to be stale
-    /// from — and whether the peer invented it is `Asserted`'s question, which only a
-    /// receiver of this role's OUTPUT can ask.
-    type Scope = (AuthN,);
-
+/// The contract as this role serves it, at its end of the leg ([`AnyCaller`]):
+/// what that end's declaration answers arrives answered, and what it leaves open
+/// on the reply — `Covert` — is answered where the reply is made.
+impl RemoteCompilerAt<AnyCaller> for Supervisor {
     async fn compile(
         &self,
-        req: Untrusted<CompileRequest, Self::Scope>,
-    ) -> Result<CompileReply, CompileError> {
-        // INDIFFERENT, and it is a property of the position rather than of the
-        // bytes: nothing DERIVED FROM a request outlives its call, so one caller's
-        // input cannot reach another's compile, and the result goes back only to
-        // whoever asked. Hostile input costs that caller its own compile.
-        //
-        // What IS shared is a concurrency budget — the runner's slots, one semaphore
-        // across every connection — so a caller can make others WAIT. That is
-        // availability, not a leak, and the deadline plus the compile's memory
-        // max are what answer it; a judgement about the bytes would not.
-        //
-        // The data-side statelessness is load-bearing, not incidental: it carries
-        // the weight the measurement pin would have carried if this end could pin
-        // api back. A cache added here would end that, and would need the executor's
-        // per-caller partitioning before it could.
-        let req = req
-            .trust(enclavid_boundary::reason!(
-                AuthN::Indifferent,
-                "nothing derived from a request outlives its call, so hostile input \
-                 reaches only its own compile and its own caller; the shared runner slots \
-                 are availability, capped elsewhere"
-            ))
-            .into_inner();
+        req: Untrusted<CompileRequest, (), AnyCaller>,
+    ) -> Result<Exposed<CompileReply, (), AnyCaller>, CompileError> {
+        let req = req.into_inner();
         // Components past the hop's bound together are the pins' doing, so the
         // same pins are refused every time.
         let (onward, relay) = req
@@ -225,6 +196,19 @@ impl RemoteCompilerUntrusted for Supervisor {
     }
 }
 
+/// Release a reply to api. `AuthZ` is answered by this end's declaration; its
+/// lengths are what is left, and they are a standing risk, said here.
+fn outbound_reply(reply: CompileReply) -> Exposed<CompileReply, (), AnyCaller> {
+    AnyCaller::expose(reply).vouch_accept_risk(enclavid_boundary::reason!(
+        Covert::AcceptedRisk,
+        "the cwasm's length and the metadata's are the compile's, a function of the \
+         composition its consumer pinned, and nothing of an applicant's reaches this \
+         role; but a child turned by one artifact could pick them to carry the \
+         plaintext of another compiled beside it — an encrypted plugin's, which the \
+         host holds only as ciphertext"
+    ))
+}
+
 /// The file a compile child writes its cwasm into: made here, handed to the
 /// child at its inherited descriptor, and read back here once the child is gone.
 ///
@@ -256,7 +240,7 @@ fn reply(
     output: File,
     compiled: ChildCompiled,
     piece: NonZeroUsize,
-) -> Result<CompileReply, CompileError> {
+) -> Result<Exposed<CompileReply, (), AnyCaller>, CompileError> {
     let ChildCompiled { meta, cwasm } = compiled;
     if meta.len() as u64 > MAX_BUNDLE_META_BYTES {
         debug!("compile: the child's metadata is past its bound");
@@ -281,7 +265,7 @@ fn reply(
         )
         .await;
     });
-    Ok(CompileReply { meta, cwasm, body })
+    Ok(outbound_reply(CompileReply { meta, cwasm, body }))
 }
 
 /// The first `len` bytes of `file`, in pieces of `piece` bytes.
@@ -822,7 +806,7 @@ async fn serve_conn(
     // Above this line is WHO connected; below is WHAT MAY CROSS, which belongs to
     // the contract. Bringing the hop up means naming the generated client, and that
     // is what no crate outside engine-rpc may do.
-    engine_rpc::serve_compiler(read, write, svc, request_buffer, &leg)
+    engine_rpc::serve_compiler::<AnyCaller, _, _, _>(read, write, svc, request_buffer, &leg)
         .await
         .map_err(|e| {
             debug!("compile leg: {e}");

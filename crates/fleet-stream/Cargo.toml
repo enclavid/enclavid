@@ -15,7 +15,8 @@ remoc = { version = "0.18", default-features = false, features = ["rch"] }
 serde = { version = "1", features = ["derive"] }
 bytes = "1"
 sha2 = "0.10"
-tokio = { version = "1", default-features = false, features = ["time"] }
+# `rt` and `macros` for `leg_end`, the task that watches a leg's two ends.
+tokio = { version = "1", default-features = false, features = ["macros", "rt", "time"] }
 # `Stream`, what `send_from` takes its pieces from and `into_pieces` gives
 # them as. remoc is built on it.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }

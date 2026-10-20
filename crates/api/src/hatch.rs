@@ -1,33 +1,32 @@
 //! The HATCH leg: api's way out, to the hatch-CVM, dialed under mutual RA-TLS
 //! and pinned like every other leg (see [`crate::endorsement`]). The typed
 //! clients in `hatch-client` call through it — authorization, pulls, the key
-//! broker's legs — and find it down as they find any leg down.
+//! broker's legs — at api's end of it, [`Hatch`], and find it down as they find
+//! any leg down.
 
 use std::sync::Arc;
 
-use remoc::codec::Ciborium;
-use remoc::rtc::Client as _;
-
 use fleet_transport::LegFailure;
-use hatch_rpc::HatchClient;
+use hatch_rpc::HatchLeg;
 use safe_logger::debug;
 
-impl hatch_client::Link for crate::fleet::Leg<HatchClient> {
-    fn client(&self) -> Option<HatchClient> {
+use crate::boundary::Hatch;
+
+impl hatch_client::Link<Hatch> for crate::fleet::Leg<Arc<HatchLeg<Hatch>>> {
+    fn leg(&self) -> Option<Arc<HatchLeg<Hatch>>> {
         self.get()
     }
 }
 
-/// Dial the hatch-CVM at `addr`, RA-TLS-handshake + remoc-frame it, and receive
-/// its client on the base channel. Mirrors `connect_storage`, down to the handle
-/// it returns: it finishes when the leg is over, which is the connection ending
-/// or the client's channel closing (`engine_rpc::leg_end`). `leg` is this end of
-/// the connection.
+/// Dial the hatch-CVM at `addr` and RA-TLS-handshake it. Mirrors
+/// `connect_execution_worker`, down to the handle it returns: it finishes when
+/// the leg is over, which is the connection ending or the client's channel
+/// closing. `leg` is this end of the connection.
 pub async fn connect_hatch(
     addr: &str,
     attestor: Arc<dyn enclavid_attestation::Attestor>,
     leg: hatch_rpc::LegSettings,
-) -> Result<(HatchClient, tokio::task::JoinHandle<()>), LegFailure> {
+) -> Result<(Arc<HatchLeg<Hatch>>, tokio::task::JoinHandle<()>), LegFailure> {
     let stream = fleet_transport::dial(addr).await.map_err(|e| {
         debug!("connect {addr}: {e}");
         LegFailure::Connect(e.kind())
@@ -52,29 +51,19 @@ pub async fn connect_hatch(
         })?;
     let (read, write) = tokio::io::split(tls);
 
-    let (conn, _tx, mut rx) = remoc::Connect::io::<_, _, HatchClient, HatchClient, Ciborium>(
-        hatch_rpc::connection_cfg(&leg),
-        read,
-        write,
-    )
-    .await
-    .map_err(|e| {
-        debug!("rpc connect: {e}");
-        LegFailure::Rpc
-    })?;
-    let driver = tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let client = rx
-        .recv()
+    // Everything above this line is WHO — the dial, the pin, what a refusal
+    // means. Everything below is WHAT MAY CROSS, and that is hatch-rpc's: it
+    // brings the leg up and keeps the generated client, which api has no name
+    // for. How api judges what crosses is its end's declaration, `Hatch`.
+    let (leg, ended) = hatch_rpc::connect_hatch::<Hatch, _, _>(read, write, &leg)
         .await
         .map_err(|e| {
-            debug!("recv client: {e}");
-            LegFailure::Clients
-        })?
-        .ok_or(LegFailure::Closed)?;
-    let closed = client.closed();
-    let ended = engine_rpc::leg_end(driver, closed);
-    Ok((client, ended))
+            debug!("hatch leg: {e}");
+            match e {
+                hatch_rpc::LegError::Rpc => LegFailure::Rpc,
+                hatch_rpc::LegError::Clients | hatch_rpc::LegError::Serve => LegFailure::Clients,
+                hatch_rpc::LegError::Closed => LegFailure::Closed,
+            }
+        })?;
+    Ok((Arc::new(leg), ended))
 }

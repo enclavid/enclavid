@@ -5,6 +5,7 @@ use secrecy::SecretBox;
 use hatch_client::{KbsClient, Link, RegistryClient};
 use storage_client::{CacheStore, SessionStore};
 
+use crate::boundary::Hatch;
 use crate::compiler::{Compiler, connect_compile_worker};
 use crate::compositions::Compositions;
 use crate::executor::{Executor, connect_execution_worker};
@@ -46,7 +47,7 @@ impl AppState {
     /// `settings` says how long the hatch has to answer a pull and a KBS leg.
     pub fn new(
         session_store: Arc<SessionStore>,
-        hatch: Arc<dyn Link>,
+        hatch: Arc<dyn Link<Hatch>>,
         compiler: Arc<Compiler>,
         executor: Arc<Executor>,
         shuffle_key: Arc<ShuffleKey>,
@@ -86,7 +87,7 @@ impl AppState {
     /// dialed and held up is `settings`'.
     #[allow(clippy::too_many_arguments)]
     pub async fn init(
-        hatch: Arc<dyn Link>,
+        hatch: Arc<dyn Link<Hatch>>,
         compile_addr: String,
         exec_addr: String,
         session_store: Arc<SessionStore>,

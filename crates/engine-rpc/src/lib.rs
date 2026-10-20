@@ -69,18 +69,16 @@ mod compile;
 // EXPLICIT, not a glob, for the same reason the execute half is: neither
 // `RemoteCompilerClient` nor its server half is re-exported, so no crate outside
 // this one can name the generated client for the api hop — let alone call it — and
-// none can serve the RAW contract either. Both ends reach the hop through `leg`.
+// none can serve the RAW contract either. Both ends reach the hop through `leg`,
+// each at the end its role declares: `RemoteCompilerCalls` / `RemoteCompilerServes`
+// are what an end declares, and `RemoteCompilerAt` the contract as its server sees
+// it there.
 #[cfg(feature = "compile")]
 pub use compile::{
     Artifact, COMPILE_STREAM_DEADLINE, COMPILE_STREAM_IDLE, CompileError, CompileFault,
     CompileReply, CompileRequest, CompileSource, InterfaceName, MAX_COMPONENTS_BYTES, PluginLength,
+    RemoteCompilerAt, RemoteCompilerCalls, RemoteCompilerServes,
 };
-
-// The compile contract as its SERVER sees it.
-#[cfg(feature = "compile")]
-mod untrusted_compile;
-#[cfg(feature = "compile")]
-pub use untrusted_compile::RemoteCompilerUntrusted;
 
 // The two names a cache slot is addressed by, as types that carry their own
 // shape check. Both cross the execute hop, and only it.
@@ -126,7 +124,7 @@ pub use leg::{
 #[cfg(feature = "compile")]
 pub use leg::{CompilerLeg, connect_compiler, serve_compiler};
 #[cfg(any(feature = "compile", feature = "execute"))]
-pub use leg::{DEFAULT_REQUEST_BUFFER, LegError, leg_end};
+pub use leg::{DEFAULT_REQUEST_BUFFER, LegError};
 
 // The bundle a `run_with_bundle` carries, streamed beside the request so the
 // request stays one bounded item. Built only by the door; read only through
@@ -144,11 +142,6 @@ pub use stream::{
 mod padded;
 #[cfg(feature = "execute")]
 pub use padded::{FrameError, Framed, Padded};
-
-// The adapter the compile leg's door applies — never exported; see the module
-// doc. The execute leg's is written by `#[protocol]`.
-#[cfg(feature = "compile")]
-mod adapter;
 
 /// The remoc connection config both ends of an engine leg build from, and what a
 /// role sets of it — shared with the storage tier's legs (see `fleet_stream`).

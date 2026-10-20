@@ -4,9 +4,9 @@
 //! may have under way at once, and how it holds up its own end of each leg.
 //!
 //! None of them reaches the terms between applicant, consumer and policy, and
-//! none opens anything to the host. The hatch is the host's own process, so how
-//! long api waits on it was the host's to decide already; a leg is dialed at
-//! the host; and a session's lifetime is swept on the host's clock. The framing
+//! none opens anything to the host. The host splices the hatch's leg, so how
+//! long api waits on the hatch was the host's to stall already; a leg is dialed
+//! at the host; and a session's lifetime is swept on the host's clock. The framing
 //! that keeps a round's sizes constant on a leg is the contract's, above the
 //! connection these set. Read once, before api talks to anything.
 

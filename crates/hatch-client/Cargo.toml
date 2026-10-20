@@ -13,10 +13,17 @@ hatch-rpc = { path = "../hatch-rpc" }
 fleet-stream = { path = "../fleet-stream" }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 bytes = "1"
-# The concern vocabulary the `boundary` facades are built from. A leaf crate
-# because `safe-logger` needs the same words for the serial-port crossing and
-# must not pull a wire client in to get them.
+# The concern vocabulary the clients take and hand back values in, at the end
+# of the leg their holder declares. A leaf crate because `safe-logger` needs the
+# same words for the serial-port crossing and must not pull a wire client in to
+# get them.
 enclavid-boundary = { path = "../boundary" }
 # `time` for the one deadline every hatch call runs under: a remoc call has none
 # of its own.
 tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+# The doors end to end: a hatch served at a declared end, over a real connection
+# brought up as both roles bring the leg up.
+enclavid-boundary-macros = { path = "../boundary-macros" }
+tokio = { version = "1", features = ["io-util", "macros", "rt", "test-util"] }

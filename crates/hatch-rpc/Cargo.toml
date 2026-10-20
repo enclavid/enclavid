@@ -9,7 +9,8 @@ repository.workspace = true
 # over an RA-TLS leg, as storage-rpc is for the storage-CVM — both ends are our
 # own attested Rust CVMs. What the hatch asks of the operator is a contract of
 # its own, plain HTTP and JSON (hooks.openapi.yaml in crates/hatch), which any
-# language can serve. Deps are remoc, serde and the fleet-stream leaf only.
+# language can serve. Deps are remoc, serde and serde_bytes, tokio's runtime,
+# the fleet-stream leaf, the boundary vocabulary, and its macros at build time.
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -19,6 +20,15 @@ remoc = { version = "0.18", default-features = false, features = [
     "rtc",
     "codec-ciborium",
 ] }
-# The connection config every fleet leg is brought up with, and the stream a
-# blob crosses as.
+# The connection config every fleet leg is brought up with, the handle that says
+# a leg is over, and the stream a blob crosses as.
 fleet-stream = { path = "../fleet-stream" }
+# `rt` for the tasks that drive the leg's connection: the leg is brought up and
+# served here, so the generated client and server are named nowhere else.
+tokio = { version = "1", default-features = false, features = ["rt"] }
+# The words `#[protocol]` writes what the contract asks of its two ends in: a
+# dependency-free leaf.
+enclavid-boundary = { path = "../boundary" }
+# `#[protocol]` on the contract: what its two ends must declare, and the
+# contract as the hatch serves it at its declared end. Build-time only.
+enclavid-boundary-macros = { path = "../boundary-macros" }

@@ -256,7 +256,7 @@ impl<C: Clone> Leg<C> {
 /// carries two clients on one connection, and both have to move together.
 ///
 /// `connect` returns the clients and a handle that finishes when the leg is over
-/// (`engine_rpc::leg_end`). Awaiting it is how this learns the leg ended, and it
+/// (`fleet_stream::leg_end`). Awaiting it is how this learns the leg ended, and it
 /// is a verdict rather than silence, because two different ends both reach it.
 /// The connection: chmux pings at half its peer's `connection_timeout` whenever
 /// the link is idle, so "no traffic" and "no peer" are already distinct one

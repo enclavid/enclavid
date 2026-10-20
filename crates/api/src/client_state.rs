@@ -17,10 +17,11 @@ use enclavid_attestation::Attestor;
 use hatch_client::{AuthClient, Link};
 use storage_client::SessionStore;
 
+use crate::boundary::Hatch;
 use crate::compositions::Compositions;
 
 pub struct ClientState {
-    pub auth: AuthClient,
+    pub auth: AuthClient<Hatch>,
     pub session_store: Arc<SessionStore>,
     pub attestor: Arc<dyn Attestor>,
     /// The applicant surface's, shared: a warmup has a session's composition
@@ -35,7 +36,7 @@ impl ClientState {
     /// `authorize_deadline` is how long the hatch has to answer each
     /// authorization, over `hatch`.
     pub fn new(
-        hatch: Arc<dyn Link>,
+        hatch: Arc<dyn Link<Hatch>>,
         session_store: Arc<SessionStore>,
         attestor: Arc<dyn Attestor>,
         compositions: Arc<Compositions>,

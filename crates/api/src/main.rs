@@ -332,7 +332,7 @@ async fn build_hatch_link(
     api_health: Arc<health::ApiHealth>,
     how: fleet::Dial,
     leg: hatch_rpc::LegSettings,
-) -> Arc<dyn hatch_client::Link> {
+) -> Arc<dyn hatch_client::Link<boundary::Hatch>> {
     let link = fleet::Leg::new();
     {
         let link = link.clone();

@@ -14,15 +14,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use remoc::codec::Ciborium;
-use remoc::rtc::ServerShared;
-
+use enclavid_hatch::boundary::AnyCaller;
 use enclavid_hatch::hooks::Hooks;
 use enclavid_hatch::oci::{DEFAULT_CONCURRENT_BLOBS, DEFAULT_CONCURRENT_MANIFESTS, Pulls};
 use enclavid_hatch::service::Hatch;
 use fleet_transport::LegFailure;
 use fleet_transport::launch::{LaunchError, Settings};
-use hatch_rpc::{HatchClient, LegSettings, RemoteHatchServerShared};
+use hatch_rpc::LegSettings;
 use safe_logger::{debug, info, reason, safe, warn};
 
 /// How long a hook has to answer, unless the host says otherwise (the
@@ -355,9 +353,9 @@ async fn main() {
     .await
 }
 
-/// RA-TLS-accept one api connection, frame it with remoc on this end's `leg`
-/// settings, and serve the hatch on it — its client sent to api on the base
-/// channel.
+/// RA-TLS-accept one api connection and serve the hatch on it at this role's
+/// end, [`AnyCaller`]: bringing the leg up on this end's `leg` settings, and
+/// sending api the hatch's client, are hatch-rpc's ([`hatch_rpc::serve_hatch`]).
 async fn serve_conn(
     stream: fleet_transport::Stream,
     ratls: tokio_rustls::TlsAcceptor,
@@ -370,25 +368,14 @@ async fn serve_conn(
         LegFailure::Attest
     })?;
     let (read, write) = tokio::io::split(tls);
-    let (conn, mut tx, _rx) = remoc::Connect::io::<_, _, HatchClient, HatchClient, Ciborium>(
-        hatch_rpc::connection_cfg(&leg),
-        read,
-        write,
-    )
-    .await
-    .map_err(|e| {
-        debug!("rpc connect: {e}");
-        LegFailure::Rpc
-    })?;
-    tokio::spawn(conn);
-
-    let (server, client) = RemoteHatchServerShared::<_, Ciborium>::new(hatch, request_buffer);
-    tx.send(client).await.map_err(|e| {
-        debug!("send service client: {e}");
-        LegFailure::Clients
-    })?;
-    server.serve(true).await.map_err(|e| {
-        debug!("serve: {e}");
-        LegFailure::Serve
-    })
+    hatch_rpc::serve_hatch::<AnyCaller, _, _, _>(read, write, hatch, request_buffer, &leg)
+        .await
+        .map_err(|e| {
+            debug!("hatch leg: {e}");
+            match e {
+                hatch_rpc::LegError::Rpc => LegFailure::Rpc,
+                hatch_rpc::LegError::Clients | hatch_rpc::LegError::Closed => LegFailure::Clients,
+                hatch_rpc::LegError::Serve => LegFailure::Serve,
+            }
+        })
 }

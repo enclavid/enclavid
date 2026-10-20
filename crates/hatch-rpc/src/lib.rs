@@ -7,25 +7,27 @@
 //! hooks who a caller is and what it may do. api pins its measurement, so what
 //! crosses here in the clear — a consumer's credential, its registry bearer —
 //! reaches our own build and goes no further than the party it is for: a
-//! registry over TLS, which ends inside the hatch, since api pins no bearer to
-//! one written `http://`. What
-//! comes back is checked where it arrives, as it always was: an artifact
-//! against its pinned digest, a released key against the TEE's own.
+//! registry over TLS, which ends inside the hatch, since neither api nor the
+//! hatch sends a bearer to one written `http://`. What comes back is checked
+//! where it arrives, as it always was: an artifact against its pinned digest, a
+//! released key against the TEE's own.
 //!
-//! One service, [`RemoteHatch`]:
+//! One leg — [`HatchLeg`] at api's end, [`serve_hatch`] at the hatch's:
 //!
-//!   * [`authorize`](RemoteHatch::authorize) — who a consumer's request is
-//!     from, and for a creation the terms its session is held to;
-//!   * [`manifest`](RemoteHatch::manifest) and [`blob`](RemoteHatch::blob) —
-//!     an OCI pull: the raw manifest a pinned reference names, then one blob of
-//!     it streaming beside the reply;
-//!   * [`kbs`](RemoteHatch::kbs) — one leg of a key broker's attestation
+//!   * [`authorize`](HatchLeg::authorize) — who a consumer's request is from,
+//!     and for a creation the terms its session is held to;
+//!   * [`manifest`](HatchLeg::manifest) and [`blob`](HatchLeg::blob) — an OCI
+//!     pull: the raw manifest a pinned reference names, then one blob of it
+//!     streaming beside the reply;
+//!   * [`kbs`](HatchLeg::kbs) — one leg of a key broker's attestation
 //!     handshake, relayed.
+//!
+//! Each end declares how it judges what crosses it: api's in `api::boundary`,
+//! the hatch's in `enclavid_hatch::boundary`.
 
-use remoc::codec::Ciborium;
 use serde::{Deserialize, Serialize};
 
-use fleet_stream::{StreamLen, bin};
+use fleet_stream::StreamLen;
 
 /// The longest blob the hatch streams, in bytes: 2 GiB, above the largest a
 /// composition carries — its components together are held to 1.5 GiB.
@@ -127,9 +129,13 @@ pub struct BlobRequest {
 pub enum PullError {
     /// The registry has no such manifest, blob or repository.
     NotFound,
-    /// The registry refused the bearer, or the reference is not one the hatch
-    /// fetches.
+    /// The registry refused the bearer, or the request is not one the hatch
+    /// makes: a reference that pins no digest, or a bearer for a registry
+    /// reached in the clear.
     Refused,
+    /// What the registry serves for the reference is past what the hatch reads:
+    /// a manifest past its bound. The pin names the same bytes every time.
+    TooLarge,
     /// The registry did not answer as one does, or not in time.
     Failed(String),
 }
@@ -162,7 +168,7 @@ pub struct KbsResponse {
 }
 
 /// Why a broker leg did not happen: the broker did not answer as one does, or
-/// not in time.
+/// not in time, or the leg is not one the hatch sends.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KbsError(pub String);
 
@@ -189,6 +195,7 @@ impl std::fmt::Display for PullError {
         match self {
             PullError::NotFound => f.write_str("pull: not found"),
             PullError::Refused => f.write_str("pull: refused"),
+            PullError::TooLarge => f.write_str("pull: past what is read"),
             PullError::Failed(m) => write!(f, "pull: {m}"),
         }
     }
@@ -200,29 +207,18 @@ impl From<remoc::rtc::CallError> for PullError {
     }
 }
 
-/// What api asks of the hatch. The hatch serves one of these per api
-/// connection, and sends api its client on the connection's base channel.
-#[remoc::rtc::remote]
-pub trait RemoteHatch {
-    /// Who a consumer's request is from, and whether it may go on — and for a
-    /// creation, the terms its session is held to.
-    async fn authorize(&self, req: AuthorizeRequest) -> Result<Verdict, AuthorizeError>;
+// The contract, and the client and server remoc writes from it, are NOT
+// exported: no crate outside this one can name the generated client, let alone
+// call it, and none can serve the raw contract. Both ends reach the leg through
+// `leg`, each at the end its role declares: `RemoteHatchCalls` /
+// `RemoteHatchServes` are what an end declares, and `RemoteHatchAt` the contract
+// as its server sees it there.
+mod contract;
+pub use contract::{RemoteHatchAt, RemoteHatchCalls, RemoteHatchServes};
 
-    /// The raw manifest a pinned reference names.
-    async fn manifest(&self, req: ManifestRequest) -> Result<Manifest, PullError>;
+mod leg;
+pub use leg::{HatchLeg, LegError, connect_hatch, serve_hatch};
 
-    /// One blob, its bytes streaming beside the reply as one message of
-    /// `req.size` bytes. A stream abandoned part-way is a blob that did not
-    /// arrive.
-    async fn blob(&self, req: BlobRequest) -> Result<bin::Receiver, PullError>;
-
-    /// One leg of a key broker's handshake.
-    async fn kbs(&self, req: KbsRequest) -> Result<KbsResponse, KbsError>;
-}
-
-/// The client api holds, as the hatch sends it.
-pub type HatchClient = RemoteHatchClient<Ciborium>;
-
-/// The remoc connection config both ends build from, and what a role sets of it
-/// — the one every fleet leg is brought up with (see `fleet_stream`).
-pub use fleet_stream::{LegSettings, connection_cfg};
+/// What a role sets of its end of the leg — the same as of every fleet leg (see
+/// `fleet_stream`).
+pub use fleet_stream::LegSettings;

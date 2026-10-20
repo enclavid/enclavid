@@ -5,8 +5,9 @@
 //! into `hatch-client` so the definitions sat beside the facades that construct
 //! them. Out again, because the TEE grew a second way to speak: the serial port
 //! that `safe-logger` writes to. Two channels with nothing in common but this
-//! vocabulary, so the vocabulary belongs below both. The facades stay with the
-//! clients that cross, and `safe-logger`, which opens its channel before
+//! vocabulary, so the vocabulary belongs below both. The mints stay with the
+//! channels — a leg's in the declarations of its ends, the storage volume's in
+//! its client's facades — and `safe-logger`, which opens its channel before
 //! anything else in a role exists, depends on the vocabulary without depending on
 //! a wire client.
 //!
