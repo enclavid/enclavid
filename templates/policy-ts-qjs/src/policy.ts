@@ -6,9 +6,7 @@
 // round after it, with the event that brought it. Each returns the state to
 // keep for the next round and what to do now: show the applicant something
 // (`render`), or end the session with a decision (`finish`).
-import "./global.js";
-import "./random.js";
-import "fast-text-encoding";
+import "@enclavid/policy-quickjs";
 import { definePolicy, withStart } from "@enclavid/policy";
 import type { Action, Event } from "enclavid:policy/types@0.1.0";
 import * as capture from "enclavid:well-known/capture@0.1.0";

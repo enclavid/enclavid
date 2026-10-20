@@ -1,0 +1,31 @@
+{
+  "name": "@enclavid/policy-quickjs",
+  "version": "0.1.0",
+  "description": "What an Enclavid policy built on QuickJS needs of the runtime and QuickJS lacks: TextEncoder and TextDecoder, crypto.getRandomValues, and a Math.random drawn afresh every round.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/enclavid/enclavid",
+    "directory": "sdk/typescript/policy-quickjs"
+  },
+  "type": "module",
+  "sideEffects": true,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "fast-text-encoding": "1.0.6"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.3"
+  }
+}

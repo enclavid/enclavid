@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@enclavid/policy": "^0.1.0",
-    "fast-text-encoding": "1.0.6"
+    "@enclavid/policy-quickjs": "^0.1.0"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "1.37.0",

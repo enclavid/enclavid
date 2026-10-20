@@ -22,11 +22,8 @@ enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
 ## What is where
 
 - `src/policy.ts` — the policy. Its state is a value of its own type; see
-  `definePolicy` and `withStart` in `@enclavid/policy`.
-- `src/global.ts` — makes QuickJS's global object reachable as `global`, for
-  the TextEncoder polyfill imported next to it.
-- `src/random.ts` — serves `Math.random` and `crypto.getRandomValues` from the
-  round's randomness.
+  `definePolicy` and `withStart` in `@enclavid/policy`. Its first import,
+  `@enclavid/policy-quickjs`, fills in what QuickJS lacks; see below.
 - `wit/world.wit` — what the policy imports (the host's interfaces and plugins')
   and exports, and the props it takes. The WIT it imports is in `wit/deps/`.
 - `i18n.json` — the texts the policy shows, by key and locale.
@@ -79,6 +76,15 @@ round it runs in.
 - `Date.now()` and `new Date()` are the second the round started, the same for
   the whole round.
 - `Math.random()` and `crypto.getRandomValues()` draw from the round's
-  randomness (`src/random.ts`). It is fresh for every round and unpredictable
-  to anyone outside the enclave; a round that runs again draws anew.
-- `TextEncoder` and `TextDecoder` come from the `fast-text-encoding` polyfill.
+  randomness, through `wasi:random`, which the world imports for it. It is
+  fresh for every round and unpredictable to anyone outside the enclave; a
+  round that runs again draws anew. QuickJS has no `crypto`, and seeds its own
+  `Math.random` once, when the policy is built — so without
+  `@enclavid/policy-quickjs` every session would draw the same numbers.
+- `TextEncoder` and `TextDecoder`, which `@enclavid/policy` keeps the state
+  with, come from the `fast-text-encoding` polyfill, also through
+  `@enclavid/policy-quickjs`.
+
+`@enclavid/policy-quickjs` is QuickJS's alone, so `@enclavid/policy` stays
+what it is under any engine. It goes first among the policy's imports, so
+everything after it finds what it puts in place.

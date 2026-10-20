@@ -5,12 +5,6 @@
 // module of its own, imported before anything that draws.
 import { getRandomBytes } from "wasi:random/random@0.2.12";
 
-declare global {
-  var crypto: {
-    getRandomValues<T extends ArrayBufferView>(array: T): T;
-  };
-}
-
 // componentize-qjs 0.4.5 takes a u64 as a `number` (a `bigint` traps), while the
 // generated types say `bigint`.
 const bytes = (length: number): Uint8Array =>
