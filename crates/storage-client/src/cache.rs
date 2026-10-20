@@ -111,22 +111,23 @@ impl CacheStore {
         plain: BlobPieces,
     ) -> Result<(), StoreError> {
         let (sealer, header) = Sealer::new(self.keys.seal_key.expose_secret(), cache_id.as_bytes());
-        let sealed = seal(header, sealer, length, plain);
-        // Cross the outbound boundary: the sealed stream's three concerns
-        // are all closed here — see each reason.
-        let pieces = boundary::outbound::to_untrusted(sealed)
-            .vouch_unchecked::<AuthN, _>(reason!(
-                "cwasm-cache blob is sealed under a TEE-only HKDF subkey of \
-                 tee_seal_key; the host stores opaque ciphertext it cannot read"
-            ))
-            .vouch_unchecked::<AuthZ, _>(reason!(
+        // Cross the outbound boundary: the sealed stream's three concerns are all
+        // closed here, the first by the seal itself — under a TEE-only HKDF subkey
+        // of tee_seal_key, so the host stores opaque ciphertext it cannot read.
+        let pieces = boundary::outbound::to_untrusted(plain)
+            .vouch_with(AuthN::Verified, |plain| {
+                Ok::<_, StoreError>(seal(header, sealer, length, plain))
+            })?
+            .vouch(reason!(
+                AuthZ::NoPrincipal,
                 "the cache is TEE-internal compile amortization, not a per-consumer \
-                 disclosure; there is no recipient-authorization dimension to gate"
+                 disclosure; there is no recipient to authorize"
             ))
-            .vouch_unchecked::<Covert, _>(reason!(
+            .vouch(reason!(
+                Covert::AlreadyHeld,
                 "blob size is a deterministic function of the consumer-chosen \
                  composition (policy+plugins), which the host already observes via \
-                 its OCI pulls; it carries no applicant/covert data"
+                 its OCI pulls; it carries no applicant data"
             ))
             .into_inner();
         self.backend
@@ -152,22 +153,24 @@ impl CacheStore {
             return Ok(None);
         };
         let opener = Opener::new(self.keys.seal_key.expose_secret(), cache_id.as_bytes());
-        // Inbound boundary: all three concerns closed here.
-        let pieces = boundary::inbound::from_untrusted(open(opener, length, sealed))
-            .trust_unchecked::<AuthN, _>(reason!(
-                "every piece is handed on only once its segment opened under the \
-                 TEE-only cache seal key, and a stream cut short, reordered or spliced \
-                 ends in an error — only bytes this TEE sealed come out"
+        // Inbound boundary: all three concerns closed here, the first by the open
+        // itself — every piece is handed on only once its segment opened under the
+        // TEE-only cache seal key, and a stream cut short, reordered or spliced ends
+        // in an error, so only bytes this TEE sealed come out.
+        let pieces = boundary::inbound::from_untrusted(sealed)
+            .trust_with(AuthN::Verified, |sealed| {
+                Ok::<_, StoreError>(open(opener, length, sealed))
+            })?
+            .trust(reason!(
+                AuthZ::NoPrincipal,
+                "cache is TEE-internal compile amortization; there is no recipient to \
+                 authorize"
             ))
-            .trust_unchecked::<AuthZ, _>(reason!(
-                "cache is TEE-internal compile amortization; no \
-                 per-recipient authorization dimension"
-            ))
-            .trust_unchecked::<Replay, _>(reason!(
-                "a stale/replayed blob under this content+format-addressed \
-                 key is a prior compile of the SAME composition (identical \
-                 meaning) or wasmtime-incompatible and rejected at \
-                 deserialize — never a different policy"
+            .trust(reason!(
+                Replay::Idempotent,
+                "a stale/replayed blob under this content+format-addressed key is a prior \
+                 compile of the SAME composition (identical meaning) or \
+                 wasmtime-incompatible and rejected at deserialize — never a different policy"
             ))
             .into_inner();
         Ok(Some((length, pieces)))

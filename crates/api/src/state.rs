@@ -30,7 +30,7 @@ pub struct AppState {
     /// execution-worker (started by infrastructure; api [`connect`s]
     /// (connect_execution_worker) to it). api holds NO wasmtime — the round runs
     /// on the worker, which calls back for media / state persistence via the
-    /// per-run CallbackService (api holds the seal key, the worker does not). See
+    /// per-run RemoteCallbacks (api holds the seal key, the worker does not). See
     /// [`crate::executor`]. The orchestrator delegates compile + execute through
     /// these two client boundaries.
     pub executor: Arc<Executor>,

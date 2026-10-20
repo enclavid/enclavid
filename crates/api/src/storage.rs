@@ -19,8 +19,8 @@ use fleet_transport::LegFailure;
 use safe_logger::debug;
 use storage_client::{BlobPieces, CacheBackend, SessionBackend, StoreError};
 use storage_rpc::{
-    CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheService, CacheServiceClient,
-    ReadRequest, SessionError, SessionStoreService, SessionStoreServiceClient, Slot,
+    CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, ReadRequest, RemoteCache,
+    RemoteCacheClient, RemoteSessionStore, RemoteSessionStoreClient, SessionError, Slot,
     StorageClients, WriteRequest,
 };
 
@@ -32,20 +32,20 @@ fn to_store(e: impl std::fmt::Display) -> StoreError {
     StoreError::Transport(format!("storage-cvm: {e}"))
 }
 
-/// `SessionBackend` over the storage-CVM's `SessionStoreService`.
+/// `SessionBackend` over the storage-CVM's `RemoteSessionStore`.
 pub struct SessionCvmBackend {
-    leg: Arc<crate::fleet::Leg<SessionStoreServiceClient<Ciborium>>>,
+    leg: Arc<crate::fleet::Leg<RemoteSessionStoreClient<Ciborium>>>,
 }
 
 impl SessionCvmBackend {
-    pub fn new(leg: Arc<crate::fleet::Leg<SessionStoreServiceClient<Ciborium>>>) -> Self {
+    pub fn new(leg: Arc<crate::fleet::Leg<RemoteSessionStoreClient<Ciborium>>>) -> Self {
         Self { leg }
     }
 
     /// The client, or the leg's own failure. A request during an outage fails
     /// rather than waits — the health port is already saying which leg is down,
     /// and how long to wait for it is the host's call.
-    fn client(&self) -> Result<SessionStoreServiceClient<Ciborium>, StoreError> {
+    fn client(&self) -> Result<RemoteSessionStoreClient<Ciborium>, StoreError> {
         self.leg
             .get()
             .ok_or_else(|| StoreError::Transport("storage-cvm: the leg is down".into()))
@@ -88,20 +88,20 @@ impl SessionBackend for SessionCvmBackend {
     }
 }
 
-/// `CacheBackend` over the storage-CVM's `CacheService`. Every blob streams
+/// `CacheBackend` over the storage-CVM's `RemoteCache`. Every blob streams
 /// beside its call, so no call carries one: a blob of any size crosses without
 /// coming near remoc's item limit, and one that fails ends its own stream and
 /// nothing else on the connection the session store shares.
 pub struct CacheCvmBackend {
-    leg: Arc<crate::fleet::Leg<CacheServiceClient<Ciborium>>>,
+    leg: Arc<crate::fleet::Leg<RemoteCacheClient<Ciborium>>>,
 }
 
 impl CacheCvmBackend {
-    pub fn new(leg: Arc<crate::fleet::Leg<CacheServiceClient<Ciborium>>>) -> Self {
+    pub fn new(leg: Arc<crate::fleet::Leg<RemoteCacheClient<Ciborium>>>) -> Self {
         Self { leg }
     }
 
-    fn client(&self) -> Result<CacheServiceClient<Ciborium>, StoreError> {
+    fn client(&self) -> Result<RemoteCacheClient<Ciborium>, StoreError> {
         self.leg
             .get()
             .ok_or_else(|| StoreError::Transport("storage-cvm: the leg is down".into()))

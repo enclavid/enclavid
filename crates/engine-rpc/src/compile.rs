@@ -1,4 +1,4 @@
-//! Compile boundary — the `CompilerService` remote trait, what crosses it, and its
+//! Compile boundary — the `RemoteCompiler` remote trait, what crosses it, and its
 //! error.
 //!
 //! Gated behind the `compile` feature: a compile-worker (or the
@@ -322,9 +322,9 @@ pub struct CompileReply {
 /// the cwasm and its metadata.
 ///
 /// `&self` so the client is clonable and the server can run compiles in
-/// parallel (`CompilerServiceServerShared`).
+/// parallel (`RemoteCompilerServerShared`).
 #[remoc::rtc::remote]
-pub trait CompilerService {
+pub trait RemoteCompiler {
     async fn compile(&self, req: CompileRequest) -> Result<CompileReply, CompileError>;
 }
 
@@ -341,7 +341,7 @@ mod tests {
     /// stream both cross a real connection.
     struct MockCompiler;
 
-    impl CompilerService for MockCompiler {
+    impl RemoteCompiler for MockCompiler {
         async fn compile(&self, req: CompileRequest) -> Result<CompileReply, CompileError> {
             let (policy, plugins) = req.receive().await.map_err(|_| CompileError::Failed)?;
             if policy == b"boom" {
@@ -363,7 +363,7 @@ mod tests {
         }
     }
 
-    type CompilerCli = CompilerServiceClient<Ciborium>;
+    type CompilerCli = RemoteCompilerClient<Ciborium>;
 
     async fn call(
         client: &CompilerCli,
@@ -400,7 +400,7 @@ mod tests {
                 .unwrap();
             tokio::spawn(conn);
             let (server, client) =
-                CompilerServiceServerShared::<_, Ciborium>::new(Arc::new(MockCompiler), 4);
+                RemoteCompilerServerShared::<_, Ciborium>::new(Arc::new(MockCompiler), 4);
             tx.send(client).await.unwrap();
             server.serve(true).await.unwrap();
         });

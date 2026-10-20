@@ -1,5 +1,6 @@
 mod applicant;
 mod assets;
+mod boundary;
 mod client;
 mod client_state;
 mod compiler;

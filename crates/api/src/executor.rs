@@ -2,12 +2,12 @@
 //! api NEVER runs wasm in-process — it always drives an execution-worker over
 //! rpc, so the api binary links NO wasmtime runtime (and no Cranelift).
 //!
-//! [`Executor`] wraps the `engine_rpc::ExecutorService` client. The worker is a
+//! [`Executor`] wraps the `engine_rpc::RemoteExecutor` client. The worker is a
 //! separate CVM, brought up at boot rather than by api. api
 //! [`connect`](connect_execution_worker)s to it at a configured address, under
 //! mutual RA-TLS; the transport is TCP by default and vsock under that feature.
 //!
-//! Per round api stands up a `CallbackService` server (`media_load` /
+//! Per round api stands up a `RemoteCallbacks` server (`media_load` /
 //! `session_change`) on the SAME connection and passes its client into
 //! [`run`](Executor::run), so the KEYLESS worker rehydrates blobs and persists
 //! state without ever holding the seal key (remoc multiplexes the callbacks over
@@ -24,63 +24,39 @@
 //! session's rounds, and has the props read against the type the composition
 //! declares for them.
 
-use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Exposed, Untrusted, reason};
+use enclavid_boundary::{Asserted, AuthZ, Covert, Exposed, Untrusted, reason};
 use engine_rpc::{
-    BundleSource, CallbackServiceUntrusted, CompositionKey, ExecError, ExecutorLeg, Padded,
-    Preparation, PrepareRequest, Preparing, PropsRead, RoundProps, RunOutcome, RunRequest,
+    BundleSource, CompositionKey, ExecError, ExecutorLeg, MediaBytes, Padded, Preparation,
+    PrepareRequest, Preparing, PropsRead, RemoteCallbacksAt, RoundProps, RunOutcome, RunRequest,
     RunStatus,
 };
 use fleet_transport::LegFailure;
 use safe_logger::debug;
 use session_types::{Event, SessionState};
 
-/// What is still open on a value api is about to release to the
-/// execution-worker.
-///
-/// Declared here rather than taken from a client's `boundary::outbound`: those
-/// facades are the host's, whose every byte the host reads. A scope is a property
-/// of the CHANNEL, so this leg names its own.
-type ToWorker<T> = Exposed<T, (AuthN, AuthZ, Covert)>;
-
-/// Open a value for the execution-worker with the leg's own answer given, so
-/// what is left is what differs per message.
-///
-/// `AuthN` is IDENTIFIED, and it is the same for everything this leg carries — a
-/// round, a preparation, a blob a round asked for: the leg dials one
-/// compile-time-pinned measurement, and that peer keeps what it is handed in its
-/// own memory, where the host that splices the hop cannot read it.
-///
-/// `AuthZ` and `Covert` stay open. What may go to the code that runs a consumer's
-/// policy, and what a value's shape can carry, are answered value by value, by the
-/// mints below. Private to this module, so its receipt reaches no other door.
-fn to_worker<T>(value: T) -> Exposed<T, (AuthZ, Covert)> {
-    let open: ToWorker<T> = Exposed::new(value);
-    open.vouch_unchecked::<AuthN, _>(reason!(
-        "identified: this leg dials ONE compile-time-pinned measurement, the handshake \
-         fails before a byte moves if the peer is not it, and the peer keeps what it \
-         is handed in its own memory"
-    ))
-}
+use crate::boundary::ExecutionWorker;
 
 /// Mint a round's request — the only way one reaches an execution-worker, and
 /// the receipt `ExecutorLeg::run` and `run_with_bundle` demand.
 ///
 /// One mint for the whole message, so every field it carries is answered here
-/// and none rides in on another's receipt.
+/// and none rides in on another's receipt. `AuthN` is this end's declaration's
+/// (`crate::boundary::ExecutionWorker`); `AuthZ` and `Covert` are answered here,
+/// because the fields answer them differently.
 ///
-/// `AuthZ` takes one answer for the five fields, and it names the kind of each:
+/// `AuthZ` is MATCHED, upstream, and the reason covers the five fields:
 ///
-///   * the state, the props, the key and the ceiling are NO-SECRET: the state is
-///     what this peer wrote on the session's previous round, or the empty one
+///   * the event is the reply sent under the bearer that opened this session's
+///     state (`round::extract`), and it goes to the runner of this session's
+///     policy, whose prompt it answers;
+///   * the state, the props, the key and the ceiling are the peer's own: the
+///     state is what it wrote on the session's previous round, or the empty one
 ///     genesis starts from; the props are what its preparation read; the key
 ///     names the composition it is handed on every miss; the ceiling is the
-///     session's terms;
-///   * the event is MATCHED, upstream: it is the reply sent under the bearer that
-///     opened this session's state (`round::extract`), and it goes to the runner
-///     of this session's policy, whose prompt it answers.
+///     session's terms.
 ///
 /// `Covert` is closed by the work for the two fields whose length the policy
-/// chooses — the state, and the props as read against its type: the peel's
+/// chooses — the state, and the props as read against its type: the work's
 /// codomain IS the wire type, so no `RunRequest` exists whose frames skipped the
 /// padding. The other three are not framed, and the reason for each is that
 /// nobody with something to hide chose its shape:
@@ -96,29 +72,34 @@ pub(crate) fn outbound_round(
     state: &SessionState,
     props: Option<&str>,
     event: Event,
-) -> Result<Exposed<RunRequest, ()>, ExecError> {
+) -> Result<Exposed<RunRequest, (), ExecutionWorker>, ExecError> {
     let props = RoundProps(props.map(str::as_bytes).unwrap_or_default().to_vec());
-    Ok(
-        to_worker((composition_key, max_cwasm_bytes, state, props, event))
-            .vouch_unchecked::<AuthZ, _>(reason!(
-                "no-secret for the state, the props, the key and the ceiling — this \
-                 peer's own prior output or the empty genesis state, what its preparation \
-                 read, the key it is handed on every miss, and the session's terms; \
-                 matched for the event — the reply sent under the bearer that opened this \
-                 session's state, to the runner of the policy whose prompt it answers"
-            ))
-            .vouch::<Covert, _, _, _, _>(
-                |(composition_key, max_cwasm_bytes, state, props, event)| {
-                    Ok::<_, engine_rpc::FrameError>(RunRequest {
-                        composition_key: composition_key.clone(),
-                        max_cwasm_bytes,
-                        props: Padded::seal(&props)?,
-                        session_state: Padded::seal(state)?,
-                        event,
-                    })
-                },
-            )?,
-    )
+    Ok(ExecutionWorker::expose_as::<RunRequest, _>((
+        composition_key,
+        max_cwasm_bytes,
+        state,
+        props,
+        event,
+    ))
+    .vouch(reason!(
+        AuthZ::Matched,
+        "the event is the reply sent under the bearer that opened this session's state, \
+         to the runner of the policy whose prompt it answers; the rest is this peer's own \
+         prior output, what its preparation read, the key it is handed on every miss, and \
+         the session's terms"
+    ))
+    .vouch_with(
+        Covert::Transformed,
+        |(composition_key, max_cwasm_bytes, state, props, event)| {
+            Ok::<_, engine_rpc::FrameError>(RunRequest {
+                composition_key: composition_key.clone(),
+                max_cwasm_bytes,
+                props: Padded::seal(&props)?,
+                session_state: Padded::seal(state)?,
+                event,
+            })
+        },
+    )?)
 }
 
 /// Mint a rehydrated blob as a released value — the ONE thing api hands back to
@@ -127,7 +108,7 @@ pub(crate) fn outbound_round(
 /// captured-hash gate has admitted the hash.
 ///
 /// These are the applicant's own pixels, going out over the hop the host splices,
-/// whose `AuthN` the leg answers ([`to_worker`]). Two answers here, and the last
+/// whose `AuthN` this end's declaration answers. Two answers here, and the last
 /// is the one worth reading twice because it is why there is no frame:
 ///
 ///   * `AuthZ` — SCOPED, by the captured-hash gate rather than by a sentence: the
@@ -140,35 +121,42 @@ pub(crate) fn outbound_round(
 /// The residual under that last one is real and bounded: WHICH of this session's
 /// own blobs a round fetched. The gate bounds the set, the worker's per-run memo
 /// bounds repeats within a round, and the applicant's round count bounds the rest.
-pub(crate) fn outbound_blob(loaded: Option<Vec<u8>>) -> Exposed<Option<Vec<u8>>, ()> {
-    to_worker(loaded)
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "scoped: the captured-hash gate admits only blobs THIS session stored, so \
-             the set this peer can name is the applicant's own frames and nothing else"
+pub(crate) fn outbound_blob(
+    loaded: Option<Vec<u8>>,
+) -> Exposed<Option<MediaBytes>, (), ExecutionWorker> {
+    ExecutionWorker::expose(loaded.map(MediaBytes))
+        .vouch(reason!(
+            AuthZ::Scoped,
+            "the captured-hash gate admits only blobs THIS session stored, so the set this \
+             peer can name is the applicant's own frames and nothing else"
         ))
-        .vouch_unchecked::<Covert, _>(reason!(
-            "already-held: media is sealed to the host WITHOUT padding under an HKDF \
-             name derived from (session, hash), so it held this blob's exact length \
-             and saw the read before this hop carried anything"
+        .vouch(reason!(
+            Covert::AlreadyHeld,
+            "media is sealed to the host WITHOUT padding under an HKDF name derived from \
+             (session, hash), so it held this blob's exact length and saw the read before \
+             this hop carried anything"
         ))
 }
 
 /// The EXECUTE boundary: a client for an execution-worker's
-/// `engine_rpc::ExecutorService`. A cheap remoc handle (`Send + Sync`); concurrent
-/// rounds multiplex over the one connection.
+/// `engine_rpc::RemoteExecutor`, held at api's end of the leg
+/// ([`ExecutionWorker`]). A cheap remoc handle (`Send + Sync`); concurrent rounds
+/// multiplex over the one connection.
 pub struct Executor {
-    leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<ExecutorLeg>>>,
+    leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<ExecutorLeg<ExecutionWorker>>>>,
 }
 
 impl Executor {
-    pub fn new(leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<ExecutorLeg>>>) -> Self {
+    pub fn new(
+        leg: std::sync::Arc<crate::fleet::Leg<std::sync::Arc<ExecutorLeg<ExecutionWorker>>>>,
+    ) -> Self {
         Self { leg }
     }
 
     /// The client, or the leg's own failure. A request arriving during an outage
     /// fails rather than waits: how long to wait for a peer is the host's
     /// decision, and the health port is already telling it which leg is down.
-    fn client(&self) -> Result<std::sync::Arc<ExecutorLeg>, ExecError> {
+    fn client(&self) -> Result<std::sync::Arc<ExecutorLeg<ExecutionWorker>>, ExecError> {
         // api's OWN error, built here and never crossing the wire — which is why
         // the contract needs no variant for it. Whatever this side must tell apart
         // it can tell apart at the point it knows.
@@ -183,12 +171,11 @@ impl Executor {
     /// key-holding orchestrator, never the worker.
     pub async fn run<C>(
         &self,
-        req: Exposed<RunRequest, ()>,
+        req: Exposed<RunRequest, (), ExecutionWorker>,
         callbacks: C,
-    ) -> Result<Untrusted<RunOutcome, C::Scope>, ExecError>
+    ) -> Result<Untrusted<RunOutcome, (), ExecutionWorker>, ExecError>
     where
-        C: CallbackServiceUntrusted + Send + Sync + 'static,
-        C::Scope: Send,
+        C: RemoteCallbacksAt<ExecutionWorker> + Send + Sync + 'static,
     {
         self.client()?.run(req, callbacks).await
     }
@@ -201,13 +188,12 @@ impl Executor {
     /// a compile, from the cache on an L2 hit.
     pub async fn run_with_bundle<C>(
         &self,
-        req: Exposed<RunRequest, ()>,
+        req: Exposed<RunRequest, (), ExecutionWorker>,
         bundle: BundleSource,
         callbacks: C,
-    ) -> Result<Untrusted<RunStatus, C::Scope>, ExecError>
+    ) -> Result<Untrusted<RunStatus, (), ExecutionWorker>, ExecError>
     where
-        C: CallbackServiceUntrusted + Send + Sync + 'static,
-        C::Scope: Send,
+        C: RemoteCallbacksAt<ExecutionWorker> + Send + Sync + 'static,
     {
         self.client()?.run_with_bundle(req, bundle, callbacks).await
     }
@@ -216,12 +202,12 @@ impl Executor {
     /// its props if asked. What the worker read on a hit, or its ABI id on a
     /// miss, at which point the caller resolves the bundle as a round does and
     /// calls [`prepare_with_bundle`](Self::prepare_with_bundle). Both are the
-    /// worker's word, judged as everything on this leg is (`WorkerScope` in
-    /// `crate::applicant::callbacks`).
+    /// worker's word, and api's end leaves them open (`crate::boundary`): the two
+    /// halves are judged where they are used.
     pub async fn prepare(
         &self,
-        req: Exposed<PrepareRequest, ()>,
-    ) -> Result<Preparation<(Asserted,)>, ExecError> {
+        req: Exposed<PrepareRequest, (), ExecutionWorker>,
+    ) -> Result<Preparation<(Asserted,), ExecutionWorker>, ExecError> {
         self.client()?.prepare(req).await
     }
 
@@ -229,43 +215,30 @@ impl Executor {
     /// `req.composition_key`, which crosses as a round's does.
     pub async fn prepare_with_bundle(
         &self,
-        req: Exposed<PrepareRequest, ()>,
+        req: Exposed<PrepareRequest, (), ExecutionWorker>,
         bundle: BundleSource,
-    ) -> Result<Untrusted<PropsRead, (Asserted,)>, ExecError> {
+    ) -> Result<Untrusted<PropsRead, (Asserted,), ExecutionWorker>, ExecError> {
         self.client()?.prepare_with_bundle(req, bundle).await
     }
 }
 
-/// Mint a session's preparation as a fully-vouched request — the only way one
-/// reaches an execution-worker.
+/// Mint a session's preparation — the only way one reaches an execution-worker.
 ///
-/// `AuthZ` is NO-SECRET: the props are the ones every round of the session hands
-/// this same peer, as WAVE once read, the key names the composition it is handed
-/// on every miss, and the ceiling is the session's terms. `Covert` is
-/// ALREADY-HELD: the props are the consumer's JSON, whose length the host saw on
-/// the request that created the session, and nothing of the applicant's is in
-/// it — a session is prepared before any of its rounds. The key beside them is
-/// 64 hex characters, whatever it names, and the ceiling what the operator's
-/// limits gave.
+/// Every concern on it is answered by this end's declaration
+/// (`crate::boundary::ExecutionWorker`), because every preparation answers them
+/// alike: the props, the key and the ceiling are what every round of the session
+/// hands the same peer, and their lengths are the consumer's and the operator's,
+/// all seen by the host before the session had a round.
 pub(crate) fn outbound_preparation(
     composition_key: &CompositionKey,
     max_cwasm_bytes: u64,
     preparing: Preparing,
-) -> Exposed<PrepareRequest, ()> {
-    to_worker(PrepareRequest {
+) -> Exposed<PrepareRequest, (), ExecutionWorker> {
+    ExecutionWorker::expose(PrepareRequest {
         composition_key: composition_key.clone(),
         max_cwasm_bytes,
         preparing,
     })
-    .vouch_unchecked::<AuthZ, _>(reason!(
-        "no-secret: the props every round of this session hands the same peer, the \
-         key it is handed on every miss, and the session's terms"
-    ))
-    .vouch_unchecked::<Covert, _>(reason!(
-        "already-held: the consumer's own props, whose length the host saw when the \
-         session was created, beside a key of fixed length and the ceiling the \
-         operator's limits gave; nothing of an applicant's is in any"
-    ))
 }
 
 /// Connect to an execution-worker already listening at `addr` and hand back an
@@ -280,7 +253,13 @@ pub async fn connect_execution_worker(
     attestor: std::sync::Arc<dyn enclavid_attestation::Attestor>,
     leg: engine_rpc::LegSettings,
     callback_buffer: usize,
-) -> Result<(std::sync::Arc<ExecutorLeg>, tokio::task::JoinHandle<()>), LegFailure> {
+) -> Result<
+    (
+        std::sync::Arc<ExecutorLeg<ExecutionWorker>>,
+        tokio::task::JoinHandle<()>,
+    ),
+    LegFailure,
+> {
     let stream = fleet_transport::dial(addr).await.map_err(|e| {
         debug!("connect {addr}: {e}");
         LegFailure::Connect(e.kind())
@@ -314,16 +293,20 @@ pub async fn connect_execution_worker(
     // Everything above this line is WHO — the dial, the pins, what a refusal
     // means. Everything below is WHAT MAY CROSS, and that is engine-rpc's: it
     // brings the hop up and keeps the generated client, which api has no name for.
-    let (leg, driver) = engine_rpc::connect_executor(read, write, &leg, callback_buffer)
-        .await
-        .map_err(|e| {
-            debug!("execute leg: {e}");
-            match e {
-                engine_rpc::LegError::Rpc => LegFailure::Rpc,
-                engine_rpc::LegError::Clients | engine_rpc::LegError::Serve => LegFailure::Clients,
-                engine_rpc::LegError::Closed => LegFailure::Closed,
-            }
-        })?;
+    // How api judges what crosses is its end's declaration, `ExecutionWorker`.
+    let (leg, driver) =
+        engine_rpc::connect_executor::<ExecutionWorker, _, _>(read, write, &leg, callback_buffer)
+            .await
+            .map_err(|e| {
+                debug!("execute leg: {e}");
+                match e {
+                    engine_rpc::LegError::Rpc => LegFailure::Rpc,
+                    engine_rpc::LegError::Clients | engine_rpc::LegError::Serve => {
+                        LegFailure::Clients
+                    }
+                    engine_rpc::LegError::Closed => LegFailure::Closed,
+                }
+            })?;
 
     Ok((std::sync::Arc::new(leg), driver))
 }

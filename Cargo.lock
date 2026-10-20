@@ -1499,6 +1499,7 @@ dependencies = [
  "ciborium-ll",
  "enclavid-attestation",
  "enclavid-boundary",
+ "enclavid-boundary-macros",
  "enclavid-crypto",
  "enclavid-kbs-client",
  "enclavid-ra-tls",
@@ -1554,6 +1555,18 @@ dependencies = [
 [[package]]
 name = "enclavid-boundary"
 version = "0.1.0"
+dependencies = [
+ "enclavid-boundary-macros",
+]
+
+[[package]]
+name = "enclavid-boundary-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "enclavid-cli"
@@ -1800,6 +1813,7 @@ dependencies = [
  "blake3",
  "enclavid-attestation",
  "enclavid-boundary",
+ "enclavid-boundary-macros",
  "enclavid-ra-tls",
  "engine-compiler",
  "engine-rpc",
@@ -1851,6 +1865,7 @@ dependencies = [
  "bytes",
  "ciborium",
  "enclavid-boundary",
+ "enclavid-boundary-macros",
  "engine-types",
  "fleet-stream",
  "futures-util",

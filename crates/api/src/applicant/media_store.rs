@@ -1,5 +1,5 @@
 //! Host media store the keyless execution-worker calls BACK for
-//! `blob::from-blob-ref` (via `CallbackService::media_load`) — a **pull** over
+//! `blob::from-blob-ref` (via `RemoteCallbacks::media_load`) — a **pull** over
 //! the sealed hatch backing store, with a **gate** on the read key. It runs
 //! orchestrator-side because it holds the seal key + applicant token the worker
 //! must never see.
@@ -56,9 +56,10 @@ use std::sync::{Arc, Weak};
 
 use enclavid_boundary::Asserted;
 use enclavid_boundary::{Exposed, Replay, reason};
-use engine_rpc::CallbackError;
+use engine_rpc::{CallbackError, MediaBytes, MediaHash};
 use storage_client::SessionStore;
 
+use crate::boundary::ExecutionWorker;
 use crate::executor::outbound_blob;
 
 use super::callbacks::FromWorker;
@@ -83,7 +84,7 @@ pub(super) struct HatchMediaStore {
 
 impl HatchMediaStore {
     /// Rehydrate one stored blob by content hash — the api side of the keyless
-    /// executor's `CallbackService::media_load`. Returns owned bytes for the
+    /// executor's `RemoteCallbacks::media_load`. Returns owned bytes for the
     /// wire (`None` = miss / gated), so the worker's `from-blob-ref` traps on a
     /// `None` exactly as the in-process store did. The seal key never leaves
     /// this side — the worker only ever receives the decrypted bytes it asked
@@ -92,15 +93,15 @@ impl HatchMediaStore {
     /// closed).
     pub(super) async fn load(
         &self,
-        blob_hash: FromWorker<[u8; 32]>,
-    ) -> Result<Exposed<Option<Vec<u8>>, ()>, CallbackError> {
+        blob_hash: FromWorker<MediaHash>,
+    ) -> Result<Exposed<Option<MediaBytes>, (), ExecutionWorker>, CallbackError> {
         // 1. Gate — an unknown hash is a fabricated ref: refuse with no hatch
         //    read. The worker traps on the `None` (from-blob-ref has no miss branch).
         //
-        //    CONTAINED, and the gate is written AS the discharge rather than
-        //    beside it. That buys legibility, not a guarantee: `trust` forces a
-        //    closure over the value with a failure arm, so a reviewer reads the
-        //    predicate instead of a sentence about it — but `|h| Ok(h)` would
+        //    BOUND, and the gate is written AS the discharge rather than beside
+        //    it: the hash is checked against a set a different party established,
+        //    and that kind is work, so the closure cannot be dropped for a
+        //    sentence. That buys legibility, not a guarantee — `|h| Ok(h)` would
         //    still type-check. Making the gate load-bearing needs the shape
         //    `storage::scope::Name` uses: a type whose only constructor is the
         //    check. `captured` is a snapshot taken
@@ -119,9 +120,9 @@ impl HatchMediaStore {
         //    `round_captures` — blake3 over the frames api itself read off
         //    `/input` — and `session_change` has no parameter left to report
         //    through. So a hash that passes here is the hash of an applicant
-        //    frame of THIS session, and CONTAINED means what it says rather than
+        //    frame of THIS session, and BOUND means what it says rather than
         //    "given a ledger the peer wrote".
-        let Ok(blob_hash) = blob_hash.trust::<Asserted, _, _, _, ()>(|hash| {
+        let Ok(blob_hash) = blob_hash.trust_with(Asserted::Bound, |MediaHash(hash)| {
             if self.captured.contains(&hash) {
                 Ok(hash)
             } else {
@@ -153,7 +154,8 @@ impl HatchMediaStore {
                 safe_logger::debug!("media load failed: {e}");
                 CallbackError
             })?
-            .trust_unchecked::<Replay, _>(reason!(
+            .trust(reason!(
+                Replay::Idempotent,
                 "api is the only writer here and writes bytes only under their own \
                  blake3, so a stale or reordered read returns the one plaintext that \
                  hashes to this key — the applicant's frame itself; the AAD \

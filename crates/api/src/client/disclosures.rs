@@ -95,7 +95,7 @@ async fn read(
     // (order is meaningless). 500 keeps the failure path consistent with other
     // host misbehaviours here.
     let items = disclosures
-        .trust::<AuthN, _, _, _, _>(|items| {
+        .trust_with(AuthN::Verified, |items| {
             let served = disclosure_commit::commit_from_ciphertexts(&session_id, &items);
             if served == expected && items.len() as u64 == metadata.disclosure_count {
                 Ok(items)
@@ -103,7 +103,8 @@ async fn read(
                 Err(StatusCode::INTERNAL_SERVER_ERROR)
             }
         })?
-        .trust_unchecked::<AuthZ, _>(reason!(
+        .trust(reason!(
+            AuthZ::Matched,
             r#"
 TEE forwards opaque sealed bytes; only the holder of the consumer's
 disclosure private key can open them. This endpoint requires the
@@ -112,7 +113,8 @@ metadata.client predicate (closed upstream), so the recipient is
 both authenticated and the correct decryption target.
         "#
         ))
-        .trust_unchecked::<Replay, _>(reason!(
+        .trust_accept_risk(reason!(
+            Replay::AcceptedRisk,
             r#"
 Two replay angles to consider:
   * Stale list against current metadata's set commitment —

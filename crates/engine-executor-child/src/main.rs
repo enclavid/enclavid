@@ -3,10 +3,10 @@
 //! OS address-space boundary.
 //!
 //! Lifecycle (one round, then die): the supervisor spawns this process with one
-//! end of a socketpair on **fd 0**, [`prime`](engine_rpc::ChildService::prime)s
+//! end of a socketpair on **fd 0**, [`prime`](engine_rpc::RemoteChild::prime)s
 //! it once with the compiled bundle (deserialize + build the reusable
-//! `InstancePre`), drives exactly one [`run`](engine_rpc::ChildService::run) — or,
-//! preparing a session, one [`read_props`](engine_rpc::ChildService::read_props),
+//! `InstancePre`), drives exactly one [`run`](engine_rpc::RemoteChild::run) — or,
+//! preparing a session, one [`read_props`](engine_rpc::RemoteChild::read_props),
 //! which never instantiates the policy — then
 //! drops its client — this process's `serve` loop ends and it exits. A fresh
 //! child is spawned for the next round. So a wasmtime sandbox ESCAPE is confined
@@ -15,11 +15,11 @@
 //! process — no cross-round persistence, no cross-session bleed.
 //!
 //! **Keyless.** This process never holds `tee_seal_key` or an applicant token.
-//! Blob rehydration ([`media_load`](engine_rpc::ChildCallbacks::media_load)) and
-//! state persistence ([`session_change`](engine_rpc::ChildCallbacks::session_change))
+//! Blob rehydration ([`media_load`](engine_rpc::RemoteChildCallbacks::media_load)) and
+//! state persistence ([`session_change`](engine_rpc::RemoteChildCallbacks::session_change))
 //! forward over the socketpair to the SUPERVISOR's relay, which forwards them on
 //! to api (the seal-key holder). Those two calls are the whole of the
-//! [`ChildCallbacks`] boundary: the supervisor primed this process with its
+//! [`RemoteChildCallbacks`] boundary: the supervisor primed this process with its
 //! bundle before starting it, so there is nothing here that can ask for a
 //! composition, and no OCI-pull or compile surface to ask with.
 //!
@@ -49,15 +49,15 @@ use engine_executor::{
     RunInputs, RunResult, RunStatus, SessionChange, SessionListener, SessionState,
 };
 use engine_rpc::{
-    BundleRef, ChildCallbacks, ChildCallbacksClient, ChildService, ChildServiceServerShared,
-    ExecError,
+    BundleRef, Committed, ExecError, MediaHash, RemoteChild, RemoteChildCallbacks,
+    RemoteChildCallbacksClient, RemoteChildServerShared,
 };
 // The inward tier only. This package deliberately does not carry safe-logger's
 // outward half — see `assert_contained!` above — so what a failure says stays in
 // a debug build's private sink and never reaches the host through this process.
 use safe_logger::debug;
 
-/// The `engine_rpc::ChildService` impl. `prime` is called once (stores the
+/// The `engine_rpc::RemoteChild` impl. `prime` is called once (stores the
 /// primed composition); `run` reads it. Under per-round each is called exactly
 /// once, but `OnceLock` keeps the contract explicit (prime-before-run, prime-once).
 struct Child {
@@ -65,7 +65,7 @@ struct Child {
     primed: OnceLock<PrimedComposition>,
 }
 
-impl ChildService for Child {
+impl RemoteChild for Child {
     async fn prime(&self, bundle: BundleRef) -> Result<(), ExecError> {
         // MMAP the cwasm via its inherited fd path (`/proc/self/fd/N`, an anonymous
         // memfd the supervisor handed us at spawn) and build the reusable
@@ -105,7 +105,7 @@ impl ChildService for Child {
         event: Event,
         props: engine_rpc::ByteBuf,
         fuel: u64,
-        callbacks: ChildCallbacksClient<Ciborium>,
+        callbacks: RemoteChildCallbacksClient<Ciborium>,
     ) -> Result<engine_rpc::RunStatus, ExecError> {
         let primed = self.primed.get().ok_or_else(|| {
             debug!("engine-executor-child: run before prime");
@@ -208,11 +208,11 @@ fn round_failure(e: RunError) -> ExecError {
 
 /// `SessionListener` that forwards each round's `on_session_change` — the state
 /// and, if the round finished, its decision — to the supervisor's
-/// `ChildCallbacks::session_change` (→ api). Converts the BORROWED
+/// `RemoteChildCallbacks::session_change` (→ api). Converts the BORROWED
 /// `SessionChange` to owned wire form synchronously (before the await), so the
 /// future owns everything it sends.
 struct RelayListener {
-    callbacks: ChildCallbacksClient<Ciborium>,
+    callbacks: RemoteChildCallbacksClient<Ciborium>,
 }
 
 impl SessionListener for RelayListener {
@@ -227,6 +227,7 @@ impl SessionListener for RelayListener {
             callbacks
                 .session_change(state, decision)
                 .await
+                .map(|Committed| ())
                 .map_err(|e| {
                     debug!("session_change callback: {e}");
                     RunError::new(CallbackFailed)
@@ -236,10 +237,10 @@ impl SessionListener for RelayListener {
 }
 
 /// `MediaStore` that forwards `blob::from-blob-ref` loads to the supervisor's
-/// `ChildCallbacks::media_load` (→ api, which holds the seal key + the
+/// `RemoteChildCallbacks::media_load` (→ api, which holds the seal key + the
 /// captured-hash gate). `None` = miss, exactly as the in-process store returned.
 struct RelayMediaStore {
-    callbacks: ChildCallbacksClient<Ciborium>,
+    callbacks: RemoteChildCallbacksClient<Ciborium>,
     /// Per-run memo of rehydrated blobs, keyed by content hash. Collapses REPEAT
     /// `bytes()` reads of the SAME blob within a round to ONE `media_load` RPC.
     ///
@@ -268,11 +269,11 @@ impl MediaStore for RelayMediaStore {
             if let Some(bytes) = self.memo.lock().unwrap().get(&hash).cloned() {
                 return Ok(Some(bytes));
             }
-            let loaded = callbacks.media_load(hash).await.map_err(|e| {
+            let loaded = callbacks.media_load(MediaHash(hash)).await.map_err(|e| {
                 debug!("media_load callback: {e}");
                 RunError::new(CallbackFailed)
             })?;
-            let arc = loaded.map(|blob| Arc::new(blob.into_vec()));
+            let arc = loaded.map(|blob| Arc::new(blob.0));
             if let Some(bytes) = &arc {
                 self.memo.lock().unwrap().insert(hash, bytes.clone());
             }
@@ -310,11 +311,11 @@ async fn main() {
     safe_logger::debug!("engine-executor-child: engine built, serving fd 0");
 
     // The supervisor placed one end of a socketpair on our fd 0; engine-supervisor
-    // adopts it, serves `ChildService`, and returns when the supervisor drops its
+    // adopts it, serves `RemoteChild`, and returns when the supervisor drops its
     // client (round done) → we exit. Request buffer 1 — prime then run,
     // sequential, no cross-round concurrency. The cwasm itself never crosses this
     // socket: `prime` carries the path of an inherited fd, which we mmap.
-    match engine_supervisor::serve_child::<Child, ChildServiceServerShared<Child, Ciborium>>(
+    match engine_supervisor::serve_child::<Child, RemoteChildServerShared<Child, Ciborium>>(
         child, 1,
     )
     .await

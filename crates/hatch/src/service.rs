@@ -1,9 +1,9 @@
-//! What the hatch serves api: [`HatchService`], over the hooks and the egress.
+//! What the hatch serves api: [`RemoteHatch`], over the hooks and the egress.
 
 use fleet_stream::bin;
 use hatch_rpc::{
-    AuthorizeError, AuthorizeRequest, BlobRequest, ClientOperation, HatchService, KbsError,
-    KbsRequest, KbsResponse, Manifest, ManifestRequest, PullError, SessionTerms, Verdict,
+    AuthorizeError, AuthorizeRequest, BlobRequest, ClientOperation, KbsError, KbsRequest,
+    KbsResponse, Manifest, ManifestRequest, PullError, RemoteHatch, SessionTerms, Verdict,
 };
 
 use crate::hooks::{Authorization, Hooks, Limits};
@@ -16,7 +16,7 @@ pub struct Hatch {
     pub kbs: reqwest::Client,
 }
 
-impl HatchService for Hatch {
+impl RemoteHatch for Hatch {
     /// Who the request is from, by the authorization hook if it is on; for a
     /// creation, then, what its consumer may do, by the limits hook if that is
     /// on — the session's terms, or a refusal the hook counted its way to. A

@@ -26,8 +26,8 @@
 //! same crate. Here it has to survive a serde round-trip and be reconstructed by
 //! the peer, so the codomain gets a name and a private field.
 //!
-//! The private field is the part a vouch cannot buy: `vouch::<Covert>(|s|
-//! Ok(encode(s)))` type-checks while padding nothing. [`Padded::seal`] is the only
+//! The private field is the part a vouch cannot buy: `vouch_with(Covert::Transformed,
+//! |s| Ok(encode(s)))` type-checks while padding nothing. [`Padded::seal`] is the only
 //! constructor, so no path on either side puts an unpadded value on this wire —
 //! and that matters most in the direction no marker reaches at all, since api is
 //! the RECEIVER of `session_change` and `RunReply` and `Covert` is outbound-only
@@ -202,9 +202,9 @@ impl<T: Framed> Padded<T> {
     /// Encode and pad to the frame. Fails if the encoding is already over it —
     /// the caller traps rather than sending a short frame.
     ///
-    /// This is written to be the `vouch::<Covert>` closure at the call site that
-    /// releases the value, so the discharge of the concern IS this call and not a
-    /// sentence beside it.
+    /// This is written to be the `vouch_with(Covert::Transformed, …)` closure at
+    /// the call site that releases the value, so the discharge of the concern IS
+    /// this call and not a sentence beside it.
     pub fn seal(value: &T) -> Result<Self, FrameError> {
         let mut frame = Vec::with_capacity(T::FRAME);
         ciborium::into_writer(value, &mut frame)

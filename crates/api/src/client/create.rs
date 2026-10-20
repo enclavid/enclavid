@@ -457,15 +457,18 @@ async fn create(
     // leak lifecycle + tenant identity for zero benefit.
     let set_metadata = SetMetadata(
         boundary::outbound::to_untrusted(&metadata)
-            .vouch_unchecked::<AuthZ, _>(reason!(
+            .vouch(reason!(
+                AuthZ::NoSecret,
                 "only the attested CVM holds tee_seal_key; read at /connect as opaque ciphertext — release implicit in key-possession"
             ))
-            .vouch_unchecked::<Covert, _>(reason!(
+            .vouch(reason!(
+                Covert::NotChosen,
                 "initial /create write before any policy runs; fields are client-controlled, not policy-controlled — zero covert bandwidth"
             )),
     );
     let ops: Vec<&dyn WriteField> = vec![&set_metadata];
-    let ops = outbound_fields(&ops).vouch_unchecked::<Covert, _>(reason!(
+    let ops = outbound_fields(&ops).vouch(reason!(
+        Covert::NotChosen,
         "no policy has run at /create — the single metadata op is fixed, not policy bandwidth"
     ));
     // A session lives as long as its terms say, where they say: its deadline

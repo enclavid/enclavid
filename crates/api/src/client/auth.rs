@@ -151,14 +151,15 @@ pub(super) fn trust_metadata(
     presented_principal: &Option<String>,
 ) -> Result<SessionMetadata, StatusCode> {
     metadata
-        .trust::<AuthZ, _, _, _, _>(|opt_md| -> Result<_, StatusCode> {
+        .trust_with(AuthZ::Matched, |opt_md| -> Result<_, StatusCode> {
             {
                 let md = opt_md.as_ref().ok_or(StatusCode::NOT_FOUND)?;
                 check_client_access(md, presented_token, presented_principal)?;
             }
             Ok(opt_md)
         })?
-        .trust_unchecked::<Replay, _>(reason!(
+        .trust(reason!(
+            Replay::Harmless,
             r#"
 Metadata's ACCESS fields (client_session_token, principal) are immutable
 across the session, so the AuthZ gate above is unaffected by staleness. The
@@ -197,7 +198,7 @@ residual of the host-holds-all-state model.
 ///   * 404 — token or principal mismatch (uniform reject — don't
 ///     leak session-existence info to wrong principals).
 ///
-/// Used as the predicate inside `.trust::<AuthZ>(...)` on every
+/// Used as the predicate inside `.trust_with(AuthZ::Matched, ...)` on every
 /// client-side read endpoint so the AuthZ scope on metadata is
 /// **physically discharged by this check**, not blanket-trusted.
 pub(super) fn check_client_access(
@@ -295,13 +296,17 @@ pub(super) async fn enforce(
         authorization_header: auth_header.to_string(),
         operation: op,
     })
-    .vouch_unchecked::<AuthN, _>(reason!(
-        "client's own credential, released to its validating hatch — not a TEE secret"
+    .vouch(reason!(
+        AuthN::Indifferent,
+        "a credential the operator issued, read by the operator's own hook: the reader \
+         is the party it came from"
     ))
-    .vouch_unchecked::<AuthZ, _>(reason!(
-        "forwarding the credential to its validator IS the op"
+    .vouch(reason!(
+        AuthZ::NoSecret,
+        "the hook is handed a credential its operator issued, to say whether it holds"
     ))
-    .vouch_unchecked::<Covert, _>(reason!(
+    .vouch(reason!(
+        Covert::NotChosen,
         "client-supplied header + fixed-enum op — no policy bandwidth"
     ));
     // No answer — the hatch out of reach, or a hook that did not answer it in
@@ -311,7 +316,8 @@ pub(super) async fn enforce(
         .authorize(authorize_req)
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-        .trust_unchecked::<AuthN, _>(reason!(
+        .trust_accept_risk(reason!(
+            AuthN::AcceptedRisk,
             r#"
 TEE has nothing to verify a credential against — the operator's
 hook parses tokens, and the operator issues them. A lying operator
@@ -320,13 +326,16 @@ principal; it decides who may use the service in any case, and no
 session is read without its own token, which it never sees.
         "#
         ))
-        .trust_unchecked::<AuthZ, _>(reason!(
+        .trust(reason!(
+            AuthZ::NoPrincipal,
             r#"
-The AuthVerdict IS the authorisation answer for this request —
-there is no second access decision to gate on top of it.
+A return value on this side's own call: the AuthVerdict IS the
+authorisation answer for this request — there is no second access
+decision to gate on top of it.
         "#
         ))
-        .trust_unchecked::<Replay, _>(reason!(
+        .trust_accept_risk(reason!(
+            Replay::AcceptedRisk,
             r#"
 Stale verdict (yesterday's answer for today's request — e.g.
 accepting a since-revoked credential) is the operator's to avoid,

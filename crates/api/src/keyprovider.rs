@@ -122,15 +122,18 @@ async fn kbs_release(
         auth_body,
     )
     .await?
-    .trust_unchecked::<AuthN, _>(reason!(
+    .trust(reason!(
+        AuthN::Indifferent,
         "RCAR handshake plumbing carries no secret; the only released secret is the \
-             resource, JWE-sealed to our ephemeral key at leg 3 — tampered handshake bytes \
-             only break that unwrap and fail closed"
+         resource, JWE-sealed to our ephemeral key at leg 3 — tampered handshake bytes \
+         only break that unwrap and fail closed"
     ))
-    .trust_unchecked::<AuthZ, _>(reason!(
+    .trust(reason!(
+        AuthZ::NoPrincipal,
         "the KBS, not the TEE, authorizes release (resource policy + token)"
     ))
-    .trust_unchecked::<Replay, _>(reason!(
+    .trust(reason!(
+        Replay::Harmless,
         "a stale challenge only breaks the report_data binding and fails the leg-3 unwrap"
     ))
     .into_inner();
@@ -155,15 +158,18 @@ async fn kbs_release(
         attest_body,
     )
     .await?
-    .trust_unchecked::<AuthN, _>(reason!(
+    .trust(reason!(
+        AuthN::Indifferent,
         "handshake plumbing; release secrecy is enforced at the leg-3 JWE unwrap"
     ))
-    .trust_unchecked::<AuthZ, _>(reason!(
+    .trust(reason!(
+        AuthZ::NoPrincipal,
         "the KBS verifies the evidence and gates the token, not the TEE"
     ))
-    .trust_unchecked::<Replay, _>(reason!(
+    .trust(reason!(
+        Replay::Harmless,
         "attestation binds this handshake's fresh nonce; a replayed token can't unwrap \
-             the resource sealed to our per-pull ephemeral key"
+         the resource sealed to our per-pull ephemeral key"
     ))
     .into_inner();
     require_ok(&resp, "attest")?;
@@ -180,17 +186,19 @@ async fn kbs_release(
     .await?
     // AuthN is closed by the JWE unwrap: only this enclave's per-pull
     // ephemeral secret opens the released resource.
-    .trust::<AuthN, _, _, _, _>(|r| {
+    .trust_with(AuthN::Verified, |r| {
         require_ok(&r, "resource")?;
         session
             .unwrap_resource(&r.body)
             .map_err(|e| KeyError::new(KeyFailure::NotReleased, format!("jwe unwrap: {e}")))
     })?
-    .trust_unchecked::<AuthZ, _>(reason!(
+    .trust(reason!(
+        AuthZ::NoPrincipal,
         "the KBS enforces release authorization via its resource policy (Rego) + token; \
          the TEE only consumes the sealed result"
     ))
-    .trust_unchecked::<Replay, _>(reason!(
+    .trust(reason!(
+        Replay::Fresh,
         "the resource is JWE-sealed to a per-pull ephemeral key bound in this handshake's \
          report_data; a replayed blob from a prior pull cannot open under the fresh secret"
     ))
@@ -220,14 +228,18 @@ async fn relay(
         body,
     };
     let exposed = boundary::outbound::to_untrusted(req)
-        .vouch_unchecked::<AuthN, _>(reason!(
+        .vouch(reason!(
+            AuthN::Indifferent,
             "the leg carries only public RCAR material — our ephemeral pubkey, the sample \
              evidence, the session cookie; no TEE secret"
         ))
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "forwarding the artifact-key handshake to the author's KBS IS the courier op"
+        .vouch(reason!(
+            AuthZ::Matched,
+            "the handshake for the artifact's key goes to the KBS the consumer named for \
+             it at session create — the party that releases that key, and the one it is for"
         ))
-        .vouch_unchecked::<Covert, _>(reason!(
+        .vouch(reason!(
+            Covert::NotChosen,
             "endpoint is client-supplied at session create and the resource URI is the \
              artifact's digest-pinned annotation — neither is policy-controlled; leg shape \
              is fixed by the RCAR protocol"

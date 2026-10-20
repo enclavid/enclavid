@@ -17,8 +17,8 @@ use storage_rpc::{
     WriteRequest,
 };
 use storage_rpc::{
-    CacheBlob, CacheError, CacheService, CacheServiceClient, CacheServiceServerShared,
-    SessionError, SessionStoreService, SessionStoreServiceServerShared, StorageClients,
+    CacheBlob, CacheError, RemoteCache, RemoteCacheClient, RemoteCacheServerShared,
+    RemoteSessionStore, RemoteSessionStoreServerShared, SessionError, StorageClients,
 };
 
 use crate::{CacheBlobs, Caller, SessionStore, StorageSvc};
@@ -26,7 +26,7 @@ use crate::{CacheBlobs, Caller, SessionStore, StorageSvc};
 /// Store `bytes` under `key` through a cache client, streaming them beside the
 /// call as api does.
 async fn put(
-    cache: &CacheServiceClient<Ciborium>,
+    cache: &RemoteCacheClient<Ciborium>,
     key: &str,
     bytes: &[u8],
 ) -> Result<(), CacheError> {
@@ -43,7 +43,7 @@ async fn put(
 }
 
 /// The blob under `key` through a cache client, read whole as api reads one.
-async fn get(cache: &CacheServiceClient<Ciborium>, key: &str) -> Option<Vec<u8>> {
+async fn get(cache: &RemoteCacheClient<Ciborium>, key: &str) -> Option<Vec<u8>> {
     let blob = cache.load(key.to_string()).await.unwrap()?;
     let mut incoming = Incoming::open(blob.body, blob.length.get(), Duration::from_secs(10))
         .await
@@ -114,11 +114,11 @@ async fn connected(
             .unwrap();
         tokio::spawn(conn);
         let (s_server, mut session) =
-            SessionStoreServiceServerShared::<_, Ciborium>::new(svc.clone(), 4);
+            RemoteSessionStoreServerShared::<_, Ciborium>::new(svc.clone(), 4);
         if let Some(limit) = session_request_limit {
             session.set_max_request_size(limit);
         }
-        let (c_server, cache) = CacheServiceServerShared::<_, Ciborium>::new(svc.clone(), 4);
+        let (c_server, cache) = RemoteCacheServerShared::<_, Ciborium>::new(svc.clone(), 4);
         if tx.send(StorageClients { session, cache }).await.is_err() {
             panic!("failed to send storage clients");
         }

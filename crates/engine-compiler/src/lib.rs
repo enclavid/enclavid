@@ -27,7 +27,7 @@ mod props;
 mod seam;
 #[cfg(feature = "child-seam")]
 pub use seam::{
-    ChildCompiled, CompileChildService, CompileChildServiceClient, CompileChildServiceServerShared,
+    ChildCompiled, RemoteCompileChild, RemoteCompileChildClient, RemoteCompileChildServerShared,
 };
 
 use wasmtime::component::Component;

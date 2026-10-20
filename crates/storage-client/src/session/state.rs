@@ -74,8 +74,10 @@ impl ReadField for State<'_> {
             return Ok(Untrusted::new(None));
         };
         let decoded: Untrusted<SessionState, (Replay,)> = boundary::inbound::from_untrusted(b)
-            .trust::<AuthN, _, _, _, _>(|raw| aead::open(&raw, ctx.tee_seal_key, ctx.aad()))?
-            .trust::<AuthZ, _, _, _, _>(|outer| -> Result<_, StoreError> {
+            .trust_with(AuthN::Verified, |raw| {
+                aead::open(&raw, ctx.tee_seal_key, ctx.aad())
+            })?
+            .trust_with(AuthZ::Matched, |outer| -> Result<_, StoreError> {
                 let inner = aead::open(&outer, self.applicant_session_token, ctx.aad())?;
                 Ok(session_types::decode::<SessionState>(&inner)?)
             })?;
@@ -91,7 +93,8 @@ impl WriteField for SetState<'_> {
         // seal: inner under applicant_session_token, outer under tee_seal_key.
         // Each layer gets its own random nonce; AAD identical so cross-session
         // copies fail at the outer layer.
-        let sealed = self.state.clone().vouch::<AuthN, _, _, _, _>(
+        let sealed = self.state.clone().vouch_with(
+            AuthN::Verified,
             |plaintext| -> Result<Vec<u8>, StoreError> {
                 let inner = aead::seal(&plaintext, self.applicant_session_token, ctx.aad())?;
                 aead::seal(&inner, ctx.tee_seal_key, ctx.aad()).map_err(Into::into)

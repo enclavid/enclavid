@@ -1,92 +1,180 @@
-//! Type-level wrappers for values crossing the TEE ↔ host trust
-//! boundary. Two dual markers, one per direction.
+//! Type-level wrappers for values crossing a trust boundary. Two dual
+//! wrappers, one per direction, and the vocabulary they are written in.
 //!
-//! It has lived in two places. On its own as `enclavid-untrusted`,
-//! then folded into `hatch-client` so the definitions sat beside the
-//! `inbound` / `outbound` facades that construct them — one perimeter,
-//! one crate, inspectable together. Out again now, because the TEE
-//! grew a second way to speak: the serial port that `safe-logger`
-//! writes to. Two channels with nothing in common but this vocabulary,
-//! so the vocabulary belongs below both. The facades stay with the
-//! clients that cross — `hatch-client` for the hatch, `storage-client`
-//! for the storage volume — and `safe-logger`, which opens its channel
-//! before anything else in a role exists, can depend on the vocabulary
-//! without depending on a wire client.
+//! It has lived in two places. On its own as `enclavid-untrusted`, then folded
+//! into `hatch-client` so the definitions sat beside the facades that construct
+//! them. Out again, because the TEE grew a second way to speak: the serial port
+//! that `safe-logger` writes to. Two channels with nothing in common but this
+//! vocabulary, so the vocabulary belongs below both. The facades stay with the
+//! clients that cross, and `safe-logger`, which opens its channel before
+//! anything else in a role exists, depends on the vocabulary without depending on
+//! a wire client.
 //!
-//! `Untrusted<T, S>` — INBOUND. Carries a tuple-typed scope `S`
-//! listing the open trust concerns for the value; what each one asks
-//! is written on the marker itself ([`AuthN`], [`AuthZ`], [`Replay`],
-//! [`Asserted`], [`Covert`]) and nowhere else. The inner `T` cannot be
-//! inspected until the caller addresses every concern via
-//! `trust_unchecked::<X>()` (blanket-accept) or
-//! `trust::<X>(predicate)` (verify), each peeling one concern off
-//! `S`. After all concerns are addressed (`S = ()`) the caller
-//! reaches the inner value via `into_inner`. Reviewers grep for
-//! `trust_unchecked::<` / `trust::<` to see every gate; the
-//! turbofish marker says which concern was accepted.
+//! `Untrusted<T, S, B>` — INBOUND. `S` is a tuple of the concerns still open on
+//! the value; what each one asks is written on the marker itself ([`AuthN`],
+//! [`AuthZ`], [`Replay`], [`Asserted`], [`Covert`]) and nowhere else. The inner
+//! `T` is reachable through `into_inner` only once every concern has been
+//! answered and `S` is `()`.
 //!
-//! `Exposed<T, S>` — OUTBOUND. Mirror of `Untrusted`: tuple-typed
-//! scope `S` lists the open concerns for a value being released to
-//! the host. The inner `T` is reachable only via
-//! `into_inner` after every concern has been peeled with
-//! `vouch_unchecked::<X>()` / `vouch::<X>(predicate)`. Both wrappers
-//! share the [`Remove`] machinery and the `reason!` macro — the
-//! direction is carried by the wrapper type, not by the peel API.
-//! Reviewers grep for `Exposed::new` to find every release point
-//! and `vouch_unchecked::<` to see how each concern was addressed.
+//! `Exposed<T, S, B>` — OUTBOUND, the mirror: the concerns still open on a value
+//! being released, answered before `into_inner` lets it go.
+//!
+//! ## Answering a concern
+//!
+//! Every marker lists the legal ways to answer it as constants of its own type
+//! — `AuthN::Verified`, `AuthZ::NoSecret`, `Asserted::AcceptedRisk` — and each is
+//! classed by what answering with it takes. The class decides which method takes
+//! it, so the form of a peel says what backs it:
+//!
+//!   * `trust(reason!(K, "…"))` / `vouch(…)` — an [`Argued`] kind: its own
+//!     argument is the answer, and no work at the peel is needed for it to hold.
+//!   * `trust_with(K, |v| …)` / `vouch_with(…)` — the work in the closure is the
+//!     answer. A [`Work`] kind is taken here and nowhere else, so it cannot be
+//!     claimed without the work in front of the reader; an argued kind may be
+//!     backed by work too.
+//!   * `trust_accept_risk(reason!(M::AcceptedRisk, "…"))` / `vouch_accept_risk(…)`
+//!     — no kind fits, and the site says so. A [`Risk`] is taken here alone, so
+//!     the standing risks are one grep away.
+//!
+//! The marker is inferred from the kind, so a peel names no type parameter, and a
+//! reason that names no kind does not compile against any of them.
+//!
+//! ## The end
+//!
+//! `B` is the end of a boundary the value crossed, as the role holding that end
+//! judges it. A declared end — a type `boundary!` from `enclavid-boundary-macros`
+//! writes — states, for each type crossing it, which concerns its direction
+//! opens and which the declaration answers once for every value of that type;
+//! [`outbound`] and [`inbound`] wrap a value at such an end with exactly what is
+//! left. A value whose end nothing declares carries [`Undeclared`], and its scope
+//! is whatever its mint opened.
+//!
+//! Scope and end are part of the type, so a receipt — `Exposed<_, (), B>` —
+//! records which end it was answered for, and a door that names its end takes
+//! no other.
 
 use std::marker::PhantomData;
 
 // =====================================================================
-// Reason token + `reason!` macro.
-//
-// `trust_unchecked` requires a `Reason` argument so every blanket
-// accept must go through the `reason!("...")` macro. The macro
-// matches a string literal at parse time but does not include it in
-// the expansion — the explanatory text is captured in source (for
-// audit / `grep`) and never reaches compiled output.
-//
-// `Reason` is a ZST whose only field is private; the only way to
-// construct it from outside this crate is the macro, which calls the
-// `#[doc(hidden)]` constructor. Direct use of the constructor is
-// possible but conspicuous (loud name) and rejected at code review.
+// Kinds — the legal answers, as constants of each marker — and the
+// classes that say what answering with one takes.
 // =====================================================================
 
-/// Audit-trail token — proves the caller wrote a `reason!("...")`
-/// alongside their `trust_unchecked` peel or `Untrusted::new`
-/// construction. ZST; carries no runtime data. The explanation
-/// lives in source code only.
+/// An answer that is work done on the value at the peel: a check over its
+/// bytes, a transformation of its encoding. Taken by `trust_with` / `vouch_with`
+/// and nothing else.
+pub struct Work;
+
+/// An answer that is the kind's own argument: no work at the peel is needed for
+/// it to hold. Taken by `trust` / `vouch` with a reason, and by `trust_with` /
+/// `vouch_with` where work backs it anyway.
+pub struct Argued;
+
+/// No kind fits, and the site says so. Taken by `trust_accept_risk` /
+/// `vouch_accept_risk` alone.
+pub struct Risk;
+
+mod backs_sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Work {}
+    impl Sealed for super::Argued {}
+}
+
+/// The classes work can stand behind: a [`Work`] kind, or an [`Argued`] one whose
+/// argument the work makes concrete. Never [`Risk`] — a risk with a check in front
+/// of it is not a risk, and should name the kind the check establishes.
+pub trait Backs: backs_sealed::Sealed {}
+impl Backs for Work {}
+impl Backs for Argued {}
+
+/// One legal way to answer concern `M`, of class `By`. Defined as a constant of
+/// the marker it belongs to — the list there is the whole list.
+pub struct Kind<M, By>(PhantomData<fn() -> (M, By)>);
+
+impl<M, By> Kind<M, By> {
+    /// `pub` and `doc(hidden)`, for the reason `Untrusted::new` is: a marker
+    /// defined in another crate defines its kinds with it, and nothing else
+    /// should. A kind made anywhere but next to its marker is a kind no reviewer
+    /// will find on the list.
+    #[doc(hidden)]
+    pub const fn __define() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M, By> Clone for Kind<M, By> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<M, By> Copy for Kind<M, By> {}
+
+// =====================================================================
+// Reason token + `reason!` macro.
+// =====================================================================
+
+/// Audit-trail token — proves the caller wrote a `reason!(...)` beside what it
+/// justifies. A ZST; the explanation lives in source code only.
 ///
-/// `Copy + Clone` so a single `reason!(...)` token can be reused
-/// across multiple call sites in the same expression — typical
-/// when a `decode` method has two return paths (e.g., `None`
-/// versus `Some(value)`) sharing the same scope rationale.
-#[derive(Debug, Clone, Copy)]
-pub struct Reason(());
+/// `Reason<M, By>` justifies an answer to concern `M` with a kind of class `By`:
+/// that is the form every argued peel and every accepted risk takes. The bare
+/// `Reason` justifies a line on the serial port (`safe-logger`), which answers
+/// no marker — and, being a different type, can stand behind no peel.
+///
+/// `Copy + Clone` so a single `reason!(...)` can be reused across sites in one
+/// expression — a `decode` with two return paths sharing a rationale.
+pub struct Reason<M = (), By = ()>(PhantomData<fn() -> (M, By)>);
 
 impl Reason {
     #[doc(hidden)]
     pub const fn __reason_macro_internal_do_not_call_directly() -> Self {
-        Self(())
+        Self(PhantomData)
     }
 }
 
-/// Build a [`Reason`] token, recording the rationale for a
-/// `trust_unchecked` peel. The string literal is parsed by the macro
-/// but never appears in the macro expansion — it is discarded at
-/// compile time, so the binary contains neither the bytes nor a
-/// pointer to them.
+impl<M, By> Reason<M, By> {
+    #[doc(hidden)]
+    pub const fn __reason_macro_internal_for_kind(_kind: Kind<M, By>) -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M, By> Clone for Reason<M, By> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<M, By> Copy for Reason<M, By> {}
+
+impl<M, By> std::fmt::Debug for Reason<M, By> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Reason")
+    }
+}
+
+/// Build a [`Reason`]. The string literal is parsed by the macro but never
+/// appears in its expansion — it is discarded at compile time, so the binary
+/// contains neither the bytes nor a pointer to them.
+///
+/// Two forms. With a kind, it justifies answering that kind's marker, and the
+/// marker is inferred from it:
 ///
 /// ```ignore
 /// value
-///     .trust_unchecked::<AuthN, _>(reason!("AEAD-binding via session_id"))
-///     .trust_unchecked::<Replay, _>(reason!("idempotent retry handles stale"))
+///     .trust(reason!(AuthZ::NoPrincipal, "the return value of a read this side made"))
+///     .trust(reason!(Replay::Harmless, "a stale copy only makes the next write refuse"))
 ///     .into_inner();
 /// ```
+///
+/// With the text alone, it justifies a log line (`safe-logger`), and no peel
+/// takes it.
 #[macro_export]
 macro_rules! reason {
     ($explanation:literal) => {
-        $crate::Reason::__reason_macro_internal_do_not_call_directly()
+        $crate::Reason::<(), ()>::__reason_macro_internal_do_not_call_directly()
+    };
+    ($kind:path, $explanation:literal) => {
+        $crate::Reason::__reason_macro_internal_for_kind($kind)
     };
 }
 
@@ -203,9 +291,22 @@ mod sealed {
 /// let _: Exposed<u32, (Covert,)> = Exposed::new(7);
 /// ```
 ///
-/// **What this bound does NOT give you**, and the doors should not be read as if it
-/// did. Two routes reach `()` without a peel, and both are deliberate features that
-/// happen to compose badly:
+/// The one other way to `()` without a peel is a declaration: [`outbound`] and
+/// [`inbound`] give a value the scope its end's declaration left open, and where
+/// the declaration answered everything about that type, that is `()`. The answers
+/// are written there, once, in the place a reviewer reads them.
+///
+/// **At a declared end, a receipt is for the type it was answered for.** `new`
+/// exists only at [`Undeclared`], so a declared end mints through its declaration
+/// alone. The work in `vouch_with` keeps the value's type there, and a value built
+/// in the work leaves through [`Parts`], whose one way out builds the type whose
+/// declaration it was opened under. What carries a scope onto a different value —
+/// [`Exposed::map`], the `Vec` transpose, `distribute` — exists only at
+/// [`Undeclared`] as well.
+///
+/// **What this bound does NOT give you** at an undeclared end, and the facades
+/// should not be read as if it did. Two routes reach `()` without a peel there,
+/// and both are deliberate features that happen to compose badly:
 ///
 ///   * the `Vec` transpose joins a batch at its elements' scope, and an EMPTY batch
 ///     satisfies "every element addressed `S`" vacuously, for any `S`;
@@ -245,36 +346,120 @@ impl_open!(T0, T1, T2, T3, T4, T5, T6);
 impl_open!(T0, T1, T2, T3, T4, T5, T6, T7);
 
 // =====================================================================
-// Untrusted<T, S> — inbound wrapper.
+// Direction — which scopes a marker may stand in.
 // =====================================================================
 
-/// Inbound wrapper. `S` is a tuple of concern markers; methods peel
-/// one concern at a time until `S = ()`, after which the inner `T`
-/// is reachable via `into_inner`.
-#[derive(Debug)]
-pub struct Untrusted<T, S = ()> {
-    value: T,
-    _marker: PhantomData<S>,
+/// A concern a value ARRIVING may carry: a marker an `in` block of a declaration
+/// may open. Direction is part of a marker's meaning — a marker implements this
+/// only if its question can be asked of a value this side receives.
+pub trait InboundConcern {}
+
+/// A concern a value LEAVING may carry: a marker an `out` block of a declaration
+/// may open.
+pub trait OutboundConcern {}
+
+// =====================================================================
+// Ends — what a `boundary!` declaration writes, and the two mints that
+// read it.
+// =====================================================================
+
+/// One end of a boundary, as the role that holds it judges what crosses.
+///
+/// `boundary!` (`enclavid-boundary-macros`) declares one: a type that implements
+/// this, plus a [`Sends`] or [`Receives`] impl for every type crossing it.
+pub trait Boundary {}
+
+/// This end sends `T`, and `Open` is what is still open on a `T` once the
+/// declaration has answered what it answers for every value of it.
+///
+/// Implemented on the END rather than on `T`, so that what a protocol requires
+/// of an end can be its supertraits — `B: RemoteExecutorCalls` then brings
+/// every `Sends` / `Receives` it lists along, where a bound on `T` would have to
+/// be restated at every use.
+pub trait Sends<T>: Boundary {
+    type Open;
 }
 
-impl<T, S> Untrusted<T, S> {
-    /// Wrap a value with an explicit initial scope. The caller picks
-    /// `S` to match what concerns are genuinely open at the
-    /// construction site (e.g., a host-plaintext field starts with
-    /// `(AuthN, Replay)` open; an AEAD-decrypted field starts with
-    /// `(AuthZ, Replay)`).
+/// This end receives `T`, and `Open` is what is still open on a `T` once the
+/// declaration has answered what it answers for every value of it.
+pub trait Receives<T>: Boundary {
+    type Open;
+}
+
+/// The end of a crossing nothing has declared. Its scope is whatever the mint
+/// opened, and no declaration answers any of it.
+pub struct Undeclared;
+
+/// Open `value` to leave end `B`: open on exactly what `B`'s declaration left
+/// open for this type — `()` where the declaration answered everything.
+pub fn outbound<B: Sends<T>, T>(value: T) -> Exposed<T, B::Open, B> {
+    Exposed {
+        value,
+        _marker: PhantomData,
+    }
+}
+
+/// [`outbound`] for a value that becomes the `W` that crosses only in the work
+/// that answers it — the parts a request is framed from, say. The parts open what
+/// `B` left open on a `W`, and the one way out of [`Parts`] is work that builds a
+/// `W`, so the receipt is for a `W` and for nothing else.
+///
+/// What `B` left open on `W` must not be empty: a `W` its declaration answered in
+/// full has no work to be built in, and is opened with [`outbound`] once it exists.
+pub fn outbound_as<B, W, T>(value: T) -> Parts<T, W, B::Open, B>
+where
+    B: Sends<W>,
+    B::Open: Open,
+{
+    Parts {
+        value,
+        _builds: PhantomData,
+        _marker: PhantomData,
+    }
+}
+
+/// Wrap `value` as it arrives at end `B`: open on exactly what `B`'s declaration
+/// left open for this type — `()` where the declaration answered everything.
+pub fn inbound<B: Receives<T>, T>(value: T) -> Untrusted<T, B::Open, B> {
+    Untrusted {
+        value,
+        _marker: PhantomData,
+    }
+}
+
+// =====================================================================
+// Untrusted<T, S, B> — inbound wrapper.
+// =====================================================================
+
+/// Inbound wrapper. `S` is a tuple of concern markers; methods answer one
+/// concern at a time until `S = ()`, after which the inner `T` is reachable via
+/// `into_inner`. `B` is the end it arrived at.
+pub struct Untrusted<T, S = (), B = Undeclared> {
+    value: T,
+    _marker: PhantomData<fn() -> (S, B)>,
+}
+
+impl<T: std::fmt::Debug, S, B> std::fmt::Debug for Untrusted<T, S, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Untrusted").field(&self.value).finish()
+    }
+}
+
+impl<T, S> Untrusted<T, S, Undeclared> {
+    /// Wrap a value with an explicit initial scope. The caller picks `S` to match
+    /// what concerns are genuinely open at the construction site.
     ///
     /// `S: Open`, so the scope cannot be `()`: a wrapper with nothing left to
-    /// answer is something a peel produces, never something a caller declares.
+    /// answer is something a peel or a declaration produces, never something a
+    /// caller declares. And only at [`Undeclared`]: a declared end's scope is its
+    /// declaration's, so a value arriving there is wrapped by [`inbound`].
     ///
     /// `pub` and `doc(hidden)`. It has to be public — the facades that call it
     /// live in other crates, and this one is a dependency-free leaf, so there is
     /// no `pub(crate)` that could span them. Hidden because nothing outside those
     /// facades should ever find it: the guard here is against a wrong turn, not
-    /// against someone with commit access, and the named entry points —
-    /// `hatch_client::boundary::inbound::from_untrusted` for the hatch wire,
-    /// `storage_client::boundary::inbound::from_untrusted` for the storage
-    /// volume — are what a reviewer greps.
+    /// against someone with commit access, and the named entry points are what a
+    /// reviewer greps.
     #[doc(hidden)]
     pub fn new(value: T) -> Self
     where
@@ -285,15 +470,14 @@ impl<T, S> Untrusted<T, S> {
             _marker: PhantomData,
         }
     }
+}
 
-    /// Blanket-accept concern `X` without verification. Requires a
-    /// [`Reason`] token built via [`reason!`] — the macro forces
-    /// every call site to embed an explanation in source for audit.
-    /// The token is a ZST and the macro discards the explanatory
-    /// text at compile time, so this is free at runtime.
-    pub fn trust_unchecked<X, I>(self, _reason: Reason) -> Untrusted<T, S::Rest>
+impl<T, S, B> Untrusted<T, S, B> {
+    /// Answer concern `M` with an argued kind: the kind's argument is the answer,
+    /// and the [`reason!`] says why it holds here.
+    pub fn trust<M, I>(self, _reason: Reason<M, Argued>) -> Untrusted<T, S::Rest, B>
     where
-        S: Remove<X, I>,
+        S: Remove<M, I>,
     {
         Untrusted {
             value: self.value,
@@ -301,35 +485,45 @@ impl<T, S> Untrusted<T, S> {
         }
     }
 
-    /// Close concern `X` by performing the work that addresses it
-    /// (cryptographic verify, decrypt-and-decode, predicate check
-    /// returning the same value). The closure receives ownership of
-    /// the wrapped value and produces a (possibly transformed) new
-    /// value `U` — e.g. AEAD-open turns ciphertext bytes into
-    /// plaintext; a parse step turns bytes into a typed record.
+    /// Answer concern `M` with the work in `work`: a check over the value, an
+    /// open, a decode. The closure takes the value and gives back a (possibly
+    /// transformed) one — AEAD-open turns ciphertext into plaintext; a predicate
+    /// that only checks returns its input.
     ///
-    /// Predicate-only verification fits this signature too: return
-    /// `Ok(value)` to keep the value unchanged, `Err(e)` to fail.
-    ///
-    /// On success the scope shrinks by `X`; on failure the scope is
-    /// unchanged but the wrapper is dropped.
-    pub fn trust<X, I, U, F, E>(self, work: F) -> Result<Untrusted<U, S::Rest>, E>
+    /// On success the scope shrinks by `M`; on failure the wrapper is dropped.
+    pub fn trust_with<M, I, K, U, F, E>(
+        self,
+        _kind: Kind<M, K>,
+        work: F,
+    ) -> Result<Untrusted<U, S::Rest, B>, E>
     where
-        S: Remove<X, I>,
+        S: Remove<M, I>,
+        K: Backs,
         F: FnOnce(T) -> Result<U, E>,
     {
-        let new_value = work(self.value)?;
+        let value = work(self.value)?;
         Ok(Untrusted {
-            value: new_value,
+            value,
             _marker: PhantomData,
         })
     }
 
-    /// Project the inner value while preserving the scope. Use when
-    /// you need to transform `T` to `U` (e.g., extract a sub-field)
-    /// without addressing any concerns yet — the wrapped value
-    /// becomes `Untrusted<U, S>` with the same open concerns.
-    pub fn map<U, F>(self, f: F) -> Untrusted<U, S>
+    /// Take concern `M` off with no kind that fits: a standing accepted risk,
+    /// and the [`reason!`] says what limits it.
+    pub fn trust_accept_risk<M, I>(self, _reason: Reason<M, Risk>) -> Untrusted<T, S::Rest, B>
+    where
+        S: Remove<M, I>,
+    {
+        Untrusted {
+            value: self.value,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Project the inner value while preserving the scope. Use when you need to
+    /// transform `T` to `U` (e.g., extract a sub-field) without answering any
+    /// concern yet.
+    pub fn map<U, F>(self, f: F) -> Untrusted<U, S, B>
     where
         F: FnOnce(T) -> U,
     {
@@ -338,41 +532,77 @@ impl<T, S> Untrusted<T, S> {
             _marker: PhantomData,
         }
     }
+
+    /// [`map`](Self::map) for a projection that can fail — unframing, say. It
+    /// answers nothing: what comes out is open on everything the input was, the
+    /// error as much as the value, since a projection's error can carry the
+    /// sender's bytes as well.
+    pub fn try_map<U, E, F>(self, f: F) -> Result<Untrusted<U, S, B>, Untrusted<E, S, B>>
+    where
+        F: FnOnce(T) -> Result<U, E>,
+    {
+        match f(self.value) {
+            Ok(value) => Ok(Untrusted {
+                value,
+                _marker: PhantomData,
+            }),
+            Err(error) => Err(Untrusted {
+                value: error,
+                _marker: PhantomData,
+            }),
+        }
+    }
+
+    /// Take a two-way value apart, each half open on everything the whole was:
+    /// the variants of a reply that lead to different paths, each judged on its
+    /// own grounds. It answers nothing.
+    pub fn split<L, R, F>(self, f: F) -> Result<Untrusted<L, S, B>, Untrusted<R, S, B>>
+    where
+        F: FnOnce(T) -> Result<L, R>,
+    {
+        match f(self.value) {
+            Ok(l) => Ok(Untrusted {
+                value: l,
+                _marker: PhantomData,
+            }),
+            Err(r) => Err(Untrusted {
+                value: r,
+                _marker: PhantomData,
+            }),
+        }
+    }
 }
 
-impl<T> Untrusted<T, ()> {
-    /// Reach the inner value once every concern has been addressed.
-    /// Only available when `S = ()`, so the type system enforces
-    /// that consumers exhaustively peel.
+impl<T, B> Untrusted<T, (), B> {
+    /// Reach the inner value once every concern has been answered. Only
+    /// available when `S = ()`, so the type system enforces that consumers
+    /// answer exhaustively.
     pub fn into_inner(self) -> T {
         self.value
     }
 }
 
 // =====================================================================
-// Exposed<T, S> — outbound wrapper. Mirror of Untrusted.
+// Exposed<T, S, B> — outbound wrapper. Mirror of Untrusted.
 // =====================================================================
 
-/// Outbound wrapper. `S` is a tuple of concern markers; methods peel
-/// one concern at a time until `S = ()`, after which the inner `T`
-/// is reachable via `into_inner`.
-///
-/// Concerns are addressed by *vouching* — the caller asserts that
-/// the concern has been handled upstream (sealing, sanitisation,
-/// authorization-gate) and records why with a [`Reason`] token.
-/// Symmetric with `Untrusted`'s *trust* peel (we're not receiving
-/// data we have to trust the producer of; we're emitting data and
-/// vouching that we've cleared its risk surfaces).
-#[derive(Debug)]
-pub struct Exposed<T, S = ()> {
+/// Outbound wrapper. `S` is a tuple of concern markers; methods answer one
+/// concern at a time until `S = ()`, after which the inner `T` is reachable via
+/// `into_inner`. `B` is the end it leaves.
+pub struct Exposed<T, S = (), B = Undeclared> {
     value: T,
-    _marker: PhantomData<S>,
+    _marker: PhantomData<fn() -> (S, B)>,
 }
 
-impl<T: Clone, S> Clone for Exposed<T, S> {
-    /// Manual `Clone` impl — derive can't synthesise it when the
-    /// scope `S` may not be `Clone` (it never is, the markers are
-    /// phantom). Preserves scope.
+impl<T: std::fmt::Debug, S, B> std::fmt::Debug for Exposed<T, S, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Exposed").field(&self.value).finish()
+    }
+}
+
+impl<T: Clone, S, B> Clone for Exposed<T, S, B> {
+    /// Manual `Clone` impl — derive can't synthesise it when the scope may not be
+    /// `Clone` (it never is, the markers are phantom). Preserves scope and end.
     fn clone(&self) -> Self {
         Self {
             value: self.value.clone(),
@@ -381,19 +611,44 @@ impl<T: Clone, S> Clone for Exposed<T, S> {
     }
 }
 
-impl<T, S> Exposed<T, S> {
-    /// Wrap a value being released to the host with an explicit
-    /// initial scope. Caller picks `S` to match the concerns
-    /// genuinely open at the construction site (e.g., a fresh
-    /// disclosure envelope starts with `(AuthN, AuthZ, Covert)` open;
-    /// a public-by-design status byte starts with `(AuthN, AuthZ,
-    /// Covert)` too but each gets peeled with a "by design observable
-    /// to host" rationale).
+impl<T, S, B> Exposed<T, S, B> {
+    /// Answer concern `M` with an argued kind: the kind's argument is the answer,
+    /// and the [`reason!`] says why it holds here.
+    pub fn vouch<M, I>(self, _reason: Reason<M, Argued>) -> Exposed<T, S::Rest, B>
+    where
+        S: Remove<M, I>,
+    {
+        Exposed {
+            value: self.value,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Take concern `M` off with no kind that fits: a standing accepted risk,
+    /// and the [`reason!`] says what limits it.
+    pub fn vouch_accept_risk<M, I>(self, _reason: Reason<M, Risk>) -> Exposed<T, S::Rest, B>
+    where
+        S: Remove<M, I>,
+    {
+        Exposed {
+            value: self.value,
+            _marker: PhantomData,
+        }
+    }
+}
+
+/// At an end nothing declares, the value is whatever its mint made it, and work
+/// may turn it into what crosses.
+impl<T, S> Exposed<T, S, Undeclared> {
+    /// Wrap a value being released with an explicit initial scope. The caller
+    /// picks `S` to match the concerns genuinely open at the construction site.
     ///
     /// `S: Open`, so the scope cannot be `()`. That is what makes a door demanding
-    /// `Exposed<_, ()>` mean anything: the only way to that type is to peel every
-    /// concern the mint opened, so the receipt records answers actually given
-    /// rather than an assertion that none were needed.
+    /// `Exposed<_, ()>` mean anything: the only ways to that type are answering
+    /// every concern the mint opened, or a declaration that answered them, so the
+    /// receipt records answers actually given rather than an assertion that none
+    /// were needed. And only at [`Undeclared`]: a declared end's scope is its
+    /// declaration's, so a value leaving there is opened by [`outbound`].
     ///
     /// `pub` and `doc(hidden)`, for the reason given on `Untrusted::new`.
     #[doc(hidden)]
@@ -407,60 +662,42 @@ impl<T, S> Exposed<T, S> {
         }
     }
 
-    /// Vouch (blanket-accept) that concern `X` has been addressed
-    /// upstream. Requires a [`Reason`] token built via [`reason!`] —
-    /// the macro forces every call site to embed an explanation in
-    /// source for audit. Mirror of `Untrusted::trust_unchecked`; same
-    /// position-marker inference machinery (`I`) lets callers peel in
-    /// any order.
-    pub fn vouch_unchecked<X, I>(self, _reason: Reason) -> Exposed<T, S::Rest>
-    where
-        S: Remove<X, I>,
-    {
-        Exposed {
-            value: self.value,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Close concern `X` by performing the work that addresses it
-    /// (AEAD-seal, shuffle, sanitise, predicate check returning the
-    /// same value). The closure receives ownership of the wrapped
-    /// value and produces a (possibly transformed) new value `U` —
-    /// e.g. AEAD-seal turns plaintext bytes into ciphertext;
-    /// `shuffle_fields` permutes a typed list; an identity-on-success
-    /// predicate is just `|v| { check(&v)?; Ok(v) }`.
+    /// Answer concern `M` with the work in `work`: AEAD-seal turns plaintext into
+    /// ciphertext; `Padded::seal` makes an encoding one constant size; a predicate
+    /// that only checks returns its input.
     ///
-    /// Symmetric to `Untrusted::trust`: inbound trusts WORK that
-    /// verifies authenticity (decrypt), outbound vouches WORK that
-    /// establishes confidentiality (encrypt). Both sides close their
-    /// concern by performing the transformation, not just attesting
-    /// to it.
+    /// Symmetric to [`Untrusted::trust_with`]: inbound work verifies, outbound
+    /// work establishes. Both close their concern by performing the
+    /// transformation, not by attesting to it.
     ///
-    /// On success the scope shrinks by `X`; on failure the scope is
-    /// unchanged but the wrapper is dropped.
-    pub fn vouch<X, I, U, F, E>(self, work: F) -> Result<Exposed<U, S::Rest>, E>
+    /// On success the scope shrinks by `M`; on failure the wrapper is dropped.
+    pub fn vouch_with<M, I, K, U, F, E>(
+        self,
+        _kind: Kind<M, K>,
+        work: F,
+    ) -> Result<Exposed<U, S::Rest, Undeclared>, E>
     where
-        S: Remove<X, I>,
+        S: Remove<M, I>,
+        K: Backs,
         F: FnOnce(T) -> Result<U, E>,
     {
-        let new_value = work(self.value)?;
+        let value = work(self.value)?;
         Ok(Exposed {
-            value: new_value,
+            value,
             _marker: PhantomData,
         })
     }
 
-    /// Project the inner value while preserving the scope. Use when
-    /// you need to transform `T` to `U` (e.g., wrap sealed bytes
-    /// into a typed `Op`) without addressing any concerns.
+    /// Project the inner value while preserving the scope. Use when you need to
+    /// transform `T` to `U` (e.g., wrap sealed bytes into a typed `Op`) without
+    /// answering any concern.
     ///
     /// It carries the scope onto a DIFFERENT value, and at `S = ()` that means
     /// carrying a completed receipt. Sound where the closure embeds its input, which
     /// is every use here; a closure that discarded it would leave a receipt
     /// describing something no longer present. Nothing in the type system separates
     /// the two — see [`Open`] for what that costs and what it does not.
-    pub fn map<U, F>(self, f: F) -> Exposed<U, S>
+    pub fn map<U, F>(self, f: F) -> Exposed<U, S, Undeclared>
     where
         F: FnOnce(T) -> U,
     {
@@ -468,6 +705,94 @@ impl<T, S> Exposed<T, S> {
             value: f(self.value),
             _marker: PhantomData,
         }
+    }
+}
+
+/// At a declared end, a receipt is for the type its declaration was read for, so
+/// the work here keeps the value's type. Work that builds the value that crosses
+/// starts from [`Parts`] ([`outbound_as`]).
+impl<T, S, B: Boundary> Exposed<T, S, B> {
+    /// Answer concern `M` with the work in `work`, which checks the value or
+    /// rewrites it in place — a scrub, say — and gives back the same type.
+    ///
+    /// On success the scope shrinks by `M`; on failure the wrapper is dropped.
+    pub fn vouch_with<M, I, K, F, E>(
+        self,
+        _kind: Kind<M, K>,
+        work: F,
+    ) -> Result<Exposed<T, S::Rest, B>, E>
+    where
+        S: Remove<M, I>,
+        K: Backs,
+        F: FnOnce(T) -> Result<T, E>,
+    {
+        let value = work(self.value)?;
+        Ok(Exposed {
+            value,
+            _marker: PhantomData,
+        })
+    }
+}
+
+// =====================================================================
+// Parts<T, W, S, B> — what a `W` is built from, on its way out of `B`.
+// =====================================================================
+
+/// The parts a `W` is built from, open on what end `B`'s declaration left open
+/// on a `W` ([`outbound_as`]). Argued answers come off as they do on
+/// [`Exposed`]; the one way out is [`vouch_with`](Self::vouch_with), the work
+/// that builds the `W`.
+pub struct Parts<T, W, S, B> {
+    value: T,
+    /// What the work builds the parts into.
+    _builds: PhantomData<fn() -> W>,
+    _marker: PhantomData<fn() -> (S, B)>,
+}
+
+impl<T, W, S, B> Parts<T, W, S, B> {
+    /// Answer concern `M` with an argued kind, as [`Exposed::vouch`] does.
+    pub fn vouch<M, I>(self, _reason: Reason<M, Argued>) -> Parts<T, W, S::Rest, B>
+    where
+        S: Remove<M, I>,
+    {
+        Parts {
+            value: self.value,
+            _builds: PhantomData,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Take concern `M` off as a standing risk, as [`Exposed::vouch_accept_risk`]
+    /// does.
+    pub fn vouch_accept_risk<M, I>(self, _reason: Reason<M, Risk>) -> Parts<T, W, S::Rest, B>
+    where
+        S: Remove<M, I>,
+    {
+        Parts {
+            value: self.value,
+            _builds: PhantomData,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Answer concern `M` with the work that builds the `W` from the parts — the
+    /// only way a `W` leaves from them. The work's codomain is the `W` the parts
+    /// were opened as, so what this releases is that and nothing else.
+    pub fn vouch_with<M, I, K, F, E>(
+        self,
+        _kind: Kind<M, K>,
+        work: F,
+    ) -> Result<Exposed<W, S::Rest, B>, E>
+    where
+        S: Remove<M, I>,
+        K: Backs,
+        F: FnOnce(T) -> Result<W, E>,
+    {
+        let value = work(self.value)?;
+        Ok(Exposed {
+            value,
+            _marker: PhantomData,
+        })
     }
 }
 
@@ -482,12 +807,14 @@ impl<T, S> Exposed<T, S> {
 ///
 /// Use to assemble a request body from per-field vouched values (e.g.
 /// the ops of a session write) and thread the `Exposed` through, instead
-/// of `into_inner`-ing each part and then rubber-stamping the envelope
-/// with a blanket `vouch_unchecked`. Pair with [`Exposed::map`] to fold
-/// in non-secret envelope fields (a version counter, …) at the same
-/// preserved scope.
-impl<T, S> From<Vec<Exposed<T, S>>> for Exposed<Vec<T>, S> {
-    fn from(items: Vec<Exposed<T, S>>) -> Self {
+/// of `into_inner`-ing each part and then rubber-stamping the envelope.
+/// Pair with [`Exposed::map`] to fold in non-secret envelope fields (a
+/// version counter, …) at the same preserved scope.
+///
+/// Only at [`Undeclared`]: a `Vec<T>` is not a type a declaration answered for
+/// because it answered for `T`.
+impl<T, S> From<Vec<Exposed<T, S, Undeclared>>> for Exposed<Vec<T>, S, Undeclared> {
+    fn from(items: Vec<Exposed<T, S, Undeclared>>) -> Self {
         Exposed {
             value: items.into_iter().map(|e| e.value).collect(),
             _marker: PhantomData,
@@ -508,16 +835,18 @@ impl<T, S> From<Vec<Exposed<T, S>>> for Exposed<Vec<T>, S> {
 /// independent — closing `S` on one component does not touch the others.
 ///
 /// Note on honesty: distributing only moves the wrapper; it does not make
-/// a tuple-level blanket `vouch_unchecked` any more honest than it was.
-/// Bundle into a tuple-then-vouch ONLY when one reason genuinely covers
-/// every component (e.g. same-provenance scalars). For heterogeneous
-/// members that close a concern differently (per-field AEAD vs age-seal
-/// vs plaintext), keep them as separate per-member exposures instead.
+/// a tuple-level argued answer any more honest than it was. Bundle into a
+/// tuple-then-answer ONLY when one reason genuinely covers every component
+/// (e.g. same-provenance scalars). For heterogeneous members that close a
+/// concern differently (per-field AEAD vs sealing to a recipient vs
+/// plaintext), keep them as separate per-member exposures instead.
+///
+/// Only at [`Undeclared`], for the reason the transpose is.
 macro_rules! impl_exposed_distribute {
     ($($T:ident),+) => {
-        impl<$($T,)+ S> Exposed<($($T,)+), S> {
+        impl<$($T,)+ S> Exposed<($($T,)+), S, Undeclared> {
             #[allow(non_snake_case)]
-            pub fn distribute(self) -> ($(Exposed<$T, S>,)+) {
+            pub fn distribute(self) -> ($(Exposed<$T, S, Undeclared>,)+) {
                 let ($($T,)+) = self.value;
                 ($(Exposed { value: $T, _marker: PhantomData },)+)
             }
@@ -533,25 +862,265 @@ impl_exposed_distribute!(T0, T1, T2, T3, T4, T5);
 impl_exposed_distribute!(T0, T1, T2, T3, T4, T5, T6);
 impl_exposed_distribute!(T0, T1, T2, T3, T4, T5, T6, T7);
 
-impl<T> Exposed<T, ()> {
-    /// Reach the inner value once every concern has been vouched
-    /// for. Only available when `S = ()`, so the type system
-    /// enforces that consumers exhaustively peel before the value
-    /// hits the wire.
+impl<T, B> Exposed<T, (), B> {
+    /// Reach the inner value once every concern has been answered. Only
+    /// available when `S = ()`, so the type system enforces that consumers
+    /// answer exhaustively before the value hits the wire.
     pub fn into_inner(self) -> T {
         self.value
     }
 
-    /// Borrow the inner value once every concern has been vouched
-    /// for. Same `S = ()` gate as [`into_inner`](Self::into_inner) —
-    /// usable when the caller needs read-only access (e.g. to feed
-    /// the bytes through a chained hash) before later releasing the
-    /// value to wire. Reviewers grep for `into_inner` *and*
-    /// `as_inner` to find every release point.
+    /// Borrow the inner value once every concern has been answered. Same
+    /// `S = ()` gate as [`into_inner`](Self::into_inner) — usable when the
+    /// caller needs read-only access (e.g. to feed the bytes through a chained
+    /// hash) before later releasing the value to wire. Reviewers grep for
+    /// `into_inner` *and* `as_inner` to find every release point.
     pub fn as_inner(&self) -> &T {
         &self.value
     }
 }
+
+// =====================================================================
+// What a declaration says, as data.
+// =====================================================================
+
+/// What a `boundary!` declaration says, as plain data a test can render: each
+/// declared end carries one as `DECLARATION`, in its own crate's test build.
+pub mod declaration {
+    /// One declared end.
+    pub struct End {
+        /// The end's type name.
+        pub name: &'static str,
+        /// The declaration's own doc.
+        pub doc: &'static str,
+        /// Who sees the bytes on the way.
+        pub observer: &'static str,
+        /// The protocols this end calls.
+        pub calls: &'static [&'static str],
+        /// The protocols this end serves.
+        pub serves: &'static [&'static str],
+        pub crossings: &'static [Crossing],
+    }
+
+    /// Which way a type crosses this end.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Direction {
+        Out,
+        In,
+    }
+
+    /// One type crossing one end.
+    pub struct Crossing {
+        pub direction: Direction,
+        pub ty: &'static str,
+        /// The concerns its direction opens on it.
+        pub opens: &'static [&'static str],
+        /// What the declaration answers, once, for every value of it.
+        pub answers: &'static [Answer],
+        /// What is left for the site that holds a value of it.
+        pub left: &'static [&'static str],
+    }
+
+    /// One answer a declaration gives.
+    pub struct Answer {
+        pub marker: &'static str,
+        pub kind: &'static str,
+        /// The reason, from the doc above the answer.
+        pub doc: &'static str,
+        /// Given with `_`, for every type in its block, rather than on this type's
+        /// own line.
+        pub every_type: bool,
+    }
+}
+
+// =====================================================================
+// What the compiler refuses — as doctests, since a refusal is a build that fails.
+// =====================================================================
+
+/// The class of a kind decides the method, and that is checked by the compiler,
+/// not by review.
+///
+/// A work kind cannot be argued:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{AuthN, Untrusted, reason};
+/// let v: Untrusted<u8, (AuthN,)> = Untrusted::new(1);
+/// let _ = v.trust(reason!(AuthN::Verified, "claimed, not done"));
+/// ```
+///
+/// A risk cannot be argued:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{Asserted, Untrusted, reason};
+/// let v: Untrusted<u8, (Asserted,)> = Untrusted::new(1);
+/// let _ = v.trust(reason!(Asserted::AcceptedRisk, "a risk, written as an answer"));
+/// ```
+///
+/// A reason that names no kind answers no concern:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{AuthZ, Untrusted, reason};
+/// let v: Untrusted<u8, (AuthZ,)> = Untrusted::new(1);
+/// let _ = v.trust(reason!("no kind named"));
+/// ```
+///
+/// A kind answers its own marker and no other:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{AuthN, AuthZ, Untrusted, reason};
+/// let v: Untrusted<u8, (AuthZ,)> = Untrusted::new(1);
+/// let _ = v.trust(reason!(AuthN::Indifferent, "the wrong question"));
+/// ```
+///
+/// And a receipt is for the end it was answered for:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{Boundary, Exposed, Sends, outbound};
+/// struct A;
+/// struct B;
+/// impl Boundary for A {}
+/// impl Boundary for B {}
+/// impl Sends<u8> for A { type Open = (); }
+/// fn door(_: Exposed<u8, (), B>) {}
+/// door(outbound::<A, _>(1));
+/// ```
+///
+/// A declared end mints through its declaration and nowhere else:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{Boundary, Covert, Exposed};
+/// struct A;
+/// impl Boundary for A {}
+/// let _ = Exposed::<u8, (Covert,), A>::new(1);
+/// ```
+///
+/// At a declared end, the work keeps the value's type:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{Boundary, Covert, Sends, outbound};
+/// struct A;
+/// impl Boundary for A {}
+/// impl Sends<u8> for A { type Open = (Covert,); }
+/// let _ = outbound::<A, _>(1u8).vouch_with(Covert::Transformed, |b| Ok::<_, ()>(u16::from(b)));
+/// ```
+///
+/// Parts leave only as the value they were opened as:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{Boundary, Covert, Sends, outbound_as};
+/// struct A;
+/// impl Boundary for A {}
+/// impl Sends<u8> for A { type Open = (Covert,); }
+/// let _ = outbound_as::<A, u8, _>("x").vouch_with(Covert::Transformed, |s| Ok::<_, ()>(s.len()));
+/// ```
+///
+/// A value its declaration answered in full lends its scope to no parts:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{Boundary, Sends, outbound_as};
+/// struct A;
+/// impl Boundary for A {}
+/// impl Sends<u8> for A { type Open = (); }
+/// let _ = outbound_as::<A, u8, _>("x");
+/// ```
+///
+/// A projection's error comes out open:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{Asserted, Untrusted};
+/// let v: Untrusted<u8, (Asserted,)> = Untrusted::new(1);
+/// let _: u8 = v.try_map(|b| Err::<(), _>(b)).unwrap_err().into_inner();
+/// ```
+///
+/// A declaration's blocks open only markers of their own direction, and only
+/// markers. The control first:
+///
+/// ```
+/// use enclavid_boundary::{Asserted, Covert};
+/// use enclavid_boundary_macros::boundary;
+/// pub struct Req;
+/// pub struct Rep;
+/// boundary! {
+///     End { observer: Test }
+///     in (Asserted,) { #[doc = "test fixture"] Req: Asserted::Bounded }
+///     out (Covert,) { #[doc = "test fixture"] Rep: Covert::Bounded }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use enclavid_boundary::Covert;
+/// use enclavid_boundary_macros::boundary;
+/// pub struct Req;
+/// boundary! {
+///     End { observer: Test }
+///     in (Covert,) { #[doc = "test fixture"] Req: Covert::Bounded }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use enclavid_boundary::Asserted;
+/// use enclavid_boundary_macros::boundary;
+/// pub struct Rep;
+/// boundary! {
+///     End { observer: Test }
+///     out (Asserted,) { #[doc = "test fixture"] Rep: Asserted::Bounded }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use enclavid_boundary_macros::boundary;
+/// pub struct Req;
+/// boundary! {
+///     End { observer: Test }
+///     in (u8,) { Req }
+/// }
+/// ```
+///
+/// And a declaration does no work, nor accepts a risk: its answers are argued.
+///
+/// ```compile_fail
+/// use enclavid_boundary::Covert;
+/// use enclavid_boundary_macros::boundary;
+/// pub struct Rep;
+/// boundary! {
+///     End { observer: Test }
+///     out (Covert,) { #[doc = "test fixture"] Rep: Covert::Transformed }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use enclavid_boundary::Covert;
+/// use enclavid_boundary_macros::boundary;
+/// pub struct Rep;
+/// boundary! {
+///     End { observer: Test }
+///     out (Covert,) { #[doc = "test fixture"] Rep: Covert::AcceptedRisk }
+/// }
+/// ```
+///
+/// A contract's every crossing is a type of its own, and `()` under another name
+/// is still `()`. The control first:
+///
+/// ```
+/// pub struct Error;
+/// pub struct Req;
+/// #[enclavid_boundary_macros::protocol]
+/// pub trait Contract {
+///     async fn op(&self, req: Req) -> Result<Req, Error>;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// pub struct Error;
+/// pub struct Req;
+/// pub type Unit = ();
+/// #[enclavid_boundary_macros::protocol]
+/// pub trait Contract {
+///     async fn op(&self, req: Req) -> Result<Unit, Error>;
+/// }
+/// ```
+#[allow(dead_code)]
+fn compile_checks() {}
 
 // =====================================================================
 // Tests
@@ -568,23 +1137,22 @@ mod tests {
     }
 
     #[test]
-    fn peel_in_natural_order() {
+    fn answers_in_natural_order() {
         let raw: Untrusted<Meta, (AuthN, AuthZ, Replay)> = Untrusted::new(Meta {
             owner: "alice".into(),
             version: 1,
         });
-        let after_authn = raw.trust_unchecked::<AuthN, _>(reason!("test fixture"));
-        let after_authz = after_authn
-            .trust::<AuthZ, _, _, _, _>(|m| {
+        let m = raw
+            .trust(reason!(AuthN::SelfProduced, "test fixture"))
+            .trust_with(AuthZ::Matched, |m: Meta| {
                 if m.owner == "alice" {
                     Ok(m)
                 } else {
                     Err("wrong owner")
                 }
             })
-            .unwrap();
-        let m = after_authz
-            .trust_unchecked::<Replay, _>(reason!("test fixture"))
+            .unwrap()
+            .trust(reason!(Replay::Harmless, "test fixture"))
             .into_inner();
         assert_eq!(
             m,
@@ -596,25 +1164,23 @@ mod tests {
     }
 
     #[test]
-    fn peel_in_arbitrary_order() {
-        // Same scope, peeled in different order — type inference
-        // picks the matching position marker each time.
+    fn answers_in_any_order() {
+        // Same scope, answered in different order — type inference picks the
+        // matching position marker each time, and the marker from the kind.
         let raw: Untrusted<u32, (AuthN, AuthZ, Replay)> = Untrusted::new(42);
         let v = raw
-            .trust_unchecked::<Replay, _>(reason!("test fixture"))
-            .trust_unchecked::<AuthN, _>(reason!("test fixture"))
-            .trust_unchecked::<AuthZ, _>(reason!("test fixture"))
+            .trust(reason!(Replay::Idempotent, "test fixture"))
+            .trust(reason!(AuthN::Indifferent, "test fixture"))
+            .trust(reason!(AuthZ::NoPrincipal, "test fixture"))
             .into_inner();
         assert_eq!(v, 42);
     }
 
     #[test]
-    fn trust_predicate_style_propagates_error() {
-        // Predicate-on-success: keep the value unchanged, fail on
-        // bad input. Same shape as a real authorization check.
+    fn work_propagates_its_error() {
         let raw: Untrusted<&'static str, (AuthZ,)> = Untrusted::new("mallory");
         let err = raw
-            .trust::<AuthZ, _, _, _, _>(|s| {
+            .trust_with(AuthZ::Matched, |s| {
                 if s == "alice" {
                     Ok(s)
                 } else {
@@ -626,97 +1192,93 @@ mod tests {
     }
 
     #[test]
-    fn trust_transforming_changes_type_on_success() {
-        // Real inbound shape: bytes-on-wire → typed value after
-        // AEAD-open + decode. We model with a string-to-length
-        // transform to keep the test focused on the type shift.
+    fn work_may_change_the_type() {
+        // Real inbound shape: bytes-on-wire → typed value after AEAD-open +
+        // decode, modelled with a string-to-length transform.
         let raw: Untrusted<&'static str, (AuthN,)> = Untrusted::new("hello");
         let len: Untrusted<usize, ()> = raw
-            .trust::<AuthN, _, _, _, _>(|s| Ok::<_, ()>(s.len()))
+            .trust_with(AuthN::Verified, |s| Ok::<_, ()>(s.len()))
             .unwrap();
         assert_eq!(len.into_inner(), 5);
     }
 
     #[test]
-    fn map_preserves_scope() {
+    fn an_accepted_risk_takes_its_concern_off() {
+        let raw: Untrusted<u8, (Asserted,)> = Untrusted::new(3);
+        let v = raw
+            .trust_accept_risk(reason!(Asserted::AcceptedRisk, "test fixture"))
+            .into_inner();
+        assert_eq!(v, 3);
+    }
+
+    #[test]
+    fn projections_answer_nothing() {
         let raw: Untrusted<Meta, (Replay,)> = Untrusted::new(Meta {
             owner: "alice".into(),
             version: 7,
         });
         let projected: Untrusted<u32, (Replay,)> = raw.map(|m| m.version);
-        let v = projected
-            .trust_unchecked::<Replay, _>(reason!("test fixture"))
+        let doubled: Untrusted<u32, (Replay,)> =
+            projected.try_map(|v| v.checked_mul(2).ok_or(())).unwrap();
+        let halves: Result<Untrusted<u32, (Replay,)>, Untrusted<u32, (Replay,)>> =
+            doubled.split(|v| if v > 10 { Ok(v) } else { Err(v) });
+        let v = halves
+            .unwrap()
+            .trust(reason!(Replay::Harmless, "test fixture"))
             .into_inner();
-        assert_eq!(v, 7);
-    }
-
-    /// An empty scope is somewhere you ARRIVE, never somewhere you start.
-    /// `Untrusted::new` requires `S: Open`, so the only route to `into_inner` is
-    /// through a peel per concern — which is what lets a signature demanding
-    /// `Untrusted<_, ()>` mean the answers were given rather than skipped.
-    #[test]
-    fn empty_scope_is_reached_by_peeling_not_by_declaring() {
-        let u: Untrusted<u32, (AuthN,)> = Untrusted::new(99);
-        assert_eq!(
-            u.trust_unchecked::<AuthN, _>(reason!("test fixture"))
-                .into_inner(),
-            99
-        );
+        assert_eq!(v, 14);
     }
 
     #[test]
     fn reason_token_is_zst() {
-        // Sanity check that the audit-trail token has zero runtime
-        // size — passing it as a method argument is free.
         assert_eq!(std::mem::size_of::<Reason>(), 0);
-    }
-
-    /// The outbound mirror of the rule above: a door that demands
-    /// `Exposed<_, ()>` is worth something only because that type cannot be
-    /// conjured, so reaching it is evidence rather than assertion.
-    #[test]
-    fn exposed_reaches_empty_scope_only_by_vouching() {
-        let e: Exposed<Vec<u8>, (Covert,)> = Exposed::new(vec![1u8, 2, 3]);
-        assert_eq!(
-            e.vouch_unchecked::<Covert, _>(reason!("test fixture"))
-                .into_inner(),
-            vec![1, 2, 3]
-        );
+        assert_eq!(std::mem::size_of::<Reason<AuthN, Argued>>(), 0);
     }
 
     #[test]
-    fn exposed_vouch_peels_concerns_in_any_order() {
+    fn exposed_answers_in_any_order() {
         let raw: Exposed<u32, (AuthN, AuthZ, Covert)> = Exposed::new(42);
         let v = raw
-            .vouch_unchecked::<Covert, _>(reason!("test fixture"))
-            .vouch_unchecked::<AuthN, _>(reason!("test fixture"))
-            .vouch_unchecked::<AuthZ, _>(reason!("test fixture"))
+            .vouch(reason!(Covert::Bounded, "test fixture"))
+            .vouch(reason!(AuthN::SelfProduced, "test fixture"))
+            .vouch(reason!(AuthZ::NoSecret, "test fixture"))
             .into_inner();
         assert_eq!(v, 42);
     }
 
     #[test]
-    fn exposed_vouch_predicate_style_propagates_error() {
-        let raw: Exposed<&'static str, (Covert,)> = Exposed::new("encoded:bits");
+    fn exposed_work_propagates_its_error() {
+        let raw: Exposed<&'static str, (Covert,)> = Exposed::new("past its frame");
         let err = raw
-            .vouch::<Covert, _, _, _, _>(|s| {
-                if s.contains(':') {
-                    Err("looks like encoded data")
-                } else {
+            .vouch_with(Covert::Transformed, |s| {
+                if s.len() <= 4 {
                     Ok(s)
+                } else {
+                    Err("over the frame")
                 }
             })
             .unwrap_err();
-        assert_eq!(err, "looks like encoded data");
+        assert_eq!(err, "over the frame");
+    }
+
+    /// A projection's error is the sender's as much as its value is, so it comes
+    /// out open on the same scope.
+    #[test]
+    fn a_projection_error_stays_open() {
+        let raw: Untrusted<&'static str, (Asserted,)> = Untrusted::new("the peer's own text");
+        let err: Untrusted<&'static str, (Asserted,)> = raw.try_map(Err::<u8, _>).unwrap_err();
+        let text = err
+            .trust_accept_risk(reason!(Asserted::AcceptedRisk, "test fixture"))
+            .into_inner();
+        assert_eq!(text, "the peer's own text");
     }
 
     #[test]
-    fn exposed_vouch_transforming_changes_type_on_success() {
-        // Real outbound shape: plaintext value → ciphertext bytes
-        // after AEAD-seal. We model with a serialise-to-bytes step.
-        let raw: Exposed<&'static str, (AuthN,)> = Exposed::new("hello");
+    fn exposed_work_may_change_the_type() {
+        // Real outbound shape: plaintext value → ciphertext bytes after AEAD-seal.
+        let raw: Exposed<&'static str, (Covert,)> = Exposed::new("hello");
         let bytes: Exposed<Vec<u8>, ()> = raw
-            .vouch::<AuthN, _, _, _, _>(|s| Ok::<_, ()>(s.as_bytes().to_vec()))
+            .vouch_with(Covert::Transformed, |s| Ok::<_, ()>(s.as_bytes().to_vec()))
             .unwrap();
         assert_eq!(bytes.into_inner(), b"hello".to_vec());
     }
@@ -729,23 +1291,67 @@ mod tests {
         });
         let projected: Exposed<u32, (AuthN, Covert)> = raw.map(|m| m.version);
         let v = projected
-            .vouch_unchecked::<AuthN, _>(reason!("test fixture"))
-            .vouch_unchecked::<Covert, _>(reason!("test fixture"))
+            .vouch(reason!(AuthN::SelfProduced, "test fixture"))
+            .vouch_accept_risk(reason!(Covert::AcceptedRisk, "test fixture"))
             .into_inner();
         assert_eq!(v, 7);
     }
 
-    // === Compile-fail expectations ===
-    //
-    // These cases would not compile:
-    //
-    //   raw.trust_unchecked::<AuthZ, _>(reason!("..."));  // scope lacks AuthZ
-    //   raw.trust_unchecked::<AuthN, _>();                // missing reason token
-    //   raw.trust_unchecked::<AuthN, _>(Reason(()));      // private field
-    //   raw.into_inner();                                 // scope is non-empty
-    //
-    //   exposed.vouch_unchecked::<Replay, _>(reason!()); // wrong direction
-    //   exposed.into_inner();                            // scope is non-empty
-    //
-    // We rely on the type system + macro hygiene to reject these.
+    struct End;
+    impl Boundary for End {}
+    impl Sends<u32> for End {
+        type Open = (Covert,);
+    }
+    impl Sends<u64> for End {
+        type Open = (AuthZ, Covert);
+    }
+    impl Sends<u8> for End {
+        type Open = ();
+    }
+    impl Receives<u16> for End {
+        type Open = ();
+    }
+
+    /// Parts take argued answers as they are, and leave only as the value the work
+    /// builds from them.
+    #[test]
+    fn parts_leave_as_what_they_build() {
+        let framed: Exposed<u64, (), End> = outbound_as::<End, u64, _>(7u8)
+            .vouch(reason!(AuthZ::NoSecret, "test fixture"))
+            .vouch_with(Covert::Transformed, |b| Ok::<_, ()>(u64::from(b) << 8))
+            .unwrap();
+        assert_eq!(framed.into_inner(), 7 << 8);
+    }
+
+    /// At a declared end the work keeps the value's type.
+    #[test]
+    fn declared_work_keeps_the_type() {
+        let checked: Exposed<u32, (), End> = outbound::<End, _>(9u32)
+            .vouch_with(Covert::Transformed, |v| Ok::<_, ()>(v.rotate_left(8)))
+            .unwrap();
+        assert_eq!(checked.into_inner(), 9u32.rotate_left(8));
+    }
+
+    /// A declaration decides the scope a value starts with at its end, and where
+    /// it answered everything, the value starts answered.
+    #[test]
+    fn an_end_opens_what_its_declaration_left() {
+        let open: Exposed<u32, (Covert,), End> = outbound::<End, _>(5);
+        assert_eq!(
+            open.vouch(reason!(Covert::Bounded, "test fixture"))
+                .into_inner(),
+            5
+        );
+        let answered: Exposed<u8, (), End> = outbound::<End, _>(6);
+        assert_eq!(answered.into_inner(), 6);
+        let arrived: Untrusted<u16, (), End> = inbound::<End, _>(7);
+        assert_eq!(arrived.into_inner(), 7);
+        // The parts of a `u32` open what the `u32` does, and become one in the work.
+        let framed: Exposed<u32, (), End> = outbound_as::<End, u32, _>((2u16, 3u16))
+            .vouch_with(Covert::Transformed, |(a, b)| {
+                Ok::<_, ()>(u32::from(a) * u32::from(b))
+            })
+            .unwrap();
+        assert_eq!(framed.into_inner(), 6);
+    }
 }

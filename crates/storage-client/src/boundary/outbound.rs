@@ -1,9 +1,9 @@
 //! Store → volume crossings: values the storage-CVM keeps where the host
 //! reads them. [`to_untrusted`] opens all three outbound concerns
-//! `(AuthN, AuthZ, Covert)`, and the use site answers each: a peel that does
-//! the work ([`vouch::<X>(work)`](Exposed::vouch)) — a seal, a pad, a shuffle —
-//! or a vouch with its reason
-//! ([`vouch_unchecked::<X>(reason)`](Exposed::vouch_unchecked)). It answers
+//! `(AuthN, AuthZ, Covert)`, and the use site answers each: with the work
+//! ([`vouch_with`](Exposed::vouch_with)) — a seal, a pad, a shuffle — with an
+//! argued kind and its reason ([`vouch`](Exposed::vouch)), or as an accepted
+//! risk ([`vouch_accept_risk`](Exposed::vouch_accept_risk)). It answers
 //! none of them itself: against a reader of every byte, what keeps a value is
 //! its own seal, and each is sealed to its own key or recipient. Where a whole
 //! kind of value is answered alike every time, the answer is given once, in a

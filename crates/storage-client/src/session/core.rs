@@ -41,15 +41,15 @@ pub trait ReadField: Sized {
 /// `build_op` returns `Exposed<Op, ()>`: a fully-vouched outbound
 /// wrapper. Inside the body the implementation constructs an
 /// `Exposed<Op, S>` where `S` lists the outbound concerns it cares
-/// about — typically `(AuthN, AuthZ, Covert)` — and then peels each
-/// with `vouch_unchecked::<X>(reason!("…"))` recording why the
-/// concern was addressed (AEAD-seal under what key, app-level
-/// consent / by-design plaintext, sanitisation step, ...). By the
-/// time the wrapper returns, `S == ()` and only `into_inner` lifts
-/// the raw `Op` for the wire send inside
-/// [`SessionStore::write`](super::SessionStore::write). Reviewers
-/// grep for `Exposed::new` to find every TEE → host data release
-/// and for `vouch_unchecked::<` to read the per-concern rationale.
+/// about — typically `(AuthN, AuthZ, Covert)` — and then answers each:
+/// with work (`vouch_with`, the AEAD seal under the field's key), or with
+/// an argued kind (`vouch(reason!(Kind, "…"))`, recording why it holds:
+/// app-level consent, by-design plaintext, ...). By the time the wrapper
+/// returns, `S == ()` and only `into_inner` lifts the raw `Op` for the
+/// wire send inside [`SessionStore::write`](super::SessionStore::write).
+/// Reviewers grep for `to_untrusted(` to find every TEE → host data
+/// release and for `vouch(` / `vouch_with(` to read how each concern
+/// was answered.
 ///
 /// Object-safe by design (`&self` method, no `Sized` bound) so callers
 /// pass heterogeneous slices `&[&dyn WriteField]` for atomic writes

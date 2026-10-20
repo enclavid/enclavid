@@ -25,8 +25,9 @@ use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 
 use engine_rpc::{
-    BundleRef, ByteBuf, CallbackError, CatalogEntry, ChildCallbacks, ChildCallbacksServerShared,
-    ChildService, ChildServiceClient, CompiledBundle, ExecError, RunStatus,
+    BundleRef, ByteBuf, CallbackError, CatalogEntry, Committed, CompiledBundle, ExecError,
+    MediaBytes, MediaHash, RemoteChild, RemoteChildCallbacks, RemoteChildCallbacksServerShared,
+    RemoteChildClient, RunStatus,
 };
 
 /// The plugins the policy imports, from the shared fixture catalog — the same
@@ -73,14 +74,11 @@ fn to_bundle_ref(bundle: &CompiledBundle) -> BundleRef {
 /// (→ api). Records what the child called BACK during the run.
 struct MockCallbacks {
     session_changes: Mutex<u32>,
-    media_loads: Mutex<Vec<[u8; 32]>>,
+    media_loads: Mutex<Vec<MediaHash>>,
 }
 
-impl ChildCallbacks for MockCallbacks {
-    async fn media_load(
-        &self,
-        hash: [u8; 32],
-    ) -> Result<Option<engine_rpc::ByteBuf>, CallbackError> {
+impl RemoteChildCallbacks for MockCallbacks {
+    async fn media_load(&self, hash: MediaHash) -> Result<Option<MediaBytes>, CallbackError> {
         self.media_loads.lock().unwrap().push(hash);
         Ok(None)
     }
@@ -88,9 +86,9 @@ impl ChildCallbacks for MockCallbacks {
         &self,
         _state: SessionState,
         _decision: Option<engine_executor::Decision>,
-    ) -> Result<(), CallbackError> {
+    ) -> Result<Committed, CallbackError> {
         *self.session_changes.lock().unwrap() += 1;
-        Ok(())
+        Ok(Committed)
     }
 }
 
@@ -114,8 +112,8 @@ fn real_bundle() -> CompiledBundle {
 }
 
 /// Spawn the real `engine-executor-child` over a socketpair (its fd 0), the way the
-/// supervisor does, and return the child handle + its `ChildService` client.
-async fn spawn_child() -> (tokio::process::Child, ChildServiceClient<Ciborium>) {
+/// supervisor does, and return the child handle + its `RemoteChild` client.
+async fn spawn_child() -> (tokio::process::Child, RemoteChildClient<Ciborium>) {
     let (sup_end, child_end) = std::os::unix::net::UnixStream::pair().unwrap();
     sup_end.set_nonblocking(true).unwrap();
     let mut cmd = tokio::process::Command::new(xtask::child_binary("engine-executor-child"));
@@ -125,7 +123,7 @@ async fn spawn_child() -> (tokio::process::Child, ChildServiceClient<Ciborium>) 
 
     let sup_end = tokio::net::UnixStream::from_std(sup_end).unwrap();
     let (read, write) = sup_end.into_split();
-    type Cli = ChildServiceClient<Ciborium>;
+    type Cli = RemoteChildClient<Ciborium>;
     let (conn, _tx, mut rx) = remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(
         engine_rpc::connection_cfg(&engine_rpc::LegSettings::default()),
         read,
@@ -161,7 +159,7 @@ async fn spawned_child_primes_runs_relays_then_exits() {
         session_changes: Mutex::new(0),
         media_loads: Mutex::new(Vec::new()),
     });
-    let (server, cb_client) = ChildCallbacksServerShared::<_, Ciborium>::new(cbs.clone(), 4);
+    let (server, cb_client) = RemoteChildCallbacksServerShared::<_, Ciborium>::new(cbs.clone(), 4);
     tokio::spawn(async move {
         let _ = server.serve(true).await;
     });
@@ -274,7 +272,7 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
         cwasm_path: format!("/proc/self/fd/{}", engine_supervisor::INHERITED_FD),
         ..staged
     };
-    let (mut child, client) = engine_supervisor::spawn_and_connect::<ChildServiceClient<Ciborium>>(
+    let (mut child, client) = engine_supervisor::spawn_and_connect::<RemoteChildClient<Ciborium>>(
         &xtask::child_binary("engine-executor-child"),
         Some(cwasm.as_fd()),
         true,
@@ -291,7 +289,7 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
         session_changes: Mutex::new(0),
         media_loads: Mutex::new(Vec::new()),
     });
-    let (server, cb_client) = ChildCallbacksServerShared::<_, Ciborium>::new(cbs.clone(), 4);
+    let (server, cb_client) = RemoteChildCallbacksServerShared::<_, Ciborium>::new(cbs.clone(), 4);
     tokio::spawn(async move {
         let _ = server.serve(true).await;
     });
@@ -520,7 +518,7 @@ async fn measure_per_round_cost() {
             session_changes: std::sync::Mutex::new(0),
             media_loads: std::sync::Mutex::new(Vec::new()),
         });
-        let (server, cb_client) = ChildCallbacksServerShared::<_, Ciborium>::new(cbs, 4);
+        let (server, cb_client) = RemoteChildCallbacksServerShared::<_, Ciborium>::new(cbs, 4);
         tokio::spawn(async move {
             let _ = server.serve(true).await;
         });

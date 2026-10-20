@@ -17,7 +17,7 @@
 //! // `None` instead: the session must not exist yet (/create).
 //! let fields: [&dyn WriteField; 1] = [&SetMetadata(metadata)];
 //! let fields = outbound_fields(&fields)
-//!     .vouch_unchecked::<Covert, _>(reason!("why this many ops says nothing"));
+//!     .vouch(reason!(Covert::Bounded, "why this many ops says nothing"));
 //! let new_v = session_store.write(&id, Some(version), fields).await?;
 //! ```
 //!
@@ -270,8 +270,10 @@ impl SessionStore {
             return Ok(Untrusted::new(None));
         };
         let opened: Untrusted<Vec<u8>, (Replay,)> = boundary::inbound::from_untrusted(sealed)
-            .trust::<AuthN, _, _, _, _>(|raw| aead::open(&raw, self.tee_seal_key(), &aad))?
-            .trust::<AuthZ, _, _, _, _>(|outer| {
+            .trust_with(AuthN::Verified, |raw| {
+                aead::open(&raw, self.tee_seal_key(), &aad)
+            })?
+            .trust_with(AuthZ::Matched, |outer| {
                 aead::open(&outer, applicant_session_token, &aad)
             })?;
         Ok(opened.map(Some))
@@ -315,10 +317,13 @@ pub fn outbound_fields<'a>(
     fields: &'a [&'a dyn WriteField],
 ) -> Exposed<&'a [&'a dyn WriteField], (Covert,)> {
     boundary::outbound::to_untrusted(fields)
-        .vouch_unchecked::<AuthN, _>(reason!(
-            "each member is sealed, or carries no bytes, in its own build_op"
+        .vouch(reason!(
+            AuthN::Indifferent,
+            "the set has no bytes of its own: each member is sealed, or carries none, in \
+             its own build_op"
         ))
-        .vouch_unchecked::<AuthZ, _>(reason!(
+        .vouch(reason!(
+            AuthZ::Scoped,
             "every member writes the one record this write names, its session's own"
         ))
 }

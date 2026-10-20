@@ -19,7 +19,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
-use hatch_rpc::{BlobRequest, HatchService, ManifestRequest};
+use hatch_rpc::{BlobRequest, ManifestRequest, RemoteHatch};
 use tokio::time::{Instant, timeout_at};
 
 use crate::boundary;

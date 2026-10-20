@@ -1,6 +1,6 @@
 //! The `storage-cvm` deployable: the trusted storage node. LISTENS for the
 //! orchestrator (api) over mutual RA-TLS and serves BOTH `storage-rpc` services
-//! — `SessionStoreService` (one SQLite file per session) + `CacheService`
+//! — `RemoteSessionStore` (one SQLite file per session) + `RemoteCache`
 //! (object_store) — on one remoc connection. Started by INFRASTRUCTURE, exactly
 //! like the hatch and the engine workers.
 //!
@@ -30,7 +30,7 @@ use fleet_transport::LegFailure;
 use fleet_transport::launch::{LaunchError, Settings};
 use safe_logger::{debug, info, reason, safe, warn};
 use storage_rpc::{
-    CacheServiceServerShared, LegSettings, SessionStoreServiceServerShared, StorageClients,
+    LegSettings, RemoteCacheServerShared, RemoteSessionStoreServerShared, StorageClients,
 };
 
 /// How many expired sessions the sweeper purges per tick, unless the host says
@@ -582,8 +582,8 @@ async fn serve_conn(
     // rather than one node per peer.
     let caller = Arc::new(Caller::new(svc, measurement));
     let (session_server, session) =
-        SessionStoreServiceServerShared::<_, Ciborium>::new(caller.clone(), buffers.session);
-    let (cache_server, cache) = CacheServiceServerShared::<_, Ciborium>::new(caller, buffers.cache);
+        RemoteSessionStoreServerShared::<_, Ciborium>::new(caller.clone(), buffers.session);
+    let (cache_server, cache) = RemoteCacheServerShared::<_, Ciborium>::new(caller, buffers.cache);
     tx.send(StorageClients { session, cache })
         .await
         .map_err(|e| {

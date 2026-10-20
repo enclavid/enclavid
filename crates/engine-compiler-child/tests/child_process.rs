@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use remoc::codec::Ciborium;
 
-use engine_compiler::{ChildCompiled, CompileChildService, CompileChildServiceClient};
+use engine_compiler::{ChildCompiled, RemoteCompileChild, RemoteCompileChildClient};
 use engine_rpc::{
     Artifact, BundleMeta, CompileError, CompileFault, CompileRequest, CompileSource,
     MAX_CWASM_BYTES, PluginLength,
@@ -36,7 +36,7 @@ use fleet_stream::{BlobHeader, StreamLen, bin};
 /// A spawned child, its service client, and the file it writes its cwasm to.
 struct Spawned {
     process: tokio::process::Child,
-    client: CompileChildServiceClient<Ciborium>,
+    client: RemoteCompileChildClient<Ciborium>,
     output: File,
 }
 
@@ -51,7 +51,7 @@ async fn spawn_with(filtered: bool) -> Spawned {
     let exe = xtask::child_binary("engine-compiler-child");
     let output = tempfile::tempfile().expect("an output file");
     let (process, client) = engine_supervisor::spawn_and_connect::<
-        CompileChildServiceClient<Ciborium>,
+        RemoteCompileChildClient<Ciborium>,
     >(&exe, Some(output.as_fd()), filtered)
     .await
     .expect("spawn engine-compiler-child");
@@ -65,7 +65,7 @@ async fn spawn_with(filtered: bool) -> Spawned {
 /// One compile through `client`, its components streamed beside the call as the
 /// supervisor relays them.
 async fn compile(
-    client: &CompileChildServiceClient<Ciborium>,
+    client: &RemoteCompileChildClient<Ciborium>,
     policy: Vec<u8>,
     plugins: Vec<PluginInstance>,
 ) -> Result<ChildCompiled, CompileError> {
@@ -343,7 +343,7 @@ async fn a_runner_answers_and_gives_back_what_its_child_held() {
             .run(
                 Some(output.as_fd()),
                 kept.clone(),
-                |client: CompileChildServiceClient<Ciborium>| async move {
+                |client: RemoteCompileChildClient<Ciborium>| async move {
                     compile(&client, b"not a wasm component".to_vec(), vec![]).await
                 },
             )

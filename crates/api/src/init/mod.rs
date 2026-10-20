@@ -24,9 +24,11 @@ use axum::http::StatusCode;
 use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Replay, Untrusted, reason};
 use engine_rpc::{ExecError, Preparation, Preparing, PropsRead};
 use engine_types::limits::MAX_PROPS_BYTES;
+use engine_types::props::PropsRefusal;
 use session_types::{InitError, Prepared, SessionMetadata, SessionStatus};
 use storage_client::{SessionStore, SetMetadata, WriteField, boundary, outbound_fields};
 
+use crate::boundary::ExecutionWorker;
 use crate::compositions::{Composition, Compositions, max_cwasm_bytes};
 use crate::executor::outbound_preparation;
 
@@ -60,8 +62,34 @@ pub async fn prepare(
     check_pull(compositions, session_id, metadata).await?;
     let preparing = Preparing::Read(metadata.props.clone());
     let read = hold(compositions, &composition, session_id, preparing).await?;
-    read.trust::<Asserted, _, _, _, _>(|read| settled(read, metadata))?
-        .into_inner()
+    judged(read, metadata)
+}
+
+/// What the worker read of the props, judged. Each answer it can give is judged
+/// on its own grounds, so it is taken apart before either is acted on: see
+/// [`settled`] and [`refused`].
+fn judged(
+    read: Untrusted<PropsRead, (Asserted,), ExecutionWorker>,
+    metadata: &SessionMetadata,
+) -> Result<Prepared, Unavailable> {
+    match read.split(|read| match read {
+        PropsRead::Refused(refusal) => Err(refusal),
+        other => Ok(other),
+    }) {
+        Ok(read) => read.trust_with(Asserted::Contained, settled)?.into_inner(),
+        Err(refusal) => refused(
+            refusal
+                .trust_accept_risk(reason!(
+                    Asserted::AcceptedRisk,
+                    "the session has not started, so nothing of an applicant's was ever \
+                     handed to a worker for it, and the props bear the refusal out; what \
+                     remains is which problem of a fixed set, once per session, read by the \
+                     consumer"
+                ))
+                .into_inner(),
+            metadata,
+        ),
+    }
 }
 
 /// Have the execution-worker hold `composition` and do what `preparing` asks
@@ -72,7 +100,7 @@ async fn hold(
     composition: &Composition,
     session_id: &str,
     preparing: Preparing,
-) -> Result<Untrusted<PropsRead, (Asserted,)>, Unavailable> {
+) -> Result<Untrusted<PropsRead, (Asserted,), ExecutionWorker>, Unavailable> {
     let key = composition.key();
     let max_cwasm_bytes = max_cwasm_bytes(&composition.terms);
     let executor = &compositions.executor;
@@ -87,10 +115,11 @@ async fn hold(
     {
         Preparation::Read(read) => return Ok(read),
         Preparation::CacheMiss(compat_token) => compat_token
-            .trust_unchecked::<Asserted, _>(reason!(
-                "contained: a miss names only a slot inside the composition namespace \
-                 api itself computed, so a fabricated token costs a recompile and never \
-                 yields another composition's code"
+            .trust(reason!(
+                Asserted::Contained,
+                "a miss names only a slot inside the composition namespace api itself \
+                 computed, so a fabricated token costs a recompile and never yields \
+                 another composition's code"
             ))
             .into_inner(),
     };
@@ -117,29 +146,16 @@ fn unprepared(session_id: &str, e: &ExecError) -> StatusCode {
     }
 }
 
-/// What the worker read of `metadata`'s props, judged — the work that closes
-/// `Asserted` on it, a kind per answer:
+/// What the worker read of the props, judged — the work that closes `Asserted` on
+/// it as CONTAINED: the props as WAVE are kept for the session and handed back to
+/// the worker every round, to the policy whose type they are, and shown to no
+/// one; held to what a round carries, and framed wherever they cross or rest, so
+/// their length tells the host nothing either.
 ///
-///   * the props as WAVE: CONTAINED — kept for the session and handed back to
-///     the worker every round, to the policy whose type they are, and shown to
-///     no one; held to what a round carries, and framed wherever they cross or
-///     rest, so their length tells the host nothing either.
-///   * a refusal: no kind fits — an accepted risk, narrowed by two checks. The
-///     session has not started: nothing of an applicant's was ever handed to a
-///     worker for it, since a session takes input only on a prompt a round
-///     committed, and that write records it prepared — so no round can have,
-///     and the refusal is read only while none has; the write that marks it is
-///     refused if one commits meanwhile. And the props bear it out
-///     ([`crate::props::fault`]): a problem of a fixed set, at a place the
-///     props hold. What remains is which of those, once per session, read by
-///     the consumer — and a worker that broke out of its child could put a
-///     neighbouring session's bits into that choice.
-///   * nothing read, when reading was asked: not an answer, 500.
-fn settled(
-    read: PropsRead,
-    metadata: &SessionMetadata,
-) -> Result<Result<Prepared, Unavailable>, StatusCode> {
-    Ok(match read {
+/// Nothing read, when reading was asked, is not an answer: 500. A refusal is not
+/// judged here — see [`refused`].
+fn settled(read: PropsRead) -> Result<Result<Prepared, Unavailable>, StatusCode> {
+    match read {
         PropsRead::Read(props) => {
             if props
                 .as_ref()
@@ -147,20 +163,31 @@ fn settled(
             {
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
-            Ok(Prepared { props })
+            Ok(Ok(Prepared { props }))
         }
-        PropsRead::Refused(refusal) => {
-            if metadata.prepared.is_some() {
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
-            }
-            let fault = crate::props::fault(&refusal, &metadata.props).ok_or_else(|| {
-                safe_logger::debug!("init: a props refusal the props do not bear out");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-            Err(Unavailable::Init(InitError::Props(fault)))
-        }
-        PropsRead::NotRead => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-    })
+        PropsRead::Refused(_) | PropsRead::NotRead => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// A refusal of the props, once its concern is taken off as an accepted risk —
+/// no kind fits, and two checks narrow it. The session has not started: nothing
+/// of an applicant's was ever handed to a worker for it, since a session takes
+/// input only on a prompt a round committed, and that write records it prepared —
+/// so no round can have, and the refusal is read only while none has; the write
+/// that marks it is refused if one commits meanwhile. And the props bear it out
+/// ([`crate::props::fault`]): a problem of a fixed set, at a place the props hold.
+/// What remains is which of those, once per session, read by the consumer — and a
+/// worker that broke out of its child could put a neighbouring session's bits into
+/// that choice.
+fn refused(refusal: PropsRefusal, metadata: &SessionMetadata) -> Result<Prepared, Unavailable> {
+    if metadata.prepared.is_some() {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+    }
+    let fault = crate::props::fault(&refusal, &metadata.props).ok_or_else(|| {
+        safe_logger::debug!("init: a props refusal the props do not bear out");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Err(Unavailable::Init(InitError::Props(fault)))
 }
 
 /// Prepare a session ahead of its rounds — what a warmup asks — and mark it
@@ -201,16 +228,18 @@ pub fn warm_in_background(
     // Fed back only as the CAS token of the write that marks the session, if
     // preparing it fails for good.
     let version = version
-        .trust_unchecked::<AuthN, _>(reason!(
-            "indifferent: any value only makes the write that marks the session land or \
-             refuse"
+        .trust(reason!(
+            AuthN::Indifferent,
+            "any value only makes the write that marks the session land or refuse"
         ))
-        .trust_unchecked::<AuthZ, _>(reason!(
-            "no-principal: the return value of a read this side made"
+        .trust(reason!(
+            AuthZ::NoPrincipal,
+            "the return value of a read this side made"
         ))
-        .trust_unchecked::<Replay, _>(reason!(
-            "harmless: a stale one makes the write refuse, which costs only the mark — a \
-             round that moved the session on stands"
+        .trust(reason!(
+            Replay::Harmless,
+            "a stale one makes the write refuse, which costs only the mark — a round that \
+             moved the session on stands"
         ))
         .into_inner();
     tokio::spawn(async move {
@@ -280,18 +309,19 @@ pub async fn record(
     metadata.init_error = Some(error);
     let set_metadata = SetMetadata(
         boundary::outbound::to_untrusted(&metadata)
-            .vouch_unchecked::<AuthZ, _>(reason!(
-                "only the attested CVM holds tee_seal_key; read as opaque ciphertext — \
-                 release implicit in key-possession"
+            .vouch(reason!(
+                AuthZ::NoSecret,
+                "sealed under tee_seal_key, which only the attested CVM holds: the volume \
+                 receives ciphertext it cannot read"
             ))
-            .vouch_unchecked::<Covert, _>(reason!(
+            .vouch(reason!(
+                Covert::NotChosen,
                 "the error rides in a fixed frame, so the write says only that the session \
                  could not be prepared — which api decided before any policy code ran"
             )),
     );
     let fields: [&dyn WriteField; 1] = [&set_metadata];
-    let fields =
-        outbound_fields(&fields).vouch_unchecked::<Covert, _>(reason!("a single fixed field"));
+    let fields = outbound_fields(&fields).vouch(reason!(Covert::Bounded, "a single fixed field"));
     if let Err(e) = store.write(session_id, Some(version), fields).await {
         safe_logger::debug!("init: {session_id} was not marked as failed: {e}");
     }

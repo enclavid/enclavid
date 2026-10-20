@@ -50,7 +50,8 @@ async fn status(
     // public; we just need to know whether a session exists for
     // this id.
     let metadata = metadata_opt
-        .trust_unchecked::<AuthZ, _>(reason!(
+        .trust(reason!(
+            AuthZ::NoPrincipal,
             r#"
 Applicant flow doesn't authenticate per-tenant — /status is
 public, used by the frontend on first page load before the
@@ -58,7 +59,8 @@ applicant has any credential. Existence of the session_id is
 acceptable to leak (32-byte random, ≥128 bits entropy).
         "#
         ))
-        .trust_unchecked::<Replay, _>(reason!(
+        .trust(reason!(
+            Replay::Harmless,
             r#"
 Stale metadata might return an older status (e.g. show
 "running" when session has since completed). Worst case is the

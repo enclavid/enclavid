@@ -84,7 +84,7 @@ pub fn adopt_fd0() -> std::io::Result<tokio::net::UnixStream> {
 /// The child side: adopt fd 0, frame it with remoc, and serve `service` until the
 /// supervisor drops its client (request done) — then return so the process exits.
 /// `Srv` is the bindgen `…ServerShared` for the child's remoc trait (e.g.
-/// `ChildServiceServerShared<Child, Ciborium>`); `request_buffer` is remoc's
+/// `RemoteChildServerShared<Child, Ciborium>`); `request_buffer` is remoc's
 /// per-connection request buffer (1 is fine for a one-request child).
 pub async fn serve_child<Target, Srv>(
     service: Arc<Target>,

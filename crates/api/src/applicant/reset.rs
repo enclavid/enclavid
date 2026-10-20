@@ -29,8 +29,12 @@ pub(super) fn delete_state() -> MethodRouter<Arc<AppState>> {
 /// No auth: the legitimate applicant who lost their key cannot prove ownership
 /// cryptographically (state is encrypted with the lost key). Knowledge of
 /// `session_id` (≥128 bits entropy, distributed only to the applicant + bank)
-/// is the trust gate. An attacker with `session_id` can already grief the
-/// session via /connect front-running, so as a *takeover* this adds nothing.
+/// is the trust gate, and it is all that stands in the way: whoever holds the id
+/// can reset a session its applicant has already claimed, then `/connect` with a
+/// key of their own and run it as themselves. Front-running cannot do that once
+/// the session is claimed — a wrong key is refused at `/connect` — so this is the
+/// price of giving an applicant who lost their key a way back, and an accepted
+/// risk at the peel below.
 ///
 /// What it would add, left alone, is worse than takeover. Front-running yields
 /// a chain holding only the attacker's entries; resetting a session that has
@@ -51,11 +55,13 @@ async fn reset(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let metadata = metadata_untrusted
-        .trust_unchecked::<AuthZ, _>(reason!(
-            "the applicant flow authenticates no tenant and this route none at all — \
-             knowing the id is the gate, and the id's existence is already public at /status"
+        .trust_accept_risk(reason!(
+            AuthZ::AcceptedRisk,
+            "anyone holding the session's link may drop what its applicant brought and \
+             claim it anew — the one way back for an applicant who lost their key"
         ))
-        .trust_unchecked::<Replay, _>(reason!(
+        .trust(reason!(
+            Replay::Fresh,
             "a stale copy is caught by the version this read returned: the write below \
              names it, so a session that moved under us refuses the whole reset"
         ))
@@ -65,9 +71,18 @@ async fn reset(
     // token below. Host-supplied, and there is no direction in which a wrong
     // one grants anything: it can only make the write refuse.
     let version = version
-        .trust_unchecked::<AuthN, _>(reason!("the host's own counter"))
-        .trust_unchecked::<AuthZ, _>(reason!("a CAS token, not an access decision"))
-        .trust_unchecked::<Replay, _>(reason!("a stale value can only make the write refuse"))
+        .trust(reason!(
+            AuthN::Indifferent,
+            "the host's own counter, and any value only makes the write refuse"
+        ))
+        .trust(reason!(
+            AuthZ::NoPrincipal,
+            "a CAS token, not an access decision"
+        ))
+        .trust(reason!(
+            Replay::Harmless,
+            "a stale value can only make the write refuse"
+        ))
         .into_inner();
 
     // No session, nothing to hand back. Same answer as a successful reset —
@@ -95,11 +110,13 @@ async fn reset(
 
     let set_metadata = SetMetadata(
         boundary::outbound::to_untrusted(&metadata)
-            .vouch_unchecked::<AuthZ, _>(reason!(
-                "only the attested CVM holds tee_seal_key; read as opaque ciphertext on \
-                 /connect — release implicit in key-possession"
+            .vouch(reason!(
+                AuthZ::NoSecret,
+                "sealed under tee_seal_key, which only the attested CVM holds: the volume \
+                 receives ciphertext it cannot read"
             ))
-            .vouch_unchecked::<Covert, _>(reason!(
+            .vouch(reason!(
+                Covert::AlreadyHeld,
                 "sealed under tee_seal_key; this write SHRINKS the metadata to its \
                  disclosure-free size, which tells the host a reset happened — something \
                  it already watched arrive as this very request"
@@ -113,7 +130,8 @@ async fn reset(
     // whole, and what the round committed stays. There is no moment at which
     // the metadata is reset and the data is not, or the other way round.
     let fields: [&dyn WriteField; 2] = [&set_metadata, &DropApplicantData];
-    let fields = outbound_fields(&fields).vouch_unchecked::<Covert, _>(reason!(
+    let fields = outbound_fields(&fields).vouch(reason!(
+        Covert::Bounded,
         "a fixed pair, so the count says only that a reset happened"
     ));
     match state

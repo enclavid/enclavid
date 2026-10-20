@@ -7,7 +7,7 @@
 //! cannot route around the door.
 //!
 //! The execute hop had neither. api dialled, received the generated
-//! `ExecutorServiceClient`, and called it. Nothing stood between a value and the
+//! `RemoteExecutorClient`, and called it. Nothing stood between a value and the
 //! wire, so a wrapper api applied on its own way out was api reassuring itself
 //! about a crossing it owned both ends of — ritual, not a boundary.
 //!
@@ -36,10 +36,10 @@
 //! ## The compile hop
 //!
 //! It has no door YET, and the reason it long had none has gone: the compile-worker
-//! used to drive its own child over this same `CompilerService`, so its client could
+//! used to drive its own child over this same `RemoteCompiler`, so its client could
 //! not be withheld from the crate's surface without walling off a hop inside one
 //! CVM. That seam now lives with the role that owns both its ends
-//! (`engine_compiler::CompileChildService`), and `CompilerServiceClient` is
+//! (`engine_compiler::RemoteCompileChild`), and `RemoteCompilerClient` is
 //! api-facing only.
 
 use std::sync::Arc;
@@ -49,7 +49,10 @@ use remoc::rtc::ServerShared;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[cfg(feature = "execute")]
-use crate::execute::{ExecutorServiceClient, ExecutorServiceServerShared, PropsRead, RunOutcome};
+use crate::execute::{
+    PropsRead, RemoteCallbacksClient, RemoteExecutorAdapter, RemoteExecutorAt,
+    RemoteExecutorClient, RemoteExecutorServerShared, RemoteExecutorServes,
+};
 #[cfg(feature = "execute")]
 use crate::keys::CompatToken;
 #[cfg(feature = "execute")]
@@ -134,10 +137,12 @@ pub fn leg_end(
 /// may do any more. `service` is per-connection, so a caller that wants to know
 /// who is asking builds one per accept and passes it in.
 ///
-/// Takes the UNTRUSTED view, never the raw trait — the same demand
-/// [`serve_compiler`] makes, and for the same reason. This end runs `AcceptAny`,
-/// so what arrives arrives from a genuine SNP guest and not identifiably from api;
-/// a role serving it has something open to name whether or not it feels like it.
+/// Takes the contract as its server sees it at end `B` — an
+/// [`RemoteExecutorAt`] — never the raw trait: the raw server type is not
+/// exported, so there is no unwrapped shape to implement. This end accepts any
+/// attested guest, so what arrives arrives from a genuine SNP guest and not
+/// identifiably from api, and `B`'s declaration is where the serving role says
+/// what that leaves open.
 ///
 /// `request_buffer` is how many requests may wait to be taken
 /// ([`DEFAULT_REQUEST_BUFFER`] unless the role says otherwise), and NOT how many
@@ -145,7 +150,7 @@ pub fn leg_end(
 /// limit. A role that must bound concurrent work bounds it in that work. `leg` is
 /// what the role sets of its end of the connection.
 #[cfg(feature = "execute")]
-pub async fn serve_executor<S, R, W>(
+pub async fn serve_executor<B, S, R, W>(
     read: R,
     write: W,
     service: S,
@@ -153,12 +158,12 @@ pub async fn serve_executor<S, R, W>(
     leg: &crate::LegSettings,
 ) -> Result<(), LegError>
 where
-    S: crate::untrusted_execute::ExecutorServiceUntrusted + Send + Sync + 'static,
-    S::Scope: Send,
+    B: RemoteExecutorServes + 'static,
+    S: RemoteExecutorAt<B> + Send + Sync + 'static,
     R: AsyncRead + Send + Sync + Unpin + 'static,
     W: AsyncWrite + Send + Sync + Unpin + 'static,
 {
-    type Cli = ExecutorServiceClient<Ciborium>;
+    type Cli = RemoteExecutorClient<Ciborium>;
 
     let (conn, mut tx, _rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(crate::connection_cfg(leg), read, write)
@@ -166,8 +171,8 @@ where
             .map_err(|_| LegError::Rpc)?;
     tokio::spawn(conn);
 
-    let (server, client) = ExecutorServiceServerShared::<_, Ciborium>::new(
-        Arc::new(crate::adapter::Untrusting(service)),
+    let (server, client) = RemoteExecutorServerShared::<_, Ciborium>::new(
+        Arc::new(RemoteExecutorAdapter::<S, B>::new(service)),
         request_buffer,
     );
     tx.send(client).await.map_err(|_| LegError::Clients)?;
@@ -184,21 +189,23 @@ where
 /// none of this crate's business. Noticing it is this crate's, because the
 /// channel belongs to a client nothing outside it can name.
 ///
-/// `leg` is what the caller sets of its end of the connection, and
-/// `callback_buffer` how many of a round's callbacks may wait for its server
-/// ([`DEFAULT_CALLBACK_REQUEST_BUFFER`] unless the caller says otherwise).
+/// `B` is the caller's end of the hop, whose declaration says what is open on
+/// each value that crosses it. `leg` is what the caller sets of its end of the
+/// connection, and `callback_buffer` how many of a round's callbacks may wait for
+/// its server ([`DEFAULT_CALLBACK_REQUEST_BUFFER`] unless the caller says
+/// otherwise).
 #[cfg(feature = "execute")]
-pub async fn connect_executor<R, W>(
+pub async fn connect_executor<B, R, W>(
     read: R,
     write: W,
     leg: &crate::LegSettings,
     callback_buffer: usize,
-) -> Result<(ExecutorLeg, tokio::task::JoinHandle<()>), LegError>
+) -> Result<(ExecutorLeg<B>, tokio::task::JoinHandle<()>), LegError>
 where
     R: AsyncRead + Send + Sync + Unpin + 'static,
     W: AsyncWrite + Send + Sync + Unpin + 'static,
 {
-    type Cli = ExecutorServiceClient<Ciborium>;
+    type Cli = RemoteExecutorClient<Ciborium>;
 
     let (conn, _tx, mut rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(crate::connection_cfg(leg), read, write)
@@ -217,32 +224,59 @@ where
         ExecutorLeg {
             client,
             callback_buffer,
+            _end: std::marker::PhantomData,
         },
         ended,
     ))
 }
 
-/// The only handle on the execute hop that exists outside this crate.
+/// The only handle on the execute hop that exists outside this crate, held at
+/// end `B`.
 ///
 /// It holds the generated client, which nothing else can name. Calls go through
 /// the doors below, so what a caller must have closed before a value crosses is
 /// stated in a signature the caller cannot get around rather than in a comment it
-/// can forget.
+/// can forget — and stated by `B`'s declaration, which is the one place the
+/// caller says how it judges this leg.
 #[cfg(feature = "execute")]
-pub struct ExecutorLeg {
-    client: ExecutorServiceClient<Ciborium>,
+pub struct ExecutorLeg<B> {
+    client: RemoteExecutorClient<Ciborium>,
     /// How many of a round's callbacks may wait for its server.
     callback_buffer: usize,
+    _end: std::marker::PhantomData<fn() -> B>,
 }
 
-/// What a cache-only preparation answered, each half the worker's word under
-/// the scope `S` the caller judges it by.
+/// The callbacks a round was handed, as end `B` calls them — the only handle on
+/// them a serving role is given.
+///
+/// The serve view hands this rather than the generated client, and the client is
+/// not re-exported, so what a role sends back mid-round goes through `B`'s
+/// declaration as what it replies does: each argument leaves answered, each
+/// answer arrives open on what `B` left open on it.
 #[cfg(feature = "execute")]
-pub enum Preparation<S> {
+pub struct Callbacks<B> {
+    client: RemoteCallbacksClient<Ciborium>,
+    _end: std::marker::PhantomData<fn() -> B>,
+}
+
+#[cfg(feature = "execute")]
+impl<B> From<RemoteCallbacksClient<Ciborium>> for Callbacks<B> {
+    fn from(client: RemoteCallbacksClient<Ciborium>) -> Self {
+        Self {
+            client,
+            _end: std::marker::PhantomData,
+        }
+    }
+}
+
+/// What a cache-only preparation answered, each half the worker's word, open
+/// on what end `B` left open on the preparation's outcome.
+#[cfg(feature = "execute")]
+pub enum Preparation<S, B> {
     /// The composition is held, and this is what was read.
-    Read(Untrusted<PropsRead, S>),
+    Read(Untrusted<PropsRead, S, B>),
     /// It is not cached; the worker's cwasm ABI id, to resolve it under.
-    CacheMiss(Untrusted<CompatToken, S>),
+    CacheMiss(Untrusted<CompatToken, S, B>),
 }
 
 /// The doors.
@@ -256,22 +290,32 @@ pub enum Preparation<S> {
 mod doors {
     use std::sync::Arc;
 
-    use super::{ExecutorLeg, Preparation, RunOutcome};
-    use crate::adapter::Untrusting;
+    use super::{Callbacks, ExecutorLeg, Preparation};
     use crate::execute::{
-        CallbackServiceClient, CallbackServiceServerShared, ExecError, ExecutorService,
-        PrepareOutcome, PrepareReply, PrepareRequest, PropsRead, RunReply, RunRequest, RunStatus,
+        CallbackError, Committed, ExecError, MediaBytes, MediaHash, PrepareOutcome, PrepareReply,
+        PrepareRequest, PropsRead, RemoteCallbacks, RemoteCallbacksAdapter, RemoteCallbacksAt,
+        RemoteCallbacksCalls, RemoteCallbacksClient, RemoteCallbacksServerShared,
+        RemoteCallbacksServes, RemoteExecutor, RemoteExecutorCalls, RunOutcome, RunReply,
+        RunRequest, RunStatus,
     };
+    use crate::padded::{FrameError, Padded};
     use crate::stream::BundleStream;
-    use crate::untrusted_execute::CallbackServiceUntrusted;
-    use enclavid_boundary::{Exposed, Open, Untrusted};
+    use enclavid_boundary::{Exposed, Receives, Sends, Untrusted, inbound, outbound};
     use remoc::codec::Ciborium;
     use remoc::rtc::ServerShared;
+    use session_types::{Decision, SessionState};
+
+    /// A frame the peer sent that does not decode, as the caller hears of it:
+    /// `Unknown`, and the error itself dropped unread — it is the peer's doing as
+    /// much as the frame was, so nothing of it is passed on.
+    fn unframed<S, B>(_: Untrusted<FrameError, S, B>) -> ExecError {
+        ExecError::Unknown
+    }
 
     /// Stand up this round's callback server and hand back its client.
     ///
-    /// The caller supplies a [`CallbackServiceUntrusted`], never a raw
-    /// `CallbackService`, and that is the inbound half of the wall: the server
+    /// The caller supplies a [`RemoteCallbacksAt`] at its own end, never a raw
+    /// `RemoteCallbacks`, and that is the inbound half of the wall: the server
     /// type is not re-exported, so no crate outside this one can serve the raw
     /// contract at all. Wrapping is therefore not something the caller opts into
     /// and can forget — there is no unwrapped shape for it to implement.
@@ -279,13 +323,13 @@ mod doors {
     /// It self-terminates once the client handed to the RPC and this copy both
     /// drop, so no task leaks per attempt. `buffer` is how many callbacks may
     /// wait for it.
-    fn callback_client<C>(callbacks: C, buffer: usize) -> CallbackServiceClient<Ciborium>
+    fn callback_client<B, C>(callbacks: C, buffer: usize) -> RemoteCallbacksClient<Ciborium>
     where
-        C: CallbackServiceUntrusted + Send + Sync + 'static,
-        C::Scope: Send,
+        B: RemoteCallbacksServes + 'static,
+        C: RemoteCallbacksAt<B> + Send + Sync + 'static,
     {
-        let (server, client) = CallbackServiceServerShared::<_, Ciborium>::new(
-            Arc::new(Untrusting(callbacks)),
+        let (server, client) = RemoteCallbacksServerShared::<_, Ciborium>::new(
+            Arc::new(RemoteCallbacksAdapter::<C, B>::new(callbacks)),
             buffer,
         );
         tokio::spawn(async move {
@@ -294,75 +338,69 @@ mod doors {
         client
     }
 
-    impl ExecutorLeg {
+    impl<B> ExecutorLeg<B>
+    where
+        B: RemoteExecutorCalls + RemoteCallbacksServes + 'static,
+    {
         /// The cache-only attempt.
         ///
-        /// `req` arrives fully vouched — `Exposed<_, ()>` is reachable only by
-        /// peeling every concern the caller's mint opened, so the type is a
-        /// receipt that the chain was walked rather than a claim that it was. The
-        /// round's state inside it is a [`Padded`](crate::Padded), which is a
-        /// stronger statement still: that one has no constructor that skips the
-        /// work.
+        /// `req` arrives answered — `Exposed<_, (), B>` is reachable only through
+        /// `B`'s declaration and the answers its sender gave after it, so the type
+        /// is a receipt rather than a claim. The round's state inside it is a
+        /// [`Padded`](crate::Padded), which is a stronger statement still: that one
+        /// has no constructor that skips the work.
         ///
         /// `callbacks` is the same demand in the other direction, and so is the
         /// RETURN. A peer answers on two channels — what it pushes back mid-round
         /// and what it replies with — and both are equally its own word, so both
-        /// arrive under the scope this implementor named. Typing only the pushed
-        /// half would have left the reply, which api renders to an applicant and
-        /// acts on, as the one thing the peer says that nobody has to judge.
+        /// arrive open on what `B` left open. Typing only the pushed half would
+        /// have left the reply, which api renders to an applicant and acts on, as
+        /// the one thing the peer says that nobody has to judge.
         pub async fn run<C>(
             &self,
-            req: Exposed<RunRequest, ()>,
+            req: Exposed<RunRequest, (), B>,
             callbacks: C,
-        ) -> Result<Untrusted<RunOutcome, C::Scope>, ExecError>
+        ) -> Result<Untrusted<RunOutcome, <B as Receives<RunOutcome>>::Open, B>, ExecError>
         where
-            C: CallbackServiceUntrusted + Send + Sync + 'static,
-            C::Scope: Send,
+            C: RemoteCallbacksAt<B> + Send + Sync + 'static,
         {
             self.client
                 .run(
                     req.into_inner(),
-                    callback_client(callbacks, self.callback_buffer),
+                    callback_client::<B, C>(callbacks, self.callback_buffer),
                 )
                 .await
-                .map(Untrusted::new)
+                .map(inbound::<B, _>)
         }
 
         /// The post-miss attempt, with the bundle the caller resolved under its own
         /// key. Unframes the reply, so the caller never handles a raw frame.
         ///
-        /// `bundle` is deliberately bare ON THIS SIDE. The caller resolved it under
-        /// its own key, so releasing it raises no question the round's own mint has
-        /// not already answered for the leg.
-        ///
-        /// The RECEIVING side is where it earns a wrapper, and it has one: the
-        /// worker takes `Untrusted<BundleStream, _>` separately from the request,
-        /// because the bytes it is about to file and later MMAP are the one value on
-        /// this hop for which no discharge kind fits. That answer belongs to the
-        /// side that acts on them, not to the side that forwards them.
+        /// `bundle` crosses answered by `B`'s declaration alone, which the bound
+        /// demands: the door frames it into the stream itself, so there is no
+        /// later point at which a sender could answer for it. The bytes the
+        /// worker is about to file and later map are answered for again on its
+        /// side, which is where acting on them happens.
         ///
         /// It crosses as two streams beside a bounded request ([`BundleStream`]):
         /// the request is the round alone, so a full clip and a large bundle
-        /// never have to fit one remoc item together. The same bytes, framed
-        /// differently, and the header names them — so the release raises
-        /// nothing new. Their lengths are fixed per composition, set when the
-        /// consumer's policy was compiled and never a function of applicant data,
-        /// and "this composition was cold" was already legible on this hop.
+        /// never have to fit one remoc item together.
         pub async fn run_with_bundle<C>(
             &self,
-            req: Exposed<RunRequest, ()>,
+            req: Exposed<RunRequest, (), B>,
             bundle: crate::BundleSource,
             callbacks: C,
-        ) -> Result<Untrusted<RunStatus, C::Scope>, ExecError>
+        ) -> Result<Untrusted<RunStatus, <B as Receives<RunReply>>::Open, B>, ExecError>
         where
-            C: CallbackServiceUntrusted + Send + Sync + 'static,
-            C::Scope: Send,
+            B: Sends<BundleStream, Open = ()>,
+            C: RemoteCallbacksAt<B> + Send + Sync + 'static,
         {
             let (stream, writer) = BundleStream::split(bundle);
+            let stream = outbound::<B, _>(stream).into_inner();
             let mut call = std::pin::pin!(self.client.run_with_bundle(
                 req.into_inner(),
                 stream,
-                callback_client(callbacks, self.callback_buffer)
+                callback_client::<B, C>(callbacks, self.callback_buffer)
             ));
             // The reply is the round's outcome and the writer's never is: a worker
             // that already holds this composition never reads the stream, and one
@@ -372,47 +410,84 @@ mod doors {
                 reply = &mut call => reply,
                 () = writer => call.await,
             };
-            reply
-                .and_then(|RunReply { status }| status.open().map_err(Into::into))
-                .map(Untrusted::new)
+            inbound::<B, _>(reply?)
+                .try_map(|RunReply { status }| status.open())
+                .map_err(unframed)
         }
 
-        /// The cache-only attempt at preparing a session. `req` arrives fully
-        /// vouched, as a round's does; the reply arrives under `S`, the scope the
-        /// caller judges this leg's word by — there are no callbacks on this
-        /// call to have named it. Unframed, and taken apart by its variant, so
-        /// that each half is judged on its own grounds: the two lead to different
-        /// paths, and neither is acted on before it is judged.
-        pub async fn prepare<S: Open>(
+        /// The cache-only attempt at preparing a session. `req` arrives answered,
+        /// as a round's does; the reply arrives open on what `B` left open on it.
+        /// Unframed, and taken apart by its variant, so that each half is judged
+        /// on its own grounds: the two lead to different paths, and neither is
+        /// acted on before it is judged.
+        pub async fn prepare(
             &self,
-            req: Exposed<PrepareRequest, ()>,
-        ) -> Result<Preparation<S>, ExecError> {
-            Ok(match self.client.prepare(req.into_inner()).await? {
-                PrepareOutcome::Prepared(read) => Preparation::Read(Untrusted::new(read.open()?)),
-                PrepareOutcome::CacheMiss { compat_token } => {
-                    Preparation::CacheMiss(Untrusted::new(compat_token))
-                }
-            })
+            req: Exposed<PrepareRequest, (), B>,
+        ) -> Result<Preparation<<B as Receives<PrepareOutcome>>::Open, B>, ExecError> {
+            let outcome = inbound::<B, _>(self.client.prepare(req.into_inner()).await?);
+            Ok(
+                match outcome.split(|o| match o {
+                    PrepareOutcome::Prepared(read) => Ok(read),
+                    PrepareOutcome::CacheMiss { compat_token } => Err(compat_token),
+                }) {
+                    Ok(read) => Preparation::Read(read.try_map(|r| r.open()).map_err(unframed)?),
+                    Err(compat_token) => Preparation::CacheMiss(compat_token),
+                },
+            )
         }
 
         /// The post-miss attempt at preparing a session, with the bundle the
         /// caller resolved under its own key, which crosses as a round's does
         /// (see [`run_with_bundle`](Self::run_with_bundle)). Unframes the reply.
-        pub async fn prepare_with_bundle<S: Open>(
+        pub async fn prepare_with_bundle(
             &self,
-            req: Exposed<PrepareRequest, ()>,
+            req: Exposed<PrepareRequest, (), B>,
             bundle: crate::BundleSource,
-        ) -> Result<Untrusted<PropsRead, S>, ExecError> {
+        ) -> Result<Untrusted<PropsRead, <B as Receives<PrepareReply>>::Open, B>, ExecError>
+        where
+            B: Sends<BundleStream, Open = ()>,
+        {
             let (stream, writer) = BundleStream::split(bundle);
+            let stream = outbound::<B, _>(stream).into_inner();
             let mut call =
                 std::pin::pin!(self.client.prepare_with_bundle(req.into_inner(), stream));
             let reply = tokio::select! {
                 reply = &mut call => reply,
                 () = writer => call.await,
             };
-            reply
-                .and_then(|PrepareReply { props }| props.open().map_err(Into::into))
-                .map(Untrusted::new)
+            inbound::<B, _>(reply?)
+                .try_map(|PrepareReply { props }| props.open())
+                .map_err(unframed)
+        }
+    }
+
+    impl<B: RemoteCallbacksCalls> Callbacks<B> {
+        /// Ask for a blob by the hash a round named.
+        pub async fn media_load(
+            &self,
+            hash: Exposed<MediaHash, (), B>,
+        ) -> Result<
+            Untrusted<Option<MediaBytes>, <B as Receives<Option<MediaBytes>>>::Open, B>,
+            CallbackError,
+        > {
+            self.client
+                .media_load(hash.into_inner())
+                .await
+                .map(inbound::<B, _>)
+        }
+
+        /// Hand a round's state, and its decision if it made one, back to be
+        /// committed.
+        pub async fn session_change(
+            &self,
+            state: Exposed<Padded<SessionState>, (), B>,
+            decision: Exposed<Padded<Option<Decision>>, (), B>,
+        ) -> Result<Untrusted<Committed, <B as Receives<Committed>>::Open, B>, CallbackError>
+        {
+            self.client
+                .session_change(state.into_inner(), decision.into_inner())
+                .await
+                .map(inbound::<B, _>)
         }
     }
 }
@@ -442,13 +517,13 @@ pub async fn serve_compiler<S, R, W>(
     leg: &crate::LegSettings,
 ) -> Result<(), LegError>
 where
-    S: crate::untrusted_compile::CompilerServiceUntrusted + Send + Sync + 'static,
+    S: crate::untrusted_compile::RemoteCompilerUntrusted + Send + Sync + 'static,
     S::Scope: Send,
     R: AsyncRead + Send + Sync + Unpin + 'static,
     W: AsyncWrite + Send + Sync + Unpin + 'static,
 {
-    use crate::compile::{CompilerServiceClient, CompilerServiceServerShared};
-    type Cli = CompilerServiceClient<Ciborium>;
+    use crate::compile::{RemoteCompilerClient, RemoteCompilerServerShared};
+    type Cli = RemoteCompilerClient<Ciborium>;
 
     let (conn, mut tx, _rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(crate::connection_cfg(leg), read, write)
@@ -456,7 +531,7 @@ where
             .map_err(|_| LegError::Rpc)?;
     tokio::spawn(conn);
 
-    let (server, client) = CompilerServiceServerShared::<_, Ciborium>::new(
+    let (server, client) = RemoteCompilerServerShared::<_, Ciborium>::new(
         Arc::new(crate::adapter::Untrusting(service)),
         request_buffer,
     );
@@ -484,8 +559,8 @@ where
     R: AsyncRead + Send + Sync + Unpin + 'static,
     W: AsyncWrite + Send + Sync + Unpin + 'static,
 {
-    use crate::compile::CompilerServiceClient;
-    type Cli = CompilerServiceClient<Ciborium>;
+    use crate::compile::RemoteCompilerClient;
+    type Cli = RemoteCompilerClient<Ciborium>;
 
     let (conn, _tx, mut rx) =
         remoc::Connect::io::<_, _, Cli, Cli, Ciborium>(crate::connection_cfg(leg), read, write)
@@ -510,7 +585,7 @@ where
 /// call.
 #[cfg(feature = "compile")]
 pub struct CompilerLeg<S>(
-    crate::compile::CompilerServiceClient<Ciborium>,
+    crate::compile::RemoteCompilerClient<Ciborium>,
     std::marker::PhantomData<S>,
 );
 
@@ -534,7 +609,7 @@ impl<S: enclavid_boundary::Open> CompilerLeg<S> {
         enclavid_boundary::Untrusted<crate::CompileReply, S>,
         enclavid_boundary::Untrusted<crate::CompileError, S>,
     > {
-        use crate::compile::CompilerService as _;
+        use crate::compile::RemoteCompiler as _;
         let (request, writer) = req.into_inner().split();
         let mut call = std::pin::pin!(self.0.compile(request));
         // The reply comes once the components were read, or once the worker
@@ -554,25 +629,87 @@ impl<S: enclavid_boundary::Open> CompilerLeg<S> {
 /// on the other, the real connection config between them.
 #[cfg(all(test, feature = "execute"))]
 mod door_tests {
-    use enclavid_boundary::{AuthN, Exposed, Untrusted, reason};
-    use remoc::codec::Ciborium;
+    use enclavid_boundary::{Asserted, AuthN, Exposed, Untrusted};
+    use enclavid_boundary_macros::boundary;
     use session_types::{
         Clip, Decision, Event, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MediaResult, SessionState,
     };
 
     use super::{
-        DEFAULT_CALLBACK_REQUEST_BUFFER, DEFAULT_REQUEST_BUFFER, ExecutorLeg, connect_executor,
-        serve_executor,
+        Callbacks, DEFAULT_CALLBACK_REQUEST_BUFFER, DEFAULT_REQUEST_BUFFER, ExecutorLeg,
+        connect_executor, serve_executor,
     };
     use crate::bundle::{CompiledBundle, sample_bundle};
     use crate::execute::{
-        CallbackError, CallbackServiceClient, ExecError, PrepareOutcome, PrepareReply,
-        PrepareRequest, RunOutcome, RunReply, RunRequest, RunStatus,
+        CallbackError, Committed, ExecError, MediaBytes, MediaHash, PrepareOutcome, PrepareReply,
+        PrepareRequest, RemoteCallbacksAt, RemoteExecutorAt, RunOutcome, RunReply, RunRequest,
+        RunStatus,
     };
     use crate::keys::CompositionKey;
     use crate::padded::{Framed, Padded};
     use crate::stream::BundleStream;
-    use crate::untrusted_execute::{CallbackServiceUntrusted, ExecutorServiceUntrusted};
+
+    boundary! {
+        /// The calling end, for the test: every concern answered.
+        Api {
+            calls: [crate::execute::RemoteExecutor],
+            serves: [crate::execute::RemoteCallbacks],
+            observer: Test,
+        }
+        out (AuthN,) {
+            /// test fixture
+            _: AuthN::SelfProduced,
+            RunRequest,
+            PrepareRequest,
+            BundleStream,
+            Option<MediaBytes>,
+            Committed,
+            CallbackError,
+        }
+        in (Asserted,) {
+            /// test fixture
+            _: Asserted::Contained,
+            RunOutcome,
+            RunReply,
+            PrepareOutcome,
+            PrepareReply,
+            ExecError,
+            MediaHash,
+            Padded<SessionState>,
+            Padded<Option<Decision>>,
+        }
+    }
+
+    boundary! {
+        /// The serving end, for the test: every concern answered.
+        Worker {
+            calls: [crate::execute::RemoteCallbacks],
+            serves: [crate::execute::RemoteExecutor],
+            observer: Test,
+        }
+        in (AuthN,) {
+            /// test fixture
+            _: AuthN::SelfProduced,
+            RunRequest,
+            PrepareRequest,
+            BundleStream,
+            Option<MediaBytes>,
+            Committed,
+            CallbackError,
+        }
+        out (AuthN,) {
+            /// test fixture
+            _: AuthN::SelfProduced,
+            RunOutcome,
+            RunReply,
+            PrepareOutcome,
+            PrepareReply,
+            ExecError,
+            MediaHash,
+            Padded<SessionState>,
+            Padded<Option<Decision>>,
+        }
+    }
 
     /// A worker that checks the bundle it is sent against `expect`, or — with
     /// `None` — never reads it at all, as a worker that already holds the
@@ -581,29 +718,23 @@ mod door_tests {
         expect: Option<Vec<u8>>,
     }
 
-    impl ExecutorServiceUntrusted for FakeWorker {
-        type Scope = (AuthN,);
-
+    impl RemoteExecutorAt<Worker> for FakeWorker {
         async fn run(
             &self,
-            _req: Untrusted<RunRequest, Self::Scope>,
-            _callbacks: CallbackServiceClient<Ciborium>,
-        ) -> Result<Exposed<RunOutcome, ()>, ExecError> {
+            _req: Untrusted<RunRequest, (), Worker>,
+            _callbacks: Callbacks<Worker>,
+        ) -> Result<Exposed<RunOutcome, (), Worker>, ExecError> {
             Err(ExecError::Unknown)
         }
 
         async fn run_with_bundle(
             &self,
-            req: Untrusted<RunRequest, Self::Scope>,
-            bundle: Untrusted<BundleStream, Self::Scope>,
-            _callbacks: CallbackServiceClient<Ciborium>,
-        ) -> Result<Exposed<RunReply, ()>, ExecError> {
-            let _ = req
-                .trust_unchecked::<AuthN, _>(reason!("test fixture"))
-                .into_inner();
-            let bundle = bundle
-                .trust_unchecked::<AuthN, _>(reason!("test fixture"))
-                .into_inner();
+            req: Untrusted<RunRequest, (), Worker>,
+            bundle: Untrusted<BundleStream, (), Worker>,
+            _callbacks: Callbacks<Worker>,
+        ) -> Result<Exposed<RunReply, (), Worker>, ExecError> {
+            let _ = req.into_inner();
+            let bundle = bundle.into_inner();
             if let Some(expect) = &self.expect {
                 let mut cwasm = Vec::new();
                 let (len, meta, _) = bundle
@@ -625,79 +756,216 @@ mod door_tests {
             let reply = RunReply {
                 status: Padded::seal(&RunStatus::Completed(Decision::Approved))?,
             };
-            Ok(Exposed::<_, (AuthN,)>::new(reply)
-                .vouch_unchecked::<AuthN, _>(reason!("test fixture")))
+            Ok(Worker::expose(reply))
         }
 
         async fn prepare(
             &self,
-            _req: Untrusted<PrepareRequest, Self::Scope>,
-        ) -> Result<Exposed<PrepareOutcome, ()>, ExecError> {
+            _req: Untrusted<PrepareRequest, (), Worker>,
+        ) -> Result<Exposed<PrepareOutcome, (), Worker>, ExecError> {
             Err(ExecError::Unknown)
         }
 
         async fn prepare_with_bundle(
             &self,
-            _req: Untrusted<PrepareRequest, Self::Scope>,
-            _bundle: Untrusted<BundleStream, Self::Scope>,
-        ) -> Result<Exposed<PrepareReply, ()>, ExecError> {
+            _req: Untrusted<PrepareRequest, (), Worker>,
+            _bundle: Untrusted<BundleStream, (), Worker>,
+        ) -> Result<Exposed<PrepareReply, (), Worker>, ExecError> {
             Err(ExecError::Unknown)
         }
     }
 
     struct NoCallbacks;
 
-    impl CallbackServiceUntrusted for NoCallbacks {
-        type Scope = (AuthN,);
-
+    impl RemoteCallbacksAt<Api> for NoCallbacks {
         async fn media_load(
             &self,
-            _hash: Untrusted<[u8; 32], Self::Scope>,
-        ) -> Result<Exposed<Option<Vec<u8>>, ()>, CallbackError> {
+            _hash: Untrusted<MediaHash, (), Api>,
+        ) -> Result<Exposed<Option<MediaBytes>, (), Api>, CallbackError> {
             Err(CallbackError)
         }
 
         async fn session_change(
             &self,
-            _state: Untrusted<Padded<SessionState>, Self::Scope>,
-            _decision: Untrusted<Padded<Option<Decision>>, Self::Scope>,
-        ) -> Result<(), CallbackError> {
+            _state: Untrusted<Padded<SessionState>, (), Api>,
+            _decision: Untrusted<Padded<Option<Decision>>, (), Api>,
+        ) -> Result<Exposed<Committed, (), Api>, CallbackError> {
             Err(CallbackError)
         }
     }
 
-    async fn leg(worker: FakeWorker) -> ExecutorLeg {
+    /// A worker whose cached round calls back mid-round, as a policy does that
+    /// reads a capture and finishes: a blob by its hash, then the round's state
+    /// and decision, each through the door its end is given.
+    struct CallingWorker;
+
+    impl RemoteExecutorAt<Worker> for CallingWorker {
+        async fn run(
+            &self,
+            req: Untrusted<RunRequest, (), Worker>,
+            callbacks: Callbacks<Worker>,
+        ) -> Result<Exposed<RunOutcome, (), Worker>, ExecError> {
+            let RunRequest { session_state, .. } = req.into_inner();
+            let blob = callbacks
+                .media_load(Worker::expose(MediaHash([9; 32])))
+                .await?
+                .into_inner();
+            if blob != Some(MediaBytes(vec![0xAB, 0xCD])) {
+                return Err(ExecError::Unknown);
+            }
+            callbacks
+                .session_change(
+                    Worker::expose(session_state),
+                    Worker::expose(Padded::seal(&Some(Decision::Approved))?),
+                )
+                .await?
+                .into_inner();
+            let status = Padded::seal(&RunStatus::Completed(Decision::Approved))?;
+            Ok(Worker::expose(RunOutcome::Ran(status)))
+        }
+
+        async fn run_with_bundle(
+            &self,
+            _req: Untrusted<RunRequest, (), Worker>,
+            _bundle: Untrusted<BundleStream, (), Worker>,
+            _callbacks: Callbacks<Worker>,
+        ) -> Result<Exposed<RunReply, (), Worker>, ExecError> {
+            Err(ExecError::Unknown)
+        }
+
+        async fn prepare(
+            &self,
+            _req: Untrusted<PrepareRequest, (), Worker>,
+        ) -> Result<Exposed<PrepareOutcome, (), Worker>, ExecError> {
+            Err(ExecError::Unknown)
+        }
+
+        async fn prepare_with_bundle(
+            &self,
+            _req: Untrusted<PrepareRequest, (), Worker>,
+            _bundle: Untrusted<BundleStream, (), Worker>,
+        ) -> Result<Exposed<PrepareReply, (), Worker>, ExecError> {
+            Err(ExecError::Unknown)
+        }
+    }
+
+    /// api's side of the callbacks, recording what arrives through its door.
+    #[derive(Clone, Default)]
+    struct RecordingCallbacks {
+        hashes: std::sync::Arc<std::sync::Mutex<Vec<MediaHash>>>,
+        decisions: std::sync::Arc<std::sync::Mutex<Vec<Option<Decision>>>>,
+    }
+
+    impl RemoteCallbacksAt<Api> for RecordingCallbacks {
+        async fn media_load(
+            &self,
+            hash: Untrusted<MediaHash, (), Api>,
+        ) -> Result<Exposed<Option<MediaBytes>, (), Api>, CallbackError> {
+            self.hashes.lock().unwrap().push(hash.into_inner());
+            Ok(Api::expose(Some(MediaBytes(vec![0xAB, 0xCD]))))
+        }
+
+        async fn session_change(
+            &self,
+            _state: Untrusted<Padded<SessionState>, (), Api>,
+            decision: Untrusted<Padded<Option<Decision>>, (), Api>,
+        ) -> Result<Exposed<Committed, (), Api>, CallbackError> {
+            let decision = decision.into_inner().open()?;
+            self.decisions.lock().unwrap().push(decision);
+            Ok(Api::expose(Committed))
+        }
+    }
+
+    async fn leg<S>(worker: S) -> ExecutorLeg<Api>
+    where
+        S: RemoteExecutorAt<Worker> + Send + Sync + 'static,
+    {
         let (a, b) = tokio::io::duplex(1 << 20);
         let (ar, aw) = tokio::io::split(a);
         let (br, bw) = tokio::io::split(b);
         let settings = crate::LegSettings::default();
         tokio::spawn(async move {
-            let _ = serve_executor(ar, aw, worker, DEFAULT_REQUEST_BUFFER, &settings).await;
+            let _ = serve_executor::<Worker, _, _, _>(
+                ar,
+                aw,
+                worker,
+                DEFAULT_REQUEST_BUFFER,
+                &settings,
+            )
+            .await;
         });
-        let (leg, _ended) = connect_executor(br, bw, &settings, DEFAULT_CALLBACK_REQUEST_BUFFER)
-            .await
-            .expect("the leg comes up");
+        let (leg, _ended) =
+            connect_executor::<Api, _, _>(br, bw, &settings, DEFAULT_CALLBACK_REQUEST_BUFFER)
+                .await
+                .expect("the leg comes up");
         leg
     }
 
-    fn round(event: Event) -> Exposed<RunRequest, ()> {
-        Exposed::<_, (AuthN,)>::new(RunRequest {
+    fn round(event: Event) -> Exposed<RunRequest, (), Api> {
+        Api::expose(RunRequest {
             composition_key: CompositionKey::from_digest([0x22; 32]),
             max_cwasm_bytes: crate::MAX_CWASM_BYTES,
             props: Padded::seal(&crate::execute::RoundProps(Vec::new())).expect("fits the frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event,
         })
-        .vouch_unchecked::<AuthN, _>(reason!("test fixture"))
     }
 
-    fn approved(status: Result<Untrusted<RunStatus, (AuthN,)>, ExecError>) -> bool {
+    fn approved(status: Result<Untrusted<RunStatus, (), Api>, ExecError>) -> bool {
         matches!(
-            status.map(|s| s
-                .trust_unchecked::<AuthN, _>(reason!("test fixture"))
-                .into_inner()),
+            status.map(|s| s.into_inner()),
             Ok(RunStatus::Completed(Decision::Approved))
         )
+    }
+
+    /// The declaration is data a test can read: what crosses, what it opens,
+    /// what is answered, and why.
+    #[test]
+    fn a_declaration_reads_back_as_data() {
+        let d = Api::DECLARATION;
+        assert_eq!(d.name, "Api");
+        assert_eq!(d.calls, ["crate::execute::RemoteExecutor"]);
+        let request = d
+            .crossings
+            .iter()
+            .find(|c| c.ty == "RunRequest")
+            .expect("RunRequest crosses");
+        assert_eq!(request.opens, ["AuthN"]);
+        assert_eq!(request.answers[0].kind, "SelfProduced");
+        assert_eq!(request.answers[0].doc, "test fixture");
+        assert!(request.answers[0].every_type);
+        assert!(request.left.is_empty());
+    }
+
+    /// A round's callbacks cross both doors: the worker calls back through the
+    /// `Callbacks` its end is handed, and api's server receives through the
+    /// adapter written for its end — the hash as the worker named it, the decision
+    /// as the round made it, and the blob and the commit back the other way.
+    #[tokio::test]
+    async fn a_round_calls_back_through_both_doors() {
+        let leg = leg(CallingWorker).await;
+        let callbacks = RecordingCallbacks::default();
+        let event = Event::Media(MediaResult {
+            slot: 0,
+            clip: Clip { frames: Vec::new() },
+        });
+        let outcome = leg
+            .run(round(event), callbacks.clone())
+            .await
+            .expect("the round runs")
+            .into_inner();
+        let RunOutcome::Ran(status) = outcome else {
+            panic!("the round was answered as a miss");
+        };
+        assert!(matches!(
+            status.open(),
+            Ok(RunStatus::Completed(Decision::Approved))
+        ));
+        assert_eq!(*callbacks.hashes.lock().unwrap(), [MediaHash([9; 32])]);
+        assert_eq!(
+            *callbacks.decisions.lock().unwrap(),
+            [Some(Decision::Approved)]
+        );
     }
 
     /// The round that failed in the field: a full capture, during a cache miss,

@@ -1,10 +1,10 @@
 //! `enclavid-storage` — the trusted storage-CVM's core. Serves the two
 //! `storage-rpc` services against local backends:
 //!
-//!   * [`SessionStoreService`] → one SQLite file per session ([`session`]),
+//!   * [`RemoteSessionStore`] → one SQLite file per session ([`session`]),
 //!     write-heavy per-session state / media / disclosures with ACID CAS + a
 //!     marker-based TTL sweeper.
-//!   * [`CacheService`] → `object_store` ([`cache`]), the write-once/read-mostly
+//!   * [`RemoteCache`] → `object_store` ([`cache`]), the write-once/read-mostly
 //!     L2 cwasm cache.
 //!
 //! Both share this one CVM (same *trust* tier — blind ciphertext KV, one
@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use fleet_stream::{Incoming, StreamLen, bin};
 use storage_rpc::{
-    CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheError, CacheService, ReadRequest,
-    ReadResponse, SessionError, SessionStoreService, WriteRequest, WriteResponse,
+    CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheError, ReadRequest, ReadResponse,
+    RemoteCache, RemoteSessionStore, SessionError, WriteRequest, WriteResponse,
 };
 
 pub use cache::CacheBlobs;
@@ -105,7 +105,7 @@ where
         .map_err(|e| SessionError::Internal(format!("session store task join: {e}")))?
 }
 
-impl SessionStoreService for Caller {
+impl RemoteSessionStore for Caller {
     async fn read(&self, id: String, req: ReadRequest) -> Result<ReadResponse, SessionError> {
         let s = self.svc.sessions.clone();
         let name = self.scope.session(&id);
@@ -130,7 +130,7 @@ impl SessionStoreService for Caller {
     }
 }
 
-impl CacheService for Caller {
+impl RemoteCache for Caller {
     async fn store(&self, key: String, blob: CacheBlob) -> Result<(), CacheError> {
         let name = self.scope.blob(&key);
         let length = blob.length.get();

@@ -20,7 +20,7 @@
 //!
 //! Lifecycle: take the output file the supervisor handed it at its inherited
 //! descriptor, adopt the socketpair on fd 0, serve ONE
-//! `engine_compiler::CompileChildService::compile` — the components streaming in
+//! `engine_compiler::RemoteCompileChild::compile` — the components streaming in
 //! beside the request, the cwasm written to the output file — and exit when the
 //! supervisor drops its client. Multi-threaded runtime + `spawn_blocking` because
 //! `compile_to_parts` is a SYNCHRONOUS, CPU-bound, multi-second call — offloading
@@ -49,7 +49,7 @@ use std::sync::{Arc, Mutex};
 use remoc::codec::Ciborium;
 
 use engine_compiler::{
-    ChildCompiled, CompileChildService, CompileChildServiceServerShared, Compiler,
+    ChildCompiled, Compiler, RemoteCompileChild, RemoteCompileChildServerShared,
 };
 use engine_rpc::{
     CatalogEntry, CompileError, CompileFault, CompileRequest, CompiledBundle, MAX_BUNDLE_META_BYTES,
@@ -63,7 +63,7 @@ struct Child {
     output: Mutex<Option<File>>,
 }
 
-impl CompileChildService for Child {
+impl RemoteCompileChild for Child {
     async fn compile(&self, req: CompileRequest) -> Result<ChildCompiled, CompileError> {
         let output = self
             .output
@@ -166,9 +166,9 @@ async fn main() {
     });
 
     // The supervisor placed one end of a socketpair on our fd 0; engine-supervisor
-    // adopts it, serves `CompileChildService`, and returns when the supervisor drops
+    // adopts it, serves `RemoteCompileChild`, and returns when the supervisor drops
     // its client (compile done) → we exit. Request buffer 1 — one compile.
-    match engine_supervisor::serve_child::<Child, CompileChildServiceServerShared<Child, Ciborium>>(
+    match engine_supervisor::serve_child::<Child, RemoteCompileChildServerShared<Child, Ciborium>>(
         child, 1,
     )
     .await

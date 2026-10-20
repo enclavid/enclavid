@@ -1,0 +1,19 @@
+[package]
+name = "enclavid-boundary-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `boundary!` declares one end of a boundary; `#[protocol]` reads a remoc
+# contract and writes what its ends must declare and how its server receives.
+# Both write impls of `enclavid-boundary`'s traits. A proc-macro crate runs at
+# build time and links into no image, and keeping it apart keeps `syn` out of
+# the vocabulary crate, which has no dependencies.
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

@@ -4,9 +4,9 @@
 //! same *trust* tier (both blind ciphertext KV, one orchestrator) even though
 //! their load profiles diverge:
 //!
-//!   * [`SessionStoreService`] — per-session state / media / disclosures, backed
+//!   * [`RemoteSessionStore`] — per-session state / media / disclosures, backed
 //!     by one SQLite file per record (write-heavy, CAS, TTL).
-//!   * [`CacheService`] — the L2 compiled-artifact (cwasm) cache, backed by
+//!   * [`RemoteCache`] — the L2 compiled-artifact (cwasm) cache, backed by
 //!     `object_store` (write-once, read-mostly).
 //!
 //! The storage-CVM is a **blind ciphertext KV**: every payload is already
@@ -110,11 +110,11 @@ impl From<remoc::rtc::CallError> for CacheError {
 
 /// Per-session state / media / disclosures. Method payloads are the
 /// [`session`] DTOs. `deadline_unix_secs` on
-/// [`write`](SessionStoreService::write) threads the sliding TTL INSIDE the
+/// [`write`](RemoteSessionStore::write) threads the sliding TTL INSIDE the
 /// RA-TLS channel (the plaintext host STATUS byte is gone) — the CVM commits it
 /// atomically with the version bump and its sweeper enforces it.
 #[remoc::rtc::remote]
-pub trait SessionStoreService {
+pub trait RemoteSessionStore {
     /// Batched typed read. Empty `req.fields` is a version probe. `version == 0`
     /// in the response means the session does not exist.
     async fn read(&self, id: String, req: ReadRequest) -> Result<ReadResponse, SessionError>;
@@ -145,7 +145,7 @@ pub trait SessionStoreService {
 /// [`CacheBlob`], so no call carries one and no blob is held whole on either
 /// end. A miss is `Ok(None)` (not an error) so the orchestrator recompiles.
 #[remoc::rtc::remote]
-pub trait CacheService {
+pub trait RemoteCache {
     /// Keep the blob streaming beside the call under `key`, in place of any
     /// before it. It is in place only once all of it has arrived: a stream that
     /// fails leaves what was there.
@@ -166,8 +166,8 @@ pub trait CacheService {
 /// method argument.
 #[derive(Serialize, Deserialize)]
 pub struct StorageClients {
-    pub session: SessionStoreServiceClient<Ciborium>,
-    pub cache: CacheServiceClient<Ciborium>,
+    pub session: RemoteSessionStoreClient<Ciborium>,
+    pub cache: RemoteCacheClient<Ciborium>,
 }
 
 /// The remoc connection config both storage peers build from, and what a role

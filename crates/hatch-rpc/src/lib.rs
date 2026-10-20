@@ -12,14 +12,14 @@
 //! comes back is checked where it arrives, as it always was: an artifact
 //! against its pinned digest, a released key against the TEE's own.
 //!
-//! One service, [`HatchService`]:
+//! One service, [`RemoteHatch`]:
 //!
-//!   * [`authorize`](HatchService::authorize) — who a consumer's request is
+//!   * [`authorize`](RemoteHatch::authorize) — who a consumer's request is
 //!     from, and for a creation the terms its session is held to;
-//!   * [`manifest`](HatchService::manifest) and [`blob`](HatchService::blob) —
+//!   * [`manifest`](RemoteHatch::manifest) and [`blob`](RemoteHatch::blob) —
 //!     an OCI pull: the raw manifest a pinned reference names, then one blob of
 //!     it streaming beside the reply;
-//!   * [`kbs`](HatchService::kbs) — one leg of a key broker's attestation
+//!   * [`kbs`](RemoteHatch::kbs) — one leg of a key broker's attestation
 //!     handshake, relayed.
 
 use remoc::codec::Ciborium;
@@ -203,7 +203,7 @@ impl From<remoc::rtc::CallError> for PullError {
 /// What api asks of the hatch. The hatch serves one of these per api
 /// connection, and sends api its client on the connection's base channel.
 #[remoc::rtc::remote]
-pub trait HatchService {
+pub trait RemoteHatch {
     /// Who a consumer's request is from, and whether it may go on — and for a
     /// creation, the terms its session is held to.
     async fn authorize(&self, req: AuthorizeRequest) -> Result<Verdict, AuthorizeError>;
@@ -221,7 +221,7 @@ pub trait HatchService {
 }
 
 /// The client api holds, as the hatch sends it.
-pub type HatchClient = HatchServiceClient<Ciborium>;
+pub type HatchClient = RemoteHatchClient<Ciborium>;
 
 /// The remoc connection config both ends build from, and what a role sets of it
 /// — the one every fleet leg is brought up with (see `fleet_stream`).

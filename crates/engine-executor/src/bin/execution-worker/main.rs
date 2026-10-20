@@ -1,6 +1,6 @@
 //! The `execution-worker` deployable: the SUPERVISOR of the execute side.
 //!
-//! It LISTENS for the orchestrator (api) and serves `engine_rpc::ExecutorService`
+//! It LISTENS for the orchestrator (api) and serves `engine_rpc::RemoteExecutor`
 //! — the same api-facing contract as before — but it runs NO wasm itself. Per
 //! reducer round it drives a fresh `engine-executor-child` PROCESS (spawned + bounded +
 //! deadline-guarded + released by the shared [`engine_supervisor::ChildRunner`]), primes
@@ -19,11 +19,11 @@
 //! `run_with_bundle`. So the OCI-pull / compile probe surface never touches the
 //! worker, and the worker never names a cache slot back (L2 cache-poisoning
 //! defence).
-//!   * api → supervisor: the orchestrator passes a `CallbackServiceClient` into
-//!     `run`.
+//!   * api → supervisor: the orchestrator passes its callbacks into `run`, which
+//!     this role holds as [`engine_rpc::Callbacks`] at its end of the leg.
 //!   * supervisor → child: the supervisor stands up a [`relay::RelayCallbacks`]
-//!     ([`engine_rpc::ChildCallbacks`]) that forwards the child's `media_load` /
-//!     `session_change` on to the api client — so the untrusted-wasm child gets
+//!     ([`engine_rpc::RemoteChildCallbacks`]) that forwards the child's `media_load` /
+//!     `session_change` on to api through them — so the untrusted-wasm child gets
 //!     blob + state I/O but never the seal key.
 //!
 //! **What is domain vs supervisor.** The generic process plumbing — spawn a
@@ -61,6 +61,7 @@
 //! supervisor↔child hop is a private per-child socketpair (never leaves this
 //! host).
 
+mod boundary;
 mod bundles;
 mod cwasm;
 mod relay;
@@ -618,7 +619,7 @@ async fn main() {
 }
 
 /// RA-TLS-accept one api connection, then frame it with remoc and serve
-/// `ExecutorService`, `request_buffer` of api's requests waiting at most, on this
+/// `RemoteExecutor`, `request_buffer` of api's requests waiting at most, on this
 /// end's `leg` settings.
 async fn serve_conn(
     stream: fleet_transport::Stream,
@@ -661,15 +662,22 @@ async fn serve_conn(
     });
     // Bringing the hop up means naming the generated client, and that is the one
     // thing no crate outside engine-rpc may do — so the remoc half lives there for
-    // this end too, and this one keeps what it is actually about: who connected.
-    engine_rpc::serve_executor(read, write, caller, request_buffer, &leg)
-        .await
-        .map_err(|e| {
-            debug!("execute leg: {e}");
-            match e {
-                engine_rpc::LegError::Rpc => LegFailure::Rpc,
-                engine_rpc::LegError::Clients | engine_rpc::LegError::Closed => LegFailure::Clients,
-                engine_rpc::LegError::Serve => LegFailure::Serve,
-            }
-        })
+    // this end too, and this one keeps what it is actually about: who connected,
+    // and how this end judges what they send (`boundary::AnyCaller`).
+    engine_rpc::serve_executor::<boundary::AnyCaller, _, _, _>(
+        read,
+        write,
+        caller,
+        request_buffer,
+        &leg,
+    )
+    .await
+    .map_err(|e| {
+        debug!("execute leg: {e}");
+        match e {
+            engine_rpc::LegError::Rpc => LegFailure::Rpc,
+            engine_rpc::LegError::Clients | engine_rpc::LegError::Closed => LegFailure::Clients,
+            engine_rpc::LegError::Serve => LegFailure::Serve,
+        }
+    })
 }

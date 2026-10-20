@@ -1,23 +1,25 @@
 //! The child's callbacks, relayed to api.
 
+use enclavid_boundary::Covert;
 use engine_executor::{Decision, SessionState};
-use engine_rpc::{CallbackError, CallbackService, CallbackServiceClient, ChildCallbacks, Padded};
-use remoc::codec::Ciborium;
+use engine_rpc::{
+    CallbackError, Callbacks, Committed, MediaBytes, MediaHash, Padded, RemoteChildCallbacks,
+};
 
-/// Forwards the child's narrowed callbacks straight to api's full
-/// `CallbackService` client. The upstream client method already returns the same
-/// `Result<_, CallbackError>` these methods return (remoc folds transport errors
-/// into `CallbackError`), so each is a one-line forward.
+use crate::boundary::AnyCaller;
+
+/// Forwards the child's narrowed callbacks to api's, at this role's end of the
+/// leg ([`AnyCaller`]): each leaves through that end's declaration, and what the
+/// declaration leaves open is answered here. remoc folds a transport failure into
+/// `CallbackError`, so a failed call comes back as the child's own error.
 pub(crate) struct RelayCallbacks {
-    pub(crate) upstream: CallbackServiceClient<Ciborium>,
+    pub(crate) upstream: Callbacks<AnyCaller>,
 }
 
-impl ChildCallbacks for RelayCallbacks {
-    async fn media_load(
-        &self,
-        hash: [u8; 32],
-    ) -> Result<Option<engine_rpc::ByteBuf>, CallbackError> {
-        self.upstream.media_load(hash).await
+impl RemoteChildCallbacks for RelayCallbacks {
+    async fn media_load(&self, hash: MediaHash) -> Result<Option<MediaBytes>, CallbackError> {
+        let loaded = self.upstream.media_load(AnyCaller::expose(hash)).await?;
+        Ok(loaded.into_inner())
     }
 
     /// The child seam behind this call is a socketpair inside this CVM — no host
@@ -32,9 +34,12 @@ impl ChildCallbacks for RelayCallbacks {
         &self,
         state: SessionState,
         decision: Option<Decision>,
-    ) -> Result<(), CallbackError> {
-        self.upstream
-            .session_change(Padded::seal(&state)?, Padded::seal(&decision)?)
-            .await
+    ) -> Result<Committed, CallbackError> {
+        let state = AnyCaller::expose_as::<Padded<SessionState>, _>(state)
+            .vouch_with(Covert::Transformed, |s| Padded::seal(&s))?;
+        let decision = AnyCaller::expose_as::<Padded<Option<Decision>>, _>(decision)
+            .vouch_with(Covert::Transformed, |d| Padded::seal(&d))?;
+        let committed = self.upstream.session_change(state, decision).await?;
+        Ok(committed.into_inner())
     }
 }

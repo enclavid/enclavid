@@ -22,7 +22,7 @@ use enclavid_hatch::oci::{DEFAULT_CONCURRENT_BLOBS, DEFAULT_CONCURRENT_MANIFESTS
 use enclavid_hatch::service::Hatch;
 use fleet_transport::LegFailure;
 use fleet_transport::launch::{LaunchError, Settings};
-use hatch_rpc::{HatchClient, HatchServiceServerShared, LegSettings};
+use hatch_rpc::{HatchClient, LegSettings, RemoteHatchServerShared};
 use safe_logger::{debug, info, reason, safe, warn};
 
 /// How long a hook has to answer, unless the host says otherwise (the
@@ -382,7 +382,7 @@ async fn serve_conn(
     })?;
     tokio::spawn(conn);
 
-    let (server, client) = HatchServiceServerShared::<_, Ciborium>::new(hatch, request_buffer);
+    let (server, client) = RemoteHatchServerShared::<_, Ciborium>::new(hatch, request_buffer);
     tx.send(client).await.map_err(|e| {
         debug!("send service client: {e}");
         LegFailure::Clients

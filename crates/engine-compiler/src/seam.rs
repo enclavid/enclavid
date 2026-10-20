@@ -18,7 +18,7 @@
 //! That also settles a mechanical problem. `#[remoc::rtc::remote]` generates a
 //! client type per trait; while one trait served both hops, its client could not be
 //! withheld from `engine-rpc`'s public surface, so the api hop could never have the
-//! wall the execute leg's `ExecutorServiceClient` has. Two traits in two crates,
+//! wall the execute leg's `RemoteExecutorClient` has. Two traits in two crates,
 //! each where it belongs, and the wall becomes possible.
 //!
 //! ## What is deliberately absent
@@ -66,6 +66,6 @@ pub struct ChildCompiled {
 /// child was handed rather than in a stream beside the reply, since the child
 /// does not outlive the call.
 #[remoc::rtc::remote]
-pub trait CompileChildService {
+pub trait RemoteCompileChild {
     async fn compile(&self, req: CompileRequest) -> Result<ChildCompiled, CompileError>;
 }

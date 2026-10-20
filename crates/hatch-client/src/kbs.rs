@@ -9,12 +9,13 @@
 //! Trust model: the broker's answer can be dropped or stalled on the way, but
 //! the released secret cannot be forged — it is JWE-wrapped to api's ephemeral
 //! key, so only the enclave can unwrap it. The caller MUST verify via
-//! `.trust(...)` at the keyprovider layer (the unwrap closes AuthN; the RCAR
-//! challenge nonce closes Replay).
+//! `.trust_with(AuthN::Verified, …)` at the keyprovider layer — the unwrap closes
+//! AuthN — and the per-pull ephemeral key, bound into the handshake's report
+//! data, is what closes Replay.
 
 use std::sync::Arc;
 
-use hatch_rpc::{HatchService, KbsRequest, KbsResponse};
+use hatch_rpc::{KbsRequest, KbsResponse, RemoteHatch};
 
 use crate::boundary;
 use crate::error::BridgeError;

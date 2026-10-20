@@ -1,6 +1,6 @@
 //! The `compile-worker` deployable: the SUPERVISOR of the compile side.
 //!
-//! It LISTENS for the orchestrator (api) and serves `engine_rpc::CompilerService`
+//! It LISTENS for the orchestrator (api) and serves `engine_rpc::RemoteCompiler`
 //! — the same api-facing contract as before — but it runs NO Cranelift itself.
 //! Per compile it drives a fresh `engine-compiler-child` PROCESS (spawned + bounded +
 //! deadline-guarded + released by the shared [`engine_supervisor::ChildRunner`]),
@@ -44,10 +44,10 @@ use fleet_stream::bin;
 use remoc::codec::Ciborium;
 
 use enclavid_boundary::{AuthN, Untrusted};
-use engine_compiler::{ChildCompiled, CompileChildService, CompileChildServiceClient};
+use engine_compiler::{ChildCompiled, RemoteCompileChild, RemoteCompileChildClient};
 use engine_rpc::{
-    COMPILE_STREAM_DEADLINE, CompileError, CompileFault, CompileReply, CompileRequest,
-    CompilerServiceUntrusted, LegSettings, MAX_BUNDLE_META_BYTES,
+    COMPILE_STREAM_DEADLINE, CompileError, CompileFault, CompileReply, CompileRequest, LegSettings,
+    MAX_BUNDLE_META_BYTES, RemoteCompilerUntrusted,
 };
 use fleet_transport::LegFailure;
 use fleet_transport::launch::{LaunchError, Settings};
@@ -109,7 +109,7 @@ const DEFAULT_BASE_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 /// reach the end.
 const DEFAULT_CWASM_READ_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap();
 
-/// The `engine_rpc::CompilerService` impl served to api: forward each compile to
+/// The `engine_rpc::RemoteCompiler` impl served to api: forward each compile to
 /// a fresh disposable `engine-compiler-child` via the runner. Shared (`Arc`) across
 /// api connections.
 struct Supervisor {
@@ -117,7 +117,7 @@ struct Supervisor {
     cwasm_read: NonZeroUsize,
 }
 
-impl CompilerServiceUntrusted for Supervisor {
+impl RemoteCompilerUntrusted for Supervisor {
     /// What this role does not know about its caller.
     ///
     /// `AuthN` and nothing else. The listener runs `AcceptAny` — it cannot pin api
@@ -152,10 +152,11 @@ impl CompilerServiceUntrusted for Supervisor {
         // api back. A cache added here would end that, and would need the executor's
         // per-caller partitioning before it could.
         let req = req
-            .trust_unchecked::<AuthN, _>(enclavid_boundary::reason!(
-                "indifferent: nothing derived from a request outlives its call, so \
-                 hostile input reaches only its own compile and its own caller; the \
-                 shared runner slots are availability, capped elsewhere"
+            .trust(enclavid_boundary::reason!(
+                AuthN::Indifferent,
+                "nothing derived from a request outlives its call, so hostile input \
+                 reaches only its own compile and its own caller; the shared runner slots \
+                 are availability, capped elsewhere"
             ))
             .into_inner();
         // Components past the hop's bound together are the pins' doing, so the
@@ -178,7 +179,7 @@ impl CompilerServiceUntrusted for Supervisor {
             .run(
                 Some(output.as_fd()),
                 (),
-                move |client: CompileChildServiceClient<Ciborium>| async move {
+                move |client: RemoteCompileChildClient<Ciborium>| async move {
                     let mut call = std::pin::pin!(client.compile(onward));
                     // The child answers once it has compiled, which it does only
                     // on components that arrived whole; the relay is never the

@@ -135,27 +135,30 @@ impl SessionRunCtx {
         // sealing under tee_seal_key/AAD=session_id (host tampering breaks the
         // seal at decode).
         let metadata = metadata_untrusted
-            .trust_unchecked::<AuthZ, _>(reason!(
+            .trust(reason!(
+                AuthZ::Matched,
                 r#"
-Applicant flow doesn't authenticate per-tenant, so we have
-no principal to cross-check here. Security relies on the
-bearer-key auth layer at the route plus AEAD-binding on state
+Applicant flow doesn't authenticate per-tenant, so there is no
+principal to cross-check here. The match is upstream: the
+bearer-key auth layer at the route, plus AEAD-binding on state
 under applicant_session_token.
             "#
             ))
-            .trust_unchecked::<Replay, _>(reason!(
+            .trust_accept_risk(reason!(
+                Replay::AcceptedRisk,
                 r#"
 Metadata is NOT static — the persister mutates it each disclosure/media
-round (captured_media, disclosure_count/entry_hashes, status) — so freshness is
-UNVERIFIABLE here, not guaranteed: a stateless TEE cannot detect a
-compromised host replaying an older (genuine, tee_seal_key-sealed,
-AAD=session_id) snapshot. Safe because BOUNDED: the mutations are monotonic,
-so a stale snapshot can only DROP entries — a later from-blob-ref then misses
-the dropped capture and traps (session-local DoS), and a rewound disclosure
-count surfaces as the consumer's own chain-verification failure. No leak
-(host replays blobs it cannot read), no forgery (AEAD). Same containment as
-the version vouch below (a lying host self-limits to DoS); full-coherent
-rollback is an accepted residual of the host-holds-all-state model.
+round (captured_media, disclosure_count/entry_hashes, status) — and a
+stateless TEE cannot tell a genuine older snapshot (sealed under
+tee_seal_key, AAD=session_id) from the latest. A rollback of the session's
+whole record — metadata, state and version restored together — passes the
+version's CAS as well. Most of what it rewinds only drops entries: a later
+from-blob-ref misses the dropped capture and traps, and a rewound disclosure
+count fails the consumer's own chain check. But it also brings back `Running`
+for a session that finished, so `ended` lets a round through and the policy
+can reach `finish` again — another disclosure sealed, the decision the
+consumer already read rewritten. Closing that needs a freshness source outside
+the host, as `client::disclosures` says of the same rollback.
             "#
             ))
             .into_inner()
@@ -165,7 +168,8 @@ rollback is an accepted residual of the host-holds-all-state model.
             })?;
 
         let session_state = state_opt
-            .trust_unchecked::<Replay, _>(reason!(
+            .trust(reason!(
+                Replay::Fresh,
                 r#"
 Stale state is bounded by per-call version-CAS during the run.
 The first write on a stale snapshot fails with VersionMismatch
@@ -176,20 +180,23 @@ state on retry.
             .into_inner();
 
         let version = version
-            .trust_unchecked::<AuthN, _>(reason!(
+            .trust(reason!(
+                AuthN::Indifferent,
                 r#"
 Version is a CAS token only. A lying host either fails our
 writes (DoS) or stomps a concurrent winner (UX regression). No
 data leak path.
             "#
             ))
-            .trust_unchecked::<AuthZ, _>(reason!(
+            .trust(reason!(
+                AuthZ::NoPrincipal,
                 r#"
 Version counter is not an ownership signal — fed back as
 expected_version on the next write, no access decision hangs on it.
             "#
             ))
-            .trust_unchecked::<Replay, _>(reason!(
+            .trust(reason!(
+                Replay::Fresh,
                 r#"
 Staleness on the version manifests as CAS mismatch on first
 persist; same containment as above.

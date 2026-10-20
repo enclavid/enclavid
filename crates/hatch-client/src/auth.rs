@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use hatch_rpc::{AuthorizeRequest, HatchService, SessionTerms, Verdict};
+use hatch_rpc::{AuthorizeRequest, RemoteHatch, SessionTerms, Verdict};
 
 use crate::boundary;
 use crate::error::BridgeError;

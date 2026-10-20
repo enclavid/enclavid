@@ -65,7 +65,7 @@ tokio = { version = "1", default-features = false }
 
 # --- execution-worker bin deps (optional) — pulled ONLY by the `worker`
 # feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable
-# execution-worker CVM: it serves `engine_rpc::ExecutorService`, caches each
+# execution-worker CVM: it serves `engine_rpc::RemoteExecutor`, caches each
 # composition's cwasm, and drives one disposable child per round — this crate's
 # `Executor` runs in that CHILD (engine-executor-child), not here. It also proxies
 # the child's mid-run callbacks (media_load / session_change) on to the
@@ -76,6 +76,8 @@ engine-rpc = { path = "../engine-rpc", default-features = false, features = ["ex
 # — it accepts any attested guest, so it has something open to say — and reaches
 # the words directly rather than through whoever happens to re-export them.
 enclavid-boundary = { path = "../boundary", optional = true }
+# `boundary!`: the supervisor's end of the api leg, declared. Build-time only.
+enclavid-boundary-macros = { path = "../boundary-macros", optional = true }
 # Shared disposable-child process-isolation plumbing (spawn + concurrency bound +
 # round deadline + release); the compile-worker rides the same crate.
 engine-supervisor = { path = "../engine-supervisor", optional = true }
@@ -135,6 +137,7 @@ worker = [
     "safe-logger/device",
     "dep:engine-rpc",
     "dep:enclavid-boundary",
+    "dep:enclavid-boundary-macros",
     "dep:engine-supervisor",
     "dep:remoc",
     "tokio/macros",

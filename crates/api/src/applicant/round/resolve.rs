@@ -5,10 +5,11 @@ use axum::http::StatusCode;
 
 use enclavid_boundary::{Exposed, Untrusted};
 use engine_rpc::{
-    CallbackServiceUntrusted, CompatToken, CompositionKey, ExecError, RunRequest, RunStatus,
+    CompatToken, CompositionKey, ExecError, RemoteCallbacksAt, RunRequest, RunStatus,
 };
 use session_types::SessionMetadata;
 
+use crate::boundary::ExecutionWorker;
 use crate::compositions::Composition;
 use crate::init::Unavailable;
 use crate::state::AppState;
@@ -21,12 +22,11 @@ pub(super) async fn run_resolved<C>(
     compat_token: &CompatToken,
     session_id: &str,
     metadata: &SessionMetadata,
-    req: Exposed<RunRequest, ()>,
+    req: Exposed<RunRequest, (), ExecutionWorker>,
     callbacks: C,
-) -> Result<Result<Untrusted<RunStatus, C::Scope>, ExecError>, Unavailable>
+) -> Result<Result<Untrusted<RunStatus, (), ExecutionWorker>, ExecError>, Unavailable>
 where
-    C: CallbackServiceUntrusted + Send + Sync + 'static,
-    C::Scope: Send,
+    C: RemoteCallbacksAt<ExecutionWorker> + Send + Sync + 'static,
 {
     let composition = Composition::of(metadata).ok_or_else(|| {
         safe_logger::debug!("run_resolved: metadata.client missing for {session_id}");

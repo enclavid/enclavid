@@ -1,23 +1,22 @@
 //! Wire → TEE crossings. A single generic entry function
 //! [`from_untrusted`] wraps any host-supplied value with the
 //! **maximally-open inbound scope** `(AuthN, AuthZ, Replay)`. The
-//! caller (use site) then addresses each concern via a transforming
-//! peel ([`trust::<X>(work)`](Untrusted::trust)) or a blanket-
-//! accept ([`trust_unchecked::<X>(reason)`](
-//! Untrusted::trust_unchecked)).
+//! caller (use site) then answers each concern: with work
+//! ([`trust_with`](Untrusted::trust_with)), with an argued kind
+//! ([`trust`](Untrusted::trust)), or as an accepted risk
+//! ([`trust_accept_risk`](Untrusted::trust_accept_risk)).
 //!
 //! The boundary layer doesn't carry per-channel scope decisions —
-//! it just names "data crossed here" via the [`Reason`] token, and
-//! pins the maximal scope so every consumer is forced to make every
-//! concern decision **at the use site** with a reason that explains
-//! the specific context of that call.
+//! it just names "data crossed here", and pins the maximal scope so
+//! every consumer is forced to make every concern decision **at the
+//! use site** with a reason that explains the specific context of
+//! that call.
 //!
 //! Audit grep:
 //!
-//!   * `boundary::inbound::from_untrusted(` — every wire → TEE crossing,
-//!     each carrying a per-call `reason!` naming the channel.
-//!   * `trust::<X,` / `trust_unchecked::<X,` — where each concern
-//!     gets closed downstream, locally documented.
+//!   * `boundary::inbound::from_untrusted(` — every wire → TEE crossing.
+//!   * `trust(` / `trust_with(` / `trust_accept_risk(` — where each
+//!     concern gets answered downstream, locally documented.
 //!
 //! Why a single fn (not per-channel `state_blob` / `version` / ...):
 //! a per-channel fn either returns its own narrowed scope (the

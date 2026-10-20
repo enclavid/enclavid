@@ -1,9 +1,9 @@
 //! Volume → store crossings: values read back from where the host could have
 //! changed them or put an older copy back. [`from_untrusted`] opens all three
-//! inbound concerns `(AuthN, AuthZ, Replay)`, and the use site answers each: a
-//! peel that does the work ([`trust::<X>(work)`](Untrusted::trust)) — an AEAD
-//! open, a decode — or an accept with its reason
-//! ([`trust_unchecked::<X>(reason)`](Untrusted::trust_unchecked)).
+//! inbound concerns `(AuthN, AuthZ, Replay)`, and the use site answers each: with
+//! work ([`trust_with`](Untrusted::trust_with)) — an AEAD open, a decode — with
+//! an argued kind and its reason ([`trust`](Untrusted::trust)), or as an
+//! accepted risk ([`trust_accept_risk`](Untrusted::trust_accept_risk)).
 
 use enclavid_boundary::{AuthN, AuthZ, Replay, Untrusted};
 

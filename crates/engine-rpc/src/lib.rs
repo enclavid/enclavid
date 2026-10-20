@@ -22,9 +22,9 @@
 //! The contract is split under two cargo features so a single-role worker
 //! links only its half (least-knowledge for its measured image):
 //!
-//!   * `compile` → `CompilerService` + `CompileError`; the worker fuses +
+//!   * `compile` → `RemoteCompiler` + `CompileError`; the worker fuses +
 //!     Cranelift-compiles into a `CompiledBundle`.
-//!   * `execute` → `ExecutorService` + `CallbackService` + the execute wire
+//!   * `execute` → `RemoteExecutor` + `RemoteCallbacks` + the execute wire
 //!     types (`RunRequest`, `RunReply`, `RunStatus`, `ExecError`,
 //!     `CallbackError`) + `BundleStream` — the bundle a `run_with_bundle`
 //!     carries, streamed beside the request; pulls `session-types` and
@@ -67,7 +67,7 @@ pub use bundle::*;
 #[cfg(feature = "compile")]
 mod compile;
 // EXPLICIT, not a glob, for the same reason the execute half is: neither
-// `CompilerServiceClient` nor its server half is re-exported, so no crate outside
+// `RemoteCompilerClient` nor its server half is re-exported, so no crate outside
 // this one can name the generated client for the api hop — let alone call it — and
 // none can serve the RAW contract either. Both ends reach the hop through `leg`.
 #[cfg(feature = "compile")]
@@ -80,7 +80,7 @@ pub use compile::{
 #[cfg(feature = "compile")]
 mod untrusted_compile;
 #[cfg(feature = "compile")]
-pub use untrusted_compile::CompilerServiceUntrusted;
+pub use untrusted_compile::RemoteCompilerUntrusted;
 
 // The two names a cache slot is addressed by, as types that carry their own
 // shape check. Both cross the execute hop, and only it.
@@ -92,29 +92,39 @@ pub use keys::{CompatToken, CompositionKey, KeyError};
 #[cfg(feature = "execute")]
 mod execute;
 // EXPLICIT, not a glob, and that is the point — in BOTH directions. Outbound,
-// `ExecutorServiceClient` and its server half are absent, so no crate outside
+// `RemoteExecutorClient` and its server half are absent, so no crate outside
 // this one can name the generated client for this hop, let alone call it.
-// Inbound, `CallbackServiceServerShared` is absent too, so nobody outside can
+// Inbound, `RemoteCallbacksServerShared` is absent too, so nobody outside can
 // serve the RAW callback contract: the only way to answer these callbacks is to
-// implement the untrusted view and hand it to the door. A wrapper a caller opts
-// into is a habit; a wrapper with no unwrapped alternative is a boundary.
+// implement `RemoteCallbacksAt` at a declared end and hand it to the door.
+// And `RemoteCallbacksClient` is absent, so the role that calls them back has
+// only `Callbacks` at its end to call them through. A wrapper a caller opts into
+// is a habit; a wrapper with no unwrapped alternative is a boundary.
+//
+// `*Calls` / `*Serves` are what an end of this hop declares, and `*Serve` the
+// contract as its server sees it at that end — all three written by
+// `#[protocol]` from the contract itself, so a method added to it reaches them
+// without anyone remembering to.
 #[cfg(feature = "execute")]
 pub use execute::{
-    ByteBuf, CallbackError, CallbackService, CallbackServiceClient, ChildCallbacks,
-    ChildCallbacksClient, ChildCallbacksServerShared, ChildService, ChildServiceClient,
-    ChildServiceServerShared, ExecError, PrepareOutcome, PrepareReply, PrepareRequest, Preparing,
-    PropsRead, RoundProps, RunOutcome, RunReply, RunRequest, RunStatus,
+    ByteBuf, CallbackError, Committed, ExecError, MediaBytes, MediaHash, PrepareOutcome,
+    PrepareReply, PrepareRequest, Preparing, PropsRead, RemoteCallbacks, RemoteCallbacksAt,
+    RemoteCallbacksCalls, RemoteCallbacksServes, RemoteChild, RemoteChildCallbacks,
+    RemoteChildCallbacksClient, RemoteChildCallbacksServerShared, RemoteChildClient,
+    RemoteChildServerShared, RemoteExecutorAt, RemoteExecutorCalls, RemoteExecutorServes,
+    RoundProps, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 
 // Both ends of the execute hop, and the doors on the calling end.
 #[cfg(any(feature = "compile", feature = "execute"))]
 mod leg;
-#[cfg(feature = "compile")]
-pub use leg::{CompilerLeg, connect_compiler, serve_compiler};
 #[cfg(feature = "execute")]
 pub use leg::{
-    DEFAULT_CALLBACK_REQUEST_BUFFER, ExecutorLeg, Preparation, connect_executor, serve_executor,
+    Callbacks, DEFAULT_CALLBACK_REQUEST_BUFFER, ExecutorLeg, Preparation, connect_executor,
+    serve_executor,
 };
+#[cfg(feature = "compile")]
+pub use leg::{CompilerLeg, connect_compiler, serve_compiler};
 #[cfg(any(feature = "compile", feature = "execute"))]
 pub use leg::{DEFAULT_REQUEST_BUFFER, LegError, leg_end};
 
@@ -135,17 +145,9 @@ mod padded;
 #[cfg(feature = "execute")]
 pub use padded::{FrameError, Framed, Padded};
 
-// The execute contract as each of its two servers sees it. EXPLICIT, like every
-// list above: the raw `ExecutorService` and `CallbackService` server halves stay
-// unexported, so a role that serves this hop has the untrusted view and nothing
-// else to implement.
-#[cfg(feature = "execute")]
-mod untrusted_execute;
-#[cfg(feature = "execute")]
-pub use untrusted_execute::{CallbackServiceUntrusted, ExecutorServiceUntrusted};
-
-// The one adapter both legs' doors apply — never exported; see the module doc.
-#[cfg(any(feature = "compile", feature = "execute"))]
+// The adapter the compile leg's door applies — never exported; see the module
+// doc. The execute leg's is written by `#[protocol]`.
+#[cfg(feature = "compile")]
 mod adapter;
 
 /// The remoc connection config both ends of an engine leg build from, and what a

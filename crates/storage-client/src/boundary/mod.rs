@@ -15,8 +15,8 @@
 //!
 //!   * `boundary::outbound::` — every value sent to be kept.
 //!   * `boundary::inbound::`  — every value read back.
-//!   * `trust::<X,` / `trust_unchecked::<X,` and `vouch::<X,` /
-//!     `vouch_unchecked::<X,` — how each concern gets closed.
+//!   * `trust(` / `trust_with(` / `trust_accept_risk(` and `vouch(` /
+//!     `vouch_with(` / `vouch_accept_risk(` — how each concern gets answered.
 
 pub mod inbound;
 pub mod outbound;

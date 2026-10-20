@@ -7,9 +7,9 @@
 //! captured arrives here — the orchestrator holds both already.
 //! [`CallbackServer`] wires those to the per-round [`SessionPersister`] +
 //! [`HatchMediaStore`] (they hold the seal key + applicant token). It
-//! implements `engine_rpc::CallbackService`; the
+//! implements `engine_rpc::RemoteCallbacksAt` at api's end of the leg; the
 //! orchestrator stands one up per run and passes its client into
-//! `ExecutorService::run` (see [`crate::executor`]).
+//! `RemoteExecutor::run` (see [`crate::executor`]).
 //!
 //! Bundle resolution is deliberately NOT a callback here. The composition is known
 //! before the run, so the orchestrator resolves the compiled bundle UP FRONT (see
@@ -37,33 +37,32 @@
 //!     stream has no versions and no store to be stale from.
 //!   * `Covert` is outbound-only by construction.
 //!
-//! The scope is declared HERE rather than in the contract because it is not a
-//! property of the bytes: the same `SessionState` from this worker and from a peer
-//! that runs no adversary code carries a different one. Two consumers of one
-//! contract may disagree, each rightly about its own position.
+//! How api judges this leg is declared once, on its end of it
+//! (`crate::boundary::ExecutionWorker`), rather than in the contract, because it
+//! is not a property of the bytes: the same `SessionState` from this worker and
+//! from a peer that runs no adversary code carries a different scope. Two
+//! consumers of one contract may disagree, each rightly about its own position.
 //!
 //! It does not follow the value everywhere, either. `current_prompt` reaches
 //! `consent::for_round` on the NEXT round out of the sealed store rather than over
 //! this leg, and the double AEAD legitimately closes AuthN/AuthZ over a blob the
-//! worker authored — so the store launders the provenance, and this scope says
-//! nothing about that field where it is finally read.
+//! worker authored — so the store launders the provenance, and this end's scope
+//! says nothing about that field where it is finally read.
 
 use std::sync::Arc;
 
-use enclavid_boundary::{Asserted, Exposed, Untrusted, reason};
-use engine_rpc::{CallbackError, CallbackServiceUntrusted, Padded};
+use enclavid_boundary::{Asserted, Exposed, Untrusted};
+use engine_rpc::{CallbackError, Committed, MediaBytes, MediaHash, Padded, RemoteCallbacksAt};
 use session_types::{Decision, SessionState};
 
 use super::media_store::HatchMediaStore;
 use super::persister::SessionPersister;
+use crate::boundary::ExecutionWorker;
 
-/// How api judges everything the worker leg hands it — see the module docs.
-pub(super) type WorkerScope = (Asserted,);
-
-/// A value a worker produced, for signatures below the seam. Whether it came back
-/// from a call api made or arrived on a callback api serves makes no difference:
-/// both are the worker's own word.
-pub(super) type FromWorker<T> = Untrusted<T, WorkerScope>;
+/// A value a worker produced, open on what api's end leaves open on it. Whether
+/// it came back from a call api made or arrived on a callback api serves makes no
+/// difference: both are the worker's own word.
+pub(super) type FromWorker<T> = Untrusted<T, (Asserted,), ExecutionWorker>;
 
 /// Per-run callback target: delegates the callback methods to the seal-key-holding
 /// persister + media store. One per round (both are per-round).
@@ -73,52 +72,35 @@ pub(super) struct CallbackServer {
     pub(super) media_store: Arc<HatchMediaStore>,
 }
 
-impl CallbackServiceUntrusted for CallbackServer {
-    type Scope = WorkerScope;
-
-    /// The hash arrives judged and the blob leaves vouched — this method is a
+impl RemoteCallbacksAt<ExecutionWorker> for CallbackServer {
+    /// The hash arrives open and the blob leaves answered — this method is a
     /// crossing in BOTH directions, which is why the media store owns both halves:
     /// the gate that answers for the hash is the same predicate that makes the
     /// reply's `AuthZ` true.
     async fn media_load(
         &self,
-        hash: Untrusted<[u8; 32], Self::Scope>,
-    ) -> Result<Exposed<Option<Vec<u8>>, ()>, CallbackError> {
+        hash: FromWorker<MediaHash>,
+    ) -> Result<Exposed<Option<MediaBytes>, (), ExecutionWorker>, CallbackError> {
         self.media_store.load(hash).await
     }
 
+    /// Both arrive answered: api's end declares that the state is sealed verbatim
+    /// and handed back only to its author, and that the verdict is the policy's to
+    /// choose — the worker's word is all it ever was. api commits it as that, and
+    /// checks the round's reply against it.
+    ///
+    /// Two separate questions, and closing one says nothing about the other. The
+    /// frame answers "did the length tell the host anything" — settled by the wire
+    /// type, on a hop api only receives on. The scope answers "whose word is the
+    /// CONTENT".
     async fn session_change(
         &self,
-        state: Untrusted<Padded<SessionState>, Self::Scope>,
-        decision: Untrusted<Padded<Option<Decision>>, Self::Scope>,
-    ) -> Result<(), CallbackError> {
-        // Two separate questions, and closing one says nothing about the other.
-        // The frame answers "did the length tell the host anything" — settled by
-        // the wire type, on a hop api only receives on, so no marker of api's
-        // could have asked it. The scope answers "whose word is the CONTENT".
-        //
-        // Nothing api reads out of the round's own state is worth more than the
-        // worker's word, and api does not read any of it: `state` is sealed
-        // verbatim. The one field it DOES interpret — `current_prompt` — reaches
-        // `consent::for_round` on the NEXT round, out of the sealed store rather
-        // than over this leg, where this scope does not follow it.
-        let state = state
-            .trust_unchecked::<Asserted, _>(reason!(
-                "contained: sealed verbatim and handed back only to the peer that \
-                 authored it; api interprets nothing in it here"
-            ))
-            .into_inner()
-            .open()?;
-        // The verdict is the policy's to reach, and the worker is where the
-        // policy runs, so its word is the only one there is about it. api commits
-        // it as that, and checks the round's reply against it.
-        let decision = decision
-            .trust_unchecked::<Asserted, _>(reason!(
-                "contained: the verdict is the policy's to choose by design, one of \
-                 four fixed values — the worker's word is all it ever was"
-            ))
-            .into_inner()
-            .open()?;
-        self.persister.persist(state, decision).await
+        state: Untrusted<Padded<SessionState>, (), ExecutionWorker>,
+        decision: Untrusted<Padded<Option<Decision>>, (), ExecutionWorker>,
+    ) -> Result<Exposed<Committed, (), ExecutionWorker>, CallbackError> {
+        let state = state.into_inner().open()?;
+        let decision = decision.into_inner().open()?;
+        self.persister.persist(state, decision).await?;
+        Ok(ExecutionWorker::expose(Committed))
     }
 }

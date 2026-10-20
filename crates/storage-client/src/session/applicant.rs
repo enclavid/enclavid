@@ -20,8 +20,14 @@ pub struct DropApplicantData;
 impl WriteField for DropApplicantData {
     fn build_op(&self, _ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, StoreError> {
         Ok(boundary::outbound::to_untrusted(Op::Reset)
-            .vouch_unchecked::<AuthN, _>(reason!("carries no bytes, only that the data goes"))
-            .vouch_unchecked::<AuthZ, _>(reason!("drops this session's own data"))
-            .vouch_unchecked::<Covert, _>(reason!("one fixed op, nothing the TEE fills in")))
+            .vouch(reason!(
+                AuthN::Indifferent,
+                "carries no bytes, only that the data goes"
+            ))
+            .vouch(reason!(AuthZ::Scoped, "drops this session's own data"))
+            .vouch(reason!(
+                Covert::Bounded,
+                "one fixed op, nothing the TEE fills in"
+            )))
     }
 }

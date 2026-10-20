@@ -42,7 +42,7 @@
 //! here does: a call in flight when the leg dies fails, and is reported as a
 //! failure. Nor did ending the process avoid the ambiguity; it relocated it, since
 //! the applicant's request failed either way. And the state layer already carries
-//! the mechanism that makes a retry safe — `SessionStoreService::write` is an
+//! the mechanism that makes a retry safe — `RemoteSessionStore::write` is an
 //! atomic CAS on `expected_version`, so a stale repeat fails the check instead of
 //! applying twice.
 

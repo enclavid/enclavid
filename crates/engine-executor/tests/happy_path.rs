@@ -94,7 +94,7 @@ impl TestRunner {
     }
 
     /// Build the reusable `InstancePre` once (the Linker + type-check), mirroring
-    /// the production `ChildService::prime`. Every [`run`](Self::run) drives a
+    /// the production `RemoteChild::prime`. Every [`run`](Self::run) drives a
     /// fresh round against it — so a multi-round test exercises the real
     /// prime-once / run-many path.
     fn prime(

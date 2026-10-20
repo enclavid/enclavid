@@ -13,7 +13,8 @@
 //! UNIDENTIFIED — the listener runs `AcceptAny`. On api, the producer IS
 //! identified: api dials under a pinned measurement. What is open there is not who
 //! sent the token but that it is the peer's own word about its own runtime, which
-//! is `Asserted`'s question and is discharged at api's call site.
+//! is `Asserted`'s question: answered in api's declaration of its end for a
+//! round's miss, and at the call site for a preparation's.
 //!
 //! What the types give is a SHAPE that was checked, and the check is the
 //! constructor rather than a call beside it. [`CompositionKey`] has no fallible

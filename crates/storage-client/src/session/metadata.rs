@@ -41,7 +41,8 @@ impl ReadField for Metadata {
             return Ok(Untrusted::new(None));
         };
         let decoded: Untrusted<SessionMetadata, (AuthZ, Replay)> =
-            boundary::inbound::from_untrusted(b).trust::<AuthN, _, _, _, _>(
+            boundary::inbound::from_untrusted(b).trust_with(
+                AuthN::Verified,
                 |raw| -> Result<_, StoreError> {
                     let plaintext = aead::open(&raw, ctx.tee_seal_key, ctx.aad())?;
                     Ok(session_types::decode::<SessionMetadata>(&plaintext)?)
@@ -59,7 +60,7 @@ impl WriteField for SetMetadata<'_> {
         let sealed =
             self.0
                 .clone()
-                .vouch::<AuthN, _, _, _, _>(|m| -> Result<Vec<u8>, StoreError> {
+                .vouch_with(AuthN::Verified, |m| -> Result<Vec<u8>, StoreError> {
                     aead::seal(&session_types::encode(m)?, ctx.tee_seal_key, ctx.aad())
                         .map_err(Into::into)
                 })?;

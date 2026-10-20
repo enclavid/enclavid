@@ -1,4 +1,4 @@
-//! The session store's payloads — what [`SessionStoreService`](crate::SessionStoreService)
+//! The session store's payloads — what [`RemoteSessionStore`](crate::RemoteSessionStore)
 //! takes and gives:
 //!
 //! ```text

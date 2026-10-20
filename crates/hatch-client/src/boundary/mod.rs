@@ -22,11 +22,11 @@
 //!
 //!   * `boundary::outbound::` — every TEE → wire crossing.
 //!   * `boundary::inbound::`  — every wire → TEE crossing.
-//!   * `trust::<X,` / `trust_unchecked::<X,` — how each inbound
-//!     concern actually gets cleared by the caller (cryptographic
-//!     check, application predicate, blanket-trust with reason).
-//!   * `vouch::<X,` / `vouch_unchecked::<X,` — how each outbound
-//!     concern gets closed (seal, sanitise, blanket-vouch).
+//!   * `trust(` / `trust_with(` / `trust_accept_risk(` — how each inbound
+//!     concern is answered by the caller: an argued kind, work (a
+//!     cryptographic check, an application predicate), or an accepted risk.
+//!   * `vouch(` / `vouch_with(` / `vouch_accept_risk(` — how each outbound
+//!     concern is answered (seal, sanitise, argued kind, accepted risk).
 //!
 //! This module is ONE perimeter, not the only one. It owns the hatch's
 //! requests and replies, and the concerns that crossing raises.
@@ -34,9 +34,9 @@
 //! A role that speaks on other channels declares those itself,
 //! against the same vocabulary taken from `enclavid-boundary`
 //! directly: what the storage-CVM keeps is `storage_client::boundary`,
-//! api opens its worker legs with `to_worker` / `to_compiler` and
-//! judges what the execution-worker sends back `Asserted` in
-//! `api::applicant::callbacks`, and the serial port is `safe-logger`
+//! api's end of the execution-worker leg is declared with `boundary!`
+//! in `api::boundary`, its compile leg opens with `to_compiler`, and
+//! the serial port is `safe-logger`
 //! (release point `safe_logger::line`, grep term `log!`). A scope is
 //! a property of the CHANNEL, not of the bytes, so each perimeter
 //! names its own and none of them belong in this one's surface.

@@ -9,7 +9,7 @@
 //!     consumer may do, asked of the hooks the launch switched on;
 //!   * [`oci`] and [`kbs`] — what api names outside: a registry's pulls, a key
 //!     broker's legs;
-//!   * [`service`] — the `HatchService` all of that is served as.
+//!   * [`service`] — the `RemoteHatch` all of that is served as.
 //!
 //! The interface carries what consumers name and nothing of the operator's:
 //! the hooks are reached over vsock, so no address a consumer writes — a name,

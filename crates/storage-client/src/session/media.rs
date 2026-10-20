@@ -89,7 +89,8 @@ impl WriteField for SetMedia<'_> {
         // stays keyed by the raw content hash (TEE-internal binding), so the
         // double-AEAD's cross-session / cross-key protection is unchanged.
         let blob_key = media_field_name(ctx.tee_seal_key, ctx.session_id, &self.blob_hash);
-        let sealed = self.bytes.clone().vouch::<AuthN, _, _, _, _>(
+        let sealed = self.bytes.clone().vouch_with(
+            AuthN::Verified,
             |plaintext| -> Result<Vec<u8>, StoreError> {
                 let inner = aead::seal(&plaintext, self.applicant_session_token, &aad)?;
                 aead::seal(&inner, ctx.tee_seal_key, &aad).map_err(Into::into)
@@ -107,8 +108,11 @@ mod tests {
 
     fn exposed_bytes(bytes: Vec<u8>) -> Exposed<Vec<u8>, (AuthN,)> {
         boundary::outbound::to_untrusted(bytes)
-            .vouch_unchecked::<enclavid_boundary::AuthZ, _>(reason!("test"))
-            .vouch_unchecked::<enclavid_boundary::Covert, _>(reason!("test"))
+            .vouch(reason!(enclavid_boundary::AuthZ::Scoped, "test fixture"))
+            .vouch(reason!(
+                enclavid_boundary::Covert::AlreadyHeld,
+                "test fixture"
+            ))
     }
 
     #[test]

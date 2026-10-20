@@ -1,6 +1,6 @@
 //! Seals + persists each reducer round's result to the host-side
 //! `SessionStore`. The keyless execution-worker calls back once per `handle`
-//! round via `CallbackService::session_change` → [`SessionPersister::persist`];
+//! round via `RemoteCallbacks::session_change` → [`SessionPersister::persist`];
 //! we age-encrypt the disclosure THIS side recorded for the round (present only
 //! when a consent-disclosure prompt was accepted) to the client recipient
 //! pubkey, then translate state + sealed disclosure into a single atomic Write
@@ -223,7 +223,7 @@ impl SessionPersister {
         })
     }
 
-    /// api side of the keyless executor's `CallbackService::session_change`:
+    /// api side of the keyless executor's `RemoteCallbacks::session_change`:
     /// seal + persist one round's post-`state`, together with the consent and the
     /// captures THIS side recorded for the round, in ONE atomic host transaction.
     /// `state` and `decision` arrive over rpc; the other two are `Weak` upgrades
@@ -407,7 +407,7 @@ impl SessionPersister {
             .enumerate()
             .map(|(i, d)| -> Result<AppendDisclosure, CallbackError> {
                 let sealed = boundary::outbound::to_untrusted(d)
-                    .vouch::<Covert, _, _, _, _>(|d| -> Result<Vec<u8>, CallbackError> {
+                    .vouch_with(Covert::Transformed, |d| -> Result<Vec<u8>, CallbackError> {
                         shuffle_to_envelope_bytes(
                             d,
                             &self.session_id,
@@ -415,7 +415,8 @@ impl SessionPersister {
                             &self.shuffle_key,
                         )
                     })?
-                    .vouch_unchecked::<AuthZ, _>(reason!(
+                    .vouch(reason!(
+                        AuthZ::Matched,
                         "this side derived the envelope from the pre-round current_prompt on an \
                          accepted consent event, and /input had already refused that accept \
                          unless the applicant's echoed digest matched the same prompt — so this \
@@ -424,7 +425,7 @@ impl SessionPersister {
                          in the execution-worker, so a value can still carry what the screen did \
                          not render"
                     ))
-                    .vouch::<AuthN, _, _, _, _>(|bytes| -> Result<Vec<u8>, CallbackError> {
+                    .vouch_with(AuthN::Verified, |bytes| -> Result<Vec<u8>, CallbackError> {
                         seal_to_recipient(&bytes, &self.client_disclosure_pubkey).map_err(|e| {
                             safe_logger::debug!("disclosure seal failed: {e}");
                             CallbackError
@@ -448,26 +449,30 @@ impl SessionPersister {
     ) -> Result<SetState<'a>, CallbackError> {
         Ok(SetState {
             state: boundary::outbound::to_untrusted(state)
-                .vouch_unchecked::<AuthZ, _>(reason!(
-                    "inner-AEAD'd to applicant_session_token; receipt of ciphertext is not \
-                     access — AuthZ implicit in key possession"
+                .vouch(reason!(
+                    AuthZ::NoSecret,
+                    "inner-AEAD'd to applicant_session_token: the volume receives ciphertext \
+                     only the session's own token opens"
                 ))
-                .vouch::<Covert, _, _, _, _>(|state| -> Result<Vec<u8>, CallbackError> {
-                    // Close the size covert channel BY DOING it here: encode +
-                    // pad the WHOLE SessionState to a constant plaintext frame,
-                    // so the sealed ciphertext is fixed-size regardless of the
-                    // `state` and `current_prompt` content (both policy-
-                    // controlled). Errors if the encoding exceeds the frame.
-                    //
-                    // That error NAMES the state's true byte count, which is the
-                    // one number this padding exists to hide — so it stays here
-                    // and `CallbackError` carries none of it back to the party
-                    // whose policy chose the size.
-                    encode_padded(state).map_err(|e| {
-                        safe_logger::debug!("state pad: {e}");
-                        CallbackError
-                    })
-                })?,
+                .vouch_with(
+                    Covert::Transformed,
+                    |state| -> Result<Vec<u8>, CallbackError> {
+                        // Close the size covert channel BY DOING it here: encode +
+                        // pad the WHOLE SessionState to a constant plaintext frame,
+                        // so the sealed ciphertext is fixed-size regardless of the
+                        // `state` and `current_prompt` content (both policy-
+                        // controlled). Errors if the encoding exceeds the frame.
+                        //
+                        // That error NAMES the state's true byte count, which is the
+                        // one number this padding exists to hide — so it stays here
+                        // and `CallbackError` carries none of it back to the party
+                        // whose policy chose the size.
+                        encode_padded(state).map_err(|e| {
+                            safe_logger::debug!("state pad: {e}");
+                            CallbackError
+                        })
+                    },
+                )?,
             applicant_session_token: token,
         })
     }
@@ -492,11 +497,13 @@ impl SessionPersister {
             .map(|(hash, bytes)| SetMedia {
                 blob_hash: *hash,
                 bytes: boundary::outbound::to_untrusted(bytes.clone())
-                    .vouch_unchecked::<AuthZ, _>(reason!(
-                        "inner-AEAD'd to applicant_session_token; receipt of ciphertext is not \
-                         access — AuthZ implicit in key possession"
+                    .vouch(reason!(
+                        AuthZ::NoSecret,
+                        "inner-AEAD'd to applicant_session_token: the volume receives ciphertext \
+                         only the session's own token opens"
                     ))
-                    .vouch_unchecked::<Covert, _>(reason!(
+                    .vouch(reason!(
+                        Covert::AlreadyHeld,
                         "each op is one frame api itself read off /input and content-addressed \
                          here, so op COUNT and each op's LENGTH are functions of the applicant's \
                          upload alone — the per-frame partition of a body the host already \
@@ -535,11 +542,13 @@ impl SessionPersister {
         }
         SetMetadata(
             boundary::outbound::to_untrusted(&*metadata)
-                .vouch_unchecked::<AuthZ, _>(reason!(
-                    "only the attested CVM holds tee_seal_key; read as opaque ciphertext on \
-                     /connect — release implicit in key-possession"
+                .vouch(reason!(
+                    AuthZ::NoSecret,
+                    "sealed under tee_seal_key, which only the attested CVM holds: the volume \
+                     receives ciphertext it cannot read"
                 ))
-                .vouch_unchecked::<Covert, _>(reason!(
+                .vouch(reason!(
+                    Covert::AlreadyHeld,
                     "sealed under tee_seal_key; caveat: ciphertext size + write-presence \
                      host-observable. Metadata now grows 32 B per disclosure (one leaf hash) = \
                      a deterministic function of the disclosure count M, which the host ALREADY \
@@ -564,11 +573,12 @@ impl SessionPersister {
     /// DoS / a stomped concurrent winner, with no data-leak path.
     async fn commit_ops(&self, ops: &[&dyn WriteField]) -> Result<(), CallbackError> {
         let expected = self.current_version.load(Ordering::SeqCst);
-        let ops = outbound_fields(ops).vouch_unchecked::<Covert, _>(reason!(
-            "bounded: one state op; one metadata op when the round finished, disclosed, \
-             captured or is the first since preparing — the bit a finishing round gives \
-             anyway; at most one disclosure; one media op per frame the applicant \
-             uploaded, a count the policy does not choose"
+        let ops = outbound_fields(ops).vouch(reason!(
+            Covert::Bounded,
+            "one state op; one metadata op when the round finished, disclosed, captured or \
+             is the first since preparing — the bit a finishing round gives anyway; at most \
+             one disclosure; one media op per frame the applicant uploaded, a count the \
+             policy does not choose"
         ));
         let new_version = self
             .session_store
@@ -586,13 +596,16 @@ impl SessionPersister {
                 );
                 CallbackError
             })?
-            .trust_unchecked::<AuthN, _>(reason!(
+            .trust(reason!(
+                AuthN::Indifferent,
                 "version is a CAS token only; a lying host self-limits to DoS / stomp, no leak"
             ))
-            .trust_unchecked::<AuthZ, _>(reason!(
+            .trust(reason!(
+                AuthZ::NoPrincipal,
                 "version is not an ownership signal — no access decision hangs on it"
             ))
-            .trust_unchecked::<Replay, _>(reason!(
+            .trust(reason!(
+                Replay::Fresh,
                 "staleness surfaces as next-write CAS mismatch; the run aborts cleanly"
             ))
             .into_inner();
@@ -615,7 +628,7 @@ impl SessionPersister {
 /// ordering), and the envelope is padded to a constant SIZE
 /// ([`pad_envelope`]) so the host-observable age-ciphertext length can't
 /// relay the policy-controlled field byte-lengths. The subsequent
-/// `vouch::<AuthN>(seal_to_recipient)` closes confidentiality.
+/// `vouch_with(AuthN::Verified, seal_to_recipient)` closes confidentiality.
 ///
 /// `session_id` is embedded in the envelope as defense-in-depth:
 /// the metadata-level set commitment already binds the per-session

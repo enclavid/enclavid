@@ -7,13 +7,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed, Untrusted};
+use enclavid_boundary::{AuthN, Covert, Exposed, Untrusted};
 use engine_executor::{Event, SessionState};
 use engine_rpc::{
-    BundleMeta, BundleRef, BundleStream, ByteBuf, CallbackServiceClient,
-    ChildCallbacksServerShared, ChildService, ChildServiceClient, CompatToken, CompositionKey,
-    ExecError, ExecutorServiceUntrusted, Padded, PrepareOutcome, PrepareReply, PrepareRequest,
-    Preparing, PropsRead, RunOutcome, RunReply, RunRequest, RunStatus,
+    BundleMeta, BundleRef, BundleStream, ByteBuf, Callbacks, CompatToken, CompositionKey,
+    ExecError, Padded, PrepareOutcome, PrepareReply, PrepareRequest, Preparing, PropsRead,
+    RemoteChild, RemoteChildCallbacksServerShared, RemoteChildClient, RemoteExecutorAt, RunOutcome,
+    RunReply, RunRequest, RunStatus,
 };
 use engine_supervisor::{ChildRunner, Exit, ExitCause, SupervisorError};
 use remoc::codec::Ciborium;
@@ -22,6 +22,7 @@ use safe_logger::{debug, reason};
 use tokio::sync::{Semaphore, SemaphorePermit, TryAcquireError};
 use tokio::time::Instant;
 
+use crate::boundary::AnyCaller;
 use crate::bundles::{Bundles, Claim, CompositionEntry, LastUsed, Lease, entry_charge};
 use crate::cwasm::{Cwasm, Incoming};
 use crate::relay::RelayCallbacks;
@@ -87,7 +88,7 @@ async fn child_reply<T>(
     }
 }
 
-/// The `engine_rpc::ExecutorService` impl. Shared (`Arc`) across api connections;
+/// The `engine_rpc::RemoteExecutor` impl. Shared (`Arc`) across api connections;
 /// each round runs in its own child, spawned + bounded + deadline-guarded by
 /// [`ChildRunner`].
 pub(crate) struct Supervisor {
@@ -245,7 +246,7 @@ impl Supervisor {
         session_state: SessionState,
         event: Event,
         props: Vec<u8>,
-        callbacks: CallbackServiceClient<Ciborium>,
+        callbacks: Callbacks<AnyCaller>,
     ) -> Result<RunStatus, ExecError> {
         let entry = lease.entry().clone();
         let cwasm_fd = entry.cwasm.as_fd();
@@ -267,7 +268,7 @@ impl Supervisor {
             .run(
                 Some(cwasm_fd),
                 lease,
-                move |client: ChildServiceClient<Ciborium>| async move {
+                move |client: RemoteChildClient<Ciborium>| async move {
                     // Prime: the child re-opens its inherited fd
                     // (`/proc/self/fd/N`) and MMAPs it via `deserialize_file`; the
                     // cwasm never crosses the child hop — only the fd-path + small
@@ -285,7 +286,10 @@ impl Supervisor {
                         upstream: callbacks,
                     });
                     let (relay_server, relay_client) =
-                        ChildCallbacksServerShared::<_, Ciborium>::new(relay, callback_buffer);
+                        RemoteChildCallbacksServerShared::<_, Ciborium>::new(
+                            relay,
+                            callback_buffer,
+                        );
                     tokio::spawn(async move {
                         let _ = relay_server.serve(true).await;
                     });
@@ -332,7 +336,7 @@ impl Supervisor {
             .run(
                 Some(cwasm_fd),
                 lease,
-                move |client: ChildServiceClient<Ciborium>| async move {
+                move |client: RemoteChildClient<Ciborium>| async move {
                     let bundle_ref = BundleRef {
                         cwasm_path: Cwasm::path_in_child(),
                         embedded_imports,
@@ -417,64 +421,7 @@ impl Slot {
     }
 }
 
-/// Take a round's inputs out of the scope this role named.
-///
-/// INDIFFERENT, kind 4, and it is a property of this role's POSITION rather than
-/// of the bytes. Nothing derived from a round leaves the caller's own partition:
-/// the slot it names is inside that partition, the work runs in a disposable child,
-/// and the answer goes back only to whoever asked. So hostile input reaches its own
-/// round and its own caller, and who produced it cannot matter to anyone else.
-///
-/// Not "nothing outlives the call", which is the compile-worker's sentence and is
-/// false here. This role HAS a cache: `run_with_bundle` files an entry under the
-/// key this request named, and it is served to later calls for as long as it is
-/// kept. That is a difference between the two leaves rather than a hole in this
-/// one — the compile worker's statelessness and this worker's partitioning are the
-/// two ways the same missing pin gets answered — but the sentence had to say which
-/// one it is using.
-///
-/// The decoder bounds are the PREMISE of that, not the discharge — "the whole
-/// range is safe to act on" is only a sentence if the range is bounded, and until
-/// this leg had bounds it was not:
-///
-///   * `composition_key` — `CompositionKey`'s decoder: 64 lowercase hex, so it is
-///     a digest rendering and nothing else.
-///   * `session_state` — `Padded`'s exact-frame decode: a frame of any other size
-///     is refused outright.
-///   * `props` — `Padded`'s exact-frame decode, and the byte bound where the
-///     frame opens; what matters to this role is that the props are finite, not
-///     that they match.
-///   * `event` — the frame count and clip budget in `Clip`'s decoder, likewise.
-///   * `max_cwasm_bytes` — any number: it only decides whether the caller's own
-///     entry is a hit or a miss, and refuses a bundle of more.
-///
-/// None of that is a check on AUTHENTICITY and none of it is claimed as one —
-/// `engine_rpc::keys` says as much about its own types. The thing that would make
-/// authenticity checkable is a pin this leaf cannot have.
-fn open_round(req: Untrusted<RunRequest, (AuthN,)>) -> RunRequest {
-    req.trust_unchecked::<AuthN, _>(enclavid_boundary::reason!(
-        "indifferent: nothing derived from a round leaves the caller's own partition \
-         — the slot it names is inside that partition, the work runs in a disposable \
-         child, and the answer goes back only to whoever asked; every field was \
-         bounded by its own decoder, which is what makes that range a finite one"
-    ))
-    .into_inner()
-}
-
-/// Take a preparation's inputs out of the scope this role named: INDIFFERENT,
-/// for the reason [`open_round`] gives, over fewer fields — the key, the
-/// ceiling, and the props JSON held to the same byte bound.
-fn open_preparation(req: Untrusted<PrepareRequest, (AuthN,)>) -> PrepareRequest {
-    req.trust_unchecked::<AuthN, _>(enclavid_boundary::reason!(
-        "indifferent: nothing derived from a preparation leaves the caller's own \
-         partition — the slot it names is inside it, the props are read in a \
-         disposable child, and the answer goes back only to whoever asked; the key \
-         and the props were bounded by their own decoders"
-    ))
-    .into_inner()
-}
-
-/// Take a bundle a caller streams in out of the scope this role named.
+/// Take a bundle a caller streams in out of the scope this role's end opened.
 ///
 /// NO KIND FITS, and that is the honest answer rather than a gap to be filled.
 /// Nothing here re-derives these bytes — this role holds no Cranelift by design.
@@ -490,72 +437,24 @@ fn open_preparation(req: Untrusted<PrepareRequest, (AuthN,)>) -> PrepareRequest 
 /// and the sealed file reads as a serialized component, and the deserialization
 /// runs in a disposable per-round child behind an address-space boundary. A
 /// standing accepted risk, which is what it should look like on every audit.
-fn open_bundle(bundle: Untrusted<BundleStream, (AuthN,)>) -> BundleStream {
+fn open_bundle(bundle: Untrusted<BundleStream, (AuthN,), AnyCaller>) -> BundleStream {
     bundle
-        .trust_unchecked::<AuthN, _>(reason!(
-            "no kind fits — an accepted risk: no key or pin covers these bytes, \
-             their length and digest are the sender's own word, and the range is \
-             native code. Contained by the caller's own L1 partition and a \
-             disposable child around the deserialize; admitted only whole, \
-             digest-matched and component-shaped"
+        .trust_accept_risk(reason!(
+            AuthN::AcceptedRisk,
+            "no key or pin covers these bytes, their length and digest are the sender's \
+             own word, and the range is native code. Contained by the caller's own L1 \
+             partition and a disposable child around the deserialize; admitted only \
+             whole, digest-matched and component-shaped"
         ))
         .into_inner()
 }
 
-/// What is still open on a value this role is about to release to its caller.
-///
-/// The same three the outbound perimeter opens everywhere, read in this role's own
-/// position:
-///
-///   * `AuthN` — CONFIDENTIALITY: can the host read these bytes? It splices this
-///     hop and counts every one of them.
-///   * `AuthZ` — which party may receive this? The sharp one here, because this
-///     role cannot answer "which party" at all: it runs `AcceptAny`.
-///   * `Covert` — hidden bandwidth in the encoded shape. The only axis that
-///     differs per value, and the only one closed by doing work.
-type ToCaller<T> = Exposed<T, (AuthN, AuthZ, Covert)>;
-
-/// The two answers that are the same for everything this role releases.
-///
-/// `AuthN` is IDENTIFIED in the sense the outbound perimeter uses it — the hop is
-/// mutual RA-TLS terminated inside two SNP guests, so the host process that splices
-/// it carries ciphertext. That this side cannot say WHICH guest is the other
-/// concern's problem, not this one's.
-///
-/// `AuthZ` is NO-SECRET, and it is the load-bearing sentence on this whole leg.
-/// This role cannot identify its caller, so "may this party receive it" has no
-/// answer of the usual kind. What makes the release safe is that every input to it
-/// came from that same caller: the round's arguments it just sent, and the compiled
-/// code it cached itself, in a partition only it can reach.
-///
-/// Note the second half is not "a pure function of this call". A cache HIT serves
-/// bytes an earlier call cached, and a cache MISS returns this build's own ABI
-/// id, which is no function of the request at all. Both stay NO-SECRET for the same
-/// underlying reason — the caller supplied the one and already holds the other —
-/// but the shorter sentence would have been false.
-///
-/// It is the partition that carries this, which is why [`Caller`] builds the slot
-/// from a measurement no caller can choose, and why the compile-worker's
-/// statelessness is described as load-bearing rather than incidental. If this role
-/// ever returns something derived from ANOTHER caller's input, this sentence
-/// becomes false and the release becomes a leak.
-fn to_caller<T>(value: T) -> Exposed<T, (Covert,)> {
-    let open: ToCaller<T> = Exposed::new(value);
-    open.vouch_unchecked::<AuthN, _>(reason!(
-        "identified: the hop is mutual RA-TLS terminated inside two SNP guests, so \
-         the host process that splices it carries ciphertext"
-    ))
-    .vouch_unchecked::<AuthZ, _>(reason!(
-        "no-secret: computed from what this caller sent, over code this caller itself \
-         cached, inside its own L1 partition — every input is one it supplied, so \
-         it learns nothing it did not already hold and no answer about WHICH caller \
-         is needed"
-    ))
-}
-
 /// Mint a completed round's status as a released, constant-size frame.
 ///
-/// `Covert` is TRANSFORMED, and it is done rather than promised: the peel's
+/// `AuthZ` is answered by this end's declaration (`crate::boundary`), type by
+/// type; what differs per value is `Covert`.
+///
+/// `Covert` is TRANSFORMED, and it is done rather than promised: the work's
 /// codomain IS the wire type, so there is no path from here to a `RunOutcome::Ran`
 /// that skipped the padding. Both halves of what it hides are the policy's to
 /// choose — the opaque state and the resolved prompt — and this is the hop the
@@ -568,8 +467,8 @@ fn to_caller<T>(value: T) -> Exposed<T, (Covert,)> {
 /// would not fit here failed there first and the round already returned. Naming
 /// the policy here would attribute a case this side reaches only when the earlier
 /// check did not, which is a case it cannot explain.
-fn outbound_ran(status: &RunStatus) -> Result<Exposed<RunOutcome, ()>, ExecError> {
-    to_caller(status).vouch::<Covert, _, _, _, _>(|s| {
+fn outbound_ran(status: &RunStatus) -> Result<Exposed<RunOutcome, (), AnyCaller>, ExecError> {
+    AnyCaller::expose_as::<RunOutcome, _>(status).vouch_with(Covert::Transformed, |s| {
         Padded::seal(s).map(RunOutcome::Ran).map_err(|e| {
             debug!("framing the round's status: {e}");
             ExecError::Unknown
@@ -581,17 +480,18 @@ fn outbound_ran(status: &RunStatus) -> Result<Exposed<RunOutcome, ()>, ExecError
 /// variant plus a [`CompatToken`], whose shape caps it at 64 characters of a fixed
 /// alphabet and whose value is a constant of this measured build — so what varies
 /// is nothing this side chose per call.
-fn outbound_cache_miss(compat_token: CompatToken) -> Exposed<RunOutcome, ()> {
-    to_caller(RunOutcome::CacheMiss { compat_token }).vouch_unchecked::<Covert, _>(reason!(
-        "bounded: a variant plus this build's own ABI id, capped at 64 characters of \
-         a fixed alphabet and identical on every miss this image serves"
+fn outbound_cache_miss(compat_token: CompatToken) -> Exposed<RunOutcome, (), AnyCaller> {
+    AnyCaller::expose(RunOutcome::CacheMiss { compat_token }).vouch(reason!(
+        Covert::Bounded,
+        "a variant plus this build's own ABI id, capped at 64 characters of a fixed \
+         alphabet and identical on every miss this image serves"
     ))
 }
 
 /// Mint the post-miss reply. Same frame, same reasons as [`outbound_ran`] — a
 /// different envelope around the identical value, because this call always runs.
-fn outbound_reply(status: &RunStatus) -> Result<Exposed<RunReply, ()>, ExecError> {
-    to_caller(status).vouch::<Covert, _, _, _, _>(|s| {
+fn outbound_reply(status: &RunStatus) -> Result<Exposed<RunReply, (), AnyCaller>, ExecError> {
+    AnyCaller::expose_as::<RunReply, _>(status).vouch_with(Covert::Transformed, |s| {
         Padded::seal(s)
             .map(|status| RunReply { status })
             .map_err(|e| {
@@ -605,8 +505,10 @@ fn outbound_reply(status: &RunStatus) -> Result<Exposed<RunReply, ()>, ExecError
 /// TRANSFORMED, as a round's status is: whether the props were read or refused,
 /// and how long they are once read, are what the frame hides — and what a child
 /// that broke out would choose.
-fn outbound_prepared(read: &PropsRead) -> Result<Exposed<PrepareOutcome, ()>, ExecError> {
-    to_caller(read).vouch::<Covert, _, _, _, _>(|r| {
+fn outbound_prepared(
+    read: &PropsRead,
+) -> Result<Exposed<PrepareOutcome, (), AnyCaller>, ExecError> {
+    AnyCaller::expose_as::<PrepareOutcome, _>(read).vouch_with(Covert::Transformed, |r| {
         Padded::seal(r).map(PrepareOutcome::Prepared).map_err(|e| {
             debug!("framing what the preparation read: {e}");
             ExecError::Unknown
@@ -615,17 +517,20 @@ fn outbound_prepared(read: &PropsRead) -> Result<Exposed<PrepareOutcome, ()>, Ex
 }
 
 /// Mint a preparation's cache miss, BOUNDED as [`outbound_cache_miss`] is.
-fn outbound_prepare_miss(compat_token: CompatToken) -> Exposed<PrepareOutcome, ()> {
-    to_caller(PrepareOutcome::CacheMiss { compat_token }).vouch_unchecked::<Covert, _>(reason!(
-        "bounded: a variant plus this build's own ABI id, capped at 64 characters of \
-         a fixed alphabet and identical on every miss this image serves"
+fn outbound_prepare_miss(compat_token: CompatToken) -> Exposed<PrepareOutcome, (), AnyCaller> {
+    AnyCaller::expose(PrepareOutcome::CacheMiss { compat_token }).vouch(reason!(
+        Covert::Bounded,
+        "a variant plus this build's own ABI id, capped at 64 characters of a fixed \
+         alphabet and identical on every miss this image serves"
     ))
 }
 
 /// Mint a preparation's post-miss reply: the frame of [`outbound_prepared`] in
 /// the envelope of a call that always prepares.
-fn outbound_prepare_reply(read: &PropsRead) -> Result<Exposed<PrepareReply, ()>, ExecError> {
-    to_caller(read).vouch::<Covert, _, _, _, _>(|r| {
+fn outbound_prepare_reply(
+    read: &PropsRead,
+) -> Result<Exposed<PrepareReply, (), AnyCaller>, ExecError> {
+    AnyCaller::expose_as::<PrepareReply, _>(read).vouch_with(Covert::Transformed, |r| {
         Padded::seal(r)
             .map(|props| PrepareReply { props })
             .map_err(|e| {
@@ -635,24 +540,10 @@ fn outbound_prepare_reply(read: &PropsRead) -> Result<Exposed<PrepareReply, ()>,
     })
 }
 
-impl ExecutorServiceUntrusted for Caller {
-    /// What this role does not know about its caller.
-    ///
-    /// `AuthN` and nothing else. The listener runs `AcceptAny` — it cannot pin api
-    /// without a cycle — so a completed handshake proves a genuine SNP guest on
-    /// this part and NOT that it is api. That is the one question open here, and
-    /// it is open in a way it never is on api's side of the same wire: the
-    /// sentence `trust_unchecked::<AuthN>(reason!("RA-TLS against a pinned
-    /// measurement"))` is true over there and false here.
-    ///
-    /// Not `AuthZ`: a caller reaches only its own L1 partition and the name of
-    /// another's is not expressible from here, which is a shape rather than a
-    /// judgement — see [`Caller`]. Not `Replay`: a round is a call with arguments,
-    /// not a read from a store, so there is no version for one to be stale from.
-    /// Not `Asserted`: that asks whose word a value is, and the role that can ask
-    /// it about THIS one is the role receiving this one's output.
-    type Scope = (AuthN,);
-
+/// The contract as this role serves it, at its end of the leg ([`AnyCaller`]):
+/// what that end's declaration answers arrives answered, and the rest — the
+/// bundle's `AuthN`, each reply's `Covert` — is answered here.
+impl RemoteExecutorAt<AnyCaller> for Caller {
     /// The L1-cache path: run the composition if it is cached, else report the miss
     /// so the orchestrator resolves the bundle (under ITS OWN key) and re-drives via
     /// [`run_with_bundle`](Self::run_with_bundle). No bundle crosses on this call.
@@ -662,9 +553,9 @@ impl ExecutorServiceUntrusted for Caller {
     /// resolves to this one's terms.
     async fn run(
         &self,
-        req: Untrusted<RunRequest, Self::Scope>,
-        callbacks: CallbackServiceClient<Ciborium>,
-    ) -> Result<Exposed<RunOutcome, ()>, ExecError> {
+        req: Untrusted<RunRequest, (), AnyCaller>,
+        callbacks: Callbacks<AnyCaller>,
+    ) -> Result<Exposed<RunOutcome, (), AnyCaller>, ExecError> {
         let _round = round_place(&self.sup.rounds)?;
         let RunRequest {
             composition_key,
@@ -672,7 +563,7 @@ impl ExecutorServiceUntrusted for Caller {
             props,
             session_state,
             event,
-        } = open_round(req);
+        } = req.into_inner();
         let kept = self.sup.bundles.lease(&self.slot(&composition_key));
         match kept.and_then(|lease| lease.within(max_cwasm_bytes)) {
             // The frame comes off HERE, at the api hop, and goes back on in the
@@ -703,10 +594,10 @@ impl ExecutorServiceUntrusted for Caller {
     /// can poison neither another composition's slot nor another peer's.
     async fn run_with_bundle(
         &self,
-        req: Untrusted<RunRequest, Self::Scope>,
-        bundle: Untrusted<BundleStream, Self::Scope>,
-        callbacks: CallbackServiceClient<Ciborium>,
-    ) -> Result<Exposed<RunReply, ()>, ExecError> {
+        req: Untrusted<RunRequest, (), AnyCaller>,
+        bundle: Untrusted<BundleStream, (AuthN,), AnyCaller>,
+        callbacks: Callbacks<AnyCaller>,
+    ) -> Result<Exposed<RunReply, (), AnyCaller>, ExecError> {
         // Before the cache fill as well as the child: a round waiting for either
         // holds its request.
         let _round = round_place(&self.sup.rounds)?;
@@ -716,7 +607,7 @@ impl ExecutorServiceUntrusted for Caller {
             props,
             session_state,
             event,
-        } = open_round(req);
+        } = req.into_inner();
         let lease = self
             .sup
             .cache_bundle(
@@ -745,14 +636,14 @@ impl ExecutorServiceUntrusted for Caller {
     /// else report the miss, as [`run`](Self::run) does.
     async fn prepare(
         &self,
-        req: Untrusted<PrepareRequest, Self::Scope>,
-    ) -> Result<Exposed<PrepareOutcome, ()>, ExecError> {
+        req: Untrusted<PrepareRequest, (), AnyCaller>,
+    ) -> Result<Exposed<PrepareOutcome, (), AnyCaller>, ExecError> {
         let _round = round_place(&self.sup.rounds)?;
         let PrepareRequest {
             composition_key,
             max_cwasm_bytes,
             preparing,
-        } = open_preparation(req);
+        } = req.into_inner();
         let kept = self.sup.bundles.lease(&self.slot(&composition_key));
         match kept.and_then(|lease| lease.within(max_cwasm_bytes)) {
             Some(lease) => self
@@ -769,15 +660,15 @@ impl ExecutorServiceUntrusted for Caller {
     /// [`prepare`](Self::prepare) does.
     async fn prepare_with_bundle(
         &self,
-        req: Untrusted<PrepareRequest, Self::Scope>,
-        bundle: Untrusted<BundleStream, Self::Scope>,
-    ) -> Result<Exposed<PrepareReply, ()>, ExecError> {
+        req: Untrusted<PrepareRequest, (), AnyCaller>,
+        bundle: Untrusted<BundleStream, (AuthN,), AnyCaller>,
+    ) -> Result<Exposed<PrepareReply, (), AnyCaller>, ExecError> {
         let _round = round_place(&self.sup.rounds)?;
         let PrepareRequest {
             composition_key,
             max_cwasm_bytes,
             preparing,
-        } = open_preparation(req);
+        } = req.into_inner();
         let lease = self
             .sup
             .cache_bundle(

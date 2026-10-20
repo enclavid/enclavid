@@ -280,16 +280,20 @@ pub fn build_attestor() -> Arc<dyn Attestor> {
     // A certificate for another machine, or for a superseded platform TCB,
     // fails that and never becomes an attestor.
     let attestor = certificate
-        .trust::<AuthN, _, _, _, _>(|certificate| SnpAttestor::new(MILAN_ASK, &certificate))
+        .trust_with(AuthN::Verified, |certificate| {
+            SnpAttestor::new(MILAN_ASK, &certificate)
+        })
         .expect(
             "the certificate this launch gave does not endorse this chip at this \
              platform TCB",
         )
-        .trust_unchecked::<AuthZ, _>(reason!(
+        .trust(reason!(
+            AuthZ::NoPrincipal,
             "a VCEK is published by AMD to anyone who asks for it; there is no party for \
              whom receiving one is unauthorised"
         ))
-        .trust_unchecked::<Replay, _>(reason!(
+        .trust(reason!(
+            Replay::Fresh,
             "the same construction rejects a stale answer — a certificate for an earlier \
              platform TCB cannot verify the report this chip just signed"
         ))

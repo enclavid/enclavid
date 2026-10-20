@@ -15,6 +15,7 @@ members = [
     "crates/hatch-rpc",
     "crates/engine-supervisor",
     "crates/boundary",
+    "crates/boundary-macros",
     "crates/crypto",
     "crates/embedded",
     "crates/kbs-client",

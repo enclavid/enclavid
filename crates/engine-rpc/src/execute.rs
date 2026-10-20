@@ -14,9 +14,9 @@
 //! [`RunOutcome::CacheMiss`] with its `compat_token` and running nothing. The
 //! orchestrator then resolves the bundle under its own key — from L2, or by
 //! compiling on an L2 miss (OCI pull + compile-worker) and sealing the result
-//! into L2 — and calls [`ExecutorService::run_with_bundle`]. The bundle streams
+//! into L2 — and calls [`RemoteExecutor::run_with_bundle`]. The bundle streams
 //! beside that call ([`BundleStream`]), so the request is the round alone.
-//! Preparing a session ([`ExecutorService::prepare`]) takes the same two paths
+//! Preparing a session ([`RemoteExecutor::prepare`]) takes the same two paths
 //! with no round: it fills the L1 ahead of the session's rounds, and reads the
 //! session's props against the type the composition declares for them.
 //!
@@ -198,6 +198,30 @@ impl From<CallbackError> for ExecError {
     }
 }
 
+/// What a policy names a captured blob by, and the key
+/// [`RemoteCallbacks::media_load`] takes: blake3 over an applicant frame, computed
+/// by api from the frame it read off `/input`. The worker sends whatever 32 bytes
+/// the policy chose; api serves only the hashes it recorded for the session.
+///
+/// One CBOR byte string, for the reason [`MediaBytes`] is: as an integer array its
+/// length on this hop would vary with which hash the policy named.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaHash(#[serde(with = "serde_bytes")] pub [u8; 32]);
+
+/// A captured blob's bytes, as [`RemoteCallbacks::media_load`] hands them back.
+///
+/// One CBOR byte string. As ciborium's integer array a capture cost close to twice
+/// its length, and the length on this hop — which the host splices — then varied
+/// with how many of the image's bytes fell under 0x18.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaBytes(#[serde(with = "serde_bytes")] pub Vec<u8>);
+
+/// What [`RemoteCallbacks::session_change`] answers: the round's state, and its
+/// decision if it made one, are committed. A write that did not land is a
+/// [`CallbackError`], so this one value is all the reply ever says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Committed;
+
 /// One reducer round's inputs on the wire. `session_state`/`event`/`props` are the
 /// round's already-decrypted inputs (the seal key stays orchestrator-side).
 ///
@@ -293,11 +317,11 @@ mod props {
 /// One reducer round's result on the API hop: the next [`RunStatus`], framed.
 ///
 /// State is NOT returned — it is persisted mid-run via
-/// [`CallbackService::session_change`] (the orchestrator holds the seal key),
+/// [`RemoteCallbacks::session_change`] (the orchestrator holds the seal key),
 /// and the orchestrator discards the engine's vestigial returned copy, exactly
 /// as the in-process path did.
 ///
-/// The envelope exists for this hop alone. [`ChildService::run`] returns a bare
+/// The envelope exists for this hop alone. [`RemoteChild::run`] returns a bare
 /// [`RunStatus`], because the seam behind it is a socketpair inside the
 /// execution-worker with no host on it — framing there would be a megabyte of
 /// memcpy per round against no observer.
@@ -310,7 +334,7 @@ pub struct RunReply {
     pub status: Padded<RunStatus>,
 }
 
-/// The result of `ExecutorService::run` (the cache-only path): either the round
+/// The result of `RemoteExecutor::run` (the cache-only path): either the round
 /// ran from the worker's L1, or the composition is NOT cached. On
 /// [`CacheMiss`](RunOutcome::CacheMiss) the orchestrator resolves the compiled
 /// bundle under ITS OWN `composition_key` (L2 read or cold compile) and calls
@@ -374,7 +398,7 @@ pub enum PropsRead {
     Refused(PropsRefusal),
 }
 
-/// The result of `ExecutorService::prepare`, the cache-only path, as
+/// The result of `RemoteExecutor::prepare`, the cache-only path, as
 /// [`RunOutcome`] is `run`'s: the composition was held, or it is NOT cached and
 /// the orchestrator resolves it under its own key for
 /// `prepare_with_bundle`.
@@ -387,7 +411,7 @@ pub enum PrepareOutcome {
     },
 }
 
-/// The result of `ExecutorService::prepare_with_bundle`, which always holds the
+/// The result of `RemoteExecutor::prepare_with_bundle`, which always holds the
 /// composition it is handed.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -401,20 +425,21 @@ pub struct PrepareReply {
 /// side. Bundle resolution is NOT here — the composition is known before the run,
 /// so the orchestrator resolves it UP FRONT (see [`RunOutcome::CacheMiss`]) under
 /// its own key, keeping the OCI-pull / compile probe surface off the worker
-/// entirely. A [`CallbackServiceClient`] is passed to the worker as an argument to
-/// `ExecutorService::run` — remoc multiplexes these callbacks over the SAME
-/// connection as the in-flight run, so the key never crosses to the worker.
+/// entirely. A client for it is passed to the worker as an argument to
+/// `RemoteExecutor::run`, and the worker holds it as [`Callbacks`](crate::Callbacks)
+/// at its end — remoc multiplexes these callbacks over the SAME connection as the
+/// in-flight run, so the key never crosses to the worker.
+///
+/// `#[protocol]` writes what its ends declare (`RemoteCallbacksCalls` /
+/// `RemoteCallbacksServes`) and how its server receives (`RemoteCallbacksAt`),
+/// which is the only way api answers these calls.
+#[enclavid_boundary_macros::protocol]
 #[remoc::rtc::remote]
-pub trait CallbackService {
+pub trait RemoteCallbacks {
     /// Rehydrate a stored blob by content hash (orchestrator unseals). `None` =
     /// miss (unknown / never-stored ref) — the worker's `from-blob-ref` traps
     /// on it, same as the in-process gate.
-    ///
-    /// The blob crosses as one CBOR byte string. As ciborium's integer array a
-    /// capture cost close to twice its length, and the length on this hop — which
-    /// the host splices — then varied with how many of the image's bytes fell
-    /// under 0x18.
-    async fn media_load(&self, hash: [u8; 32]) -> Result<Option<ByteBuf>, CallbackError>;
+    async fn media_load(&self, hash: MediaHash) -> Result<Option<MediaBytes>, CallbackError>;
 
     /// Seal + persist the post-round session state and, on the round that
     /// finishes, the policy's decision — the owned form of the engine's borrowed
@@ -439,18 +464,18 @@ pub trait CallbackService {
         &self,
         state: Padded<SessionState>,
         decision: Padded<Option<Decision>>,
-    ) -> Result<(), CallbackError>;
+    ) -> Result<Committed, CallbackError>;
 }
 
 /// The execute boundary as a remote trait. The execution-worker serves it; the
-/// orchestrator calls it with a [`CallbackServiceClient`] pointing at its own
+/// orchestrator calls it with a [`RemoteCallbacksClient`] pointing at its own
 /// callback server so the keyless worker can rehydrate media / persist state
 /// mid-round without ever holding the seal key. Two methods split the cache paths
 /// cleanly:
 ///
-///   * [`run`](ExecutorService::run) — the L1-cache path, NO bundle: `Ran` on a
+///   * [`run`](RemoteExecutor::run) — the L1-cache path, NO bundle: `Ran` on a
 ///     hit, [`RunOutcome::CacheMiss`] on a miss.
-///   * [`run_with_bundle`](ExecutorService::run_with_bundle) — the post-miss path:
+///   * [`run_with_bundle`](RemoteExecutor::run_with_bundle) — the post-miss path:
 ///     the orchestrator supplies the bundle it resolved under its OWN key; the
 ///     worker files it in L1 and runs. Always runs, so it returns the [`RunReply`]
 ///     directly (no cache-miss outcome).
@@ -458,12 +483,19 @@ pub trait CallbackService {
 /// The worker only ever caches / serves under the orchestrator's `composition_key`
 /// and never names one back, so a compromised worker cannot poison another
 /// session's cache slot.
+///
+/// `#[protocol]` writes what its ends declare (`RemoteExecutorCalls` /
+/// `RemoteExecutorServes`) and how its server receives (`RemoteExecutorAt`).
+/// The `callbacks` client is a capability handed over, not a value: the server
+/// gets it as [`Callbacks`](crate::Callbacks), so it calls back through its end's
+/// declaration and never through the raw client.
+#[enclavid_boundary_macros::protocol]
 #[remoc::rtc::remote]
-pub trait ExecutorService {
+pub trait RemoteExecutor {
     async fn run(
         &self,
         req: RunRequest,
-        callbacks: CallbackServiceClient<remoc::codec::Ciborium>,
+        #[capability(crate::Callbacks)] callbacks: RemoteCallbacksClient<remoc::codec::Ciborium>,
     ) -> Result<RunOutcome, ExecError>;
 
     /// `bundle` streams beside the request rather than riding in it — a header in
@@ -478,15 +510,15 @@ pub trait ExecutorService {
         &self,
         req: RunRequest,
         bundle: BundleStream,
-        callbacks: CallbackServiceClient<remoc::codec::Ciborium>,
+        #[capability(crate::Callbacks)] callbacks: RemoteCallbacksClient<remoc::codec::Ciborium>,
     ) -> Result<RunReply, ExecError>;
 
     /// Hold the composition for the session's rounds, and read its props when
     /// asked — no round: see [`PrepareRequest`]. The L1-cache path, as
-    /// [`run`](ExecutorService::run) is: [`PrepareOutcome::CacheMiss`] on a miss.
+    /// [`run`](RemoteExecutor::run) is: [`PrepareOutcome::CacheMiss`] on a miss.
     async fn prepare(&self, req: PrepareRequest) -> Result<PrepareOutcome, ExecError>;
 
-    /// The post-miss path, as [`run_with_bundle`](ExecutorService::run_with_bundle)
+    /// The post-miss path, as [`run_with_bundle`](RemoteExecutor::run_with_bundle)
     /// is: the bundle streams beside the request, and the worker files it in L1
     /// and prepares.
     async fn prepare_with_bundle(
@@ -500,15 +532,15 @@ pub trait ExecutorService {
 /// a per-child socketpair, never over the api hop).
 ///
 /// The execution-worker is a SUPERVISOR: it holds the bundle-byte L1 and runs NO
-/// wasm itself. Per reducer round it spawns a fresh [`ChildService`] PROCESS,
-/// [`prime`](ChildService::prime)s it once with the compiled bundle, drives
-/// exactly one [`run`](ChildService::run), and discards the child. Untrusted
+/// wasm itself. Per reducer round it spawns a fresh [`RemoteChild`] PROCESS,
+/// [`prime`](RemoteChild::prime)s it once with the compiled bundle, drives
+/// exactly one [`run`](RemoteChild::run), and discards the child. Untrusted
 /// policy wasm — and the `Component::deserialize` unsafe sink — execute ONLY in
 /// that disposable per-round process, so a sandbox escape is confined to one
 /// round's plaintext (one applicant) behind an OS address-space boundary, with no
 /// cross-round persistence.
 #[remoc::rtc::remote]
-pub trait ChildService {
+pub trait RemoteChild {
     /// MMAP the cwasm (via `Component::deserialize_file` on `bundle.cwasm_path`)
     /// and build the reusable `InstancePre` (the engine's `prime`). The 7-15 MiB
     /// cwasm is NOT shipped — only the [`BundleRef`] path + small metadata cross
@@ -541,7 +573,7 @@ pub trait ChildService {
         event: Event,
         props: ByteBuf,
         fuel: u64,
-        callbacks: ChildCallbacksClient<remoc::codec::Ciborium>,
+        callbacks: RemoteChildCallbacksClient<remoc::codec::Ciborium>,
     ) -> Result<RunStatus, ExecError>;
 
     /// Read the consumer's props, the JSON value, as the type the primed
@@ -554,24 +586,24 @@ pub trait ChildService {
 /// during a run. The supervisor already resolved and primed the bundle before
 /// spawning the child, so the process running UNTRUSTED wasm has nothing to ask
 /// for and is handed no way to ask — blast-radius minimization. The supervisor's
-/// relay implements this and forwards each call to its own upstream
-/// [`CallbackServiceClient`] (→ api, which holds the seal key). The two traits
-/// carry the same pair of methods, `media_load` / `session_change`, so the relay
-/// is a straight forward.
+/// relay implements this and forwards each call to api, which holds the seal key,
+/// through [`Callbacks`](crate::Callbacks) at its own end. The two traits carry the
+/// same pair of methods, `media_load` / `session_change`, so the relay is a
+/// straight forward.
 #[remoc::rtc::remote]
-pub trait ChildCallbacks {
+pub trait RemoteChildCallbacks {
     /// Rehydrate a stored blob by content hash (api unseals). `None` = miss.
-    async fn media_load(&self, hash: [u8; 32]) -> Result<Option<ByteBuf>, CallbackError>;
+    async fn media_load(&self, hash: MediaHash) -> Result<Option<MediaBytes>, CallbackError>;
 
     /// Seal + persist the post-round state and, if the round finished, its
     /// decision — relayed to api's `session_change`, committed together under the
     /// seal key this process never holds. Neither the round's disclosure nor its
-    /// captures are carried; see [`CallbackService::session_change`].
+    /// captures are carried; see [`RemoteCallbacks::session_change`].
     async fn session_change(
         &self,
         state: SessionState,
         decision: Option<Decision>,
-    ) -> Result<(), CallbackError>;
+    ) -> Result<Committed, CallbackError>;
 }
 
 #[cfg(test)]
@@ -582,27 +614,55 @@ mod execute_tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::split;
 
+    /// A blob's bytes cross as one CBOR byte string, so the length of its encoding
+    /// is the blob's own and not a function of which bytes it holds.
+    #[test]
+    fn media_bytes_encode_to_their_length_whatever_they_hold() {
+        let encoded = |byte| {
+            let mut wire = Vec::new();
+            ciborium::into_writer(&MediaBytes(vec![byte; 1000]), &mut wire).expect("encodes");
+            wire.len()
+        };
+        assert_eq!(encoded(0x00), encoded(0xFF));
+    }
+
+    /// A hash crosses as one CBOR byte string of its own fixed length, whichever
+    /// hash the policy named, and a shorter string does not decode as one.
+    #[test]
+    fn a_media_hash_encodes_to_one_length_and_a_short_one_is_refused() {
+        let encoded = |byte| {
+            let mut wire = Vec::new();
+            ciborium::into_writer(&MediaHash([byte; 32]), &mut wire).expect("encodes");
+            wire
+        };
+        assert_eq!(encoded(0x00).len(), encoded(0xFF).len());
+        let mut short = Vec::new();
+        ciborium::into_writer(&serde_bytes::ByteBuf::from(vec![0u8; 31]), &mut short)
+            .expect("encodes");
+        assert!(ciborium::from_reader::<MediaHash, _>(short.as_slice()).is_err());
+    }
+
     /// Orchestrator-side callback target: records the media / state calls it
     /// receives and returns canned media, so the test can assert the worker called
     /// BACK with the right arguments mid-run.
     struct MockCallbacks {
-        media_calls: Mutex<Vec<[u8; 32]>>,
+        media_calls: Mutex<Vec<MediaHash>>,
         state_calls: Mutex<Vec<Option<Decision>>>,
     }
 
-    impl CallbackService for MockCallbacks {
-        async fn media_load(&self, hash: [u8; 32]) -> Result<Option<ByteBuf>, CallbackError> {
+    impl RemoteCallbacks for MockCallbacks {
+        async fn media_load(&self, hash: MediaHash) -> Result<Option<MediaBytes>, CallbackError> {
             self.media_calls.lock().unwrap().push(hash);
-            Ok(Some(ByteBuf::from(vec![0xAB, 0xCD])))
+            Ok(Some(MediaBytes(vec![0xAB, 0xCD])))
         }
         async fn session_change(
             &self,
             _state: Padded<SessionState>,
             decision: Padded<Option<Decision>>,
-        ) -> Result<(), CallbackError> {
+        ) -> Result<Committed, CallbackError> {
             let decision = decision.open().map_err(|_| CallbackError)?;
             self.state_calls.lock().unwrap().push(decision);
-            Ok(())
+            Ok(Committed)
         }
     }
 
@@ -611,11 +671,11 @@ mod execute_tests {
     /// the passed-in callback client (media_load + session_change) BACK — and replies.
     struct MockExecutor;
 
-    impl ExecutorService for MockExecutor {
+    impl RemoteExecutor for MockExecutor {
         async fn run(
             &self,
             _req: RunRequest,
-            _callbacks: CallbackServiceClient<Ciborium>,
+            _callbacks: RemoteCallbacksClient<Ciborium>,
         ) -> Result<RunOutcome, ExecError> {
             // Cache-only path: always a miss in this mock (no L1). The worker returns
             // its ABI id and NEVER names the composition_key.
@@ -628,7 +688,7 @@ mod execute_tests {
             &self,
             req: RunRequest,
             bundle: BundleStream,
-            callbacks: CallbackServiceClient<Ciborium>,
+            callbacks: RemoteCallbacksClient<Ciborium>,
         ) -> Result<RunReply, ExecError> {
             let mut cwasm = Vec::new();
             bundle
@@ -643,8 +703,8 @@ mod execute_tests {
                 return Err(ExecError::Unknown);
             }
             // Bundle in hand: run, calling BACK for media + state persistence.
-            let bytes = callbacks.media_load([9u8; 32]).await?;
-            if bytes != Some(ByteBuf::from(vec![0xAB, 0xCD])) {
+            let bytes = callbacks.media_load(MediaHash([9u8; 32])).await?;
+            if bytes != Some(MediaBytes(vec![0xAB, 0xCD])) {
                 return Err(ExecError::Unknown);
             }
             callbacks
@@ -693,7 +753,7 @@ mod execute_tests {
         }
     }
 
-    type ExecCli = ExecutorServiceClient<Ciborium>;
+    type ExecCli = RemoteExecutorClient<Ciborium>;
 
     /// A preparation takes a round's two paths with no round: a miss naming
     /// only the worker's ABI id, then the bundle the orchestrator resolved, and
@@ -758,7 +818,7 @@ mod execute_tests {
             .unwrap();
             tokio::spawn(conn);
             let (server, client) =
-                ExecutorServiceServerShared::<_, Ciborium>::new(Arc::new(MockExecutor), 4);
+                RemoteExecutorServerShared::<_, Ciborium>::new(Arc::new(MockExecutor), 4);
             tx.send(client).await.unwrap();
             server.serve(true).await.unwrap();
         });
@@ -774,7 +834,7 @@ mod execute_tests {
         let exec_client = rx.recv().await.unwrap().unwrap();
 
         let (cb_server, cb_client) =
-            CallbackServiceServerShared::<_, Ciborium>::new(callbacks.clone(), 4);
+            RemoteCallbacksServerShared::<_, Ciborium>::new(callbacks.clone(), 4);
         tokio::spawn(async move {
             let _ = cb_server.serve(true).await;
         });
@@ -812,7 +872,7 @@ mod execute_tests {
         ));
         assert_eq!(
             callbacks.media_calls.lock().unwrap().as_slice(),
-            &[[9u8; 32]]
+            &[MediaHash([9u8; 32])]
         );
         // One commit, carrying the decision the reply reports.
         assert_eq!(
@@ -837,14 +897,14 @@ mod execute_tests {
     /// The mock executor served on one end of a real connection, and the other
     /// end's client — taken as `Cli`, which may be a wire-identical stand-in — plus
     /// a callback client for the calls to carry.
-    async fn serve_mock<Cli: remoc::RemoteSend>() -> (Cli, CallbackServiceClient<Ciborium>) {
+    async fn serve_mock<Cli: remoc::RemoteSend>() -> (Cli, RemoteCallbacksClient<Ciborium>) {
         serve::<Cli, _>(Arc::new(MockExecutor)).await
     }
 
     /// [`serve_mock`] with the executor named by the test.
-    async fn serve<Cli: remoc::RemoteSend, E: ExecutorService + Send + Sync + 'static>(
+    async fn serve<Cli: remoc::RemoteSend, E: RemoteExecutor + Send + Sync + 'static>(
         executor: Arc<E>,
-    ) -> (Cli, CallbackServiceClient<Ciborium>) {
+    ) -> (Cli, RemoteCallbacksClient<Ciborium>) {
         let (a, b) = tokio::io::duplex(1 << 20);
         let (a_r, a_w) = split(a);
         let (b_r, b_w) = split(b);
@@ -857,7 +917,7 @@ mod execute_tests {
             .await
             .unwrap();
             tokio::spawn(conn);
-            let (server, client) = ExecutorServiceServerShared::<_, Ciborium>::new(executor, 4);
+            let (server, client) = RemoteExecutorServerShared::<_, Ciborium>::new(executor, 4);
             tx.send(client).await.unwrap();
             let _ = server.serve(true).await;
         });
@@ -870,7 +930,7 @@ mod execute_tests {
         .unwrap();
         tokio::spawn(conn);
         let client = rx.recv().await.unwrap().unwrap();
-        let (cb_server, cb_client) = CallbackServiceServerShared::<_, Ciborium>::new(
+        let (cb_server, cb_client) = RemoteCallbacksServerShared::<_, Ciborium>::new(
             Arc::new(MockCallbacks {
                 media_calls: Mutex::new(Vec::new()),
                 state_calls: Mutex::new(Vec::new()),
@@ -993,11 +1053,11 @@ mod execute_tests {
         dropped: Arc<std::sync::atomic::AtomicBool>,
     }
 
-    impl ExecutorService for WatchedExecutor {
+    impl RemoteExecutor for WatchedExecutor {
         async fn run(
             &self,
             req: RunRequest,
-            callbacks: CallbackServiceClient<Ciborium>,
+            callbacks: RemoteCallbacksClient<Ciborium>,
         ) -> Result<RunOutcome, ExecError> {
             MockExecutor.run(req, callbacks).await
         }
@@ -1006,7 +1066,7 @@ mod execute_tests {
             &self,
             _req: RunRequest,
             bundle: BundleStream,
-            _callbacks: CallbackServiceClient<Ciborium>,
+            _callbacks: RemoteCallbacksClient<Ciborium>,
         ) -> Result<RunReply, ExecError> {
             let _held = DropFlag(self.dropped.clone());
             self.started.notify_one();
@@ -1108,7 +1168,7 @@ mod execute_tests {
     /// the method names and argument shapes, so its client speaks to the real
     /// server.
     mod loose {
-        use super::{CallbackServiceClient, Ciborium, ExecError, RunOutcome, RunReply, RunRequest};
+        use super::{Ciborium, ExecError, RemoteCallbacksClient, RunOutcome, RunReply, RunRequest};
         use fleet_stream::bin;
         use serde::{Deserialize, Serialize};
 
@@ -1130,18 +1190,18 @@ mod execute_tests {
         }
 
         #[remoc::rtc::remote]
-        pub trait ExecutorService {
+        pub trait RemoteExecutor {
             async fn run(
                 &self,
                 req: RunRequest,
-                callbacks: CallbackServiceClient<Ciborium>,
+                callbacks: RemoteCallbacksClient<Ciborium>,
             ) -> Result<RunOutcome, ExecError>;
 
             async fn run_with_bundle(
                 &self,
                 req: RunRequest,
                 bundle: LooseStream,
-                callbacks: CallbackServiceClient<Ciborium>,
+                callbacks: RemoteCallbacksClient<Ciborium>,
             ) -> Result<RunReply, ExecError>;
         }
     }
@@ -1152,9 +1212,9 @@ mod execute_tests {
     #[tokio::test]
     async fn a_header_past_its_bound_fails_its_call_and_not_the_leg() {
         use fleet_stream::bin;
-        use loose::{ExecutorService as _, LooseBlob, LooseHeader, LooseStream};
+        use loose::{LooseBlob, LooseHeader, LooseStream, RemoteExecutor as _};
 
-        let (client, cb) = serve_mock::<loose::ExecutorServiceClient<Ciborium>>().await;
+        let (client, cb) = serve_mock::<loose::RemoteExecutorClient<Ciborium>>().await;
         let (cwasm_tx, cwasm_rx) = bin::channel();
         let (meta_tx, meta_rx) = bin::channel();
         let stream = LooseStream {

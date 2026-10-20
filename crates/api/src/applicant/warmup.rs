@@ -39,14 +39,15 @@ async fn warmup(Path(session_id): Path<String>, State(state): State<Arc<AppState
         return StatusCode::INTERNAL_SERVER_ERROR;
     };
     let Some(metadata) = metadata
-        .trust_unchecked::<AuthZ, _>(reason!(
-            "no kind fits — an accepted risk: anyone holding the session's link may \
-             cause its preparation, and with it the write that marks a session that \
-             cannot run, as its /connect would"
+        .trust_accept_risk(reason!(
+            AuthZ::AcceptedRisk,
+            "anyone holding the session's link may cause its preparation, and with it \
+             the write that marks a session that cannot run, as its /connect would"
         ))
-        .trust_unchecked::<Replay, _>(reason!(
-            "harmless: stale metadata prepares what the session pinned all the same, \
-             and a failure found on it is marked by a write the version guards"
+        .trust(reason!(
+            Replay::Harmless,
+            "stale metadata prepares what the session pinned all the same, and a failure \
+             found on it is marked by a write the version guards"
         ))
         .into_inner()
     else {

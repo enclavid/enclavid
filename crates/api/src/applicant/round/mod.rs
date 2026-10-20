@@ -17,7 +17,6 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use secrecy::SecretBox;
 
-use enclavid_boundary::{Asserted, reason};
 use engine_rpc::{CompositionKey, ExecError, RunOutcome, RunStatus};
 use session_types::{Decision, Event, Prompt, SessionMetadata, SessionState};
 
@@ -183,9 +182,10 @@ impl SessionRunCtx {
         // is NOT here — the orchestrator drives it itself on a cache miss (below),
         // under the `composition_key` IT computed, so the worker never names which
         // L2 slot a compile lands in.
-        // Handed over as the UNTRUSTED view — there is no other kind to hand over.
-        // The raw callback server is not engine-rpc's to export, so this side has
-        // no unwrapped contract available to implement by accident.
+        // Handed over as the contract served at api's end of the leg
+        // (`RemoteCallbacksAt<ExecutionWorker>`) — there is no other kind to
+        // hand over. The raw callback server is not engine-rpc's to export, so this
+        // side has no unwrapped contract available to implement by accident.
         let callbacks = CallbackServer {
             persister: persister.clone(),
             media_store,
@@ -203,20 +203,10 @@ impl SessionRunCtx {
                 .run(req.clone(), callbacks.clone())
                 .await
                 .map_err(|e| classify_run_error(&session_id, &e))?
-                // CONTAINED, and the reason has to cover BOTH arms — an earlier
-                // version spoke only about the miss, while the hit arm carried a
-                // whole policy-authored prompt through the same peel. A cache miss
-                // and a cache hit differ in whether the worker's L1 happened to
-                // hold the composition, which is no reason for two different
-                // judgements.
-                .trust_unchecked::<Asserted, _>(reason!(
-                    "contained: a miss names only a slot inside the composition namespace \
-                     api itself computed, so a fabricated token costs a recompile and \
-                     never yields another composition's code; a hit carries a prompt that \
-                     is shown to the applicant, its sole auditor, or a decision api only \
-                     compares with the one the round committed. The round's DISCLOSURE \
-                     comes from api's own copy, never from this"
-                ))
+                // Answered by api's end (`crate::boundary::ExecutionWorker`), and
+                // the answer covers BOTH arms: a cache miss and a cache hit differ
+                // in whether the worker's L1 happened to hold the composition,
+                // which is no reason for two different judgements.
                 .into_inner()
             {
                 RunOutcome::Ran(status) => status
@@ -241,12 +231,6 @@ impl SessionRunCtx {
                     )
                     .await?
                     .map_err(|e| classify_run_error(&session_id, &e))?
-                    .trust_unchecked::<Asserted, _>(reason!(
-                        "contained: a prompt is shown to the applicant, who is the \
-                             sole auditor of what they see, and a decision api only \
-                             compares with the one the round committed. The round's \
-                             DISCLOSURE comes from api's own copy, never from this"
-                    ))
                     .into_inner()
                 }
             };

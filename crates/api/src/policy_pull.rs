@@ -249,21 +249,26 @@ pub async fn manifest(
         reference: artifact_ref.to_string(),
         registry_auth: registry_auth.to_vec(),
     })
-    .vouch_unchecked::<AuthN, _>(reason!(
-        "policy_ref public (digest-pinned); registry_auth is the consumer's bearer, \
-         courier-forwarded — not a TEE secret"
+    .vouch(reason!(
+        AuthN::Identified,
+        "the consumer's bearer, read by the hatch this leg pins and sent on over TLS \
+         that ends inside it; a bearer for a plain-http registry, where it would cross \
+         in the host's sight, is refused when the session is created"
     ))
-    .vouch_unchecked::<AuthZ, _>(reason!(
-        "forwarding the bearer to its registry IS the courier op"
+    .vouch(reason!(
+        AuthZ::NoSecret,
+        "the registry is handed the bearer it accepts for its own repository, and a \
+         ref to a manifest it hosts"
     ))
-    .vouch_unchecked::<Covert, _>(reason!(
+    .vouch(reason!(
+        Covert::NotChosen,
         "both consumer-supplied at session create, not policy-controlled"
     ));
     Ok(registry
         .manifest(req, within)
         .await
         .map_err(classify_transport_error)?
-        .trust::<AuthN, _, _, _, _>(|manifest| {
+        .trust_with(AuthN::Verified, |manifest| {
             // The manifest's bytes must hash to the pinned digest.
             let actual = sha256_hex(&manifest);
             if digest_matches(artifact_digest, &actual) {
@@ -275,14 +280,15 @@ pub async fn manifest(
                 })
             }
         })?
-        .trust_unchecked::<AuthZ, _>(reason!(
-            "names no kind — ACCEPTED RISK: the registry decides with the consumer's \
-             bearer, and its refusal binds only as far as the hatch hears it — over TLS \
-             that ends in the hatch for an https registry, but a plain-http one is the \
-             host's to answer, and a host that answers yes in its place serves only what \
-             it could serve on a pull"
+        .trust_accept_risk(reason!(
+            AuthZ::AcceptedRisk,
+            "the registry decides with the consumer's bearer, and its refusal binds only \
+             as far as the hatch hears it — over TLS that ends in the hatch for an https \
+             registry, but a plain-http one is the host's to answer, and a host that \
+             answers yes in its place serves only what it could serve on a pull"
         ))
-        .trust_unchecked::<Replay, _>(reason!(
+        .trust(reason!(
+            Replay::Idempotent,
             "content-addressed by digest — bit-identical responses for the same digest"
         ))
         .into_inner())
@@ -326,14 +332,18 @@ impl WasmLayer {
                 size: length,
                 registry_auth,
             })
-            .vouch_unchecked::<AuthN, _>(reason!(
-                "a digest from the manifest this TEE verified, and the consumer's own ref \
-                 and bearer, courier-forwarded — not a TEE secret"
+            .vouch(reason!(
+                AuthN::Identified,
+                "the consumer's bearer, read by the hatch this leg pins and sent on over \
+                 TLS that ends inside it, as the manifest's was"
             ))
-            .vouch_unchecked::<AuthZ, _>(reason!(
-                "forwarding the bearer to its registry IS the courier op"
+            .vouch(reason!(
+                AuthZ::NoSecret,
+                "the registry is handed the bearer it accepts for its own repository, and \
+                 a digest from a manifest it hosts"
             ))
-            .vouch_unchecked::<Covert, _>(reason!(
+            .vouch(reason!(
+                Covert::NotChosen,
                 "every part is consumer-supplied or read from the consumer's own manifest, \
                  not policy-controlled"
             ));
@@ -341,19 +351,24 @@ impl WasmLayer {
                 .blob(req, within)
                 .await
                 .map_err(classify_transport_error)?
-                .trust_unchecked::<AuthN, _>(reason!(
-                    "held below to the size and digest the pinned manifest declares, so a \
-                     blob that is not that layer ends in an error before anything acts on it"
+                // Held to the size and digest the pinned manifest declares, so a blob
+                // that is not that layer ends in an error before anything acts on it.
+                .trust_with(AuthN::Verified, |pieces| {
+                    Ok::<_, PullError>(held(pieces, digest, size, decrypt, turn))
+                })?
+                .trust_accept_risk(reason!(
+                    AuthZ::AcceptedRisk,
+                    "the grant `manifest` accepted, carried: the registry decides per \
+                     repository with the consumer's bearer, and for a plain-http registry \
+                     the host answers in its place — the bytes are held to the pinned digest \
+                     either way"
                 ))
-                .trust_unchecked::<AuthZ, _>(reason!(
-                    "OCI registry server enforces pull authorisation with the consumer's \
-                     bearer; TEE doesn't gate access at this layer"
-                ))
-                .trust_unchecked::<Replay, _>(reason!(
+                .trust(reason!(
+                    Replay::Idempotent,
                     "content-addressed by digest — bit-identical responses for the same digest"
                 ))
                 .into_inner();
-            Ok::<_, PullError>(held(pieces, digest, size, decrypt, turn))
+            Ok::<_, PullError>(pieces)
         };
         futures::stream::once(fetch).try_flatten().boxed()
     }

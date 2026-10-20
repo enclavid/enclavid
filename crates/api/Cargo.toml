@@ -48,7 +48,7 @@ engine-types = { path = "../engine-types" }
 blake3 = "1"
 # remoc client for BOTH workers: the Compiler (compile-worker) and the Executor
 # (execution-worker), each over rpc; connection_cfg from rpc. api also SERVES
-# the per-round CallbackService back to the keyless executor over the same
+# the per-round RemoteCallbacks back to the keyless executor over the same
 # connection (media_load / session_change — it holds the seal key, the worker
 # does not).
 remoc = { version = "0.18", default-features = false, features = [
@@ -56,8 +56,8 @@ remoc = { version = "0.18", default-features = false, features = [
     "codec-ciborium",
 ] }
 # The rpc contract — api needs BOTH halves: `compile` for the CompiledBundle /
-# CompileError / CompilerService client (compile-worker output + L2 cache
-# bundle), and `execute` for the ExecutorService client + CallbackService server
+# CompileError / RemoteCompiler client (compile-worker output + L2 cache
+# bundle), and `execute` for the RemoteExecutor client + RemoteCallbacks server
 # + the run wire types (RunRequest / RunReply / RunStatus / Prop). Neither pulls
 # Cranelift or the wasmtime runtime.
 # What makes this leg a boundary is not a feature api asks for — it is that the
@@ -71,6 +71,8 @@ engine-rpc = { path = "../engine-rpc", default-features = false, features = [
 # a re-export: `Asserted` is how api judges its WORKER legs, and the hatch client
 # has no business carrying a marker for a channel it does not own.
 enclavid-boundary = { path = "../boundary" }
+# `boundary!`: api's ends of its legs, declared (`crate::boundary`). Build-time only.
+enclavid-boundary-macros = { path = "../boundary-macros" }
 hatch-client = { path = "../hatch-client" }
 # The contract with the hatch-CVM, for the leg api keeps connected to it.
 hatch-rpc = { path = "../hatch-rpc" }
@@ -86,7 +88,7 @@ safe-logger = { path = "../safe-logger", features = ["device"] }
 # guest keeps its clock with `timesync`, and this role ends when the kernel stops
 # vouching for it. The library alone — none of the keeper comes with it.
 timesync = { path = "../timesync", optional = true }
-# The storage-tier RPC contract — the remoc `SessionStoreService` / `CacheService`
+# The storage-tier RPC contract — the remoc `RemoteSessionStore` / `RemoteCache`
 # clients api dials on the trusted storage-CVM at boot. Reuses the same
 # RA-TLS/remoc stack as the engine workers.
 storage-rpc = { path = "../storage-rpc" }

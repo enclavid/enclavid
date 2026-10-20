@@ -1,14 +1,14 @@
 //! The compile contract as its SERVER sees it: arguments wrapped in the scope the
 //! serving role declares.
 //!
-//! The mirror of [`crate::untrusted_execute`] on the other leg, and the reason it exists is
-//! sharper here. api pins the workers' measurements, so on api's side every concern
+//! The compile leg's counterpart of the execute contract's `RemoteExecutorAt`, and
+//! the reason it exists is sharper here. api pins the workers' measurements, so on api's side every concern
 //! is about a peer it has authenticated. The leaves cannot pin back — api's
 //! measurement is a function of theirs, leaves first, api last, no cycle — so they
 //! run `AcceptAny`, and from this seat:
 //!
 //! ```text
-//! trust_unchecked::<AuthN>(reason!("RA-TLS against a pinned measurement"))
+//! trust(reason!(AuthN::Identified, "RA-TLS against a pinned measurement"))
 //!     api-side    → TRUE
 //!     worker-side → FALSE
 //! ```
@@ -19,7 +19,7 @@
 //! `AuthN` is genuinely open, and open in a way api's never is.
 //!
 //! This is not the thing `docs/engine-boundary.md` rules out. That rules out a
-//! worker writing `trust::<Asserted>` — a claim about the peer's own word, which the
+//! worker answering `Asserted` — a claim about the peer's own word, which the
 //! peer cannot make about itself. A serving role naming what IT does not know about
 //! ITS caller is a second, independent party asking its own question.
 //!
@@ -32,7 +32,7 @@ use std::future::Future;
 use enclavid_boundary::{Open, Untrusted};
 
 use crate::adapter::Untrusting;
-use crate::compile::{CompileError, CompileReply, CompileRequest, CompilerService};
+use crate::compile::{CompileError, CompileReply, CompileRequest, RemoteCompiler};
 
 /// The compile surface as its server sees it. Implement this and hand it to
 /// [`serve_compiler`](crate::serve_compiler), which is the only way to serve these
@@ -42,7 +42,7 @@ use crate::compile::{CompileError, CompileReply, CompileRequest, CompilerService
 /// `async fn`: remoc serves these on a task pool and needs the bound, which a plain
 /// `async fn` in a trait does not promise. Implementors still write `async fn` — the
 /// bound is satisfied, not restated.
-pub trait CompilerServiceUntrusted {
+pub trait RemoteCompilerUntrusted {
     /// How this implementor judges what arrives on this hop. Named once, here.
     ///
     /// `Open`, so it cannot be `()`. An implementor that named the empty scope would
@@ -51,7 +51,7 @@ pub trait CompilerServiceUntrusted {
     type Scope: Open;
 
     /// Fuse, compile, and parse the embedded sections. See
-    /// the raw `CompilerService::compile`.
+    /// the raw `RemoteCompiler::compile`.
     fn compile(
         &self,
         req: Untrusted<CompileRequest, Self::Scope>,
@@ -61,9 +61,9 @@ pub trait CompilerServiceUntrusted {
 /// A shared service is still one: the supervisor is `Arc`-held because its pool and
 /// its configuration outlive any one connection, and that is a property of how the
 /// role is assembled rather than of what it judges.
-impl<T> CompilerServiceUntrusted for std::sync::Arc<T>
+impl<T> RemoteCompilerUntrusted for std::sync::Arc<T>
 where
-    T: CompilerServiceUntrusted + Send + Sync + 'static,
+    T: RemoteCompilerUntrusted + Send + Sync + 'static,
 {
     type Scope = T::Scope;
 
@@ -75,12 +75,11 @@ where
     }
 }
 
-/// Serves a [`CompilerServiceUntrusted`] as a [`CompilerService`], wrapping the
-/// argument on the way in — the same [`Untrusting`] both execute-leg views use,
-/// because there is one idea here and it is the same on every hop.
-impl<T> CompilerService for Untrusting<T>
+/// Serves a [`RemoteCompilerUntrusted`] as a [`RemoteCompiler`], wrapping the
+/// argument on the way in.
+impl<T> RemoteCompiler for Untrusting<T>
 where
-    T: CompilerServiceUntrusted + Send + Sync + 'static,
+    T: RemoteCompilerUntrusted + Send + Sync + 'static,
     T::Scope: Send,
 {
     async fn compile(&self, req: CompileRequest) -> Result<CompileReply, CompileError> {

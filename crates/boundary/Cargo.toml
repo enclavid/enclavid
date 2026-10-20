@@ -9,3 +9,9 @@ repository.workspace = true
 # `Exposed`, the markers, and `reason!`. No dependencies, deliberately: it is
 # linked by the logger, which installs before anything else exists in a role.
 [dependencies]
+
+# The doctests that hold `boundary!` to the vocabulary's rules — what a block
+# may open and what a declaration may answer with — are checks of this crate's
+# types, so they live here.
+[dev-dependencies]
+enclavid-boundary-macros = { path = "../boundary-macros" }

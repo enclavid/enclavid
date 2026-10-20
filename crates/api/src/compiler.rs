@@ -2,7 +2,7 @@
 //! cwasm and its metadata. api NEVER compiles in-process — it always drives a
 //! compile-worker over rpc, so the api binary links NO Cranelift.
 //!
-//! [`Compiler`] wraps the `engine_rpc::CompilerService` client. The worker is a
+//! [`Compiler`] wraps the `engine_rpc::RemoteCompiler` client. The worker is a
 //! separate CVM, brought up at boot rather than by api.
 //! api [`connect`](connect_compile_worker)s to it at a configured address, under
 //! mutual RA-TLS; the transport is TCP by default and vsock under that feature.
@@ -25,7 +25,7 @@ use fleet_transport::LegFailure;
 use futures::{StreamExt, TryStreamExt};
 use safe_logger::debug;
 
-/// The COMPILE boundary: a client for a compile-worker's `engine_rpc::CompilerService`.
+/// The COMPILE boundary: a client for a compile-worker's `engine_rpc::RemoteCompiler`.
 /// Given already-pulled artifact bytes (the orchestrator owns the OCI pull +
 /// registry auth), the worker fuses + Cranelift-compiles + parses sections into
 /// a [`Compiled`]. The client is a cheap remoc handle (`Send + Sync`);
@@ -40,16 +40,16 @@ pub type CompileScope = (Asserted,);
 /// leg names its own.
 type ToCompiler<T> = Exposed<T, (AuthN, AuthZ, Covert)>;
 
-/// Open a value for the compile-worker with the leg's own answer given, as
-/// `crate::executor::to_worker` does for the execution-worker: `AuthN` is
-/// IDENTIFIED for everything this leg carries, and what is left differs per
+/// Open a value for the compile-worker with the leg's own answer given: `AuthN`
+/// is IDENTIFIED for everything this leg carries, and what is left differs per
 /// message.
 fn to_compiler<T>(value: T) -> Exposed<T, (AuthZ, Covert)> {
     let open: ToCompiler<T> = Exposed::new(value);
-    open.vouch_unchecked::<AuthN, _>(reason!(
-        "identified: this leg dials ONE compile-time-pinned measurement, the handshake \
-         fails before a byte moves if the peer is not it, and the peer keeps nothing \
-         past the compile it is handed"
+    open.vouch(reason!(
+        AuthN::Identified,
+        "this leg dials ONE compile-time-pinned measurement, the handshake fails \
+         before a byte moves if the peer is not it, and the peer keeps nothing past \
+         the compile it is handed"
     ))
 }
 
@@ -58,13 +58,15 @@ fn to_compiler<T>(value: T) -> Exposed<T, (AuthZ, Covert)> {
 /// one place (grep `outbound_compile_request(`).
 fn outbound_compile_request(source: CompileSource) -> Exposed<CompileSource, ()> {
     to_compiler(source)
-        .vouch_unchecked::<AuthZ, _>(reason!(
-            "no-secret: the consumer's own artifacts, going to the code that exists to \
-             compile them; the recipient is handed nothing it is not being asked to read"
+        .vouch(reason!(
+            AuthZ::NoSecret,
+            "the consumer's own artifacts, going to the code that exists to compile \
+             them; the recipient is handed nothing it is not being asked to read"
         ))
-        .vouch_unchecked::<Covert, _>(reason!(
-            "already-held: the HOST performed the OCI pull that produced these bytes, so \
-             their length is a quantity it measured itself"
+        .vouch(reason!(
+            Covert::AlreadyHeld,
+            "the HOST performed the OCI pull that produced these bytes, so their \
+             length is a quantity it measured itself"
         ))
 }
 
@@ -104,7 +106,8 @@ impl Compiler {
             .compile(outbound_compile_request(source))
             .await
             .map_err(refusal)?;
-        // CONTAINED, and the honest form of it: there is NO check available here.
+        // An accepted risk, and the honest form of it: there is NO check available
+        // here.
         //
         // Read the axis carefully, because the obvious reading is the wrong one.
         // This is not about the peer having been substituted — that is `AuthN`, and
@@ -122,13 +125,14 @@ impl Compiler {
         // asked. It is a tamper-evident bag: proof nobody opened it afterwards, and
         // no evidence at all about what went in.
         let CompileReply { meta, cwasm, body } = reply
-            .trust_unchecked::<Asserted, _>(reason!(
-                "NO KIND FITS — an accepted risk, not a discharge. Not re-derived \
-                 (this side carries no Cranelift), not bound (a digest the compiler \
-                 also chose is its word twice), not bounded (the range is arbitrary \
-                 native code), not contained (the audience is the executor, which \
-                 did not author it). Carried because no check exists and the fleet \
-                 needs a compiler; what limits the damage is downstream containment"
+            .trust_accept_risk(reason!(
+                Asserted::AcceptedRisk,
+                "not re-derived (this side carries no Cranelift), not bound (a digest \
+                 the compiler also chose is its word twice), not bounded (the range is \
+                 arbitrary native code), not contained (the audience is the executor, \
+                 which did not author it). Carried because no check exists and the \
+                 fleet needs a compiler; what limits the damage is downstream \
+                 containment"
             ))
             .into_inner();
         // What the execute hop takes, held here where api would otherwise pass on
@@ -161,11 +165,12 @@ impl Compiler {
 /// as the session's init error and the consumer reads, so this is where the
 /// worker's word about it is let through, and on what grounds.
 fn refusal(e: Untrusted<CompileError, CompileScope>) -> CompileError {
-    e.trust_unchecked::<Asserted, _>(reason!(
-        "bounded: a value of a fixed set whose only text is a name held to the WIT \
-         alphabet and 128 bytes as it is decoded, read only by the consumer that \
-         pinned this composition, about its own artifacts and imports; a compile \
-         child its composition turned picks no more than that per compile"
+    e.trust(reason!(
+        Asserted::Bounded,
+        "a value of a fixed set whose only text is a name held to the WIT alphabet \
+         and 128 bytes as it is decoded, read only by the consumer that pinned this \
+         composition, about its own artifacts and imports; a compile child its \
+         composition turned picks no more than that per compile"
     ))
     .into_inner()
 }
@@ -251,7 +256,7 @@ mod tests {
     // `lie` it names one cwasm and sends another.
     struct MockService;
 
-    impl engine_rpc::CompilerServiceUntrusted for MockService {
+    impl engine_rpc::RemoteCompilerUntrusted for MockService {
         type Scope = (AuthN,);
 
         async fn compile(
@@ -259,7 +264,10 @@ mod tests {
             req: Untrusted<CompileRequest, Self::Scope>,
         ) -> Result<CompileReply, CompileError> {
             let (policy, plugins) = req
-                .trust_unchecked::<AuthN, _>(reason!("test fixture"))
+                .trust(reason!(
+                    AuthN::Indifferent,
+                    "test fixture, answered as the compile-worker answers it"
+                ))
                 .into_inner()
                 .receive()
                 .await
@@ -291,7 +299,7 @@ mod tests {
         CompileSource::whole(policy.to_vec(), plugins).unwrap()
     }
 
-    /// The Compiler client drives a CompilerService over an in-memory remoc
+    /// The Compiler client drives a RemoteCompiler over an in-memory remoc
     /// duplex: args cross, the cwasm streams back, and the error path
     /// propagates.
     #[tokio::test]
