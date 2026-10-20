@@ -76,7 +76,7 @@ pub(crate) struct CompositionEntry {
     /// too, subject to the per-entry floor in [`engine_executor::admission`] that
     /// stops a weightless entry from being free.
     pub(crate) charged: u64,
-    /// Per-catalog i18n/icons import manifest (registered as strict host `Linker`
+    /// Per-catalog i18n import manifest (registered as strict host `Linker`
     /// instances at prime). Small in every legitimate composition, and NOT small
     /// by construction — it comes verbatim from a caller no leaf can identify, so
     /// it is charged rather than assumed. Shared with every round's `prime`

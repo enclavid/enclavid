@@ -26,9 +26,9 @@ pub(crate) mod store;
 
 pub use host::undeclared_trap;
 pub use registry::{
-    ComponentDecls, DisclosureFieldsStore, EmbeddedRegistry, EmbeddedRegistryBuilder, IconStore,
+    ComponentDecls, DisclosureFieldsStore, EmbeddedRegistry, EmbeddedRegistryBuilder,
     LocalizedStore, Translation,
 };
 pub use store::{
-    DisclosureFieldRef, DisclosureFields, Icon, IconRef, Localized, LocalizedRef, RefKind, RefStore,
+    DisclosureFieldRef, DisclosureFields, IconRef, Localized, LocalizedRef, RefKind, RefStore,
 };

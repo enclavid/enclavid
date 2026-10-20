@@ -16,7 +16,7 @@
 //! first `handle(&[], event::start)` works without a prior write.
 //!
 //! Every capture spec + canonical `display-field` comes from the
-//! well-known plugin (its own i18n / icons / disclosure-field sections);
+//! well-known plugin (its own i18n, the host's icons);
 //! the policy authors only its consent reason + requester refs against
 //! its own `i18n.json`.
 

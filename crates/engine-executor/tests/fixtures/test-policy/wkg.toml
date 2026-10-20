@@ -3,6 +3,7 @@
 "enclavid:shared-types" = { path = "../../../../../wit/shared-types" }
 "enclavid:policy" = { path = "../../../../../wit/policy" }
 "enclavid:host" = { path = "../../../../../wit/host" }
+"enclavid:host-icons" = { path = "../../../../../wit/host-icons" }
 "enclavid:extra" = { path = "../test-extra/wit" }
 "enclavid:face-age" = { path = "../../../../../plugins/face-age/wit" }
 "enclavid:preprocess" = { path = "../../../../../plugins/preprocess/wit" }

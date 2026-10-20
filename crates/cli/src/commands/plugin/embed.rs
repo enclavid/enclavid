@@ -1,27 +1,20 @@
 //! `enclavid plugin embed` — appends the plugin's
-//! `enclavid:embedded.{i18n,icons}.v1` declarations to a wasm
-//! component as custom sections.
+//! `enclavid:embedded.i18n.v1` declarations to a wasm component as a
+//! custom section.
 //!
 //! Same mechanics as `enclavid policy embed`, minus `disclosure-fields`:
-//! under Option C the policy is the single source of truth for what's
-//! disclosable to the consumer, so plugins don't declare their own
-//! DF keys (see `[[project-df-policy-gated]]`). i18n and icons stay
-//! per-component because they're applicant-facing only — consumer
-//! never sees these refs.
+//! a plugin's disclosure fields are looked up in the policy's list, so
+//! plugins don't declare their own DF keys. i18n stays per-component
+//! because it's applicant-facing only — consumer never sees these refs.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-use enclavid_embedded::{read_bytes, read_i18n, read_icons, validate};
+use enclavid_embedded::{read_bytes, read_i18n, validate};
 
 use crate::embed::embed_sections;
 
-pub fn run(
-    wasm: PathBuf,
-    i18n_path: PathBuf,
-    icons_path: PathBuf,
-    output: Option<PathBuf>,
-) -> Result<()> {
+pub fn run(wasm: PathBuf, i18n_path: PathBuf, output: Option<PathBuf>) -> Result<()> {
     let wasm_bytes = std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
 
     // Role gate: this component must NOT be a policy (it must not export
@@ -31,11 +24,9 @@ pub fn run(
 
     let parsed_i18n =
         read_i18n(&i18n_path).with_context(|| format!("reading {}", i18n_path.display()))?;
-    let parsed_icons =
-        read_icons(&icons_path).with_context(|| format!("reading {}", icons_path.display()))?;
     // No DF section for plugins — pass None to skip validation of
     // that kind.
-    let report = validate(None, parsed_i18n.as_ref(), parsed_icons.as_ref());
+    let report = validate(None, parsed_i18n.as_ref());
     for w in &report.warnings {
         println!("warning: {w}");
     }
@@ -54,18 +45,12 @@ pub fn run(
     } else {
         None
     };
-    let icons_bytes = if parsed_icons.is_some() {
-        Some(read_bytes(&icons_path)?)
-    } else {
-        None
-    };
 
     let embedded = embed_sections(
         &wasm_bytes,
         // No disclosure-fields section for plugins.
         None,
         i18n_bytes.as_deref(),
-        icons_bytes.as_deref(),
     );
 
     let output_path = output.unwrap_or_else(|| derive_output_path(&wasm));
@@ -79,13 +64,11 @@ pub fn run(
         .with_context(|| format!("writing {}", output_path.display()))?;
 
     let i18n_len = i18n_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
-    let icons_len = icons_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
     println!(
-        "Embedded: {} (wasm {} B + i18n {} B + icons {} B → {} B) → {}",
+        "Embedded: {} (wasm {} B + i18n {} B → {} B) → {}",
         wasm.display(),
         wasm_bytes.len(),
         i18n_len,
-        icons_len,
         embedded.len(),
         output_path.display(),
     );

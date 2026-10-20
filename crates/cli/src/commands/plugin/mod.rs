@@ -5,7 +5,7 @@
 //!   * Plugins don't ship `disclosure-fields.json` — the policy is
 //!     the single bandwidth gate for disclosure-field refs (Option C,
 //!     see `[[project-df-policy-gated]]`). `plugin embed` / `validate`
-//!     handle only `--i18n` and `--icons`.
+//!     handle only `--i18n`.
 //!   * `embed` asserts the component is NOT a policy (does not export
 //!     `enclavid:policy/policy`); a policy handed here is rejected with
 //!     a pointer to `enclavid policy embed`.

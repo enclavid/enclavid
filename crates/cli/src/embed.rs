@@ -20,9 +20,9 @@
 use std::borrow::Cow;
 use wasm_encoder::ComponentSection;
 
-use enclavid_embedded::{SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS};
+use enclavid_embedded::{SECTION_DISCLOSURE_FIELDS, SECTION_I18N};
 
-/// Append the three embedded-section kinds to a wasm component.
+/// Append the two embedded-section kinds to a wasm component.
 /// Each kind is independently optional. The returned `Vec<u8>` is
 /// the original wasm with appended custom sections; callers stream
 /// it to disk verbatim.
@@ -30,12 +30,9 @@ pub fn embed_sections(
     wasm_bytes: &[u8],
     disclosure: Option<&[u8]>,
     i18n: Option<&[u8]>,
-    icons: Option<&[u8]>,
 ) -> Vec<u8> {
-    let extra_capacity = disclosure.map(|b| b.len()).unwrap_or(0)
-        + i18n.map(|b| b.len()).unwrap_or(0)
-        + icons.map(|b| b.len()).unwrap_or(0)
-        + 96;
+    let extra_capacity =
+        disclosure.map(|b| b.len()).unwrap_or(0) + i18n.map(|b| b.len()).unwrap_or(0) + 64;
     let mut out = Vec::with_capacity(wasm_bytes.len() + extra_capacity);
     out.extend_from_slice(wasm_bytes);
     if let Some(bytes) = disclosure {
@@ -48,13 +45,6 @@ pub fn embed_sections(
     if let Some(bytes) = i18n {
         wasm_encoder::CustomSection {
             name: Cow::Borrowed(SECTION_I18N),
-            data: Cow::Borrowed(bytes),
-        }
-        .append_to_component(&mut out);
-    }
-    if let Some(bytes) = icons {
-        wasm_encoder::CustomSection {
-            name: Cow::Borrowed(SECTION_ICONS),
             data: Cow::Borrowed(bytes),
         }
         .append_to_component(&mut out);

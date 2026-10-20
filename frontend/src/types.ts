@@ -47,10 +47,8 @@ export type CaptureGuide =
 
 export type CaptureStep = {
   /// Optional icon name dispatched against the frontend's bundled
-  /// SVG library. `null` skips the icon area entirely. Unknown
-  /// names render as no icon (graceful fallback). Polici author
-  /// picks one of the well-known names; frontend version controls
-  /// the accepted set.
+  /// SVG library. `null` skips the icon area entirely. The name is
+  /// one of the host's own (`enclavid:host-icons/icons`).
   icon: string | null;
   /// Pre-capture intro body, paired with `icon` on the intro
   /// screen for this step. Already resolved to user's locale.

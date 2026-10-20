@@ -277,3 +277,73 @@ fn props_imported_as_what_the_host_does_not_serve_are_refused() {
         );
     }
 }
+
+/// A policy importing the icons at `version`, their interface holding `body`.
+fn with_icons(version: &str, body: &str) -> Vec<u8> {
+    importing(
+        &format!("enclavid:host-icons/icons@{version}"),
+        &format!(
+            "package enclavid:host@0.1.0 {{
+                 interface types {{ resource icon-ref; resource localized-ref; }}
+             }}
+             package enclavid:host-icons@{version} {{
+                 interface icons {{
+                     use enclavid:host/types@0.1.0.{{icon-ref, localized-ref}};
+                     {body}
+                 }}
+             }}"
+        ),
+    )
+}
+
+/// Any of the icons the host has are served, at its version and at a
+/// compatible one either side of it: a later version adds icons, and those the
+/// host has are the same functions.
+#[test]
+fn icons_the_host_has_compile_on_its_track() {
+    let all = "passport: func() -> icon-ref;
+               id-card: func() -> icon-ref;
+               drivers-license: func() -> icon-ref;
+               selfie: func() -> icon-ref;";
+    for (version, body) in [
+        ("0.1.0", all),
+        ("0.1.0", "selfie: func() -> icon-ref;"),
+        ("0.1.9", "passport: func() -> icon-ref;"),
+    ] {
+        assert_eq!(
+            refusal(with_icons(version, body), vec![]),
+            None,
+            "{version}: {body}"
+        );
+    }
+}
+
+/// An icon the host has not got — as a later version may add — or one in a
+/// shape the host does not serve, a handle of another resource among them, is
+/// refused; a version on another track is not the host's at all.
+#[test]
+fn icons_the_host_does_not_serve_are_refused() {
+    let bodies = [
+        "proof-of-address: func() -> icon-ref;",
+        "passport: func(size: u32) -> icon-ref;",
+        "passport: func();",
+        "passport: func() -> localized-ref;",
+        "resource token; passport: func() -> token;",
+        "passport: func() -> icon-ref; other: func();",
+    ];
+    for body in bodies {
+        assert_eq!(
+            refusal(with_icons("0.1.0", body), vec![]),
+            Some(CompileFault::Mismatched(name(
+                "enclavid:host-icons/icons@0.1.0"
+            ))),
+            "{body}"
+        );
+    }
+    assert_eq!(
+        refusal(with_icons("0.2.0", "passport: func() -> icon-ref;"), vec![]),
+        Some(CompileFault::Unsatisfied(name(
+            "enclavid:host-icons/icons@0.2.0"
+        )))
+    );
+}

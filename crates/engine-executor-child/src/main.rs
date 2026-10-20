@@ -345,7 +345,7 @@ mod round_failure_tests {
         let chosen = [
             "all fuel consumed",
             "embedded localized: no component declared key 'consent_reason' ...",
-            "embedded icon: no component declared key '<script>alert(1)</script>' ...",
+            "embedded disclosure-field: no component declared key '<script>alert(1)</script>' ...",
             "x' is not registered '",
             "secret=MRZ<<DOE<<JOHN",
             "",

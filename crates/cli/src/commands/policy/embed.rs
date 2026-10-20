@@ -1,21 +1,20 @@
 //! `enclavid policy embed` — appends the policy's
-//! `enclavid:embedded.*.v1` declarations (disclosure-fields, i18n,
-//! icons) to a wasm component as custom sections.
+//! `enclavid:embedded.*.v1` declarations (disclosure-fields, i18n) to a
+//! wasm component as custom sections.
 //!
 //! Pure metadata embedding — no encryption, no signing. The output is
 //! a wasm component, ready for `enclavid policy push`.
 //!
-//! All three section files are independently optional. A policy
-//! without `prompt-disclosure` calls can omit `disclosure-fields.json`;
-//! one without UI text refs can omit `i18n.json`; one that never sets
-//! `CaptureStep.icon` can omit `icons.json`. An absent file is silently
+//! Both section files are independently optional. A policy without
+//! `prompt-disclosure` calls can omit `disclosure-fields.json`; one
+//! without UI text refs can omit `i18n.json`. An absent file is silently
 //! treated as "no declarations of this kind" — the TEE-side loader
 //! sees the missing section as an empty registry slot for that kind.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-use enclavid_embedded::{read_bytes, read_disclosure_fields, read_i18n, read_icons, validate};
+use enclavid_embedded::{read_bytes, read_disclosure_fields, read_i18n, validate};
 
 use crate::embed::embed_sections;
 
@@ -23,7 +22,6 @@ pub fn run(
     wasm: PathBuf,
     disclosure_fields_path: PathBuf,
     i18n_path: PathBuf,
-    icons_path: PathBuf,
     output: Option<PathBuf>,
 ) -> Result<()> {
     let wasm_bytes = std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
@@ -34,20 +32,14 @@ pub fn run(
     // on the wire, so this WIT check is what keeps the groups honest.
     crate::wit_role::assert_policy(&wasm_bytes)?;
 
-    // Parse + validate whatever sections the author supplied. All
-    // three are independently optional — `read_*` return None for
-    // an absent file, validation runs over whatever's present.
+    // Parse + validate whatever sections the author supplied. Both
+    // are independently optional — `read_*` return None for an absent
+    // file, validation runs over whatever's present.
     let parsed_disclosure = read_disclosure_fields(&disclosure_fields_path)
         .with_context(|| format!("reading {}", disclosure_fields_path.display()))?;
     let parsed_i18n =
         read_i18n(&i18n_path).with_context(|| format!("reading {}", i18n_path.display()))?;
-    let parsed_icons =
-        read_icons(&icons_path).with_context(|| format!("reading {}", icons_path.display()))?;
-    let report = validate(
-        parsed_disclosure.as_ref(),
-        parsed_i18n.as_ref(),
-        parsed_icons.as_ref(),
-    );
+    let report = validate(parsed_disclosure.as_ref(), parsed_i18n.as_ref());
     for w in &report.warnings {
         println!("warning: {w}");
     }
@@ -76,17 +68,11 @@ pub fn run(
     } else {
         None
     };
-    let icons_bytes = if parsed_icons.is_some() {
-        Some(read_bytes(&icons_path)?)
-    } else {
-        None
-    };
 
     let embedded = embed_sections(
         &wasm_bytes,
         disclosure_bytes.as_deref(),
         i18n_bytes.as_deref(),
-        icons_bytes.as_deref(),
     );
 
     let output_path = output.unwrap_or_else(|| derive_output_path(&wasm));
@@ -101,15 +87,12 @@ pub fn run(
 
     let disclosure_len = disclosure_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
     let i18n_len = i18n_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
-    let icons_len = icons_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
     println!(
-        "Embedded: {} (wasm {} B + disclosure-fields {} B + i18n {} B + icons {} B \
-         → {} B) → {}",
+        "Embedded: {} (wasm {} B + disclosure-fields {} B + i18n {} B → {} B) → {}",
         wasm.display(),
         wasm_bytes.len(),
         disclosure_len,
         i18n_len,
-        icons_len,
         embedded.len(),
         output_path.display(),
     );

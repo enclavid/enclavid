@@ -19,6 +19,10 @@ interface capture {
 
   /// On-screen guideline shown over the camera preview. Purely UX
   /// hint — doesn't affect the captured bytes.
+  ///
+  /// A `rect` is drawn at its width:height aspect held to 0.5–2.0 and
+  /// rounded to hundredths: past those, a frame no longer fits the screen,
+  /// and further digits are a difference the applicant cannot see.
   variant capture-guide {
     none,
     /// no overlay
@@ -33,12 +37,11 @@ interface capture {
   /// Multi-step captures within ONE media render belong to the
   /// SAME artifact — plugins analyse them together.
   ///
-  /// `icon` is an `icon-ref` resolved through `enclavid:host/embedded-icons.icon`
-  /// — the name has to appear in the calling component's
-  /// `enclavid:embedded.icons.v1` section, blocking the free-form
-  /// covert channel a raw `option<string>` would otherwise be. Not
-  /// a text-ref because there's nothing to localise — icon-name is
-  /// purely a frontend dispatch token, never displayed verbatim.
+  /// `icon` is an `icon-ref` minted by one of the functions of
+  /// `enclavid:host-icons/icons`, one per icon the frontend draws, so a
+  /// step carries an icon from that fixed set and never a free-form
+  /// string. Not a text-ref because there's nothing to localise — the
+  /// name is a frontend dispatch token, never displayed verbatim.
   ///
   /// The three remaining surfaces are `localized-ref`s into the
   /// component's pre-declared `i18n` catalog:

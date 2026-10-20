@@ -22,7 +22,7 @@ pub const HOST_INTERFACES: [&str; 25] = [
     "enclavid:host/types@0.1.0",
     "enclavid:host/embedded-disclosure-fields@0.1.0",
     "enclavid:host/embedded-i18n@0.1.0",
-    "enclavid:host/embedded-icons@0.1.0",
+    crate::icons::INTERFACE,
     POLICY_PROPS,
     "wasi:clocks/wall-clock@0.2.12",
     "wasi:clocks/monotonic-clock@0.2.12",

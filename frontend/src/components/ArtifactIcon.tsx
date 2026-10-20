@@ -1,26 +1,19 @@
 // Frontend-bundled artifact silhouettes for the pre-capture intro
 // screen.
 //
-// Dispatch is by name (text-ref string). The policy supplies the
-// name (validated as a registered `text-ref` host-side), the
-// frontend looks it up in `GLYPHS`. Two design points:
+// Dispatch is by name. The set of names is the host's own: one
+// function each in `enclavid:host-icons/icons` (`NAMES` in
+// `engine-types`), so a step only ever carries one of them, and
+// `GLYPHS` draws every one.
 //
-//   - **Why static React components, not policy-supplied SVG.**
-//     Inline SVG is an XSS vector (script tags, event handlers,
-//     foreignObject HTML); a sanitizer is fragile and ongoing-CVE
-//     -prone. Keeping the icon surface attested-in-the-bundle
-//     closes the door entirely.
-//   - **Why graceful fallback on unknown names.** A new policy
-//     can ask for icon names the running frontend doesn't yet
-//     bundle (e.g. policy targets future "european-residence-permit"
-//     before the frontend ship adds it). Unknown name → render
-//     nothing, capture flow continues. New icons are a frontend
-//     release, not a coupled WIT/host bump.
+// Why static React components, not policy-supplied SVG: inline SVG
+// is an XSS vector (script tags, event handlers, foreignObject
+// HTML); a sanitizer is fragile and ongoing-CVE-prone. Keeping the
+// icon surface attested-in-the-bundle closes the door entirely.
 //
-// Adding a new icon = add an entry to `GLYPHS` + a Glyph function.
-// No WIT, proto, or host code changes. Frontend rebuild + PCR
-// updates; policies that already register the matching text-ref
-// start rendering it.
+// Adding an icon = a function `@since` the next 0.1.x of
+// `wit/host-icons/icons.wit`, its name in `NAMES`, and an entry in
+// `GLYPHS` with its Glyph function — one release of the image.
 //
 // Visual style: 96x96 viewBox, stroke-only, currentColor-inheriting
 // (so the parent's `text-*` class drives the colour). Stroke 2.5
@@ -31,8 +24,8 @@
 // and to keep the icon language KYC-serious.
 
 type Props = {
-  /// text-ref name as the policy registered + the host validated.
-  /// `null` (or unknown) → no icon rendered.
+  /// Icon name, one of the host's own. `null` (or one `GLYPHS`
+  /// lacks) → no icon rendered.
   name: string | null;
   className?: string;
 };
@@ -41,9 +34,8 @@ export function ArtifactIcon({ name, className }: Props) {
   if (!name) return null;
   const Glyph = GLYPHS[name];
   if (!Glyph) {
-    // Unknown ref — graceful fallback. Policy was valid (host
-    // verified membership in prepare-text-refs), but this frontend
-    // release doesn't bundle a matching SVG. Render nothing.
+    // A name `GLYPHS` lacks: only a host list ahead of this bundle
+    // could send one. Render nothing rather than fail the step.
     return null;
   }
   return (

@@ -59,13 +59,12 @@ pub fn componentize(module: &[u8]) -> Result<Vec<u8>> {
 /// does. A missing file appends no section (a plugin ships no
 /// `disclosure-fields.json`; a section-less plugin ships none at all).
 pub fn embed_sections(mut wasm: Vec<u8>, dir: &str) -> Vec<u8> {
-    use enclavid_embedded::{SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS};
+    use enclavid_embedded::{SECTION_DISCLOSURE_FIELDS, SECTION_I18N};
     use wasm_encoder::{ComponentSection, CustomSection};
     let read = |name: &str| std::fs::read(format!("{dir}/{name}")).ok();
     for (name, data) in [
         (SECTION_DISCLOSURE_FIELDS, read("disclosure-fields.json")),
         (SECTION_I18N, read("i18n.json")),
-        (SECTION_ICONS, read("icons.json")),
     ] {
         if let Some(bytes) = data {
             CustomSection {

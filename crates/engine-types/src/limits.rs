@@ -121,10 +121,30 @@ pub const MAX_VALUE_LENGTH: usize = 4096;
 /// rejected; [`MAX_TEXT_VALUE_HARD_BYTES`] is the rejection threshold.
 pub const MAX_TEXT_VALUE_SOFT_CHARS: usize = 1000;
 
+// ----- The capture guide -----
+
+/// The narrowest width:height a `rect` capture guide is drawn at. The
+/// frame's width is fixed on screen and its height follows from the
+/// aspect, so below this a frame on a phone held upright runs past the
+/// screen. A portrait ID-1 card is 0.63, a portrait A4 page 0.707.
+pub const GUIDE_ASPECT_MIN: f32 = 0.5;
+
+/// The widest width:height a `rect` capture guide is drawn at. Past it the
+/// frame is a strip no document fills; a TD3 passport page is 1.42, an
+/// ID-1 card 1.586.
+pub const GUIDE_ASPECT_MAX: f32 = 2.0;
+
+/// How many steps of a `rect` guide's aspect there are per unit: it is
+/// drawn rounded to hundredths. The policy picks the aspect freely, and
+/// past what the applicant can tell apart on screen every further digit
+/// would carry bits no one can see; held to the range above, the choice
+/// is one of 151.
+pub const GUIDE_ASPECT_STEPS_PER_UNIT: f32 = 100.0;
+
 // ----- The consumer's embedded catalogs, as a whole -----
 
 /// The most embedded-section bytes one composition may carry: every
-/// `enclavid:embedded.*.v1` section — disclosure-fields, i18n, icons — of the
+/// `enclavid:embedded.*.v1` section — disclosure-fields, i18n — of the
 /// policy and of every plugin it pins, at every nesting depth, summed as raw
 /// bytes. Past it the compile is refused before any section is parsed, and no
 /// bundle exists to be cached or installed.
@@ -170,15 +190,14 @@ pub const MAX_EMBEDDED_SECTION_BYTES: u64 = 2 * 1024 * 1024;
 //     the round's process holds; this caps per-entry size so a million
 //     1-byte entries can't slip under the memory wire by spreading
 //     the payload.
-//   * `MAX_DECLARED_DISCLOSURE_FIELDS` / `MAX_DECLARED_LOCALIZED` /
-//     `MAX_DECLARED_ICONS` — per-kind cardinality caps on a single
-//     component's embedded declarations. Split per kind because the
-//     covert-channel surfaces aren't symmetric — see
-//     `enclavid-embedded::lib.rs` for the per-kind rationale. The
-//     compile-time bound is the system-wide trust contract; runtime
-//     transparency UI in api views surfaces the actual declared
-//     counts to the user as a second-line defence.
+//   * `MAX_DECLARED_DISCLOSURE_FIELDS` / `MAX_DECLARED_LOCALIZED` —
+//     per-kind cardinality caps on a single component's embedded
+//     declarations. Split per kind because the covert-channel surfaces
+//     aren't symmetric — see `enclavid-embedded::lib.rs` for the
+//     per-kind rationale. The compile-time bound is the system-wide
+//     trust contract; runtime transparency UI in api views surfaces the
+//     actual declared counts to the user as a second-line defence.
 pub use enclavid_embedded::{
-    MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_ICONS, MAX_DECLARED_LOCALIZED, MAX_KEY_LENGTH,
-    MAX_LANGUAGE_LENGTH, MAX_TEXT_VALUE_HARD_BYTES,
+    MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_LOCALIZED, MAX_KEY_LENGTH, MAX_LANGUAGE_LENGTH,
+    MAX_TEXT_VALUE_HARD_BYTES,
 };

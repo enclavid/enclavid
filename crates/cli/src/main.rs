@@ -33,7 +33,7 @@ enum Commands {
     },
 
     /// Author a **policy** artifact: embed its `enclavid:embedded.*`
-    /// declarations (disclosure-fields / i18n / icons) and validate them.
+    /// declarations (disclosure-fields / i18n) and validate them.
     /// `embed` asserts the component exports the `enclavid:policy/policy`
     /// world. Registry push is role-agnostic — see `enclavid oci push`.
     Policy {
@@ -41,10 +41,10 @@ enum Commands {
         command: PolicyCommand,
     },
 
-    /// Author a **plugin** artifact: embed its `enclavid:embedded.{i18n,
-    /// icons}` declarations. No disclosure-fields (policy is the single
-    /// bandwidth gate, Option C). `embed` asserts the component is NOT a
-    /// policy. Registry push is role-agnostic — see `enclavid oci push`.
+    /// Author a **plugin** artifact: embed its `enclavid:embedded.i18n`
+    /// declarations. No disclosure-fields (a plugin's are looked up in the
+    /// policy's list). `embed` asserts the component is NOT a policy.
+    /// Registry push is role-agnostic — see `enclavid oci push`.
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
@@ -130,9 +130,9 @@ enum WorkspaceCommand {
 #[derive(Subcommand)]
 enum PolicyCommand {
     /// Embed the policy's `enclavid:embedded.*.v1` declarations
-    /// (disclosure-fields, i18n, icons) into a wasm component as
-    /// custom sections. Pure metadata embedding — the output is a
-    /// wasm component ready for `enclavid oci push`.
+    /// (disclosure-fields, i18n) into a wasm component as custom
+    /// sections. Pure metadata embedding — the output is a wasm
+    /// component ready for `enclavid oci push`.
     Embed {
         /// Path to the wasm component file (output of
         /// `cargo build --target wasm32-…` + `wasm-tools component
@@ -158,15 +158,6 @@ enum PolicyCommand {
         #[arg(long = "i18n", default_value = "i18n.json")]
         i18n: PathBuf,
 
-        /// Path to the icons declarations file (flat JSON list of
-        /// machine identifiers). Embedded as the
-        /// `enclavid:embedded.icons.v1` custom section. Optional —
-        /// components that never set `CaptureStep.icon` can omit it.
-        /// Defaults to `icons.json`; an absent file is silently
-        /// treated as "no icons".
-        #[arg(long = "icons", default_value = "icons.json")]
-        icons: PathBuf,
-
         /// Output path for the embedded wasm. Defaults to
         /// `<input-stem>.embedded.wasm` next to the input.
         #[arg(short, long)]
@@ -189,11 +180,10 @@ enum PolicyCommand {
 
 #[derive(Subcommand)]
 enum PluginCommand {
-    /// Embed the plugin's `enclavid:embedded.{i18n,icons}.v1`
-    /// declarations into a wasm component as custom sections. Pure
-    /// metadata embedding — no encryption. Plugins don't carry a
-    /// `disclosure-fields` section under Option C (policy is the
-    /// single bandwidth gate for DF refs).
+    /// Embed the plugin's `enclavid:embedded.i18n.v1` declarations into
+    /// a wasm component as a custom section. Pure metadata embedding —
+    /// no encryption. Plugins don't carry a `disclosure-fields` section:
+    /// a plugin's disclosure fields are looked up in the policy's list.
     Embed {
         /// Path to the wasm component file (output of
         /// `cargo build --target wasm32-…` + `wasm-tools component
@@ -207,28 +197,20 @@ enum PluginCommand {
         #[arg(long = "i18n", default_value = "i18n.json")]
         i18n: PathBuf,
 
-        /// Path to the icons declarations file. Embedded as the
-        /// `enclavid:embedded.icons.v1` custom section. Optional —
-        /// defaults to `icons.json`; absent file is treated as "no
-        /// icons".
-        #[arg(long = "icons", default_value = "icons.json")]
-        icons: PathBuf,
-
         /// Output path for the embedded wasm. Defaults to
         /// `<input-stem>.embedded.wasm` next to the input.
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
 
-    /// Validate a plugin project's embedded declarations (i18n, icons)
-    /// against the same rules the TEE engine enforces at load. No
-    /// disclosure-fields (policy is the single bandwidth gate, Option
-    /// C). Run before `enclavid oci push`.
+    /// Validate a plugin project's embedded declarations (i18n) against
+    /// the same rules the TEE engine enforces at load. No
+    /// disclosure-fields (a plugin's are looked up in the policy's
+    /// list). Run before `enclavid oci push`.
     Validate {
         /// Path to the plugin project directory containing `i18n.json`
-        /// and `icons.json` (both optional — missing files are treated
-        /// as "no declarations of that kind"). Defaults to the current
-        /// directory.
+        /// (optional — a missing file is treated as "no declarations").
+        /// Defaults to the current directory.
         #[arg(default_value = ".")]
         dir: PathBuf,
     },
@@ -418,18 +400,14 @@ async fn main() -> Result<()> {
                 wasm,
                 disclosure_fields,
                 i18n,
-                icons,
                 output,
-            } => commands::policy::embed::run(wasm, disclosure_fields, i18n, icons, output),
+            } => commands::policy::embed::run(wasm, disclosure_fields, i18n, output),
             PolicyCommand::Validate { dir } => commands::policy::validate::run(dir).await,
         },
         Commands::Plugin { command } => match command {
-            PluginCommand::Embed {
-                wasm,
-                i18n,
-                icons,
-                output,
-            } => commands::plugin::embed::run(wasm, i18n, icons, output),
+            PluginCommand::Embed { wasm, i18n, output } => {
+                commands::plugin::embed::run(wasm, i18n, output)
+            }
             PluginCommand::Validate { dir } => commands::plugin::validate::run(dir).await,
         },
         Commands::Oci { command } => match command {

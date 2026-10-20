@@ -34,7 +34,7 @@ use wasmtime::{Config, Engine, Store};
 
 use crate::Host_ as GeneratedHost;
 use crate::Host_Pre as GeneratedHostPre;
-use crate::embedded::{Icon, IconRef, Localized, LocalizedRef, undeclared_trap};
+use crate::embedded::{IconRef, Localized, LocalizedRef, undeclared_trap};
 use crate::limits::POLICY_MAX_STATE_BYTES;
 use crate::listener::SessionChange;
 use crate::round::Round;
@@ -159,18 +159,19 @@ impl Executor {
     /// Build a [`PrimedComposition`] from an already-deserialized `component`:
     /// construct the host `Linker` for the imports fusion bubbled up and
     /// type-check it into a reusable `InstancePre`, ONCE. `embedded_imports` names
-    /// the distinct per-catalog i18n/icons instances (`embedded-slot:<hash>/
-    /// <iface>`); `embedded` is the composition-wide registry those resolve
-    /// against (and that [`run`](Self::run) reads at the action boundary).
+    /// the distinct per-catalog i18n instances (`embedded-slot:<hash>/i18n`);
+    /// `embedded` is the composition-wide registry those resolve against (and
+    /// that [`run`](Self::run) reads at the action boundary).
     ///
     /// bindgen wires the CANONICAL-named imports on `HostState`: the merged
     /// `enclavid:host/embedded-disclosure-fields` (first-match, option B), and the
-    /// canonical `enclavid:host/embedded-{i18n,icons}` (used only by a lone
-    /// unfused policy — a fused component routes those away, so the canonical
-    /// registrations sit unused, harmless). Plugin↔policy interfaces are internal
-    /// to the fused component, so the Linker never sees them. Added on top: the
-    /// strict per-catalog resolvers (`embedded-slot:<hash>/<iface>`), whose names
-    /// bindgen can't emit, and the props' `get`, whose type is the policy's.
+    /// canonical `enclavid:host/embedded-i18n` (used only by a lone unfused
+    /// policy — a fused component routes it away, so the canonical registration
+    /// sits unused, harmless). Plugin↔policy interfaces are internal to the
+    /// fused component, so the Linker never sees them. Added on top: the strict
+    /// per-catalog resolvers (`embedded-slot:<hash>/i18n`), whose names bindgen
+    /// can't emit; the icons, one function each from the host's own list; and
+    /// the props' `get`, whose type is the policy's.
     pub fn prime(
         &self,
         component: &Component,
@@ -181,6 +182,7 @@ impl Executor {
         GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
         crate::round::add_to_linker(&mut linker)?;
         register_strict_embedded(&mut linker, embedded_imports, &embedded)?;
+        register_icons(&mut linker)?;
         let props = crate::props::declared(component, &self.engine);
         if props.is_some() {
             register_props(&mut linker)?;
@@ -324,9 +326,9 @@ impl Executor {
     }
 }
 
-/// Register the distinct per-catalog i18n / icons instances the fusion
-/// produced. Each [`EmbeddedImport`] names one composite import
-/// (`embedded-slot:<hash>/<iface>`) whose single func resolves keys
+/// Register the distinct per-catalog i18n instances the fusion produced.
+/// Each [`EmbeddedImport`] names one composite import
+/// (`embedded-slot:<hash>/i18n`) whose single func resolves keys
 /// STRICTLY against the one catalog identified by `catalog_hash` — a
 /// plugin's i18n key can never resolve to the policy's translation.
 /// Instance names are unique per `(hash, iface)` (fusion dedups), so
@@ -337,9 +339,7 @@ fn register_strict_embedded(
     imports: &[EmbeddedImport],
     embedded: &std::sync::Arc<crate::embedded::EmbeddedRegistry>,
 ) -> wasmtime::Result<()> {
-    // Branch by kind at REGISTRATION (not inside the closure) so each
-    // func's closure has a single concrete resource return type. Each
-    // resolves STRICTLY against the bound `catalog_hash` and mints the
+    // Each resolves STRICTLY against the bound `catalog_hash` and mints the
     // ref resource into the run's ResourceTable.
     for imp in imports {
         let hash = imp.catalog_hash;
@@ -363,26 +363,26 @@ fn register_strict_embedded(
                         })
                     })?;
             }
-            EmbeddedIface::Icons => {
-                let embedded = embedded.clone();
-                linker
-                    .root()
-                    .instance(&imp.instance_name)?
-                    .func_wrap_async("icon", move |mut store, (name,): (String,)| {
-                        let embedded = embedded.clone();
-                        Box::new(async move {
-                            let data = embedded
-                                .icons
-                                .resolve_strict(&hash, &name)
-                                .ok_or_else(|| undeclared_trap::<Icon>(&name))?
-                                .clone();
-                            let res: Resource<IconRef> =
-                                store.data_mut().table.push(IconRef(data))?;
-                            Ok((res,))
-                        })
-                    })?;
-            }
         }
+    }
+    Ok(())
+}
+
+/// Register the icons, one function each, at the version the host serves —
+/// which the linker serves to an import at a compatible version as well, of
+/// whichever of them it names. Each mints the `icon-ref` of its own icon.
+fn register_icons(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
+    use engine_types::icons::{INTERFACE, NAMES};
+    let mut root = linker.root();
+    let mut icons = root.instance(INTERFACE)?;
+    for name in NAMES {
+        icons.func_wrap_async(name, move |mut store, (): ()| {
+            Box::new(async move {
+                let icon: Resource<IconRef> =
+                    store.data_mut().table.push(IconRef(name.to_owned()))?;
+                Ok((icon,))
+            })
+        })?;
     }
     Ok(())
 }
@@ -455,6 +455,15 @@ mod tests {
     /// the props package `props` — the version it is written at, and its
     /// interface's body — compiled by the fleet's compile and primed here.
     fn primed(imports: &str, props: (&str, &str)) -> (Executor, PrimedComposition) {
+        primed_beside(imports, props, "")
+    }
+
+    /// [`primed`], with the WIT of `packages` declared beside the props.
+    fn primed_beside(
+        imports: &str,
+        props: (&str, &str),
+        packages: &str,
+    ) -> (Executor, PrimedComposition) {
         use wit_component::{
             ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata,
         };
@@ -472,6 +481,7 @@ mod tests {
             "tests/wit/wasi/sockets.wit",
             "tests/wit/wasi/cli.wit",
             "../../wit/host",
+            "../../wit/host-icons",
             "../../wit/shared-types",
             "../../wit/policy",
         ] {
@@ -488,7 +498,8 @@ mod tests {
              }}
              package enclavid:host-ext@{version} {{
                  interface policy-props {{ {body} }}
-             }}"
+             }}
+             {packages}"
         );
         let package = resolve
             .push_str("policy.wit", &wit)
@@ -526,6 +537,40 @@ mod tests {
 
     const FLAG: &str = "record props { flag: bool } get: func() -> props;";
 
+    /// The icons the host serves are the functions `wit/host-icons` publishes,
+    /// at the version it publishes them.
+    #[test]
+    fn the_icons_are_the_ones_the_wit_declares() {
+        use engine_types::icons::{INTERFACE, NAMES};
+        use wit_parser::Resolve;
+
+        let mut resolve = Resolve::default();
+        resolve
+            .push_path(format!("{}/../../wit/host", env!("CARGO_MANIFEST_DIR")))
+            .expect("the repository's WIT parses");
+        let (package, _) = resolve
+            .push_path(format!(
+                "{}/../../wit/host-icons",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .expect("the repository's WIT parses");
+        let icons = resolve.packages[package].interfaces["icons"];
+        assert_eq!(
+            resolve.id_of(icons).as_deref(),
+            Some(INTERFACE),
+            "the version the host serves is the one published",
+        );
+        let mut published: Vec<&str> = resolve.interfaces[icons]
+            .functions
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut served = NAMES.to_vec();
+        published.sort_unstable();
+        served.sort_unstable();
+        assert_eq!(published, served);
+    }
+
     /// The compile refuses a composition that, fused, imports anything outside
     /// [`HOST_INTERFACES`](engine_types::compile::HOST_INTERFACES) that needs
     /// serving — so every name there must be one this linker serves. A policy
@@ -558,6 +603,24 @@ mod tests {
         assert_eq!(
             executor.read_props(&primed, br#"{"flag": false}"#),
             Ok(Some("{flag: false}".into()))
+        );
+    }
+
+    /// The icons imported at a later compatible version, naming only icons the
+    /// host has, compile and are served from the version the host registers
+    /// them at.
+    #[test]
+    fn icons_at_a_compatible_version_are_served() {
+        primed_beside(
+            "import enclavid:host-icons/icons@0.1.7;",
+            ("0.1.0", FLAG),
+            "package enclavid:host-icons@0.1.7 {
+                 interface icons {
+                     use enclavid:host/types@0.1.0.{icon-ref};
+                     passport: func() -> icon-ref;
+                     selfie: func() -> icon-ref;
+                 }
+             }",
         );
     }
 }

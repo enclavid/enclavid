@@ -1,21 +1,13 @@
-//! `enclavid:well-known` — canonical KYC field strings, icons, and
-//! pre-baked capture flows. Drop-in helpers so policy authors don't
-//! hand-roll text-refs for standard data shapes.
+//! `enclavid:well-known` — canonical KYC field strings and pre-baked
+//! capture flows. Drop-in helpers so policy authors don't hand-roll
+//! text-refs for standard data shapes.
 //!
 //! Every ref this plugin hands back (disclosure-field key, localized
-//! label, icon name) is resolved through the corresponding
-//! `enclavid:host/*` embedded host import — the host hashes
-//! `(slot, kind, key)` under a TEE-only key and returns the opaque
-//! token. The plugin's own `enclavid:embedded.*.v1` custom sections
-//! (`disclosure-fields.json`, `i18n.json`, `icons.json`) declare the
-//! full set of keys the host will accept; anything passed to one of
-//! the embedded imports that isn't in the matching section traps at
-//! load time.
-//!
-//! Raw string construction wouldn't work: under Phase B BLAKE3-keyed
-//! tokens the engine reverse-index never sees a string the host
-//! itself didn't issue, so any hand-built `"passport-number"` would
-//! fail the use-site membership check.
+//! label, icon) is minted by the host, which a component cannot do for
+//! itself. A disclosure-field key resolves against the composition's
+//! lists, a label against this plugin's own `i18n.json`; a key neither
+//! declares traps at use. An icon is one of the host's own, one function
+//! each in `enclavid:host-icons/icons`.
 
 wit_bindgen::generate!({
     path: "wit",
@@ -25,32 +17,14 @@ wit_bindgen::generate!({
 
 use enclavid::host::embedded_disclosure_fields::disclosure_field as resolve_disclosure_field;
 use enclavid::host::embedded_i18n::localized as resolve_localized;
-use enclavid::host::embedded_icons::icon as resolve_icon;
-use enclavid::shared_types::capture::{CameraFacing, CaptureGuide, CaptureStep, MediaSpec};
 use enclavid::host::types::IconRef;
+use enclavid::host_icons::icons;
+use enclavid::shared_types::capture::{CameraFacing, CaptureGuide, CaptureStep, MediaSpec};
 use enclavid::shared_types::disclosure::DisplayField;
 use exports::enclavid::well_known::capture::Guest as CaptureGuest;
 use exports::enclavid::well_known::disclosure_fields::Guest as DisclosureFieldsGuest;
-use exports::enclavid::well_known::icons::Guest as IconsGuest;
 
 struct WellKnown;
-
-// ─── icons ────────────────────────────────────────────────────────
-
-impl IconsGuest for WellKnown {
-    fn passport() -> IconRef {
-        resolve_icon("passport")
-    }
-    fn id_card() -> IconRef {
-        resolve_icon("id_card")
-    }
-    fn drivers_license() -> IconRef {
-        resolve_icon("drivers_license")
-    }
-    fn selfie() -> IconRef {
-        resolve_icon("selfie")
-    }
-}
 
 // ─── disclosure-fields ────────────────────────────────────────────
 
@@ -135,19 +109,19 @@ const PASSPORT_ASPECT: f32 = 1.42;
 /// ICAO TD1 ID-1 card aspect (85.6x54mm → ~1.585).
 const ID1_ASPECT: f32 = 1.585;
 
-/// Build a CaptureStep, resolving every ref through the embedded
-/// host imports. `prefix` is the snake_case per-step namespace
-/// (`passport`, `id_card_front`, ...); the three localized refs
-/// follow `<prefix>_{instructions,step,review_hint}`, which
-/// `i18n.json` declares verbatim.
+/// Build a CaptureStep, resolving every ref through the host imports.
+/// `prefix` is the snake_case per-step namespace (`passport`,
+/// `id_card_front`, ...); the three localized refs follow
+/// `<prefix>_{instructions,step,review_hint}`, which `i18n.json`
+/// declares verbatim.
 fn step(
     prefix: &str,
-    icon_name: Option<&str>,
+    icon: Option<IconRef>,
     camera: CameraFacing,
     guide: CaptureGuide,
 ) -> CaptureStep {
     CaptureStep {
-        icon: icon_name.map(resolve_icon),
+        icon,
         instructions: resolve_localized(&format!("{prefix}_instructions")),
         label: resolve_localized(&format!("{prefix}_step")),
         camera,
@@ -159,7 +133,7 @@ fn step(
 fn passport_step() -> CaptureStep {
     step(
         "passport",
-        Some("passport"),
+        Some(icons::passport()),
         CameraFacing::Rear,
         CaptureGuide::Rect(PASSPORT_ASPECT),
     )
@@ -168,7 +142,7 @@ fn passport_step() -> CaptureStep {
 fn id_card_front_step_inner() -> CaptureStep {
     step(
         "id_card_front",
-        Some("id_card"),
+        Some(icons::id_card()),
         CameraFacing::Rear,
         CaptureGuide::Rect(ID1_ASPECT),
     )
@@ -177,7 +151,7 @@ fn id_card_front_step_inner() -> CaptureStep {
 fn id_card_back_step_inner() -> CaptureStep {
     step(
         "id_card_back",
-        Some("id_card"),
+        Some(icons::id_card()),
         CameraFacing::Rear,
         CaptureGuide::Rect(ID1_ASPECT),
     )
@@ -186,7 +160,7 @@ fn id_card_back_step_inner() -> CaptureStep {
 fn drivers_license_front_step_inner() -> CaptureStep {
     step(
         "drivers_license_front",
-        Some("drivers_license"),
+        Some(icons::drivers_license()),
         CameraFacing::Rear,
         CaptureGuide::Rect(ID1_ASPECT),
     )
@@ -195,7 +169,7 @@ fn drivers_license_front_step_inner() -> CaptureStep {
 fn drivers_license_back_step_inner() -> CaptureStep {
     step(
         "drivers_license_back",
-        Some("drivers_license"),
+        Some(icons::drivers_license()),
         CameraFacing::Rear,
         CaptureGuide::Rect(ID1_ASPECT),
     )
@@ -204,7 +178,7 @@ fn drivers_license_back_step_inner() -> CaptureStep {
 fn selfie_step_inner() -> CaptureStep {
     step(
         "selfie",
-        Some("selfie"),
+        Some(icons::selfie()),
         CameraFacing::Front,
         CaptureGuide::Oval,
     )

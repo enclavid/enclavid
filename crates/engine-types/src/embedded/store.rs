@@ -1,26 +1,26 @@
-//! Generic backing for the three public embedded stores. Each
+//! Generic backing for the two public embedded stores. Each
 //! `enclavid:host/embedded-*` interface gets its own `RefStore<K>`
 //! instantiation, exposed via type aliases in
 //! [`registry`](super::registry).
 //!
 //! ## Refs are resources, not tokens
 //!
-//! A component never sees a ref VALUE — `localized`/`icon`/
-//! `disclosure-field` return an opaque WIT `resource` handle it cannot
-//! forge (wasmtime owns the handle table). So the store carries no
-//! keyed-hash / reverse-index: membership is a plain `key → data`
-//! lookup, and the host (in `engine-executor`) mints a resource whose
-//! rep IS the resolved data (`LocalizedRef` / `IconRef` /
-//! `DisclosureFieldRef`). The engine dereferences that rep at the action
+//! A component never sees a ref VALUE — `localized`/`disclosure-field`
+//! return an opaque WIT `resource` handle it cannot forge (wasmtime owns
+//! the handle table). So the store carries no keyed-hash /
+//! reverse-index: membership is a plain `key → data` lookup, and the
+//! host (in `engine-executor`) mints a resource whose rep IS the
+//! resolved data (`LocalizedRef` / `DisclosureFieldRef`; `IconRef` too,
+//! from a name no store holds). The engine dereferences that rep at the action
 //! boundary, so the resolved data is self-contained (no registry needed
 //! to render it later).
 //!
 //! Catalogs are identified by their **content-hash** (`catalog_hash`,
 //! in `engine-compiler`), which survives wac fusion. `resolve_strict`
 //! answers against ONE bound catalog (the strict per-component path —
-//! i18n / icons routed to a distinct twin); `resolve_first_match` walks
+//! i18n routed to a distinct twin); `resolve_first_match` walks
 //! catalogs in composition order (the merged path — disclosure-fields
-//! always, and i18n / icons for a lone unfused policy).
+//! always, and i18n for a lone unfused policy).
 
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -28,15 +28,14 @@ use std::marker::PhantomData;
 use super::registry::Translation;
 
 /// Static description of one embedded interface. The marker types below
-/// ([`DisclosureFields`], [`Localized`], [`Icon`]) pick the per-kind
-/// `NAME` (for trap messages) and `Stored` type.
+/// ([`DisclosureFields`], [`Localized`]) pick the per-kind `NAME` (for
+/// trap messages) and `Stored` type.
 pub trait RefKind {
     /// Human-readable name for trap messages — matches the
     /// `enclavid:host/embedded-*` interface a misuse came from.
     const NAME: &'static str;
     /// What the store keeps per declared key. The key itself for
-    /// [`DisclosureFields`] / [`Icon`]; the translation list for
-    /// [`Localized`].
+    /// [`DisclosureFields`]; the translation list for [`Localized`].
     type Stored;
 }
 
@@ -54,14 +53,6 @@ pub enum Localized {}
 impl RefKind for Localized {
     const NAME: &'static str = "localized";
     type Stored = Vec<Translation>;
-}
-
-/// Marker for `enclavid:host/embedded-icons` refs.
-pub enum Icon {}
-
-impl RefKind for Icon {
-    const NAME: &'static str = "icon";
-    type Stored = String;
 }
 
 /// Per-kind `key → data` store, keyed by catalog content-hash. Built

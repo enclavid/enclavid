@@ -1,13 +1,12 @@
 # enclavid:well-known
 
-Canonical KYC field strings, icons, and pre-baked capture flows for
-Enclavid policies. Drop-in helpers so policy authors don't hand-roll
-text-refs for standard data shapes.
+Canonical KYC field strings and pre-baked capture flows for Enclavid
+policies. Drop-in helpers so policy authors don't hand-roll text-refs
+for standard data shapes. Icons are not this plugin's: a capture step
+names one of the host's own (`enclavid:host-icons/icons`).
 
 ## What it provides
 
-- **`icons`** — canonical icon names (`passport`, `id-card`,
-  `drivers-license`, `selfie`) for `CaptureStep.icon`.
 - **`disclosure-fields`** — `DisplayField` constructors for 17 common
   KYC fields. Each function returns a `display-field` with `key` and
   `label` set to canonical text-ref strings.
@@ -20,7 +19,7 @@ text-refs for standard data shapes.
 ## Usage from a policy
 
 ```rust
-use enclavid::well_known::{disclosure_fields, capture, icons};
+use enclavid::well_known::{disclosure_fields, capture};
 
 // One-line passport capture (single step, rear camera, ICAO TD3 aspect):
 let clips = prompt_media(&capture::passport());
@@ -34,7 +33,7 @@ let consented = prompt_disclosure(&[
 ], reason_ref, requester_ref);
 ```
 
-`use enclavid::well_known::{disclosure_fields, capture, icons}` —
+`use enclavid::well_known::{disclosure_fields, capture}` —
 explicit scope keeps short names without collisions
 (`disclosure_fields::passport_number` vs `disclosure::prompt_disclosure`).
 
@@ -156,13 +155,13 @@ wkg wit build --wit-dir wit -o target/well-known-wit.wasm
 wkg publish target/well-known-wit.wasm
 # → enclavid:well-known@0.1.0 (WIT package)
 
-# 5. Embed the plugin's i18n / icons declarations as custom sections.
+# 5. Embed the plugin's i18n declarations as a custom section.
 #    No `disclosure-fields` — the policy is the single bandwidth gate
 #    for disclosure-field refs (Option C). `embed` also asserts this is
 #    a plugin (it must NOT export `enclavid:policy/policy`) and rejects a
 #    core module — so step 3 (componentize) is required before it.
 enclavid plugin embed target/well-known.component.wasm \
-    --i18n i18n.json --icons icons.json \
+    --i18n i18n.json \
     -o target/well-known.embedded.wasm
 
 # (optional) lint the declarations standalone:

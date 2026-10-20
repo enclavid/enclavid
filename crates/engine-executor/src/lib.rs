@@ -65,8 +65,7 @@ mod state;
 
 pub use embedded::{
     ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedRegistry,
-    EmbeddedRegistryBuilder, Icon, IconStore, Localized, LocalizedStore, RefKind, RefStore,
-    Translation,
+    EmbeddedRegistryBuilder, Localized, LocalizedStore, RefKind, RefStore, Translation,
 };
 pub use listener::{SessionChange, SessionListener};
 pub use media_store::MediaStore;
@@ -115,12 +114,12 @@ wasmtime::component::bindgen!({
             import enclavid:host/types@0.1.0;
             import enclavid:host/embedded-disclosure-fields@0.1.0;
             import enclavid:host/embedded-i18n@0.1.0;
-            import enclavid:host/embedded-icons@0.1.0;
             export enclavid:policy/policy@0.1.0;
         }
     "#,
     // WASI is not in this world: it is linked from wasmtime-wasi's own
-    // bindings, see `round`.
+    // bindings, see `round`. Nor are the icons, served at whatever version a
+    // component imports them: see `runner::register_icons`.
     path: [
         "../../wit/host",
         "../../wit/shared-types",

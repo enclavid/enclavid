@@ -25,11 +25,11 @@ enclavid
 │       ├── list
 │       └── use <id-or-name>
 ├── policy                         ← OCI artifact tooling (registry-agnostic)
-│   ├── embed --disclosure-fields ... --i18n ... --icons ...
+│   ├── embed --disclosure-fields ... --i18n ...
 │   ├── push [--auth ...]
 │   └── validate
 ├── plugin                         ← OCI artifact tooling for plugin components
-│   └── embed --i18n ... --icons ...
+│   └── embed --i18n ...
 └── session                        ← verification session lifecycle
     ├── create --policy ... [--measurement <hex>]
     ├── get <id>
@@ -42,10 +42,10 @@ enclavid
 
 ```bash
 # 1. Embed the policy's `enclavid:embedded.*.v1` declarations
-#    (disclosure-fields, i18n, icons) into the wasm component.
+#    (disclosure-fields, i18n) into the wasm component.
 enclavid policy embed path/to/policy.wasm \
     --disclosure-fields disclosure-fields.json \
-    --i18n i18n.json --icons icons.json \
+    --i18n i18n.json \
     -o policy.embedded.wasm
 
 # 2. Authenticate to Enclavid + auto-wire docker credentials. Prompts
@@ -127,7 +127,7 @@ For CI runners that don't want to write `~/.docker/config.json`:
 - run: |
     enclavid policy embed policy.wasm \
         --disclosure-fields disclosure-fields.json \
-        --i18n i18n.json --icons icons.json \
+        --i18n i18n.json \
         -o policy.embedded.wasm
     enclavid policy push policy.embedded.wasm \
         ghcr.io/${{ github.repository }}/kyc:v${{ github.sha }} \

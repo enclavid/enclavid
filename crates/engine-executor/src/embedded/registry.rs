@@ -9,6 +9,6 @@
 //! the wasmtime-coupled ref resource reps stay in [`super::store`].
 
 pub use engine_types::embedded::registry::{
-    ComponentDecls, DisclosureFieldsStore, EmbeddedRegistry, EmbeddedRegistryBuilder, IconStore,
+    ComponentDecls, DisclosureFieldsStore, EmbeddedRegistry, EmbeddedRegistryBuilder,
     LocalizedStore, Translation,
 };

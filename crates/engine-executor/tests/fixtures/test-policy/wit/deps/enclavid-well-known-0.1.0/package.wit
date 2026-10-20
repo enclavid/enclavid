@@ -1,22 +1,5 @@
 package enclavid:well-known@0.1.0;
 
-/// Icon-ref helpers for capture flows. Returns an `icon-ref` resource
-/// (minted from this plugin's `icons.json` section) that feeds
-/// `capture-step.icon`; the host resolves it to the dispatch name the
-/// frontend maps to its bundled SVG library. Per-component scoping,
-/// applicant-facing only (consumer never sees icon refs).
-interface icons {
-  use enclavid:host/types@0.1.0.{icon-ref};
-
-  passport: func() -> icon-ref;
-
-  id-card: func() -> icon-ref;
-
-  drivers-license: func() -> icon-ref;
-
-  selfie: func() -> icon-ref;
-}
-
 /// DisplayField helpers for canonical KYC fields.
 ///
 /// Each function returns a `display-field` carrying a canonical
@@ -105,10 +88,10 @@ interface disclosure-fields {
 /// `*_step` functions return individual `capture-step`s for tenants
 /// who want to compose custom flows mixing sides.
 ///
-/// All refs inside the returned records (labels, instructions, icons)
-/// are resolved against THIS PLUGIN's `i18n.json` / `icons.json` —
-/// per-component scoping, applicant-facing only, no policy whitelist
-/// needed.
+/// The text refs inside the returned records (labels, instructions)
+/// are resolved against THIS PLUGIN's `i18n.json` — per-component
+/// scoping, applicant-facing only, no policy whitelist needed — and the
+/// icons are the host's own (`enclavid:host-icons/icons`).
 interface capture {
   use enclavid:shared-types/capture@0.1.0.{capture-step, media-spec};
 
@@ -135,11 +118,10 @@ world well-known {
   import enclavid:host/types@0.1.0;
   import enclavid:host/embedded-disclosure-fields@0.1.0;
   import enclavid:host/embedded-i18n@0.1.0;
-  import enclavid:host/embedded-icons@0.1.0;
+  import enclavid:host-icons/icons@0.1.0;
   import enclavid:shared-types/disclosure@0.1.0;
   import enclavid:shared-types/capture@0.1.0;
 
-  export icons;
   export disclosure-fields;
   export capture;
 }

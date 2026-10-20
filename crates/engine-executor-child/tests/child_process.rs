@@ -475,17 +475,16 @@ async fn measure_per_round_cost() {
     // whether the ~48 ms residual `prime` is catalog VOLUME or remoc RPC base
     // latency.
     {
-        let (mut ncat, mut nloc, mut ndf, mut nic) = (0usize, 0usize, 0usize, 0usize);
+        let (mut ncat, mut nloc, mut ndf) = (0usize, 0usize, 0usize);
         for c in &bundle.catalogs {
             ncat += 1;
             ndf += c.decls.disclosure_fields.len();
-            nic += c.decls.icons.len();
             for (_, tr) in &c.decls.localized {
                 nloc += tr.len();
             }
         }
         eprintln!(
-            "catalogs shipped in BundleRef: {ncat} components, {nloc} translations, {ndf} DF, {nic} icons"
+            "catalogs shipped in BundleRef: {ncat} components, {nloc} translations, {ndf} DF"
         );
     }
 

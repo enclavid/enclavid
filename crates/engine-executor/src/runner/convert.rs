@@ -31,7 +31,10 @@ use session_types::{
 use crate::embedded::{DisclosureFieldRef, EmbeddedRegistry, IconRef, LocalizedRef};
 use crate::enclavid::policy::types as wit_policy;
 use crate::enclavid::shared_types::capture as wit_capture;
-use crate::limits::{MAX_CONSENT_FIELDS, MAX_VALUE_LENGTH};
+use crate::limits::{
+    GUIDE_ASPECT_MAX, GUIDE_ASPECT_MIN, GUIDE_ASPECT_STEPS_PER_UNIT, MAX_CONSENT_FIELDS,
+    MAX_VALUE_LENGTH,
+};
 use crate::sanitize;
 
 // ---------------------------------------------------------------------
@@ -227,8 +230,58 @@ fn camera_to_domain(c: wit_capture::CameraFacing) -> DCameraFacing {
 fn guide_to_domain(g: wit_capture::CaptureGuide) -> DCaptureGuide {
     let kind = match g {
         wit_capture::CaptureGuide::None => capture_guide::Kind::None(GuideNone {}),
-        wit_capture::CaptureGuide::Rect(aspect) => capture_guide::Kind::Rect(GuideRect { aspect }),
+        wit_capture::CaptureGuide::Rect(aspect) => capture_guide::Kind::Rect(GuideRect {
+            aspect: drawn_aspect(aspect),
+        }),
         wit_capture::CaptureGuide::Oval => capture_guide::Kind::Oval(GuideOval {}),
     };
     DCaptureGuide { kind: Some(kind) }
+}
+
+/// The aspect a `rect` guide is drawn at: the policy's, held to
+/// [`GUIDE_ASPECT_MIN`]..=[`GUIDE_ASPECT_MAX`] and rounded to the step
+/// [`GUIDE_ASPECT_STEPS_PER_UNIT`] sets; a square for NaN, which has no
+/// place in the range.
+fn drawn_aspect(aspect: f32) -> f32 {
+    if aspect.is_nan() {
+        return 1.0;
+    }
+    let held = aspect.clamp(GUIDE_ASPECT_MIN, GUIDE_ASPECT_MAX);
+    (held * GUIDE_ASPECT_STEPS_PER_UNIT).round() / GUIDE_ASPECT_STEPS_PER_UNIT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Inside the range an aspect is drawn to hundredths, and written out as
+    /// no more than that: the digits past them carry nothing to the page.
+    #[test]
+    fn an_aspect_is_drawn_to_hundredths() {
+        for (given, drawn) in [
+            (1.42_f32, "1.42"),
+            (1.419_999_9, "1.42"),
+            (1.585, "1.59"),
+            (1.234_567_8, "1.23"),
+            (1.0, "1"),
+        ] {
+            assert_eq!(drawn_aspect(given).to_string(), drawn, "{given}");
+        }
+    }
+
+    /// Past either end an aspect is drawn at that end, and NaN, which is
+    /// neither, as a square.
+    #[test]
+    fn an_aspect_past_the_range_is_drawn_at_its_end() {
+        for (given, drawn) in [
+            (0.1_f32, GUIDE_ASPECT_MIN),
+            (f32::NEG_INFINITY, GUIDE_ASPECT_MIN),
+            (-3.0, GUIDE_ASPECT_MIN),
+            (40_000.0, GUIDE_ASPECT_MAX),
+            (f32::INFINITY, GUIDE_ASPECT_MAX),
+            (f32::NAN, 1.0),
+        ] {
+            assert_eq!(drawn_aspect(given), drawn, "{given}");
+        }
+    }
 }

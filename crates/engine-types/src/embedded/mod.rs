@@ -3,20 +3,21 @@
 //!
 //! ```text
 //! registry ← ComponentDecls (per-component parsed catalog) + the
-//!            composition-wide EmbeddedRegistry (three per-kind stores).
+//!            composition-wide EmbeddedRegistry (two per-kind stores).
 //! store    ← the generic RefStore<K> backing each kind + the kind
-//!            markers (DisclosureFields / Localized / Icon).
+//!            markers (DisclosureFields / Localized).
 //! ```
 //!
 //! The wasmtime-coupled pieces live in `engine-executor`: the bindgen ref
 //! resource reps (`LocalizedRef` / `IconRef` / `DisclosureFieldRef`) and
-//! the section parsers (`load_embedded`), which import these types.
+//! the section parsers (`load_embedded`), which import these types. Icons
+//! keep no catalog: their names are the host's own ([`crate::icons`]).
 
 pub mod registry;
 pub mod store;
 
 pub use registry::{
-    ComponentDecls, DisclosureFieldsStore, EmbeddedRegistry, EmbeddedRegistryBuilder, IconStore,
+    ComponentDecls, DisclosureFieldsStore, EmbeddedRegistry, EmbeddedRegistryBuilder,
     LocalizedStore, Translation,
 };
-pub use store::{DisclosureFields, Icon, Localized, RefKind, RefStore};
+pub use store::{DisclosureFields, Localized, RefKind, RefStore};

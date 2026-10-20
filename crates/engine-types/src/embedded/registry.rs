@@ -1,6 +1,6 @@
 //! `enclavid:embedded/*` ref scoping — first match across catalogs.
 //!
-//! Three **public stores** on [`EmbeddedRegistry`], one per
+//! Two **public stores** on [`EmbeddedRegistry`], one per
 //! `enclavid:embedded/*` interface:
 //!
 //!   * [`DisclosureFieldsStore`] — machine identifiers consumed by
@@ -9,11 +9,12 @@
 //!   * [`LocalizedStore`] — translation catalogs. Resolved to
 //!     applicant-locale text inside the TEE before any wire send;
 //!     consumer never sees refs or text.
-//!   * [`IconStore`] — frontend dispatch names. Reach the applicant
-//!     frontend, never the consumer envelope.
+//!
+//! Icons have no store: their names are the host's own
+//! ([`crate::icons`]), so no component declares any.
 //!
 //! Each component (policy at slot 0, plugins at slots 1..N) declares
-//! its own keys per kind, and all three stores resolve a bare key by
+//! its own keys per kind, and both stores resolve a bare key by
 //! **first match across the merged catalogs** (composition order,
 //! policy first). This mirrors what wac single-store fusion does to
 //! the imports: the per-component `enclavid:embedded/i18n` imports
@@ -28,7 +29,7 @@
 //! resolution slot. Each component's DF section is size-capped at
 //! build time (`MAX_DECLARED_DISCLOSURE_FIELDS`).
 //!
-//! All three wrap the same private generic [`RefStore`](super::store::
+//! Both wrap the same private generic [`RefStore`](super::store::
 //! RefStore) so the membership / get_token / lookup mechanics live in
 //! one place.
 //!
@@ -41,7 +42,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::store::{DisclosureFields, Icon, Localized, RefStore};
+use super::store::{DisclosureFields, Localized, RefStore};
 
 /// Type alias for the `enclavid:embedded/disclosure-fields` store.
 /// `lookup` returns `Option<&String>` — the raw declared key, which
@@ -54,11 +55,6 @@ pub type DisclosureFieldsStore = RefStore<DisclosureFields>;
 /// set; locale-picking is the consumer's call. Auto-deref to
 /// `&[Translation]` covers most call sites.
 pub type LocalizedStore = RefStore<Localized>;
-
-/// Type alias for the `enclavid:embedded/icons` store. `lookup`
-/// returns `Option<&String>` — the declared icon name the applicant
-/// frontend dispatches against its bundled SVG library.
-pub type IconStore = RefStore<Icon>;
 
 /// One `(language, text)` row inside a localized declaration. Engine
 /// stores every translation a component declared verbatim — locale
@@ -83,8 +79,6 @@ pub struct ComponentDecls {
     pub disclosure_fields: HashSet<String>,
     /// `enclavid:embedded.i18n.v1` — `key → translations` catalog.
     pub localized: HashMap<String, Vec<Translation>>,
-    /// `enclavid:embedded.icons.v1` — frontend-dispatched icon names.
-    pub icons: HashSet<String>,
 }
 
 // ----- Top-level registry -----
@@ -93,17 +87,15 @@ pub struct ComponentDecls {
 /// One per `Executor::run` call; shared by `Arc` into every Store and into
 /// the api view layer for ref-to-data projection.
 ///
-/// Three fields, one per interface. Consumers call the store
+/// Two fields, one per interface. Consumers call the store
 /// matching the kind they're working with — there's no runtime kind
 /// dispatch on this type, because every wire field's kind is known
 /// at the call site (a `DisplayField.key` is always a disclosure-
-/// field-ref, a `DisplayField.label` is always a localized-ref,
-/// `CaptureStep.icon` is always an icon-ref, etc.).
+/// field-ref, a `DisplayField.label` is always a localized-ref, etc.).
 #[derive(Debug, Default)]
 pub struct EmbeddedRegistry {
     pub disclosure_fields: DisclosureFieldsStore,
     pub localized: LocalizedStore,
-    pub icons: IconStore,
 }
 
 impl EmbeddedRegistry {
@@ -139,14 +131,13 @@ impl EmbeddedRegistryBuilder {
         self.components.push((hash, decls));
     }
 
-    /// Finalise: walk every component into the three per-kind
+    /// Finalise: walk every component into the two per-kind
     /// `key → data` stores keyed by catalog content-hash. After this
     /// returns the registry is immutable.
     pub fn build(self) -> EmbeddedRegistry {
         let n = self.components.len();
         let mut df: Vec<([u8; 32], Vec<(String, String)>)> = Vec::with_capacity(n);
         let mut loc: Vec<([u8; 32], Vec<(String, Vec<Translation>)>)> = Vec::with_capacity(n);
-        let mut icons: Vec<([u8; 32], Vec<(String, String)>)> = Vec::with_capacity(n);
         for (hash, c) in self.components {
             df.push((
                 hash,
@@ -156,12 +147,10 @@ impl EmbeddedRegistryBuilder {
                     .collect(),
             ));
             loc.push((hash, c.localized.into_iter().collect()));
-            icons.push((hash, c.icons.into_iter().map(|n| (n.clone(), n)).collect()));
         }
         EmbeddedRegistry {
             disclosure_fields: RefStore::build_from(df),
             localized: RefStore::build_from(loc),
-            icons: RefStore::build_from(icons),
         }
     }
 }
@@ -187,7 +176,6 @@ mod tests {
                     )
                 })
                 .collect(),
-            icons: Default::default(),
         }
     }
 
@@ -314,7 +302,7 @@ mod tests {
 
     // ---------- first-match resolution across merged catalogs ----------
     //
-    // The merged path (DF always; i18n/icons when not strictly routed)
+    // The merged path (DF always; i18n when not strictly routed)
     // resolves a bare key by first match across every catalog in
     // composition order (policy first). Scoping / anti-forgery no longer
     // rides on a token — the ref is an unforgeable resource handle — so
@@ -322,8 +310,8 @@ mod tests {
 
     /// A key any component declared resolves — including a plugin's, even
     /// when the policy has no such section. This is the well-known
-    /// plugin's shape: it ships its own i18n / icons and (optionally) DF
-    /// keys the policy never restated.
+    /// plugin's shape: it ships its own i18n and (optionally) DF keys
+    /// the policy never restated.
     #[test]
     fn first_match_resolves_from_any_catalog() {
         let mut b = EmbeddedRegistry::builder();

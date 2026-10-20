@@ -145,10 +145,9 @@ fn honest_metadata_decodes_within_the_margin() {
         localized: (0..3585).map(|i| (two(i), Vec::new())).collect(),
         ..Default::default()
     }));
-    // Disclosure fields and icons one past their tables' boundaries.
+    // Disclosure fields one past their table's boundary.
     assert_within_margin(&encoded(64, || ComponentDecls {
         disclosure_fields: (0..225).map(two).collect(),
-        icons: (0..57).map(two).collect(),
         ..Default::default()
     }));
     // Translations into one-character languages with empty texts.

@@ -21,16 +21,13 @@
 use std::collections::{HashMap, HashSet};
 
 use enclavid_embedded::{
-    SECTION_DISCLOSURE_FIELDS, SECTION_I18N, SECTION_ICONS, parse_disclosure_fields, parse_i18n,
-    parse_icons,
+    SECTION_DISCLOSURE_FIELDS, SECTION_I18N, parse_disclosure_fields, parse_i18n,
 };
 use wasmparser::{Parser, Payload};
 
 use engine_types::compile::{Artifact, CompileFault};
 use engine_types::embedded::{ComponentDecls, Translation};
-use engine_types::limits::{
-    MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_ICONS, MAX_DECLARED_LOCALIZED,
-};
+use engine_types::limits::{MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_LOCALIZED};
 
 use crate::hash::catalog_hash;
 
@@ -180,7 +177,7 @@ pub(crate) fn embedded_section_bytes(wasm_bytes: &[u8]) -> wasmtime::Result<u64>
             payload.map_err(|e| wasmtime::Error::msg(format!("wasm component parse: {e}")))?;
         if let Payload::CustomSection(reader) = &payload {
             let name = reader.name();
-            if name == SECTION_DISCLOSURE_FIELDS || name == SECTION_I18N || name == SECTION_ICONS {
+            if name == SECTION_DISCLOSURE_FIELDS || name == SECTION_I18N {
                 total += reader.data().len() as u64;
             }
         }
@@ -224,14 +221,13 @@ pub fn top_level_imports(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<String>> {
 struct RawFrame<'a> {
     disclosure_fields: Option<&'a [u8]>,
     i18n: Option<&'a [u8]>,
-    icons: Option<&'a [u8]>,
     is_policy: bool,
 }
 
 impl<'a> RawFrame<'a> {
     /// True if this component shipped no embedded sections at all.
     fn is_empty(&self) -> bool {
-        self.disclosure_fields.is_none() && self.i18n.is_none() && self.icons.is_none()
+        self.disclosure_fields.is_none() && self.i18n.is_none()
     }
 
     /// Fold one payload into the frame: capture our custom sections
@@ -242,7 +238,6 @@ impl<'a> RawFrame<'a> {
                 let slot = match reader.name() {
                     n if n == SECTION_DISCLOSURE_FIELDS => &mut self.disclosure_fields,
                     n if n == SECTION_I18N => &mut self.i18n,
-                    n if n == SECTION_ICONS => &mut self.icons,
                     _ => return Ok(()),
                 };
                 if slot.is_some() {
@@ -271,8 +266,8 @@ impl<'a> RawFrame<'a> {
     /// Parse the captured sections into a [`ComponentDecls`], enforce
     /// the per-kind cardinality caps, and compute the content-hash.
     fn finish(self) -> wasmtime::Result<EmbeddedCatalog> {
-        let hash = catalog_hash(self.disclosure_fields, self.i18n, self.icons);
-        let decls = build_decls(self.disclosure_fields, self.i18n, self.icons)?;
+        let hash = catalog_hash(self.disclosure_fields, self.i18n);
+        let decls = build_decls(self.disclosure_fields, self.i18n)?;
         Ok(EmbeddedCatalog {
             is_policy: self.is_policy,
             decls,
@@ -286,7 +281,6 @@ impl<'a> RawFrame<'a> {
 fn build_decls(
     disclosure_bytes: Option<&[u8]>,
     i18n_bytes: Option<&[u8]>,
-    icons_bytes: Option<&[u8]>,
 ) -> wasmtime::Result<ComponentDecls> {
     let disclosure_section = disclosure_bytes
         .map(|b| parse_disclosure_fields(b))
@@ -301,19 +295,11 @@ fn build_decls(
             "parsing custom section `{SECTION_I18N}` as JSON: {e}"
         ))
     })?;
-    let icons_section = icons_bytes
-        .map(|b| parse_icons(b))
-        .transpose()
-        .map_err(|e| {
-            invalid(format!(
-                "parsing custom section `{SECTION_ICONS}` as JSON: {e}"
-            ))
-        })?;
 
     // Per-kind cardinality caps. Each kind has a different covert-
     // channel surface (DF leak to consumer; localized fully resolved
-    // before wire framing; icons reach browser only) and a different
-    // cap accordingly — see the constants' module-level docs in
+    // before wire framing) and a different cap accordingly — see the
+    // constants' module-level docs in
     // `enclavid-embedded`. Defence-in-depth alongside the seal-time
     // `validate` check; engine refuses to load anything that slipped
     // past the CLI validation gate.
@@ -331,12 +317,6 @@ fn build_decls(
     if l_count > MAX_DECLARED_LOCALIZED {
         return Err(invalid(format!(
             "component declares {l_count} i18n entries, max is {MAX_DECLARED_LOCALIZED}",
-        )));
-    }
-    let icon_count = icons_section.as_ref().map(|i| i.names.len()).unwrap_or(0);
-    if icon_count > MAX_DECLARED_ICONS {
-        return Err(invalid(format!(
-            "component declares {icon_count} icons, max is {MAX_DECLARED_ICONS}",
         )));
     }
 
@@ -367,15 +347,8 @@ fn build_decls(
         })
         .collect();
 
-    // Icons: same set semantics as disclosure-fields — flat list of
-    // identifiers; duplicates collapse on insertion.
-    let icons: HashSet<String> = icons_section
-        .map(|s| s.names.into_iter().collect())
-        .unwrap_or_default();
-
     Ok(ComponentDecls {
         disclosure_fields,
         localized,
-        icons,
     })
 }

@@ -30,13 +30,12 @@ pub struct PluginInstance {
     pub wasm: Vec<u8>,
 }
 
-/// The two applicant-facing embedded interfaces routed strictly
-/// per-component (i18n and icons). DF stays merged, so it is not one of
-/// these.
+/// The applicant-facing embedded interfaces routed strictly per-component:
+/// i18n alone. DF stays merged, so it is not one of these, and icons are no
+/// catalog at all — the host's own functions ([`crate::icons`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EmbeddedIface {
     I18n,
-    Icons,
 }
 
 impl EmbeddedIface {
@@ -45,7 +44,6 @@ impl EmbeddedIface {
     pub fn as_str(self) -> &'static str {
         match self {
             EmbeddedIface::I18n => "i18n",
-            EmbeddedIface::Icons => "icons",
         }
     }
 }
@@ -54,8 +52,8 @@ impl EmbeddedIface {
 /// host `Linker` registers an instance named `instance_name` whose func
 /// resolves keys against the catalog with `catalog_hash` — strict
 /// per-component routing, so a plugin's i18n key never resolves to the
-/// policy's (or another plugin's) translation. Emitted only for i18n /
-/// icons; DF is merged and served first-match under its canonical name.
+/// policy's (or another plugin's) translation. Emitted only for i18n; DF
+/// is merged and served first-match under its canonical name.
 ///
 /// serde: part of the L2 cwasm-cache bundle — the import manifest is
 /// stored beside the cwasm so a cache hit reconstructs the host

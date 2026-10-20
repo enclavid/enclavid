@@ -3,16 +3,17 @@
 //! Each `enclavid:host/embedded-*` func resolves a key against the
 //! frozen [`EmbeddedRegistry`](super::registry::EmbeddedRegistry) and
 //! MINTS an unforgeable WIT `resource` whose rep carries the RESOLVED
-//! data (translations / icon name / DF key). A component cannot
-//! fabricate a handle, so membership needs no keyed token — the handle
-//! IS the proof the key was declared. The engine dereferences the rep at
-//! the action boundary (`runner::convert`), so the resolved data is
-//! self-contained (nothing downstream re-consults the registry).
+//! data (translations / DF key). A component cannot fabricate a handle,
+//! so membership needs no keyed token — the handle IS the proof the key
+//! was declared. The engine dereferences the rep at the action boundary
+//! (`runner::convert`), so the resolved data is self-contained (nothing
+//! downstream re-consults the registry). The `icon-ref` is minted the
+//! same way, from a name of the host's own (`runner::register_icons`).
 //!
 //! Two resolution modes share the stores:
 //!   * MERGED (first match across catalogs) — the canonical `Host` funcs
-//!     below: disclosure-fields always, and i18n / icons for a lone
-//!     unfused policy whose imports weren't routed to a twin.
+//!     below: disclosure-fields always, and i18n for a lone unfused
+//!     policy whose import wasn't routed to a twin.
 //!   * STRICT (one bound catalog) — the per-component twins fusion
 //!     produced; minted in `runner::register_strict_embedded` off
 //!     [`RefStore::resolve_strict`](super::store::RefStore::resolve_strict).
@@ -61,14 +62,6 @@ embedded_kind! {
     store = localized,
     kind = super::store::Localized,
     rep = LocalizedRef,
-}
-
-embedded_kind! {
-    host_trait = crate::enclavid::host::embedded_icons::Host,
-    host_method = icon,
-    store = icons,
-    kind = super::store::Icon,
-    rep = IconRef,
 }
 
 // Resource destructors. The rep is a plain owned value in the table;

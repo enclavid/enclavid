@@ -352,7 +352,7 @@ impl Compositions {
         // policy first — as one stream into the COMPILE boundary: each fetched
         // when the one before it has been read, so no fetch waits half-read on
         // another. The compile-worker fuses + compiles + parses sections into a
-        // cwasm and its metadata (the i18n/icons import manifest + per-component
+        // cwasm and its metadata (the i18n import manifest + per-component
         // catalogs, composition order), starting only once every component has
         // arrived whole. The caller passes the cwasm on as it streams back — to
         // L2, and for a round to the execution-worker, which files it in its L1.

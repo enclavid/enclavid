@@ -51,7 +51,7 @@ struct Plugin {
     crate_dir: &'static str,
     /// Where the built `.wasm` module lands.
     module: &'static str,
-    /// Dir holding `i18n.json` / `icons.json` (if any).
+    /// Dir holding `i18n.json` / `disclosure-fields.json` (if any).
     src: &'static str,
 }
 

@@ -632,7 +632,7 @@ async fn a_round_reads_its_own_time_and_fresh_randomness() {
 /// it back with NO runtime plugins. The engine must reconstruct the
 /// embedded manifest from the artifact's own `embedded-slot:*` imports,
 /// recover the nested catalogs for the registry, and resolve both
-/// strict (plugin i18n/icons) and merged (DF) refs through it.
+/// strict (plugin i18n) and merged (DF) refs through it.
 #[tokio::test]
 async fn static_fused_artifact_resolves_strictly() {
     let runner = TestRunner::new().unwrap();
@@ -641,11 +641,10 @@ async fn static_fused_artifact_resolves_strictly() {
         .unwrap();
 
     // The twins survive as distinct `embedded-slot:*` imports (strict
-    // routing) — not collapsed to canonical. The policy calls only
-    // `localized` (its capture icons come from well-known), so wit_bindgen
-    // elides its unused icons import; distinct twins are: policy (i18n) +
-    // well-known (i18n+icons) + extra (i18n) = 4. face-age ships no
-    // embedded catalog, so it adds no twin.
+    // routing) — not collapsed to canonical. Distinct twins are: policy
+    // (i18n) + well-known (i18n) + extra (i18n) = 3. face-age ships no
+    // embedded catalog, so it adds no twin, and icons are the host's own,
+    // so none of them routes any.
     let imports = engine_compiler::top_level_imports(&fused).unwrap();
     let slots: Vec<&String> = imports
         .iter()
@@ -653,8 +652,8 @@ async fn static_fused_artifact_resolves_strictly() {
         .collect();
     assert_eq!(
         slots.len(),
-        4,
-        "policy(i18n) + well-known(i18n+icons) + extra(i18n) = 4 distinct twin imports, got {slots:?}",
+        3,
+        "policy(i18n) + well-known(i18n) + extra(i18n) = 3 distinct twin imports, got {slots:?}",
     );
     // Each twin name carries the routed interface version (`0.1.0` →
     // `-0-1-0`, kept off the semver `@` track) so two components with
@@ -671,7 +670,7 @@ async fn static_fused_artifact_resolves_strictly() {
     let composition = runner.compose(&fused, &[]).unwrap();
     assert_eq!(
         composition.embedded_imports.len(),
-        4,
+        3,
         "static artifact's strict manifest reconstructed from its imports",
     );
 
@@ -691,9 +690,9 @@ async fn static_fused_artifact_resolves_strictly() {
     let listener = Arc::new(PersistListener::default());
 
     // start → media(passport) → media(selfie) → consent-disclosure.
-    // Each media prompt resolves the plugin's i18n/icons strictly; the
-    // consent screen resolves DF (merged) — all through the static
-    // artifact with no runtime fusion.
+    // Each media prompt resolves the plugin's i18n strictly; the consent
+    // screen resolves DF (merged) — all through the static artifact with
+    // no runtime fusion.
     let primed = runner
         .prime(&composition, embedded.clone())
         .expect("prime static composition");
@@ -777,6 +776,21 @@ async fn strict_routing_isolates_colliding_i18n_key() {
         "the policy's colliding passport_title must be registered, else \
          the isolation assertion above is vacuous",
     );
+}
+
+/// A capture step's icon is the host's own: well-known calls
+/// `icons::passport()` of `enclavid:host-icons/icons`, the host mints its
+/// ref, and the prompt carries the name the frontend draws.
+#[tokio::test]
+async fn a_capture_step_carries_the_icon_it_named() {
+    let h = Harness::new();
+    let listener = Arc::new(PersistListener::default());
+
+    let (status, _session) = h.run(Session::default(), Event::Start, &listener).await;
+    let RunStatus::AwaitingInput(Prompt::Media(spec)) = status else {
+        panic!("round 1 expected AwaitingInput(Media)");
+    };
+    assert_eq!(spec.captures[0].icon.as_deref(), Some("passport"));
 }
 
 /// HYBRID composition: a pre-fused core (policy + well-known baked) plus a

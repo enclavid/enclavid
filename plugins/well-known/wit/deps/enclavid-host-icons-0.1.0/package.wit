@@ -1,0 +1,26 @@
+package enclavid:host-icons@0.1.0;
+
+/// The icons the applicant frontend draws, one function each. A capture step
+/// shows one through an `icon-ref`, which only these functions mint: a step
+/// carries one of these icons and nothing else.
+///
+/// A package of its own, so that a new icon moves this version alone. The set
+/// only grows, each new icon a function `@since` the version that adds it, so a
+/// component built against an earlier version keeps running on a host that
+/// serves a later one.
+interface icons {
+  use enclavid:host/types@0.1.0.{icon-ref};
+
+  @since(version = 0.1.0)
+  passport: func() -> icon-ref;
+
+  @since(version = 0.1.0)
+  id-card: func() -> icon-ref;
+
+  @since(version = 0.1.0)
+  drivers-license: func() -> icon-ref;
+
+  @since(version = 0.1.0)
+  selfie: func() -> icon-ref;
+}
+

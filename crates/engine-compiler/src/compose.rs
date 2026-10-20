@@ -1,23 +1,23 @@
 //! Single-store fusion of a policy with its plugins via `wac-graph`,
-//! with strict per-component routing of the applicant-facing embedded
-//! imports (i18n / icons).
+//! with strict per-component routing of the applicant-facing text
+//! (i18n).
 //!
 //! [`fuse`] builds the composition graph by hand rather than using the
 //! high-level `wac_graph::plug` helper, because `plug` MERGES every
 //! same-named unsatisfied import into one — which is what we want for
 //! `disclosure-fields` (option B: DF is merged, first-match, bounded by
-//! the visible static-set size) and `enclavid:host-ext/policy-props`, but NOT
-//! for i18n / icons, whose stored value differs per component. For those
-//! two, each component's `enclavid:host/embedded-<iface>` import is routed
-//! to a DISTINCT composite import named by that component's catalog
-//! content-hash (`embedded-slot:<slug>/<iface>`), so the host can serve
-//! each from its own catalog. Byte-identical catalogs share a slug (and
-//! thus one import node) — correct, since identical content resolves the
-//! same.
+//! the visible static-set size), `enclavid:host-ext/policy-props` and the
+//! icons (`enclavid:host-icons/icons`, whose versions on one track merge into
+//! the later's functions), but NOT for i18n, whose stored value differs per
+//! component. Each component's `enclavid:host/embedded-i18n` import is
+//! routed to a DISTINCT composite import named by that component's catalog
+//! content-hash (`embedded-slot:<slug>/i18n`), so the host can serve each
+//! from its own catalog. Byte-identical catalogs share a slug (and thus
+//! one import node) — correct, since identical content resolves the same.
 //!
 //! The result is ONE component (one wasmtime `Store` at run time, so
 //! cross-component WIT resources are native handles) plus a manifest of
-//! the distinct i18n/icons imports the host `Linker` must register.
+//! the distinct i18n imports the host `Linker` must register.
 
 use std::collections::HashMap;
 
@@ -31,8 +31,8 @@ use engine_types::compile::{Artifact, CompileFault, HOST_INTERFACES};
 use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstance};
 
 use crate::decls::unreadable;
-use crate::props;
 use crate::{embedded_import_name, load_embedded, load_embedded_nested, top_level_imports};
+use crate::{icons, props};
 
 /// Namespace prefix of a strict per-component embedded import that a
 /// pre-fused artifact already carries.
@@ -44,7 +44,7 @@ const EMBEDDED_SLOT_PREFIX: &str = "embedded-slot:";
 const POLICY_PACKAGE: &str = "enclavid:composed-policy";
 
 /// Fuse `policy_wasm` with `plugins` into one component's bytes plus the
-/// manifest of distinct per-component i18n/icons imports.
+/// manifest of distinct per-component i18n imports.
 ///
 /// Takes the components whole: the graph keeps them as they are rather than
 /// a copy, and they are gone once the fused bytes are made, so a composition
@@ -77,7 +77,7 @@ pub(crate) fn fuse(
         .map(|(id, hash)| (graph.instantiate(*id), *id, *hash))
         .collect();
 
-    // Strict per-component routing of i18n / icons. Route the runtime
+    // Strict per-component routing of i18n. Route the runtime
     // plugins always; route the socket (policy) ONLY if it isn't already
     // a fused core — a pre-fused core's per-component embedded imports
     // are already `embedded-slot:*` (passed through + re-emitted via
@@ -213,11 +213,11 @@ fn encoding(e: EncodeError) -> wasmtime::Error {
 /// execution-worker's linker refuses it before one does.
 ///
 /// Read as a wac package, which validates everything but the function bodies,
-/// and kept as one, so the bytes are compiled from where they are. Props it
-/// declares in a shape the host cannot serve are refused too
-/// ([`props::declared`]). `plugged` says whether there was a fusion: without one
-/// the bytes are the policy's own, and bytes that do not read are the policy not
-/// being a component.
+/// and kept as one, so the bytes are compiled from where they are. Props or
+/// icons it declares in a shape the host cannot serve are refused too
+/// ([`props::declared`], [`icons::declared`]). `plugged` says whether there was
+/// a fusion: without one the bytes are the policy's own, and bytes that do not
+/// read are the policy not being a component.
 pub(crate) fn served(bytes: Vec<u8>, plugged: bool) -> wasmtime::Result<Package> {
     let mut types = Types::default();
     let package = Package::from_bytes("enclavid:fused", None, bytes, &mut types).map_err(|e| {
@@ -240,6 +240,7 @@ pub(crate) fn served(bytes: Vec<u8>, plugged: bool) -> wasmtime::Result<Package>
         }
     }
     props::declared(&types, &package).map_err(wasmtime::Error::new)?;
+    icons::declared(&types, &package).map_err(wasmtime::Error::new)?;
     Ok(package)
 }
 
@@ -276,14 +277,14 @@ pub(crate) fn needs_serving(types: &Types, kind: &ItemKind) -> bool {
     }
 }
 
-/// Route one component's i18n / icons imports to distinct composite
-/// imports named by its catalog hash.
+/// Route one component's i18n import to a distinct composite import named
+/// by its catalog hash.
 ///
 /// wac merges every instance import of the SAME interface into one (it
 /// dedups by interface id), so simply renaming the import doesn't split
 /// them. To keep per-component imports distinct we give each a **twin
-/// interface**: a structural clone of `enclavid:host/embedded-<iface>`
-/// with a distinct id (`embedded-slot:<hash>/<iface>`). The component's
+/// interface**: a structural clone of `enclavid:host/embedded-i18n`
+/// with a distinct id (`embedded-slot:<hash>/i18n`). The component's
 /// canonical import subtype-checks against the twin (func-only, no
 /// resources → purely structural), and because the twin's id differs,
 /// wac keeps it as its own import. The host `Linker` then serves each
@@ -346,7 +347,7 @@ fn route_strict_embedded(
     Ok(())
 }
 
-/// Recover the strict per-catalog i18n / icons imports a PRE-FUSED
+/// Recover the strict per-catalog i18n imports a PRE-FUSED
 /// artifact already carries (static / hybrid consumption). For each
 /// top-level `embedded-slot:<slug>/<iface>` import, find the nested
 /// catalog whose content-hash reproduces that name, so the host
@@ -403,7 +404,6 @@ fn slot_import_parts(name: &str) -> Option<(EmbeddedIface, String)> {
     let (pkg, iface_seg) = rest.rsplit_once('/')?;
     let iface = match iface_seg {
         "i18n" => EmbeddedIface::I18n,
-        "icons" => EmbeddedIface::Icons,
         _ => return None,
     };
     let version = match pkg.split_once('-') {
@@ -437,17 +437,12 @@ fn catalog_hash_of(wasm: &[u8], artifact: Artifact) -> wasmtime::Result<[u8; 32]
 }
 
 /// The strict-routed kind of an embedded import name, or `None` for DF
-/// / non-embedded imports (which stay merged). Only `embedded-i18n` and
-/// `embedded-icons` are per-component routed; `disclosure-fields` and
-/// `policy-props` stay merged / host-served as-is.
+/// / non-embedded imports (which stay merged). Only `embedded-i18n` is
+/// per-component routed; `disclosure-fields`, `policy-props` and the
+/// icons stay merged / host-served as-is.
 fn strict_iface(name: &str) -> Option<EmbeddedIface> {
-    if name.starts_with("enclavid:host/embedded-i18n") {
-        Some(EmbeddedIface::I18n)
-    } else if name.starts_with("enclavid:host/embedded-icons") {
-        Some(EmbeddedIface::Icons)
-    } else {
-        None
-    }
+    name.starts_with("enclavid:host/embedded-i18n")
+        .then_some(EmbeddedIface::I18n)
 }
 
 /// Interfaces the TEE host `Linker` serves EXCLUSIVELY. A composed
@@ -455,14 +450,14 @@ fn strict_iface(name: &str) -> Option<EmbeddedIface> {
 /// but must never SATISFY one: wiring a plugin export into a
 /// host-reserved import would let the plugin interpose on the props the
 /// policy reads (`enclavid:host-ext/policy-props`), the applicant-facing
-/// text / icons (`embedded-i18n` / `embedded-icons`), or the consumer
-/// disclosure vocabulary (`disclosure-fields`). Reserved is every interface
-/// of `enclavid:host` and of any `enclavid:host-*` package — `host-ext` is
-/// the one whose WIT the policy writes itself, since the props' type is its
-/// own. Kept as ONE prefix rule so a new host capability in those packages is
-/// protected the moment it exists — no per-interface filter to remember, no
-/// denylist to drift. `embedded-slot:*` are the synthetic per-catalog twins
-/// fusion itself derives from the `embedded-i18n` / `embedded-icons`
+/// text / icons (`embedded-i18n` / `enclavid:host-icons/icons`), or the
+/// consumer disclosure vocabulary (`disclosure-fields`). Reserved is every
+/// interface of `enclavid:host` and of any `enclavid:host-*` package —
+/// `host-ext` is the one whose WIT the policy writes itself, since the props'
+/// type is its own. Kept as ONE prefix rule so a new host capability in those
+/// packages is protected the moment it exists — no per-interface filter to
+/// remember, no denylist to drift. `embedded-slot:*` are the synthetic
+/// per-catalog twins fusion itself derives from the `embedded-i18n`
 /// imports, host-owned by construction.
 ///
 /// All of `wasi:` is reserved too. The host serves the clocks and randomness
@@ -520,7 +515,7 @@ mod tests {
         assert!(is_host_reserved("enclavid:host/timer@0.1.0"));
         assert!(is_host_reserved("enclavid:host-next/timer@0.1.0"));
         assert!(is_host_reserved("enclavid:host/embedded-i18n@0.1.0"));
-        assert!(is_host_reserved("enclavid:host/embedded-icons@0.1.0"));
+        assert!(is_host_reserved("enclavid:host-icons/icons@0.1.0"));
         assert!(is_host_reserved(
             "enclavid:host/embedded-disclosure-fields@0.1.0"
         ));

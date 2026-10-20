@@ -1,13 +1,13 @@
 //! Content-hash of a component's embedded catalog.
 //!
-//! Under strict per-component embedded routing (i18n / icons), each
-//! component's `enclavid:embedded/{i18n,icons}` import is wired to a
-//! DISTINCT composite import named by the hash of that component's
-//! catalog — `embedded-slot:<slug>/i18n`. [`catalog_hash`] is that
-//! hash, [`slug`] its wire form.
+//! Under strict per-component embedded routing (i18n), each component's
+//! `enclavid:embedded/i18n` import is wired to a DISTINCT composite
+//! import named by the hash of that component's catalog —
+//! `embedded-slot:<slug>/i18n`. [`catalog_hash`] is that hash, [`slug`]
+//! its wire form.
 //!
 //! The hash is over the RAW section payloads — exactly the author's
-//! `disclosure-fields.json` / `i18n.json` / `icons.json` bytes.
+//! `disclosure-fields.json` / `i18n.json` bytes.
 //! `enclavid {policy,plugin} embed` writes those files verbatim as the
 //! custom-section data (see `crates/cli/src/embed.rs` —
 //! `Cow::Borrowed(bytes)`, no re-serialization), and wac fusion
@@ -22,18 +22,14 @@
 const VERSION: &[u8] = b"enclavid:embedded-catalog:v1";
 
 /// Content-hash of a component's embedded catalog over the raw section
-/// payloads, in fixed kind order (disclosure-fields, i18n, icons).
-/// Each section is tagged present/absent and length-prefixed, so an
-/// absent section differs from an empty one and no section's bytes can
-/// be mistaken for another's.
-pub fn catalog_hash(
-    disclosure_fields: Option<&[u8]>,
-    i18n: Option<&[u8]>,
-    icons: Option<&[u8]>,
-) -> [u8; 32] {
+/// payloads, in fixed kind order (disclosure-fields, i18n). Each
+/// section is tagged present/absent and length-prefixed, so an absent
+/// section differs from an empty one and no section's bytes can be
+/// mistaken for another's.
+pub fn catalog_hash(disclosure_fields: Option<&[u8]>, i18n: Option<&[u8]>) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(VERSION);
-    for section in [disclosure_fields, i18n, icons] {
+    for section in [disclosure_fields, i18n] {
         match section {
             Some(bytes) => {
                 h.update(&[1u8]);
@@ -77,8 +73,8 @@ pub fn slug(hash: &[u8; 32]) -> String {
 /// wac's aggregator never merges it with the versioned canonical import
 /// or with another catalog's / version's slot. Because the version is
 /// part of the name, a same-catalog different-version import can't
-/// collide onto one twin. `iface` is `"i18n"` or `"icons"`; `version` is
-/// the canonical import's `@x.y.z` (empty for unversioned).
+/// collide onto one twin. `iface` is `"i18n"`; `version` is the
+/// canonical import's `@x.y.z` (empty for unversioned).
 ///
 /// The slug is hex (no `-`), so the first `-` in the package segment is
 /// the slug/version boundary — `compose::slot_import_parts` inverts this
@@ -103,40 +99,37 @@ mod tests {
 
     #[test]
     fn identical_bytes_identical_hash() {
-        let a = catalog_hash(Some(b"{\"df\":1}"), Some(b"{\"i\":2}"), Some(b"[\"ic\"]"));
-        let b = catalog_hash(Some(b"{\"df\":1}"), Some(b"{\"i\":2}"), Some(b"[\"ic\"]"));
+        let a = catalog_hash(Some(b"{\"df\":1}"), Some(b"{\"i\":2}"));
+        let b = catalog_hash(Some(b"{\"df\":1}"), Some(b"{\"i\":2}"));
         assert_eq!(a, b);
     }
 
     #[test]
     fn absent_differs_from_empty() {
-        assert_ne!(
-            catalog_hash(None, None, None),
-            catalog_hash(Some(b""), Some(b""), Some(b"")),
-        );
+        assert_ne!(catalog_hash(None, None), catalog_hash(Some(b""), Some(b"")));
     }
 
     #[test]
     fn section_position_not_confused() {
         // The same bytes in the DF slot vs the i18n slot must hash
-        // differently — length prefixes + fixed order keep the three
+        // differently — length prefixes + fixed order keep the two
         // section namespaces disjoint.
         assert_ne!(
-            catalog_hash(Some(b"x"), None, None),
-            catalog_hash(None, Some(b"x"), None),
+            catalog_hash(Some(b"x"), None),
+            catalog_hash(None, Some(b"x"))
         );
     }
 
     #[test]
     fn content_sensitive() {
-        let base = catalog_hash(Some(b"{\"title\":\"KYC\"}"), None, None);
-        let diff = catalog_hash(Some(b"{\"title\":\"AML\"}"), None, None);
+        let base = catalog_hash(Some(b"{\"title\":\"KYC\"}"), None);
+        let diff = catalog_hash(Some(b"{\"title\":\"AML\"}"), None);
         assert_ne!(base, diff);
     }
 
     #[test]
     fn slug_is_letter_then_32_lowercase_hex() {
-        let s = slug(&catalog_hash(None, None, None));
+        let s = slug(&catalog_hash(None, None));
         assert_eq!(s.len(), 33);
         let mut chars = s.chars();
         assert_eq!(chars.next(), Some('h')); // must start with a letter, not a digit
@@ -145,7 +138,7 @@ mod tests {
 
     #[test]
     fn import_name_stays_off_semver_track() {
-        let h = catalog_hash(Some(b"x"), None, None);
+        let h = catalog_hash(Some(b"x"), None);
         // Unversioned.
         let n0 = embedded_import_name(&h, "i18n", "");
         assert!(n0.starts_with("embedded-slot:h"));

@@ -129,12 +129,9 @@ pub struct DisclosureSchema {
 
 #[derive(Serialize)]
 pub struct CaptureStepView {
-    /// Icon name resolved from the policy's `icons` declarations
-    /// (engine-side `enclavid:embedded/icons` ref). Frontend
-    /// dispatches against its bundled SVG library; unknown names
-    /// render no icon (graceful fallback). Declarations bounded by
-    /// `MAX_DECLARED_ICONS` — icon names never reach the consumer
-    /// envelope so a tight cap is the right shape.
+    /// Icon name, one of the host's own (`enclavid:host-icons/icons`)
+    /// — the frontend draws it from its bundled SVG library. Icon
+    /// names never reach the consumer envelope.
     pub icon: Option<String>,
     /// Pre-capture intro body, paired with `icon` on the intro
     /// screen for this step.
@@ -226,9 +223,8 @@ fn media_view(spec: &MediaSpec, locale: &Locale) -> RequestView {
 
 fn capture_step_view(s: &CaptureStep, locale: &Locale) -> CaptureStepView {
     CaptureStepView {
-        // Already the resolved icon name (engine deref'd the ref); the
-        // frontend dispatches against its bundled library, no-icon on
-        // unknown names.
+        // Already the icon name (engine deref'd the ref); the frontend
+        // draws it from its bundled library.
         icon: s.icon.clone(),
         instructions: dto::pick_localized(&s.instructions, locale),
         label: dto::pick_localized(&s.label, locale),

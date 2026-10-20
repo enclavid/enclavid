@@ -18,6 +18,7 @@
 mod compose;
 mod decls;
 mod hash;
+mod icons;
 mod props;
 
 // This role's own supervisor↔child hop. Behind a feature because the pure library
@@ -207,8 +208,8 @@ impl Compiler {
 /// Three shapes are handled:
 ///
 ///   * **Dynamic** — a non-fused policy plus runtime `plugins`:
-///     `compose::fuse` routes each component's i18n / icons import
-///     to a distinct per-catalog import (the manifest).
+///     `compose::fuse` routes each component's i18n import to a
+///     distinct per-catalog import (the manifest).
 ///   * **Static** — a pre-fused policy artifact with no runtime
 ///     plugins: compiled as-is; the manifest is reconstructed from
 ///     the `embedded-slot:*` imports the artifact already carries

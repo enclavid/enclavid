@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use enclavid_embedded::{SECTION_I18N, SECTION_ICONS};
+use enclavid_embedded::{SECTION_DISCLOSURE_FIELDS, SECTION_I18N};
 use engine_compiler::Compiler;
 use engine_types::compile::{Artifact, CompileFault};
 use engine_types::composition::PluginInstance;
@@ -59,7 +59,7 @@ fn one_byte_past_the_cap_is_refused_before_any_section_is_parsed() {
 fn the_cap_is_on_the_composition_not_on_each_component() {
     let plugin = PluginInstance {
         package: "enclavid:p".into(),
-        wasm: carrying(SECTION_ICONS, CAP / 2 + 1).finish(),
+        wasm: carrying(SECTION_DISCLOSURE_FIELDS, CAP / 2 + 1).finish(),
     };
     assert!(refused(
         &carrying(SECTION_I18N, CAP / 2).finish(),

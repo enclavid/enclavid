@@ -102,7 +102,7 @@ pub const MAX_DECODED_META_BYTES: u64 = 32 * MAX_EMBEDDED_SECTION_BYTES;
 
 /// A freshly compiled composition: the wasmtime-serialized fused component
 /// (`cwasm`) plus the host-side metadata compile drops (the per-catalog
-/// i18n/icons import manifest and the parsed per-component catalogs). This is
+/// i18n import manifest and the parsed per-component catalogs). This is
 /// BOTH the compile RPC return value AND the L2 cache bundle
 /// (`enclavid-api::cwasm_cache`) AND what api fills an execution-worker's cache
 /// with after a miss — one compiled artifact, three consumers, so a cold
@@ -124,7 +124,7 @@ pub struct CompiledBundle {
     /// api hop, the child hop, AND to seal into L2).
     #[serde(with = "serde_bytes")]
     pub cwasm: Vec<u8>,
-    /// Per-catalog i18n / icons import manifest (lost in compile; needed to
+    /// Per-catalog i18n import manifest (lost in compile; needed to
     /// register the host `Linker` instances at run time).
     pub embedded_imports: Vec<EmbeddedImport>,
     /// Per-component parsed catalogs, composition order (policy first) — the
@@ -198,7 +198,7 @@ pub struct BundleRef {
     /// Host-local path the child feeds to `Component::deserialize_file` (mmap) —
     /// its inherited cwasm fd, e.g. `/proc/self/fd/3`.
     pub cwasm_path: String,
-    /// Per-catalog i18n/icons import manifest (needed to register the strict
+    /// Per-catalog i18n import manifest (needed to register the strict
     /// host `Linker` instances) — same as [`CompiledBundle::embedded_imports`].
     pub embedded_imports: Arc<[EmbeddedImport]>,
     /// Per-component parsed catalogs (the registry-builder inputs) — same as
@@ -211,7 +211,6 @@ pub(crate) fn sample_bundle() -> CompiledBundle {
     use engine_types::composition::EmbeddedIface;
     let mut decls = ComponentDecls::default();
     decls.disclosure_fields.insert("dob".to_string());
-    decls.icons.insert("passport".to_string());
     CompiledBundle {
         cwasm: vec![1, 2, 3, 4],
         embedded_imports: vec![EmbeddedImport {
@@ -292,22 +291,16 @@ mod tests {
         assert!(ciborium::from_reader::<BundleMeta, _>(&encode(&plus)[..]).is_err());
     }
 
-    /// The import manifest a compiled component carries: one routed i18n and one
-    /// routed icons import, named the way the compiler names them.
+    /// The import manifest a compiled component carries: one routed i18n
+    /// import, named the way the compiler names it.
     fn routed_imports(hash: [u8; 32]) -> Vec<EmbeddedImport> {
         let slug: String = hash[..16].iter().map(|b| format!("{b:02x}")).collect();
-        [
-            (EmbeddedIface::I18n, "i18n"),
-            (EmbeddedIface::Icons, "icons"),
-        ]
-        .into_iter()
-        .map(|(iface, name)| EmbeddedImport {
-            instance_name: format!("embedded-slot:h{slug}-0-1-0/{name}"),
+        vec![EmbeddedImport {
+            instance_name: format!("embedded-slot:h{slug}-0-1-0/i18n"),
             catalog_hash: hash,
-            iface,
+            iface: EmbeddedIface::I18n,
             version: "0.1.0".to_string(),
-        })
-        .collect()
+        }]
     }
 
     /// The section shape that grows most from JSON to CBOR, a whole i18n section

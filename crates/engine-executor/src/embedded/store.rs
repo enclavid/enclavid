@@ -21,7 +21,7 @@
 
 use engine_types::embedded::registry::Translation;
 
-pub use engine_types::embedded::store::{DisclosureFields, Icon, Localized, RefKind, RefStore};
+pub use engine_types::embedded::store::{DisclosureFields, Localized, RefKind, RefStore};
 
 // ---------------------------------------------------------------------
 // Resource reps — the host-owned backing of each WIT ref resource. Carry
@@ -33,8 +33,8 @@ pub use engine_types::embedded::store::{DisclosureFields, Icon, Localized, RefKi
 /// Backing rep of `enclavid:host/types.localized-ref` — the full
 /// translation set the applicant-locale text is later picked from.
 pub struct LocalizedRef(pub Vec<Translation>);
-/// Backing rep of `enclavid:host/types.icon-ref` — the resolved icon
-/// name the applicant frontend dispatches.
+/// Backing rep of `enclavid:host/types.icon-ref` — the icon name, one of
+/// the host's own, that the applicant frontend dispatches.
 pub struct IconRef(pub String);
 /// Backing rep of `enclavid:host/types.disclosure-field-ref` — the
 /// resolved machine `display-field.key` the consumer receives.
