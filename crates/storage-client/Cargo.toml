@@ -6,30 +6,38 @@ license.workspace = true
 repository.workspace = true
 
 # api's client of the storage-CVM: the session store and the L2 cache, with
-# every seal and open done here. What crosses is moved by a backend api
-# implements over the storage leg; this crate names no transport.
+# every seal and open done here, and api's end of the storage leg declared
+# beside them. The leg itself is api's to keep connected; the stores call
+# through it.
 [dependencies]
-# The wire DTOs a backend moves (ReadRequest / WriteRequest / Slot / Op / …).
+# The storage leg and the wire DTOs that cross it.
 storage-rpc = { path = "../storage-rpc" }
 # What the store seals: the session's own types.
 session-types = { path = "../session-types" }
-# Object-safe async seam under SessionStore / CacheStore, so the backend swaps
-# behind an `Arc<dyn _>` without generics rippling through api's AppState.
-async-trait = "0.1"
-# `Stream`, what a cache blob crosses the seam as, sealed and opened a piece
-# at a time.
+# The digest a state's seal is bound to: what its record's metadata says the
+# applicant left in it.
+sha2 = "0.10"
+# `Stream`, what a cache blob is sealed and opened as, a piece at a time.
 futures = { version = "0.3", default-features = false, features = ["std"] }
 bytes = "1"
-# Hex encoding of the identity-hiding L2 cache blob name (HKDF label).
-hex = "0.4"
+# A cache blob's stream, as it crosses the leg either way.
+fleet-stream = { path = "../fleet-stream" }
 # Crypto primitives (symmetric AEAD session seals + sealed streams).
 enclavid-crypto = { path = "../crypto" }
-# The concern vocabulary the `boundary` facades are built from.
+# The concern vocabulary api's end of the leg is judged in.
 enclavid-boundary = { path = "../boundary" }
+# `boundary!`: api's end of the storage leg, declared. Build-time only.
+enclavid-boundary-macros = { path = "../boundary-macros" }
 # Wraps the raw `tee_seal_key` master + its HKDF subkeys: zeroize-on-drop and
 # Debug-redaction, with `expose_secret()` making every key use explicit.
 secrecy = "0.10"
+# The pipe a store in memory is served over (`memory`).
+tokio = { version = "1", features = ["io-util", "rt"], optional = true }
+
+[features]
+# A store in memory, served over a pipe as the storage-CVM serves its volume:
+# for the tests of a crate whose code holds a store.
+memory = ["dep:tokio"]
 
 [dev-dependencies]
-# `#[tokio::test]` for the async seam tests.
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "io-util"] }

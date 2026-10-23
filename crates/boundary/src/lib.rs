@@ -6,10 +6,9 @@
 //! them. Out again, because the TEE grew a second way to speak: the serial port
 //! that `safe-logger` writes to. Two channels with nothing in common but this
 //! vocabulary, so the vocabulary belongs below both. The mints stay with the
-//! channels — a leg's in the declarations of its ends, the storage volume's in
-//! its client's facades — and `safe-logger`, which opens its channel before
-//! anything else in a role exists, depends on the vocabulary without depending on
-//! a wire client.
+//! channels — a leg's in the declarations of its ends — and `safe-logger`, which
+//! opens its channel before anything else in a role exists, depends on the
+//! vocabulary without depending on a wire client.
 //!
 //! `Untrusted<T, S, B>` — INBOUND. `S` is a tuple of the concerns still open on
 //! the value; what each one asks is written on the marker itself ([`AuthN`],
@@ -47,8 +46,9 @@
 //! writes — states, for each type crossing it, which concerns its direction
 //! opens and which the declaration answers once for every value of that type;
 //! [`outbound`] and [`inbound`] wrap a value at such an end with exactly what is
-//! left. A value whose end nothing declares carries [`Undeclared`], and its scope
-//! is whatever its mint opened.
+//! left. A value that arrives where nothing declares the end carries
+//! [`Undeclared`], and its scope is whatever its mint opened. Nothing leaves
+//! there: every value released leaves a declared end.
 //!
 //! Scope and end are part of the type, so a receipt — `Exposed<_, (), B>` —
 //! records which end it was answered for, and a door that names its end takes
@@ -204,48 +204,75 @@ pub struct P3;
 // marker the compiler infers.
 // =====================================================================
 
+mod remove_sealed {
+    /// Implemented beside each of this crate's own `Remove` impls, and nowhere
+    /// else.
+    pub trait Sealed<X, I> {}
+}
+
 /// Remove the type `X` from a tuple `Self` (of concern markers),
 /// producing `Self::Rest`. The `I` type parameter disambiguates
 /// which position `X` sits in — the compiler infers it.
-pub trait Remove<X, I> {
+///
+/// Sealed: every impl is one position of one tuple, so a peel takes exactly one
+/// concern off. An impl elsewhere could take several off in one:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{AuthZ, Covert, Remove};
+/// pub struct Both;
+/// impl Remove<AuthZ, Both> for (AuthZ, Covert) {
+///     type Rest = ();
+/// }
+/// ```
+pub trait Remove<X, I>: remove_sealed::Sealed<X, I> {
     type Rest;
 }
 
 // 1-tuple: only position P0.
+impl<X> remove_sealed::Sealed<X, P0> for (X,) {}
 impl<X> Remove<X, P0> for (X,) {
     type Rest = ();
 }
 
 // 2-tuple: P0, P1.
+impl<X, B> remove_sealed::Sealed<X, P0> for (X, B) {}
 impl<X, B> Remove<X, P0> for (X, B) {
     type Rest = (B,);
 }
+impl<A, X> remove_sealed::Sealed<X, P1> for (A, X) {}
 impl<A, X> Remove<X, P1> for (A, X) {
     type Rest = (A,);
 }
 
 // 3-tuple: P0, P1, P2.
+impl<X, B, C> remove_sealed::Sealed<X, P0> for (X, B, C) {}
 impl<X, B, C> Remove<X, P0> for (X, B, C) {
     type Rest = (B, C);
 }
+impl<A, X, C> remove_sealed::Sealed<X, P1> for (A, X, C) {}
 impl<A, X, C> Remove<X, P1> for (A, X, C) {
     type Rest = (A, C);
 }
+impl<A, B, X> remove_sealed::Sealed<X, P2> for (A, B, X) {}
 impl<A, B, X> Remove<X, P2> for (A, B, X) {
     type Rest = (A, B);
 }
 
 // 4-tuple: P0, P1, P2, P3 — headroom for one more concern axis
 // without crate-level migration.
+impl<X, B, C, D> remove_sealed::Sealed<X, P0> for (X, B, C, D) {}
 impl<X, B, C, D> Remove<X, P0> for (X, B, C, D) {
     type Rest = (B, C, D);
 }
+impl<A, X, C, D> remove_sealed::Sealed<X, P1> for (A, X, C, D) {}
 impl<A, X, C, D> Remove<X, P1> for (A, X, C, D) {
     type Rest = (A, C, D);
 }
+impl<A, B, X, D> remove_sealed::Sealed<X, P2> for (A, B, X, D) {}
 impl<A, B, X, D> Remove<X, P2> for (A, B, X, D) {
     type Rest = (A, B, D);
 }
+impl<A, B, C, X> remove_sealed::Sealed<X, P3> for (A, B, C, X) {}
 impl<A, B, C, X> Remove<X, P3> for (A, B, C, X) {
     type Rest = (A, B, C);
 }
@@ -261,74 +288,50 @@ mod sealed {
 /// A scope with at least one concern still open.
 ///
 /// Implemented for every non-empty marker tuple and NEVER for `()`, which is the
-/// whole point. `Untrusted<T, ()>` and `Exposed<T, ()>` mean "every concern was
-/// answered", and both release their inner value on that basis — so a constructor
-/// able to produce one directly would let a caller assert the answer without ever
-/// having given it. A door that demands `Exposed<_, ()>` is only worth something
-/// if `()` cannot be conjured, and this bound is what makes that true:
-/// `Exposed::new(req)` where `Exposed<Req, ()>` is wanted stops compiling.
+/// whole point. `Untrusted<T, ()>` and `Exposed<T, (), B>` mean "every concern
+/// was answered", and both release their inner value on that basis — so a mint
+/// able to produce one directly would let a caller assert the answer without
+/// ever having given it.
 ///
-/// It restricts WHAT a mint may produce, not WHO may mint. Whoever calls a
-/// constructor still chooses the scope, which is right — the concerns a crossing
-/// raises are the caller's to name — but they cannot choose to name none.
-/// DECLARING a fully-answered wrapper is a type error, in both directions — `new`
-/// cannot mint at `()`, so an empty scope is somewhere you arrive:
-///
-/// ```compile_fail
-/// use enclavid_boundary::Exposed;
-/// let _: Exposed<u32, ()> = Exposed::new(7);
-/// ```
+/// [`Untrusted::new`] is the one mint whose scope its caller picks, and it takes
+/// this bound: the concerns a crossing raises are the caller's to name, but it
+/// cannot name none, so an empty scope is somewhere you arrive —
 ///
 /// ```compile_fail
 /// use enclavid_boundary::Untrusted;
 /// let _: Untrusted<u32, ()> = Untrusted::new(7);
 /// ```
 ///
-/// And a non-empty scope still constructs, so the bound narrows what a mint may
-/// produce without restricting who may mint:
+/// — while a non-empty one still constructs:
 ///
 /// ```
-/// use enclavid_boundary::{Covert, Exposed};
-/// let _: Exposed<u32, (Covert,)> = Exposed::new(7);
+/// use enclavid_boundary::{Replay, Untrusted};
+/// let _: Untrusted<u32, (Replay,)> = Untrusted::new(7);
 /// ```
 ///
-/// The one other way to `()` without a peel is a declaration: [`outbound`] and
+/// [`outbound_builder`] takes it too, on what its end left open on the type it
+/// builds: a type its declaration answered in full has no work to be built in.
+///
+/// The one way to `()` without a peel is a declaration: [`outbound`] and
 /// [`inbound`] give a value the scope its end's declaration left open, and where
 /// the declaration answered everything about that type, that is `()`. The answers
 /// are written there, once, in the place a reviewer reads them.
 ///
-/// **At a declared end, a receipt is for the type it was answered for.** `new`
-/// exists only at [`Undeclared`], so a declared end mints through its declaration
-/// alone. The work in `vouch_with` keeps the value's type there, and a value built
-/// in the work leaves through [`Parts`], whose one way out builds the type whose
-/// declaration it was opened under. What carries a scope onto a different value —
-/// [`Exposed::map`], the `Vec` transpose, `distribute` — exists only at
-/// [`Undeclared`] as well.
+/// **A receipt is for the type it was answered for.** An `Exposed` is opened only
+/// at a declared end, through its declaration. The work in
+/// [`Exposed::vouch_with`] keeps the value's type, and a value built in the work
+/// leaves through an [`ExposedBuilder`], whose one way out is a value of the type
+/// whose declaration it was opened under. Nothing carries an outbound scope onto
+/// a different value.
 ///
-/// **What this bound does NOT give you** at an undeclared end, and the facades
-/// should not be read as if it did. Two routes reach `()` without a peel there,
-/// and both are deliberate features that happen to compose badly:
-///
-///   * the `Vec` transpose joins a batch at its elements' scope, and an EMPTY batch
-///     satisfies "every element addressed `S`" vacuously, for any `S`;
-///   * [`Exposed::map`] carries a scope onto a different value.
-///
-/// Chained, they mint `Exposed<Anything, ()>` from nothing, and a third soft spot
-/// sits beside them: `((),)` is a non-empty tuple, so it is `Open`, and its single
-/// "marker" is the unit type — nothing prevents a scope that asks nothing.
-///
-/// None of that is an argument for removing the bound, and none of it is an
-/// argument for chasing the rest. What it settles is what the bound is FOR. The
-/// accident it catches is the quiet one: at a call site whose signature wants
-/// `Exposed<_, ()>`, with a bare value in hand, `Exposed::new(v)` is the natural
-/// thing to type and would otherwise compile in silence, skipping the mint with no
-/// signal at all. The routes above are the loud ones — an empty-batch transpose or
-/// a discarding `map` is conspicuous in a diff in a way one constructor call is not.
-///
-/// So: a scope of `()` is evidence that the mint was walked, not proof that it was.
-/// The guard lives in the same repository as what it guards, which is true of every
-/// private field and every `pub(crate)` here; it stops a wrong turn, not an author
-/// who means it.
+/// **What this bound does NOT give you.** `((),)` is a non-empty tuple, so it is
+/// `Open`, and its single "marker" is the unit type — nothing prevents a scope
+/// that asks nothing. The accident the bound catches is the quiet one: with a
+/// bare value in hand where a signature wants `Untrusted<_, ()>`,
+/// `Untrusted::new(v)` is the natural thing to type and would otherwise compile
+/// in silence. So a scope of `()` is evidence that the mint was walked, not proof
+/// that it was: the guard lives in the same repository as what it guards, and it
+/// stops a wrong turn, not an author who means it.
 pub trait Open: sealed::Sealed {}
 
 macro_rules! impl_open {
@@ -387,8 +390,8 @@ pub trait Receives<T>: Boundary {
     type Open;
 }
 
-/// The end of a crossing nothing has declared. Its scope is whatever the mint
-/// opened, and no declaration answers any of it.
+/// The end of an arrival nothing has declared. Its scope is whatever the mint
+/// opened, and no declaration answers any of it. Nothing leaves at it.
 pub struct Undeclared;
 
 /// Open `value` to leave end `B`: open on exactly what `B`'s declaration left
@@ -401,18 +404,19 @@ pub fn outbound<B: Sends<T>, T>(value: T) -> Exposed<T, B::Open, B> {
 }
 
 /// [`outbound`] for a value that becomes the `W` that crosses only in the work
-/// that answers it — the parts a request is framed from, say. The parts open what
-/// `B` left open on a `W`, and the one way out of [`Parts`] is work that builds a
-/// `W`, so the receipt is for a `W` and for nothing else.
+/// that answers it — the parts a request is framed from, say. The builder opens
+/// what `B` left open on a `W`, whatever it holds on the way, and the one way out
+/// of an [`ExposedBuilder`] is [`build`](ExposedBuilder::build), once it holds a
+/// `W` and nothing is open — so the receipt is for a `W` and for nothing else.
 ///
 /// What `B` left open on `W` must not be empty: a `W` its declaration answered in
 /// full has no work to be built in, and is opened with [`outbound`] once it exists.
-pub fn outbound_as<B, W, T>(value: T) -> Parts<T, W, B::Open, B>
+pub fn outbound_builder<B, W, T>(value: T) -> ExposedBuilder<T, W, B::Open, B>
 where
     B: Sends<W>,
     B::Open: Open,
 {
-    Parts {
+    ExposedBuilder {
         value,
         _builds: PhantomData,
         _marker: PhantomData,
@@ -455,12 +459,11 @@ impl<T, S> Untrusted<T, S, Undeclared> {
     /// caller declares. And only at [`Undeclared`]: a declared end's scope is its
     /// declaration's, so a value arriving there is wrapped by [`inbound`].
     ///
-    /// `pub` and `doc(hidden)`. It has to be public — the facades that call it
+    /// `pub` and `doc(hidden)`. It has to be public — the sites that call it
     /// live in other crates, and this one is a dependency-free leaf, so there is
-    /// no `pub(crate)` that could span them. Hidden because nothing outside those
-    /// facades should ever find it: the guard here is against a wrong turn, not
-    /// against someone with commit access, and the named entry points are what a
-    /// reviewer greps.
+    /// no `pub(crate)` that could span them. Hidden because nothing else should
+    /// ever find it: the guard here is against a wrong turn, not against someone
+    /// with commit access, and the named entry points are what a reviewer greps.
     #[doc(hidden)]
     pub fn new(value: T) -> Self
     where
@@ -589,8 +592,9 @@ impl<T, B> Untrusted<T, (), B> {
 
 /// Outbound wrapper. `S` is a tuple of concern markers; methods answer one
 /// concern at a time until `S = ()`, after which the inner `T` is reachable via
-/// `into_inner`. `B` is the end it leaves.
-pub struct Exposed<T, S = (), B = Undeclared> {
+/// `into_inner`. `B` is the declared end it leaves, which opened it
+/// ([`outbound`], [`outbound_builder`]).
+pub struct Exposed<T, S, B> {
     value: T,
     _marker: PhantomData<fn() -> (S, B)>,
 }
@@ -636,85 +640,16 @@ impl<T, S, B> Exposed<T, S, B> {
             _marker: PhantomData,
         }
     }
-}
 
-/// At an end nothing declares, the value is whatever its mint made it, and work
-/// may turn it into what crosses.
-impl<T, S> Exposed<T, S, Undeclared> {
-    /// Wrap a value being released with an explicit initial scope. The caller
-    /// picks `S` to match the concerns genuinely open at the construction site.
-    ///
-    /// `S: Open`, so the scope cannot be `()`. That is what makes a door demanding
-    /// `Exposed<_, ()>` mean anything: the only ways to that type are answering
-    /// every concern the mint opened, or a declaration that answered them, so the
-    /// receipt records answers actually given rather than an assertion that none
-    /// were needed. And only at [`Undeclared`]: a declared end's scope is its
-    /// declaration's, so a value leaving there is opened by [`outbound`].
-    ///
-    /// `pub` and `doc(hidden)`, for the reason given on `Untrusted::new`.
-    #[doc(hidden)]
-    pub fn new(value: T) -> Self
-    where
-        S: Open,
-    {
-        Self {
-            value,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Answer concern `M` with the work in `work`: AEAD-seal turns plaintext into
-    /// ciphertext; `Padded::seal` makes an encoding one constant size; a predicate
-    /// that only checks returns its input.
+    /// Answer concern `M` with the work in `work`, which checks the value or
+    /// rewrites it in place — a scrub, say — and gives back the same type: a
+    /// receipt is for the type its declaration was read for. Work that builds
+    /// the value that crosses starts from an [`ExposedBuilder`]
+    /// ([`outbound_builder`]).
     ///
     /// Symmetric to [`Untrusted::trust_with`]: inbound work verifies, outbound
-    /// work establishes. Both close their concern by performing the
-    /// transformation, not by attesting to it.
-    ///
-    /// On success the scope shrinks by `M`; on failure the wrapper is dropped.
-    pub fn vouch_with<M, I, K, U, F, E>(
-        self,
-        _kind: Kind<M, K>,
-        work: F,
-    ) -> Result<Exposed<U, S::Rest, Undeclared>, E>
-    where
-        S: Remove<M, I>,
-        K: Backs,
-        F: FnOnce(T) -> Result<U, E>,
-    {
-        let value = work(self.value)?;
-        Ok(Exposed {
-            value,
-            _marker: PhantomData,
-        })
-    }
-
-    /// Project the inner value while preserving the scope. Use when you need to
-    /// transform `T` to `U` (e.g., wrap sealed bytes into a typed `Op`) without
-    /// answering any concern.
-    ///
-    /// It carries the scope onto a DIFFERENT value, and at `S = ()` that means
-    /// carrying a completed receipt. Sound where the closure embeds its input, which
-    /// is every use here; a closure that discarded it would leave a receipt
-    /// describing something no longer present. Nothing in the type system separates
-    /// the two — see [`Open`] for what that costs and what it does not.
-    pub fn map<U, F>(self, f: F) -> Exposed<U, S, Undeclared>
-    where
-        F: FnOnce(T) -> U,
-    {
-        Exposed {
-            value: f(self.value),
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// At a declared end, a receipt is for the type its declaration was read for, so
-/// the work here keeps the value's type. Work that builds the value that crosses
-/// starts from [`Parts`] ([`outbound_as`]).
-impl<T, S, B: Boundary> Exposed<T, S, B> {
-    /// Answer concern `M` with the work in `work`, which checks the value or
-    /// rewrites it in place — a scrub, say — and gives back the same type.
+    /// work establishes. Both close their concern by performing the work, not by
+    /// attesting to it.
     ///
     /// On success the scope shrinks by `M`; on failure the wrapper is dropped.
     pub fn vouch_with<M, I, K, F, E>(
@@ -736,27 +671,40 @@ impl<T, S, B: Boundary> Exposed<T, S, B> {
 }
 
 // =====================================================================
-// Parts<T, W, S, B> — what a `W` is built from, on its way out of `B`.
+// ExposedBuilder<T, W, S, B> — a `W` being built, on its way out of `B`.
 // =====================================================================
 
-/// The parts a `W` is built from, open on what end `B`'s declaration left open
-/// on a `W` ([`outbound_as`]). Argued answers come off as they do on
-/// [`Exposed`]; the one way out is [`vouch_with`](Self::vouch_with), the work
-/// that builds the `W`.
-pub struct Parts<T, W, S, B> {
+/// A `W` being built to leave end `B`, open on what `B`'s declaration left open
+/// on a `W` ([`outbound_builder`]) whatever it holds on the way. Each answer takes
+/// one concern off, and the work in [`vouch_with`](Self::vouch_with) may turn
+/// what it holds into something else — a padded encoding, then its seal. Nothing
+/// leaves it but [`build`](Self::build), which takes a builder holding a `W` with
+/// nothing open, so the receipt is for a `W` and for nothing else.
+pub struct ExposedBuilder<T, W, S, B> {
     value: T,
-    /// What the work builds the parts into.
+    /// What the builder builds.
     _builds: PhantomData<fn() -> W>,
     _marker: PhantomData<fn() -> (S, B)>,
 }
 
-impl<T, W, S, B> Parts<T, W, S, B> {
+impl<T: Clone, W, S, B> Clone for ExposedBuilder<T, W, S, B> {
+    /// Preserves what it holds, what it builds, its scope and its end.
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone(),
+            _builds: PhantomData,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T, W, S, B> ExposedBuilder<T, W, S, B> {
     /// Answer concern `M` with an argued kind, as [`Exposed::vouch`] does.
-    pub fn vouch<M, I>(self, _reason: Reason<M, Argued>) -> Parts<T, W, S::Rest, B>
+    pub fn vouch<M, I>(self, _reason: Reason<M, Argued>) -> ExposedBuilder<T, W, S::Rest, B>
     where
         S: Remove<M, I>,
     {
-        Parts {
+        ExposedBuilder {
             value: self.value,
             _builds: PhantomData,
             _marker: PhantomData,
@@ -765,103 +713,55 @@ impl<T, W, S, B> Parts<T, W, S, B> {
 
     /// Take concern `M` off as a standing risk, as [`Exposed::vouch_accept_risk`]
     /// does.
-    pub fn vouch_accept_risk<M, I>(self, _reason: Reason<M, Risk>) -> Parts<T, W, S::Rest, B>
+    pub fn vouch_accept_risk<M, I>(
+        self,
+        _reason: Reason<M, Risk>,
+    ) -> ExposedBuilder<T, W, S::Rest, B>
     where
         S: Remove<M, I>,
     {
-        Parts {
+        ExposedBuilder {
             value: self.value,
             _builds: PhantomData,
             _marker: PhantomData,
         }
     }
 
-    /// Answer concern `M` with the work that builds the `W` from the parts — the
-    /// only way a `W` leaves from them. The work's codomain is the `W` the parts
-    /// were opened as, so what this releases is that and nothing else.
-    pub fn vouch_with<M, I, K, F, E>(
+    /// Answer concern `M` with the work in `work`, which may turn what the
+    /// builder holds into something else. What comes back is still a builder of
+    /// the `W` it was opened for: the concerns left are the `W`'s, whatever it
+    /// holds now.
+    ///
+    /// On success the scope shrinks by `M`; on failure the builder is dropped.
+    pub fn vouch_with<M, I, K, U, F, E>(
         self,
         _kind: Kind<M, K>,
         work: F,
-    ) -> Result<Exposed<W, S::Rest, B>, E>
+    ) -> Result<ExposedBuilder<U, W, S::Rest, B>, E>
     where
         S: Remove<M, I>,
         K: Backs,
-        F: FnOnce(T) -> Result<W, E>,
+        F: FnOnce(T) -> Result<U, E>,
     {
         let value = work(self.value)?;
-        Ok(Exposed {
+        Ok(ExposedBuilder {
             value,
+            _builds: PhantomData,
             _marker: PhantomData,
         })
     }
 }
 
-/// Transpose a homogeneous batch of same-scope exposures into one
-/// exposure of the batch: `Vec<Exposed<T, S>>` → `Exposed<Vec<T>, S>`.
-///
-/// **No `Reason`, sound by construction:** every element already
-/// addressed exactly the concerns in `S` (each earned its scope through
-/// its own peel chain), so the batch has too — the scope is *derived*
-/// from the parts, never re-asserted. The uniform `S` is enforced by
-/// the `Vec`'s homogeneous element type.
-///
-/// Use to assemble a request body from per-field vouched values (e.g.
-/// the ops of a session write) and thread the `Exposed` through, instead
-/// of `into_inner`-ing each part and then rubber-stamping the envelope.
-/// Pair with [`Exposed::map`] to fold in non-secret envelope fields (a
-/// version counter, …) at the same preserved scope.
-///
-/// Only at [`Undeclared`]: a `Vec<T>` is not a type a declaration answered for
-/// because it answered for `T`.
-impl<T, S> From<Vec<Exposed<T, S, Undeclared>>> for Exposed<Vec<T>, S, Undeclared> {
-    fn from(items: Vec<Exposed<T, S, Undeclared>>) -> Self {
+impl<W, B> ExposedBuilder<W, W, (), B> {
+    /// The `W` the builder was opened for, every concern answered: the one way
+    /// out of it. Only a builder that holds a `W` and has nothing open has this.
+    pub fn build(self) -> Exposed<W, (), B> {
         Exposed {
-            value: items.into_iter().map(|e| e.value).collect(),
+            value: self.value,
             _marker: PhantomData,
         }
     }
 }
-
-/// Distribute one exposure of a tuple into a tuple of exposures, each
-/// component carrying the SAME scope `S`:
-/// `Exposed<(A, B, C), S>` → `(Exposed<A, S>, Exposed<B, S>, Exposed<C, S>)`.
-///
-/// The **dual** of the `From<Vec<Exposed<T, S>>>` transpose: that joins
-/// homogeneous parts into a whole; this splits a whole into its parts.
-///
-/// **No `Reason`, sound by construction:** whatever concerns are still
-/// open for the tuple are open for each of its components, so each part's
-/// scope is *derived* from the whole, never re-asserted. The split is
-/// independent — closing `S` on one component does not touch the others.
-///
-/// Note on honesty: distributing only moves the wrapper; it does not make
-/// a tuple-level argued answer any more honest than it was. Bundle into a
-/// tuple-then-answer ONLY when one reason genuinely covers every component
-/// (e.g. same-provenance scalars). For heterogeneous members that close a
-/// concern differently (per-field AEAD vs sealing to a recipient vs
-/// plaintext), keep them as separate per-member exposures instead.
-///
-/// Only at [`Undeclared`], for the reason the transpose is.
-macro_rules! impl_exposed_distribute {
-    ($($T:ident),+) => {
-        impl<$($T,)+ S> Exposed<($($T,)+), S, Undeclared> {
-            #[allow(non_snake_case)]
-            pub fn distribute(self) -> ($(Exposed<$T, S, Undeclared>,)+) {
-                let ($($T,)+) = self.value;
-                ($(Exposed { value: $T, _marker: PhantomData },)+)
-            }
-        }
-    };
-}
-
-impl_exposed_distribute!(T0, T1);
-impl_exposed_distribute!(T0, T1, T2);
-impl_exposed_distribute!(T0, T1, T2, T3);
-impl_exposed_distribute!(T0, T1, T2, T3, T4);
-impl_exposed_distribute!(T0, T1, T2, T3, T4, T5);
-impl_exposed_distribute!(T0, T1, T2, T3, T4, T5, T6);
-impl_exposed_distribute!(T0, T1, T2, T3, T4, T5, T6, T7);
 
 impl<T, B> Exposed<T, (), B> {
     /// Reach the inner value once every concern has been answered. Only
@@ -897,10 +797,144 @@ pub mod declaration {
         /// Who sees the bytes on the way.
         pub observer: &'static str,
         /// The protocols this end calls.
-        pub calls: &'static [&'static str],
+        pub calls: &'static [Protocol],
         /// The protocols this end serves.
-        pub serves: &'static [&'static str],
+        pub serves: &'static [Protocol],
         pub crossings: &'static [Crossing],
+    }
+
+    /// One protocol, as an end holding it sees it: what crosses for each method,
+    /// as `#[protocol]` read the contract, and at a calling end what each
+    /// method's door takes and hands back, as `#[calls]` read the doors. Its name
+    /// is what pairs an end that calls it with one that serves it.
+    pub struct Protocol {
+        /// The contract's name.
+        pub name: &'static str,
+        pub methods: &'static [Method],
+    }
+
+    /// One method of a protocol, and the types that cross for it.
+    pub struct Method {
+        pub name: &'static str,
+        /// Its arguments, in order; a capability handed over is not one.
+        pub args: &'static [&'static str],
+        pub reply: &'static str,
+        pub error: &'static str,
+        /// What the calling end's door for it takes and hands back, at a calling
+        /// end; `None` at a serving end, which holds what crosses.
+        pub door: Option<Door>,
+    }
+
+    /// What a calling end's door takes and hands back, `Self` being that end.
+    pub struct Door {
+        /// What it takes, answered at the end; and what its `where` says it
+        /// builds what crosses as, answered in full.
+        pub sends: &'static [&'static str],
+        /// What it receives: each type whose declaration leaves open what the
+        /// door hands back, which may be that value or what it is taken from.
+        pub receives: &'static [&'static str],
+    }
+
+    impl End {
+        /// What this end declares but never holds: a type that crosses for a
+        /// protocol it calls only where a door builds it, or takes it apart. No
+        /// line about such a type governs anything, so a sound end has none.
+        /// Types are compared as spelled, less the paths they are named by.
+        pub fn unheld(&self) -> Vec<&'static str> {
+            let as_this_end = |part: &str| bare(&as_end(part, self.name));
+            let (mut crossing, mut held) = ((Vec::new(), Vec::new()), (Vec::new(), Vec::new()));
+            for method in self.calls.iter().flat_map(|p| p.methods) {
+                let args = method.args.iter().map(|a| bare(a));
+                crossing.0.extend(args.clone());
+                crossing.1.push(bare(method.reply));
+                match &method.door {
+                    None => {
+                        held.0.extend(args);
+                        held.1.push(bare(method.reply));
+                    }
+                    Some(door) => {
+                        held.0.extend(door.sends.iter().map(|s| as_this_end(s)));
+                        held.1.extend(door.receives.iter().map(|r| as_this_end(r)));
+                    }
+                }
+            }
+            self.crossings
+                .iter()
+                .filter(|c| {
+                    let (crossing, held) = match c.direction {
+                        Direction::Out => (&crossing.0, &held.0),
+                        Direction::In => (&crossing.1, &held.1),
+                    };
+                    let ty = bare(c.ty);
+                    crossing.contains(&ty) && !held.contains(&ty)
+                })
+                .map(|c| c.ty)
+                .collect()
+        }
+    }
+
+    fn is_word(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+
+    /// `ty` with the word `Self` in it read as `end`, and no other word touched.
+    fn as_end(ty: &str, end: &str) -> String {
+        let mut out = String::new();
+        let mut rest = ty;
+        while let Some(at) = rest.find("Self") {
+            let before = rest[..at].chars().next_back();
+            let after = rest[at + 4..].chars().next();
+            let in_a_word = before.is_some_and(is_word) || after.is_some_and(is_word);
+            out.push_str(&rest[..at]);
+            out.push_str(if in_a_word { "Self" } else { end });
+            rest = &rest[at + 4..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// `ty` with every path it names a type by left out:
+    /// `storage_rpc::Fields<crate::Slot>` is `Fields<Slot>`. A `::` with no
+    /// name of a path before it — after a `>`, say — stays.
+    fn bare(ty: &str) -> String {
+        let mut out = String::new();
+        let mut rest = ty;
+        while let Some(at) = rest.find("::") {
+            let before = &rest[..at];
+            let qualifier = before.trim_end_matches(is_word);
+            if qualifier.len() == before.len() && !before.is_empty() {
+                out.push_str(before);
+                out.push_str("::");
+            } else {
+                out.push_str(qualifier);
+            }
+            rest = &rest[at + 2..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{as_end, bare};
+
+        /// Paths go, and every name stays.
+        #[test]
+        fn bare_leaves_out_paths_and_nothing_else() {
+            assert_eq!(bare("storage_rpc::Fields<crate::Slot>"), "Fields<Slot>");
+            assert_eq!(bare("::wire::Done"), "Done");
+            assert_eq!(bare("Option<a::b::C>"), "Option<C>");
+            assert_eq!(bare("&'static crate::Name"), "&'static Name");
+            assert_eq!(bare("<T as Trait>::Assoc"), "<T as Trait>::Assoc");
+        }
+
+        /// `Self` is read as the end where it is a word of its own, and only there.
+        #[test]
+        fn self_is_the_end_only_as_a_word() {
+            assert_eq!(as_end("Fields<Self>", "Storage"), "Fields<Storage>");
+            assert_eq!(as_end("Selfie<Self>", "End"), "Selfie<End>");
+            assert_eq!(as_end("MySelf", "End"), "MySelf");
+        }
     }
 
     /// Which way a type crosses this end.
@@ -986,7 +1020,7 @@ pub mod declaration {
 /// door(outbound::<A, _>(1));
 /// ```
 ///
-/// A declared end mints through its declaration and nowhere else:
+/// What leaves is opened through a declaration and nowhere else:
 ///
 /// ```compile_fail
 /// use enclavid_boundary::{Boundary, Covert, Exposed};
@@ -995,7 +1029,7 @@ pub mod declaration {
 /// let _ = Exposed::<u8, (Covert,), A>::new(1);
 /// ```
 ///
-/// At a declared end, the work keeps the value's type:
+/// The work keeps the value's type:
 ///
 /// ```compile_fail
 /// use enclavid_boundary::{Boundary, Covert, Sends, outbound};
@@ -1005,24 +1039,50 @@ pub mod declaration {
 /// let _ = outbound::<A, _>(1u8).vouch_with(Covert::Transformed, |b| Ok::<_, ()>(u16::from(b)));
 /// ```
 ///
-/// Parts leave only as the value they were opened as:
+/// A builder leaves only as the value it was opened for. The control first:
 ///
-/// ```compile_fail
-/// use enclavid_boundary::{Boundary, Covert, Sends, outbound_as};
+/// ```
+/// use enclavid_boundary::{Boundary, Covert, Exposed, Sends, outbound_builder};
 /// struct A;
 /// impl Boundary for A {}
 /// impl Sends<u8> for A { type Open = (Covert,); }
-/// let _ = outbound_as::<A, u8, _>("x").vouch_with(Covert::Transformed, |s| Ok::<_, ()>(s.len()));
+/// let _: Exposed<u8, (), A> = outbound_builder::<A, u8, _>("x")
+///     .vouch_with(Covert::Transformed, |s| Ok::<_, ()>(s.len() as u8))
+///     .unwrap()
+///     .build();
 /// ```
 ///
-/// A value its declaration answered in full lends its scope to no parts:
+/// Holding something else, it does not build:
 ///
 /// ```compile_fail
-/// use enclavid_boundary::{Boundary, Sends, outbound_as};
+/// use enclavid_boundary::{Boundary, Covert, Sends, outbound_builder};
+/// struct A;
+/// impl Boundary for A {}
+/// impl Sends<u8> for A { type Open = (Covert,); }
+/// let _ = outbound_builder::<A, u8, _>("x")
+///     .vouch_with(Covert::Transformed, |s| Ok::<_, ()>(s.len()))
+///     .unwrap()
+///     .build();
+/// ```
+///
+/// Nor with a concern still open, even holding a value of the type:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{Boundary, Covert, Sends, outbound_builder};
+/// struct A;
+/// impl Boundary for A {}
+/// impl Sends<u8> for A { type Open = (Covert,); }
+/// let _ = outbound_builder::<A, u8, _>(1u8).build();
+/// ```
+///
+/// A value its declaration answered in full lends its scope to no builder:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{Boundary, Sends, outbound_builder};
 /// struct A;
 /// impl Boundary for A {}
 /// impl Sends<u8> for A { type Open = (); }
-/// let _ = outbound_as::<A, u8, _>("x");
+/// let _ = outbound_builder::<A, u8, _>("x");
 /// ```
 ///
 /// A projection's error comes out open:
@@ -1118,6 +1178,182 @@ pub mod declaration {
 /// #[enclavid_boundary_macros::protocol]
 /// pub trait Contract {
 ///     async fn op(&self, req: Req) -> Result<Unit, Error>;
+/// }
+/// ```
+///
+/// An end that calls a contract declares what its doors take and hand back — the
+/// end named `B` there — and not what crosses. The control first:
+///
+/// ```
+/// use enclavid_boundary::{AuthN, Exposed, Receives, Untrusted};
+/// use enclavid_boundary_macros::boundary;
+/// pub struct Error;
+/// pub struct Req;
+/// pub struct Rep;
+/// pub struct Part<B>(std::marker::PhantomData<B>);
+/// #[enclavid_boundary_macros::protocol]
+/// pub trait Contract {
+///     async fn op(&self, req: Req) -> Result<Rep, Error>;
+/// }
+/// pub struct Leg<B>(std::marker::PhantomData<B>);
+/// #[enclavid_boundary_macros::calls(Contract)]
+/// impl<B> Leg<B> {
+///     pub async fn op(
+///         &self,
+///         part: Exposed<Part<B>, (), B>,
+///     ) -> Result<Untrusted<Rep, <B as Receives<Rep>>::Open, B>, Error> {
+///         unimplemented!()
+///     }
+/// }
+/// boundary! {
+///     Caller { calls: [Contract], observer: Test }
+///     out (AuthN,) { Part<Caller> }
+///     in (AuthN,) { Rep, #[doc = "test fixture"] Error: AuthN::Indifferent }
+/// }
+/// ```
+///
+/// Declaring what crosses in place of what the door takes does not do:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{AuthN, Exposed, Receives, Untrusted};
+/// use enclavid_boundary_macros::boundary;
+/// pub struct Error;
+/// pub struct Req;
+/// pub struct Rep;
+/// pub struct Part<B>(std::marker::PhantomData<B>);
+/// #[enclavid_boundary_macros::protocol]
+/// pub trait Contract {
+///     async fn op(&self, req: Req) -> Result<Rep, Error>;
+/// }
+/// pub struct Leg<B>(std::marker::PhantomData<B>);
+/// #[enclavid_boundary_macros::calls(Contract)]
+/// impl<B> Leg<B> {
+///     pub async fn op(
+///         &self,
+///         part: Exposed<Part<B>, (), B>,
+///     ) -> Result<Untrusted<Rep, <B as Receives<Rep>>::Open, B>, Error> {
+///         unimplemented!()
+///     }
+/// }
+/// boundary! {
+///     Caller { calls: [Contract], observer: Test }
+///     out (AuthN,) { Req }
+///     in (AuthN,) { Rep, #[doc = "test fixture"] Error: AuthN::Indifferent }
+/// }
+/// ```
+///
+/// A door named for no method of its contract is refused:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{Exposed, Receives, Untrusted};
+/// pub struct Error;
+/// pub struct Req;
+/// pub struct Rep;
+/// #[enclavid_boundary_macros::protocol]
+/// pub trait Contract {
+///     async fn op(&self, req: Req) -> Result<Rep, Error>;
+/// }
+/// pub struct Leg<B>(std::marker::PhantomData<B>);
+/// #[enclavid_boundary_macros::calls(Contract)]
+/// impl<B> Leg<B> {
+///     pub async fn other(
+///         &self,
+///         req: Exposed<Req, (), B>,
+///     ) -> Result<Untrusted<Rep, <B as Receives<Rep>>::Open, B>, Error> {
+///         unimplemented!()
+///     }
+/// }
+/// ```
+///
+/// A door that builds what crosses from a value of its own says so in its
+/// `where`, and the end declares what it builds answered in full. The control
+/// first:
+///
+/// ```
+/// use enclavid_boundary::{AuthN, Receives, Sends, Untrusted};
+/// use enclavid_boundary_macros::boundary;
+/// pub struct Error;
+/// pub struct Req;
+/// pub struct Rep;
+/// pub struct Source;
+/// #[enclavid_boundary_macros::protocol]
+/// pub trait Contract {
+///     async fn op(&self, req: Req) -> Result<Rep, Error>;
+/// }
+/// pub struct Leg<B>(std::marker::PhantomData<B>);
+/// #[enclavid_boundary_macros::calls(Contract)]
+/// impl<B> Leg<B> {
+///     pub async fn op(
+///         &self,
+///         source: Source,
+///     ) -> Result<Untrusted<Rep, <B as Receives<Rep>>::Open, B>, Error>
+///     where
+///         B: Sends<Req, Open = ()>,
+///     {
+///         unimplemented!()
+///     }
+/// }
+/// boundary! {
+///     Caller { calls: [Contract], observer: Test }
+///     out (AuthN,) { #[doc = "test fixture"] Req: AuthN::Indifferent }
+///     in (AuthN,) { Rep, #[doc = "test fixture"] Error: AuthN::Indifferent }
+/// }
+/// ```
+///
+/// An end that leaves something open on it does not do:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{AuthN, Receives, Sends, Untrusted};
+/// use enclavid_boundary_macros::boundary;
+/// pub struct Error;
+/// pub struct Req;
+/// pub struct Rep;
+/// pub struct Source;
+/// #[enclavid_boundary_macros::protocol]
+/// pub trait Contract {
+///     async fn op(&self, req: Req) -> Result<Rep, Error>;
+/// }
+/// pub struct Leg<B>(std::marker::PhantomData<B>);
+/// #[enclavid_boundary_macros::calls(Contract)]
+/// impl<B> Leg<B> {
+///     pub async fn op(
+///         &self,
+///         source: Source,
+///     ) -> Result<Untrusted<Rep, <B as Receives<Rep>>::Open, B>, Error>
+///     where
+///         B: Sends<Req, Open = ()>,
+///     {
+///         unimplemented!()
+///     }
+/// }
+/// boundary! {
+///     Caller { calls: [Contract], observer: Test }
+///     out (AuthN,) { Req }
+///     in (AuthN,) { Rep, #[doc = "test fixture"] Error: AuthN::Indifferent }
+/// }
+/// ```
+///
+/// And a method left without a door is refused:
+///
+/// ```compile_fail
+/// use enclavid_boundary::{Exposed, Receives, Untrusted};
+/// pub struct Error;
+/// pub struct Req;
+/// pub struct Rep;
+/// #[enclavid_boundary_macros::protocol]
+/// pub trait Contract {
+///     async fn op(&self, req: Req) -> Result<Rep, Error>;
+///     async fn more(&self, req: Req) -> Result<Rep, Error>;
+/// }
+/// pub struct Leg<B>(std::marker::PhantomData<B>);
+/// #[enclavid_boundary_macros::calls(Contract)]
+/// impl<B> Leg<B> {
+///     pub async fn op(
+///         &self,
+///         req: Exposed<Req, (), B>,
+///     ) -> Result<Untrusted<Rep, <B as Receives<Rep>>::Open, B>, Error> {
+///         unimplemented!()
+///     }
 /// }
 /// ```
 #[allow(dead_code)]
@@ -1238,7 +1474,7 @@ mod tests {
 
     #[test]
     fn exposed_answers_in_any_order() {
-        let raw: Exposed<u32, (AuthN, AuthZ, Covert)> = Exposed::new(42);
+        let raw: Exposed<i64, (AuthN, AuthZ, Covert), End> = outbound::<End, _>(42);
         let v = raw
             .vouch(reason!(Covert::Bounded, "test fixture"))
             .vouch(reason!(AuthN::SelfProduced, "test fixture"))
@@ -1249,17 +1485,20 @@ mod tests {
 
     #[test]
     fn exposed_work_propagates_its_error() {
-        let raw: Exposed<&'static str, (Covert,)> = Exposed::new("past its frame");
-        let err = raw
-            .vouch_with(Covert::Transformed, |s| {
-                if s.len() <= 4 {
-                    Ok(s)
-                } else {
-                    Err("over the frame")
-                }
+        let err = outbound::<End, _>(5u32)
+            .vouch_with(Covert::Transformed, |v| {
+                if v <= 4 { Ok(v) } else { Err("over the frame") }
             })
             .unwrap_err();
         assert_eq!(err, "over the frame");
+    }
+
+    #[test]
+    fn exposed_takes_an_accepted_risk() {
+        let v = outbound::<End, _>(3u32)
+            .vouch_accept_risk(reason!(Covert::AcceptedRisk, "test fixture"))
+            .into_inner();
+        assert_eq!(v, 3);
     }
 
     /// A projection's error is the sender's as much as its value is, so it comes
@@ -1274,34 +1513,13 @@ mod tests {
         assert_eq!(text, "the peer's own text");
     }
 
-    #[test]
-    fn exposed_work_may_change_the_type() {
-        // Real outbound shape: plaintext value → ciphertext bytes after AEAD-seal.
-        let raw: Exposed<&'static str, (Covert,)> = Exposed::new("hello");
-        let bytes: Exposed<Vec<u8>, ()> = raw
-            .vouch_with(Covert::Transformed, |s| Ok::<_, ()>(s.as_bytes().to_vec()))
-            .unwrap();
-        assert_eq!(bytes.into_inner(), b"hello".to_vec());
-    }
-
-    #[test]
-    fn exposed_map_preserves_scope() {
-        let raw: Exposed<Meta, (AuthN, Covert)> = Exposed::new(Meta {
-            owner: "alice".into(),
-            version: 7,
-        });
-        let projected: Exposed<u32, (AuthN, Covert)> = raw.map(|m| m.version);
-        let v = projected
-            .vouch(reason!(AuthN::SelfProduced, "test fixture"))
-            .vouch_accept_risk(reason!(Covert::AcceptedRisk, "test fixture"))
-            .into_inner();
-        assert_eq!(v, 7);
-    }
-
     struct End;
     impl Boundary for End {}
     impl Sends<u32> for End {
         type Open = (Covert,);
+    }
+    impl Sends<i64> for End {
+        type Open = (AuthN, AuthZ, Covert);
     }
     impl Sends<u64> for End {
         type Open = (AuthZ, Covert);
@@ -1313,15 +1531,29 @@ mod tests {
         type Open = ();
     }
 
-    /// Parts take argued answers as they are, and leave only as the value the work
-    /// builds from them.
+    /// A builder takes argued answers as they are, and leaves only as the value
+    /// the work builds.
     #[test]
-    fn parts_leave_as_what_they_build() {
-        let framed: Exposed<u64, (), End> = outbound_as::<End, u64, _>(7u8)
+    fn a_builder_leaves_as_what_it_builds() {
+        let framed: Exposed<u64, (), End> = outbound_builder::<End, u64, _>(7u8)
             .vouch(reason!(AuthZ::NoSecret, "test fixture"))
             .vouch_with(Covert::Transformed, |b| Ok::<_, ()>(u64::from(b) << 8))
-            .unwrap();
+            .unwrap()
+            .build();
         assert_eq!(framed.into_inner(), 7 << 8);
+    }
+
+    /// Each work may turn what a builder holds into something else, and only
+    /// the last needs to hold what it builds.
+    #[test]
+    fn a_builder_takes_work_after_work() {
+        let built: Exposed<u64, (), End> = outbound_builder::<End, u64, _>(7u8)
+            .vouch_with(Covert::Transformed, |b| Ok::<_, ()>(u16::from(b) << 4))
+            .unwrap()
+            .vouch_with(AuthZ::NoSecret, |w| Ok::<_, ()>(u64::from(w) << 4))
+            .unwrap()
+            .build();
+        assert_eq!(built.into_inner(), 7 << 8);
     }
 
     /// At a declared end the work keeps the value's type.
@@ -1331,6 +1563,71 @@ mod tests {
             .vouch_with(Covert::Transformed, |v| Ok::<_, ()>(v.rotate_left(8)))
             .unwrap();
         assert_eq!(checked.into_inner(), 9u32.rotate_left(8));
+    }
+
+    /// A type that crosses only where a door builds it, or takes it apart, is
+    /// one the calling end never holds: declaring it is found out, and declaring
+    /// the door's parts — its own end named as `Self` — is not.
+    #[test]
+    fn what_only_a_door_holds_is_unheld() {
+        use declaration::{Crossing, Direction, Door, End, Method, Protocol};
+        const fn crossing(direction: Direction, ty: &'static str) -> Crossing {
+            Crossing {
+                direction,
+                ty,
+                opens: &[],
+                answers: &[],
+                left: &[],
+            }
+        }
+        const CALLS: &[Protocol] = &[Protocol {
+            name: "Contract",
+            methods: &[
+                Method {
+                    name: "built",
+                    args: &["Name", "Request"],
+                    reply: "Response",
+                    error: "Error",
+                    door: Some(Door {
+                        sends: &["Name", "Part<Self>"],
+                        receives: &["Slot"],
+                    }),
+                },
+                Method {
+                    name: "plain",
+                    args: &["Name"],
+                    reply: "Done",
+                    error: "Error",
+                    door: None,
+                },
+            ],
+        }];
+        const SOUND: &[Crossing] = &[
+            crossing(Direction::Out, "Name"),
+            crossing(Direction::Out, "Part<Caller>"),
+            crossing(Direction::In, "Slot"),
+            crossing(Direction::In, "Done"),
+            crossing(Direction::In, "Error"),
+        ];
+        const WITH_THE_WIRE: &[Crossing] = &[
+            crossing(Direction::Out, "Name"),
+            crossing(Direction::Out, "Request"),
+            crossing(Direction::In, "crate::Response"),
+            crossing(Direction::In, "::wire::Done"),
+        ];
+        let caller = |crossings| End {
+            name: "Caller",
+            doc: "",
+            observer: "",
+            calls: CALLS,
+            serves: &[],
+            crossings,
+        };
+        assert!(caller(SOUND).unheld().is_empty());
+        assert_eq!(
+            caller(WITH_THE_WIRE).unheld(),
+            ["Request", "crate::Response"]
+        );
     }
 
     /// A declaration decides the scope a value starts with at its end, and where
@@ -1347,12 +1644,13 @@ mod tests {
         assert_eq!(answered.into_inner(), 6);
         let arrived: Untrusted<u16, (), End> = inbound::<End, _>(7);
         assert_eq!(arrived.into_inner(), 7);
-        // The parts of a `u32` open what the `u32` does, and become one in the work.
-        let framed: Exposed<u32, (), End> = outbound_as::<End, u32, _>((2u16, 3u16))
+        // A builder of a `u32` opens what the `u32` does, and becomes one in the work.
+        let framed: Exposed<u32, (), End> = outbound_builder::<End, u32, _>((2u16, 3u16))
             .vouch_with(Covert::Transformed, |(a, b)| {
                 Ok::<_, ()>(u32::from(a) * u32::from(b))
             })
-            .unwrap();
+            .unwrap()
+            .build();
         assert_eq!(framed.into_inner(), 6);
     }
 }

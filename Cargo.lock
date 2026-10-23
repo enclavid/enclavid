@@ -1490,7 +1490,6 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 name = "enclavid-api"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "axum",
  "base64ct",
  "blake3",
@@ -1722,6 +1721,8 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "enclavid-attestation",
+ "enclavid-boundary",
+ "enclavid-boundary-macros",
  "enclavid-ra-tls",
  "fleet-stream",
  "fleet-transport",
@@ -4945,14 +4946,15 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 name = "storage-client"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bytes",
  "enclavid-boundary",
+ "enclavid-boundary-macros",
  "enclavid-crypto",
+ "fleet-stream",
  "futures",
- "hex",
  "secrecy",
  "session-types",
+ "sha2",
  "storage-rpc",
  "tokio",
 ]
@@ -4961,8 +4963,12 @@ dependencies = [
 name = "storage-rpc"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "ciborium",
+ "enclavid-boundary",
+ "enclavid-boundary-macros",
  "fleet-stream",
+ "futures-util",
  "remoc",
  "serde",
  "serde_bytes",

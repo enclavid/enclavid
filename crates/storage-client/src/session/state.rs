@@ -1,24 +1,33 @@
-//! `STATE` session field. Encrypted replay log produced by the policy
-//! engine. Double-AEAD'd: inner layer under the applicant's bearer
-//! key, outer under `tee_seal_key`. AAD = session_id on both layers, so
-//! cross-session copies fail at the outer check before the inner one
-//! is even attempted.
+//! `STATE` session field. The policy reducer's sealed state. Double-AEAD'd:
+//! inner layer under the applicant's bearer key, outer under `tee_seal_key`.
+//! Both layers are bound (AAD) to the field, to the session, and to what the
+//! record's metadata says the session's applicant has left in it
+//! ([`StateBinding`]). So a state opens only beside the metadata it was written
+//! with: not as metadata, not in another session, and not after a reset or
+//! another disclosure or capture than the ones it was written beside.
 //!
 //! State is only present once the applicant claims the session via
 //! `/connect` and the policy runs at least one round; before that the
-//! field is absent (`Option::None` from the read marker).
+//! field is absent, and a reset makes it absent again.
 
-use session_types::{SEALED_STATE_PLAINTEXT_BYTES, SessionState};
-use storage_rpc::{BlobField, BlobWrite, FieldSelector, Op, Slot};
+use sha2::{Digest, Sha256};
 
-use crate::boundary;
+use session_types::{SEALED_STATE_PLAINTEXT_BYTES, SessionMetadata, SessionState};
+use storage_rpc::{Fields, Ops, Slot, StateOp};
+
+use crate::boundary::Storage;
 use crate::error::StoreError;
-use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
+use enclavid_boundary::{AuthN, AuthZ, ExposedBuilder, Replay, Untrusted};
 
 use enclavid_crypto::aead;
 
 use super::Ctx;
-use super::core::{ReadField, WriteField, unwrap_scalar};
+use super::core::{ReadField, WriteField, scalar};
+
+/// What a state's seal is labelled with, apart from every other field's.
+const STATE_AAD: &[u8] = b"enclavid.state.v1";
+/// What a binding's digest is labelled with.
+const BINDING: &[u8] = b"enclavid.state-binding.v1";
 
 /// Encode `state` and pad it with trailing zeros to
 /// [`SEALED_STATE_PLAINTEXT_BYTES`], so the sealed ciphertext is a fixed size
@@ -39,73 +48,142 @@ pub fn encode_padded(state: &SessionState) -> Result<Vec<u8>, StoreError> {
     Ok(bytes)
 }
 
-/// Read marker: session state blob. Carries the applicant key for
-/// the inner AEAD layer. Output is `Untrusted<Option<SessionState>,
-/// (Replay,)>` — the boundary entry hands us `(AuthN, AuthZ, Replay)`
-/// open; outer-AEAD-open closes AuthN (real crypto), inner-AEAD-open
-/// closes AuthZ (key possession authorises, real crypto). Only Replay
-/// remains as a caller concern. `None` until the applicant connects
-/// and runs the policy at least once.
-pub struct State<'a> {
-    pub applicant_session_token: &'a [u8],
+/// What a state is bound to beside its session: everything of an applicant the
+/// record's metadata records — the hashes of its disclosures and of its
+/// captures, in the order the metadata keeps them.
+///
+/// In an honest record the state is always sealed to the metadata beside it: a
+/// round that adds to either list writes the state with the lists it leaves, and
+/// a reset clears both in the write that drops the state. So a state put back
+/// from before a reset, or from before a newer disclosure or capture, is bound
+/// to other lists and does not open; and a state missing beside lists that are
+/// not empty was removed by whoever holds the volume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateBinding {
+    digest: [u8; 32],
+    /// Whether the metadata records nothing of an applicant: the one record a
+    /// state may be missing from.
+    empty: bool,
 }
+
+impl StateBinding {
+    pub fn of(metadata: &SessionMetadata) -> Self {
+        let mut h = Sha256::new();
+        h.update(BINDING);
+        h.update((metadata.disclosure_entry_hashes.len() as u64).to_le_bytes());
+        for entry in &metadata.disclosure_entry_hashes {
+            h.update(entry);
+        }
+        h.update((metadata.captured_media.len() as u64).to_le_bytes());
+        for capture in &metadata.captured_media {
+            h.update((capture.len() as u64).to_le_bytes());
+            h.update(capture);
+        }
+        Self {
+            digest: h.finalize().into(),
+            empty: metadata.disclosure_entry_hashes.is_empty()
+                && metadata.captured_media.is_empty(),
+        }
+    }
+}
+
+/// The AAD both of a state's layers are sealed under: the field, the binding,
+/// the session. The label and the digest are fixed-length, so the session id
+/// last cannot be read two ways.
+fn aad(session_id: &str, binding: &StateBinding) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(STATE_AAD.len() + 32 + session_id.len());
+    aad.extend_from_slice(STATE_AAD);
+    aad.extend_from_slice(&binding.digest);
+    aad.extend_from_slice(session_id.as_bytes());
+    aad
+}
+
+/// Read marker: the session's state as the store keeps it, still sealed —
+/// shape-checked, every concern open. It is opened by
+/// [`SessionStore::open_state`](super::SessionStore::open_state), beside the
+/// record's metadata, which says what it must be bound to.
+pub struct SealedState;
 
 /// Write marker: replace session state with the freshly-encoded,
-/// constant-size-padded, freshly-encrypted `SessionState`. Payload is
-/// `Exposed<Vec<u8>, (AuthN,)>` — the caller's Covert vouch already
-/// encoded + padded it (`encode_padded`) to a fixed plaintext size, so the
-/// sealed ciphertext is constant every round and the size covert channel is
-/// closed; the caller also pre-vouches AuthZ (key-possession reasoning).
-/// Host-bridge closes AuthN via the double-AEAD seal it owns the keys for.
+/// constant-size-padded, freshly-encrypted `SessionState`. Payload is a
+/// [`StateOp`] being built, holding the encoded state padded to a fixed
+/// plaintext size (`encode_padded`, the work the caller answered `Covert`
+/// with), so the sealed ciphertext is constant every round; [`Storage`]
+/// answers `AuthZ` for every state op. storage-client answers `AuthN` with the
+/// double-AEAD seal it owns the keys for, which builds the op. `binding` is
+/// that of the metadata this write leaves beside the state.
 pub struct SetState<'a> {
-    pub state: Exposed<Vec<u8>, (AuthN,)>,
+    pub state: ExposedBuilder<Vec<u8>, StateOp, (AuthN,), Storage>,
     pub applicant_session_token: &'a [u8],
+    pub binding: StateBinding,
 }
 
-impl ReadField for State<'_> {
-    type Output = Untrusted<Option<SessionState>, (Replay,)>;
+impl ReadField for SealedState {
+    type Output = Untrusted<Option<Vec<u8>>, (AuthN, AuthZ, Replay), Storage>;
 
-    fn selector(&self) -> FieldSelector {
-        FieldSelector::Blob(BlobField::State)
+    fn select(&self, fields: &mut Fields<Storage>) {
+        fields.state();
     }
 
-    fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, StoreError> {
-        let Some(b) = unwrap_scalar(slot)? else {
-            return Ok(Untrusted::new(None));
-        };
-        let decoded: Untrusted<SessionState, (Replay,)> = boundary::inbound::from_untrusted(b)
-            .trust_with(AuthN::Verified, |raw| {
-                aead::open(&raw, ctx.tee_seal_key, ctx.aad())
-            })?
-            .trust_with(AuthZ::Matched, |outer| -> Result<_, StoreError> {
-                let inner = aead::open(&outer, self.applicant_session_token, ctx.aad())?;
-                Ok(session_types::decode::<SessionState>(&inner)?)
-            })?;
-        Ok(decoded.map(Some))
+    fn decode(
+        self,
+        slot: Untrusted<Slot, (AuthN, AuthZ, Replay), Storage>,
+        _ctx: &Ctx<'_>,
+    ) -> Result<Self::Output, StoreError> {
+        scalar(slot)
     }
+}
+
+/// Open `sealed` as the state of the record whose metadata, opened, is
+/// `metadata`. Outer-AEAD-open under `tee_seal_key` and the binding closes
+/// AuthN; inner-AEAD-open under the applicant's key closes AuthZ (key possession
+/// authorises). A missing state is believed only beside metadata that records
+/// nothing of an applicant — the check that answers AuthN for it — and is
+/// refused as a state that does not open otherwise.
+pub(super) fn open(
+    ctx: &Ctx<'_>,
+    sealed: Untrusted<Option<Vec<u8>>, (AuthN, AuthZ, Replay), Storage>,
+    metadata: &SessionMetadata,
+    applicant_session_token: &[u8],
+) -> Result<Untrusted<Option<SessionState>, (Replay,), Storage>, StoreError> {
+    let binding = StateBinding::of(metadata);
+    let aad = aad(ctx.session_id, &binding);
+    sealed
+        .trust_with(AuthN::Verified, |sealed| match sealed {
+            Some(raw) => Ok(Some(aead::open(&raw, ctx.tee_seal_key, &aad)?)),
+            None if binding.empty => Ok(None),
+            None => Err(StoreError::Crypto(
+                "the record's metadata holds an applicant's data its state is missing from".into(),
+            )),
+        })?
+        .trust_with(AuthZ::Matched, |outer| -> Result<_, StoreError> {
+            outer
+                .map(|outer| {
+                    let inner = aead::open(&outer, applicant_session_token, &aad)?;
+                    Ok(session_types::decode::<SessionState>(&inner)?)
+                })
+                .transpose()
+        })
 }
 
 impl WriteField for SetState<'_> {
-    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, StoreError> {
-        // AuthZ + Covert (constant-size padding via `encode_padded`) are
-        // pre-vouched at the construction site; `state` is already the encoded
-        // + padded plaintext. Host-bridge closes AuthN with the double-AEAD
-        // seal: inner under applicant_session_token, outer under tee_seal_key.
-        // Each layer gets its own random nonce; AAD identical so cross-session
-        // copies fail at the outer layer.
-        let sealed = self.state.clone().vouch_with(
-            AuthN::Verified,
-            |plaintext| -> Result<Vec<u8>, StoreError> {
-                let inner = aead::seal(&plaintext, self.applicant_session_token, ctx.aad())?;
-                aead::seal(&inner, ctx.tee_seal_key, ctx.aad()).map_err(Into::into)
-            },
-        )?;
-        Ok(sealed.map(|value| {
-            Op::Blob(BlobWrite {
-                field: BlobField::State,
-                value,
-            })
-        }))
+    fn add_to(&self, ops: &mut Ops<Storage>, ctx: &Ctx<'_>) -> Result<(), StoreError> {
+        // `state` is already the encoded + padded plaintext. The double-AEAD
+        // seal answers AuthN and builds the op: inner under
+        // applicant_session_token, outer under tee_seal_key. Each layer gets its
+        // own random nonce; both are bound to the same AAD, so a copy into
+        // another session, or beside other metadata, fails at the outer layer.
+        let aad = aad(ctx.session_id, &self.binding);
+        let op = self
+            .state
+            .clone()
+            .vouch_with(AuthN::Verified, |plaintext| -> Result<_, StoreError> {
+                let inner = aead::seal(&plaintext, self.applicant_session_token, &aad)?;
+                Ok(StateOp(aead::seal(&inner, ctx.tee_seal_key, &aad)?))
+            })?
+            .build();
+        ops.state(op);
+        Ok(())
     }
 }
 
@@ -129,5 +207,28 @@ mod tests {
             let decoded: SessionState = session_types::decode(&padded).unwrap();
             assert_eq!(decoded, s, "decode ignores trailing padding");
         }
+    }
+
+    /// A binding moves with every disclosure and capture the metadata records,
+    /// and says the metadata records nothing only when both lists are empty.
+    #[test]
+    fn a_binding_follows_what_the_applicant_left() {
+        let mut md = SessionMetadata::default();
+        let none = StateBinding::of(&md);
+        assert!(none.empty);
+        md.captured_media.push(vec![1; 32]);
+        let captured = StateBinding::of(&md);
+        assert!(!captured.empty);
+        assert_ne!(captured, none);
+        md.disclosure_entry_hashes.push([2; 32]);
+        let disclosed = StateBinding::of(&md);
+        assert_ne!(disclosed, captured);
+        md.disclosure_entry_hashes.clear();
+        md.captured_media.clear();
+        assert_eq!(
+            StateBinding::of(&md),
+            none,
+            "a reset's lists bind as none did"
+        );
     }
 }

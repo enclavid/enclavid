@@ -26,9 +26,10 @@ fleet-stream = { path = "../fleet-stream" }
 # `rt` for the tasks that drive the leg's connection: the leg is brought up and
 # served here, so the generated client and server are named nowhere else.
 tokio = { version = "1", default-features = false, features = ["rt"] }
-# The words `#[protocol]` writes what the contract asks of its two ends in: a
+# The words the contract and the doors say what each end must declare in: a
 # dependency-free leaf.
 enclavid-boundary = { path = "../boundary" }
-# `#[protocol]` on the contract: what its two ends must declare, and the
-# contract as the hatch serves it at its declared end. Build-time only.
+# `#[protocol]` on the contract — what the hatch's end must declare, and the
+# contract as the hatch serves it there — and `#[calls]` on the doors, what
+# api's end must declare. Build-time only.
 enclavid-boundary-macros = { path = "../boundary-macros" }

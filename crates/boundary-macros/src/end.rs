@@ -3,14 +3,16 @@
 use std::collections::BTreeMap;
 
 use proc_macro2::TokenStream;
-use quote::{ToTokens, format_ident, quote, quote_spanned};
+use quote::{quote, quote_spanned};
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Error, Expr, ExprLit, Ident, Lit, Meta, Path, PathSegment, Result, Token, Type,
-    Visibility, braced, bracketed, parenthesized,
+    Attribute, Error, Expr, ExprLit, Ident, Lit, Meta, Path, Result, Token, Type, Visibility,
+    braced, bracketed, parenthesized,
 };
+
+use crate::{key, with_suffix};
 
 pub(crate) fn expand(input: TokenStream) -> Result<TokenStream> {
     let decl: Decl = syn::parse2(input)?;
@@ -48,11 +50,6 @@ struct Entry {
 enum Target {
     Every(Token![_]),
     One(Box<Type>),
-}
-
-/// A type or path as one comparable string.
-fn key(t: &impl ToTokens) -> String {
-    t.to_token_stream().to_string().replace(' ', "")
 }
 
 /// The `///` lines above an item, joined; anything else is refused, so a reason
@@ -208,6 +205,22 @@ impl Parse for Entry {
     }
 }
 
+/// A marker as the data names it: the last word of its path, however the
+/// declaration spelled it, so a test that asks for `AuthN` finds it either way.
+fn path_name(path: &Path) -> String {
+    path.segments
+        .last()
+        .map_or_else(|| key(path), |s| s.ident.to_string())
+}
+
+/// A scope's marker as the data names it ([`path_name`]).
+fn marker_name(marker: &Type) -> String {
+    match marker {
+        Type::Path(p) if p.qself.is_none() => path_name(&p.path),
+        other => key(other),
+    }
+}
+
 /// One answer: the marker it answers, the kind, its reason, and whether `_`
 /// gave it for every type in its block.
 #[derive(Clone)]
@@ -257,15 +270,6 @@ fn answer(kind: &Path, docs: &str, scope_keys: &[String], every_type: bool) -> R
         docs: docs.to_string(),
         every_type,
     })
-}
-
-fn with_suffix(path: &Path, suffix: &str) -> Path {
-    let mut path = path.clone();
-    if let Some(last) = path.segments.last_mut() {
-        let ident = format_ident!("{}{}", last.ident, suffix, span = last.ident.span());
-        *last = PathSegment::from(ident);
-    }
-    path
 }
 
 impl Decl {
@@ -420,17 +424,18 @@ impl Decl {
                     ::enclavid_boundary::outbound::<Self, T>(value)
                 }
 
-                /// Open the parts of a `W` to leave this end as a `W` does: the
-                /// one way out is the work that builds the `W` from them.
+                /// Start building a `W` to leave this end from `value`, open on
+                /// what this declaration leaves open on a `W`: the one way out
+                /// is `build`, once the builder holds a `W` with nothing open.
                 #[allow(dead_code)]
-                #vis fn expose_as<W, T>(
+                #vis fn expose_builder<W, T>(
                     value: T,
-                ) -> ::enclavid_boundary::Parts<T, W, <Self as ::enclavid_boundary::Sends<W>>::Open, Self>
+                ) -> ::enclavid_boundary::ExposedBuilder<T, W, <Self as ::enclavid_boundary::Sends<W>>::Open, Self>
                 where
                     Self: ::enclavid_boundary::Sends<W>,
                     <Self as ::enclavid_boundary::Sends<W>>::Open: ::enclavid_boundary::Open,
                 {
-                    ::enclavid_boundary::outbound_as::<Self, W, T>(value)
+                    ::enclavid_boundary::outbound_builder::<Self, W, T>(value)
                 }
             }
 
@@ -459,22 +464,30 @@ impl Decl {
             .as_ref()
             .map(|o| o.to_string())
             .unwrap_or_default();
-        let calls = self.calls.iter().map(key);
-        let serves = self.serves.iter().map(key);
+        // Each protocol as `#[protocol]` wrote it down, which every end of it
+        // carries alike.
+        let calls = self.calls.iter().map(|p| {
+            let calls = with_suffix(p, "Calls");
+            quote!(<#name as #calls>::PROTOCOL)
+        });
+        let serves = self.serves.iter().map(|p| {
+            let serves = with_suffix(p, "Serves");
+            quote!(<#name as #serves>::PROTOCOL)
+        });
         let rows = crossings.iter().map(|c| {
             let direction = match c.dir {
                 Dir::Out => quote!(::enclavid_boundary::declaration::Direction::Out),
                 Dir::In => quote!(::enclavid_boundary::declaration::Direction::In),
             };
             let ty = key(&c.ty);
-            let opens = c.opens.iter().map(key);
+            let opens = c.opens.iter().map(marker_name);
             let left = c
                 .opens
                 .iter()
-                .map(key)
-                .filter(|o| !c.answers.iter().any(|a| &a.marker_key == o));
+                .filter(|o| !c.answers.iter().any(|a| a.marker_key == key(*o)))
+                .map(marker_name);
             let answers = c.answers.iter().map(|a| {
-                let marker = &a.marker_key;
+                let marker = path_name(&a.marker);
                 let kind = a
                     .kind
                     .segments
@@ -624,6 +637,25 @@ mod tests {
         assert!(!reads(quote! {
             End { observer: Test } out (AuthZ,) { #[doc = "fixture"] _: AuthZ::NoSecret }
         }));
+    }
+
+    /// A marker spelled with its path is named in the data by its last word, so a
+    /// test asking whether `AuthN` is open finds it however it was written.
+    #[test]
+    fn a_marker_is_named_in_the_data_by_its_last_word() {
+        let written = super::expand(quote! {
+            End { observer: Test }
+            out (enclavid_boundary::AuthN,) {
+                #[doc = "fixture"] Rep: enclavid_boundary::AuthN::Identified,
+                Other,
+            }
+        })
+        .unwrap()
+        .to_string()
+        .replace(' ', "");
+        assert!(written.contains(r#"opens:&["AuthN"]"#), "{written}");
+        assert!(written.contains(r#"marker:"AuthN""#), "{written}");
+        assert!(written.contains(r#"left:&["AuthN"]"#), "{written}");
     }
 
     #[test]

@@ -35,10 +35,12 @@ impl RemoteChildCallbacks for RelayCallbacks {
         state: SessionState,
         decision: Option<Decision>,
     ) -> Result<Committed, CallbackError> {
-        let state = AnyCaller::expose_as::<Padded<SessionState>, _>(state)
-            .vouch_with(Covert::Transformed, |s| Padded::seal(&s))?;
-        let decision = AnyCaller::expose_as::<Padded<Option<Decision>>, _>(decision)
-            .vouch_with(Covert::Transformed, |d| Padded::seal(&d))?;
+        let state = AnyCaller::expose_builder::<Padded<SessionState>, _>(state)
+            .vouch_with(Covert::Transformed, |s| Padded::seal(&s))?
+            .build();
+        let decision = AnyCaller::expose_builder::<Padded<Option<Decision>>, _>(decision)
+            .vouch_with(Covert::Transformed, |d| Padded::seal(&d))?
+            .build();
         let committed = self.upstream.session_change(state, decision).await?;
         Ok(committed.into_inner())
     }

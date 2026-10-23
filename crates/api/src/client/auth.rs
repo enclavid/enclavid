@@ -34,6 +34,7 @@ use base64ct::{Base64, Encoding};
 use enclavid_boundary::{AuthN, AuthZ, Replay, Untrusted, reason};
 use hatch_client::{AuthVerdict, AuthorizeRequest, ClientOperation, SessionTerms};
 use session_types::SessionMetadata;
+use storage_client::boundary::Storage;
 
 use crate::boundary::Hatch;
 use crate::client_state::ClientState;
@@ -125,7 +126,7 @@ where
 }
 
 /// Peel both trust scopes off an already-decrypted
-/// `Untrusted<Option<SessionMetadata>, (AuthZ, Replay)>` for a
+/// `Untrusted<Option<SessionMetadata>, (AuthZ, Replay), Storage>` for a
 /// Client-side read endpoint: discharge AuthZ via
 /// `check_client_access` (token + principal match), trust Replay
 /// (metadata fields stable across session lifetime), and unwrap the
@@ -147,7 +148,7 @@ where
 ///   * `500 INTERNAL_SERVER_ERROR` — malformed metadata
 ///     (`client`/`access` block absent — TEE-side invariant violation).
 pub(super) fn trust_metadata(
-    metadata: Untrusted<Option<SessionMetadata>, (AuthZ, Replay)>,
+    metadata: Untrusted<Option<SessionMetadata>, (AuthZ, Replay), Storage>,
     presented_token: &[u8],
     presented_principal: &Option<String>,
 ) -> Result<SessionMetadata, StatusCode> {

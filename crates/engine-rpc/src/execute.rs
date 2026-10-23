@@ -430,9 +430,10 @@ pub struct PrepareReply {
 /// at its end — remoc multiplexes these callbacks over the SAME connection as the
 /// in-flight run, so the key never crosses to the worker.
 ///
-/// `#[protocol]` writes what its ends declare (`RemoteCallbacksCalls` /
-/// `RemoteCallbacksServes`) and how its server receives (`RemoteCallbacksAt`),
-/// which is the only way api answers these calls.
+/// `#[protocol]` writes what its serving end declares (`RemoteCallbacksServes`)
+/// and how its server receives (`RemoteCallbacksAt`), which is the only way api
+/// answers these calls. What the calling end declares is read off its doors
+/// ([`Callbacks`](crate::Callbacks)).
 #[enclavid_boundary_macros::protocol]
 #[remoc::rtc::remote]
 pub trait RemoteCallbacks {
@@ -484,8 +485,9 @@ pub trait RemoteCallbacks {
 /// and never names one back, so a compromised worker cannot poison another
 /// session's cache slot.
 ///
-/// `#[protocol]` writes what its ends declare (`RemoteExecutorCalls` /
-/// `RemoteExecutorServes`) and how its server receives (`RemoteExecutorAt`).
+/// `#[protocol]` writes what its serving end declares (`RemoteExecutorServes`)
+/// and how its server receives (`RemoteExecutorAt`); what the calling end
+/// declares is read off its doors ([`ExecutorLeg`](crate::ExecutorLeg)).
 /// The `callbacks` client is a capability handed over, not a value: the server
 /// gets it as [`Callbacks`](crate::Callbacks), so it calls back through its end's
 /// declaration and never through the raw client.

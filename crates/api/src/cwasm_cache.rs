@@ -2,7 +2,7 @@
 //!
 //! This is the fleet's DURABLE cache tier and the orchestrator's ONLY compiled
 //! artifact store — [`storage_client::CacheStore`], sealed under `tee_seal_key`,
-//! over the storage-CVM backend api dials at boot. It survives a TEE restart.
+//! over the storage leg api dials at boot. It survives a TEE restart.
 //! There is no api-side in-RAM component cache; the sole in-memory L1 lives on
 //! the execution-worker, which on a miss says so (`RunOutcome::CacheMiss`) and
 //! lets api open one from here. A compiled bundle is a pure function of the
@@ -236,6 +236,15 @@ pub async fn open(
             return None;
         }
     };
+    let (cwasm, found_bad) = watched(cwasm);
+    let source = BundleSource::streamed(front.cwasm_len, front.cwasm_sha256, meta, cwasm)?;
+    Some(Hit { source, found_bad })
+}
+
+/// `cwasm` without its empty pieces, and whether it ended because the entry was
+/// found bad — a segment that did not open, or bytes off what its start said —
+/// rather than because the leg under it failed.
+fn watched(cwasm: BlobPieces) -> (BlobPieces, FoundBad) {
     let bad = Arc::new(AtomicBool::new(false));
     let flag = bad.clone();
     let cwasm = cwasm
@@ -244,12 +253,9 @@ pub async fn open(
             if matches!(e, StoreError::Crypto(_) | StoreError::Codec(_)) {
                 flag.store(true, Ordering::Relaxed);
             }
-        });
-    let source = BundleSource::streamed(front.cwasm_len, front.cwasm_sha256, meta, cwasm)?;
-    Some(Hit {
-        source,
-        found_bad: FoundBad(bad),
-    })
+        })
+        .boxed();
+    (cwasm, FoundBad(bad))
 }
 
 /// An entry's `pieces`, `length` bytes in all, taken apart: its metadata, its
@@ -381,37 +387,14 @@ mod tests {
         );
     }
 
-    /// A cache in memory, under the real store's seal.
-    #[derive(Default)]
-    struct Blobs {
-        held: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    /// A cache under the real store's seal, on a store in memory.
+    async fn cache() -> CacheStore {
+        cache_on(&Arc::new(storage_client::memory::Disk::default())).await
     }
 
-    #[async_trait::async_trait]
-    impl storage_client::CacheBackend for Blobs {
-        async fn store(
-            &self,
-            name: &str,
-            length: u64,
-            pieces: BlobPieces,
-        ) -> Result<(), StoreError> {
-            let blob = read(pieces).await?;
-            assert_eq!(blob.len() as u64, length);
-            self.held.lock().unwrap().insert(name.to_string(), blob);
-            Ok(())
-        }
-
-        async fn load(&self, name: &str) -> Result<Option<(u64, BlobPieces)>, StoreError> {
-            let Some(blob) = self.held.lock().unwrap().get(name).cloned() else {
-                return Ok(None);
-            };
-            Ok(Some((blob.len() as u64, pieces(&blob, 4096))))
-        }
-
-        async fn remove(&self, name: &str) -> Result<(), StoreError> {
-            self.held.lock().unwrap().remove(name);
-            Ok(())
-        }
+    /// A cache under the real store's seal, on `disk`.
+    async fn cache_on(disk: &Arc<storage_client::memory::Disk>) -> CacheStore {
+        CacheStore::new(disk.connect().await, &[3; 32])
     }
 
     async fn read(pieces: BlobPieces) -> Result<Vec<u8>, StoreError> {
@@ -444,7 +427,7 @@ mod tests {
     /// it as such, sending nothing back as bad.
     #[tokio::test]
     async fn an_entry_holds_its_digest_its_metadata_then_its_cwasm() {
-        let cache = CacheStore::new(Arc::new(Blobs::default()), &[3; 32]);
+        let cache = cache().await;
         let (meta, cwasm) = (b"the metadata".to_vec(), cwasm(300_000));
         let stored = entry(&meta, &cwasm);
         let sha256 = stored.cwasm_sha256;
@@ -523,7 +506,7 @@ mod tests {
     /// before the worker is called.
     #[tokio::test]
     async fn an_entry_not_laid_out_as_one_is_a_miss() {
-        let cache = CacheStore::new(Arc::new(Blobs::default()), &[3; 32]);
+        let cache = cache().await;
         let mut not_a_string = Vec::new();
         ciborium::into_writer(&5u64, &mut not_a_string).unwrap();
         not_a_string.extend(laid_out(b"meta", b"cwasm"));
@@ -548,17 +531,52 @@ mod tests {
     /// A cwasm that stops part-way is not kept, and leaves no entry to hit.
     #[tokio::test]
     async fn a_cwasm_that_stops_part_way_is_not_stored() {
-        let cache = CacheStore::new(Arc::new(Blobs::default()), &[3; 32]);
+        let cache = cache().await;
         let mut stored = entry(b"the metadata", &cwasm(50_000));
         stored.cwasm = futures::stream::iter([Ok(Bytes::from(cwasm(10_000))), Err(())]).boxed();
         store(&cache, &key(1), &token("tok"), stored).await;
         assert!(open(&cache, &key(1), &token("tok")).await.is_none());
     }
 
+    /// A byte the host flipped past an entry's first read leaves it a hit, and
+    /// its cwasm ends found bad, so the entry is dropped rather than read again.
+    /// A leg that fails under the cwasm finds nothing bad: the entry may be
+    /// fine.
+    #[tokio::test]
+    async fn an_entry_changed_on_the_volume_is_found_bad() {
+        let disk = Arc::new(storage_client::memory::Disk::default());
+        let cache = cache_on(&disk).await;
+        store(&cache, &key(1), &token("tok"), entry(b"m", &cwasm(300_000))).await;
+        {
+            let mut blobs = disk.blobs.lock().unwrap();
+            let blob = blobs.values_mut().next().expect("the entry is kept");
+            let at = blob.len() - 1000;
+            blob[at] ^= 1;
+        }
+        let (length, plain) = cache
+            .load(&cache_id(&key(1), &token("tok")))
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, _, cwasm) = split(plain, length).await.expect("the first read opens");
+        let (cwasm, found_bad) = watched(cwasm);
+        assert!(read(cwasm).await.is_err());
+        assert!(found_bad.get());
+
+        let cut = futures::stream::iter([
+            Ok(Bytes::from_static(b"cwasm")),
+            Err(StoreError::Transport("the leg went".into())),
+        ])
+        .boxed();
+        let (cwasm, found_bad) = watched(cut);
+        assert!(read(cwasm).await.is_err());
+        assert!(!found_bad.get());
+    }
+
     /// An entry removed is a miss after.
     #[tokio::test]
     async fn a_removed_entry_is_a_miss() {
-        let cache = CacheStore::new(Arc::new(Blobs::default()), &[3; 32]);
+        let cache = cache().await;
         store(&cache, &key(1), &token("tok"), entry(b"m", &cwasm(1000))).await;
         assert!(open(&cache, &key(1), &token("tok")).await.is_some());
         remove(&cache, &key(1), &token("tok")).await;

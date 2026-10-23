@@ -6,22 +6,26 @@
 //!   * [`CacheStore`] — the L2 cache of compiled compositions, each blob sealed
 //!     as a stream under a key of its own.
 //!
-//! Neither holds a connection. A [`SessionBackend`] / [`CacheBackend`] moves
-//! what they have already sealed, and api implements both over its storage
-//! leg. What the storage-CVM keeps lands on a volume the host reads, so what
-//! the stores send and read back crosses the perimeter in [`boundary`].
+//! Neither holds a connection. Both call through a [`Link`] — the storage leg
+//! api keeps connected — at api's end of it, [`boundary::Storage`], declared
+//! here beside the seals: what the storage-CVM keeps lands on a volume the host
+//! reads, so the declaration judges the leg as the host's disk.
 
-mod backend;
 pub mod boundary;
 mod cache;
 mod error;
+mod link;
+#[cfg(any(test, feature = "memory"))]
+pub mod memory;
 mod session;
 
-pub use backend::{BlobPieces, CacheBackend, SessionBackend};
-pub use cache::CacheStore;
+pub use cache::{BlobPieces, CacheStore};
 pub use error::StoreError;
+pub use link::Link;
 pub use session::{
     AppendDisclosure, Ctx, Disclosure, DropApplicantData, Metadata, ReadField, ReadTuple,
-    SessionStore, SetMedia, SetMetadata, SetState, State, WriteField, encode_padded,
-    outbound_fields,
+    SealedState, SessionStore, SetMedia, SetMetadata, SetState, StateBinding, WriteField,
+    encode_padded,
 };
+// The ops a caller builds the fields of a write as.
+pub use storage_rpc::{DisclosureOp, MediaOp, MetadataOp, Ops, StateOp};

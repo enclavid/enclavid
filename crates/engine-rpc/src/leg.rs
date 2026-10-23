@@ -216,6 +216,43 @@ where
 /// stated in a signature the caller cannot get around rather than in a comment it
 /// can forget — and stated by `B`'s declaration, which is the one place the
 /// caller says how it judges this leg.
+///
+/// Nothing else outside this crate can call the execute hop or its callbacks,
+/// or serve either raw: the generated clients, the generated servers and the
+/// contracts themselves are not names another crate can use.
+///
+/// ```compile_fail
+/// use engine_rpc::RemoteExecutorClient;
+/// ```
+///
+/// ```compile_fail
+/// use engine_rpc::RemoteExecutorServerShared;
+/// ```
+///
+/// ```compile_fail
+/// use engine_rpc::RemoteExecutor;
+/// ```
+///
+/// ```compile_fail
+/// use engine_rpc::RemoteCallbacksClient;
+/// ```
+///
+/// ```compile_fail
+/// use engine_rpc::RemoteCallbacksServerShared;
+/// ```
+///
+/// ```compile_fail
+/// use engine_rpc::RemoteCallbacks;
+/// ```
+///
+/// What an end declares, and the contracts as their server sees them there, are:
+///
+/// ```
+/// use engine_rpc::{
+///     RemoteCallbacksAt, RemoteCallbacksCalls, RemoteCallbacksServes, RemoteExecutorAt,
+///     RemoteExecutorCalls, RemoteExecutorServes,
+/// };
+/// ```
 #[cfg(feature = "execute")]
 pub struct ExecutorLeg<B> {
     client: RemoteExecutorClient<Ciborium>,
@@ -272,9 +309,8 @@ mod doors {
     use crate::execute::{
         CallbackError, Committed, ExecError, MediaBytes, MediaHash, PrepareOutcome, PrepareReply,
         PrepareRequest, PropsRead, RemoteCallbacks, RemoteCallbacksAdapter, RemoteCallbacksAt,
-        RemoteCallbacksCalls, RemoteCallbacksClient, RemoteCallbacksServerShared,
-        RemoteCallbacksServes, RemoteExecutor, RemoteExecutorCalls, RunOutcome, RunReply,
-        RunRequest, RunStatus,
+        RemoteCallbacksClient, RemoteCallbacksServerShared, RemoteCallbacksServes, RemoteExecutor,
+        RunOutcome, RunReply, RunRequest, RunStatus,
     };
     use crate::padded::{FrameError, Padded};
     use crate::stream::BundleStream;
@@ -316,9 +352,13 @@ mod doors {
         client
     }
 
+    /// The execute hop's doors: what an end that calls it declares
+    /// (`RemoteExecutorCalls`) is what these take and hand back. Its end serves
+    /// the round's callbacks too.
+    #[enclavid_boundary_macros::calls(crate::execute::RemoteExecutor)]
     impl<B> ExecutorLeg<B>
     where
-        B: RemoteExecutorCalls + RemoteCallbacksServes + 'static,
+        B: RemoteCallbacksServes + 'static,
     {
         /// The cache-only attempt.
         ///
@@ -439,7 +479,10 @@ mod doors {
         }
     }
 
-    impl<B: RemoteCallbacksCalls> Callbacks<B> {
+    /// The callbacks' doors: what an end that calls them back declares
+    /// (`RemoteCallbacksCalls`) is what these take and hand back.
+    #[enclavid_boundary_macros::calls(crate::execute::RemoteCallbacks)]
+    impl<B> Callbacks<B> {
         /// Ask for a blob by the hash a round named.
         pub async fn media_load(
             &self,
@@ -469,6 +512,9 @@ mod doors {
         }
     }
 }
+
+#[cfg(feature = "execute")]
+pub use doors::{RemoteCallbacksCalls, RemoteExecutorCalls};
 
 // =====================================================================
 // The compile hop.
@@ -567,14 +613,35 @@ where
 /// It holds the generated client, which nothing else can name. What a caller must
 /// have closed before its components cross, and what comes back open, are stated
 /// by `B`'s declaration, the one place the caller says how it judges this leg.
+///
+/// ```compile_fail
+/// use engine_rpc::RemoteCompilerClient;
+/// ```
+///
+/// ```compile_fail
+/// use engine_rpc::RemoteCompilerServerShared;
+/// ```
+///
+/// ```compile_fail
+/// use engine_rpc::RemoteCompiler;
+/// ```
+///
+/// What an end declares, and the contract as its server sees it there, are:
+///
+/// ```
+/// use engine_rpc::{RemoteCompilerAt, RemoteCompilerCalls, RemoteCompilerServes};
+/// ```
 #[cfg(feature = "compile")]
 pub struct CompilerLeg<B> {
     client: crate::compile::RemoteCompilerClient<Ciborium>,
     _end: std::marker::PhantomData<fn() -> B>,
 }
 
+/// The compile hop's door: what an end that calls it declares
+/// (`RemoteCompilerCalls`) is what this takes and hands back.
 #[cfg(feature = "compile")]
-impl<B: crate::compile::RemoteCompilerCalls + 'static> CompilerLeg<B> {
+#[enclavid_boundary_macros::calls(crate::compile::RemoteCompiler)]
+impl<B: 'static> CompilerLeg<B> {
     /// Compile, and hand back the bundle as the peer's word.
     ///
     /// The request crosses answered by `B`'s declaration alone, which the bound
@@ -643,7 +710,7 @@ mod door_tests {
     boundary! {
         /// The calling end, for the test: every concern answered.
         Api {
-            calls: [crate::execute::RemoteExecutor],
+            calls: [crate::RemoteExecutor],
             serves: [crate::execute::RemoteCallbacks],
             observer: Test,
         }
@@ -674,7 +741,7 @@ mod door_tests {
     boundary! {
         /// The serving end, for the test: every concern answered.
         Worker {
-            calls: [crate::execute::RemoteCallbacks],
+            calls: [crate::RemoteCallbacks],
             serves: [crate::execute::RemoteExecutor],
             observer: Test,
         }
@@ -915,7 +982,8 @@ mod door_tests {
     fn a_declaration_reads_back_as_data() {
         let d = Api::DECLARATION;
         assert_eq!(d.name, "Api");
-        assert_eq!(d.calls, ["crate::execute::RemoteExecutor"]);
+        let calls: Vec<_> = d.calls.iter().map(|p| p.name).collect();
+        assert_eq!(calls, ["RemoteExecutor"]);
         let request = d
             .crossings
             .iter()

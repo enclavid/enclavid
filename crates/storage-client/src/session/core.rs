@@ -1,55 +1,51 @@
 //! Shared traits, helpers, and tuple machinery used by the per-field
-//! modules (`status`, `metadata`, `state`, `disclosure`). Each field
-//! file impls `ReadField` / `WriteField` for its own markers using
-//! the helpers exposed here.
+//! modules (`metadata`, `state`, `disclosure`). Each field file impls
+//! `ReadField` / `WriteField` for its own markers using the helpers
+//! exposed here.
 
-use storage_rpc::{FieldSelector, Op, ReadRequest, Slot};
+use storage_rpc::{Fields, Ops, Slot};
 
+use crate::boundary::Storage;
 use crate::error::StoreError;
-use enclavid_boundary::{AuthN, AuthZ, Exposed, Replay, Untrusted};
+use enclavid_boundary::{AuthN, AuthZ, Replay, Untrusted};
 
 use super::Ctx;
 use super::SessionStore;
 
 // ---------- traits ----------
 
-/// Decode a single field from a host-returned slot. The slot's oneof
-/// shape (scalar vs list) is determined by the marker's selector;
-/// decoding mismatch surfaces as a `StoreError::Transport`.
+/// One field of a read: what it asks the store for, and how its slot is
+/// decoded. The slot's shape (scalar vs list) is fixed by what `select` asked
+/// for; a slot of the other shape is refused as `StoreError::Transport`.
 ///
-/// `Output` is the field's typed return wrapped in an `Untrusted<_, S>`
-/// whose scope `S` lists exactly the concerns a caller still needs to
-/// address for THAT field. AEAD-verified fields (Metadata, State)
-/// have AuthN already cleared inside `decode`, so their scope omits
-/// it; disclosures, sealed to the consumer rather than to this side,
-/// leave it open. Per-field scopes mean the caller's peel-pattern stays minimal — only the
-/// concerns the field actually has, no ceremony for what's already
-/// known.
+/// The slot arrives open on everything [`Storage`] leaves open on one, and
+/// `Output` is the field's typed value still open on exactly the concerns a
+/// caller has to answer for THAT field. Metadata answers AuthN inside `decode`
+/// with its AEAD open, so its scope omits it; the state is opened beside the
+/// metadata it is bound to, so it comes back sealed; disclosures, sealed to the
+/// consumer rather than to this side, leave every concern open. Per-field
+/// scopes mean the caller's peel-pattern stays minimal — only the concerns
+/// the field actually has, no ceremony for what's already known.
 pub trait ReadField: Sized {
     type Output;
-    fn selector(&self) -> FieldSelector;
-    fn decode(self, slot: Slot, ctx: &Ctx<'_>) -> Result<Self::Output, StoreError>;
+    fn select(&self, fields: &mut Fields<Storage>);
+    fn decode(
+        self,
+        slot: Untrusted<Slot, (AuthN, AuthZ, Replay), Storage>,
+        ctx: &Ctx<'_>,
+    ) -> Result<Self::Output, StoreError>;
 }
 
-/// Single field-op for the `/write` request. Implementors carry the
-/// value being written; `ctx` provides keys + AAD for any encryption
-/// step. Scalar-field markers (`SetMetadata`, `SetState`), media
-/// (`SetMedia`), list appends (`AppendDisclosure`) and the reset
-/// (`DropApplicantData`) all implement this trait — each emits its own
-/// `Op` shape so the SessionStore client stays uniform across them.
+/// One op of a write. Implementors carry the value being written; `ctx`
+/// provides keys + AAD for any encryption step. Scalar-field markers
+/// (`SetMetadata`, `SetState`), media (`SetMedia`), list appends
+/// (`AppendDisclosure`) and the reset (`DropApplicantData`) all implement this
+/// trait, each adding its own kind of op to the write.
 ///
-/// `build_op` returns `Exposed<Op, ()>`: a fully-vouched outbound
-/// wrapper. Inside the body the implementation constructs an
-/// `Exposed<Op, S>` where `S` lists the outbound concerns it cares
-/// about — typically `(AuthN, AuthZ, Covert)` — and then answers each:
-/// with work (`vouch_with`, the AEAD seal under the field's key), or with
-/// an argued kind (`vouch(reason!(Kind, "…"))`, recording why it holds:
-/// app-level consent, by-design plaintext, ...). By the time the wrapper
-/// returns, `S == ()` and only `into_inner` lifts the raw `Op` for the
-/// wire send inside [`SessionStore::write`](super::SessionStore::write).
-/// Reviewers grep for `to_untrusted(` to find every TEE → host data
-/// release and for `vouch(` / `vouch_with(` to read how each concern
-/// was answered.
+/// `add_to` adds the op only answered in full at [`Storage`]: what its kind's
+/// declaration line leaves open, the caller answered where it built the value,
+/// and the seal under the field's own key is the work that builds the op here.
+/// [`Ops`] takes nothing else.
 ///
 /// Object-safe by design (`&self` method, no `Sized` bound) so callers
 /// pass heterogeneous slices `&[&dyn WriteField]` for atomic writes
@@ -59,50 +55,43 @@ pub trait ReadField: Sized {
 /// `Send + Sync` supertraits keep the trait-object usable across
 /// async-await boundaries (axum requires `Send` futures).
 pub trait WriteField: Send + Sync {
-    fn build_op(&self, ctx: &Ctx<'_>) -> Result<Exposed<Op, ()>, StoreError>;
+    fn add_to(&self, ops: &mut Ops<Storage>, ctx: &Ctx<'_>) -> Result<(), StoreError>;
 }
 
-// ---------- slot / op helpers ----------
+// ---------- slot helpers ----------
 
-pub(super) fn unwrap_scalar(slot: Slot) -> Result<Option<Vec<u8>>, StoreError> {
-    match slot {
+/// The value of a scalar slot, still open on all the slot was. Which shape a
+/// slot has decides nothing but this refusal, so it is taken apart with
+/// `split` and the other shape dropped unread.
+pub(super) fn scalar<S>(
+    slot: Untrusted<Slot, S, Storage>,
+) -> Result<Untrusted<Option<Vec<u8>>, S, Storage>, StoreError> {
+    slot.split(|slot| match slot {
         Slot::Scalar(s) => Ok(s.value),
-        Slot::List(_) => Err(StoreError::Transport(
-            "expected scalar slot, got list".to_string(),
-        )),
-    }
+        other => Err(other),
+    })
+    .map_err(|_| StoreError::Transport("expected scalar slot, got list".to_string()))
 }
 
-pub(super) fn unwrap_list(slot: Slot) -> Result<Vec<Vec<u8>>, StoreError> {
-    match slot {
+/// The items of a list slot, still open on all the slot was.
+pub(super) fn list<S>(
+    slot: Untrusted<Slot, S, Storage>,
+) -> Result<Untrusted<Vec<Vec<u8>>, S, Storage>, StoreError> {
+    slot.split(|slot| match slot {
         Slot::List(l) => Ok(l.items),
-        Slot::Scalar(_) => Err(StoreError::Transport(
-            "expected list slot, got scalar".to_string(),
-        )),
-    }
-}
-
-// ---------- read request ----------
-
-/// The read request for a tuple's selectors. It crosses as a plain value, as
-/// the id it reads under does (see [`SessionStore`]): the selectors are
-/// field-kind tags the caller's marker tuple picks, bounded by the selector
-/// enum. The one that carries more is a media read's, and what it carries is
-/// the blob's HKDF name — the name the volume already holds it under.
-pub(super) fn read_request(selectors: Vec<FieldSelector>) -> ReadRequest {
-    ReadRequest { fields: selectors }
+        other => Err(other),
+    })
+    .map_err(|_| StoreError::Transport("expected list slot, got scalar".to_string()))
 }
 
 // ---------- ReadTuple ----------
 
-/// Tuple of `ReadField`s. `fetch` returns the typed fields paired
-/// with the session's current version. Each field in the result
-/// tuple carries its own per-field scope (set by its `ReadField::decode`);
-/// the version comes back as `Untrusted<u64, (AuthN, AuthZ, Replay)>`
-/// — host-supplied counter with no concern closed at this layer.
-/// Caller peels with channel-specific rationale (typical: "counter
-/// is not an ownership signal" closes AuthZ; CAS-feed-forward closes
-/// Replay; the CAS-mismatch failure path closes AuthN downstream).
+/// Tuple of `ReadField`s. `fetch` returns the typed fields paired with
+/// the session's current version. Each field in the result tuple carries
+/// its own per-field scope (set by its `ReadField::decode`); the version
+/// comes back open on `Replay` alone — [`Storage`] answers the rest for
+/// every version — and the caller answers it with how a stale one plays
+/// out where it is fed back.
 pub trait ReadTuple {
     type Output;
     #[allow(async_fn_in_trait)]
@@ -110,7 +99,7 @@ pub trait ReadTuple {
         self,
         store: &SessionStore,
         id: &str,
-    ) -> Result<(Self::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), StoreError>;
+    ) -> Result<(Self::Output, Untrusted<u64, (Replay,), Storage>), StoreError>;
 }
 
 macro_rules! impl_read_tuple {
@@ -122,13 +111,14 @@ macro_rules! impl_read_tuple {
                 self,
                 store: &SessionStore,
                 id: &str,
-            ) -> Result<(Self::Output, Untrusted<u64, (AuthN, AuthZ, Replay)>), StoreError> {
+            ) -> Result<(Self::Output, Untrusted<u64, (Replay,), Storage>), StoreError> {
                 let ctx = Ctx { tee_seal_key: store.tee_seal_key(), session_id: id };
-                let selectors = vec![$(self.$idx.selector()),+];
-                let (raw, version) = store.read_raw(id, read_request(selectors)).await?;
+                let mut fields = Fields::new();
+                $(self.$idx.select(&mut fields);)+
+                let (raw, version) = store.read_raw(id, fields).await?;
                 let mut iter = raw.into_iter();
                 let fields = ($(self.$idx.decode(
-                    iter.next().expect("slot count matches request"),
+                    iter.next().expect("read_raw holds the slots to the selectors"),
                     &ctx,
                 )?,)+);
                 Ok((fields, version))

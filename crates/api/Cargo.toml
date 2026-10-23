@@ -88,17 +88,12 @@ safe-logger = { path = "../safe-logger", features = ["device"] }
 # guest keeps its clock with `timesync`, and this role ends when the kernel stops
 # vouching for it. The library alone — none of the keeper comes with it.
 timesync = { path = "../timesync", optional = true }
-# The storage-tier RPC contract — the remoc `RemoteSessionStore` / `RemoteCache`
-# clients api dials on the trusted storage-CVM at boot. Reuses the same
-# RA-TLS/remoc stack as the engine workers.
+# The contract with the storage-CVM, for the leg api keeps connected to it.
 storage-rpc = { path = "../storage-rpc" }
-# The cache's blobs cross the storage leg as streams, and a cached bundle goes on
-# to a worker as one, a piece at a time.
+# Blobs cross api's legs as streams, a piece at a time: a pulled layer, a
+# compile's output, a cached bundle on to a worker.
 fleet-stream = { path = "../fleet-stream" }
 bytes = "1"
-# Object-safe async impls of the storage-client `SessionBackend` / `CacheBackend`
-# seams for the storage-CVM clients.
-async-trait = "0.1"
 enclavid-crypto = { path = "../crypto" }
 enclavid-kbs-client = { path = "../kbs-client" }
 enclavid-attestation = { path = "../attestation", default-features = false }
@@ -150,3 +145,7 @@ thiserror = "1"
 # see `crate::transport`. `service` is what bridges the axum `Router` into it.
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "service", "http1", "http2"], optional = true }
 hyper = { version = "1", features = ["server", "http1", "http2"], optional = true }
+
+[dev-dependencies]
+# A store in memory, served over the real leg, for the tests of what holds one.
+storage-client = { path = "../storage-client", features = ["memory"] }

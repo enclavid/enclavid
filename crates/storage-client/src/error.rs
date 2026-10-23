@@ -26,6 +26,28 @@ pub enum StoreError {
     /// session already present. HTTP 412. Callers branch on this to
     /// pick idempotent retry vs surfacing the conflict.
     VersionMismatch,
+    /// A write past what the storage leg carries in one call, refused before it
+    /// was sent: the session's own fields have grown past it, and only its
+    /// writes fail. Asking again sends the same.
+    TooLarge,
+}
+
+/// What the session store answered a call with: the version race as it is, a
+/// write the door refused as it is, a failure as the leg's.
+impl From<storage_rpc::SessionError> for StoreError {
+    fn from(e: storage_rpc::SessionError) -> Self {
+        match e {
+            storage_rpc::SessionError::VersionMismatch => Self::VersionMismatch,
+            storage_rpc::SessionError::TooLarge => Self::TooLarge,
+            storage_rpc::SessionError::Internal(e) => Self::Transport(format!("storage-cvm: {e}")),
+        }
+    }
+}
+
+impl From<storage_rpc::CacheError> for StoreError {
+    fn from(e: storage_rpc::CacheError) -> Self {
+        Self::Transport(format!("storage-cvm: {e}"))
+    }
 }
 
 impl From<session_types::CodecError> for StoreError {
@@ -47,6 +69,7 @@ impl std::fmt::Display for StoreError {
             Self::Codec(e) => write!(f, "codec: {e}"),
             Self::Crypto(e) => write!(f, "crypto: {e}"),
             Self::VersionMismatch => write!(f, "version mismatch"),
+            Self::TooLarge => write!(f, "a write past what the storage leg carries"),
         }
     }
 }

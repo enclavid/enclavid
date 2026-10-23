@@ -20,8 +20,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::task::JoinHandle;
 
 use crate::contract::{
-    RemoteHatch, RemoteHatchAdapter, RemoteHatchAt, RemoteHatchCalls, RemoteHatchClient,
-    RemoteHatchServerShared, RemoteHatchServes,
+    RemoteHatch, RemoteHatchAdapter, RemoteHatchAt, RemoteHatchClient, RemoteHatchServerShared,
+    RemoteHatchServes,
 };
 use crate::{
     AuthorizeError, AuthorizeRequest, BlobRequest, KbsError, KbsRequest, KbsResponse,
@@ -89,7 +89,10 @@ pub struct HatchLeg<B> {
     _end: PhantomData<fn() -> B>,
 }
 
-impl<B: RemoteHatchCalls> HatchLeg<B> {
+/// The hatch's doors: what an end that calls it declares (`RemoteHatchCalls`) is
+/// what these take and hand back.
+#[enclavid_boundary_macros::calls(crate::contract::RemoteHatch)]
+impl<B> HatchLeg<B> {
     /// Who a consumer's request is from, and whether it may go on.
     ///
     /// `req` arrives answered — `Exposed<_, (), B>` is reachable only through

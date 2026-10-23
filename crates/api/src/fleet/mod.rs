@@ -211,11 +211,11 @@ where
 
 /// A fleet client that can be replaced underneath its holders.
 ///
-/// The adapters (`Compiler`, `Executor`, the two storage backends) hold one of
-/// these instead of a client, so a reconnect swaps what is inside and every call
-/// site is untouched. `RwLock` rather than a lock-free cell because the write
-/// happens twice per outage and the read clones a remoc handle, which is a few
-/// atomics — the guard never crosses an await.
+/// The adapters (`Compiler`, `Executor`) and the links the hatch's and the
+/// storage's clients call through hold one of these instead of a client, so a
+/// reconnect swaps what is inside and every call site is untouched. `RwLock`
+/// rather than a lock-free cell because the write happens twice per outage and
+/// the read clones an `Arc` — the guard never crosses an await.
 pub struct Leg<C> {
     client: std::sync::RwLock<Option<C>>,
 }
@@ -238,8 +238,8 @@ impl<C: Clone> Leg<C> {
             .clone()
     }
 
-    /// Install or clear the client. Called only by [`supervise`] and by the
-    /// install closure it is given — the adapters read, they never write.
+    /// Install or clear the client. Called only by [`supervise`] — the adapters
+    /// read, they never write.
     pub fn set(&self, client: Option<C>) {
         *self.client.write().unwrap_or_else(|e| e.into_inner()) = client;
     }
@@ -251,11 +251,9 @@ impl<C: Clone> Leg<C> {
 /// before its peers are reachable — then spawns a task that watches the
 /// connection and dials again when it ends.
 ///
-/// `install` is how the leg reaches its adapters: `Some(clients)` on connect,
-/// `None` on loss. It is a closure rather than a `Leg` because the storage leg
-/// carries two clients on one connection, and both have to move together.
+/// `leg` is where its holders find the client: set on connect, cleared on loss.
 ///
-/// `connect` returns the clients and a handle that finishes when the leg is over
+/// `connect` returns the client and a handle that finishes when the leg is over
 /// (`fleet_stream::leg_end`). Awaiting it is how this learns the leg ended, and it
 /// is a verdict rather than silence, because two different ends both reach it.
 /// The connection: chmux pings at half its peer's `connection_timeout` whenever
@@ -265,29 +263,28 @@ impl<C: Clone> Leg<C> {
 /// every call fails as up for as long as it lived.
 ///
 /// Every dial, the first and each after a loss, is made as `how` says.
-pub async fn supervise<C, F, Fut, I>(
+pub async fn supervise<C, F, Fut>(
     peer: crate::health::Peer,
     addr: String,
     how: Dial,
     health: std::sync::Arc<crate::health::ApiHealth>,
     mut connect: F,
-    install: I,
+    leg: std::sync::Arc<Leg<C>>,
 ) where
-    C: Send + 'static,
+    C: Clone + Send + Sync + 'static,
     F: FnMut() -> Fut + Send + 'static,
     Fut: Future<Output = Result<(C, tokio::task::JoinHandle<()>), fleet_transport::LegFailure>>
         + Send,
-    I: Fn(Option<C>) + Send + 'static,
 {
-    let (clients, driver) = dial(peer, &addr, how, &mut connect).await;
-    install(Some(clients));
+    let (client, driver) = dial(peer, &addr, how, &mut connect).await;
+    leg.set(Some(client));
     health.set_peer(peer, true);
 
     tokio::spawn(async move {
         let mut driver = driver;
         loop {
             let _ = driver.await;
-            install(None);
+            leg.set(None);
             health.set_peer(peer, false);
             warn!(
                 "api: the {} leg ended; requests touching it now fail and the health port \
@@ -299,8 +296,8 @@ pub async fn supervise<C, F, Fut, I>(
                 )
             );
 
-            let (clients, next) = dial(peer, &addr, how, &mut connect).await;
-            install(Some(clients));
+            let (client, next) = dial(peer, &addr, how, &mut connect).await;
+            leg.set(Some(client));
             health.set_peer(peer, true);
             info!(
                 "api: the {} leg is back",

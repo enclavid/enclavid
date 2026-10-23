@@ -13,11 +13,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use enclavid_attestation::ReportData;
-use enclavid_boundary::{AuthZ, Covert, reason};
+use enclavid_boundary::{Covert, reason};
 use session_types::{
     Client, ClientAccess, Key, PluginPin, SessionMetadata, SessionStatus, is_wit_name,
 };
-use storage_client::{SetMetadata, WriteField, boundary, outbound_fields};
+use storage_client::boundary::Storage;
+use storage_client::{MetadataOp, SetMetadata};
 
 use crate::client_state::ClientState;
 use crate::dto::{PluginView, ResolvedPolicyView};
@@ -467,27 +468,25 @@ async fn create(
     // already live crypto-pinned in `metadata` (status / client.access.principal).
     // A blind storage-CVM exposes no host query surface, so a plaintext copy would
     // leak lifecycle + tenant identity for zero benefit.
-    let set_metadata = SetMetadata(
-        boundary::outbound::to_untrusted(&metadata)
-            .vouch(reason!(
-                AuthZ::NoSecret,
-                "only the attested CVM holds tee_seal_key; read at /connect as opaque ciphertext — release implicit in key-possession"
-            ))
-            .vouch(reason!(
-                Covert::NotChosen,
-                "initial /create write before any policy runs; fields are client-controlled, not policy-controlled — zero covert bandwidth"
-            )),
-    );
-    let ops: Vec<&dyn WriteField> = vec![&set_metadata];
-    let ops = outbound_fields(&ops).vouch(reason!(
-        Covert::NotChosen,
-        "no policy has run at /create — the single metadata op is fixed, not policy bandwidth"
+    let set_metadata = SetMetadata(Storage::expose_builder::<MetadataOp, _>(&metadata).vouch(
+        reason!(
+            Covert::NotChosen,
+            "initial /create write before any policy runs; fields are client-controlled, not policy-controlled — zero covert bandwidth"
+        ),
     ));
+    let ops = state
+        .session_store
+        .seal(&session_id, &[&set_metadata])
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .vouch(reason!(
+            Covert::NotChosen,
+            "no policy has run at /create — the single metadata op is fixed, not policy bandwidth"
+        ));
     // A session lives as long as its terms say, where they say: its deadline
     // is set by this write, once.
     let version = match metadata.terms.session_ttl_secs {
-        Some(ttl) => state.session_store.create(&session_id, ttl, ops).await,
-        None => state.session_store.write(&session_id, None, ops).await,
+        Some(ttl) => state.session_store.create(ttl, ops).await,
+        None => state.session_store.write(None, ops).await,
     }
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

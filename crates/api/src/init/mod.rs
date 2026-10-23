@@ -21,12 +21,13 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
-use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert, Replay, Untrusted, reason};
+use enclavid_boundary::{Asserted, Covert, Replay, Untrusted, reason};
 use engine_rpc::{ExecError, Preparation, Preparing, PropsRead};
 use engine_types::limits::MAX_PROPS_BYTES;
 use engine_types::props::PropsRefusal;
 use session_types::{InitError, Prepared, SessionMetadata, SessionStatus};
-use storage_client::{SessionStore, SetMetadata, WriteField, boundary, outbound_fields};
+use storage_client::boundary::Storage;
+use storage_client::{MetadataOp, SessionStore, SetMetadata};
 
 use crate::boundary::ExecutionWorker;
 use crate::compositions::{Composition, Compositions, max_cwasm_bytes};
@@ -222,20 +223,12 @@ pub fn warm_in_background(
     compositions: Arc<Compositions>,
     store: Arc<SessionStore>,
     session_id: String,
-    version: Untrusted<u64, (AuthN, AuthZ, Replay)>,
+    version: Untrusted<u64, (Replay,), Storage>,
     metadata: SessionMetadata,
 ) {
     // Fed back only as the CAS token of the write that marks the session, if
     // preparing it fails for good.
     let version = version
-        .trust(reason!(
-            AuthN::Indifferent,
-            "any value only makes the write that marks the session land or refuse"
-        ))
-        .trust(reason!(
-            AuthZ::NoPrincipal,
-            "the return value of a read this side made"
-        ))
         .trust(reason!(
             Replay::Harmless,
             "a stale one makes the write refuse, which costs only the mark — a round that \
@@ -307,22 +300,21 @@ pub async fn record(
     let mut metadata = metadata.clone();
     metadata.status = SessionStatus::InitFailed;
     metadata.init_error = Some(error);
-    let set_metadata = SetMetadata(
-        boundary::outbound::to_untrusted(&metadata)
-            .vouch(reason!(
-                AuthZ::NoSecret,
-                "sealed under tee_seal_key, which only the attested CVM holds: the volume \
-                 receives ciphertext it cannot read"
-            ))
-            .vouch(reason!(
-                Covert::NotChosen,
-                "the error rides in a fixed frame, so the write says only that the session \
-                 could not be prepared — which api decided before any policy code ran"
-            )),
-    );
-    let fields: [&dyn WriteField; 1] = [&set_metadata];
-    let fields = outbound_fields(&fields).vouch(reason!(Covert::Bounded, "a single fixed field"));
-    if let Err(e) = store.write(session_id, Some(version), fields).await {
+    let set_metadata = SetMetadata(Storage::expose_builder::<MetadataOp, _>(&metadata).vouch(
+        reason!(
+            Covert::NotChosen,
+            "the error rides in a fixed frame, so the write says only that the session \
+             could not be prepared — which api decided before any policy code ran"
+        ),
+    ));
+    let written = match store.seal(session_id, &[&set_metadata]) {
+        Ok(ops) => {
+            let ops = ops.vouch(reason!(Covert::Bounded, "a single fixed field"));
+            store.write(Some(version), ops).await
+        }
+        Err(e) => Err(e),
+    };
+    if let Err(e) = written {
         safe_logger::debug!("init: {session_id} was not marked as failed: {e}");
     }
 }

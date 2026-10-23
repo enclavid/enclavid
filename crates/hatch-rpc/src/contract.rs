@@ -1,10 +1,11 @@
 //! The contract between api and the hatch, as remoc serves it.
 //!
-//! Nothing here is exported but what an end of the leg declares
-//! (`RemoteHatchCalls`, `RemoteHatchServes`) and the contract as its server sees
-//! it at a declared end (`RemoteHatchAt`). The raw trait, the client and server
-//! remoc writes from it, and the adapter between them are reached through
-//! [`crate::leg`] alone, so no crate outside this one can name them.
+//! Nothing here is exported but what an end that serves the leg declares
+//! (`RemoteHatchServes`) and the contract as its server sees it at a declared end
+//! (`RemoteHatchAt`). What an end that calls it declares is read off the doors it
+//! calls through, in [`crate::leg`]. The raw trait, the client and server remoc
+//! writes from it, and the adapter between them are reached through `leg` alone,
+//! so no crate outside this one can name them.
 
 use fleet_stream::bin;
 
@@ -16,9 +17,9 @@ use crate::{
 /// What api asks of the hatch. The hatch serves one of these per api
 /// connection, and sends api its client on the connection's base channel.
 ///
-/// `#[protocol]` writes what its ends declare (`RemoteHatchCalls` /
-/// `RemoteHatchServes`) and how its server receives (`RemoteHatchAt`), which is
-/// the only shape `serve_hatch` serves it in.
+/// `#[protocol]` writes what its serving end declares (`RemoteHatchServes`) and
+/// how its server receives (`RemoteHatchAt`), which is the only shape
+/// `serve_hatch` serves it in.
 #[enclavid_boundary_macros::protocol]
 #[remoc::rtc::remote]
 pub trait RemoteHatch {

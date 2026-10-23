@@ -27,6 +27,13 @@ path = "src/lib.rs"
 # reason and reach the port; `debug!` needs none and is not built in production.
 safe-logger = { path = "../safe-logger", features = ["device"] }
 storage-rpc = { path = "../storage-rpc" }
+# The concern vocabulary. The storage-CVM names its own scope on what api sends
+# it — it accepts any attested guest, so it has something open to say — and
+# reaches the words directly rather than through whoever happens to re-export
+# them.
+enclavid-boundary = { path = "../boundary" }
+# `boundary!`: the storage-CVM's end of the api leg, declared. Build-time only.
+enclavid-boundary-macros = { path = "../boundary-macros" }
 # The RA-TLS backend is chosen here, not by ra-tls — see the `[features]` axis.
 # The hardware arm exists now: a blind CVM still cannot reach AMD for the
 # certificate that would endorse it, so it mints without one and api, which can

@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use enclavid_attestation::Attestor;
 use safe_logger::{debug, info, reason};
-use storage_client::{CacheBackend, CacheStore, SessionBackend, SessionStore};
+use storage_client::{CacheStore, SessionStore};
 
 use crate::client_state::ClientState;
 use crate::state::AppState;
@@ -127,12 +127,12 @@ async fn main() {
     .await;
     info!("api: hatch connected", reason!("a constant"));
 
-    // SessionStore is storage-client's per-session typed-field store. It is
-    // transport-agnostic — it holds an `Arc<dyn SessionBackend>`, and the
-    // backend built above dials the storage-CVM over RA-TLS. Shared between
-    // the client API (writes metadata/status on /create and /init) and the
-    // applicant API (reads/writes state on /connect and /input), so the Arc
-    // is what gives both state structs the same connection underneath.
+    // SessionStore is storage-client's per-session typed-field store. It holds
+    // no connection — it calls through the storage leg's link, built below,
+    // which dials the storage-CVM over RA-TLS. Shared between the client API
+    // (writes metadata/status on /create and /init) and the applicant API
+    // (reads/writes state on /connect and /input), so the Arc is what gives
+    // both state structs the same connection underneath.
     //
     // The seal key comes from the chip: under `sev-snp`, `load_tee_seal_key`
     // calls `enclavid_attestation::derive_seal_key`, so it is bound to the
@@ -146,13 +146,14 @@ async fn main() {
     // PRNG seeding — see `crate::shuffle` for the threat model.
     let shuffle_key = Arc::new(shuffle::ShuffleKey::from_tee_seal_key(&tee_seal_key));
 
-    // Storage backends for the session KV + L2 cwasm cache: the trusted
-    // storage-CVM over RA-TLS. This is api's ONLY durable-state backend — host
-    // Redis + the host object_store cache were retired (the hatch now fronts
-    // external egress only). All AEAD sealing stays TEE-side in
-    // `SessionStore` / `CacheStore`; the storage-CVM sees ciphertext only. Each
-    // session lives `session_ttl_secs` from its creation (`settings`).
-    let (session_backend, cache_backend) = build_storage_backends(
+    // The storage leg, for the session KV + L2 cwasm cache: the storage-CVM over
+    // RA-TLS. This is api's ONLY durable-state store — host Redis + the host
+    // object_store cache were retired (the hatch now fronts external egress
+    // only). All AEAD sealing stays TEE-side in `SessionStore` / `CacheStore`;
+    // the storage-CVM sees ciphertext under names derived from keys only api
+    // holds. Each session lives `session_ttl_secs` from its creation
+    // (`settings`).
+    let storage = build_storage_link(
         legs.storage,
         attestor.clone(),
         api_health.clone(),
@@ -162,11 +163,11 @@ async fn main() {
     .await;
     info!("api: storage-CVM connected", reason!("a constant"));
     let session_store = Arc::new(SessionStore::new(
-        session_backend,
+        storage.clone(),
         tee_seal_key,
         Some(settings.session_ttl_secs),
     ));
-    let cache_store = CacheStore::new(cache_backend, &tee_seal_key);
+    let cache_store = CacheStore::new(storage, &tee_seal_key);
 
     // Two listeners, two routers, one process. Topology rationale: TLS
     // terminates inside this TEE, so a host-side proxy can only route by
@@ -275,52 +276,33 @@ async fn main() {
     let _ = tokio::join!(client_handle, applicant_handle);
 }
 
-/// Dial the trusted storage-CVM (session KV + L2 cwasm cache) over RA-TLS and
-/// hand back both backends on one connection. This is api's ONLY durable-state
-/// backend — the legacy hatch/Redis + host object_store path was retired, so
-/// there is no runtime selector. `addr` is `crate::fleet::legs`'; it is dialed
-/// as `how` says, and this end of the leg held up as `leg` does.
-async fn build_storage_backends(
+/// Dial the storage-CVM (session KV + L2 cwasm cache) over RA-TLS and hand back
+/// the link both stores call through, one connection under it. This is api's
+/// ONLY durable-state store — the legacy hatch/Redis + host object_store path
+/// was retired, so there is no runtime selector. `addr` is
+/// `crate::fleet::legs`'; it is dialed as `how` says, and this end of the leg
+/// held up as `leg` does.
+async fn build_storage_link(
     addr: String,
     attestor: Arc<dyn Attestor>,
     api_health: Arc<health::ApiHealth>,
     how: fleet::Dial,
     leg: storage_rpc::LegSettings,
-) -> (Arc<dyn SessionBackend>, Arc<dyn CacheBackend>) {
-    // Two clients, one connection: they go up and down together, so one
-    // supervisor installs into both legs.
-    let session_leg = fleet::Leg::new();
-    let cache_leg = fleet::Leg::new();
-    {
-        let (session_leg, cache_leg) = (session_leg.clone(), cache_leg.clone());
-        let addr = addr.clone();
-        let attestor = attestor.clone();
-        fleet::supervise(
-            health::Peer::Storage,
-            addr.clone(),
-            how,
-            api_health,
-            move || {
-                let (addr, attestor) = (addr.clone(), attestor.clone());
-                async move { storage::connect_storage(&addr, attestor, leg).await }
-            },
-            move |clients| match clients {
-                Some(c) => {
-                    session_leg.set(Some(c.session));
-                    cache_leg.set(Some(c.cache));
-                }
-                None => {
-                    session_leg.set(None);
-                    cache_leg.set(None);
-                }
-            },
-        )
-        .await;
-    }
-
-    let session: Arc<dyn SessionBackend> = Arc::new(storage::SessionCvmBackend::new(session_leg));
-    let cache: Arc<dyn CacheBackend> = Arc::new(storage::CacheCvmBackend::new(cache_leg));
-    (session, cache)
+) -> Arc<dyn storage_client::Link> {
+    let link = fleet::Leg::new();
+    fleet::supervise(
+        health::Peer::Storage,
+        addr.clone(),
+        how,
+        api_health,
+        move || {
+            let (addr, attestor) = (addr.clone(), attestor.clone());
+            async move { storage::connect_storage(&addr, attestor, leg).await }
+        },
+        link.clone(),
+    )
+    .await;
+    link
 }
 
 /// Dial the hatch-CVM over RA-TLS and hand back the link the typed hatch
@@ -334,21 +316,18 @@ async fn build_hatch_link(
     leg: hatch_rpc::LegSettings,
 ) -> Arc<dyn hatch_client::Link<boundary::Hatch>> {
     let link = fleet::Leg::new();
-    {
-        let link = link.clone();
-        fleet::supervise(
-            health::Peer::Hatch,
-            addr.clone(),
-            how,
-            api_health,
-            move || {
-                let (addr, attestor) = (addr.clone(), attestor.clone());
-                async move { hatch::connect_hatch(&addr, attestor, leg).await }
-            },
-            move |client| link.set(client),
-        )
-        .await;
-    }
+    fleet::supervise(
+        health::Peer::Hatch,
+        addr.clone(),
+        how,
+        api_health,
+        move || {
+            let (addr, attestor) = (addr.clone(), attestor.clone());
+            async move { hatch::connect_hatch(&addr, attestor, leg).await }
+        },
+        link.clone(),
+    )
+    .await;
     link
 }
 

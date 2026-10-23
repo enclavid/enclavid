@@ -209,7 +209,7 @@ impl Asserted {
 /// padding exists to close — the bytes stayed sealed the whole time.
 ///
 /// Outbound-only axis: inbound data is not a covert-channel concern because this
-/// side is not the encoder. `Exposed<T, S>` is where `Covert` appears in `S`.
+/// side is not the encoder. `Exposed<T, S, B>` is where `Covert` appears in `S`.
 pub struct Covert;
 
 impl OutboundConcern for Covert {}

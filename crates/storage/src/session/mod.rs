@@ -8,18 +8,20 @@
 //!     globally-queryable per-session metadata.
 //!
 //! [`SessionStore`] is the facade over both: it owns the name → path mapping
-//! (hashed — hides which record a file is on a volume the host provisions and
-//! reads, and guards path traversal) and the create ordering + sweep that tie the
+//! (hashed, which guards path traversal; it hides nothing, since the index keeps
+//! each name as it is) and the create ordering + sweep that tie the
 //! two tiers together. One file per session gives isolation, wholesale delete (`rm` returns
 //! space to the OS — no compaction), atomic rounds, and cross-session write
 //! parallelism (the hot update path touches neither the index nor any global
 //! lock).
 //!
-//! **`name`, not `session_id`.** This tier is a KV over opaque strings and knows
-//! nothing about sessions or callers. What it receives is a record name that
-//! the crate-private `scope` module derived from the calling peer's digest and the
-//! session id it asked for, which is what keeps two callers out of each other's
-//! records; here it is simply the key.
+//! **A [`Name`], not a session id.** The facade takes a name only the
+//! crate-private `scope` module can make: a digest of the calling peer's
+//! measurement and the record name it asked for, which api in turn derived from
+//! a session id under a key only api holds. So two callers stay out of each
+//! other's records, and nothing this store keeps on the volume is a name a caller
+//! sent, let alone a session id. Under the facade the tiers are a KV over opaque
+//! strings, the names the facade gives them.
 
 mod db_blobs;
 mod db_meta;
@@ -29,6 +31,7 @@ use std::time::Duration;
 
 use storage_rpc::{ReadRequest, ReadResponse, SessionError, WriteRequest, WriteResponse};
 
+use crate::scope::Name;
 use db_blobs::DbBlobs;
 use db_meta::DbMeta;
 
@@ -94,23 +97,25 @@ impl SessionStore {
     }
 
     /// Batched typed read (see [`DbBlobs::read`]).
-    pub fn read(&self, name: &str, req: ReadRequest) -> Result<ReadResponse, SessionError> {
-        self.blobs.read(name, req).map_err(SessionError::from)
+    pub(crate) fn read(&self, name: &Name, req: ReadRequest) -> Result<ReadResponse, SessionError> {
+        self.blobs
+            .read(name.as_str(), req)
+            .map_err(SessionError::from)
     }
 
     /// Atomic CAS write. `expected_version == None` dispatches to a create,
-    /// `Some(v)` to a CAS update. `deadline` (`Some` only on create) is recorded
-    /// in the index FIRST — after the must-not-exist check passes (so a duplicate
-    /// create can't reset an existing session's deadline) and as its OWN durable
-    /// commit BEFORE the session file — so a committed session always has a
-    /// durable deadline row (the reverse is harmless, swept self-healingly).
-    /// `req.ops` must be non-empty.
-    pub fn write(
+    /// `Some(v)` to a CAS update. A create's deadline is recorded in the index
+    /// FIRST — after the must-not-exist check passes (so a duplicate create can't
+    /// reset an existing session's deadline) and as its OWN durable commit BEFORE
+    /// the session file — so a committed session always has a durable deadline
+    /// row (the reverse is harmless, swept self-healingly). An update's deadline
+    /// is ignored: a record's deadline is set once. `req.ops` must be non-empty.
+    pub(crate) fn write(
         &self,
-        name: &str,
+        name: &Name,
         req: WriteRequest,
-        deadline: Option<u64>,
     ) -> Result<WriteResponse, SessionError> {
+        let name = name.as_str();
         (|| -> Result<WriteResponse, StoreErr> {
             if req.ops.is_empty() {
                 return Err(StoreErr::Internal("write with no ops".to_string()));
@@ -120,7 +125,7 @@ impl SessionStore {
                     if self.blobs.committed_exists(name)? {
                         return Err(StoreErr::VersionMismatch);
                     }
-                    if let Some(dl) = deadline {
+                    if let Some(dl) = req.deadline_unix_secs {
                         self.meta.put_deadline(name, dl)?;
                     }
                     self.blobs.create(name, req.ops)
@@ -132,8 +137,9 @@ impl SessionStore {
     }
 
     /// Existence probe (see [`DbBlobs::exists`]).
-    pub fn exists(&self, name: &str) -> Result<bool, SessionError> {
-        self.blobs.exists(name).map_err(SessionError::from)
+    #[cfg(test)]
+    pub(crate) fn exists(&self, name: &Name) -> Result<bool, SessionError> {
+        self.blobs.exists(name.as_str()).map_err(SessionError::from)
     }
 
     /// Delete every session whose deadline is `<= now`, up to `max` per call:
@@ -161,10 +167,10 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_BUSY_TIMEOUT, SessionStore};
-    use storage_rpc::SessionError;
+    use crate::scope::{Name, Scope};
     use storage_rpc::{
-        BlobField, BlobWrite, FieldSelector, ListAppend, ListField, ListSlot, MediaWrite, Op,
-        ReadRequest, ScalarSlot, Slot, WriteRequest,
+        BlobField, BlobWrite, FieldSelector, ListAppend, ListField, ListSlot, MediaName,
+        MediaWrite, Op, ReadRequest, RecordName, ScalarSlot, SessionError, Slot, WriteRequest,
     };
 
     fn tmp_store() -> (tempfile::TempDir, SessionStore) {
@@ -173,6 +179,12 @@ mod tests {
         (dir, store)
     }
 
+    /// The name one test caller's record `tag` is kept under.
+    fn n(tag: u8) -> Name {
+        Scope::new("aa".repeat(48)).session(&RecordName([tag; 32]))
+    }
+
+    /// One field set, at whatever version the caller then gives it.
     fn set_blob(field: BlobField, value: &[u8]) -> WriteRequest {
         WriteRequest {
             ops: vec![Op::Blob(BlobWrite {
@@ -180,6 +192,15 @@ mod tests {
                 value: value.to_vec(),
             })],
             expected_version: None,
+            deadline_unix_secs: None,
+        }
+    }
+
+    /// A create of one field, dropped once `deadline` passes.
+    fn create(field: BlobField, value: &[u8], deadline: u64) -> WriteRequest {
+        WriteRequest {
+            deadline_unix_secs: Some(deadline),
+            ..set_blob(field, value)
         }
     }
 
@@ -187,28 +208,28 @@ mod tests {
     fn cas_rejects_stale_and_must_not_exist() {
         let (_d, s) = tmp_store();
         let v1 = s
-            .write("s", set_blob(BlobField::Metadata, b"m1"), Some(100))
+            .write(&n(1), create(BlobField::Metadata, b"m1", 100))
             .unwrap();
         assert_eq!(v1.new_version, 1);
         // second create at None → conflict
         assert!(matches!(
-            s.write("s", set_blob(BlobField::Metadata, b"x"), Some(100)),
+            s.write(&n(1), create(BlobField::Metadata, b"x", 100)),
             Err(SessionError::VersionMismatch)
         ));
         // CAS at 1 → v2
         let mut upd = set_blob(BlobField::State, b"st");
         upd.expected_version = Some(1);
-        assert_eq!(s.write("s", upd, None).unwrap().new_version, 2);
+        assert_eq!(s.write(&n(1), upd).unwrap().new_version, 2);
         // stale CAS at 1 → conflict, losing value not applied
         let mut stale = set_blob(BlobField::State, b"loser");
         stale.expected_version = Some(1);
         assert!(matches!(
-            s.write("s", stale, None),
+            s.write(&n(1), stale),
             Err(SessionError::VersionMismatch)
         ));
         let got = s
             .read(
-                "s",
+                &n(1),
                 ReadRequest {
                     fields: vec![FieldSelector::Blob(BlobField::State)],
                 },
@@ -229,7 +250,7 @@ mod tests {
         let mut upd = set_blob(BlobField::State, b"x");
         upd.expected_version = Some(1);
         assert!(matches!(
-            s.write("nope", upd, None),
+            s.write(&n(9), upd),
             Err(SessionError::VersionMismatch)
         ));
     }
@@ -240,19 +261,23 @@ mod tests {
         let empty = WriteRequest {
             ops: vec![],
             expected_version: None,
+            deadline_unix_secs: Some(100),
         };
-        assert!(s.write("s", empty, Some(100)).is_err());
-        assert!(!s.exists("s").unwrap(), "no phantom session materialized");
+        assert!(s.write(&n(1), empty).is_err());
+        assert!(!s.exists(&n(1)).unwrap(), "no phantom session materialized");
         // An empty UPDATE is rejected too, version untouched.
-        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100))
+        s.write(&n(1), create(BlobField::Metadata, b"m", 100))
             .unwrap();
         let empty_upd = WriteRequest {
             ops: vec![],
             expected_version: Some(1),
+            deadline_unix_secs: None,
         };
-        assert!(s.write("s", empty_upd, None).is_err());
+        assert!(s.write(&n(1), empty_upd).is_err());
         assert_eq!(
-            s.read("s", ReadRequest { fields: vec![] }).unwrap().version,
+            s.read(&n(1), ReadRequest { fields: vec![] })
+                .unwrap()
+                .version,
             1
         );
     }
@@ -263,7 +288,7 @@ mod tests {
         // absent session → version 0, absent slot
         let got = s
             .read(
-                "s",
+                &n(1),
                 ReadRequest {
                     fields: vec![FieldSelector::Blob(BlobField::State)],
                 },
@@ -272,11 +297,11 @@ mod tests {
         assert_eq!(got.version, 0);
         assert_eq!(got.slots[0], Slot::Scalar(ScalarSlot { value: None }));
         // present-but-empty must read back as Some(empty), not None
-        s.write("s", set_blob(BlobField::Metadata, b""), Some(100))
+        s.write(&n(1), create(BlobField::Metadata, b"", 100))
             .unwrap();
         let got = s
             .read(
-                "s",
+                &n(1),
                 ReadRequest {
                     fields: vec![FieldSelector::Blob(BlobField::Metadata)],
                 },
@@ -293,13 +318,13 @@ mod tests {
     #[test]
     fn read_media_absent_slot() {
         let (_d, s) = tmp_store();
-        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100))
+        s.write(&n(1), create(BlobField::Metadata, b"m", 100))
             .unwrap();
         let got = s
             .read(
-                "s",
+                &n(1),
                 ReadRequest {
-                    fields: vec![FieldSelector::Media(vec![7u8; 32])],
+                    fields: vec![FieldSelector::Media(MediaName([7u8; 32]))],
                 },
             )
             .unwrap();
@@ -309,7 +334,7 @@ mod tests {
     #[test]
     fn disclosure_set_membership_order_agnostic() {
         let (_d, s) = tmp_store();
-        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100))
+        s.write(&n(1), create(BlobField::Metadata, b"m", 100))
             .unwrap();
         for (i, val) in [b"c".as_slice(), b"a", b"b"].iter().enumerate() {
             let req = WriteRequest {
@@ -318,12 +343,13 @@ mod tests {
                     value: val.to_vec(),
                 })],
                 expected_version: Some((i + 1) as u64),
+                deadline_unix_secs: None,
             };
-            s.write("s", req, None).unwrap();
+            s.write(&n(1), req).unwrap();
         }
         let got = s
             .read(
-                "s",
+                &n(1),
                 ReadRequest {
                     fields: vec![FieldSelector::List(ListField::Disclosure)],
                 },
@@ -350,7 +376,7 @@ mod tests {
                     value: b"st".to_vec(),
                 }),
                 Op::MediaWrite(MediaWrite {
-                    blob_key: vec![1u8; 32],
+                    name: MediaName([1u8; 32]),
                     value: b"jpeg".to_vec(),
                 }),
                 Op::ListAppend(ListAppend {
@@ -359,21 +385,23 @@ mod tests {
                 }),
             ],
             expected_version: None,
+            deadline_unix_secs: Some(100),
         };
-        let created = s.write("s", req, Some(100)).unwrap();
+        let created = s.write(&n(1), req).unwrap();
         let reset = WriteRequest {
             ops: vec![Op::Reset],
             expected_version: Some(created.new_version),
+            deadline_unix_secs: None,
         };
-        s.write("s", reset, None).unwrap();
-        assert!(s.exists("s").unwrap(), "session still exists after reset");
+        s.write(&n(1), reset).unwrap();
+        assert!(s.exists(&n(1)).unwrap(), "session still exists after reset");
         let got = s
             .read(
-                "s",
+                &n(1),
                 ReadRequest {
                     fields: vec![
                         FieldSelector::Blob(BlobField::State),
-                        FieldSelector::Media(vec![1u8; 32]),
+                        FieldSelector::Media(MediaName([1u8; 32])),
                         FieldSelector::List(ListField::Disclosure),
                     ],
                 },
@@ -390,7 +418,7 @@ mod tests {
     fn a_reset_under_a_stale_version_drops_nothing() {
         let (_d, s) = tmp_store();
         let read_at = s
-            .write("s", set_blob(BlobField::State, b"st"), Some(100))
+            .write(&n(1), create(BlobField::State, b"st", 100))
             .unwrap()
             .new_version;
         let round = WriteRequest {
@@ -399,20 +427,22 @@ mod tests {
                 value: b"consented".to_vec(),
             })],
             expected_version: Some(read_at),
+            deadline_unix_secs: None,
         };
-        s.write("s", round, None).unwrap();
+        s.write(&n(1), round).unwrap();
 
         let reset = WriteRequest {
             ops: vec![Op::Reset],
             expected_version: Some(read_at),
+            deadline_unix_secs: None,
         };
         assert!(matches!(
-            s.write("s", reset, None),
+            s.write(&n(1), reset),
             Err(SessionError::VersionMismatch)
         ));
         let got = s
             .read(
-                "s",
+                &n(1),
                 ReadRequest {
                     fields: vec![
                         FieldSelector::Blob(BlobField::State),
@@ -435,27 +465,38 @@ mod tests {
         );
     }
 
+    /// An update carries no deadline that sticks: a record's deadline is set once,
+    /// at its create.
+    #[test]
+    fn an_update_does_not_move_the_deadline() {
+        let (_d, s) = tmp_store();
+        s.write(&n(1), create(BlobField::Metadata, b"m", 100))
+            .unwrap();
+        let mut later = set_blob(BlobField::State, b"st");
+        later.expected_version = Some(1);
+        later.deadline_unix_secs = Some(10_000_000);
+        s.write(&n(1), later).unwrap();
+        assert_eq!(s.sweep_once(1_000, 1024).unwrap(), 1);
+        assert!(!s.exists(&n(1)).unwrap());
+    }
+
     #[test]
     fn sweeper_purges_expired_only() {
         let (_d, s) = tmp_store();
-        s.write("s_old", set_blob(BlobField::Metadata, b"m"), Some(100))
+        s.write(&n(1), create(BlobField::Metadata, b"m", 100))
             .unwrap();
-        s.write(
-            "s_new",
-            set_blob(BlobField::Metadata, b"m"),
-            Some(10_000_000),
-        )
-        .unwrap();
+        s.write(&n(2), create(BlobField::Metadata, b"m", 10_000_000))
+            .unwrap();
         let purged = s.sweep_once(1_000, 1024).unwrap();
         assert_eq!(purged, 1);
-        assert!(!s.exists("s_old").unwrap());
-        assert!(s.exists("s_new").unwrap());
+        assert!(!s.exists(&n(1)).unwrap());
+        assert!(s.exists(&n(2)).unwrap());
     }
 
     #[test]
     fn sweep_removes_whole_session() {
         let (_d, s) = tmp_store();
-        s.write("s", set_blob(BlobField::Metadata, b"m"), Some(100))
+        s.write(&n(1), create(BlobField::Metadata, b"m", 100))
             .unwrap();
         let req = WriteRequest {
             ops: vec![Op::ListAppend(ListAppend {
@@ -463,13 +504,14 @@ mod tests {
                 value: b"d1".to_vec(),
             })],
             expected_version: Some(1),
+            deadline_unix_secs: None,
         };
-        s.write("s", req, None).unwrap();
+        s.write(&n(1), req).unwrap();
         assert_eq!(s.sweep_once(1_000, 1024).unwrap(), 1);
-        assert!(!s.exists("s").unwrap());
+        assert!(!s.exists(&n(1)).unwrap());
         let got = s
             .read(
-                "s",
+                &n(1),
                 ReadRequest {
                     fields: vec![FieldSelector::List(ListField::Disclosure)],
                 },
@@ -483,14 +525,14 @@ mod tests {
     #[test]
     fn sweep_respects_max() {
         let (_d, s) = tmp_store();
-        s.write("a", set_blob(BlobField::Metadata, b"m"), Some(10))
+        s.write(&n(1), create(BlobField::Metadata, b"m", 10))
             .unwrap();
-        s.write("b", set_blob(BlobField::Metadata, b"m"), Some(20))
+        s.write(&n(2), create(BlobField::Metadata, b"m", 20))
             .unwrap();
-        s.write("c", set_blob(BlobField::Metadata, b"m"), Some(5_000))
+        s.write(&n(3), create(BlobField::Metadata, b"m", 5_000))
             .unwrap(); // future
         assert_eq!(s.sweep_once(1_000, 1).unwrap(), 1);
         assert_eq!(s.sweep_once(1_000, 1024).unwrap(), 1);
-        assert!(s.exists("c").unwrap());
+        assert!(s.exists(&n(3)).unwrap());
     }
 }

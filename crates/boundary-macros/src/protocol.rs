@@ -1,4 +1,5 @@
-//! `#[protocol]` — what a remoc contract asks of its two ends.
+//! `#[protocol]` — what a remoc contract asks of the end that serves it, and the
+//! contract as data.
 
 use std::collections::BTreeSet;
 
@@ -10,12 +11,14 @@ use syn::{
     ReturnType, TraitItem, Type,
 };
 
+use crate::key;
+
 struct Arg {
     name: Ident,
     ty: Type,
     /// For a remoc client handed over rather than a value: the door, generic
     /// over the server's end, that the server is given it in.
-    door: Option<Path>,
+    capability: Option<Path>,
 }
 
 struct Method {
@@ -27,7 +30,7 @@ struct Method {
 
 /// `()` however it is spelled: parentheses and invisible groups around it are
 /// still it. An alias of it is caught by the compiler instead (`NotUnit`).
-fn is_unit(ty: &Type) -> bool {
+pub(crate) fn is_unit(ty: &Type) -> bool {
     match ty {
         Type::Tuple(t) => t.elems.is_empty(),
         Type::Paren(p) => is_unit(&p.elem),
@@ -39,7 +42,7 @@ fn is_unit(ty: &Type) -> bool {
 /// An end's declaration answers for a type, not for a method, so a type that
 /// crosses must be its own: `()` would be every unit reply, error or argument of
 /// every protocol at once.
-fn refuse_unit(ty: &Type, what: &str) -> Result<()> {
+pub(crate) fn refuse_unit(ty: &Type, what: &str) -> Result<()> {
     if is_unit(ty) {
         return Err(Error::new_spanned(
             ty,
@@ -52,12 +55,30 @@ fn refuse_unit(ty: &Type, what: &str) -> Result<()> {
     Ok(())
 }
 
-fn result_types(output: &ReturnType) -> Result<(Type, Type)> {
+/// `ty`, held to being a type of its own by the compiler — which sees through an
+/// alias of `()` that spelling cannot. `()` alone has two impls, so naming one is
+/// ambiguous for it and for nothing else. The helpers' names are ones a contract
+/// will not use: the block shares the contract's scope, and a helper named like a
+/// contract's type would stand in for it unseen.
+pub(crate) fn not_unit(ty: &Type) -> TokenStream {
+    quote_spanned! {ty.span()=>
+        const _: () = {
+            trait __NotUnit<A> {
+                fn check() {}
+            }
+            impl<T: ?Sized> __NotUnit<()> for T {}
+            struct __Unit;
+            impl __NotUnit<__Unit> for () {}
+            let _ = <#ty as __NotUnit<_>>::check;
+        };
+    }
+}
+
+/// What a `what` — a protocol method, a door — returns, as `Result<T, E>`.
+pub(crate) fn result_types(output: &ReturnType, what: &str) -> Result<(Type, Type)> {
+    let shape = format!("a {what} returns `Result<T, E>`");
     let ReturnType::Type(_, ty) = output else {
-        return Err(Error::new_spanned(
-            output,
-            "a protocol method returns `Result<T, E>`",
-        ));
+        return Err(Error::new_spanned(output, shape));
     };
     if let Type::Path(p) = &**ty
         && let Some(last) = p.path.segments.last()
@@ -76,10 +97,7 @@ fn result_types(output: &ReturnType) -> Result<(Type, Type)> {
             return Ok(((*ok).clone(), (*err).clone()));
         }
     }
-    Err(Error::new_spanned(
-        ty,
-        "a protocol method returns `Result<T, E>`",
-    ))
+    Err(Error::new_spanned(ty, shape))
 }
 
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
@@ -108,7 +126,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream
         let mut args = Vec::new();
         for input in f.sig.inputs.iter_mut() {
             let FnArg::Typed(pt) = input else { continue };
-            let mut door = None;
+            let mut capability = None;
             for attr in pt.attrs.iter().filter(|a| a.path().is_ident("capability")) {
                 let Meta::List(_) = &attr.meta else {
                     return Err(Error::new_spanned(
@@ -118,7 +136,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream
                          declaration too",
                     ));
                 };
-                door = Some(attr.parse_args::<Path>()?);
+                capability = Some(attr.parse_args::<Path>()?);
             }
             pt.attrs.retain(|a| !a.path().is_ident("capability"));
             let Pat::Ident(pat) = &*pt.pat else {
@@ -127,16 +145,16 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream
                     "a protocol argument is a plain name",
                 ));
             };
-            if door.is_none() {
+            if capability.is_none() {
                 refuse_unit(&pt.ty, "argument")?;
             }
             args.push(Arg {
                 name: pat.ident.clone(),
                 ty: (*pt.ty).clone(),
-                door,
+                capability,
             });
         }
-        let (ok, err) = result_types(&f.sig.output)?;
+        let (ok, err) = result_types(&f.sig.output, "protocol method")?;
         refuse_unit(&ok, "reply")?;
         refuse_unit(&err, "error")?;
         methods.push(Method {
@@ -149,86 +167,43 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream
 
     let name = &contract.ident;
     let vis = &contract.vis;
-    let calls = format_ident!("{}Calls", name);
     let serves = format_ident!("{}Serves", name);
     let at = format_ident!("{}At", name);
     let adapter = format_ident!("{}Adapter", name);
+    let wire = format_ident!("{}Wire", name);
 
-    // What each end must declare, deduplicated by spelling.
-    let mut calls_bounds = Vec::new();
+    // What the serving end must declare, deduplicated by spelling.
     let mut serves_bounds = Vec::new();
-    let mut seen_calls = BTreeSet::new();
     let mut seen_serves = BTreeSet::new();
-    let push = |bounds: &mut Vec<TokenStream>, seen: &mut BTreeSet<String>, b: TokenStream| {
-        if seen.insert(b.to_string()) {
-            bounds.push(b);
+    let mut push = |b: TokenStream| {
+        if seen_serves.insert(b.to_string()) {
+            serves_bounds.push(b);
         }
     };
     // Every type that crosses, once each, held to being a type of its own by the
-    // compiler too — which sees through an alias of `()` that spelling cannot.
+    // compiler too.
     let mut crossing = Vec::new();
     let mut seen_crossing = BTreeSet::new();
     for ty in methods.iter().flat_map(|m| {
         m.args
             .iter()
-            .filter(|a| a.door.is_none())
+            .filter(|a| a.capability.is_none())
             .map(|a| &a.ty)
             .chain([&m.ok, &m.err])
     }) {
         if seen_crossing.insert(quote!(#ty).to_string()) {
-            // `()` alone has two impls, so naming one is ambiguous for it and for
-            // nothing else. The helpers' names are ones a contract will not use:
-            // the block shares the contract's scope, and a helper named like a
-            // contract's type would stand in for it unseen.
-            crossing.push(quote_spanned! {ty.span()=>
-                const _: () = {
-                    trait __NotUnit<A> {
-                        fn check() {}
-                    }
-                    impl<T: ?Sized> __NotUnit<()> for T {}
-                    struct __Unit;
-                    impl __NotUnit<__Unit> for () {}
-                    let _ = <#ty as __NotUnit<_>>::check;
-                };
-            });
+            crossing.push(not_unit(ty));
         }
     }
     for m in &methods {
-        for a in m.args.iter().filter(|a| a.door.is_none()) {
+        for a in m.args.iter().filter(|a| a.capability.is_none()) {
             let ty = &a.ty;
-            push(
-                &mut calls_bounds,
-                &mut seen_calls,
-                quote!(::enclavid_boundary::Sends<#ty>),
-            );
-            push(
-                &mut serves_bounds,
-                &mut seen_serves,
-                quote!(::enclavid_boundary::Receives<#ty>),
-            );
+            push(quote!(::enclavid_boundary::Receives<#ty>));
         }
         let ok = &m.ok;
         let err = &m.err;
-        push(
-            &mut calls_bounds,
-            &mut seen_calls,
-            quote!(::enclavid_boundary::Receives<#ok>),
-        );
-        push(
-            &mut serves_bounds,
-            &mut seen_serves,
-            quote!(::enclavid_boundary::Sends<#ok>),
-        );
-        push(
-            &mut calls_bounds,
-            &mut seen_calls,
-            quote!(::enclavid_boundary::Receives<#err, Open = ()>),
-        );
-        push(
-            &mut serves_bounds,
-            &mut seen_serves,
-            quote!(::enclavid_boundary::Sends<#err, Open = ()>),
-        );
+        push(quote!(::enclavid_boundary::Sends<#ok>));
+        push(quote!(::enclavid_boundary::Sends<#err, Open = ()>));
     }
 
     let sig = |m: &Method| {
@@ -236,7 +211,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream
         let params = m.args.iter().map(|a| {
             let n = &a.name;
             let ty = &a.ty;
-            match &a.door {
+            match &a.capability {
                 Some(door) => quote!(#n: #door<B>),
                 None => {
                     quote!(#n: ::enclavid_boundary::Untrusted<#ty, <B as ::enclavid_boundary::Receives<#ty>>::Open, B>)
@@ -278,7 +253,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream
         let wrapped = m.args.iter().map(|a| {
             let n = &a.name;
             let ty = &a.ty;
-            match &a.door {
+            match &a.capability {
                 Some(door) => quote!(#door::<B>::from(#n)),
                 None => quote!(::enclavid_boundary::inbound::<B, #ty>(#n)),
             }
@@ -298,18 +273,19 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream
          arrives at `B` and releasing each answer."
     );
 
+    let wire_data = wire_data(name, &methods);
+
     Ok(quote! {
         #contract
 
         #( #crossing )*
 
-        /// What an end that calls this protocol declares: every argument it
-        /// sends, every answer and error it receives — the error answered in full.
-        #vis trait #calls: ::enclavid_boundary::Boundary #( + #calls_bounds )* {}
-
         /// What an end that serves this protocol declares: every argument it
         /// receives, every answer and error it sends — the error answered in full.
-        #vis trait #serves: ::enclavid_boundary::Boundary #( + #serves_bounds )* {}
+        #vis trait #serves: ::enclavid_boundary::Boundary #( + #serves_bounds )* {
+            /// This protocol, as data, for the declaration of an end that serves it.
+            const PROTOCOL: ::enclavid_boundary::declaration::Protocol = #wire::PROTOCOL;
+        }
 
         /// This protocol as its server sees it at end `B`: every argument arrives
         /// open on what `B`'s declaration left open, every answer leaves answered,
@@ -338,7 +314,56 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream
         {
             #( #raw_methods )*
         }
+
+        #wire_data
     })
+}
+
+/// The contract `name` as data: each method and what crosses for it, one
+/// constant a method, by its name — which the doors of a calling end are matched
+/// to (`#[calls]`) — and the whole as `PROTOCOL`.
+fn wire_data(name: &Ident, methods: &[Method]) -> TokenStream {
+    let wire = format_ident!("{}Wire", name);
+    let name = name.to_string();
+    let doc = format!(" `{name}` as data: each method, and what crosses for it.");
+    let consts = methods.iter().map(|m| {
+        let ident = &m.name;
+        let method = m.name.to_string();
+        let args = m
+            .args
+            .iter()
+            .filter(|a| a.capability.is_none())
+            .map(|a| key(&a.ty));
+        let reply = key(&m.ok);
+        let error = key(&m.err);
+        quote! {
+            pub const #ident: ::enclavid_boundary::declaration::Method =
+                ::enclavid_boundary::declaration::Method {
+                    name: #method,
+                    args: &[ #( #args ),* ],
+                    reply: #reply,
+                    error: #error,
+                    door: ::core::option::Option::None,
+                };
+        }
+    });
+    let idents = methods.iter().map(|m| &m.name);
+    quote! {
+        #[doc = #doc]
+        #[doc(hidden)]
+        pub struct #wire;
+
+        #[allow(non_upper_case_globals)]
+        impl #wire {
+            #( #consts )*
+
+            pub const PROTOCOL: ::enclavid_boundary::declaration::Protocol =
+                ::enclavid_boundary::declaration::Protocol {
+                    name: #name,
+                    methods: &[ #( Self::#idents ),* ],
+                };
+        }
+    }
 }
 
 /// What `#[protocol]` refuses as it reads a contract. Each case is the

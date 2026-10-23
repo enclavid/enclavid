@@ -210,14 +210,14 @@ impl From<remoc::rtc::CallError> for PullError {
 // The contract, and the client and server remoc writes from it, are NOT
 // exported: no crate outside this one can name the generated client, let alone
 // call it, and none can serve the raw contract. Both ends reach the leg through
-// `leg`, each at the end its role declares: `RemoteHatchCalls` /
-// `RemoteHatchServes` are what an end declares, and `RemoteHatchAt` the contract
-// as its server sees it there.
+// `leg`, each at the end its role declares: `RemoteHatchServes` is what a
+// serving end declares, and `RemoteHatchAt` the contract as its server sees it
+// there; `RemoteHatchCalls`, read off the doors, is what a calling end declares.
 mod contract;
-pub use contract::{RemoteHatchAt, RemoteHatchCalls, RemoteHatchServes};
+pub use contract::{RemoteHatchAt, RemoteHatchServes};
 
 mod leg;
-pub use leg::{HatchLeg, LegError, connect_hatch, serve_hatch};
+pub use leg::{HatchLeg, LegError, RemoteHatchCalls, connect_hatch, serve_hatch};
 
 /// What a role sets of its end of the leg — the same as of every fleet leg (see
 /// `fleet_stream`).

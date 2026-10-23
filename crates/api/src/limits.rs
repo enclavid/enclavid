@@ -101,7 +101,9 @@ const WIRE_HEADROOM: usize = 1024 * 1024;
 // storage-CVM. An item past the limit is refused, and remoc closes the channel it
 // was refused on for good — every later call on that leg fails until it is
 // redialled. So a clip api admits must fit, or the 413 the applicant should have
-// had becomes a dropped leg.
+// had becomes a dropped leg. The write's door also measures every write before
+// handing it over, since the metadata a session has grown rides in it too: a
+// write that would not fit fails that session's round alone.
 const _: () = assert!(
     session_types::MAX_CLIP_BYTES + session_types::SEALED_STATE_PLAINTEXT_BYTES + WIRE_HEADROOM
         <= remoc::rch::DEFAULT_MAX_ITEM_SIZE,

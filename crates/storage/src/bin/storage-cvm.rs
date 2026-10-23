@@ -20,18 +20,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use object_store::local::LocalFileSystem;
-use remoc::codec::Ciborium;
-use remoc::rtc::ServerShared;
 
+use enclavid_storage::boundary::AnyCaller;
 use enclavid_storage::{
     CacheBlobs, Caller, DEFAULT_BUSY_TIMEOUT, SessionStore, StorageSvc, now_unix,
 };
 use fleet_transport::LegFailure;
 use fleet_transport::launch::{LaunchError, Settings};
 use safe_logger::{debug, info, reason, safe, warn};
-use storage_rpc::{
-    LegSettings, RemoteCacheServerShared, RemoteSessionStoreServerShared, StorageClients,
-};
+use storage_rpc::LegSettings;
 
 /// How many expired sessions the sweeper purges per tick, unless the host says
 /// otherwise (the `sweep-batch` setting): what bounds one sweep pass.
@@ -49,7 +46,8 @@ const DEFAULT_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// would never reach the end.
 const DEFAULT_CACHE_READ_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap();
 /// How often expired sessions are swept, unless the host says otherwise (the
-/// `sweep-secs` setting). The host's to choose like the clock the sweep reads.
+/// `sweep-secs` setting): how soon after its deadline a session goes from a disk
+/// the host holds, and could keep a copy of anyway.
 const DEFAULT_SWEEP_SECS: u64 = 60;
 /// How many calls each service takes off a connection ahead of handling them,
 /// unless the host says otherwise (the `session-request-buffer` and
@@ -340,8 +338,9 @@ async fn main() {
     let cache = CacheBlobs::new(store, cache_bytes, cache_read);
     let svc = Arc::new(StorageSvc::new(sessions.clone(), cache.clone()));
 
-    // TTL sweeper — enforce per-session deadlines INSIDE the trust boundary (the
-    // host STATUS byte is gone). Clock is host-skewable → availability-only.
+    // TTL sweeper — per-session deadlines, enforced here on the clock `timesync`
+    // keeps (the host STATUS byte is gone). The deadlines themselves lie on the
+    // host's volume, so a host can move them: see `now_unix`.
     // The same tick brings the cache within its budget when that was lowered
     // since its blobs were written; a store keeps within it on its own.
     {
@@ -565,40 +564,26 @@ async fn serve_conn(
     })?;
 
     let (read, write) = tokio::io::split(tls);
-    let (conn, mut tx, _rx) = remoc::Connect::io::<_, _, StorageClients, StorageClients, Ciborium>(
-        storage_rpc::connection_cfg(&leg),
+
+    // The service is per connection so it can carry who is calling; the
+    // backends it delegates to stay shared, which is what keeps this one node
+    // rather than one node per peer. Bringing the leg up and sending api both
+    // clients are storage-rpc's (`serve_storage`), at this role's end.
+    storage_rpc::serve_storage::<AnyCaller, _, _, _>(
         read,
         write,
+        Caller::new(svc, measurement),
+        buffers.session,
+        buffers.cache,
+        &leg,
     )
     .await
     .map_err(|e| {
-        debug!("rpc connect: {e}");
-        LegFailure::Rpc
-    })?;
-    tokio::spawn(conn);
-
-    // The services are per-connection so they can carry who is calling; the
-    // backends they delegate to stay shared, which is what keeps this one node
-    // rather than one node per peer.
-    let caller = Arc::new(Caller::new(svc, measurement));
-    let (session_server, session) =
-        RemoteSessionStoreServerShared::<_, Ciborium>::new(caller.clone(), buffers.session);
-    let (cache_server, cache) = RemoteCacheServerShared::<_, Ciborium>::new(caller, buffers.cache);
-    tx.send(StorageClients { session, cache })
-        .await
-        .map_err(|e| {
-            debug!("send service client: {e}");
-            LegFailure::Clients
-        })?;
-
-    // Both services run for the lifetime of the connection; drive one on a task
-    // and await the other.
-    tokio::spawn(async move {
-        let _ = session_server.serve(true).await;
-    });
-    cache_server.serve(true).await.map_err(|e| {
-        debug!("serve: {e}");
-        LegFailure::Serve
-    })?;
-    Ok(())
+        debug!("storage leg: {e}");
+        match e {
+            storage_rpc::LegError::Rpc => LegFailure::Rpc,
+            storage_rpc::LegError::Clients | storage_rpc::LegError::Closed => LegFailure::Clients,
+            storage_rpc::LegError::Serve => LegFailure::Serve,
+        }
+    })
 }

@@ -74,7 +74,7 @@ pub(crate) fn outbound_round(
     event: Event,
 ) -> Result<Exposed<RunRequest, (), ExecutionWorker>, ExecError> {
     let props = RoundProps(props.map(str::as_bytes).unwrap_or_default().to_vec());
-    Ok(ExecutionWorker::expose_as::<RunRequest, _>((
+    Ok(ExecutionWorker::expose_builder::<RunRequest, _>((
         composition_key,
         max_cwasm_bytes,
         state,
@@ -99,7 +99,8 @@ pub(crate) fn outbound_round(
                 event,
             })
         },
-    )?)
+    )?
+    .build())
 }
 
 /// Mint a rehydrated blob as a released value — the ONE thing api hands back to

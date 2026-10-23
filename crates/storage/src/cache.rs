@@ -1,9 +1,9 @@
 //! The L2 compiled-artifact (cwasm) cache, backed by `object_store`. A blind
-//! opaque-blob KV keyed by the identity-hiding `blob_name` the api derives
-//! (`hex(HKDF(filename_key, cache_id))`), re-derived here against the calling
-//! peer's launch digest (the crate-private `scope` module) — the CVM sees only
-//! pseudo-random hex, never the composition. Sealed bytes ride the wire; a miss is `Ok(None)` (not
-//! an error) so the orchestrator recompiles. Kept on `object_store` (not redb) to
+//! opaque-blob KV keyed by the identity-hiding blob name api derives
+//! (`HKDF(filename_key, cache_id)`), re-derived here against the calling peer's
+//! launch digest into a [`Name`] (the crate-private `scope` module) — the CVM
+//! sees only pseudo-random bytes, never the composition. Sealed bytes ride the
+//! wire; a miss is `Ok(None)` (not an error) so the orchestrator recompiles. Kept on `object_store` (not redb) to
 //! keep multi-MiB cwasm blobs off the session B-tree behind a backend-agnostic
 //! blob interface (local filesystem today). The blobs are sealed under the
 //! writer's chip-bound `tee_seal_key`, so the cache is per-instance — a cold
@@ -22,6 +22,8 @@ use object_store::path::Path as ObjPath;
 use object_store::{GetResultPayload, ObjectStore, WriteMultipart};
 
 use storage_rpc::CacheError;
+
+use crate::scope::Name;
 
 fn internal(e: impl std::fmt::Display) -> CacheError {
     CacheError(e.to_string())
@@ -66,13 +68,12 @@ const MAX_KEY_LEN: usize = 128;
 const PIECE_BYTES: usize = 8 * 1024 * 1024;
 const PIECES_WRITING: usize = 2;
 
-/// Validate `key` is non-empty bounded hex and map it to an object path. The
+/// Validate `name` is non-empty bounded hex and map it to an object path. The
 /// alphabet excludes `/`, `.`, `\`, so the location cannot traverse out of the
-/// store prefix. Nothing on the served path can fail this any more — a key
-/// reaches this store only as a [`crate::scope::Name`], which is hex by
-/// construction — but the store is a plain type that will take any string, and
-/// this is the check that makes that safe.
-fn object_path(key: &str) -> Result<ObjPath, CacheError> {
+/// store prefix. A [`Name`] is hex by construction, so nothing reaching this
+/// fails it; it is the path-traversal guard all the same, where the path is made.
+fn object_path(name: &Name) -> Result<ObjPath, CacheError> {
+    let key = name.as_str();
     if key.is_empty() || key.len() > MAX_KEY_LEN {
         return Err(CacheError("cache key length".to_string()));
     }
@@ -153,12 +154,17 @@ impl CacheBlobs {
     /// Written aside and put in place only once `pieces` has ended: a blob whose
     /// pieces fail, or a store dropped part-way, leaves what was there, and what
     /// was written aside goes with it.
-    pub async fn store<S, E>(&self, key: &str, length: u64, mut pieces: S) -> Result<(), CacheError>
+    pub(crate) async fn store<S, E>(
+        &self,
+        name: &Name,
+        length: u64,
+        mut pieces: S,
+    ) -> Result<(), CacheError>
     where
         S: Stream<Item = Result<Bytes, E>> + Unpin,
         E: std::fmt::Display,
     {
-        let path = object_path(key)?;
+        let path = object_path(name)?;
         let _room = self.make_room(length).await?;
         let upload = self.store.put_multipart(&path).await.map_err(internal)?;
         let mut writer = WriteMultipart::new_with_chunk_size(upload, PIECE_BYTES);
@@ -182,14 +188,14 @@ impl CacheBlobs {
         Ok(())
     }
 
-    /// The blob for `key`, as its length and its pieces. `Ok(None)` = miss
+    /// The blob for `name`, as its length and its pieces. `Ok(None)` = miss
     /// (absent); `Err` only on a genuine store failure.
     #[allow(clippy::type_complexity)]
-    pub async fn load(
+    pub(crate) async fn load(
         &self,
-        key: &str,
+        name: &Name,
     ) -> Result<Option<(u64, BoxStream<'static, Result<Bytes, CacheError>>)>, CacheError> {
-        let path = object_path(key)?;
+        let path = object_path(name)?;
         match self.store.get(&path).await {
             Ok(res) => {
                 self.used().insert(path.to_string(), SystemTime::now());
@@ -205,9 +211,9 @@ impl CacheBlobs {
         }
     }
 
-    /// Drop the blob for `key`, if there is one.
-    pub async fn remove(&self, key: &str) -> Result<(), CacheError> {
-        let path = object_path(key)?;
+    /// Drop the blob for `name`, if there is one.
+    pub(crate) async fn remove(&self, name: &Name) -> Result<(), CacheError> {
+        let path = object_path(name)?;
         match self.store.delete(&path).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
             Err(e) => return Err(internal(e)),
@@ -249,10 +255,11 @@ impl CacheBlobs {
     /// least recently — loaded, or else written. Returns how many it dropped.
     ///
     /// The cache shares its volume with the session store and nothing else
-    /// ever removes a blob, so without this it grows until session writes
-    /// fail. A blob dropped while still wanted costs a miss and a recompile;
-    /// the clock it is judged by is the host's, so skewing it can only make
-    /// that happen sooner.
+    /// bounds what it holds, so without this it grows until session writes
+    /// fail. A blob dropped while still wanted costs a miss and a recompile.
+    /// When a blob was last loaded is this process's own clock; when it was
+    /// written is a file time on a volume the host can rewrite, which can only
+    /// make a blob go sooner — as deleting it would.
     async fn drop_until(&self, within: u64) -> Result<usize, CacheError> {
         let listed = self
             .store
@@ -321,7 +328,12 @@ mod tests {
         CacheBlobs::new(Arc::new(InMemory::new()), budget, READ_PIECE)
     }
 
-    async fn put(cache: &CacheBlobs, key: &str, bytes: &[u8]) {
+    /// The name one test caller's blob `tag` is kept under.
+    fn k(tag: u8) -> Name {
+        crate::scope::Scope::new("aa".repeat(48)).blob(&storage_rpc::BlobName([tag; 32]))
+    }
+
+    async fn put(cache: &CacheBlobs, key: &Name, bytes: &[u8]) {
         cache
             .store(key, bytes.len() as u64, pieces(bytes, 1000))
             .await
@@ -329,7 +341,7 @@ mod tests {
     }
 
     /// The blob under `key`, read whole, checked against the length it came with.
-    async fn get(cache: &CacheBlobs, key: &str) -> Option<Vec<u8>> {
+    async fn get(cache: &CacheBlobs, key: &Name) -> Option<Vec<u8>> {
         let (len, pieces) = cache.load(key).await.unwrap()?;
         let bytes: Vec<u8> = pieces
             .try_fold(Vec::new(), |mut all, p| async move {
@@ -345,7 +357,7 @@ mod tests {
     #[tokio::test]
     async fn store_load_roundtrip_and_miss() {
         let cache = cache(ROOMY);
-        let key = "deadbeef".repeat(8); // 64 hex chars
+        let key = k(1);
         assert_eq!(get(&cache, &key).await, None);
         let blob: Vec<u8> = (0..20 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         cache
@@ -362,7 +374,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap();
         let cache = CacheBlobs::new(Arc::new(store), ROOMY, READ_PIECE);
-        let key = "ef".repeat(32);
+        let key = k(2);
         let blob: Vec<u8> = (0..READ_PIECE.get() * 2 + 12_345)
             .map(|i| (i % 253) as u8)
             .collect();
@@ -374,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn a_store_that_fails_part_way_leaves_what_was_there() {
         let cache = cache(ROOMY);
-        let key = "ab".repeat(32);
+        let key = k(3);
         put(&cache, &key, b"old").await;
         let failing = futures::stream::iter(vec![
             Ok(Bytes::from_static(b"ne")),
@@ -392,7 +404,7 @@ mod tests {
     #[tokio::test]
     async fn a_removed_blob_is_a_miss() {
         let cache = cache(ROOMY);
-        let key = "cd".repeat(32);
+        let key = k(4);
         put(&cache, &key, b"x").await;
         cache.remove(&key).await.unwrap();
         assert_eq!(get(&cache, &key).await, None);
@@ -408,10 +420,7 @@ mod tests {
     #[tokio::test]
     async fn a_store_makes_room_dropping_the_least_recently_used_first() {
         let cache = cache(300);
-        let keys: Vec<String> = ["aa", "bb", "cc", "dd"]
-            .iter()
-            .map(|k| k.repeat(32))
-            .collect();
+        let keys: Vec<Name> = (1..=4).map(k).collect();
         for key in &keys[..3] {
             put(&cache, key, &[0u8; 100]).await;
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -430,15 +439,10 @@ mod tests {
     #[tokio::test]
     async fn a_blob_longer_than_the_cache_is_refused_and_drops_nothing() {
         let cache = cache(100);
-        let kept = "ab".repeat(32);
+        let kept = k(1);
         put(&cache, &kept, &[0u8; 100]).await;
         let long = [0u8; 101];
-        assert!(
-            cache
-                .store(&"cd".repeat(32), 101, pieces(&long, 1000))
-                .await
-                .is_err()
-        );
+        assert!(cache.store(&k(2), 101, pieces(&long, 1000)).await.is_err());
         assert!(get(&cache, &kept).await.is_some());
     }
 
@@ -450,7 +454,7 @@ mod tests {
         let (tx, rx) = futures::channel::mpsc::unbounded::<Result<Bytes, CacheError>>();
         let writing = tokio::spawn({
             let cache = cache.clone();
-            async move { cache.store(&"aa".repeat(32), 150, rx).await }
+            async move { cache.store(&k(1), 150, rx).await }
         });
         while cache.writing.load(Ordering::Relaxed) != 150 {
             tokio::task::yield_now().await;
@@ -458,7 +462,7 @@ mod tests {
         let beside = [0u8; 100];
         assert!(
             cache
-                .store(&"bb".repeat(32), 100, pieces(&beside, 1000))
+                .store(&k(2), 100, pieces(&beside, 1000))
                 .await
                 .is_err(),
             "100 bytes do not fit beside 150 being written in 200"
@@ -468,7 +472,7 @@ mod tests {
         drop(tx);
         writing.await.unwrap().unwrap();
         assert_eq!(cache.writing.load(Ordering::Relaxed), 0);
-        put(&cache, &"cc".repeat(32), &[0u8; 50]).await;
+        put(&cache, &k(3), &[0u8; 50]).await;
     }
 
     /// A budget lowered since the blobs were written is reached by the sweep.
@@ -476,8 +480,8 @@ mod tests {
     async fn the_sweep_brings_the_cache_within_a_lowered_budget() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let before = CacheBlobs::new(store.clone(), 300, READ_PIECE);
-        for key in ["aa", "bb", "cc"] {
-            put(&before, &key.repeat(32), &[0u8; 100]).await;
+        for tag in 1..=3 {
+            put(&before, &k(tag), &[0u8; 100]).await;
         }
         let after = CacheBlobs::new(store, 200, READ_PIECE);
         assert_eq!(after.evict().await.unwrap(), 1);
@@ -487,17 +491,9 @@ mod tests {
     #[tokio::test]
     async fn a_cache_within_budget_is_left_alone() {
         let cache = cache(100);
-        let key = "ab".repeat(32);
+        let key = k(1);
         put(&cache, &key, &[0u8; 100]).await;
         assert_eq!(cache.evict().await.unwrap(), 0);
         assert!(get(&cache, &key).await.is_some());
-    }
-
-    #[tokio::test]
-    async fn rejects_non_hex_key() {
-        let cache = cache(ROOMY);
-        assert!(cache.load("../etc/passwd").await.is_err());
-        assert!(cache.store("a/b", 1, pieces(b"x", 1)).await.is_err());
-        assert!(cache.remove("a/b").await.is_err());
     }
 }

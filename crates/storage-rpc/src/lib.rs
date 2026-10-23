@@ -1,18 +1,26 @@
 //! `storage-rpc` — the storage-tier RPC contract: remote trait calls (remoc
-//! `rtc`) between the orchestrator (api) and the trusted **storage-CVM**, over an
-//! RA-TLS tunnel. Two services live behind one connection because they share the
-//! same *trust* tier (both blind ciphertext KV, one orchestrator) even though
-//! their load profiles diverge:
+//! `rtc`) between the orchestrator (api) and the **storage-CVM**, over an RA-TLS
+//! tunnel. Two services live behind one connection because they share the same
+//! *trust* tier (both blind ciphertext KV, one orchestrator) even though their
+//! load profiles diverge:
 //!
-//!   * [`RemoteSessionStore`] — per-session state / media / disclosures, backed
-//!     by one SQLite file per record (write-heavy, CAS, TTL).
-//!   * [`RemoteCache`] — the L2 compiled-artifact (cwasm) cache, backed by
+//!   * the session store — per-session state / media / disclosures, backed by
+//!     one SQLite file per record (write-heavy, CAS, TTL);
+//!   * the cache — the L2 compiled-artifact (cwasm) cache, backed by
 //!     `object_store` (write-once, read-mostly).
 //!
-//! The storage-CVM is a **blind ciphertext KV**: every payload is already
-//! AEAD-sealed under `tee_seal_key` TEE-side (in storage-client's `SessionStore`
-//! / `CacheStore`), so the CVM never holds a key or plaintext PII. RA-TLS is the
-//! second layer that hides the access pattern + key from the untrusted host.
+//! The storage-CVM is a **blind ciphertext KV**, and api takes it for the
+//! volume it keeps everything on: every payload is already sealed TEE-side (in
+//! storage-client's `SessionStore` / `CacheStore`), and every name is one api
+//! derived under a key only api holds — a [`RecordName`], a [`MediaName`], a
+//! [`BlobName`] — so the CVM never holds a key, a plaintext or a session id.
+//!
+//! One leg — [`StorageLeg`] at api's end, [`serve_storage`] at the storage-CVM's.
+//! Each end declares how it judges what crosses it: api's in `storage_client`,
+//! beside the seals; the storage-CVM's in `enclavid_storage`. A read, a write
+//! and a stored blob reach api's doors as their answered parts — [`Fields`],
+//! [`Ops`] of each kind, [`Expected`], a [`BlobStream`] — and cross as what the
+//! doors build of them.
 //!
 //! A SEPARATE crate from `engine-rpc` on purpose: the storage-CVM is a distinct
 //! fleet role with its own measured image; it must not link the engine
@@ -22,7 +30,6 @@ mod session;
 
 use std::time::Duration;
 
-use remoc::codec::Ciborium;
 use serde::{Deserialize, Serialize};
 
 use fleet_stream::{StreamLen, bin};
@@ -30,6 +37,11 @@ use fleet_stream::{StreamLen, bin};
 pub use session::{
     BlobField, BlobWrite, FieldSelector, ListAppend, ListField, ListSlot, MediaWrite, Op,
     ReadRequest, ReadResponse, ScalarSlot, Slot, WriteRequest, WriteResponse,
+};
+
+mod ops;
+pub use ops::{
+    BlobStream, DisclosureOp, Expected, Fields, MediaOp, MetadataOp, Ops, ResetOp, StateOp,
 };
 
 /// The longest blob the cache takes or gives, in bytes: 2 GiB.
@@ -49,6 +61,31 @@ pub const CACHE_STREAM_IDLE: Duration = Duration::from_secs(20);
 /// 17 MiB/s, far below what the leg runs at.
 pub const CACHE_STREAM_DEADLINE: Duration = Duration::from_secs(120);
 
+/// The name a session's record is kept under: derived in api from the session
+/// id, under a key only api holds. The store files the record under a digest
+/// of this and of its caller's measurement; neither the store nor its volume
+/// ever holds the session id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RecordName(#[serde(with = "serde_bytes")] pub [u8; 32]);
+
+/// The name a record keeps one media blob under: derived in api from the
+/// session and what the blob is a capture of, under a key only api holds, so
+/// it differs for the same capture in two sessions and never is the capture's
+/// own hash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MediaName(#[serde(with = "serde_bytes")] pub [u8; 32]);
+
+/// The name a cache blob is kept under: derived in api from what the blob is a
+/// compile of, under a key only api holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BlobName(#[serde(with = "serde_bytes")] pub [u8; 32]);
+
+/// A record's version as the store read it back or bumped it: 0 for a record
+/// that does not exist. It crosses as a field of [`ReadResponse`] and
+/// [`WriteResponse`]; api's end of the leg is handed it as this type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Version(pub u64);
+
 /// A cache blob crossing the leg: its exact length in the call, its bytes on a
 /// `bin` channel beside it.
 ///
@@ -63,16 +100,29 @@ pub struct CacheBlob {
     pub body: bin::Receiver,
 }
 
+/// The store's answer that a blob is kept: the whole of it arrived, and it is in
+/// place of any before it.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Kept;
+
+/// The store's answer that no blob is kept under a name any more, whether or not
+/// one was.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Dropped;
+
 /// A session-store RPC failure. `VersionMismatch` is the CAS precondition (the
 /// session's stored version did not match `expected_version`, or a must-not-exist
 /// create found an existing session) — the api client maps it back to
 /// `StoreError::VersionMismatch`.
 /// `Internal` is an opaque store / transport failure. This is the SESSION error:
 /// the L2 cache has no CAS, so `VersionMismatch` lives only here.
+/// `TooLarge` is a write the calling end's door refused before sending it,
+/// because it would not fit the one call it crosses in; the store never saw it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionError {
     VersionMismatch,
     Internal(String),
+    TooLarge,
 }
 
 impl std::fmt::Display for SessionError {
@@ -80,6 +130,7 @@ impl std::fmt::Display for SessionError {
         match self {
             SessionError::VersionMismatch => write!(f, "version mismatch"),
             SessionError::Internal(m) => write!(f, "session store internal: {m}"),
+            SessionError::TooLarge => write!(f, "a write past what the storage leg carries"),
         }
     }
 }
@@ -108,68 +159,22 @@ impl From<remoc::rtc::CallError> for CacheError {
     }
 }
 
-/// Per-session state / media / disclosures. Method payloads are the
-/// [`session`] DTOs. `deadline_unix_secs` on
-/// [`write`](RemoteSessionStore::write) threads the sliding TTL INSIDE the
-/// RA-TLS channel (the plaintext host STATUS byte is gone) — the CVM commits it
-/// atomically with the version bump and its sweeper enforces it.
-#[remoc::rtc::remote]
-pub trait RemoteSessionStore {
-    /// Batched typed read. Empty `req.fields` is a version probe. `version == 0`
-    /// in the response means the session does not exist.
-    async fn read(&self, id: String, req: ReadRequest) -> Result<ReadResponse, SessionError>;
+// The contracts, and the clients and servers remoc writes from them, are NOT
+// exported: no crate outside this one can name a generated client, let alone
+// call it, and none can serve a raw contract. Both ends reach the leg through
+// `leg`, each at the end its role declares: `*Serves` is what a serving end
+// declares, and `*At` a contract as its server sees it there; `*Calls`, read
+// off the doors, is what a calling end declares.
+mod contract;
+pub use contract::{
+    RemoteCacheAt, RemoteCacheServes, RemoteSessionStoreAt, RemoteSessionStoreServes,
+};
 
-    /// Atomic CAS write. `req.expected_version`: `None` = must-not-exist
-    /// (create), `Some(v)` = current version must equal `v`; otherwise
-    /// [`SessionError::VersionMismatch`]. `deadline_unix_secs` refreshes the
-    /// session's TTL deadline in the same transaction. A `/reset` is a write
-    /// too (`Op::Reset`), so it is version-checked like any other.
-    async fn write(
-        &self,
-        id: String,
-        req: WriteRequest,
-        deadline_unix_secs: Option<u64>,
-    ) -> Result<WriteResponse, SessionError>;
+mod leg;
+pub use leg::{
+    LegError, RemoteCacheCalls, RemoteSessionStoreCalls, StorageLeg, connect_storage, serve_storage,
+};
 
-    /// Existence probe (version present).
-    async fn exists(&self, id: String) -> Result<bool, SessionError>;
-}
-
-/// L2 compiled-artifact (cwasm) cache — a blind opaque-blob KV keyed by the
-/// identity-hiding `blob_name` the api derives (`hex(HKDF(filename_key,
-/// cache_id))`), which the CVM re-derives under the calling peer's own scope
-/// before it touches a blob. It never sees the composition, only pseudo-random
-/// hex.
-///
-/// Sealed bytes ride the wire, each blob streamed beside its call as a
-/// [`CacheBlob`], so no call carries one and no blob is held whole on either
-/// end. A miss is `Ok(None)` (not an error) so the orchestrator recompiles.
-#[remoc::rtc::remote]
-pub trait RemoteCache {
-    /// Keep the blob streaming beside the call under `key`, in place of any
-    /// before it. It is in place only once all of it has arrived: a stream that
-    /// fails leaves what was there.
-    async fn store(&self, key: String, blob: CacheBlob) -> Result<(), CacheError>;
-
-    /// The blob under `key`, streaming beside the reply, or `None`.
-    async fn load(&self, key: String) -> Result<Option<CacheBlob>, CacheError>;
-
-    /// Drop the blob under `key`, if there is one.
-    async fn remove(&self, key: String) -> Result<(), CacheError>;
-}
-
-/// The base-channel handshake value: on connect the storage-CVM sends the
-/// orchestrator BOTH service clients over the one remoc connection, so a single
-/// RA-TLS dial reaches both stores. remoc RTC clients are `RemoteSend`
-/// (transported as chmux port references), so a struct of two derives cleanly —
-/// the same mechanism that lets the execute boundary pass a callback client as a
-/// method argument.
-#[derive(Serialize, Deserialize)]
-pub struct StorageClients {
-    pub session: RemoteSessionStoreClient<Ciborium>,
-    pub cache: RemoteCacheClient<Ciborium>,
-}
-
-/// The remoc connection config both storage peers build from, and what a role
-/// sets of it — the one every fleet leg is brought up with (see `fleet_stream`).
-pub use fleet_stream::{LegSettings, connection_cfg};
+/// What a role sets of its end of the leg — the same as of every fleet leg (see
+/// `fleet_stream`).
+pub use fleet_stream::LegSettings;

@@ -28,6 +28,8 @@
 
 use sha2::{Digest, Sha256};
 
+use storage_rpc::{BlobName, RecordName};
+
 /// Session records. Domain-separated from [`BLOB`] so one caller's two stores
 /// cannot be made to collide by a chosen key, independently of the fact that
 /// they are different backends today.
@@ -48,10 +50,9 @@ pub(crate) struct Scope {
 /// What the type guarantees is that a name cannot be FORGED: the field is
 /// private to this module, so the only way to hold one is to have derived it,
 /// and every `Name` in existence therefore belongs to some caller's partition.
-/// It does not guarantee that call sites use one — the tiers below take `&str`,
-/// because they are a KV over opaque strings and coupling them to this would
-/// buy nothing. That every served call derives first is enforced one level up,
-/// by [`crate::Caller`] being the only implementor of the RPC traits.
+/// The stores take nothing else — [`crate::SessionStore`] and
+/// [`crate::CacheBlobs`] address a record or a blob only by a `Name` — so what
+/// reaches the volume is a name this module made, never one a caller sent.
 pub(crate) struct Name(String);
 
 impl Name {
@@ -65,28 +66,29 @@ impl Scope {
         Scope { measurement }
     }
 
-    /// The name a session's record is stored under, for the wire `session_id`.
-    pub(crate) fn session(&self, id: &str) -> Name {
-        self.derive(SESSION, id)
+    /// The name a session's record is stored under, for the record name a call
+    /// gave.
+    pub(crate) fn session(&self, record: &RecordName) -> Name {
+        self.derive(SESSION, &record.0)
     }
 
-    /// The name an L2 cache blob is stored under, for the wire cache key.
-    pub(crate) fn blob(&self, key: &str) -> Name {
-        self.derive(BLOB, key)
+    /// The name an L2 cache blob is stored under, for the blob name a call gave.
+    pub(crate) fn blob(&self, blob: &BlobName) -> Name {
+        self.derive(BLOB, &blob.0)
     }
 
     /// Length-prefixed rather than concatenated. Digests are fixed-width today,
     /// so two callers whose bytes differ only in where the boundary falls cannot
     /// occur — but that is a property of the current attestation backend, not of
     /// this function, and the prefix is what keeps it from being one.
-    fn derive(&self, domain: &str, key: &str) -> Name {
+    fn derive(&self, domain: &str, key: &[u8]) -> Name {
         let mut h = Sha256::new();
         h.update((domain.len() as u64).to_le_bytes());
         h.update(domain.as_bytes());
         h.update((self.measurement.len() as u64).to_le_bytes());
         h.update(self.measurement.as_bytes());
         // Last, so it needs no length of its own.
-        h.update(key.as_bytes());
+        h.update(key);
         Name(hex::encode(h.finalize()))
     }
 }
@@ -95,12 +97,17 @@ impl Scope {
 mod tests {
     use super::*;
 
+    const RECORD: RecordName = RecordName([7; 32]);
+
     #[test]
     fn same_key_under_different_callers_is_a_different_name() {
         let a = Scope::new("aa".repeat(48));
         let b = Scope::new("bb".repeat(48));
-        assert_ne!(a.session("s").as_str(), b.session("s").as_str());
-        assert_ne!(a.blob("k").as_str(), b.blob("k").as_str());
+        assert_ne!(a.session(&RECORD).as_str(), b.session(&RECORD).as_str());
+        assert_ne!(
+            a.blob(&BlobName([7; 32])).as_str(),
+            b.blob(&BlobName([7; 32])).as_str()
+        );
     }
 
     #[test]
@@ -108,36 +115,36 @@ mod tests {
         // Two Scopes, one digest: a reconnecting api must find what it wrote.
         let first = Scope::new("aa".repeat(48));
         let again = Scope::new("aa".repeat(48));
-        assert_eq!(first.session("s").as_str(), again.session("s").as_str());
+        assert_eq!(
+            first.session(&RECORD).as_str(),
+            again.session(&RECORD).as_str()
+        );
     }
 
     #[test]
     fn the_two_stores_do_not_share_a_name() {
         let s = Scope::new("aa".repeat(48));
-        assert_ne!(s.session("x").as_str(), s.blob("x").as_str());
+        assert_ne!(
+            s.session(&RECORD).as_str(),
+            s.blob(&BlobName(RECORD.0)).as_str()
+        );
     }
 
     #[test]
-    fn a_name_is_always_a_safe_filename() {
+    fn a_name_is_always_a_safe_filename_and_never_the_name_sent() {
         // The tiers below turn a name into a path; nothing a caller sends can
-        // make one that is not 64 lowercase hex characters.
+        // make one that is not 64 lowercase hex characters, nor one that is the
+        // name it sent.
         let s = Scope::new("aa".repeat(48));
-        for key in ["", "../../etc/passwd", "a/b", &"x".repeat(10_000)] {
-            let n = s.session(key);
+        for record in [RecordName([0; 32]), RecordName([0xff; 32]), RECORD] {
+            let n = s.session(&record);
             assert_eq!(n.as_str().len(), 64);
             assert!(
                 n.as_str()
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             );
+            assert_ne!(n.as_str(), hex::encode(record.0));
         }
-    }
-
-    #[test]
-    fn the_boundary_between_digest_and_key_cannot_be_moved() {
-        // Without the length prefix these two would hash the same bytes.
-        let a = Scope::new("aabb".to_string());
-        let b = Scope::new("aa".to_string());
-        assert_ne!(a.session("cc").as_str(), b.session("bbcc").as_str());
     }
 }

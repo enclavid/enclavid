@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use enclavid_boundary::{AuthN, Covert, Exposed, Untrusted};
+use enclavid_boundary::{AuthN, Covert, Exposed, ExposedBuilder, Untrusted};
 use engine_executor::{Event, SessionState};
 use engine_rpc::{
     BundleMeta, BundleRef, BundleStream, ByteBuf, Callbacks, CompatToken, CompositionKey,
@@ -468,12 +468,14 @@ fn open_bundle(bundle: Untrusted<BundleStream, (AuthN,), AnyCaller>) -> BundleSt
 /// the policy here would attribute a case this side reaches only when the earlier
 /// check did not, which is a case it cannot explain.
 fn outbound_ran(status: &RunStatus) -> Result<Exposed<RunOutcome, (), AnyCaller>, ExecError> {
-    AnyCaller::expose_as::<RunOutcome, _>(status).vouch_with(Covert::Transformed, |s| {
-        Padded::seal(s).map(RunOutcome::Ran).map_err(|e| {
-            debug!("framing the round's status: {e}");
-            ExecError::Unknown
+    AnyCaller::expose_builder::<RunOutcome, _>(status)
+        .vouch_with(Covert::Transformed, |s| {
+            Padded::seal(s).map(RunOutcome::Ran).map_err(|e| {
+                debug!("framing the round's status: {e}");
+                ExecError::Unknown
+            })
         })
-    })
+        .map(ExposedBuilder::build)
 }
 
 /// Mint a cache miss. `Covert` is BOUNDED rather than transformed: the reply is a
@@ -491,14 +493,16 @@ fn outbound_cache_miss(compat_token: CompatToken) -> Exposed<RunOutcome, (), Any
 /// Mint the post-miss reply. Same frame, same reasons as [`outbound_ran`] — a
 /// different envelope around the identical value, because this call always runs.
 fn outbound_reply(status: &RunStatus) -> Result<Exposed<RunReply, (), AnyCaller>, ExecError> {
-    AnyCaller::expose_as::<RunReply, _>(status).vouch_with(Covert::Transformed, |s| {
-        Padded::seal(s)
-            .map(|status| RunReply { status })
-            .map_err(|e| {
-                debug!("framing the round's status: {e}");
-                ExecError::Unknown
-            })
-    })
+    AnyCaller::expose_builder::<RunReply, _>(status)
+        .vouch_with(Covert::Transformed, |s| {
+            Padded::seal(s)
+                .map(|status| RunReply { status })
+                .map_err(|e| {
+                    debug!("framing the round's status: {e}");
+                    ExecError::Unknown
+                })
+        })
+        .map(ExposedBuilder::build)
 }
 
 /// Mint what a preparation read as a released, constant-size frame. `Covert` is
@@ -508,12 +512,14 @@ fn outbound_reply(status: &RunStatus) -> Result<Exposed<RunReply, (), AnyCaller>
 fn outbound_prepared(
     read: &PropsRead,
 ) -> Result<Exposed<PrepareOutcome, (), AnyCaller>, ExecError> {
-    AnyCaller::expose_as::<PrepareOutcome, _>(read).vouch_with(Covert::Transformed, |r| {
-        Padded::seal(r).map(PrepareOutcome::Prepared).map_err(|e| {
-            debug!("framing what the preparation read: {e}");
-            ExecError::Unknown
+    AnyCaller::expose_builder::<PrepareOutcome, _>(read)
+        .vouch_with(Covert::Transformed, |r| {
+            Padded::seal(r).map(PrepareOutcome::Prepared).map_err(|e| {
+                debug!("framing what the preparation read: {e}");
+                ExecError::Unknown
+            })
         })
-    })
+        .map(ExposedBuilder::build)
 }
 
 /// Mint a preparation's cache miss, BOUNDED as [`outbound_cache_miss`] is.
@@ -530,14 +536,16 @@ fn outbound_prepare_miss(compat_token: CompatToken) -> Exposed<PrepareOutcome, (
 fn outbound_prepare_reply(
     read: &PropsRead,
 ) -> Result<Exposed<PrepareReply, (), AnyCaller>, ExecError> {
-    AnyCaller::expose_as::<PrepareReply, _>(read).vouch_with(Covert::Transformed, |r| {
-        Padded::seal(r)
-            .map(|props| PrepareReply { props })
-            .map_err(|e| {
-                debug!("framing what the preparation read: {e}");
-                ExecError::Unknown
-            })
-    })
+    AnyCaller::expose_builder::<PrepareReply, _>(read)
+        .vouch_with(Covert::Transformed, |r| {
+            Padded::seal(r)
+                .map(|props| PrepareReply { props })
+                .map_err(|e| {
+                    debug!("framing what the preparation read: {e}");
+                    ExecError::Unknown
+                })
+        })
+        .map(ExposedBuilder::build)
 }
 
 /// The contract as this role serves it, at its end of the leg ([`AnyCaller`]):

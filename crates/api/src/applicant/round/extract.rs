@@ -10,10 +10,10 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use secrecy::ExposeSecret;
 
-use enclavid_boundary::{AuthN, AuthZ, Replay, reason};
+use enclavid_boundary::{AuthZ, Replay, reason};
 use engine_rpc::CompositionKey;
 use session_types::{SessionMetadata, SessionStatus};
-use storage_client::{Metadata, State as StateField};
+use storage_client::{Metadata, SealedState};
 
 use crate::applicant::auth::CallerKey;
 use crate::applicant::media_store::HatchMediaStore;
@@ -98,29 +98,15 @@ impl SessionRunCtx {
         // persister then matches the metadata it also writes back. Not a
         // security property (the CAS is host-enforced); a consistency + latency
         // win.
-        let ((metadata_untrusted, state_opt), version) = state
+        let ((metadata_untrusted, sealed_state), version) = state
             .session_store
-            .read(
-                &session_id,
-                (
-                    Metadata,
-                    StateField {
-                        applicant_session_token: applicant_session_token.expose_secret(),
-                    },
-                ),
-            )
+            .read(&session_id, (Metadata, SealedState))
             .await
             .map_err(|e| {
-                // A state blob that won't open under this bearer is a wrong key /
-                // different-device claim (the inner AEAD layer is keyed by the
-                // applicant token) — the durable, cryptographic first-claim guard.
-                // Surface it as 403 so the frontend offers `/reset`; everything
-                // else (transport, codec) is a real 500. A Crypto error is also
-                // what a host gets by altering the metadata or the state's outer
-                // layer, both sealed under tee_seal_key: it then reads as the
-                // wrong device, which costs the session no more than the host
-                // deleting the state would. An ABSENT state is `Ok(None)`, not an
-                // error, so a first `/connect` still proceeds.
+                // Metadata that won't open is what a host gets by altering it:
+                // it reads as the wrong device, which costs the session no more
+                // than the host deleting the record would. Everything else
+                // (transport, codec) is a real 500.
                 if matches!(e, storage_client::StoreError::Crypto(_)) {
                     return StatusCode::FORBIDDEN;
                 }
@@ -167,39 +153,55 @@ the host, as `client::disclosures` says of the same rollback.
                 StatusCode::NOT_FOUND
             })?;
 
-        let session_state = state_opt
-            .trust(reason!(
-                Replay::Fresh,
+        // The state, opened beside the metadata it is bound to. A state that
+        // won't open is refused as 403, so the frontend offers `/reset`:
+        //   * under this bearer — a wrong key / different-device claim, since the
+        //     inner AEAD layer is keyed by the applicant token: the durable,
+        //     cryptographic first-claim guard;
+        //   * beside this metadata — one the host put back from before a reset,
+        //     or from before a newer disclosure or capture;
+        //   * missing beside metadata that records an applicant's data — one the
+        //     host removed.
+        // Everything else is a real 500. A state missing beside metadata that
+        // records nothing of an applicant is `Ok(None)`: the session is
+        // unclaimed, and a first `/connect` proceeds.
+        let session_state = state
+            .session_store
+            .open_state(
+                &session_id,
+                sealed_state,
+                &metadata,
+                applicant_session_token.expose_secret(),
+            )
+            .map_err(|e| {
+                if matches!(e, storage_client::StoreError::Crypto(_)) {
+                    return StatusCode::FORBIDDEN;
+                }
+                safe_logger::debug!(
+                    "session_run_ctx: opening the state failed for {session_id}: {e}",
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .trust_accept_risk(reason!(
+                Replay::AcceptedRisk,
                 r#"
-Stale state is bounded by per-call version-CAS during the run.
-The first write on a stale snapshot fails with VersionMismatch
-and the run aborts cleanly — replay from the latest persisted
-state on retry.
+A state is bound to what the metadata beside it records of the applicant, so
+one from before a reset, or from before a newer disclosure or capture, does
+not open: no one carries on beside another person's data. What still opens is
+a state of this same applicant from since its last disclosure or capture. Its
+round replays prompts the applicant already answered, a retry that can change
+what was typed but loses or doubles nothing it captured or disclosed. A
+whole-record rollback opens too, as the metadata above says.
             "#
             ))
             .into_inner();
 
         let version = version
             .trust(reason!(
-                AuthN::Indifferent,
-                r#"
-Version is a CAS token only. A lying host either fails our
-writes (DoS) or stomps a concurrent winner (UX regression). No
-data leak path.
-            "#
-            ))
-            .trust(reason!(
-                AuthZ::NoPrincipal,
-                r#"
-Version counter is not an ownership signal — fed back as
-expected_version on the next write, no access decision hangs on it.
-            "#
-            ))
-            .trust(reason!(
                 Replay::Fresh,
                 r#"
-Staleness on the version manifests as CAS mismatch on first
-persist; same containment as above.
+Fed back as the expected version of this round's first write, where a stale
+one is refused: the CAS is its freshness check.
             "#
             ))
             .into_inner();

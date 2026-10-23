@@ -73,9 +73,9 @@ session-types = { path = "../session-types", optional = true }
 # leaf and is in every image anyway (the logger links it), so the axis bought
 # nothing and cost a configuration in which a leg had no boundary.
 enclavid-boundary = { path = "../boundary", optional = true }
-# `#[protocol]` on the compile and execute contracts: what their two ends must
-# declare, and each contract as its server sees it at a declared end. Build-time
-# only.
+# `#[protocol]` on the compile and execute contracts — what a serving end must
+# declare, and each contract as its server sees it at a declared end — and
+# `#[calls]` on the doors, what a calling end must declare. Build-time only.
 enclavid-boundary-macros = { path = "../boundary-macros", optional = true }
 # The connection config every leg is brought up with, under either feature; and,
 # execute-side, how a bundle crosses beside a `run_with_bundle` call rather than

@@ -1,19 +1,20 @@
 //! `enclavid-storage` — the trusted storage-CVM's core. Serves the two
 //! `storage-rpc` services against local backends:
 //!
-//!   * [`RemoteSessionStore`] → one SQLite file per session ([`session`]),
+//!   * [`RemoteSessionStoreAt`] → one SQLite file per session ([`session`]),
 //!     write-heavy per-session state / media / disclosures with ACID CAS + a
 //!     marker-based TTL sweeper.
-//!   * [`RemoteCache`] → `object_store` ([`cache`]), the write-once/read-mostly
+//!   * [`RemoteCacheAt`] → `object_store` ([`cache`]), the write-once/read-mostly
 //!     L2 cwasm cache.
 //!
 //! Both share this one CVM (same *trust* tier — blind ciphertext KV, one
 //! orchestrator in practice) but stay distinct stores (their *load* profiles diverge), so a future
 //! split into two CVMs is a deploy step, not a rewrite. The store cores are plain
 //! structs so they unit-test without remoc; [`StorageSvc`] holds them and
-//! [`Caller`] — one per connection, carrying the peer's launch digest — adds the
-//! async remoc trait impls on top.
+//! [`Caller`] — one per connection, carrying the peer's launch digest — serves
+//! both contracts at this role's end of the leg, [`boundary::AnyCaller`].
 
+pub mod boundary;
 pub mod cache;
 mod scope;
 pub mod session;
@@ -23,21 +24,27 @@ mod integration_tests;
 
 use std::sync::Arc;
 
+use enclavid_boundary::{Exposed, Untrusted};
 use fleet_stream::{Incoming, StreamLen, bin};
+use safe_logger::debug;
 use storage_rpc::{
-    CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheError, ReadRequest, ReadResponse,
-    RemoteCache, RemoteSessionStore, SessionError, WriteRequest, WriteResponse,
+    BlobName, CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheError, Dropped, Kept,
+    ReadRequest, ReadResponse, RecordName, RemoteCacheAt, RemoteSessionStoreAt, SessionError,
+    WriteRequest, WriteResponse,
 };
 
 pub use cache::CacheBlobs;
 pub use session::{DEFAULT_BUSY_TIMEOUT, SessionStore};
 
+use boundary::AnyCaller;
 use scope::Scope;
 
-/// Current wall-clock unix seconds. The CVM's clock is host-controllable (no
-/// trusted time without a vTPM/roughtime upgrade), so a skewed clock only affects
-/// TTL *availability* — never confidentiality (data is ciphertext, `tee_seal_key`
-/// never enters the CVM). See the sweeper docs.
+/// Current wall-clock unix seconds. In the attested build the guest's clock is
+/// kept by `timesync`, and this role ends once the kernel stops vouching for it.
+/// What it is compared with is less safe: a session's deadline and a blob's file
+/// time lie on the volume the host provisions, and the host can rewrite them.
+/// That makes a record go sooner, or a session stay longer on a disk the host
+/// could keep a copy of anyway.
 pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -51,9 +58,8 @@ pub fn now_unix() -> u64 {
 ///
 /// It serves nobody by itself: the RPC services are implemented by [`Caller`],
 /// which is where a wire name becomes a record name. The backends underneath
-/// take a plain `&str` and will store whatever they are given; the crate-private
-/// `scope` module says which half of that is enforced by a type and which by
-/// there being one implementor.
+/// address a record or a blob only by a name the crate-private `scope` module
+/// derived, so what reaches the volume is never a name a caller sent.
 pub struct StorageSvc {
     sessions: Arc<SessionStore>,
     cache: CacheBlobs,
@@ -105,52 +111,90 @@ where
         .map_err(|e| SessionError::Internal(format!("session store task join: {e}")))?
 }
 
-impl RemoteSessionStore for Caller {
-    async fn read(&self, id: String, req: ReadRequest) -> Result<ReadResponse, SessionError> {
+/// A session-store failure as it leaves: the lost version race as it is, any
+/// other in one fixed text, what the store failed on kept for the debug log.
+fn session_failed(e: SessionError) -> SessionError {
+    match e {
+        SessionError::VersionMismatch => SessionError::VersionMismatch,
+        SessionError::TooLarge => SessionError::TooLarge,
+        SessionError::Internal(detail) => {
+            debug!("session store: {detail}");
+            SessionError::Internal("the session store failed".into())
+        }
+    }
+}
+
+/// A cache failure as it leaves: one fixed text, what the cache failed on kept
+/// for the debug log.
+fn cache_failed(e: CacheError) -> CacheError {
+    debug!("cache: {e}");
+    CacheError("the cache failed".into())
+}
+
+impl RemoteSessionStoreAt<AnyCaller> for Caller {
+    async fn read(
+        &self,
+        record: Untrusted<RecordName, (), AnyCaller>,
+        req: Untrusted<ReadRequest, (), AnyCaller>,
+    ) -> Result<Exposed<ReadResponse, (), AnyCaller>, SessionError> {
         let s = self.svc.sessions.clone();
-        let name = self.scope.session(&id);
-        blocking(move || s.read(name.as_str(), req)).await
+        let name = self.scope.session(&record.into_inner());
+        let req = req.into_inner();
+        blocking(move || s.read(&name, req))
+            .await
+            .map(AnyCaller::expose)
+            .map_err(session_failed)
     }
 
     async fn write(
         &self,
-        id: String,
-        req: WriteRequest,
-        deadline_unix_secs: Option<u64>,
-    ) -> Result<WriteResponse, SessionError> {
+        record: Untrusted<RecordName, (), AnyCaller>,
+        req: Untrusted<WriteRequest, (), AnyCaller>,
+    ) -> Result<Exposed<WriteResponse, (), AnyCaller>, SessionError> {
         let s = self.svc.sessions.clone();
-        let name = self.scope.session(&id);
-        blocking(move || s.write(name.as_str(), req, deadline_unix_secs)).await
-    }
-
-    async fn exists(&self, id: String) -> Result<bool, SessionError> {
-        let s = self.svc.sessions.clone();
-        let name = self.scope.session(&id);
-        blocking(move || s.exists(name.as_str())).await
+        let name = self.scope.session(&record.into_inner());
+        let req = req.into_inner();
+        blocking(move || s.write(&name, req))
+            .await
+            .map(AnyCaller::expose)
+            .map_err(session_failed)
     }
 }
 
-impl RemoteCache for Caller {
-    async fn store(&self, key: String, blob: CacheBlob) -> Result<(), CacheError> {
-        let name = self.scope.blob(&key);
-        let length = blob.length.get();
+impl RemoteCacheAt<AnyCaller> for Caller {
+    async fn store(
+        &self,
+        blob: Untrusted<BlobName, (), AnyCaller>,
+        body: Untrusted<CacheBlob, (), AnyCaller>,
+    ) -> Result<Exposed<Kept, (), AnyCaller>, CacheError> {
+        let name = self.scope.blob(&blob.into_inner());
+        let body = body.into_inner();
+        let length = body.length.get();
         // A stream that fails, at its deadline among other ways, is not kept:
         // what was written aside goes, and what was there stays. Held to the
         // length it came with, which is what its room in the cache was made for.
-        let pieces = Incoming::open(blob.body, length, CACHE_STREAM_IDLE)
+        let pieces = Incoming::open(body.body, length, CACHE_STREAM_IDLE)
             .await
-            .map_err(|e| CacheError(e.to_string()))?
+            .map_err(|e| cache_failed(CacheError(e.to_string())))?
             .into_pieces(CACHE_STREAM_DEADLINE, None);
-        self.svc.cache.store(name.as_str(), length, pieces).await
+        self.svc
+            .cache
+            .store(&name, length, pieces)
+            .await
+            .map_err(cache_failed)?;
+        Ok(AnyCaller::expose(Kept))
     }
 
-    async fn load(&self, key: String) -> Result<Option<CacheBlob>, CacheError> {
-        let name = self.scope.blob(&key);
-        let Some((size, pieces)) = self.svc.cache.load(name.as_str()).await? else {
-            return Ok(None);
+    async fn load(
+        &self,
+        blob: Untrusted<BlobName, (), AnyCaller>,
+    ) -> Result<Exposed<Option<CacheBlob>, (), AnyCaller>, CacheError> {
+        let name = self.scope.blob(&blob.into_inner());
+        let Some((size, pieces)) = self.svc.cache.load(&name).await.map_err(cache_failed)? else {
+            return Ok(AnyCaller::expose(None));
         };
         let length = StreamLen::new(size)
-            .ok_or_else(|| CacheError("a blob past what the leg carries".into()))?;
+            .ok_or_else(|| cache_failed(CacheError("a blob past what the leg carries".into())))?;
         let (tx, body) = bin::channel();
         // The reply carries the receiving end, so the bytes go after the reply
         // has: a task of their own, which ends with the stream, with a caller
@@ -160,11 +204,15 @@ impl RemoteCache for Caller {
                 tokio::time::timeout(CACHE_STREAM_DEADLINE, fleet_stream::send_from(tx, pieces))
                     .await;
         });
-        Ok(Some(CacheBlob { length, body }))
+        Ok(AnyCaller::expose(Some(CacheBlob { length, body })))
     }
 
-    async fn remove(&self, key: String) -> Result<(), CacheError> {
-        let name = self.scope.blob(&key);
-        self.svc.cache.remove(name.as_str()).await
+    async fn remove(
+        &self,
+        blob: Untrusted<BlobName, (), AnyCaller>,
+    ) -> Result<Exposed<Dropped, (), AnyCaller>, CacheError> {
+        let name = self.scope.blob(&blob.into_inner());
+        self.svc.cache.remove(&name).await.map_err(cache_failed)?;
+        Ok(AnyCaller::expose(Dropped))
     }
 }

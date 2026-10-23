@@ -4,11 +4,10 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{MethodRouter, delete};
 
-use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
+use enclavid_boundary::{AuthZ, Covert, Replay, reason};
 use session_types::SessionStatus;
-use storage_client::{
-    DropApplicantData, Metadata, SetMetadata, StoreError, WriteField, boundary, outbound_fields,
-};
+use storage_client::boundary::Storage;
+use storage_client::{DropApplicantData, Metadata, MetadataOp, SetMetadata, StoreError};
 
 use crate::state::AppState;
 
@@ -60,25 +59,19 @@ async fn reset(
             "anyone holding the session's link may drop what its applicant brought and \
              claim it anew — the one way back for an applicant who lost their key"
         ))
-        .trust(reason!(
-            Replay::Fresh,
-            "a stale copy is caught by the version this read returned: the write below \
-             names it, so a session that moved under us refuses the whole reset"
+        .trust_accept_risk(reason!(
+            Replay::AcceptedRisk,
+            "a session that moved under this read refuses the write below, which names \
+             the version read with it. But a whole record put back from before passes that \
+             check: a completed session reads as running, and this reset drops what its \
+             consumer may have read. It is the rollback a round's load accepts too, and \
+             closing it needs a freshness source outside the host"
         ))
         .into_inner();
 
     // The version this read returned, fed straight back as the write's CAS
-    // token below. Host-supplied, and there is no direction in which a wrong
-    // one grants anything: it can only make the write refuse.
+    // token below: it can only make the write refuse.
     let version = version
-        .trust(reason!(
-            AuthN::Indifferent,
-            "the host's own counter, and any value only makes the write refuse"
-        ))
-        .trust(reason!(
-            AuthZ::NoPrincipal,
-            "a CAS token, not an access decision"
-        ))
         .trust(reason!(
             Replay::Harmless,
             "a stale value can only make the write refuse"
@@ -108,20 +101,14 @@ async fn reset(
     // store — a trap in the worker rather than a clean refusal.
     metadata.captured_media.clear();
 
-    let set_metadata = SetMetadata(
-        boundary::outbound::to_untrusted(&metadata)
-            .vouch(reason!(
-                AuthZ::NoSecret,
-                "sealed under tee_seal_key, which only the attested CVM holds: the volume \
-                 receives ciphertext it cannot read"
-            ))
-            .vouch(reason!(
-                Covert::AlreadyHeld,
-                "sealed under tee_seal_key; this write SHRINKS the metadata to its \
-                 disclosure-free size, which tells the host a reset happened — something \
-                 it already watched arrive as this very request"
-            )),
-    );
+    let set_metadata = SetMetadata(Storage::expose_builder::<MetadataOp, _>(&metadata).vouch(
+        reason!(
+            Covert::AlreadyHeld,
+            "sealed under tee_seal_key; this write SHRINKS the metadata to its \
+             disclosure-free size, which tells the host a reset happened — something \
+             it already watched arrive as this very request"
+        ),
+    ));
 
     // The metadata and everything the applicant brought go in ONE write, under
     // the version the read above returned — which is what makes the status
@@ -129,16 +116,15 @@ async fn reset(
     // completing the session or not, has moved the version: this refuses
     // whole, and what the round committed stays. There is no moment at which
     // the metadata is reset and the data is not, or the other way round.
-    let fields: [&dyn WriteField; 2] = [&set_metadata, &DropApplicantData];
-    let fields = outbound_fields(&fields).vouch(reason!(
-        Covert::Bounded,
-        "a fixed pair, so the count says only that a reset happened"
-    ));
-    match state
+    let ops = state
         .session_store
-        .write(&session_id, Some(version), fields)
-        .await
-    {
+        .seal(&session_id, &[&set_metadata, &DropApplicantData])
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .vouch(reason!(
+            Covert::Bounded,
+            "a fixed pair, so the count says only that a reset happened"
+        ));
+    match state.session_store.write(Some(version), ops).await {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
         // The session moved since the read: a round committed, maybe the one
         // that completed it. Nothing was reset; asking again reads it afresh.

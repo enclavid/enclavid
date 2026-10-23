@@ -1,10 +1,8 @@
-//! The session store's payloads — what [`RemoteSessionStore`](crate::RemoteSessionStore)
-//! takes and gives:
+//! The session store's payloads — what the session store takes and gives:
 //!
 //! ```text
-//! read(id, ReadRequest)             -> ReadResponse
-//! write(id, WriteRequest, deadline) -> WriteResponse | SessionError::VersionMismatch
-//! exists(id)                        -> bool
+//! read(record, ReadRequest)   -> ReadResponse
+//! write(record, WriteRequest) -> WriteResponse | SessionError::VersionMismatch
 //! ```
 //!
 //! They are NOT the sealed domain types: `SessionMetadata` / `SessionState`
@@ -13,6 +11,8 @@
 //! inside these envelopes.
 
 use serde::{Deserialize, Serialize};
+
+use crate::MediaName;
 
 // Every byte field below is a CBOR byte string. ciborium writes a bare
 // `Vec<u8>` element by element — two bytes for every byte over 0x17 — so
@@ -55,15 +55,15 @@ pub enum ListField {
 }
 
 /// Selector for one field in a read. Picks scalar, list, or keyed-media
-/// shape. (Not `Copy` — the `Media` variant carries its blob-hash key.)
+/// shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FieldSelector {
     Blob(BlobField),
     List(ListField),
-    /// One media blob, keyed by its content hash (32-byte BLAKE3). Lives in
-    /// a per-session media table, separate from the scalar fields; reads
-    /// return a `Slot::Scalar` (absent → `None`).
-    Media(#[serde(with = "serde_bytes")] Vec<u8>),
+    /// One media blob, by the name its record keeps it under. Lives in a
+    /// per-session media table, separate from the scalar fields; reads return
+    /// a `Slot::Scalar` (absent → `None`).
+    Media(MediaName),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +116,11 @@ pub struct WriteRequest {
     /// session's current version == v (else `VersionMismatch`). `None`
     /// means "the session must not exist yet" (used by session creation).
     pub expected_version: Option<u64>,
+    /// The record's absolute deadline, in unix seconds, committed with a create
+    /// and never moved after: the store's sweeper drops the record once it
+    /// passes. `None` on every write but the create, and on a create that never
+    /// expires.
+    pub deadline_unix_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,9 +129,9 @@ pub enum Op {
     Blob(BlobWrite),
     /// Append to a list field.
     ListAppend(ListAppend),
-    /// Write one media blob under its content-hash key into the per-session
-    /// media table. Idempotent — the key IS the content, so a re-write is a
-    /// no-op-equivalent overwrite of identical bytes.
+    /// Write one media blob under its name into the per-session media table.
+    /// The name is a function of what the blob is a capture of, so a re-write
+    /// is an overwrite of the same capture.
     MediaWrite(MediaWrite),
     /// Drop the state, every media blob and every disclosure, keeping the
     /// session's metadata and version — the `/reset` path. In order with the
@@ -143,9 +148,8 @@ pub struct BlobWrite {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaWrite {
-    /// Content-hash key (32-byte BLAKE3 of the sealed blob's plaintext).
-    #[serde(with = "serde_bytes")]
-    pub blob_key: Vec<u8>,
+    /// The name the record keeps the blob under.
+    pub name: MediaName,
     /// Sealed blob bytes (double-AEAD ciphertext).
     #[serde(with = "serde_bytes")]
     pub value: Vec<u8>,
@@ -190,7 +194,7 @@ mod tests {
                     value: sealed(),
                 }),
                 Op::MediaWrite(MediaWrite {
-                    blob_key: vec![0xff; 32],
+                    name: MediaName([0xff; 32]),
                     value: sealed(),
                 }),
                 Op::ListAppend(ListAppend {
@@ -199,6 +203,7 @@ mod tests {
                 }),
             ],
             expected_version: Some(1),
+            deadline_unix_secs: None,
         };
         assert!(encode(&write).len() < 3 * sealed().len() + 256);
 

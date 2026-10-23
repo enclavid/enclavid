@@ -324,8 +324,9 @@ pub struct CompileReply {
 /// `&self` so the client is clonable and the server can run compiles in
 /// parallel (`RemoteCompilerServerShared`).
 ///
-/// `#[protocol]` writes what its ends declare (`RemoteCompilerCalls` /
-/// `RemoteCompilerServes`) and how its server receives (`RemoteCompilerAt`).
+/// `#[protocol]` writes what its serving end declares (`RemoteCompilerServes`)
+/// and how its server receives (`RemoteCompilerAt`); what the calling end
+/// declares is read off its door.
 #[enclavid_boundary_macros::protocol]
 #[remoc::rtc::remote]
 pub trait RemoteCompiler {

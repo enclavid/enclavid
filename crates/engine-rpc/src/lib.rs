@@ -70,14 +70,14 @@ mod compile;
 // `RemoteCompilerClient` nor its server half is re-exported, so no crate outside
 // this one can name the generated client for the api hop — let alone call it — and
 // none can serve the RAW contract either. Both ends reach the hop through `leg`,
-// each at the end its role declares: `RemoteCompilerCalls` / `RemoteCompilerServes`
-// are what an end declares, and `RemoteCompilerAt` the contract as its server sees
-// it there.
+// each at the end its role declares: `RemoteCompilerServes` is what a serving end
+// declares, and `RemoteCompilerAt` the contract as its server sees it there;
+// `RemoteCompilerCalls`, read off the door, is what a calling end declares.
 #[cfg(feature = "compile")]
 pub use compile::{
     Artifact, COMPILE_STREAM_DEADLINE, COMPILE_STREAM_IDLE, CompileError, CompileFault,
     CompileReply, CompileRequest, CompileSource, InterfaceName, MAX_COMPONENTS_BYTES, PluginLength,
-    RemoteCompilerAt, RemoteCompilerCalls, RemoteCompilerServes,
+    RemoteCompilerAt, RemoteCompilerServes,
 };
 
 // The two names a cache slot is addressed by, as types that carry their own
@@ -99,18 +99,18 @@ mod execute;
 // only `Callbacks` at its end to call them through. A wrapper a caller opts into
 // is a habit; a wrapper with no unwrapped alternative is a boundary.
 //
-// `*Calls` / `*Serves` are what an end of this hop declares, and `*Serve` the
-// contract as its server sees it at that end — all three written by
-// `#[protocol]` from the contract itself, so a method added to it reaches them
-// without anyone remembering to.
+// `*Serves` is what a serving end of this hop declares, and `*At` the contract
+// as its server sees it at that end — both written by `#[protocol]` from the
+// contract itself, so a method added to it reaches them without anyone
+// remembering to. `*Calls`, what a calling end declares, is read off the doors
+// it calls through (`leg`), each of which answers for one method.
 #[cfg(feature = "execute")]
 pub use execute::{
     ByteBuf, CallbackError, Committed, ExecError, MediaBytes, MediaHash, PrepareOutcome,
-    PrepareReply, PrepareRequest, Preparing, PropsRead, RemoteCallbacks, RemoteCallbacksAt,
-    RemoteCallbacksCalls, RemoteCallbacksServes, RemoteChild, RemoteChildCallbacks,
-    RemoteChildCallbacksClient, RemoteChildCallbacksServerShared, RemoteChildClient,
-    RemoteChildServerShared, RemoteExecutorAt, RemoteExecutorCalls, RemoteExecutorServes,
-    RoundProps, RunOutcome, RunReply, RunRequest, RunStatus,
+    PrepareReply, PrepareRequest, Preparing, PropsRead, RemoteCallbacksAt, RemoteCallbacksServes,
+    RemoteChild, RemoteChildCallbacks, RemoteChildCallbacksClient,
+    RemoteChildCallbacksServerShared, RemoteChildClient, RemoteChildServerShared, RemoteExecutorAt,
+    RemoteExecutorServes, RoundProps, RunOutcome, RunReply, RunRequest, RunStatus,
 };
 
 // Both ends of the execute hop, and the doors on the calling end.
@@ -118,11 +118,11 @@ pub use execute::{
 mod leg;
 #[cfg(feature = "execute")]
 pub use leg::{
-    Callbacks, DEFAULT_CALLBACK_REQUEST_BUFFER, ExecutorLeg, Preparation, connect_executor,
-    serve_executor,
+    Callbacks, DEFAULT_CALLBACK_REQUEST_BUFFER, ExecutorLeg, Preparation, RemoteCallbacksCalls,
+    RemoteExecutorCalls, connect_executor, serve_executor,
 };
 #[cfg(feature = "compile")]
-pub use leg::{CompilerLeg, connect_compiler, serve_compiler};
+pub use leg::{CompilerLeg, RemoteCompilerCalls, connect_compiler, serve_compiler};
 #[cfg(any(feature = "compile", feature = "execute"))]
 pub use leg::{DEFAULT_REQUEST_BUFFER, LegError};
 

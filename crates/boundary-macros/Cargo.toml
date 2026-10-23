@@ -6,14 +6,16 @@ license.workspace = true
 repository.workspace = true
 
 # `boundary!` declares one end of a boundary; `#[protocol]` reads a remoc
-# contract and writes what its ends must declare and how its server receives.
-# Both write impls of `enclavid-boundary`'s traits. A proc-macro crate runs at
+# contract and writes what its serving end must declare and how it receives;
+# `#[calls]` reads a calling end's doors and writes what that end must declare.
+# All write impls of `enclavid-boundary`'s traits. A proc-macro crate runs at
 # build time and links into no image, and keeping it apart keeps `syn` out of
 # the vocabulary crate, which has no dependencies.
 [lib]
 proc-macro = true
 
 [dependencies]
-syn = { version = "2", features = ["full"] }
+# `visit` to find, in a door's signature, the parts it takes and hands back.
+syn = { version = "2", features = ["full", "visit"] }
 quote = "1"
 proc-macro2 = "1"

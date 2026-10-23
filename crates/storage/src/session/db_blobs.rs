@@ -4,14 +4,14 @@
 //! delegates. A blind ciphertext KV — every value is already AEAD-sealed
 //! TEE-side, so this tier never interprets bytes.
 //!
-//! The file is `<dir>/<sha256(name)>.sqlite` — hashing the name both hides which
-//! record a file is and guards path traversal, which is what lets this tier take
-//! any string at all. The volume underneath is plain ext4 that the host
-//! provisions and can read, so the hash is not a second layer over an encrypted
-//! disk: content is ciphertext by the time it arrives, and a host that mounts
-//! the volume learns how many records exist, when each appeared and how big it
-//! is regardless. What the hash withholds is which record is which. A round's
-//! ops (state + metadata + version + media + disclosure)
+//! The file is `<dir>/<sha256(name)>.sqlite` — the hash guards path traversal,
+//! which is what lets this tier take any string at all. It hides nothing: the
+//! deadline index keeps each name as it is, and the volume underneath is plain
+//! ext4 that the host provisions and can read, so a host that mounts it learns
+//! how many records exist, when each appeared and how big it is. Whose record a
+//! file is stays hidden because api names records by a digest under its own key,
+//! which no file holds the key to. A round's ops (state + metadata + version +
+//! media + disclosure)
 //! commit in ONE transaction, so a committed state never references media that
 //! isn't durable. Connections are opened per operation (SQLite opens in ~tens of
 //! µs) — no pool, no persistent handle.
@@ -33,9 +33,10 @@ use super::StoreErr;
 
 /// Per-session schema. `meta` holds the CAS version in its sole row (k=1);
 /// `scalars` the `BlobField`s by [`blob_tag`]; `media` the double-AEAD blobs
-/// by content hash; `disclosure` the age-sealed entries as a SET (rowid order is
-/// not meaningful — the api commits to the set, not the order). `IF NOT EXISTS`
-/// so re-opening / a crash-empty file is idempotent.
+/// by the name api gave each (a keyed digest, never the content's own hash);
+/// `disclosure` the age-sealed entries as a SET (rowid order is not meaningful —
+/// the api commits to the set, not the order). `IF NOT EXISTS` so re-opening /
+/// a crash-empty file is idempotent.
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS meta(k INTEGER PRIMARY KEY, version INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS scalars(tag INTEGER PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID;
@@ -98,11 +99,11 @@ impl DbBlobs {
                         .optional()?;
                     slots.push(Slot::Scalar(ScalarSlot { value: v }));
                 }
-                FieldSelector::Media(hash) => {
+                FieldSelector::Media(name) => {
                     let v: Option<Vec<u8>> = tx
                         .query_row(
                             "SELECT v FROM media WHERE hash=?1",
-                            params![hash.as_slice()],
+                            params![name.0.as_slice()],
                             |r| r.get(0),
                         )
                         .optional()?;
@@ -174,6 +175,7 @@ impl DbBlobs {
     }
 
     /// Existence probe: file present with a committed version row.
+    #[cfg(test)]
     pub(super) fn exists(&self, name: &str) -> Result<bool, StoreErr> {
         self.committed_exists(name)
     }
@@ -237,7 +239,7 @@ fn apply_ops(tx: &Transaction, ops: Vec<Op>) -> Result<(), StoreErr> {
                 tx.execute(
                     "INSERT INTO media(hash, v) VALUES(?1, ?2) \
                      ON CONFLICT(hash) DO UPDATE SET v=?2",
-                    params![m.blob_key, m.value],
+                    params![m.name.0.as_slice(), m.value],
                 )?;
             }
             // Disclosures go for the same reason the state does. A reset hands

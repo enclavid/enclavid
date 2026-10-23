@@ -6,13 +6,13 @@ license.workspace = true
 repository.workspace = true
 
 # The storage-tier RPC contract: remote trait calls (remoc `rtc`) between the
-# orchestrator (api) and the trusted storage-CVM, over an RA-TLS tunnel. Like
-# `engine-rpc`, remoc is reserved for the boundary where BOTH ends are our own
-# attested Rust CVMs; the `hatch` keeps its plain HTTP+CBOR protocol. A SEPARATE
-# crate from engine-rpc on purpose — the storage-CVM is a different fleet role
-# with its own measured image, and must not link the engine compile/execute
-# contract. Deps are remoc, serde and the fleet-stream leaf only — the
-# session store's payloads are defined here.
+# orchestrator (api) and the storage-CVM, over an RA-TLS tunnel, as engine-rpc
+# and hatch-rpc are for their legs — both ends are our own attested Rust CVMs. A
+# SEPARATE crate from engine-rpc on purpose — the storage-CVM is a different
+# fleet role with its own measured image, and must not link the engine
+# compile/execute contract. Deps are remoc, serde and serde_bytes, tokio's
+# runtime, the fleet-stream leaf, the boundary vocabulary, and its macros at
+# build time — the session store's payloads are defined here.
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -24,11 +24,26 @@ remoc = { version = "0.18", default-features = false, features = [
     "rtc",
     "codec-ciborium",
 ] }
-# The connection config every fleet leg is brought up with, shared with the
-# engine's legs, and the streams the cache's blobs cross as.
+# The connection config every fleet leg is brought up with, the handle that says
+# a leg is over, and the streams the cache's blobs cross as.
 fleet-stream = { path = "../fleet-stream" }
+# The words the contracts and the doors say what each end must declare in: a
+# dependency-free leaf.
+enclavid-boundary = { path = "../boundary" }
+# `#[protocol]` on the contracts — what a serving end must declare, and each
+# contract as its server sees it at a declared end — and `#[calls]` on the
+# doors, what a calling end must declare. Build-time only.
+enclavid-boundary-macros = { path = "../boundary-macros" }
+# `rt` for the tasks that drive the leg's connection, `macros` for a blob's
+# stream written while its call is awaited: the leg is brought up and served
+# here, so the generated clients and servers are named nowhere else.
+tokio = { version = "1", default-features = false, features = ["macros", "rt"] }
+# A cache blob's pieces, boxed as the door takes them to stream beside the call.
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+# The codec remoc carries the payloads in: the write door measures a write in it
+# before handing it over.
+ciborium = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread"] }
-# The codec remoc carries the payloads in, named for the test that sizes them.
-ciborium = "0.2"

@@ -107,6 +107,7 @@ pub struct SessionMetadata {
     /// (see `enclavid-api::disclosure_commit`). The commitment is DERIVED from
     /// this list on demand, never stored, so persister and verifier cannot
     /// diverge. Order of this list is irrelevant (the commitment sorts).
+    #[serde(with = "hashes")]
     pub disclosure_entry_hashes: Vec<[u8; 32]>,
     /// The policy artifact's decryption key. `None` (incl. older blobs) ⇒
     /// the artifact is not encrypted.
@@ -119,6 +120,7 @@ pub struct SessionMetadata {
     /// TEE-ONLY — the host stores media under identity-hiding per-session HKDF
     /// field names (`media::media_field_name`), never these hashes — so carrying
     /// them in sealed metadata leaks nothing to the host.
+    #[serde(with = "hashes")]
     pub captured_media: Vec<Vec<u8>>,
     /// The policy's verdict, once it has given one — told to the consumer
     /// unconditionally. Kept as one byte whichever it is: the host sees the
@@ -307,6 +309,32 @@ mod init_error_frame {
         Option::<serde_bytes::ByteBuf>::deserialize(d)?
             .map(|frame| ciborium::from_reader(frame.as_slice()).map_err(D::Error::custom))
             .transpose()
+    }
+}
+
+/// A list of hashes on the wire, each one CBOR byte string — so what the list
+/// adds to a sealed blob is a function of how many it holds, never of what they
+/// are. As plain integers, a byte below 0x18 encodes in one byte and the rest in
+/// two, and the size would carry a few bits of every hash.
+mod hashes {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer, H: AsRef<[u8]>>(hashes: &[H], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(hashes.iter().map(|h| serde_bytes::Bytes::new(h.as_ref())))
+    }
+
+    pub fn deserialize<'de, D, H>(d: D) -> Result<Vec<H>, D::Error>
+    where
+        D: Deserializer<'de>,
+        H: TryFrom<Vec<u8>>,
+    {
+        Vec::<serde_bytes::ByteBuf>::deserialize(d)?
+            .into_iter()
+            .map(|h| {
+                H::try_from(h.into_vec()).map_err(|_| D::Error::custom("a hash of another length"))
+            })
+            .collect()
     }
 }
 
@@ -825,6 +853,45 @@ mod terms_tests {
         struct Empty {}
         let back: Terms = decode(&encode(&Empty {}).unwrap()).unwrap();
         assert_eq!(back, Terms::default());
+    }
+}
+
+#[cfg(test)]
+mod hashes_tests {
+    use super::*;
+
+    fn with_hashes(byte: u8) -> SessionMetadata {
+        SessionMetadata {
+            disclosure_entry_hashes: vec![[byte; 32]; 3],
+            captured_media: vec![vec![byte; 32]; 5],
+            ..Default::default()
+        }
+    }
+
+    /// What the hash lists add to the metadata is how many hashes they hold, the
+    /// same whatever each hash is, and each list reads back as it was.
+    #[test]
+    fn a_hash_list_weighs_its_count_and_not_its_hashes() {
+        let low = encode(&with_hashes(0x00)).unwrap();
+        let high = encode(&with_hashes(0xff)).unwrap();
+        assert_eq!(low.len(), high.len());
+        let back: SessionMetadata = decode(&high).unwrap();
+        assert_eq!(back, with_hashes(0xff));
+    }
+
+    /// A disclosure hash of another length is refused as it is read, not cut or
+    /// padded to fit.
+    #[test]
+    fn a_hash_of_another_length_is_refused() {
+        #[derive(Serialize)]
+        struct Written {
+            disclosure_entry_hashes: Vec<serde_bytes::ByteBuf>,
+        }
+        let short = encode(&Written {
+            disclosure_entry_hashes: vec![serde_bytes::ByteBuf::from(vec![1; 31])],
+        })
+        .unwrap();
+        assert!(decode::<SessionMetadata>(&short).is_err());
     }
 }
 

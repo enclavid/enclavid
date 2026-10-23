@@ -100,7 +100,6 @@ impl AppState {
         let tuning = settings.leg;
         let compile_leg = crate::fleet::Leg::new();
         {
-            let leg = compile_leg.clone();
             let addr = compile_addr.clone();
             let attestor = attestor.clone();
             crate::fleet::supervise(
@@ -112,14 +111,13 @@ impl AppState {
                     let (addr, attestor) = (addr.clone(), attestor.clone());
                     async move { connect_compile_worker(&addr, attestor, tuning).await }
                 },
-                move |client| leg.set(client),
+                compile_leg.clone(),
             )
             .await;
         }
         let compiler = Arc::new(Compiler::new(compile_leg));
         let execute_leg = crate::fleet::Leg::new();
         {
-            let leg = execute_leg.clone();
             let addr = exec_addr.clone();
             let attestor = attestor.clone();
             let callback_buffer = settings.callback_request_buffer;
@@ -134,7 +132,7 @@ impl AppState {
                         connect_execution_worker(&addr, attestor, tuning, callback_buffer).await
                     }
                 },
-                move |client| leg.set(client),
+                execute_leg.clone(),
             )
             .await;
         }

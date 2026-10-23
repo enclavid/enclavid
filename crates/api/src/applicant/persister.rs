@@ -49,9 +49,10 @@ use enclavid_crypto::seal_to_recipient;
 use session_types::{
     Decision, DisplayField, Event, Prepared, Prompt, SessionMetadata, SessionState, SessionStatus,
 };
+use storage_client::boundary::Storage;
 use storage_client::{
-    AppendDisclosure, SessionStore, SetMedia, SetMetadata, SetState, WriteField, boundary,
-    encode_padded, outbound_fields,
+    AppendDisclosure, DisclosureOp, MediaOp, MetadataOp, SessionStore, SetMedia, SetMetadata,
+    SetState, StateBinding, StateOp, WriteField, encode_padded,
 };
 // `CallbackError` replaces the old wasmtime `RunError` as the persist error,
 // keeping api free of the runtime.
@@ -327,33 +328,37 @@ impl SessionPersister {
             working.status = SessionStatus::Completed;
             working.decision = Some(decision);
         }
+        // Record this round's captured blob hashes — the TEE-side authoritative
+        // set the NEXT round's `from-blob-ref` gate reads, and now api's own:
+        // `round_captures` computed them over the applicant's frames, so a hash
+        // that later passes the gate is the hash of a frame of this session.
+        //
+        // The host does NOT see these hashes: a media write is keyed by
+        // `media_field_name`, an HKDF of `tee_seal_key` whose whole purpose is
+        // that the raw content hash never leaves the TEE. What carrying them in
+        // metadata costs the host is a fixed growth per blob, whatever its hash —
+        // the same count it reads off the `SetMedia` ops in this very batch.
+        //
+        // Deduped: unlike a `SetMedia`, which upserts the same bytes under the
+        // same key, extending this set twice would double-count a frame.
+        for (hash, _) in media.iter() {
+            let hash = hash.to_vec();
+            if !working.captured_media.contains(&hash) {
+                working.captured_media.push(hash);
+            }
+        }
+        record_disclosures(&mut working, &appends);
+        // The state is bound to what the metadata beside it records of the
+        // applicant, as this round leaves it. A round that changes neither list
+        // writes no metadata, and leaves the lists as the metadata already holds
+        // them.
+        let binding = StateBinding::of(&working);
         let commit = {
-            let set_state = self.build_state_op(&state, token_bytes)?;
+            let set_state = self.build_state_op(&state, token_bytes, binding)?;
             // Seal every captured frame this round into the media store,
             // co-committed with the state (kept in a local so the `&dyn` refs
-            // below outlive the write). `media_ops` owns its bytes, so reading
-            // `media` again below is fine.
+            // below outlive the write).
             let media_ops = self.build_media_ops(&media, token_bytes);
-            // Record this round's captured blob hashes — the TEE-side
-            // authoritative set the NEXT round's `from-blob-ref` gate reads, and
-            // now api's own: `round_captures` computed them over the applicant's
-            // frames, so a hash that later passes the gate is the hash of a frame
-            // of this session.
-            //
-            // The host does NOT see these hashes: a media write is keyed by
-            // `media_field_name`, an HKDF of `tee_seal_key` whose whole purpose is
-            // that the raw content hash never leaves the TEE. What carrying them
-            // in metadata costs the host is 32 B of growth per blob — the same
-            // count it reads off the `SetMedia` ops in this very batch.
-            //
-            // Deduped: unlike a `SetMedia`, which upserts the same bytes under the
-            // same key, extending this set twice would double-count a frame.
-            for (hash, _) in media.iter() {
-                let hash = hash.to_vec();
-                if !working.captured_media.contains(&hash) {
-                    working.captured_media.push(hash);
-                }
-            }
             let mut ops: Vec<&dyn WriteField> =
                 Vec::with_capacity(2 + appends.len() + media_ops.len());
             ops.push(&set_state);
@@ -369,7 +374,7 @@ impl SessionPersister {
                 || !media_ops.is_empty()
                 || metadata.prepared.is_none()
             {
-                set_metadata_holder = self.build_metadata_op(&mut working, &appends);
+                set_metadata_holder = self.build_metadata_op(&working);
                 ops.push(&set_metadata_holder);
             }
             ops.extend(appends.iter().map(|a| a as &dyn WriteField));
@@ -406,7 +411,7 @@ impl SessionPersister {
             .iter()
             .enumerate()
             .map(|(i, d)| -> Result<AppendDisclosure, CallbackError> {
-                let sealed = boundary::outbound::to_untrusted(d)
+                let sealed = Storage::expose_builder::<DisclosureOp, _>(d)
                     .vouch_with(Covert::Transformed, |d| -> Result<Vec<u8>, CallbackError> {
                         shuffle_to_envelope_bytes(
                             d,
@@ -425,12 +430,15 @@ impl SessionPersister {
                          in the execution-worker, so a value can still carry what the screen did \
                          not render"
                     ))
-                    .vouch_with(AuthN::Verified, |bytes| -> Result<Vec<u8>, CallbackError> {
-                        seal_to_recipient(&bytes, &self.client_disclosure_pubkey).map_err(|e| {
-                            safe_logger::debug!("disclosure seal failed: {e}");
-                            CallbackError
-                        })
-                    })?;
+                    .vouch_with(AuthN::Verified, |bytes| -> Result<_, CallbackError> {
+                        seal_to_recipient(&bytes, &self.client_disclosure_pubkey)
+                            .map(DisclosureOp)
+                            .map_err(|e| {
+                                safe_logger::debug!("disclosure seal failed: {e}");
+                                CallbackError
+                            })
+                    })?
+                    .build();
                 Ok(AppendDisclosure(sealed))
             })
             .collect()
@@ -438,42 +446,39 @@ impl SessionPersister {
 
     /// Build the `SetState` op from the engine's opaque state blob.
     /// AuthN is closed inside storage-client by the double AEAD-seal (inner
-    /// under `applicant_session_token`, outer under `tee_seal_key`); AuthZ
-    /// vouched here; Covert CLOSED here by `encode_padded`, which encodes the
-    /// `SessionState` and pads it to a constant plaintext frame so the sealed
-    /// ciphertext size is fixed. Fallible: an encoding over the frame traps.
+    /// under `applicant_session_token`, outer under `tee_seal_key`, both bound
+    /// to `binding`); AuthZ by `Storage`'s declaration for every state op;
+    /// Covert CLOSED here by `encode_padded`, which encodes the `SessionState`
+    /// and pads it to a constant plaintext frame so the sealed ciphertext size
+    /// is fixed. Fallible: an encoding over the frame traps.
     fn build_state_op<'a>(
         &self,
         state: &SessionState,
         token: &'a [u8],
+        binding: StateBinding,
     ) -> Result<SetState<'a>, CallbackError> {
         Ok(SetState {
-            state: boundary::outbound::to_untrusted(state)
-                .vouch(reason!(
-                    AuthZ::NoSecret,
-                    "inner-AEAD'd to applicant_session_token: the volume receives ciphertext \
-                     only the session's own token opens"
-                ))
-                .vouch_with(
-                    Covert::Transformed,
-                    |state| -> Result<Vec<u8>, CallbackError> {
-                        // Close the size covert channel BY DOING it here: encode +
-                        // pad the WHOLE SessionState to a constant plaintext frame,
-                        // so the sealed ciphertext is fixed-size regardless of the
-                        // `state` and `current_prompt` content (both policy-
-                        // controlled). Errors if the encoding exceeds the frame.
-                        //
-                        // That error NAMES the state's true byte count, which is the
-                        // one number this padding exists to hide — so it stays here
-                        // and `CallbackError` carries none of it back to the party
-                        // whose policy chose the size.
-                        encode_padded(state).map_err(|e| {
-                            safe_logger::debug!("state pad: {e}");
-                            CallbackError
-                        })
-                    },
-                )?,
+            state: Storage::expose_builder::<StateOp, _>(state).vouch_with(
+                Covert::Transformed,
+                |state| -> Result<Vec<u8>, CallbackError> {
+                    // Close the size covert channel BY DOING it here: encode +
+                    // pad the WHOLE SessionState to a constant plaintext frame,
+                    // so the sealed ciphertext is fixed-size regardless of the
+                    // `state` and `current_prompt` content (both policy-
+                    // controlled). Errors if the encoding exceeds the frame.
+                    //
+                    // That error NAMES the state's true byte count, which is the
+                    // one number this padding exists to hide — so it stays here
+                    // and `CallbackError` carries none of it back to the party
+                    // whose policy chose the size.
+                    encode_padded(state).map_err(|e| {
+                        safe_logger::debug!("state pad: {e}");
+                        CallbackError
+                    })
+                },
+            )?,
             applicant_session_token: token,
+            binding,
         })
     }
 
@@ -483,10 +488,11 @@ impl SessionPersister {
     /// runtime reporting its captures honestly; the set is now api's own, so it
     /// rests on nothing. AuthN is closed inside storage-client by the double
     /// AEAD-seal (inner under `applicant_session_token`, outer under
-    /// `tee_seal_key`, AAD = session_id||blob_hash); AuthZ + Covert vouched here.
-    /// Covert is NOT padded (unlike state): what a frame's length reveals is the
-    /// applicant's own upload, partitioned, and there is no policy-controlled
-    /// quantity left to pad.
+    /// `tee_seal_key`, AAD = the field, the blob's hash, the session); AuthZ by
+    /// `Storage`'s declaration for every media op; Covert vouched here. Covert is NOT padded
+    /// (unlike state): what a frame's length reveals is the applicant's own
+    /// upload, partitioned, and there is no policy-controlled quantity left to
+    /// pad.
     fn build_media_ops<'a>(
         &self,
         media: &[([u8; 32], Vec<u8>)],
@@ -496,93 +502,79 @@ impl SessionPersister {
             .iter()
             .map(|(hash, bytes)| SetMedia {
                 blob_hash: *hash,
-                bytes: boundary::outbound::to_untrusted(bytes.clone())
-                    .vouch(reason!(
-                        AuthZ::NoSecret,
-                        "inner-AEAD'd to applicant_session_token: the volume receives ciphertext \
-                         only the session's own token opens"
-                    ))
-                    .vouch(reason!(
-                        Covert::AlreadyHeld,
-                        "each op is one frame api itself read off /input and content-addressed \
-                         here, so op COUNT and each op's LENGTH are functions of the applicant's \
-                         upload alone — the per-frame partition of a body the host already \
-                         watched arrive encrypted. The worker supplies no byte, no hash and no \
-                         member, and a non-media round emits zero ops. Unpadded unlike state \
-                         because no policy-controlled quantity is left to pad; residual is that \
-                         the worker still chooses whether to call session_change at all"
-                    )),
+                bytes: Storage::expose_builder::<MediaOp, _>(bytes.clone()).vouch(reason!(
+                    Covert::AlreadyHeld,
+                    "each op is one frame api itself read off /input and content-addressed \
+                     here, so op COUNT and each op's LENGTH are functions of the applicant's \
+                     upload alone — the per-frame partition of a body the host already \
+                     watched arrive encrypted. The worker supplies no byte, no hash and no \
+                     member, and a non-media round emits zero ops. Unpadded unlike state \
+                     because no policy-controlled quantity is left to pad; residual is that \
+                     the worker still chooses whether to call session_change at all"
+                )),
                 applicant_session_token: token,
             })
             .collect()
     }
 
-    /// Advance the disclosure bookkeeping (count + running hash chain) and
-    /// build the `SetMetadata` op carrying the updated metadata (disclosure
+    /// Build the `SetMetadata` op carrying the updated metadata (disclosure
     /// chain AND the captured-media gate set and, on the round that finishes,
     /// the status and decision, which the caller set before this). AuthN is
-    /// closed inside storage-client by the AEAD-seal under `tee_seal_key`. Called
-    /// when this commit finished the session, emitted disclosures, captured
-    /// media or is the first to record what preparing the session settled;
-    /// `appends` may be empty.
-    fn build_metadata_op<'m>(
-        &self,
-        metadata: &'m mut SessionMetadata,
-        appends: &[AppendDisclosure],
-    ) -> SetMetadata<'m> {
-        metadata.disclosure_count += appends.len() as u64;
-        for a in appends {
-            // `as_inner` is the borrow analog of `into_inner` — read the
-            // fully-vouched ciphertext to append its per-entry leaf hash to the
-            // set-commitment leaf list before the same bytes get released to wire
-            // by `build_op`. Order of the list is irrelevant (commit() sorts).
-            metadata
-                .disclosure_entry_hashes
-                .push(disclosure_commit::entry_hash(a.0.as_inner()));
-        }
+    /// closed inside storage-client by the AEAD-seal under `tee_seal_key`, AuthZ
+    /// by `Storage`'s declaration for every metadata op. Called when this commit
+    /// finished the session, emitted disclosures, captured media or is the first
+    /// to record what preparing the session settled.
+    fn build_metadata_op<'m>(&self, metadata: &'m SessionMetadata) -> SetMetadata<'m> {
         SetMetadata(
-            boundary::outbound::to_untrusted(&*metadata)
-                .vouch(reason!(
-                    AuthZ::NoSecret,
-                    "sealed under tee_seal_key, which only the attested CVM holds: the volume \
-                     receives ciphertext it cannot read"
-                ))
-                .vouch(reason!(
-                    Covert::AlreadyHeld,
-                    "sealed under tee_seal_key; caveat: ciphertext size + write-presence \
-                     host-observable. Metadata now grows 32 B per disclosure (one leaf hash) = \
-                     a deterministic function of the disclosure count M, which the host ALREADY \
-                     observes via each ListAppend — zero marginal covert bits, and the emission- \
-                     ORDER channel (log2 M!) is REMOVED (set commitment sorts). Residual write- \
-                     presence is host-compromise-gated, as before. The captured-media gate hashes \
-                     also carried are NOT host-visible — a media write is keyed by an HKDF of \
-                     tee_seal_key so the raw hash never leaves the TEE — but they grow this blob \
-                     by 32 B per frame, a count the host reads off the SetMedia ops in this same \
-                     batch anyway. On the round that finishes it carries the status and the \
-                     decision's one byte: a size delta fixed per transition, whichever decision. \
-                     What preparing the session settled rides in one fixed frame whatever the \
-                     props, written by the session's first committed round whatever the policy \
-                     did: a size delta fixed for that transition too"
-                )),
+            Storage::expose_builder::<MetadataOp, _>(metadata).vouch(reason!(
+                Covert::AlreadyHeld,
+                "sealed under tee_seal_key; caveat: ciphertext size + write-presence \
+                 host-observable. Metadata grows by one fixed-size byte string per \
+                 disclosure (its leaf hash), whatever the hash = a deterministic function \
+                 of the disclosure count M, which the host ALREADY \
+                 observes via each ListAppend — zero marginal covert bits, and the emission- \
+                 ORDER channel (log2 M!) is REMOVED (set commitment sorts). Residual write- \
+                 presence is host-compromise-gated, as before. The captured-media gate hashes \
+                 also carried are NOT host-visible — a media write is keyed by an HKDF of \
+                 tee_seal_key so the raw hash never leaves the TEE — but they grow this blob \
+                 by one fixed-size byte string per frame, whatever its hash, a count the \
+                 host reads off the SetMedia ops in this same batch anyway. On the round \
+                 that finishes it carries the status and the \
+                 decision's one byte: a size delta fixed per transition, whichever decision. \
+                 What preparing the session settled rides in one fixed frame whatever the \
+                 props, written by the session's first committed round whatever the policy \
+                 did: a size delta fixed for that transition too"
+            )),
         )
     }
 
-    /// Vouch the op set and commit it at the current expected version,
-    /// advancing `current_version` on success. The version verdict is the
-    /// store's (a CAS token only): a store that lied about it self-limits to
-    /// DoS / a stomped concurrent winner, with no data-leak path.
-    async fn commit_ops(&self, ops: &[&dyn WriteField]) -> Result<(), CallbackError> {
+    /// Seal the fields into the round's ops, say why their count says nothing,
+    /// and commit them at the current expected version, advancing
+    /// `current_version` on success. The version verdict is the store's (a CAS
+    /// token only): a store that lied about it self-limits to DoS / a stomped
+    /// concurrent winner, with no data-leak path.
+    async fn commit_ops(&self, fields: &[&dyn WriteField]) -> Result<(), CallbackError> {
         let expected = self.current_version.load(Ordering::SeqCst);
-        let ops = outbound_fields(ops).vouch(reason!(
-            Covert::Bounded,
-            "one state op; one metadata op when the round finished, disclosed, captured or \
-             is the first since preparing — the bit a finishing round gives anyway; at most \
-             one disclosure; one media op per frame the applicant uploaded, a count the \
-             policy does not choose"
-        ));
+        let ops = self
+            .session_store
+            .seal(&self.session_id, fields)
+            .map_err(|e| {
+                safe_logger::debug!(
+                    "persister.commit_ops: sealing the round's ops failed for {}: {e}",
+                    self.session_id,
+                );
+                CallbackError
+            })?
+            .vouch(reason!(
+                Covert::Bounded,
+                "one state op; one metadata op when the round finished, disclosed, captured \
+                 or is the first since preparing — the bit a finishing round gives anyway; at \
+                 most one disclosure; one media op per frame the applicant uploaded, a count \
+                 the policy does not choose"
+            ));
         let new_version = self
             .session_store
-            .write(&self.session_id, Some(expected), ops)
+            .write(Some(expected), ops)
             .await
             .map_err(|e| {
                 // The cause, on the inward tier, before the error flows back over
@@ -597,14 +589,6 @@ impl SessionPersister {
                 CallbackError
             })?
             .trust(reason!(
-                AuthN::Indifferent,
-                "version is a CAS token only; a lying host self-limits to DoS / stomp, no leak"
-            ))
-            .trust(reason!(
-                AuthZ::NoPrincipal,
-                "version is not an ownership signal — no access decision hangs on it"
-            ))
-            .trust(reason!(
                 Replay::Fresh,
                 "staleness surfaces as next-write CAS mismatch; the run aborts cleanly"
             ))
@@ -618,6 +602,22 @@ impl SessionPersister {
     /// or answered in its place when the reply never came.
     pub(super) async fn decided(&self) -> Option<Decision> {
         self.metadata.lock().await.decision
+    }
+}
+
+/// Advance the disclosure bookkeeping by the round's appends: the count, and
+/// each entry's leaf hash in the set-commitment leaf list.
+fn record_disclosures(metadata: &mut SessionMetadata, appends: &[AppendDisclosure]) {
+    metadata.disclosure_count += appends.len() as u64;
+    for a in appends {
+        // `as_inner` is the borrow analog of `into_inner` — read the
+        // fully-vouched ciphertext to append its per-entry leaf hash to the
+        // set-commitment leaf list before the same bytes are added to the write.
+        // Order of the list is irrelevant to the consumer's check (commit()
+        // sorts); the state's binding hashes it as kept.
+        metadata
+            .disclosure_entry_hashes
+            .push(disclosure_commit::entry_hash(&a.0.as_inner().0));
     }
 }
 
@@ -720,6 +720,7 @@ fn pad_envelope(bytes: &mut Vec<u8>) -> Result<(), CallbackError> {
 mod tests {
     use super::*;
     use session_types::{Clip, DisplayField, MediaResult};
+    use storage_client::{Metadata, SealedState};
 
     fn media_round(frames: Vec<&[u8]>) -> Event {
         Event::Media(MediaResult {
@@ -809,5 +810,105 @@ mod tests {
         let sk = ShuffleKey::from_tee_seal_key(&[9u8; 32]);
         let huge = vec![field("k", &"x".repeat(SEALED_DISCLOSURE_PLAINTEXT_BYTES))];
         assert!(shuffle_to_envelope_bytes(&huge, "sid", 0, &sk).is_err());
+    }
+
+    /// The session as a round's load reads it: its metadata, opened, the state
+    /// opened beside it, and the version.
+    async fn load(
+        store: &SessionStore,
+        id: &str,
+        token: &[u8],
+    ) -> Result<(SessionMetadata, Option<SessionState>, u64), storage_client::StoreError> {
+        let ((metadata, sealed), version) = store.read(id, (Metadata, SealedState)).await?;
+        let metadata = metadata
+            .trust(reason!(AuthZ::Matched, "test fixture"))
+            .trust_accept_risk(reason!(Replay::AcceptedRisk, "test fixture"))
+            .into_inner()
+            .expect("the session exists");
+        let state = store
+            .open_state(id, sealed, &metadata, token)?
+            .trust_accept_risk(reason!(Replay::AcceptedRisk, "test fixture"))
+            .into_inner();
+        let version = version
+            .trust(reason!(Replay::Fresh, "test fixture"))
+            .into_inner();
+        Ok((metadata, state, version))
+    }
+
+    /// One round's persist on the session as [`load`] reads it: `event`, and the
+    /// policy's state `n`.
+    async fn persist_round(
+        store: &Arc<SessionStore>,
+        id: &str,
+        token: &Arc<SecretBox<Vec<u8>>>,
+        event: Event,
+        n: u8,
+    ) {
+        let (metadata, _, version) = load(store, id, token.expose_secret()).await.unwrap();
+        let consent = round_consent(&event, &None);
+        let captures = round_captures(&event);
+        let awaiting = RoundAwaiting::default();
+        let persister = SessionPersister::for_round(
+            store.clone(),
+            id.into(),
+            Arc::downgrade(token),
+            String::new(),
+            version,
+            metadata,
+            Prepared { props: None },
+            &consent,
+            &captures,
+            &awaiting,
+            Arc::new(ShuffleKey::from_tee_seal_key(&[4; 32])),
+        );
+        let state = SessionState {
+            state: vec![n],
+            ..Default::default()
+        };
+        persister.persist(state, None).await.unwrap();
+    }
+
+    /// A round's state opens beside the metadata its own write leaves — whether
+    /// the round recorded a capture and rewrote the metadata, or recorded nothing
+    /// and left the metadata as it was. A state from before a capture, put back
+    /// beside metadata that records it, does not.
+    #[tokio::test]
+    async fn a_round_s_state_opens_beside_the_metadata_its_write_leaves() {
+        let disk = Arc::new(storage_client::memory::Disk::default());
+        let store = Arc::new(SessionStore::new(disk.connect().await, [4; 32], None));
+        let id = "ses_round";
+        let created = SessionMetadata {
+            prepared: Some(Prepared { props: None }),
+            ..Default::default()
+        };
+        let set = SetMetadata(
+            Storage::expose_builder::<MetadataOp, _>(&created)
+                .vouch(reason!(Covert::NotChosen, "test fixture")),
+        );
+        let ops = store
+            .seal(id, &[&set])
+            .unwrap()
+            .vouch(reason!(Covert::Bounded, "test fixture"));
+        store.write(None, ops).await.unwrap();
+        let token = Arc::new(SecretBox::new(Box::new(vec![9; 32])));
+
+        persist_round(&store, id, &token, media_round(vec![b"passport"]), 1).await;
+        let (metadata, state, _) = load(&store, id, token.expose_secret()).await.unwrap();
+        assert_eq!(metadata.captured_media.len(), 1);
+        assert_eq!(state.unwrap().state, [1]);
+
+        persist_round(&store, id, &token, Event::Start, 2).await;
+        let (_, state, _) = load(&store, id, token.expose_secret()).await.unwrap();
+        assert_eq!(state.unwrap().state, [2]);
+
+        let before = disk.records.lock().unwrap().clone();
+        persist_round(&store, id, &token, media_round(vec![b"selfie"]), 3).await;
+        for (name, record) in disk.records.lock().unwrap().iter_mut() {
+            record.state = before[name].state.clone();
+        }
+        assert!(matches!(
+            load(&store, id, token.expose_secret()).await,
+            Err(storage_client::StoreError::Crypto(_))
+        ));
     }
 }
