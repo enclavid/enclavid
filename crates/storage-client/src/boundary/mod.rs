@@ -218,8 +218,8 @@ mod tests {
     }
 
     /// The doors build both requests and the blob, and take both responses
-    /// apart: this end declares what they take and hand back, and nothing it
-    /// never holds — a line about a request would govern nothing.
+    /// apart: this end declares what they take and hand back. That it declares
+    /// nothing it never holds is held by the test `boundary!` writes for it.
     #[test]
     fn this_end_declares_what_its_doors_take() {
         let d = Storage::DECLARATION;
@@ -232,6 +232,5 @@ mod tests {
         let door = write.door.as_ref().expect("its door");
         assert_eq!(door.sends, ["Expected", "Ops<Self>"]);
         assert_eq!(door.receives, ["Version"]);
-        assert!(d.unheld().is_empty(), "{:?}", d.unheld());
     }
 }

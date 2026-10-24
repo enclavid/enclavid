@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use proc_macro2::TokenStream;
-use quote::{quote, quote_spanned};
+use quote::{format_ident, quote, quote_spanned};
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
@@ -515,6 +515,9 @@ impl Decl {
                 }
             }
         });
+        // Every end is held to declaring nothing it never holds, by a test of its
+        // own: one an end has to remember is one a new end goes without.
+        let unheld = format_ident!("{}_declares_nothing_it_never_holds", snake(&name_str));
         Ok(quote! {
             #[cfg(test)]
             impl #name {
@@ -529,8 +532,37 @@ impl Decl {
                     crossings: &[ #( #rows ),* ],
                 };
             }
+
+            /// A line about a type this end never holds governs nothing.
+            #[cfg(test)]
+            #[test]
+            fn #unheld() {
+                let unheld = #name::DECLARATION.unheld();
+                assert!(
+                    unheld.is_empty(),
+                    "{} declares what it never holds: {:?}",
+                    #name_str,
+                    unheld
+                );
+            }
         })
     }
+}
+
+/// `name` as a function's name: `ExecutionWorker` is `execution_worker`.
+fn snake(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// What `boundary!` refuses as it reads a declaration. Each case is the

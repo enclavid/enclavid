@@ -114,7 +114,8 @@ fn with_suffix(path: &Path, suffix: &str) -> Path {
 /// and `expose_builder`, which starts building a value to leave it from what it
 /// is built from (`enclavid_boundary::ExposedBuilder`); a `Sends` / `Receives`
 /// impl per type; and, in the crate's test build, the declaration as data
-/// (`DECLARATION`).
+/// (`DECLARATION`) and a test that the end declares nothing it never holds
+/// (`<end>_declares_nothing_it_never_holds`, from `End::unheld`).
 #[proc_macro]
 pub fn boundary(input: TokenStream) -> TokenStream {
     end::expand(input.into())
