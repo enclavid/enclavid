@@ -221,9 +221,11 @@ engine-compiler = { path = "../engine-compiler" }
 # loading its cwasm copies.
 wasm-encoder = "0.247"
 # The props tests, and the runner's test that the host serves every interface
-# the compile counts as its own, build components from WIT alone.
+# the compile counts as its own, build components from WIT alone — the latter
+# with the disclosure fields it declares listed, as embedding lists them.
 wit-component = { version = "0.247", features = ["dummy-module"] }
 wit-parser = "0.247"
+enclavid-embedded = { path = "../embedded" }
 # fake_capture emits a real JPEG so the face-age plugin's in-sandbox
 # decode → preprocess → inference pipeline has something to decode.
 jpeg-encoder = "0.6"

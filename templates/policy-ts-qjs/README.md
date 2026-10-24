@@ -25,12 +25,67 @@ enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
   `definePolicy` and `withStart` in `@enclavid/policy`. Its first import,
   `@enclavid/policy-quickjs`, fills in what QuickJS lacks; see below.
 - `wit/world.wit` — what the policy imports (the host's interfaces and plugins')
-  and exports, and the props it takes. The WIT it imports is in `wit/deps/`.
-- `i18n.json` — the texts the policy shows, by key and locale.
-- `disclosure-fields.json` — the keys of the fields the policy may disclose to
-  the consumer, on the applicant's consent.
+  and exports; the keys of its texts; the fields it may disclose to the
+  consumer, on the applicant's consent; and the props it takes. The WIT it
+  imports is in `wit/deps/`.
+- `i18n/en.json` — the texts the policy shows, in English: one JSON file per
+  language.
 - `types/` — the TypeScript types of everything in `wit/`, written by
   `npm run types` (the build writes them too). Not edited by hand.
+
+## Texts
+
+A text the policy shows is a case of the `key` in its `i18n` interface, in
+`wit/world.wit`, and its wording is in `i18n/<language>.json`, one file per
+language, each text by its key:
+
+```wit
+enum key {
+    consent-reason,
+    requester,
+}
+```
+
+```json
+{
+  "consent-reason": "To verify your identity.",
+  "requester": "My service"
+}
+```
+
+```ts
+import { localized } from "local:policy/i18n@0.1.0";
+
+localized("consent-reason");
+```
+
+A text is shown as it is written: it takes no values.
+
+The texts can also live in one file, every language under its tag —
+`{ "en": { "consent-reason": "…" }, "ru": { "consent-reason": "…" } }` —
+passed to the build's embed as `--i18n i18n.json`.
+
+The platform picks the applicant's language, and the policy never learns it. A
+language without a text of its own shows `en`'s. The build's `enclavid policy
+embed` checks the texts against the keys: every key needs a text, and every
+text a key.
+
+## Disclosure fields
+
+Every field the consumer may receive is named by a key the policy lists, a
+case of the `key` in `enclavid:host-ext/disclosure-fields`, in
+`wit/world.wit`. A well-known helper names its field by its own name
+(`fields.fullName` is `full-name`), which has to be one of them; a field of the
+policy's own is named with `disclosureField`:
+
+```ts
+import { disclosureField } from "enclavid:host-ext/disclosure-fields@0.1.0";
+
+disclosureField("full-name");
+```
+
+The list is the most a field's key can say to the consumer, so list only the
+fields the policy discloses.
 
 ## Props
 

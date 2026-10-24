@@ -22,7 +22,7 @@ name = "docker-credential-enclavid"
 path = "src/bin/cred_helper.rs"
 
 [dependencies]
-enclavid-embedded = { path = "../embedded" }
+enclavid-embedded = { path = "../embedded", features = ["embed"] }
 # ocicrypt layer encryption (encrypt side) for the
 # `enclavid oci push --encrypt` path.
 enclavid-crypto = { path = "../crypto" }
@@ -52,12 +52,8 @@ dirs = "5"
 base64 = "0.22"
 dialoguer = "0.11"
 
-# Custom-section writer for embedding the policy manifest into the
-# encrypted wasm bundle (see commands/policy/encrypt.rs). Pinned to
-# the version wasmtime transitively pulls — keeps the dep tree from
-# fanning out across multiple wasm-encoder versions.
-wasm-encoder = "0.247"
 # Component parser — read a component's top-level interface exports so
 # `policy`/`plugin embed` can assert the artifact's WIT role matches the
-# command group. Lockstep-versioned with wasm-encoder.
+# command group. Pinned to the version wasmtime transitively pulls — keeps
+# the dep tree from fanning out across versions.
 wasmparser = "0.247"

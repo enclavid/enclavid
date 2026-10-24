@@ -30,21 +30,18 @@ pub const MAX_CWASM_BYTES: u64 = 3 * 512 * 1024 * 1024;
 /// the field names, CBOR framing and remoc's own envelope.
 const PRIME_HEADROOM: u64 = 64 * 1024;
 
-/// How many bytes of metadata one byte of embedded section can become.
-///
-/// Measured at 2.55 at the cap, in the shape that grows most: translations into
-/// one-character languages with empty texts, where `"a":"",` — seven bytes of
-/// JSON — is an eighteen-byte `Translation` once its field names are encoded, so
-/// no catalog of them passes 18/7. Every other shape shrinks: a key or a set
-/// member loses its quotes and comma.
-const META_BYTES_PER_SECTION_BYTE: u64 = 3;
+/// How many bytes of metadata one byte of embedded section can become: one. A
+/// catalog's disclosure fields encode as the strings they are, without their
+/// JSON's quotes and commas, and its texts as the i18n section's own bytes.
+const META_BYTES_PER_SECTION_BYTE: u64 = 1;
 
-/// What the metadata carries that no section accounts for: each component's
-/// catalog hash and field names, and the import manifest. About 455 bytes for a
-/// component with two routed imports, so this is some two thousand components.
+/// What the metadata carries that no section accounts for: each catalog's hash,
+/// its field names and its texts' length, and the import manifest. About 455
+/// bytes for a component with two slots, so this is some two thousand
+/// components.
 const META_COMPONENT_ROOM: u64 = 1024 * 1024;
 
-/// The longest encoded [`BundleMeta`] the execute hop accepts, in bytes: 7 MiB.
+/// The longest encoded [`BundleMeta`] the execute hop accepts, in bytes: 3 MiB.
 ///
 /// Set by what the compiler admits. A composition's embedded sections are held
 /// to `MAX_EMBEDDED_SECTION_BYTES` before any is parsed, and their catalogs
@@ -75,12 +72,12 @@ const _: () = assert!(
 /// [`MAX_DECODED_META_BYTES`].
 ///
 /// Not a few, as a JSON-sized intuition suggests: a tiny key costs more as a
-/// hash-table slot than as bytes. An i18n key with no translations is two bytes
-/// encoded and a 49-byte bucket decoded, in a table that can stand half empty
-/// one past a growth boundary. Measured (`tests/meta_weight.rs`, counting
-/// glibc's 8-byte header, 16-byte rounding and 32-byte minimum chunk): 36.0 at
-/// the worst for metadata as this crate encodes it. A realistic catalog decodes
-/// to two or three times its encoding.
+/// hash-table slot than as bytes. A disclosure field of two characters is three
+/// bytes encoded and a slot and a `String` decoded, in a table that can stand
+/// half empty one past a growth boundary. Measured (`tests/meta_weight.rs`,
+/// counting glibc's 8-byte header, 16-byte rounding and 32-byte minimum chunk):
+/// 26.0 at the worst for metadata as this crate encodes it. A catalog's texts
+/// are one byte string, and decode to about their encoding.
 ///
 /// An encoding written by hand to size tables for members that then collapse
 /// into one can go well past it. Only a peer other than api writes one, and
@@ -93,16 +90,15 @@ pub const META_WEIGHT_MARGIN: u64 = 40;
 ///
 /// What fixes it is the section cap, not the encoding: whatever shape a catalog
 /// takes, it is at most `MAX_EMBEDDED_SECTION_BYTES` of JSON. The costliest shape
-/// per byte of JSON is a key with one tiny translation — `"ab":{"a":""},`,
-/// fourteen bytes, decodes to a hash-table slot, two `String`s and a `Vec` — and
-/// a composition whose sections hold nothing else decodes to some sixteen times
-/// their length (`tests/meta_weight.rs`). A realistic catalog decodes to about
-/// twice.
+/// per byte of JSON is a disclosure field of two characters — `"ab",`, five
+/// bytes, decodes to a hash-table slot and a `String` — and a composition whose
+/// sections hold nothing else decodes to some sixteen and a half times their
+/// length (`tests/meta_weight.rs`). Texts decode to about their length.
 pub const MAX_DECODED_META_BYTES: u64 = 32 * MAX_EMBEDDED_SECTION_BYTES;
 
 /// A freshly compiled composition: the wasmtime-serialized fused component
-/// (`cwasm`) plus the host-side metadata compile drops (the per-catalog
-/// i18n import manifest and the parsed per-component catalogs). This is
+/// (`cwasm`) plus the host-side metadata compile drops (the slots the texts
+/// come through, and every catalog of the composition). This is
 /// BOTH the compile RPC return value AND the L2 cache bundle
 /// (`enclavid-api::cwasm_cache`) AND what api fills an execution-worker's cache
 /// with after a miss — one compiled artifact, three consumers, so a cold
@@ -124,11 +120,11 @@ pub struct CompiledBundle {
     /// api hop, the child hop, AND to seal into L2).
     #[serde(with = "serde_bytes")]
     pub cwasm: Vec<u8>,
-    /// Per-catalog i18n import manifest (lost in compile; needed to
-    /// register the host `Linker` instances at run time).
+    /// The slots the components' texts come through (lost in compile;
+    /// needed to register the host `Linker` instances at run time).
     pub embedded_imports: Vec<EmbeddedImport>,
-    /// Per-component parsed catalogs, composition order (policy first) — the
-    /// exact registry-builder inputs.
+    /// Every catalog of the composition, nested ones included, the
+    /// policy's first — the exact registry-builder inputs.
     pub catalogs: Vec<CatalogEntry>,
 }
 
@@ -171,7 +167,7 @@ impl CompiledBundle {
     }
 }
 
-/// One component's `(content_hash, parsed catalog)` — a registry-builder input.
+/// One catalog's `(content_hash, decls)` — a registry-builder input.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogEntry {
@@ -198,10 +194,10 @@ pub struct BundleRef {
     /// Host-local path the child feeds to `Component::deserialize_file` (mmap) —
     /// its inherited cwasm fd, e.g. `/proc/self/fd/3`.
     pub cwasm_path: String,
-    /// Per-catalog i18n import manifest (needed to register the strict
-    /// host `Linker` instances) — same as [`CompiledBundle::embedded_imports`].
+    /// The slots the texts come through (needed to register the host
+    /// `Linker` instances) — same as [`CompiledBundle::embedded_imports`].
     pub embedded_imports: Arc<[EmbeddedImport]>,
-    /// Per-component parsed catalogs (the registry-builder inputs) — same as
+    /// The catalogs (the registry-builder inputs) — same as
     /// [`CompiledBundle::catalogs`].
     pub catalogs: Arc<[CatalogEntry]>,
 }
@@ -230,9 +226,7 @@ pub(crate) fn sample_bundle() -> CompiledBundle {
 mod tests {
     use super::*;
     use engine_types::composition::EmbeddedIface;
-    use engine_types::embedded::Translation;
     use serde::Serialize;
-    use std::fmt::Write;
 
     fn encode<T: Serialize>(v: &T) -> Vec<u8> {
         let mut b = Vec::new();
@@ -291,9 +285,9 @@ mod tests {
         assert!(ciborium::from_reader::<BundleMeta, _>(&encode(&plus)[..]).is_err());
     }
 
-    /// The import manifest a compiled component carries: one routed i18n
-    /// import, named the way the compiler names it.
-    fn routed_imports(hash: [u8; 32]) -> Vec<EmbeddedImport> {
+    /// The import manifest a compiled component carries: the one slot its
+    /// texts come through, named the way embedding names it.
+    fn slot_imports(hash: [u8; 32]) -> Vec<EmbeddedImport> {
         let slug: String = hash[..16].iter().map(|b| format!("{b:02x}")).collect();
         vec![EmbeddedImport {
             instance_name: format!("embedded-slot:h{slug}-0-1-0/i18n"),
@@ -303,52 +297,54 @@ mod tests {
         }]
     }
 
-    /// The section shape that grows most from JSON to CBOR, a whole i18n section
-    /// of it at the cap, encodes within its share of the bound — every printable
-    /// ASCII character a language, so the key count stays one the compiler
-    /// admits.
+    /// What a catalog's sections add to its encoding, in each shape they take,
+    /// is within their share of the bound: the texts are their section's bytes,
+    /// and what grows beyond them — the length written in front — is a
+    /// component's room, not the section's.
     #[test]
     fn catalogs_at_the_section_cap_encode_within_their_share() {
-        let languages: Vec<char> = (' '..='~').filter(|c| !matches!(c, '"' | '\\')).collect();
+        let encoded_with = |decls: ComponentDecls| {
+            encode(&BundleMeta {
+                embedded_imports: Vec::new(),
+                catalogs: vec![CatalogEntry {
+                    hash: [0xFF; 32],
+                    decls,
+                }],
+            })
+            .len() as u64
+        };
+        let empty = encoded_with(ComponentDecls::default());
+        let length_in_front = 8;
+
+        // Texts filling the cap.
         let cap = MAX_EMBEDDED_SECTION_BYTES as usize;
-        let mut json = String::from("{");
-        let mut decls = ComponentDecls::default();
-        for key in 0.. {
-            let mut entry = format!("\"k{key}\":{{");
-            for l in &languages {
-                write!(entry, "\"{l}\":\"\",").unwrap();
-            }
-            entry.pop();
-            entry.push_str("},");
-            if json.len() + entry.len() > cap {
-                break;
-            }
-            json.push_str(&entry);
-            let rows = languages
-                .iter()
-                .map(|l| Translation {
-                    language: l.to_string(),
-                    text: String::new(),
-                })
-                .collect();
-            decls.localized.insert(format!("k{key}"), rows);
-        }
-        json.pop();
-        json.push('}');
-        assert!(json.len() <= cap);
-        assert!(decls.localized.len() <= engine_types::limits::MAX_DECLARED_LOCALIZED);
-        let encoded = encode(&BundleMeta {
-            embedded_imports: Vec::new(),
-            catalogs: vec![CatalogEntry {
-                hash: [0xFF; 32],
-                decls,
-            }],
-        });
+        let mut texts = String::from("{\"en\":\"");
+        texts.push_str(&"x".repeat(cap - texts.len() - 2));
+        texts.push_str("\"}");
+        let added = encoded_with(ComponentDecls {
+            i18n: texts.clone().into_bytes(),
+            ..Default::default()
+        }) - empty;
         assert!(
-            encoded.len() as u64 <= META_BYTES_PER_SECTION_BYTE * json.len() as u64,
-            "{} bytes of section encode to {}",
-            json.len(),
-            encoded.len()
+            added <= META_BYTES_PER_SECTION_BYTE * texts.len() as u64 + length_in_front,
+            "{} bytes of texts add {added}",
+            texts.len()
+        );
+
+        // Disclosure fields as many and as short as a component may declare.
+        let fields: Vec<String> = (0..engine_types::limits::MAX_DECLARED_DISCLOSURE_FIELDS)
+            .map(|i| format!("k{i}"))
+            .collect();
+        let quoted: Vec<String> = fields.iter().map(|field| format!("\"{field}\"")).collect();
+        let json = format!("[{}]", quoted.join(","));
+        let added = encoded_with(ComponentDecls {
+            disclosure_fields: fields.into_iter().collect(),
+            ..Default::default()
+        }) - empty;
+        assert!(
+            added <= META_BYTES_PER_SECTION_BYTE * json.len() as u64,
+            "{} bytes of disclosure fields add {added}",
+            json.len()
         );
     }
 
@@ -361,7 +357,7 @@ mod tests {
         for i in 0..2000u64 {
             let mut hash = [0xFF; 32];
             hash[..8].copy_from_slice(&i.to_le_bytes());
-            embedded_imports.extend(routed_imports(hash));
+            embedded_imports.extend(slot_imports(hash));
             catalogs.push(CatalogEntry {
                 hash,
                 decls: ComponentDecls::default(),

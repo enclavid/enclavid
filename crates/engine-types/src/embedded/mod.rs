@@ -17,7 +17,7 @@ pub mod registry;
 pub mod store;
 
 pub use registry::{
-    ComponentDecls, DisclosureFieldsStore, EmbeddedRegistry, EmbeddedRegistryBuilder,
-    LocalizedStore, Translation,
+    CatalogUnreadable, ComponentDecls, DisclosureFieldsStore, EmbeddedRegistry,
+    EmbeddedRegistryBuilder, LocalizedStore, Translation,
 };
 pub use store::{DisclosureFields, Localized, RefKind, RefStore};

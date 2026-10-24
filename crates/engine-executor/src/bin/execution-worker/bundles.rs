@@ -76,14 +76,14 @@ pub(crate) struct CompositionEntry {
     /// too, subject to the per-entry floor in [`engine_executor::admission`] that
     /// stops a weightless entry from being free.
     pub(crate) charged: u64,
-    /// Per-catalog i18n import manifest (registered as strict host `Linker`
+    /// The slots the texts come through (registered as host `Linker`
     /// instances at prime). Small in every legitimate composition, and NOT small
     /// by construction — it comes verbatim from a caller no leaf can identify, so
     /// it is charged rather than assumed. Shared with every round's `prime`
     /// request, never copied into one.
     pub(crate) embedded_imports: Arc<[EmbeddedImport]>,
-    /// Per-component parsed catalogs (the registry-builder inputs). Charged and
-    /// shared for the same reasons, and it is the bigger of the two.
+    /// The catalogs (the registry-builder inputs). Charged and shared for the
+    /// same reasons, and it is the bigger of the two.
     pub(crate) catalogs: Arc<[CatalogEntry]>,
     /// When a round last took or let go of this entry.
     pub(crate) used: LastUsed,

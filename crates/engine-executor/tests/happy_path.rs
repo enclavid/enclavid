@@ -32,10 +32,11 @@ use std::sync::{Arc, Mutex};
 
 use engine_compiler::Compiler;
 use engine_executor::{
-    Component, DEFAULT_ROUND_FUEL, EmbeddedImport, EmbeddedRegistry, Executor, MediaStore,
-    PluginInstance, PrimedComposition, RunInputs, RunResult, RunStatus, SessionChange,
+    Component, ComponentDecls, DEFAULT_ROUND_FUEL, EmbeddedImport, EmbeddedRegistry, Executor,
+    MediaStore, PluginInstance, PrimedComposition, RunInputs, RunResult, RunStatus, SessionChange,
     SessionListener,
 };
+use engine_types::text::Localized;
 use session_types::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use xtask::fixtures;
 
@@ -58,6 +59,26 @@ struct TestRunner {
 struct Fused {
     component: Component,
     embedded_imports: Vec<EmbeddedImport>,
+    catalogs: Vec<([u8; 32], ComponentDecls)>,
+}
+
+impl Fused {
+    /// The registry its catalogs make, as the round's process builds it.
+    fn registry(&self) -> Arc<EmbeddedRegistry> {
+        let mut builder = EmbeddedRegistry::builder();
+        for (hash, decls) in &self.catalogs {
+            builder.add_component(*hash, decls.clone());
+        }
+        Arc::new(builder.build().expect("the texts read"))
+    }
+}
+
+/// `text` in English, as the applicant reading English sees it.
+fn english(text: &Localized) -> &str {
+    text.translations
+        .iter()
+        .find(|t| t.language == "en")
+        .map_or("", |t| t.text.as_str())
 }
 
 impl TestRunner {
@@ -90,6 +111,7 @@ impl TestRunner {
         Ok(Fused {
             component,
             embedded_imports: composition.embedded_imports,
+            catalogs: composition.catalogs,
         })
     }
 
@@ -308,6 +330,28 @@ async fn passport_selfie_consent_accept_reaches_approved_over_the_rendered_field
         screen.fields.iter().any(|f| f.value.parse::<i32>().is_ok()),
         "rendered fields must include the face-age estimate (a numeric value)",
     );
+    // The keys are the policy's disclosure fields, the cases of its `key`
+    // and the well-known helpers' names alike; the labels are texts.
+    let keys: Vec<&str> = screen.fields.iter().map(|f| f.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "full-name",
+            "date-of-birth",
+            "nationality",
+            "passport-number",
+            "document-expiry",
+            "address",
+            "estimated-age",
+        ]
+    );
+    assert_eq!(english(&screen.fields[0].label), "Full name");
+    assert_eq!(english(&screen.fields[6].label), "Estimated age");
+    assert_eq!(
+        english(&screen.reason),
+        "Identity verification for the test policy."
+    );
+    assert_eq!(english(&screen.requester), "EXTRA-PLUGIN-TAG");
 
     // Accept → the policy branches to Approved.
     let (status, _session) = h
@@ -627,12 +671,12 @@ async fn a_round_reads_its_own_time_and_fresh_randomness() {
     assert_ne!(random(&first), random(&again));
 }
 
-/// STATIC-strict consumption: fuse policy + well-known into a
-/// self-contained artifact (what `enclavid link` would ship), then feed
-/// it back with NO runtime plugins. The engine must reconstruct the
-/// embedded manifest from the artifact's own `embedded-slot:*` imports,
-/// recover the nested catalogs for the registry, and resolve both
-/// strict (plugin i18n) and merged (DF) refs through it.
+/// STATIC consumption: fuse the policy and every plugin into one artifact
+/// before the session, as a consumer may with plain `wac` — a fusion that
+/// knows nothing of the slots — then feed it back with NO runtime plugins.
+/// The engine finds each component's slot among the artifact's imports and
+/// its catalog nested inside, and resolves both the plugins' texts (each
+/// from its own catalog) and the disclosure fields (merged) through it.
 #[tokio::test]
 async fn static_fused_artifact_resolves_strictly() {
     let runner = TestRunner::new().unwrap();
@@ -640,11 +684,9 @@ async fn static_fused_artifact_resolves_strictly() {
         .fuse(fixtures::test_policy(), &all_plugins())
         .unwrap();
 
-    // The twins survive as distinct `embedded-slot:*` imports (strict
-    // routing) — not collapsed to canonical. Distinct twins are: policy
-    // (i18n) + well-known (i18n) + extra (i18n) = 3. face-age ships no
-    // embedded catalog, so it adds no twin, and icons are the host's own,
-    // so none of them routes any.
+    // The slots survive the fusion as distinct `embedded-slot:*` imports:
+    // policy + well-known + extra = 3. The vision plugins have no texts, so
+    // they import none, and icons are the host's own.
     let imports = engine_compiler::top_level_imports(&fused).unwrap();
     let slots: Vec<&String> = imports
         .iter()
@@ -653,46 +695,31 @@ async fn static_fused_artifact_resolves_strictly() {
     assert_eq!(
         slots.len(),
         3,
-        "policy(i18n) + well-known(i18n) + extra(i18n) = 3 distinct twin imports, got {slots:?}",
+        "policy + well-known + extra = 3 distinct slots, got {slots:?}",
     );
-    // Each twin name carries the routed interface version (`0.1.0` →
-    // `-0-1-0`, kept off the semver `@` track) so two components with
-    // byte-identical catalogs but different versions can't collide onto
-    // one twin — and reconstruct can recover the version below.
+    // Each slot name carries the version of the interface it renamed
+    // (`0.1.0` → `-0-1-0`, kept off the semver `@` track), so two
+    // components with byte-identical catalogs but different versions can't
+    // collide onto one slot.
     assert!(
         slots.iter().all(|n| n.contains("-0-1-0/")),
-        "twin names must carry the interface version, got {slots:?}",
+        "slot names must carry the interface version, got {slots:?}",
     );
 
-    // Consume with an empty plugin list — the static path. The engine
-    // reconstructs the strict manifest from the artifact's own
-    // `embedded-slot:*` imports.
+    // Consume with an empty plugin list — the static path.
     let composition = runner.compose(&fused, &[]).unwrap();
     assert_eq!(
         composition.embedded_imports.len(),
         3,
-        "static artifact's strict manifest reconstructed from its imports",
+        "each slot found among the artifact's imports",
     );
-
-    // Registry from the fused artifact's OWN nested catalogs, policy first.
-    let mut cats = engine_compiler::load_embedded_nested(&fused).unwrap();
-    assert!(
-        cats.iter().filter(|c| c.is_policy).count() == 1,
-        "exactly one nested policy catalog recovered, got {}",
-        cats.len(),
-    );
-    cats.sort_by_key(|c| !c.is_policy);
-    let mut builder = EmbeddedRegistry::builder();
-    for c in cats {
-        builder.add_component(c.hash, c.decls);
-    }
-    let embedded = Arc::new(builder.build());
+    let embedded = composition.registry();
     let listener = Arc::new(PersistListener::default());
 
     // start → media(passport) → media(selfie) → consent-disclosure.
-    // Each media prompt resolves the plugin's i18n strictly; the consent
-    // screen resolves DF (merged) — all through the static artifact with
-    // no runtime fusion.
+    // Each media prompt is the plugin's own texts; the consent screen
+    // resolves DF (merged) — all through the static artifact with no
+    // runtime fusion.
     let primed = runner
         .prime(&composition, embedded.clone())
         .expect("prime static composition");
@@ -722,58 +749,55 @@ async fn static_fused_artifact_resolves_strictly() {
     }
 }
 
+/// Whether any catalog of `registry` holds `text` as a text.
+fn registered(registry: &EmbeddedRegistry, text: &str) -> bool {
+    registry
+        .localized
+        .declared()
+        .any(|rows| rows.iter().any(|t| t.text == text))
+}
+
 /// The definitive runtime proof of STRICT per-component isolation.
 ///
-/// The test-policy and well-known BOTH declare the i18n key
-/// `passport_title` with different text. well-known's passport capture
-/// spec resolves `localized("passport_title")` — under strict routing
-/// it MUST resolve against well-known's OWN catalog ("Your passport"),
-/// via its own twin import. If resolution were first-match (the failure
-/// mode when the twins collapse), it would pick the POLICY's colliding
-/// value instead (policy is composed first). So this asserts the plugin
-/// never sees the policy's translation.
+/// The test-policy and well-known BOTH have a text `passport-title`, each
+/// its own. well-known's passport capture spec is
+/// `localized(passport-title)` through well-known's OWN slot, so it MUST
+/// be well-known's text ("Your passport"). If resolution were first-match
+/// (the failure mode were the slots to collapse into one), it would pick
+/// the POLICY's colliding text instead (policy is composed first). So this
+/// asserts the plugin never sees the policy's text.
 #[tokio::test]
 async fn strict_routing_isolates_colliding_i18n_key() {
     let h = Harness::new();
     let listener = Arc::new(PersistListener::default());
 
-    // Round 1: start → render media(passport). The spec's `label_ref` is
-    // the token well-known produced from `localized("passport_title")`.
+    // Round 1: start → render media(passport). The spec's label is the
+    // text well-known minted through its own slot.
     let (status, _session) = h.run(Session::default(), Event::Start, &listener).await;
     let spec = match status {
         RunStatus::AwaitingInput(Prompt::Media(spec)) => spec,
         _ => panic!("round 1 expected AwaitingInput(Media)"),
     };
 
-    // The engine resolved `spec.label` (well-known's `passport_title`) at
-    // the action boundary; the domain carries the translation set
-    // directly, no registry lookup needed.
-    let en = spec
-        .label
-        .translations
-        .iter()
-        .find(|t| t.language == "en")
-        .expect("en translation present")
-        .text
-        .as_str();
-
+    // The engine resolved `spec.label` at the action boundary; the domain
+    // carries the text whole, no registry lookup needed.
     assert_eq!(
-        en, "Your passport",
-        "well-known's passport spec must resolve its OWN passport_title \
-         (strict isolation) — got the policy's colliding value, which \
-         means routing collapsed to first-match",
+        english(&spec.label),
+        "Your passport",
+        "well-known's passport spec must be its OWN passport-title \
+         (strict isolation) — got the policy's colliding text, which \
+         means the slots collapsed to first-match",
     );
 
     // Guard against a vacuous test: the collision must be REAL — the
-    // policy declared a DIFFERENT passport_title that first-match (policy
+    // policy has a DIFFERENT passport-title that first-match (policy
     // composed first) would have leaked here.
-    let policy_value = "POLICY-OWNED passport_title (must NOT leak into the plugin)";
     assert!(
-        h.embedded
-            .localized
-            .declared()
-            .any(|rows| rows.iter().any(|t| t.text == policy_value)),
-        "the policy's colliding passport_title must be registered, else \
+        registered(
+            &h.embedded,
+            "POLICY-OWNED passport-title (must NOT leak into the plugin)"
+        ),
+        "the policy's colliding passport-title must be registered, else \
          the isolation assertion above is vacuous",
     );
 }
@@ -795,12 +819,12 @@ async fn a_capture_step_carries_the_icon_it_named() {
 
 /// HYBRID composition: a pre-fused core (policy + well-known baked) plus a
 /// runtime plugin (extra) linked on top. The policy imports `extra/tag`,
-/// which the core leaves unsatisfied; the runtime fusion wires it, routes
-/// extra's embedded to its own twin, and passes through the core's baked
-/// twins. The consent requester ref (`tag::get()` → `extra_tag`) must
-/// resolve against the RUNTIME extra plugin's OWN catalog — proving
-/// strict routing survives the pass-through, not first-match (which
-/// would leak the policy's colliding `extra_tag`).
+/// which the core leaves unsatisfied; the runtime fusion wires it, and
+/// every slot — the core's and extra's — comes through. The consent
+/// requester (`tag::get()` → `extra-tag`) must be the RUNTIME extra
+/// plugin's OWN text — proving each slot is served from its own catalog
+/// however the composition was put together, not first-match (which would
+/// leak the policy's colliding `extra-tag`).
 #[tokio::test]
 async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let runner = TestRunner::new().unwrap();
@@ -833,18 +857,11 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
         wasm: fixtures::extra().to_vec(),
     }];
     let composition = runner.compose(&core, &runtime).unwrap();
+    assert_eq!(composition.embedded_imports.len(), 3);
 
-    // Registry: policy + well-known recovered from the core's nested
-    // catalogs (policy first), plus the runtime extra catalog.
-    let mut cats = engine_compiler::load_embedded_nested(&core).unwrap();
-    cats.sort_by_key(|c| !c.is_policy);
-    let mut builder = EmbeddedRegistry::builder();
-    for c in cats {
-        builder.add_component(c.hash, c.decls);
-    }
-    let extra_cat = engine_compiler::load_embedded(fixtures::extra()).unwrap();
-    builder.add_component(extra_cat.hash, extra_cat.decls);
-    let embedded = Arc::new(builder.build());
+    // Registry: policy + well-known from the core's nested catalogs, plus
+    // the runtime extra's — as the compile found them.
+    let embedded = composition.registry();
     let listener = Arc::new(PersistListener::default());
 
     let primed = runner
@@ -878,28 +895,20 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
 
     // The requester came from the RUNTIME extra plugin (`tag::get()`);
     // the engine resolved it at the boundary into `disclosure.requester`.
-    let en = disclosure
-        .requester
-        .translations
-        .iter()
-        .find(|t| t.language == "en")
-        .expect("en translation present")
-        .text
-        .as_str();
     assert_eq!(
-        en, "EXTRA-PLUGIN-TAG",
-        "runtime extra plugin must resolve extra_tag against its OWN \
-         catalog in a hybrid composition — got the policy's colliding value",
+        english(&disclosure.requester),
+        "EXTRA-PLUGIN-TAG",
+        "the runtime extra plugin's extra-tag must be its OWN text in a \
+         hybrid composition — got the policy's colliding text",
     );
 
-    // Collision is real: the policy declared a different extra_tag.
-    let policy_value = "POLICY-OWNED extra_tag (must NOT leak into the extra plugin)";
+    // Collision is real: the policy has a different extra-tag.
     assert!(
-        embedded
-            .localized
-            .declared()
-            .any(|rows| rows.iter().any(|t| t.text == policy_value)),
-        "the policy's colliding extra_tag must be registered, else the \
+        registered(
+            &embedded,
+            "POLICY-OWNED extra-tag (must NOT leak into the extra plugin)"
+        ),
+        "the policy's colliding extra-tag must be registered, else the \
          isolation assertion above is vacuous",
     );
 }
@@ -922,32 +931,19 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         let runner = TestRunner::new().unwrap();
-        // Fuse the test policy with BOTH plugins into one component (the
+        // Fuse the test policy with every plugin into one component (the
         // same path `TestRunner::compose` takes in prod). The fixtures carry
-        // their embedded sections (embedded verbatim from the author
-        // JSON), so `compose` derives each catalog's content-hash from
-        // the same bytes the registry keys on.
+        // their catalogs, embedded as `enclavid {policy,plugin} embed`
+        // embeds them, so each slot is named after the same bytes the
+        // registry keys on.
         let composition = runner
             .compose(fixtures::test_policy(), &all_plugins())
             .unwrap();
 
-        // Composition-wide `EmbeddedRegistry`, keyed by each component's
-        // catalog content-hash — policy first, then the plugins in the
-        // same order as the fused set. Both decls and hash come straight
-        // from the sealed wasm (`load_embedded`), so they match exactly
-        // what `compose` routed the imports under. The `ref_key` is a
-        // fixed test value; production derives it per-policy from
-        // `tee_seal_key + policy_ref`.
-        let mut builder = EmbeddedRegistry::builder();
-        for wasm in [
-            fixtures::test_policy(),
-            fixtures::well_known(),
-            fixtures::extra(),
-        ] {
-            let cat = engine_compiler::load_embedded(wasm).expect("load embedded");
-            builder.add_component(cat.hash, cat.decls);
-        }
-        let embedded = Arc::new(builder.build());
+        // Composition-wide `EmbeddedRegistry`, keyed by each catalog's
+        // content-hash, from the catalogs the compile found — what the
+        // round's process builds it from.
+        let embedded = composition.registry();
 
         let primed = runner
             .prime(&composition, embedded.clone())

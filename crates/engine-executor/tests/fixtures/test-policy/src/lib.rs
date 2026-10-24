@@ -16,9 +16,9 @@
 //! first `handle(&[], event::start)` works without a prior write.
 //!
 //! Every capture spec + canonical `display-field` comes from the
-//! well-known plugin (its own i18n, the host's icons);
-//! the policy authors only its consent reason + requester refs against
-//! its own `i18n.json`.
+//! well-known plugin (its own texts, the host's icons); the policy
+//! authors only its consent reason and its face-age field, as its own
+//! texts and disclosure fields.
 
 wit_bindgen::generate!({
     // wkg vendors the full dependency tree (embedded / shared-types /
@@ -29,12 +29,12 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::host::embedded_i18n::localized as l10n;
 // Mints the policy's OWN `disclosure-field-ref` for a key the well-known
-// helpers don't cover (the face-age estimate), gated by this policy's
-// `disclosure-fields.json`.
-use enclavid::host::embedded_disclosure_fields::disclosure_field as dfref;
+// helpers don't cover (the face-age estimate): a case of its own list.
+use enclavid::host_ext::disclosure_fields::{Key as Field, disclosure_field};
 use enclavid::shared_types::disclosure::DisplayField;
+// The policy's own texts.
+use enclavid::test_policy::i18n::{Key as Text, localized};
 // The host `blob` resource + its content ref: on the passport round we stash
 // the frame blob's `blob-ref` (a hex string) in `state`, then rehydrate it on
 // the selfie round via `Blob::from_blob_ref` — proving cross-round reload.
@@ -44,8 +44,8 @@ use enclavid::policy::types::{Action, Decision, Disclosure, Event, Prompt};
 // and the canonical KYC `display-field` helpers.
 use enclavid::well_known::capture;
 use enclavid::well_known::disclosure_fields as wk;
-// Second plugin (linked at runtime in the hybrid test): its `get()`
-// resolves `extra_tag` from the extra plugin's own i18n catalog.
+// Second plugin (linked at runtime in the hybrid test): its `get()` is
+// `extra-tag`, one of the extra plugin's own texts.
 use enclavid::extra::tag;
 // The vision substrate, threaded across the fused boundary: preprocess
 // decodes the selfie clip into a plugin-owned `decoded-frame`, face-detect
@@ -57,15 +57,13 @@ use exports::enclavid::policy::policy::Guest;
 
 struct TestPolicy;
 
-// The consent screen's reason ref, authored in this policy's `i18n.json`.
-// The requester ref comes from the extra plugin (see `build_consent`).
-// Every field label, capture instruction, guide and icon is owned by the
-// well-known plugin's embedded sections.
-const KEY_CONSENT_REASON: &str = "consent_reason";
-// The face-age estimate field: a policy-owned `display-field` key (declared
-// in this policy's `disclosure-fields.json`) + its i18n label.
-const KEY_ESTIMATED_AGE: &str = "estimated_age";
-const KEY_ESTIMATED_AGE_LABEL: &str = "estimated_age_label";
+// The consent screen's reason is one of this policy's own texts; the
+// requester comes from the extra plugin (see `build_consent`). Every field
+// label, capture instruction, guide and icon is owned by the well-known
+// plugin.
+
+/// The name the consent fields are of.
+const HOLDER: &str = "Jane Q. Citizen";
 
 // ~500-char value (held by the well-known `address` helper) — well past
 // the consent screen's 200-char collapse threshold, exercising the
@@ -144,38 +142,37 @@ fn probe_state() -> Vec<u8> {
 }
 
 fn build_consent(age_years: i32) -> Disclosure {
+    // Canonical KYC fields built by the plugin: labels are the plugin's own
+    // texts; the keys (full-name, date-of-birth, …) are held to THIS
+    // policy's disclosure fields — the single bandwidth gate for what
+    // reaches the consumer.
+    let mut fields = vec![
+        wk::full_name(HOLDER),
+        wk::date_of_birth("1990-04-12"),
+        wk::nationality("Utopia"),
+        wk::passport_number("X1234567"),
+        wk::document_expiry("2030-01-01"),
+        wk::address(LONG_ADDRESS),
+    ];
+    // The face-age estimate, disclosed as a POLICY-owned field. Its key isn't
+    // a well-known helper, so the policy mints the `disclosure-field-ref`
+    // itself, a case of its own list, plus its own label. Shown on the consent
+    // screen and sealed only on accept (show == seal) — the sanctioned path
+    // for a plugin-computed value to reach the consumer (never auto-shared).
+    fields.push(DisplayField {
+        key: disclosure_field(Field::EstimatedAge),
+        label: localized(Text::EstimatedAgeLabel),
+        value: age_years.to_string(),
+    });
+    let reason = localized(Text::ConsentReason);
     Disclosure {
-        // Canonical KYC fields built by the plugin: labels resolve from
-        // the plugin's i18n; the snake_case keys (full_name,
-        // date_of_birth, …) are validated against THIS policy's
-        // `disclosure-fields.json` — the single bandwidth gate for what
-        // reaches the consumer.
-        fields: vec![
-            wk::full_name("Jane Q. Citizen"),
-            wk::date_of_birth("1990-04-12"),
-            wk::nationality("Utopia"),
-            wk::passport_number("X1234567"),
-            wk::document_expiry("2030-01-01"),
-            wk::address(LONG_ADDRESS),
-            // The face-age estimate, disclosed as a POLICY-owned field. Its
-            // key isn't a well-known helper, so the policy mints the
-            // `disclosure-field-ref` itself (against its own
-            // `disclosure-fields.json` gate) plus its own i18n label. Shown on
-            // the consent screen and sealed only on accept (show == seal) —
-            // the sanctioned path for a plugin-computed value to reach the
-            // consumer (never auto-shared).
-            DisplayField {
-                key: dfref(KEY_ESTIMATED_AGE),
-                label: l10n(KEY_ESTIMATED_AGE_LABEL),
-                value: age_years.to_string(),
-            },
-        ],
-        reason: l10n(KEY_CONSENT_REASON),
-        // Requester ref comes from the EXTRA plugin (`tag::get()` →
-        // `extra_tag`), resolved against the extra plugin's own catalog.
-        // Both this policy and the extra plugin declare `extra_tag` with
-        // different text, so a correct (strict) routing yields the
-        // plugin's value here — first-match would leak the policy's.
+        fields,
+        reason,
+        // The requester comes from the EXTRA plugin (`tag::get()` →
+        // `extra-tag`), one of the extra plugin's own texts. This policy has
+        // an `extra-tag` too, with a text of its own, so a slot served from
+        // its own catalog yields the plugin's text here — first-match would
+        // leak the policy's.
         requester: tag::get(),
     }
 }
@@ -253,7 +250,7 @@ impl Guest for TestPolicy {
                     Some(est) => (
                         state_at(STEP_AWAIT_CONSENT),
                         Action::Render(Prompt::ConsentDisclosure(build_consent(
-                            est.age.round() as i32,
+                            est.age.round() as i32
                         ))),
                     ),
                     None => (

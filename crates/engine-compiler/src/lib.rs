@@ -3,10 +3,11 @@
 //! Given a policy component and its pinned plugin components (already
 //! pulled), [`Compiler`] fuses them into ONE component via `wac-graph`
 //! single-store fusion, runs Cranelift codegen, and serializes the result
-//! to `cwasm`. The parsed embedded catalogs ([`load_embedded`]) and the
-//! per-catalog import manifest ([`Composition::embedded_imports`]) ride
-//! alongside so the executor can rebuild the host `Linker` + ref registry
-//! without re-pulling.
+//! to `cwasm`. The embedded catalogs of every artifact, at every depth
+//! ([`load_embedded_nested`]), and the slots the components' texts come
+//! through ([`Composition::embedded_imports`]) ride alongside so the
+//! executor can rebuild the host `Linker` + ref registry without
+//! re-pulling.
 //!
 //! This is the ONLY crate that carries Cranelift. The execution half
 //! ([`engine-executor`](../engine_executor/index.html)) structurally does
@@ -17,9 +18,10 @@
 
 mod compose;
 mod decls;
-mod hash;
+mod disclosure_fields;
 mod icons;
 mod props;
+mod texts;
 
 // This role's own supervisor↔child hop. Behind a feature because the pure library
 // — used by tests and by the child — stays free of rpc/remoc, and because a crate
@@ -31,6 +33,9 @@ pub use seam::{
     ChildCompiled, RemoteCompileChild, RemoteCompileChildClient, RemoteCompileChildServerShared,
 };
 
+use std::collections::HashSet;
+
+use wac_graph::types::Package;
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
 
@@ -43,30 +48,33 @@ pub use decls::{
     CatalogRefused, EmbeddedCatalog, load_embedded, load_embedded_nested, top_level_imports,
 };
 use decls::{embedded_section_bytes, unreadable};
-pub use hash::{catalog_hash, embedded_import_name, slug};
+pub use enclavid_embedded::{catalog_hash, embedded_import_name, slug};
 
-/// A fused policy component plus the manifest of distinct embedded
-/// imports its host `Linker` must register. Returned by
+/// A fused policy component, the slots its host `Linker` must register,
+/// and the catalogs its registry is built from. Returned by
 /// [`Compiler::compose`], for tests and tooling that run a composition in
 /// the process that compiled it; the fleet's compile output is
 /// [`BundleParts`].
 pub struct Composition {
     pub component: Component,
     pub embedded_imports: Vec<EmbeddedImport>,
+    /// Same as [`BundleParts::catalogs`].
+    pub catalogs: Vec<([u8; 32], ComponentDecls)>,
 }
 
 /// The serializable output of a compile, in engine-native types (NO rpc
-/// dep): the `cwasm` bytes, the per-catalog import manifest, and the parsed
-/// per-component catalogs. This is exactly what the wire `CompiledBundle`
-/// carries; `engine-compiler-child`, the disposable process that runs the
-/// compile, wraps this into that wire type. Keeping it native lets the pure lib
-/// produce the whole compile output without depending on the `engine-rpc`
-/// contract.
+/// dep): the `cwasm` bytes, the slots the components' texts come through,
+/// and every catalog of the composition. This is exactly what the wire
+/// `CompiledBundle` carries; `engine-compiler-child`, the disposable process
+/// that runs the compile, wraps this into that wire type. Keeping it native
+/// lets the pure lib produce the whole compile output without depending on
+/// the `engine-rpc` contract.
 pub struct BundleParts {
     pub cwasm: Vec<u8>,
     pub embedded_imports: Vec<EmbeddedImport>,
-    /// Per-component `(catalog content-hash, parsed decls)`, composition
-    /// order (policy first) — the registry-builder inputs.
+    /// `(catalog content-hash, decls)` of every catalog of every artifact,
+    /// nested ones included, the policy's first — the registry-builder
+    /// inputs.
     pub catalogs: Vec<([u8; 32], ComponentDecls)>,
 }
 
@@ -98,25 +106,24 @@ impl Compiler {
         component.serialize()
     }
 
-    /// Fuse a policy with plugins into a self-contained component's
-    /// BYTES — the strict-routed static artifact `enclavid link` would
-    /// publish. The embedded manifest is reconstructed from these bytes
-    /// at load time (see `compose::reconstruct_strict_manifest`), so
-    /// it isn't returned here.
+    /// Fuse a policy with plugins into one component's BYTES, wiring each
+    /// import a plugin's interface names to that plugin and nothing more —
+    /// what any fusion of embedded artifacts makes of them, the compile's own
+    /// included. For tests and tooling that pin a composition fused before
+    /// the session, as a consumer may with plain `wac`.
     pub fn fuse(
         &self,
         policy_wasm: &[u8],
         plugins: &[PluginInstance],
     ) -> wasmtime::Result<Vec<u8>> {
-        let (bytes, _manifest) = compose::fuse(policy_wasm.to_vec(), lent(plugins))?;
-        Ok(bytes)
+        compose::fuse(policy_wasm.to_vec(), lent(plugins))
     }
 
-    /// Fuse a policy with its pinned plugins into ONE component (see
-    /// `fused`) and compile it, loaded and ready to run here. For tests and
-    /// tooling, which run what they compile in the same process, and copy the
-    /// components they lend it; the fleet's compile is
-    /// [`compile_to_parts`](Self::compile_to_parts).
+    /// The composition the fleet's compile would make of a policy and its
+    /// pinned plugins (see [`compile_to_parts`](Self::compile_to_parts)),
+    /// compiled and loaded, ready to run here. For tests and tooling, which
+    /// run what they compile in the same process, and copy the components
+    /// they lend it.
     ///
     /// This is a build-time step: the caller compiles once per
     /// `(policy, plugin-set)` and reuses the returned [`Composition`]
@@ -126,16 +133,17 @@ impl Compiler {
         policy_wasm: &[u8],
         plugins: &[PluginInstance],
     ) -> wasmtime::Result<Composition> {
-        let (bytes, embedded_imports) = fused(policy_wasm.to_vec(), lent(plugins))?;
+        let prepared = prepare(policy_wasm.to_vec(), lent(plugins))?;
         Ok(Composition {
-            component: self.compile(&bytes)?,
-            embedded_imports,
+            component: self.compile(prepared.fused.bytes())?,
+            embedded_imports: prepared.embedded_imports,
+            catalogs: prepared.catalogs,
         })
     }
 
-    /// The whole compile-boundary output as [`BundleParts`]: parse each
-    /// component's embedded catalog (composition order, policy first), fuse
-    /// (see `fused`), and Cranelift-compile to `cwasm`. Called by
+    /// The whole compile-boundary output as [`BundleParts`]: read every
+    /// artifact's catalogs and the slots its texts come through, fuse, check
+    /// (see `prepare`), and Cranelift-compile to `cwasm`. Called by
     /// `engine-compiler-child` — the process the compile-worker spawns — which
     /// wraps the result into the wire `CompiledBundle`, so this orchestration
     /// lives ONCE, in the pure lib.
@@ -145,98 +153,113 @@ impl Compiler {
     /// compiled. The compile writes its artifact straight into the `cwasm`
     /// bytes; nothing of it is loaded or made runnable here, so there is no
     /// loaded copy to serialize from.
-    ///
-    /// A composition the pinned bytes decide against is refused: the error then
-    /// carries the [`CompileFault`] saying why, which the child answers as a
-    /// refusal. Before any section is parsed, one whose embedded sections are
-    /// past `MAX_EMBEDDED_SECTION_BYTES`; then one whose catalogs break their
-    /// format, that does not fuse, or that, fused, still imports what nothing
-    /// serves (`compose::served`) or declares props the host cannot serve
-    /// (`props::declared`). [`compose`](Self::compose) and
-    /// [`fuse`](Self::fuse), which tests and tooling call directly, hold none of
-    /// this.
     pub fn compile_to_parts(
         &self,
         policy_wasm: Vec<u8>,
         plugins: Vec<PluginInstance>,
     ) -> wasmtime::Result<BundleParts> {
-        let components = || {
-            std::iter::once((Artifact::Policy, &policy_wasm)).chain(
-                plugins
-                    .iter()
-                    .map(|p| (Artifact::Plugin(p.package.clone()), &p.wasm)),
-            )
-        };
-        // The cap first, on lengths alone: everything below parses, and what it
-        // would parse is what the cap bounds. Summed over the whole composition,
-        // because the plugin set is the consumer's to pin.
-        let mut section_bytes = 0;
-        for (artifact, wasm) in components() {
-            section_bytes += embedded_section_bytes(wasm)
-                .map_err(|e| e.context(CompileFault::NotAComponent(artifact)))?;
-        }
-        if section_bytes > MAX_EMBEDDED_SECTION_BYTES {
-            return Err(wasmtime::Error::new(CompileFault::CatalogsPastCap));
-        }
-        let mut catalogs = Vec::with_capacity(1 + plugins.len());
-        for (artifact, wasm) in components() {
-            let catalog = load_embedded(wasm).map_err(|e| unreadable(artifact, e))?;
-            catalogs.push((catalog.hash, catalog.decls));
-        }
-        let plugged = !plugins.is_empty();
-        let (bytes, embedded_imports) = fused(policy_wasm, plugins)?;
-        let fused = compose::served(bytes, plugged)?;
+        let prepared = prepare(policy_wasm, plugins)?;
         let cwasm = self
             .engine
-            .precompile_component(fused.bytes())
+            .precompile_component(prepared.fused.bytes())
             .map_err(|e| e.context(CompileFault::Invalid))?;
         Ok(BundleParts {
             cwasm,
-            embedded_imports,
-            catalogs,
+            embedded_imports: prepared.embedded_imports,
+            catalogs: prepared.catalogs,
         })
     }
 }
 
-/// The bytes a composition compiles from, and the manifest of distinct
-/// embedded imports its host `Linker` must register. `wac-graph`
-/// single-store fusion (see `compose::fuse`) wires every plugin export into
-/// the policy's imports; the result runs in one wasmtime `Store`, so
-/// cross-component WIT resources are native handles. With no plugins the
-/// bytes are the policy's own.
+/// A composition fused and checked, ready to compile.
+struct Prepared {
+    fused: Package,
+    embedded_imports: Vec<EmbeddedImport>,
+    catalogs: Vec<([u8; 32], ComponentDecls)>,
+}
+
+/// The composition a policy and its pinned plugins make: every artifact's
+/// catalogs, at every depth, since an embedded component's are nested and a
+/// pre-fused artifact holds several; the slots each artifact's texts come
+/// through, each named after one of ITS OWN catalogs; the components fused
+/// (see `compose::fuse`) — with no plugins, the policy's own bytes — and
+/// checked for what nothing would serve (`compose::served`).
 ///
-/// Three shapes are handled:
-///
-///   * **Dynamic** — a non-fused policy plus runtime `plugins`:
-///     `compose::fuse` routes each component's i18n import to a
-///     distinct per-catalog import (the manifest).
-///   * **Static** — a pre-fused policy artifact with no runtime
-///     plugins: compiled as-is; the manifest is reconstructed from
-///     the `embedded-slot:*` imports the artifact already carries
-///     (empty for a lone unfused policy, whose canonical embedded
-///     imports the host serves first-match).
-///   * **Hybrid** — a pre-fused core plus runtime `plugins`: fused
-///     again; the core's own routed imports bubble through and are
-///     re-emitted alongside the freshly routed runtime ones.
-fn fused(
-    policy_wasm: Vec<u8>,
-    plugins: Vec<PluginInstance>,
-) -> wasmtime::Result<(Vec<u8>, Vec<EmbeddedImport>)> {
-    // A pre-fused core's own `embedded-slot:*` imports come through fusion
-    // untouched, so their entries are read off the core before fusion takes
-    // its bytes. Empty for a non-fused policy.
-    let mut core_imports = compose::reconstruct_strict_manifest(&policy_wasm)?;
-    let (bytes, mut embedded_imports) = if plugins.is_empty() {
-        (policy_wasm, Vec::new())
-    } else {
-        compose::fuse(policy_wasm, plugins)?
+/// A composition the pinned bytes decide against is refused: the error then
+/// carries the [`CompileFault`] saying why, which the child answers as a
+/// refusal. Before any section is parsed, one whose embedded sections are past
+/// `MAX_EMBEDDED_SECTION_BYTES`; then one whose catalogs break their format,
+/// one with a slot no catalog of its artifact names, one that does not fuse,
+/// and one that, fused, still imports what nothing serves or declares props,
+/// icons, slots or disclosure fields in a shape the host cannot serve.
+fn prepare(policy_wasm: Vec<u8>, plugins: Vec<PluginInstance>) -> wasmtime::Result<Prepared> {
+    let components = || {
+        std::iter::once((Artifact::Policy, &policy_wasm)).chain(
+            plugins
+                .iter()
+                .map(|p| (Artifact::Plugin(p.package.clone()), &p.wasm)),
+        )
     };
-    embedded_imports.append(&mut core_imports);
-    // Dedup by instance name: a runtime plugin and a baked one can
-    // share a catalog (same slug) — register the host instance once.
-    let mut seen = std::collections::HashSet::new();
-    embedded_imports.retain(|e| seen.insert(e.instance_name.clone()));
-    Ok((bytes, embedded_imports))
+    // The cap first, on lengths alone: everything below parses, and what it
+    // would parse is what the cap bounds. Summed over the whole composition,
+    // because the plugin set is the consumer's to pin.
+    let mut section_bytes = 0;
+    for (artifact, wasm) in components() {
+        section_bytes += embedded_section_bytes(wasm)
+            .map_err(|e| e.context(CompileFault::NotAComponent(artifact)))?;
+    }
+    if section_bytes > MAX_EMBEDDED_SECTION_BYTES {
+        return Err(wasmtime::Error::new(CompileFault::CatalogsPastCap));
+    }
+    let mut artifacts = Vec::with_capacity(1 + plugins.len());
+    for (artifact, wasm) in components() {
+        let catalogs = load_embedded_nested(wasm).map_err(|e| unreadable(artifact.clone(), e))?;
+        let slots = compose::slots(wasm, &artifact, &catalogs)?;
+        artifacts.push((artifact, catalogs, slots));
+    }
+
+    let plugged = !plugins.is_empty();
+    let bytes = if plugged {
+        compose::fuse(policy_wasm, plugins)?
+    } else {
+        policy_wasm
+    };
+    let declared = compose::Declared {
+        slots: artifacts
+            .iter()
+            .flat_map(|(artifact, catalogs, slots)| {
+                slots
+                    .iter()
+                    .map(|(slot, index)| (artifact.clone(), slot, &catalogs[*index].texts))
+            })
+            .collect(),
+        disclosure_fields: artifacts
+            .iter()
+            .flat_map(|(_, catalogs, _)| catalogs)
+            .flat_map(|catalog| catalog.decls.disclosure_fields.iter().map(String::as_str))
+            .collect(),
+    };
+    let fused = compose::served(bytes, plugged, &declared)?;
+    drop(declared);
+
+    // One host instance per slot: two artifacts whose catalogs are the same
+    // bytes take their texts through the same one.
+    let mut seen = HashSet::new();
+    let mut embedded_imports = Vec::new();
+    let mut catalogs = Vec::new();
+    for (_, found, slots) in artifacts {
+        for (slot, _) in slots {
+            if seen.insert(slot.instance_name.clone()) {
+                embedded_imports.push(slot);
+            }
+        }
+        catalogs.extend(found.into_iter().map(|c| (c.hash, c.decls)));
+    }
+    Ok(Prepared {
+        fused,
+        embedded_imports,
+        catalogs,
+    })
 }
 
 /// Owned copies of the plugins a caller lends, for the entry points that

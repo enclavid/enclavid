@@ -1591,7 +1591,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
- "wasm-encoder 0.247.0",
  "wasmparser 0.247.0",
 ]
 
@@ -1619,8 +1618,14 @@ name = "enclavid-embedded"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "serde",
  "serde_json",
+ "tempfile",
+ "wac-graph",
+ "wasm-encoder 0.247.0",
+ "wit-component 0.247.0",
+ "wit-parser 0.247.0",
 ]
 
 [[package]]
@@ -1759,7 +1764,6 @@ dependencies = [
 name = "engine-compiler"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "bytes",
  "enclavid-attestation",
  "enclavid-boundary",
@@ -1817,6 +1821,7 @@ dependencies = [
  "enclavid-attestation",
  "enclavid-boundary",
  "enclavid-boundary-macros",
+ "enclavid-embedded",
  "enclavid-ra-tls",
  "engine-compiler",
  "engine-rpc",
@@ -1900,6 +1905,7 @@ dependencies = [
  "enclavid-embedded",
  "serde",
  "serde_bytes",
+ "serde_json",
  "unicode-general-category",
 ]
 
@@ -6710,7 +6716,6 @@ dependencies = [
  "clap",
  "enclavid-embedded",
  "serde_json",
- "wasm-encoder 0.247.0",
  "wit-component 0.247.0",
 ]
 

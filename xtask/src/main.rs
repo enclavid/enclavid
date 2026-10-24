@@ -20,7 +20,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-use xtask::{build_componentized, embed_sections};
+use xtask::{Role, build_componentized, embed_sections};
 
 #[derive(Parser)]
 #[command(about = "Enclavid repo dev tasks")]
@@ -51,7 +51,7 @@ struct Plugin {
     crate_dir: &'static str,
     /// Where the built `.wasm` module lands.
     module: &'static str,
-    /// Dir holding `i18n.json` / `disclosure-fields.json` (if any).
+    /// The project dir holding its `wit/` and its texts in `i18n/` (if any).
     src: &'static str,
 }
 
@@ -137,7 +137,11 @@ fn push_plugins(selected: Option<Vec<String>>, registry: &str) -> Result<()> {
         let module = abs(&root, p.module);
         let src = abs(&root, p.src);
 
-        let wasm = embed_sections(build_componentized(&crate_dir, &module)?, &src);
+        let wasm = embed_sections(
+            build_componentized(&crate_dir, &module)?,
+            &src,
+            Role::Plugin,
+        )?;
         let file = dist.join(format!("{}.embedded.wasm", p.name));
         std::fs::write(&file, &wasm).with_context(|| format!("writing {}", file.display()))?;
 

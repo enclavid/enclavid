@@ -11,7 +11,7 @@ import { definePolicy, withStart } from "@enclavid/policy";
 import type { Action, Event } from "enclavid:policy/types@0.1.0";
 import * as capture from "enclavid:well-known/capture@0.1.0";
 import * as fields from "enclavid:well-known/disclosure-fields@0.1.0";
-import { localized } from "enclavid:host/embedded-i18n@0.1.0";
+import { localized } from "local:policy/i18n@0.1.0";
 import * as props from "enclavid:host-ext/policy-props@0.1.0";
 
 // The state is this policy's own: kept between rounds, sealed, never seen by
@@ -22,7 +22,10 @@ type State =
   | { step: "selfie"; passport: string }
   | { step: "consent" };
 
-// The consent screen: the fields the consumer receives if the applicant accepts.
+// The consent screen: the fields the consumer receives if the applicant
+// accepts. Each field's key is one of the policy's disclosure fields
+// (`wit/world.wit`); the reason and the requester are the policy's own texts
+// (`i18n/en.json`).
 const consent: () => Action = () => ({
   tag: "render",
   val: {
@@ -33,7 +36,7 @@ const consent: () => Action = () => ({
         fields.dateOfBirth("1990-04-12"),
         fields.nationality("Utopia"),
       ],
-      reason: localized("consent_reason"),
+      reason: localized("consent-reason"),
       requester: localized("requester"),
     },
   },

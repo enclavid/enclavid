@@ -19,11 +19,14 @@ serde_bytes = "0.11"
 # invisible-character covert channel robustly instead of via an ever-incomplete
 # blacklist. Small table-driven crate; leaf-safe (no wasmtime).
 unicode-general-category = "1"
-# Owns the wire-format cardinality caps re-exported by `limits`; a leaf
-# (no wasmtime) so it does not compromise this crate's leaf-ness.
+# Owns the wire-format cardinality caps re-exported by `limits`, the text
+# model, and the reader the registry reads a catalog with; a leaf (no
+# wasmtime) so it does not compromise this crate's leaf-ness.
 enclavid-embedded = { path = "../embedded" }
 
 [dev-dependencies]
 # The codec the compile hop decodes a refusal with, for the test that it holds a
 # name to the same rule.
 ciborium = "0.2"
+# The registry's tests write the i18n sections they read.
+serde_json = "1"

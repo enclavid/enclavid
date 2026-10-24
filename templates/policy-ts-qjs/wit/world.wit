@@ -1,16 +1,17 @@
 package local:policy@0.1.0;
 
 // What this policy imports and exports. Every interface imported here is
-// either the host's or a plugin's; the consumer pins an implementation of each
-// plugin package (here `enclavid:well-known`) when it creates a session.
+// the policy's own, the host's, or a plugin's; the consumer pins an
+// implementation of each plugin package (here `enclavid:well-known`) when it
+// creates a session.
 //
 // To use another plugin, import its interfaces here, put its WIT in `deps/`,
 // and run `npm run types`.
 world policy {
     import enclavid:well-known/capture@0.1.0;
     import enclavid:well-known/disclosure-fields@0.1.0;
-    import enclavid:host/embedded-i18n@0.1.0;
-    import enclavid:host/embedded-disclosure-fields@0.1.0;
+    import i18n;
+    import enclavid:host-ext/disclosure-fields@0.1.0;
     import enclavid:host-ext/policy-props@0.1.0;
     // The round's randomness, which `@enclavid/policy-quickjs` serves
     // `Math.random` and `crypto.getRandomValues` from.
@@ -18,13 +19,46 @@ world policy {
     export enclavid:policy/policy@0.1.0;
 }
 
-// The props this policy takes: what the consumer sets for each session. The
-// interface's name and its `get` are the host's, which serves them; the record
-// is this policy's own, so it is written here rather than taken from `deps/`.
-// The consumer gives the props as a JSON object keyed by these field names
-// when it creates a session, and a session whose props do not fit the record
-// fails. Leave the import out for a policy that takes none.
+// The policy's texts: a case of `key` for each. The texts themselves are in
+// `i18n/`, one JSON file per language (`en.json` to start), and `enclavid
+// policy embed` checks them against these keys.
+interface i18n {
+    use enclavid:host/types@0.1.0.{localized-ref};
+
+    enum key {
+        consent-reason,
+        requester,
+    }
+
+    localized: func(key: key) -> localized-ref;
+}
+
+// The host's interfaces whose types are this policy's own, so they are
+// written here rather than taken from `deps/`.
 package enclavid:host-ext@0.1.0 {
+    // The fields the consent screen may name: every field the consumer may
+    // receive, by its key. A well-known helper names its field by its own
+    // name (`full-name`), which must be one of these; `disclosure-field`
+    // names one of the policy's own. `enclavid policy embed` writes the list
+    // into the policy, and the applicant is shown how long it is.
+    interface disclosure-fields {
+        use enclavid:host/types@0.1.0.{disclosure-field-ref};
+
+        enum key {
+            full-name,
+            date-of-birth,
+            nationality,
+        }
+
+        disclosure-field: func(key: key) -> disclosure-field-ref;
+    }
+
+    // The props this policy takes: what the consumer sets for each session.
+    // The interface's name and its `get` are the host's, which serves them;
+    // the record is this policy's own. The consumer gives the props as a JSON
+    // object keyed by these field names when it creates a session, and a
+    // session whose props do not fit the record fails. Leave the import out
+    // for a policy that takes none.
     interface policy-props {
         record props {
             // Ask for a selfie after the passport, unless this is `false`.

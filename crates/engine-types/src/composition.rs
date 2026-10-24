@@ -30,9 +30,9 @@ pub struct PluginInstance {
     pub wasm: Vec<u8>,
 }
 
-/// The applicant-facing embedded interfaces routed strictly per-component:
-/// i18n alone. DF stays merged, so it is not one of these, and icons are no
-/// catalog at all — the host's own functions ([`crate::icons`]).
+/// The embedded interfaces a component imports through a slot of its own:
+/// its texts alone. DF stays merged, so it is not one of these, and icons are
+/// no catalog at all — the host's own functions ([`crate::icons`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EmbeddedIface {
     I18n,
@@ -48,12 +48,13 @@ impl EmbeddedIface {
     }
 }
 
-/// One distinct per-component embedded import produced by fusion. The
+/// One slot a component's texts come through: the import its embedding
+/// renamed its `i18n` to, after its catalog, which the compile found among
+/// an artifact's imports with that catalog nested in the same artifact. The
 /// host `Linker` registers an instance named `instance_name` whose func
-/// resolves keys against the catalog with `catalog_hash` — strict
-/// per-component routing, so a plugin's i18n key never resolves to the
-/// policy's (or another plugin's) translation. Emitted only for i18n; DF
-/// is merged and served first-match under its canonical name.
+/// resolves keys against the catalog with `catalog_hash` alone, so a
+/// plugin's text never resolves to the policy's (or another plugin's). DF is
+/// merged and served first-match.
 ///
 /// serde: part of the L2 cwasm-cache bundle — the import manifest is
 /// stored beside the cwasm so a cache hit reconstructs the host
@@ -63,10 +64,8 @@ pub struct EmbeddedImport {
     pub instance_name: String,
     pub catalog_hash: [u8; 32],
     pub iface: EmbeddedIface,
-    /// Version of the routed interface — the canonical import's `@x.y.z`
-    /// (empty if unversioned). Baked into `instance_name` so a
-    /// same-catalog different-version import can't collide onto one twin;
-    /// also lets host registration be version-aware if interface
-    /// signatures ever diverge across versions.
+    /// Version of the renamed interface — its `@x.y.z` (empty if
+    /// unversioned). Part of `instance_name`, so a same-catalog
+    /// different-version import can't collide onto one slot.
     pub version: String,
 }

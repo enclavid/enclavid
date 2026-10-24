@@ -9,8 +9,7 @@
 //! Two blobs, two ends, one header: the cwasm and the [`BundleMeta`] it is
 //! registered with, each a `fleet_stream` blob under its own bound. The metadata is
 //! a blob rather than a header field because at its bound
-//! ([`MAX_BUNDLE_META_BYTES`], 7 MiB) it cannot fit beside a full clip in one
-//! request.
+//! ([`MAX_BUNDLE_META_BYTES`]) it would share one request's limit with a full clip.
 //!
 //! The sender need not hold the cwasm whole: a [`BundleSource`] names it by its
 //! length and digest and passes its pieces on as they come, from wherever the

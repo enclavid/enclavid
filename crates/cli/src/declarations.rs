@@ -1,94 +1,138 @@
-//! Shared declaration-file linter for `enclavid policy validate` and
-//! `enclavid plugin validate`. Reads the embedded-section JSONs in a
-//! project dir and runs `enclavid_embedded::validate` — the same rules
-//! the TEE engine enforces at load — then prints a summary.
+//! What `enclavid {policy,plugin} {embed,validate}` share: a project's
+//! catalogs — its texts, under `i18n/` or in one `i18n.json`, and for a
+//! policy its disclosure fields — checked against the keys its WIT declares by
+//! `enclavid_embedded::embed`, the same rules the TEE holds them to at load,
+//! and what is wrong printed where it is.
 //!
-//! Policies and plugins differ by exactly one input: `disclosure-fields`
-//! is policy-only (the policy is the single bandwidth gate to the
-//! consumer, Option C). Plugins pass `with_disclosure_fields = false`,
-//! which skips reading it and omits it from the summary.
+//! Policies and plugins differ by exactly one input: disclosure fields are a
+//! policy's, the cases of its `enclavid:host-ext/disclosure-fields` key. A
+//! plugin's helpers name fields of the policy's list.
 
-use anyhow::Result;
-use std::path::Path;
+use anyhow::{Context, Result, bail};
+use std::path::{Path, PathBuf};
 
-use enclavid_embedded::{
-    FILE_DISCLOSURE_FIELDS, FILE_I18N, read_disclosure_fields, read_i18n, validate,
-};
+use enclavid_embedded::embed::{self, Checked, Project};
 
-/// Lint the embedded declarations under `dir`. `label` is the artifact
-/// kind shown in the summary header ("Policy" / "Plugin").
-pub fn validate_dir(dir: &Path, with_disclosure_fields: bool, label: &str) -> Result<()> {
-    let i18n_path = dir.join(FILE_I18N);
-    let disclosure_path = dir.join(FILE_DISCLOSURE_FIELDS);
+/// Which artifact a project is: a policy declares disclosure fields, a plugin
+/// does not.
+#[derive(Clone, Copy)]
+pub enum Role {
+    Policy,
+    Plugin,
+}
 
-    // disclosure-fields only applies to policies.
-    let disclosure = if with_disclosure_fields {
-        read_disclosure_fields(&disclosure_path)?
-    } else {
-        None
-    };
-    let i18n = read_i18n(&i18n_path)?;
-    let report = validate(disclosure.as_ref(), i18n.as_ref());
-
-    let i18n_count = i18n.as_ref().map(|i| i.entries.len()).unwrap_or(0);
-    let locale_set: std::collections::BTreeSet<&str> = i18n
-        .as_ref()
-        .map(|i| {
-            i.entries
-                .values()
-                .flat_map(|m| m.keys().map(String::as_str))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    println!("{label} embedded declarations at {}:", dir.display());
-    if with_disclosure_fields {
-        let disclosure_count = disclosure.as_ref().map(|d| d.fields.len()).unwrap_or(0);
-        println!(
-            "  disclosure-fields: {} ({} entries)",
-            match &disclosure {
-                Some(_) => disclosure_path.display().to_string(),
-                None => format!("{} (absent)", disclosure_path.display()),
-            },
-            disclosure_count,
-        );
-    }
-    println!(
-        "  i18n:              {} ({} entries, {} locale(s))",
-        match &i18n {
-            Some(_) => i18n_path.display().to_string(),
-            None => format!("{} (absent)", i18n_path.display()),
-        },
-        i18n_count,
-        locale_set.len(),
-    );
-    if !locale_set.is_empty() {
-        let tags: Vec<&str> = locale_set.iter().copied().collect();
-        println!("  Locales: {}", tags.join(", "));
-    }
-    println!();
-
-    for w in &report.warnings {
-        println!("  warning: {w}");
-    }
-    for e in &report.errors {
-        println!("  error: {e}");
-    }
-
-    if report.ok() {
-        if report.warnings.is_empty() {
-            println!("✓ Declarations valid.");
-        } else {
-            println!(
-                "✓ Declarations valid ({} warning(s)).",
-                report.warnings.len()
-            );
+impl Role {
+    fn label(self) -> &'static str {
+        match self {
+            Role::Policy => "Policy",
+            Role::Plugin => "Plugin",
         }
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "{} error(s) found — fix before pushing.",
-            report.errors.len()
+    }
+}
+
+/// Check the project whose WIT is `wit` and whose texts are `i18n`, printing
+/// what is wrong and what is worth saying.
+fn check(wit: PathBuf, i18n: PathBuf, role: Role) -> Result<Checked> {
+    let checked = embed::check(&Project {
+        wit,
+        i18n,
+        disclosure_fields: matches!(role, Role::Policy),
+    })?;
+    for warning in &checked.report.warnings {
+        println!("warning: {warning}");
+    }
+    for error in &checked.report.errors {
+        println!("error: {error}");
+    }
+    Ok(checked)
+}
+
+/// Lint the project in `dir`: its `wit/` and its texts at `i18n` in it.
+pub fn validate(dir: &Path, i18n: &Path, role: Role) -> Result<()> {
+    let checked = check(dir.join("wit"), dir.join(i18n), role)?;
+    println!("{} {} at {}:", role.label(), checked.package, dir.display());
+    println!(
+        "  texts: {} key(s), in {}",
+        checked.keys.as_ref().map_or(0, Vec::len),
+        match checked.languages.as_slice() {
+            [] => "no language".to_string(),
+            languages => languages.join(", "),
+        },
+    );
+    if matches!(role, Role::Policy) {
+        println!(
+            "  disclosure fields: {}",
+            checked.disclosure_fields.as_ref().map_or(0, Vec::len)
         );
     }
+    if !checked.report.ok() {
+        bail!(
+            "{} error(s) found — fix before pushing.",
+            checked.report.errors.len()
+        );
+    }
+    match checked.report.warnings.len() {
+        0 => println!("✓ Declarations valid."),
+        n => println!("✓ Declarations valid ({n} warning(s))."),
+    }
+    Ok(())
+}
+
+/// Embed the catalogs of the project whose WIT is `wit` and whose texts are
+/// `i18n` into the component `wasm`, its texts' import renamed to the slot its
+/// catalog names, and write it to `output` (`<input-stem>.embedded.wasm` beside
+/// the input by default). `check_role` refuses a component of the other role.
+pub fn embed(
+    wasm: &Path,
+    wit: PathBuf,
+    i18n: PathBuf,
+    output: Option<PathBuf>,
+    role: Role,
+    check_role: fn(&[u8]) -> Result<()>,
+) -> Result<()> {
+    let wasm_bytes = std::fs::read(wasm).with_context(|| format!("reading {}", wasm.display()))?;
+    check_role(&wasm_bytes)?;
+
+    let checked = check(wit, i18n, role)?;
+    if !checked.report.ok() {
+        bail!(
+            "the catalogs did not check ({} error(s))",
+            checked.report.errors.len()
+        );
+    }
+    let embedded = embed::embed(&wasm_bytes, &checked)?;
+
+    let output_path = output.unwrap_or_else(|| derive_output_path(wasm));
+    if output_path.exists() {
+        bail!(
+            "{} already exists — refusing to overwrite",
+            output_path.display()
+        );
+    }
+    std::fs::write(&output_path, &embedded)
+        .with_context(|| format!("writing {}", output_path.display()))?;
+    println!(
+        "Embedded: {} ({} B → {} B, {} text key(s), {} language(s)) → {}",
+        wasm.display(),
+        wasm_bytes.len(),
+        embedded.len(),
+        checked.keys.as_ref().map_or(0, Vec::len),
+        checked.languages.len(),
+        output_path.display(),
+    );
+    Ok(())
+}
+
+fn derive_output_path(wasm: &Path) -> PathBuf {
+    let stem = wasm
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "component".to_string());
+    let extension = wasm.extension().map(|e| e.to_string_lossy().to_string());
+    let mut name = format!("{stem}.embedded");
+    if let Some(ext) = extension {
+        name.push('.');
+        name.push_str(&ext);
+    }
+    wasm.with_file_name(name)
 }

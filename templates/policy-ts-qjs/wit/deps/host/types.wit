@@ -8,12 +8,19 @@
 /// boundary stays a single prefix check rather than a denylist that must be kept
 /// in sync.
 ///
-/// `enclavid:host-ext` is the one the policy declares itself, because the type
-/// is its own: `policy-props`, whose `get` returns the props the consumer gave
-/// the session, in whatever record the policy declares for them.
+/// `enclavid:host-ext` is the one the policy declares itself, because the types
+/// are its own: `policy-props`, whose `get` returns the props the consumer gave
+/// the session, in whatever record the policy declares for them; and
+/// `disclosure-fields`, whose `key` lists the fields its disclosures may name.
 ///
 /// `enclavid:host-icons` holds the icons the applicant frontend draws, in a
 /// package of its own so that a new icon moves that package's version alone.
+///
+/// A component's texts are an interface of its OWN package, `i18n`: its `key`
+/// enum has a case for each text, and `localized` mints the text of a case.
+/// Embedding renames the component's import of it to the slot its catalog
+/// names, which the host serves from that catalog — so every component's texts
+/// stay its own through any fusion.
 package enclavid:host@0.1.0;
 
 /// Value shapes carried by the host capabilities in this package. Kept
@@ -22,16 +29,15 @@ package enclavid:host@0.1.0;
 /// getter, and so `enclavid:host` stays a self-contained leaf package.
 ///
 /// The three refs (`localized-ref` / `icon-ref` / `disclosure-field-ref`)
-/// are RESOURCES, minted only by the host: `embedded-i18n`,
-/// `embedded-disclosure-fields` and `enclavid:host-icons/icons`. A
-/// component cannot construct one — the handle IS the proof the key was
-/// declared, so membership needs no crypto token. They live HERE (a shared
-/// interface) rather than inside each interface that mints them, so the
-/// strict per-component routing twin — a structural clone of
-/// `embedded-i18n` with a distinct id — still references the SAME resource
-/// type and subtype-matches the component's canonical import, and every
-/// version of `enclavid:host-icons` mints the one `icon-ref` that
-/// `capture-step` carries.
+/// are RESOURCES, minted only by the host: through a component's `i18n` slot,
+/// `embedded-disclosure-fields` and the policy's `disclosure-fields`, and
+/// `enclavid:host-icons/icons`. A component cannot construct one — the handle
+/// IS the proof the key was declared, so membership needs no crypto token.
+/// They live HERE (a shared interface) rather than inside each interface that
+/// mints them, so every component's `i18n`, and the slot its embedding renames
+/// it to, mints the SAME resource type that the records a prompt is made of
+/// carry, and every version of `enclavid:host-icons` mints the one `icon-ref`
+/// that `capture-step` carries.
 ///
 /// `blob` is likewise a host-owned resource — one stored byte-blob, minted
 /// by the runtime into `event::media` and rehydrated across rounds via its
@@ -47,8 +53,8 @@ package enclavid:host@0.1.0;
 /// `media-result` uses it) and lives in `enclavid:policy/types`; this package
 /// holds only what the host mints or owns.
 interface types {
-    /// A validated reference to a `localized` catalog entry — surfaces as
-    /// UI text once the host resolves it to the applicant's locale.
+    /// One of a component's texts, in every language its catalog has it in —
+    /// surfaces as UI text once the host picks the applicant's language.
     resource localized-ref;
     /// An icon from `enclavid:host-icons/icons`, which the applicant
     /// frontend draws by its name.

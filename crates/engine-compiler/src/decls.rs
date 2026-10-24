@@ -1,35 +1,36 @@
-//! Extract and parse a policy's "embedded" sections — the embedded
+//! Extract and parse a component's "embedded" sections — the embedded
 //! `enclavid:embedded.*` declarations a component ships inside its
 //! wasm:
 //!
 //!   * `enclavid:embedded.disclosure-fields.v1` — machine identifier
 //!     list, surfaces as `DisplayField.key` in `prompt-disclosure`.
-//!   * `enclavid:embedded.i18n.v1` — translation catalog for UI refs.
+//!   * `enclavid:embedded.i18n.v1` — the texts, each language's by key.
 //!
-//! Both sections are **independently optional**. A component that
-//! ships neither is valid — it just trades the safety of registry
-//! membership for nothing, and any call that passes a key the engine
-//! never saw declared will trap at use site via
-//! `sanitize::ensure_registered`. No load-time atomicity requirement:
-//! missing sections are simply absent from the union.
+//! Both sections are **independently optional**. A component that ships
+//! neither is valid; a key no catalog declared traps where it is minted. No
+//! load-time atomicity requirement: missing sections are simply absent from
+//! the union.
+//!
+//! Every section is read in full here, and held to the bounds of the format,
+//! so a composition whose catalogs break it is refused at compile rather than
+//! in a round.
 //!
 //! The OCI annotation `com.enclavid.component.kind` (set by
 //! `enclavid policy push`) discriminates policy vs plugin before the
 //! layer is ever pulled; this loader doesn't see that field anymore
 //! (it used to live in the JSON we parsed here).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use enclavid_embedded::{
-    SECTION_DISCLOSURE_FIELDS, SECTION_I18N, parse_disclosure_fields, parse_i18n,
+    Catalog, SECTION_DISCLOSURE_FIELDS, SECTION_I18N, catalog_hash, is_valid_text_ref,
+    parse_disclosure_fields, read_i18n,
 };
 use wasmparser::{Parser, Payload};
 
 use engine_types::compile::{Artifact, CompileFault};
-use engine_types::embedded::{ComponentDecls, Translation};
-use engine_types::limits::{MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_LOCALIZED};
-
-use crate::hash::catalog_hash;
+use engine_types::embedded::ComponentDecls;
+use engine_types::limits::MAX_DECLARED_DISCLOSURE_FIELDS;
 
 /// WIT interface a component exports iff it is the POLICY (not a
 /// plugin). Matched by prefix so a version bump doesn't break policy
@@ -37,24 +38,24 @@ use crate::hash::catalog_hash;
 const POLICY_EXPORT_PREFIX: &str = "enclavid:policy/policy";
 
 /// A single component's embedded catalog plus its identity. `hash` is
-/// the content-hash of the raw section bytes ([`catalog_hash`]) — the
-/// name each component's `enclavid:embedded/*` import is routed to
-/// under strict per-component routing, and the key the registry stores
-/// the catalog under. `is_policy` is true iff the component exports
-/// `enclavid:policy/policy` (used to attribute the policy slot when
-/// recovering catalogs from a fused artifact, where nesting order is
-/// not meaningful).
+/// the content-hash of the raw section bytes ([`catalog_hash`]) — what
+/// the slot its texts come through is named after, and the key the
+/// registry stores the catalog under. `is_policy` is true iff the
+/// component exports `enclavid:policy/policy`.
 pub struct EmbeddedCatalog {
     pub is_policy: bool,
     pub decls: ComponentDecls,
+    /// The texts of `decls`, read: what the slot naming this catalog is
+    /// held to.
+    pub texts: Catalog,
     pub hash: [u8; 32],
 }
 
 /// Load one component's embedded catalog from the top-level custom
-/// sections of a wasm component binary. For a NON-fused policy or
-/// plugin this is the whole story; a component that ships no embedded
-/// sections yields an empty catalog. A fused artifact carries its
-/// catalogs NESTED — use [`load_embedded_nested`] for those.
+/// sections of a wasm component binary; a component that ships no
+/// embedded sections yields an empty catalog. An embedded component whose
+/// texts come through a slot, and any fusion, carries its catalogs NESTED
+/// — use [`load_embedded_nested`] for those.
 ///
 /// `wasm_bytes` is the (decrypted) policy or plugin wasm — caller
 /// already pulled and unwrapped any age-encrypted layer. We don't
@@ -81,12 +82,13 @@ pub fn load_embedded(wasm_bytes: &[u8]) -> wasmtime::Result<EmbeddedCatalog> {
     frame.finish()
 }
 
-/// Recover every embedded catalog from a (possibly) fused artifact.
-/// Descends into nested sub-components — under wac fusion each original
-/// policy/plugin becomes a nested component carrying its own embedded
-/// sections. Returns one [`EmbeddedCatalog`] per component that ships
-/// at least one embedded section (empty wrappers are skipped). Works
-/// on a non-fused component too (returns its single catalog, if any).
+/// Recover every embedded catalog from an artifact. Descends into nested
+/// sub-components — embedding wraps a component whose texts come through a
+/// slot, and under wac fusion each original policy/plugin becomes a nested
+/// component carrying its own embedded sections. Returns one
+/// [`EmbeddedCatalog`] per component that ships at least one embedded
+/// section (empty wrappers are skipped). Works on a component with its
+/// sections at the top too (returns its single catalog, if any).
 pub fn load_embedded_nested(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<EmbeddedCatalog>> {
     // `parse_all` yields a flat stream across all nesting levels with
     // ComponentSection/ModuleSection as descend markers and End as the
@@ -125,9 +127,10 @@ pub fn load_embedded_nested(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<EmbeddedC
     Ok(out)
 }
 
-/// Max component nesting we'll descend. `wac plug` output is depth 1;
-/// a re-fused hybrid core adds one more. A generous bound guards
-/// against pathological inputs without constraining real artifacts.
+/// Max component nesting we'll descend. An embedded component's catalog
+/// is at depth 1, under `wac plug` at depth 2; a re-fused hybrid core adds
+/// one more. A generous bound guards against pathological inputs without
+/// constraining real artifacts.
 const MAX_NESTING: usize = 8;
 
 /// An embedded catalog breaks its format: a section repeated in one component,
@@ -186,10 +189,9 @@ pub(crate) fn embedded_section_bytes(wasm_bytes: &[u8]) -> wasmtime::Result<u64>
 }
 
 /// The import names of a component's OWN (top-level) world. Used to
-/// recover the `embedded-slot:<hash>/<iface>` imports a pre-fused
-/// artifact already carries, so the host `Linker` can re-register them
-/// (static / hybrid consumption). Depth-0 only — nested components'
-/// imports are internal and already satisfied.
+/// recover the `embedded-slot:<hash>/<iface>` imports an artifact
+/// carries, so the host `Linker` can register them. Depth-0 only — nested
+/// components' imports are internal and already satisfied.
 pub fn top_level_imports(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<String>> {
     let mut out = Vec::new();
     let mut depth = 0usize;
@@ -263,25 +265,26 @@ impl<'a> RawFrame<'a> {
         Ok(())
     }
 
-    /// Parse the captured sections into a [`ComponentDecls`], enforce
-    /// the per-kind cardinality caps, and compute the content-hash.
+    /// Parse the captured sections into a [`ComponentDecls`], hold them to
+    /// the format's bounds, and compute the content-hash.
     fn finish(self) -> wasmtime::Result<EmbeddedCatalog> {
         let hash = catalog_hash(self.disclosure_fields, self.i18n);
-        let decls = build_decls(self.disclosure_fields, self.i18n)?;
+        let (decls, texts) = build_decls(self.disclosure_fields, self.i18n)?;
         Ok(EmbeddedCatalog {
             is_policy: self.is_policy,
             decls,
+            texts,
             hash,
         })
     }
 }
 
-/// Parse the raw section bytes into a [`ComponentDecls`], enforcing the
-/// per-kind cardinality caps.
+/// Parse the raw section bytes into a [`ComponentDecls`] and its texts read,
+/// holding both to the bounds embedding holds them to.
 fn build_decls(
     disclosure_bytes: Option<&[u8]>,
     i18n_bytes: Option<&[u8]>,
-) -> wasmtime::Result<ComponentDecls> {
+) -> wasmtime::Result<(ComponentDecls, Catalog)> {
     let disclosure_section = disclosure_bytes
         .map(|b| parse_disclosure_fields(b))
         .transpose()
@@ -290,65 +293,39 @@ fn build_decls(
                 "parsing custom section `{SECTION_DISCLOSURE_FIELDS}` as JSON: {e}",
             ))
         })?;
-    let i18n_section = i18n_bytes.map(|b| parse_i18n(b)).transpose().map_err(|e| {
-        invalid(format!(
-            "parsing custom section `{SECTION_I18N}` as JSON: {e}"
-        ))
-    })?;
+    let texts = i18n_bytes
+        .map(read_i18n)
+        .transpose()
+        .map_err(|e| invalid(format!("reading custom section `{SECTION_I18N}`: {e}")))?
+        .unwrap_or_default();
 
-    // Per-kind cardinality caps. Each kind has a different covert-
-    // channel surface (DF leak to consumer; localized fully resolved
-    // before wire framing) and a different cap accordingly — see the
-    // constants' module-level docs in
-    // `enclavid-embedded`. Defence-in-depth alongside the seal-time
-    // `validate` check; engine refuses to load anything that slipped
-    // past the CLI validation gate.
-    let df_count = disclosure_section
-        .as_ref()
-        .map(|d| d.fields.len())
-        .unwrap_or(0);
-    if df_count > MAX_DECLARED_DISCLOSURE_FIELDS {
+    // Disclosure fields reach the consumer and are shown to the applicant
+    // by their raw key, so a key is held to an alphabet nothing invisible or
+    // confusable is in, and the list to its cap: what the consent screen
+    // counts as the bound on what a field's key can carry.
+    let fields = disclosure_section.map(|s| s.fields).unwrap_or_default();
+    if fields.len() > MAX_DECLARED_DISCLOSURE_FIELDS {
         return Err(invalid(format!(
-            "component declares {df_count} disclosure-fields, max is \
+            "component declares {} disclosure-fields, max is \
              {MAX_DECLARED_DISCLOSURE_FIELDS}",
+            fields.len(),
         )));
     }
-    let l_count = i18n_section.as_ref().map(|i| i.entries.len()).unwrap_or(0);
-    if l_count > MAX_DECLARED_LOCALIZED {
+    if let Some(field) = fields.iter().find(|field| !is_valid_text_ref(field)) {
         return Err(invalid(format!(
-            "component declares {l_count} i18n entries, max is {MAX_DECLARED_LOCALIZED}",
+            "the disclosure field `{field}` is not a key's shape"
         )));
     }
 
     // Disclosure fields: HashSet collapses any in-list duplicates
     // (JSON arrays allow them, but the registry's membership is
     // set-typed and would have the same effect).
-    let disclosure_fields: HashSet<String> = disclosure_section
-        .map(|s| s.fields.into_iter().collect())
-        .unwrap_or_default();
-
-    // i18n: `entries` is a BTreeMap<key, BTreeMap<lang, text>> — JSON
-    // object keys are unique by construction. We flatten the inner
-    // map into `Vec<Translation>` so the consumer sees translation
-    // rows in a fixed iteration shape; per-language uniqueness is
-    // guaranteed by the inner map. Sanitisation of the text values
-    // is deferred to the consumer (api views call
-    // `sanitize_text_value` after locale picking).
-    let localized: HashMap<String, Vec<Translation>> = i18n_section
-        .map(|i| i.entries)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(key, translations)| {
-            let rows: Vec<Translation> = translations
-                .into_iter()
-                .map(|(language, text)| Translation { language, text })
-                .collect();
-            (key, rows)
-        })
-        .collect();
-
-    Ok(ComponentDecls {
-        disclosure_fields,
-        localized,
-    })
+    let disclosure_fields: HashSet<String> = fields.into_iter().collect();
+    Ok((
+        ComponentDecls {
+            disclosure_fields,
+            i18n: i18n_bytes.map(<[u8]>::to_vec).unwrap_or_default(),
+        },
+        texts,
+    ))
 }

@@ -9,14 +9,16 @@
 //! time a plugin gains a section.
 //!
 //! Each artifact is built once per process and cached — `cargo build` for the
-//! wasm crate, componentize, then weld its author JSON as `enclavid:embedded.*`
-//! custom sections. Building on first use rather than in a `build.rs` keeps an
-//! ordinary engine build free of wasm tooling.
+//! wasm crate, componentize, then embed its catalogs. Building on first use
+//! rather than in a `build.rs` keeps an ordinary engine build free of wasm
+//! tooling.
 //!
 //! Paths are relative to THIS crate's manifest, so a caller's location does not
 //! matter — which is the point of moving them.
 
 use std::sync::OnceLock;
+
+use crate::Role;
 
 /// WIT package id the policy imports its capture / disclosure-field helpers
 /// from; used as the plugin descriptor label at compose time.
@@ -25,7 +27,7 @@ pub const WELL_KNOWN_PACKAGE: &str = "enclavid:well-known@0.1.0";
 /// supplies the consent requester).
 pub const EXTRA_PACKAGE: &str = "enclavid:extra@0.1.0";
 /// Package id of the face-age plugin the policy calls on the selfie round.
-/// Ships no embedded catalog, so it adds no strict-routing twin.
+/// Ships no embedded catalog, so it imports no slot.
 pub const FACE_AGE_PACKAGE: &str = "enclavid:face-age@0.1.0";
 /// Package id of the preprocess plugin — decodes the selfie `clip` into the
 /// plugin-owned `decoded-frame` the policy threads to face-age.
@@ -56,75 +58,86 @@ fn shared_plugin_module(name: &str) -> String {
     )
 }
 
-fn build(dir: String, module: String) -> Vec<u8> {
+fn build(dir: String, module: String, role: Role) -> Vec<u8> {
     crate::embed_sections(
         crate::build_componentized(&dir, &module).expect("build_componentized"),
         &dir,
+        role,
     )
+    .expect("the catalogs embed")
 }
 
-/// The `test-policy` fixture: componentized and sealed with its author JSON as
-/// `enclavid:embedded.*` custom sections — exactly the shape the engine sees in
-/// production.
+/// The `test-policy` fixture: componentized and embedded with its texts and
+/// disclosure fields — exactly the shape the engine sees in production.
 pub fn test_policy() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
         .get_or_init(|| {
             let dir = fixture_dir("test-policy");
             let module = format!("{dir}/target/wasm32-unknown-unknown/release/test_policy.wasm");
-            build(dir, module)
+            build(dir, module, Role::Policy)
         })
         .as_slice()
 }
 
-/// The `enclavid:well-known` plugin, componentized, with its author JSON
-/// embedded.
+/// The `enclavid:well-known` plugin, componentized, with its texts embedded.
 pub fn well_known() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
         .get_or_init(|| {
             let dir = plugin_dir("well-known");
             let module = format!("{dir}/target/wasm32-unknown-unknown/release/well_known.wasm");
-            build(dir, module)
+            build(dir, module, Role::Plugin)
         })
         .as_slice()
 }
 
-/// The minimal `enclavid:extra` plugin, componentized, with its `i18n.json`
-/// embedded as a custom section.
+/// The minimal `enclavid:extra` plugin, componentized, with its texts
+/// embedded.
 pub fn extra() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
         .get_or_init(|| {
             let dir = fixture_dir("test-extra");
             let module = format!("{dir}/target/wasm32-unknown-unknown/release/test_extra.wasm");
-            build(dir, module)
+            build(dir, module, Role::Plugin)
         })
         .as_slice()
 }
 
-/// The `enclavid:face-age` plugin. It ships no embedded JSON, so the section
-/// weld appends nothing — the artifact carries only its `check` export and the
+/// The `enclavid:face-age` plugin. It has no texts, so embedding adds
+/// nothing — the artifact carries only its `check` export and the
 /// `enclavid:vision/types` import (the `decoded-frame` it reads crops from).
 pub fn face_age() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
-        .get_or_init(|| build(plugin_dir("face-age"), shared_plugin_module("face_age")))
+        .get_or_init(|| {
+            build(
+                plugin_dir("face-age"),
+                shared_plugin_module("face_age"),
+                Role::Plugin,
+            )
+        })
         .as_slice()
 }
 
 /// The `enclavid:preprocess` plugin — OWNS the `decoded-frame` resource
-/// (exports `enclavid:vision/types`) and imports the host `clip`; no embedded
-/// JSON.
+/// (exports `enclavid:vision/types`) and imports the host `clip`; no texts.
 pub fn preprocess() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
-        .get_or_init(|| build(plugin_dir("preprocess"), shared_plugin_module("preprocess")))
+        .get_or_init(|| {
+            build(
+                plugin_dir("preprocess"),
+                shared_plugin_module("preprocess"),
+                Role::Plugin,
+            )
+        })
         .as_slice()
 }
 
 /// The `enclavid:face-detect` plugin — imports `enclavid:vision/types` (reads
-/// the preprocess-owned `decoded-frame`) and exports `detect`; no embedded JSON.
+/// the preprocess-owned `decoded-frame`) and exports `detect`; no texts.
 /// The default build is the weightless placeholder (whole frame as the face).
 pub fn face_detect() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
@@ -133,6 +146,7 @@ pub fn face_detect() -> &'static [u8] {
             build(
                 plugin_dir("face-detect"),
                 shared_plugin_module("face_detect"),
+                Role::Plugin,
             )
         })
         .as_slice()

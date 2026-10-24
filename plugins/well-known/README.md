@@ -8,112 +8,75 @@ names one of the host's own (`enclavid:host-icons/icons`).
 ## What it provides
 
 - **`disclosure-fields`** — `DisplayField` constructors for 17 common
-  KYC fields. Each function returns a `display-field` with `key` and
-  `label` set to canonical text-ref strings.
+  KYC fields. Each function returns a `display-field` whose `key` is the
+  field's canonical name — the function's own, `passport-number` — and
+  whose `label` is the plugin's text for it.
 - **`capture`** — `MediaSpec`/`CaptureStep` constructors for the four
   standard capture flows: passport, ID card, driver's license,
-  selfie. `*-spec` returns a complete `media-spec` ready for
-  `prompt-media`; multi-side documents include front+back as
-  separate steps.
+  selfie. Each returns a complete `media-spec` ready for
+  `action::render(prompt::media)`; multi-side documents include
+  front+back as separate steps.
 
 ## Usage from a policy
 
 ```rust
-use enclavid::well_known::{disclosure_fields, capture};
+use enclavid::well_known::{capture, disclosure_fields};
 
 // One-line passport capture (single step, rear camera, ICAO TD3 aspect):
-let clips = prompt_media(&capture::passport());
+let action = Action::Render(Prompt::Media(capture::passport()));
 
 // One-line consent screen:
-let consented = prompt_disclosure(&[
-    disclosure_fields::passport_number("P12345678".into()),
-    disclosure_fields::given_name("John".into()),
-    disclosure_fields::family_name("Smith".into()),
-    disclosure_fields::date_of_birth("1990-01-15".into()),
-], reason_ref, requester_ref);
+let action = Action::Render(Prompt::ConsentDisclosure(Disclosure {
+    fields: vec![
+        disclosure_fields::passport_number("P12345678"),
+        disclosure_fields::given_name("John"),
+        disclosure_fields::family_name("Smith"),
+        disclosure_fields::date_of_birth("1990-01-15"),
+    ],
+    reason,
+    requester,
+}));
 ```
 
-`use enclavid::well_known::{disclosure_fields, capture}` —
-explicit scope keeps short names without collisions
-(`disclosure_fields::passport_number` vs `disclosure::prompt_disclosure`).
+## What a policy declares
 
-## Required `policy.json` registrations
+Every text the plugin shows — the fields' labels, the captures'
+titles, instructions and hints — is its own (`i18n/en.json`), so a
+policy declares none of them.
 
-All text-refs returned by the plugin must be pre-registered in the
-consuming policy's `policy.json`. Without registration, the host's
-text-ref membership check traps at use site.
+A field's key reaches the consumer, so it is held to the policy's
+disclosure fields: list the field of every helper you call, by the
+helper's name, as a case of the `key` in your
+`enclavid:host-ext/disclosure-fields`. A helper whose field the policy
+didn't list traps at runtime. List only the fields you use:
 
-Drop the snippet below into your `policy.json` — adjust translations
-to your wording. Add only the fields/captures you actually use; you
-don't need every entry.
+```wit
+package enclavid:host-ext@0.1.0 {
+    interface disclosure-fields {
+        use enclavid:host/types@0.1.0.{disclosure-field-ref};
 
-```json
-{
-  "version": 1,
-  "disclosure_fields": [
-    "passport-number",
-    "id-card-number",
-    "drivers-license-number",
-    "document-issuing-country",
-    "document-expiry",
-    "document-issued",
-    "given-name",
-    "family-name",
-    "full-name",
-    "date-of-birth",
-    "sex",
-    "nationality",
-    "residence-country",
-    "address",
-    "email",
-    "phone",
-    "tax-id"
-  ],
-  "localized": {
-    "passport-number-label":          { "en": "Passport number" },
-    "id-card-number-label":           { "en": "ID card number" },
-    "drivers-license-number-label":   { "en": "Driver's license number" },
-    "document-issuing-country-label": { "en": "Issuing country" },
-    "document-expiry-label":          { "en": "Document expiry date" },
-    "document-issued-label":          { "en": "Document issue date" },
-    "given-name-label":               { "en": "Given name" },
-    "family-name-label":              { "en": "Family name" },
-    "full-name-label":                { "en": "Full name" },
-    "date-of-birth-label":            { "en": "Date of birth" },
-    "sex-label":                      { "en": "Sex" },
-    "nationality-label":              { "en": "Nationality" },
-    "residence-country-label":        { "en": "Country of residence" },
-    "address-label":                  { "en": "Residence address" },
-    "email-label":                    { "en": "Email" },
-    "phone-label":                    { "en": "Phone" },
-    "tax-id-label":                   { "en": "Tax ID" },
+        enum key {
+            passport-number,
+            id-card-number,
+            drivers-license-number,
+            document-issuing-country,
+            document-expiry,
+            document-issued,
+            given-name,
+            family-name,
+            full-name,
+            date-of-birth,
+            sex,
+            nationality,
+            residence-country,
+            address,
+            email,
+            phone,
+            tax-id,
+        }
 
-    "passport-title":          { "en": "Your passport" },
-    "passport-instructions":   { "en": "Have your passport open to the photo page. We'll take a quick 1-second capture — make sure you're in good lighting and the page lies flat." },
-    "passport-step":           { "en": "Open to the photo page" },
-    "passport-review-hint":    { "en": "Check the data page is sharp, with no glare or shadow over the text." },
-
-    "id-card-title":                  { "en": "Your ID card" },
-    "id-card-front-instructions":     { "en": "Place the front of your ID card flat under good lighting." },
-    "id-card-front-step":             { "en": "Front side" },
-    "id-card-front-review-hint":      { "en": "Check the front is sharp and the photo is visible." },
-    "id-card-back-instructions":      { "en": "Now flip the card over." },
-    "id-card-back-step":              { "en": "Back side" },
-    "id-card-back-review-hint":       { "en": "Check the back is sharp and free of glare." },
-
-    "drivers-license-title":                { "en": "Your driver's license" },
-    "drivers-license-front-instructions":   { "en": "Place the front of your license flat under good lighting." },
-    "drivers-license-front-step":           { "en": "Front side" },
-    "drivers-license-front-review-hint":    { "en": "Check the front is sharp and the photo is visible." },
-    "drivers-license-back-instructions":    { "en": "Now flip the license over." },
-    "drivers-license-back-step":            { "en": "Back side" },
-    "drivers-license-back-review-hint":     { "en": "Check the back is sharp and free of glare." },
-
-    "selfie-title":          { "en": "Selfie verification" },
-    "selfie-instructions":   { "en": "Hold your face inside the oval. We'll capture a short clip — keep still." },
-    "selfie-step":           { "en": "Look at the camera" },
-    "selfie-review-hint":    { "en": "Check your face is centered and well-lit." }
-  }
+        disclosure-field: func(key: key) -> disclosure-field-ref;
+    }
 }
 ```
 
@@ -155,16 +118,16 @@ wkg wit build --wit-dir wit -o target/well-known-wit.wasm
 wkg publish target/well-known-wit.wasm
 # → enclavid:well-known@0.1.0 (WIT package)
 
-# 5. Embed the plugin's i18n declarations as a custom section.
-#    No `disclosure-fields` — the policy is the single bandwidth gate
-#    for disclosure-field refs (Option C). `embed` also asserts this is
-#    a plugin (it must NOT export `enclavid:policy/policy`) and rejects a
-#    core module — so step 3 (componentize) is required before it.
+# 5. Embed the plugin's texts (`i18n/`), checked against the keys of
+#    its `i18n` interface, and rename its texts' import to the slot its
+#    catalog names. No disclosure fields — the policy is the single
+#    bandwidth gate for those. `embed` also asserts this is a plugin (it
+#    must NOT export `enclavid:policy/policy`) and rejects a core module
+#    — so step 3 (componentize) is required before it.
 enclavid plugin embed target/well-known.component.wasm \
-    --i18n i18n.json \
     -o target/well-known.embedded.wasm
 
-# (optional) lint the declarations standalone:
+# (optional) lint the texts standalone:
 enclavid plugin validate .
 
 # 6. Push the embedded component. `oci push` is role-agnostic — the same

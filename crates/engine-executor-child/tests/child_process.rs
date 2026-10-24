@@ -410,7 +410,7 @@ async fn measure_per_round_cost() {
         for c in &bundle.catalogs {
             b.add_component(c.hash, c.decls.clone());
         }
-        std::sync::Arc::new(b.build())
+        std::sync::Arc::new(b.build().expect("the texts read"))
     };
 
     // Warm up (page-cache, allocator).
@@ -475,16 +475,14 @@ async fn measure_per_round_cost() {
     // whether the ~48 ms residual `prime` is catalog VOLUME or remoc RPC base
     // latency.
     {
-        let (mut ncat, mut nloc, mut ndf) = (0usize, 0usize, 0usize);
+        let (mut ncat, mut ntexts, mut ndf) = (0usize, 0usize, 0usize);
         for c in &bundle.catalogs {
             ncat += 1;
             ndf += c.decls.disclosure_fields.len();
-            for (_, tr) in &c.decls.localized {
-                nloc += tr.len();
-            }
+            ntexts += c.decls.i18n.len();
         }
         eprintln!(
-            "catalogs shipped in BundleRef: {ncat} components, {nloc} translations, {ndf} DF"
+            "catalogs shipped in BundleRef: {ncat} components, {ntexts} bytes of texts, {ndf} DF"
         );
     }
 

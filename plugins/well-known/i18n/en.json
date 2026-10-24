@@ -1,0 +1,48 @@
+{
+  "passport-number-label": "Passport number",
+  "id-card-number-label": "ID card number",
+  "drivers-license-number-label": "Driver's license number",
+  "document-issuing-country-label": "Issuing country",
+  "document-expiry-label": "Expiry date",
+  "document-issued-label": "Issue date",
+  "given-name-label": "Given name",
+  "family-name-label": "Family name",
+  "full-name-label": "Full name",
+  "date-of-birth-label": "Date of birth",
+  "sex-label": "Sex",
+  "nationality-label": "Nationality",
+  "residence-country-label": "Country of residence",
+  "address-label": "Address",
+  "email-label": "Email",
+  "phone-label": "Phone number",
+  "tax-id-label": "Tax ID",
+
+  "passport-title": "Your passport",
+  "id-card-title": "Your ID card",
+  "drivers-license-title": "Your driver's license",
+  "selfie-title": "Selfie",
+
+  "passport-instructions": "Take a photo of the photo page of your passport.",
+  "passport-step": "Photo page",
+  "passport-review-hint": "Check the photo page is sharp and free of glare.",
+
+  "id-card-front-instructions": "Take a photo of the front of your ID card.",
+  "id-card-front-step": "Front side",
+  "id-card-front-review-hint": "Check all text is sharp and corners are visible.",
+
+  "id-card-back-instructions": "Now flip the card and take a photo of the back.",
+  "id-card-back-step": "Back side",
+  "id-card-back-review-hint": "Check all text is sharp and corners are visible.",
+
+  "drivers-license-front-instructions": "Take a photo of the front of your driver's license.",
+  "drivers-license-front-step": "Front side",
+  "drivers-license-front-review-hint": "Check all text is sharp and free of glare.",
+
+  "drivers-license-back-instructions": "Now flip the card and take a photo of the back.",
+  "drivers-license-back-step": "Back side",
+  "drivers-license-back-review-hint": "Check all text is sharp and free of glare.",
+
+  "selfie-instructions": "Hold the camera at eye level and align your face inside the oval.",
+  "selfie-step": "Look straight ahead",
+  "selfie-review-hint": "Check your face is clearly visible and well-lit."
+}

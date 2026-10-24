@@ -19,8 +19,6 @@
 //! resolved data is self-contained (no registry needed to render it
 //! later).
 
-use engine_types::embedded::registry::Translation;
-
 pub use engine_types::embedded::store::{DisclosureFields, Localized, RefKind, RefStore};
 
 // ---------------------------------------------------------------------
@@ -32,7 +30,7 @@ pub use engine_types::embedded::store::{DisclosureFields, Localized, RefKind, Re
 
 /// Backing rep of `enclavid:host/types.localized-ref` — the full
 /// translation set the applicant-locale text is later picked from.
-pub struct LocalizedRef(pub Vec<Translation>);
+pub struct LocalizedRef(pub engine_types::text::Localized);
 /// Backing rep of `enclavid:host/types.icon-ref` — the icon name, one of
 /// the host's own, that the applicant frontend dispatches.
 pub struct IconRef(pub String);

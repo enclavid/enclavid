@@ -15,12 +15,11 @@
 //! boundary, so the resolved data is self-contained (no registry needed
 //! to render it later).
 //!
-//! Catalogs are identified by their **content-hash** (`catalog_hash`,
-//! in `engine-compiler`), which survives wac fusion. `resolve_strict`
-//! answers against ONE bound catalog (the strict per-component path —
-//! i18n routed to a distinct twin); `resolve_first_match` walks
-//! catalogs in composition order (the merged path — disclosure-fields
-//! always, and i18n for a lone unfused policy).
+//! Catalogs are identified by their **content-hash**
+//! (`enclavid_embedded::catalog_hash`), which survives wac fusion.
+//! `resolve_strict` answers against ONE bound catalog (a component's
+//! texts, through the slot its catalog names); `resolve_first_match` walks
+//! catalogs in composition order (disclosure fields).
 
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -47,7 +46,7 @@ impl RefKind for DisclosureFields {
     type Stored = String;
 }
 
-/// Marker for `enclavid:host/embedded-i18n` refs.
+/// Marker for the texts a component's `i18n` slot mints refs of.
 pub enum Localized {}
 
 impl RefKind for Localized {

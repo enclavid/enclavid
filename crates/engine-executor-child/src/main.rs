@@ -79,12 +79,15 @@ impl RemoteChild for Child {
                 ExecError::Unknown
             })?;
         // Rebuild the composition-wide embedded registry from the bundle's
-        // per-component catalogs (ref → data), same as the old in-worker prime.
+        // catalogs (ref → data), reading each one's texts.
         let mut builder = EmbeddedRegistry::builder();
         for c in bundle.catalogs.iter() {
             builder.add_component(c.hash, c.decls.clone());
         }
-        let embedded = Arc::new(builder.build());
+        let embedded = Arc::new(builder.build().map_err(|e| {
+            debug!("build the embedded registry: {e}");
+            ExecError::Unknown
+        })?);
         let primed = self
             .executor
             .prime(&component, &bundle.embedded_imports, embedded)

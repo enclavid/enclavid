@@ -15,12 +15,11 @@ name = "xtask"
 path = "src/lib.rs"
 
 [dependencies]
-# Same componentize + section-embed libraries the engine's happy_path test
-# uses, so an artifact this tool publishes is byte-identical to the tested
-# in-process path.
+# Same componentize + embedding the engine's happy_path test and the CLI's
+# `embed` use, so an artifact this tool publishes is byte-identical to the
+# tested in-process path.
 wit-component = "0.247"
-wasm-encoder = "0.247"
-enclavid-embedded = { path = "../crates/embedded" }
+enclavid-embedded = { path = "../crates/embedded", features = ["embed"] }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

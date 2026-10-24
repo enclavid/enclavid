@@ -1,21 +1,17 @@
-//! Content-hash of a component's embedded catalog.
+//! Content-hash of a component's embedded catalog, and the name of the slot
+//! its texts are imported under.
 //!
-//! Under strict per-component embedded routing (i18n), each component's
-//! `enclavid:embedded/i18n` import is wired to a DISTINCT composite
-//! import named by the hash of that component's catalog —
-//! `embedded-slot:<slug>/i18n`. [`catalog_hash`] is that hash, [`slug`]
-//! its wire form.
+//! Every component's i18n import is renamed, when its catalog is embedded,
+//! to a slot of its own: `embedded-slot:<slug>/i18n`, named by the hash of
+//! that component's catalog. So any fusion — the TEE's, or one a consumer
+//! runs with `wac` — keeps each component's texts apart by name, and the host
+//! serves every slot from the catalog its name points at. [`catalog_hash`] is
+//! that hash, [`slug`] its wire form, [`embedded_import_name`] the slot's name.
 //!
-//! The hash is over the RAW section payloads — exactly the author's
-//! `disclosure-fields.json` / `i18n.json` bytes.
-//! `enclavid {policy,plugin} embed` writes those files verbatim as the
-//! custom-section data (see `crates/cli/src/embed.rs` —
-//! `Cow::Borrowed(bytes)`, no re-serialization), and wac fusion
-//! preserves custom sections byte-for-byte. So the identical bytes
-//! reach every producer that needs the hash — the author-time file,
-//! the engine reading a plugin's section, the engine reading a nested
-//! section inside a fused artifact — and they all agree with no
-//! parsing or canonicalization.
+//! The hash is over the RAW section payloads, exactly as embedded. wac fusion
+//! preserves custom sections byte-for-byte, so the embed that names a slot and
+//! the engine that finds its catalog — in a plugin's sections, or nested in a
+//! fused artifact — agree with no parsing or canonicalization.
 
 /// Domain tag mixed into every hash so a future change to the input
 /// framing can't collide with an existing slug.
@@ -46,13 +42,12 @@ pub fn catalog_hash(disclosure_fields: Option<&[u8]>, i18n: Option<&[u8]>) -> [u
 
 /// Wire form of a catalog hash: a `'h'` letter followed by the first
 /// 16 bytes as 32 lowercase-hex characters (33 chars total). Used as
-/// the package segment of the distinct import name
-/// `embedded-slot:<slug>/<iface>`. The leading letter is required —
-/// a WIT/component name segment can't start with a digit, and a hex
-/// slug can. 128 bits of hash: a collision between two DISTINCT
-/// catalogs is negligible; byte-identical catalogs intentionally share
-/// a slug (they route to one instance, which is correct — identical
-/// content resolves the same).
+/// the package segment of the slot name `embedded-slot:<slug>/<iface>`.
+/// The leading letter is required — a WIT/component name segment can't
+/// start with a digit, and a hex slug can. 128 bits of hash: a collision
+/// between two DISTINCT catalogs is negligible; byte-identical catalogs
+/// intentionally share a slug (they route to one instance, which is
+/// correct — identical content resolves the same).
 pub fn slug(hash: &[u8; 32]) -> String {
     let mut s = String::with_capacity(33);
     s.push('h');
@@ -63,23 +58,20 @@ pub fn slug(hash: &[u8; 32]) -> String {
     s
 }
 
-/// The distinct composite import name a component's
-/// `enclavid:host/embedded-<iface>` import is routed to under strict
-/// per-component routing: `embedded-slot:<slug>/<iface>` (unversioned)
-/// or `embedded-slot:<slug>-<ver>/<iface>` when the routed interface
-/// carries a version. The name lives in its own `embedded-slot`
-/// namespace and stays OFF the semver `@` track (dots in the version are
-/// hyphenated so the package segment is a valid kebab identifier) so
-/// wac's aggregator never merges it with the versioned canonical import
-/// or with another catalog's / version's slot. Because the version is
-/// part of the name, a same-catalog different-version import can't
-/// collide onto one twin. `iface` is `"i18n"`; `version` is the
-/// canonical import's `@x.y.z` (empty for unversioned).
+/// The slot a component's `<iface>` import is renamed to:
+/// `embedded-slot:<slug>/<iface>` (unversioned) or
+/// `embedded-slot:<slug>-<ver>/<iface>` when the interface carries a
+/// version. The name lives in its own `embedded-slot` namespace and stays
+/// OFF the semver `@` track (dots in the version are hyphenated so the
+/// package segment is a valid kebab identifier) so wac's aggregator never
+/// merges it with another catalog's or version's slot. `iface` is
+/// `"i18n"`; `version` is the renamed import's `@x.y.z` (empty for
+/// unversioned).
 ///
 /// The slug is hex (no `-`), so the first `-` in the package segment is
-/// the slug/version boundary — `compose::slot_import_parts` inverts this
-/// to recover `(iface, version)`. Round-trips for `x.y.z`; pre-release
-/// versions (which contain `-`) are not used by these interfaces.
+/// the slug/version boundary, which the engine inverts to recover
+/// `(iface, version)`. Round-trips for `x.y.z`; pre-release versions
+/// (which contain `-`) are not used by these interfaces.
 pub fn embedded_import_name(hash: &[u8; 32], iface: &str, version: &str) -> String {
     if version.is_empty() {
         format!("embedded-slot:{}/{}", slug(hash), iface)
@@ -151,8 +143,8 @@ mod tests {
         assert!(n1.ends_with("/i18n"));
         assert!(n1.contains("-0-1-0/"));
         assert!(!n1.contains('@'), "must stay off the semver track");
-        // Distinct per version → a same-catalog different-version routed
-        // import can't collide onto one twin.
+        // Distinct per version → a same-catalog different-version slot
+        // can't collide onto one.
         assert_ne!(n1, embedded_import_name(&h, "i18n", "0.2.0"));
     }
 }

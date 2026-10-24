@@ -131,6 +131,57 @@ fn the_host_serves_its_interfaces_by_the_linkers_rule() {
     );
 }
 
+/// A policy importing `interface` at two versions on one semver track, each an
+/// instance of one function taking and returning nothing. No WIT tooling writes
+/// this — wit-component merges the two into one import, refusing types that do
+/// not merge — so the component is made by hand, as an attacker would.
+fn importing_twice(interface: &str, first: &str, second: &str) -> Vec<u8> {
+    use wasm_encoder::{
+        Component, ComponentImportSection, ComponentTypeRef, ComponentTypeSection,
+        ComponentValType, InstanceType,
+    };
+    let mut instance = InstanceType::new();
+    instance
+        .ty()
+        .function()
+        .params(std::iter::empty::<(&str, ComponentValType)>())
+        .result(None);
+    instance.export("get", ComponentTypeRef::Func(0));
+    let mut types = ComponentTypeSection::new();
+    types.instance(&instance);
+    let mut imports = ComponentImportSection::new();
+    for version in [first, second] {
+        imports.import(
+            &format!("{interface}@{version}"),
+            ComponentTypeRef::Instance(0),
+        );
+    }
+    let mut component = Component::new();
+    component.section(&types).section(&imports);
+    component.finish()
+}
+
+/// The host serves one of its interfaces from one definition, which the linker
+/// gives every import on its semver track. A second import on the track is
+/// refused, whatever its type, so the import the compile checks is the only one
+/// a round serves: no props whose `get` returns nothing, no second list of
+/// disclosure fields. The fault names the second import, not the first.
+#[test]
+fn a_second_import_of_a_host_interface_on_its_track_is_refused() {
+    for interface in [
+        "enclavid:host-ext/policy-props",
+        "enclavid:host-ext/disclosure-fields",
+    ] {
+        assert_eq!(
+            refusal(importing_twice(interface, "0.1.0", "0.1.1"), vec![]),
+            Some(CompileFault::Mismatched(name(&format!(
+                "{interface}@0.1.1"
+            )))),
+            "{interface}"
+        );
+    }
+}
+
 /// A host package's interface the host does not serve — one a policy built
 /// against an older WIT still imports — is refused like any other.
 #[test]

@@ -10,9 +10,10 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// The interfaces the execution-worker's host serves a composition, beside the
-/// per-catalog `embedded-slot:` twins fusion names itself. An import a
-/// composition still has once fused must be one of these — or one that needs
-/// nothing served, an interface of types alone — or no round of it can run.
+/// `embedded-slot:` imports a component's texts come through, which its
+/// embedding named after its catalog. An import a composition still has once
+/// fused must be one of these — or one that needs nothing served, an interface
+/// of types alone — or no round of it can run.
 ///
 /// Of WASI, the clocks and randomness as values of the round, and what
 /// toolchains' runtimes import beside them, served empty: the environment,
@@ -21,9 +22,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub const HOST_INTERFACES: [&str; 25] = [
     "enclavid:host/types@0.1.0",
     "enclavid:host/embedded-disclosure-fields@0.1.0",
-    "enclavid:host/embedded-i18n@0.1.0",
     crate::icons::INTERFACE,
     POLICY_PROPS,
+    POLICY_DISCLOSURE_FIELDS,
     "wasi:clocks/wall-clock@0.2.12",
     "wasi:clocks/monotonic-clock@0.2.12",
     "wasi:random/random@0.2.12",
@@ -48,6 +49,19 @@ pub const HOST_INTERFACES: [&str; 25] = [
 
 /// The interface a policy imports to read its props.
 pub const POLICY_PROPS: &str = "enclavid:host-ext/policy-props@0.1.0";
+
+/// The interface a policy imports its disclosure fields through: the cases of
+/// its `key`, which its embedding writes out as its disclosure-fields list.
+pub const POLICY_DISCLOSURE_FIELDS: &str = "enclavid:host-ext/disclosure-fields@0.1.0";
+
+/// The one function the host serves in [`POLICY_DISCLOSURE_FIELDS`]: a case
+/// of the policy's `key` in, its `disclosure-field-ref` out.
+pub const DISCLOSURE_FIELD: &str = "disclosure-field";
+
+/// The one function the host serves in a slot a component's texts come
+/// through: a case of the component's `key` in, carrying its text's values,
+/// and its `localized-ref` out.
+pub const LOCALIZED: &str = "localized";
 
 /// One of the artifacts a composition is made of.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

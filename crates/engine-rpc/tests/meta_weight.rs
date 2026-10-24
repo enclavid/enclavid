@@ -10,8 +10,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use engine_rpc::{BundleMeta, CatalogEntry, MAX_DECODED_META_BYTES, META_WEIGHT_MARGIN};
-use engine_types::embedded::{ComponentDecls, Translation};
-use engine_types::limits::{MAX_DECLARED_LOCALIZED, MAX_EMBEDDED_SECTION_BYTES};
+use engine_types::embedded::ComponentDecls;
+use engine_types::limits::{MAX_DECLARED_DISCLOSURE_FIELDS, MAX_EMBEDDED_SECTION_BYTES};
 
 thread_local! {
     static LIVE: Cell<u64> = const { Cell::new(0) };
@@ -98,11 +98,6 @@ fn assert_within_margin(encoded: &[u8]) {
 
 const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
-/// The `i`th one-character string.
-fn one(i: usize) -> String {
-    (ALPHABET[i] as char).to_string()
-}
-
 /// The `i`th two-character string.
 fn two(i: usize) -> String {
     let n = ALPHABET.len();
@@ -136,103 +131,63 @@ fn encoded(components: usize, decls: impl Fn() -> ComponentDecls) -> Vec<u8> {
 }
 
 /// The shapes metadata takes as api sends it, at their most expensive: tiny
-/// keys, each a `String` in a hash-table slot, in tables sized one past a growth
-/// boundary so half their slots stand empty.
+/// disclosure fields, each a `String` in a hash-table slot, in tables sized one
+/// past a growth boundary so half their slots stand empty; and catalogs whose
+/// texts are a few bytes each.
 #[test]
 fn honest_metadata_decodes_within_the_margin() {
-    // i18n keys with no translations: a 49-byte bucket each, for four bytes.
-    assert_within_margin(&encoded(64, || ComponentDecls {
-        localized: (0..3585).map(|i| (two(i), Vec::new())).collect(),
-        ..Default::default()
-    }));
     // Disclosure fields one past their table's boundary.
     assert_within_margin(&encoded(64, || ComponentDecls {
         disclosure_fields: (0..225).map(two).collect(),
         ..Default::default()
     }));
-    // Translations into one-character languages with empty texts.
-    assert_within_margin(&encoded(1, || ComponentDecls {
-        localized: (0..3585)
-            .map(|i| {
-                let rows = (0..ALPHABET.len())
-                    .map(|l| Translation {
-                        language: one(l),
-                        text: String::new(),
-                    })
-                    .collect();
-                (two(i), rows)
-            })
-            .collect(),
+    // Texts of one language with nothing in it.
+    assert_within_margin(&encoded(2000, || ComponentDecls {
+        i18n: b"{\"a\":\"\"}".to_vec(),
         ..Default::default()
     }));
 }
 
-/// The `i`th short key: one, two or three characters.
-fn short(mut i: usize) -> String {
-    let n = ALPHABET.len();
-    let mut s = String::new();
-    loop {
-        s.push(ALPHABET[i % n] as char);
-        i /= n;
-        if i == 0 {
-            return s;
-        }
-    }
-}
-
 /// A composition whose embedded sections fill the cap with the shape that costs
-/// most decoded per byte of JSON: keys with one tiny translation each, as many as
-/// a component may declare, over as many components as the cap leaves room for.
-/// What it decodes to stays under the bound the worker charges metadata at most.
+/// most decoded per byte of JSON: disclosure fields of two characters, as many
+/// as a component may declare, over as many components as the cap leaves room
+/// for. What it decodes to stays under the bound the worker charges metadata at
+/// most.
 #[test]
 fn a_composition_at_the_section_cap_decodes_within_its_bound() {
-    let entry = |k: &str| format!("\"{k}\":{{\"a\":\"\"}},").len() as u64;
+    // A list's brackets, then each field quoted and followed by a comma.
+    let list = |fields: usize| 2 + 5 * fields as u64;
+    let full = list(MAX_DECLARED_DISCLOSURE_FIELDS);
     let mut section_bytes = 0u64;
     let mut catalogs = Vec::new();
-    'components: for c in 0u64.. {
-        // A component's i18n section is one JSON object: its braces, then entries.
-        section_bytes += 2;
-        let mut localized = std::collections::HashMap::new();
-        for i in 0..MAX_DECLARED_LOCALIZED {
-            let key = short(i);
-            let cost = entry(&key);
-            if section_bytes + cost > MAX_EMBEDDED_SECTION_BYTES {
-                if !localized.is_empty() {
-                    catalogs.push(localized);
-                }
-                break 'components;
+    for i in 0u64.. {
+        let fields = if section_bytes + full <= MAX_EMBEDDED_SECTION_BYTES {
+            MAX_DECLARED_DISCLOSURE_FIELDS
+        } else {
+            let left = MAX_EMBEDDED_SECTION_BYTES - section_bytes;
+            let fit = left.saturating_sub(2) / 5;
+            if fit == 0 {
+                break;
             }
-            section_bytes += cost;
-            localized.insert(
-                key,
-                vec![Translation {
-                    language: "a".to_owned(),
-                    text: String::new(),
-                }],
-            );
-        }
-        catalogs.push(localized);
-        assert!(c < 1000, "the cap holds a bounded number of components");
+            fit as usize
+        };
+        section_bytes += list(fields);
+        let mut hash = [0xFF; 32];
+        hash[..8].copy_from_slice(&i.to_le_bytes());
+        catalogs.push(CatalogEntry {
+            hash,
+            decls: ComponentDecls {
+                disclosure_fields: (0..fields).map(two).collect(),
+                ..Default::default()
+            },
+        });
+        assert!(i < 10_000, "the cap holds a bounded number of components");
     }
     let mut b = Vec::new();
     ciborium::into_writer(
         &BundleMeta {
             embedded_imports: Vec::new(),
-            catalogs: catalogs
-                .into_iter()
-                .enumerate()
-                .map(|(i, localized)| {
-                    let mut hash = [0xFF; 32];
-                    hash[..8].copy_from_slice(&(i as u64).to_le_bytes());
-                    CatalogEntry {
-                        hash,
-                        decls: ComponentDecls {
-                            localized,
-                            ..Default::default()
-                        },
-                    }
-                })
-                .collect(),
+            catalogs,
         },
         &mut b,
     )

@@ -47,13 +47,13 @@ wac-graph = "0.10"
 wasmtime-environ = { version = "46", default-features = false, features = ["component-model"] }
 
 # `decls::load_embedded` pulls the embedded custom sections (disclosure-
-# fields / i18n / icons) straight out of a compiled component without
+# fields / i18n) straight out of a compiled component without
 # round-tripping through wasmtime instantiation.
 wasmparser = "0.247"
 
-# Catalog content-hashing (`hash::catalog_hash`) + the section parsers /
-# cardinality caps the loader enforces.
-blake3 = "1"
+# Catalog content-hashing (`catalog_hash`), the section parsers and the
+# bounds the loader enforces, and the check of a catalog against the keys of
+# the slot that names it.
 enclavid-embedded = { path = "../embedded" }
 
 # --- compile-worker bin deps (optional) — pulled ONLY by the `worker`
@@ -197,3 +197,7 @@ wasm-encoder = "0.247"
 # compositions the compile refuses and for what.
 wit-component = { version = "0.247", features = ["dummy-module"] }
 wit-parser = "0.247"
+# slots.rs embeds the components it builds as the CLI does, from projects it
+# writes out.
+enclavid-embedded = { path = "../embedded", features = ["embed"] }
+tempfile = "3"

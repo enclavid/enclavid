@@ -1,5 +1,22 @@
 package enclavid:test-policy@0.1.0;
 
+/// The policy's own texts, a case of `key` for each; `i18n/en.json` holds
+/// them.
+interface i18n {
+    use enclavid:host/types@0.1.0.{localized-ref};
+
+    enum key {
+        consent-reason,
+        estimated-age-label,
+        // Texts of the same names as the plugins' own, with texts of
+        // their own, to show that a plugin's stay its own.
+        passport-title,
+        extra-tag,
+    }
+
+    localized: func(key: key) -> localized-ref;
+}
+
 world policy {
     // Canonical KYC building blocks from the well-known plugin: pre-baked
     // capture flows and `display-field` helpers. Satisfied at /connect via
@@ -10,9 +27,8 @@ world policy {
 
     // A second plugin, imported to exercise HYBRID composition: baked
     // into no core, linked at runtime on top of a pre-fused (policy +
-    // well-known) core. `tag::get()` resolves a key from the extra
-    // plugin's OWN i18n catalog, so its embedded import routes to a
-    // distinct twin.
+    // well-known) core. `tag::get()` is one of the extra plugin's OWN
+    // texts, through the slot its own catalog names.
     import enclavid:extra/tag@0.1.0;
 
     // The vision substrate. preprocess decodes the selfie `clip` into a
@@ -24,21 +40,21 @@ world policy {
     import enclavid:face-detect/detect@0.1.0;
     import enclavid:vision/types@0.1.0;
 
-    // The face-age plugin: a real decoded-frame + face consumer. No embedded
-    // catalog of its own → no routing twin.
+    // The face-age plugin: a real decoded-frame + face consumer. No texts
+    // of its own, so no slot.
     import enclavid:face-age/check@0.1.0;
 
-    // Host interfaces. The policy resolves its own consent copy via
-    // embedded/i18n and mints its OWN `disclosure-field-ref`s (for keys the
-    // well-known helpers don't cover, e.g. the face-age estimate) via
-    // embedded/disclosure-fields; the props the session was created with
-    // come from policy-props, as the record this policy declares in
-    // `props/policy-props.wit`.
+    // The policy's own texts, through the slot its embedding renames this
+    // import to; its OWN disclosure fields (the face-age estimate, which no
+    // well-known helper covers), the cases of the `key` in
+    // `host-ext/disclosure-fields.wit`; and the props the session was
+    // created with, as the record this policy declares in
+    // `host-ext/policy-props.wit`.
     // Capture and consent are driven by the `action` the policy returns from
     // `handle` (`render(prompt::media)` / `render(prompt::consent-disclosure)`),
     // not by suspending host imports.
-    import enclavid:host/embedded-i18n@0.1.0;
-    import enclavid:host/embedded-disclosure-fields@0.1.0;
+    import i18n;
+    import enclavid:host-ext/disclosure-fields@0.1.0;
     import enclavid:host-ext/policy-props@0.1.0;
     export enclavid:policy/policy@0.1.0;
 }

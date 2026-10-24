@@ -1,11 +1,12 @@
 //! Shared plugin/policy build helpers: build a wasm crate, componentize
-//! its core module, and weld the `enclavid:embedded.*` custom sections.
+//! its core module, and embed its catalogs.
 //!
 //! This is the ONE home for the build→componentize→embed pipeline. Both
 //! the `xtask push-plugins` binary and the engine's `happy_path` test call
 //! these, so a published artifact is byte-identical to the one the test
 //! exercises in-process (same `wit_component::ComponentEncoder`, same
-//! section bytes) — no drift between "what we test" and "what we ship".
+//! embedding as `enclavid {policy,plugin} embed`) — no drift between "what
+//! we test" and "what we ship".
 //!
 //! [`fixtures`] builds on that: the catalog of policy + plugin artifacts the
 //! engine tests compose, shared now that the executor and its child are
@@ -54,25 +55,38 @@ pub fn componentize(module: &[u8]) -> Result<Vec<u8>> {
         .context("componentizing the core module")
 }
 
-/// Append the author JSON in `dir` as `enclavid:embedded.*` custom
-/// sections — byte-for-byte, exactly what `enclavid {policy,plugin} embed`
-/// does. A missing file appends no section (a plugin ships no
-/// `disclosure-fields.json`; a section-less plugin ships none at all).
-pub fn embed_sections(mut wasm: Vec<u8>, dir: &str) -> Vec<u8> {
-    use enclavid_embedded::{SECTION_DISCLOSURE_FIELDS, SECTION_I18N};
-    use wasm_encoder::{ComponentSection, CustomSection};
-    let read = |name: &str| std::fs::read(format!("{dir}/{name}")).ok();
-    for (name, data) in [
-        (SECTION_DISCLOSURE_FIELDS, read("disclosure-fields.json")),
-        (SECTION_I18N, read("i18n.json")),
-    ] {
-        if let Some(bytes) = data {
-            CustomSection {
-                name: name.into(),
-                data: bytes.into(),
-            }
-            .append_to_component(&mut wasm);
-        }
+/// Which artifact a project is: a policy embeds its disclosure fields
+/// beside its texts, a plugin its texts alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Policy,
+    Plugin,
+}
+
+/// Embed the catalogs of the project in `dir` into `wasm` — its texts
+/// under `i18n/`, checked against the keys its `wit/` declares, and for a
+/// policy its disclosure fields — exactly as `enclavid {policy,plugin}
+/// embed` does. Refused when they do not check.
+pub fn embed_sections(wasm: Vec<u8>, dir: &str, role: Role) -> Result<Vec<u8>> {
+    use enclavid_embedded::embed::{self, Project};
+    let dir = std::path::Path::new(dir);
+    let checked = embed::check(&Project {
+        wit: dir.join("wit"),
+        i18n: dir.join(enclavid_embedded::DIR_I18N),
+        disclosure_fields: role == Role::Policy,
+    })?;
+    if !checked.report.ok() {
+        let errors: Vec<String> = checked
+            .report
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        bail!(
+            "the catalogs in {} did not check:\n{}",
+            dir.display(),
+            errors.join("\n")
+        );
     }
-    wasm
+    embed::embed(&wasm, &checked)
 }

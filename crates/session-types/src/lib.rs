@@ -751,24 +751,13 @@ pub struct DisplayField {
     pub value: String,
 }
 
-/// A resolved `localized-ref`: the full translation set the engine read
-/// out of the ref resource. Applicant-facing only — the api picks the
-/// request-locale text at view time (`en` fallback); the map itself
-/// never reaches the consumer envelope, closing the covert translation
-/// channel. Sealed into `current_prompt` so a read renders without the
-/// policy component / embedded registry.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Localized {
-    pub translations: Vec<Translation>,
-}
-
-/// One `(language, text)` row of a [`Localized`] set.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Translation {
-    pub language: String,
-    pub text: String,
-}
+/// A resolved `localized-ref`: the full translation set the engine read out of
+/// the ref resource. Applicant-facing only — the api picks the request-locale
+/// text at view time (`en` fallback); the set itself never reaches the
+/// consumer envelope, closing the covert translation channel. Sealed into
+/// `current_prompt` so a read renders without the policy component / embedded
+/// registry.
+pub use engine_types::text::{Localized, Translation};
 
 #[cfg(test)]
 mod clip_tests {

@@ -1,12 +1,14 @@
-//! `enclavid plugin validate [dir]` — lint a plugin project's embedded
-//! declarations (i18n) against the same rules the TEE engine
-//! enforces at load. No `disclosure-fields` — the policy is the single
-//! bandwidth gate for disclosure-field refs (Option C). Pre-flight
-//! before `oci push`. Shares the linter with `policy validate`.
+//! `enclavid plugin validate [dir]` — lint a plugin project's texts against
+//! the keys its WIT declares, by the same rules the TEE engine enforces at
+//! load. No disclosure fields — a plugin's helpers name fields of the
+//! policy's list. Pre-flight before `oci push`. Shares the linter with
+//! `policy validate`.
 
 use anyhow::Result;
 use std::path::PathBuf;
 
-pub async fn run(dir: PathBuf) -> Result<()> {
-    crate::declarations::validate_dir(&dir, false, "Plugin")
+use crate::declarations::{self, Role};
+
+pub async fn run(dir: PathBuf, i18n: PathBuf) -> Result<()> {
+    declarations::validate(&dir, &i18n, Role::Plugin)
 }

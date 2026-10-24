@@ -48,18 +48,18 @@ pub(crate) const FUNCTION: &str = "get";
 
 /// The type of `get`, when `component` imports [`INTERFACE`] — at its own
 /// version or a semver-compatible one, the rule the linker looks the name up by
-/// and the compile admits it by.
+/// and the compile admits it by. The first import on that track: the one the
+/// compile checked, which admits no second.
 pub(crate) fn declared(component: &Component, engine: &Engine) -> Option<ComponentFunc> {
-    component
-        .component_type()
-        .imports(engine)
+    let ty = component.component_type();
+    let (_, item) = ty.imports(engine).find(|(name, _)| is_props(name))?;
+    let ComponentItem::ComponentInstance(instance) = item.ty else {
+        return None;
+    };
+    instance
+        .exports(engine)
         .find_map(|(name, item)| match item.ty {
-            ComponentItem::ComponentInstance(instance) if is_props(name) => instance
-                .exports(engine)
-                .find_map(|(name, item)| match item.ty {
-                    ComponentItem::ComponentFunc(func) if name == FUNCTION => Some(func),
-                    _ => None,
-                }),
+            ComponentItem::ComponentFunc(func) if name == FUNCTION => Some(func),
             _ => None,
         })
 }

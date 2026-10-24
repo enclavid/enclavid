@@ -197,7 +197,8 @@ pub const MAX_EMBEDDED_SECTION_BYTES: u64 = 2 * 1024 * 1024;
 //     per-kind rationale. The compile-time bound is the system-wide
 //     trust contract; runtime transparency UI in api views surfaces the
 //     actual declared counts to the user as a second-line defence.
+//   * `MAX_LANGUAGES` — how many languages one component's texts come in.
 pub use enclavid_embedded::{
     MAX_DECLARED_DISCLOSURE_FIELDS, MAX_DECLARED_LOCALIZED, MAX_KEY_LENGTH, MAX_LANGUAGE_LENGTH,
-    MAX_TEXT_VALUE_HARD_BYTES,
+    MAX_LANGUAGES, MAX_TEXT_VALUE_HARD_BYTES,
 };

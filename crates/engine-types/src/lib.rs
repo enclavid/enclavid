@@ -26,3 +26,7 @@ pub mod icons;
 pub mod limits;
 pub mod props;
 pub mod sanitize;
+
+/// The text model — what a `localized-ref` carries — owned by the schema
+/// crate the CLI shares.
+pub use enclavid_embedded::text;

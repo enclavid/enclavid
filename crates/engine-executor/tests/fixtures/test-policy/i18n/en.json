@@ -1,0 +1,6 @@
+{
+  "consent-reason": "Identity verification for the test policy.",
+  "estimated-age-label": "Estimated age",
+  "passport-title": "POLICY-OWNED passport-title (must NOT leak into the plugin)",
+  "extra-tag": "POLICY-OWNED extra-tag (must NOT leak into the extra plugin)"
+}

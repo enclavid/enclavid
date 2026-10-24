@@ -25,7 +25,7 @@ use session_types::{
     CameraFacing as DCameraFacing, CaptureGuide as DCaptureGuide, CaptureStep as DCaptureStep,
     Decision as DDecision, Disclosure as DDisclosure, DisplayField as DDisplayField, Event,
     GuideNone, GuideOval, GuideRect, Localized as DLocalized, MediaSpec as DMediaSpec, Prompt,
-    Translation as DTranslation, capture_guide,
+    capture_guide,
 };
 
 use crate::embedded::{DisclosureFieldRef, EmbeddedRegistry, IconRef, LocalizedRef};
@@ -86,18 +86,9 @@ pub fn event_to_wit(
 // Ref-resource deref helpers
 // ---------------------------------------------------------------------
 
-/// Read a `localized-ref` handle into the resolved translation set.
+/// Read a `localized-ref` handle into the text it resolved to.
 fn localized(table: &ResourceTable, r: &Resource<LocalizedRef>) -> wasmtime::Result<DLocalized> {
-    let reps = &table.get(r)?.0;
-    Ok(DLocalized {
-        translations: reps
-            .iter()
-            .map(|t| DTranslation {
-                language: t.language.clone(),
-                text: t.text.clone(),
-            })
-            .collect(),
-    })
+    Ok(table.get(r)?.0.clone())
 }
 
 /// Read an `icon-ref` handle into the resolved icon name.

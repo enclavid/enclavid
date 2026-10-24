@@ -26,11 +26,11 @@ pub struct HostState {
     /// returns. Constant for the session; the policy may read it any round.
     /// `None` for a policy that declares none.
     pub props: Option<Val>,
-    /// Per-composition `enclavid:host/embedded-*` registry — one frozen
-    /// index built from the policy's and every fused plugin's embedded
-    /// sections. The embedded host fns resolve a key against it (first
-    /// match across the merged catalogs, or strict against one catalog
-    /// for a routed twin) and MINT a ref resource into [`table`](Self::
+    /// Per-composition embedded registry — one frozen index built from the
+    /// policy's and every fused plugin's embedded sections. The embedded
+    /// host fns resolve a key against it (first match across the catalogs
+    /// for a disclosure field, or against the one catalog a component's
+    /// slot names for a text) and MINT a ref resource into [`table`](Self::
     /// table) carrying the resolved data. Frozen before any per-session
     /// input reaches the component; a component can only reference a key
     /// some catalog declared.

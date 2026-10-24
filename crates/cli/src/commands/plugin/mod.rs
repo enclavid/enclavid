@@ -2,10 +2,9 @@
 //! validate. Symmetric with `enclavid policy ...` minus the parts that
 //! don't apply to plugins:
 //!
-//!   * Plugins don't ship `disclosure-fields.json` — the policy is
-//!     the single bandwidth gate for disclosure-field refs (Option C,
-//!     see `[[project-df-policy-gated]]`). `plugin embed` / `validate`
-//!     handle only `--i18n`.
+//!   * Plugins declare no disclosure fields — their helpers name fields
+//!     of the policy's list. `plugin embed` / `validate` handle only
+//!     the texts.
 //!   * `embed` asserts the component is NOT a policy (does not export
 //!     `enclavid:policy/policy`); a policy handed here is rejected with
 //!     a pointer to `enclavid policy embed`.

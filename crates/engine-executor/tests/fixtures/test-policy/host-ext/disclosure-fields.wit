@@ -1,0 +1,20 @@
+package enclavid:host-ext@0.1.0;
+
+/// The disclosure fields this policy's consent screen may name: those of the
+/// well-known helpers it calls, and its own face-age estimate. Embedding
+/// writes the cases out as its list; the host serves `disclosure-field`.
+interface disclosure-fields {
+    use enclavid:host/types@0.1.0.{disclosure-field-ref};
+
+    enum key {
+        full-name,
+        date-of-birth,
+        nationality,
+        passport-number,
+        document-expiry,
+        address,
+        estimated-age,
+    }
+
+    disclosure-field: func(key: key) -> disclosure-field-ref;
+}

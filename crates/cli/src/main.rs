@@ -8,7 +8,6 @@ mod config;
 mod declarations;
 mod discovery;
 mod docker_config;
-mod embed;
 mod registry_auth;
 mod wit_role;
 
@@ -32,17 +31,17 @@ enum Commands {
         command: CloudCommand,
     },
 
-    /// Author a **policy** artifact: embed its `enclavid:embedded.*`
-    /// declarations (disclosure-fields / i18n) and validate them.
-    /// `embed` asserts the component exports the `enclavid:policy/policy`
-    /// world. Registry push is role-agnostic — see `enclavid oci push`.
+    /// Author a **policy** artifact: embed its catalogs (texts and
+    /// disclosure fields) and validate them. `embed` asserts the
+    /// component exports the `enclavid:policy/policy` world. Registry
+    /// push is role-agnostic — see `enclavid oci push`.
     Policy {
         #[command(subcommand)]
         command: PolicyCommand,
     },
 
-    /// Author a **plugin** artifact: embed its `enclavid:embedded.i18n`
-    /// declarations. No disclosure-fields (a plugin's are looked up in the
+    /// Author a **plugin** artifact: embed its texts and validate them.
+    /// No disclosure fields (a plugin's helpers name fields of the
     /// policy's list). `embed` asserts the component is NOT a policy.
     /// Registry push is role-agnostic — see `enclavid oci push`.
     Plugin {
@@ -129,33 +128,29 @@ enum WorkspaceCommand {
 
 #[derive(Subcommand)]
 enum PolicyCommand {
-    /// Embed the policy's `enclavid:embedded.*.v1` declarations
-    /// (disclosure-fields, i18n) into a wasm component as custom
-    /// sections. Pure metadata embedding — the output is a wasm
-    /// component ready for `enclavid oci push`.
+    /// Embed the policy's catalogs into its wasm component: its texts
+    /// and its disclosure fields, checked against the keys its WIT
+    /// declares, with its texts' import renamed to the slot the catalog
+    /// names. Pure metadata embedding — the output is a wasm component
+    /// ready for `enclavid oci push`.
     Embed {
         /// Path to the wasm component file (output of
         /// `cargo build --target wasm32-…` + `wasm-tools component
         /// new`).
         wasm: PathBuf,
 
-        /// Path to the disclosure-fields declarations file (flat JSON
-        /// list of identifier keys). Embedded into the wasm as the
-        /// `enclavid:embedded.disclosure-fields.v1` custom section.
-        /// Optional — components without `prompt-disclosure` calls
-        /// can omit it. Defaults to `disclosure-fields.json` in the
-        /// current directory; an absent file is silently treated as
-        /// "no declarations".
-        #[arg(long = "disclosure-fields", default_value = "disclosure-fields.json")]
-        disclosure_fields: PathBuf,
+        /// The WIT the component was built from. Its package's `i18n`
+        /// interface declares the texts' keys, and the cases of `key` in
+        /// `enclavid:host-ext/disclosure-fields` are the policy's
+        /// disclosure fields.
+        #[arg(long = "wit", default_value = "wit")]
+        wit: PathBuf,
 
-        /// Path to the i18n translations catalog (JSON map of
-        /// `key → { locale → text }`). Embedded as the
-        /// `enclavid:embedded.i18n.v1` custom section. Optional —
-        /// components without UI text refs can omit it. Defaults to
-        /// `i18n.json`; an absent file is silently treated as "no
-        /// translations".
-        #[arg(long = "i18n", default_value = "i18n.json")]
+        /// The texts: a directory of `<language>.json` files, each a
+        /// language's texts by key, or one JSON file of every language's
+        /// texts, by language (`i18n.json`). Absent for a policy with no
+        /// texts of its own.
+        #[arg(long = "i18n", default_value = "i18n")]
         i18n: PathBuf,
 
         /// Output path for the embedded wasm. Defaults to
@@ -164,37 +159,46 @@ enum PolicyCommand {
         output: Option<PathBuf>,
     },
 
-    /// Validate a policy manifest against the same rules the TEE
-    /// engine enforces at load time. Run before `push` to catch
+    /// Validate a policy project's catalogs against the same rules the
+    /// TEE engine enforces at load time. Run before `push` to catch
     /// issues at author time with clean error messages.
     Validate {
-        /// Path to the policy project directory containing the
-        /// embedded declarations files (`disclosure-fields.json`,
-        /// `i18n.json`). Both files are optional — missing files are
-        /// silently treated as "no declarations of that kind".
-        /// Defaults to the current directory.
+        /// Path to the policy project directory, holding its `wit/` and
+        /// its texts. Defaults to the current directory.
         #[arg(default_value = ".")]
         dir: PathBuf,
+
+        /// The texts, in the project directory: a directory of
+        /// `<language>.json` files, or one JSON file of every language's
+        /// texts (`i18n.json`).
+        #[arg(long = "i18n", default_value = "i18n")]
+        i18n: PathBuf,
     },
 }
 
 #[derive(Subcommand)]
 enum PluginCommand {
-    /// Embed the plugin's `enclavid:embedded.i18n.v1` declarations into
-    /// a wasm component as a custom section. Pure metadata embedding —
-    /// no encryption. Plugins don't carry a `disclosure-fields` section:
-    /// a plugin's disclosure fields are looked up in the policy's list.
+    /// Embed the plugin's texts into its wasm component, checked against
+    /// the keys its WIT declares, with its texts' import renamed to the
+    /// slot the catalog names. Pure metadata embedding — no encryption.
+    /// Plugins declare no disclosure fields: their helpers name fields of
+    /// the policy's list.
     Embed {
         /// Path to the wasm component file (output of
         /// `cargo build --target wasm32-…` + `wasm-tools component
         /// new`).
         wasm: PathBuf,
 
-        /// Path to the i18n translations catalog. Embedded as the
-        /// `enclavid:embedded.i18n.v1` custom section. Optional —
-        /// defaults to `i18n.json`; absent file is treated as "no
-        /// translations".
-        #[arg(long = "i18n", default_value = "i18n.json")]
+        /// The WIT the component was built from; its package's `i18n`
+        /// interface declares the texts' keys.
+        #[arg(long = "wit", default_value = "wit")]
+        wit: PathBuf,
+
+        /// The texts: a directory of `<language>.json` files, each a
+        /// language's texts by key, or one JSON file of every language's
+        /// texts, by language (`i18n.json`). Absent for a plugin with no
+        /// texts.
+        #[arg(long = "i18n", default_value = "i18n")]
         i18n: PathBuf,
 
         /// Output path for the embedded wasm. Defaults to
@@ -203,16 +207,19 @@ enum PluginCommand {
         output: Option<PathBuf>,
     },
 
-    /// Validate a plugin project's embedded declarations (i18n) against
-    /// the same rules the TEE engine enforces at load. No
-    /// disclosure-fields (a plugin's are looked up in the policy's
-    /// list). Run before `enclavid oci push`.
+    /// Validate a plugin project's texts against the same rules the TEE
+    /// engine enforces at load. Run before `enclavid oci push`.
     Validate {
-        /// Path to the plugin project directory containing `i18n.json`
-        /// (optional — a missing file is treated as "no declarations").
-        /// Defaults to the current directory.
+        /// Path to the plugin project directory, holding its `wit/` and
+        /// its texts. Defaults to the current directory.
         #[arg(default_value = ".")]
         dir: PathBuf,
+
+        /// The texts, in the project directory: a directory of
+        /// `<language>.json` files, or one JSON file of every language's
+        /// texts (`i18n.json`).
+        #[arg(long = "i18n", default_value = "i18n")]
+        i18n: PathBuf,
     },
 }
 
@@ -398,17 +405,24 @@ async fn main() -> Result<()> {
         Commands::Policy { command } => match command {
             PolicyCommand::Embed {
                 wasm,
-                disclosure_fields,
+                wit,
                 i18n,
                 output,
-            } => commands::policy::embed::run(wasm, disclosure_fields, i18n, output),
-            PolicyCommand::Validate { dir } => commands::policy::validate::run(dir).await,
+            } => commands::policy::embed::run(wasm, wit, i18n, output),
+            PolicyCommand::Validate { dir, i18n } => {
+                commands::policy::validate::run(dir, i18n).await
+            }
         },
         Commands::Plugin { command } => match command {
-            PluginCommand::Embed { wasm, i18n, output } => {
-                commands::plugin::embed::run(wasm, i18n, output)
+            PluginCommand::Embed {
+                wasm,
+                wit,
+                i18n,
+                output,
+            } => commands::plugin::embed::run(wasm, wit, i18n, output),
+            PluginCommand::Validate { dir, i18n } => {
+                commands::plugin::validate::run(dir, i18n).await
             }
-            PluginCommand::Validate { dir } => commands::plugin::validate::run(dir).await,
         },
         Commands::Oci { command } => match command {
             OciCommand::Push {

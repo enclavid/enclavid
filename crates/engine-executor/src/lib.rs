@@ -15,8 +15,8 @@
 //! runner/      ← Executor + RunStatus; WIT⇄domain conversions +
 //!                media/consent validation
 //! embedded/    ← `enclavid:embedded/*` ref registry (EmbeddedRegistry) +
-//!                the embedded host-fn impls (slot 0 via bindgen) + the ref
-//!                resource reps. Section parsing / hashing is in
+//!                the plugins' disclosure-field host fn (via bindgen) + the
+//!                ref resource reps. Section parsing / hashing is in
 //!                engine-compiler.
 //!   ↓ uses
 //! state/       ← Store<T> data layer (HostState, RunInputs)
@@ -64,7 +64,7 @@ mod sanitize;
 mod state;
 
 pub use embedded::{
-    ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedRegistry,
+    CatalogUnreadable, ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedRegistry,
     EmbeddedRegistryBuilder, Localized, LocalizedStore, RefKind, RefStore, Translation,
 };
 pub use listener::{SessionChange, SessionListener};
@@ -113,13 +113,15 @@ wasmtime::component::bindgen!({
         world host {
             import enclavid:host/types@0.1.0;
             import enclavid:host/embedded-disclosure-fields@0.1.0;
-            import enclavid:host/embedded-i18n@0.1.0;
             export enclavid:policy/policy@0.1.0;
         }
     "#,
     // WASI is not in this world: it is linked from wasmtime-wasi's own
     // bindings, see `round`. Nor are the icons, served at whatever version a
-    // component imports them: see `runner::register_icons`.
+    // component imports them: see `runner::register_icons`. Nor the slots a
+    // component's texts come through and the policy's disclosure fields, whose
+    // types are the component's own: see `runner::register_slots` and
+    // `runner::register_disclosure_fields`.
     path: [
         "../../wit/host",
         "../../wit/shared-types",

@@ -29,12 +29,14 @@ mod status;
 
 use session_types::{Event, SessionState};
 use wasmtime::component::types::ComponentFunc;
-use wasmtime::component::{Component, Linker, Resource};
+use wasmtime::component::{Component, Linker, Resource, ResourceAny, Val};
 use wasmtime::{Config, Engine, Store};
 
 use crate::Host_ as GeneratedHost;
 use crate::Host_Pre as GeneratedHostPre;
-use crate::embedded::{IconRef, Localized, LocalizedRef, undeclared_trap};
+use crate::embedded::{
+    DisclosureFieldRef, DisclosureFields, IconRef, Localized, LocalizedRef, undeclared_trap,
+};
 use crate::limits::POLICY_MAX_STATE_BYTES;
 use crate::listener::SessionChange;
 use crate::round::Round;
@@ -76,8 +78,8 @@ pub struct Executor {
 
 /// A composition primed for repeated instantiation. Holds the bindgen
 /// [`InstancePre`](wasmtime::component::InstancePre) wrapper (the Linker built +
-/// type-checked ONCE — [`add_to_linker`] plus the strict per-catalog embedded
-/// resolvers) and the composition-wide embedded registry the run reads at the
+/// type-checked ONCE — [`add_to_linker`] plus the slots the texts come through)
+/// and the composition-wide embedded registry the run reads at the
 /// action boundary. Built by [`Executor::prime`]; every [`Executor::run`] against
 /// it only mints a fresh `Store` + `instantiate_async`, so the link/type-check
 /// cost is paid once per composition, not once per round.
@@ -159,19 +161,17 @@ impl Executor {
     /// Build a [`PrimedComposition`] from an already-deserialized `component`:
     /// construct the host `Linker` for the imports fusion bubbled up and
     /// type-check it into a reusable `InstancePre`, ONCE. `embedded_imports` names
-    /// the distinct per-catalog i18n instances (`embedded-slot:<hash>/i18n`);
+    /// the slots the components' texts come through (`embedded-slot:<hash>/i18n`);
     /// `embedded` is the composition-wide registry those resolve against (and
     /// that [`run`](Self::run) reads at the action boundary).
     ///
-    /// bindgen wires the CANONICAL-named imports on `HostState`: the merged
-    /// `enclavid:host/embedded-disclosure-fields` (first-match, option B), and the
-    /// canonical `enclavid:host/embedded-i18n` (used only by a lone unfused
-    /// policy — a fused component routes it away, so the canonical registration
-    /// sits unused, harmless). Plugin↔policy interfaces are internal to the
-    /// fused component, so the Linker never sees them. Added on top: the strict
-    /// per-catalog resolvers (`embedded-slot:<hash>/i18n`), whose names bindgen
-    /// can't emit; the icons, one function each from the host's own list; and
-    /// the props' `get`, whose type is the policy's.
+    /// bindgen wires the host's types and the merged
+    /// `enclavid:host/embedded-disclosure-fields` (first-match) the plugins'
+    /// helpers name keys through. Plugin↔policy interfaces are internal to the
+    /// fused component, so the Linker never sees them. Added on top, each in the
+    /// type the component declares: the slots, whose names bindgen can't emit;
+    /// the policy's disclosure fields; the icons, one function each from the
+    /// host's own list; and the props' `get`.
     pub fn prime(
         &self,
         component: &Component,
@@ -181,7 +181,8 @@ impl Executor {
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
         GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
         crate::round::add_to_linker(&mut linker)?;
-        register_strict_embedded(&mut linker, embedded_imports, &embedded)?;
+        register_slots(&mut linker, embedded_imports)?;
+        register_disclosure_fields(&mut linker)?;
         register_icons(&mut linker)?;
         let props = crate::props::declared(component, &self.engine);
         if props.is_some() {
@@ -326,46 +327,82 @@ impl Executor {
     }
 }
 
-/// Register the distinct per-catalog i18n instances the fusion produced.
-/// Each [`EmbeddedImport`] names one composite import
-/// (`embedded-slot:<hash>/i18n`) whose single func resolves keys
-/// STRICTLY against the one catalog identified by `catalog_hash` — a
-/// plugin's i18n key can never resolve to the policy's translation.
-/// Instance names are unique per `(hash, iface)` (fusion dedups), so
-/// no double-registration; the canonical `enclavid:host/*` names
-/// bindgen registered are disjoint from these.
-fn register_strict_embedded(
+/// Register the slots the components' texts come through, one per
+/// [`EmbeddedImport`]: its `localized` takes a case of the component's own
+/// `key` and resolves it STRICTLY against the one catalog the slot is named
+/// after — a plugin's key can never resolve to the policy's text — and mints
+/// it as a `localized-ref`. Dynamic, because the `key` is the component's: the
+/// compile held its cases to the catalog. Instance names are unique (the
+/// compile dedups), so no double-registration.
+fn register_slots(
     linker: &mut Linker<HostState>,
     imports: &[EmbeddedImport],
-    embedded: &std::sync::Arc<crate::embedded::EmbeddedRegistry>,
 ) -> wasmtime::Result<()> {
-    // Each resolves STRICTLY against the bound `catalog_hash` and mints the
-    // ref resource into the run's ResourceTable.
+    use engine_types::compile::LOCALIZED;
+
     for imp in imports {
         let hash = imp.catalog_hash;
         match imp.iface {
-            EmbeddedIface::I18n => {
-                let embedded = embedded.clone();
-                linker
-                    .root()
-                    .instance(&imp.instance_name)?
-                    .func_wrap_async("localized", move |mut store, (key,): (String,)| {
-                        let embedded = embedded.clone();
-                        Box::new(async move {
-                            let data = embedded
-                                .localized
-                                .resolve_strict(&hash, &key)
-                                .ok_or_else(|| undeclared_trap::<Localized>(&key))?
-                                .clone();
-                            let res: Resource<LocalizedRef> =
-                                store.data_mut().table.push(LocalizedRef(data))?;
-                            Ok((res,))
-                        })
-                    })?;
-            }
+            EmbeddedIface::I18n => linker.root().instance(&imp.instance_name)?.func_new_async(
+                LOCALIZED,
+                move |mut store, _ty, params, results| {
+                    Box::new(async move {
+                        let ([Val::Enum(case)], [result]) = (params, results) else {
+                            return Err(wasmtime::Error::msg(
+                                "a slot takes one case of its key and returns its text",
+                            ));
+                        };
+                        let translations = store
+                            .data()
+                            .embedded
+                            .localized
+                            .resolve_strict(&hash, case)
+                            .ok_or_else(|| undeclared_trap::<Localized>(case))?
+                            .clone();
+                        let text = engine_types::text::Localized { translations };
+                        let minted = store.data_mut().table.push(LocalizedRef(text))?;
+                        *result =
+                            Val::Resource(ResourceAny::try_from_resource(minted, &mut store)?);
+                        Ok(())
+                    })
+                },
+            )?,
         }
     }
     Ok(())
+}
+
+/// Register the policy's disclosure fields, at the version the host serves —
+/// which the linker serves to an import at a compatible version as well: its
+/// `disclosure-field` takes a case of the policy's `key` and mints the field of
+/// that name, resolved MERGED (first match) as a plugin's helper's key is.
+/// Dynamic, because the `key` is the policy's: the compile held its cases to
+/// the disclosure fields the catalogs declare.
+fn register_disclosure_fields(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
+    use engine_types::compile::{DISCLOSURE_FIELD, POLICY_DISCLOSURE_FIELDS};
+
+    linker
+        .root()
+        .instance(POLICY_DISCLOSURE_FIELDS)?
+        .func_new_async(DISCLOSURE_FIELD, |mut store, _ty, params, results| {
+            Box::new(async move {
+                let ([Val::Enum(case)], [result]) = (params, results) else {
+                    return Err(wasmtime::Error::msg(
+                        "`disclosure-field` takes one case of its key and returns its field",
+                    ));
+                };
+                let key = store
+                    .data()
+                    .embedded
+                    .disclosure_fields
+                    .resolve_first_match(case)
+                    .ok_or_else(|| undeclared_trap::<DisclosureFields>(case))?
+                    .clone();
+                let minted = store.data_mut().table.push(DisclosureFieldRef(key))?;
+                *result = Val::Resource(ResourceAny::try_from_resource(minted, &mut store)?);
+                Ok(())
+            })
+        })
 }
 
 /// Register the icons, one function each, at the version the host serves —
@@ -399,8 +436,11 @@ fn register_props(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
         .func_new_async(crate::props::FUNCTION, |store, _ty, _params, results| {
             let props = store.data().props.clone();
             Box::new(async move {
+                let [result] = results else {
+                    return Err(wasmtime::Error::msg("`get` returns the props"));
+                };
                 // `run` builds the props whenever the composition imports `get`.
-                results[0] =
+                *result =
                     props.ok_or_else(|| wasmtime::Error::msg("the round has no props built"))?;
                 Ok(())
             })
@@ -458,12 +498,15 @@ mod tests {
         primed_beside(imports, props, "")
     }
 
-    /// [`primed`], with the WIT of `packages` declared beside the props.
+    /// [`primed`], with the WIT of `packages` declared beside the props. The
+    /// props' package declares the policy's disclosure fields as well, one of
+    /// them, which the policy lists.
     fn primed_beside(
         imports: &str,
         props: (&str, &str),
         packages: &str,
     ) -> (Executor, PrimedComposition) {
+        use wasm_encoder::{ComponentSection, CustomSection};
         use wit_component::{
             ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata,
         };
@@ -498,6 +541,11 @@ mod tests {
              }}
              package enclavid:host-ext@{version} {{
                  interface policy-props {{ {body} }}
+                 interface disclosure-fields {{
+                     use enclavid:host/types@0.1.0.{{disclosure-field-ref}};
+                     enum key {{ full-name }}
+                     disclosure-field: func(key: key) -> disclosure-field-ref;
+                 }}
              }}
              {packages}"
         );
@@ -510,12 +558,17 @@ mod tests {
         let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
         embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8)
             .expect("the metadata");
-        let bytes = ComponentEncoder::default()
+        let mut bytes = ComponentEncoder::default()
             .module(&module)
             .expect("the module")
             .validate(true)
             .encode()
             .expect("the component");
+        CustomSection {
+            name: enclavid_embedded::SECTION_DISCLOSURE_FIELDS.into(),
+            data: br#"["full-name"]"#.as_slice().into(),
+        }
+        .append_to_component(&mut bytes);
 
         let compiler = engine_compiler::Compiler::new().expect("a compiler");
         let parts = compiler
@@ -525,11 +578,15 @@ mod tests {
         let component = executor
             .deserialize_component(&parts.cwasm)
             .expect("it loads");
+        let mut registry = crate::embedded::EmbeddedRegistry::builder();
+        for (hash, decls) in parts.catalogs {
+            registry.add_component(hash, decls);
+        }
         let primed = executor
             .prime(
                 &component,
                 &parts.embedded_imports,
-                std::sync::Arc::new(crate::embedded::EmbeddedRegistry::default()),
+                std::sync::Arc::new(registry.build().expect("the texts read")),
             )
             .expect("the linker serves every host interface");
         (executor, primed)
