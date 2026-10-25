@@ -162,9 +162,10 @@ fn encoding(e: EncodeError) -> wasmtime::Error {
 /// of every artifact at every depth, that names the slot. Refused, as the
 /// [`CompileFault::CatalogInvalid`] of the artifact that holds it: a second
 /// catalog of a slot, unless it is the same bytes as the first; the policy's
-/// slot, or a list of disclosure fields, in a catalog other than the policy's
-/// own; and a second list of disclosure fields, so that the composition's
-/// fields are one list, which the consent screen counts.
+/// slot, or a list of disclosure fields, in a plugin; and a second list of
+/// disclosure fields, so that the composition's fields are one list, which the
+/// consent screen counts. What the policy's artifact holds is the consumer's,
+/// a fusion of its own included, so any of its catalogs may be the policy's.
 pub(crate) fn slots(
     artifacts: &[(Artifact, Vec<EmbeddedCatalog>)],
 ) -> wasmtime::Result<HashMap<&str, (&Artifact, &EmbeddedCatalog)>> {
@@ -174,19 +175,19 @@ pub(crate) fn slots(
     let mut slots = HashMap::new();
     let mut listed = false;
     for (artifact, catalogs) in artifacts {
+        let a_plugin = *artifact != Artifact::Policy;
         for catalog in catalogs {
-            let the_policys = *artifact == Artifact::Policy && catalog.is_policy;
             let lists_fields = !catalog.decls.disclosure_fields.is_empty();
-            if !the_policys && catalog.slot.as_deref() == Some(POLICY_SLOT) {
+            if a_plugin && catalog.slot.as_deref() == Some(POLICY_SLOT) {
                 return Err(refused(
                     artifact,
-                    format!("a catalog other than the policy's names the slot `{POLICY_SLOT}`"),
+                    format!("a plugin's catalog names the slot `{POLICY_SLOT}`"),
                 ));
             }
-            if lists_fields && !the_policys {
+            if a_plugin && lists_fields {
                 return Err(refused(
                     artifact,
-                    "a catalog other than the policy's lists disclosure fields".into(),
+                    "a plugin's catalog lists disclosure fields".into(),
                 ));
             }
             if lists_fields && std::mem::replace(&mut listed, true) {

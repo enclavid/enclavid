@@ -23,10 +23,6 @@ const HOST: &str = "package enclavid:host@0.1.0;
 const API: &str = "package test:api@0.1.0;
     interface api { ping: func(); }";
 
-/// What makes a component the policy: its export of `enclavid:policy/policy`.
-const POLICY_EXPORT: &str = "package enclavid:policy@0.1.0;
-    interface policy { run: func(); }";
-
 /// The texts interface of `slot` at `version`, its keys `cases`.
 fn texts_of(slot: &str, version: &str, cases: &str) -> String {
     format!(
@@ -72,10 +68,7 @@ fn project(role: Role, world: &str, deps: &[(&str, &str)], en: Option<&str>) -> 
     let wit = dir.path().join("wit");
     fs::create_dir_all(&wit).unwrap();
     fs::write(wit.join("world.wit"), world).unwrap();
-    for (name, source) in [("host", HOST), ("policy", POLICY_EXPORT)]
-        .iter()
-        .chain(deps)
-    {
+    for (name, source) in [("host", HOST)].iter().chain(deps) {
         let dep = wit.join("deps").join(name);
         fs::create_dir_all(&dep).unwrap();
         fs::write(dep.join(format!("{name}.wit")), source).unwrap();
@@ -117,11 +110,7 @@ fn policy(imports: &str, deps: &[(&str, &str)]) -> Built {
         Role::Policy,
         &format!(
             "package test:policy@0.1.0;
-             world policy {{
-                 import enclavid-ext:policy/i18n@0.1.0;
-                 {imports}
-                 export enclavid:policy/policy@0.1.0;
-             }}
+             world policy {{ import enclavid-ext:policy/i18n@0.1.0; {imports} }}
              {}",
             texts("policy", "greeting, title")
         ),
@@ -227,10 +216,7 @@ fn a_slots_texts_at_another_version_are_refused() {
         Role::Policy,
         &format!(
             "package test:policy@0.1.0;
-             world policy {{
-                 import enclavid-ext:policy/i18n@0.2.0;
-                 export enclavid:policy/policy@0.1.0;
-             }}
+             world policy {{ import enclavid-ext:policy/i18n@0.2.0; }}
              {}",
             texts_of("policy", "0.2.0", "greeting, title")
         ),
@@ -410,10 +396,7 @@ fn a_catalog_its_slots_keys_do_not_fit_is_refused() {
         Role::Policy,
         &format!(
             "package test:policy@0.1.0;
-             world policy {{
-                 import enclavid-ext:policy/i18n@0.1.0;
-                 export enclavid:policy/policy@0.1.0;
-             }}
+             world policy {{ import enclavid-ext:policy/i18n@0.1.0; }}
              {}",
             texts("policy", "greeting, subtitle")
         ),
@@ -436,10 +419,7 @@ fn a_slot_whose_key_is_not_an_enum_is_refused() {
     let variant_keys = project(
         Role::Policy,
         "package test:policy@0.1.0;
-         world policy {
-             import enclavid-ext:policy/i18n@0.1.0;
-             export enclavid:policy/policy@0.1.0;
-         }
+         world policy { import enclavid-ext:policy/i18n@0.1.0; }
          package enclavid-ext:policy@0.1.0 {
              interface i18n {
                  use enclavid:host/types@0.1.0.{localized-ref};
@@ -466,10 +446,7 @@ fn with_disclosure_fields(function: &str) -> Built {
         Role::Policy,
         &format!(
             "package test:policy@0.1.0;
-             world policy {{
-                 import enclavid-ext:policy/disclosure-fields@0.1.0;
-                 export enclavid:policy/policy@0.1.0;
-             }}
+             world policy {{ import enclavid-ext:policy/disclosure-fields@0.1.0; }}
              package enclavid-ext:policy@0.1.0 {{
                  interface disclosure-fields {{
                      use enclavid:host/types@0.1.0.{{disclosure-field-ref}};

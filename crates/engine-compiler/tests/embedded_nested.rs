@@ -47,7 +47,6 @@ fn load_embedded_reads_top_level_sections_and_hash() {
     assert!(cat.decls.disclosure_fields.contains("passport-number"));
     assert!(cat.texts["en"].contains_key("title"));
     assert_eq!(cat.slot.as_deref(), Some("policy"));
-    assert!(!cat.is_policy);
 }
 
 /// A catalog breaking the format is refused where it is read: texts that are

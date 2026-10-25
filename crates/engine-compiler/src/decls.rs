@@ -32,17 +32,10 @@ use engine_types::compile::{Artifact, CompileFault};
 use engine_types::embedded::ComponentDecls;
 use engine_types::limits::MAX_DECLARED_DISCLOSURE_FIELDS;
 
-/// WIT interface a component exports iff it is the POLICY (not a
-/// plugin). Matched by prefix so a version bump doesn't break policy
-/// attribution in a fused artifact.
-const POLICY_EXPORT_PREFIX: &str = "enclavid:policy/policy";
-
 /// A single component's embedded catalog plus its identity. `hash` is
 /// the content-hash of the raw section bytes ([`catalog_hash`]) — the key
-/// the registry stores the catalog under. `is_policy` is true iff the
-/// component exports `enclavid:policy/policy`.
+/// the registry stores the catalog under.
 pub struct EmbeddedCatalog {
-    pub is_policy: bool,
     pub decls: ComponentDecls,
     /// The texts of `decls`, read: what the slot's imports are held to.
     pub texts: Catalog,
@@ -61,7 +54,7 @@ pub struct EmbeddedCatalog {
 /// already pulled and unwrapped any age-encrypted layer. We don't
 /// reach for wasmtime here: `wasmparser` walks the component's outer
 /// payloads without compiling anything, which is enough to extract
-/// custom sections by name and spot the policy export.
+/// custom sections by name.
 pub fn load_embedded(wasm_bytes: &[u8]) -> wasmtime::Result<EmbeddedCatalog> {
     // `parse_all` descends into nested components (flat stream with
     // ComponentSection/End as depth markers), so restrict absorption to
@@ -212,15 +205,13 @@ pub fn top_level_imports(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<String>> {
     Ok(out)
 }
 
-/// Accumulator for one component node's raw embedded-section bytes plus
-/// whether it exports the policy interface. Borrows the section bytes
-/// from the wasm; [`finish`](RawFrame::finish) parses + hashes them
-/// into an owned [`EmbeddedCatalog`].
+/// Accumulator for one component node's raw embedded-section bytes.
+/// Borrows the section bytes from the wasm; [`finish`](RawFrame::finish)
+/// parses + hashes them into an owned [`EmbeddedCatalog`].
 #[derive(Default)]
 struct RawFrame<'a> {
     disclosure_fields: Option<&'a [u8]>,
     i18n: Option<&'a [u8]>,
-    is_policy: bool,
 }
 
 impl<'a> RawFrame<'a> {
@@ -229,36 +220,24 @@ impl<'a> RawFrame<'a> {
         self.disclosure_fields.is_none() && self.i18n.is_none()
     }
 
-    /// Fold one payload into the frame: capture our custom sections
-    /// (rejecting duplicates), and flag the policy export.
+    /// Fold one payload into the frame: capture our custom sections,
+    /// rejecting duplicates.
     fn absorb(&mut self, payload: &Payload<'a>) -> wasmtime::Result<()> {
-        match payload {
-            Payload::CustomSection(reader) => {
-                let slot = match reader.name() {
-                    n if n == SECTION_DISCLOSURE_FIELDS => &mut self.disclosure_fields,
-                    n if n == SECTION_I18N => &mut self.i18n,
-                    _ => return Ok(()),
-                };
-                if slot.is_some() {
-                    return Err(invalid(format!(
-                        "duplicate custom section `{}` in component wasm",
-                        reader.name(),
-                    )));
-                }
-                *slot = Some(reader.data());
-            }
-            Payload::ComponentExportSection(reader) => {
-                for export in reader.clone() {
-                    let export = export.map_err(|e| {
-                        wasmtime::Error::msg(format!("component export parse: {e}"))
-                    })?;
-                    if export.name.0.starts_with(POLICY_EXPORT_PREFIX) {
-                        self.is_policy = true;
-                    }
-                }
-            }
-            _ => {}
+        let Payload::CustomSection(reader) = payload else {
+            return Ok(());
+        };
+        let section = match reader.name() {
+            n if n == SECTION_DISCLOSURE_FIELDS => &mut self.disclosure_fields,
+            n if n == SECTION_I18N => &mut self.i18n,
+            _ => return Ok(()),
+        };
+        if section.is_some() {
+            return Err(invalid(format!(
+                "duplicate custom section `{}` in component wasm",
+                reader.name(),
+            )));
         }
+        *section = Some(reader.data());
         Ok(())
     }
 
@@ -268,7 +247,6 @@ impl<'a> RawFrame<'a> {
         let hash = catalog_hash(self.disclosure_fields, self.i18n);
         let (decls, texts, slot) = build_decls(self.disclosure_fields, self.i18n)?;
         Ok(EmbeddedCatalog {
-            is_policy: self.is_policy,
             decls,
             texts,
             slot,
