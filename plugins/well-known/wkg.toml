@@ -2,3 +2,4 @@
 "enclavid:shared-types" = { path = "../../wit/shared-types" }
 "enclavid:host" = { path = "../../wit/host" }
 "enclavid:host-icons" = { path = "../../wit/host-icons" }
+"enclavid-ext:well-known" = { path = "ext" }

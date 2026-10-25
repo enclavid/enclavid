@@ -68,7 +68,7 @@ interface types {
   /// `handle`, one per call.
   variant event {
     start,
-    /// genesis: session opened (props via `enclavid:host-ext/policy-props`)
+    /// genesis: session opened (props via `enclavid-ext:policy/props`)
     consent-disclosure(bool),
     /// ← reply to prompt::consent-disclosure: accepted? (true ⇒ disclosure already sealed)
     media(media-result),

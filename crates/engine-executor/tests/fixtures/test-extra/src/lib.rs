@@ -2,7 +2,7 @@
 //! `extra-tag`, one of this plugin's own texts. Used only by the hybrid
 //! composition test: the policy imports it, it's linked at runtime on top
 //! of a pre-fused (policy + well-known) core, and its texts come through
-//! the slot its own catalog names.
+//! its own slot, `enclavid-ext:extra`.
 
 wit_bindgen::generate!({
     path: "wit",
@@ -10,8 +10,8 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::extra::i18n::{Key, localized};
 use enclavid::host::types::LocalizedRef;
+use enclavid_ext::extra::i18n::{Key, localized};
 use exports::enclavid::extra::tag::Guest;
 
 struct Extra;

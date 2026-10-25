@@ -6,7 +6,7 @@ use wit_parser::{ManglingAndAbi, Resolve};
 
 use PropsProblem as P;
 
-/// The type of `get` in a component whose `policy-props` package holds
+/// The type of `get` in a component whose `props` package holds
 /// `package` — the interface and any it uses.
 fn get_in_package(package: &str) -> ComponentFunc {
     let wit = format!(
@@ -44,8 +44,8 @@ fn get_in_package(package: &str) -> ComponentFunc {
 /// `get` returning `record props { fields }`, beside `types`.
 fn props_with(types: &str, fields: &str) -> ComponentFunc {
     get_in_package(&format!(
-        "package enclavid:host-ext@0.1.0 {{
-             interface policy-props {{
+        "package enclavid-ext:policy@0.1.0 {{
+             interface props {{
                  {types}
                  record props {{ {fields} }}
                  get: func() -> props;
@@ -310,8 +310,8 @@ fn props_for_a_record_that_are_no_object_are_refused() {
 /// `get` returning `ty`, beside `types`.
 fn returning(types: &str, ty: &str) -> ComponentFunc {
     get_in_package(&format!(
-        "package enclavid:host-ext@0.1.0 {{
-             interface policy-props {{
+        "package enclavid-ext:policy@0.1.0 {{
+             interface props {{
                  {types}
                  get: func() -> {ty};
              }}
@@ -363,9 +363,9 @@ fn props_not_given_are_null_to_a_type_that_is_no_record() {
 #[test]
 fn a_record_using_another_interfaces_types_reads() {
     let get = get_in_package(
-        "package enclavid:host-ext@0.1.0 {
+        "package enclavid-ext:policy@0.1.0 {
              interface shapes { record point { x: u32, y: u32 } }
-             interface policy-props {
+             interface props {
                  use shapes.{point};
                  record props { at: point, path: list<point> }
                  get: func() -> props;

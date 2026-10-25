@@ -1,8 +1,8 @@
 //! `enclavid policy embed` — writes the policy's catalogs into its wasm
 //! component: its texts (`i18n/`, one JSON file per language) and its
-//! disclosure fields (the cases of its `enclavid:host-ext/disclosure-fields`
-//! key), each checked against the keys its WIT declares, and its texts'
-//! import renamed to the slot the catalog names.
+//! disclosure fields (the cases of its `enclavid-ext:policy/disclosure-fields`
+//! key), each checked against the keys its slot, `enclavid-ext:policy`,
+//! declares.
 //!
 //! Pure metadata embedding — no encryption, no signing. The output is a wasm
 //! component, ready for `enclavid oci push`.

@@ -45,7 +45,7 @@ enclavid
 # 1. Embed the policy's catalogs into the wasm component: its texts
 #    (`i18n/`, one JSON file per language — or `--i18n i18n.json`, every
 #    language in one file) and its disclosure fields, checked against the
-#    keys its WIT (`wit/`) declares.
+#    keys its slot, `enclavid-ext:policy` in its WIT (`wit/`), declares.
 enclavid policy embed path/to/policy.wasm -o policy.embedded.wasm
 
 # 2. Authenticate to Enclavid + auto-wire docker credentials. Prompts

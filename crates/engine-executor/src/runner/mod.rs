@@ -161,17 +161,16 @@ impl Executor {
     /// Build a [`PrimedComposition`] from an already-deserialized `component`:
     /// construct the host `Linker` for the imports fusion bubbled up and
     /// type-check it into a reusable `InstancePre`, ONCE. `embedded_imports` names
-    /// the slots the components' texts come through (`embedded-slot:<hash>/i18n`);
-    /// `embedded` is the composition-wide registry those resolve against (and
-    /// that [`run`](Self::run) reads at the action boundary).
+    /// the slots the components' texts come through
+    /// (`enclavid-ext:<slot>/i18n@<version>`); `embedded` is the composition-wide
+    /// registry those resolve against (and that [`run`](Self::run) reads at the
+    /// action boundary).
     ///
-    /// bindgen wires the host's types and the merged
-    /// `enclavid:host/embedded-disclosure-fields` (first-match) the plugins'
-    /// helpers name keys through. Plugin↔policy interfaces are internal to the
-    /// fused component, so the Linker never sees them. Added on top, each in the
-    /// type the component declares: the slots, whose names bindgen can't emit;
-    /// the policy's disclosure fields; the icons, one function each from the
-    /// host's own list; and the props' `get`.
+    /// bindgen wires the host's types. Plugin↔policy interfaces are internal to
+    /// the fused component, so the Linker never sees them. Added on top, each in
+    /// the type the component declares: the slots, whose types are the
+    /// components' own; the policy's disclosure fields; the icons, one function
+    /// each from the host's own list; and the props' `get`.
     pub fn prime(
         &self,
         component: &Component,
@@ -328,12 +327,12 @@ impl Executor {
 }
 
 /// Register the slots the components' texts come through, one per
-/// [`EmbeddedImport`]: its `localized` takes a case of the component's own
-/// `key` and resolves it STRICTLY against the one catalog the slot is named
-/// after — a plugin's key can never resolve to the policy's text — and mints
-/// it as a `localized-ref`. Dynamic, because the `key` is the component's: the
-/// compile held its cases to the catalog. Instance names are unique (the
-/// compile dedups), so no double-registration.
+/// [`EmbeddedImport`]: its `localized` takes a case of the slot's `key` and
+/// resolves it STRICTLY against the one catalog of the slot — one slot's key
+/// can never resolve to another's text — and mints it as a `localized-ref`.
+/// Dynamic, because the `key` is the slot's: the compile held its cases to the
+/// catalog. Instance names are unique (the fused composition imports each
+/// once), so no double-registration.
 fn register_slots(
     linker: &mut Linker<HostState>,
     imports: &[EmbeddedImport],
@@ -375,9 +374,8 @@ fn register_slots(
 /// Register the policy's disclosure fields, at the version the host serves —
 /// which the linker serves to an import at a compatible version as well: its
 /// `disclosure-field` takes a case of the policy's `key` and mints the field of
-/// that name, resolved MERGED (first match) as a plugin's helper's key is.
-/// Dynamic, because the `key` is the policy's: the compile held its cases to
-/// the disclosure fields the catalogs declare.
+/// that name, from the composition's one list, the policy's. Dynamic, because
+/// the `key` is the policy's: the compile held its cases to the list.
 fn register_disclosure_fields(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     use engine_types::compile::{DISCLOSURE_FIELD, POLICY_DISCLOSURE_FIELDS};
 
@@ -539,8 +537,8 @@ mod tests {
                  {imports}
                  export enclavid:policy/policy@0.1.0;
              }}
-             package enclavid:host-ext@{version} {{
-                 interface policy-props {{ {body} }}
+             package enclavid-ext:policy@{version} {{
+                 interface props {{ {body} }}
                  interface disclosure-fields {{
                      use enclavid:host/types@0.1.0.{{disclosure-field-ref}};
                      enum key {{ full-name }}
@@ -653,10 +651,7 @@ mod tests {
     /// compile admits, is found, served and read like its own.
     #[test]
     fn props_at_a_compatible_version_are_served() {
-        let (executor, primed) = primed(
-            "import enclavid:host-ext/policy-props@0.1.7;",
-            ("0.1.7", FLAG),
-        );
+        let (executor, primed) = primed("import enclavid-ext:policy/props@0.1.7;", ("0.1.7", FLAG));
         assert_eq!(
             executor.read_props(&primed, br#"{"flag": false}"#),
             Ok(Some("{flag: false}".into()))

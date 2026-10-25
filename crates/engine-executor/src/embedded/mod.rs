@@ -11,11 +11,10 @@
 //!            disclosure_fields (Store<DisclosureFields>) and
 //!            localized (Store<Localized>). Shared by Arc with every
 //!            consumer so slot attribution can't drift.
-//! host     ← the `enclavid:host/embedded-disclosure-fields` host fn the
-//!            plugins' helpers name keys through, wired onto `HostState`
-//!            via the bindgen `Host` trait. The slots and the policy's typed
+//! host     ← the ref resources' destructors, wired onto `HostState` via
+//!            the bindgen `Host` traits. The slots and the policy's typed
 //!            disclosure fields are registered in `runner`, since their
-//!            types are the component's own.
+//!            types are the components' own.
 //! ```
 //!
 //! Stays out of `runner/` (which is about execution). Embedded is its

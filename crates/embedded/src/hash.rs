@@ -1,20 +1,13 @@
-//! Content-hash of a component's embedded catalog, and the name of the slot
-//! its texts are imported under.
-//!
-//! Every component's i18n import is renamed, when its catalog is embedded,
-//! to a slot of its own: `embedded-slot:<slug>/i18n`, named by the hash of
-//! that component's catalog. So any fusion — the TEE's, or one a consumer
-//! runs with `wac` — keeps each component's texts apart by name, and the host
-//! serves every slot from the catalog its name points at. [`catalog_hash`] is
-//! that hash, [`slug`] its wire form, [`embedded_import_name`] the slot's name.
+//! Content-hash of a component's embedded catalog: what the registry keeps a
+//! catalog under, so byte-identical catalogs are one.
 //!
 //! The hash is over the RAW section payloads, exactly as embedded. wac fusion
-//! preserves custom sections byte-for-byte, so the embed that names a slot and
-//! the engine that finds its catalog — in a plugin's sections, or nested in a
-//! fused artifact — agree with no parsing or canonicalization.
+//! preserves custom sections byte-for-byte, so every reader of a catalog — in
+//! a plugin's sections, or nested in a fused artifact — agrees on it with no
+//! parsing or canonicalization.
 
 /// Domain tag mixed into every hash so a future change to the input
-/// framing can't collide with an existing slug.
+/// framing can't collide with an existing hash.
 const VERSION: &[u8] = b"enclavid:embedded-catalog:v1";
 
 /// Content-hash of a component's embedded catalog over the raw section
@@ -40,51 +33,6 @@ pub fn catalog_hash(disclosure_fields: Option<&[u8]>, i18n: Option<&[u8]>) -> [u
     *h.finalize().as_bytes()
 }
 
-/// Wire form of a catalog hash: a `'h'` letter followed by the first
-/// 16 bytes as 32 lowercase-hex characters (33 chars total). Used as
-/// the package segment of the slot name `embedded-slot:<slug>/<iface>`.
-/// The leading letter is required — a WIT/component name segment can't
-/// start with a digit, and a hex slug can. 128 bits of hash: a collision
-/// between two DISTINCT catalogs is negligible; byte-identical catalogs
-/// intentionally share a slug (they route to one instance, which is
-/// correct — identical content resolves the same).
-pub fn slug(hash: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(33);
-    s.push('h');
-    use std::fmt::Write;
-    for b in &hash[..16] {
-        write!(s, "{b:02x}").expect("write into String never fails");
-    }
-    s
-}
-
-/// The slot a component's `<iface>` import is renamed to:
-/// `embedded-slot:<slug>/<iface>` (unversioned) or
-/// `embedded-slot:<slug>-<ver>/<iface>` when the interface carries a
-/// version. The name lives in its own `embedded-slot` namespace and stays
-/// OFF the semver `@` track (dots in the version are hyphenated so the
-/// package segment is a valid kebab identifier) so wac's aggregator never
-/// merges it with another catalog's or version's slot. `iface` is
-/// `"i18n"`; `version` is the renamed import's `@x.y.z` (empty for
-/// unversioned).
-///
-/// The slug is hex (no `-`), so the first `-` in the package segment is
-/// the slug/version boundary, which the engine inverts to recover
-/// `(iface, version)`. Round-trips for `x.y.z`; pre-release versions
-/// (which contain `-`) are not used by these interfaces.
-pub fn embedded_import_name(hash: &[u8; 32], iface: &str, version: &str) -> String {
-    if version.is_empty() {
-        format!("embedded-slot:{}/{}", slug(hash), iface)
-    } else {
-        format!(
-            "embedded-slot:{}-{}/{}",
-            slug(hash),
-            version.replace('.', "-"),
-            iface
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,7 +51,7 @@ mod tests {
 
     #[test]
     fn section_position_not_confused() {
-        // The same bytes in the DF slot vs the i18n slot must hash
+        // The same bytes as the DF section vs the i18n section must hash
         // differently — length prefixes + fixed order keep the two
         // section namespaces disjoint.
         assert_ne!(
@@ -117,34 +65,5 @@ mod tests {
         let base = catalog_hash(Some(b"{\"title\":\"KYC\"}"), None);
         let diff = catalog_hash(Some(b"{\"title\":\"AML\"}"), None);
         assert_ne!(base, diff);
-    }
-
-    #[test]
-    fn slug_is_letter_then_32_lowercase_hex() {
-        let s = slug(&catalog_hash(None, None));
-        assert_eq!(s.len(), 33);
-        let mut chars = s.chars();
-        assert_eq!(chars.next(), Some('h')); // must start with a letter, not a digit
-        assert!(chars.all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-    }
-
-    #[test]
-    fn import_name_stays_off_semver_track() {
-        let h = catalog_hash(Some(b"x"), None);
-        // Unversioned.
-        let n0 = embedded_import_name(&h, "i18n", "");
-        assert!(n0.starts_with("embedded-slot:h"));
-        assert!(n0.ends_with("/i18n"));
-        assert!(!n0.contains('@'));
-        // Versioned: version hyphenated into the package segment — still
-        // no `@`, so wac won't re-merge onto the semver track.
-        let n1 = embedded_import_name(&h, "i18n", "0.1.0");
-        assert!(n1.starts_with("embedded-slot:h"));
-        assert!(n1.ends_with("/i18n"));
-        assert!(n1.contains("-0-1-0/"));
-        assert!(!n1.contains('@'), "must stay off the semver track");
-        // Distinct per version → a same-catalog different-version slot
-        // can't collide onto one.
-        assert_ne!(n1, embedded_import_name(&h, "i18n", "0.2.0"));
     }
 }

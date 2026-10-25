@@ -4,17 +4,18 @@
 //! `enclavid_embedded::embed`, the same rules the TEE holds them to at load,
 //! and what is wrong printed where it is.
 //!
-//! Policies and plugins differ by exactly one input: disclosure fields are a
-//! policy's, the cases of its `enclavid:host-ext/disclosure-fields` key. A
-//! plugin's helpers name fields of the policy's list.
+//! Policies and plugins differ by their slot: a policy's is
+//! `enclavid-ext:policy`, which holds its texts and its disclosure fields, the
+//! cases of its `disclosure-fields` key; a plugin's is named for its package and
+//! holds its texts alone. A plugin's helpers take the fields the policy mints.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 use enclavid_embedded::embed::{self, Checked, Project};
 
-/// Which artifact a project is: a policy declares disclosure fields, a plugin
-/// does not.
+/// Which artifact a project is: a policy's slot is `enclavid-ext:policy`,
+/// which holds its disclosure fields; a plugin's is named for its package.
 #[derive(Clone, Copy)]
 pub enum Role {
     Policy,
@@ -36,7 +37,10 @@ fn check(wit: PathBuf, i18n: PathBuf, role: Role) -> Result<Checked> {
     let checked = embed::check(&Project {
         wit,
         i18n,
-        disclosure_fields: matches!(role, Role::Policy),
+        role: match role {
+            Role::Policy => embed::Role::Policy,
+            Role::Plugin => embed::Role::Plugin,
+        },
     })?;
     for warning in &checked.report.warnings {
         println!("warning: {warning}");
@@ -51,6 +55,7 @@ fn check(wit: PathBuf, i18n: PathBuf, role: Role) -> Result<Checked> {
 pub fn validate(dir: &Path, i18n: &Path, role: Role) -> Result<()> {
     let checked = check(dir.join("wit"), dir.join(i18n), role)?;
     println!("{} {} at {}:", role.label(), checked.package, dir.display());
+    println!("  slot: enclavid-ext:{}", checked.slot);
     println!(
         "  texts: {} key(s), in {}",
         checked.keys.as_ref().map_or(0, Vec::len),
@@ -79,9 +84,9 @@ pub fn validate(dir: &Path, i18n: &Path, role: Role) -> Result<()> {
 }
 
 /// Embed the catalogs of the project whose WIT is `wit` and whose texts are
-/// `i18n` into the component `wasm`, its texts' import renamed to the slot its
-/// catalog names, and write it to `output` (`<input-stem>.embedded.wasm` beside
-/// the input by default). `check_role` refuses a component of the other role.
+/// `i18n` into the component `wasm`, the texts with the slot they are served
+/// through, and write it to `output` (`<input-stem>.embedded.wasm` beside the
+/// input by default). `check_role` refuses a component of the other role.
 pub fn embed(
     wasm: &Path,
     wit: PathBuf,
@@ -112,10 +117,11 @@ pub fn embed(
     std::fs::write(&output_path, &embedded)
         .with_context(|| format!("writing {}", output_path.display()))?;
     println!(
-        "Embedded: {} ({} B → {} B, {} text key(s), {} language(s)) → {}",
+        "Embedded: {} ({} B → {} B, slot enclavid-ext:{}, {} text key(s), {} language(s)) → {}",
         wasm.display(),
         wasm_bytes.len(),
         embedded.len(),
+        checked.slot,
         checked.keys.as_ref().map_or(0, Vec::len),
         checked.languages.len(),
         output_path.display(),

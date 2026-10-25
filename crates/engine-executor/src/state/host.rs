@@ -22,7 +22,7 @@ use crate::round::Round;
 /// is set on the Store directly.
 pub struct HostState {
     /// The props the consumer gave the session, as the type the policy
-    /// declares for them, which `enclavid:host-ext/policy-props.get`
+    /// declares for them, which `enclavid-ext:policy/props.get`
     /// returns. Constant for the session; the policy may read it any round.
     /// `None` for a policy that declares none.
     pub props: Option<Val>,

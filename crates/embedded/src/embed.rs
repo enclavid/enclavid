@@ -1,43 +1,53 @@
 //! Embedding a component's catalogs, as `enclavid {policy,plugin} embed` and
 //! every other builder do it: read its project, check its texts against the
-//! keys its WIT declares, write both catalogs into the component as custom
-//! sections, and rename its `i18n` import to the slot its catalog names.
+//! keys its slot declares, and write both catalogs into the component as
+//! custom sections, the texts with the slot they are served through.
 //!
-//! The rename is what lets any fusion — the TEE's, or one a consumer runs with
-//! plain `wac` — keep every component's texts apart without knowing about
-//! them: two components' slots differ by name wherever their catalogs differ,
-//! and the host serves each slot from the catalog its name points at.
+//! The component's imports stay as they are: a slot's name is the component's
+//! own (see the crate docs), so any fusion — the TEE's, or one a consumer runs
+//! with plain `wac` — keeps every component's texts apart, and one component
+//! importing another's texts by the slot's name shares them.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
-use wac_graph::types::{ItemKind, Package};
-use wac_graph::{CompositionGraph, EncodeOptions};
+use anyhow::{Context, Result, ensure};
 use wasm_encoder::{ComponentSection, CustomSection};
 use wit_parser::{PackageId, Resolve, Span, TypeDefKind};
 
 use crate::keys;
 use crate::{
-    Catalog, DisclosureFieldsSection, I18nSection, MAX_DECLARED_DISCLOSURE_FIELDS, MAX_KEY_LENGTH,
-    MAX_LANGUAGES, SECTION_DISCLOSURE_FIELDS, SECTION_I18N, catalog_hash, embedded_import_name,
-    is_valid_text_ref, language_problems,
+    Catalog, DisclosureFieldsSection, EXTENSIONS, I18nSection, MAX_DECLARED_DISCLOSURE_FIELDS,
+    MAX_KEY_LENGTH, MAX_LANGUAGES, MAX_SLOT_LENGTH, POLICY_SLOT, SECTION_DISCLOSURE_FIELDS,
+    SECTION_I18N, is_valid_slot, is_valid_text_ref, language_problems,
 };
+
+/// The preamble of a component's binary: the wasm magic, then the component
+/// encoding's version and layer.
+const COMPONENT_PREAMBLE: [u8; 8] = [0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
+
+/// Which artifact a project is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Its slot is [`POLICY_SLOT`], and its disclosure fields are the cases of
+    /// `key` in `enclavid-ext:policy/disclosure-fields`.
+    Policy,
+    /// Its slot is named for its own package.
+    Plugin,
+}
 
 /// Where a component's project keeps what is embedded.
 pub struct Project {
-    /// The WIT the component was built from: its world's package declares
-    /// the keys of its texts (`interface i18n { enum key { … } }`).
+    /// The WIT the component was built from, with its slot: the keys of its
+    /// texts are the cases of `key` in `enclavid-ext:<slot>/i18n`.
     pub wit: PathBuf,
     /// The texts: a directory of `<language>.json` files, each a language's
     /// texts by key, or one JSON file of every language's texts, by language;
     /// absent for none.
     pub i18n: PathBuf,
-    /// Whether the component is a policy, whose disclosure fields are the
-    /// cases of `key` in `enclavid:host-ext/disclosure-fields`.
-    pub disclosure_fields: bool,
+    pub role: Role,
 }
 
 /// Something wrong with a project's catalogs, and where.
@@ -91,9 +101,11 @@ impl Report {
 /// A project read and checked: what was found, and the sections it embeds.
 pub struct Checked {
     pub report: Report,
-    /// `namespace:name` of the world's package, whose `i18n` the component
-    /// imports.
+    /// `namespace:name` of the world's package.
     pub package: String,
+    /// The component's slot: its texts are served through
+    /// `enclavid-ext:<slot>`.
+    pub slot: String,
     /// The `i18n` keys the WIT declares, the languages the texts come in,
     /// and the disclosure fields.
     pub keys: Option<Vec<String>>,
@@ -118,7 +130,44 @@ pub fn check(project: &Project) -> Result<Checked> {
     let name = &resolve.packages[package].name;
     let package_name = format!("{}:{}", name.namespace, name.name);
 
-    let keys = match text_keys(&resolve, package) {
+    let slot = match project.role {
+        Role::Policy => POLICY_SLOT.to_string(),
+        Role::Plugin => name.name.clone(),
+    };
+    if project.role == Role::Plugin {
+        if slot == POLICY_SLOT {
+            report.error(
+                &wit_file,
+                None,
+                format!(
+                    "a plugin's slot is named for its package, and `{EXTENSIONS}:{POLICY_SLOT}` \
+                     is the policy's: give `{package_name}` another name"
+                ),
+            );
+        } else if extension(&resolve, POLICY_SLOT).is_some() {
+            report.error(
+                &wit_file,
+                None,
+                format!(
+                    "`{EXTENSIONS}:{POLICY_SLOT}` is the policy's slot; a plugin's texts are in \
+                     `{EXTENSIONS}:{slot}`"
+                ),
+            );
+        }
+        if !is_valid_slot(&slot) {
+            report.error(
+                &wit_file,
+                None,
+                format!(
+                    "a plugin's slot is named for its package, and `{slot}` is not lowercase \
+                     words of letters and digits joined by `-`, at most {MAX_SLOT_LENGTH} bytes"
+                ),
+            );
+        }
+    }
+    let slot_package = extension(&resolve, &slot);
+
+    let keys = match slot_package.map_or(Ok(None), |id| text_keys(&resolve, id)) {
         Ok(keys) => keys,
         Err(problem) => {
             report.error(&wit_file, None, problem);
@@ -126,16 +175,15 @@ pub fn check(project: &Project) -> Result<Checked> {
         }
     };
 
-    let disclosure_fields = if project.disclosure_fields {
-        match disclosure_fields(&resolve) {
+    let disclosure_fields = match (project.role, slot_package) {
+        (Role::Policy, Some(id)) => match disclosure_fields(&resolve, id) {
             Ok(fields) => fields,
             Err(problem) => {
                 report.error(&wit_file, None, problem);
                 None
             }
-        }
-    } else {
-        None
+        },
+        _ => None,
     };
     if let Some(fields) = &disclosure_fields {
         if fields.len() > MAX_DECLARED_DISCLOSURE_FIELDS {
@@ -189,9 +237,7 @@ pub fn check(project: &Project) -> Result<Checked> {
                             .iter()
                             .find(|(key, _)| *key == problem.key)
                             .and_then(|(_, span)| place_of_span(&resolve, *span))
-                            .map_or((wit_file.clone(), None), |(file, line)| {
-                                (file, Some(line))
-                            });
+                            .map_or((wit_file.clone(), None), |(file, line)| (file, Some(line)));
                         (file, line, String::new())
                     }
                 };
@@ -206,13 +252,17 @@ pub fn check(project: &Project) -> Result<Checked> {
         None if !catalog.is_empty() => report.error(
             &project.i18n.display().to_string(),
             None,
-            format!("holds texts, but `{package_name}` declares no `i18n` interface with a `key` to name them"),
+            format!(
+                "holds texts, but `{EXTENSIONS}:{slot}` declares no `i18n` interface with a `key` \
+                 to name them"
+            ),
         ),
         None => {}
     }
 
     let i18n_section = (!catalog.is_empty()).then(|| {
         serde_json::to_vec(&I18nSection {
+            slot: slot.clone(),
             languages: catalog.clone(),
         })
         .expect("a map of strings serializes")
@@ -226,6 +276,7 @@ pub fn check(project: &Project) -> Result<Checked> {
     Ok(Checked {
         report,
         package: package_name,
+        slot,
         keys: keys.map(|keys| keys.into_iter().map(|(key, _)| key).collect()),
         languages: catalog.keys().cloned().collect(),
         disclosure_fields,
@@ -234,14 +285,17 @@ pub fn check(project: &Project) -> Result<Checked> {
     })
 }
 
-/// `component` with the catalogs `checked` holds written into it, and its
-/// `i18n` import, if it has one, renamed to the slot they name. Refused when
-/// the check found errors.
+/// `component` with the catalogs `checked` holds written into it. Refused when
+/// the check found errors, or when `component` is not a component.
 pub fn embed(component: &[u8], checked: &Checked) -> Result<Vec<u8>> {
     ensure!(
         checked.report.ok(),
         "the catalogs did not check: {} error(s)",
         checked.report.errors.len()
+    );
+    ensure!(
+        component.starts_with(&COMPONENT_PREAMBLE),
+        "not a wasm component: componentize the module before embedding its catalogs"
     );
     let mut wasm = component.to_vec();
     for (name, data) in [
@@ -259,66 +313,30 @@ pub fn embed(component: &[u8], checked: &Checked) -> Result<Vec<u8>> {
             .append_to_component(&mut wasm);
         }
     }
-    let hash = catalog_hash(
-        checked.disclosure_fields_section.as_deref(),
-        checked.i18n_section.as_deref(),
-    );
-    route(wasm, &checked.package, &hash)
+    Ok(wasm)
 }
 
-/// `wasm` wrapped so that its import of `<package>/i18n` is the slot `hash`
-/// names; `wasm` itself when it imports no such interface (it shows no text).
-fn route(wasm: Vec<u8>, package: &str, hash: &[u8; 32]) -> Result<Vec<u8>> {
-    let mut graph = CompositionGraph::new();
-    let component = Package::from_bytes("enclavid:embedded", None, wasm.clone(), graph.types_mut())
-        .context("reading the component")?;
-    let interface = format!("{package}/i18n");
-    let found = graph.types()[component.ty()]
-        .imports
+/// The package of the slot `slot`, `enclavid-ext:<slot>`, when the WIT has it.
+fn extension(resolve: &Resolve, slot: &str) -> Option<PackageId> {
+    resolve
+        .packages
         .iter()
-        .find(|(name, _)| name.as_str() == interface || name.starts_with(&format!("{interface}@")))
-        .map(|(name, kind)| (name.clone(), *kind));
-    let Some((import, kind)) = found else {
-        return Ok(wasm);
-    };
-    let ItemKind::Instance(imported) = kind else {
-        bail!("`{import}` is imported as something other than an interface");
-    };
-    let version = import.rsplit_once('@').map_or("", |(_, version)| version);
-    let slot = embedded_import_name(hash, "i18n", version);
-
-    let exports: Vec<String> = graph.types()[component.ty()]
-        .exports
-        .keys()
-        .cloned()
-        .collect();
-    let id = graph.register_package(component)?;
-    let instance = graph.instantiate(id);
-    // A twin of the interface under the slot's name: wac keeps imports apart
-    // by interface, so a renamed clone, not a new name alone.
-    let mut twin = graph.types()[imported].clone();
-    twin.id = Some(slot.clone());
-    let twin = graph.types_mut().add_interface(twin);
-    let node = graph.import(&slot, ItemKind::Instance(twin))?;
-    graph.set_instantiation_argument(instance, &import, node)?;
-    for name in exports {
-        let export = graph.alias_instance_export(instance, &name)?;
-        graph.export(export, &name)?;
-    }
-    graph
-        .encode(EncodeOptions::default())
-        .context("writing the component out")
+        .find(|(_, package)| package.name.namespace == EXTENSIONS && package.name.name == slot)
+        .map(|(id, _)| id)
 }
 
-/// The keys `package` declares for its texts — the cases of the `key` enum in
-/// its interface `i18n` — each with where it is declared; `None` for a package
-/// with no such interface.
+/// The keys the slot `package` declares for its texts — the cases of the `key`
+/// enum in its interface `i18n` — each with where it is declared; `None` for a
+/// slot with no such interface.
 fn text_keys(resolve: &Resolve, package: PackageId) -> Result<Option<Vec<(String, Span)>>, String> {
     let Some(interface) = resolve.packages[package].interfaces.get("i18n") else {
         return Ok(None);
     };
     let Some(key) = resolve.interfaces[*interface].types.get("key") else {
-        return Err("the `i18n` interface declares no `key`".into());
+        return Err(format!(
+            "`{EXTENSIONS}:{}/i18n` declares no `key`",
+            resolve.packages[package].name.name
+        ));
     };
     let TypeDefKind::Enum(cases) = &resolve.types[*key].kind else {
         return Err("the `key` of `i18n` must be an enum, a case for each text".into());
@@ -332,19 +350,19 @@ fn text_keys(resolve: &Resolve, package: PackageId) -> Result<Option<Vec<(String
     ))
 }
 
-/// The disclosure fields a policy declares: the cases of `key` in
-/// `enclavid:host-ext/disclosure-fields`; `None` when it declares none.
-fn disclosure_fields(resolve: &Resolve) -> Result<Option<Vec<String>>, String> {
-    let Some((_, package)) = resolve.packages.iter().find(|(_, package)| {
-        package.name.namespace == "enclavid" && package.name.name == "host-ext"
-    }) else {
-        return Ok(None);
-    };
-    let Some(interface) = package.interfaces.get("disclosure-fields") else {
+/// The disclosure fields the policy's slot `package` declares: the cases of
+/// `key` in its `disclosure-fields`; `None` when it declares none.
+fn disclosure_fields(resolve: &Resolve, package: PackageId) -> Result<Option<Vec<String>>, String> {
+    let Some(interface) = resolve.packages[package]
+        .interfaces
+        .get("disclosure-fields")
+    else {
         return Ok(None);
     };
     let Some(key) = resolve.interfaces[*interface].types.get("key") else {
-        return Err("`enclavid:host-ext/disclosure-fields` declares no `key`".into());
+        return Err(format!(
+            "`{EXTENSIONS}:{POLICY_SLOT}/disclosure-fields` declares no `key`"
+        ));
     };
     let TypeDefKind::Enum(cases) = &resolve.types[*key].kind else {
         return Err(
@@ -435,13 +453,28 @@ mod tests {
 
     const WORLD: &str = "package test:policy@0.1.0;
 
-        interface i18n {
-            use enclavid:host/types@0.1.0.{localized-ref};
-            enum key { greeting, title }
-            localized: func(key: key) -> localized-ref;
-        }
+        world policy { import enclavid-ext:policy/i18n@0.1.0; }
 
-        world policy { import i18n; }";
+        package enclavid-ext:policy@0.1.0 {
+            interface i18n {
+                use enclavid:host/types@0.1.0.{localized-ref};
+                enum key { greeting, title }
+                localized: func(key: key) -> localized-ref;
+            }
+        }";
+
+    /// A plugin's texts, in the slot named for its package.
+    const PLUGIN: &str = "package test:ocr@0.1.0;
+
+        world plugin { import enclavid-ext:ocr/i18n@0.1.0; }
+
+        package enclavid-ext:ocr@0.1.0 {
+            interface i18n {
+                use enclavid:host/types@0.1.0.{localized-ref};
+                enum key { retake }
+                localized: func(key: key) -> localized-ref;
+            }
+        }";
 
     /// A project of `WORLD` with `en` as its English texts' file.
     fn project(en: &str) -> (tempfile::TempDir, Project) {
@@ -451,13 +484,25 @@ mod tests {
     /// A project of `WORLD` whose texts are at `i18n`, with `files` written at
     /// their paths in it.
     fn project_at(i18n: &str, files: &[(&str, &str)]) -> (tempfile::TempDir, Project) {
+        project_of(WORLD, Role::Policy, i18n, files)
+    }
+
+    /// A project of the `role` whose world is `world`, its texts at `i18n` and
+    /// `files` written at their paths in it.
+    fn project_of(
+        world: &str,
+        role: Role,
+        i18n: &str,
+        files: &[(&str, &str)],
+    ) -> (tempfile::TempDir, Project) {
         let dir = tempfile::tempdir().unwrap();
         let wit = dir.path().join("wit");
         fs::create_dir_all(wit.join("deps/host")).unwrap();
-        fs::write(wit.join("world.wit"), WORLD).unwrap();
+        fs::write(wit.join("world.wit"), world).unwrap();
         fs::write(
             wit.join("deps/host/types.wit"),
-            "package enclavid:host@0.1.0; interface types { resource localized-ref; }",
+            "package enclavid:host@0.1.0;
+             interface types { resource localized-ref; resource disclosure-field-ref; }",
         )
         .unwrap();
         for (path, source) in files {
@@ -468,7 +513,7 @@ mod tests {
         let project = Project {
             wit,
             i18n: dir.path().join(i18n),
-            disclosure_fields: false,
+            role,
         };
         (dir, project)
     }
@@ -489,30 +534,157 @@ mod tests {
     }
 
     fn imports(wasm: &[u8]) -> Vec<String> {
-        let mut types = wac_graph::types::Types::default();
-        let package = Package::from_bytes("test", None, wasm.to_vec(), &mut types).unwrap();
-        types[package.ty()].imports.keys().cloned().collect()
+        let wit_component::DecodedWasm::Component(resolve, world) =
+            wit_component::decode(wasm).unwrap()
+        else {
+            panic!("not a component");
+        };
+        resolve.worlds[world]
+            .imports
+            .keys()
+            .map(|key| resolve.name_world_key(key))
+            .collect()
     }
 
+    /// The texts are written in with the slot they are served through, and
+    /// the component's imports stay as they are: the slot's name is its own.
     #[test]
-    fn the_texts_import_is_renamed_to_the_slot_its_catalog_names() {
+    fn the_texts_are_embedded_with_their_slot() {
         let (_dir, project) = project(r#"{ "greeting": "Hello!", "title": "Title" }"#);
         let checked = check(&project).unwrap();
         assert!(checked.report.ok(), "{:?}", checked.report.errors);
+        assert_eq!(checked.slot, POLICY_SLOT);
 
-        let embedded = embed(&component(&project), &checked).unwrap();
-        let imports = imports(&embedded);
-        let slot = embedded_import_name(
-            &catalog_hash(None, checked.i18n_section.as_deref()),
+        let component = component(&project);
+        let embedded = embed(&component, &checked).unwrap();
+        assert_eq!(imports(&embedded), imports(&component));
+        assert!(imports(&embedded).contains(&"enclavid-ext:policy/i18n@0.1.0".to_string()));
+        let section = crate::read_i18n(checked.i18n_section.as_deref().unwrap()).unwrap();
+        assert_eq!(section.slot, POLICY_SLOT);
+        assert_eq!(section.languages["en"]["title"], "Title");
+    }
+
+    /// A plugin's slot is named for its package; the texts of another slot it
+    /// imports are not its own.
+    #[test]
+    fn a_plugins_slot_is_named_for_its_package() {
+        let (_dir, project) = project_of(
+            PLUGIN,
+            Role::Plugin,
             "i18n",
-            "0.1.0",
+            &[("i18n/en.json", r#"{ "retake": "Try again" }"#)],
         );
-        assert!(imports.contains(&slot), "{imports:?}");
+        let checked = check(&project).unwrap();
+        assert!(checked.report.ok(), "{:?}", checked.report.errors);
+        assert_eq!(checked.slot, "ocr");
+        assert_eq!(checked.keys.as_deref(), Some(&["retake".to_string()][..]));
+        let section = crate::read_i18n(checked.i18n_section.as_deref().unwrap()).unwrap();
+        assert_eq!(section.slot, "ocr");
+    }
+
+    /// Texts a policy imports from another slot are that slot's: the
+    /// policy's keys are its own slot's alone.
+    #[test]
+    fn a_policys_keys_are_its_own_slots() {
+        let world = format!(
+            "{WORLD}
+            package enclavid-ext:ocr@0.1.0 {{
+                interface i18n {{
+                    use enclavid:host/types@0.1.0.{{localized-ref}};
+                    enum key {{ retake }}
+                    localized: func(key: key) -> localized-ref;
+                }}
+            }}"
+        )
+        .replace(
+            "world policy { import enclavid-ext:policy/i18n@0.1.0; }",
+            "world policy {
+                import enclavid-ext:policy/i18n@0.1.0;
+                import enclavid-ext:ocr/i18n@0.1.0;
+            }",
+        );
+        let (_dir, project) = project_of(
+            &world,
+            Role::Policy,
+            "i18n",
+            &[(
+                "i18n/en.json",
+                r#"{ "greeting": "Hello!", "title": "Title" }"#,
+            )],
+        );
+        let checked = check(&project).unwrap();
+        assert!(checked.report.ok(), "{:?}", checked.report.errors);
+        assert_eq!(
+            checked.keys.as_deref(),
+            Some(&["greeting".to_string(), "title".to_string()][..])
+        );
+    }
+
+    /// The slot `policy` is the policy's: a plugin declaring it, or named
+    /// for it, is refused.
+    #[test]
+    fn a_plugin_does_not_take_the_policys_slot() {
+        let declaring = PLUGIN.replace("enclavid-ext:ocr", "enclavid-ext:policy");
+        let (_dir, project) = project_of(&declaring, Role::Plugin, "i18n", &[]);
+        let checked = check(&project).unwrap();
         assert!(
-            !imports
-                .iter()
-                .any(|name| name.starts_with("test:policy/i18n"))
+            checked.report.errors[0]
+                .message
+                .contains("`enclavid-ext:policy` is the policy's slot"),
+            "{:?}",
+            checked.report.errors
         );
+
+        let named = PLUGIN
+            .replace("test:ocr", "test:policy")
+            .replace("enclavid-ext:ocr", "enclavid-ext:policy");
+        let (_dir, project) = project_of(&named, Role::Plugin, "i18n", &[]);
+        let checked = check(&project).unwrap();
+        assert!(
+            checked.report.errors[0]
+                .message
+                .contains("give `test:policy` another name"),
+            "{:?}",
+            checked.report.errors
+        );
+    }
+
+    /// A policy's disclosure fields are the cases of `key` in its slot's
+    /// `disclosure-fields`.
+    #[test]
+    fn a_policys_disclosure_fields_are_its_slots() {
+        let world = WORLD.replace(
+            "interface i18n {",
+            "interface disclosure-fields {
+                use enclavid:host/types@0.1.0.{disclosure-field-ref};
+                enum key { full-name, date-of-birth }
+                disclosure-field: func(key: key) -> disclosure-field-ref;
+            }
+            interface i18n {",
+        );
+        let (_dir, project) = project_of(
+            &world,
+            Role::Policy,
+            "i18n",
+            &[(
+                "i18n/en.json",
+                r#"{ "greeting": "Hello!", "title": "Title" }"#,
+            )],
+        );
+        let checked = check(&project).unwrap();
+        assert!(checked.report.ok(), "{:?}", checked.report.errors);
+        assert_eq!(
+            checked.disclosure_fields.as_deref(),
+            Some(&["full-name".to_string(), "date-of-birth".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn a_core_module_is_not_embedded_into() {
+        let (_dir, project) = project(r#"{ "greeting": "Hello!", "title": "Title" }"#);
+        let checked = check(&project).unwrap();
+        let module = b"\0asm\x01\0\0\0";
+        assert!(embed(module, &checked).is_err());
     }
 
     #[test]
@@ -532,7 +704,7 @@ mod tests {
         let checked = check(&project).unwrap();
         let error = &checked.report.errors[0];
         assert!(error.file.ends_with("world.wit"), "{error}");
-        assert_eq!(error.line, Some(5), "{error}");
+        assert_eq!(error.line, Some(8), "{error}");
         assert!(error.message.contains("`title` has no text"), "{error}");
     }
 

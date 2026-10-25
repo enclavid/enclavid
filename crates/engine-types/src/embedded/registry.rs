@@ -1,5 +1,5 @@
-//! `enclavid:embedded/*` ref scoping: a component's texts from its own
-//! catalog, disclosure fields from all of them.
+//! `enclavid:embedded/*` ref scoping: a slot's texts from its own catalog,
+//! the policy's disclosure fields from its list.
 //!
 //! Two **public stores** on [`EmbeddedRegistry`], one per kind:
 //!
@@ -13,19 +13,13 @@
 //! Icons have no store: their names are the host's own
 //! ([`crate::icons`]), so no component declares any.
 //!
-//! A component's texts resolve against its own catalog alone
-//! (`RefStore::resolve_strict`): it imports them through the slot its
-//! catalog names, which the host serves from that catalog. Disclosure
-//! fields resolve by **first match across every catalog** (composition
-//! order, policy first, `RefStore::resolve_first_match`): one list the
-//! policy declares, which the plugins' helpers name keys of.
-//!
-//! DF is not resolution-gated to the policy even though it reaches the
-//! consumer: the policy chooses which `display-field`s it discloses
-//! and the applicant consents to every `(key, label, value)` on
-//! screen (the sole auditor). That is the bound on what leaks, not the
-//! resolution slot. Each component's DF section is size-capped at
-//! build time (`MAX_DECLARED_DISCLOSURE_FIELDS`).
+//! A slot's texts resolve against its own catalog alone
+//! (`RefStore::resolve_strict`): the host serves the slot from the catalog
+//! that names it. Disclosure fields resolve against the one list a
+//! composition has, the policy's (`RefStore::resolve_first_match`), which
+//! the compile holds every composition to; the plugins' helpers take the
+//! fields the policy mints. The list is size-capped at build time
+//! (`MAX_DECLARED_DISCLOSURE_FIELDS`).
 //!
 //! Both wrap the same private generic [`RefStore`](super::store::
 //! RefStore) so the membership / get_token / lookup mechanics live in
@@ -169,9 +163,9 @@ fn texts(section: &[u8]) -> Result<HashMap<String, Vec<Translation>>, CatalogUnr
     if section.is_empty() {
         return Ok(HashMap::new());
     }
-    let catalog = enclavid_embedded::read_i18n(section).map_err(CatalogUnreadable)?;
+    let section = enclavid_embedded::read_i18n(section).map_err(CatalogUnreadable)?;
     let mut texts: HashMap<String, Vec<Translation>> = HashMap::new();
-    for (language, by_key) in catalog {
+    for (language, by_key) in section.languages {
         for (key, text) in by_key {
             texts.entry(key).or_default().push(Translation {
                 language: language.clone(),
@@ -189,7 +183,10 @@ mod tests {
     /// A component declaring `df`, and `localized` as its texts: each key's
     /// text in each language.
     fn decls(df: &[&str], localized: &[(&str, &[(&str, &str)])]) -> ComponentDecls {
-        let mut i18n = enclavid_embedded::I18nSection::default();
+        let mut i18n = enclavid_embedded::I18nSection {
+            slot: "policy".into(),
+            ..Default::default()
+        };
         for (key, rows) in localized {
             for (language, text) in *rows {
                 i18n.languages
@@ -350,9 +347,8 @@ mod tests {
     // so these pin only the resolution order, which the store keeps for
     // either kind.
 
-    /// A key any component declared resolves — including a plugin's, even
-    /// when the policy has no such section: a plugin MAY declare DF keys
-    /// of its own.
+    /// A key any catalog declared resolves, whichever catalog in the order it
+    /// is: the store keeps no order of its own beyond first match.
     #[test]
     fn first_match_resolves_from_any_catalog() {
         let mut b = EmbeddedRegistry::builder();

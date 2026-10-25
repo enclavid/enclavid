@@ -86,7 +86,7 @@ pub struct CreateSessionRequest {
     pub policy_key: Option<KeyRequest>,
 
     /// The props the policy reads for this session, as the JSON value of the
-    /// type the policy declares for them (`enclavid:host-ext/policy-props`): an
+    /// type the policy declares for them (`enclavid-ext:policy/props`): an
     /// object keyed by its field names for a record, as a rule, or a number, a
     /// string, an array. Omit for a policy that takes none, or none to give.
     /// At most [`MAX_PROPS_SIZE`](crate::limits::MAX_PROPS_SIZE) bytes as

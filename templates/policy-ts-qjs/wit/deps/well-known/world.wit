@@ -2,119 +2,49 @@ package enclavid:well-known@0.1.0;
 
 /// DisplayField helpers for canonical KYC fields.
 ///
-/// Each function returns a `display-field` carrying a canonical
-/// disclosure-field key plus its label. The label is one of THIS
-/// PLUGIN's texts (`i18n`, applicant-facing); the key is resolved
-/// against the **policy's** disclosure fields — the cases of `key` in
-/// its `enclavid:host-ext/disclosure-fields`, the single source of
-/// truth for what's disclosable to the consumer.
+/// Each helper takes one of the POLICY's disclosure fields — the
+/// `disclosure-field-ref` it mints from a case of the `key` in its
+/// `enclavid-ext:policy/disclosure-fields`, the single source of truth for
+/// what's disclosable to the consumer — and returns a `display-field` of
+/// that field, labelled with THIS PLUGIN's text for it (applicant-facing).
 ///
-/// **Each helper documents the exact key it emits**, which is the
-/// helper's own name. Policy authors MUST list any helper they use as a
-/// case of their `key` — calling a helper for a key the policy didn't
-/// list traps at runtime.
+/// A helper is meant for the field of its own name: `passport-number`
+/// labels a passport number, so the policy passes it its
+/// `passport-number` field. The consent screen shows every field's key
+/// beside its label, so a field passed to another field's helper is on
+/// the applicant's screen for them to see.
 interface disclosure-fields {
+    use enclavid:host/types@0.1.0.{disclosure-field-ref};
     use enclavid:shared-types/disclosure@0.1.0.{display-field};
 
     // ─── Document identifiers ──────────────────────────────────────
 
-    /// Emits key `"passport-number"`.
-    passport-number: func(value: string) -> display-field;
-    /// Emits key `"id-card-number"`.
-    id-card-number: func(value: string) -> display-field;
-    /// Emits key `"drivers-license-number"`.
-    drivers-license-number: func(value: string) -> display-field;
-    /// Emits key `"document-issuing-country"`.
-    document-issuing-country: func(value: string) -> display-field;
-    /// Emits key `"document-expiry"`.
-    document-expiry: func(value: string) -> display-field;
-    /// Emits key `"document-issued"`.
-    document-issued: func(value: string) -> display-field;
+    passport-number: func(field: disclosure-field-ref, value: string) -> display-field;
+    id-card-number: func(field: disclosure-field-ref, value: string) -> display-field;
+    drivers-license-number: func(field: disclosure-field-ref, value: string) -> display-field;
+    document-issuing-country: func(field: disclosure-field-ref, value: string) -> display-field;
+    document-expiry: func(field: disclosure-field-ref, value: string) -> display-field;
+    document-issued: func(field: disclosure-field-ref, value: string) -> display-field;
 
     // ─── Identity ──────────────────────────────────────────────────
 
-    /// Emits key `"given-name"`.
-    given-name: func(value: string) -> display-field;
-    /// Emits key `"family-name"`.
-    family-name: func(value: string) -> display-field;
-    /// Emits key `"full-name"`.
-    full-name: func(value: string) -> display-field;
-    /// Emits key `"date-of-birth"`.
-    date-of-birth: func(value: string) -> display-field;
-    /// Emits key `"sex"`.
-    sex: func(value: string) -> display-field;
-    /// Emits key `"nationality"`.
-    nationality: func(value: string) -> display-field;
+    given-name: func(field: disclosure-field-ref, value: string) -> display-field;
+    family-name: func(field: disclosure-field-ref, value: string) -> display-field;
+    full-name: func(field: disclosure-field-ref, value: string) -> display-field;
+    date-of-birth: func(field: disclosure-field-ref, value: string) -> display-field;
+    sex: func(field: disclosure-field-ref, value: string) -> display-field;
+    nationality: func(field: disclosure-field-ref, value: string) -> display-field;
 
     // ─── Contact / location ────────────────────────────────────────
 
-    /// Emits key `"residence-country"`.
-    residence-country: func(value: string) -> display-field;
-    /// Emits key `"address"`.
-    address: func(value: string) -> display-field;
-    /// Emits key `"email"`.
-    email: func(value: string) -> display-field;
-    /// Emits key `"phone"`.
-    phone: func(value: string) -> display-field;
+    residence-country: func(field: disclosure-field-ref, value: string) -> display-field;
+    address: func(field: disclosure-field-ref, value: string) -> display-field;
+    email: func(field: disclosure-field-ref, value: string) -> display-field;
+    phone: func(field: disclosure-field-ref, value: string) -> display-field;
 
     // ─── Other ─────────────────────────────────────────────────────
 
-    /// Emits key `"tax-id"`.
-    tax-id: func(value: string) -> display-field;
-}
-
-/// The plugin's texts, a case of `key` for each; `i18n/en.json` holds
-/// them. Applicant-facing: the host picks a text's language inside the
-/// TEE, the applicant's, and it never reaches the consumer.
-interface i18n {
-    use enclavid:host/types@0.1.0.{localized-ref};
-
-    enum key {
-        // The labels of the disclosure fields.
-        passport-number-label,
-        id-card-number-label,
-        drivers-license-number-label,
-        document-issuing-country-label,
-        document-expiry-label,
-        document-issued-label,
-        given-name-label,
-        family-name-label,
-        full-name-label,
-        date-of-birth-label,
-        sex-label,
-        nationality-label,
-        residence-country-label,
-        address-label,
-        email-label,
-        phone-label,
-        tax-id-label,
-
-        // The captures.
-        passport-title,
-        id-card-title,
-        drivers-license-title,
-        selfie-title,
-        passport-instructions,
-        passport-step,
-        passport-review-hint,
-        id-card-front-instructions,
-        id-card-front-step,
-        id-card-front-review-hint,
-        id-card-back-instructions,
-        id-card-back-step,
-        id-card-back-review-hint,
-        drivers-license-front-instructions,
-        drivers-license-front-step,
-        drivers-license-front-review-hint,
-        drivers-license-back-instructions,
-        drivers-license-back-step,
-        drivers-license-back-review-hint,
-        selfie-instructions,
-        selfie-step,
-        selfie-review-hint,
-    }
-
-    localized: func(key: key) -> localized-ref;
+    tax-id: func(field: disclosure-field-ref, value: string) -> display-field;
 }
 
 /// Pre-baked MediaSpec / CaptureStep helpers for common KYC documents.
@@ -127,8 +57,8 @@ interface i18n {
 /// who want to compose custom flows mixing sides.
 ///
 /// The texts inside the returned records (labels, instructions) are
-/// THIS PLUGIN's own (`i18n`) — applicant-facing only, no policy
-/// whitelist needed — and the icons are the host's own
+/// THIS PLUGIN's own (`enclavid-ext:well-known/i18n`) — applicant-facing
+/// only, no policy whitelist needed — and the icons are the host's own
 /// (`enclavid:host-icons/icons`).
 interface capture {
     use enclavid:shared-types/capture@0.1.0.{capture-step, media-spec};
@@ -151,13 +81,10 @@ world well-known {
     export capture;
 
     // Every ref the plugin returns comes from the host:
-    //   * `disclosure-fields` — the key is looked up in the
-    //     composition's lists; a well-known field has to be one of the
-    //     policy's, since this plugin ships no list of its own.
-    //   * `i18n` — this plugin's own texts, through the slot its
-    //     embedding renames this import to.
+    //   * `i18n` — this plugin's own texts, through its slot, which the
+    //     host serves from the catalog its embedding writes in.
     //   * `icons` — one of the names the frontend draws.
-    import enclavid:host/embedded-disclosure-fields@0.1.0;
-    import i18n;
+    // A field's key is the policy's: the helpers take it.
+    import enclavid-ext:well-known/i18n@0.1.0;
     import enclavid:host-icons/icons@0.1.0;
 }

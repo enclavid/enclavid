@@ -1,0 +1,22 @@
+package enclavid-ext:policy@0.1.0;
+
+/// The policy's own texts, a case of `key` for each; `i18n/en.json` holds
+/// them.
+///
+/// The policy's slot is kept out of `wit/` and vendored into `wit/deps` by
+/// `wkg`, which reads a package it does not find in a registry only from a
+/// path.
+interface i18n {
+    use enclavid:host/types@0.1.0.{localized-ref};
+
+    enum key {
+        consent-reason,
+        estimated-age-label,
+        // Texts of the same names as the plugins' own, with texts of
+        // their own, to show that a plugin's stay its own.
+        passport-title,
+        extra-tag,
+    }
+
+    localized: func(key: key) -> localized-ref;
+}

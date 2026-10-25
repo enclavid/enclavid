@@ -41,8 +41,8 @@ enum Commands {
     },
 
     /// Author a **plugin** artifact: embed its texts and validate them.
-    /// No disclosure fields (a plugin's helpers name fields of the
-    /// policy's list). `embed` asserts the component is NOT a policy.
+    /// No disclosure fields (a plugin's helpers take the fields the policy
+    /// mints). `embed` asserts the component is NOT a policy.
     /// Registry push is role-agnostic — see `enclavid oci push`.
     Plugin {
         #[command(subcommand)]
@@ -129,19 +129,18 @@ enum WorkspaceCommand {
 #[derive(Subcommand)]
 enum PolicyCommand {
     /// Embed the policy's catalogs into its wasm component: its texts
-    /// and its disclosure fields, checked against the keys its WIT
-    /// declares, with its texts' import renamed to the slot the catalog
-    /// names. Pure metadata embedding — the output is a wasm component
-    /// ready for `enclavid oci push`.
+    /// and its disclosure fields, checked against the keys its slot,
+    /// `enclavid-ext:policy`, declares. Pure metadata embedding — the
+    /// output is a wasm component ready for `enclavid oci push`.
     Embed {
         /// Path to the wasm component file (output of
         /// `cargo build --target wasm32-…` + `wasm-tools component
         /// new`).
         wasm: PathBuf,
 
-        /// The WIT the component was built from. Its package's `i18n`
-        /// interface declares the texts' keys, and the cases of `key` in
-        /// `enclavid:host-ext/disclosure-fields` are the policy's
+        /// The WIT the component was built from. The cases of `key` in
+        /// `enclavid-ext:policy/i18n` are the texts' keys, and those in
+        /// `enclavid-ext:policy/disclosure-fields` the policy's
         /// disclosure fields.
         #[arg(long = "wit", default_value = "wit")]
         wit: PathBuf,
@@ -179,18 +178,19 @@ enum PolicyCommand {
 #[derive(Subcommand)]
 enum PluginCommand {
     /// Embed the plugin's texts into its wasm component, checked against
-    /// the keys its WIT declares, with its texts' import renamed to the
-    /// slot the catalog names. Pure metadata embedding — no encryption.
-    /// Plugins declare no disclosure fields: their helpers name fields of
-    /// the policy's list.
+    /// the keys its slot declares: `enclavid-ext:<name>`, named for its
+    /// package. Pure metadata embedding — no encryption. Plugins declare
+    /// no disclosure fields: their helpers take the fields the policy
+    /// mints.
     Embed {
         /// Path to the wasm component file (output of
         /// `cargo build --target wasm32-…` + `wasm-tools component
         /// new`).
         wasm: PathBuf,
 
-        /// The WIT the component was built from; its package's `i18n`
-        /// interface declares the texts' keys.
+        /// The WIT the component was built from; the cases of `key` in
+        /// its slot's `i18n`, `enclavid-ext:<name>/i18n`, are the texts'
+        /// keys.
         #[arg(long = "wit", default_value = "wit")]
         wit: PathBuf,
 

@@ -1,20 +1,26 @@
 //! Shared schema for the "embedded" sections embedded in policy and
 //! plugin wasm components, and the text model they carry.
 //!
+//! A component declares what the host serves it in a package of its own, its
+//! slot: `enclavid-ext:<slot>`. A policy's slot is [`POLICY_SLOT`], holding
+//! its texts, its disclosure fields and its props; a plugin's is named for its
+//! own package, so `enclavid:well-known` keeps its texts in
+//! `enclavid-ext:well-known`. The host serves a slot's texts from the catalog
+//! that names the slot, so any component may import another's texts by it.
+//!
 //! A component's project holds its catalogs beside its WIT:
 //!
 //! ```text
 //! my-policy/
-//! ├── wit/world.wit     # the keys: `interface i18n { enum key { … } }`,
-//! │                     # and for a policy its disclosure fields
+//! ├── wit/world.wit     # the keys: `interface i18n { enum key { … } }` in
+//! │                     # its slot, and for a policy its disclosure fields
 //! ├── i18n/
 //! │   ├── en.json       # the texts, one file per language: key → text
 //! │   └── ru.json
 //! └── src/…
 //! ```
 //!
-//! or, all languages in one file, `language → key → text`, the section's own
-//! shape:
+//! or, all languages in one file, `language → key → text`:
 //!
 //! ```text
 //! my-policy/
@@ -27,10 +33,11 @@
 //! texts against the keys, and writes two independent wasm custom sections:
 //!
 //!   * `enclavid:embedded.disclosure-fields.v1` — the policy's disclosure
-//!     fields, the cases of its `enclavid:host-ext/disclosure-fields` key:
+//!     fields, the cases of its `enclavid-ext:policy/disclosure-fields` key:
 //!     a JSON list; see [`SECTION_DISCLOSURE_FIELDS`].
-//!   * `enclavid:embedded.i18n.v1` — the texts: a JSON map of
-//!     `language → key → text`; see [`SECTION_I18N`].
+//!   * `enclavid:embedded.i18n.v1` — the texts and the slot they are served
+//!     through: the slot's name and a JSON map of `language → key → text`;
+//!     see [`SECTION_I18N`].
 //!
 //! Each section is optional; a component with no texts ships without one.
 //!
@@ -54,7 +61,15 @@ pub mod text;
 #[cfg(feature = "embed")]
 pub mod embed;
 
-pub use hash::{catalog_hash, embedded_import_name, slug};
+pub use hash::catalog_hash;
+
+/// The namespace of the packages a component declares what the host serves it
+/// in: one slot each, `enclavid-ext:<slot>`.
+pub const EXTENSIONS: &str = "enclavid-ext";
+
+/// The policy's slot: its texts, its disclosure fields and its props. No
+/// plugin's.
+pub const POLICY_SLOT: &str = "policy";
 
 // ---------- Schema-level limits ----------
 //
@@ -91,6 +106,8 @@ pub const MAX_LANGUAGES: usize = 64;
 pub const MAX_TEXT_VALUE_HARD_BYTES: usize = 16 * 1024;
 pub const MAX_KEY_LENGTH: usize = 128;
 pub const MAX_LANGUAGE_LENGTH: usize = 16;
+/// The most bytes a slot's name may hold.
+pub const MAX_SLOT_LENGTH: usize = 64;
 
 /// Custom section name for the disclosure-fields list.
 pub const SECTION_DISCLOSURE_FIELDS: &str = "enclavid:embedded.disclosure-fields.v1";
@@ -124,18 +141,20 @@ pub struct DisclosureFieldsSection {
 /// A component's texts: per language, each text by its key.
 pub type Catalog = BTreeMap<String, BTreeMap<String, String>>;
 
-/// Contents of `enclavid:embedded.i18n.v1`: each language's texts by key.
-/// `BTreeMap`s so the bytes are a pure function of the texts, which the slot
-/// name is a hash of.
+/// Contents of `enclavid:embedded.i18n.v1`: the slot the texts are served
+/// through, and each language's texts by key. `BTreeMap`s so the bytes are a
+/// pure function of the texts.
 ///
 /// Wire format:
 ///
 /// ```text
-/// { "en": { "consent-reason": "To verify your identity." }, "ru": { … } }
+/// { "slot": "policy",
+///   "languages": { "en": { "consent-reason": "To verify your identity." }, "ru": { … } } }
 /// ```
 #[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, Eq)]
-#[serde(transparent)]
+#[serde(deny_unknown_fields)]
 pub struct I18nSection {
+    pub slot: String,
     pub languages: Catalog,
 }
 
@@ -149,10 +168,17 @@ pub fn parse_i18n(bytes: &[u8]) -> serde_json::Result<I18nSection> {
     serde_json::from_slice(bytes)
 }
 
-/// The texts of an i18n section, held to the bounds a component's texts are:
-/// or the first thing wrong with them.
-pub fn read_i18n(bytes: &[u8]) -> Result<Catalog, String> {
+/// An i18n section, its slot and its texts held to the bounds they are: or the
+/// first thing wrong with them.
+pub fn read_i18n(bytes: &[u8]) -> Result<I18nSection, String> {
     let section = parse_i18n(bytes).map_err(|e| e.to_string())?;
+    if !is_valid_slot(&section.slot) {
+        return Err(format!(
+            "the slot `{}` is not a package's name: lowercase words of letters and \
+             digits joined by `-`, at most {MAX_SLOT_LENGTH} bytes",
+            section.slot
+        ));
+    }
     if section.languages.len() > MAX_LANGUAGES {
         return Err(format!(
             "holds {} languages, at most {MAX_LANGUAGES}",
@@ -164,7 +190,19 @@ pub fn read_i18n(bytes: &[u8]) -> Result<Catalog, String> {
             return Err(format!("{language}: {problem}"));
         }
     }
-    Ok(section.languages)
+    Ok(section)
+}
+
+/// Whether `s` is a slot's shape, the name of a WIT package: lowercase words
+/// of letters and digits, each starting with a letter, joined by `-`; at most
+/// [`MAX_SLOT_LENGTH`] bytes.
+pub fn is_valid_slot(s: &str) -> bool {
+    s.len() <= MAX_SLOT_LENGTH
+        && s.split('-').all(|word| {
+            let mut bytes = word.bytes();
+            bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+                && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }
 
 /// What is wrong with one language's texts against the bounds a component's
@@ -228,7 +266,7 @@ pub fn is_valid_language(s: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn section(languages: &[(&str, &[(&str, &str)])]) -> Vec<u8> {
+    fn section(slot: &str, languages: &[(&str, &[(&str, &str)])]) -> Vec<u8> {
         let catalog: Catalog = languages
             .iter()
             .map(|(language, texts)| {
@@ -239,26 +277,64 @@ mod tests {
                 (language.to_string(), texts)
             })
             .collect();
-        serde_json::to_vec(&I18nSection { languages: catalog }).unwrap()
+        serde_json::to_vec(&I18nSection {
+            slot: slot.into(),
+            languages: catalog,
+        })
+        .unwrap()
     }
 
     #[test]
     fn a_section_within_the_bounds_reads() {
-        let catalog = read_i18n(&section(&[
-            ("en", &[("title", "Title")]),
-            ("pt-BR", &[("title", "Título")]),
-        ]))
+        let section = read_i18n(&section(
+            "well-known",
+            &[
+                ("en", &[("title", "Title")]),
+                ("pt-BR", &[("title", "Título")]),
+            ],
+        ))
         .unwrap();
-        assert_eq!(catalog["pt-BR"]["title"], "Título");
+        assert_eq!(section.slot, "well-known");
+        assert_eq!(section.languages["pt-BR"]["title"], "Título");
     }
 
     #[test]
     fn a_section_past_the_bounds_is_refused_and_named() {
         let long = "x".repeat(MAX_TEXT_VALUE_HARD_BYTES + 1);
         let refused = |bytes: &[u8]| read_i18n(bytes).unwrap_err();
-        assert!(refused(&section(&[("en", &[("title", long.as_str())])])).contains("`title`"));
-        assert!(refused(&section(&[("en us", &[])])).contains("language tag"));
-        assert!(refused(&section(&[("en", &[("Title", "x")])])).contains("`Title`"));
-        assert!(refused(br#"{"en": {"title": 1}}"#).contains("invalid type"));
+        assert!(
+            refused(&section("policy", &[("en", &[("title", long.as_str())])])).contains("`title`")
+        );
+        assert!(refused(&section("policy", &[("en us", &[])])).contains("language tag"));
+        assert!(refused(&section("policy", &[("en", &[("Title", "x")])])).contains("`Title`"));
+        assert!(
+            refused(br#"{"slot": "policy", "languages": {"en": {"title": 1}}}"#)
+                .contains("invalid type")
+        );
+    }
+
+    #[test]
+    fn a_slot_is_held_to_a_package_names_shape() {
+        for slot in ["policy", "well-known", "face-age2"] {
+            assert!(is_valid_slot(slot), "{slot}");
+        }
+        let long = "a".repeat(MAX_SLOT_LENGTH + 1);
+        for slot in [
+            "",
+            "Policy",
+            "well_known",
+            "-well",
+            "well-",
+            "2fa",
+            "a--b",
+            &long,
+        ] {
+            assert!(!is_valid_slot(slot), "{slot}");
+        }
+        assert!(
+            read_i18n(&section("Well Known", &[]))
+                .unwrap_err()
+                .contains("slot")
+        );
     }
 }

@@ -1,11 +1,11 @@
 //! `enclavid plugin embed` — writes the plugin's texts (`i18n/`, one JSON
 //! file per language) into its wasm component, checked against the keys its
-//! WIT declares, and renames its texts' import to the slot the catalog names.
+//! slot declares: `enclavid-ext:<name>`, named for the plugin's package.
 //!
 //! Same mechanics as `enclavid policy embed`, minus disclosure fields: a
-//! plugin's helpers name fields of the policy's list, so plugins don't declare
-//! their own. Texts stay per-component because they are applicant-facing
-//! only — the consumer never sees them.
+//! plugin's helpers take the fields the policy mints, so plugins don't declare
+//! their own. Texts stay per-slot because they are applicant-facing only — the
+//! consumer never sees them.
 
 use anyhow::Result;
 use std::path::PathBuf;

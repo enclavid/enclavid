@@ -30,9 +30,9 @@ pub struct PluginInstance {
     pub wasm: Vec<u8>,
 }
 
-/// The embedded interfaces a component imports through a slot of its own:
-/// its texts alone. DF stays merged, so it is not one of these, and icons are
-/// no catalog at all — the host's own functions ([`crate::icons`]).
+/// The embedded interfaces a slot is served from a catalog: its texts alone.
+/// The policy's disclosure fields are served by their interface's name, and
+/// icons are no catalog at all — the host's own functions ([`crate::icons`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EmbeddedIface {
     I18n,
@@ -48,13 +48,12 @@ impl EmbeddedIface {
     }
 }
 
-/// One slot a component's texts come through: the import its embedding
-/// renamed its `i18n` to, after its catalog, which the compile found among
-/// an artifact's imports with that catalog nested in the same artifact. The
-/// host `Linker` registers an instance named `instance_name` whose func
-/// resolves keys against the catalog with `catalog_hash` alone, so a
-/// plugin's text never resolves to the policy's (or another plugin's). DF is
-/// merged and served first-match.
+/// One slot's texts, as the fused composition imports them:
+/// `enclavid-ext:<slot>/i18n@<version>`, every component's import of them made
+/// one by the fusion, and served from the one catalog that names the slot,
+/// which the compile found. The host `Linker` registers an instance named
+/// `instance_name` whose func resolves keys against the catalog with
+/// `catalog_hash` alone, so one slot's text never resolves to another's.
 ///
 /// serde: part of the L2 cwasm-cache bundle — the import manifest is
 /// stored beside the cwasm so a cache hit reconstructs the host
@@ -64,8 +63,7 @@ pub struct EmbeddedImport {
     pub instance_name: String,
     pub catalog_hash: [u8; 32],
     pub iface: EmbeddedIface,
-    /// Version of the renamed interface — its `@x.y.z` (empty if
-    /// unversioned). Part of `instance_name`, so a same-catalog
-    /// different-version import can't collide onto one slot.
+    /// Version of the imported interface — its `@x.y.z`. Part of
+    /// `instance_name`.
     pub version: String,
 }

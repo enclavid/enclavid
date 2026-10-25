@@ -10,34 +10,34 @@ interface disclosure {
     /// screen and (modulo the label) included in the sealed
     /// disclosure envelope to the consumer.
     ///
-    /// Both `key` and `label` are refs produced by `manifest`
-    /// host functions of the issuing component; the host validates
-    /// every call against the per-component manifest registry
-    /// (unregistered → trap, closing the runtime ref-crafting channel).
+    /// Both `key` and `label` are refs the host mints, which no
+    /// component can construct (closing the runtime ref-crafting
+    /// channel).
     ///
-    ///   * `key` is a `disclosure-field-ref` — produced by
-    ///     `manifest::disclosure-field("…")` against the issuing
-    ///     component's `disclosure_fields` list. The host treats it
-    ///     as an opaque string and **always shows the resolved
-    ///     machine key raw** on the consent screen — no canonical/
-    ///     custom distinction, every (key, label, value) triple is
-    ///     rendered with nothing suppressed. The user is the sole
-    ///     auditor on this screen; whatever string leaves is
-    ///     whatever they saw next to the slide-to-disclose.
+    ///   * `key` is a `disclosure-field-ref` — minted by the policy's
+    ///     `enclavid-ext:policy/disclosure-fields.disclosure-field`,
+    ///     from a case of its `key`: the policy's list, the one a
+    ///     composition has. A plugin's helper that builds a
+    ///     `display-field` takes the ref the policy minted. The host
+    ///     **always shows the machine key raw** on the consent screen
+    ///     — no canonical/custom distinction, every (key, label,
+    ///     value) triple is rendered with nothing suppressed. The user
+    ///     is the sole auditor on this screen; whatever string leaves
+    ///     is whatever they saw next to the slide-to-disclose.
     ///     Defence against a policy that tries to encode categorical
     ///     data (country, gender, bucket id, ...) into key
-    ///     cardinality: pre-registration in the component's manifest
-    ///     — the set is frozen before any per-session input reaches
-    ///     the policy, so a fresh `passport-number-<user-country>`
-    ///     can't be resolved at evaluate time.
-    ///   * `label` is a `localized-ref` — produced by
-    ///     `manifest::localized("…")`. The host resolves it via the
-    ///     issuing component's text registry into the full set of
-    ///     language translations; the frontend picks the user's
-    ///     locale. Resolved label is sent to the frontend **only**
-    ///     — it never reaches the sealed envelope, closing any
-    ///     covert translation channel where non-user-locale variants
-    ///     might otherwise smuggle data to the consumer.
+    ///     cardinality: the list is the policy's WIT, frozen before
+    ///     any per-session input reaches the policy, so a fresh
+    ///     `passport-number-<user-country>` can't be minted at
+    ///     evaluate time.
+    ///   * `label` is a `localized-ref` — minted by a slot's
+    ///     `enclavid-ext:<slot>/i18n.localized`. The host resolves it
+    ///     from the slot's catalog into the full set of language
+    ///     translations; the frontend picks the user's locale.
+    ///     Resolved label is sent to the frontend **only** — it never
+    ///     reaches the sealed envelope, closing any covert translation
+    ///     channel where non-user-locale variants might otherwise
+    ///     smuggle data to the consumer.
     ///
     /// `value` is the policy-supplied data. Sanitised host-side
     /// (control chars / BIDI overrides / zero-width / Unicode-tag

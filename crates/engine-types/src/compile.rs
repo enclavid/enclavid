@@ -10,18 +10,17 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// The interfaces the execution-worker's host serves a composition, beside the
-/// `embedded-slot:` imports a component's texts come through, which its
-/// embedding named after its catalog. An import a composition still has once
-/// fused must be one of these — or one that needs nothing served, an interface
-/// of types alone — or no round of it can run.
+/// texts of each slot, `enclavid-ext:<slot>/i18n`, which it serves from the
+/// catalog that names the slot. An import a composition still has once fused
+/// must be one of these — or one that needs nothing served, an interface of
+/// types alone — or no round of it can run.
 ///
 /// Of WASI, the clocks and randomness as values of the round, and what
 /// toolchains' runtimes import beside them, served empty: the environment,
 /// stdio, the filesystem with nothing opened. Nothing of `wasi:sockets` or
 /// `wasi:http`, so a composition importing them is refused.
-pub const HOST_INTERFACES: [&str; 25] = [
+pub const HOST_INTERFACES: [&str; 24] = [
     "enclavid:host/types@0.1.0",
-    "enclavid:host/embedded-disclosure-fields@0.1.0",
     crate::icons::INTERFACE,
     POLICY_PROPS,
     POLICY_DISCLOSURE_FIELDS,
@@ -47,20 +46,27 @@ pub const HOST_INTERFACES: [&str; 25] = [
     "wasi:cli/terminal-stderr@0.2.12",
 ];
 
+/// The version the host serves the extension interfaces at, those of every
+/// `enclavid-ext:<slot>` package: one number for them all, so every slot's
+/// texts are served alike.
+pub const EXTENSIONS_VERSION: &str = "0.1.0";
+
 /// The interface a policy imports to read its props.
-pub const POLICY_PROPS: &str = "enclavid:host-ext/policy-props@0.1.0";
+pub const POLICY_PROPS: &str = "enclavid-ext:policy/props@0.1.0";
 
 /// The interface a policy imports its disclosure fields through: the cases of
 /// its `key`, which its embedding writes out as its disclosure-fields list.
-pub const POLICY_DISCLOSURE_FIELDS: &str = "enclavid:host-ext/disclosure-fields@0.1.0";
+pub const POLICY_DISCLOSURE_FIELDS: &str = "enclavid-ext:policy/disclosure-fields@0.1.0";
 
 /// The one function the host serves in [`POLICY_DISCLOSURE_FIELDS`]: a case
 /// of the policy's `key` in, its `disclosure-field-ref` out.
 pub const DISCLOSURE_FIELD: &str = "disclosure-field";
 
-/// The one function the host serves in a slot a component's texts come
-/// through: a case of the component's `key` in, carrying its text's values,
-/// and its `localized-ref` out.
+/// The interface of a slot its texts come through: `enclavid-ext:<slot>/i18n`.
+pub const TEXTS: &str = "i18n";
+
+/// The one function the host serves in a slot's [`TEXTS`]: a case of the
+/// slot's `key` in, and its text's `localized-ref` out.
 pub const LOCALIZED: &str = "localized";
 
 /// One of the artifacts a composition is made of.

@@ -109,7 +109,7 @@ fn an_import_of_types_alone_compiles() {
     assert_eq!(refusal(policy, vec![]), None);
 }
 
-const PROPS: &str = "interface policy-props { record props { flag: bool } get: func() -> props; }";
+const PROPS: &str = "interface props { record props { flag: bool } get: func() -> props; }";
 
 /// The host's interfaces are served at their own version and at any
 /// semver-compatible one, as the linker looks a name up — and not past that.
@@ -117,8 +117,8 @@ const PROPS: &str = "interface policy-props { record props { flag: bool } get: f
 fn the_host_serves_its_interfaces_by_the_linkers_rule() {
     let at = |version: &str| {
         importing(
-            &format!("enclavid:host-ext/policy-props@{version}"),
-            &format!("package enclavid:host-ext@{version} {{ {PROPS} }}"),
+            &format!("enclavid-ext:policy/props@{version}"),
+            &format!("package enclavid-ext:policy@{version} {{ {PROPS} }}"),
         )
     };
     assert_eq!(refusal(at("0.1.0"), vec![]), None);
@@ -126,7 +126,7 @@ fn the_host_serves_its_interfaces_by_the_linkers_rule() {
     assert_eq!(
         refusal(at("0.2.0"), vec![]),
         Some(CompileFault::Unsatisfied(name(
-            "enclavid:host-ext/policy-props@0.2.0"
+            "enclavid-ext:policy/props@0.2.0"
         )))
     );
 }
@@ -169,8 +169,8 @@ fn importing_twice(interface: &str, first: &str, second: &str) -> Vec<u8> {
 #[test]
 fn a_second_import_of_a_host_interface_on_its_track_is_refused() {
     for interface in [
-        "enclavid:host-ext/policy-props",
-        "enclavid:host-ext/disclosure-fields",
+        "enclavid-ext:policy/props",
+        "enclavid-ext:policy/disclosure-fields",
     ] {
         assert_eq!(
             refusal(importing_twice(interface, "0.1.0", "0.1.1"), vec![]),
@@ -234,8 +234,8 @@ fn bytes_that_are_not_a_component_are_refused() {
 fn a_plugin_exporting_a_host_interface_is_refused() {
     let policy = importing("test:api/api@0.1.0", API);
     let plugin = exporting(
-        "enclavid:host-ext/policy-props@0.1.0",
-        &format!("package enclavid:host-ext@0.1.0 {{ {PROPS} }}"),
+        "enclavid-ext:policy/props@0.1.0",
+        &format!("package enclavid-ext:policy@0.1.0 {{ {PROPS} }}"),
     );
     assert_eq!(
         refusal(policy, vec![plugin]),
@@ -248,8 +248,8 @@ fn a_plugin_exporting_a_host_interface_is_refused() {
 /// A policy whose props interface holds `body`.
 fn with_props(body: &str) -> Vec<u8> {
     importing(
-        "enclavid:host-ext/policy-props@0.1.0",
-        &format!("package enclavid:host-ext@0.1.0 {{ interface policy-props {{ {body} }} }}"),
+        "enclavid-ext:policy/props@0.1.0",
+        &format!("package enclavid-ext:policy@0.1.0 {{ interface props {{ {body} }} }}"),
     )
 }
 
@@ -274,10 +274,10 @@ fn props_of_any_value_the_host_serves_compile() {
     assert_eq!(refusal(policy, vec![]), None);
 
     let used = importing(
-        "enclavid:host-ext/policy-props@0.1.0",
-        "package enclavid:host-ext@0.1.0 {
+        "enclavid-ext:policy/props@0.1.0",
+        "package enclavid-ext:policy@0.1.0 {
              interface shapes { record point { x: u32, y: u32 } }
-             interface policy-props {
+             interface props {
                  use shapes.{point};
                  record props { at: point, path: list<point> }
                  get: func() -> props;
@@ -297,11 +297,11 @@ fn props_of_any_value_the_host_serves_compile() {
 fn props_imported_as_what_the_host_does_not_serve_are_refused() {
     let host_types = "package enclavid:host@0.1.0 { interface types { resource icon-ref; } }";
     let returns_a_handle = importing(
-        "enclavid:host-ext/policy-props@0.1.0",
+        "enclavid-ext:policy/props@0.1.0",
         &format!(
             "{host_types}
-             package enclavid:host-ext@0.1.0 {{
-                 interface policy-props {{
+             package enclavid-ext:policy@0.1.0 {{
+                 interface props {{
                      use enclavid:host/types@0.1.0.{{icon-ref}};
                      get: func() -> icon-ref;
                  }}
@@ -322,7 +322,7 @@ fn props_imported_as_what_the_host_does_not_serve_are_refused() {
         assert_eq!(
             refusal(policy, vec![]),
             Some(CompileFault::Mismatched(name(
-                "enclavid:host-ext/policy-props@0.1.0"
+                "enclavid-ext:policy/props@0.1.0"
             ))),
             "{what}"
         );

@@ -1,7 +1,7 @@
 //! Test policy — pure reducer (`enclavid:policy/policy.handle`).
 //!
 //! Drives a minimal KYC walk, composed with the `enclavid:well-known`
-//! plugin (linked at slot 1):
+//! plugin:
 //!
 //!   start                       → render media(passport spec)
 //!   media(passport result)      → render media(selfie spec)
@@ -16,9 +16,10 @@
 //! first `handle(&[], event::start)` works without a prior write.
 //!
 //! Every capture spec + canonical `display-field` comes from the
-//! well-known plugin (its own texts, the host's icons); the policy
-//! authors only its consent reason and its face-age field, as its own
-//! texts and disclosure fields.
+//! well-known plugin (its own texts, the host's icons), of the fields the
+//! policy hands it; the policy authors only its consent reason and its
+//! face-age field, as its own texts and disclosure fields, and labels one
+//! field with the plugin's text, imported by the plugin's slot.
 
 wit_bindgen::generate!({
     // wkg vendors the full dependency tree (embedded / shared-types /
@@ -29,12 +30,14 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-// Mints the policy's OWN `disclosure-field-ref` for a key the well-known
-// helpers don't cover (the face-age estimate): a case of its own list.
-use enclavid::host_ext::disclosure_fields::{Key as Field, disclosure_field};
+// Mints the policy's `disclosure-field-ref`s, each a case of its own list:
+// those it hands the well-known helpers, and its own face-age estimate.
 use enclavid::shared_types::disclosure::DisplayField;
+use enclavid_ext::policy::disclosure_fields::{Key as Field, disclosure_field};
 // The policy's own texts.
-use enclavid::test_policy::i18n::{Key as Text, localized};
+use enclavid_ext::policy::i18n::{Key as Text, localized};
+// The well-known plugin's texts, by its slot.
+use enclavid_ext::well_known::i18n::{Key as WellKnownText, localized as well_known_text};
 // The host `blob` resource + its content ref: on the passport round we stash
 // the frame blob's `blob-ref` (a hex string) in `state`, then rehydrate it on
 // the selfie round via `Blob::from_blob_ref` — proving cross-round reload.
@@ -92,7 +95,7 @@ fn state_at(step: u8) -> Vec<u8> {
 /// The optional `state-bloat = N` prop. Present only when the harness drives
 /// the engine's `POLICY_MAX_STATE_BYTES` cap; absent on every real flow.
 fn bloat_bytes() -> Option<usize> {
-    enclavid::host_ext::policy_props::get()
+    enclavid_ext::policy::props::get()
         .state_bloat
         .map(|n| n as usize)
 }
@@ -102,7 +105,7 @@ fn bloat_bytes() -> Option<usize> {
 /// counting media store can prove `from-blob-ref` alone triggers no load (the
 /// pull is lazy, on `bytes()`). Absent on every real flow.
 fn skip_passport_read() -> bool {
-    enclavid::host_ext::policy_props::get()
+    enclavid_ext::policy::props::get()
         .skip_passport_read
         .unwrap_or(false)
 }
@@ -111,7 +114,7 @@ fn skip_passport_read() -> bool {
 /// WASI clocks and randomness read instead of the step. Absent on every real
 /// flow.
 fn wasi_probe() -> bool {
-    enclavid::host_ext::policy_props::get()
+    enclavid_ext::policy::props::get()
         .wasi_probe
         .unwrap_or(false)
 }
@@ -143,16 +146,23 @@ fn probe_state() -> Vec<u8> {
 
 fn build_consent(age_years: i32) -> Disclosure {
     // Canonical KYC fields built by the plugin: labels are the plugin's own
-    // texts; the keys (full-name, date-of-birth, …) are held to THIS
-    // policy's disclosure fields — the single bandwidth gate for what
-    // reaches the consumer.
+    // texts; the keys (full-name, date-of-birth, …) are THIS policy's
+    // disclosure fields, minted from its own list — the single bandwidth gate
+    // for what reaches the consumer.
     let mut fields = vec![
-        wk::full_name(HOLDER),
-        wk::date_of_birth("1990-04-12"),
-        wk::nationality("Utopia"),
-        wk::passport_number("X1234567"),
-        wk::document_expiry("2030-01-01"),
-        wk::address(LONG_ADDRESS),
+        wk::full_name(disclosure_field(Field::FullName), HOLDER),
+        wk::date_of_birth(disclosure_field(Field::DateOfBirth), "1990-04-12"),
+        // Built by the policy itself, labelled with the plugin's text for the
+        // field: one import of the plugin's slot, the policy's and the
+        // plugin's, served from the plugin's catalog.
+        DisplayField {
+            key: disclosure_field(Field::Nationality),
+            label: well_known_text(WellKnownText::NationalityLabel),
+            value: "Utopia".into(),
+        },
+        wk::passport_number(disclosure_field(Field::PassportNumber), "X1234567"),
+        wk::document_expiry(disclosure_field(Field::DocumentExpiry), "2030-01-01"),
+        wk::address(disclosure_field(Field::Address), LONG_ADDRESS),
     ];
     // The face-age estimate, disclosed as a POLICY-owned field. Its key isn't
     // a well-known helper, so the policy mints the `disclosure-field-ref`
@@ -170,9 +180,9 @@ fn build_consent(age_years: i32) -> Disclosure {
         reason,
         // The requester comes from the EXTRA plugin (`tag::get()` →
         // `extra-tag`), one of the extra plugin's own texts. This policy has
-        // an `extra-tag` too, with a text of its own, so a slot served from
-        // its own catalog yields the plugin's text here — first-match would
-        // leak the policy's.
+        // an `extra-tag` too, with a text of its own, so the plugin's slot,
+        // served from the plugin's catalog, yields the plugin's text here —
+        // a first match across catalogs would leak the policy's.
         requester: tag::get(),
     }
 }

@@ -330,8 +330,10 @@ async fn passport_selfie_consent_accept_reaches_approved_over_the_rendered_field
         screen.fields.iter().any(|f| f.value.parse::<i32>().is_ok()),
         "rendered fields must include the face-age estimate (a numeric value)",
     );
-    // The keys are the policy's disclosure fields, the cases of its `key`
-    // and the well-known helpers' names alike; the labels are texts.
+    // The keys are the policy's disclosure fields, the cases of its `key`,
+    // which it hands the well-known helpers; the labels are texts — the
+    // nationality's the plugin's own, which the policy took by the plugin's
+    // slot.
     let keys: Vec<&str> = screen.fields.iter().map(|f| f.key.as_str()).collect();
     assert_eq!(
         keys,
@@ -346,6 +348,7 @@ async fn passport_selfie_consent_accept_reaches_approved_over_the_rendered_field
         ]
     );
     assert_eq!(english(&screen.fields[0].label), "Full name");
+    assert_eq!(english(&screen.fields[2].label), "Nationality");
     assert_eq!(english(&screen.fields[6].label), "Estimated age");
     assert_eq!(
         english(&screen.reason),
@@ -674,9 +677,9 @@ async fn a_round_reads_its_own_time_and_fresh_randomness() {
 /// STATIC consumption: fuse the policy and every plugin into one artifact
 /// before the session, as a consumer may with plain `wac` — a fusion that
 /// knows nothing of the slots — then feed it back with NO runtime plugins.
-/// The engine finds each component's slot among the artifact's imports and
-/// its catalog nested inside, and resolves both the plugins' texts (each
-/// from its own catalog) and the disclosure fields (merged) through it.
+/// The engine finds each slot among the artifact's imports and its catalog
+/// nested inside, and resolves both the plugins' texts (each from its own
+/// catalog) and the policy's disclosure fields through it.
 #[tokio::test]
 async fn static_fused_artifact_resolves_strictly() {
     let runner = TestRunner::new().unwrap();
@@ -684,26 +687,24 @@ async fn static_fused_artifact_resolves_strictly() {
         .fuse(fixtures::test_policy(), &all_plugins())
         .unwrap();
 
-    // The slots survive the fusion as distinct `embedded-slot:*` imports:
-    // policy + well-known + extra = 3. The vision plugins have no texts, so
-    // they import none, and icons are the host's own.
+    // The slots survive the fusion as distinct imports, one per slot:
+    // policy + well-known + extra = 3 — the policy's import of well-known's
+    // texts and well-known's own made one. The vision plugins have no texts,
+    // so they import none, and icons are the host's own.
     let imports = engine_compiler::top_level_imports(&fused).unwrap();
-    let slots: Vec<&String> = imports
+    let mut slots: Vec<&str> = imports
         .iter()
-        .filter(|n| n.starts_with("embedded-slot:"))
+        .map(String::as_str)
+        .filter(|n| n.starts_with("enclavid-ext:") && n.contains("/i18n@"))
         .collect();
+    slots.sort_unstable();
     assert_eq!(
-        slots.len(),
-        3,
-        "policy + well-known + extra = 3 distinct slots, got {slots:?}",
-    );
-    // Each slot name carries the version of the interface it renamed
-    // (`0.1.0` → `-0-1-0`, kept off the semver `@` track), so two
-    // components with byte-identical catalogs but different versions can't
-    // collide onto one slot.
-    assert!(
-        slots.iter().all(|n| n.contains("-0-1-0/")),
-        "slot names must carry the interface version, got {slots:?}",
+        slots,
+        [
+            "enclavid-ext:extra/i18n@0.1.0",
+            "enclavid-ext:policy/i18n@0.1.0",
+            "enclavid-ext:well-known/i18n@0.1.0",
+        ],
     );
 
     // Consume with an empty plugin list — the static path.

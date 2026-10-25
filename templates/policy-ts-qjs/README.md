@@ -25,9 +25,9 @@ enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
   `definePolicy` and `withStart` in `@enclavid/policy`. Its first import,
   `@enclavid/policy-quickjs`, fills in what QuickJS lacks; see below.
 - `wit/world.wit` — what the policy imports (the host's interfaces and plugins')
-  and exports; the keys of its texts; the fields it may disclose to the
-  consumer, on the applicant's consent; and the props it takes. The WIT it
-  imports is in `wit/deps/`.
+  and exports, and its slot, `enclavid-ext:policy`: the keys of its texts; the
+  fields it may disclose to the consumer, on the applicant's consent; and the
+  props it takes. The WIT it imports is in `wit/deps/`.
 - `i18n/en.json` — the texts the policy shows, in English: one JSON file per
   language.
 - `types/` — the TypeScript types of everything in `wit/`, written by
@@ -35,8 +35,8 @@ enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
 
 ## Texts
 
-A text the policy shows is a case of the `key` in its `i18n` interface, in
-`wit/world.wit`, and its wording is in `i18n/<language>.json`, one file per
+A text the policy shows is a case of the `key` in `enclavid-ext:policy/i18n`,
+in `wit/world.wit`, and its wording is in `i18n/<language>.json`, one file per
 language, each text by its key:
 
 ```wit
@@ -54,12 +54,29 @@ enum key {
 ```
 
 ```ts
-import { localized } from "local:policy/i18n@0.1.0";
+import { localized } from "enclavid-ext:policy/i18n@0.1.0";
 
 localized("consent-reason");
 ```
 
 A text is shown as it is written: it takes no values.
+
+A plugin's texts are in its own slot, named for its package, and the policy
+may show them too: import the slot's `i18n`, with the plugin's WIT for it in
+`wit/deps/` (well-known's is `deps/well-known-texts/`):
+
+```wit
+import enclavid-ext:well-known/i18n@0.1.0;
+```
+
+```ts
+import { localized as wellKnown } from "enclavid-ext:well-known/i18n@0.1.0";
+
+wellKnown("nationality-label");
+```
+
+They are the plugin's: the host serves them from the plugin's catalog, and a
+build of the plugin with other keys needs the policy built again with its WIT.
 
 The texts can also live in one file, every language under its tag —
 `{ "en": { "consent-reason": "…" }, "ru": { "consent-reason": "…" } }` —
@@ -73,16 +90,18 @@ text a key.
 ## Disclosure fields
 
 Every field the consumer may receive is named by a key the policy lists, a
-case of the `key` in `enclavid:host-ext/disclosure-fields`, in
-`wit/world.wit`. A well-known helper names its field by its own name
-(`fields.fullName` is `full-name`), which has to be one of them; a field of the
-policy's own is named with `disclosureField`:
+case of the `key` in `enclavid-ext:policy/disclosure-fields`, in
+`wit/world.wit`. `disclosureField` makes the field of a key, and a well-known
+helper labels it — by convention the helper of its name:
 
 ```ts
-import { disclosureField } from "enclavid:host-ext/disclosure-fields@0.1.0";
+import { disclosureField } from "enclavid-ext:policy/disclosure-fields@0.1.0";
 
-disclosureField("full-name");
+fields.fullName(disclosureField("full-name"), "Jane Q. Citizen");
 ```
+
+A field of the policy's own is a `display-field` it builds itself, with
+`disclosureField` and a text of its own as the label.
 
 The list is the most a field's key can say to the consumer, so list only the
 fields the policy discloses.
@@ -91,11 +110,11 @@ fields the policy discloses.
 
 Props are what the consumer sets for each session: a threshold, a mode, a
 value to compare the document against. The policy declares them as a record in
-`wit/world.wit`, in the interface `enclavid:host-ext/policy-props`, and reads
+`wit/world.wit`, in the interface `enclavid-ext:policy/props`, and reads
 them with `get()`:
 
 ```ts
-import * as props from "enclavid:host-ext/policy-props@0.1.0";
+import * as props from "enclavid-ext:policy/props@0.1.0";
 
 if (props.get().selfie === false) { … }
 ```
@@ -117,7 +136,8 @@ for a policy that takes none. A policy that takes none leaves the import out.
 
 ## Using a plugin
 
-Import its interfaces in `wit/world.wit`, put its WIT in `wit/deps/`, and run
+Import its interfaces in `wit/world.wit`, put its WIT in `wit/deps/` — its own
+package and, when it has texts, its slot, `enclavid-ext:<name>` — and run
 `npm run types`. Then import it in `src/policy.ts` by the interface name, for
 example `import * as ocr from "acme:ocr/read@0.1.0"`. The consumer pins an
 implementation of the plugin's package when it creates a session.

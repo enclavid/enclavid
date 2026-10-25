@@ -11,14 +11,13 @@ path = "src/lib.rs"
 
 [features]
 # Embedding a project's catalogs into a component: the CLI and other builders.
-embed = ["dep:anyhow", "dep:wac-graph", "dep:wasm-encoder", "dep:wit-parser"]
+embed = ["dep:anyhow", "dep:wasm-encoder", "dep:wit-parser"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
 anyhow = { version = "1", optional = true }
-wac-graph = { version = "0.10", optional = true }
 wasm-encoder = { version = "0.247", optional = true }
 wit-parser = { version = "0.247", optional = true }
 

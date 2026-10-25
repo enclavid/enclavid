@@ -1,9 +1,8 @@
-package enclavid:host-ext@0.1.0;
+package enclavid-ext:policy@0.1.0;
 
 /// The props this policy takes. The host serves `get`; the record is this
-/// policy's own. Kept out of `wit/` and vendored into `wit/deps` by `wkg`,
-/// which reads a package it does not find in a registry only from a path.
-interface policy-props {
+/// policy's own.
+interface props {
     /// All are harness knobs, absent on every real flow.
     record props {
         /// Return a state blob of this many bytes from genesis, to drive the

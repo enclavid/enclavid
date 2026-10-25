@@ -113,8 +113,8 @@ pub enum RequestView {
 /// `log2(total_declared)` bits per `DisplayField.key`, and "wide
 /// vocabulary with few shown" (`total_declared >> used_in_call`) is the
 /// visual signal of possible synonym-encoding (`country_a / country_b /
-/// …`). `total_declared` is the DISTINCT declared-key count across the
-/// whole composition (policy + every plugin), computed and sealed
+/// …`). `total_declared` is the DISTINCT declared-key count of the
+/// composition's one list, the policy's, computed and sealed
 /// engine-side; the full key list is intentionally NOT surfaced — the
 /// bare count is the load-bearing signal.
 #[derive(Serialize)]

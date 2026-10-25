@@ -10,36 +10,35 @@ package local:policy@0.1.0;
 world policy {
     import enclavid:well-known/capture@0.1.0;
     import enclavid:well-known/disclosure-fields@0.1.0;
-    import i18n;
-    import enclavid:host-ext/disclosure-fields@0.1.0;
-    import enclavid:host-ext/policy-props@0.1.0;
+    import enclavid-ext:policy/i18n@0.1.0;
+    import enclavid-ext:policy/disclosure-fields@0.1.0;
+    import enclavid-ext:policy/props@0.1.0;
     // The round's randomness, which `@enclavid/policy-quickjs` serves
     // `Math.random` and `crypto.getRandomValues` from.
     import wasi:random/random@0.2.12;
     export enclavid:policy/policy@0.1.0;
 }
 
-// The policy's texts: a case of `key` for each. The texts themselves are in
-// `i18n/`, one JSON file per language (`en.json` to start), and `enclavid
-// policy embed` checks them against these keys.
-interface i18n {
-    use enclavid:host/types@0.1.0.{localized-ref};
+// The policy's slot: what the host serves this policy, of types that are its
+// own, so they are written here rather than taken from `deps/`.
+package enclavid-ext:policy@0.1.0 {
+    // The policy's texts: a case of `key` for each. The texts themselves are
+    // in `i18n/`, one JSON file per language (`en.json` to start), and
+    // `enclavid policy embed` checks them against these keys.
+    interface i18n {
+        use enclavid:host/types@0.1.0.{localized-ref};
 
-    enum key {
-        consent-reason,
-        requester,
+        enum key {
+            consent-reason,
+            requester,
+        }
+
+        localized: func(key: key) -> localized-ref;
     }
 
-    localized: func(key: key) -> localized-ref;
-}
-
-// The host's interfaces whose types are this policy's own, so they are
-// written here rather than taken from `deps/`.
-package enclavid:host-ext@0.1.0 {
     // The fields the consent screen may name: every field the consumer may
-    // receive, by its key. A well-known helper names its field by its own
-    // name (`full-name`), which must be one of these; `disclosure-field`
-    // names one of the policy's own. `enclavid policy embed` writes the list
+    // receive, by its key. `disclosure-field` mints the field of a case, which
+    // a well-known helper then labels. `enclavid policy embed` writes the list
     // into the policy, and the applicant is shown how long it is.
     interface disclosure-fields {
         use enclavid:host/types@0.1.0.{disclosure-field-ref};
@@ -59,7 +58,7 @@ package enclavid:host-ext@0.1.0 {
     // object keyed by these field names when it creates a session, and a
     // session whose props do not fit the record fails. Leave the import out
     // for a policy that takes none.
-    interface policy-props {
+    interface props {
         record props {
             // Ask for a selfie after the passport, unless this is `false`.
             selfie: option<bool>,

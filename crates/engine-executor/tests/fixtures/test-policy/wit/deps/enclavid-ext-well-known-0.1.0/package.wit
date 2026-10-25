@@ -1,0 +1,59 @@
+package enclavid-ext:well-known@0.1.0;
+
+/// The plugin's texts, a case of `key` for each; `i18n/en.json` holds
+/// them. Applicant-facing: the host picks a text's language inside the
+/// TEE, the applicant's, and it never reaches the consumer. A policy may
+/// import them too, to label fields of its own with the plugin's texts.
+///
+/// Kept out of `wit/` and vendored into `wit/deps` by `wkg`, which reads
+/// a package it does not find in a registry only from a path.
+interface i18n {
+  use enclavid:host/types@0.1.0.{localized-ref};
+
+  enum key {
+    /// The labels of the disclosure fields.
+    passport-number-label,
+    id-card-number-label,
+    drivers-license-number-label,
+    document-issuing-country-label,
+    document-expiry-label,
+    document-issued-label,
+    given-name-label,
+    family-name-label,
+    full-name-label,
+    date-of-birth-label,
+    sex-label,
+    nationality-label,
+    residence-country-label,
+    address-label,
+    email-label,
+    phone-label,
+    tax-id-label,
+    /// The captures.
+    passport-title,
+    id-card-title,
+    drivers-license-title,
+    selfie-title,
+    passport-instructions,
+    passport-step,
+    passport-review-hint,
+    id-card-front-instructions,
+    id-card-front-step,
+    id-card-front-review-hint,
+    id-card-back-instructions,
+    id-card-back-step,
+    id-card-back-review-hint,
+    drivers-license-front-instructions,
+    drivers-license-front-step,
+    drivers-license-front-review-hint,
+    drivers-license-back-instructions,
+    drivers-license-back-step,
+    drivers-license-back-review-hint,
+    selfie-instructions,
+    selfie-step,
+    selfie-review-hint,
+  }
+
+  localized: func(key: key) -> localized-ref;
+}
+

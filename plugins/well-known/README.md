@@ -1,6 +1,6 @@
 # enclavid:well-known
 
-Canonical KYC field strings and pre-baked capture flows for Enclavid
+Canonical KYC field labels and pre-baked capture flows for Enclavid
 policies. Drop-in helpers so policy authors don't hand-roll text-refs
 for standard data shapes. Icons are not this plugin's: a capture step
 names one of the host's own (`enclavid:host-icons/icons`).
@@ -8,19 +8,23 @@ names one of the host's own (`enclavid:host-icons/icons`).
 ## What it provides
 
 - **`disclosure-fields`** — `DisplayField` constructors for 17 common
-  KYC fields. Each function returns a `display-field` whose `key` is the
-  field's canonical name — the function's own, `passport-number` — and
-  whose `label` is the plugin's text for it.
+  KYC fields. Each takes one of the policy's disclosure fields and a
+  value, and returns a `display-field` of that field whose `label` is
+  the plugin's text for it.
 - **`capture`** — `MediaSpec`/`CaptureStep` constructors for the four
   standard capture flows: passport, ID card, driver's license,
   selfie. Each returns a complete `media-spec` ready for
   `action::render(prompt::media)`; multi-side documents include
   front+back as separate steps.
+- **Its texts**, in its slot `enclavid-ext:well-known/i18n`: the
+  labels and the captures' texts. A policy may import them to label
+  fields of its own.
 
 ## Usage from a policy
 
 ```rust
 use enclavid::well_known::{capture, disclosure_fields};
+use enclavid_ext::policy::disclosure_fields::{Key as Field, disclosure_field};
 
 // One-line passport capture (single step, rear camera, ICAO TD3 aspect):
 let action = Action::Render(Prompt::Media(capture::passport()));
@@ -28,10 +32,10 @@ let action = Action::Render(Prompt::Media(capture::passport()));
 // One-line consent screen:
 let action = Action::Render(Prompt::ConsentDisclosure(Disclosure {
     fields: vec![
-        disclosure_fields::passport_number("P12345678"),
-        disclosure_fields::given_name("John"),
-        disclosure_fields::family_name("Smith"),
-        disclosure_fields::date_of_birth("1990-01-15"),
+        disclosure_fields::passport_number(disclosure_field(Field::PassportNumber), "P12345678"),
+        disclosure_fields::given_name(disclosure_field(Field::GivenName), "John"),
+        disclosure_fields::family_name(disclosure_field(Field::FamilyName), "Smith"),
+        disclosure_fields::date_of_birth(disclosure_field(Field::DateOfBirth), "1990-01-15"),
     ],
     reason,
     requester,
@@ -44,35 +48,21 @@ Every text the plugin shows — the fields' labels, the captures'
 titles, instructions and hints — is its own (`i18n/en.json`), so a
 policy declares none of them.
 
-A field's key reaches the consumer, so it is held to the policy's
-disclosure fields: list the field of every helper you call, by the
-helper's name, as a case of the `key` in your
-`enclavid:host-ext/disclosure-fields`. A helper whose field the policy
-didn't list traps at runtime. List only the fields you use:
+A field's key reaches the consumer, so it is the policy's: a case of
+the `key` in its `enclavid-ext:policy/disclosure-fields`, which it
+mints the field from and hands the helper. List the fields you
+disclose, by convention named as the helpers are:
 
 ```wit
-package enclavid:host-ext@0.1.0 {
+package enclavid-ext:policy@0.1.0 {
     interface disclosure-fields {
         use enclavid:host/types@0.1.0.{disclosure-field-ref};
 
         enum key {
             passport-number,
-            id-card-number,
-            drivers-license-number,
-            document-issuing-country,
-            document-expiry,
-            document-issued,
             given-name,
             family-name,
-            full-name,
             date-of-birth,
-            sex,
-            nationality,
-            residence-country,
-            address,
-            email,
-            phone,
-            tax-id,
         }
 
         disclosure-field: func(key: key) -> disclosure-field-ref;
@@ -80,13 +70,18 @@ package enclavid:host-ext@0.1.0 {
 }
 ```
 
+Its WIT is two packages: `enclavid:well-known` (`wit/`), the helpers,
+and `enclavid-ext:well-known` (`ext/`), its texts. A policy vendors
+both.
+
 ## OCI artifacts
 
 Plugin is published as **two separate OCI artifacts** following the
 two-artifact pattern:
 
-- **WIT package** — `enclavid:well-known@0.1.0`. Interface
-  contract only. Consumed by `wkg wit fetch` at policy build time.
+- **WIT packages** — `enclavid:well-known@0.1.0` and its slot,
+  `enclavid-ext:well-known@0.1.0`. Interface contracts only. Consumed
+  by `wkg wit fetch` at policy build time.
 - **Component** — `enclavid/plugins/well-known:0.1.0`. The wasm
   implementation. Referenced by policy lockfile, pulled by TEE at
   runtime.
@@ -113,17 +108,21 @@ wasm-tools component new \
     target/wasm32-unknown-unknown/release/well_known.wasm \
     -o target/well-known.component.wasm
 
-# 4. Publish WIT package (interface contract, for `wkg wit fetch`)
+# 4. Publish the WIT packages (interface contracts, for `wkg wit
+#    fetch`): the helpers, and the texts in the plugin's slot, which the
+#    helpers' world imports.
 wkg wit build --wit-dir wit -o target/well-known-wit.wasm
+wkg wit build --wit-dir ext -o target/well-known-ext-wit.wasm
 wkg publish target/well-known-wit.wasm
-# → enclavid:well-known@0.1.0 (WIT package)
+wkg publish target/well-known-ext-wit.wasm
+# → enclavid:well-known@0.1.0, enclavid-ext:well-known@0.1.0 (WIT packages)
 
 # 5. Embed the plugin's texts (`i18n/`), checked against the keys of
-#    its `i18n` interface, and rename its texts' import to the slot its
-#    catalog names. No disclosure fields — the policy is the single
-#    bandwidth gate for those. `embed` also asserts this is a plugin (it
-#    must NOT export `enclavid:policy/policy`) and rejects a core module
-#    — so step 3 (componentize) is required before it.
+#    its slot's `i18n` — `enclavid-ext:well-known`, named for its
+#    package. No disclosure fields — the policy is the single bandwidth
+#    gate for those. `embed` also asserts this is a plugin (it must NOT
+#    export `enclavid:policy/policy`) and rejects a core module — so
+#    step 3 (componentize) is required before it.
 enclavid plugin embed target/well-known.component.wasm \
     -o target/well-known.embedded.wasm
 
@@ -140,9 +139,9 @@ enclavid oci push target/well-known.embedded.wasm \
 
 The component (steps 3–5) ships as a single `application/wasm` OCI
 layer, integrity-pinned by digest; the TEE re-verifies the layer digest
-on pull. Step 4's `wkg publish` of the WIT *package* is separate — it
-publishes the interface contract so policies / other plugins can `wkg
-wit fetch` it; it does not ship the implementation.
+on pull. Step 4's `wkg publish` of the WIT *packages* is separate — it
+publishes the interface contracts so policies / other plugins can `wkg
+wit fetch` them; it does not ship the implementation.
 
 ## Capture settings (baked in by each helper)
 

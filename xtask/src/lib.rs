@@ -57,11 +57,7 @@ pub fn componentize(module: &[u8]) -> Result<Vec<u8>> {
 
 /// Which artifact a project is: a policy embeds its disclosure fields
 /// beside its texts, a plugin its texts alone.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    Policy,
-    Plugin,
-}
+pub use enclavid_embedded::embed::Role;
 
 /// Embed the catalogs of the project in `dir` into `wasm` — its texts
 /// under `i18n/`, checked against the keys its `wit/` declares, and for a
@@ -73,7 +69,7 @@ pub fn embed_sections(wasm: Vec<u8>, dir: &str, role: Role) -> Result<Vec<u8>> {
     let checked = embed::check(&Project {
         wit: dir.join("wit"),
         i18n: dir.join(enclavid_embedded::DIR_I18N),
-        disclosure_fields: role == Role::Policy,
+        role,
     })?;
     if !checked.report.ok() {
         let errors: Vec<String> = checked

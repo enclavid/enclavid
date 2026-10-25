@@ -36,9 +36,9 @@ const PRIME_HEADROOM: u64 = 64 * 1024;
 const META_BYTES_PER_SECTION_BYTE: u64 = 1;
 
 /// What the metadata carries that no section accounts for: each catalog's hash,
-/// its field names and its texts' length, and the import manifest. About 455
-/// bytes for a component with two slots, so this is some two thousand
-/// components.
+/// its field names and its texts' length, and the import manifest. A few hundred
+/// bytes for a component with two slots named at their longest, so this is some
+/// two thousand components.
 const META_COMPONENT_ROOM: u64 = 1024 * 1024;
 
 /// The longest encoded [`BundleMeta`] the execute hop accepts, in bytes: 3 MiB.
@@ -210,7 +210,7 @@ pub(crate) fn sample_bundle() -> CompiledBundle {
     CompiledBundle {
         cwasm: vec![1, 2, 3, 4],
         embedded_imports: vec![EmbeddedImport {
-            instance_name: "embedded-slot:abcd/i18n".to_string(),
+            instance_name: "enclavid-ext:well-known/i18n@0.1.0".to_string(),
             catalog_hash: [7u8; 32],
             iface: EmbeddedIface::I18n,
             version: "0.1.0".to_string(),
@@ -286,11 +286,11 @@ mod tests {
     }
 
     /// The import manifest a compiled component carries: the one slot its
-    /// texts come through, named the way embedding names it.
+    /// texts come through, its name as long as a slot's may be.
     fn slot_imports(hash: [u8; 32]) -> Vec<EmbeddedImport> {
-        let slug: String = hash[..16].iter().map(|b| format!("{b:02x}")).collect();
+        let slot: String = format!("s{:063}", u64::from_le_bytes(hash[..8].try_into().unwrap()));
         vec![EmbeddedImport {
-            instance_name: format!("embedded-slot:h{slug}-0-1-0/i18n"),
+            instance_name: format!("enclavid-ext:{slot}/i18n@0.1.0"),
             catalog_hash: hash,
             iface: EmbeddedIface::I18n,
             version: "0.1.0".to_string(),

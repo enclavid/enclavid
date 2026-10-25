@@ -9,4 +9,6 @@
 "enclavid:preprocess" = { path = "../../../../../plugins/preprocess/wit" }
 "enclavid:face-detect" = { path = "../../../../../plugins/face-detect/wit" }
 "enclavid:vision" = { path = "../../../../../plugins/vision/wit" }
-"enclavid:host-ext" = { path = "host-ext" }
+"enclavid-ext:policy" = { path = "ext" }
+"enclavid-ext:well-known" = { path = "../../../../../plugins/well-known/ext" }
+"enclavid-ext:extra" = { path = "../test-extra/ext" }

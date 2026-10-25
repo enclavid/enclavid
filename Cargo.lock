@@ -1622,7 +1622,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "wac-graph",
  "wasm-encoder 0.247.0",
  "wit-component 0.247.0",
  "wit-parser 0.247.0",

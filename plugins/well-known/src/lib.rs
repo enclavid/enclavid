@@ -1,14 +1,13 @@
-//! `enclavid:well-known` — canonical KYC field strings and pre-baked
+//! `enclavid:well-known` — canonical KYC field labels and pre-baked
 //! capture flows. Drop-in helpers so policy authors don't hand-roll
 //! text-refs for standard data shapes.
 //!
-//! Every ref this plugin hands back (disclosure-field key, localized
-//! label, icon) is minted by the host, which a component cannot do for
-//! itself. A disclosure-field key resolves against the composition's
-//! lists — a key none declares traps at use — and a text is a case of
-//! this plugin's own `i18n` key, which its catalog has a text for. An
-//! icon is one of the host's own, one function each in
-//! `enclavid:host-icons/icons`.
+//! Every ref this plugin hands back (localized label, icon) is minted by
+//! the host, which a component cannot do for itself: a text is a case of
+//! the `key` of this plugin's slot, `enclavid-ext:well-known/i18n`, which
+//! its catalog has a text for, and an icon is one of the host's own, one
+//! function each in `enclavid:host-icons/icons`. A field's key is the
+//! policy's, minted from its own list, which the helpers take.
 
 wit_bindgen::generate!({
     path: "wit",
@@ -16,12 +15,11 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::host::embedded_disclosure_fields::disclosure_field as resolve_disclosure_field;
-use enclavid::host::types::IconRef;
+use enclavid::host::types::{DisclosureFieldRef, IconRef};
 use enclavid::host_icons::icons;
 use enclavid::shared_types::capture::{CameraFacing, CaptureGuide, CaptureStep, MediaSpec};
 use enclavid::shared_types::disclosure::DisplayField;
-use enclavid::well_known::i18n::{Key, localized};
+use enclavid_ext::well_known::i18n::{Key, localized};
 use exports::enclavid::well_known::capture::Guest as CaptureGuest;
 use exports::enclavid::well_known::disclosure_fields::Guest as DisclosureFieldsGuest;
 
@@ -29,12 +27,10 @@ struct WellKnown;
 
 // ─── disclosure-fields ────────────────────────────────────────────
 
-/// Build a `DisplayField` for a well-known field: `key` is its canonical
-/// name, which the host holds to the POLICY's disclosure fields (the
-/// bandwidth gate), and `label` the text it is shown by.
-fn field(key: &str, label: Key, value: String) -> DisplayField {
+/// A `DisplayField` of the policy's `field`, shown by the text `label`.
+fn labelled(field: DisclosureFieldRef, label: Key, value: String) -> DisplayField {
     DisplayField {
-        key: resolve_disclosure_field(key),
+        key: field,
         label: localized(label),
         value,
     }
@@ -42,70 +38,62 @@ fn field(key: &str, label: Key, value: String) -> DisplayField {
 
 impl DisclosureFieldsGuest for WellKnown {
     // Document identifiers
-    fn passport_number(value: String) -> DisplayField {
-        field("passport-number", Key::PassportNumberLabel, value)
+    fn passport_number(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::PassportNumberLabel, value)
     }
-    fn id_card_number(value: String) -> DisplayField {
-        field("id-card-number", Key::IdCardNumberLabel, value)
+    fn id_card_number(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::IdCardNumberLabel, value)
     }
-    fn drivers_license_number(value: String) -> DisplayField {
-        field(
-            "drivers-license-number",
-            Key::DriversLicenseNumberLabel,
-            value,
-        )
+    fn drivers_license_number(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::DriversLicenseNumberLabel, value)
     }
-    fn document_issuing_country(value: String) -> DisplayField {
-        field(
-            "document-issuing-country",
-            Key::DocumentIssuingCountryLabel,
-            value,
-        )
+    fn document_issuing_country(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::DocumentIssuingCountryLabel, value)
     }
-    fn document_expiry(value: String) -> DisplayField {
-        field("document-expiry", Key::DocumentExpiryLabel, value)
+    fn document_expiry(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::DocumentExpiryLabel, value)
     }
-    fn document_issued(value: String) -> DisplayField {
-        field("document-issued", Key::DocumentIssuedLabel, value)
+    fn document_issued(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::DocumentIssuedLabel, value)
     }
 
     // Identity
-    fn given_name(value: String) -> DisplayField {
-        field("given-name", Key::GivenNameLabel, value)
+    fn given_name(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::GivenNameLabel, value)
     }
-    fn family_name(value: String) -> DisplayField {
-        field("family-name", Key::FamilyNameLabel, value)
+    fn family_name(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::FamilyNameLabel, value)
     }
-    fn full_name(value: String) -> DisplayField {
-        field("full-name", Key::FullNameLabel, value)
+    fn full_name(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::FullNameLabel, value)
     }
-    fn date_of_birth(value: String) -> DisplayField {
-        field("date-of-birth", Key::DateOfBirthLabel, value)
+    fn date_of_birth(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::DateOfBirthLabel, value)
     }
-    fn sex(value: String) -> DisplayField {
-        field("sex", Key::SexLabel, value)
+    fn sex(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::SexLabel, value)
     }
-    fn nationality(value: String) -> DisplayField {
-        field("nationality", Key::NationalityLabel, value)
+    fn nationality(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::NationalityLabel, value)
     }
 
     // Contact / location
-    fn residence_country(value: String) -> DisplayField {
-        field("residence-country", Key::ResidenceCountryLabel, value)
+    fn residence_country(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::ResidenceCountryLabel, value)
     }
-    fn address(value: String) -> DisplayField {
-        field("address", Key::AddressLabel, value)
+    fn address(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::AddressLabel, value)
     }
-    fn email(value: String) -> DisplayField {
-        field("email", Key::EmailLabel, value)
+    fn email(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::EmailLabel, value)
     }
-    fn phone(value: String) -> DisplayField {
-        field("phone", Key::PhoneLabel, value)
+    fn phone(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::PhoneLabel, value)
     }
 
     // Other
-    fn tax_id(value: String) -> DisplayField {
-        field("tax-id", Key::TaxIdLabel, value)
+    fn tax_id(field: DisclosureFieldRef, value: String) -> DisplayField {
+        labelled(field, Key::TaxIdLabel, value)
     }
 }
 

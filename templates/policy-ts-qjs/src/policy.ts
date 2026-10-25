@@ -11,33 +11,34 @@ import { definePolicy, withStart } from "@enclavid/policy";
 import type { Action, Event } from "enclavid:policy/types@0.1.0";
 import * as capture from "enclavid:well-known/capture@0.1.0";
 import * as fields from "enclavid:well-known/disclosure-fields@0.1.0";
-import { localized } from "local:policy/i18n@0.1.0";
-import * as props from "enclavid:host-ext/policy-props@0.1.0";
+import { disclosureField as df } from "enclavid-ext:policy/disclosure-fields@0.1.0";
+import { localized as t } from "enclavid-ext:policy/i18n@0.1.0";
+import * as props from "enclavid-ext:policy/props@0.1.0";
 
 // The state is this policy's own: kept between rounds, sealed, never seen by
 // anyone but the policy. Plain data only — the passport's frame cannot be kept,
 // but the hash that names it can.
-type State =
-  | { step: "passport" }
-  | { step: "selfie"; passport: string }
-  | { step: "consent" };
+type State = { 
+  step: "passport" | "selfie" | "consent",
+  passport?: string 
+};
 
 // The consent screen: the fields the consumer receives if the applicant
-// accepts. Each field's key is one of the policy's disclosure fields
-// (`wit/world.wit`); the reason and the requester are the policy's own texts
-// (`i18n/en.json`).
+// accepts. Each field is one of the policy's disclosure fields
+// (`wit/world.wit`), which a well-known helper labels; the reason and the
+// requester are the policy's own texts (`i18n/en.json`).
 const consent: () => Action = () => ({
   tag: "render",
   val: {
     tag: "consent-disclosure",
     val: {
       fields: [
-        fields.fullName("Jane Q. Citizen"),
-        fields.dateOfBirth("1990-04-12"),
-        fields.nationality("Utopia"),
+        fields.fullName(df("full-name"), "Jane Q. Citizen"),
+        fields.dateOfBirth(df("date-of-birth"), "1990-04-12"),
+        fields.nationality(df("nationality"), "Utopia"),
       ],
-      reason: localized("consent-reason"),
-      requester: localized("requester"),
+      reason: t("consent-reason"),
+      requester: t("requester"),
     },
   },
 });

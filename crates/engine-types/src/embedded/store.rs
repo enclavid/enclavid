@@ -1,7 +1,6 @@
-//! Generic backing for the two public embedded stores. Each
-//! `enclavid:host/embedded-*` interface gets its own `RefStore<K>`
-//! instantiation, exposed via type aliases in
-//! [`registry`](super::registry).
+//! Generic backing for the two public embedded stores, one `RefStore<K>`
+//! instantiation per kind of ref a catalog backs, exposed via type aliases
+//! in [`registry`](super::registry).
 //!
 //! ## Refs are resources, not tokens
 //!
@@ -17,9 +16,9 @@
 //!
 //! Catalogs are identified by their **content-hash**
 //! (`enclavid_embedded::catalog_hash`), which survives wac fusion.
-//! `resolve_strict` answers against ONE bound catalog (a component's
-//! texts, through the slot its catalog names); `resolve_first_match` walks
-//! catalogs in composition order (disclosure fields).
+//! `resolve_strict` answers against ONE bound catalog (a slot's texts,
+//! from the catalog that names the slot); `resolve_first_match` walks
+//! catalogs in composition order (the disclosure fields, one list).
 
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -30,15 +29,15 @@ use super::registry::Translation;
 /// ([`DisclosureFields`], [`Localized`]) pick the per-kind `NAME` (for
 /// trap messages) and `Stored` type.
 pub trait RefKind {
-    /// Human-readable name for trap messages — matches the
-    /// `enclavid:host/embedded-*` interface a misuse came from.
+    /// Human-readable name for trap messages — the function a misuse
+    /// came through.
     const NAME: &'static str;
     /// What the store keeps per declared key. The key itself for
     /// [`DisclosureFields`]; the translation list for [`Localized`].
     type Stored;
 }
 
-/// Marker for `enclavid:host/embedded-disclosure-fields` refs.
+/// Marker for the refs the policy's `disclosure-field` mints.
 pub enum DisclosureFields {}
 
 impl RefKind for DisclosureFields {

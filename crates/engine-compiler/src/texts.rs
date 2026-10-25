@@ -1,8 +1,8 @@
-//! The slots a composition's texts come through — the `embedded-slot:`
-//! imports each component's embedding named after its catalog — held to what
-//! the host serves: [`LOCALIZED`], taking the component's `key` enum and
-//! returning an owned `localized-ref`. The cases of `key` are the catalog's
-//! texts — the check embedding ran, run again against the slot as fused.
+//! The slots a composition's texts come through — its `enclavid-ext:<slot>/i18n`
+//! imports — held to what the host serves: [`LOCALIZED`], taking the slot's
+//! `key` enum and returning an owned `localized-ref`. The cases of `key` are
+//! the texts of the slot's catalog — the check embedding ran, run again against
+//! the slot as fused.
 
 use enclavid_embedded::Catalog;
 use enclavid_embedded::keys;
@@ -21,7 +21,7 @@ const LOCALIZED_REF: &str = "localized-ref";
 /// is refused as [`CompileFault::Mismatched`]: no round of it could be linked.
 /// A catalog its keys do not fit — a text no key names, a key with no text —
 /// is refused as the [`CompileFault::CatalogInvalid`] of the artifact that
-/// imports the slot.
+/// holds the catalog.
 pub(crate) fn declared(
     types: &Types,
     package: &Package,

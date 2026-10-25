@@ -1,9 +1,9 @@
 //! The keys a component declares for its texts — the cases of the `key` enum
-//! of its `i18n` interface — and the check of a catalog against them.
+//! of its slot's `i18n` interface — and the check of a catalog against them.
 //!
 //! The same check runs where the catalog is embedded, against the keys the
-//! component's WIT declares, and in the TEE, against the keys of the slot the
-//! component imports.
+//! component's WIT declares, and in the TEE, against the keys the slot is
+//! imported with.
 
 use crate::{Catalog, DEFAULT_LANGUAGE};
 

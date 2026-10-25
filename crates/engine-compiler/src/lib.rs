@@ -33,8 +33,6 @@ pub use seam::{
     ChildCompiled, RemoteCompileChild, RemoteCompileChildClient, RemoteCompileChildServerShared,
 };
 
-use std::collections::HashSet;
-
 use wac_graph::types::Package;
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
@@ -48,7 +46,7 @@ pub use decls::{
     CatalogRefused, EmbeddedCatalog, load_embedded, load_embedded_nested, top_level_imports,
 };
 use decls::{embedded_section_bytes, unreadable};
-pub use enclavid_embedded::{catalog_hash, embedded_import_name, slug};
+pub use enclavid_embedded::catalog_hash;
 
 /// A fused policy component, the slots its host `Linker` must register,
 /// and the catalogs its registry is built from. Returned by
@@ -179,19 +177,18 @@ struct Prepared {
 }
 
 /// The composition a policy and its pinned plugins make: every artifact's
-/// catalogs, at every depth, since an embedded component's are nested and a
-/// pre-fused artifact holds several; the slots each artifact's texts come
-/// through, each named after one of ITS OWN catalogs; the components fused
+/// catalogs, at every depth, since a pre-fused artifact holds several; the
+/// catalog each slot is served from (`compose::slots`); the components fused
 /// (see `compose::fuse`) — with no plugins, the policy's own bytes — and
 /// checked for what nothing would serve (`compose::served`).
 ///
 /// A composition the pinned bytes decide against is refused: the error then
 /// carries the [`CompileFault`] saying why, which the child answers as a
 /// refusal. Before any section is parsed, one whose embedded sections are past
-/// `MAX_EMBEDDED_SECTION_BYTES`; then one whose catalogs break their format,
-/// one with a slot no catalog of its artifact names, one that does not fuse,
-/// and one that, fused, still imports what nothing serves or declares props,
-/// icons, slots or disclosure fields in a shape the host cannot serve.
+/// `MAX_EMBEDDED_SECTION_BYTES`; then one whose catalogs break their format, or
+/// claim a slot or disclosure fields they may not, one that does not fuse, and
+/// one that, fused, still imports what nothing serves or declares props, icons,
+/// slots or disclosure fields in a shape the host cannot serve.
 fn prepare(policy_wasm: Vec<u8>, plugins: Vec<PluginInstance>) -> wasmtime::Result<Prepared> {
     let components = || {
         std::iter::once((Artifact::Policy, &policy_wasm)).chain(
@@ -214,9 +211,9 @@ fn prepare(policy_wasm: Vec<u8>, plugins: Vec<PluginInstance>) -> wasmtime::Resu
     let mut artifacts = Vec::with_capacity(1 + plugins.len());
     for (artifact, wasm) in components() {
         let catalogs = load_embedded_nested(wasm).map_err(|e| unreadable(artifact.clone(), e))?;
-        let slots = compose::slots(wasm, &artifact, &catalogs)?;
-        artifacts.push((artifact, catalogs, slots));
+        artifacts.push((artifact, catalogs));
     }
+    let slots = compose::slots(&artifacts)?;
 
     let plugged = !plugins.is_empty();
     let bytes = if plugged {
@@ -225,36 +222,21 @@ fn prepare(policy_wasm: Vec<u8>, plugins: Vec<PluginInstance>) -> wasmtime::Resu
         policy_wasm
     };
     let declared = compose::Declared {
-        slots: artifacts
-            .iter()
-            .flat_map(|(artifact, catalogs, slots)| {
-                slots
-                    .iter()
-                    .map(|(slot, index)| (artifact.clone(), slot, &catalogs[*index].texts))
-            })
-            .collect(),
+        slots,
         disclosure_fields: artifacts
             .iter()
-            .flat_map(|(_, catalogs, _)| catalogs)
+            .flat_map(|(_, catalogs)| catalogs)
             .flat_map(|catalog| catalog.decls.disclosure_fields.iter().map(String::as_str))
             .collect(),
     };
-    let fused = compose::served(bytes, plugged, &declared)?;
+    let (fused, embedded_imports) = compose::served(bytes, plugged, &declared)?;
     drop(declared);
 
-    // One host instance per slot: two artifacts whose catalogs are the same
-    // bytes take their texts through the same one.
-    let mut seen = HashSet::new();
-    let mut embedded_imports = Vec::new();
-    let mut catalogs = Vec::new();
-    for (_, found, slots) in artifacts {
-        for (slot, _) in slots {
-            if seen.insert(slot.instance_name.clone()) {
-                embedded_imports.push(slot);
-            }
-        }
-        catalogs.extend(found.into_iter().map(|c| (c.hash, c.decls)));
-    }
+    let catalogs = artifacts
+        .into_iter()
+        .flat_map(|(_, found)| found)
+        .map(|c| (c.hash, c.decls))
+        .collect();
     Ok(Prepared {
         fused,
         embedded_imports,
