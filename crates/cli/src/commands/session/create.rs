@@ -191,7 +191,7 @@ pub async fn run(
         DisclosureSource::Caller => None,
     };
     let applicant_link = format!(
-        "{}/#/session/{}",
+        "{}/{}",
         under_group(APPLICANT_URL_VAR, &applicant_url(), group.as_deref())?,
         created.session_id,
     );

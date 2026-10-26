@@ -83,7 +83,7 @@ ENCLAVID_API_URL=https://<api name> ENCLAVID_APPLICANT_URL=https://<applicant na
 # → also prints group: <label>.<build>
 ```
 
-The CLI sends the build as `x-enclavid-measurement`, reads the group back from `x-enclavid-group`, and caches it beside the session token. From then on `session get` and `session disclosures` put the group in front of the path (`<api>/-<label>.<build>/api/v1/sessions/<id>/...`), and the printed applicant link goes under it too (`<applicant>/-<label>.<build>/#/session/<id>`), because the gateway routes a request by that marker alone.
+The CLI sends the build as `x-enclavid-measurement`, reads the group back from `x-enclavid-group`, and caches it beside the session token. From then on `session get` and `session disclosures` put the group in front of the path (`<api>/-<label>.<build>/api/v1/sessions/<id>/...`), and the printed applicant link goes under it too (`<applicant>/-<label>.<build>/<id>`), because the gateway routes a request by that marker alone.
 
 The gateway reads the marker only at the very start of the path, so a base that carries a path of its own would hide it: with a build named, the CLI refuses such a base before sending anything, and later commands refuse it too. Do not write the marker into either variable by hand — the CLI adds it, so it would appear twice.
 
@@ -163,7 +163,7 @@ The CLI fetches its endpoints (issuer, OAuth client id, scopes) from a discovery
 | `ENCLAVID_API_TOKEN` | Raw Bearer for API calls (sessions). Bypasses Logto entirely — for lightweight dev stacks or pre-minted tokens |
 | `ENCLAVID_API_URL` | Enclavid API base URL (sessions). Through a gateway, its api name as a bare origin, see [Sessions through a gateway](#sessions-through-a-gateway). Default: `http://localhost:8001` |
 | `ENCLAVID_API_MEASUREMENT` | The api build `session create` requires, as 96 lowercase hex characters; `--measurement` wins over it. Sent to a gateway in front of api, see [Sessions through a gateway](#sessions-through-a-gateway). Unset: no build is named, as against api directly |
-| `ENCLAVID_APPLICANT_URL` | Base of the applicant link printed after `session create` (`<base>/#/session/<id>`, or `<base>/-<group>/#/session/<id>` when a gateway placed the session on a group). Through a gateway, its applicant name as a bare origin; the CLI adds the marker itself. Default: `http://localhost:5173` |
+| `ENCLAVID_APPLICANT_URL` | Base of the applicant link printed after `session create` (`<base>/<id>`, or `<base>/-<group>/<id>` when a gateway placed the session on a group). Through a gateway, its applicant name as a bare origin; the CLI adds the marker itself. Default: `http://localhost:5173` |
 | `ENCLAVID_WORKSPACE_ID` | Active workspace override (CI: avoids the interactive picker in `cloud login`) |
 | `ENCLAVID_CLIENT_ID` | M2M client_id (Logto client_credentials grant for non-interactive auth) |
 | `ENCLAVID_CLIENT_SECRET` | M2M client_secret |

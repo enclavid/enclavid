@@ -45,12 +45,12 @@ pub fn api_url() -> String {
 
 /// `$ENCLAVID_APPLICANT_URL` resolver — base origin of the applicant
 /// SPA. Used only for printing the "open this in a browser" hint
-/// after `session create`, as `<base>/#/session/<id>`: the page is
-/// served at the root and routes on the URL fragment, which a browser
-/// never sends, so loading the page names no session. When the
-/// session was placed on a group, the link goes under that group's
-/// marker — see [`under_group`]. Default targets `pnpm dev` on :5173;
-/// set to `http://localhost:8002` when api serves built static instead.
+/// after `session create`, as `<base>/<id>`: the session's id is the
+/// path's one segment, never in the fragment, which a browser carries
+/// across a redirect to another site. When the session was placed on
+/// a group, the link goes under that group's marker — see
+/// [`under_group`]. Default targets `pnpm dev` on :5173; set to
+/// `http://localhost:8002` when api serves built static instead.
 pub fn applicant_url() -> String {
     std::env::var(APPLICANT_URL_VAR).unwrap_or_else(|_| "http://localhost:5173".to_string())
 }
