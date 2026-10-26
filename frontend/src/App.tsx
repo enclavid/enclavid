@@ -271,6 +271,7 @@ function Session({ sessionId }: { sessionId: string }) {
       </Route>
       <Route path="/verify">
         <Verify
+          sessionId={sessionId}
           progress={progress}
           error={error}
           onSubmit={submitAndRender}

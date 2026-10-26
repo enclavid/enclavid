@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ConsentScreen } from "@/components/ConsentScreen";
+import { ContinueOnPhone } from "@/components/ContinueOnPhone";
 import { MediaCapture } from "@/components/MediaCapture";
 import { MediaInstructions } from "@/components/MediaInstructions";
 import { Spinner } from "@/components/icons";
@@ -7,6 +8,9 @@ import { Completed } from "@/screens/Completed";
 import type { RequestView, SessionProgress } from "@/types";
 
 type Props = {
+  /// The session on screen — what a capture step offers to continue on a
+  /// phone.
+  sessionId: string;
   progress: SessionProgress | null;
   error: string | null;
   /// Submit the applicant's input for the current Suspended request
@@ -17,7 +21,7 @@ type Props = {
   onSubmit: (slotId: string, form: FormData) => Promise<void>;
 };
 
-export function Verify({ progress, error, onSubmit }: Props) {
+export function Verify({ sessionId, progress, error, onSubmit }: Props) {
   if (!progress) {
     // /connect either hasn't returned yet OR returned an error. With
     // progress still null we have no request to render — show the
@@ -36,6 +40,7 @@ export function Verify({ progress, error, onSubmit }: Props) {
   }
   return (
     <RequestRenderer
+      sessionId={sessionId}
       request={progress.request}
       error={error}
       onSubmit={onSubmit}
@@ -80,10 +85,12 @@ function ConnectError({ message }: { message: string }) {
 }
 
 function RequestRenderer({
+  sessionId,
   request,
   error,
   onSubmit,
 }: {
+  sessionId: string;
   request: RequestView;
   error: string | null;
   onSubmit: (slotId: string, form: FormData) => Promise<void>;
@@ -150,6 +157,7 @@ function RequestRenderer({
           stepNumber={(nextIndex ?? 0) + 1}
           totalSteps={total}
           onStart={() => setStartedFor(request.next_slot_id)}
+          secondaryAction={<ContinueOnPhone sessionId={sessionId} />}
         />
       );
     }

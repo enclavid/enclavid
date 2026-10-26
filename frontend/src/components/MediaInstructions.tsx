@@ -27,6 +27,7 @@
 // the frontend-bundled SVG library so no policy-controlled imagery
 // ever reaches the DOM.
 
+import type { ReactNode } from "react";
 import { ArtifactIcon } from "@/components/ArtifactIcon";
 import { Button } from "@/components/ui/button";
 
@@ -45,6 +46,9 @@ type Props = {
   /// Total step count; badge is hidden when 1.
   totalSteps: number;
   onStart: () => void;
+  /// Another way to take this step, under the main one — continuing on a
+  /// phone, for an applicant on a computer.
+  secondaryAction?: ReactNode;
 };
 
 export function MediaInstructions({
@@ -54,6 +58,7 @@ export function MediaInstructions({
   stepNumber,
   totalSteps,
   onStart,
+  secondaryAction,
 }: Props) {
   const hasIcon = icon != null;
   return (
@@ -94,6 +99,7 @@ export function MediaInstructions({
         <p className="mt-3 text-center text-xs text-muted-foreground">
           Your camera will turn on after you tap Start.
         </p>
+        {secondaryAction && <div className="mt-4">{secondaryAction}</div>}
       </div>
     </main>
   );
