@@ -16,8 +16,8 @@
 //! whatever key is presented; `/reset` deletes the state, making the
 //! session claimable again with a new key.
 //!
-//! `/status` and `/state` (DELETE) are intentionally unauthenticated and
-//! bypass this layer at the router level.
+//! `/status`, `/attestation` and `/state` (DELETE) are intentionally
+//! unauthenticated and bypass this layer at the router level.
 
 use std::sync::Arc;
 

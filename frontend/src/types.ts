@@ -77,7 +77,10 @@ export type RequestView =
       captures: CaptureStep[];
       /// Step indices already captured (subset of 0..captures.length).
       filled: number[];
-      /// Slot id to POST the next step to (`/input/<slot_id>`).
+      /// Slot id to POST the next step to (`/input/<slot_id>`):
+      /// `<version>.media-<step>`, the version of the session as this step
+      /// was rendered, so an answer that arrives after the session moved on
+      /// is refused rather than taken for the next step's.
       next_slot_id: string;
       /// The most bytes one step's upload may be, multipart framing
       /// included; past it the server answers 413.
@@ -101,6 +104,8 @@ export type RequestView =
       /// (e.g. a stale tab), the accept is refused instead of sealing
       /// something the user never saw (show == seal).
       disclosure_digest: string;
+      /// Slot id to POST the answer to: `<version>.consent`.
+      slot_id: string;
     }
   | { kind: "verification_set"; alternatives: MediaSpec[][] };
 

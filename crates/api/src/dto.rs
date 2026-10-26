@@ -258,11 +258,11 @@ pub fn json_hiding_decision<T: Serialize>(value: &T, decision: Option<DecisionVi
 }
 
 /// The pinned policy of a session, echoed to the consumer: the full OCI
-/// reference plus its `sha256:<hex>` digest substring (the same value the
-/// attestation quote binds as the `policy_digest` of `ReportData::Session`), and every plugin
-/// fused alongside it. Shared by the create response (`CreateSessionResponse`)
-/// and the read view (`SessionView`). All refs are digest-pinned — the TEE
-/// only ever runs digest-pinned artifacts.
+/// reference plus its `sha256:<hex>` digest substring, and every plugin fused
+/// alongside it — none of it bound by the session's quote, which binds the id
+/// alone; the channel is what vouches for it. Shared by the create response
+/// (`CreateSessionResponse`) and the read view (`SessionView`). All refs are
+/// digest-pinned — the TEE only ever runs digest-pinned artifacts.
 #[derive(Serialize)]
 pub struct ResolvedPolicyView {
     /// Full pinned OCI reference from session metadata / request.

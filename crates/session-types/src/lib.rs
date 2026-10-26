@@ -147,6 +147,27 @@ pub struct SessionMetadata {
     /// What the session is held to, as its consumer's limits gave them at the
     /// creation, each already held to the fleet's own ceiling.
     pub terms: Terms,
+    /// The quote minted at the creation — what `POST /sessions` answered the
+    /// consumer with — kept to be served to the session's applicant page as
+    /// those same bytes: a signature minted per request would let a caller
+    /// choose how often the Secure Processor signs. Set once, with the creation.
+    ///
+    /// Its size is the part's, the same on every session of one machine, so it
+    /// tells the host nothing it does not know.
+    pub quote: Option<SessionQuote>,
+}
+
+/// A session's quote as it is kept: which backend minted it, and the signed
+/// payload. What a sender may claim beside a quote — the measurement, the part —
+/// is not kept: the signed payload is what says it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionQuote {
+    pub format: String,
+    /// One CBOR byte string, not an array of integers — see
+    /// [`SessionState::state`].
+    #[serde(with = "serde_bytes")]
+    pub blob: Vec<u8>,
 }
 
 /// A session's terms: each `None` where its consumer's limits gave none, and the
@@ -881,6 +902,35 @@ mod hashes_tests {
         })
         .unwrap();
         assert!(decode::<SessionMetadata>(&short).is_err());
+    }
+}
+
+#[cfg(test)]
+mod quote_tests {
+    use super::*;
+
+    fn with_quote(blob: Vec<u8>) -> SessionMetadata {
+        SessionMetadata {
+            quote: Some(SessionQuote {
+                format: "sev-snp".into(),
+                blob,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The kept quote weighs its length and reads back as it was: one CBOR byte
+    /// string, not an array of integers that would cost up to twice the bytes,
+    /// and more for the bytes over 0x17.
+    #[test]
+    fn a_kept_quote_weighs_its_length_and_round_trips() {
+        let empty = encode(&with_quote(Vec::new())).unwrap();
+        let low = encode(&with_quote(vec![0x00; 4096])).unwrap();
+        let high = encode(&with_quote(vec![0xff; 4096])).unwrap();
+        assert_eq!(low.len(), high.len());
+        assert!(high.len() - empty.len() < 4096 + 8);
+        let back: SessionMetadata = decode(&high).unwrap();
+        assert_eq!(back, with_quote(vec![0xff; 4096]));
     }
 }
 

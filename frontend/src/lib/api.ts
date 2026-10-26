@@ -74,7 +74,32 @@ export async function submitInput(
       body,
     },
   );
+  // A 409 that carries a step is the session having moved on past the one
+  // this answered — a second tap, a retry after a lost reply, another tab.
+  // The answer was not taken; the step it carries is where the session is.
+  if (res.status === 409) {
+    const moved = (await res.json().catch(() => null)) as SessionProgress | null;
+    if (moved?.status === "awaiting_input" || moved?.status === "completed") return moved;
+    throw new ApiError(res.status, `HTTP ${res.status}`);
+  }
   return parseOrThrow(res);
+}
+
+// The quote the session was created with, as api keeps it for this page.
+export async function getAttestation(
+  sessionId: string,
+): Promise<{ format: string; quote: string }> {
+  const res = await fetch(endpoint(sessionId, "/attestation"));
+  return parseOrThrow(res);
+}
+
+// The gateway's own attestation. Absolute, unlike every other call here: the
+// gateway answers it itself, at the root of the name, outside any link's
+// marker.
+export async function getGatewayAttestation(): Promise<Uint8Array> {
+  const res = await fetch("/.well-known/enclavid-attestation");
+  if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
+  return new Uint8Array(await res.arrayBuffer());
 }
 
 // Asks for the session to be made ready to run while the applicant is

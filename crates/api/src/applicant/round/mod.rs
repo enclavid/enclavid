@@ -13,6 +13,7 @@ mod extract;
 mod resolve;
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use axum::http::StatusCode;
 use secrecy::SecretBox;
@@ -65,8 +66,9 @@ pub(super) struct SessionRunCtx {
     /// the round consented to.
     disclosure_pubkey: String,
     /// Session version the state read returned — the persister's opening CAS
-    /// token.
-    version: u64,
+    /// token, and what the step the session awaits is addressed under
+    /// (`views::slot`).
+    pub(super) version: u64,
     /// The per-round media store — becomes the `media_load` half of the
     /// [`CallbackServer`] the keyless worker calls back into. Holds the seal key
     /// + a `Weak` to the applicant token.
@@ -269,7 +271,10 @@ impl SessionRunCtx {
                 committed(persister.decided().await, awaiting.lock().await.take()).ok_or(e)?
             }
         };
-        Ok(progress_from(status, &locale))
+        // The step the session now awaits is addressed under the version the
+        // round's last write left the record at — the one the next round reads.
+        let version = persister.current_version.load(Ordering::SeqCst);
+        Ok(progress_from(status, &locale, version))
     }
 }
 

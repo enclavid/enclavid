@@ -6,9 +6,9 @@
 //!
 //! Auth model mirrors the client API: a single `enforce` middleware,
 //! attached per-route via `.layer(auth())`. See `auth.rs` for cache
-//! semantics. `/status` (GET), `/state` (DELETE, recovery path) and
-//! `/warmup` (POST, before the applicant has a key) are intentionally
-//! unauthenticated and bypass the layer at the router.
+//! semantics. `/status` (GET), `/attestation` (GET), `/state` (DELETE,
+//! recovery path) and `/warmup` (POST, before the applicant has a key) are
+//! intentionally unauthenticated and bypass the layer at the router.
 //!
 //! Static assets:
 //! The applicant frontend is served from this same surface, compiled
@@ -30,6 +30,7 @@
 //! attested build cannot be produced without the page at all; `build.rs`
 //! refuses.
 
+mod attestation;
 mod auth;
 mod callbacks;
 mod connect;
@@ -72,6 +73,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     // fragment.
     let routes = Router::new()
         .route("/api/v1/sessions/{id}/status", status::get_status())
+        .route(
+            "/api/v1/sessions/{id}/attestation",
+            attestation::get_attestation(),
+        )
         .route("/api/v1/sessions/{id}/state", reset::delete_state())
         .route("/api/v1/sessions/{id}/warmup", warmup::post_warmup())
         .route(

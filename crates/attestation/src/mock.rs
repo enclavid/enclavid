@@ -178,7 +178,7 @@ mod tests {
     use super::*;
 
     fn sample_data() -> ReportData {
-        ReportData::session("ses_01HF7K".to_string(), "sha256:7e93fba".to_string())
+        ReportData::session("ses_01HF7K".to_string())
     }
 
     #[test]
@@ -192,7 +192,7 @@ mod tests {
     fn binding_mismatch_rejected() {
         let attestor = MockAttestor::new_random();
         let quote = attestor.mint(&sample_data()).unwrap();
-        let tampered = ReportData::session("ses_OTHER".to_string(), "sha256:7e93fba".to_string());
+        let tampered = ReportData::session("ses_OTHER".to_string());
         let err = attestor.verify(&quote, &tampered).unwrap_err();
         assert!(matches!(err, AttestationError::BindingMismatch));
     }

@@ -287,8 +287,8 @@ pub(super) async fn enforce(
     // creator and the host never sees.
     //
     // Attestation still protects against spoofed session_ids: the
-    // quote binds (session_id, policy_digest) to TEE measurement,
-    // signed by AMD-SP. A real client tricked into using a fake id
+    // quote binds the session_id to TEE measurement, signed by
+    // AMD-SP. A real client tricked into using a fake id
     // detects the mismatch on quote verification and refuses further
     // inputs.
     //

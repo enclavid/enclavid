@@ -77,9 +77,22 @@ export function MediaCapture({
   onCancel,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  // Set while the frames are being fitted for sending, which takes a
-  // moment on a large capture and comes before `sending` turns on.
-  const fittingRef = useRef(false);
+  // Set from the "Use photo" tap until the parent's submit ends without a new
+  // step — through fitting the frames, which takes a moment on a large
+  // capture, and the moment before the parent's `sending` turns on. The ref
+  // turns a second tap away at once; the state shows the first one taken.
+  const busyRef = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const wasSending = useRef(false);
+  useEffect(() => {
+    // The submit ended and this step is still on screen — it failed, and the
+    // same frames may be sent again or retaken.
+    if (wasSending.current && !sending) {
+      busyRef.current = false;
+      setBusy(false);
+    }
+    wasSending.current = sending;
+  }, [sending]);
   // Off-DOM canvas reused across frame-grabs to avoid per-frame
   // allocation thrash.
   const grabCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -244,22 +257,22 @@ export function MediaCapture({
 
   async function confirm() {
     if (framesRef.current.length === 0) return;
-    // Guard against double-fire: the buttons themselves get
-    // disabled while `sending`, but tap-bursts on touch devices can
-    // sometimes register two onClicks before React commits the
-    // disabled state. This local check makes the second one a
-    // no-op.
-    if (sending || fittingRef.current) return;
-    fittingRef.current = true;
+    // Guard against double-fire: the buttons are disabled from the first
+    // tap, but tap-bursts on touch devices can register two onClicks
+    // before React commits the disabled state. The ref makes the second a
+    // no-op, and holds until the parent's submit is over.
+    if (sending || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
     let frames: Blob[];
     try {
       frames = await fitFrames(framesRef.current, maxUploadBytes);
     } catch {
+      busyRef.current = false;
+      setBusy(false);
       setPhase("error");
       setErrorMsg("This photo is too large to send. Please retake it.");
       return;
-    } finally {
-      fittingRef.current = false;
     }
     const form = new FormData();
     frames.forEach((blob, i) => {
@@ -363,7 +376,7 @@ export function MediaCapture({
               size="lg"
               className="h-12 flex-1 bg-white/10 text-white hover:bg-white/20"
               onClick={retake}
-              disabled={sending}
+              disabled={sending || busy}
             >
               Retake
             </Button>
@@ -371,9 +384,9 @@ export function MediaCapture({
               size="lg"
               className="h-12 flex-1 bg-white text-black hover:bg-white/90"
               onClick={confirm}
-              disabled={sending}
+              disabled={sending || busy}
             >
-              {sending ? (
+              {sending || busy ? (
                 <span className="inline-flex items-center gap-2">
                   <span
                     aria-hidden

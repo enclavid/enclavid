@@ -1,21 +1,20 @@
 import { useState } from "react";
-import { cn } from "@/lib/utils";
+import { CircleCheck, ShieldAlert } from "lucide-react";
+import { Spinner } from "@/components/icons";
 import { AttestationModal } from "@/components/AttestationModal";
+import { useEnclave, type EnclaveState } from "@/lib/enclave";
+import { cn } from "@/lib/utils";
 
 type Props = {
   className?: string;
 };
 
-/// Persistent footer. One line naming where the session runs, tapping it
-/// opens the explanation.
-///
-/// It carries no status glyph. A badge has exactly one job — to say whether
-/// something was checked — and nothing here checks anything, so a green
-/// indicator would be reporting a verification that did not happen. The
-/// footer states a fact about the platform and hands the reader somewhere to
-/// find out what that does and does not buy them.
+/// Persistent footer. One line naming where the session runs, with a badge
+/// that says how the page's check of it came out; tapping the badge opens the
+/// checks one by one, and what a page's own checks cannot establish.
 export function AppFooter({ className }: Props) {
   const [open, setOpen] = useState(false);
+  const enclave = useEnclave();
 
   return (
     <>
@@ -30,18 +29,50 @@ export function AppFooter({ className }: Props) {
         <button
           type="button"
           onClick={() => setOpen(true)}
-          // `data-footer-badge` is the anchor Welcome's pill animation
-          // homes onto when it slides downward — see the pillRef
-          // bounding-rect math in Welcome.tsx. Don't rename without
-          // updating the query.
+          // `data-footer-badge` is the anchor Welcome's badge homes onto
+          // when it slides downward — see the badgeRef bounding-rect math
+          // in Welcome.tsx. Don't rename without updating the query.
           data-footer-badge=""
-          className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2 py-0.5 text-[11px] font-medium leading-tight transition-colors hover:bg-muted"
+          className={BADGE_CLASS + " transition-colors hover:bg-muted"}
           aria-haspopup="dialog"
         >
-          <span>Where this runs</span>
+          <EnclaveBadgeFace state={enclave} />
         </button>
       </footer>
       <AttestationModal open={open} onOpenChange={setOpen} />
+    </>
+  );
+}
+
+/// The badge's shape. Welcome flies a larger one of the same proportions down
+/// onto it, shrinking to this size on the way, which is what makes the landing
+/// read as one badge.
+export const BADGE_CLASS =
+  "inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2.5 py-1 text-xs font-medium leading-tight";
+
+/// The badge's face: the check under way, passed, or not. Its glyphs are sized
+/// in `em`, so the face scales with whichever badge it is in.
+export function EnclaveBadgeFace({ state }: { state: EnclaveState }) {
+  if (state.status === "checking") {
+    return (
+      <>
+        <Spinner className="size-[1em]" />
+        <span>Checking enclave</span>
+      </>
+    );
+  }
+  if (state.verified) {
+    return (
+      <>
+        <CircleCheck className="size-[1.2em] text-emerald-600 dark:text-emerald-400" />
+        <span>Enclave verified</span>
+      </>
+    );
+  }
+  return (
+    <>
+      <ShieldAlert className="size-[1.2em] text-amber-600 dark:text-amber-400" />
+      <span>Enclave not verified</span>
     </>
   );
 }

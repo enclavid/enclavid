@@ -11,12 +11,23 @@
 // participatory step. Even if the user produces zero entropy via
 // drawing, the key is still secure due to the random IKM.
 //
-// Storage: localStorage scoped by session_id. `enclavid:key:<id>`.
-// Per-session, persists across reloads, cleared on /reset (caller
-// responsibility — see `clearKey`).
+// Storage: `enclavid:key:<id>`, as the key and when it was made, in two
+// places. localStorage keeps it while the session runs, across reloads and
+// tabs; once the session has its decision only this tab keeps it, in
+// sessionStorage, so a reload still shows the decision and closing the tab
+// forgets it (`keepKeyInTabOnly`). A session that ended without one forgets it
+// everywhere (`clearKey`), and keys left behind by sessions never finished
+// are dropped by age (`pruneKeys`).
 
 const STORAGE_PREFIX = "enclavid:key:";
 const KEY_LEN = 32;
+
+// The longest a key is kept: past it, the session it opens has ended under any
+// terms a consumer can be given, and the key opens nothing anyone should still
+// hold.
+const KEY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+type Stored = { key: string; created: number };
 
 // Empirically maps to roughly 2-3 seconds of continuous drawing
 // on mobile. In theory pointermove fires at 60-120Hz, but browsers
@@ -31,21 +42,73 @@ const ENTROPY_TARGET_POINTS = 200;
 // --- Storage ---
 
 export function loadKey(sessionId: string): Uint8Array | null {
-  const raw = localStorage.getItem(STORAGE_PREFIX + sessionId);
-  if (!raw) return null;
+  const name = STORAGE_PREFIX + sessionId;
+  const stored =
+    read(localStorage.getItem(name)) ?? read(sessionStorage.getItem(name));
+  if (!stored) return null;
   try {
-    return base64Decode(raw);
+    return base64Decode(stored.key);
   } catch {
     return null;
   }
 }
 
 export function storeKey(sessionId: string, key: Uint8Array): void {
-  localStorage.setItem(STORAGE_PREFIX + sessionId, base64Encode(key));
+  const stored = JSON.stringify({
+    key: base64Encode(key),
+    created: Date.now(),
+  } satisfies Stored);
+  localStorage.setItem(STORAGE_PREFIX + sessionId, stored);
+  sessionStorage.setItem(STORAGE_PREFIX + sessionId, stored);
 }
 
+/// The session has its decision: keep the key in this tab alone, so a reload
+/// still shows the decision, and let closing the tab forget it. Once a session
+/// is decided its key opens nothing but that decision.
+export function keepKeyInTabOnly(sessionId: string): void {
+  localStorage.removeItem(STORAGE_PREFIX + sessionId);
+}
+
+/// Forget the key of a session that ended without a decision to show: it
+/// opens nothing that still runs, and a key kept past its session is only
+/// something to take.
 export function clearKey(sessionId: string): void {
   localStorage.removeItem(STORAGE_PREFIX + sessionId);
+  sessionStorage.removeItem(STORAGE_PREFIX + sessionId);
+}
+
+/// Drop every key older than `KEY_MAX_AGE_MS`, and any that cannot be read —
+/// those of sessions abandoned before they ended, whose `clearKey` never ran.
+export function pruneKeys(): void {
+  const now = Date.now();
+  const names: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const name = localStorage.key(i);
+    if (name?.startsWith(STORAGE_PREFIX)) names.push(name);
+  }
+  for (const name of names) {
+    const stored = read(localStorage.getItem(name));
+    if (!stored || now - stored.created > KEY_MAX_AGE_MS) localStorage.removeItem(name);
+  }
+}
+
+function read(raw: string | null): Stored | null {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as Partial<Stored>;
+    return typeof value.key === "string" && typeof value.created === "number"
+      ? { key: value.key, created: value.created }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/// A key straight from the browser's random source, for a link that skips the
+/// drawing (`explicitSeed`): what `EntropyAccumulator::finalize` rests on, with
+/// nothing mixed in.
+export function randomKey(): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(KEY_LEN));
 }
 
 // --- Entropy collection ---

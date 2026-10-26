@@ -1,25 +1,44 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import Autoplay from "embla-carousel-autoplay";
 import { Button } from "@/components/ui/button";
-import { AppFooter } from "@/components/AppFooter";
+import {
+  Carousel,
+  CarouselContent,
+  CarouselItem,
+  type CarouselApi,
+} from "@/components/ui/carousel";
+import { AppFooter, EnclaveBadgeFace } from "@/components/AppFooter";
+import { useEnclave, type EnclaveState } from "@/lib/enclave";
 import { cn } from "@/lib/utils";
 
 type Props = {
-  /// Invoked when Begin is tapped. Never gated: nothing on this screen
-  /// establishes a fact that beginning ought to wait for.
+  /// Invoked when Begin is tapped. Never gated: a check that did not pass is
+  /// reported, on the badge, and the applicant decides.
   onBegin: () => void;
 };
 
-// How long the pill sits in the hero before it starts moving.
-const PILL_DELAY_MS = 800;
-// Pause between the pill appearing and the merge-down animation kicking
-// off, so the user has a moment to register it.
-const PILL_HOLD_MS = 800;
-// Length of the merge transition (pill translates + fades, wrapper grid
-// row collapses). Both run on this same timeline so they read as a
-// single move.
+// The hero badge: the footer badge's shape at a third larger, so it shrinks
+// onto it in proportion on the way down.
+const HERO_BADGE_CLASS =
+  "inline-flex items-center gap-2 rounded-full border border-border bg-background px-3.5 py-1.5 text-base font-medium leading-tight shadow-sm";
+
+// How long the hero shows alone before the badge appears.
+const BADGE_DELAY_MS = 600;
+// The least the spinner shows, so a check that finishes at once does not
+// flash past.
+const MIN_CHECKING_MS = 1200;
+// How long the result holds before the badge flies down.
+const RESULT_HOLD_MS = 1200;
+// The longest the badge waits for the check: past it, it flies down with the
+// check still under way, and the footer badge goes on reporting it.
+const CHECK_WAIT_MS = 8000;
+// Length of the merge transition (badge translates + fades, wrapper grid row
+// collapses). Both run on this same timeline so they read as a single move.
 const MERGE_DURATION_MS = 1200;
-// One-shot fade-in for the pill when it first appears.
-const PILL_FADE_IN_MS = 300;
+// One-shot fade-in for the badge when it first appears.
+const BADGE_FADE_IN_MS = 300;
+
+type Phase = "before" | "checking" | "result" | "fading" | "gone";
 
 // Module-level latch: set true the first time Welcome mounts in this
 // tab, so a return visit lands on the final layout instead of replaying
@@ -27,7 +46,7 @@ const PILL_FADE_IN_MS = 300;
 let welcomeAnimationSeen = false;
 
 // Hero copy slideshow. First slide is the headline the user reads while
-// the pill is on screen; the rest gently rotate through how-it-works
+// the badge is on screen; the rest gently rotate through how-it-works
 // angles afterwards. Auto-cycle only starts once `phase === "gone"`, so
 // the first read-through of the hero copy isn't interrupted.
 const HERO_SLIDES: ReadonlyArray<{ title: ReactNode; body: ReactNode }> = [
@@ -57,18 +76,16 @@ const HERO_SLIDES: ReadonlyArray<{ title: ReactNode; body: ReactNode }> = [
 
 const SLIDE_INTERVAL_MS = 6000;
 
-/// The welcome hero plus the opening motion: a pill naming the platform
-/// appears under the hero copy, then merges down onto the footer badge —
-/// it translates the real distance (via refs) and fades while the wrapper
-/// grid row collapses, so the hero slides into the freed space with no
-/// layout jump.
+/// The welcome hero plus the opening motion: a badge under the hero copy shows
+/// the page's check of where the session runs — a spinner while it runs, then
+/// the result — and merges down onto the footer badge, which says the same and
+/// goes on reporting it. The badge translates the real distance (via refs),
+/// shrinking to the footer badge's size, and fades while the wrapper grid row
+/// collapses, so the hero slides into the freed space with no layout jump.
 ///
-/// The motion narrates nothing and gates nothing. What used to sit here
-/// was a three-step checklist — fetching, comparing, confirming — for a
-/// verification the page never performed, and an animation is the worst
-/// possible place to put a claim like that: it reads as progress, so the
-/// third checkmark reads as a result. When there is a real check to
-/// narrate, this is where it goes.
+/// The result it shows is the one the page computed; the motion paces it, and
+/// invents none. The checks one by one, and what they cannot establish, are
+/// behind the footer badge — see `AttestationModal`.
 export function Welcome({ onBegin }: Props) {
   // Play the opening only on the first mount in this tab — a user
   // navigating back from /keygen lands on the final layout rather than
@@ -78,78 +95,103 @@ export function Welcome({ onBegin }: Props) {
     welcomeAnimationSeen = true;
   }, []);
 
-  // One fixed timeline, on its own clock: the pill appears, holds, then
-  // merges into the footer over MERGE_DURATION_MS.
-  const [phase, setPhase] = useState<
-    "before" | "showing-pill" | "fading" | "gone"
-  >(skipAnimationRef.current ? "gone" : "before");
-  useEffect(() => {
-    if (skipAnimationRef.current) return;
-    const t1 = setTimeout(() => setPhase("showing-pill"), PILL_DELAY_MS);
-    const t2 = setTimeout(
-      () => setPhase("fading"),
-      PILL_DELAY_MS + PILL_HOLD_MS,
-    );
-    const t3 = setTimeout(
-      () => setPhase("gone"),
-      PILL_DELAY_MS + PILL_HOLD_MS + MERGE_DURATION_MS,
-    );
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
-    };
-  }, []);
+  const enclave = useEnclave();
 
-  // Compute the exact translateY that lands the inline pill on top
-  // of the footer badge. Run when phase becomes "fading" — the pill
-  // is in its final pre-animation position and the footer is mounted.
-  const pillRef = useRef<HTMLDivElement>(null);
-  const [travelY, setTravelY] = useState(0);
+  // The badge appears with its spinner, shows the result once the check is in
+  // and the spinner has had its moment, holds, then merges into the footer
+  // over MERGE_DURATION_MS.
+  const [phase, setPhase] = useState<Phase>(
+    skipAnimationRef.current ? "gone" : "before",
+  );
+  const [spun, setSpun] = useState(false);
   useEffect(() => {
-    if (phase !== "fading" || !pillRef.current) return;
+    if (phase !== "before") return;
+    const t = setTimeout(() => setPhase("checking"), BADGE_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [phase]);
+  useEffect(() => {
+    if (phase !== "checking") return;
+    const spin = setTimeout(() => setSpun(true), MIN_CHECKING_MS);
+    const wait = setTimeout(() => setPhase("fading"), CHECK_WAIT_MS);
+    return () => {
+      clearTimeout(spin);
+      clearTimeout(wait);
+    };
+  }, [phase]);
+  useEffect(() => {
+    if (phase === "checking" && spun && enclave.status === "done") setPhase("result");
+  }, [phase, spun, enclave.status]);
+  useEffect(() => {
+    if (phase !== "result") return;
+    const t = setTimeout(() => setPhase("fading"), RESULT_HOLD_MS);
+    return () => clearTimeout(t);
+  }, [phase]);
+  useEffect(() => {
+    if (phase !== "fading") return;
+    const t = setTimeout(() => setPhase("gone"), MERGE_DURATION_MS);
+    return () => clearTimeout(t);
+  }, [phase]);
+
+  // Compute the exact translateY that lands the badge on top of the footer
+  // badge, and the scale that makes it the footer badge's size. Run when phase
+  // becomes "fading" — the badge is in its final pre-animation position and
+  // the footer is mounted.
+  const badgeRef = useRef<HTMLDivElement>(null);
+  const [landing, setLanding] = useState({ y: 0, scale: 1 });
+  useEffect(() => {
+    if (phase !== "fading" || !badgeRef.current) return;
     const footer = document.querySelector<HTMLElement>("[data-footer-badge]");
     if (!footer) return;
-    const inlineRect = pillRef.current.getBoundingClientRect();
+    const badgeRect = badgeRef.current.getBoundingClientRect();
     const footerRect = footer.getBoundingClientRect();
-    // Centre-to-centre delta so the pill physically lands on the
+    // Centre-to-centre delta so the badge physically lands on the
     // footer badge regardless of viewport height.
-    const dy =
+    const y =
       footerRect.top + footerRect.height / 2 -
-      (inlineRect.top + inlineRect.height / 2);
-    setTravelY(dy);
+      (badgeRect.top + badgeRect.height / 2);
+    setLanding({ y, scale: footerRect.height / badgeRect.height });
   }, [phase]);
 
   const collapsed = phase === "fading" || phase === "gone";
 
-  // Hero copy slideshow. Cycles only after the opening has finished
-  // playing — the first slide stays put while the user is reading it.
+  // Hero copy slideshow: a carousel a finger drags, the next slide coming in
+  // under it, looping round from the last to the first. It turns on its own
+  // only after the opening has finished playing — the first slide stays put
+  // while the user is reading it — pauses while a finger is on it, and
+  // starts its count over after a tap on a dot or a side.
   const slideshowActive = phase === "gone";
+  const [carousel, setCarousel] = useState<CarouselApi>();
+  const autoplay = useRef(
+    Autoplay({
+      delay: SLIDE_INTERVAL_MS,
+      playOnInit: false,
+      stopOnInteraction: false,
+    }),
+  );
+  // The slide the carousel shows, kept for the dots, however it got there.
   const [slideIndex, setSlideIndex] = useState(0);
-  // Bumped by user navigation (dot click, tap zone). The auto-cycle
-  // useEffect depends on it, so any interaction restarts the timer —
-  // tapping next doesn't immediately get overtaken 1s later.
-  const [interactionEpoch, setInteractionEpoch] = useState(0);
+  useEffect(() => {
+    if (!carousel) return;
+    const select = () => setSlideIndex(carousel.selectedScrollSnap());
+    select();
+    carousel.on("select", select);
+    return () => {
+      carousel.off("select", select);
+    };
+  }, [carousel]);
+  useEffect(() => {
+    if (slideshowActive && carousel) autoplay.current.play();
+  }, [slideshowActive, carousel]);
 
   const goToSlide = (next: number) => {
-    if (next === slideIndex) return;
-    setSlideIndex(next);
-    setInteractionEpoch((e) => e + 1);
+    carousel?.scrollTo(next);
+    autoplay.current.reset();
   };
   const advanceSlide = (delta: number) => {
-    setSlideIndex(
-      (i) => (i + delta + HERO_SLIDES.length) % HERO_SLIDES.length,
-    );
-    setInteractionEpoch((e) => e + 1);
+    if (delta < 0) carousel?.scrollPrev();
+    else carousel?.scrollNext();
+    autoplay.current.reset();
   };
-
-  useEffect(() => {
-    if (!slideshowActive) return;
-    const id = setInterval(() => {
-      setSlideIndex((i) => (i + 1) % HERO_SLIDES.length);
-    }, SLIDE_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [slideshowActive, interactionEpoch]);
 
   return (
     <main
@@ -182,27 +224,23 @@ export function Welcome({ onBegin }: Props) {
         </div>
 
         {/*
-         * Slide stack. All slides are rendered in the same grid cell
-         * (col-start-1 row-start-1) so the cell sizes to the tallest
-         * slide and stays that height for the lifetime of the screen.
-         * That stops the dots row below from jumping when slides of
-         * different content lengths swap in. Active slide is opaque +
-         * untranslated; the others are inert and faded out, ready to
-         * crossfade when the index changes.
+         * The slides, each as wide as the screen: the carousel reaches past
+         * the page's own padding to both edges, so a slide comes in from the
+         * edge of the screen rather than from inside it, and each slide puts
+         * the padding back inside itself. A row is as tall as its tallest
+         * slide, so the dots below stay put whichever slide is shown.
          */}
-        <div className="grid">
-          {HERO_SLIDES.map((s, i) => {
-            const active = i === slideIndex;
-            return (
-              <div
+        <Carousel
+          setApi={setCarousel}
+          opts={{ loop: true }}
+          plugins={[autoplay.current]}
+          className="-mx-6 self-stretch"
+        >
+          <CarouselContent className="ml-0">
+            {HERO_SLIDES.map((s, i) => (
+              <CarouselItem
                 key={i}
-                aria-hidden={!active}
-                className={cn(
-                  "col-start-1 row-start-1 flex flex-col items-center gap-6 transition-[opacity,transform] duration-500 ease-out",
-                  active
-                    ? "translate-y-0 opacity-100"
-                    : "pointer-events-none translate-y-1 opacity-0",
-                )}
+                className="flex flex-col items-center gap-6 px-6"
               >
                 <h1 className="text-balance text-3xl font-semibold leading-tight tracking-tight">
                   {s.title}
@@ -210,10 +248,10 @@ export function Welcome({ onBegin }: Props) {
                 <p className="max-w-md text-pretty text-base leading-relaxed text-muted-foreground">
                   {s.body}
                 </p>
-              </div>
-            );
-          })}
-        </div>
+              </CarouselItem>
+            ))}
+          </CarouselContent>
+        </Carousel>
 
         {/*
          * Dots are always mounted so they reserve their height even
@@ -263,8 +301,8 @@ export function Welcome({ onBegin }: Props) {
         {/*
          * Grid-row collapse: outer grid animates rows from 1fr to 0fr;
          * inner element's `min-h-0` allows shrinking below content
-         * size. Pill (with overflow visible) escapes the collapsing
-         * row downward via translateY — height collapse and pill
+         * size. The badge (with overflow visible) escapes the collapsing
+         * row downward via translateY — height collapse and the badge's
          * journey play on the same `MERGE_DURATION_MS` timeline so
          * the user reads them as one move.
          */}
@@ -280,7 +318,12 @@ export function Welcome({ onBegin }: Props) {
           aria-hidden={phase === "gone"}
         >
           <div className="flex min-h-0 justify-center">
-            <PlatformBadge ref={pillRef} phase={phase} travelY={travelY} />
+            <HeroBadge
+              ref={badgeRef}
+              phase={phase}
+              landing={landing}
+              enclave={enclave}
+            />
           </div>
         </div>
       </section>
@@ -291,8 +334,8 @@ export function Welcome({ onBegin }: Props) {
         </Button>
 
         {/*
-         * The footer badge is always present; the hero pill flies down
-         * onto it, so the opening reads as the pill settling into the
+         * The footer badge is always present; the hero badge flies down
+         * onto it, so the opening reads as the result settling into the
          * place it lives for the rest of the session.
          */}
         <AppFooter />
@@ -301,64 +344,59 @@ export function Welcome({ onBegin }: Props) {
   );
 }
 
-/// The pill that appears in the hero and then merges onto the footer
-/// badge. `pillRef` targets the moving node; during `fading` it takes the
-/// precomputed translateY and fades over the merge duration.
-function PlatformBadge({
+/// The badge that shows the check in the hero and then merges onto the footer
+/// badge: the same face at a larger size, shrinking to the footer badge's on
+/// the way, which is what makes the landing read as one badge. `ref` targets
+/// the moving node; during `fading` it takes the precomputed translate and
+/// scale and fades over the merge duration.
+///
+/// Rendered from the start, just invisible, so the section's `justify-center`
+/// does not shift the hero content when it appears.
+function HeroBadge({
   ref,
   phase,
-  travelY,
+  landing,
+  enclave,
 }: {
   ref: React.RefObject<HTMLDivElement | null>;
-  phase: "before" | "showing-pill" | "fading" | "gone";
-  travelY: number;
+  phase: Phase;
+  landing: { y: number; scale: number };
+  enclave: EnclaveState;
 }) {
   if (phase === "gone") {
     return null;
   }
 
-  const showingPill = phase === "showing-pill";
+  const shown = phase === "checking" || phase === "result";
   const fading = phase === "fading";
-  // Short fade-in when it lands, long synchronized merge when it slides to
+  // Short fade-in when it appears, long synchronized merge when it slides to
   // the footer. Tracking both inline lets the duration swap cleanly between
   // phases — Tailwind transitions cannot switch durations mid-flight.
-  const pillTransition = {
+  const transition = {
     transitionProperty: "opacity, transform",
-    transitionDuration: fading
-      ? `${MERGE_DURATION_MS}ms`
-      : `${PILL_FADE_IN_MS}ms`,
+    transitionDuration: fading ? `${MERGE_DURATION_MS}ms` : `${BADGE_FADE_IN_MS}ms`,
     transitionTimingFunction: "cubic-bezier(0.4, 0, 0.2, 1)",
   } as const;
 
   return (
-    <div className="flex flex-col items-center gap-4">
-      {/*
-       * Rendered from the start, just invisible, so the section's
-       * `justify-center` does not shift the hero content when it appears.
-       */}
-      <div
-        ref={ref}
-        aria-hidden={!showingPill}
-        className={cn(!showingPill && "opacity-0")}
-        style={{
-          ...pillTransition,
-          transform: fading ? `translateY(${travelY}px)` : undefined,
-        }}
-      >
-        <PlatformPill />
+    <div
+      ref={ref}
+      aria-hidden={!shown}
+      className={cn(!shown && "opacity-0")}
+      style={{
+        ...transition,
+        transform: fading
+          ? `translateY(${landing.y}px) scale(${landing.scale})`
+          : undefined,
+      }}
+    >
+      <div className={HERO_BADGE_CLASS}>
+        {/* The spinner holds until the check is in and has had its moment,
+            whatever the check's own state meanwhile. */}
+        <EnclaveBadgeFace
+          state={phase === "checking" ? { status: "checking" } : enclave}
+        />
       </div>
-    </div>
-  );
-}
-
-/// Visually identical to the footer badge — same shape, same colors, same
-/// words. The match is what sells the merge. It carries no glyph and no
-/// colour signal, because it reports no outcome: see `AttestationModal`
-/// for what this page can and cannot establish.
-function PlatformPill() {
-  return (
-    <div className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2 py-0.5 text-[11px] font-medium leading-tight">
-      <span>Where this runs</span>
     </div>
   );
 }

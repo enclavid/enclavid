@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ConsentScreen } from "@/components/ConsentScreen";
 import { MediaCapture } from "@/components/MediaCapture";
 import { MediaInstructions } from "@/components/MediaInstructions";
@@ -90,20 +90,19 @@ function RequestRenderer({
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
-  // Whether the user has tapped "Start" on the instruction screen
-  // for the CURRENT media prompt. Resets when next_slot_id changes
-  // (new prompt or new step within the same prompt) so a fresh
-  // prompt always shows instructions on entry.
+  // The step whose instruction screen the user has tapped "Start" on.
+  // Compared with the step on screen rather than reset when it changes,
+  // so the render that brings a new step already shows its instructions:
+  // a reset after the fact would leave one frame of the old step's
+  // capture screen, its "Use photo" live, under the new step's address.
   const slotKey = request.kind === "media" ? request.next_slot_id : null;
-  const [startedCapture, setStartedCapture] = useState(false);
-  useEffect(() => {
-    setStartedCapture(false);
-  }, [slotKey]);
+  const [startedFor, setStartedFor] = useState<string | null>(null);
+  const startedCapture = slotKey !== null && startedFor === slotKey;
 
   if (request.kind === "media") {
     // `next_slot_id` is the URL the host wants the next clip POSTed
-    // to. We derive the step it refers to from `media-<N>` and read
-    // that entry from `captures` to drive the on-screen guide.
+    // to. We derive the step it refers to from `<version>.media-<N>`
+    // and read that entry from `captures` to drive the on-screen guide.
     const nextIndex = parseStepIndex(request.next_slot_id);
     const total = request.captures.length;
     const step =
@@ -137,10 +136,9 @@ function RequestRenderer({
     }
 
     // Per-step intro: shown before the camera turns on for EVERY
-    // step. `startedCapture` is local-only and resets when
-    // `next_slot_id` changes (new step or new prompt) — so each
-    // step gets its own intro screen, then its own camera, then
-    // its own preview. Multi-step captures get "now flip to the
+    // step. `startedCapture` holds only for the step it was tapped
+    // on — each step gets its own intro screen, then its own camera,
+    // then its own preview. Multi-step captures get "now flip to the
     // back" framing between shots instead of jumping directly
     // into a different camera view.
     if (!startedCapture) {
@@ -151,7 +149,7 @@ function RequestRenderer({
           instructions={step.instructions}
           stepNumber={(nextIndex ?? 0) + 1}
           totalSteps={total}
-          onStart={() => setStartedCapture(true)}
+          onStart={() => setStartedFor(request.next_slot_id)}
         />
       );
     }
@@ -159,6 +157,9 @@ function RequestRenderer({
     return (
       <>
         <MediaCapture
+          // A step of its own: frames, preview and buttons start over, so
+          // nothing taken for one step can be sent for the next.
+          key={request.next_slot_id}
           promptLabel={request.label}
           step={step}
           stepNumber={(nextIndex ?? 0) + 1}
@@ -186,7 +187,7 @@ function RequestRenderer({
         // seals only what the applicant audited (show == seal). If the flow
         // advanced since this screen rendered, the TEE rejects the accept.
         form.append("disclosure_hash", request.disclosure_digest);
-        await onSubmit("consent", form);
+        await onSubmit(request.slot_id, form);
       } catch (e) {
         setLocalError(
           e instanceof Error ? e.message : "Could not submit consent.",
@@ -239,10 +240,11 @@ function RequestRenderer({
   );
 }
 
-/// Parse `media-<N>` slot ids back to their integer index. Returns
-/// `null` for malformed values (caller surfaces "unexpected state").
+/// Parse `<version>.media-<N>` slot ids back to their integer index.
+/// Returns `null` for malformed values (caller surfaces "unexpected
+/// state").
 function parseStepIndex(slotId: string): number | null {
-  const m = slotId.match(/^media-(\d+)$/);
+  const m = slotId.match(/^\d+\.media-(\d+)$/);
   if (!m) return null;
   const n = parseInt(m[1], 10);
   return Number.isFinite(n) ? n : null;

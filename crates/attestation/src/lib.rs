@@ -83,11 +83,18 @@ pub struct Quote {
 /// its own preimage — a quote minted for one is never evidence in another.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReportData {
-    /// An ordinary per-session quote, returned from `POST /sessions`.
-    Session {
-        session_id: String,
-        policy_digest: String,
-    },
+    /// An ordinary per-session quote: returned from `POST /sessions`, and served
+    /// to the session's applicant page by anyone holding its link.
+    ///
+    /// The session id alone. A field more would reach every holder of the link,
+    /// and nothing beside the id is theirs to read: the policy's digest, say,
+    /// would let them gather sessions by the policy they run before any of them
+    /// is opened. Nor would a field more guard the consumer. Whoever could change
+    /// a creation on its way in holds a certificate for enclavid's names, the
+    /// applicant's page among them, and would take the applicant's data there
+    /// whatever the quote bound; what guards both is the channel, the gateway's
+    /// quote over its own key.
+    Session { session_id: String },
     /// The TEE's ephemeral public key, bound for a key-release request. Nothing
     /// in this workspace mints one outside tests: the Trustee handshake binds a
     /// value of its own — see [`ReportData::for_kbs`].
@@ -111,11 +118,8 @@ const RATLS_TAG: &[u8] = b"\x00\x00ratls-spki\x00";
 
 impl ReportData {
     /// Report data for an ordinary per-session quote.
-    pub fn session(session_id: String, policy_digest: String) -> Self {
-        Self::Session {
-            session_id,
-            policy_digest,
-        }
+    pub fn session(session_id: String) -> Self {
+        Self::Session { session_id }
     }
 
     /// Report data binding an ephemeral public key for an artifact-key request.
@@ -146,10 +150,9 @@ impl ReportData {
     /// Injective over every variant, which is what keeps one protocol's quote
     /// out of another. Each preimage opens with its variant's tag, and no tag is
     /// a prefix of another, so the tag alone says which variant it is. After
-    /// that, every field is its length (u64, big-endian) followed by its bytes,
-    /// so a NUL inside a session id cannot move where one field ends. The one
-    /// exception is RA-TLS, whose only field runs to the end of the preimage: a
-    /// fixed tag and a single trailing field already leave nothing to split.
+    /// that, a field is its length (u64, big-endian) followed by its bytes. The
+    /// one exception is RA-TLS, whose only field runs to the end of the preimage:
+    /// a fixed tag and a single trailing field already leave nothing to split.
     pub fn hash(&self) -> [u8; 32] {
         fn field(h: &mut Sha256, bytes: &[u8]) {
             h.update((bytes.len() as u64).to_be_bytes());
@@ -158,13 +161,9 @@ impl ReportData {
 
         let mut h = Sha256::new();
         match self {
-            ReportData::Session {
-                session_id,
-                policy_digest,
-            } => {
+            ReportData::Session { session_id } => {
                 h.update(SESSION_TAG);
                 field(&mut h, session_id.as_bytes());
-                field(&mut h, policy_digest.as_bytes());
             }
             ReportData::Kbs { ephemeral_pubkey } => {
                 h.update(KBS_TAG);
@@ -243,8 +242,8 @@ mod tests {
     /// one untagged stream, a KBS key that began with `ratls-spki\0` — the
     /// RA-TLS marker less the NUL a field separator supplied — produced the
     /// preimage of the certificate that followed it: a key-release quote that
-    /// verified as RA-TLS evidence. A session whose digest began the same way
-    /// did too.
+    /// verified as RA-TLS evidence. A session id spelling the RA-TLS preimage
+    /// out in full must not reach it either.
     #[test]
     fn no_other_variant_reaches_an_ratls_preimage() {
         let spki = b"a-subject-public-key-info".to_vec();
@@ -253,19 +252,8 @@ mod tests {
         let kbs = ReportData::for_kbs([b"ratls-spki\x00".as_slice(), &spki].concat());
         assert_ne!(kbs.hash(), ratls);
 
-        let digest = String::from_utf8([b"\x00ratls-spki\x00".as_slice(), &spki].concat()).unwrap();
-        let session = ReportData::session(String::new(), digest);
-        assert_ne!(session.hash(), ratls);
-    }
-
-    /// A session id is chosen outside this crate and may hold a NUL. Were the
-    /// fields separated by one, `("a\0b", "c")` and `("a", "b\0c")` would be the
-    /// same bytes; a length in front of each field is what tells them apart.
-    #[test]
-    fn a_nul_in_a_session_id_cannot_move_the_split() {
-        let one = ReportData::session("a\x00b".into(), "c".into());
-        let other = ReportData::session("a".into(), "b\x00c".into());
-        assert_ne!(one.hash(), other.hash());
+        let id = String::from_utf8([RATLS_TAG, &spki].concat()).unwrap();
+        assert_ne!(ReportData::session(id).hash(), ratls);
     }
 
     /// Each variant's hash, pinned. The values were computed outside Rust, from
@@ -273,10 +261,10 @@ mod tests {
     /// deliberate or not — fails here rather than as a quote no peer accepts.
     #[test]
     fn each_variant_hashes_to_its_known_answer() {
-        let session = ReportData::session("ses_01HF7K".into(), "sha256:7e93fba".into());
+        let session = ReportData::session("ses_01HF7K".into());
         assert_eq!(
             hex::encode(session.hash()),
-            "747d204813283c5cd23e5c70e2dc1ef0ea44cfd377f1e3dafd8ef1e1979fca88"
+            "f0faf5c08b04c832a4beb6ed5ca5451406e827ba38ac69c88118906a15ecdce7"
         );
 
         let kbs = ReportData::for_kbs(vec![9u8; 32]);

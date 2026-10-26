@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use enclavid_attestation::ReportData;
 use enclavid_boundary::{Covert, reason};
 use session_types::{
-    Client, ClientAccess, Key, PluginPin, SessionMetadata, SessionStatus, is_wit_name,
+    Client, ClientAccess, Key, PluginPin, SessionMetadata, SessionQuote, SessionStatus, is_wit_name,
 };
 use storage_client::boundary::Storage;
 use storage_client::{MetadataOp, SetMetadata};
@@ -358,10 +358,13 @@ pub(super) fn post_create() -> MethodRouter<Arc<ClientState>> {
 /// POST /api/v1/sessions — full session-creation flow in one shot.
 ///
 /// 1. Parse + validate `policy` reference, `client_ref`, plugin pins.
-/// 2. Mint attestation quote binding (session_id, policy_digest) to
-///    this TEE measurement. Per-instance TLS-cert-to-attestation
-///    binding handles "is this the right TEE?" out of band.
-/// 3. Write the sealed metadata, its status Running, to the store.
+/// 2. Mint an attestation quote binding the session id to this TEE
+///    measurement — the one the session's applicant page is served too, so it
+///    binds nothing else (see `ReportData::Session`). That the request reached
+///    this TEE as it was sent is the channel's to show: the gateway's quote
+///    over its own key.
+/// 3. Write the sealed metadata, its status Running and the quote with it, to
+///    the store.
 ///
 /// The persisted metadata blob is AEAD'd with the TEE-side key,
 /// AAD=session_id, so the host sees opaque bytes only.
@@ -407,7 +410,7 @@ async fn create(
     let client_session_token = generate_client_session_token();
     let client_session_token_hash = Sha256::digest(client_session_token.expose_secret()).to_vec();
 
-    let report_data = ReportData::session(session_id.clone(), policy_digest.clone());
+    let report_data = ReportData::session(session_id.clone());
     let quote = state
         .attestor
         .mint(&report_data)
@@ -461,6 +464,12 @@ async fn create(
         // Set with `InitFailed`, if preparing the session fails: see `crate::init`.
         init_error: None,
         terms: held(asked, state.session_store.ttl_secs(), state.pull_deadline),
+        // The same bytes the consumer is answered with below, kept for the
+        // session's applicant page.
+        quote: Some(SessionQuote {
+            format: quote.format.clone(),
+            blob: quote.quote_blob.clone(),
+        }),
     };
     // Write ONLY the sealed metadata. The plaintext STATUS byte and PRINCIPAL
     // host hooks are gone: TTL is enforced inside the storage-CVM (its sweeper,

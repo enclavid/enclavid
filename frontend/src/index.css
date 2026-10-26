@@ -121,10 +121,13 @@
   * {
     @apply border-border outline-ring/50;
     }
+  /* No rubber band, pull-to-refresh or scroll chaining: a stroke on the
+     drawing screen or a swipe on the welcome moves what it is on, not the
+     page — nor the page's container in an in-app browser. */
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground overscroll-none;
     }
   html {
-    @apply font-sans;
+    @apply font-sans overscroll-none;
     }
 }

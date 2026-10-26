@@ -45,7 +45,20 @@ export function DrawingCanvas({ onPoint, className, hint }: Props) {
     fit();
     const ro = new ResizeObserver(fit);
     ro.observe(canvas);
-    return () => ro.disconnect();
+
+    // `touch-action: none` keeps the browser's own pan and zoom off the
+    // canvas, but an in-app browser's sheet listens beside the page, and a
+    // stroke down the canvas drags it. Cancelling the touch itself is the
+    // stronger refusal, and React's touch handlers are passive, so they
+    // cannot: these native ones are not. Pointer events still arrive.
+    const hold = (e: TouchEvent) => e.preventDefault();
+    canvas.addEventListener("touchstart", hold, { passive: false });
+    canvas.addEventListener("touchmove", hold, { passive: false });
+    return () => {
+      ro.disconnect();
+      canvas.removeEventListener("touchstart", hold);
+      canvas.removeEventListener("touchmove", hold);
+    };
   }, []);
 
   const localXY = (e: React.PointerEvent<HTMLCanvasElement>) => {

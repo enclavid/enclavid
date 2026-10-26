@@ -638,7 +638,7 @@ mod mint {
                 }),
             };
 
-            let probe = ReportData::session(String::new(), String::new());
+            let probe = ReportData::session(String::new());
             let quote = attestor.mint(&probe)?;
             verify_quote(&quote, &probe)?;
             Ok(attestor)

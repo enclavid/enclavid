@@ -9,8 +9,16 @@ import { Verify } from "@/screens/Verify";
 import { Completed } from "@/screens/Completed";
 import { Terminated } from "@/screens/Terminated";
 import { Unavailable } from "@/screens/Unavailable";
-import { getSessionId } from "@/lib/session";
-import { loadKey } from "@/lib/key";
+import { explicitSeed, getSessionId } from "@/lib/session";
+import { startEnclaveCheck } from "@/lib/enclave";
+import {
+  clearKey,
+  keepKeyInTabOnly,
+  loadKey,
+  pruneKeys,
+  randomKey,
+  storeKey,
+} from "@/lib/key";
 import { connect, getStatus, submitInput, warmup, ApiError } from "@/lib/api";
 import type { Decision, SessionProgress } from "@/types";
 
@@ -68,6 +76,14 @@ function Session({ sessionId }: { sessionId: string }) {
   // request, but a single visit to /verify only triggers one /connect.
   const connectFiredRef = useRef(false);
 
+  // Where the session runs is checked as the page opens, beside the status
+  // fetch, so the welcome has the result to show; and keys left behind by
+  // sessions abandoned long ago go.
+  useEffect(() => {
+    startEnclaveCheck(sessionId);
+    pruneKeys();
+  }, [sessionId]);
+
   // Status fetch + initial route normalization. Runs once per
   // session_id. Terminal statuses bypass the URL entirely; for a
   // running session we pin location to a valid sub-path.
@@ -87,7 +103,8 @@ function Session({ sessionId }: { sessionId: string }) {
           // re-fetch the decision via authenticated /connect,
           // which requires the applicant key. If the key is gone
           // (cleared storage, link reopened in a different
-          // browser) we fall through to the neutral fallback.
+          // browser or in a new tab after the session ended) we
+          // fall through to the neutral fallback.
           const key = loadKey(sessionId);
           if (key) {
             try {
@@ -101,6 +118,8 @@ function Session({ sessionId }: { sessionId: string }) {
               // already done.
             }
           }
+          // The session is decided: its key stays with this tab alone.
+          keepKeyInTabOnly(sessionId);
           setTerminal("completed");
           return;
         }
@@ -109,6 +128,7 @@ function Session({ sessionId }: { sessionId: string }) {
           status === "expired" ||
           status === "unspecified"
         ) {
+          clearKey(sessionId);
           setTerminal("terminated");
           return;
         }
@@ -134,6 +154,7 @@ function Session({ sessionId }: { sessionId: string }) {
         setStatusFetched(true);
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) {
+          clearKey(sessionId);
           setTerminationReason(
             "We couldn't find this verification session. Request a new link from the service that sent you here.",
           );
@@ -174,11 +195,17 @@ function Session({ sessionId }: { sessionId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location, sessionId, statusFetched]);
 
+  // The progress a request answered with; once the session has its decision,
+  // its key stays with this tab alone.
+  function show(next: SessionProgress) {
+    if (next.status === "completed") keepKeyInTabOnly(sessionId);
+    setProgress(next);
+  }
+
   async function connectAndRender(id: string, key: Uint8Array) {
     setError(null);
     try {
-      const next = await connect(id, key);
-      setProgress(next);
+      show(await connect(id, key));
     } catch (e) {
       const msg =
         e instanceof ApiError
@@ -201,8 +228,7 @@ function Session({ sessionId }: { sessionId: string }) {
     }
     setError(null);
     try {
-      const next = await submitInput(sessionId, slotId, key, form);
-      setProgress(next);
+      show(await submitInput(sessionId, slotId, key, form));
     } catch (e) {
       const msg =
         e instanceof ApiError
@@ -227,7 +253,18 @@ function Session({ sessionId }: { sessionId: string }) {
     location,
     <Switch>
       <Route path="/start">
-        <Welcome onBegin={() => setLocation("/keygen")} />
+        <Welcome
+          onBegin={() => {
+            // A link that skips the drawing makes the key here and goes
+            // straight on; otherwise the applicant draws it first.
+            if (explicitSeed(window.location.search)) {
+              setLocation("/keygen");
+              return;
+            }
+            storeKey(sessionId, randomKey());
+            setLocation("/verify");
+          }}
+        />
       </Route>
       <Route path="/keygen">
         <Ritual sessionId={sessionId} onReady={() => setLocation("/verify")} />
