@@ -59,6 +59,7 @@ export async function connect(
 
 export async function submitInput(
   sessionId: string,
+  awaitingSeq: number,
   slotId: string,
   applicantKey: Uint8Array,
   body: FormData,
@@ -67,14 +68,17 @@ export async function submitInput(
   // boundary=…` from the FormData itself. Setting it manually
   // breaks the boundary detection.
   const res = await fetch(
-    endpoint(sessionId, `/input/${encodeURIComponent(slotId)}`),
+    endpoint(
+      sessionId,
+      `/input/${awaitingSeq}/${encodeURIComponent(slotId)}`,
+    ),
     {
       method: "POST",
       headers: bearer(applicantKey),
       body,
     },
   );
-  // A 409 that carries a step is the session having moved on past the one
+  // A 409 that carries a step is the session having moved on past the wait
   // this answered — a second tap, a retry after a lost reply, another tab.
   // The answer was not taken; the step it carries is where the session is.
   if (res.status === 409) {

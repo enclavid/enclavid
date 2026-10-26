@@ -429,6 +429,16 @@ pub struct SessionState {
     /// The prompt the runtime is currently awaiting input for, if any.
     /// `None` before the first render and after a `finish`.
     pub current_prompt: Option<Prompt>,
+    /// How many times the session has stopped to wait for the applicant's
+    /// page, this wait included — `0` before the first. An answer names the
+    /// wait it answers by this number, so one composed for an earlier wait —
+    /// a second tap, a second tab, a retry after a lost reply — is refused
+    /// rather than taken for this one's.
+    ///
+    /// api's own count: it numbers each round that ends awaiting the page as
+    /// it persists it, whatever the runtime that wrote the rest of this value
+    /// put here. Only a wait moves it, so no other write to the session does.
+    pub awaiting_seq: u64,
 }
 
 // ---------------------------------------------------------------------

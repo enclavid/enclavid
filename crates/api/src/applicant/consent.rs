@@ -81,7 +81,7 @@ mod tests {
     /// rendered screen, not recomputed. Taking it from anywhere else would make
     /// these tests compare a function with itself.
     fn digest_the_browser_sees(prompt: &PromptDisclosure) -> String {
-        match consent_view(prompt, &Locale::default(), 1) {
+        match consent_view(prompt, &Locale::default()) {
             RequestView::Consent {
                 disclosure_digest, ..
             } => disclosure_digest,

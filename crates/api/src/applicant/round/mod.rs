@@ -13,7 +13,6 @@ mod extract;
 mod resolve;
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use axum::http::StatusCode;
 use secrecy::SecretBox;
@@ -66,9 +65,8 @@ pub(super) struct SessionRunCtx {
     /// the round consented to.
     disclosure_pubkey: String,
     /// Session version the state read returned — the persister's opening CAS
-    /// token, and what the step the session awaits is addressed under
-    /// (`views::slot`).
-    pub(super) version: u64,
+    /// token.
+    version: u64,
     /// The per-round media store — becomes the `media_load` half of the
     /// [`CallbackServer`] the keyless worker calls back into. Holds the seal key
     /// + a `Weak` to the applicant token.
@@ -159,6 +157,9 @@ impl SessionRunCtx {
         // Where this round's write leaves the session, once it lands. Held here
         // on the terms the consent is.
         let awaiting = RoundAwaiting::default();
+        // The wait this round ends in, if it ends in one: the next after the
+        // session's as the round began.
+        let awaiting_seq = session_state.awaiting_seq + 1;
         let persister = SessionPersister::for_round(
             state.session_store.clone(),
             session_id.clone(),
@@ -167,6 +168,7 @@ impl SessionRunCtx {
             Arc::downgrade(&token_owner),
             disclosure_pubkey,
             version,
+            awaiting_seq,
             metadata.clone(),
             prepared,
             &consent,
@@ -271,10 +273,7 @@ impl SessionRunCtx {
                 committed(persister.decided().await, awaiting.lock().await.take()).ok_or(e)?
             }
         };
-        // The step the session now awaits is addressed under the version the
-        // round's last write left the record at — the one the next round reads.
-        let version = persister.current_version.load(Ordering::SeqCst);
-        Ok(progress_from(status, &locale, version))
+        Ok(progress_from(status, &locale, awaiting_seq))
     }
 }
 

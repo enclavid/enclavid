@@ -77,10 +77,8 @@ export type RequestView =
       captures: CaptureStep[];
       /// Step indices already captured (subset of 0..captures.length).
       filled: number[];
-      /// Slot id to POST the next step to (`/input/<slot_id>`):
-      /// `<version>.media-<step>`, the version of the session as this step
-      /// was rendered, so an answer that arrives after the session moved on
-      /// is refused rather than taken for the next step's.
+      /// Slot id to POST the next step to
+      /// (`/input/<awaiting_seq>/<slot_id>`): `media-<step>`.
       next_slot_id: string;
       /// The most bytes one step's upload may be, multipart framing
       /// included; past it the server answers 413.
@@ -104,8 +102,6 @@ export type RequestView =
       /// (e.g. a stale tab), the accept is refused instead of sealing
       /// something the user never saw (show == seal).
       disclosure_digest: string;
-      /// Slot id to POST the answer to: `<version>.consent`.
-      slot_id: string;
     }
   | { kind: "verification_set"; alternatives: MediaSpec[][] };
 
@@ -119,5 +115,13 @@ export type Decision =
 
 export type SessionProgress =
   | { status: "completed"; decision: Decision }
-  | { status: "awaiting_input"; request: RequestView };
+  | {
+      status: "awaiting_input";
+      /// Which of the session's waits this is. The answer names it
+      /// (`/input/<awaiting_seq>/<slot_id>`), so one composed for an
+      /// earlier wait — a second tap, a second tab, a retry after a lost
+      /// reply — is refused with the wait that is current.
+      awaiting_seq: number;
+      request: RequestView;
+    };
 

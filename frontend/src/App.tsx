@@ -216,6 +216,7 @@ function Session({ sessionId }: { sessionId: string }) {
   }
 
   async function submitAndRender(
+    awaitingSeq: number,
     slotId: string,
     form: FormData,
   ): Promise<void> {
@@ -228,7 +229,7 @@ function Session({ sessionId }: { sessionId: string }) {
     }
     setError(null);
     try {
-      show(await submitInput(sessionId, slotId, key, form));
+      show(await submitInput(sessionId, awaitingSeq, slotId, key, form));
     } catch (e) {
       const msg =
         e instanceof ApiError

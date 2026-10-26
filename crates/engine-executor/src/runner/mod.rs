@@ -272,9 +272,12 @@ impl Executor {
         }
 
         // Perform the action and assemble the next session record.
+        // The wait's number is api's to give (`SessionState::awaiting_seq`): it
+        // numbers the round as it persists it, whatever this side puts here.
         let mut next_session = SessionState {
             state: new_state,
             current_prompt: None,
+            ..Default::default()
         };
         let status = match wit_action {
             crate::enclavid::policy::types::Action::Render(prompt) => {

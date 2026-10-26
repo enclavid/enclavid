@@ -32,8 +32,16 @@ use crate::locale::Locale;
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum SessionProgress {
-    Completed { decision: DecisionView },
-    AwaitingInput { request: RequestView },
+    Completed {
+        decision: DecisionView,
+    },
+    AwaitingInput {
+        /// Which of the session's waits this is (`SessionState::awaiting_seq`).
+        /// The page names it in the answer — `/input/{awaiting_seq}/{slot}` — so
+        /// an answer to an earlier wait is refused with the one that is current.
+        awaiting_seq: u64,
+        request: RequestView,
+    },
 }
 
 /// As JSON, as long whichever the verdict — see
@@ -63,8 +71,7 @@ pub enum RequestView {
     /// The prompt carries no running fill state — the policy reducer
     /// receives one `event::media` per round and re-renders until it
     /// advances, so `next_slot_id` is the first capture step
-    /// (`<version>.media-0`, see [`slot`]) and the frontend walks the steps
-    /// in order.
+    /// (`media-0`) and the frontend walks the steps in order.
     ///
     /// Per-step instructions + icon live on `CaptureStepView` — the
     /// frontend renders an intro screen before each step (gates the
@@ -99,9 +106,6 @@ pub enum RequestView {
         /// did not audit (show == seal). See
         /// [`dto::consent_disclosure_digest`].
         disclosure_digest: String,
-        /// Where the answer to this screen goes: `<version>.consent`, see
-        /// [`slot`].
-        slot_id: String,
         /// Covert-channel bandwidth of the `disclosure-fields`
         /// vocabulary — the only embedded kind whose keys reach the
         /// consumer envelope. Frontend renders `total_declared` vs
@@ -171,47 +175,32 @@ pub enum CaptureGuideView {
     Oval,
 }
 
-/// The address an answer to a step goes to: the step's name under the version
-/// of the session record it was rendered from.
-///
-/// Only a round's own write moves a running session's version on — another
-/// tab's round, a reset, a reply lost after its write and the input sent again
-/// all do — so an answer whose version is not the session's is for a step no
-/// longer shown, and `/input` refuses it rather than take it as the answer to
-/// whatever step came next.
-pub(super) fn slot(version: u64, step: &str) -> String {
-    format!("{version}.{step}")
-}
-
-/// A slot's version and step, as [`slot`] wrote them; `None` for anything else.
-pub(super) fn parse_slot(slot_id: &str) -> Option<(u64, &str)> {
-    let (version, step) = slot_id.split_once('.')?;
-    Some((version.parse().ok()?, step))
-}
-
-/// A round's result as the applicant sees it, its step addressed under
-/// `version`, the session record's as the round left it.
-pub(super) fn progress_from(status: RunStatus, locale: &Locale, version: u64) -> SessionProgress {
+/// A round's result as the applicant sees it: the decision, or the wait it
+/// ended in — numbered `awaiting_seq`, as the round persisted it.
+pub(super) fn progress_from(
+    status: RunStatus,
+    locale: &Locale,
+    awaiting_seq: u64,
+) -> SessionProgress {
     match status {
         RunStatus::Completed(decision) => SessionProgress::Completed {
             decision: decision.into(),
         },
         RunStatus::AwaitingInput(prompt) => SessionProgress::AwaitingInput {
-            request: prompt_view(&prompt, locale, version),
+            awaiting_seq,
+            request: prompt_view(&prompt, locale),
         },
     }
 }
 
-/// `prompt` as the applicant sees it, its step addressed under `version`, the
-/// session record's it was read from.
-pub(super) fn prompt_view(prompt: &Prompt, locale: &Locale, version: u64) -> RequestView {
+pub(super) fn prompt_view(prompt: &Prompt, locale: &Locale) -> RequestView {
     match prompt {
-        Prompt::Media(spec) => media_view(spec, locale, version),
-        Prompt::ConsentDisclosure(d) => consent_view(d, locale, version),
+        Prompt::Media(spec) => media_view(spec, locale),
+        Prompt::ConsentDisclosure(d) => consent_view(d, locale),
     }
 }
 
-pub(super) fn consent_view(d: &PromptDisclosure, locale: &Locale, version: u64) -> RequestView {
+pub(super) fn consent_view(d: &PromptDisclosure, locale: &Locale) -> RequestView {
     RequestView::Consent {
         fields: d
             .fields
@@ -228,11 +217,10 @@ pub(super) fn consent_view(d: &PromptDisclosure, locale: &Locale, version: u64) 
         // Binds this rendered screen to the accept the applicant will send
         // back (show == seal); recomputed + checked in `input::build_event`.
         disclosure_digest: dto::consent_disclosure_digest(d),
-        slot_id: slot(version, "consent"),
     }
 }
 
-fn media_view(spec: &MediaSpec, locale: &Locale, version: u64) -> RequestView {
+fn media_view(spec: &MediaSpec, locale: &Locale) -> RequestView {
     let captures: Vec<CaptureStepView> = spec
         .captures
         .iter()
@@ -243,7 +231,7 @@ fn media_view(spec: &MediaSpec, locale: &Locale, version: u64) -> RequestView {
         captures,
         // The prompt carries no fill state; the frontend walks the
         // capture steps from the first one and POSTs each in order.
-        next_slot_id: slot(version, "media-0"),
+        next_slot_id: "media-0".to_string(),
         max_upload_bytes: crate::limits::APPLICANT_INPUT_BODY_LIMIT,
     }
 }
@@ -284,52 +272,18 @@ fn guide_view(g: Option<&CaptureGuide>) -> CaptureGuideView {
 mod tests {
     use super::*;
 
-    /// A step's address reads back as the version and the step it was written
-    /// with, which is what `/input` compares against the session's.
+    /// The wait's number travels beside the request, not inside it, so any kind
+    /// of wait carries one, and the step's own address stays the step's.
     #[test]
-    fn a_slot_reads_back_as_written() {
-        assert_eq!(slot(7, "media-0"), "7.media-0");
-        assert_eq!(parse_slot(&slot(7, "media-0")), Some((7, "media-0")));
-        assert_eq!(
-            parse_slot(&slot(u64::MAX, "consent")),
-            Some((u64::MAX, "consent"))
+    fn a_wait_names_its_number_beside_its_request() {
+        let progress = progress_from(
+            RunStatus::AwaitingInput(Prompt::Media(MediaSpec::default())),
+            &Locale::default(),
+            3,
         );
-    }
-
-    /// An address with no version is no address: an answer to a step rendered
-    /// without one is refused, not taken for whichever step is current.
-    #[test]
-    fn a_slot_without_its_version_is_refused() {
-        for unversioned in ["media-0", "consent", ".consent", "x.media-0", "-1.consent"] {
-            assert_eq!(parse_slot(unversioned), None, "{unversioned}");
-        }
-    }
-
-    /// Each step a prompt renders carries the version it was read at, so two
-    /// renders of the same prompt — a retake — are two steps.
-    #[test]
-    fn a_rendered_step_is_addressed_under_its_version() {
-        let consent = PromptDisclosure::default();
-        match consent_view(&consent, &Locale::default(), 3) {
-            RequestView::Consent { slot_id, .. } => assert_eq!(slot_id, "3.consent"),
-            _ => panic!("a consent prompt renders a consent view"),
-        }
-        let media = MediaSpec::default();
-        let first = media_view(&media, &Locale::default(), 3);
-        let again = media_view(&media, &Locale::default(), 4);
-        match (first, again) {
-            (
-                RequestView::Media {
-                    next_slot_id: a, ..
-                },
-                RequestView::Media {
-                    next_slot_id: b, ..
-                },
-            ) => {
-                assert_eq!(a, "3.media-0");
-                assert_ne!(a, b);
-            }
-            _ => panic!("a media prompt renders a media view"),
-        }
+        let json = serde_json::to_value(&progress).unwrap();
+        assert_eq!(json["status"], "awaiting_input");
+        assert_eq!(json["awaiting_seq"], 3);
+        assert_eq!(json["request"]["next_slot_id"], "media-0");
     }
 }

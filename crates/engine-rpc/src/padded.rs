@@ -323,6 +323,7 @@ mod tests {
         let state = SessionState {
             state: vec![7u8; 4096],
             current_prompt: None,
+            awaiting_seq: u64::MAX,
         };
         let padded = Padded::seal(&state).expect("fits the frame");
         assert_eq!(padded.open().expect("decodes"), state);
@@ -336,6 +337,7 @@ mod tests {
         let large = Padded::seal(&SessionState {
             state: vec![0xAB; 512 * 1024],
             current_prompt: None,
+            awaiting_seq: u64::MAX,
         })
         .expect("fits");
 
@@ -423,6 +425,8 @@ mod tests {
                 .map(|i| (i % 256) as u8)
                 .collect(),
             current_prompt: None,
+            // The widest the count encodes at.
+            awaiting_seq: u64::MAX,
         };
         Padded::seal(&at_cap).expect("a state at POLICY_MAX_STATE_BYTES must fit its frame");
     }

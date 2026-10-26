@@ -14,7 +14,7 @@ use crate::state::AppState;
 
 use super::consent;
 use super::round::SessionRunCtx;
-use super::views::{SessionProgress, parse_slot, prompt_view};
+use super::views::{SessionProgress, prompt_view};
 
 /// Route factory. Auth attached at router level via
 /// `.layer(auth())` — see `applicant::router`.
@@ -22,11 +22,17 @@ pub(super) fn post_input() -> MethodRouter<Arc<AppState>> {
     post(input).layer(DefaultBodyLimit::max(APPLICANT_INPUT_BODY_LIMIT))
 }
 
-/// POST /api/v1/sessions/{id}/input/{slot_id} — submits applicant input for the
-/// prompt the session is currently awaiting.
+/// POST /api/v1/sessions/{id}/input/{awaiting_seq}/{slot_id} — submits applicant
+/// input for the prompt the session is currently awaiting.
 ///
-/// `slot_id` is `<version>.<step>` (`views::slot`): the version of the session
-/// record the step was rendered from, and the step —
+/// `awaiting_seq` names the wait the answer is for (`SessionState::awaiting_seq`),
+/// as the page was given it with the prompt. An answer to another wait than the
+/// session's — a second tap that arrived after the first moved the session on, a
+/// retry of a round whose reply was lost, another tab — is refused (409) with the
+/// wait that is current, before its body is read, so the page shows where the
+/// session stands instead of the answer being taken for the next step's.
+///
+/// `slot_id` shapes:
 ///   * `media-N` — capture-step `N` of the current `Prompt::Media`'s
 ///     `captures` (multipart parts = JPEG frames, in order); builds an
 ///     [`Event::Media`].
@@ -35,19 +41,13 @@ pub(super) fn post_input() -> MethodRouter<Arc<AppState>> {
 ///     an [`Event::ConsentDisclosure`]. On accept the digest must match the
 ///     current disclosure or the round is refused (409) — show == seal.
 ///
-/// An answer under another version than the session's is for a step no longer
-/// shown — a second tap that arrived after the first moved the session on, a
-/// retry of a round whose reply was lost, another tab — and is refused (409)
-/// with the step that is, so the page shows where the session stands instead
-/// of the answer being taken for the next step's.
-///
-/// The step must match the kind/shape of the prompt persisted as
+/// The `slot_id` must match the kind/shape of the prompt persisted as
 /// `current_prompt`. A mismatch returns 409 (kind/shape desync) or 400
 /// (unknown slot id) — the desync is surfaced explicitly rather than
 /// silently reinterpreting the body, which could trip fraud heuristics
 /// downstream.
 async fn input(
-    Path((session_id, slot_id)): Path<(String, String)>,
+    Path((session_id, awaiting_seq, slot_id)): Path<(String, u64, String)>,
     mut ctx: SessionRunCtx,
     multipart: Multipart,
 ) -> Response {
@@ -69,27 +69,25 @@ async fn input(
         );
         return StatusCode::CONFLICT.into_response();
     };
-    let Some((version, step)) = parse_slot(&slot_id) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    if version != ctx.version {
+    if awaiting_seq != session_state.awaiting_seq {
         return moved_on(&session_state, &ctx);
     }
-    let event = match build_event(&session_state, step, multipart).await {
+    let event = match build_event(&session_state, &slot_id, multipart).await {
         Ok(event) => event,
         Err(status) => return status.into_response(),
     };
     ctx.run(session_state, event).await.into_response()
 }
 
-/// The refusal of an answer to a step no longer shown: 409, with the step the
-/// session awaits now, as `/connect` would answer it.
+/// The refusal of an answer to a wait no longer current: 409, with the wait the
+/// session is in now, as `/connect` would answer it.
 fn moved_on(session_state: &SessionState, ctx: &SessionRunCtx) -> Response {
     let Some(prompt) = session_state.current_prompt.as_ref() else {
         return StatusCode::CONFLICT.into_response();
     };
     let mut response = SessionProgress::AwaitingInput {
-        request: prompt_view(prompt, &ctx.locale, ctx.version),
+        awaiting_seq: session_state.awaiting_seq,
+        request: prompt_view(prompt, &ctx.locale),
     }
     .into_response();
     *response.status_mut() = StatusCode::CONFLICT;
@@ -98,11 +96,10 @@ fn moved_on(session_state: &SessionState, ctx: &SessionRunCtx) -> Response {
 
 /// Build the inbound [`Event`] from the applicant's `/input`, validated
 /// against the prompt the session is awaiting (`current_prompt`). The
-/// `slot_id` — the slot's step, its version already matched — selects the
-/// input kind; it MUST match the kind of the current prompt — otherwise the
-/// desync is a 409 (or 400 for an unrecognised step). Frame counts and
-/// per-frame bounds are document-specific and live in the plugin layer, not
-/// here.
+/// `slot_id` selects the input kind; it MUST match the kind of the
+/// current prompt — otherwise the desync is a 409 (or 400 for an
+/// unrecognised slot id). Frame counts and per-frame bounds are
+/// document-specific and live in the plugin layer, not here.
 async fn build_event(
     session: &SessionState,
     slot_id: &str,

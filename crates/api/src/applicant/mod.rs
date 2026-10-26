@@ -84,7 +84,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             connect::post_connect().layer(auth()),
         )
         .route(
-            "/api/v1/sessions/{id}/input/{slot_id}",
+            "/api/v1/sessions/{id}/input/{awaiting_seq}/{slot_id}",
             input::post_input().layer(auth()),
         );
 

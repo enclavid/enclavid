@@ -95,6 +95,12 @@ pub(super) struct SessionPersister {
     /// the session, or settled for this round when the session holds none yet.
     /// The round's first write records it.
     prepared: Prepared,
+    /// The number this round's wait is given — one past the session's as the
+    /// round began (`SessionState::awaiting_seq`). Every state the round
+    /// persists carries it, whatever the worker put there: the count is this
+    /// side's, so a runtime that numbered its own waits could not make a stale
+    /// answer look current.
+    awaiting_seq: u64,
     /// The fields this round may seal, decided by THIS side before the worker
     /// ran — from the pre-round `current_prompt` and the accepted event, the
     /// same pair `/input` already bound the applicant's echoed digest to.
@@ -202,6 +208,7 @@ impl SessionPersister {
         applicant_session_token: Weak<SecretBox<Vec<u8>>>,
         client_disclosure_pubkey: String,
         version: u64,
+        awaiting_seq: u64,
         metadata: SessionMetadata,
         prepared: Prepared,
         consent: &RoundConsent,
@@ -217,6 +224,7 @@ impl SessionPersister {
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata),
             prepared,
+            awaiting_seq,
             consented: Arc::downgrade(consent),
             captures: Arc::downgrade(captures),
             awaiting: Arc::downgrade(awaiting),
@@ -254,9 +262,11 @@ impl SessionPersister {
     /// [`SessionPersister::consented`].
     pub(super) async fn persist(
         &self,
-        state: SessionState,
+        mut state: SessionState,
         decision: Option<Decision>,
     ) -> Result<(), CallbackError> {
+        // The wait this round ends in is numbered here, not by the worker.
+        state.awaiting_seq = self.awaiting_seq;
         // Serialize the whole critical section on the metadata guard, taken
         // before the acceptance is claimed: a second callback in the same round
         // waits here rather than interleaving with this one.
@@ -854,6 +864,7 @@ mod tests {
             Arc::downgrade(token),
             String::new(),
             version,
+            1,
             metadata,
             Prepared { props: None },
             &consent,
@@ -910,5 +921,53 @@ mod tests {
             load(&store, id, token.expose_secret()).await,
             Err(storage_client::StoreError::Crypto(_))
         ));
+    }
+
+    /// The wait a round ends in is numbered by this side: the state written
+    /// carries the number the round was given, whatever the worker put there.
+    #[tokio::test]
+    async fn a_round_s_wait_is_numbered_by_this_side() {
+        let disk = Arc::new(storage_client::memory::Disk::default());
+        let store = Arc::new(SessionStore::new(disk.connect().await, [4; 32], None));
+        let id = "ses_wait";
+        let created = SessionMetadata::default();
+        let set = SetMetadata(
+            Storage::expose_builder::<MetadataOp, _>(&created)
+                .vouch(reason!(Covert::NotChosen, "test fixture")),
+        );
+        let ops = store
+            .seal(id, &[&set])
+            .unwrap()
+            .vouch(reason!(Covert::Bounded, "test fixture"));
+        store.write(None, ops).await.unwrap();
+        let token = Arc::new(SecretBox::new(Box::new(vec![9; 32])));
+
+        let (metadata, _, version) = load(&store, id, token.expose_secret()).await.unwrap();
+        let consent = round_consent(&Event::Start, &None);
+        let captures = round_captures(&Event::Start);
+        let awaiting = RoundAwaiting::default();
+        let persister = SessionPersister::for_round(
+            store.clone(),
+            id.into(),
+            Arc::downgrade(&token),
+            String::new(),
+            version,
+            5,
+            metadata,
+            Prepared { props: None },
+            &consent,
+            &captures,
+            &awaiting,
+            Arc::new(ShuffleKey::from_tee_seal_key(&[4; 32])),
+        );
+        let from_the_worker = SessionState {
+            current_prompt: Some(Prompt::Media(Default::default())),
+            awaiting_seq: 999,
+            ..Default::default()
+        };
+        persister.persist(from_the_worker, None).await.unwrap();
+
+        let (_, state, _) = load(&store, id, token.expose_secret()).await.unwrap();
+        assert_eq!(state.unwrap().awaiting_seq, 5);
     }
 }

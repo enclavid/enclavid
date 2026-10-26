@@ -14,11 +14,12 @@ type Props = {
   progress: SessionProgress | null;
   error: string | null;
   /// Submit the applicant's input for the current Suspended request
-  /// to api/v1/sessions/:id/input/:slot_id as multipart/form-data. App owns
-  /// the network call + key + state update; Verify just hands it the
-  /// slot identifier and the assembled FormData (frames as parts for
+  /// to api/v1/sessions/:id/input/:awaiting_seq/:slot_id as
+  /// multipart/form-data. App owns the network call + key + state
+  /// update; Verify just hands it the wait the screen was rendered for,
+  /// the slot identifier and the assembled FormData (frames as parts for
   /// media captures, an `accepted` text part for consent).
-  onSubmit: (slotId: string, form: FormData) => Promise<void>;
+  onSubmit: (awaitingSeq: number, slotId: string, form: FormData) => Promise<void>;
 };
 
 export function Verify({ sessionId, progress, error, onSubmit }: Props) {
@@ -41,6 +42,7 @@ export function Verify({ sessionId, progress, error, onSubmit }: Props) {
   return (
     <RequestRenderer
       sessionId={sessionId}
+      awaitingSeq={progress.awaiting_seq}
       request={progress.request}
       error={error}
       onSubmit={onSubmit}
@@ -86,30 +88,37 @@ function ConnectError({ message }: { message: string }) {
 
 function RequestRenderer({
   sessionId,
+  awaitingSeq,
   request,
   error,
   onSubmit,
 }: {
   sessionId: string;
+  /// The wait this screen was rendered for: every answer from it names
+  /// it, whatever wait the session has moved on to since.
+  awaitingSeq: number;
   request: RequestView;
   error: string | null;
-  onSubmit: (slotId: string, form: FormData) => Promise<void>;
+  onSubmit: (awaitingSeq: number, slotId: string, form: FormData) => Promise<void>;
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
-  // The step whose instruction screen the user has tapped "Start" on.
-  // Compared with the step on screen rather than reset when it changes,
-  // so the render that brings a new step already shows its instructions:
-  // a reset after the fact would leave one frame of the old step's
-  // capture screen, its "Use photo" live, under the new step's address.
-  const slotKey = request.kind === "media" ? request.next_slot_id : null;
+  // The step whose instruction screen the user has tapped "Start" on —
+  // the wait and the slot together, since every wait is a step of its
+  // own, a retake of the same prompt included. Compared with the step on
+  // screen rather than reset when it changes, so the render that brings
+  // a new step already shows its instructions: a reset after the fact
+  // would leave one frame of the old step's capture screen, its "Use
+  // photo" live, under the new step.
+  const slotKey =
+    request.kind === "media" ? `${awaitingSeq}/${request.next_slot_id}` : null;
   const [startedFor, setStartedFor] = useState<string | null>(null);
   const startedCapture = slotKey !== null && startedFor === slotKey;
 
   if (request.kind === "media") {
     // `next_slot_id` is the URL the host wants the next clip POSTed
-    // to. We derive the step it refers to from `<version>.media-<N>`
-    // and read that entry from `captures` to drive the on-screen guide.
+    // to. We derive the step it refers to from `media-<N>` and read
+    // that entry from `captures` to drive the on-screen guide.
     const nextIndex = parseStepIndex(request.next_slot_id);
     const total = request.captures.length;
     const step =
@@ -121,7 +130,7 @@ function RequestRenderer({
       setLocalError(null);
       setSubmitting(true);
       try {
-        await onSubmit(request.next_slot_id, form);
+        await onSubmit(awaitingSeq, request.next_slot_id, form);
       } catch (e) {
         setLocalError(
           e instanceof Error ? e.message : "Could not submit the photo.",
@@ -156,7 +165,7 @@ function RequestRenderer({
           instructions={step.instructions}
           stepNumber={(nextIndex ?? 0) + 1}
           totalSteps={total}
-          onStart={() => setStartedFor(request.next_slot_id)}
+          onStart={() => setStartedFor(slotKey)}
           secondaryAction={<ContinueOnPhone sessionId={sessionId} />}
         />
       );
@@ -167,7 +176,7 @@ function RequestRenderer({
         <MediaCapture
           // A step of its own: frames, preview and buttons start over, so
           // nothing taken for one step can be sent for the next.
-          key={request.next_slot_id}
+          key={slotKey}
           promptLabel={request.label}
           step={step}
           stepNumber={(nextIndex ?? 0) + 1}
@@ -195,7 +204,7 @@ function RequestRenderer({
         // seals only what the applicant audited (show == seal). If the flow
         // advanced since this screen rendered, the TEE rejects the accept.
         form.append("disclosure_hash", request.disclosure_digest);
-        await onSubmit(request.slot_id, form);
+        await onSubmit(awaitingSeq, "consent", form);
       } catch (e) {
         setLocalError(
           e instanceof Error ? e.message : "Could not submit consent.",
@@ -248,11 +257,10 @@ function RequestRenderer({
   );
 }
 
-/// Parse `<version>.media-<N>` slot ids back to their integer index.
-/// Returns `null` for malformed values (caller surfaces "unexpected
-/// state").
+/// Parse `media-<N>` slot ids back to their integer index. Returns
+/// `null` for malformed values (caller surfaces "unexpected state").
 function parseStepIndex(slotId: string): number | null {
-  const m = slotId.match(/^\d+\.media-(\d+)$/);
+  const m = slotId.match(/^media-(\d+)$/);
   if (!m) return null;
   const n = parseInt(m[1], 10);
   return Number.isFinite(n) ? n : null;

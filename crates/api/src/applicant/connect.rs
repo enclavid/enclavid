@@ -28,13 +28,12 @@ async fn connect(ctx: SessionRunCtx) -> Result<SessionProgress, StatusCode> {
     // A started session answers with the prompt it waits on, so reopening the
     // link carries on where the applicant was instead of starting over. One that
     // has ended never reaches here: the extractor answers it (`round::extract`).
-    if let Some(prompt) = ctx
-        .session_state
-        .as_ref()
-        .and_then(|s| s.current_prompt.as_ref())
+    if let Some(state) = ctx.session_state.as_ref()
+        && let Some(prompt) = state.current_prompt.as_ref()
     {
         return Ok(SessionProgress::AwaitingInput {
-            request: prompt_view(prompt, &ctx.locale, ctx.version),
+            awaiting_seq: state.awaiting_seq,
+            request: prompt_view(prompt, &ctx.locale),
         });
     }
     ctx.run(SessionState::default(), Event::Start).await
