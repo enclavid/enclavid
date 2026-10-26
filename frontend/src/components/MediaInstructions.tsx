@@ -96,9 +96,6 @@ export function MediaInstructions({
         <Button size="lg" className="h-14 w-full text-base" onClick={onStart}>
           Start capture
         </Button>
-        <p className="mt-3 text-center text-xs text-muted-foreground">
-          Your camera will turn on after you tap Start.
-        </p>
         {secondaryAction && <div className="mt-4">{secondaryAction}</div>}
       </div>
     </main>

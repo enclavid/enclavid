@@ -107,6 +107,11 @@ export function MediaCapture({
   const [attempt, setAttempt] = useState(0);
 
   const [phase, setPhase] = useState<Phase>("initializing");
+  // A camera facing the applicant is shown as a mirror, as a phone's own
+  // camera shows a selfie — otherwise every move reads backwards. Only the
+  // view turns: the frames are drawn from the stream as the camera sees it,
+  // and the photo to review is the one that is sent.
+  const [mirrored, setMirrored] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   // 0..1 — completed-frame ratio while phase === "recording".
@@ -133,6 +138,10 @@ export function MediaCapture({
           return;
         }
         streamRef.current = stream;
+        // A computer's camera may not say which way it faces; one asked for
+        // as the front is taken to face the applicant.
+        const facing = stream.getVideoTracks()[0]?.getSettings().facingMode;
+        setMirrored(facing ? facing === "user" : step.camera === "front");
 
         const video = videoRef.current;
         if (!video) return;
@@ -311,6 +320,7 @@ export function MediaCapture({
           autoPlay
           className={cn(
             "absolute inset-0 size-full object-cover",
+            mirrored && "-scale-x-100",
             !showCamera && "invisible",
           )}
         />
