@@ -119,6 +119,56 @@ export async function warmup(sessionId: string): Promise<void> {
   }
 }
 
+// A hand-over of the session for another device, made for the key that holds
+// it: what the code the page shows carries (see `lib/handoff.ts`).
+export async function createHandoff(
+  sessionId: string,
+  key: Uint8Array,
+): Promise<string> {
+  const res = await fetch(endpoint(sessionId, "/handoff"), {
+    method: "POST",
+    headers: bearer(key),
+  });
+  const { handoff } = await parseOrThrow<{ handoff: string }>(res);
+  return handoff;
+}
+
+// Take the session over from another device's hand-over, with this browser's
+// own key: once it lands, that key alone opens the session.
+export async function takeOver(
+  sessionId: string,
+  key: Uint8Array,
+  handoff: string,
+): Promise<void> {
+  const res = await fetch(endpoint(sessionId, "/takeover"), {
+    method: "POST",
+    headers: { ...bearer(key), "Content-Type": "application/json" },
+    body: JSON.stringify({ handoff }),
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, `HTTP ${res.status}`);
+  }
+}
+
+// Whether `key` still holds the session, asked without claiming it — unlike
+// /connect, which claims a session no applicant holds: `held`, `lost` (another
+// key holds it now) or `unclaimed` (no key does).
+export async function heldBy(
+  sessionId: string,
+  key: Uint8Array,
+): Promise<"held" | "lost" | "unclaimed"> {
+  const res = await fetch(endpoint(sessionId, "/held"), {
+    headers: bearer(key),
+  });
+  if (res.status === 204) return "held";
+  if (res.status === 403) return "lost";
+  if (res.status === 409) return "unclaimed";
+  throw new ApiError(res.status, `HTTP ${res.status}`);
+}
+
+// Hands the session back unclaimed: what its applicant did goes, and the next
+// /connect takes it with any key. Refused (409) once the session has its
+// decision, or when it moved under the reset.
 export async function resetState(sessionId: string): Promise<void> {
   const res = await fetch(endpoint(sessionId, "/state"), {
     method: "DELETE",

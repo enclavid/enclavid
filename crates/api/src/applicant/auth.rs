@@ -1,20 +1,22 @@
 //! Per-route authentication for the applicant-facing API.
 //!
-//! Uniform model across the authenticated routes (`/connect`, `/input`):
-//! parse the `Authorization: Bearer <base64>` header into a [`CallerKey`]
-//! (the applicant's session token) and attach it to the request
-//! extensions. The handler downstream extracts `CallerKey` and uses it as
-//! the inner AEAD layer key for session state + media.
+//! Uniform model across the authenticated routes (`/connect`, `/input`,
+//! `/handoff`, `/takeover`, `/held`): parse the `Authorization: Bearer <base64>` header
+//! into a [`CallerKey`] (the applicant's key) and attach it to the request
+//! extensions. The handler downstream extracts `CallerKey` and opens with it
+//! the lock the session's data key is kept in — the inner AEAD layer key for
+//! session state + media.
 //!
 //! There is NO key table here. A wrong key is rejected CRYPTOGRAPHICALLY,
-//! not by a lookup: session state is sealed under the applicant token, so a
-//! mismatched bearer fails to open it at the state read in the extractor,
-//! which surfaces as **403** (see `round::extract` +
-//! `StoreError::Crypto`). The frontend treats that 403 as "wrong key /
-//! different device" and offers `/reset`. First-claim is implicit: a fresh
-//! session has no state, so the first `/connect` establishes it under
-//! whatever key is presented; `/reset` deletes the state, making the
-//! session claimable again with a new key.
+//! not by a lookup: the data key is locked under the applicant's key, so a
+//! mismatched bearer fails to open the lock in the extractor, which surfaces
+//! as **403** (see `round::extract` + `StoreError::Crypto`). The frontend
+//! treats that 403 as "wrong key / different device" and offers `/reset`.
+//! First-claim is implicit: a fresh session has no lock, so the first
+//! `/connect` locks a new data key under whatever key is presented; `/reset`
+//! drops the lock with what it opened, making the session claimable again
+//! with a new key; `/takeover` locks the data keys, and a fresh one, under
+//! another.
 //!
 //! `/status`, `/attestation` and `/state` (DELETE) are intentionally
 //! unauthenticated and bypass this layer at the router level.
@@ -58,10 +60,10 @@ where
 }
 
 pub(super) async fn enforce(mut req: Request, next: Next) -> Result<Response, StatusCode> {
-    // Parse the bearer into the applicant session token and attach it. No
-    // lookup, no claim table: a wrong key can't open the AEAD-sealed state,
-    // so it is rejected at the state read (403), not here. A missing /
-    // malformed header is the only thing this layer rejects (401).
+    // Parse the bearer into the applicant's key and attach it. No lookup, no
+    // claim table: a wrong key can't open the data key's lock, so it is
+    // rejected where the lock is opened (403), not here. A missing / malformed
+    // header is the only thing this layer rejects (401).
     let key = parse_bearer(&req)?;
     let key_arc = Arc::new(SecretBox::new(Box::new(key)));
     req.extensions_mut().insert(CallerKey(key_arc));

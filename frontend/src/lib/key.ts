@@ -17,9 +17,11 @@
 // sessionStorage, so a reload still shows the decision and closing the tab
 // forgets it (`keepKeyInTabOnly`). A session that ended without one forgets it
 // everywhere (`clearKey`), and keys left behind by sessions never finished
-// are dropped by age (`pruneKeys`).
+// are dropped by age (`pruneKeys`). A key made for a take-over whose answer has
+// not come yet waits beside it, under `enclavid:pending-key:<id>`.
 
 const STORAGE_PREFIX = "enclavid:key:";
+const PENDING_PREFIX = "enclavid:pending-key:";
 const KEY_LEN = 32;
 
 // The longest a key is kept: past it, the session it opens has ended under any
@@ -42,7 +44,37 @@ const ENTROPY_TARGET_POINTS = 200;
 // --- Storage ---
 
 export function loadKey(sessionId: string): Uint8Array | null {
-  const name = STORAGE_PREFIX + sessionId;
+  return loadFrom(STORAGE_PREFIX + sessionId);
+}
+
+export function storeKey(sessionId: string, key: Uint8Array): void {
+  storeAt(STORAGE_PREFIX + sessionId, key);
+}
+
+/// A key this page made for a take-over whose answer has not come yet. Kept
+/// before the request leaves, so a take that lands while its answer is lost —
+/// the network gone, the tab closed — does not leave the session under a key
+/// nobody has; settled by asking whether it holds the session (see
+/// `lib/handoff.ts`).
+export function storePendingKey(sessionId: string, key: Uint8Array): void {
+  storeAt(PENDING_PREFIX + sessionId, key);
+}
+
+export function loadPendingKey(sessionId: string): Uint8Array | null {
+  return loadFrom(PENDING_PREFIX + sessionId);
+}
+
+export function clearPendingKey(sessionId: string): void {
+  localStorage.removeItem(PENDING_PREFIX + sessionId);
+  sessionStorage.removeItem(PENDING_PREFIX + sessionId);
+}
+
+/// Whether two keys are the same key.
+export function sameKey(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((byte, i) => byte === b[i]);
+}
+
+function loadFrom(name: string): Uint8Array | null {
   const stored =
     read(localStorage.getItem(name)) ?? read(sessionStorage.getItem(name));
   if (!stored) return null;
@@ -53,13 +85,13 @@ export function loadKey(sessionId: string): Uint8Array | null {
   }
 }
 
-export function storeKey(sessionId: string, key: Uint8Array): void {
+function storeAt(name: string, key: Uint8Array): void {
   const stored = JSON.stringify({
     key: base64Encode(key),
     created: Date.now(),
   } satisfies Stored);
-  localStorage.setItem(STORAGE_PREFIX + sessionId, stored);
-  sessionStorage.setItem(STORAGE_PREFIX + sessionId, stored);
+  localStorage.setItem(name, stored);
+  sessionStorage.setItem(name, stored);
 }
 
 /// The session has its decision: keep the key in this tab alone, so a reload
@@ -75,6 +107,7 @@ export function keepKeyInTabOnly(sessionId: string): void {
 export function clearKey(sessionId: string): void {
   localStorage.removeItem(STORAGE_PREFIX + sessionId);
   sessionStorage.removeItem(STORAGE_PREFIX + sessionId);
+  clearPendingKey(sessionId);
 }
 
 /// Drop every key older than `KEY_MAX_AGE_MS`, and any that cannot be read —
@@ -84,7 +117,9 @@ export function pruneKeys(): void {
   const names: string[] = [];
   for (let i = 0; i < localStorage.length; i++) {
     const name = localStorage.key(i);
-    if (name?.startsWith(STORAGE_PREFIX)) names.push(name);
+    if (name?.startsWith(STORAGE_PREFIX) || name?.startsWith(PENDING_PREFIX)) {
+      names.push(name);
+    }
   }
   for (const name of names) {
     const stored = read(localStorage.getItem(name));

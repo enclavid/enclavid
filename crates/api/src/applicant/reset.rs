@@ -100,12 +100,15 @@ async fn reset(
     // policy naming an old ref would pass the gate and get `Ok(None)` from the
     // store — a trap in the worker rather than a clean refusal.
     metadata.captured_media.clear();
+    // The lock goes with what it opened: the next `/connect` claims the session
+    // with a data key of its own.
+    metadata.data_key_lock = None;
 
     let set_metadata = SetMetadata(Storage::expose_builder::<MetadataOp, _>(&metadata).vouch(
         reason!(
             Covert::AlreadyHeld,
-            "sealed under tee_seal_key; this write SHRINKS the metadata to its \
-             disclosure-free size, which tells the host a reset happened — something \
+            "sealed under tee_seal_key; this write SHRINKS the metadata to its size \
+             before any applicant, which tells the host a reset happened — something \
              it already watched arrive as this very request"
         ),
     ));

@@ -12,12 +12,13 @@ use crate::executor::{Executor, connect_execution_worker};
 use crate::shuffle::ShuffleKey;
 use crate::turns::ConsumerTurns;
 
-/// Applicant key held in TEE memory for the duration of a request. Raw
-/// bytes used as the inner AEAD layer key for session state + media.
-/// `SecretBox` provides zeroization on drop and redacts from Debug output.
-/// Sourced fresh from the request bearer by [`super::applicant::auth`]; not
-/// cached — a wrong key is rejected cryptographically at the state read
-/// (`StoreError::Crypto` → 403), so there is no first-claim table to keep.
+/// Applicant key held in TEE memory for the duration of a request: what the
+/// session's data key — the inner AEAD layer key for session state + media —
+/// is locked under. `SecretBox` provides zeroization on drop and redacts from
+/// Debug output. Sourced fresh from the request bearer by
+/// [`super::applicant::auth`]; not cached — a wrong key is rejected
+/// cryptographically where the lock is opened (`StoreError::Crypto` → 403), so
+/// there is no first-claim table to keep.
 pub type ApplicantSessionToken = SecretBox<Vec<u8>>;
 
 pub struct AppState {

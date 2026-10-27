@@ -12,7 +12,7 @@ use super::*;
 use crate::memory::Disk;
 
 const KEY: [u8; 32] = [7; 32];
-const TOKEN: [u8; 32] = [9; 32];
+const DATA_KEY: [u8; 32] = [9; 32];
 
 async fn store_on(disk: &Arc<Disk>, key: [u8; 32]) -> SessionStore {
     SessionStore::new(disk.connect().await, key, Some(3600))
@@ -50,7 +50,7 @@ fn set_state(state: &SessionState, beside: &SessionMetadata) -> SetState<'static
         state: Storage::expose_builder::<StateOp, _>(state)
             .vouch_with(Covert::Transformed, encode_padded)
             .unwrap(),
-        applicant_session_token: &TOKEN,
+        data_key: &DATA_KEY,
         binding: StateBinding::of(beside),
     }
 }
@@ -60,7 +60,7 @@ fn set_media(hash: [u8; 32], frame: &[u8]) -> SetMedia<'static> {
         blob_hash: hash,
         bytes: Storage::expose_builder::<MediaOp, _>(frame.to_vec())
             .vouch(reason!(Covert::AlreadyHeld, "test fixture")),
-        applicant_session_token: &TOKEN,
+        data_key: &DATA_KEY,
     }
 }
 
@@ -111,7 +111,7 @@ async fn read_state(store: &SessionStore, id: &str) -> Result<Option<SessionStat
         .into_inner()
         .expect("the session exists");
     Ok(store
-        .open_state(id, sealed, &md, &TOKEN)?
+        .open_state(id, sealed, &md, &DATA_KEY)?
         .trust(reason!(Replay::Harmless, "test fixture"))
         .into_inner())
 }
@@ -385,15 +385,16 @@ async fn media_round_trips_under_a_name_that_is_not_its_hash() {
     let hash = [3; 32];
     write(&store, "ses_a", version, &[&set_media(hash, b"a frame")]).await;
 
+    let keys = DataKeys::of(&[DATA_KEY]);
     let loaded = store
-        .load_media("ses_a", &hash, &TOKEN)
+        .load_media("ses_a", &hash, &keys)
         .await
         .unwrap()
         .trust(reason!(Replay::Idempotent, "test fixture"))
         .into_inner();
     assert_eq!(loaded.as_deref(), Some(&b"a frame"[..]));
     let missing = store
-        .load_media("ses_a", &[4; 32], &TOKEN)
+        .load_media("ses_a", &[4; 32], &keys)
         .await
         .unwrap()
         .trust(reason!(Replay::Idempotent, "test fixture"))
@@ -407,10 +408,116 @@ async fn media_round_trips_under_a_name_that_is_not_its_hash() {
         records.insert(store.record("ses_b").into_inner(), a);
     }
     let moved = store
-        .load_media("ses_b", &hash, &TOKEN)
+        .load_media("ses_b", &hash, &keys)
         .await
         .unwrap()
         .trust(reason!(Replay::Idempotent, "test fixture"))
         .into_inner();
     assert_eq!(moved, None, "another session names its media otherwise");
+}
+
+/// A capture sealed before a take opens with the keys after it; one sealed
+/// after a take does not open with the keys from before it.
+#[tokio::test]
+async fn media_opens_for_whoever_held_the_key_it_was_sealed_under() {
+    let disk = Arc::new(Disk::default());
+    let store = store_on(&disk, KEY).await;
+    let version = create(&store, "ses_a", &metadata("a")).await;
+    const LATER: [u8; 32] = [10; 32];
+
+    let before = [3; 32];
+    let version = write(&store, "ses_a", version, &[&set_media(before, b"before")]).await;
+    let after = [4; 32];
+    let set_after = SetMedia {
+        blob_hash: after,
+        bytes: Storage::expose_builder::<MediaOp, _>(b"after".to_vec())
+            .vouch(reason!(Covert::AlreadyHeld, "test fixture")),
+        data_key: &LATER,
+    };
+    write(&store, "ses_a", version, &[&set_after]).await;
+
+    let load = |hash: [u8; 32], keys: DataKeys| {
+        let store = &store;
+        async move {
+            store.load_media("ses_a", &hash, &keys).await.map(|m| {
+                m.trust(reason!(Replay::Idempotent, "test fixture"))
+                    .into_inner()
+            })
+        }
+    };
+    let taker = || DataKeys::of(&[DATA_KEY, LATER]);
+    assert_eq!(
+        load(before, taker()).await.unwrap().as_deref(),
+        Some(&b"before"[..])
+    );
+    assert_eq!(
+        load(after, taker()).await.unwrap().as_deref(),
+        Some(&b"after"[..])
+    );
+    assert!(matches!(
+        load(after, DataKeys::of(&[DATA_KEY])).await,
+        Err(StoreError::Crypto(_))
+    ));
+}
+
+/// A state is bound to the lock beside it: beside another lock — a hand-over it
+/// was not written with — it does not open.
+#[tokio::test]
+async fn a_state_opens_only_beside_the_lock_it_was_written_with() {
+    let disk = Arc::new(Disk::default());
+    let store = store_on(&disk, KEY).await;
+    let mut md = metadata("a");
+    md.data_key_lock = Some(vec![1; 60]);
+    let version = create(&store, "ses_a", &md).await;
+    let version = write(
+        &store,
+        "ses_a",
+        version,
+        &[&set_state(&state_at(b"one"), &md)],
+    )
+    .await;
+    assert_eq!(
+        read_state(&store, "ses_a").await.unwrap(),
+        Some(state_at(b"one"))
+    );
+
+    let mut handed = md.clone();
+    handed.data_key_lock = Some(vec![2; 60]);
+    write(&store, "ses_a", version, &[&set_metadata(&handed)]).await;
+    assert!(matches!(
+        read_state(&store, "ses_a").await,
+        Err(StoreError::Crypto(_))
+    ));
+}
+
+/// A hand-over opens on this side, for its own session, to the key and the time
+/// it was sealed with; for another session, or under another master, it does
+/// not open.
+#[tokio::test]
+async fn a_handoff_opens_only_here_and_for_its_session() {
+    let disk = Arc::new(Disk::default());
+    let store = store_on(&disk, KEY).await;
+    let sealed = store
+        .seal_handoff(
+            "ses_a",
+            &Handoff {
+                key: SecretBox::new(Box::new(vec![1; 32])),
+                lock: [5; 32],
+                until_unix_secs: 1_000,
+            },
+        )
+        .unwrap();
+    let opened = store.open_handoff("ses_a", &sealed).unwrap();
+    assert_eq!(opened.key.expose_secret().as_slice(), &[1; 32]);
+    assert_eq!(opened.lock, [5; 32]);
+    assert_eq!(opened.until_unix_secs, 1_000);
+    assert!(matches!(
+        store.open_handoff("ses_b", &sealed),
+        Err(StoreError::Crypto(_))
+    ));
+    let elsewhere = store_on(&disk, [8; 32]).await;
+    assert!(matches!(
+        elsewhere.open_handoff("ses_a", &sealed),
+        Err(StoreError::Crypto(_))
+    ));
 }

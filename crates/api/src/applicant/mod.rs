@@ -35,6 +35,7 @@ mod auth;
 mod callbacks;
 mod connect;
 mod consent;
+mod handoff;
 mod input;
 pub(crate) mod media_store;
 mod persister;
@@ -86,6 +87,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/sessions/{id}/input/{awaiting_seq}/{slot_id}",
             input::post_input().layer(auth()),
+        )
+        .route(
+            "/api/v1/sessions/{id}/handoff",
+            handoff::post_handoff().layer(auth()),
+        )
+        .route(
+            "/api/v1/sessions/{id}/takeover",
+            handoff::post_takeover().layer(auth()),
+        )
+        .route(
+            "/api/v1/sessions/{id}/held",
+            handoff::get_held().layer(auth()),
         );
 
     // The page, out of this binary. Not a directory the host named: it is

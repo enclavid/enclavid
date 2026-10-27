@@ -13,7 +13,7 @@ use secrecy::ExposeSecret;
 use enclavid_boundary::{AuthZ, Replay, reason};
 use engine_rpc::CompositionKey;
 use session_types::{SessionMetadata, SessionStatus};
-use storage_client::{Metadata, SealedState};
+use storage_client::{DataKeys, Metadata, SealedState, lock_data_keys, unlock_data_keys};
 
 use crate::applicant::auth::CallerKey;
 use crate::applicant::media_store::HatchMediaStore;
@@ -84,8 +84,7 @@ impl SessionRunCtx {
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
         let session_id = params.get("id").cloned().ok_or(StatusCode::BAD_REQUEST)?;
-        let CallerKey(applicant_session_token) =
-            CallerKey::from_request_parts(parts, state).await?;
+        let CallerKey(applicant_key) = CallerKey::from_request_parts(parts, state).await?;
         // Applicant locale from `Accept-Language` — captured once per
         // request and threaded through view construction so every
         // text-ref resolves to the user's preferred language.
@@ -117,17 +116,16 @@ impl SessionRunCtx {
             })?;
 
         // Trust the metadata. Applicant flow has no per-tenant principal to
-        // cross-check; security rides on the bearer-key auth layer + AEAD-
-        // sealing under tee_seal_key/AAD=session_id (host tampering breaks the
-        // seal at decode).
+        // cross-check; security rides on the bearer opening the data key's lock
+        // below + AEAD-sealing under tee_seal_key/AAD=session_id (host tampering
+        // breaks the seal at decode).
         let metadata = metadata_untrusted
             .trust(reason!(
                 AuthZ::Matched,
                 r#"
 Applicant flow doesn't authenticate per-tenant, so there is no
-principal to cross-check here. The match is upstream: the
-bearer-key auth layer at the route, plus AEAD-binding on state
-under applicant_session_token.
+principal to cross-check here. The match is below: the bearer must
+open the lock this metadata keeps the session's data key in.
             "#
             ))
             .trust_accept_risk(reason!(
@@ -153,26 +151,41 @@ the host, as `client::disclosures` says of the same rollback.
                 StatusCode::NOT_FOUND
             })?;
 
+        // The keys the state and media are sealed under inside. A claimed
+        // session keeps them locked under its applicant's key, and a bearer that
+        // does not open the lock is not that applicant's: refused as 403, the
+        // different-device answer, so the frontend offers `/reset` — the
+        // durable, cryptographic first-claim guard. A session no applicant holds
+        // yet gets a fresh key, locked under this bearer for the round's first
+        // write to record: the claim is whoever's round lands first.
+        let (data_keys, new_lock) = match &metadata.data_key_lock {
+            Some(lock) => (
+                unlock_data_keys(&session_id, lock, applicant_key.expose_secret())
+                    .map_err(|_| StatusCode::FORBIDDEN)?,
+                None,
+            ),
+            None => {
+                let data_keys = DataKeys::fresh();
+                // A key no AEAD takes — not 32 bytes — can lock nothing.
+                let lock = lock_data_keys(&session_id, &data_keys, applicant_key.expose_secret())
+                    .map_err(|_| StatusCode::FORBIDDEN)?;
+                (data_keys, Some(lock))
+            }
+        };
+        let data_keys = Arc::new(data_keys);
+
         // The state, opened beside the metadata it is bound to. A state that
         // won't open is refused as 403, so the frontend offers `/reset`:
-        //   * under this bearer — a wrong key / different-device claim, since the
-        //     inner AEAD layer is keyed by the applicant token: the durable,
-        //     cryptographic first-claim guard;
         //   * beside this metadata — one the host put back from before a reset,
-        //     or from before a newer disclosure or capture;
-        //   * missing beside metadata that records an applicant's data — one the
-        //     host removed.
+        //     a hand-over, or a newer disclosure or capture;
+        //   * missing beside metadata that records an applicant — one the host
+        //     removed.
         // Everything else is a real 500. A state missing beside metadata that
         // records nothing of an applicant is `Ok(None)`: the session is
         // unclaimed, and a first `/connect` proceeds.
         let session_state = state
             .session_store
-            .open_state(
-                &session_id,
-                sealed_state,
-                &metadata,
-                applicant_session_token.expose_secret(),
-            )
+            .open_state(&session_id, sealed_state, &metadata, data_keys.current())
             .map_err(|e| {
                 if matches!(e, storage_client::StoreError::Crypto(_)) {
                     return StatusCode::FORBIDDEN;
@@ -240,7 +253,7 @@ one is refused: the CAS is its freshness check.
             session_store: state.session_store.clone(),
             session_id: session_id.clone(),
             // Weak: the strong lives in the SessionRunCtx below (sole owner).
-            applicant_session_token: Arc::downgrade(&applicant_session_token),
+            data_keys: Arc::downgrade(&data_keys),
             captured,
         });
 
@@ -251,7 +264,8 @@ one is refused: the CAS is its freshness check.
             locale,
             // Move the sole strong ref in — the media store above holds only a
             // `Weak` downgraded from it, and so will the persister `run` builds.
-            applicant_session_token,
+            data_keys,
+            new_lock,
             disclosure_pubkey,
             version,
             media_store,

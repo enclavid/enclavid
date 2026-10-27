@@ -30,8 +30,8 @@ export function getBuild(pathname: string): string | null {
 // link says `?explicit_seed=0` — for a consumer whose applicants arrive where
 // drawing does not work well. The key is as strong either way: it is drawn
 // from the browser's random source, and the strokes are only mixed in (see
-// `lib/key.ts`). The parameter only switches a screen, and nothing of a key
-// ever travels in an address.
+// `lib/key.ts`). The parameter only switches a screen; a key never travels in
+// an address, and a page never takes one from it (see `lib/handoff.ts`).
 export function explicitSeed(search: string): boolean {
   return new URLSearchParams(search).get("explicit_seed") !== "0";
 }

@@ -1,8 +1,10 @@
 //! `MEDIA` per-session store. Sealed applicant captures (camera frames today,
 //! documents/PDFs later), each found by its 32-byte BLAKE3 content hash and
 //! kept under a [`MediaName`] derived from it. Double-AEAD'd exactly like
-//! STATE: inner layer under the applicant's bearer token, outer under
-//! `tee_seal_key`. Both layers are bound (AAD) to the field, the content hash and
+//! STATE: inner layer under the data key the session seals under as the blob
+//! is captured, outer under `tee_seal_key`. Not bound to the lock as STATE is: a
+//! blob is only ever read as one the state names, and a take-over that locks
+//! the keys anew leaves every blob as it was, under its own key. Both layers are bound (AAD) to the field, the content hash and
 //! the session, so (a) cross-session copies fail at the outer check and (b) a
 //! host swapping blob-A's ciphertext under blob-B's name within a session also
 //! fails auth.
@@ -95,7 +97,7 @@ pub(super) fn media_name(ctx: &Ctx<'_>, blob_hash: &[u8; 32]) -> Exposed<MediaNa
 pub struct SetMedia<'a> {
     pub blob_hash: [u8; 32],
     pub bytes: ExposedBuilder<Vec<u8>, MediaOp, (AuthN,), Storage>,
-    pub applicant_session_token: &'a [u8],
+    pub data_key: &'a [u8],
 }
 
 impl SetMedia<'_> {
@@ -111,7 +113,7 @@ impl SetMedia<'_> {
         ),
         StoreError,
     > {
-        // The double-AEAD seal: inner under applicant_session_token, outer under
+        // The double-AEAD seal: inner under the data key, outer under
         // tee_seal_key. Each layer gets its own random nonce; both are bound to
         // the same AAD (field, content hash, session), so a cross-session (or
         // cross-name-within-session) copy fails. The name the host sees is the
@@ -123,7 +125,7 @@ impl SetMedia<'_> {
             .bytes
             .clone()
             .vouch_with(AuthN::Verified, |plaintext| -> Result<_, StoreError> {
-                let inner = aead::seal(&plaintext, self.applicant_session_token, &aad)?;
+                let inner = aead::seal(&plaintext, self.data_key, &aad)?;
                 Ok(MediaOp(aead::seal(&inner, ctx.tee_seal_key, &aad)?))
             })?
             .build();
@@ -152,7 +154,7 @@ mod tests {
     #[test]
     fn seal_open_round_trips_and_binds_aad() {
         let tee_key = [7u8; 32];
-        let app_token = [9u8; 32];
+        let data_key = [9u8; 32];
         let ctx = Ctx {
             tee_seal_key: &tee_key,
             session_id: "ses_abc",
@@ -163,7 +165,7 @@ mod tests {
         let set = SetMedia {
             blob_hash: hash,
             bytes: exposed_bytes(plaintext.clone()),
-            applicant_session_token: &app_token,
+            data_key: &data_key,
         };
         let (name, op) = set.op(&ctx).unwrap();
         let (MediaName(name), MediaOp(sealed)) = (name.into_inner(), op.into_inner());
@@ -180,7 +182,7 @@ mod tests {
         // Double-open with the same keys + AAD round-trips.
         let aad = media_aad(ctx.session_id, &hash);
         let outer = aead::open(&sealed, &tee_key, &aad).unwrap();
-        let inner = aead::open(&outer, &app_token, &aad).unwrap();
+        let inner = aead::open(&outer, &data_key, &aad).unwrap();
         assert_eq!(inner, plaintext, "double-AEAD round-trips");
 
         // A different blob-hash → different AAD → outer open fails (the host

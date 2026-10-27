@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Route, Router, Switch, useLocation } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
 import { SessionRequired } from "@/screens/SessionRequired";
@@ -9,17 +9,28 @@ import { Verify } from "@/screens/Verify";
 import { Completed } from "@/screens/Completed";
 import { Terminated } from "@/screens/Terminated";
 import { Unavailable } from "@/screens/Unavailable";
+import { StartedElsewhere } from "@/screens/StartedElsewhere";
+import { Moved } from "@/screens/Moved";
 import { explicitSeed, getSessionId } from "@/lib/session";
 import { startEnclaveCheck } from "@/lib/enclave";
+import { settlePendingKey, takeOverHere } from "@/lib/handoff";
 import {
   clearKey,
   keepKeyInTabOnly,
   loadKey,
   pruneKeys,
   randomKey,
+  sameKey,
   storeKey,
 } from "@/lib/key";
-import { connect, getStatus, submitInput, warmup, ApiError } from "@/lib/api";
+import {
+  connect,
+  getStatus,
+  resetState,
+  submitInput,
+  warmup,
+  ApiError,
+} from "@/lib/api";
 import type { Decision, SessionProgress } from "@/types";
 
 // Routing model. The page's address names the session (`…/<session id>`,
@@ -28,27 +39,38 @@ import type { Decision, SessionProgress } from "@/types";
 // rather than the path, and the back button works for free. The steps go
 // in the fragment because the page's references are relative to its own
 // address (see `vite.config.ts`), so its path cannot grow a segment per
-// step. Three states sit *outside* the URL because they're decided by
+// step. Six states sit *outside* the URL because they're decided by
 // the server, not user navigation: `completed`, `terminated` (the
-// session is gone or over) and `unavailable` (the service did not
-// answer — the session is fine). We surface those as overlays that
-// ignore the location.
-type Terminal = "completed" | "terminated" | "unavailable";
+// session is gone or over), `unavailable` (the service did not
+// answer — the session is fine), `elsewhere` (this browser's key
+// does not open the session: it is another browser's), `moved`
+// (this page showed a code, and the session was taken over from it)
+// and `refused_code` (this page was opened from a code that could not
+// be taken). We surface those as overlays that ignore the location.
+type Terminal =
+  | "completed"
+  | "terminated"
+  | "unavailable"
+  | "elsewhere"
+  | "moved"
+  | "refused_code";
 
-export function App() {
+/// `handoff`: a hand-over another device showed this one, taken out of the
+/// address before the page started (see `lib/handoff.ts`).
+export function App({ handoff }: { handoff: string | null }) {
   return (
     <Router hook={useHashLocation}>
-      <SessionFromLocation />
+      <SessionFromLocation handoff={handoff} />
     </Router>
   );
 }
 
-function SessionFromLocation() {
+function SessionFromLocation({ handoff }: { handoff: string | null }) {
   // The path is fixed for the page's life: another session is another
   // address, and so another page load.
   const sessionId = getSessionId(window.location.pathname);
   if (!sessionId) return <SessionRequired />;
-  return <Session sessionId={sessionId} />;
+  return <Session sessionId={sessionId} handoff={handoff} />;
 }
 
 // The fragment as wouter's hash location reads it — without its `#`,
@@ -58,7 +80,13 @@ function currentLocation(): string {
   return "/" + window.location.hash.replace(/^#?\/?/, "");
 }
 
-function Session({ sessionId }: { sessionId: string }) {
+function Session({
+  sessionId,
+  handoff,
+}: {
+  sessionId: string;
+  handoff: string | null;
+}) {
   const [location, setLocation] = useLocation();
 
   const [terminal, setTerminal] = useState<Terminal | null>(null);
@@ -75,6 +103,23 @@ function Session({ sessionId }: { sessionId: string }) {
   // the user leaves /verify so back→forward navigation re-fires the
   // request, but a single visit to /verify only triggers one /connect.
   const connectFiredRef = useRef(false);
+
+  // The session was taken over from the code this page showed: this browser's
+  // key opens nothing any more, and the session goes on without this page.
+  // Only when `refused` is still the key this browser holds: one it has made
+  // since — its own take landing while the answer for the old key was out —
+  // holds the session, and stays.
+  const moved = useCallback(
+    (refused: Uint8Array) => {
+      const held = loadKey(sessionId);
+      if (held && !sameKey(held, refused)) return;
+      clearKey(sessionId);
+      setTerminal("moved");
+    },
+    [sessionId],
+  );
+
+  const finishedElsewhere = useCallback(() => setTerminal("completed"), []);
 
   // Where the session runs is checked as the page opens, beside the status
   // fetch, so the welcome has the result to show; and keys left behind by
@@ -131,6 +176,21 @@ function Session({ sessionId }: { sessionId: string }) {
           clearKey(sessionId);
           setTerminal("terminated");
           return;
+        }
+        // A hand-over another device showed this one: taken with a key this
+        // browser makes, which alone opens the session from then on. One that
+        // is refused — expired, taken already, or made before the session
+        // changed hands — is said plainly to a browser with no key of its own;
+        // one whose outcome is unknown leaves the page to go on as for any link.
+        // A take an earlier visit sent and never heard back from is settled
+        // first: its key may be the one that holds the session.
+        await settlePendingKey(sessionId);
+        if (handoff) {
+          const take = await takeOverHere(sessionId, handoff);
+          if (take.kind === "refused" && !loadKey(sessionId)) {
+            setTerminal("refused_code");
+            return;
+          }
         }
         // Read afresh rather than from the render that started this
         // fetch: the fragment may have moved on while it was out.
@@ -207,6 +267,10 @@ function Session({ sessionId }: { sessionId: string }) {
     try {
       show(await connect(id, key));
     } catch (e) {
+      if (e instanceof ApiError && e.status === 403) {
+        setTerminal("elsewhere");
+        return;
+      }
       const msg =
         e instanceof ApiError
           ? `Server returned ${e.status}.`
@@ -231,13 +295,61 @@ function Session({ sessionId }: { sessionId: string }) {
     try {
       show(await submitInput(sessionId, awaitingSeq, slotId, key, form));
     } catch (e) {
-      const msg =
-        e instanceof ApiError
-          ? `Server returned ${e.status}.`
-          : "Could not reach the server.";
-      setError(msg);
+      // Refused for its key: the session was started over elsewhere while
+      // this page was on a step.
+      if (e instanceof ApiError && e.status === 403) {
+        setTerminal("elsewhere");
+      } else {
+        setError(
+          e instanceof ApiError
+            ? `Server returned ${e.status}.`
+            : "Could not reach the server.",
+        );
+      }
       throw e;
     }
+  }
+
+  // A key of this browser's own for the session — drawn, or made at random
+  // when the link says to skip the drawing — and on to the session.
+  function beginKey() {
+    if (explicitSeed(window.location.search)) {
+      setLocation("/keygen");
+      return;
+    }
+    storeKey(sessionId, randomKey());
+    setLocation("/verify");
+  }
+
+  // Hands the session back and claims it anew: what was done in the other
+  // browser goes. The claim is made with a key this browser makes now, never
+  // with the one the session just refused. A session that finished, or moved
+  // on meanwhile, refuses (409) and is read afresh.
+  async function startOver() {
+    try {
+      await resetState(sessionId);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        window.location.reload();
+        return;
+      }
+      throw e;
+    }
+    clearKey(sessionId);
+    setProgress(null);
+    setTerminal(null);
+    // A page that came here from a refused code never finished reading the
+    // session: it has now, as one with no key.
+    setStatusFetched(true);
+    if (explicitSeed(window.location.search)) {
+      setLocation("/keygen");
+      return;
+    }
+    // Already on /verify, whose /connect fired for the refused key: this one
+    // is sent from here.
+    const key = randomKey();
+    storeKey(sessionId, key);
+    await connectAndRender(sessionId, key);
   }
 
   if (terminal === "completed")
@@ -245,6 +357,25 @@ function Session({ sessionId }: { sessionId: string }) {
   if (terminal === "terminated")
     return wrap("terminated", <Terminated reason={terminationReason} />);
   if (terminal === "unavailable") return wrap("unavailable", <Unavailable />);
+  if (terminal === "elsewhere")
+    return wrap(
+      "elsewhere",
+      <StartedElsewhere reason="elsewhere" onStartOver={startOver} />,
+    );
+  if (terminal === "refused_code")
+    return wrap(
+      "refused_code",
+      <StartedElsewhere reason="code" onStartOver={startOver} />,
+    );
+  if (terminal === "moved")
+    return wrap(
+      "moved",
+      <Moved
+        sessionId={sessionId}
+        onCompleted={finishedElsewhere}
+        onStartOver={startOver}
+      />,
+    );
   if (!statusFetched) return wrap("loading", <Loading />);
 
   // Keyed wrapper drives the per-screen mount animation. React
@@ -256,14 +387,13 @@ function Session({ sessionId }: { sessionId: string }) {
       <Route path="/start">
         <Welcome
           onBegin={() => {
-            // A link that skips the drawing makes the key here and goes
-            // straight on; otherwise the applicant draws it first.
-            if (explicitSeed(window.location.search)) {
-              setLocation("/keygen");
+            // A key this browser already holds for the session is kept: a new
+            // one would not open what the first one claimed.
+            if (loadKey(sessionId)) {
+              setLocation("/verify");
               return;
             }
-            storeKey(sessionId, randomKey());
-            setLocation("/verify");
+            beginKey();
           }}
         />
       </Route>
@@ -276,6 +406,7 @@ function Session({ sessionId }: { sessionId: string }) {
           progress={progress}
           error={error}
           onSubmit={submitAndRender}
+          onMoved={moved}
         />
       </Route>
       <Route>

@@ -30,6 +30,7 @@
 mod applicant;
 mod core;
 mod disclosure;
+mod lock;
 mod media;
 mod metadata;
 mod state;
@@ -37,6 +38,7 @@ mod state;
 pub use self::core::{ReadField, ReadTuple, WriteField};
 pub use applicant::DropApplicantData;
 pub use disclosure::{AppendDisclosure, Disclosure};
+pub use lock::{DataKeys, MAX_DATA_KEYS, lock_data_keys, lock_digest, unlock_data_keys};
 pub use media::SetMedia;
 pub use metadata::{Metadata, SetMetadata};
 pub use state::{SealedState, SetState, StateBinding, encode_padded};
@@ -57,6 +59,18 @@ use enclavid_boundary::{AuthN, AuthZ, Covert, Exposed, Replay, Untrusted};
 
 /// HKDF info label for the subkey a record's name is derived under.
 const RECORD_INFO: &[u8] = b"enclavid.session-record.v1";
+/// HKDF info label for the subkey a hand-over is sealed under, and what each
+/// hand-over is labelled with beside its session.
+const HANDOFF_INFO: &[u8] = b"enclavid.handoff.v1";
+
+/// What a hand-over carries: the key that held the session as it was made, the
+/// lock that key held it by, and the time it may be taken until.
+pub struct Handoff {
+    pub key: SecretBox<Vec<u8>>,
+    /// The [`lock_digest`] of the lock `key` opened as the hand-over was made.
+    pub lock: [u8; 32],
+    pub until_unix_secs: u64,
+}
 
 /// Per-call encryption context: the TEE-side key, and the session every seal
 /// it makes or opens is bound to. Each field binds its own AAD from these, so a
@@ -92,12 +106,15 @@ pub struct SessionStore {
     /// bound to the measurement and never leaves the enclave. A dev build takes
     /// it from the environment instead.
     /// `SecretBox` zeroizes it on drop and redacts it from any `Debug` — so the
-    /// master never lands in a log, matching how the applicant token is held; the
+    /// master never lands in a log, matching how the applicant's key is held; the
     /// `Arc` keeps cloning the store cheap (the store derives `Clone`).
     tee_seal_key: Arc<SecretBox<[u8; 32]>>,
     /// The subkey of `tee_seal_key` a record's name is derived under, its own
     /// label apart from every other use of the master.
     record_key: Arc<SecretBox<[u8; 32]>>,
+    /// The subkey of `tee_seal_key` a hand-over is sealed under, its own label
+    /// apart from every other use of the master.
+    handoff_key: Arc<SecretBox<[u8; 32]>>,
     /// ABSOLUTE session lifetime in seconds. `Some(t)` ⇒ the deadline is set ONCE
     /// at create to `created_at + t` and never refreshed — a fixed cap after which
     /// the storage-CVM sweeper GCs the session (abandoned or completed-and-pulled).
@@ -115,6 +132,10 @@ impl SessionStore {
             record_key: Arc::new(SecretBox::new(Box::new(derive_key(
                 &tee_seal_key,
                 RECORD_INFO,
+            )))),
+            handoff_key: Arc::new(SecretBox::new(Box::new(derive_key(
+                &tee_seal_key,
+                HANDOFF_INFO,
             )))),
             tee_seal_key: Arc::new(SecretBox::new(Box::new(tee_seal_key))),
             ttl_secs,
@@ -278,34 +299,81 @@ impl SessionStore {
     /// before a reset, or from before a newer disclosure or capture, does not
     /// open; and one missing beside metadata that records an applicant's data is
     /// refused as one that does not open. Both come back as `StoreError::Crypto`,
-    /// as a key that does not open the state does.
+    /// as a key that does not open the state does. `data_key` is the one the
+    /// session seals under now — [`DataKeys::current`].
     pub fn open_state(
         &self,
         id: &str,
         sealed: Untrusted<Option<Vec<u8>>, (AuthN, AuthZ, Replay), Storage>,
         metadata: &SessionMetadata,
-        applicant_session_token: &[u8],
+        data_key: &[u8],
     ) -> Result<Untrusted<Option<SessionState>, (Replay,), Storage>, StoreError> {
         let ctx = Ctx {
             tee_seal_key: self.tee_seal_key(),
             session_id: id,
         };
-        state::open(&ctx, sealed, metadata, applicant_session_token)
+        state::open(&ctx, sealed, metadata, data_key)
+    }
+
+    /// A hand-over of session `id`: the key that holds it, the lock that key
+    /// holds it by ([`lock_digest`]), and the time it may be taken until, sealed
+    /// under a key only this side holds. The page carries it to another device
+    /// and only this side opens it, so the key never travels in the open. It is
+    /// good against that one lock: taking it, or anything else that replaces
+    /// the lock, leaves it opening nothing.
+    pub fn seal_handoff(&self, id: &str, handoff: &Handoff) -> Result<Vec<u8>, StoreError> {
+        let key = handoff.key.expose_secret();
+        let mut plaintext = Vec::with_capacity(8 + 32 + key.len());
+        plaintext.extend_from_slice(&handoff.until_unix_secs.to_be_bytes());
+        plaintext.extend_from_slice(&handoff.lock);
+        plaintext.extend_from_slice(key);
+        let plaintext = SecretBox::new(Box::new(plaintext));
+        Ok(aead::seal(
+            plaintext.expose_secret(),
+            self.handoff_key.expose_secret(),
+            &handoff_aad(id),
+        )?)
+    }
+
+    /// What [`seal_handoff`](Self::seal_handoff) sealed for session `id`. One
+    /// made for another session, or not by this side, is a
+    /// `StoreError::Crypto`.
+    pub fn open_handoff(&self, id: &str, sealed: &[u8]) -> Result<Handoff, StoreError> {
+        let opened = SecretBox::new(Box::new(aead::open(
+            sealed,
+            self.handoff_key.expose_secret(),
+            &handoff_aad(id),
+        )?));
+        let short = || StoreError::Crypto("a hand-over too short for its fields".into());
+        let (until, rest) = opened
+            .expose_secret()
+            .split_at_checked(8)
+            .ok_or_else(short)?;
+        let (lock, key) = rest.split_at_checked(32).ok_or_else(short)?;
+        Ok(Handoff {
+            key: SecretBox::new(Box::new(key.to_vec())),
+            lock: lock.try_into().expect("split at thirty-two"),
+            until_unix_secs: u64::from_be_bytes(until.try_into().expect("split at eight")),
+        })
     }
 
     /// Read + double-open one sealed media blob by its content hash. Backs the
     /// policy's `blob::from-blob-ref` rehydrate. `None` = no such blob in this
     /// session (the engine turns a miss into a TRAP). The plaintext comes back
     /// open on `Replay` alone — outer-AEAD-open closes AuthN (real crypto),
-    /// inner-AEAD-open closes AuthZ (applicant-key possession authorises); only
-    /// Replay remains for the caller (trivially closed: the blob is
-    /// content-addressed, so a stale / reordered read can only return identical
-    /// bytes). The AAD mirrors [`SetMedia`]'s.
+    /// inner-AEAD-open closes AuthZ (possession of the data keys, which only the
+    /// applicant's key unlocks, authorises); only Replay remains for the caller
+    /// (trivially closed: the blob is content-addressed, so a stale / reordered
+    /// read can only return identical bytes). The AAD mirrors [`SetMedia`]'s.
+    ///
+    /// A blob is under the key the session sealed under as it was captured,
+    /// which a take-over since may have followed with newer ones: the keys are
+    /// tried newest first, and an AEAD under any other key refuses to open.
     pub async fn load_media(
         &self,
         id: &str,
         blob_hash: &[u8; 32],
-        applicant_session_token: &[u8],
+        data_keys: &DataKeys,
     ) -> Result<Untrusted<Option<Vec<u8>>, (Replay,), Storage>, StoreError> {
         // The AAD binds to the raw content hash (TEE-internal), but the name the
         // store keeps is the identity-hiding per-session HKDF — recomputed here
@@ -331,7 +399,14 @@ impl SessionStore {
             })?
             .trust_with(AuthZ::Matched, |outer| {
                 outer
-                    .map(|outer| aead::open(&outer, applicant_session_token, &aad))
+                    .map(|outer| {
+                        data_keys
+                            .newest_first()
+                            .find_map(|key| aead::open(&outer, key, &aad).ok())
+                            .ok_or_else(|| {
+                                StoreError::Crypto("no data key of the session opens it".into())
+                            })
+                    })
                     .transpose()
             })?;
         Ok(opened)
@@ -369,6 +444,15 @@ impl SessionStore {
         }
         Ok((slots, version.map(|Version(v)| v)))
     }
+}
+
+/// The AAD a hand-over is sealed under: the label, then the session. The label
+/// is fixed-length, so the session id last cannot be read two ways.
+fn handoff_aad(session_id: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(HANDOFF_INFO.len() + session_id.len());
+    aad.extend_from_slice(HANDOFF_INFO);
+    aad.extend_from_slice(session_id.as_bytes());
+    aad
 }
 
 #[cfg(test)]

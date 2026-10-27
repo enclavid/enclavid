@@ -1,8 +1,9 @@
 //! Encryption primitives for Enclavid.
 //!
 //! - [`aead`] — symmetric AEAD (ChaCha20-Poly1305) for session blobs the
-//!   TEE reads back, sealed under TEE-held keys (`tee_seal_key`,
-//!   `applicant_session_token`); AAD binds a ciphertext to its session.
+//!   TEE reads back, sealed under TEE-held keys (`tee_seal_key`, a session's
+//!   data key and the applicant's key that locks it); AAD binds a ciphertext
+//!   to its session.
 //! - [`sealed_stream`] — the same AEAD over a stream (the STREAM
 //!   construction), for blobs too large to seal or open whole: segments
 //!   sealed and opened one at a time, the stream's end authenticated with

@@ -1,10 +1,11 @@
 //! `STATE` session field. The policy reducer's sealed state. Double-AEAD'd:
-//! inner layer under the applicant's bearer key, outer under `tee_seal_key`.
-//! Both layers are bound (AAD) to the field, to the session, and to what the
-//! record's metadata says the session's applicant has left in it
-//! ([`StateBinding`]). So a state opens only beside the metadata it was written
-//! with: not as metadata, not in another session, and not after a reset or
-//! another disclosure or capture than the ones it was written beside.
+//! inner layer under the session's data key, which only the applicant's key
+//! unlocks (see `lock`), outer under `tee_seal_key`. Both layers are bound
+//! (AAD) to the field, to the session, and to what the record's metadata says
+//! of the session's applicant ([`StateBinding`]). So a state opens only beside
+//! the metadata it was written with: not as metadata, not in another session,
+//! and not after a reset, a hand-over, or another disclosure or capture than
+//! the ones it was written beside.
 //!
 //! State is only present once the applicant claims the session via
 //! `/connect` and the policy runs at least one round; before that the
@@ -49,15 +50,16 @@ pub fn encode_padded(state: &SessionState) -> Result<Vec<u8>, StoreError> {
 }
 
 /// What a state is bound to beside its session: everything of an applicant the
-/// record's metadata records — the hashes of its disclosures and of its
-/// captures, in the order the metadata keeps them.
+/// record's metadata records — the lock its data key is kept in, and the hashes
+/// of its disclosures and of its captures, in the order the metadata keeps them.
 ///
 /// In an honest record the state is always sealed to the metadata beside it: a
-/// round that adds to either list writes the state with the lists it leaves, and
-/// a reset clears both in the write that drops the state. So a state put back
-/// from before a reset, or from before a newer disclosure or capture, is bound
-/// to other lists and does not open; and a state missing beside lists that are
-/// not empty was removed by whoever holds the volume.
+/// round that adds to either list writes the state with the lists it leaves, a
+/// hand-over writes it with the lock it leaves, and a reset clears all three in
+/// the write that drops the state. So a state put back from before a reset, a
+/// hand-over, or a newer disclosure or capture, is bound to something else and
+/// does not open; and a state missing beside metadata that records an applicant
+/// was removed by whoever holds the volume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StateBinding {
     digest: [u8; 32],
@@ -70,6 +72,14 @@ impl StateBinding {
     pub fn of(metadata: &SessionMetadata) -> Self {
         let mut h = Sha256::new();
         h.update(BINDING);
+        match &metadata.data_key_lock {
+            Some(lock) => {
+                h.update([1]);
+                h.update((lock.len() as u64).to_le_bytes());
+                h.update(lock);
+            }
+            None => h.update([0]),
+        }
         h.update((metadata.disclosure_entry_hashes.len() as u64).to_le_bytes());
         for entry in &metadata.disclosure_entry_hashes {
             h.update(entry);
@@ -81,7 +91,8 @@ impl StateBinding {
         }
         Self {
             digest: h.finalize().into(),
-            empty: metadata.disclosure_entry_hashes.is_empty()
+            empty: metadata.data_key_lock.is_none()
+                && metadata.disclosure_entry_hashes.is_empty()
                 && metadata.captured_media.is_empty(),
         }
     }
@@ -114,7 +125,7 @@ pub struct SealedState;
 /// that of the metadata this write leaves beside the state.
 pub struct SetState<'a> {
     pub state: ExposedBuilder<Vec<u8>, StateOp, (AuthN,), Storage>,
-    pub applicant_session_token: &'a [u8],
+    pub data_key: &'a [u8],
     pub binding: StateBinding,
 }
 
@@ -136,15 +147,16 @@ impl ReadField for SealedState {
 
 /// Open `sealed` as the state of the record whose metadata, opened, is
 /// `metadata`. Outer-AEAD-open under `tee_seal_key` and the binding closes
-/// AuthN; inner-AEAD-open under the applicant's key closes AuthZ (key possession
-/// authorises). A missing state is believed only beside metadata that records
-/// nothing of an applicant — the check that answers AuthN for it — and is
-/// refused as a state that does not open otherwise.
+/// AuthN; inner-AEAD-open under the data key closes AuthZ — the key is only
+/// ever had by unlocking it with the applicant's, so possession authorises. A
+/// missing state is believed only beside metadata that records nothing of an
+/// applicant — the check that answers AuthN for it — and is refused as a state
+/// that does not open otherwise.
 pub(super) fn open(
     ctx: &Ctx<'_>,
     sealed: Untrusted<Option<Vec<u8>>, (AuthN, AuthZ, Replay), Storage>,
     metadata: &SessionMetadata,
-    applicant_session_token: &[u8],
+    data_key: &[u8],
 ) -> Result<Untrusted<Option<SessionState>, (Replay,), Storage>, StoreError> {
     let binding = StateBinding::of(metadata);
     let aad = aad(ctx.session_id, &binding);
@@ -159,7 +171,7 @@ pub(super) fn open(
         .trust_with(AuthZ::Matched, |outer| -> Result<_, StoreError> {
             outer
                 .map(|outer| {
-                    let inner = aead::open(&outer, applicant_session_token, &aad)?;
+                    let inner = aead::open(&outer, data_key, &aad)?;
                     Ok(session_types::decode::<SessionState>(&inner)?)
                 })
                 .transpose()
@@ -169,16 +181,16 @@ pub(super) fn open(
 impl WriteField for SetState<'_> {
     fn add_to(&self, ops: &mut Ops<Storage>, ctx: &Ctx<'_>) -> Result<(), StoreError> {
         // `state` is already the encoded + padded plaintext. The double-AEAD
-        // seal answers AuthN and builds the op: inner under
-        // applicant_session_token, outer under tee_seal_key. Each layer gets its
-        // own random nonce; both are bound to the same AAD, so a copy into
-        // another session, or beside other metadata, fails at the outer layer.
+        // seal answers AuthN and builds the op: inner under the data key, outer
+        // under tee_seal_key. Each layer gets its own random nonce; both are
+        // bound to the same AAD, so a copy into another session, or beside other
+        // metadata, fails at the outer layer.
         let aad = aad(ctx.session_id, &self.binding);
         let op = self
             .state
             .clone()
             .vouch_with(AuthN::Verified, |plaintext| -> Result<_, StoreError> {
-                let inner = aead::seal(&plaintext, self.applicant_session_token, &aad)?;
+                let inner = aead::seal(&plaintext, self.data_key, &aad)?;
                 Ok(StateOp(aead::seal(&inner, ctx.tee_seal_key, &aad)?))
             })?
             .build();
@@ -209,13 +221,21 @@ mod tests {
         }
     }
 
-    /// A binding moves with every disclosure and capture the metadata records,
-    /// and says the metadata records nothing only when both lists are empty.
+    /// A binding moves with the lock, and with every disclosure and capture the
+    /// metadata records, and says the metadata records nothing only when it
+    /// holds none of them.
     #[test]
     fn a_binding_follows_what_the_applicant_left() {
         let mut md = SessionMetadata::default();
         let none = StateBinding::of(&md);
         assert!(none.empty);
+        md.data_key_lock = Some(vec![3; 60]);
+        let claimed = StateBinding::of(&md);
+        assert!(!claimed.empty);
+        assert_ne!(claimed, none);
+        md.data_key_lock = Some(vec![4; 60]);
+        assert_ne!(StateBinding::of(&md), claimed, "a hand-over rebinds");
+        md.data_key_lock = None;
         md.captured_media.push(vec![1; 32]);
         let captured = StateBinding::of(&md);
         assert!(!captured.empty);

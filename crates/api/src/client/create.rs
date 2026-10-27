@@ -470,6 +470,9 @@ async fn create(
             format: quote.format.clone(),
             blob: quote.quote_blob.clone(),
         }),
+        // No applicant holds the session yet: the first `/connect` locks a data
+        // key under its key.
+        data_key_lock: None,
     };
     // Write ONLY the sealed metadata. The plaintext STATUS byte and PRINCIPAL
     // host hooks are gone: TTL is enforced inside the storage-CVM (its sweeper,

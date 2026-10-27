@@ -15,10 +15,10 @@ mod resolve;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use secrecy::SecretBox;
 
 use engine_rpc::{CompositionKey, ExecError, RunOutcome, RunStatus};
 use session_types::{Decision, Event, Prompt, SessionMetadata, SessionState};
+use storage_client::DataKeys;
 
 use crate::init::{self, Unavailable};
 use crate::locale::Locale;
@@ -47,7 +47,7 @@ use resolve::run_resolved;
 pub(super) struct SessionRunCtx {
     state: Arc<AppState>,
     pub(super) session_id: String,
-    /// State previously persisted under this `applicant_session_token`. `None`
+    /// State previously persisted under this session's data key. `None`
     /// for a session whose `/connect` has never reached this far —
     /// connect treats that as "fresh start", input as 409.
     pub(super) session_state: Option<SessionState>,
@@ -55,11 +55,16 @@ pub(super) struct SessionRunCtx {
     /// Text-ref resolution happens server-side so the wire payload is
     /// a plain string per ref — frontend doesn't carry i18n logic.
     pub(super) locale: Locale,
-    /// SOLE strong owner of the applicant token for this round. The persister
-    /// and media store hold only `Weak`s to it, so the plaintext token's
-    /// lifetime is exactly this context: it drops (and zeroizes) when the run
-    /// ends. MUST outlive `executor.run().await` — see [`SessionRunCtx::run`].
-    applicant_session_token: Arc<SecretBox<Vec<u8>>>,
+    /// SOLE strong owner of the session's data keys for this round, unlocked
+    /// with the caller's key. The persister and media store hold only `Weak`s to
+    /// them, so the plaintext keys' lifetime is exactly this context: they drop
+    /// (and zeroize) when the run ends. MUST outlive `executor.run().await` —
+    /// see [`SessionRunCtx::run`].
+    data_keys: Arc<DataKeys>,
+    /// The data keys locked under the caller's key, on a session no applicant
+    /// held before this request: the round's first write records the lock, and
+    /// with it the claim. `None` on a claimed session, whose lock stays as it is.
+    new_lock: Option<Vec<u8>>,
     /// Age recipient the round's disclosure seals to, lifted out of metadata on
     /// the extractor path so `run` can build the persister once it knows what
     /// the round consented to.
@@ -69,7 +74,7 @@ pub(super) struct SessionRunCtx {
     version: u64,
     /// The per-round media store — becomes the `media_load` half of the
     /// [`CallbackServer`] the keyless worker calls back into. Holds the seal key
-    /// + a `Weak` to the applicant token.
+    /// + a `Weak` to the data keys.
     media_store: Arc<HatchMediaStore>,
     /// Composition cache key — names the fused component in the execution-worker's
     /// L1 cache, and (with the worker's `compat_token`) keys the orchestrator's
@@ -99,13 +104,14 @@ impl SessionRunCtx {
             session_id,
             locale,
             // Bound (not dropped into `..`) ON PURPOSE: this is the sole strong
-            // ref to the applicant token, and the persister / media store hold
-            // only `Weak`s. It MUST stay alive across `executor.run().await`
-            // below so their `upgrade()`s succeed while the worker calls back to
-            // seal state / open media. Dropping it early makes those upgrades
-            // return `None` and the round fails. It drops (and zeroizes) at the
-            // end of this fn.
-            applicant_session_token: token_owner,
+            // ref to the data keys, and the persister / media store hold only
+            // `Weak`s. It MUST stay alive across `executor.run().await` below so
+            // their `upgrade()`s succeed while the worker calls back to seal
+            // state / open media. Dropping it early makes those upgrades return
+            // `None` and the round fails. It drops (and zeroizes) at the end of
+            // this fn.
+            data_keys: key_owner,
+            new_lock,
             disclosure_pubkey,
             version,
             media_store,
@@ -135,7 +141,7 @@ impl SessionRunCtx {
         // evidence was already checked in `input`, whose digest gate is what
         // authorizes a seal at all.
         // Sole strong hold on what this round may disclose. The persister borrows
-        // it as a `Weak`, exactly as it does the applicant token, so the
+        // it as a `Weak`, exactly as it does the data keys, so the
         // applicant's plaintext fields live exactly as long as this frame —
         // however the frame ends.
         let consent = persister::round_consent(&event, &session_state.current_prompt);
@@ -163,9 +169,10 @@ impl SessionRunCtx {
         let persister = SessionPersister::for_round(
             state.session_store.clone(),
             session_id.clone(),
-            // Weak: `token_owner` below is the sole strong ref, and it must
+            // Weak: `key_owner` below is the sole strong ref, and it must
             // outlive the worker's callbacks.
-            Arc::downgrade(&token_owner),
+            Arc::downgrade(&key_owner),
+            new_lock,
             disclosure_pubkey,
             version,
             awaiting_seq,
@@ -176,7 +183,7 @@ impl SessionRunCtx {
             &awaiting,
             state.shuffle_key.clone(),
         );
-        // Bound, like `token_owner` above and for the same reason: it is the sole
+        // Bound, like `key_owner` above and for the same reason: it is the sole
         // strong hold on the applicant's consented fields, the persister has only
         // a `Weak`, and it must outlive `executor.run().await` so a callback can
         // still seal. It drops at the end of this fn, whichever way the fn ends.

@@ -20,9 +20,18 @@ type Props = {
   /// the slot identifier and the assembled FormData (frames as parts for
   /// media captures, an `accepted` text part for consent).
   onSubmit: (awaitingSeq: number, slotId: string, form: FormData) => Promise<void>;
+  /// The session was taken over from a code a capture step showed: `refused`,
+  /// the key this page asked with, opens it no more.
+  onMoved: (refused: Uint8Array) => void;
 };
 
-export function Verify({ sessionId, progress, error, onSubmit }: Props) {
+export function Verify({
+  sessionId,
+  progress,
+  error,
+  onSubmit,
+  onMoved,
+}: Props) {
   if (!progress) {
     // /connect either hasn't returned yet OR returned an error. With
     // progress still null we have no request to render — show the
@@ -46,6 +55,7 @@ export function Verify({ sessionId, progress, error, onSubmit }: Props) {
       request={progress.request}
       error={error}
       onSubmit={onSubmit}
+      onMoved={onMoved}
     />
   );
 }
@@ -92,6 +102,7 @@ function RequestRenderer({
   request,
   error,
   onSubmit,
+  onMoved,
 }: {
   sessionId: string;
   /// The wait this screen was rendered for: every answer from it names
@@ -100,6 +111,7 @@ function RequestRenderer({
   request: RequestView;
   error: string | null;
   onSubmit: (awaitingSeq: number, slotId: string, form: FormData) => Promise<void>;
+  onMoved: (refused: Uint8Array) => void;
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -166,7 +178,9 @@ function RequestRenderer({
           stepNumber={(nextIndex ?? 0) + 1}
           totalSteps={total}
           onStart={() => setStartedFor(slotKey)}
-          secondaryAction={<ContinueOnPhone sessionId={sessionId} />}
+          secondaryAction={
+            <ContinueOnPhone sessionId={sessionId} onMoved={onMoved} />
+          }
         />
       );
     }

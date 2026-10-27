@@ -9,7 +9,7 @@
 //!
 //! Key length: 32 bytes (ChaCha20-Poly1305 standard).
 //!
-//! Layered encryption (e.g. STATE = inner(applicant_session_token) +
+//! Layered encryption (e.g. STATE = inner(the session's data key) +
 //! outer(tee_seal_key)) is composed at the call site by chaining `seal`
 //! twice — each layer carries its own random nonce, and AAD is the
 //! same on both layers.
@@ -21,6 +21,11 @@ use rand_core::OsRng;
 use crate::error::CryptoError;
 
 const NONCE_LEN: usize = 12;
+
+/// A fresh random key for [`seal`] and [`open`].
+pub fn generate_key() -> [u8; 32] {
+    ChaCha20Poly1305::generate_key(&mut OsRng).into()
+}
 
 /// Encrypt `plaintext` under `key` with `aad` binding, return
 /// `nonce || ciphertext_with_tag`.

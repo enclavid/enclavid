@@ -155,6 +155,19 @@ pub struct SessionMetadata {
     /// Its size is the part's, the same on every session of one machine, so it
     /// tells the host nothing it does not know.
     pub quote: Option<SessionQuote>,
+    /// The session's data keys — the inner keys of its state and media, one
+    /// from the claim and one more from each take-over — sealed together under
+    /// the key of the applicant who holds the session. `None` until an
+    /// applicant claims it, and again after a reset. Only the applicant's key
+    /// opens it, so what the applicant brought stays closed between their
+    /// requests even to this side. A take-over seals the keys again under the
+    /// taker's key with a fresh one beside them, which everything is sealed
+    /// under from then on; nothing sealed before is sealed anew.
+    ///
+    /// One size whenever it is set, however many keys it holds: what it tells
+    /// the host is only that an applicant holds the session.
+    #[serde(with = "serde_bytes")]
+    pub data_key_lock: Option<Vec<u8>>,
 }
 
 /// A session's quote as it is kept: which backend minted it, and the signed

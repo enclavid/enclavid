@@ -17,7 +17,7 @@
 //!
 //! Why encryption lives here, not in the executor: state and metadata are
 //! already sealed transparently inside storage-client (`SetState` /
-//! `SetMetadata` AEAD with `tee_seal_key`/`applicant_session_token`). Disclosures use
+//! `SetMetadata` AEAD with `tee_seal_key`/the session's data key). Disclosures use
 //! a different scheme (age to the consumer's `client_disclosure_pubkey`)
 //! but the architectural slot is the same — the orchestrator owns "I/O +
 //! encryption keys" and the worker never holds either, staying keyless.
@@ -28,21 +28,19 @@
 //! policy artifact path is independent.
 //!
 //! Lifetime: one persister per round, built inside `SessionRunCtx::run` once
-//! the round's consent is known. Owns session-id, the applicant key (state's
-//! inner AEAD layer), the client disclosure pubkey (disclosure age recipient),
-//! a mutable copy of session metadata (so we can update `disclosure_count`
-//! atomically with each persist), and the round's consent. How long the
-//! PERSISTER survives is partly the WORKER's choice — the callback client it was
-//! handed carries an `Arc` — so the consent is tied to the round instead, by
-//! a [`RoundConsent`] the round's own frame owns, of which this holds a `Weak` —
-//! the same arrangement as the applicant token beside it.
+//! the round's consent is known. Owns session-id, the session's data key (the
+//! inner AEAD layer of state and media), the client disclosure pubkey
+//! (disclosure age recipient), a mutable copy of session metadata (so we can
+//! update `disclosure_count` atomically with each persist), and the round's
+//! consent. How long the PERSISTER survives is partly the WORKER's choice — the
+//! callback client it was handed carries an `Arc` — so the consent is tied to
+//! the round instead, by a [`RoundConsent`] the round's own frame owns, of which
+//! this holds a `Weak` — the same arrangement as the data key beside it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use tokio::sync::Mutex;
-
-use secrecy::{ExposeSecret, SecretBox};
 
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
 use enclavid_crypto::seal_to_recipient;
@@ -51,8 +49,8 @@ use session_types::{
 };
 use storage_client::boundary::Storage;
 use storage_client::{
-    AppendDisclosure, DisclosureOp, MediaOp, MetadataOp, SessionStore, SetMedia, SetMetadata,
-    SetState, StateBinding, StateOp, WriteField, encode_padded,
+    AppendDisclosure, DataKeys, DisclosureOp, MediaOp, MetadataOp, SessionStore, SetMedia,
+    SetMetadata, SetState, StateBinding, StateOp, WriteField, encode_padded,
 };
 // `CallbackError` replaces the old wasmtime `RunError` as the persist error,
 // keeping api free of the runtime.
@@ -65,13 +63,17 @@ use crate::shuffle::ShuffleKey;
 pub(super) struct SessionPersister {
     pub session_store: Arc<SessionStore>,
     pub session_id: String,
-    /// WEAK handle to the applicant bearer — the inner AEAD layer's key,
-    /// needed to SEAL state + media on each write. `Weak` (not owned): the
-    /// per-round `SessionRunCtx` is the sole strong owner, so the persister
-    /// borrows the token for the moment of a seal but never PINS the
+    /// WEAK handle to the session's data keys — the newest is the inner AEAD
+    /// layer's key, needed to SEAL state + media on each write. `Weak` (not
+    /// owned): the per-round `SessionRunCtx` is the sole strong owner, so the
+    /// persister borrows the keys for the moment of a seal but never PINS the
     /// plaintext. Upgraded once per `persist`; a `None` means the
     /// run outlived its context (a lifetime bug) and fails the round.
-    pub applicant_session_token: Weak<SecretBox<Vec<u8>>>,
+    pub data_keys: Weak<DataKeys>,
+    /// The data keys locked under the caller's key, when the session had no
+    /// lock as the round began: the round's first write records the lock beside
+    /// the state, and the session is that caller's from then on.
+    new_lock: Option<Vec<u8>>,
     /// Age recipient string (`age1...`) for disclosure entries.
     /// Pulled from session metadata at run start; provided by the
     /// platform consumer when creating the session, so the consumer
@@ -111,7 +113,7 @@ pub(super) struct SessionPersister {
     /// be left unset is a product that silently stops disclosing.
     ///
     /// WEAK handle to what this round may seal — the same shape, and for the
-    /// same reason, as `applicant_session_token` above: the round's frame is the
+    /// same reason, as `data_keys` above: the round's frame is the
     /// sole strong owner, so these plaintext fields live exactly as long as the
     /// round and this side never pins them. A `None` from `upgrade` means the
     /// round is over and this callback is late.
@@ -145,7 +147,7 @@ pub(super) struct SessionPersister {
 
 /// The round's sole strong hold on what it may disclose. `run` binds one for the
 /// life of the round; the persister keeps only a `Weak`, exactly as it does for
-/// the applicant token.
+/// the data key.
 ///
 /// Dropping it frees the applicant's plaintext fields on every exit the frame
 /// has — the `?` paths and a panic included — with no destructor to write and no
@@ -205,7 +207,8 @@ impl SessionPersister {
     pub(super) fn for_round(
         session_store: Arc<SessionStore>,
         session_id: String,
-        applicant_session_token: Weak<SecretBox<Vec<u8>>>,
+        data_keys: Weak<DataKeys>,
+        new_lock: Option<Vec<u8>>,
         client_disclosure_pubkey: String,
         version: u64,
         awaiting_seq: u64,
@@ -219,7 +222,8 @@ impl SessionPersister {
         Arc::new(Self {
             session_store,
             session_id,
-            applicant_session_token,
+            data_keys,
+            new_lock,
             client_disclosure_pubkey,
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata),
@@ -303,19 +307,18 @@ impl SessionPersister {
         let starting_index = metadata.disclosure_count;
         let appends = self.seal_disclosures(to_seal, starting_index)?;
 
-        // Borrow the applicant token from the per-round owner once for this
-        // whole seal. The `SessionRunCtx` driving this run holds the sole strong
-        // ref (bound across `executor.run().await`), so it is alive here; a
-        // `None` means the run outlived its context — a lifetime bug that fails
-        // the round. `token` stays alive for the whole block, so the `&[u8]` the
-        // seal builders below borrow from it outlives them.
-        let token = self.applicant_session_token.upgrade().ok_or_else(|| {
-            safe_logger::debug!(
-                "persist: applicant token owner dropped (run outlived its context)"
-            );
+        // Borrow the data keys from the per-round owner once for this whole
+        // seal: everything is sealed under the newest. The `SessionRunCtx`
+        // driving this run holds the sole strong ref (bound across
+        // `executor.run().await`), so it is alive here; a `None` means the run
+        // outlived its context — a lifetime bug that fails the round. `keys`
+        // stays alive for the whole block, so the `&[u8]` the seal builders
+        // below borrow from it outlives them.
+        let keys = self.data_keys.upgrade().ok_or_else(|| {
+            safe_logger::debug!("persist: data keys owner dropped (run outlived its context)");
             CallbackError
         })?;
-        let token_bytes = token.expose_secret().as_slice();
+        let key_bytes = keys.current().as_slice();
 
         // Everything below advances a WORKING COPY. This side's own metadata is
         // republished only once the host has the write, so a failure leaves us
@@ -329,6 +332,11 @@ impl SessionPersister {
         // settled, and no later round prepares it again.
         if working.prepared.is_none() {
             working.prepared = Some(self.prepared.clone());
+        }
+        // The round that claims the session records the lock of its data key
+        // with the first state sealed under it.
+        if working.data_key_lock.is_none() {
+            working.data_key_lock = self.new_lock.clone();
         }
         // A round that finished commits its decision in this same write as its
         // state: a reply lost after it — the child killed, a leg gone — leaves a
@@ -364,24 +372,26 @@ impl SessionPersister {
         // them.
         let binding = StateBinding::of(&working);
         let commit = {
-            let set_state = self.build_state_op(&state, token_bytes, binding)?;
+            let set_state = self.build_state_op(&state, key_bytes, binding)?;
             // Seal every captured frame this round into the media store,
             // co-committed with the state (kept in a local so the `&dyn` refs
             // below outlive the write).
-            let media_ops = self.build_media_ops(&media, token_bytes);
+            let media_ops = self.build_media_ops(&media, key_bytes);
             let mut ops: Vec<&dyn WriteField> =
                 Vec::with_capacity(2 + appends.len() + media_ops.len());
             ops.push(&set_state);
 
             // Rewrite metadata when this commit finished the session (status and
             // decision), emitted a disclosure (extends the disclosure-hash chain),
-            // captured media (appends to the gate set) OR is the session's first
-            // to land since it was prepared. Plain rounds stay SetState-only,
-            // keeping the payload small.
+            // captured media (appends to the gate set), claims the session (the
+            // data key's lock) OR is the session's first to land since it was
+            // prepared. Plain rounds stay SetState-only, keeping the payload
+            // small.
             let set_metadata_holder;
             if decision.is_some()
                 || !appends.is_empty()
                 || !media_ops.is_empty()
+                || metadata.data_key_lock.is_none()
                 || metadata.prepared.is_none()
             {
                 set_metadata_holder = self.build_metadata_op(&working);
@@ -456,7 +466,7 @@ impl SessionPersister {
 
     /// Build the `SetState` op from the engine's opaque state blob.
     /// AuthN is closed inside storage-client by the double AEAD-seal (inner
-    /// under `applicant_session_token`, outer under `tee_seal_key`, both bound
+    /// under the session's data key, outer under `tee_seal_key`, both bound
     /// to `binding`); AuthZ by `Storage`'s declaration for every state op;
     /// Covert CLOSED here by `encode_padded`, which encodes the `SessionState`
     /// and pads it to a constant plaintext frame so the sealed ciphertext size
@@ -464,7 +474,7 @@ impl SessionPersister {
     fn build_state_op<'a>(
         &self,
         state: &SessionState,
-        token: &'a [u8],
+        data_key: &'a [u8],
         binding: StateBinding,
     ) -> Result<SetState<'a>, CallbackError> {
         Ok(SetState {
@@ -487,7 +497,7 @@ impl SessionPersister {
                     })
                 },
             )?,
-            applicant_session_token: token,
+            data_key,
             binding,
         })
     }
@@ -497,7 +507,7 @@ impl SessionPersister {
     /// write-presence carries no policy bandwidth. That used to rest on the
     /// runtime reporting its captures honestly; the set is now api's own, so it
     /// rests on nothing. AuthN is closed inside storage-client by the double
-    /// AEAD-seal (inner under `applicant_session_token`, outer under
+    /// AEAD-seal (inner under the session's data key, outer under
     /// `tee_seal_key`, AAD = the field, the blob's hash, the session); AuthZ by
     /// `Storage`'s declaration for every media op; Covert vouched here. Covert is NOT padded
     /// (unlike state): what a frame's length reveals is the applicant's own
@@ -506,7 +516,7 @@ impl SessionPersister {
     fn build_media_ops<'a>(
         &self,
         media: &[([u8; 32], Vec<u8>)],
-        token: &'a [u8],
+        data_key: &'a [u8],
     ) -> Vec<SetMedia<'a>> {
         media
             .iter()
@@ -522,7 +532,7 @@ impl SessionPersister {
                      because no policy-controlled quantity is left to pad; residual is that \
                      the worker still chooses whether to call session_change at all"
                 )),
-                applicant_session_token: token,
+                data_key,
             })
             .collect()
     }
@@ -553,7 +563,9 @@ impl SessionPersister {
                  decision's one byte: a size delta fixed per transition, whichever decision. \
                  What preparing the session settled rides in one fixed frame whatever the \
                  props, written by the session's first committed round whatever the policy \
-                 did: a size delta fixed for that transition too"
+                 did: a size delta fixed for that transition too. So does the data key's \
+                 lock, one size whoever holds it, written by the round that claims the \
+                 session"
             )),
         )
     }
@@ -730,7 +742,7 @@ fn pad_envelope(bytes: &mut Vec<u8>) -> Result<(), CallbackError> {
 mod tests {
     use super::*;
     use session_types::{Clip, DisplayField, MediaResult};
-    use storage_client::{Metadata, SealedState};
+    use storage_client::{Metadata, SealedState, StoreError, lock_data_keys, unlock_data_keys};
 
     fn media_round(frames: Vec<&[u8]>) -> Event {
         Event::Media(MediaResult {
@@ -822,61 +834,134 @@ mod tests {
         assert!(shuffle_to_envelope_bytes(&huge, "sid", 0, &sk).is_err());
     }
 
-    /// The session as a round's load reads it: its metadata, opened, the state
-    /// opened beside it, and the version.
-    async fn load(
-        store: &SessionStore,
-        id: &str,
-        token: &[u8],
-    ) -> Result<(SessionMetadata, Option<SessionState>, u64), storage_client::StoreError> {
+    /// The session as a round's load reads it under the applicant's key.
+    struct Loaded {
+        metadata: SessionMetadata,
+        /// Unlocked with the key, or a fresh one for a session no applicant
+        /// holds yet.
+        data_keys: Arc<DataKeys>,
+        /// The fresh key's lock, for the round's first write to record.
+        new_lock: Option<Vec<u8>>,
+        state: Option<SessionState>,
+        version: u64,
+    }
+
+    /// The session as a round's load reads it, under the applicant's `key`.
+    async fn load(store: &SessionStore, id: &str, key: &[u8]) -> Result<Loaded, StoreError> {
         let ((metadata, sealed), version) = store.read(id, (Metadata, SealedState)).await?;
         let metadata = metadata
             .trust(reason!(AuthZ::Matched, "test fixture"))
             .trust_accept_risk(reason!(Replay::AcceptedRisk, "test fixture"))
             .into_inner()
             .expect("the session exists");
+        let (data_keys, new_lock) = match &metadata.data_key_lock {
+            Some(lock) => (unlock_data_keys(id, lock, key)?, None),
+            None => {
+                let data_keys = DataKeys::fresh();
+                let lock = lock_data_keys(id, &data_keys, key)?;
+                (data_keys, Some(lock))
+            }
+        };
         let state = store
-            .open_state(id, sealed, &metadata, token)?
+            .open_state(id, sealed, &metadata, data_keys.current())?
             .trust_accept_risk(reason!(Replay::AcceptedRisk, "test fixture"))
             .into_inner();
         let version = version
             .trust(reason!(Replay::Fresh, "test fixture"))
             .into_inner();
-        Ok((metadata, state, version))
+        Ok(Loaded {
+            metadata,
+            data_keys: Arc::new(data_keys),
+            new_lock,
+            state,
+            version,
+        })
     }
 
-    /// One round's persist on the session as [`load`] reads it: `event`, and the
-    /// policy's state `n`.
-    async fn persist_round(
+    /// A persister for one round on the session as `loaded` holds it, its wait
+    /// numbered `awaiting_seq`.
+    fn persister_for(
         store: &Arc<SessionStore>,
         id: &str,
-        token: &Arc<SecretBox<Vec<u8>>>,
-        event: Event,
-        n: u8,
-    ) {
-        let (metadata, _, version) = load(store, id, token.expose_secret()).await.unwrap();
+        loaded: &Loaded,
+        awaiting_seq: u64,
+        consent: &RoundConsent,
+        captures: &RoundCaptures,
+        awaiting: &RoundAwaiting,
+    ) -> Arc<SessionPersister> {
+        SessionPersister::for_round(
+            store.clone(),
+            id.into(),
+            Arc::downgrade(&loaded.data_keys),
+            loaded.new_lock.clone(),
+            String::new(),
+            loaded.version,
+            awaiting_seq,
+            loaded.metadata.clone(),
+            Prepared { props: None },
+            consent,
+            captures,
+            awaiting,
+            Arc::new(ShuffleKey::from_tee_seal_key(&[4; 32])),
+        )
+    }
+
+    /// One round's persist on the session as [`load`] reads it under `key`:
+    /// `event`, and the policy's state `n`.
+    async fn persist_round(store: &Arc<SessionStore>, id: &str, key: &[u8], event: Event, n: u8) {
+        let loaded = load(store, id, key).await.unwrap();
         let consent = round_consent(&event, &None);
         let captures = round_captures(&event);
         let awaiting = RoundAwaiting::default();
-        let persister = SessionPersister::for_round(
-            store.clone(),
-            id.into(),
-            Arc::downgrade(token),
-            String::new(),
-            version,
-            1,
-            metadata,
-            Prepared { props: None },
-            &consent,
-            &captures,
-            &awaiting,
-            Arc::new(ShuffleKey::from_tee_seal_key(&[4; 32])),
-        );
+        let persister = persister_for(store, id, &loaded, 1, &consent, &captures, &awaiting);
         let state = SessionState {
             state: vec![n],
             ..Default::default()
         };
         persister.persist(state, None).await.unwrap();
+    }
+
+    /// A session with `metadata`, written as its creation is.
+    async fn create(
+        metadata: &SessionMetadata,
+    ) -> (Arc<storage_client::memory::Disk>, Arc<SessionStore>) {
+        let disk = Arc::new(storage_client::memory::Disk::default());
+        let store = Arc::new(SessionStore::new(disk.connect().await, [4; 32], None));
+        let set = SetMetadata(
+            Storage::expose_builder::<MetadataOp, _>(metadata)
+                .vouch(reason!(Covert::NotChosen, "test fixture")),
+        );
+        let ops = store
+            .seal(ID, &[&set])
+            .unwrap()
+            .vouch(reason!(Covert::Bounded, "test fixture"));
+        store.write(None, ops).await.unwrap();
+        (disk, store)
+    }
+
+    const ID: &str = "ses_round";
+    const KEY: [u8; 32] = [9; 32];
+
+    /// The round that claims a session records the lock of its data key — even
+    /// one that captured and finished nothing, on a session already prepared —
+    /// and the session opens under the claim's key alone from then on.
+    #[tokio::test]
+    async fn the_claiming_round_locks_the_session_to_its_key() {
+        let (_disk, store) = create(&SessionMetadata {
+            prepared: Some(Prepared { props: None }),
+            ..Default::default()
+        })
+        .await;
+
+        persist_round(&store, ID, &KEY, Event::Start, 1).await;
+        let loaded = load(&store, ID, &KEY).await.unwrap();
+        assert!(loaded.metadata.data_key_lock.is_some());
+        assert_eq!(loaded.new_lock, None);
+        assert_eq!(loaded.state.unwrap().state, [1]);
+        assert!(matches!(
+            load(&store, ID, &[8; 32]).await,
+            Err(StoreError::Crypto(_))
+        ));
     }
 
     /// A round's state opens beside the metadata its own write leaves — whether
@@ -885,41 +970,31 @@ mod tests {
     /// beside metadata that records it, does not.
     #[tokio::test]
     async fn a_round_s_state_opens_beside_the_metadata_its_write_leaves() {
-        let disk = Arc::new(storage_client::memory::Disk::default());
-        let store = Arc::new(SessionStore::new(disk.connect().await, [4; 32], None));
-        let id = "ses_round";
-        let created = SessionMetadata {
+        let (disk, store) = create(&SessionMetadata {
             prepared: Some(Prepared { props: None }),
             ..Default::default()
-        };
-        let set = SetMetadata(
-            Storage::expose_builder::<MetadataOp, _>(&created)
-                .vouch(reason!(Covert::NotChosen, "test fixture")),
+        })
+        .await;
+
+        persist_round(&store, ID, &KEY, media_round(vec![b"passport"]), 1).await;
+        let loaded = load(&store, ID, &KEY).await.unwrap();
+        assert_eq!(loaded.metadata.captured_media.len(), 1);
+        assert_eq!(loaded.state.unwrap().state, [1]);
+
+        persist_round(&store, ID, &KEY, Event::Start, 2).await;
+        assert_eq!(
+            load(&store, ID, &KEY).await.unwrap().state.unwrap().state,
+            [2]
         );
-        let ops = store
-            .seal(id, &[&set])
-            .unwrap()
-            .vouch(reason!(Covert::Bounded, "test fixture"));
-        store.write(None, ops).await.unwrap();
-        let token = Arc::new(SecretBox::new(Box::new(vec![9; 32])));
-
-        persist_round(&store, id, &token, media_round(vec![b"passport"]), 1).await;
-        let (metadata, state, _) = load(&store, id, token.expose_secret()).await.unwrap();
-        assert_eq!(metadata.captured_media.len(), 1);
-        assert_eq!(state.unwrap().state, [1]);
-
-        persist_round(&store, id, &token, Event::Start, 2).await;
-        let (_, state, _) = load(&store, id, token.expose_secret()).await.unwrap();
-        assert_eq!(state.unwrap().state, [2]);
 
         let before = disk.records.lock().unwrap().clone();
-        persist_round(&store, id, &token, media_round(vec![b"selfie"]), 3).await;
+        persist_round(&store, ID, &KEY, media_round(vec![b"selfie"]), 3).await;
         for (name, record) in disk.records.lock().unwrap().iter_mut() {
             record.state = before[name].state.clone();
         }
         assert!(matches!(
-            load(&store, id, token.expose_secret()).await,
-            Err(storage_client::StoreError::Crypto(_))
+            load(&store, ID, &KEY).await,
+            Err(StoreError::Crypto(_))
         ));
     }
 
@@ -927,39 +1002,13 @@ mod tests {
     /// carries the number the round was given, whatever the worker put there.
     #[tokio::test]
     async fn a_round_s_wait_is_numbered_by_this_side() {
-        let disk = Arc::new(storage_client::memory::Disk::default());
-        let store = Arc::new(SessionStore::new(disk.connect().await, [4; 32], None));
-        let id = "ses_wait";
-        let created = SessionMetadata::default();
-        let set = SetMetadata(
-            Storage::expose_builder::<MetadataOp, _>(&created)
-                .vouch(reason!(Covert::NotChosen, "test fixture")),
-        );
-        let ops = store
-            .seal(id, &[&set])
-            .unwrap()
-            .vouch(reason!(Covert::Bounded, "test fixture"));
-        store.write(None, ops).await.unwrap();
-        let token = Arc::new(SecretBox::new(Box::new(vec![9; 32])));
+        let (_disk, store) = create(&SessionMetadata::default()).await;
 
-        let (metadata, _, version) = load(&store, id, token.expose_secret()).await.unwrap();
+        let loaded = load(&store, ID, &KEY).await.unwrap();
         let consent = round_consent(&Event::Start, &None);
         let captures = round_captures(&Event::Start);
         let awaiting = RoundAwaiting::default();
-        let persister = SessionPersister::for_round(
-            store.clone(),
-            id.into(),
-            Arc::downgrade(&token),
-            String::new(),
-            version,
-            5,
-            metadata,
-            Prepared { props: None },
-            &consent,
-            &captures,
-            &awaiting,
-            Arc::new(ShuffleKey::from_tee_seal_key(&[4; 32])),
-        );
+        let persister = persister_for(&store, ID, &loaded, 5, &consent, &captures, &awaiting);
         let from_the_worker = SessionState {
             current_prompt: Some(Prompt::Media(Default::default())),
             awaiting_seq: 999,
@@ -967,7 +1016,7 @@ mod tests {
         };
         persister.persist(from_the_worker, None).await.unwrap();
 
-        let (_, state, _) = load(&store, id, token.expose_secret()).await.unwrap();
-        assert_eq!(state.unwrap().awaiting_seq, 5);
+        let state = load(&store, ID, &KEY).await.unwrap().state.unwrap();
+        assert_eq!(state.awaiting_seq, 5);
     }
 }

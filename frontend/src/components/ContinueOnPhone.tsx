@@ -1,21 +1,114 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { QRCodeSVG } from "qrcode.react";
 import { Smartphone } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { handoffLink } from "@/lib/handoff";
+import { ApiError, createHandoff, heldBy } from "@/lib/api";
+import { handoffLink, takeOverHere } from "@/lib/handoff";
+import { loadKey } from "@/lib/key";
 import { cn } from "@/lib/utils";
 
-/// "Continue on your phone": a QR code that carries the session, with its key,
-/// to a phone's camera — for an applicant on a computer, who would rather take
-/// the photos with the phone. Offered only where the pointer is a mouse; a
-/// phone already has the camera.
+type Props = {
+  sessionId: string;
+  /// The session was taken over from a code this page showed: `refused`, the
+  /// key this page asked with, opens it no more.
+  onMoved: (refused: Uint8Array) => void;
+};
+
+/// "Continue on your phone": a QR code that hands the session over to a phone's
+/// camera — for an applicant on a computer, who would rather take the photos
+/// with the phone. Offered only where the pointer is a mouse; a phone already
+/// has the camera.
 ///
-/// The code is made when asked for and dropped when the dialog closes: it is
-/// the whole session to whoever sees it (see `lib/handoff.ts`).
-export function ContinueOnPhone({ sessionId }: { sessionId: string }) {
-  const [link, setLink] = useState<string | null>(null);
+/// The code is a hand-over api made for this page's key (see `lib/handoff.ts`):
+/// the phone that scans it takes the session over with a key of its own. While
+/// the code is up, the page asks every few seconds whether its key still holds
+/// the session, without claiming it. When the code is put away untaken, the
+/// page takes its own session over with a fresh key, and every code it showed
+/// dies with that; until that take lands, no other code is made.
+export function ContinueOnPhone({ sessionId, onMoved }: Props) {
+  const [handoff, setHandoff] = useState<string | null>(null);
+  const [making, setMaking] = useState(false);
+  const [puttingAway, setPuttingAway] = useState(false);
+  const [failed, setFailed] = useState<"later" | "never" | null>(null);
+  // The code on screen, for putting it away when this goes — the dialog
+  // closed, or the page moved on with it still up.
+  const shownRef = useRef<string | null>(null);
+  const movedRef = useRef(false);
+
+  function moved(refused: Uint8Array) {
+    movedRef.current = true;
+    shownRef.current = null;
+    setHandoff(null);
+    onMoved(refused);
+  }
+
+  // A code put away untaken: a take of its own here ends every code shown
+  // against this page's lock. One the take does not settle is asked after with
+  // the key this page holds.
+  async function putAway(shown: string) {
+    shownRef.current = null;
+    setPuttingAway(true);
+    try {
+      const take = await takeOverHere(sessionId, shown);
+      if (take.kind === "taken") return;
+      const key = loadKey(sessionId);
+      if (key && (await heldBy(sessionId, key)) === "lost") moved(key);
+    } catch {
+      // Not known; the next request this page makes will say.
+    } finally {
+      setPuttingAway(false);
+    }
+  }
+
+  // While the code is up: has a phone taken the session? The key is read
+  // afresh each time, and an answer that comes after the code was put away
+  // is not acted on.
+  useEffect(() => {
+    if (!handoff) return;
+    const timer = window.setInterval(() => {
+      const key = loadKey(sessionId);
+      if (!key) return;
+      void heldBy(sessionId, key)
+        .then((held) => {
+          if (held === "lost" && shownRef.current === handoff) moved(key);
+        })
+        .catch(() => {
+          // A missed look says nothing; the next one asks again.
+        });
+    }, 2000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handoff, sessionId]);
+
+  // Gone with a code still up — the page moved on some other way.
+  useEffect(
+    () => () => {
+      if (shownRef.current && !movedRef.current) void putAway(shownRef.current);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
   if (!window.matchMedia("(pointer: fine)").matches) return null;
+
+  async function show() {
+    const key = loadKey(sessionId);
+    if (!key) return;
+    setMaking(true);
+    setFailed(null);
+    try {
+      const made = await createHandoff(sessionId, key);
+      shownRef.current = made;
+      setHandoff(made);
+    } catch (e) {
+      // 410: the session's lock holds all the keys it can, and it is handed
+      // over no more.
+      setFailed(e instanceof ApiError && e.status === 410 ? "never" : "later");
+    } finally {
+      setMaking(false);
+    }
+  }
 
   return (
     <>
@@ -23,15 +116,25 @@ export function ContinueOnPhone({ sessionId }: { sessionId: string }) {
         variant="ghost"
         size="lg"
         className="w-full text-muted-foreground"
-        onClick={() => setLink(handoffLink(sessionId))}
+        onClick={() => void show()}
+        disabled={making || puttingAway || failed === "never"}
       >
         <Smartphone />
         Continue on your phone
       </Button>
+      {failed && (
+        <p className="mt-2 text-center text-xs text-muted-foreground">
+          {failed === "never"
+            ? "This verification can't move to another device any more."
+            : "Couldn't make a code. Try again in a moment."}
+        </p>
+      )}
       <Dialog.Root
-        open={link !== null}
+        open={handoff !== null}
         onOpenChange={(open) => {
-          if (!open) setLink(null);
+          if (open || !handoff) return;
+          setHandoff(null);
+          if (!movedRef.current) void putAway(handoff);
         }}
       >
         <Dialog.Portal>
@@ -49,9 +152,9 @@ export function ContinueOnPhone({ sessionId }: { sessionId: string }) {
               Scan this code with your phone's camera to pick up right where
               you are.
             </Dialog.Description>
-            {link && (
+            {handoff && (
               <QRCodeSVG
-                value={link}
+                value={handoffLink(handoff)}
                 size={224}
                 marginSize={2}
                 className="rounded-lg bg-white"
@@ -59,9 +162,9 @@ export function ContinueOnPhone({ sessionId }: { sessionId: string }) {
               />
             )}
             <p className="text-xs leading-relaxed text-muted-foreground">
-              The code carries your session's key: show it only to your own
-              phone. Once your phone shows the next step, you can close this
-              tab.
+              Whoever scans this code takes the verification over from this
+              page, so show it only to your own phone. The code works once, for
+              a few minutes.
             </p>
             <Dialog.Close
               render={<Button variant="outline" className="w-full" />}

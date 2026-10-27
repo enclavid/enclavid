@@ -23,9 +23,9 @@ pub use cache::{BlobPieces, CacheStore};
 pub use error::StoreError;
 pub use link::Link;
 pub use session::{
-    AppendDisclosure, Ctx, Disclosure, DropApplicantData, Metadata, ReadField, ReadTuple,
-    SealedState, SessionStore, SetMedia, SetMetadata, SetState, StateBinding, WriteField,
-    encode_padded,
+    AppendDisclosure, Ctx, DataKeys, Disclosure, DropApplicantData, Handoff, MAX_DATA_KEYS,
+    Metadata, ReadField, ReadTuple, SealedState, SessionStore, SetMedia, SetMetadata, SetState,
+    StateBinding, WriteField, encode_padded, lock_data_keys, lock_digest, unlock_data_keys,
 };
 // The ops a caller builds the fields of a write as.
 pub use storage_rpc::{DisclosureOp, MediaOp, MetadataOp, Ops, StateOp};

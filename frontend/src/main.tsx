@@ -1,17 +1,16 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { takeHandedKey } from "@/lib/handoff";
+import { takeHandoff } from "@/lib/handoff";
 import { getSessionId } from "@/lib/session";
 import "./index.css";
 
-// A key handed over from another device is taken before anything reads the
-// address — the router included — and leaves it at once.
-const sessionId = getSessionId(window.location.pathname);
-if (sessionId) takeHandedKey(sessionId);
+// A hand-over from another device is taken out of the address before anything
+// reads it — the router included — and leaves it at once.
+const handoff = getSessionId(window.location.pathname) ? takeHandoff() : null;
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <App handoff={handoff} />
   </StrictMode>,
 );

@@ -20,10 +20,11 @@ pub(super) fn post_connect() -> MethodRouter<Arc<AppState>> {
 /// session and gets where it stands. A session no round has reached yet runs
 /// genesis: the policy reducer is driven from a fresh `SessionState::default()`
 /// (empty opaque `state`, no `current_prompt`) with `Event::Start`, and the
-/// resulting state + prompt are persisted. A different key on an
-/// already-claimed session is rejected at the auth layer with 403; recovery
-/// requires `DELETE /api/v1/sessions/{id}/state` first (no auth, by design —
-/// see reset.rs).
+/// resulting state + prompt are persisted, beside the lock of the data key that
+/// claims the session for this key. A different key on an already-claimed
+/// session does not open that lock and is rejected with 403; recovery requires
+/// `DELETE /api/v1/sessions/{id}/state` first (no auth, by design — see
+/// reset.rs), or a hand-over from the device that holds it (handoff.rs).
 async fn connect(ctx: SessionRunCtx) -> Result<SessionProgress, StatusCode> {
     // A started session answers with the prompt it waits on, so reopening the
     // link carries on where the applicant was instead of starting over. One that

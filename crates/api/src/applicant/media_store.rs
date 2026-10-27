@@ -1,8 +1,8 @@
 //! Host media store the keyless execution-worker calls BACK for
 //! `blob::from-blob-ref` (via `RemoteCallbacks::media_load`) — a **pull** over
 //! the sealed hatch backing store, with a **gate** on the read key. It runs
-//! orchestrator-side because it holds the seal key + applicant token the worker
-//! must never see.
+//! orchestrator-side because it holds the seal key + the session's data key the
+//! worker must never see.
 //!
 //! `blob::from-blob-ref` mints a COLD handle (no load); the worker calls
 //! [`load`](HatchMediaStore::load) LAZILY on the first `bytes()` read of that
@@ -63,19 +63,20 @@ use crate::boundary::ExecutionWorker;
 use crate::executor::outbound_blob;
 
 use super::callbacks::FromWorker;
-use secrecy::{ExposeSecret, SecretBox};
+use storage_client::DataKeys;
 
 pub(super) struct HatchMediaStore {
     pub session_store: Arc<SessionStore>,
     pub session_id: String,
-    /// WEAK handle to the applicant bearer — the inner AEAD layer's key,
-    /// needed to OPEN a sealed media blob on load. `Weak` (not owned): the
+    /// WEAK handle to the session's data keys — the inner AEAD layer's keys,
+    /// one of which OPENS a sealed media blob on load: the one the session
+    /// sealed under as the blob was captured. `Weak` (not owned): the
     /// per-round `SessionRunCtx` is the sole strong owner, so this store
-    /// borrows the token in the moment (`upgrade` while the run is live) but
+    /// borrows the keys in the moment (`upgrade` while the run is live) but
     /// can never PIN the plaintext — its lifetime is exactly the round. A
     /// `None` upgrade means the run outlived its context (a lifetime bug),
     /// surfaced as a trap.
-    pub applicant_session_token: Weak<SecretBox<Vec<u8>>>,
+    pub data_keys: Weak<DataKeys>,
     /// GATE — the session's captured blob hashes (from sealed metadata, prior
     /// rounds). A rehydrate for a hash NOT in here is a fabricated ref, refused
     /// in-TEE with no hatch read, so the plaintext read key can't carry data.
@@ -111,7 +112,7 @@ impl HatchMediaStore {
         //
         //    Two mechanisms contain it, and neither is "the peer is attested":
         //    the set admits only what this session already stored, and the blob
-        //    opens only under this round's applicant token with AAD
+        //    opens only under this session's data keys with AAD
         //    `session_id‖blob_hash`, so a hash that collides across sessions
         //    still yields nothing.
         //
@@ -134,21 +135,19 @@ impl HatchMediaStore {
             return Ok(outbound_blob(None));
         };
         let blob_hash = blob_hash.into_inner();
-        // 2. Pull + decrypt on serve. Borrow the token from the per-round owner
-        //    for the moment of the open; a `None` upgrade means the run outlived
-        //    its context. Nothing is retained: the decrypted blob is returned
-        //    straight to the wire, so no decrypted-PII pool lives api-side.
-        //    Cross-round re-reads simply re-pull (the worker's per-run memo
-        //    dedups repeats within a round).
-        let token = self.applicant_session_token.upgrade().ok_or_else(|| {
-            safe_logger::debug!(
-                "media load: applicant token owner dropped (run outlived its context)"
-            );
+        // 2. Pull + decrypt on serve. Borrow the data keys from the per-round
+        //    owner for the moment of the open; a `None` upgrade means the run
+        //    outlived its context. Nothing is retained: the decrypted blob is
+        //    returned straight to the wire, so no decrypted-PII pool lives
+        //    api-side. Cross-round re-reads simply re-pull (the worker's per-run
+        //    memo dedups repeats within a round).
+        let keys = self.data_keys.upgrade().ok_or_else(|| {
+            safe_logger::debug!("media load: data keys owner dropped (run outlived its context)");
             CallbackError
         })?;
         let loaded = self
             .session_store
-            .load_media(&self.session_id, &blob_hash, token.expose_secret())
+            .load_media(&self.session_id, &blob_hash, &keys)
             .await
             .map_err(|e| {
                 safe_logger::debug!("media load failed: {e}");
