@@ -184,7 +184,8 @@ pub(crate) enum DimensionValue {
     Param(String),
 }
 
-/// `FunctionProto`: a model's own operator, made of other operators.
+/// `FunctionProto`: a model's own operator, made of other operators, and the
+/// values its attributes take where a node gives none.
 #[derive(Clone, PartialEq, prost::Message)]
 pub(crate) struct Function {
     #[prost(string, tag = "1")]
@@ -193,4 +194,6 @@ pub(crate) struct Function {
     pub node: Vec<Node>,
     #[prost(string, tag = "10")]
     pub domain: String,
+    #[prost(message, repeated, tag = "11")]
+    pub attribute_proto: Vec<Attribute>,
 }

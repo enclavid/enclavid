@@ -21,7 +21,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use enclavid_inference::graph::{self, DataFile, Element, Port};
 use engine_types::compile::{MODEL_DATA_SUFFIX, MODEL_GRAPH_SUFFIX, MODELS, RUN, TENSORS};
 use engine_types::limits::{MAX_MODEL_FILE_BYTES, MAX_MODELS, MAX_RUN_TENSORS};
@@ -363,22 +363,33 @@ fn host_tensor(resolve: &Resolve, mut id: TypeId) -> Option<Element> {
 }
 
 /// The model files in `dir` — every `.onnx` and `.onnx.data` — by name; none
-/// where there is no `dir`.
+/// where there is no `dir`. Each is a file of the directory's own: a link is
+/// refused, not followed, so what is checked and pushed is never a file
+/// elsewhere that a link points at.
 pub(crate) fn files(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(Vec::new());
     };
     let mut files = Vec::new();
     for entry in entries {
-        let path = entry
-            .with_context(|| format!("reading {}", dir.display()))?
-            .path();
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if name.ends_with(MODEL_GRAPH_SUFFIX) || name.ends_with(MODEL_DATA_SUFFIX) {
-            files.push((name.to_owned(), path.clone()));
+        if !(name.ends_with(MODEL_GRAPH_SUFFIX) || name.ends_with(MODEL_DATA_SUFFIX)) {
+            continue;
         }
+        let kind = entry
+            .file_type()
+            .with_context(|| format!("reading {}", path.display()))?;
+        if !kind.is_file() {
+            bail!(
+                "{}: not a file of its own — a model file is never a link or a directory",
+                path.display()
+            );
+        }
+        files.push((name.to_owned(), path));
     }
     files.sort();
     Ok(files)

@@ -377,12 +377,20 @@ fn each_call_ends_as_listed() {
         ),
         Killed,
     ));
+    // A filter of its own over the calling thread alone: one the process's
+    // other threads would not carry.
+    rows.push((
+        "seccomp(SET_MODE_FILTER, no flags)",
+        call!(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, 0, 0),
+        Killed,
+    ));
 
     // What a coprocess does without, beside a child: it blocks on its socket, so
     // it neither sets it non-blocking nor waits on an event loop, and it has
     // no call that moves a descriptor across it. fd 0 and fd -1 here are not
-    // sockets, so each call fails — after the filter let it through. And what
-    // it has that a child has not: a filter of its own, with no flags. The
+    // sockets, so each call fails — after the filter let it through. It runs
+    // no code it makes, so it maps and turns no memory executable. And what it
+    // has that a child has not: a filter of its own, over every thread. The
     // filter's address here is none, so the call fails — after the filter let
     // it through.
     let differ = [
@@ -393,10 +401,35 @@ fn each_call_ends_as_listed() {
             Killed,
         ),
         (
-            "seccomp(SET_MODE_FILTER, no flags)",
-            call!(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, 0, 0),
+            "seccomp(SET_MODE_FILTER, TSYNC)",
+            call!(
+                libc::SYS_seccomp,
+                libc::SECCOMP_SET_MODE_FILTER,
+                libc::SECCOMP_FILTER_FLAG_TSYNC,
+                0
+            ),
             Killed,
             Survived,
+        ),
+        (
+            "mmap, anonymous, executable",
+            call!(
+                libc::SYS_mmap,
+                0,
+                4096,
+                libc::PROT_READ | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0
+            ),
+            Survived,
+            Killed,
+        ),
+        (
+            "mprotect to executable",
+            call!(libc::SYS_mprotect, 0, 0, libc::PROT_READ | libc::PROT_EXEC),
+            Survived,
+            Killed,
         ),
         (
             "ioctl(FIONBIO)",

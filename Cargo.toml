@@ -40,3 +40,11 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/enclavid/enclavid"
+
+# What reads a vendor's graph and the tensors a round sends it stops at an
+# arithmetic overflow rather than wrapping past it, in every build.
+[profile.release.package.enclavid-inference]
+overflow-checks = true
+
+[profile.release.package.engine-executor-inference]
+overflow-checks = true

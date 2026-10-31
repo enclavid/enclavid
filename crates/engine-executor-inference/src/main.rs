@@ -1,11 +1,12 @@
-//! The coprocess a round's models run in.
+//! The coprocess a model runs in.
 //!
-//! On fd 0 is the socket whose other end the round holds, and from fd 3 up, in
-//! pairs, each model of the round's composition: its graph, then its data file
-//! — empty where it has none. The coprocess checks and loads every model,
-//! narrows itself so that it opens no file and starts no program from then on,
-//! and answers the round's requests one at a time until the round lets go of
-//! the socket.
+//! On fd 0 is the socket whose other end the round holds, on fd 3 the model's
+//! graph and on fd 4 its data file — empty where it has none. One model and no
+//! more: whatever a graph makes of ONNX Runtime, the process it reaches holds
+//! no other model's weights. The coprocess checks and loads the model, narrows
+//! itself so that no thread of it opens a file or starts a program from then
+//! on, and answers the round's requests one at a time until the round lets go
+//! of the socket.
 //!
 //! A model whose graph is refused, or that ONNX Runtime does not load, is
 //! answered as no model at all. Why is the vendor's to see where the graph is
@@ -39,20 +40,17 @@ fn main() -> ExitCode {
 }
 
 fn serve() -> Result<(), Stop> {
-    let handed = handed()?;
+    let (graph, data) = handed()?;
     // Read and written as a file, with read(2) and write(2): a socket type
     // reads through recvfrom, which the coprocess's filter does not have.
     let mut socket = File::from(std::io::stdin().as_fd().try_clone_to_owned()?);
     let environment = ort::init().with_telemetry(false).build()?;
-    let mut models: Vec<Option<Model>> = handed
-        .iter()
-        .map(|(graph, data)| Model::load(&environment, graph, data).ok())
-        .collect();
-    drop(handed);
+    let mut model = Model::load(&environment, &graph, &data).ok();
+    drop((graph, data));
     narrow()?;
     while let Some(request) = protocol::read_request(&mut socket)? {
-        let answer = match models.get_mut(request.model as usize) {
-            Some(Some(model)) => model.run(&request.inputs),
+        let answer = match (request.model, model.as_mut()) {
+            (0, Some(model)) => model.run(&request.inputs),
             _ => Err(Failure::NoModel),
         };
         protocol::write_answer(&mut socket, &answer)?;
@@ -60,10 +58,11 @@ fn serve() -> Result<(), Stop> {
     Ok(())
 }
 
-/// The files handed from fd 3 up, paired as graph and data file. Every one is
-/// open, and nothing past them is: the supervisor closed the rest at the exec,
-/// and this runs before anything here opens a file.
-fn handed() -> Result<Vec<(File, File)>, Stop> {
+/// The model handed on fd 3 and fd 4: its graph and its data file. Both are
+/// open and nothing past them is — the supervisor closed the rest at the exec,
+/// and this runs before anything here opens a file — or the coprocess stops:
+/// it runs one model and no more.
+fn handed() -> Result<(File, File), Stop> {
     let mut files = Vec::new();
     for fd in HANDED.. {
         // SAFETY: `F_GETFD` on a bare number reads its flags or fails with
@@ -75,17 +74,17 @@ fn handed() -> Result<Vec<(File, File)>, Stop> {
         // and owned by nothing else in it.
         files.push(File::from(unsafe { OwnedFd::from_raw_fd(fd) }));
     }
-    if files.len() % 2 != 0 {
-        return Err("the handed files are not in pairs".into());
-    }
     let mut files = files.into_iter();
-    Ok(std::iter::from_fn(|| Some((files.next()?, files.next()?))).collect())
+    match (files.next(), files.next(), files.next()) {
+        (Some(graph), Some(data), None) => Ok((graph, data)),
+        _ => Err("the handed files are not one model's graph and data file".into()),
+    }
 }
 
-/// Once its models are loaded the coprocess has no file to open and no
-/// program to start, so a filter of its own — on top of the one it was started
-/// under, which can only be narrowed — ends it if it tries either, whatever a
-/// graph has made of ONNX Runtime.
+/// Once its model is loaded the coprocess has no file to open and no program
+/// to start, so a filter of its own — on top of the one it was started under,
+/// which can only be narrowed — ends it if any of its threads tries either,
+/// whatever a graph has made of ONNX Runtime.
 #[cfg(target_os = "linux")]
 fn narrow() -> Result<(), Stop> {
     use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
@@ -106,7 +105,7 @@ fn narrow() -> Result<(), Stop> {
         ARCH,
     )?
     .try_into()?;
-    seccompiler::apply_filter(&filter)?;
+    seccompiler::apply_filter_all_threads(&filter)?;
     Ok(())
 }
 

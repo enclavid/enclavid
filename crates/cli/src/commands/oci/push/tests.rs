@@ -33,6 +33,18 @@ fn each_model_file_is_a_layer_named_for_it() {
     );
 }
 
+/// A model file that is a link is refused, not followed: what is pushed is
+/// never a file elsewhere a link points at.
+#[test]
+fn a_link_among_the_model_files_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = dir.path().join("secret");
+    std::fs::write(&elsewhere, b"not the vendor's").unwrap();
+    std::fs::write(dir.path().join("age.onnx"), b"age graph").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, dir.path().join("age.onnx.data")).unwrap();
+    assert!(model_layers(dir.path()).is_err());
+}
+
 /// A directory with no model files, or none at all, is an error: `--models`
 /// names files to push.
 #[test]

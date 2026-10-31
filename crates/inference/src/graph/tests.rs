@@ -311,8 +311,158 @@ fn a_domain_is_the_runtimes_or_the_models_own() {
         name: "Fused".into(),
         node: vec![node("Relu", &["a"], &["b"])],
         domain: "vendor.ops".into(),
+        attribute_proto: Vec::new(),
     });
     assert!(checked(&with_function).is_ok());
+}
+
+/// The values a function's attributes take where a node gives none are held
+/// to what a node's are: a tensor in one keeps its data inline, and a graph in
+/// one runs the runtime's operators.
+#[test]
+fn a_functions_default_attributes_are_checked_as_a_nodes_are() {
+    let function = |attribute: Attribute| Function {
+        name: "Fused".into(),
+        node: vec![node("Relu", &["a"], &["b"])],
+        domain: "vendor.ops".into(),
+        attribute_proto: vec![attribute],
+    };
+    let cases = [
+        (
+            Attribute {
+                name: "value".into(),
+                t: Some(at("hidden", &[2], 0)),
+                ..Attribute::default()
+            },
+            Refusal::NotInitializer("hidden".into()),
+        ),
+        (
+            Attribute {
+                name: "body".into(),
+                g: Some(Box::new(Graph {
+                    node: vec![Node {
+                        domain: "elsewhere".into(),
+                        ..node("Open", &[], &["o"])
+                    }],
+                    ..Graph::default()
+                })),
+                ..Attribute::default()
+            },
+            Refusal::Domain {
+                domain: "elsewhere".into(),
+                op: "Open".into(),
+            },
+        ),
+    ];
+    for (attribute, refusal) in cases {
+        let mut with_function = model(linear());
+        with_function.functions.push(function(attribute));
+        assert_eq!(checked(&with_function).unwrap_err(), refusal);
+    }
+}
+
+/// `message` with a field numbered `number` after the rest.
+fn with_field(mut message: Vec<u8>, number: u32, payload: &[u8]) -> Vec<u8> {
+    crate::wire::put_delimited(&mut message, number, payload);
+    message
+}
+
+/// The model of `linear`, its graph's bytes `graph`.
+fn around(graph: Vec<u8>) -> Vec<u8> {
+    let mut bytes = Model {
+        graph: None,
+        ..model(linear())
+    }
+    .encode_to_vec();
+    crate::wire::put_delimited(&mut bytes, 7, &graph);
+    bytes
+}
+
+/// A field ONNX does not define is refused in every message that holds
+/// tensors, graphs or functions, however deep: what the check does not read,
+/// ONNX Runtime is never handed.
+#[test]
+fn a_field_onnx_does_not_define_is_refused() {
+    const ODD: u32 = 99;
+    let graph = || linear().encode_to_vec();
+    let relu = node("Relu", &["y"], &["z"]).encode_to_vec();
+    let attribute = Attribute {
+        name: "alpha".into(),
+        ..Attribute::default()
+    }
+    .encode_to_vec();
+    let function = Function {
+        name: "Fused".into(),
+        node: vec![node("Relu", &["a"], &["b"])],
+        domain: "vendor.ops".into(),
+        attribute_proto: Vec::new(),
+    }
+    .encode_to_vec();
+    let cases = [
+        (
+            with_field(model(linear()).encode_to_vec(), ODD, b"?"),
+            "model",
+        ),
+        (around(with_field(graph(), ODD, b"?")), "graph"),
+        (
+            around(with_field(graph(), 1, &with_field(relu.clone(), ODD, b"?"))),
+            "node",
+        ),
+        (
+            around(with_field(
+                graph(),
+                1,
+                &with_field(relu, 5, &with_field(attribute, ODD, b"?")),
+            )),
+            "attribute",
+        ),
+        (
+            around(with_field(
+                graph(),
+                5,
+                &with_field(inline("k", &[2]).encode_to_vec(), ODD, b"?"),
+            )),
+            "tensor",
+        ),
+        (
+            with_field(
+                model(linear()).encode_to_vec(),
+                25,
+                &with_field(function, ODD, b"?"),
+            ),
+            "function",
+        ),
+    ];
+    for (bytes, message) in cases {
+        assert_eq!(
+            check(&bytes, Some(FILE)).unwrap_err(),
+            Refusal::Unknown(message, ODD),
+            "{message}"
+        );
+    }
+}
+
+/// A field ONNX defines is taken whether or not the check reads it: a graph's
+/// value information, a node's doc string, the model's metadata.
+#[test]
+fn a_field_onnx_defines_is_taken_unread() {
+    let value_info = value("xw", FLOAT, &[1, 2]).encode_to_vec();
+    let metadata = Entry {
+        key: "author".into(),
+        value: "vendor".into(),
+    }
+    .encode_to_vec();
+    let with_doc = with_field(
+        node("Relu", &["y"], &["z"]).encode_to_vec(),
+        6,
+        b"a doc string",
+    );
+    let graph = with_field(
+        with_field(linear().encode_to_vec(), 13, &value_info),
+        1,
+        &with_doc,
+    );
+    assert!(check(&with_field(around(graph), 14, &metadata), Some(FILE)).is_ok());
 }
 
 /// A tensor anywhere but the initializers that says its data lies elsewhere

@@ -208,10 +208,31 @@ fn allowlist(of: Filters) -> BpfProgram {
     // A coprocess may narrow itself further once it is ready — a filter of its
     // own on top of this one, which can only refuse more — and do nothing else
     // with either call: `no_new_privs`, which it already has, and a filter
-    // installed with no flags. A flag could open a listener another process
-    // answers its calls through, or let speculation past what the kernel
-    // guards it with.
+    // installed over every thread at once, `TSYNC`, and with no other flag.
+    // Another flag could open a listener another process answers its calls
+    // through, or let speculation past what the kernel guards it with.
+    //
+    // And its memory is memory it writes or reads, never memory it runs: ONNX
+    // Runtime's CPU kernels are compiled in and nothing in a coprocess makes
+    // code at run time, so a page mapped or turned executable is an escape
+    // writing its own. `mmap` and `mprotect` both take the protection third.
     if let Filters::Coprocess = of {
+        let not_executable = || {
+            vec![
+                SeccompRule::new(vec![
+                    SeccompCondition::new(
+                        2,
+                        SeccompCmpArgLen::Dword,
+                        SeccompCmpOp::MaskedEq(libc::PROT_EXEC as u64),
+                        0,
+                    )
+                    .expect("build protection condition"),
+                ])
+                .expect("build protection rule"),
+            ]
+        };
+        rules.insert(libc::SYS_mmap, not_executable());
+        rules.insert(libc::SYS_mprotect, not_executable());
         rules.insert(
             libc::SYS_prctl,
             vec![
@@ -238,8 +259,13 @@ fn allowlist(of: Filters) -> BpfProgram {
                         u64::from(libc::SECCOMP_SET_MODE_FILTER),
                     )
                     .expect("build seccomp-operation condition"),
-                    SeccompCondition::new(1, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, 0)
-                        .expect("build seccomp-flags condition"),
+                    SeccompCondition::new(
+                        1,
+                        SeccompCmpArgLen::Dword,
+                        SeccompCmpOp::Eq,
+                        libc::SECCOMP_FILTER_FLAG_TSYNC,
+                    )
+                    .expect("build seccomp-flags condition"),
                 ])
                 .expect("build seccomp rule"),
             ],
@@ -403,10 +429,8 @@ const COPROCESS_ALLOWED: &[libc::c_long] = &[
     libc::SYS_getrandom,
     libc::SYS_getpid, // reasoned: the abort path
     libc::SYS_gettid,
-    // ── Memory ─────────────────────────────────────────────────────────
-    libc::SYS_mmap,
+    // ── Memory. `mmap` and `mprotect` carry a condition: in `allowlist` ──
     libc::SYS_munmap,
-    libc::SYS_mprotect,
     libc::SYS_mremap, // reasoned: a large block reallocated
     libc::SYS_brk,
     libc::SYS_madvise, // reasoned: allocator release

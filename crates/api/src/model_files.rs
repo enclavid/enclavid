@@ -29,7 +29,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 
-use enclavid_boundary::{Asserted, Exposed, Untrusted};
+use enclavid_boundary::{Asserted, Covert, Exposed, Untrusted, reason};
 use engine_rpc::{CallbackError, ModelFileDigest, ModelFileStream};
 use engine_types::composition::ModelLayer;
 use fleet_stream::{BlobHeader, bin};
@@ -223,7 +223,15 @@ impl RoundModelFiles {
                 tokio::spawn(send_pulled(cache, id, file.length, tx, pieces));
             }
         }
-        Ok(ExecutionWorker::expose(ModelFileStream { header, body }))
+        Ok(
+            ExecutionWorker::expose(ModelFileStream { header, body }).vouch_accept_risk(reason!(
+                Covert::AcceptedRisk,
+                "its length is the file's, which the host measured pulling it; but a worker \
+                 asks for it the first time a round runs its model, so a host that empties \
+                 the worker's cache reads which models a round ran — a policy's branch, which \
+                 the round's own duration shows it as well"
+            )),
+        )
     }
 }
 

@@ -67,9 +67,6 @@ boundary! {
         /// A model file of the composition this session runs, released to the
         /// image this leg pins, which is the party that runs it.
         ModelFileStream: AuthZ::Matched,
-        /// Its length is the file's, fixed by the pins: the HOST performed the pull
-        /// that produced these bytes, so it is a quantity it measured itself.
-        ModelFileStream: Covert::AlreadyHeld,
     }
 
     in (Asserted,) {

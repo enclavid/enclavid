@@ -10,13 +10,18 @@
 //! shared by every round that runs the model.
 //!
 //! Refused, and why:
+//! - a field ONNX does not define, in any message that holds tensors, graphs or
+//!   functions — the model's, a graph's, a node's, an attribute's, a tensor's,
+//!   a function's. What this check does not read, ONNX Runtime is never handed:
+//!   every field it reads, the check has read first;
 //! - a tensor whose data lies anywhere but the model's data file, inside it.
 //!   ONNX Runtime reads a tensor that names a file from that file by its path,
-//!   and one that names `*/_ORT_MEM_ADDR_/*` from the memory at its offset —
-//!   another model's weights, where a process holds several. None of these
-//!   reaches ONNX Runtime: the graph it is handed points nowhere at all;
+//!   and one that names `*/_ORT_MEM_ADDR_/*` from the memory at its offset.
+//!   None of these reaches ONNX Runtime: the graph it is handed points nowhere
+//!   at all;
 //! - such a tensor anywhere but the graph's own initializers: in a node's
-//!   attribute, in a subgraph, in a function;
+//!   attribute, in a subgraph, in a function or the values its attributes take
+//!   where a node gives none;
 //! - sparse tensors, whose densifying reads such a file too — the runtime is
 //!   built without them — and training information, graphs inference never
 //!   runs;
@@ -229,6 +234,8 @@ pub enum Refusal {
     TooLarge(usize),
     #[error("the graph is not an ONNX model")]
     Malformed,
+    #[error("a {0} carries field {1}, which ONNX does not define for it")]
+    Unknown(&'static str, u32),
     #[error("the model has no graph")]
     NoGraph,
     #[error("the model carries training information")]
@@ -276,6 +283,7 @@ pub fn check(graph: &[u8], data: Option<DataFile<'_>>) -> Result<Checked, Refusa
         return Err(Refusal::TooLarge(graph.len()));
     }
     let model = Model::decode(graph).map_err(|_| Refusal::Malformed)?;
+    known(graph, Kind::Model, 0)?;
     if !model.training_info.is_empty() {
         return Err(Refusal::Training);
     }
@@ -285,6 +293,9 @@ pub fn check(graph: &[u8], data: Option<DataFile<'_>>) -> Result<Checked, Refusa
     domains.extend(model.functions.iter().map(|f| f.domain.as_str()));
     for function in &model.functions {
         nodes(&function.node, &domains)?;
+        for attribute in &function.attribute_proto {
+            within(attribute, &domains)?;
+        }
     }
     if !top.sparse_initializer.is_empty() {
         return Err(Refusal::Sparse);
@@ -336,6 +347,90 @@ pub fn check(graph: &[u8], data: Option<DataFile<'_>>) -> Result<Checked, Refusa
         weights,
         graph,
     })
+}
+
+/// A message of the model that holds tensors, graphs or functions, or holds one
+/// that does.
+#[derive(Clone, Copy)]
+enum Kind {
+    Model,
+    Graph,
+    Node,
+    Attribute,
+    Tensor,
+    Function,
+}
+
+impl Kind {
+    /// What a refusal calls it.
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Model => "model",
+            Kind::Graph => "graph",
+            Kind::Node => "node",
+            Kind::Attribute => "attribute",
+            Kind::Tensor => "tensor",
+            Kind::Function => "function",
+        }
+    }
+
+    /// The fields ONNX defines for it — those of ONNX 1.22, the release ONNX
+    /// Runtime is built with — and the ones among them that hold a message of
+    /// these kinds. Every other field it defines holds a value, or a message
+    /// that holds no tensor.
+    fn fields(self) -> (&'static [u32], &'static [(u32, Kind)]) {
+        match self {
+            Kind::Model => (
+                &[1, 2, 3, 4, 5, 6, 7, 8, 14, 20, 25, 26],
+                &[(7, Kind::Graph), (25, Kind::Function)],
+            ),
+            Kind::Graph => (
+                &[1, 2, 5, 10, 11, 12, 13, 14, 15, 16],
+                &[(1, Kind::Node), (5, Kind::Tensor)],
+            ),
+            Kind::Node => (&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], &[(5, Kind::Attribute)]),
+            Kind::Attribute => (
+                &[
+                    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 20, 21, 22, 23,
+                ],
+                &[
+                    (5, Kind::Tensor),
+                    (6, Kind::Graph),
+                    (10, Kind::Tensor),
+                    (11, Kind::Graph),
+                ],
+            ),
+            Kind::Tensor => (&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16], &[]),
+            Kind::Function => (
+                &[1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+                &[(7, Kind::Node), (11, Kind::Attribute)],
+            ),
+        }
+    }
+}
+
+/// The deepest [`known`] follows messages into one another: past what decoding
+/// the model allows, so it reads every model that decodes, and bounded all the
+/// same.
+const MAX_DEPTH: u32 = 128;
+
+/// Every field of `message`, a `kind` at `depth`, one ONNX defines for it, and
+/// so on down through the messages it holds of these kinds.
+fn known(message: &[u8], kind: Kind, depth: u32) -> Result<(), Refusal> {
+    if depth > MAX_DEPTH {
+        return Err(Refusal::Malformed);
+    }
+    let (fields, nested) = kind.fields();
+    for field in wire::fields(message) {
+        let field = field.map_err(|_| Refusal::Malformed)?;
+        if !fields.contains(&field.number) {
+            return Err(Refusal::Unknown(kind.name(), field.number));
+        }
+        if let Some((_, inner)) = nested.iter().find(|(number, _)| *number == field.number) {
+            known(field.payload.ok_or(Refusal::Malformed)?, *inner, depth + 1)?;
+        }
+    }
+    Ok(())
 }
 
 /// Check `nodes`, and the graphs and tensors their attributes hold: each node of

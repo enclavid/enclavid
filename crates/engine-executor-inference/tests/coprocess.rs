@@ -1,6 +1,6 @@
-//! The coprocess as a runner starts it: on a socket, its models handed from
-//! fd 3, and on Linux under the coprocess's syscall filters — so a run here is
-//! a run under the narrowing it does to itself once its models are loaded.
+//! The coprocess as a runner starts it: on a socket, its model handed on fd 3
+//! and fd 4, and on Linux under the coprocess's syscall filters — so a run here
+//! is a run under the narrowing it does to itself once its model is loaded.
 //!
 //! It links ONNX Runtime, so it builds where `ORT_LIB_LOCATION` names a build
 //! of it — image/onnxruntime's, in the image's toolchain.
@@ -31,13 +31,10 @@ fn file(bytes: &[u8]) -> File {
     file
 }
 
-/// The coprocess, started on a socket with `models` handed in order — each a
-/// graph and its data file — and the other end of the socket.
-fn start(models: &[(Vec<u8>, Vec<u8>)]) -> (tokio::process::Child, UnixStream) {
-    let files: Vec<File> = models
-        .iter()
-        .flat_map(|(graph, data)| [file(graph), file(data)])
-        .collect();
+/// The coprocess, started on a socket with `files` handed in order from fd 3 —
+/// a model's graph and its data file — and the other end of the socket.
+fn start(files: &[&[u8]]) -> (tokio::process::Child, UnixStream) {
+    let files: Vec<File> = files.iter().map(|bytes| file(bytes)).collect();
     let handed: Vec<BorrowedFd<'_>> = files.iter().map(|f| f.as_fd()).collect();
     let (ours, theirs) = UnixStream::pair().expect("a socket pair");
     let coprocess = engine_supervisor::spawn_coprocess(
@@ -76,7 +73,8 @@ fn expected(rows: &[[f32; 3]]) -> Tensor {
 /// round lets go of the socket, the coprocess is done.
 #[tokio::test]
 async fn a_model_runs_and_the_answer_is_the_graphs() {
-    let (mut coprocess, mut socket) = start(&[fixture::linear(DATA, W, B)]);
+    let (graph, data) = fixture::linear(DATA, W, B);
+    let (mut coprocess, mut socket) = start(&[&graph, &data]);
     for rows in [
         &[[1.0, 1.0, 1.0]][..],
         &[[2.0, 0.0, 1.0], [0.5, -1.0, 3.0]][..],
@@ -84,7 +82,7 @@ async fn a_model_runs_and_the_answer_is_the_graphs() {
         assert_eq!(ask(&mut socket, 0, vec![x(rows)]), Ok(vec![expected(rows)]));
     }
     // Answering, it runs under three filters: the two it was started under
-    // and the one it narrowed itself with once its models were loaded.
+    // and the one it narrowed itself with once its model was loaded.
     #[cfg(target_os = "linux")]
     {
         let pid = coprocess.id().expect("the coprocess is running");
@@ -104,7 +102,8 @@ async fn a_model_runs_and_the_answer_is_the_graphs() {
 /// answering.
 #[tokio::test]
 async fn what_a_model_does_not_take_is_answered_and_the_next_request_runs() {
-    let (_coprocess, mut socket) = start(&[fixture::linear(DATA, W, B)]);
+    let (graph, data) = fixture::linear(DATA, W, B);
+    let (_coprocess, mut socket) = start(&[&graph, &data]);
     let rows = [[1.0, 2.0, 3.0]];
     assert_eq!(ask(&mut socket, 1, vec![x(&rows)]), Err(Failure::NoModel));
     assert_eq!(ask(&mut socket, 0, vec![]), Err(Failure::Inputs));
@@ -129,7 +128,7 @@ async fn what_a_model_does_not_take_is_answered_and_the_next_request_runs() {
 /// the one and gives back the other.
 #[tokio::test]
 async fn a_model_gives_back_the_element_type_its_graph_declares() {
-    let (_coprocess, mut socket) = start(&[(fixture::widen(), Vec::new())]);
+    let (_coprocess, mut socket) = start(&[&fixture::widen(), &[]]);
     let bytes = Tensor {
         dims: vec![3],
         data: Data::U8(vec![0, 7, 255]),
@@ -161,7 +160,7 @@ async fn a_vendors_model_answers_as_its_vendor_ran_it() {
     let input = floats(read(path("MIVOLO_INPUT")));
     let want = floats(read(path("MIVOLO_OUTPUT")));
 
-    let (_coprocess, mut socket) = start(&[model]);
+    let (_coprocess, mut socket) = start(&[&model.0, &model.1]);
     let started = std::time::Instant::now();
     let outputs =
         ask(&mut socket, 0, vec![f32s(&[1, 6, 384, 384], input)]).expect("the model runs");
@@ -181,17 +180,21 @@ async fn a_vendors_model_answers_as_its_vendor_ran_it() {
     assert!(diff < 1e-4, "{got:?} against {want:?}");
 }
 
-/// A model whose graph is refused is no model to the round, and the models
-/// beside it still run.
+/// A model whose graph is refused is no model to the round.
 #[tokio::test]
-async fn a_refused_model_is_none_and_its_neighbours_run() {
+async fn a_refused_model_is_none() {
     // A graph whose weights name a path, not a file beside it.
-    let refused = fixture::linear("../elsewhere", W, B);
-    let (_coprocess, mut socket) = start(&[refused, fixture::linear(DATA, W, B)]);
+    let (graph, data) = fixture::linear("../elsewhere", W, B);
+    let (_coprocess, mut socket) = start(&[&graph, &data]);
     let rows = [[1.0, 0.0, 0.0]];
     assert_eq!(ask(&mut socket, 0, vec![x(&rows)]), Err(Failure::NoModel));
-    assert_eq!(
-        ask(&mut socket, 1, vec![x(&rows)]),
-        Ok(vec![expected(&rows)])
-    );
+}
+
+/// A coprocess runs one model and no more: handed two, it runs neither.
+#[tokio::test]
+async fn a_coprocess_handed_two_models_runs_neither() {
+    let (graph, data) = fixture::linear(DATA, W, B);
+    let (mut coprocess, _socket) = start(&[&graph, &data, &fixture::widen(), &[]]);
+    let status = coprocess.wait().await.expect("wait for the coprocess");
+    assert!(!status.success(), "{status:?}");
 }
