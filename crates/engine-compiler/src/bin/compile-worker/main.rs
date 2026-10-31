@@ -739,9 +739,9 @@ async fn main() {
         reason!("a constant, emitted at boot before any policy has been composed")
     );
 
-    // Mutual RA-TLS acceptor, minted once at boot: every accepted connection is
-    // wrapped in an attested TLS server that also requires an attested client
-    // certificate. WHOSE it is depends on the build, and `fleet_identity` above
+    // Mutual RA-TLS acceptor, built once at boot: every accepted connection is
+    // wrapped in an attested TLS server, its certificate minted for that
+    // connection, that also requires an attested client certificate. WHOSE it is depends on the build, and `fleet_identity` above
     // says what each arm gives up — the measured one accepts any attested guest.
     // Nothing here is partitioned by caller, because nothing here is retained:
     // this role holds no cache and no state between calls, so one caller's

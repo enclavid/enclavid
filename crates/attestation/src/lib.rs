@@ -103,6 +103,11 @@ pub enum ReportData {
     /// quote authenticates "this measurement owns this TLS key" during the
     /// handshake.
     Ratls { spki_der: Vec<u8> },
+    /// The DER `SubjectPublicKeyInfo` of an RA-TLS certificate minted for one
+    /// connection, and the nonce the connecting client chose for it: "this
+    /// measurement owns this TLS key, for this connection". A key taken from
+    /// the server answers no connection after it.
+    RatlsConnection { spki_der: Vec<u8>, nonce: [u8; 32] },
 }
 
 /// Opens a session preimage. No tag is a prefix of another: this and
@@ -115,6 +120,10 @@ const KBS_TAG: &[u8] = b"enclavid/report-data/kbs\x00";
 /// exactly as they are: a quote a real part signed binds these bytes
 /// (`tests/from-a-real-part/`), and only hardware can mint another.
 const RATLS_TAG: &[u8] = b"\x00\x00ratls-spki\x00";
+/// Opens an RA-TLS connection preimage. It parts from [`SESSION_TAG`] and
+/// [`KBS_TAG`] at its last word and begins with no NUL, so no tag is a prefix
+/// of another still.
+const RATLS_CONNECTION_TAG: &[u8] = b"enclavid/report-data/ratls-connection\x00";
 
 impl ReportData {
     /// Report data for an ordinary per-session quote.
@@ -141,6 +150,13 @@ impl ReportData {
     /// alone.
     pub fn for_ratls(spki_der: Vec<u8>) -> Self {
         Self::Ratls { spki_der }
+    }
+
+    /// Report data for an RA-TLS cert minted for one connection: binds the
+    /// cert's DER `SubjectPublicKeyInfo` and the `nonce` the connecting client
+    /// chose, which the client checks the quote against.
+    pub fn for_ratls_connection(spki_der: Vec<u8>, nonce: [u8; 32]) -> Self {
+        Self::RatlsConnection { spki_der, nonce }
     }
 
     /// Canonical 32-byte hash that lands in the SEV-SNP `report_data` slot.
@@ -172,6 +188,11 @@ impl ReportData {
             ReportData::Ratls { spki_der } => {
                 h.update(RATLS_TAG);
                 h.update(spki_der);
+            }
+            ReportData::RatlsConnection { spki_der, nonce } => {
+                h.update(RATLS_CONNECTION_TAG);
+                field(&mut h, spki_der);
+                field(&mut h, nonce);
             }
         }
         h.finalize().into()
@@ -279,6 +300,25 @@ mod tests {
             hex::encode(ratls.hash()),
             "01900136a12b12142e1160a33d48f867dfeabc8d5e1a2cac66c09128a3b2344c"
         );
+
+        let connection = ReportData::for_ratls_connection(vec![1, 2, 3], [7u8; 32]);
+        assert_eq!(
+            hex::encode(connection.hash()),
+            "c9c168c6644c8b383f7c1bbb9521dfa36954e660582dfc01e71540bcd215c6d9"
+        );
+    }
+
+    /// A certificate's evidence for one connection is no other connection's,
+    /// and no certificate's minted once.
+    #[test]
+    fn a_connections_evidence_is_its_own() {
+        let spki = b"a-subject-public-key-info".to_vec();
+        let one = ReportData::for_ratls_connection(spki.clone(), [1u8; 32]).hash();
+        assert_ne!(
+            one,
+            ReportData::for_ratls_connection(spki.clone(), [2u8; 32]).hash()
+        );
+        assert_ne!(one, ReportData::for_ratls(spki).hash());
     }
 
     /// The blob crosses the wire as a CBOR byte string, not an array of

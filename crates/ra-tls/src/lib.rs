@@ -2,14 +2,19 @@
 //! rather than by a CA.
 //!
 //! A server mints an EPHEMERAL self-signed TLS cert. Its `SubjectPublicKeyInfo`
-//! (SPKI) is bound into an attestation [`Quote`] (`report_data =
-//! ReportData::for_ratls(spki)`), and the quote is carried in a custom X.509
-//! extension on the cert — the [`evidence`] for that key. The rustls handshake runs
-//! a CUSTOM verifier that, DURING the handshake, pulls the peer's quote out of its
-//! leaf cert, recomputes the SPKI binding, and asks the [`Attestor`] to verify the
-//! quote (signature, binding, measurement). So a completed TLS session PROVES the
-//! peer runs a measurement the verifier accepts and owns the very TLS key it
-//! presented — no CA, no KMS, no post-handshake window.
+//! (SPKI) is bound into an attestation [`Quote`], and the quote is carried in a
+//! custom X.509 extension on the cert. The rustls handshake runs a CUSTOM verifier
+//! that, DURING the handshake, pulls the peer's quote out of its leaf cert,
+//! recomputes the binding, and asks the [`Attestor`] to verify the quote
+//! (signature, binding, measurement). So a completed TLS session PROVES the peer
+//! runs a measurement the verifier accepts and owns the very TLS key it presented —
+//! no CA, no KMS, no post-handshake window.
+//!
+//! On a fleet leg the server mints its cert for each connection, binding the nonce
+//! the client chose for it, which travels in the name the client gives the server
+//! ([`fresh_server_name`]; `report_data = ReportData::for_ratls_connection(spki,
+//! nonce)`): a key taken from a server answers no connection after it, since a
+//! quote over a new nonce takes the hardware, inside the measured image.
 //!
 //! Two kinds of leg, two pairs of configs. A FLEET leg, where both ends are ours,
 //! is mutual: [`server_config`] and [`client_config`] each present a certificate and
@@ -37,10 +42,13 @@ use std::fmt;
 use std::sync::Arc;
 
 use enclavid_attestation::{Attestor, Quote, ReportData};
+use rustls::client::Resumption;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::server::{ClientHello, NoServerSessionStorage, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
 use rustls::{
     ClientConfig, DigitallySignedStruct, DistinguishedName, ServerConfig, SignatureScheme,
 };
@@ -54,9 +62,14 @@ const RATLS_OID_ARCS: &[u64] = &[1, 3, 6, 1, 4, 1, 58888, 1, 1];
 /// Dotted form for matching the parsed peer cert's extension OID.
 const RATLS_OID_DOTTED: &str = "1.3.6.1.4.1.58888.1.1";
 
-/// Server name presented on the client side. RA-TLS authenticates by ATTESTATION, not
-/// by DNS name — our verifier ignores it — but rustls requires *some* name.
+/// The name a client gives the server: on a public surface this alone, and on a
+/// fleet leg this under the client's nonce. RA-TLS authenticates by ATTESTATION, not
+/// by DNS name, but rustls requires *some* name, and the name is where a client's
+/// nonce for the connection travels to the server before its certificate is chosen.
 const RATLS_SERVER_NAME: &str = "ratls.enclavid.internal";
+
+/// The bytes of a client's nonce for a connection.
+const NONCE_LEN: usize = 32;
 
 /// What can go wrong minting or wiring an RA-TLS config (verify-time failures surface as
 /// `rustls::Error` inside the handshake, not here).
@@ -246,13 +259,27 @@ fn ratls_error(msg: impl Into<String>) -> rustls::Error {
 /// this rather than repeating it, so what it serves and what a certificate
 /// carries cannot drift apart.
 pub fn evidence(spki_der: Vec<u8>, attestor: &dyn Attestor) -> Result<Vec<u8>, RaTlsError> {
+    quoted(&ReportData::for_ratls(spki_der), attestor)
+}
+
+/// A quote over `report_data`, encoded as it travels.
+fn quoted(report_data: &ReportData, attestor: &dyn Attestor) -> Result<Vec<u8>, RaTlsError> {
     let quote = attestor
-        .mint(&ReportData::for_ratls(spki_der))
+        .mint(report_data)
         .map_err(|e| RaTlsError::Attest(e.to_string()))?;
     let mut encoded = Vec::new();
     ciborium::into_writer(&quote, &mut encoded)
         .map_err(|e| RaTlsError::Evidence(format!("encode quote: {e}")))?;
     Ok(encoded)
+}
+
+/// The report data a certificate's quote binds: its key, and the client's nonce
+/// for the connection where it was minted for one.
+fn bound(spki_der: Vec<u8>, nonce: Option<[u8; NONCE_LEN]>) -> ReportData {
+    match nonce {
+        Some(nonce) => ReportData::for_ratls_connection(spki_der, nonce),
+        None => ReportData::for_ratls(spki_der),
+    }
 }
 
 /// The quote that [`evidence`] carries, read back.
@@ -264,27 +291,27 @@ pub fn read_evidence(encoded: &[u8]) -> Result<Quote, RaTlsError> {
     ciborium::from_reader(encoded).map_err(|e| RaTlsError::Evidence(format!("decode quote: {e}")))
 }
 
-/// Mint one ephemeral self-signed cert whose SPKI is bound into an attestation quote,
-/// with the quote CBOR-embedded in the [`RATLS_OID_ARCS`] extension. Returns the cert +
-/// its private key for a rustls config.
+/// Mint one ephemeral self-signed cert whose SPKI is bound into an attestation quote —
+/// with the client's `nonce` for the connection where one is given — the quote
+/// CBOR-embedded in the [`RATLS_OID_ARCS`] extension. Returns the cert + its private key.
 ///
-/// **Nothing here expires.** The quote binds the key and says nothing about when, the
-/// verifier reads no clock, and every config that presents a certificate mints once and
-/// keeps it for its lifetime. So a private key taken from a running process keeps
-/// passing this verifier for as long as its quote does — while the TCB it was minted at
-/// stays above the verifier's floor. What bounds such a theft is what the verifier does
-/// with the measurement. One that pins measurements stops taking the key once its build
-/// leaves the pin, which is what rolling to a new build does. One that accepts any
-/// measurement never stops; it can only keep the stolen identity to what that
-/// measurement reaches — see [`peer_measurement`].
+/// A server on a fleet leg mints one for each connection, bound to the nonce in the
+/// name the client gave it, so a private key taken from a running server signs for no
+/// connection after it: a quote over a new nonce takes the hardware, inside the
+/// measured image. Minted once, binding no nonce: a client's certificate, which a fleet
+/// server verifies — its server has nowhere to hand it a nonce before it is sent — and
+/// the certificate of a public surface, whose callers may give no name to carry one.
+/// Both are api's, and a key taken from api comes with everything api holds. None
+/// reads a clock.
 fn mint_cert(
     attestor: &dyn Attestor,
+    nonce: Option<[u8; NONCE_LEN]>,
 ) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), RaTlsError> {
     let key_pair = rcgen::KeyPair::generate().map_err(|e| RaTlsError::Cert(e.to_string()))?;
     // The DER SubjectPublicKeyInfo the peer will parse out of the cert — the exact bytes
     // the quote binds. `verify_ratls_cert` recomputes the binding from the peer cert's
     // SPKI, so both ends MUST see identical bytes (they do: this is the cert's own SPKI).
-    let quote_cbor = evidence(key_pair.public_key_der(), attestor)?;
+    let quote_cbor = quoted(&bound(key_pair.public_key_der(), nonce), attestor)?;
 
     // No SANs / no CA — the cert is authenticated by the embedded quote, not by name.
     let mut params = rcgen::CertificateParams::new(Vec::<String>::new())
@@ -305,16 +332,18 @@ fn mint_cert(
 }
 
 /// THE shared verify step (client verifying server, or server verifying client): parse
-/// the peer's leaf cert, pull the quote from our extension, recompute the SPKI binding,
-/// and have the attestor verify the quote + pin the measurement. Pure, synchronous —
-/// runs INSIDE the rustls handshake (verify-DURING), so there is no unverified-peer window.
+/// the peer's leaf cert, pull the quote from our extension, recompute the binding — to
+/// the cert's key, and to this connection's `nonce` where the peer is a server — and
+/// have the attestor verify the quote + pin the measurement. Pure, synchronous — runs
+/// INSIDE the rustls handshake (verify-DURING), so there is no unverified-peer window.
 ///
-/// It reads no clock: the `now` rustls offers is ignored by both verifier roles. See
-/// [`mint_cert`] for what evidence that never expires costs.
+/// It reads no clock: the `now` rustls offers is ignored by both verifier roles. What
+/// makes a server's evidence fresh is the nonce — see [`mint_cert`].
 fn verify_ratls_cert(
     end_entity: &CertificateDer<'_>,
     attestor: &dyn Attestor,
     policy: &MeasurementPolicy,
+    nonce: Option<[u8; NONCE_LEN]>,
 ) -> Result<(), rustls::Error> {
     let quote = carried_quote(end_entity).map_err(ratls_error)?;
 
@@ -325,7 +354,7 @@ fn verify_ratls_cert(
     // attested, another proven. Same bytes `mint_cert` fed to `for_ratls`: webpki
     // re-encodes the SPKI as DER, which is how rcgen wrote it.
     let spki = rustls::server::ParsedCertificate::try_from(end_entity)?.subject_public_key_info();
-    let expected = ReportData::for_ratls(spki.as_ref().to_vec());
+    let expected = bound(spki.as_ref().to_vec(), nonce);
 
     attestor
         .verify(&quote, &expected)
@@ -342,6 +371,9 @@ struct RaTlsVerifier {
     attestor: Arc<dyn Attestor>,
     policy: MeasurementPolicy,
     provider: Arc<CryptoProvider>,
+    /// Whether the server's certificate must be minted for this connection, over the
+    /// nonce in the name given it — a fleet leg's — rather than once.
+    per_connection: bool,
 }
 
 impl fmt::Debug for RaTlsVerifier {
@@ -394,11 +426,20 @@ impl ServerCertVerifier for RaTlsVerifier {
         &self,
         end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
+        server_name: &ServerName<'_>,
         _ocsp: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        verify_ratls_cert(end_entity, &*self.attestor, &self.policy)?;
+        let nonce = if self.per_connection {
+            let nonce = match server_name {
+                ServerName::DnsName(name) => nonce_of(name.as_ref()),
+                _ => None,
+            };
+            Some(nonce.ok_or_else(|| ratls_error("the name given the server carries no nonce"))?)
+        } else {
+            None
+        };
+        verify_ratls_cert(end_entity, &*self.attestor, &self.policy, nonce)?;
         Ok(ServerCertVerified::assertion())
     }
 
@@ -436,7 +477,7 @@ impl ClientCertVerifier for RaTlsVerifier {
         _intermediates: &[CertificateDer<'_>],
         _now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        verify_ratls_cert(end_entity, &*self.attestor, &self.policy)?;
+        verify_ratls_cert(end_entity, &*self.attestor, &self.policy, None)?;
         Ok(ClientCertVerified::assertion())
     }
 
@@ -467,8 +508,38 @@ fn ring_provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
+/// What a fleet server presents: a certificate minted for the connection in front of
+/// it, its quote bound to the nonce in the name the client gave — or none, and no
+/// handshake, for a client that gave no such name.
+struct ForEachConnection {
+    attestor: Arc<dyn Attestor>,
+    provider: Arc<CryptoProvider>,
+}
+
+impl fmt::Debug for ForEachConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `dyn Attestor` isn't Debug; rustls requires the resolver be Debug.
+        f.debug_struct("ForEachConnection").finish_non_exhaustive()
+    }
+}
+
+impl ResolvesServerCert for ForEachConnection {
+    fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        let nonce = nonce_of(hello.server_name()?)?;
+        let (cert, key) = mint_cert(&*self.attestor, Some(nonce)).ok()?;
+        let key = self.provider.key_provider.load_private_key(key).ok()?;
+        Some(Arc::new(CertifiedKey::new(vec![cert], key)))
+    }
+}
+
 /// A rustls [`ServerConfig`] for a server on a FLEET leg: presents an ephemeral
-/// attested cert and REQUIRES the client to present one it attests too (mutual).
+/// attested cert minted for each connection, and REQUIRES the client to present one
+/// it attests too (mutual).
+///
+/// A cert is minted here as well, and thrown away, so a server that cannot mint fails
+/// where it is built rather than at its first connection. And no session is kept for a
+/// later connection to resume, which it would without a certificate, so without a
+/// quote over its nonce.
 ///
 /// For a leg whose callers are all ours. See [`public_server_config`] for the
 /// other kind, and for why they are different functions rather than a flag.
@@ -477,22 +548,29 @@ pub fn server_config(
     policy: MeasurementPolicy,
 ) -> Result<ServerConfig, RaTlsError> {
     let provider = ring_provider();
-    let (cert, key) = mint_cert(&*attestor)?;
+    mint_cert(&*attestor, Some([0; NONCE_LEN]))?;
     let verifier = Arc::new(RaTlsVerifier {
-        attestor,
+        attestor: attestor.clone(),
         policy,
         provider: provider.clone(),
+        per_connection: false,
     });
-    ServerConfig::builder_with_provider(provider)
+    let mut config = ServerConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .map_err(|e| RaTlsError::Config(e.to_string()))?
         .with_client_cert_verifier(verifier)
-        .with_single_cert(vec![cert], key)
-        .map_err(|e| RaTlsError::Config(e.to_string()))
+        .with_cert_resolver(Arc::new(ForEachConnection { attestor, provider }));
+    config.session_storage = Arc::new(NoServerSessionStorage {});
+    config.send_tls13_tickets = 0;
+    Ok(config)
 }
 
 /// A rustls [`ServerConfig`] for a PUBLIC surface: presents an ephemeral attested
-/// cert and asks the client for nothing.
+/// cert, minted once, and asks the client for nothing.
+///
+/// Minted once because the surface is api's, and a key taken from api comes with
+/// everything api holds; and because its callers may give no name to carry a nonce
+/// in.
 ///
 /// The difference from [`server_config`] is the kind of surface, not a degree of
 /// strictness. A fleet leg has a closed set of callers, all of them ours, so
@@ -512,7 +590,7 @@ pub fn server_config(
 /// fact about who is on the other end.
 pub fn public_server_config(attestor: Arc<dyn Attestor>) -> Result<ServerConfig, RaTlsError> {
     let provider = ring_provider();
-    let (cert, key) = mint_cert(&*attestor)?;
+    let (cert, key) = mint_cert(&*attestor, None)?;
     ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| RaTlsError::Config(e.to_string()))?
@@ -537,6 +615,7 @@ pub fn public_client_config(
         attestor,
         policy,
         provider: provider.clone(),
+        per_connection: false,
     });
     Ok(ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -546,31 +625,65 @@ pub fn public_client_config(
         .with_no_client_auth())
 }
 
-/// A rustls [`ClientConfig`] for an RA-TLS client (api): presents an ephemeral attested
-/// cert (mutual) and verifies the server's by attestation.
+/// A rustls [`ClientConfig`] for an RA-TLS client on a fleet leg (api): presents an
+/// ephemeral attested cert, minted once (mutual), and verifies the server's by
+/// attestation — one minted for the connection, over the nonce in the name
+/// [`fresh_server_name`] gives it.
 pub fn client_config(
     attestor: Arc<dyn Attestor>,
     policy: MeasurementPolicy,
 ) -> Result<ClientConfig, RaTlsError> {
     let provider = ring_provider();
-    let (cert, key) = mint_cert(&*attestor)?;
+    let (cert, key) = mint_cert(&*attestor, None)?;
     let verifier = Arc::new(RaTlsVerifier {
         attestor,
         policy,
         provider: provider.clone(),
+        per_connection: true,
     });
-    ClientConfig::builder_with_provider(provider)
+    let mut config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| RaTlsError::Config(e.to_string()))?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_client_auth_cert(vec![cert], key)
-        .map_err(|e| RaTlsError::Config(e.to_string()))
+        .map_err(|e| RaTlsError::Config(e.to_string()))?;
+    // A resumed session is answered without a certificate, so without a quote over
+    // the nonce this connection gave.
+    config.resumption = Resumption::disabled();
+    Ok(config)
 }
 
-/// The fixed rustls `ServerName` an RA-TLS client presents (ignored by our verifier).
+/// The name an RA-TLS client gives a server on a public surface. It settles nothing:
+/// who the server is, the quote says.
 pub fn server_name() -> ServerName<'static> {
     ServerName::try_from(RATLS_SERVER_NAME).expect("static RA-TLS server name is valid")
+}
+
+/// The name an RA-TLS client gives a server on a fleet leg, fresh for each
+/// connection: a nonce of its own, as two labels of hex under [`RATLS_SERVER_NAME`].
+/// The server's certificate must bind it, so a certificate minted for another
+/// connection — or one a key taken from the server could sign — answers no connection
+/// made with this name.
+pub fn fresh_server_name() -> ServerName<'static> {
+    let mut nonce = [0u8; NONCE_LEN];
+    rustls::crypto::ring::default_provider()
+        .secure_random
+        .fill(&mut nonce)
+        .expect("the system's random source answers");
+    let hex = hex::encode(nonce);
+    let (first, second) = hex.split_at(hex.len() / 2);
+    ServerName::try_from(format!("{first}.{second}.{RATLS_SERVER_NAME}"))
+        .expect("two labels of hex under a fixed name are a DNS name")
+}
+
+/// The nonce in a name [`fresh_server_name`] made, if it is one.
+fn nonce_of(name: &str) -> Option<[u8; NONCE_LEN]> {
+    let labels = name.strip_suffix(RATLS_SERVER_NAME)?.strip_suffix('.')?;
+    let (first, second) = labels.split_once('.')?;
+    let mut nonce = [0u8; NONCE_LEN];
+    hex::decode_to_slice([first, second].concat(), &mut nonce).ok()?;
+    Some(nonce)
 }
 
 #[cfg(test)]
@@ -584,9 +697,63 @@ mod tests {
     fn mint_binds_spki_and_verifies() {
         let attestor: Arc<dyn Attestor> =
             Arc::new(MockAttestor::from_seed([5u8; 32], "0".repeat(64)));
-        let (cert, _key) = mint_cert(&*attestor).unwrap();
+        let (cert, _key) = mint_cert(&*attestor, None).unwrap();
         // The shared verify path accepts the freshly minted cert.
-        verify_ratls_cert(&cert, &*attestor, &MeasurementPolicy::AcceptAny).unwrap();
+        verify_ratls_cert(&cert, &*attestor, &MeasurementPolicy::AcceptAny, None).unwrap();
+    }
+
+    /// Each name a fleet client gives carries a nonce of its own, which the server reads
+    /// back; a public surface's name carries none.
+    #[test]
+    fn a_name_carries_a_fresh_nonce_the_server_reads() {
+        let nonce = |name: ServerName<'static>| match name {
+            ServerName::DnsName(name) => nonce_of(name.as_ref()),
+            _ => panic!("a DNS name"),
+        };
+        let first = nonce(fresh_server_name()).expect("a nonce");
+        assert_ne!(Some(first), nonce(fresh_server_name()));
+        assert_eq!(nonce(server_name()), None);
+        assert_eq!(nonce_of(&format!("ab.cd.{RATLS_SERVER_NAME}")), None);
+    }
+
+    /// A certificate minted for a connection answers that connection alone: not one
+    /// with another nonce, and not as a certificate minted once.
+    #[test]
+    fn a_certificate_answers_the_connection_it_was_minted_for() {
+        let attestor: Arc<dyn Attestor> =
+            Arc::new(MockAttestor::from_seed([5u8; 32], "0".repeat(64)));
+        let any = MeasurementPolicy::AcceptAny;
+        let (cert, _) = mint_cert(&*attestor, Some([1; NONCE_LEN])).unwrap();
+        verify_ratls_cert(&cert, &*attestor, &any, Some([1; NONCE_LEN])).unwrap();
+        assert!(verify_ratls_cert(&cert, &*attestor, &any, Some([2; NONCE_LEN])).is_err());
+        assert!(verify_ratls_cert(&cert, &*attestor, &any, None).is_err());
+    }
+
+    /// On a fleet leg, a server's certificate minted once — what a key taken from a
+    /// server signs for — answers no connection, and neither does any certificate for a
+    /// name that carries no nonce.
+    #[test]
+    fn a_fleet_server_certificate_minted_once_answers_no_connection() {
+        let attestor: Arc<dyn Attestor> =
+            Arc::new(MockAttestor::from_seed([5u8; 32], "0".repeat(64)));
+        let verifier = RaTlsVerifier {
+            attestor: attestor.clone(),
+            policy: MeasurementPolicy::AcceptAny,
+            provider: ring_provider(),
+            per_connection: true,
+        };
+        let (once, _) = mint_cert(&*attestor, None).unwrap();
+        assert!(
+            verifier
+                .verify_server_cert(&once, &[], &fresh_server_name(), &[], UnixTime::now())
+                .is_err()
+        );
+        let (fresh, _) = mint_cert(&*attestor, Some([1; NONCE_LEN])).unwrap();
+        assert!(
+            verifier
+                .verify_server_cert(&fresh, &[], &server_name(), &[], UnixTime::now())
+                .is_err()
+        );
     }
 
     /// A quote minted for a DIFFERENT SPKI must not verify against this cert (a host
@@ -595,8 +762,8 @@ mod tests {
     fn swapped_quote_rejected() {
         let attestor: Arc<dyn Attestor> =
             Arc::new(MockAttestor::from_seed([6u8; 32], "0".repeat(64)));
-        let (cert_a, _) = mint_cert(&*attestor).unwrap();
-        let (cert_b, _) = mint_cert(&*attestor).unwrap();
+        let (cert_a, _) = mint_cert(&*attestor, None).unwrap();
+        let (cert_b, _) = mint_cert(&*attestor, None).unwrap();
         // Graft cert_a's extension (its quote, bound to A's SPKI) onto cert_b's bytes by
         // verifying cert_a's quote against cert_b's SPKI — must fail the binding.
         use x509_parser::prelude::*;
@@ -641,8 +808,13 @@ mod tests {
 
         // Refused at the binding, not earlier: the certificate is well-formed and the quote
         // is genuine, so any other refusal would leave this untested.
-        let err = verify_ratls_cert(grafted.der(), &*attestor, &MeasurementPolicy::AcceptAny)
-            .unwrap_err();
+        let err = verify_ratls_cert(
+            grafted.der(),
+            &*attestor,
+            &MeasurementPolicy::AcceptAny,
+            None,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains(&enclavid_attestation::AttestationError::BindingMismatch.to_string()),
@@ -655,9 +827,9 @@ mod tests {
     fn unpinned_measurement_rejected() {
         let attestor: Arc<dyn Attestor> =
             Arc::new(MockAttestor::from_seed([7u8; 32], "aa".repeat(32)));
-        let (cert, _) = mint_cert(&*attestor).unwrap();
+        let (cert, _) = mint_cert(&*attestor, None).unwrap();
         let policy = MeasurementPolicy::Pinned(vec!["bb".repeat(32)]);
-        assert!(verify_ratls_cert(&cert, &*attestor, &policy).is_err());
+        assert!(verify_ratls_cert(&cert, &*attestor, &policy, None).is_err());
     }
 
     /// The refusal has to arrive as a TYPE, not as a sentence.
@@ -671,10 +843,10 @@ mod tests {
     fn a_refused_pin_carries_the_measurement_it_saw() {
         let attestor: Arc<dyn Attestor> =
             Arc::new(MockAttestor::from_seed([7u8; 32], "aa".repeat(32)));
-        let (cert, _) = mint_cert(&*attestor).unwrap();
+        let (cert, _) = mint_cert(&*attestor, None).unwrap();
         let policy = MeasurementPolicy::Pinned(vec!["bb".repeat(32)]);
 
-        let err = verify_ratls_cert(&cert, &*attestor, &policy).unwrap_err();
+        let err = verify_ratls_cert(&cert, &*attestor, &policy, None).unwrap_err();
         let rustls::Error::InvalidCertificate(rustls::CertificateError::Other(other)) = err else {
             panic!("a refused pin must be a certificate error carrying a cause");
         };

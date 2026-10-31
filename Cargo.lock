@@ -1724,6 +1724,7 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "enclavid-attestation",
+ "hex",
  "rcgen",
  "rustls",
  "rustls-pki-types",

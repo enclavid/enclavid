@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use enclavid_attestation::{Attestor, DEV_FLEET_MEASUREMENT, MockAttestor};
 use enclavid_ra_tls::{
-    MeasurementPolicy, RaTlsError, client_config, public_client_config, public_server_config,
-    server_config, server_name,
+    MeasurementPolicy, RaTlsError, client_config, fresh_server_name, public_client_config,
+    public_server_config, server_config, server_name,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -52,7 +52,7 @@ async fn mutual_ratls_handshake_and_data() {
 
     // `connect` completes only after the client has ATTESTED the server's cert.
     let mut tls = connector
-        .connect(server_name(), client_io)
+        .connect(fresh_server_name(), client_io)
         .await
         .expect("client connect (mutual RA-TLS)");
     tls.write_all(b"hello").await.expect("client write");
@@ -108,6 +108,28 @@ async fn a_public_server_proves_itself_and_demands_nothing() {
     server.await.unwrap();
 }
 
+/// A server presents each connection a certificate of its own: the evidence one
+/// connection saw is no other's.
+#[tokio::test]
+async fn each_connection_gets_a_certificate_of_its_own() {
+    let acceptor = TlsAcceptor::from(Arc::new(dev_server().unwrap()));
+    let connector = TlsConnector::from(Arc::new(dev_client().unwrap()));
+    let mut presented = Vec::new();
+    for _ in 0..2 {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let acceptor = acceptor.clone();
+        let server = tokio::spawn(async move { acceptor.accept(server_io).await.map(|_| ()) });
+        let tls = connector
+            .connect(fresh_server_name(), client_io)
+            .await
+            .expect("client connect (mutual RA-TLS)");
+        let certificates = tls.get_ref().1.peer_certificates().expect("the server's");
+        presented.push(certificates[0].clone());
+        server.await.unwrap().expect("server accept");
+    }
+    assert_ne!(presented[0], presented[1]);
+}
+
 #[tokio::test]
 async fn wrong_measurement_pin_aborts_handshake() {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
@@ -124,7 +146,7 @@ async fn wrong_measurement_pin_aborts_handshake() {
     let server = tokio::spawn(async move {
         let _ = acceptor.accept(server_io).await; // will error when the client aborts
     });
-    let res = connector.connect(server_name(), client_io).await;
+    let res = connector.connect(fresh_server_name(), client_io).await;
     assert!(
         res.is_err(),
         "handshake must fail when the server measurement isn't pinned"

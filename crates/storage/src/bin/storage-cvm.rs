@@ -481,8 +481,9 @@ async fn main() {
         reason!("a constant, emitted once at boot")
     );
 
-    // Mutual RA-TLS acceptor, minted once at boot: every accepted connection is
-    // an attested TLS server that also REQUIRES an attested client certificate.
+    // Mutual RA-TLS acceptor, built once at boot: every accepted connection is
+    // an attested TLS server, its certificate minted for that connection, that
+    // also REQUIRES an attested client certificate.
     // WHOSE it is depends on the build, and `fleet_identity` above says what
     // each arm gives up — the measured one accepts any attested guest, which is
     // why records are partitioned by the digest the peer proved rather than by
