@@ -1,0 +1,34 @@
+package enclavid-ext:policy@0.1.0;
+
+/// The policy's models: the graphs its artifact carries — `linear.onnx` with
+/// its data file, `split.onnx` and `widen.onnx` — each run by the host in a
+/// process of its own.
+interface models {
+    use enclavid:host/tensors@0.1.0.{tensor-f32, tensor-u8};
+
+    /// One tensor in, one out.
+    resource linear-model {
+        run: func(x: borrow<tensor-f32>) -> tensor-f32;
+    }
+
+    /// What `split` gives, by name.
+    record parts {
+        a: tensor-f32,
+        b: tensor-f32,
+        sum: tensor-f32,
+    }
+
+    /// Two tensors in, three out.
+    resource split-model {
+        run: func(a: borrow<tensor-f32>, b: borrow<tensor-f32>) -> parts;
+    }
+
+    /// A tensor of `u8` in, one of `f32` out.
+    resource widen-model {
+        run: func(x: borrow<tensor-u8>) -> tensor-f32;
+    }
+
+    linear: func() -> linear-model;
+    split: func() -> split-model;
+    widen: func() -> widen-model;
+}

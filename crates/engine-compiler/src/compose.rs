@@ -24,11 +24,15 @@ use wac_graph::{
 };
 use wasmtime_environ::component::alternate_lookup_key;
 
-use engine_types::compile::{Artifact, CompileFault, EXTENSIONS_VERSION, HOST_INTERFACES, TEXTS};
-use engine_types::composition::{EmbeddedIface, EmbeddedImport, PluginInstance};
+use engine_types::compile::{
+    Artifact, CompileFault, EXTENSIONS_VERSION, HOST_INTERFACES, MODELS, TEXTS,
+};
+use engine_types::composition::{
+    EmbeddedIface, EmbeddedImport, ModelFile, ModelImport, ModelLayer, PluginInstance,
+};
 
 use crate::decls::EmbeddedCatalog;
-use crate::{disclosure_fields, icons, props, texts};
+use crate::{disclosure_fields, icons, models, props, texts};
 
 /// The interface the resources the host mints belong to.
 const HOST_TYPES: &str = "enclavid:host/types@0.1.0";
@@ -222,6 +226,20 @@ pub(crate) struct Declared<'a> {
     pub slots: HashMap<&'a str, (&'a Artifact, &'a EmbeddedCatalog)>,
     /// The disclosure fields its catalogs declare.
     pub disclosure_fields: HashSet<&'a str>,
+    /// The artifact each slot's models are served from, with its model files:
+    /// the one that imports them ([`models::owners`]).
+    pub models: HashMap<String, (&'a Artifact, &'a [ModelLayer])>,
+    /// Every artifact's model files.
+    pub model_layers: Vec<(&'a Artifact, &'a [ModelLayer])>,
+}
+
+/// A fused composition as the host serves it: the package, the slots its
+/// texts come through, and its models with the files they are.
+pub(crate) struct Served {
+    pub package: Package,
+    pub embedded_imports: Vec<EmbeddedImport>,
+    pub models: Vec<ModelImport>,
+    pub files: Vec<ModelFile>,
 }
 
 /// The fused composition and the slots its host `Linker` registers, refused if
@@ -238,15 +256,17 @@ pub(crate) struct Declared<'a> {
 /// and kept as one, so the bytes are compiled from where they are. What it
 /// declares in a shape the host cannot serve is refused too: its props
 /// ([`props::declared`]), its icons ([`icons::declared`]), its slots and the
-/// texts behind them ([`texts::declared`]), and its disclosure fields
-/// ([`disclosure_fields::declared`]). `plugged` says whether there was a
-/// fusion: without one the bytes are the policy's own, and bytes that do not
-/// read are the policy not being a component.
+/// texts behind them ([`texts::declared`]), its disclosure fields
+/// ([`disclosure_fields::declared`]), and its models with the files behind
+/// them ([`models::declared`]): the host serves a slot's models to the one
+/// artifact that imports them. `plugged` says whether there was a fusion:
+/// without one the bytes are the policy's own, and bytes that do not read are
+/// the policy not being a component.
 pub(crate) fn served(
     bytes: Vec<u8>,
     plugged: bool,
     declared: &Declared,
-) -> wasmtime::Result<(Package, Vec<EmbeddedImport>)> {
+) -> wasmtime::Result<Served> {
     let mut types = Types::default();
     let package = Package::from_bytes("enclavid:fused", None, bytes, &mut types).map_err(|e| {
         let fault = if plugged {
@@ -260,9 +280,13 @@ pub(crate) fn served(
     let mut slots = Vec::new();
     for (name, kind) in &types[package.ty()].imports {
         // What the host serves the import as, when it serves it: one of its
-        // own interfaces, or a slot's texts from the slot's catalog.
+        // own interfaces, a slot's texts from the slot's catalog, or a slot's
+        // models from the artifact that imports them.
         let host = if let Some(host) = host_interface(name) {
             Some(host.to_string())
+        } else if let Some((slot, MODELS, _)) = extension(name) {
+            let served = format!("{EXTENSIONS}:{slot}/{MODELS}@{EXTENSIONS_VERSION}");
+            (declared.models.contains_key(slot) && same_interface(name, &served)).then_some(served)
         } else if let Some((slot, TEXTS, version)) = extension(name) {
             let served = format!("{EXTENSIONS}:{slot}/{TEXTS}@{EXTENSIONS_VERSION}");
             let catalog = declared.slots.get(slot);
@@ -316,8 +340,16 @@ pub(crate) fn served(
     texts::declared(&types, &package, &checked).map_err(wasmtime::Error::new)?;
     disclosure_fields::declared(&types, &package, &declared.disclosure_fields)
         .map_err(wasmtime::Error::new)?;
-    let imports = slots.into_iter().map(|(_, slot, _)| slot).collect();
-    Ok((package, imports))
+    let (models, files) =
+        models::declared(&types, &package, &declared.models, &declared.model_layers)
+            .map_err(wasmtime::Error::new)?;
+    let embedded_imports = slots.into_iter().map(|(_, slot, _)| slot).collect();
+    Ok(Served {
+        package,
+        embedded_imports,
+        models,
+        files,
+    })
 }
 
 /// Which of [`HOST_INTERFACES`] the import `name` is, if the host serves it.
@@ -384,7 +416,7 @@ pub(crate) fn defined<'t>(types: &'t Types, ty: &ValueType) -> Option<&'t Define
 
 /// The `(slot, interface, version)` of an `enclavid-ext:<slot>/<interface>`
 /// import name, its version empty when it has none; `None` for any other name.
-fn extension(name: &str) -> Option<(&str, &str, &str)> {
+pub(crate) fn extension(name: &str) -> Option<(&str, &str, &str)> {
     let rest = name.strip_prefix(EXTENSIONS)?.strip_prefix(':')?;
     let (slot, interface) = rest.split_once('/')?;
     let (interface, version) = interface.split_once('@').unwrap_or((interface, ""));
@@ -413,8 +445,9 @@ fn register(
 /// host-reserved import would let the plugin interpose on the props the
 /// policy reads (`enclavid-ext:policy/props`), the applicant-facing
 /// texts and icons (every slot's `enclavid-ext:<slot>/i18n`,
-/// `enclavid:host-icons/icons`), or the consumer disclosure vocabulary
-/// (`enclavid-ext:policy/disclosure-fields`). Reserved is every interface of
+/// `enclavid:host-icons/icons`), the consumer disclosure vocabulary
+/// (`enclavid-ext:policy/disclosure-fields`), or a component's models
+/// (`enclavid-ext:<slot>/models`). Reserved is every interface of
 /// `enclavid:host`, of any `enclavid:host-*` package, and of every slot in
 /// `enclavid-ext` — whose WIT each component writes itself, since the types
 /// are its own. Kept as prefix rules so a new host capability in those
@@ -479,9 +512,10 @@ mod tests {
         assert!(is_host_reserved("enclavid:host/timer@0.1.0"));
         assert!(is_host_reserved("enclavid:host-next/timer@0.1.0"));
         assert!(is_host_reserved("enclavid:host-icons/icons@0.1.0"));
-        // Every slot's texts, and anything else a slot declares.
+        // Every slot's texts and models, and anything else a slot declares.
         assert!(is_host_reserved("enclavid-ext:policy/i18n@0.1.0"));
         assert!(is_host_reserved("enclavid-ext:well-known/i18n@0.1.0"));
+        assert!(is_host_reserved("enclavid-ext:face-age/models@0.1.0"));
         assert!(is_host_reserved("enclavid-ext:well-known/anything@0.1.0"));
         // Every `wasi:` interface: the served clocks and randomness, and the
         // ones nothing serves.

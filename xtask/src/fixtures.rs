@@ -121,6 +121,30 @@ pub fn face_age() -> &'static [u8] {
         .as_slice()
 }
 
+/// The `enclavid:face-age` plugin built as the artifact whose model the host
+/// runs (`--features mivolo`): its `with-models` world imports its slot,
+/// `enclavid-ext:face-age/models`, whose `age` is MiVOLO. The model is not in
+/// it: a composition names its graph and data file as the layers `age.onnx`
+/// and `age.onnx.data`. Built in a target directory of its own, so it and the
+/// default build never stand in for each other.
+pub fn face_age_mivolo() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| {
+            let dir = plugin_dir("face-age");
+            let target = format!("{}/../plugins/target/mivolo", env!("CARGO_MANIFEST_DIR"));
+            let module = format!("{target}/wasm32-unknown-unknown/release/face_age.wasm");
+            crate::embed_sections(
+                crate::build_componentized_with(&dir, &["mivolo"], &target, &module)
+                    .expect("build_componentized_with"),
+                &dir,
+                Role::Plugin,
+            )
+            .expect("the catalogs embed")
+        })
+        .as_slice()
+}
+
 /// The `enclavid:preprocess` plugin — OWNS the `decoded-frame` resource
 /// (exports `enclavid:vision/types`) and imports the host `clip`; no texts.
 pub fn preprocess() -> &'static [u8] {
@@ -148,6 +172,20 @@ pub fn face_detect() -> &'static [u8] {
                 shared_plugin_module("face_detect"),
                 Role::Plugin,
             )
+        })
+        .as_slice()
+}
+
+/// The `test-models` policy: the test entry's graph through its own slot's
+/// models. It has no texts and no disclosure fields, so it is componentized
+/// and not embedded.
+pub fn test_models() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| {
+            let dir = fixture_dir("test-models");
+            let module = format!("{dir}/target/wasm32-unknown-unknown/release/test_models.wasm");
+            crate::build_componentized(&dir, &module).expect("build_componentized")
         })
         .as_slice()
 }

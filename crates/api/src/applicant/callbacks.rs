@@ -1,12 +1,14 @@
 //! The api side of the keyless execution-worker's callback boundary.
 //!
 //! During a run the worker calls BACK over the same remoc connection: `media_load`
-//! to rehydrate a stored blob, and `session_change` to seal + persist the
+//! to rehydrate a stored blob, `session_change` to seal + persist the
 //! post-round state — with, on the round that finishes, the policy's decision,
-//! committed in the same write. Neither what the round disclosed nor what it
-//! captured arrives here — the orchestrator holds both already.
-//! [`CallbackServer`] wires those to the per-round [`SessionPersister`] +
-//! [`HatchMediaStore`] (they hold the seal key + applicant token). It
+//! committed in the same write — and `model_file_load` for a model file of the
+//! composition, a graph or a data file of a model the round runs. Neither what
+//! the round disclosed nor what it captured arrives here — the orchestrator
+//! holds both already. [`CallbackServer`] wires those to the per-round
+//! [`SessionPersister`] + [`HatchMediaStore`] (they hold the seal key +
+//! applicant token) and [`RoundModelFiles`]. It
 //! implements `engine_rpc::RemoteCallbacksAt` at api's end of the leg; the
 //! orchestrator stands one up per run and passes its client into
 //! `RemoteExecutor::run` (see [`crate::executor`]).
@@ -52,12 +54,16 @@
 use std::sync::Arc;
 
 use enclavid_boundary::{Asserted, Exposed, Untrusted};
-use engine_rpc::{CallbackError, Committed, MediaBytes, MediaHash, Padded, RemoteCallbacksAt};
+use engine_rpc::{
+    CallbackError, Committed, MediaBytes, MediaHash, ModelFileDigest, ModelFileStream, Padded,
+    RemoteCallbacksAt,
+};
 use session_types::{Decision, SessionState};
 
 use super::media_store::HatchMediaStore;
 use super::persister::SessionPersister;
 use crate::boundary::ExecutionWorker;
+use crate::model_files::RoundModelFiles;
 
 /// A value a worker produced, open on what api's end leaves open on it. Whether
 /// it came back from a call api made or arrived on a callback api serves makes no
@@ -65,11 +71,13 @@ use crate::boundary::ExecutionWorker;
 pub(super) type FromWorker<T> = Untrusted<T, (Asserted,), ExecutionWorker>;
 
 /// Per-run callback target: delegates the callback methods to the seal-key-holding
-/// persister + media store. One per round (both are per-round).
+/// persister + media store, and to the round's model files. One per round (all
+/// three are per-round).
 #[derive(Clone)]
 pub(super) struct CallbackServer {
     pub(super) persister: Arc<SessionPersister>,
     pub(super) media_store: Arc<HatchMediaStore>,
+    pub(super) model_files: Arc<RoundModelFiles>,
 }
 
 impl RemoteCallbacksAt<ExecutionWorker> for CallbackServer {
@@ -102,5 +110,15 @@ impl RemoteCallbacksAt<ExecutionWorker> for CallbackServer {
         let decision = decision.into_inner().open()?;
         self.persister.persist(state, decision).await?;
         Ok(ExecutionWorker::expose(Committed))
+    }
+
+    /// The digest arrives open and the file leaves answered, as a blob does: a
+    /// model file is served only where the round's own pins carry it, which is
+    /// what answers for both ([`RoundModelFiles::serve`]).
+    async fn model_file_load(
+        &self,
+        digest: FromWorker<ModelFileDigest>,
+    ) -> Result<Exposed<ModelFileStream, (), ExecutionWorker>, CallbackError> {
+        self.model_files.serve(digest).await
     }
 }

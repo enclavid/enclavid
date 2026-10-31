@@ -38,7 +38,7 @@ pub async fn connect_hatch(
         })?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let tls = connector
-        .connect(enclavid_ra_tls::server_name(), stream)
+        .connect(enclavid_ra_tls::fresh_server_name(), stream)
         .await
         .map_err(|e| {
             debug!("ra-tls: {e}");

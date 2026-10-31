@@ -8,6 +8,42 @@ fn pin(package: &str, impl_ref: &str) -> PluginPin {
     }
 }
 
+/// A composition's artifacts are the policy and every plugin, in pin order,
+/// each with the bearer kept for its own registry — none left out, none sent to
+/// another registry.
+#[test]
+fn every_artifact_comes_with_its_registrys_bearer() {
+    let composition = Composition {
+        policy_ref: "a.example.com/policy@sha256:aa".into(),
+        policy_key: None,
+        plugins: vec![
+            pin("p1", "b.example.com/p1@sha256:11"),
+            pin("p2", "c.example.com/p2@sha256:22"),
+            pin("p3", "a.example.com/p3@sha256:33"),
+        ],
+        registry_auth: HashMap::from([
+            ("a.example.com".to_string(), b"bearer-a".to_vec()),
+            ("b.example.com".to_string(), b"bearer-b".to_vec()),
+        ]),
+        consumer: String::new(),
+        terms: Terms::default(),
+    };
+    let plugin = |package: &str| Artifact::Plugin(package.into());
+    assert_eq!(
+        composition.artifacts(),
+        vec![
+            (
+                Artifact::Policy,
+                "a.example.com/policy@sha256:aa",
+                &b"bearer-a"[..]
+            ),
+            (plugin("p1"), "b.example.com/p1@sha256:11", &b"bearer-b"[..]),
+            (plugin("p2"), "c.example.com/p2@sha256:22", &b""[..]),
+            (plugin("p3"), "a.example.com/p3@sha256:33", &b"bearer-a"[..]),
+        ]
+    );
+}
+
 /// A pull that will not pass is the session's init error, naming the artifact;
 /// one that may pass later is a 503 for this request alone.
 #[test]

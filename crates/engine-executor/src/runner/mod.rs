@@ -27,6 +27,7 @@
 mod convert;
 mod status;
 
+use engine_types::composition::ModelImport;
 use session_types::{Event, SessionState};
 use wasmtime::component::types::ComponentFunc;
 use wasmtime::component::{Component, Linker, Resource, ResourceAny, Val};
@@ -170,12 +171,14 @@ impl Executor {
     /// the fused component, so the Linker never sees them. Added on top, each in
     /// the type the component declares: the slots, whose types are the
     /// components' own; the policy's disclosure fields; the icons, one function
-    /// each from the host's own list; and the props' `get`.
+    /// each from the host's own list; the props' `get`; and each slot's models,
+    /// whose resources and functions the slot declares.
     pub fn prime(
         &self,
         component: &Component,
         embedded_imports: &[EmbeddedImport],
         embedded: std::sync::Arc<crate::embedded::EmbeddedRegistry>,
+        models: &[ModelImport],
     ) -> wasmtime::Result<PrimedComposition> {
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
         GeneratedHost::add_to_linker::<_, HasHost>(&mut linker, |s| s)?;
@@ -187,6 +190,7 @@ impl Executor {
         if props.is_some() {
             register_props(&mut linker)?;
         }
+        crate::models::register_models(&mut linker, models)?;
         let pre = GeneratedHostPre::new(linker.instantiate_pre(component)?)?;
         Ok(PrimedComposition {
             pre,
@@ -236,6 +240,7 @@ impl Executor {
         let embedded = primed.embedded.clone();
         let listener = inputs.listener;
         let media_store = inputs.media_store;
+        let models = inputs.models;
 
         // Instantiate the primed composition and call `handle` ONCE. The Linker
         // (imports) was built + type-checked in `prime`; here we only mint a
@@ -244,7 +249,7 @@ impl Executor {
         let round = Round::starting_now();
         let mut store = Store::new(
             &self.engine,
-            HostState::new(props, embedded.clone(), media_store, round),
+            HostState::new(props, embedded.clone(), media_store, models, round),
         );
         store.set_fuel(inputs.fuel)?;
         let bindings = primed.pre.instantiate_async(&mut store).await?;
@@ -573,7 +578,7 @@ mod tests {
 
         let compiler = engine_compiler::Compiler::new().expect("a compiler");
         let parts = compiler
-            .compile_to_parts(bytes, Vec::new())
+            .compile_to_parts(bytes, Vec::new(), Vec::new())
             .expect("the compile takes every host interface as served");
         let executor = Executor::new().expect("an executor");
         let component = executor
@@ -588,6 +593,7 @@ mod tests {
                 &component,
                 &parts.embedded_imports,
                 std::sync::Arc::new(registry.build().expect("the texts read")),
+                &parts.models,
             )
             .expect("the linker serves every host interface");
         (executor, primed)

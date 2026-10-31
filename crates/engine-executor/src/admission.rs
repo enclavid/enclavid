@@ -66,6 +66,7 @@
 //! host at launch, outside its measurement, and reads them once. The
 //! numbers that describe what the code holds are constants.
 
+use engine_types::limits::MAX_MODELS;
 use session_types::{MAX_CLIP_BYTES, SEALED_STATE_PLAINTEXT_BYTES};
 
 /// Bound on L1 ENTRIES unless the host says otherwise (the
@@ -84,9 +85,11 @@ use session_types::{MAX_CLIP_BYTES, SEALED_STATE_PLAINTEXT_BYTES};
 /// The number is chosen against the DESCRIPTOR table, which is what the entries
 /// actually consume, and it is the DOMINANT term in the budget
 /// [`fd_budget`] asserts at boot — deliberately, because the cache is the
-/// unbounded-by-nature half. It covers the fills streaming in as well: each
-/// reserves at least the floor out of the same budget, and holds one
-/// descriptor, its staging file, which is the one its entry keeps.
+/// unbounded-by-nature half. It counts DESCRIPTORS rather than entries: an
+/// entry is charged a share of the budget for each it holds
+/// ([`l1_entry_weight`]). It covers the fills streaming in as well: each
+/// reserves at least the floor of the most descriptors an entry may hold out of
+/// the same budget, and stages into what its entry keeps.
 pub const DEFAULT_BUNDLE_CACHE_ENTRIES: u64 = 512;
 
 /// Descriptors a per-round child costs the SUPERVISOR: its half of the
@@ -99,10 +102,20 @@ pub const DEFAULT_BUNDLE_CACHE_ENTRIES: u64 = 512;
 /// conservative, not to be exact.
 ///
 /// Note what is NOT counted here and is counted elsewhere: the cwasm fd handed to
-/// a child is the L1 ENTRY's, already counted in the cache's entries. The
+/// a child is the L1 ENTRY's, already counted in the cache's share of
+/// descriptors, and so are the model files handed to a model's process. The
 /// memory group's files read around a spawn are opened and closed within it, a
 /// few at a time, inside [`FD_HEADROOM`].
 const FDS_PER_CHILD: u64 = 7;
+
+/// Descriptors each model of a round costs the SUPERVISOR while the round runs:
+/// both ends of the socketpair between the round's child and the model's
+/// process — the child's held until the round ends, its own until the process
+/// starts — the pidfd tokio opens per spawn, and headroom for what a spawn holds
+/// transiently: the model's two files opened for reading, the two `/dev/null`
+/// opens and the group's process list. Generous for the reason
+/// [`FDS_PER_CHILD`] is.
+const FDS_PER_MODEL: u64 = 8;
 
 /// Descriptors the role needs for everything that is neither an L1 entry nor a
 /// child: the listener, the health port, one accepted api connection and the
@@ -292,21 +305,23 @@ pub const DEFAULT_CAPACITY_WAIT_SECS: u64 = 10;
 /// The descriptor budget this role must be able to reach, given how many children
 /// it may run at once and how many entries its cache may hold
 /// ([`DEFAULT_BUNDLE_CACHE_ENTRIES`]). The entries and the fills streaming in are
-/// one term.
+/// one term; each child, with every model its round may start, another.
 ///
 /// Stated as a function rather than a constant because both counts are the
 /// host's to set, and they are only meaningful together with the descriptors:
 /// raising either without the descriptors to back it turns a capacity knob into
 /// a way to wedge the worker at its own peak.
 pub fn fd_budget(max_children: u64, cache_entries: u64) -> u64 {
+    let per_child = FDS_PER_CHILD + MAX_MODELS as u64 * FDS_PER_MODEL;
     cache_entries
-        .saturating_add(max_children.saturating_mul(FDS_PER_CHILD))
+        .saturating_add(max_children.saturating_mul(per_child))
         .saturating_add(FD_HEADROOM)
 }
 
 /// What one L1 entry is charged against the cache's byte budget: what it holds
-/// (`charged`, which the worker derives from what streamed in), or a floor of the
-/// budget divided by the entries it may hold ([`DEFAULT_BUNDLE_CACHE_ENTRIES`]),
+/// (`charged`, which the worker derives from what streamed in), or a floor of one
+/// share of the budget — the budget divided by the entries it may hold
+/// ([`DEFAULT_BUNDLE_CACHE_ENTRIES`]) — for each of the `descriptors` it holds,
 /// whichever is larger.
 ///
 /// The floor is the whole point. Charging the true size is right for a real cwasm
@@ -315,8 +330,13 @@ pub fn fd_budget(max_children: u64, cache_entries: u64) -> u64 {
 /// count which does not divide the budget still admits no more than itself. At
 /// least 1 in any case, so a caller cannot restore the original behaviour by
 /// asking the host for a zero budget, nor by a count of zero.
-pub fn l1_entry_weight(charged: u64, budget_bytes: u64, entries: u64) -> u64 {
-    charged.max(budget_bytes.div_ceil(entries.max(1)).max(1))
+///
+/// A share per DESCRIPTOR rather than per entry — the cwasm's, and one for each
+/// model file — so the cache holds no more descriptors than the entries it may
+/// hold, whatever its entries carry: the count [`fd_budget`] is made of.
+pub fn l1_entry_weight(charged: u64, descriptors: u64, budget_bytes: u64, entries: u64) -> u64 {
+    let share = budget_bytes.div_ceil(entries.max(1)).max(1);
+    charged.max(share.saturating_mul(descriptors.max(1)))
 }
 
 /// Whether `cwasm` is a wasmtime-serialized COMPONENT, read off its header.
@@ -377,13 +397,29 @@ mod tests {
     fn the_budget_bounds_the_entry_count() {
         const BUDGET: u64 = 2 * 1024 * 1024 * 1024;
         for entries in [1, 7, DEFAULT_BUNDLE_CACHE_ENTRIES, 100_000] {
-            let weightless = l1_entry_weight(0, BUDGET, entries);
+            let weightless = l1_entry_weight(0, 1, BUDGET, entries);
             assert!(weightless > 0);
             let admitted = BUDGET / weightless;
             assert!(
                 admitted <= entries,
                 "a weightless entry admits {admitted}, past the {entries} the fd budget \
                  was sized for"
+            );
+        }
+    }
+
+    /// Entries that each hold several descriptors are charged a share for each,
+    /// so the descriptors the budget admits are no more than the entries it was
+    /// sized for, however they are spread.
+    #[test]
+    fn the_budget_bounds_the_descriptors() {
+        const BUDGET: u64 = 2 * 1024 * 1024 * 1024;
+        for descriptors in [1, 3, 33] {
+            let entry = l1_entry_weight(0, descriptors, BUDGET, DEFAULT_BUNDLE_CACHE_ENTRIES);
+            let held = BUDGET / entry * descriptors;
+            assert!(
+                held <= DEFAULT_BUNDLE_CACHE_ENTRIES,
+                "{held} descriptors in entries of {descriptors}"
             );
         }
     }
@@ -395,7 +431,7 @@ mod tests {
         const BUDGET: u64 = 2 * 1024 * 1024 * 1024;
         let real = 12 * 1024 * 1024;
         assert_eq!(
-            l1_entry_weight(real, BUDGET, DEFAULT_BUNDLE_CACHE_ENTRIES),
+            l1_entry_weight(real, 1, BUDGET, DEFAULT_BUNDLE_CACHE_ENTRIES),
             real
         );
     }
@@ -404,8 +440,9 @@ mod tests {
     /// unbounded behaviour back through the division.
     #[test]
     fn a_zero_budget_still_charges_something() {
-        assert!(l1_entry_weight(0, 0, DEFAULT_BUNDLE_CACHE_ENTRIES) > 0);
-        assert!(l1_entry_weight(0, 1 << 30, 0) > 0);
+        assert!(l1_entry_weight(0, 1, 0, DEFAULT_BUNDLE_CACHE_ENTRIES) > 0);
+        assert!(l1_entry_weight(0, 1, 1 << 30, 0) > 0);
+        assert!(l1_entry_weight(0, 0, 1 << 30, 7) > 0);
     }
 
     const MIB: u64 = 1024 * 1024;

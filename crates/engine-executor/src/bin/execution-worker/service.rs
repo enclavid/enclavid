@@ -2,9 +2,10 @@
 //! caller streams in, each run in a disposable child.
 
 use std::fs::File;
-use std::os::fd::AsFd;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use enclavid_boundary::{AuthN, Covert, Exposed, ExposedBuilder, Untrusted};
@@ -23,9 +24,13 @@ use tokio::sync::{Semaphore, SemaphorePermit, TryAcquireError};
 use tokio::time::Instant;
 
 use crate::boundary::AnyCaller;
-use crate::bundles::{Bundles, Claim, CompositionEntry, LastUsed, Lease, entry_charge};
+use crate::bundles::{
+    Bundles, Claim, CompositionEntry, LastUsed, Lease, MAX_ENTRY_FILES, entry_charge,
+};
 use crate::cwasm::{Cwasm, Incoming};
+use crate::model_files::ModelFileSlot;
 use crate::relay::RelayCallbacks;
+use engine_types::limits::MAX_MODELS;
 
 /// A place for one round in this worker, taken as its handler starts and held
 /// until it answers; with none free the round answers [`ExecError::Busy`] at once,
@@ -93,10 +98,16 @@ async fn child_reply<T>(
 /// [`ChildRunner`].
 pub(crate) struct Supervisor {
     /// L1: ONE [`CompositionEntry`] per composition — the cwasm as an anonymous
-    /// in-RAM fd plus its small registry metadata. Long-lived across sessions +
-    /// rounds; the expensive layer (OCI pull + compile + api round-trip) is what
-    /// this saves. The cwasm lives ONCE here, delivered to each child by fd.
-    pub(crate) bundles: Bundles,
+    /// in-RAM fd plus its small registry metadata, and its model files.
+    /// Long-lived across sessions + rounds; the expensive layer (OCI pull +
+    /// compile + api round-trip) is what this saves. The cwasm lives ONCE here,
+    /// delivered to each child by fd, as each model file is to the process of a
+    /// model of it once a round has filled it. Shared with the rounds' relays,
+    /// which fill those files.
+    pub(crate) bundles: Arc<Bundles>,
+    /// A file with nothing in it, opened at boot: what the process of a model
+    /// whose graph has no data file is handed for one.
+    pub(crate) empty: Arc<File>,
     /// One permit per round in flight, [`engine_executor::admission::rounds_held`]
     /// of the children in all, across every caller: taken without waiting as a
     /// handler starts, held until it answers.
@@ -216,13 +227,40 @@ impl Supervisor {
         let BundleMeta {
             embedded_imports,
             catalogs,
+            models,
+            files,
         } = meta;
+        // The compile holds a composition to `MAX_MODELS`, each a graph and at
+        // most one data file of the bundle's, and each file is descriptors this
+        // worker holds: anything else is not a bundle a compile made.
+        let named = |index: u32| (index as usize) < files.len();
+        if models.len() > MAX_MODELS
+            || files.len() > MAX_ENTRY_FILES
+            || !models
+                .iter()
+                .all(|m| named(m.graph) && m.data.is_none_or(named))
+        {
+            debug!("cache_bundle: models or model files that are not a compile's");
+            return Err(ExecError::Unknown);
+        }
+        let files = files
+            .into_iter()
+            .map(ModelFileSlot::new)
+            .collect::<Result<Box<[_]>, _>>()
+            .map_err(|m| {
+                debug!("make the model files: {m}");
+                ExecError::Unknown
+            })?;
         let entry = CompositionEntry {
             cwasm,
             cwasm_len,
             charged: entry_charge(cwasm_len, meta_len),
             embedded_imports: embedded_imports.into(),
             catalogs: catalogs.into(),
+            models: models.into(),
+            files,
+            files_charged: AtomicU64::new(0),
+            slot: slot.clone(),
             used: LastUsed::now(),
             warmed: AtomicBool::new(ahead),
         };
@@ -240,6 +278,10 @@ impl Supervisor {
     /// the child has exited: the child maps the memfd through the fd it inherits,
     /// which the entry holds open until then, so the entry stays in the budget
     /// for as long as its memory is in use.
+    ///
+    /// Each model of the composition gets a socketpair: the child is handed one
+    /// end at spawn, after the cwasm, and the relay keeps the other until the
+    /// round starts the model in a process of its own on it.
     async fn run_in_child(
         &self,
         lease: Lease,
@@ -249,26 +291,50 @@ impl Supervisor {
         callbacks: Callbacks<AnyCaller>,
     ) -> Result<RunStatus, ExecError> {
         let entry = lease.entry().clone();
-        let cwasm_fd = entry.cwasm.as_fd();
+        let (theirs, ours): (Vec<OwnedFd>, Vec<Option<OwnedFd>>) = (0..entry.models.len())
+            .map(|_| UnixStream::pair().map(|(a, b)| (OwnedFd::from(a), Some(OwnedFd::from(b)))))
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|e| {
+                debug!("pair the models' sockets: {e}");
+                ExecError::Unknown
+            })?
+            .into_iter()
+            .unzip();
+        // The cwasm's descriptor, then the child's end of each model's socket,
+        // in order.
+        let inherit: Vec<BorrowedFd<'_>> = std::iter::once(entry.cwasm.as_fd())
+            .chain(theirs.iter().map(AsFd::as_fd))
+            .collect();
         // References to the entry's metadata, not copies of it: the child's
         // `prime` request shares the entry's catalogs, so a round holds none of
         // its own, waiting or running.
-        let (embedded_imports, catalogs) = (entry.embedded_imports.clone(), entry.catalogs.clone());
+        let (embedded_imports, catalogs, models) = (
+            entry.embedded_imports.clone(),
+            entry.catalogs.clone(),
+            entry.models.clone(),
+        );
         let (fuel, callback_buffer) = (self.round_fuel, self.callback_request_buffer);
+        let (relayed, bundles, empty) = (entry.clone(), self.bundles.clone(), self.empty.clone());
+        let (capacity_wait, stream_deadline, stream_idle) = (
+            self.capacity_wait,
+            self.bundle_stream,
+            self.bundle_stream_idle,
+        );
 
         // Drive ONE round in a fresh disposable child, under the runner's
         // concurrency bound + wall-clock deadline (the runner kills a wedged child
         // and releases what it held, so it can't leak its slot), admitted — a
         // slot, and room for the
         // child — within the capacity wait. The runner installs the cwasm fd at
-        // `INHERITED_FD` in the child; the closure is the DOMAIN work: prime the
-        // child (MMAP the cwasm), stand up the callback relay, run.
+        // `INHERITED_FD` in the child, and the child's end of each model's socket
+        // after it; the closure is the DOMAIN work: prime the child (MMAP the
+        // cwasm), stand up the callback relay, run.
         let outcome = self
             .runner
             .run(
-                Some(cwasm_fd),
+                &inherit,
                 lease,
-                move |client: RemoteChildClient<Ciborium>| async move {
+                move |client: RemoteChildClient<Ciborium>, coprocess| async move {
                     // Prime: the child re-opens its inherited fd
                     // (`/proc/self/fd/N`) and MMAPs it via `deserialize_file`; the
                     // cwasm never crosses the child hop — only the fd-path + small
@@ -277,13 +343,24 @@ impl Supervisor {
                         cwasm_path: Cwasm::path_in_child(),
                         embedded_imports,
                         catalogs,
+                        models,
                     };
                     client.prime(bundle_ref).await?;
 
                     // Relay: the child's media_load / session_change forward THROUGH
-                    // here to api's callbacks (the seal-key holder).
+                    // here to api's callbacks (the seal-key holder); its
+                    // start_model fills the model's files, asking api the first
+                    // time, and starts the model's process beside the child.
                     let relay = Arc::new(RelayCallbacks {
                         upstream: callbacks,
+                        entry: relayed,
+                        bundles,
+                        capacity_wait,
+                        stream_deadline,
+                        stream_idle,
+                        coprocess,
+                        sockets: Mutex::new(ours),
+                        empty,
                     });
                     let (relay_server, relay_client) =
                         RemoteChildCallbacksServerShared::<_, Ciborium>::new(
@@ -330,17 +407,24 @@ impl Supervisor {
         };
         let entry = lease.entry().clone();
         let cwasm_fd = entry.cwasm.as_fd();
-        let (embedded_imports, catalogs) = (entry.embedded_imports.clone(), entry.catalogs.clone());
+        let (embedded_imports, catalogs, models) = (
+            entry.embedded_imports.clone(),
+            entry.catalogs.clone(),
+            entry.models.clone(),
+        );
+        // No models' sockets: reading the props runs no model, and prime only
+        // registers the models.
         let outcome = self
             .runner
             .run(
-                Some(cwasm_fd),
+                &[cwasm_fd],
                 lease,
-                move |client: RemoteChildClient<Ciborium>| async move {
+                move |client: RemoteChildClient<Ciborium>, _| async move {
                     let bundle_ref = BundleRef {
                         cwasm_path: Cwasm::path_in_child(),
                         embedded_imports,
                         catalogs,
+                        models,
                     };
                     client.prime(bundle_ref).await?;
                     client.read_props(ByteBuf::from(props)).await

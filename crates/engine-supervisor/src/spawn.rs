@@ -1,6 +1,7 @@
-//! Starting one child: its socketpair, its descriptor, and what it is given
-//! between fork and exec — its group, score, limits and identity when it is
-//! placed, and its syscall filters last.
+//! Starting one process — a child, or the coprocess a child may have beside it:
+//! its socket, its descriptors, and what it is given between fork and exec —
+//! its group, score, limits and identity when it is placed, and its syscall
+//! filters last.
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
@@ -17,20 +18,21 @@ use crate::INHERITED_FD;
 use crate::cgroup::Placement;
 use crate::channel::channel_config;
 
-/// Why a child could not be started, or did not hand over its service client.
+/// Why a child or a coprocess could not be started, or a child did not hand
+/// over its service client.
 ///
 /// Each variant's text carries the error under it, as remoc's own do, so one
 /// logged line says the whole of it.
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
-    /// A descriptor meant for the child sits on 0, 1 or 2, where std puts the
-    /// child's stdio before any of ours is placed.
+    /// A descriptor meant for the process sits on 0, 1 or 2, where std puts its
+    /// stdio before any of ours is placed.
     #[error("a child's {0} sits on a stdio descriptor")]
     OnStdio(&'static str),
     /// The socketpair to the child could not be made ready.
     #[error("make the child's socketpair: {0}")]
     Socketpair(io::Error),
-    /// The child did not exec — or failed between fork and exec, which std
+    /// The process did not exec — or failed between fork and exec, which std
     /// reports the same way.
     #[error("spawn {}: {err}", exe.display())]
     Exec { exe: PathBuf, err: io::Error },
@@ -53,11 +55,12 @@ pub enum SpawnError {
 /// return the child (`kill_on_drop`) and the service client `Cli` it sends on
 /// the base channel.
 ///
-/// `inherit` lands at [`INHERITED_FD`] and is the only descriptor besides stdio
-/// that survives `exec`: on Linux every other one is marked CLOEXEC between
-/// fork and exec, whatever flag it was opened with. So a child gets a handle to
-/// its own composition's cwasm and to nothing else — no other composition's
-/// memfd, no sibling's socket, no connection to the host.
+/// `inherit` lands in order from [`INHERITED_FD`] up, and those are the only
+/// descriptors besides stdio that survive `exec`: on Linux every other one is
+/// marked CLOEXEC between fork and exec, whatever flag it was opened with. So a
+/// child gets handles to its own composition's cwasm and weights files and to
+/// nothing else — no other composition's memfd, no sibling's socket, no
+/// connection to the host.
 ///
 /// `filtered` puts the child under its syscall filters (Linux only), as a
 /// [`ChildRunner`](crate::ChildRunner) always does; `false` is for a bench or a
@@ -65,7 +68,7 @@ pub enum SpawnError {
 /// memory group, score and identity; this entry point places none.
 pub async fn spawn_and_connect<Cli>(
     exe: &Path,
-    inherit: Option<BorrowedFd<'_>>,
+    inherit: &[BorrowedFd<'_>],
     filtered: bool,
 ) -> Result<(tokio::process::Child, Cli), SpawnError>
 where
@@ -76,15 +79,84 @@ where
     Ok((child, client))
 }
 
+/// Spawn `exe` as a coprocess: `socket` on its fd 0, and `inherit` from
+/// [`INHERITED_FD`] up, as [`spawn_and_connect`] hands a child its own. The
+/// supervisor keeps no end of `socket` — whoever holds the other end is who the
+/// coprocess talks to — so nothing is connected here, and the coprocess is
+/// returned `kill_on_drop`.
+///
+/// `filtered` puts it under the coprocess's syscall filters (Linux only), as a
+/// [`Coprocess`](crate::Coprocess) always does; `false` is for a bench or a
+/// test. This entry point places it in no group and under no identity of its
+/// own.
+pub fn spawn_coprocess(
+    exe: &Path,
+    socket: OwnedFd,
+    inherit: &[BorrowedFd<'_>],
+    filtered: bool,
+) -> Result<tokio::process::Child, SpawnError> {
+    spawn(
+        exe,
+        socket,
+        inherit,
+        filtered.then_some(Filters::Coprocess),
+        None,
+    )
+}
+
+/// Which syscall filters a spawned process runs under: a child's, or the
+/// narrower ones of the coprocess beside it — see the seccomp module.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) enum Filters {
+    Child,
+    Coprocess,
+}
+
 /// The spawn half of [`spawn_and_connect`], placing the child first when given a
 /// [`Placement`]. Returns the child and the supervisor's end of its socketpair.
 pub(crate) fn spawn_child(
     exe: &Path,
-    inherit: Option<BorrowedFd<'_>>,
+    inherit: &[BorrowedFd<'_>],
     filtered: bool,
     placement: Option<Placement>,
 ) -> Result<(tokio::process::Child, std::os::unix::net::UnixStream), SpawnError> {
-    // std puts the child's stdio on 0, 1 and 2 before any of ours runs, so a
+    let (sup_end, child_end) =
+        std::os::unix::net::UnixStream::pair().map_err(SpawnError::Socketpair)?;
+    sup_end
+        .set_nonblocking(true)
+        .map_err(SpawnError::Socketpair)?;
+    let child = spawn(
+        exe,
+        OwnedFd::from(child_end),
+        inherit,
+        filtered.then_some(Filters::Child),
+        placement,
+    )?;
+    Ok((child, sup_end))
+}
+
+/// [`spawn_coprocess`] as a runner starts one: always under the coprocess's
+/// filters, and placed first when given a [`Placement`].
+pub(crate) fn spawn_placed_coprocess(
+    exe: &Path,
+    socket: OwnedFd,
+    inherit: &[BorrowedFd<'_>],
+    placement: Option<Placement>,
+) -> Result<tokio::process::Child, SpawnError> {
+    spawn(exe, socket, inherit, Some(Filters::Coprocess), placement)
+}
+
+/// Spawn `exe` with `stdin` on its fd 0 and `inherit` from [`INHERITED_FD`] up,
+/// placed first when given a [`Placement`] and under `filters` last.
+fn spawn(
+    exe: &Path,
+    stdin: OwnedFd,
+    inherit: &[BorrowedFd<'_>],
+    filters: Option<Filters>,
+    placement: Option<Placement>,
+) -> Result<tokio::process::Child, SpawnError> {
+    // std puts the process's stdio on 0, 1 and 2 before any of ours runs, so a
     // descriptor of ours numbered there would already be something else.
     let at_stdio = |fd: RawFd| fd <= libc::STDERR_FILENO;
     if placement
@@ -94,29 +166,28 @@ pub(crate) fn spawn_child(
     {
         return Err(SpawnError::OnStdio("process list"));
     }
-    let inherited = inherit.map(|fd| fd.as_raw_fd());
-    if inherited.is_some_and(at_stdio) {
+    let inherited: Vec<RawFd> = inherit.iter().map(|fd| fd.as_raw_fd()).collect();
+    if inherited.iter().any(|&fd| at_stdio(fd)) {
         return Err(SpawnError::OnStdio("inherited descriptor"));
     }
-    let (sup_end, child_end) =
-        std::os::unix::net::UnixStream::pair().map_err(SpawnError::Socketpair)?;
-    sup_end
-        .set_nonblocking(true)
-        .map_err(SpawnError::Socketpair)?;
+    // The first number past those the inherited descriptors are placed on, and
+    // room, made here before the fork, for each one lifted above it.
+    let past = INHERITED_FD + RawFd::try_from(inherited.len()).unwrap_or(RawFd::MAX - INHERITED_FD);
+    let mut lifted: Vec<RawFd> = vec![0; inherited.len()];
 
     let mut cmd = tokio::process::Command::new(exe);
-    // An empty environment, plus what is named here. The child takes every input
-    // over its socket, so nothing a worker's environment holds — a key put there
-    // by mistake, say — reaches it through `/proc/self/environ`.
+    // An empty environment, plus what is named here. The process takes every
+    // input over its socket, so nothing a worker's environment holds — a key put
+    // there by mistake, say — reaches it through `/proc/self/environ`.
     cmd.env_clear();
     if let Ok(v) = std::env::var("RUST_BACKTRACE") {
         cmd.env("RUST_BACKTRACE", v);
     }
-    // The child's end of the socketpair on fd 0. `Stdio::from` closes this
-    // process's copy at spawn, so the child's death ends the stream at once.
-    cmd.stdin(std::process::Stdio::from(OwnedFd::from(child_end)));
-    // Null stdout and stderr: the child speaks only over fd 0, and the worker's
-    // own stdio leads to the host. The `debug` build alone gives the child the
+    // Its socket on fd 0. `Stdio::from` closes this process's copy at spawn, so
+    // the process's death ends the stream at once.
+    cmd.stdin(std::process::Stdio::from(stdin));
+    // Null stdout and stderr: the process speaks only over fd 0, and the
+    // worker's own stdio leads to the host. The `debug` build alone gives it the
     // worker's stderr — its image already puts every role's `debug!` on the port
     // — and the worker's threshold with it, from the environment cleared above;
     // without one, every dependency's dump of every byte it moves goes there too.
@@ -130,13 +201,13 @@ pub(crate) fn spawn_child(
             cmd.env(safe_logger::LEVEL_KEY, level);
         }
     }
-    // An early return or a dropped request kills the child.
+    // An early return or a dropped request kills the process.
     cmd.kill_on_drop(true);
 
     #[cfg(target_os = "linux")]
-    let filters = filtered.then(crate::seccomp::filters);
+    let filters = filters.map(crate::seccomp::filters);
     #[cfg(not(target_os = "linux"))]
-    let _ = (filtered, placement); // no filter or placement off Linux
+    let _ = (filters, placement); // no filter or placement off Linux
 
     // Runs between fork and exec, in a copy of this process where only
     // async-signal-safe work is sound: every call in it is a single system call
@@ -144,43 +215,42 @@ pub(crate) fn spawn_child(
     // built above before the fork. Errors are raw errnos or kinds, which do not
     // allocate either.
     let before_exec = move || -> std::io::Result<()> {
-        // ---- the child's memory group, first (Linux) ----
+        // ---- its memory group, first (Linux) ----
         //
         // Charges do not move with a process that changes group, so the exec,
-        // the runtime and the round must all be counted in the child's group
-        // from the start. And before the inherited descriptor, which may be put
-        // on this one's number. `0` names the writer. A child that cannot be
-        // placed never execs.
+        // the runtime and the work must all be counted in its group from the
+        // start. And before the inherited descriptor, which may be put on this
+        // one's number. `0` names the writer. A process that cannot be placed
+        // never execs.
         #[cfg(target_os = "linux")]
         if let Some(procs) = placement.as_ref().and_then(|p| p.procs.as_ref())
             && rustix::io::write(procs, b"0")? != 1
         {
             return Err(std::io::ErrorKind::WriteZero.into());
         }
-        // ---- the inherited descriptor (all platforms) ----
+        // ---- the inherited descriptors (all platforms) ----
         //
-        // Before the filters, which refuse `dup2` as they do nearly everything a
-        // child has no use for. `dup2` leaves the copy without CLOEXEC; onto its
-        // own number it does nothing, so a descriptor already there has the flag
-        // cleared instead.
-        if let Some(src) = inherited {
-            let placed = if src == INHERITED_FD {
-                // SAFETY: reads the flags of a descriptor this process holds
-                // open — the caller keeps it alive across the spawn.
-                let flags = unsafe { libc::fcntl(src, libc::F_GETFD) };
-                if flags < 0 {
-                    flags
-                } else {
-                    // SAFETY: sets the flags of the same descriptor.
-                    unsafe { libc::fcntl(src, libc::F_SETFD, flags & !libc::FD_CLOEXEC) }
-                }
-            } else {
-                // SAFETY: copies a descriptor this process holds open onto a
-                // number whose holder, if any, is a CLOEXEC copy of one of the
-                // supervisor's — closed by the exec anyway.
-                unsafe { libc::dup2(src, INHERITED_FD) }
-            };
-            if placed < 0 {
+        // Each onto its number, in order, from `INHERITED_FD` up. Before the
+        // filters, which refuse `dup2` as they do nearly everything a process
+        // has no use for. Each is lifted first, as a CLOEXEC copy at or above
+        // `past`, so that placing one never lands on another still to be
+        // placed; then `dup2` puts each where it goes, without CLOEXEC. The
+        // lifted copies close at the exec.
+        for (src, copy) in inherited.iter().zip(lifted.iter_mut()) {
+            // SAFETY: copies a descriptor this process holds open — the caller
+            // keeps it alive across the spawn — onto the lowest free number at
+            // or above `past`.
+            let fd = unsafe { libc::fcntl(*src, libc::F_DUPFD_CLOEXEC, past) };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            *copy = fd;
+        }
+        for (to, copy) in (INHERITED_FD..).zip(lifted.iter()) {
+            // SAFETY: copies a descriptor this process holds open onto a number
+            // below every lifted copy, whose holder, if any, is a copy of one
+            // of the supervisor's — the one placed here is lifted already.
+            if unsafe { libc::dup2(*copy, to) } < 0 {
                 return Err(std::io::Error::last_os_error());
             }
         }
@@ -188,7 +258,7 @@ pub(crate) fn spawn_child(
         {
             // ---- every other descriptor: closed at the exec ----
             //
-            // CLOEXEC on everything else is what keeps a child to the
+            // CLOEXEC on everything else is what keeps a process to the
             // descriptors named above, and a flag set by a call of its own
             // after the descriptor was made leaves a window: the vsock
             // listener's accept marks its connection that way, and a fork from
@@ -197,17 +267,14 @@ pub(crate) fn spawn_child(
             // here, whatever it carries. Marked, not closed: std's own pipe,
             // which carries a failure here back to the spawn, is among them and
             // must stay open until the exec.
-            let first = match inherited {
-                Some(_) => INHERITED_FD + 1,
-                None => INHERITED_FD,
-            };
+            //
             // SAFETY: `close_range` takes two descriptor numbers and a flag, no
             // pointer; with CLOSE_RANGE_CLOEXEC it closes nothing, only sets
             // the flag.
             let marked = unsafe {
                 libc::syscall(
                     libc::SYS_close_range,
-                    first,
+                    past,
                     libc::c_uint::MAX,
                     libc::CLOSE_RANGE_CLOEXEC,
                 )
@@ -216,7 +283,7 @@ pub(crate) fn spawn_child(
                 return Err(std::io::Error::last_os_error());
             }
 
-            // ---- the child's score, limits and identity, while still root ----
+            // ---- its score, limits and identity, while still root ----
             if let Some(p) = &placement {
                 use rustix::fs::{Mode, OFlags};
                 use rustix::process::{Resource, Rlimit, setrlimit};
@@ -281,12 +348,12 @@ pub(crate) fn spawn_child(
     // see the comment above it, and the SAFETY of each block inside.
     unsafe { cmd.as_std_mut().pre_exec(before_exec) };
 
-    let child = cmd.spawn().map_err(|err| SpawnError::Exec {
+    let process = cmd.spawn().map_err(|err| SpawnError::Exec {
         exe: exe.to_path_buf(),
         err,
     })?;
-    safe_logger::debug!("child spawned: {}", exe.display());
-    Ok((child, sup_end))
+    safe_logger::debug!("spawned: {}", exe.display());
+    Ok(process)
 }
 
 /// The handshake half of [`spawn_and_connect`]: frame the supervisor's end with
@@ -310,11 +377,12 @@ where
 }
 
 /// What the child maps from the supervisor's memory: the length of the
-/// descriptor it inherits. Zero for none, or for one that cannot be measured,
-/// which only leaves that child's score unreduced.
-pub(crate) fn inherited_len(inherit: Option<BorrowedFd<'_>>) -> u64 {
+/// descriptors it inherits, together. Zero for one that cannot be measured,
+/// which only leaves that child's score less reduced.
+pub(crate) fn inherited_len(inherit: &[BorrowedFd<'_>]) -> u64 {
     inherit
-        .and_then(|fd| rustix::fs::fstat(fd).ok())
-        .and_then(|stat| u64::try_from(stat.st_size).ok())
-        .unwrap_or(0)
+        .iter()
+        .filter_map(|fd| rustix::fs::fstat(fd).ok())
+        .filter_map(|stat| u64::try_from(stat.st_size).ok())
+        .fold(0, u64::saturating_add)
 }

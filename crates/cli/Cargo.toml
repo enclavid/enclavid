@@ -26,6 +26,15 @@ enclavid-embedded = { path = "../embedded", features = ["embed"] }
 # ocicrypt layer encryption (encrypt side) for the
 # `enclavid oci push --encrypt` path.
 enclavid-crypto = { path = "../crypto" }
+# A model's graph and data file checked as the process that runs it checks
+# them — what `validate` holds a project's models to. No ONNX Runtime: nothing
+# runs here.
+enclavid-inference = { path = "../inference" }
+# The names a model's files are pushed under, and the bounds a composition's
+# models are held to.
+engine-types = { path = "../engine-types" }
+# The project's WIT, read for the models its slot declares.
+wit-parser = "0.247"
 
 clap = { version = "4.5", features = ["derive"] }
 
@@ -57,3 +66,9 @@ dialoguer = "0.11"
 # command group. Pinned to the version wasmtime transitively pulls — keeps
 # the dep tree from fanning out across versions.
 wasmparser = "0.247"
+
+[dev-dependencies]
+# Vendor-style models built in code, which the models check is tested against.
+enclavid-inference = { path = "../inference", features = ["test-models"] }
+# A project laid out on disk, for the models check to read.
+tempfile = "3"

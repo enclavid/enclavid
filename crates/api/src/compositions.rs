@@ -34,7 +34,7 @@ use crate::executor::Executor;
 use crate::init::Unavailable;
 use crate::policy_pull;
 use crate::semaphores::Semaphores;
-use crate::turns::ConsumerTurns;
+use crate::turns::{ConsumerTurns, Turns};
 
 /// What a composition is made of, and what reaching its artifacts takes. Holds
 /// the decrypt keys and the bearers, so it has no `Debug`.
@@ -82,6 +82,33 @@ impl Composition {
     /// Its content address — see [`composition_key`].
     pub fn key(&self) -> CompositionKey {
         composition_key(&self.policy_ref, self.policy_key.as_ref(), &self.plugins)
+    }
+
+    /// Every artifact it pins — the policy, then each plugin in composition
+    /// order — with its ref and the bearer its registry is asked with.
+    pub fn artifacts(&self) -> Vec<(Artifact, &str, &[u8])> {
+        std::iter::once((Artifact::Policy, self.policy_ref.as_str()))
+            .chain(
+                self.plugins
+                    .iter()
+                    .map(|pin| (Artifact::Plugin(pin.package.clone()), pin.impl_ref.as_str())),
+            )
+            .map(|(artifact, artifact_ref)| {
+                let bearer = policy_pull::bearer_for_ref(&self.registry_auth, artifact_ref);
+                (artifact, artifact_ref, bearer)
+            })
+            .collect()
+    }
+
+    /// The consumer's turns its pulls take ([`crate::turns`]), and how long
+    /// each may take where its terms name a deadline.
+    pub fn pulls(&self, turns: &ConsumerTurns) -> (Turns, Option<std::time::Duration>) {
+        (
+            turns.of(&self.consumer),
+            self.terms
+                .pull_deadline_secs
+                .map(std::time::Duration::from_secs),
+        )
     }
 }
 
@@ -294,11 +321,8 @@ impl Compositions {
         // Every fetch below takes one of the consumer's turns, so this compile and
         // the consumer's other sessions together hold no more of the hatch than
         // their share.
-        let turns = &self.consumer_turns.of(&composition.consumer);
-        let within = composition
-            .terms
-            .pull_deadline_secs
-            .map(std::time::Duration::from_secs);
+        let (turns, within) = composition.pulls(&self.consumer_turns);
+        let turns = &turns;
 
         // Every manifest first, concurrently, with every key it needs: all that
         // can be refused before a byte of wasm moves, so the /connect critical
@@ -327,13 +351,13 @@ impl Compositions {
                     within,
                 )
                 .await
-                .map(|layer| (pin.package.clone(), layer))
+                .map(|(layer, model_layers)| (pin.package.clone(), layer, model_layers))
             }
         });
         let (policy_res, plugin_results) =
             futures::future::join(policy_fut, futures::future::join_all(plugin_futs)).await;
 
-        let policy = policy_res.map_err(|e| {
+        let (policy, policy_model_layers) = policy_res.map_err(|e| {
             safe_logger::debug!(
                 "compile: the policy's manifest failed for {for_whom} (policy_ref={}): {e}",
                 composition.policy_ref,
@@ -362,13 +386,18 @@ impl Compositions {
         // failure; marked here, so it is answered as the pull failure it is, as a
         // manifest's would be.
         let policy_length = policy.length();
-        let lengths: Vec<_> = plugins
-            .iter()
-            .map(|(package, layer)| (package.clone(), layer.length()))
-            .collect();
+        // The model files each artifact carries go by name and digest alone:
+        // the compile pairs them with the models its component imports, and
+        // their bytes reach only the execution-worker (`crate::model_files`).
+        let mut lengths = Vec::with_capacity(plugins.len());
+        let mut plugin_layers = Vec::with_capacity(plugins.len());
+        for (package, layer, model_layers) in plugins {
+            lengths.push((package.clone(), layer.length(), model_layers));
+            plugin_layers.push((Artifact::Plugin(package), layer));
+        }
         // Before a byte of wasm moves: a composition past the session's terms is
         // refused as too large, as one past what the compile carries is.
-        let size = lengths.iter().fold(policy_length, |sum, (_, length)| {
+        let size = lengths.iter().fold(policy_length, |sum, (_, length, _)| {
             sum.saturating_add(*length)
         });
         if size
@@ -386,18 +415,15 @@ impl Compositions {
         }
         let pull_failed = Arc::new(std::sync::OnceLock::new());
         let marked = pull_failed.clone();
-        let layers = std::iter::once((Artifact::Policy, policy)).chain(
-            plugins
-                .into_iter()
-                .map(|(package, layer)| (Artifact::Plugin(package), layer)),
-        );
+        let layers = std::iter::once((Artifact::Policy, policy)).chain(plugin_layers);
         let components = futures::stream::iter(layers)
             .flat_map(|(artifact, layer)| layer.pieces().map_err(move |e| (artifact.clone(), e)))
             .inspect_err(move |(artifact, e)| {
                 safe_logger::debug!("compile: a layer did not arrive as pinned: {e}");
                 let _ = marked.set((artifact.clone(), e.problem()));
             });
-        let source = CompileSource::streamed(policy_length, lengths, components);
+        let source =
+            CompileSource::streamed(policy_length, policy_model_layers, lengths, components);
         let compiled = match source {
             Some(source) => self.compiler.compile(source).await,
             None => Err(CompileError::Refused(CompileFault::TooLarge)),
@@ -417,7 +443,7 @@ pub fn pull_failure(artifact: Artifact, e: &policy_pull::PullError) -> Unavailab
     unavailable(artifact, e.problem())
 }
 
-fn unavailable(artifact: Artifact, problem: Option<PullProblem>) -> Unavailable {
+pub(crate) fn unavailable(artifact: Artifact, problem: Option<PullProblem>) -> Unavailable {
     match problem {
         Some(problem) => Unavailable::Init(InitError::Pull { artifact, problem }),
         None => StatusCode::SERVICE_UNAVAILABLE.into(),

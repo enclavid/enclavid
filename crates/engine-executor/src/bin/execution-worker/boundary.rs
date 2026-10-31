@@ -51,8 +51,9 @@ use enclavid_boundary::{AuthN, AuthZ, Covert};
 use enclavid_boundary_macros::boundary;
 use engine_executor::{Decision, SessionState};
 use engine_rpc::{
-    BundleStream, CallbackError, Committed, ExecError, MediaBytes, MediaHash, Padded,
-    PrepareOutcome, PrepareReply, PrepareRequest, RunOutcome, RunReply, RunRequest,
+    BundleStream, CallbackError, Committed, ExecError, MediaBytes, MediaHash, ModelFileDigest,
+    ModelFileStream, Padded, PrepareOutcome, PrepareReply, PrepareRequest, RunOutcome, RunReply,
+    RunRequest,
 };
 
 boundary! {
@@ -78,6 +79,9 @@ boundary! {
         Committed: AuthN::Indifferent,
         /// One fixed value; it ends only the caller's own round.
         CallbackError: AuthN::Indifferent,
+        /// Whatever file the caller hands back fills a file of its own entry, and
+        /// only once held to the length and digest its own bundle declared for it.
+        ModelFileStream: AuthN::Indifferent,
     }
 
     out (AuthZ, Covert) {
@@ -113,6 +117,11 @@ boundary! {
         Padded<SessionState>: AuthZ::NoSecret,
         /// The decision the caller's own round made.
         Padded<Option<Decision>>: AuthZ::NoSecret,
+        /// A digest the caller's own bundle named, going back to that caller.
+        ModelFileDigest: AuthZ::NoSecret,
+        /// Every digest is one byte string of 32 bytes, so its length takes one
+        /// value; how many cross, one fill per file of an entry bounds.
+        ModelFileDigest: Covert::Bounded,
     }
 }
 

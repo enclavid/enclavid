@@ -1,0 +1,20 @@
+[package]
+name = "enclavid-inference"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Vendor-style models built in code — a graph and its data file — for the tests
+# of the crates that check and run them; never a build that ships.
+test-models = []
+
+[dependencies]
+# Bytes read as elements where they lie, and elements written as bytes: a
+# message's tensors read and written whole.
+zerocopy = "0.8"
+# A vendor's graph read for its check: the derive over the part of ONNX's
+# schema the check needs, nothing generated at build time.
+prost = "0.14"
+thiserror = "1"

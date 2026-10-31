@@ -11,7 +11,9 @@ each reproduces byte for byte:
 | initramfs | `initramfs/` | `nix-build image/initramfs --check` |
 | cmdline | `cmdline/<role>/<variant>` | the file is the value |
 
-`app/` builds the role binary the initramfs wraps.
+`app/` builds the role binary the initramfs wraps. `onnxruntime/` builds the
+ONNX Runtime the execution worker's model process links, from source and with
+its telemetry compiled out (`nix-build image/onnxruntime -A static --check`).
 
 Two of the five are shared rather than per-role. The firmware is one image for
 everyone. The kernel comes in five variants, named for the roles they boot and

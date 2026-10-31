@@ -6,7 +6,9 @@
 //! (`face.bbox` grown by the model's margin, via `region`) and runs the age
 //! model. The pixels stay in the preprocess sandbox; face-age reads only the
 //! face patch at its model resolution. Inference lives in [`infer`]: the
-//! per-model profile (normalize + model + decode).
+//! per-model profile (normalize + model + decode) — in the sandbox, or, built
+//! with `mivolo`, MiVOLO run by the host from the model files beside this
+//! component.
 
 mod infer;
 
@@ -22,9 +24,16 @@ fn no_entropy(buf: &mut [u8]) -> Result<(), getrandom::Error> {
     Ok(())
 }
 
+#[cfg(not(feature = "mivolo"))]
 wit_bindgen::generate!({
     path: "wit",
     world: "enclavid:face-age/face-age@0.1.0",
+    generate_all,
+});
+#[cfg(feature = "mivolo")]
+wit_bindgen::generate!({
+    path: "wit",
+    world: "enclavid:face-age/with-models@0.1.0",
     generate_all,
 });
 
@@ -55,12 +64,14 @@ impl Guest for FaceAge {
         if dim.width == 0 || dim.height == 0 {
             return None;
         }
-        // Pull the face patch at the model's input size — one shared decode
-        // (owned by preprocess), the crop resampled in that sandbox.
-        let s = infer::INPUT as u32;
+        // Pull the face patch at the size the model's profile asks for — one
+        // shared decode (owned by preprocess), the crop resampled in that
+        // sandbox.
         let (x, y, w, h) = crop_px(&face.bbox, dim.width, dim.height, infer::MARGIN);
-        let rgb = frame.region(x, y, w, h, s, s);
-        infer::estimate_from_rgb(&rgb).map(|age| AgeEstimate { age })
+        infer::estimate((w, h), |out_w, out_h| {
+            frame.region(x, y, w, h, out_w, out_h)
+        })
+        .map(|age| AgeEstimate { age })
     }
 }
 

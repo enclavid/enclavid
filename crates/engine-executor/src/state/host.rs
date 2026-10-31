@@ -5,16 +5,16 @@ use wasmtime::component::{ResourceTable, Val};
 use crate::embedded::EmbeddedRegistry;
 use crate::listener::SessionListener;
 use crate::media_store::MediaStore;
+use crate::models::{ModelStarter, Started};
 use crate::round::Round;
 
 /// Data placed into wasmtime `Store<HostState>` for the duration of one
 /// `handle` call. The policy is a pure reducer, so this state carries
 /// only ambient read surfaces (the session's props, the
 /// `enclavid:embedded/*` registry, the round's time and randomness) plus
-/// the runtime plumbing (the media store). No replay log, no per-call
-/// disclosure buffer — the
-/// runner fires the listener once the round is over, not from a
-/// host-fn body.
+/// the runtime plumbing (the media store, the models' processes). No replay
+/// log, no per-call disclosure buffer — the runner fires the listener once
+/// the round is over, not from a host-fn body.
 ///
 /// No memory limiter either. What the round may hold — its linear
 /// memories and everything else in its process — is the kernel's to
@@ -48,6 +48,11 @@ pub struct HostState {
     /// blob by its content ref mid-`handle`. `Arc<dyn>` so the host fn can
     /// clone it out before the `.await` (releasing the borrow of `self`).
     pub media_store: Arc<dyn MediaStore>,
+    /// Where the composition's models run — what a slot's model function
+    /// has started the first time the round calls it.
+    pub models: Arc<dyn ModelStarter>,
+    /// The models the round has started, each once.
+    pub(crate) started: Started,
     /// The WASI the round is served: its clocks, its random streams, and the
     /// empty rest. See [`crate::round`].
     pub round: Round,
@@ -55,15 +60,17 @@ pub struct HostState {
 
 /// Per-run inputs handed to [`Executor::run`](crate::Executor::run) once per
 /// round: the `listener` that ties this run to the caller's persistence layer,
-/// the `media_store` that rehydrates stored blobs, and the `fuel` the round may
-/// burn ([`DEFAULT_ROUND_FUEL`](crate::DEFAULT_ROUND_FUEL) unless the host says
-/// otherwise). The composition-wide `EmbeddedRegistry` is NOT here — it is
-/// immutable across a composition's rounds, so it is built into the
+/// the `media_store` that rehydrates stored blobs, the `models` that start the
+/// processes the composition's models run in, and the `fuel` the round may
+/// burn ([`DEFAULT_ROUND_FUEL`](crate::DEFAULT_ROUND_FUEL) unless the host
+/// says otherwise). The composition-wide `EmbeddedRegistry` is NOT here — it
+/// is immutable across a composition's rounds, so it is built into the
 /// [`PrimedComposition`](crate::PrimedComposition) at
 /// [`prime`](crate::Executor::prime) time and read from there.
 pub struct RunInputs {
     pub listener: Arc<dyn SessionListener>,
     pub media_store: Arc<dyn MediaStore>,
+    pub models: Arc<dyn ModelStarter>,
     pub fuel: u64,
 }
 
@@ -72,6 +79,7 @@ impl HostState {
         props: Option<Val>,
         embedded: Arc<EmbeddedRegistry>,
         media_store: Arc<dyn MediaStore>,
+        models: Arc<dyn ModelStarter>,
         round: Round,
     ) -> Self {
         Self {
@@ -79,6 +87,8 @@ impl HostState {
             embedded,
             table: ResourceTable::new(),
             media_store,
+            models,
+            started: Started::default(),
             round,
         }
     }

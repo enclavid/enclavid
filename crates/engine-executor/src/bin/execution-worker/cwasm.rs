@@ -9,7 +9,7 @@
 //! copied per round.
 
 use std::fs::File;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, RawFd};
 
 use engine_executor::admission::is_precompiled_component;
 
@@ -201,17 +201,22 @@ impl Drop for Mapping {
     }
 }
 
+/// The path a round's child opens the descriptor it inherits on `fd` by:
+/// through `/proc/self/fd` on Linux and `/dev/fd` on macOS.
+pub(crate) fn path_in_child(fd: RawFd) -> String {
+    #[cfg(target_os = "linux")]
+    const FD_DIR: &str = "/proc/self/fd";
+    #[cfg(not(target_os = "linux"))]
+    const FD_DIR: &str = "/dev/fd";
+    format!("{FD_DIR}/{fd}")
+}
+
 impl Cwasm {
     /// The path a round's child opens this cwasm by: the fd the runner installs
-    /// it on in the child ([`engine_supervisor::INHERITED_FD`]), through
-    /// `/proc/self/fd` on Linux and `/dev/fd` on macOS. `deserialize_file` maps
-    /// what it opens.
+    /// it on in the child ([`engine_supervisor::INHERITED_FD`]).
+    /// `deserialize_file` maps what it opens.
     pub(crate) fn path_in_child() -> String {
-        #[cfg(target_os = "linux")]
-        const FD_DIR: &str = "/proc/self/fd";
-        #[cfg(not(target_os = "linux"))]
-        const FD_DIR: &str = "/dev/fd";
-        format!("{FD_DIR}/{}", engine_supervisor::INHERITED_FD)
+        path_in_child(engine_supervisor::INHERITED_FD)
     }
 
     /// A `Cwasm` the tests make without a stream: what the cache does with an

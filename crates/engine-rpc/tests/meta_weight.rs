@@ -123,6 +123,8 @@ fn encoded(components: usize, decls: impl Fn() -> ComponentDecls) -> Vec<u8> {
         &BundleMeta {
             embedded_imports: Vec::new(),
             catalogs,
+            models: Vec::new(),
+            files: Vec::new(),
         },
         &mut b,
     )
@@ -188,6 +190,8 @@ fn a_composition_at_the_section_cap_decodes_within_its_bound() {
         &BundleMeta {
             embedded_imports: Vec::new(),
             catalogs,
+            models: Vec::new(),
+            files: Vec::new(),
         },
         &mut b,
     )

@@ -1,13 +1,15 @@
-// The SHAPE of the child's syscall filters: what they kill, refuse and let
-// past, one raw system call at a time. That a real child survives them is the
-// child packages' integration tests, which drive a full round through the
-// image's own build under them. Both halves are needed: filters that permit
-// everything pass those, and filters that permit nothing pass these.
+// The SHAPE of the syscall filters, a child's and a coprocess's: what they kill,
+// refuse and let past, one raw system call at a time. That a real child
+// survives them is the child packages' integration tests, which drive a full
+// round through the image's own build under them. Both halves are needed:
+// filters that permit everything pass those, and filters that permit nothing
+// pass these.
 
 use libc::c_long;
 use rustix::process::{Pid, WaitOptions, waitpid};
 
 use super::filters;
+use crate::spawn::Filters;
 
 /// How a probe ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,12 +49,12 @@ const SURVIVED: i32 = 42;
 const REFUSED: i32 = 38;
 const UNSUPPORTED: i32 = 7;
 
-/// Make `call` in a forked child under the real filters, installed the way a
-/// spawned child gets them, and say how the child ended — `None` where this
+/// Make `call` in a forked child under the real filters `of`, installed the way
+/// a spawned process gets them, and say how the child ended — `None` where this
 /// environment cannot install a filter at all.
-fn under_filter(call: Call) -> Option<Outcome> {
+fn under_filter(of: Filters, call: Call) -> Option<Outcome> {
     // Built here, so the child only reads them.
-    let filters = filters();
+    let filters = filters(of);
     // SAFETY: the child of this multi-threaded harness makes only
     // async-signal-safe calls — `apply_filter`'s `prctl` and `seccomp`, the call
     // under test, `_exit` — and never returns into the harness.
@@ -100,7 +102,9 @@ fn under_filter(call: Call) -> Option<Outcome> {
     }
 }
 
-/// Every row, made in a child of its own, ends as listed.
+/// Every row, made in a child of its own under each set of filters, ends as
+/// listed: the rows of `rows` alike under both, those of `differ` as a child's
+/// and as a coprocess's.
 #[test]
 fn each_call_ends_as_listed() {
     // What the calls point at, built before any child exists.
@@ -325,19 +329,13 @@ fn each_call_ends_as_listed() {
             ),
             Killed,
         ),
-        // `ioctl`: only the one request the child makes. fd 0 here is not a
-        // socket, so FIONBIO fails — after the filter let it through.
-        (
-            "ioctl(FIONBIO)",
-            call!(libc::SYS_ioctl, 0, libc::FIONBIO, &raw const on),
-            Survived,
-        ),
+        // `ioctl`, any request but the one a child makes: `differ` has that.
         (
             "ioctl(TCGETS)",
             call!(libc::SYS_ioctl, 0, libc::TCGETS, &raw mut termios),
             Killed,
         ),
-        // What every child does.
+        // What every child and coprocess does.
         ("read", call!(libc::SYS_read, 0, &raw mut byte, 0), Survived),
         (
             "mmap, anonymous",
@@ -354,24 +352,150 @@ fn each_call_ends_as_listed() {
         ),
     ];
     // The old `open`, which glibc never calls: not listed, so killed even
-    // read-only, and the only open a child has is the `openat` whose mode the
-    // filter reads.
+    // read-only, and the only open a process has is the `openat` whose mode
+    // the filter reads.
     #[cfg(target_arch = "x86_64")]
     rows.push((
         "open(O_RDONLY)",
         call!(libc::SYS_open, null, libc::O_RDONLY),
         Killed,
     ));
+    // `no_new_privs`, which every process here already has, and a filter of
+    // its own with a flag: a listener, or speculation let past.
+    rows.push((
+        "prctl(PR_SET_NO_NEW_PRIVS)",
+        call!(libc::SYS_prctl, libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0),
+        Survived,
+    ));
+    rows.push((
+        "seccomp(SET_MODE_FILTER, NEW_LISTENER)",
+        call!(
+            libc::SYS_seccomp,
+            libc::SECCOMP_SET_MODE_FILTER,
+            libc::SECCOMP_FILTER_FLAG_NEW_LISTENER,
+            0
+        ),
+        Killed,
+    ));
+    // A filter of its own over the calling thread alone: one the process's
+    // other threads would not carry.
+    rows.push((
+        "seccomp(SET_MODE_FILTER, no flags)",
+        call!(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, 0, 0),
+        Killed,
+    ));
 
+    // What a coprocess does without, beside a child: it blocks on its socket, so
+    // it neither sets it non-blocking nor waits on an event loop, and it has
+    // no call that moves a descriptor across it. fd 0 and fd -1 here are not
+    // sockets, so each call fails — after the filter let it through. It runs
+    // no code it makes, so it maps and turns no memory executable. And what it
+    // has that a child has not: a filter of its own, over every thread. The
+    // filter's address here is none, so the call fails — after the filter let
+    // it through.
+    let differ = [
+        (
+            "prctl(PR_SET_NAME)",
+            call!(libc::SYS_prctl, libc::PR_SET_NAME, c"probe".as_ptr()),
+            Survived,
+            Killed,
+        ),
+        (
+            "seccomp(SET_MODE_FILTER, TSYNC)",
+            call!(
+                libc::SYS_seccomp,
+                libc::SECCOMP_SET_MODE_FILTER,
+                libc::SECCOMP_FILTER_FLAG_TSYNC,
+                0
+            ),
+            Killed,
+            Survived,
+        ),
+        (
+            "mmap, anonymous, executable",
+            call!(
+                libc::SYS_mmap,
+                0,
+                4096,
+                libc::PROT_READ | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0
+            ),
+            Survived,
+            Killed,
+        ),
+        (
+            "mprotect to executable",
+            call!(libc::SYS_mprotect, 0, 0, libc::PROT_READ | libc::PROT_EXEC),
+            Survived,
+            Killed,
+        ),
+        (
+            "ioctl(FIONBIO)",
+            call!(libc::SYS_ioctl, 0, libc::FIONBIO, &raw const on),
+            Survived,
+            Killed,
+        ),
+        (
+            "epoll_create1",
+            call!(libc::SYS_epoll_create1, libc::EPOLL_CLOEXEC),
+            Survived,
+            Killed,
+        ),
+        (
+            "eventfd2",
+            call!(libc::SYS_eventfd2, 0, libc::EFD_CLOEXEC),
+            Survived,
+            Killed,
+        ),
+        (
+            "sendmsg",
+            call!(libc::SYS_sendmsg, -1, 0, 0),
+            Survived,
+            Killed,
+        ),
+        (
+            "recvmsg",
+            call!(libc::SYS_recvmsg, -1, 0, 0),
+            Survived,
+            Killed,
+        ),
+        (
+            "recvfrom",
+            call!(libc::SYS_recvfrom, -1, &raw mut byte, 1, 0, 0, 0),
+            Survived,
+            Killed,
+        ),
+    ];
+
+    let cases = rows
+        .into_iter()
+        .flat_map(|(what, call, ends)| {
+            [
+                (Filters::Child, what, call, ends),
+                (Filters::Coprocess, what, call, ends),
+            ]
+        })
+        .chain(
+            differ
+                .into_iter()
+                .flat_map(|(what, call, child, coprocess)| {
+                    [
+                        (Filters::Child, what, call, child),
+                        (Filters::Coprocess, what, call, coprocess),
+                    ]
+                }),
+        );
     let mut wrong = Vec::new();
-    for (what, call, expected) in rows {
-        match under_filter(call) {
+    for (of, what, call, expected) in cases {
+        match under_filter(of, call) {
             None => {
                 eprintln!("this environment cannot install a seccomp filter — skipping");
                 return;
             }
             Some(ended) if ended != expected => {
-                wrong.push(format!("{what}: {ended:?}, listed {expected:?}"));
+                wrong.push(format!("{of:?} {what}: {ended:?}, listed {expected:?}"));
             }
             Some(_) => {}
         }

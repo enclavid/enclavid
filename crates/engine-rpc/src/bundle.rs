@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use engine_types::composition::EmbeddedImport;
+use engine_types::composition::{EmbeddedImport, ModelFile, ModelImport};
 use engine_types::embedded::ComponentDecls;
 use engine_types::limits::MAX_EMBEDDED_SECTION_BYTES;
 
@@ -36,9 +36,10 @@ const PRIME_HEADROOM: u64 = 64 * 1024;
 const META_BYTES_PER_SECTION_BYTE: u64 = 1;
 
 /// What the metadata carries that no section accounts for: each catalog's hash,
-/// its field names and its texts' length, and the import manifest. A few hundred
-/// bytes for a component with two slots named at their longest, so this is some
-/// two thousand components.
+/// its field names and its texts' length, the import manifest, and the models
+/// with their files. A few hundred bytes for a component with two slots named at
+/// their longest, so this is some two thousand components; the models, held to
+/// `MAX_MODELS`, are a few hundred bytes each.
 const META_COMPONENT_ROOM: u64 = 1024 * 1024;
 
 /// The longest encoded [`BundleMeta`] the execute hop accepts, in bytes: 3 MiB.
@@ -126,6 +127,14 @@ pub struct CompiledBundle {
     /// Every catalog of the composition, nested ones included, the
     /// policy's first — the exact registry-builder inputs.
     pub catalogs: Vec<CatalogEntry>,
+    /// The functions the components' models come through (lost in compile;
+    /// needed to register them in the host `Linker`), each with its resource,
+    /// its `run`'s shape and its files.
+    pub models: Vec<ModelImport>,
+    /// The model files — graphs and data files — each once: what the
+    /// execution-worker holds a file for, and fills when a round first runs a
+    /// model that names it.
+    pub files: Vec<ModelFile>,
 }
 
 /// The non-code half of a [`CompiledBundle`]: what the execute hop streams beside
@@ -139,6 +148,10 @@ pub struct BundleMeta {
     pub embedded_imports: Vec<EmbeddedImport>,
     /// Same as [`CompiledBundle::catalogs`].
     pub catalogs: Vec<CatalogEntry>,
+    /// Same as [`CompiledBundle::models`].
+    pub models: Vec<ModelImport>,
+    /// Same as [`CompiledBundle::files`].
+    pub files: Vec<ModelFile>,
 }
 
 /// A [`BundleMeta`] by reference: the same fields under the same names, so the
@@ -147,6 +160,8 @@ pub struct BundleMeta {
 struct MetaView<'a> {
     embedded_imports: &'a [EmbeddedImport],
     catalogs: &'a [CatalogEntry],
+    models: &'a [ModelImport],
+    files: &'a [ModelFile],
 }
 
 impl CompiledBundle {
@@ -159,6 +174,8 @@ impl CompiledBundle {
             &MetaView {
                 embedded_imports: &self.embedded_imports,
                 catalogs: &self.catalogs,
+                models: &self.models,
+                files: &self.files,
             },
             &mut meta,
         )
@@ -200,6 +217,10 @@ pub struct BundleRef {
     /// The catalogs (the registry-builder inputs) — same as
     /// [`CompiledBundle::catalogs`].
     pub catalogs: Arc<[CatalogEntry]>,
+    /// The models (needed to register them in the host `Linker`) — same as
+    /// [`CompiledBundle::models`]. Each model's socket to the process it runs
+    /// in is the inherited fd after the cwasm's, in this order.
+    pub models: Arc<[ModelImport]>,
 }
 
 #[cfg(test)]
@@ -219,6 +240,23 @@ pub(crate) fn sample_bundle() -> CompiledBundle {
             hash: [9u8; 32],
             decls,
         }],
+        models: vec![ModelImport {
+            instance_name: "enclavid-ext:face-age/models@0.1.0".to_string(),
+            function: "age".to_string(),
+            resource: "age-model".to_string(),
+            graph: 0,
+            data: Some(1),
+        }],
+        files: vec![
+            ModelFile {
+                sha256: [4u8; 32],
+                length: 269_007,
+            },
+            ModelFile {
+                sha256: [5u8; 32],
+                length: 115_000_000,
+            },
+        ],
     }
 }
 
@@ -243,17 +281,23 @@ mod tests {
         assert_eq!(back.embedded_imports[0].catalog_hash, [7u8; 32]);
         assert_eq!(back.catalogs.len(), 1);
         assert!(back.catalogs[0].decls.disclosure_fields.contains("dob"));
+        assert_eq!(back.models, sample_bundle().models);
+        assert_eq!(back.files, sample_bundle().files);
     }
 
     fn sample_meta() -> BundleMeta {
         let CompiledBundle {
             embedded_imports,
             catalogs,
+            models,
+            files,
             ..
         } = sample_bundle();
         BundleMeta {
             embedded_imports,
             catalogs,
+            models,
+            files,
         }
     }
 
@@ -310,6 +354,8 @@ mod tests {
                     hash: [0xFF; 32],
                     decls,
                 }],
+                models: Vec::new(),
+                files: Vec::new(),
             })
             .len() as u64
         };
@@ -366,6 +412,8 @@ mod tests {
         let encoded = encode(&BundleMeta {
             embedded_imports,
             catalogs,
+            models: Vec::new(),
+            files: Vec::new(),
         });
         assert!(
             encoded.len() as u64 <= META_COMPONENT_ROOM,

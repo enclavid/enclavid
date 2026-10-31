@@ -56,11 +56,15 @@ fn a_compile_holds_its_data_about_three_times_at_its_peak() {
     let plugins = vec![PluginInstance {
         package: "test:weights".into(),
         wasm: weights(DATA),
+        model_layers: Vec::new(),
     }];
     // From here the peak is what is resident now — the inputs — and whatever
     // the compile adds to it.
     std::fs::write("/proc/self/clear_refs", "5").unwrap();
-    let cwasm = compiler.compile_to_parts(policy, plugins).unwrap().cwasm;
+    let cwasm = compiler
+        .compile_to_parts(policy, Vec::new(), plugins)
+        .unwrap()
+        .cwasm;
     let peak = status("VmHWM:") - before;
     assert!(cwasm.len() > DATA, "the data is in the cwasm");
     assert!(

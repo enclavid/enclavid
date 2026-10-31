@@ -74,7 +74,7 @@ impl RemoteCompileChild for Child {
                 safe_logger::debug!("engine-compiler-child: no output file for this compile");
                 CompileError::Failed
             })?;
-        let (policy, plugins) = req.receive().await.map_err(|e| {
+        let (policy, policy_model_layers, plugins) = req.receive().await.map_err(|e| {
             safe_logger::debug!("engine-compiler-child: components: {e}");
             CompileError::Failed
         })?;
@@ -82,20 +82,22 @@ impl RemoteCompileChild for Child {
         // thread so the remoc reactor stays live (answers keepalives) — else a
         // multi-second compile could look like a dead transport to the supervisor.
         let compiler = self.compiler.clone();
-        let parts = tokio::task::spawn_blocking(move || compiler.compile_to_parts(policy, plugins))
-            .await
-            .map_err(|e| {
-                safe_logger::debug!("engine-compiler-child: compile task: {e}");
-                CompileError::Failed
-            })?
-            .map_err(|e| {
-                safe_logger::debug!("engine-compiler-child: compile: {e:?}");
-                // A refusal is carried as a value, never read off the message.
-                match e.downcast_ref::<CompileFault>() {
-                    Some(fault) => CompileError::Refused(fault.clone()),
-                    None => CompileError::Failed,
-                }
-            })?;
+        let parts = tokio::task::spawn_blocking(move || {
+            compiler.compile_to_parts(policy, policy_model_layers, plugins)
+        })
+        .await
+        .map_err(|e| {
+            safe_logger::debug!("engine-compiler-child: compile task: {e}");
+            CompileError::Failed
+        })?
+        .map_err(|e| {
+            safe_logger::debug!("engine-compiler-child: compile: {e:?}");
+            // A refusal is carried as a value, never read off the message.
+            match e.downcast_ref::<CompileFault>() {
+                Some(fault) => CompileError::Refused(fault.clone()),
+                None => CompileError::Failed,
+            }
+        })?;
         let bundle = CompiledBundle {
             cwasm: parts.cwasm,
             embedded_imports: parts.embedded_imports,
@@ -104,6 +106,8 @@ impl RemoteCompileChild for Child {
                 .into_iter()
                 .map(|(hash, decls)| CatalogEntry { hash, decls })
                 .collect(),
+            models: parts.models,
+            files: parts.files,
         };
         // The bound the execute hop holds metadata to, held where the metadata is
         // made: a bundle past it would be cached and then fail every round that

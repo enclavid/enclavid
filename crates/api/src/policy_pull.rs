@@ -8,9 +8,12 @@
 //! alone is how a session shows, before its first round runs, that it may pull
 //! what it pins — whether its compile then turns out to be cached or not.
 //!
-//! Only the wasm layer is fetched. The manifest's digest pins the whole
-//! artifact, every layer's digest is inside it, and the other layers are not
-//! used — so fetching and checking them would add a pull and nothing else.
+//! An artifact's model files — its models' graphs and data files — are layers
+//! of their own beside its component ([`layers`]), each fetched the same way
+//! ([`model_file_pieces`]) — never by the compile, which takes only their names
+//! and digests, but into L2 for the execution-worker (`crate::model_files`).
+//! No other layer is fetched: the manifest's digest pins the whole artifact,
+//! every layer's digest is inside it, and the rest are not used.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -24,6 +27,8 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use enclavid_boundary::{AuthN, AuthZ, Exposed, Sends, reason};
 use enclavid_crypto::ocicrypt::{self, LayerDecryptor};
+use engine_types::compile::{MODEL_DATA_SUFFIX, MODEL_GRAPH_SUFFIX};
+use engine_types::composition::ModelLayer;
 use hatch_client::{BlobPieces, BlobRequest, ManifestRequest, RegistryClient};
 use session_types::{Key, PullProblem};
 
@@ -36,6 +41,16 @@ use crate::turns::Turns;
 /// whitelist accepts only `application/wasm` — unified across all
 /// artifact kinds.
 const WASM_LAYER: &str = "application/wasm";
+
+/// OCI layer media type for a model file: a weight layer neither archived nor
+/// compressed, as the CNCF ModelPack specification names one — an ONNX graph
+/// and the data file it points into alike. Which of the two it is, and whose,
+/// its file name says.
+const MODEL_LAYER: &str = "application/vnd.cncf.model.weight.v1.raw";
+
+/// The annotation holding a layer's file name: `<function>.onnx` for a model's
+/// graph, `<function>.onnx.data` for its data file.
+const TITLE: &str = "org.opencontainers.image.title";
 
 #[derive(Debug, thiserror::Error)]
 pub enum PullError {
@@ -63,6 +78,10 @@ pub enum PullError {
     KeyMissing,
     #[error("a key was supplied but the layer is not encrypted")]
     NotEncrypted,
+    #[error("a model layer is not named `<function>.onnx` or `<function>.onnx.data`")]
+    ModelUnnamed,
+    #[error("a model layer is encrypted")]
+    ModelEncrypted,
     /// The encrypted layer's annotations do not say how it was encrypted.
     #[error("encryption annotations: {0}")]
     Encryption(String),
@@ -113,6 +132,8 @@ impl PullError {
             Self::KeyMissing => PullProblem::KeyMissing,
             Self::NotEncrypted => PullProblem::NotEncrypted,
             Self::Decrypt(_) => PullProblem::KeyDoesNotOpen,
+            Self::ModelUnnamed => PullProblem::ModelUnnamed,
+            Self::ModelEncrypted => PullProblem::ModelEncrypted,
         })
     }
 }
@@ -175,7 +196,8 @@ pub struct WasmLayer {
 /// for a plaintext layer is refused rather than ignored, so no cleartext is
 /// served where encryption was expected. The manifest, and later the layer,
 /// each take one of `turns` for as long as they are fetched, and each pull
-/// `within` where the session's terms name a deadline.
+/// `within` where the session's terms name a deadline. Beside the layer, the
+/// model files the artifact carries ([`layers`]).
 pub async fn wasm_layer(
     registry: &RegistryClient<Hatch>,
     turns: &Turns,
@@ -184,10 +206,11 @@ pub async fn wasm_layer(
     key: Option<&Key>,
     kbs_ctx: Option<&KbsContext<'_>>,
     within: Option<Duration>,
-) -> Result<WasmLayer, PullError> {
+) -> Result<(WasmLayer, Vec<ModelLayer>), PullError> {
     let manifest = manifest(registry, turns, artifact_ref, registry_auth, within).await?;
     let manifest: OciManifest =
         serde_json::from_slice(&manifest).map_err(|e| PullError::ManifestParse(e.to_string()))?;
+    let model_layers = model_layers_of(&manifest)?;
 
     for descriptor in manifest.layers {
         let decrypt = if descriptor.media_type == WASM_LAYER {
@@ -205,7 +228,7 @@ pub async fn wasm_layer(
         } else {
             continue;
         };
-        return Ok(WasmLayer {
+        let layer = WasmLayer {
             registry: registry.clone(),
             turns: turns.clone(),
             reference: artifact_ref.to_string(),
@@ -214,18 +237,28 @@ pub async fn wasm_layer(
             size: descriptor.size,
             decrypt,
             within,
-        });
+        };
+        return Ok((layer, model_layers));
     }
     Err(PullError::NoWasmLayer)
 }
 
-/// The length of an artifact's wasm layer, read off its verified manifest: the
-/// layer [`wasm_layer`] would pick, plaintext or encrypted, whose plaintext an
-/// AES-CTR layer shares the length of.
-pub fn wasm_layer_size(manifest: &[u8]) -> Result<u64, PullError> {
+/// What an artifact's verified manifest says of the layers a composition takes
+/// from it.
+pub struct Layers {
+    /// The length of its wasm layer: the one [`wasm_layer`] would pick,
+    /// plaintext or encrypted, whose plaintext an AES-CTR layer shares the
+    /// length of.
+    pub wasm_size: u64,
+    /// The model files it carries, in the manifest's order.
+    pub model_layers: Vec<ModelLayer>,
+}
+
+/// The [`Layers`] of a verified manifest.
+pub fn layers(manifest: &[u8]) -> Result<Layers, PullError> {
     let manifest: OciManifest =
         serde_json::from_slice(manifest).map_err(|e| PullError::ManifestParse(e.to_string()))?;
-    manifest
+    let wasm_size = manifest
         .layers
         .iter()
         .find(|d| {
@@ -233,7 +266,53 @@ pub fn wasm_layer_size(manifest: &[u8]) -> Result<u64, PullError> {
                 || d.media_type.strip_suffix(ocicrypt::ENCRYPTED_MEDIA_SUFFIX) == Some(WASM_LAYER)
         })
         .map(|d| d.size)
-        .ok_or(PullError::NoWasmLayer)
+        .ok_or(PullError::NoWasmLayer)?;
+    Ok(Layers {
+        wasm_size,
+        model_layers: model_layers_of(&manifest)?,
+    })
+}
+
+/// The model files a manifest declares, in its order: each named as its title
+/// gives — a function's name, then `.onnx` or `.onnx.data` — and known by its
+/// digest and its size. One encrypted is refused.
+fn model_layers_of(manifest: &OciManifest) -> Result<Vec<ModelLayer>, PullError> {
+    let mut layers = Vec::new();
+    for d in &manifest.layers {
+        if d.media_type.strip_suffix(ocicrypt::ENCRYPTED_MEDIA_SUFFIX) == Some(MODEL_LAYER) {
+            return Err(PullError::ModelEncrypted);
+        }
+        if d.media_type != MODEL_LAYER {
+            continue;
+        }
+        let named = |title: &&String| {
+            [MODEL_GRAPH_SUFFIX, MODEL_DATA_SUFFIX]
+                .iter()
+                .any(|suffix| title.strip_suffix(suffix).is_some_and(|f| !f.is_empty()))
+        };
+        let name = d
+            .annotations
+            .get(TITLE)
+            .filter(named)
+            .ok_or(PullError::ModelUnnamed)?;
+        let sha256 = sha256_of(&d.digest).ok_or_else(|| {
+            PullError::ManifestParse(format!("a model layer's digest `{}`", d.digest))
+        })?;
+        layers.push(ModelLayer {
+            name: name.clone(),
+            sha256,
+            length: d.size,
+        });
+    }
+    Ok(layers)
+}
+
+/// The 32 bytes a `sha256:<hex>` digest names.
+fn sha256_of(digest: &str) -> Option<[u8; 32]> {
+    hex::decode(digest.strip_prefix("sha256:")?)
+        .ok()?
+        .try_into()
+        .ok()
 }
 
 /// An artifact's manifest, fetched with `registry_auth` and checked to be the
@@ -337,41 +416,92 @@ impl WasmLayer {
             decrypt,
             within,
         } = self;
-        let fetch = async move {
-            // Past what the hatch streams, the layer is not one a composition
-            // carries.
-            let length = fleet_stream::StreamLen::new(size).ok_or(PullError::LayerSize)?;
-            let turn = turns.take().await.ok_or(PullError::Busy)?;
-            let req = to_registry(
-                &reference,
-                BlobRequest {
-                    reference: reference.clone(),
-                    digest: digest.clone(),
-                    size: length,
-                    registry_auth,
-                },
-            );
-            let pieces = registry
-                .blob(req, within)
-                .await
-                .map_err(classify_transport_error)?
-                // Held to the size and digest the pinned manifest declares, so a blob
-                // that is not that layer ends in an error before anything acts on it.
-                .trust_with(AuthN::Verified, |pieces| {
-                    Ok::<_, PullError>(held(pieces, digest, size, decrypt, turn))
-                })?
-                .trust_accept_risk(reason!(
-                    AuthZ::AcceptedRisk,
-                    "the grant `manifest` accepted, carried: the registry decides per \
-                     repository with the consumer's bearer, and for a plain-http registry \
-                     the host answers in its place — the bytes are held to the pinned digest \
-                     either way"
-                ))
-                .into_inner();
-            Ok::<_, PullError>(pieces)
-        };
-        futures::stream::once(fetch).try_flatten().boxed()
+        fetched(
+            registry,
+            turns,
+            reference,
+            registry_auth,
+            digest,
+            size,
+            decrypt,
+            within,
+        )
     }
+}
+
+/// The model file of the artifact `reference` pins whose digest is `sha256`
+/// and whose length is `length`, as its verified manifest declares them —
+/// fetched as [`WasmLayer::pieces`] fetches a wasm layer: when first read, on
+/// one of `turns`, `within` where the session's terms name a deadline, and held
+/// to that length and digest.
+pub fn model_file_pieces(
+    registry: &RegistryClient<Hatch>,
+    turns: &Turns,
+    reference: &str,
+    registry_auth: &[u8],
+    sha256: &[u8; 32],
+    length: u64,
+    within: Option<Duration>,
+) -> BoxStream<'static, Result<Bytes, PullError>> {
+    fetched(
+        registry.clone(),
+        turns.clone(),
+        reference.to_owned(),
+        registry_auth.to_vec(),
+        format!("sha256:{}", hex::encode(sha256)),
+        length,
+        None,
+        within,
+    )
+}
+
+/// The layer `digest` of the artifact `reference` pins, `size` bytes long,
+/// fetched when first read and held on the way — see [`WasmLayer::pieces`].
+#[allow(clippy::too_many_arguments)]
+fn fetched(
+    registry: RegistryClient<Hatch>,
+    turns: Turns,
+    reference: String,
+    registry_auth: Vec<u8>,
+    digest: String,
+    size: u64,
+    decrypt: Option<LayerDecryptor>,
+    within: Option<Duration>,
+) -> BoxStream<'static, Result<Bytes, PullError>> {
+    let fetch = async move {
+        // Past what the hatch streams, the layer is not one a composition
+        // carries.
+        let length = fleet_stream::StreamLen::new(size).ok_or(PullError::LayerSize)?;
+        let turn = turns.take().await.ok_or(PullError::Busy)?;
+        let req = to_registry(
+            &reference,
+            BlobRequest {
+                reference: reference.clone(),
+                digest: digest.clone(),
+                size: length,
+                registry_auth,
+            },
+        );
+        let pieces = registry
+            .blob(req, within)
+            .await
+            .map_err(classify_transport_error)?
+            // Held to the size and digest the pinned manifest declares, so a blob
+            // that is not that layer ends in an error before anything acts on it.
+            .trust_with(AuthN::Verified, |pieces| {
+                Ok::<_, PullError>(held(pieces, digest, size, decrypt, turn))
+            })?
+            .trust_accept_risk(reason!(
+                AuthZ::AcceptedRisk,
+                "the grant `manifest` accepted, carried: the registry decides per \
+                 repository with the consumer's bearer, and for a plain-http registry \
+                 the host answers in its place — the bytes are held to the pinned digest \
+                 either way"
+            ))
+            .into_inner();
+        Ok::<_, PullError>(pieces)
+    };
+    futures::stream::once(fetch).try_flatten().boxed()
 }
 
 /// What [`held`] carries from one piece to the next.
@@ -673,6 +803,8 @@ mod tests {
             (PullError::NoWasmLayer, PullProblem::NoWasmLayer),
             (PullError::KeyMissing, PullProblem::KeyMissing),
             (PullError::NotEncrypted, PullProblem::NotEncrypted),
+            (PullError::ModelUnnamed, PullProblem::ModelUnnamed),
+            (PullError::ModelEncrypted, PullProblem::ModelEncrypted),
             (
                 PullError::Decrypt("hmac".into()),
                 PullProblem::KeyDoesNotOpen,
@@ -748,16 +880,91 @@ mod tests {
         let config = ("application/vnd.wasm.config.v0+json", 7);
         for wasm in [WASM_LAYER, encrypted.as_str()] {
             let manifest = manifest_of(&[config, (wasm, 4096)]);
-            assert_eq!(wasm_layer_size(&manifest).unwrap(), 4096, "{wasm}");
+            assert_eq!(layers(&manifest).unwrap().wasm_size, 4096, "{wasm}");
         }
         assert!(matches!(
-            wasm_layer_size(&manifest_of(&[config])),
+            layers(&manifest_of(&[config])),
             Err(PullError::NoWasmLayer)
         ));
         assert!(matches!(
-            wasm_layer_size(b"not json"),
+            layers(b"not json"),
             Err(PullError::ManifestParse(_))
         ));
+    }
+
+    /// A manifest of a wasm layer and of `files`, each a layer of that media
+    /// type, title and size, its digest the size's byte repeated.
+    fn manifest_with_files(files: &[(&str, Option<&str>, u64)]) -> Vec<u8> {
+        let mut layers = vec![serde_json::json!({
+            "mediaType": WASM_LAYER,
+            "digest": format!("sha256:{}", "ab".repeat(32)),
+            "size": 100,
+        })];
+        for (media_type, title, size) in files {
+            let mut layer = serde_json::json!({
+                "mediaType": media_type,
+                "digest": format!("sha256:{}", hex::encode([*size as u8; 32])),
+                "size": size,
+            });
+            if let Some(title) = title {
+                layer["annotations"] = serde_json::json!({ TITLE: title });
+            }
+            layers.push(layer);
+        }
+        serde_json::to_vec(&serde_json::json!({ "layers": layers })).unwrap()
+    }
+
+    /// Each model layer is named as its file is, and known by its digest and
+    /// size, in the manifest's order; any other layer is not one.
+    #[test]
+    fn a_model_layer_is_named_as_its_file() {
+        let manifest = manifest_with_files(&[
+            (MODEL_LAYER, Some("age.onnx"), 7),
+            (
+                "application/vnd.cncf.model.config.v1+json",
+                Some("config.json"),
+                9,
+            ),
+            (MODEL_LAYER, Some("age.onnx.data"), 3),
+        ]);
+        let layers = layers(&manifest).unwrap();
+        assert_eq!(layers.wasm_size, 100);
+        assert_eq!(
+            layers.model_layers,
+            vec![
+                ModelLayer {
+                    name: "age.onnx".into(),
+                    sha256: [7; 32],
+                    length: 7,
+                },
+                ModelLayer {
+                    name: "age.onnx.data".into(),
+                    sha256: [3; 32],
+                    length: 3,
+                },
+            ]
+        );
+    }
+
+    /// A model layer with no file name, or one with another extension or
+    /// nothing before it, is no model's file; one encrypted is refused.
+    #[test]
+    fn a_model_layer_is_refused_unnamed_or_encrypted() {
+        for title in [
+            None,
+            Some("age.safetensors"),
+            Some(".onnx"),
+            Some(".onnx.data"),
+        ] {
+            let manifest = manifest_with_files(&[(MODEL_LAYER, title, 7)]);
+            assert!(
+                matches!(layers(&manifest), Err(PullError::ModelUnnamed)),
+                "{title:?}"
+            );
+        }
+        let encrypted = format!("{MODEL_LAYER}{}", ocicrypt::ENCRYPTED_MEDIA_SUFFIX);
+        let manifest = manifest_with_files(&[(&encrypted, Some("age.onnx"), 7)]);
+        assert!(matches!(layers(&manifest), Err(PullError::ModelEncrypted)));
     }
 
     /// A ref written with the scheme to reach its registry by finds the

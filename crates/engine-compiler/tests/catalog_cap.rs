@@ -32,11 +32,12 @@ fn refusal(policy: &[u8], plugins: &[PluginInstance]) -> CompileFault {
         .map(|p| PluginInstance {
             package: p.package.clone(),
             wasm: p.wasm.clone(),
+            model_layers: Vec::new(),
         })
         .collect();
     match Compiler::new()
         .expect("compiler")
-        .compile_to_parts(policy.to_vec(), plugins)
+        .compile_to_parts(policy.to_vec(), Vec::new(), plugins)
     {
         Ok(_) => panic!("sections that are not JSON must not compile"),
         Err(e) => e
@@ -60,6 +61,7 @@ fn the_cap_is_on_the_composition_not_on_each_component() {
     let plugin = PluginInstance {
         package: "enclavid:p".into(),
         wasm: carrying(SECTION_DISCLOSURE_FIELDS, CAP / 2 + 1).finish(),
+        model_layers: Vec::new(),
     };
     assert!(refused(
         &carrying(SECTION_I18N, CAP / 2).finish(),

@@ -1,0 +1,203 @@
+/// Capabilities the TEE host provides to the policy live in the RESERVED
+/// `enclavid:host` package, and in any `enclavid:host-*` one: a composed plugin
+/// may `import` an interface there (reading the same host surface the policy
+/// does), but it must never SATISFY one. Runtime fusion refuses to wire a plugin
+/// export into a host-reserved import and rejects outright any plugin that
+/// exports one — host interfaces are served exclusively by the TEE `Linker`.
+/// New host capabilities land as new interfaces in these packages, so the trust
+/// boundary stays a single prefix check rather than a denylist that must be kept
+/// in sync.
+///
+/// `enclavid:host-icons` holds the icons the applicant frontend draws, in a
+/// package of its own so that a new icon moves that package's version alone.
+///
+/// What a component declares itself, because the types are its own, it
+/// declares in its slot, a package of the `enclavid-ext` namespace the host
+/// serves as well. Every component's texts: `enclavid-ext:<slot>/i18n`, whose
+/// `key` enum has a case for each text and whose `localized` mints the text of
+/// a case, served from the catalog that names the slot. A plugin's slot is named
+/// for its package; the policy's is `enclavid-ext:policy`, which holds as well
+/// `props`, whose `get` returns the props the consumer gave the session
+/// in whatever record the policy declares for them, and `disclosure-fields`,
+/// whose `key` lists the fields its disclosures may name. A component may import
+/// another's texts by its slot.
+///
+/// A component's models: `enclavid-ext:<slot>/models`, a function for each ONNX
+/// model its artifact carries beside its component — a layer `<function>.onnx`,
+/// the graph, and where its weights are large `<function>.onnx.data`, the data
+/// file the graph points into — returning a resource the slot declares, whose
+/// one method `run` borrows a tensor of `enclavid:host/tensors` for each input
+/// of the graph and returns one for each output: as itself, or a tuple or a
+/// record of them for more than one. The host serves the resource: the model
+/// runs in a process of its own beside the round, started the first time a
+/// round calls the function. Only the one artifact that imports a slot's models
+/// is served them, and only its own files.
+package enclavid:host@0.1.0;
+
+/// The tensors a model's `run` takes and gives: one resource for each element
+/// type, minted by the host from a tensor's dimensions and its elements, in
+/// row-major order and as many as the dimensions hold. A `run` borrows the
+/// tensors it is given and hands back tensors of its own; which element type
+/// each one is, and which dimensions it takes, is its graph's to say.
+///
+/// Half-precision elements are their bits: IEEE 754 binary16 for `f16`, the
+/// upper half of an `f32` for `bf16`.
+interface tensors {
+  resource tensor-f32 {
+    constructor(dims: list<u64>, data: list<f32>);
+    dims: func() -> list<u64>;
+    data: func() -> list<f32>;
+  }
+
+  resource tensor-f64 {
+    constructor(dims: list<u64>, data: list<f64>);
+    dims: func() -> list<u64>;
+    data: func() -> list<f64>;
+  }
+
+  resource tensor-f16 {
+    constructor(dims: list<u64>, data: list<u16>);
+    dims: func() -> list<u64>;
+    data: func() -> list<u16>;
+  }
+
+  resource tensor-bf16 {
+    constructor(dims: list<u64>, data: list<u16>);
+    dims: func() -> list<u64>;
+    data: func() -> list<u16>;
+  }
+
+  resource tensor-i8 {
+    constructor(dims: list<u64>, data: list<s8>);
+    dims: func() -> list<u64>;
+    data: func() -> list<s8>;
+  }
+
+  resource tensor-u8 {
+    constructor(dims: list<u64>, data: list<u8>);
+    dims: func() -> list<u64>;
+    data: func() -> list<u8>;
+  }
+
+  resource tensor-i16 {
+    constructor(dims: list<u64>, data: list<s16>);
+    dims: func() -> list<u64>;
+    data: func() -> list<s16>;
+  }
+
+  resource tensor-u16 {
+    constructor(dims: list<u64>, data: list<u16>);
+    dims: func() -> list<u64>;
+    data: func() -> list<u16>;
+  }
+
+  resource tensor-i32 {
+    constructor(dims: list<u64>, data: list<s32>);
+    dims: func() -> list<u64>;
+    data: func() -> list<s32>;
+  }
+
+  resource tensor-u32 {
+    constructor(dims: list<u64>, data: list<u32>);
+    dims: func() -> list<u64>;
+    data: func() -> list<u32>;
+  }
+
+  resource tensor-i64 {
+    constructor(dims: list<u64>, data: list<s64>);
+    dims: func() -> list<u64>;
+    data: func() -> list<s64>;
+  }
+
+  resource tensor-u64 {
+    constructor(dims: list<u64>, data: list<u64>);
+    dims: func() -> list<u64>;
+    data: func() -> list<u64>;
+  }
+}
+
+/// Value shapes carried by the host capabilities in this package. Kept
+/// in a SEPARATE types interface (WASI-style types-vs-behaviour split)
+/// so the value type can be `use`d without importing the capability
+/// getter, and so `enclavid:host` stays a self-contained leaf package.
+///
+/// The three refs (`localized-ref` / `icon-ref` / `disclosure-field-ref`)
+/// are RESOURCES, minted only by the host: through a slot's `i18n`, the
+/// policy's `disclosure-fields`, and `enclavid:host-icons/icons`. A component
+/// cannot construct one — the handle IS the proof the key was declared, so
+/// membership needs no crypto token. A plugin's helper that names a field takes
+/// the `disclosure-field-ref` the policy minted. They live HERE (a shared
+/// interface) rather than inside each interface that mints them, so every
+/// slot's `i18n` mints the SAME resource type that the records a prompt is made
+/// of carry, and every version of `enclavid:host-icons` mints the one
+/// `icon-ref` that `capture-step` carries.
+///
+/// `blob` is likewise a host-owned resource — one stored byte-blob, minted
+/// by the runtime into `event::media` and rehydrated across rounds via its
+/// `constructor(blob-hash)`. It is the UNIVERSAL unit: a captured camera frame
+/// is a blob, a future uploaded document / PDF is a blob — the host stores and
+/// hands them out identically. It lives here (not in
+/// `enclavid:shared-types/capture`) so both the policy and any verification
+/// plugin reference the SAME resource type and can pass a handle across the
+/// fused policy↔plugin boundary; the bytes stay host-side and enter a
+/// component's linear memory only when it pulls `bytes`. `blob-hash` is the
+/// content address that identifies any stored blob. The `clip` record that groups
+/// the blobs of one capture is NOT here — it's policy-facing (only
+/// `media-result` uses it) and lives in `enclavid:policy/types`; this package
+/// holds only what the host mints or owns.
+interface types {
+  /// One of a component's texts, in every language its catalog has it in —
+  /// surfaces as UI text once the host picks the applicant's language.
+  resource localized-ref;
+
+  /// An icon from `enclavid:host-icons/icons`, which the applicant
+  /// frontend draws by its name.
+  resource icon-ref;
+
+  /// One of the policy's disclosure fields — surfaces as the machine
+  /// `display-field.key` the consumer receives.
+  resource disclosure-field-ref;
+
+  /// A blob's content ADDRESS — the hex-encoded 32-byte BLAKE3 of its bytes.
+  /// An opaque STRING token (NOT one of the `-ref` resources above — those are
+  /// opaque per-round capability handles; this is a serializable value): the
+  /// policy stashes it in its opaque sealed `state` and passes it to the `blob`
+  /// constructor to rehydrate across rounds; it never inspects it. A string
+  /// (not raw bytes) for cross-language ergonomics — JS/Go/Rust: JSON-safe,
+  /// `==`-comparable, map-keyable, loggable (`[]byte` can't even be a Go map
+  /// key). TYPE-AGNOSTIC: a future `document`/`pdf` resource reuses the same
+  /// store and hash. (Algo-agility, if ever needed, via a multihash-style
+  /// `algo:` prefix inside the string.)
+  type blob-hash = string;
+
+  /// One stored byte-blob — a host-owned lazy CONTENT handle (has `bytes`),
+  /// distinct from the opaque `-ref` capability handles above. The universal
+  /// unit of storage: 1 blob ↔ 1 `blob-hash` ↔ 1 sealed blob host-side. A
+  /// captured camera frame is a blob; a future uploaded document / PDF is a
+  /// blob too. The semantic KIND lives in the record that groups blobs
+  /// (`clip.frames`) and the plugin that reads them — not in this type. A
+  /// verification plugin pulls the bytes via `bytes` (so they enter linear
+  /// memory only at use); the policy keeps the `blob-hash` in `state` to
+  /// rehydrate the blob in a later round. For camera frames: pristine bytes,
+  /// no container, no inter-frame compression that could mask the forensic
+  /// signal.
+  resource blob {
+    /// Rehydrate the blob with this content hash from the session's media
+    /// store. Own-session only (cross-session is cryptographically blocked).
+    /// Returns a COLD handle — no host IO yet; the bytes are pulled lazily on
+    /// the first `bytes()`. TRAPS on a miss (unknown / wrong-length hash): a
+    /// fabricated hash is never a legitimate outcome for a correct policy (it
+    /// only ever stashes hashes it got from a real `hash()`), so it fails loud
+    /// rather than handing the policy a recoverable branch. (A constructor is
+    /// possible precisely because there's no error result — only blob-or-trap.)
+    constructor(hash: blob-hash);
+    /// Pull this blob's bytes into the caller's linear memory. For a
+    /// rehydrated (constructed) blob this is the LAZY load point. Bounded by
+    /// the round's memory max: a round that goes past it is ended.
+    bytes: func() -> list<u8>;
+    /// This blob's content hash — stash in `state` to rehydrate the blob in
+    /// a later round via the constructor.
+    hash: func() -> blob-hash;
+  }
+}
+

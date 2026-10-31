@@ -8,8 +8,8 @@ use enclavid_boundary::{Asserted, AuthN, AuthZ, Covert};
 use enclavid_boundary_macros::boundary;
 use engine_rpc::{
     BundleStream, CallbackError, Committed, CompileError, CompileReply, CompileRequest, ExecError,
-    MediaBytes, MediaHash, Padded, PrepareOutcome, PrepareReply, PrepareRequest, RunOutcome,
-    RunReply, RunRequest,
+    MediaBytes, MediaHash, ModelFileDigest, ModelFileStream, Padded, PrepareOutcome, PrepareReply,
+    PrepareRequest, RunOutcome, RunReply, RunRequest,
 };
 use fleet_stream::bin;
 use hatch_rpc::{
@@ -64,6 +64,9 @@ boundary! {
         CallbackError: AuthZ::Scoped,
         /// One fixed value, carrying no detail.
         CallbackError: Covert::Bounded,
+        /// A model file of the composition this session runs, released to the
+        /// image this leg pins, which is the party that runs it.
+        ModelFileStream: AuthZ::Matched,
     }
 
     in (Asserted,) {
@@ -90,6 +93,7 @@ boundary! {
         /// The verdict is the policy's to choose by design, one of four fixed values:
         /// the worker's word is all it ever was.
         Padded<Option<Decision>>: Asserted::Contained,
+        ModelFileDigest,
     }
 }
 

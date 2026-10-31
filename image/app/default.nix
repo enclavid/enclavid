@@ -37,6 +37,10 @@ let
   # workspace.nix for why a measurement needs both.
   inherit (import ./workspace.nix { inherit (pkgs) lib; }) src fixedSeed;
 
+  # ONNX Runtime from source, its telemetry compiled out, as the archives a
+  # static binary links — see image/onnxruntime.
+  onnxruntime = import ../onnxruntime;
+
   # ONE cargo invocation over ONE package, and the binaries to keep from it.
   #
   # `noDefaultFeatures` is per part rather than blanket: `--no-default-features`
@@ -280,6 +284,17 @@ builtins.foldl' (a: b: a // b) { } [
         package = "engine-executor-child";
         binaries = [ "engine-executor-child" ];
         features = [ "contained" ];
+      }
+      # The process a round's model runs in, and the one binary in the fleet
+      # that links ONNX Runtime: the archives image/onnxruntime builds, which
+      # `ORT_LIB_LOCATION` names to ort-sys. Neither the worker's features nor
+      # the child's — its own invocation, as every part is.
+      {
+        package = "engine-executor-inference";
+        binaries = [ "engine-executor-inference" ];
+        preBuild = ''
+          export ORT_LIB_LOCATION=${onnxruntime.static}/lib
+        '';
       }
     ];
   })

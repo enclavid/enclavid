@@ -39,6 +39,7 @@ fn all_plugins() -> Vec<engine_executor::PluginInstance> {
         .map(|(package, wasm)| engine_executor::PluginInstance {
             package: package.to_string(),
             wasm: wasm.to_vec(),
+            model_layers: Vec::new(),
         })
         .collect()
 }
@@ -67,6 +68,7 @@ fn to_bundle_ref(bundle: &CompiledBundle) -> BundleRef {
         cwasm_path: path.to_string_lossy().into_owned(),
         embedded_imports: bundle.embedded_imports.clone().into(),
         catalogs: bundle.catalogs.clone().into(),
+        models: bundle.models.clone().into(),
     }
 }
 
@@ -90,6 +92,9 @@ impl RemoteChildCallbacks for MockCallbacks {
         *self.session_changes.lock().unwrap() += 1;
         Ok(Committed)
     }
+    async fn start_model(&self, _index: u32) -> Result<(), CallbackError> {
+        Err(CallbackError)
+    }
 }
 
 /// Compile the test policy + all plugins into a real wire `CompiledBundle`
@@ -98,7 +103,11 @@ impl RemoteChildCallbacks for MockCallbacks {
 fn real_bundle() -> CompiledBundle {
     let compiler = Compiler::new().expect("compiler");
     let parts = compiler
-        .compile_to_parts(xtask::fixtures::test_policy().to_vec(), all_plugins())
+        .compile_to_parts(
+            xtask::fixtures::test_policy().to_vec(),
+            Vec::new(),
+            all_plugins(),
+        )
         .expect("compile_to_parts");
     CompiledBundle {
         cwasm: parts.cwasm,
@@ -108,6 +117,8 @@ fn real_bundle() -> CompiledBundle {
             .into_iter()
             .map(|(hash, decls)| CatalogEntry { hash, decls })
             .collect(),
+        models: parts.models,
+        files: parts.files,
     }
 }
 
@@ -274,7 +285,7 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
     };
     let (mut child, client) = engine_supervisor::spawn_and_connect::<RemoteChildClient<Ciborium>>(
         &xtask::child_binary("engine-executor-child"),
-        Some(cwasm.as_fd()),
+        &[cwasm.as_fd()],
         true,
     )
     .await
@@ -328,6 +339,8 @@ async fn prime_with_garbage_cwasm_fails_safe() {
         cwasm: b"definitely not a cwasm".to_vec(),
         embedded_imports: vec![],
         catalogs: vec![],
+        models: vec![],
+        files: vec![],
     };
     let err = tokio::time::timeout(
         Duration::from_secs(10),
@@ -356,6 +369,8 @@ async fn dead_child_surfaces_error_not_hang() {
         cwasm: vec![],
         embedded_imports: vec![],
         catalogs: vec![],
+        models: vec![],
+        files: vec![],
     };
     let res = tokio::time::timeout(
         Duration::from_secs(10),
@@ -417,7 +432,12 @@ async fn measure_per_round_cost() {
     {
         let comp = executor.deserialize_component(&bundle.cwasm).unwrap();
         let _ = executor
-            .prime(&comp, &bundle.embedded_imports, build_embedded())
+            .prime(
+                &comp,
+                &bundle.embedded_imports,
+                build_embedded(),
+                &bundle.models,
+            )
             .unwrap();
     }
 
@@ -430,7 +450,12 @@ async fn measure_per_round_cost() {
         de.push(t.elapsed());
         let t = Instant::now();
         let _primed = executor
-            .prime(&comp, &bundle.embedded_imports, build_embedded())
+            .prime(
+                &comp,
+                &bundle.embedded_imports,
+                build_embedded(),
+                &bundle.models,
+            )
             .unwrap();
         pr.push(t.elapsed());
     }

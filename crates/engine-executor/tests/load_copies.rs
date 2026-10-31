@@ -63,10 +63,11 @@ fn loading_a_cwasm_maps_its_data_rather_than_copying_it() {
     let plugins = vec![PluginInstance {
         package: "test:weights".into(),
         wasm: weights(DATA),
+        model_layers: Vec::new(),
     }];
     let cwasm = Compiler::new()
         .unwrap()
-        .compile_to_parts(Encoded::new().finish(), plugins)
+        .compile_to_parts(Encoded::new().finish(), Vec::new(), plugins)
         .unwrap()
         .cwasm;
     let path = std::env::temp_dir().join(format!("load-copies-{}.cwasm", std::process::id()));

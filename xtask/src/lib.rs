@@ -30,17 +30,45 @@ use anyhow::{Context, Result, bail};
 /// `module_path` is where that crate's `.wasm` lands (its own target dir,
 /// or the shared workspace target for a member crate).
 pub fn build_componentized(crate_dir: &str, module_path: &str) -> Result<Vec<u8>> {
-    let status = Command::new("cargo")
-        .args(["build", "--release"])
+    built(
+        Command::new("cargo").args(["build", "--release"]),
+        crate_dir,
+    )?;
+    let module =
+        std::fs::read(module_path).with_context(|| format!("reading wasm module {module_path}"))?;
+    componentize(&module)
+}
+
+/// [`build_componentized`], with `features` turned on and the build kept in
+/// `target_dir`, where `module_path` lands — so a build with features never
+/// stands in for the crate's default one, nor that one for it.
+pub fn build_componentized_with(
+    crate_dir: &str,
+    features: &[&str],
+    target_dir: &str,
+    module_path: &str,
+) -> Result<Vec<u8>> {
+    built(
+        Command::new("cargo")
+            .args(["build", "--release", "--features", &features.join(",")])
+            .args(["--target-dir", target_dir]),
+        crate_dir,
+    )?;
+    let module =
+        std::fs::read(module_path).with_context(|| format!("reading wasm module {module_path}"))?;
+    componentize(&module)
+}
+
+/// Run the cargo `build` in `crate_dir`, refused unless it succeeds.
+fn built(build: &mut Command, crate_dir: &str) -> Result<()> {
+    let status = build
         .current_dir(crate_dir)
         .status()
         .with_context(|| format!("invoking cargo in {crate_dir}"))?;
     if !status.success() {
         bail!("cargo build failed in {crate_dir}");
     }
-    let module =
-        std::fs::read(module_path).with_context(|| format!("reading wasm module {module_path}"))?;
-    componentize(&module)
+    Ok(())
 }
 
 /// Componentize a wit-bindgen core module into a component (no WASI

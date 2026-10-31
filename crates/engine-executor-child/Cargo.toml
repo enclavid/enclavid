@@ -50,7 +50,7 @@ remoc = { version = "0.18", default-features = false, features = [
 ] }
 # Single-threaded: one round, no cross-round concurrency to exploit, and
 # forward-compatible with a fork-from-zygote. See `main`.
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["rt"] }
 # Contained posture only — this process says nothing outward. See `main`.
 safe-logger = { path = "../safe-logger" }
 

@@ -21,6 +21,23 @@ fn root() -> bool {
     root
 }
 
+/// What process `pid` holds at `fd`, once its start has let go of what it
+/// opened for itself. The dynamic loader opens its cache and libc on the
+/// lowest free numbers as a program starts and closes them before `main`, so a
+/// number past the handed ones can hold one of those for a moment; a
+/// descriptor that survived the exec is never let go of by itself. So the
+/// number is read until it is empty, for as long as a start could take.
+async fn after_start(pid: u32, fd: RawFd) -> Option<PathBuf> {
+    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let held = std::fs::read_link(format!("/proc/{pid}/fd/{fd}")).ok();
+        if held.is_none() || tokio::time::Instant::now() >= until {
+            return held;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 /// The executor child reopens its inherited cwasm through `/proc/self/fd/N`
 /// and maps it executable. Under an identity of its own that must still work
 /// for a memfd root created, and root's own `/proc` entries must be out of
@@ -127,7 +144,7 @@ async fn a_placed_child_runs_under_its_own_identity() {
         tasks: DEFAULT_CHILD_MAX_TASKS,
     };
     let (mut child, sup_end) =
-        spawn_child(Path::new("/bin/cat"), None, false, Some(placement)).expect("cat spawns");
+        spawn_child(Path::new("/bin/cat"), &[], false, Some(placement)).expect("cat spawns");
     let pid = child.id().expect("cat is running");
     let read = |file: &str| {
         std::fs::read_to_string(format!("/proc/{pid}/{file}")).expect("a /proc file of cat's")
@@ -195,10 +212,10 @@ async fn only_the_handed_descriptor_survives_the_exec() {
 
     // `cat` waits on its input, the socketpair, and opens nothing of its own.
     let (mut child, sup_end) =
-        spawn_child(Path::new("/bin/cat"), Some(handed.as_fd()), false, None).expect("cat spawns");
+        spawn_child(Path::new("/bin/cat"), &[handed.as_fd()], false, None).expect("cat spawns");
     let pid = child.id().expect("cat is running");
-    let holds = |fd: RawFd| Path::new(&format!("/proc/{pid}/fd/{fd}")).exists();
-    let (inherited, strayed) = (holds(INHERITED_FD), holds(stray_fd));
+    let inherited = Path::new(&format!("/proc/{pid}/fd/{INHERITED_FD}")).exists();
+    let strayed = after_start(pid, stray_fd).await.is_some();
 
     // End of its input: `cat` goes by itself.
     drop(sup_end);
@@ -208,4 +225,78 @@ async fn only_the_handed_descriptor_survives_the_exec() {
         !strayed,
         "the stray descriptor {stray_fd} survived the exec"
     );
+}
+
+/// A coprocess's fd 0 is the socket it was given, so whoever kept the other
+/// end is who it talks to, and what it was handed lands from `INHERITED_FD` up.
+#[tokio::test]
+async fn a_coprocess_gets_the_socket_it_was_given_and_its_descriptors() {
+    use std::os::fd::AsFd;
+
+    let zero = open(
+        c"/dev/zero",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("open /dev/zero");
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+    let mut coprocess = spawn_coprocess(
+        Path::new("/bin/cat"),
+        OwnedFd::from(theirs),
+        &[zero.as_fd()],
+        false,
+    )
+    .expect("cat spawns");
+    let pid = coprocess.id().expect("cat is running");
+    let target = |fd: RawFd| std::fs::read_link(format!("/proc/{pid}/fd/{fd}")).ok();
+    let (socket, first) = (target(0), target(INHERITED_FD));
+    let past = after_start(pid, INHERITED_FD + 1).await;
+
+    // The end of its input: `cat` goes by itself, which it does only if its
+    // fd 0 was the socket whose other end this test held.
+    drop(ours);
+    assert!(coprocess.wait().await.expect("wait for cat").success());
+    assert!(
+        socket.is_some_and(|s| s.to_string_lossy().starts_with("socket:")),
+        "fd 0 is not a socket"
+    );
+    assert_eq!(first.as_deref(), Some(Path::new("/dev/zero")));
+    assert_eq!(past, None, "a descriptor past the handed one");
+}
+
+/// Several descriptors land in the order handed, from `INHERITED_FD` up, each
+/// the one handed for its place, and the copies lifted on the way are gone.
+#[tokio::test]
+async fn handed_descriptors_land_in_order() {
+    use std::os::fd::AsFd;
+
+    let zero = open(
+        c"/dev/zero",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("open /dev/zero");
+    let null = open(
+        c"/dev/null",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("open /dev/null");
+    let (mut child, sup_end) = spawn_child(
+        Path::new("/bin/cat"),
+        &[zero.as_fd(), null.as_fd()],
+        false,
+        None,
+    )
+    .expect("cat spawns");
+    let pid = child.id().expect("cat is running");
+    let target = |fd: RawFd| std::fs::read_link(format!("/proc/{pid}/fd/{fd}")).ok();
+    let (first, second) = (target(INHERITED_FD), target(INHERITED_FD + 1));
+    let past = after_start(pid, INHERITED_FD + 2).await;
+
+    drop(sup_end);
+    assert!(child.wait().await.expect("wait for cat").success());
+    assert_eq!(first.as_deref(), Some(Path::new("/dev/zero")));
+    assert_eq!(second.as_deref(), Some(Path::new("/dev/null")));
+    assert_eq!(past, None, "a descriptor past the handed ones");
 }

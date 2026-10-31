@@ -56,18 +56,22 @@ pub fn compat_token() -> String {
 mod listener;
 mod media;
 mod media_store;
+mod models;
 mod props;
 mod round;
 mod runner;
 mod sanitize;
 mod state;
+mod tensors;
 
 pub use embedded::{
     CatalogUnreadable, ComponentDecls, DisclosureFields, DisclosureFieldsStore, EmbeddedRegistry,
     EmbeddedRegistryBuilder, Localized, LocalizedStore, RefKind, RefStore, Translation,
 };
+pub use engine_types::composition::ModelImport;
 pub use listener::{SessionChange, SessionListener};
 pub use media_store::MediaStore;
+pub use models::ModelStarter;
 pub use runner::{
     DEFAULT_ROUND_FUEL, EmbeddedIface, EmbeddedImport, Executor, PluginInstance, PrimedComposition,
     RunStatus,
@@ -111,6 +115,7 @@ wasmtime::component::bindgen!({
 
         world host {
             import enclavid:host/types@0.1.0;
+            import enclavid:host/tensors@0.1.0;
             export enclavid:policy/policy@0.1.0;
         }
     "#,
@@ -139,5 +144,19 @@ wasmtime::component::bindgen!({
         "enclavid:host/types.icon-ref": crate::embedded::IconRef,
         "enclavid:host/types.disclosure-field-ref": crate::embedded::DisclosureFieldRef,
         "enclavid:host/types.blob": crate::media::BlobRep,
+        // A model's tensors, each element type a resource and a Rust type of
+        // its own (`tensors`): one served for another would be one type.
+        "enclavid:host/tensors.tensor-f32": crate::tensors::TensorF32,
+        "enclavid:host/tensors.tensor-f64": crate::tensors::TensorF64,
+        "enclavid:host/tensors.tensor-f16": crate::tensors::TensorF16,
+        "enclavid:host/tensors.tensor-bf16": crate::tensors::TensorBf16,
+        "enclavid:host/tensors.tensor-i8": crate::tensors::TensorI8,
+        "enclavid:host/tensors.tensor-u8": crate::tensors::TensorU8,
+        "enclavid:host/tensors.tensor-i16": crate::tensors::TensorI16,
+        "enclavid:host/tensors.tensor-u16": crate::tensors::TensorU16,
+        "enclavid:host/tensors.tensor-i32": crate::tensors::TensorI32,
+        "enclavid:host/tensors.tensor-u32": crate::tensors::TensorU32,
+        "enclavid:host/tensors.tensor-i64": crate::tensors::TensorI64,
+        "enclavid:host/tensors.tensor-u64": crate::tensors::TensorU64,
     },
 });

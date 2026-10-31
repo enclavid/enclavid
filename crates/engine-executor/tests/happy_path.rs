@@ -25,7 +25,9 @@
 //! builds free of wasm tooling dependencies and nightly requirements.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,9 +35,10 @@ use std::sync::{Arc, Mutex};
 use engine_compiler::Compiler;
 use engine_executor::{
     Component, ComponentDecls, DEFAULT_ROUND_FUEL, EmbeddedImport, EmbeddedRegistry, Executor,
-    MediaStore, PluginInstance, PrimedComposition, RunInputs, RunResult, RunStatus, SessionChange,
-    SessionListener,
+    MediaStore, ModelImport, ModelStarter, PluginInstance, PrimedComposition, RunError, RunInputs,
+    RunResult, RunStatus, SessionChange, SessionListener,
 };
+use engine_types::composition::ModelLayer;
 use engine_types::text::Localized;
 use session_types::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use xtask::fixtures;
@@ -60,6 +63,7 @@ struct Fused {
     component: Component,
     embedded_imports: Vec<EmbeddedImport>,
     catalogs: Vec<([u8; 32], ComponentDecls)>,
+    models: Vec<ModelImport>,
 }
 
 impl Fused {
@@ -97,7 +101,7 @@ impl TestRunner {
     /// executor engine so the component is runnable here (the cross-engine
     /// cwasm bridge the real fleet uses across CVMs).
     fn compose(&self, policy_wasm: &[u8], plugins: &[PluginInstance]) -> RunResult<Fused> {
-        let composition = self.compiler.compose(policy_wasm, plugins)?;
+        let composition = self.compiler.compose(policy_wasm, &[], plugins)?;
         let cwasm = self.compiler.serialize_component(&composition.component)?;
         // The POSITIVE case for the supervisor's L1 admission check, asserted
         // against a real artifact where one already exists. Its own unit tests can
@@ -112,6 +116,7 @@ impl TestRunner {
             component,
             embedded_imports: composition.embedded_imports,
             catalogs: composition.catalogs,
+            models: composition.models,
         })
     }
 
@@ -124,8 +129,12 @@ impl TestRunner {
         fused: &Fused,
         embedded: Arc<EmbeddedRegistry>,
     ) -> RunResult<PrimedComposition> {
-        self.executor
-            .prime(&fused.component, &fused.embedded_imports, embedded)
+        self.executor.prime(
+            &fused.component,
+            &fused.embedded_imports,
+            embedded,
+            &fused.models,
+        )
     }
 
     async fn run(
@@ -188,8 +197,52 @@ fn all_plugins() -> Vec<PluginInstance> {
         .map(|(package, wasm)| PluginInstance {
             package: package.to_string(),
             wasm: wasm.to_vec(),
+            model_layers: Vec::new(),
         })
         .collect()
+}
+
+/// For a composition with no models: a round that starts one is a defect of
+/// the test.
+struct NoModels;
+
+impl ModelStarter for NoModels {
+    fn start(&self, _: u32) -> Pin<Box<dyn Future<Output = RunResult<File>> + Send + '_>> {
+        Box::pin(async { Err(RunError::msg("no composition here has models")) })
+    }
+}
+
+/// The one model of a composition, its graph and data file, run in the
+/// coprocess binary as the execution-worker starts it: each start counted, and
+/// each process held — killed — until the test is done with this.
+struct OneModel {
+    exe: PathBuf,
+    graph: File,
+    data: File,
+    started: AtomicUsize,
+    processes: Mutex<Vec<tokio::process::Child>>,
+}
+
+impl ModelStarter for OneModel {
+    fn start(&self, index: u32) -> Pin<Box<dyn Future<Output = RunResult<File>> + Send + '_>> {
+        use std::os::fd::{AsFd, OwnedFd};
+
+        self.started.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            if index != 0 {
+                return Err(RunError::msg("no such model"));
+            }
+            let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
+            let process = engine_supervisor::spawn_coprocess(
+                &self.exe,
+                OwnedFd::from(theirs),
+                &[self.graph.as_fd(), self.data.as_fd()],
+                cfg!(target_os = "linux"),
+            )?;
+            self.processes.lock().unwrap().push(process);
+            Ok(File::from(OwnedFd::from(ours)))
+        })
+    }
 }
 
 /// Stands in for the orchestrator: keeps the blob store the applicant's frames
@@ -272,7 +325,7 @@ impl SessionListener for PersistListener {
 fn the_fleets_compile_takes_the_real_composition() {
     Compiler::new()
         .unwrap()
-        .compile_to_parts(fixtures::test_policy().to_vec(), all_plugins())
+        .compile_to_parts(fixtures::test_policy().to_vec(), Vec::new(), all_plugins())
         .expect("the real composition compiles");
 }
 
@@ -367,6 +420,79 @@ async fn passport_selfie_consent_accept_reaches_approved_over_the_rendered_field
     listener.finished_with(Decision::Approved);
 }
 
+/// The selfie round on MiVOLO as its vendor ships it: face-age built
+/// `--features mivolo` hands its face crop to its slot's model `age`, whose
+/// graph and data file are the layers `age.onnx` and `age.onnx.data` beside
+/// it. The compile pairs them, the round starts the model's process once, and
+/// the estimate reaches the consent screen. Neither the model nor the process
+/// is in the repository: `MIVOLO_MODEL` names the directory of a vendor's
+/// `mivolo.onnx` and `mivolo.onnx.data`, and `ENCLAVID_INFERENCE_BIN` the
+/// coprocess binary built with ONNX Runtime linked in:
+///   cargo test -p engine-executor --test happy_path -- --ignored mivolo
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs MIVOLO_MODEL and ENCLAVID_INFERENCE_BIN"]
+async fn the_selfie_age_is_estimated_on_a_vendors_mivolo() {
+    let dir = PathBuf::from(
+        std::env::var_os("MIVOLO_MODEL").expect("MIVOLO_MODEL names MiVOLO's directory"),
+    );
+    let (graph, data) = (dir.join("mivolo.onnx"), dir.join("mivolo.onnx.data"));
+    let exe = PathBuf::from(
+        std::env::var_os("ENCLAVID_INFERENCE_BIN")
+            .expect("ENCLAVID_INFERENCE_BIN names the coprocess binary"),
+    );
+    let layer = |name: &str, path: &PathBuf, sha: u8| ModelLayer {
+        name: name.into(),
+        sha256: [sha; 32],
+        length: std::fs::metadata(path)
+            .expect("the model file is there")
+            .len(),
+    };
+    let mut plugins = all_plugins();
+    let face_age = plugins
+        .iter_mut()
+        .find(|p| p.package == fixtures::FACE_AGE_PACKAGE)
+        .expect("face-age is among the plugins");
+    face_age.wasm = fixtures::face_age_mivolo().to_vec();
+    face_age.model_layers = vec![
+        layer("age.onnx", &graph, 1),
+        layer("age.onnx.data", &data, 2),
+    ];
+    let model = Arc::new(OneModel {
+        exe,
+        graph: File::open(&graph).unwrap(),
+        data: File::open(&data).unwrap(),
+        started: AtomicUsize::new(0),
+        processes: Mutex::new(Vec::new()),
+    });
+    let h = Harness::with(&plugins, model.clone());
+    assert_eq!(
+        h.models,
+        vec![ModelImport {
+            instance_name: "enclavid-ext:face-age/models@0.1.0".into(),
+            function: "age".into(),
+            resource: "age-model".into(),
+            graph: 0,
+            data: Some(1),
+        }]
+    );
+
+    let listener = Arc::new(PersistListener::default());
+    let session = h.drive_to_consent(&listener).await;
+    let Some(Prompt::ConsentDisclosure(screen)) = session.current_prompt else {
+        panic!("drive_to_consent must leave a consent screen as current_prompt");
+    };
+    let age: i32 = screen
+        .fields
+        .iter()
+        .find(|f| f.key == "estimated-age")
+        .expect("the estimate reaches the consent screen")
+        .value
+        .parse()
+        .expect("the estimate is a whole number of years");
+    assert!((0..=122).contains(&age), "MiVOLO's range holds {age}");
+    assert_eq!(model.started.load(Ordering::SeqCst), 1, "started once");
+}
+
 #[tokio::test]
 async fn media_rounds_keep_state_minimal() {
     let h = Harness::new();
@@ -424,6 +550,7 @@ async fn reload_by_ref_misses() {
     let inputs = || RunInputs {
         listener: listener.clone(),
         media_store: empty_store.clone(),
+        models: Arc::new(NoModels),
         fuel: DEFAULT_ROUND_FUEL,
     };
     let round = |session, event: Event| {
@@ -468,6 +595,7 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
         let inputs = || RunInputs {
             listener: listener.clone(),
             media_store: store.clone(),
+            models: Arc::new(NoModels),
             fuel: DEFAULT_ROUND_FUEL,
         };
         let round = |session, event: Event| {
@@ -727,6 +855,7 @@ async fn static_fused_artifact_resolves_strictly() {
     let inputs = || RunInputs {
         listener: listener.clone(),
         media_store: listener.media_store(),
+        models: Arc::new(NoModels),
         fuel: DEFAULT_ROUND_FUEL,
     };
     let round = |session, event: Event| {
@@ -836,18 +965,22 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
         PluginInstance {
             package: fixtures::WELL_KNOWN_PACKAGE.to_string(),
             wasm: fixtures::well_known().to_vec(),
+            model_layers: Vec::new(),
         },
         PluginInstance {
             package: fixtures::PREPROCESS_PACKAGE.to_string(),
             wasm: fixtures::preprocess().to_vec(),
+            model_layers: Vec::new(),
         },
         PluginInstance {
             package: fixtures::FACE_DETECT_PACKAGE.to_string(),
             wasm: fixtures::face_detect().to_vec(),
+            model_layers: Vec::new(),
         },
         PluginInstance {
             package: fixtures::FACE_AGE_PACKAGE.to_string(),
             wasm: fixtures::face_age().to_vec(),
+            model_layers: Vec::new(),
         },
     ];
     let core = runner.fuse(fixtures::test_policy(), &baked).unwrap();
@@ -856,6 +989,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let runtime = vec![PluginInstance {
         package: fixtures::EXTRA_PACKAGE.to_string(),
         wasm: fixtures::extra().to_vec(),
+        model_layers: Vec::new(),
     }];
     let composition = runner.compose(&core, &runtime).unwrap();
     assert_eq!(composition.embedded_imports.len(), 3);
@@ -871,6 +1005,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let inputs = || RunInputs {
         listener: listener.clone(),
         media_store: listener.media_store(),
+        models: Arc::new(NoModels),
         fuel: DEFAULT_ROUND_FUEL,
     };
     // start → media(passport) → media(selfie) → consent-disclosure.
@@ -927,19 +1062,28 @@ struct Harness {
     /// Kept for assertions that reach into the registry directly (declared
     /// translations, collision checks).
     embedded: Arc<EmbeddedRegistry>,
+    /// The composition's models, as the compile paired them with its model
+    /// files.
+    models: Vec<ModelImport>,
+    /// What starts the processes every round of it runs its models in.
+    starter: Arc<dyn ModelStarter>,
 }
 
 impl Harness {
     fn new() -> Self {
+        Self::with(&all_plugins(), Arc::new(NoModels))
+    }
+
+    /// The test policy with `plugins`, its rounds running their models in the
+    /// processes `starter` starts.
+    fn with(plugins: &[PluginInstance], starter: Arc<dyn ModelStarter>) -> Self {
         let runner = TestRunner::new().unwrap();
         // Fuse the test policy with every plugin into one component (the
         // same path `TestRunner::compose` takes in prod). The fixtures carry
         // their catalogs, embedded as `enclavid {policy,plugin} embed`
         // embeds them, so each slot is named after the same bytes the
         // registry keys on.
-        let composition = runner
-            .compose(fixtures::test_policy(), &all_plugins())
-            .unwrap();
+        let composition = runner.compose(fixtures::test_policy(), plugins).unwrap();
 
         // Composition-wide `EmbeddedRegistry`, keyed by each catalog's
         // content-hash, from the catalogs the compile found — what the
@@ -954,6 +1098,8 @@ impl Harness {
             runner,
             primed,
             embedded,
+            models: composition.models,
+            starter,
         }
     }
 
@@ -961,6 +1107,7 @@ impl Harness {
         RunInputs {
             listener: listener.clone(),
             media_store: listener.media_store(),
+            models: self.starter.clone(),
             fuel: DEFAULT_ROUND_FUEL,
         }
     }

@@ -33,6 +33,8 @@ x509-parser = "0.16"
 
 # CBOR-encode the `Quote` into the cert extension (project is CBOR-native).
 ciborium = "0.2"
+# A client's nonce for a connection, written into the name it gives the server.
+hex = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
