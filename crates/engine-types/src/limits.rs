@@ -165,6 +165,23 @@ pub const GUIDE_ASPECT_STEPS_PER_UNIT: f32 = 100.0;
 /// tens of bytes each in a hash table — stays in the tens of MiB.
 pub const MAX_EMBEDDED_SECTION_BYTES: u64 = 2 * 1024 * 1024;
 
+/// The most models one composition imports: the functions of its slots'
+/// `models`, summed over its artifacts. Each is a graph and at most one data
+/// file the execution-worker holds an fd for in every composition it caches,
+/// and a process of its own beside a round that runs it, so this bounds its
+/// descriptors and processes as well as the compile's metadata.
+pub const MAX_MODELS: usize = 16;
+
+/// The longest model file — in practice a data file, the weights a graph points
+/// into — a composition may name, in bytes: 1.5 GiB, which a blob of the
+/// fleet's legs carries with room for the seal it is kept under.
+pub const MAX_MODEL_FILE_BYTES: u64 = 3 * 512 * 1024 * 1024;
+
+/// The most tensors a model's `run` takes, and the most it gives back: what
+/// one message to the process a model runs in carries. A face detector of
+/// three strides gives nine or twelve.
+pub const MAX_RUN_TENSORS: usize = 64;
+
 // ----- Schema-level caps re-exported from `enclavid-embedded` -----
 //
 // These are the wire-format limits that bound what a single source

@@ -19,8 +19,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// toolchains' runtimes import beside them, served empty: the environment,
 /// stdio, the filesystem with nothing opened. Nothing of `wasi:sockets` or
 /// `wasi:http`, so a composition importing them is refused.
-pub const HOST_INTERFACES: [&str; 24] = [
+pub const HOST_INTERFACES: [&str; 25] = [
     "enclavid:host/types@0.1.0",
+    TENSORS,
     crate::icons::INTERFACE,
     POLICY_PROPS,
     POLICY_DISCLOSURE_FIELDS,
@@ -68,6 +69,28 @@ pub const TEXTS: &str = "i18n";
 /// The one function the host serves in a slot's [`TEXTS`]: a case of the
 /// slot's `key` in, and its text's `localized-ref` out.
 pub const LOCALIZED: &str = "localized";
+
+/// The interface of a slot its models come through:
+/// `enclavid-ext:<slot>/models`, a function for each model the artifact that
+/// imports it carries, each returning a resource the slot declares, whose one
+/// method, [`RUN`], runs the model.
+pub const MODELS: &str = "models";
+
+/// The one method of a model's resource: a tensor of [`TENSORS`] for each input
+/// of its graph in, one for each output back.
+pub const RUN: &str = "run";
+
+/// The interface the host's tensors come from: a resource for each element
+/// type, `tensor-<element>`.
+pub const TENSORS: &str = "enclavid:host/tensors@0.1.0";
+
+/// What a model's graph is named as a layer of its artifact: the name of the
+/// function that hands the model out, then this.
+pub const MODEL_GRAPH_SUFFIX: &str = ".onnx";
+
+/// What the data file a model's graph points into is named as a layer of its
+/// artifact: the name of the function that hands the model out, then this.
+pub const MODEL_DATA_SUFFIX: &str = ".onnx.data";
 
 /// One of the artifacts a composition is made of.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +150,12 @@ pub enum CompileFault {
     Unsatisfied(InterfaceName),
     /// What serves this import is not of the type it is imported as.
     Mismatched(InterfaceName),
+    /// The artifact's model files are not the models it imports: a file no
+    /// function is for, or a function without its graph.
+    ModelsMismatched(Artifact),
+    /// More than one artifact imports this slot's models, which hand out the
+    /// models of the one artifact that imports them.
+    ModelsShared(InterfaceName),
     /// Fused, the composition does not validate or compile.
     Invalid,
     /// Its components, its metadata or its compiled code are past what the
@@ -153,6 +182,12 @@ impl std::fmt::Display for CompileFault {
             Self::CatalogsPastCap => f.write_str("the embedded catalogs are past their cap"),
             Self::Unsatisfied(i) => write!(f, "nothing serves the import `{}`", i.as_str()),
             Self::Mismatched(i) => write!(f, "the import `{}` is served another type", i.as_str()),
+            Self::ModelsMismatched(a) => {
+                write!(f, "the {a:?}'s model files are not the models it imports")
+            }
+            Self::ModelsShared(i) => {
+                write!(f, "more than one artifact imports `{}`", i.as_str())
+            }
             Self::Invalid => f.write_str("the composition does not validate or compile"),
             Self::TooLarge => f.write_str("the composition is past what the deployment carries"),
             Self::OutOfMemory => {

@@ -23,7 +23,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 pub use engine_types::compile::{Artifact, CompileFault, InterfaceName};
-use engine_types::composition::PluginInstance;
+use engine_types::composition::{ModelLayer, PluginInstance};
 
 use crate::bundle::MAX_CWASM_BYTES;
 
@@ -84,13 +84,14 @@ impl From<remoc::rtc::CallError> for CompileError {
     }
 }
 
-/// One plugin as a compile request names it: its package, and its length in
-/// the components stream.
+/// One plugin as a compile request names it: its package, its length in the
+/// components stream, and the model files its artifact carries.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginLength {
     pub package: String,
     pub length: StreamLen<MAX_COMPONENTS_BYTES>,
+    pub model_layers: Vec<ModelLayer>,
 }
 
 /// One compile's inputs on the wire: the consumer's own artifacts, already pulled
@@ -113,6 +114,8 @@ pub struct PluginLength {
 #[serde(deny_unknown_fields)]
 pub struct CompileRequest {
     pub policy: StreamLen<MAX_COMPONENTS_BYTES>,
+    /// The model files the policy's artifact carries.
+    pub policy_model_layers: Vec<ModelLayer>,
     pub plugins: Vec<PluginLength>,
     pub components: bin::Receiver,
 }
@@ -143,6 +146,7 @@ impl CompileRequest {
         let from = self.components;
         let onward = CompileRequest {
             policy: self.policy,
+            policy_model_layers: self.policy_model_layers,
             plugins: self.plugins,
             components,
         };
@@ -159,26 +163,29 @@ impl CompileRequest {
         Some((onward, relay))
     }
 
-    /// Receive the components whole: the policy, and each plugin with its
-    /// package. Past [`MAX_COMPONENTS_BYTES`] together they are refused before a
-    /// byte is read, as [`StreamError::Long`].
+    /// Receive the components whole: the policy with its model files, and each
+    /// plugin with its package and model files. Past [`MAX_COMPONENTS_BYTES`]
+    /// together they are refused before a byte is read, as
+    /// [`StreamError::Long`].
     ///
     /// Each component's room is taken at its declared length, which touches no
     /// memory until its bytes arrive and are held to that length.
-    pub async fn receive(self) -> Result<(Vec<u8>, Vec<PluginInstance>), StreamError> {
+    pub async fn receive(
+        self,
+    ) -> Result<(Vec<u8>, Vec<ModelLayer>, Vec<PluginInstance>), StreamError> {
         let total = self.total().ok_or(StreamError::Long)?;
         let mut pieces = Incoming::open(self.components, total, COMPILE_STREAM_IDLE)
             .await?
             .into_pieces(COMPILE_STREAM_DEADLINE, None);
-        let mut parts: Vec<(Option<String>, Vec<u8>, usize)> =
-            std::iter::once((None, self.policy.get()))
-                .chain(
-                    self.plugins
-                        .into_iter()
-                        .map(|p| (Some(p.package), p.length.get())),
-                )
-                .map(|(package, len)| (package, Vec::with_capacity(len as usize), len as usize))
-                .collect();
+        type Part = (Option<(String, Vec<ModelLayer>)>, Vec<u8>, usize);
+        let mut parts: Vec<Part> = std::iter::once((None, self.policy.get()))
+            .chain(
+                self.plugins
+                    .into_iter()
+                    .map(|p| (Some((p.package, p.model_layers)), p.length.get())),
+            )
+            .map(|(plugin, len)| (plugin, Vec::with_capacity(len as usize), len as usize))
+            .collect();
         let mut at = 0;
         while let Some(mut piece) = pieces.try_next().await? {
             while !piece.is_empty() {
@@ -195,12 +202,17 @@ impl CompileRequest {
         let mut parts = parts.into_iter();
         let (_, policy, _) = parts.next().expect("the policy is always first");
         let plugins = parts
-            .map(|(package, wasm, _)| PluginInstance {
-                package: package.expect("every part after the policy is a plugin"),
-                wasm,
+            .map(|(plugin, wasm, _)| {
+                let (package, model_layers) =
+                    plugin.expect("every part after the policy is a plugin");
+                PluginInstance {
+                    package,
+                    wasm,
+                    model_layers,
+                }
             })
             .collect();
-        Ok((policy, plugins))
+        Ok((policy, self.policy_model_layers, plugins))
     }
 }
 
@@ -208,13 +220,18 @@ impl CompileRequest {
 /// bytes in order as pieces the sender need not hold whole.
 pub struct CompileSource {
     policy: StreamLen<MAX_COMPONENTS_BYTES>,
+    policy_model_layers: Vec<ModelLayer>,
     plugins: Vec<PluginLength>,
     components: BoxStream<'static, Result<Bytes, ()>>,
 }
 
 impl CompileSource {
     /// Components held whole. `None` past [`MAX_COMPONENTS_BYTES`] together.
-    pub fn whole(policy: Vec<u8>, plugins: Vec<PluginInstance>) -> Option<Self> {
+    pub fn whole(
+        policy: Vec<u8>,
+        policy_model_layers: Vec<ModelLayer>,
+        plugins: Vec<PluginInstance>,
+    ) -> Option<Self> {
         let total = plugins.iter().try_fold(policy.len() as u64, |sum, p| {
             sum.checked_add(p.wasm.len() as u64)
         })?;
@@ -228,6 +245,7 @@ impl CompileSource {
                 Some(PluginLength {
                     package: p.package.clone(),
                     length: StreamLen::new(p.wasm.len() as u64)?,
+                    model_layers: p.model_layers.clone(),
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -237,39 +255,48 @@ impl CompileSource {
             .collect();
         Some(Self {
             policy: policy_length,
+            policy_model_layers,
             plugins: lengths,
             components: futures_util::stream::iter(pieces).boxed(),
         })
     }
 
-    /// Components streamed through: the policy's length and each plugin's
-    /// package and length, and `components` yielding their bytes in that order,
-    /// as they come. `None` past [`MAX_COMPONENTS_BYTES`] together.
+    /// Components streamed through: the policy's length and model files, each
+    /// plugin's package, length and model files, and `components` yielding
+    /// their bytes in that order, as they come. `None` past
+    /// [`MAX_COMPONENTS_BYTES`] together.
     ///
     /// The far side compiles nothing before all of it has arrived, held to the
     /// lengths, so a `components` that fails part-way — a pull that turned out
     /// not to be what it was pinned as — fails the compile and nothing else.
-    pub fn streamed<S, E>(policy: u64, plugins: Vec<(String, u64)>, components: S) -> Option<Self>
+    pub fn streamed<S, E>(
+        policy: u64,
+        policy_model_layers: Vec<ModelLayer>,
+        plugins: Vec<(String, u64, Vec<ModelLayer>)>,
+        components: S,
+    ) -> Option<Self>
     where
         S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
     {
         let total = plugins
             .iter()
-            .try_fold(policy, |sum, (_, len)| sum.checked_add(*len))?;
+            .try_fold(policy, |sum, (_, len, _)| sum.checked_add(*len))?;
         if total > MAX_COMPONENTS_BYTES {
             return None;
         }
         let plugins = plugins
             .into_iter()
-            .map(|(package, len)| {
+            .map(|(package, len, model_layers)| {
                 Some(PluginLength {
                     package,
                     length: StreamLen::new(len)?,
+                    model_layers,
                 })
             })
             .collect::<Option<Vec<_>>>()?;
         Some(Self {
             policy: StreamLen::new(policy)?,
+            policy_model_layers,
             plugins,
             components: components.map(|piece| piece.map_err(|_| ())).boxed(),
         })
@@ -287,6 +314,7 @@ impl CompileSource {
         (
             CompileRequest {
                 policy: self.policy,
+                policy_model_layers: self.policy_model_layers,
                 plugins: self.plugins,
                 components,
             },
@@ -348,7 +376,7 @@ mod tests {
 
     impl RemoteCompiler for MockCompiler {
         async fn compile(&self, req: CompileRequest) -> Result<CompileReply, CompileError> {
-            let (policy, plugins) = req.receive().await.map_err(|_| CompileError::Failed)?;
+            let (policy, _, plugins) = req.receive().await.map_err(|_| CompileError::Failed)?;
             if policy == b"boom" {
                 return Err(CompileError::Refused(CompileFault::Unsatisfied(
                     InterfaceName::new("test:api/api@0.1.0").expect("a legal name"),
@@ -375,7 +403,7 @@ mod tests {
         policy: &[u8],
         plugins: Vec<PluginInstance>,
     ) -> Result<CompileReply, CompileError> {
-        let (request, writer) = CompileSource::whole(policy.to_vec(), plugins)
+        let (request, writer) = CompileSource::whole(policy.to_vec(), Vec::new(), plugins)
             .unwrap()
             .split();
         let mut call = std::pin::pin!(client.compile(request));
@@ -424,14 +452,17 @@ mod tests {
             PluginInstance {
                 package: "p1".into(),
                 wasm: vec![0; 3],
+                model_layers: Vec::new(),
             },
             PluginInstance {
                 package: "p2".into(),
                 wasm: vec![],
+                model_layers: Vec::new(),
             },
             PluginInstance {
                 package: "p3".into(),
                 wasm: vec![1; 70_000],
+                model_layers: Vec::new(),
             },
         ];
         let reply = call(&client, b"hello", plugins).await.unwrap();

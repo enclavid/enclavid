@@ -1,21 +1,22 @@
 //! Running each request in a child of its own: admission, the request's
-//! deadline, and the release that gives its place back once the child is gone.
+//! deadline, the coprocess the child may have beside it, and the release that
+//! gives its place back once the child and its coprocess are gone.
 
 #[cfg(test)]
 mod tests;
 
 use std::future::Future;
 use std::io;
-use std::os::fd::BorrowedFd;
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use remoc::RemoteSend;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 use crate::cgroup::{Cgroups, ChildGroup, ExitCause};
-use crate::spawn::{SpawnError, connect, inherited_len, spawn_child};
+use crate::spawn::{SpawnError, connect, inherited_len, spawn_child, spawn_placed_coprocess};
 
 /// How long a runner waits on a child at the steps a request's own deadline does
 /// not cover, as the role's launch settings give them or as [`Default`] has
@@ -55,7 +56,11 @@ impl Default for ChildTimes {
 pub struct RunnerConfig {
     /// The child binary.
     pub exe: PathBuf,
-    /// How many children may be alive at once — one process each.
+    /// What a child's coprocesses run, and how many one child may have; `None`
+    /// for a runner whose children never have one.
+    pub coprocess: Option<CoprocessConfig>,
+    /// How many children may be alive at once — one process each, and the
+    /// coprocesses each may have beside it.
     pub max_children: usize,
     /// The per-request wall-clock ceiling.
     pub deadline: Duration,
@@ -65,6 +70,15 @@ pub struct RunnerConfig {
     pub admission_wait: Option<Duration>,
     /// How long the runner waits on a child where `deadline` does not reach.
     pub times: ChildTimes,
+}
+
+/// What a child's coprocesses run, and how many one child may start.
+#[derive(Clone, Debug)]
+pub struct CoprocessConfig {
+    /// The coprocess binary.
+    pub exe: PathBuf,
+    /// How many one child may start, together.
+    pub max: usize,
 }
 
 /// A failure of the SUPERVISOR itself — distinct from the domain call's own error
@@ -101,6 +115,26 @@ pub enum SupervisorError {
     Deadline(Duration),
 }
 
+/// Why a [`Coprocess`] was not started.
+#[derive(Debug, thiserror::Error)]
+pub enum CoprocessError {
+    /// The runner has no coprocess binary: its children never have one.
+    #[error("this runner's children have no coprocess")]
+    NoBinary,
+    /// The child it would run beside has ended, or is being ended.
+    #[error("the child has ended")]
+    ChildEnded,
+    /// The child has as many coprocesses as it may.
+    #[error("the child has its {0} coprocesses already")]
+    TooMany(usize),
+    /// Its identity, or its place in the child's group, could not be made.
+    #[error("place the coprocess: {0}")]
+    Place(io::Error),
+    /// It could not be started.
+    #[error("start the coprocess: {0}")]
+    Spawn(SpawnError),
+}
+
 /// Runs each request in a fresh disposable child process: bounds how many are
 /// alive at once, enforces a per-request wall-clock deadline and, if given one,
 /// a deadline on admission. On Linux every child it spawns runs under the
@@ -108,6 +142,7 @@ pub enum SupervisorError {
 #[derive(Debug)]
 pub struct ChildRunner {
     exe: PathBuf,
+    coprocess: Option<CoprocessConfig>,
     /// One permit per child alive, held from admission until the child and
     /// everything in its group are gone.
     slots: Arc<Semaphore>,
@@ -168,6 +203,8 @@ struct Child(Option<Held>);
 /// declaration order once the child is gone.
 struct Held {
     process: tokio::process::Child,
+    /// The child's coprocesses as they are started, and whether more may be.
+    coprocesses: Arc<Mutex<CoprocessState>>,
     /// Settled by the release; the answer's [`Exit`] reads it.
     cause: Option<oneshot::Sender<ExitCause>>,
     /// The caller's `keep`: what the child maps, so not before it is gone.
@@ -195,17 +232,46 @@ impl Drop for Child {
     }
 }
 
+/// What a child's [`Coprocess`] leaves with the child: the coprocesses it has
+/// started, and whether more may start — not once the child is being ended.
+#[derive(Default)]
+struct CoprocessState {
+    ended: bool,
+    started: Vec<Started>,
+}
+
+/// A started coprocess: its process, and the caller's `keep` for it.
+struct Started {
+    process: tokio::process::Child,
+    #[allow(dead_code, reason = "held for its drop")]
+    kept: Box<dyn Send>,
+}
+
+/// Nothing panics while holding it, but a poisoned lock still guards what a
+/// kill must reach.
+fn lock(state: &Mutex<CoprocessState>) -> MutexGuard<'_, CoprocessState> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl Held {
-    /// Kill the child, and everything else in its group, now.
+    /// Kill the child, its coprocesses and everything else in its group, now,
+    /// and let no coprocess start after.
     fn kill(&mut self) {
         let _ = self.process.start_kill();
+        {
+            let mut coprocesses = lock(&self.coprocesses);
+            coprocesses.ended = true;
+            for started in &mut coprocesses.started {
+                let _ = started.process.start_kill();
+            }
+        }
         if let Some(group) = &self.group {
             group.kill();
         }
     }
 
-    /// Wait for the killed child to exit and its group to empty, settle why it
-    /// ended, and let go of what it held.
+    /// Wait for the killed child and its coprocesses to exit and its group to
+    /// empty, settle why it ended, and let go of what it held.
     ///
     /// Without a bound: a killed child keeps its memory until it is gone, and
     /// one in uninterruptible sleep — likely under memory pressure — can take a
@@ -213,6 +279,11 @@ impl Held {
     /// kept for it, because it keeps its memory.
     async fn release(mut self) {
         let _ = self.process.wait().await;
+        // Waited for as the child is, since each maps what was kept for it.
+        let mut coprocesses = std::mem::take(&mut lock(&self.coprocesses).started);
+        for started in &mut coprocesses {
+            let _ = started.process.wait().await;
+        }
         let cause = match &self.group {
             Some(group) => {
                 group.emptied().await;
@@ -232,8 +303,75 @@ impl Held {
             let _ = settled.send(cause);
         }
         // Off the runtime: the group's drop reclaims what the child left
-        // charged, which can be a great many kernel objects.
-        let _ = tokio::task::spawn_blocking(move || drop(self)).await;
+        // charged, which can be a great many kernel objects. The coprocesses'
+        // keeps go first, as everything the child held goes before its slot.
+        let _ = tokio::task::spawn_blocking(move || {
+            drop(coprocesses);
+            drop(self);
+        })
+        .await;
+    }
+}
+
+/// The processes a child may have started beside it, at the caller's word,
+/// while the child runs — as many as the runner's [`CoprocessConfig::max`].
+/// [`ChildRunner::run`] hands it to the caller's closure with the child's
+/// client.
+///
+/// A coprocess runs in the child's group, so it and the child are held to the
+/// child's max together and killed together, under an identity of its own —
+/// no other coprocess's, nor the child's — and syscall filters narrower than
+/// the child's. It talks to whoever holds the other end of the socket it is
+/// given — the caller hands that end to the child — so the two speak with no
+/// supervisor between them. The child's slot comes back only once all of them
+/// are gone.
+pub struct Coprocess {
+    config: Option<CoprocessConfig>,
+    cgroups: Option<Arc<Cgroups>>,
+    /// The child's group, when the runner has [`Cgroups`].
+    group: Option<PathBuf>,
+    state: Arc<Mutex<CoprocessState>>,
+}
+
+impl Coprocess {
+    /// Start a coprocess: `socket` on its fd 0, `inherit` from
+    /// [`INHERITED_FD`](crate::INHERITED_FD) up, read only up to the spawn, and
+    /// `keep` — what it maps through those descriptors — held until it is
+    /// gone.
+    ///
+    /// Refused once the child is being ended — one started then would outlive
+    /// the kill that ends the child — and once the child has as many as it may.
+    pub fn start<K: Send + 'static>(
+        &self,
+        socket: OwnedFd,
+        inherit: &[BorrowedFd<'_>],
+        keep: K,
+    ) -> Result<(), CoprocessError> {
+        let config = self.config.as_ref().ok_or(CoprocessError::NoBinary)?;
+        // Held across the spawn, so the child's kill finds a coprocess started
+        // or refused, never between the two.
+        let mut state = lock(&self.state);
+        if state.ended {
+            return Err(CoprocessError::ChildEnded);
+        }
+        if state.started.len() >= config.max {
+            return Err(CoprocessError::TooMany(config.max));
+        }
+        let placement = match (&self.cgroups, &self.group) {
+            (Some(cgroups), Some(group)) => Some(
+                cgroups
+                    .coprocess(group, inherited_len(inherit))
+                    .map_err(CoprocessError::Place)?,
+            ),
+            _ => None,
+        };
+        let process = spawn_placed_coprocess(&config.exe, socket, inherit, placement)
+            .map_err(CoprocessError::Spawn)?;
+        state.started.push(Started {
+            process,
+            kept: Box::new(keep),
+        });
+        Ok(())
     }
 }
 
@@ -244,6 +382,7 @@ impl ChildRunner {
     pub fn new(config: RunnerConfig, cgroups: Option<Cgroups>) -> Self {
         Self {
             exe: config.exe,
+            coprocess: config.coprocess,
             slots: Arc::new(Semaphore::new(config.max_children)),
             deadline: config.deadline,
             admission_wait: config.admission_wait,
@@ -296,32 +435,35 @@ impl ChildRunner {
         SupervisorError::Busy(self.admission_wait.unwrap_or_default())
     }
 
-    /// Spawn a fresh child, hand its service client `Cli` to `f`, and drive `f`
-    /// under the request's deadline. The answer comes back beside the child's
-    /// [`Exit`], which a caller reads only when the answer leaves it asking how
-    /// the child died; the release runs off the request's path.
+    /// Spawn a fresh child, hand its service client `Cli` and its [`Coprocess`]
+    /// to `f`, and drive `f` under the request's deadline. The answer comes back
+    /// beside the child's [`Exit`], which a caller reads only when the answer
+    /// leaves it asking how the child died; the release runs off the request's
+    /// path.
     ///
-    /// `f` does the domain work — `prime` then `run`, or `compile` — and its
-    /// result is returned as it is. A [`SupervisorError`] is the runner's own:
+    /// `f` does the domain work — `prime` then `run`, or `compile` — and
+    /// starts the coprocess if the work asks for one; its result is returned as
+    /// it is. A [`SupervisorError`] is the runner's own:
     /// not admitted in time, a failed spawn, or the deadline elapsing on a
     /// wedged child, one that keeps its connection alive while parking the
     /// call. However the call ends — an answer, an error, the caller dropping
     /// it — the child is killed then: whatever it had to say, it has said.
     ///
-    /// `inherit` goes to the child at [`INHERITED_FD`](crate::INHERITED_FD)
-    /// (see [`spawn_and_connect`](crate::spawn_and_connect)), read only up to
-    /// the spawn. `keep` is what must outlive the child — what it maps through
-    /// that descriptor — and is let go of once the child has exited and its
+    /// `inherit` goes to the child in order from
+    /// [`INHERITED_FD`](crate::INHERITED_FD) up (see
+    /// [`spawn_and_connect`](crate::spawn_and_connect)), read only up to the
+    /// spawn. `keep` is what must outlive the child — what it maps through
+    /// those descriptors — and is let go of once the child has exited and its
     /// group is empty, which can be well after this call returns.
     pub async fn run<Cli, F, Fut, T, K>(
         &self,
-        inherit: Option<BorrowedFd<'_>>,
+        inherit: &[BorrowedFd<'_>],
         keep: K,
         f: F,
     ) -> Result<(T, Exit), SupervisorError>
     where
         Cli: RemoteSend,
-        F: FnOnce(Cli) -> Fut,
+        F: FnOnce(Cli, Coprocess) -> Fut,
         Fut: Future<Output = T>,
         K: Send + 'static,
     {
@@ -357,9 +499,18 @@ impl ChildRunner {
             }
         };
         let (cause, settled) = oneshot::channel();
-        // Dropped on every way out of this call, which is what ends the child.
+        let state = Arc::new(Mutex::new(CoprocessState::default()));
+        let coprocess = Coprocess {
+            config: self.coprocess.clone(),
+            cgroups: self.cgroups.clone(),
+            group: group.as_ref().map(|group| group.path().to_path_buf()),
+            state: Arc::clone(&state),
+        };
+        // Dropped on every way out of this call, which is what ends the child
+        // and its coprocesses.
         let _child = Child(Some(Held {
             process,
+            coprocesses: state,
             cause: Some(cause),
             kept: Box::new(keep),
             group,
@@ -371,7 +522,7 @@ impl ChildRunner {
             .await
             .map_err(|_elapsed| SupervisorError::Handshake(self.times.connect))?
             .map_err(SupervisorError::Spawn)?;
-        let answer = tokio::time::timeout(self.deadline, f(client))
+        let answer = tokio::time::timeout(self.deadline, f(client, coprocess))
             .await
             .map_err(|_elapsed| SupervisorError::Deadline(self.deadline))?;
         let exit = Exit {

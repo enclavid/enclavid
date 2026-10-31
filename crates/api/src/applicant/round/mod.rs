@@ -20,8 +20,10 @@ use engine_rpc::{CompositionKey, ExecError, RunOutcome, RunStatus};
 use session_types::{Decision, Event, Prompt, SessionMetadata, SessionState};
 use storage_client::DataKeys;
 
+use crate::compositions::Composition;
 use crate::init::{self, Unavailable};
 use crate::locale::Locale;
+use crate::model_files::RoundModelFiles;
 use crate::state::AppState;
 
 use super::callbacks::CallbackServer;
@@ -166,6 +168,9 @@ impl SessionRunCtx {
         // The wait this round ends in, if it ends in one: the next after the
         // session's as the round began.
         let awaiting_seq = session_state.awaiting_seq + 1;
+        // The model files the composition carries, as preparing the session
+        // found them: what this round's requests for one are checked against.
+        let carried = prepared.model_files.clone();
         let persister = SessionPersister::for_round(
             state.session_store.clone(),
             session_id.clone(),
@@ -189,17 +194,27 @@ impl SessionRunCtx {
         // still seal. It drops at the end of this fn, whichever way the fn ends.
 
         // Callbacks the keyless worker calls DURING a run: blob rehydration
-        // (`media_load`) + state persistence (`session_change`). Bundle resolution
-        // is NOT here — the orchestrator drives it itself on a cache miss (below),
-        // under the `composition_key` IT computed, so the worker never names which
-        // L2 slot a compile lands in.
+        // (`media_load`), state persistence (`session_change`), and a model file
+        // of the composition (`model_file_load`). Bundle resolution is NOT here
+        // — the orchestrator drives it itself on a cache miss (below), under the
+        // `composition_key` IT computed, so the worker never names which L2 slot
+        // a compile lands in.
         // Handed over as the contract served at api's end of the leg
         // (`RemoteCallbacksAt<ExecutionWorker>`) — there is no other kind to
         // hand over. The raw callback server is not engine-rpc's to export, so this
         // side has no unwrapped contract available to implement by accident.
+        let composition = Composition::of(&metadata).ok_or_else(|| {
+            safe_logger::debug!("session_run_ctx: metadata.client missing for {session_id}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
         let callbacks = CallbackServer {
             persister: persister.clone(),
             media_store,
+            model_files: Arc::new(RoundModelFiles::new(
+                state.compositions.clone(),
+                composition,
+                carried,
+            )),
         };
 
         let reply = async {

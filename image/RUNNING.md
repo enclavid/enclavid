@@ -86,7 +86,7 @@ nix-build image/initramfs -o irfs-execution-worker \
   --arg timesync "$A.timesync + \"/timesync\"" \
   --arg services '[ ./image/init/services/common ./image/init/services/execution-worker ]' \
   --argstr name execution-worker \
-  --arg siblings "{ engine-executor-child = $A.\"execution-worker\" + \"/engine-executor-child\"; }"
+  --arg siblings "{ engine-executor-child = $A.\"execution-worker\" + \"/engine-executor-child\"; engine-executor-inference = $A.\"execution-worker\" + \"/engine-executor-inference\"; }"
 ```
 
 …and the same shape for `compile-worker` with `engine-compiler-child`.

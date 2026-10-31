@@ -8,6 +8,7 @@ mod config;
 mod declarations;
 mod discovery;
 mod docker_config;
+mod models;
 mod registry_auth;
 mod wit_role;
 
@@ -159,8 +160,11 @@ enum PolicyCommand {
     },
 
     /// Validate a policy project's catalogs against the same rules the
-    /// TEE engine enforces at load time. Run before `push` to catch
-    /// issues at author time with clean error messages.
+    /// TEE engine enforces at load time, and the files of the models its
+    /// slot declares (`enclavid-ext:policy/models`): each graph as the
+    /// process that runs it checks it, against the `run` the slot declares.
+    /// Run before `push` to catch issues at author time with clean error
+    /// messages.
     Validate {
         /// Path to the policy project directory, holding its `wit/` and
         /// its texts. Defaults to the current directory.
@@ -172,6 +176,14 @@ enum PolicyCommand {
         /// texts (`i18n.json`).
         #[arg(long = "i18n", default_value = "i18n")]
         i18n: PathBuf,
+
+        /// The models' files, in the project directory or anywhere else: a
+        /// directory holding `<function>.onnx` for each model the slot
+        /// declares, and `<function>.onnx.data` where its graph points into
+        /// one, and nothing besides — as they are pushed beside the
+        /// component.
+        #[arg(long = "models", default_value = "models")]
+        models: PathBuf,
     },
 }
 
@@ -208,7 +220,10 @@ enum PluginCommand {
     },
 
     /// Validate a plugin project's texts against the same rules the TEE
-    /// engine enforces at load. Run before `enclavid oci push`.
+    /// engine enforces at load, and the files of the models its slot
+    /// declares (`enclavid-ext:<name>/models`): each graph as the process
+    /// that runs it checks it, against the `run` the slot declares. Run
+    /// before `enclavid oci push`.
     Validate {
         /// Path to the plugin project directory, holding its `wit/` and
         /// its texts. Defaults to the current directory.
@@ -220,6 +235,14 @@ enum PluginCommand {
         /// texts (`i18n.json`).
         #[arg(long = "i18n", default_value = "i18n")]
         i18n: PathBuf,
+
+        /// The models' files, in the project directory or anywhere else: a
+        /// directory holding `<function>.onnx` for each model the slot
+        /// declares, and `<function>.onnx.data` where its graph points into
+        /// one, and nothing besides — as they are pushed beside the
+        /// component.
+        #[arg(long = "models", default_value = "models")]
+        models: PathBuf,
     },
 }
 
@@ -409,8 +432,8 @@ async fn main() -> Result<()> {
                 i18n,
                 output,
             } => commands::policy::embed::run(wasm, wit, i18n, output),
-            PolicyCommand::Validate { dir, i18n } => {
-                commands::policy::validate::run(dir, i18n).await
+            PolicyCommand::Validate { dir, i18n, models } => {
+                commands::policy::validate::run(dir, i18n, models).await
             }
         },
         Commands::Plugin { command } => match command {
@@ -420,8 +443,8 @@ async fn main() -> Result<()> {
                 i18n,
                 output,
             } => commands::plugin::embed::run(wasm, wit, i18n, output),
-            PluginCommand::Validate { dir, i18n } => {
-                commands::plugin::validate::run(dir, i18n).await
+            PluginCommand::Validate { dir, i18n, models } => {
+                commands::plugin::validate::run(dir, i18n, models).await
             }
         },
         Commands::Oci { command } => match command {

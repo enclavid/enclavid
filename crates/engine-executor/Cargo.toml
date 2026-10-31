@@ -58,10 +58,14 @@ wasmtime-environ = { version = "46", default-features = false, features = ["comp
 wasmtime-wasi = { version = "46", default-features = false, features = ["p2"] }
 # `wasi:io`'s own bindings and its `Pollable`, which the round's deadlines are.
 wasmtime-wasi-io = { version = "46", default-features = false, features = ["std"] }
-# Named by the library only for the `AsyncWrite` in the stdio trait it
-# implements (`round`), so with no features: wasmtime-wasi pulls tokio in
-# anyway, and what the worker runs on it, it asks for itself (`worker`).
-tokio = { version = "1", default-features = false }
+# Named by the library for the `AsyncWrite` in the stdio trait it implements
+# (`round`), and for the blocking pool a model's run waits on (`models`), so
+# the process keeps answering while one does. What the worker runs on it, it
+# asks for itself (`worker`).
+tokio = { version = "1", default-features = false, features = ["rt"] }
+# What a round says to the process a model runs in, and reads back. The
+# protocol alone — no ONNX Runtime in this crate.
+enclavid-inference = { path = "../inference", default-features = false }
 
 # --- execution-worker bin deps (optional) — pulled ONLY by the `worker`
 # feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable
@@ -232,3 +236,10 @@ jpeg-encoder = "0.6"
 # The fixture catalog + the shared build→componentize→embed pipeline — the SAME
 # code `xtask push-plugins` uses, so tested and shipped artifacts match.
 xtask = { path = "../../xtask" }
+# A vendor-style model built in code, which the worker's model test runs in
+# the coprocess.
+enclavid-inference = { path = "../inference", default-features = false, features = ["test-models"] }
+# The worker's model test serves model files as api does.
+fleet-stream = { path = "../fleet-stream" }
+# happy_path.rs starts a model's process as the worker does.
+engine-supervisor = { path = "../engine-supervisor", features = ["parent"] }

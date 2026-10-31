@@ -137,6 +137,8 @@ pub enum CompileProblemView {
     CatalogsPastCap,
     UnsatisfiedImport { interface: String },
     MismatchedImport { interface: String },
+    ModelsMismatched { artifact: ArtifactView },
+    ModelsShared { interface: String },
     Invalid,
     TooLarge,
     OutOfMemory,
@@ -153,6 +155,10 @@ impl From<&CompileFault> for CompileProblemView {
                 interface: i.as_str().into(),
             },
             CompileFault::Mismatched(i) => Self::MismatchedImport {
+                interface: i.as_str().into(),
+            },
+            CompileFault::ModelsMismatched(a) => Self::ModelsMismatched { artifact: a.into() },
+            CompileFault::ModelsShared(i) => Self::ModelsShared {
                 interface: i.as_str().into(),
             },
             CompileFault::Invalid => Self::Invalid,
@@ -175,6 +181,8 @@ pub enum PullProblemView {
     NotEncrypted,
     KeyDoesNotOpen,
     KeyNotReleased,
+    ModelUnnamed,
+    ModelEncrypted,
 }
 
 impl From<PullProblem> for PullProblemView {
@@ -189,6 +197,8 @@ impl From<PullProblem> for PullProblemView {
             PullProblem::NotEncrypted => PullProblemView::NotEncrypted,
             PullProblem::KeyDoesNotOpen => PullProblemView::KeyDoesNotOpen,
             PullProblem::KeyNotReleased => PullProblemView::KeyNotReleased,
+            PullProblem::ModelUnnamed => PullProblemView::ModelUnnamed,
+            PullProblem::ModelEncrypted => PullProblemView::ModelEncrypted,
         }
     }
 }

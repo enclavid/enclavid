@@ -52,7 +52,7 @@ async fn spawn_with(filtered: bool) -> Spawned {
     let output = tempfile::tempfile().expect("an output file");
     let (process, client) = engine_supervisor::spawn_and_connect::<
         RemoteCompileChildClient<Ciborium>,
-    >(&exe, Some(output.as_fd()), filtered)
+    >(&exe, &[output.as_fd()], filtered)
     .await
     .expect("spawn engine-compiler-child");
     Spawned {
@@ -69,7 +69,7 @@ async fn compile(
     policy: Vec<u8>,
     plugins: Vec<PluginInstance>,
 ) -> Result<ChildCompiled, CompileError> {
-    let (request, writer) = CompileSource::whole(policy, plugins)
+    let (request, writer) = CompileSource::whole(policy, Vec::new(), plugins)
         .expect("components within the bound")
         .split();
     let mut call = std::pin::pin!(client.compile(request));
@@ -164,9 +164,11 @@ async fn components_that_stop_part_way_are_not_compiled() {
     let (tx, components) = bin::channel();
     let request = CompileRequest {
         policy: StreamLen::new(1000).unwrap(),
+        policy_model_layers: Vec::new(),
         plugins: vec![PluginLength {
             package: "p".into(),
             length: StreamLen::new(1000).unwrap(),
+            model_layers: Vec::new(),
         }],
         components,
     };
@@ -240,6 +242,7 @@ async fn a_real_policy_compiles_through_the_spawned_child() {
         .map(|(package, wasm)| PluginInstance {
             package: package.to_string(),
             wasm: wasm.to_vec(),
+            model_layers: Vec::new(),
         })
         .collect();
 
@@ -329,6 +332,7 @@ async fn a_runner_answers_and_gives_back_what_its_child_held() {
     let runner = ChildRunner::new(
         RunnerConfig {
             exe: xtask::child_binary("engine-compiler-child"),
+            coprocess: None,
             max_children: 1,
             deadline: Duration::from_secs(30),
             admission_wait: Some(Duration::from_secs(30)),
@@ -341,9 +345,9 @@ async fn a_runner_answers_and_gives_back_what_its_child_held() {
         let output = tempfile::tempfile().expect("an output file");
         let (answer, exit) = runner
             .run(
-                Some(output.as_fd()),
+                &[output.as_fd()],
                 kept.clone(),
-                |client: RemoteCompileChildClient<Ciborium>| async move {
+                |client: RemoteCompileChildClient<Ciborium>, _| async move {
                     compile(&client, b"not a wasm component".to_vec(), vec![]).await
                 },
             )

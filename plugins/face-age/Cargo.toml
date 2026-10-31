@@ -15,6 +15,12 @@ crate-type = ["cdylib"]
 # weights. Enable with a model present:
 #   FACE_AGE_MODEL=/abs/age_googlenet.onnx cargo build --features age-googlenet ...
 age-googlenet = []
+# Build the artifact whose model the host runs: the `with-models` world, which
+# imports this plugin's slot, `enclavid-ext:face-age/models`, whose `age` is
+# MiVOLO. The model is not in the component: its graph and data file are
+# pushed beside it as the layers `age.onnx` and `age.onnx.data`. Profile: 384²
+# letterboxed RGB, ImageNet-normalized, the face beside an empty body.
+mivolo = []
 
 [dependencies]
 wit-bindgen = "0.57"

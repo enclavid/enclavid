@@ -898,7 +898,10 @@ mod tests {
             loaded.version,
             awaiting_seq,
             loaded.metadata.clone(),
-            Prepared { props: None },
+            Prepared {
+                props: None,
+                model_files: Vec::new(),
+            },
             consent,
             captures,
             awaiting,
@@ -948,7 +951,10 @@ mod tests {
     #[tokio::test]
     async fn the_claiming_round_locks_the_session_to_its_key() {
         let (_disk, store) = create(&SessionMetadata {
-            prepared: Some(Prepared { props: None }),
+            prepared: Some(Prepared {
+                props: None,
+                model_files: Vec::new(),
+            }),
             ..Default::default()
         })
         .await;
@@ -971,7 +977,10 @@ mod tests {
     #[tokio::test]
     async fn a_round_s_state_opens_beside_the_metadata_its_write_leaves() {
         let (disk, store) = create(&SessionMetadata {
-            prepared: Some(Prepared { props: None }),
+            prepared: Some(Prepared {
+                props: None,
+                model_files: Vec::new(),
+            }),
             ..Default::default()
         })
         .await;

@@ -45,6 +45,33 @@ pub fn take_inherited_fd() -> std::io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(INHERITED_FD) })
 }
 
+/// Take the descriptors the supervisor handed this child after the one at
+/// [`INHERITED_FD`], in order, once: every open slot from the next up, which
+/// the spawn fills without a gap, closing every slot past them.
+///
+/// Called before anything in the child opens a file, for the reason
+/// [`take_inherited_fd`] is: the first slot past them would be the next file's.
+/// A second call is refused.
+pub fn take_inherited_rest() -> std::io::Result<Vec<OwnedFd>> {
+    static TAKEN: AtomicBool = AtomicBool::new(false);
+    if TAKEN.swap(true, Ordering::AcqRel) {
+        return Err(std::io::Error::other(
+            "the inherited descriptors were taken already",
+        ));
+    }
+    let mut taken = Vec::new();
+    for fd in INHERITED_FD + 1.. {
+        // SAFETY: as in `take_inherited_fd`.
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1 {
+            break;
+        }
+        // SAFETY: open, as just checked; placed by the supervisor before exec,
+        // and `TAKEN` makes this the only `OwnedFd` ever made of it.
+        taken.push(unsafe { OwnedFd::from_raw_fd(fd) });
+    }
+    Ok(taken)
+}
+
 /// Why a child stopped serving its supervisor other than by being done.
 ///
 /// Each variant's text carries the error under it, as remoc's own do, so the

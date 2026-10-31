@@ -17,6 +17,7 @@ mod init;
 mod keyprovider;
 mod limits;
 mod locale;
+mod model_files;
 mod policy_pull;
 mod props;
 mod semaphores;

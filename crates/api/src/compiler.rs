@@ -230,7 +230,7 @@ mod tests {
             &self,
             req: Untrusted<CompileRequest, (), TestWorker>,
         ) -> Result<Exposed<CompileReply, (), TestWorker>, CompileError> {
-            let (policy, plugins) = req
+            let (policy, _, plugins) = req
                 .into_inner()
                 .receive()
                 .await
@@ -259,7 +259,7 @@ mod tests {
         policy: &[u8],
         plugins: Vec<engine_types::composition::PluginInstance>,
     ) -> CompileSource {
-        CompileSource::whole(policy.to_vec(), plugins).unwrap()
+        CompileSource::whole(policy.to_vec(), Vec::new(), plugins).unwrap()
     }
 
     /// The Compiler client drives a RemoteCompiler over an in-memory remoc
@@ -297,6 +297,7 @@ mod tests {
         let plugins = vec![engine_types::composition::PluginInstance {
             package: "p".into(),
             wasm: vec![0],
+            model_layers: Vec::new(),
         }];
         let compiled = compiler.compile(whole(b"hello", plugins)).await.unwrap();
         assert_eq!(compiled.meta, b"meta");

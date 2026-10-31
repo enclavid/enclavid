@@ -148,9 +148,9 @@ impl RemoteCompilerAt<AnyCaller> for Supervisor {
         let outcome = self
             .runner
             .run(
-                Some(output.as_fd()),
+                &[output.as_fd()],
                 (),
-                move |client: RemoteCompileChildClient<Ciborium>| async move {
+                move |client: RemoteCompileChildClient<Ciborium>, _| async move {
                     let mut call = std::pin::pin!(client.compile(onward));
                     // The child answers once it has compiled, which it does only
                     // on components that arrived whole; the relay is never the
@@ -636,6 +636,8 @@ async fn main() {
         runner: ChildRunner::new(
             RunnerConfig {
                 exe: child_exe.clone(),
+                // A compile has nothing beside it.
+                coprocess: None,
                 max_children: max_compiles,
                 deadline,
                 // No admission wait: a compile waits for a slot, and for room for

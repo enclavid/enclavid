@@ -20,11 +20,16 @@
 //!   * [`ChildRunner`] — admit a request, spawn its child under the syscall
 //!     filters, drive the caller's closure under the request's deadline, and
 //!     kill the child as the call ends, giving its slot back once it is gone.
+//!   * [`Coprocess`] — the processes a child may have beside it, started at
+//!     the caller's word: in the child's group, each under an identity of its
+//!     own and narrower filters, talking to the child over a socket the caller
+//!     pairs.
 //!   * [`Cgroups`] — the kernel's hold on the children's memory, built at boot:
 //!     all of them to one total, each to its own max, each in a group and under
 //!     an identity of its own.
-//!   * [`spawn_and_connect`] — one child on its socketpair, with the caller's
-//!     descriptor at [`INHERITED_FD`], for a bench or a test.
+//!   * [`spawn_and_connect`], [`spawn_coprocess`] — one child on its
+//!     socketpair, or one coprocess on a given socket, with the caller's
+//!     descriptors from [`INHERITED_FD`] up, for a bench or a test.
 //!   * [`require_ptrace_scope`], [`require_fd_budget`], [`physical_memory`] —
 //!     what a supervisor checks and measures at boot.
 //!
@@ -52,7 +57,9 @@
 
 mod channel;
 mod child;
-pub use child::{INHERITED_FD, ServeError, adopt_fd0, serve_child, take_inherited_fd};
+pub use child::{
+    INHERITED_FD, ServeError, adopt_fd0, serve_child, take_inherited_fd, take_inherited_rest,
+};
 
 #[cfg(feature = "parent")]
 mod cgroup;
@@ -70,6 +77,9 @@ pub use cgroup::{Cgroups, ChildLimits, DEFAULT_CHILD_MAX_TASKS, ExitCause};
 #[cfg(feature = "parent")]
 pub use preconditions::{physical_memory, require_fd_budget, require_ptrace_scope};
 #[cfg(feature = "parent")]
-pub use runner::{ChildRunner, ChildTimes, Exit, RunnerConfig, SupervisorError};
+pub use runner::{
+    ChildRunner, ChildTimes, Coprocess, CoprocessConfig, CoprocessError, Exit, RunnerConfig,
+    SupervisorError,
+};
 #[cfg(feature = "parent")]
-pub use spawn::{SpawnError, spawn_and_connect};
+pub use spawn::{SpawnError, spawn_and_connect, spawn_coprocess};

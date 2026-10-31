@@ -1,0 +1,5 @@
+[overrides]
+"enclavid:policy" = { path = "../../../../../wit/policy" }
+"enclavid:host" = { path = "../../../../../wit/host" }
+"enclavid:shared-types" = { path = "../../../../../wit/shared-types" }
+"enclavid-ext:policy" = { path = "ext" }

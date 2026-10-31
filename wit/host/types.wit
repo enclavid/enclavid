@@ -21,6 +21,17 @@
 /// in whatever record the policy declares for them, and `disclosure-fields`,
 /// whose `key` lists the fields its disclosures may name. A component may import
 /// another's texts by its slot.
+///
+/// A component's models: `enclavid-ext:<slot>/models`, a function for each ONNX
+/// model its artifact carries beside its component — a layer `<function>.onnx`,
+/// the graph, and where its weights are large `<function>.onnx.data`, the data
+/// file the graph points into — returning a resource the slot declares, whose
+/// one method `run` borrows a tensor of `enclavid:host/tensors` for each input
+/// of the graph and returns one for each output: as itself, or a tuple or a
+/// record of them for more than one. The host serves the resource: the model
+/// runs in a process of its own beside the round, started the first time a
+/// round calls the function. Only the one artifact that imports a slot's models
+/// is served them, and only its own files.
 package enclavid:host@0.1.0;
 
 /// Value shapes carried by the host capabilities in this package. Kept

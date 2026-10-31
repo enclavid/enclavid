@@ -106,11 +106,12 @@ mod execute;
 // it calls through (`leg`), each of which answers for one method.
 #[cfg(feature = "execute")]
 pub use execute::{
-    ByteBuf, CallbackError, Committed, ExecError, MediaBytes, MediaHash, PrepareOutcome,
-    PrepareReply, PrepareRequest, Preparing, PropsRead, RemoteCallbacksAt, RemoteCallbacksServes,
-    RemoteChild, RemoteChildCallbacks, RemoteChildCallbacksClient,
-    RemoteChildCallbacksServerShared, RemoteChildClient, RemoteChildServerShared, RemoteExecutorAt,
-    RemoteExecutorServes, RoundProps, RunOutcome, RunReply, RunRequest, RunStatus,
+    ByteBuf, CallbackError, Committed, ExecError, MediaBytes, MediaHash, ModelFileDigest,
+    ModelFileStream, PrepareOutcome, PrepareReply, PrepareRequest, Preparing, PropsRead,
+    RemoteCallbacksAt, RemoteCallbacksServes, RemoteChild, RemoteChildCallbacks,
+    RemoteChildCallbacksClient, RemoteChildCallbacksServerShared, RemoteChildClient,
+    RemoteChildServerShared, RemoteExecutorAt, RemoteExecutorServes, RoundProps, RunOutcome,
+    RunReply, RunRequest, RunStatus,
 };
 
 // Both ends of the execute hop, and the doors on the calling end.

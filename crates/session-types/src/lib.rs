@@ -215,6 +215,23 @@ pub struct Prepared {
     /// against the type the composition declares, and reads them back every
     /// round; `None` for a composition that declares none.
     pub props: Option<String>,
+    /// The model files the composition carries — its models' graphs and data
+    /// files — as their artifacts' verified manifests declare them: what a
+    /// round's request for one is checked against, and where it is found, with
+    /// no registry asked. At most two for each of
+    /// [`engine_types::limits::MAX_MODELS`].
+    pub model_files: Vec<CarriedModelFile>,
+}
+
+/// One model file a session's composition carries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CarriedModelFile {
+    /// The artifact carrying it: 0 for the policy, then each plugin in pin
+    /// order.
+    pub artifact: u32,
+    #[serde(with = "serde_bytes")]
+    pub sha256: [u8; 32],
+    pub length: u64,
 }
 
 /// Why a session could not be prepared to run: something the consumer set up for
@@ -263,6 +280,12 @@ pub enum PullProblem {
     KeyDoesNotOpen,
     /// The KBS refused to release the key, or answered with none it could.
     KeyNotReleased,
+    /// A model layer it carries has no file name ending in `.onnx` or
+    /// `.onnx.data` to serve its model under.
+    ModelUnnamed,
+    /// A model layer it carries is encrypted: models are taken only in the
+    /// clear.
+    ModelEncrypted,
 }
 
 /// Where props do not fit the type the policy declares, and why.
@@ -279,9 +302,15 @@ pub struct PropsFault {
 /// The longest [`PropsFault::at`].
 pub const MAX_PROPS_AT_BYTES: usize = 256;
 
-/// The bytes a [`Prepared`] is kept in, whatever its props: props as long as a
-/// round carries, and room for the CBOR around them.
-pub const PREPARED_FRAME: usize = engine_types::limits::MAX_PROPS_BYTES + 64;
+/// The bytes a [`Prepared`] is kept in, whatever its props and its model
+/// files: props as long as a round carries, as many model files as a
+/// composition may — a graph and a data file for each model — and room for
+/// the CBOR around them.
+pub const PREPARED_FRAME: usize = engine_types::limits::MAX_PROPS_BYTES + MAX_MODEL_FILES * 96 + 64;
+
+/// The most model files a composition carries: a graph and a data file for
+/// each of its models.
+pub const MAX_MODEL_FILES: usize = 2 * engine_types::limits::MAX_MODELS;
 
 /// [`SessionMetadata::prepared`] on the wire: `null`, or its CBOR in a byte
 /// string of [`PREPARED_FRAME`] bytes, zeros after it.
@@ -299,7 +328,7 @@ mod prepared_frame {
         let mut frame = Vec::new();
         ciborium::into_writer(prepared, &mut frame).map_err(S::Error::custom)?;
         if frame.len() > PREPARED_FRAME {
-            return Err(S::Error::custom("props past their frame"));
+            return Err(S::Error::custom("what preparing settled is past its frame"));
         }
         frame.resize(PREPARED_FRAME, 0);
         s.serialize_some(serde_bytes::Bytes::new(&frame))
@@ -987,16 +1016,32 @@ mod decision_tests {
     }
 
     /// What preparing a session settled is kept as it was settled — without
-    /// props, with short ones and with the longest a round carries — and the
-    /// metadata is as long whichever it holds.
+    /// props, with short ones and with the longest a round carries; with no
+    /// model files and with as many as a composition may, each as long as its
+    /// fields' encodings go — and the metadata is as long whichever it holds.
     #[test]
     fn what_preparing_settled_round_trips_at_one_length() {
-        let with = |props: Option<String>| SessionMetadata {
-            prepared: Some(Prepared { props }),
-            ..Default::default()
-        };
+        let with =
+            |(props, model_files): (Option<String>, Vec<CarriedModelFile>)| SessionMetadata {
+                prepared: Some(Prepared { props, model_files }),
+                ..Default::default()
+            };
         let longest = "w".repeat(engine_types::limits::MAX_PROPS_BYTES);
-        let all = [None, Some("{min-age: 18}".to_owned()), Some(longest)].map(with);
+        let most = vec![
+            CarriedModelFile {
+                artifact: u32::MAX,
+                sha256: [0xff; 32],
+                length: u64::MAX,
+            };
+            MAX_MODEL_FILES
+        ];
+        let all = [
+            (None, Vec::new()),
+            (Some("{min-age: 18}".to_owned()), most[..1].to_vec()),
+            (Some(longest.clone()), Vec::new()),
+            (Some(longest), most),
+        ]
+        .map(with);
         let lengths: Vec<usize> = all
             .iter()
             .map(|metadata| {
@@ -1010,7 +1055,7 @@ mod decision_tests {
     }
 
     fn init_errors() -> Vec<InitError> {
-        const PROBLEMS: [PullProblem; 9] = [
+        const PROBLEMS: [PullProblem; 11] = [
             PullProblem::NotFound,
             PullProblem::Refused,
             PullProblem::NotAsPinned,
@@ -1020,6 +1065,8 @@ mod decision_tests {
             PullProblem::NotEncrypted,
             PullProblem::KeyDoesNotOpen,
             PullProblem::KeyNotReleased,
+            PullProblem::ModelUnnamed,
+            PullProblem::ModelEncrypted,
         ];
         let longest_name = "a".repeat(InterfaceName::MAX_BYTES);
         let artifacts = [

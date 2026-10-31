@@ -307,10 +307,11 @@ mod doors {
 
     use super::{Callbacks, ExecutorLeg, Preparation};
     use crate::execute::{
-        CallbackError, Committed, ExecError, MediaBytes, MediaHash, PrepareOutcome, PrepareReply,
-        PrepareRequest, PropsRead, RemoteCallbacks, RemoteCallbacksAdapter, RemoteCallbacksAt,
-        RemoteCallbacksClient, RemoteCallbacksServerShared, RemoteCallbacksServes, RemoteExecutor,
-        RunOutcome, RunReply, RunRequest, RunStatus,
+        CallbackError, Committed, ExecError, MediaBytes, MediaHash, ModelFileDigest,
+        ModelFileStream, PrepareOutcome, PrepareReply, PrepareRequest, PropsRead, RemoteCallbacks,
+        RemoteCallbacksAdapter, RemoteCallbacksAt, RemoteCallbacksClient,
+        RemoteCallbacksServerShared, RemoteCallbacksServes, RemoteExecutor, RunOutcome, RunReply,
+        RunRequest, RunStatus,
     };
     use crate::padded::{FrameError, Padded};
     use crate::stream::BundleStream;
@@ -510,6 +511,21 @@ mod doors {
                 .await
                 .map(inbound::<B, _>)
         }
+
+        /// Ask for a model file of the round's composition by the digest its
+        /// bundle gives it.
+        pub async fn model_file_load(
+            &self,
+            digest: Exposed<ModelFileDigest, (), B>,
+        ) -> Result<
+            Untrusted<ModelFileStream, <B as Receives<ModelFileStream>>::Open, B>,
+            CallbackError,
+        > {
+            self.client
+                .model_file_load(digest.into_inner())
+                .await
+                .map(inbound::<B, _>)
+        }
     }
 }
 
@@ -699,9 +715,9 @@ mod door_tests {
     };
     use crate::bundle::{CompiledBundle, sample_bundle};
     use crate::execute::{
-        CallbackError, Committed, ExecError, MediaBytes, MediaHash, PrepareOutcome, PrepareReply,
-        PrepareRequest, RemoteCallbacksAt, RemoteExecutorAt, RunOutcome, RunReply, RunRequest,
-        RunStatus,
+        CallbackError, Committed, ExecError, MediaBytes, MediaHash, ModelFileDigest,
+        ModelFileStream, PrepareOutcome, PrepareReply, PrepareRequest, RemoteCallbacksAt,
+        RemoteExecutorAt, RunOutcome, RunReply, RunRequest, RunStatus,
     };
     use crate::keys::CompositionKey;
     use crate::padded::{Framed, Padded};
@@ -723,6 +739,7 @@ mod door_tests {
             Option<MediaBytes>,
             Committed,
             CallbackError,
+            ModelFileStream,
         }
         in (Asserted,) {
             /// test fixture
@@ -735,6 +752,7 @@ mod door_tests {
             MediaHash,
             Padded<SessionState>,
             Padded<Option<Decision>>,
+            ModelFileDigest,
         }
     }
 
@@ -754,6 +772,7 @@ mod door_tests {
             Option<MediaBytes>,
             Committed,
             CallbackError,
+            ModelFileStream,
         }
         out (AuthN,) {
             /// test fixture
@@ -766,6 +785,7 @@ mod door_tests {
             MediaHash,
             Padded<SessionState>,
             Padded<Option<Decision>>,
+            ModelFileDigest,
         }
     }
 
@@ -850,6 +870,13 @@ mod door_tests {
         ) -> Result<Exposed<Committed, (), Api>, CallbackError> {
             Err(CallbackError)
         }
+
+        async fn model_file_load(
+            &self,
+            _digest: Untrusted<ModelFileDigest, (), Api>,
+        ) -> Result<Exposed<ModelFileStream, (), Api>, CallbackError> {
+            Err(CallbackError)
+        }
     }
 
     /// A worker whose cached round calls back mid-round, as a policy does that
@@ -869,6 +896,17 @@ mod door_tests {
                 .await?
                 .into_inner();
             if blob != Some(MediaBytes(vec![0xAB, 0xCD])) {
+                return Err(ExecError::Unknown);
+            }
+            let ModelFileStream { header, body } = callbacks
+                .model_file_load(Worker::expose(ModelFileDigest(MODEL_FILE_DIGEST)))
+                .await?
+                .into_inner();
+            let mut file = Vec::new();
+            fleet_stream::recv_exact(body, &header, std::time::Duration::from_secs(5), &mut file)
+                .await
+                .map_err(|_| ExecError::Unknown)?;
+            if file != served_model_file() {
                 return Err(ExecError::Unknown);
             }
             callbacks
@@ -907,11 +945,20 @@ mod door_tests {
         }
     }
 
+    /// What the calling worker names its model file by.
+    const MODEL_FILE_DIGEST: [u8; 32] = [5; 32];
+
+    /// The model file api serves for it: more than one piece of the stream.
+    fn served_model_file() -> Vec<u8> {
+        (0..200_000).map(|i| (i % 253) as u8).collect()
+    }
+
     /// api's side of the callbacks, recording what arrives through its door.
     #[derive(Clone, Default)]
     struct RecordingCallbacks {
         hashes: std::sync::Arc<std::sync::Mutex<Vec<MediaHash>>>,
         decisions: std::sync::Arc<std::sync::Mutex<Vec<Option<Decision>>>>,
+        digests: std::sync::Arc<std::sync::Mutex<Vec<ModelFileDigest>>>,
     }
 
     impl RemoteCallbacksAt<Api> for RecordingCallbacks {
@@ -931,6 +978,18 @@ mod door_tests {
             let decision = decision.into_inner().open()?;
             self.decisions.lock().unwrap().push(decision);
             Ok(Api::expose(Committed))
+        }
+
+        async fn model_file_load(
+            &self,
+            digest: Untrusted<ModelFileDigest, (), Api>,
+        ) -> Result<Exposed<ModelFileStream, (), Api>, CallbackError> {
+            self.digests.lock().unwrap().push(digest.into_inner());
+            let bytes = served_model_file();
+            let header = fleet_stream::BlobHeader::of(&bytes).ok_or(CallbackError)?;
+            let (tx, body) = fleet_stream::bin::channel();
+            tokio::spawn(fleet_stream::send(tx, bytes));
+            Ok(Api::expose(ModelFileStream { header, body }))
         }
     }
 
@@ -1021,6 +1080,10 @@ mod door_tests {
             Ok(RunStatus::Completed(Decision::Approved))
         ));
         assert_eq!(*callbacks.hashes.lock().unwrap(), [MediaHash([9; 32])]);
+        assert_eq!(
+            *callbacks.digests.lock().unwrap(),
+            [ModelFileDigest(MODEL_FILE_DIGEST)]
+        );
         assert_eq!(
             *callbacks.decisions.lock().unwrap(),
             [Some(Decision::Approved)]

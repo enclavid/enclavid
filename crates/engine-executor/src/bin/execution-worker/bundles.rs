@@ -11,7 +11,7 @@
 //! many of those went before a round used them is counted, for the host to read
 //! how well entries filled ahead are kept.
 //!
-//! The map, the order entries go in, the weights and one fill per composition
+//! The map, the order entries go in, the weighing and one fill per composition
 //! are `quick_cache`'s. What is here is the rest of the budget: the room a
 //! bundle reserves before its first byte, taken out of the cache's capacity so
 //! the cache makes it by evicting what no round is using, and the wait when
@@ -21,18 +21,29 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use quick_cache::sync::{Cache, PlaceholderGuard};
+use quick_cache::sync::{Cache, EntryAction, EntryResult, PlaceholderGuard};
 use quick_cache::{DefaultHashBuilder, Lifecycle, OptionsBuilder, Weighter};
 use safe_logger::{debug, reason};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
+use engine_executor::ModelImport;
 use engine_executor::admission::l1_entry_weight;
 use engine_rpc::{CatalogEntry, ExecError, MAX_DECODED_META_BYTES, META_WEIGHT_MARGIN};
 use engine_types::composition::EmbeddedImport;
+use engine_types::limits::MAX_MODELS;
 
 use crate::cwasm::Cwasm;
+use crate::model_files::ModelFileSlot;
 use crate::service::Slot;
+
+/// The most model files one entry holds: a graph and a data file for each of
+/// its models.
+pub(crate) const MAX_ENTRY_FILES: usize = 2 * MAX_MODELS;
+
+/// The most descriptors one entry holds: its cwasm's, and one for each of its
+/// model files.
+pub(crate) const MAX_ENTRY_DESCRIPTORS: u64 = 1 + MAX_ENTRY_FILES as u64;
 
 /// The longest an entry no round has used stays, so that a composition nobody
 /// runs any more does not keep its compiled code in this process for good.
@@ -85,11 +96,30 @@ pub(crate) struct CompositionEntry {
     /// The catalogs (the registry-builder inputs). Charged and shared for the
     /// same reasons, and it is the bigger of the two.
     pub(crate) catalogs: Arc<[CatalogEntry]>,
+    /// The models (registered in each round's host `Linker`), shared with every
+    /// round's `prime` request as the two above are.
+    pub(crate) models: Arc<[ModelImport]>,
+    /// The model files, in the order of the bundle's: each empty until a round
+    /// first runs a model of it ([`ModelFileSlot`]).
+    pub(crate) files: Box<[ModelFileSlot]>,
+    /// What the model files filled so far are charged, in bytes. Changed only
+    /// inside [`Bundles::grow`], which the cache weighs the entry again around.
+    pub(crate) files_charged: AtomicU64,
+    /// The slot this entry is kept under, for [`Bundles::grow`] to find it by.
+    pub(crate) slot: Slot,
     /// When a round last took or let go of this entry.
     pub(crate) used: LastUsed,
     /// Filled by a preparation, ahead of its session's rounds, and no round has
     /// held it since: what [`Bundles::warmed_evicted`] counts when it goes.
     pub(crate) warmed: AtomicBool,
+}
+
+impl CompositionEntry {
+    /// The descriptors this entry holds: its cwasm's, and one for each model
+    /// file.
+    pub(crate) fn descriptors(&self) -> u64 {
+        1 + self.files.len() as u64
+    }
 }
 
 /// When a round last took or let go of an entry: what [`Bundles::evict_idle`]
@@ -132,8 +162,8 @@ pub(crate) const fn fill_charge(cwasm_len: u64, meta_len: u64) -> u64 {
     entry_charge(cwasm_len, meta_len).saturating_add(meta_len.saturating_mul(2))
 }
 
-/// What an entry takes out of the budget: its charge, or the per-entry floor if
-/// that is more ([`l1_entry_weight`]).
+/// What an entry takes out of the budget: its charge, or the floor for the
+/// descriptors it holds if that is more ([`l1_entry_weight`]).
 #[derive(Clone, Copy)]
 pub(crate) struct ByCharge {
     budget: u64,
@@ -141,14 +171,17 @@ pub(crate) struct ByCharge {
 }
 
 impl ByCharge {
-    fn of(&self, charged: u64) -> u64 {
-        l1_entry_weight(charged, self.budget, self.max_entries)
+    fn of(&self, charged: u64, descriptors: u64) -> u64 {
+        l1_entry_weight(charged, descriptors, self.budget, self.max_entries)
     }
 }
 
 impl Weighter<Slot, Arc<CompositionEntry>> for ByCharge {
     fn weight(&self, _slot: &Slot, entry: &Arc<CompositionEntry>) -> u64 {
-        self.of(entry.charged)
+        let charged = entry
+            .charged
+            .saturating_add(entry.files_charged.load(Ordering::Relaxed));
+        self.of(charged, entry.descriptors())
     }
 }
 
@@ -282,13 +315,38 @@ impl Bundles {
     /// The cache evicts before anyone knows whether the room will come of it: a
     /// fill that goes on to wait, or to answer busy, may still have cost entries
     /// no round was using.
+    ///
+    /// Reserved at the floor of the most descriptors an entry may hold, as the
+    /// number of its model files is read only once its metadata has arrived.
     pub(crate) async fn reserve(
         &self,
         cwasm_len: u64,
         meta_len: u64,
         deadline: Instant,
     ) -> Result<Room<'_>, ExecError> {
-        let need = self.weigh.of(fill_charge(cwasm_len, meta_len));
+        let need = self
+            .weigh
+            .of(fill_charge(cwasm_len, meta_len), MAX_ENTRY_DESCRIPTORS);
+        self.reserve_weight(need, deadline).await
+    }
+
+    /// Room for a model file of `bytes` that a round fills into an entry it
+    /// holds, as [`reserve`](Self::reserve) makes room for a bundle. The file's
+    /// descriptors were charged with its entry, so this is its bytes alone; a
+    /// file the whole budget could not hold is refused at once.
+    pub(crate) async fn reserve_bytes(
+        &self,
+        bytes: u64,
+        deadline: Instant,
+    ) -> Result<Room<'_>, ExecError> {
+        if bytes > self.budget {
+            debug!("reserve_bytes: a model file past the whole budget");
+            return Err(ExecError::Unknown);
+        }
+        self.reserve_weight(bytes, deadline).await
+    }
+
+    async fn reserve_weight(&self, need: u64, deadline: Instant) -> Result<Room<'_>, ExecError> {
         loop {
             // Taken before the look, so whatever is given back after it wakes
             // this fill.
@@ -335,9 +393,10 @@ impl Bundles {
         mut room: Room<'_>,
         entry: CompositionEntry,
     ) -> Result<Lease, ExecError> {
-        // A fill reserves the charge of the lengths its stream declares, and an
-        // entry is made only of a stream that arrived at exactly those.
-        debug_assert!(self.weigh.of(entry.charged) <= room.bytes);
+        // A fill reserves the charge of the lengths its stream declares at the
+        // floor of the most descriptors, and an entry is made only of a stream
+        // that arrived at exactly those, holding no more.
+        debug_assert!(self.weigh.of(entry.charged, entry.descriptors()) <= room.bytes);
         let lease = self.leased(Arc::new(entry));
         let kept = {
             // The room goes back and the entry takes it in one step: a fill
@@ -358,6 +417,40 @@ impl Bundles {
             return Err(ExecError::Unknown);
         }
         Ok(lease)
+    }
+
+    /// Charge `entry` with the model file a round just filled into it, out of
+    /// the room that fill reserved: the room goes back and the entry takes it
+    /// in one step, as [`keep`](Self::keep) does. The cache weighs the entry
+    /// again around the change, which is why the charge changes nowhere else.
+    ///
+    /// Unknown if the entry is no longer in the cache, which a round holding it
+    /// rules out ([`InUse`]).
+    pub(crate) fn grow(
+        &self,
+        entry: &Arc<CompositionEntry>,
+        mut room: Room<'_>,
+    ) -> Result<(), ExecError> {
+        let bytes = room.bytes;
+        let grown = {
+            let mut reserved = self.reserved();
+            *reserved -= bytes;
+            room.bytes = 0;
+            self.entries.set_capacity(self.budget - *reserved);
+            let charged = self
+                .entries
+                .entry(&entry.slot, Some(Duration::ZERO), |_, kept| {
+                    kept.files_charged.fetch_add(bytes, Ordering::Relaxed);
+                    EntryAction::Retain(())
+                });
+            matches!(charged, EntryResult::Retained(()))
+        };
+        drop(room);
+        if !grown {
+            debug!("grow: the entry was gone");
+            return Err(ExecError::Unknown);
+        }
+        Ok(())
     }
 
     /// Let go of every entry no round holds and no round has used for `idle`,
@@ -472,17 +565,19 @@ impl Drop for Room<'_> {
 mod tests {
     use std::fs::File;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
 
     use engine_executor::admission::DEFAULT_BUNDLE_CACHE_ENTRIES;
     use engine_rpc::CompositionKey;
+    use engine_types::composition::ModelFile;
     use tokio::time::Instant;
 
     use super::{
         Bundles, Claim, CompositionEntry, Cwasm, ExecError, LastUsed, Lease,
         MAX_DECODED_META_BYTES, MAX_IDLE, META_WEIGHT_MARGIN, Slot, entry_charge, fill_charge,
     };
+    use crate::model_files::ModelFileSlot;
 
     /// A cache of `BUDGET` bytes at the default entry count.
     fn cache() -> Bundles {
@@ -509,6 +604,10 @@ mod tests {
             charged,
             embedded_imports: Vec::new().into(),
             catalogs: Vec::new().into(),
+            models: Vec::new().into(),
+            files: Box::new([]),
+            files_charged: AtomicU64::new(0),
+            slot: slot(""),
             used: LastUsed::now(),
             warmed: AtomicBool::new(false),
         }
@@ -520,7 +619,8 @@ mod tests {
         fill_with(bundles, name, entry(ENTRY)).await
     }
 
-    async fn fill_with(bundles: &Bundles, name: &str, entry: CompositionEntry) -> Lease {
+    async fn fill_with(bundles: &Bundles, name: &str, mut entry: CompositionEntry) -> Lease {
+        entry.slot = slot(name);
         let Ok(Claim::Fill(fill)) = bundles.claim(&slot(name), Instant::now() + WAIT).await else {
             panic!("{name} is neither kept nor being filled");
         };
@@ -760,5 +860,55 @@ mod tests {
         bundles.evict_idle(IDLE);
         assert!(!present(&bundles, "unused") && !present(&bundles, "used"));
         assert_eq!(bundles.warmed_evicted(), 1);
+    }
+
+    /// A model file a round fills is charged to its entry out of the room its
+    /// fill reserved: the cache's weight grows by the file, its capacity comes
+    /// back whole, and the entry, once no round holds it, goes with its file's
+    /// charge as well.
+    #[tokio::test]
+    async fn a_filled_model_file_is_charged_to_its_entry() {
+        const FILE: u64 = 64 * MIB;
+        let bundles = cache();
+        let mut with_file = entry(ENTRY);
+        let file = ModelFile {
+            sha256: [1; 32],
+            length: FILE,
+        };
+        with_file.files = vec![ModelFileSlot::new(file).expect("a model file")].into();
+        let lease = fill_with(&bundles, "models", with_file).await;
+        let before = bundles.entries.weight();
+
+        let room = bundles
+            .reserve_bytes(FILE, Instant::now() + WAIT)
+            .await
+            .expect("there is room");
+        assert_eq!(bundles.entries.capacity(), BUDGET - FILE);
+        bundles
+            .grow(lease.entry(), room)
+            .expect("the entry is held");
+        assert_eq!(bundles.entries.weight(), before + FILE);
+        assert_eq!(bundles.entries.capacity(), BUDGET);
+
+        drop(lease);
+        assert!(bundles.entries.remove(&slot("models")).is_some());
+        assert_eq!(
+            bundles.entries.weight(),
+            0,
+            "the charge left with the entry"
+        );
+    }
+
+    /// A model file no budget could hold is refused before anything waits for
+    /// room.
+    #[tokio::test]
+    async fn a_model_file_past_the_budget_is_refused() {
+        let bundles = cache();
+        assert!(matches!(
+            bundles
+                .reserve_bytes(BUDGET + 1, Instant::now() + WAIT)
+                .await,
+            Err(ExecError::Unknown)
+        ));
     }
 }

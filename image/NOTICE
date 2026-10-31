@@ -1,11 +1,19 @@
 The guest image aggregates software under several licenses.
 
-  Component   Version    License        Build recipe and configuration
-  ---------   --------   ------------   ------------------------------
-  Linux       6.18.55    GPL-2.0-only   image/kernel/
-  BusyBox     1.38.0     GPL-2.0-only   image/init/
+  Component      Version    License        Build recipe and configuration
+  ------------   --------   ------------   ------------------------------
+  Linux          6.18.55    GPL-2.0-only   image/kernel/
+  BusyBox        1.38.0     GPL-2.0-only   image/init/
+  ONNX Runtime   1.31.1     MIT            image/onnxruntime/
 
-Neither is modified; the recipes above pin upstream sources by digest and select
-which parts are built. They also satisfy GPL-2.0 section 3.
+Linux and BusyBox are not modified; the recipes above pin upstream sources by
+digest and select which parts are built. They also satisfy GPL-2.0 section 3.
+
+ONNX Runtime is built from its upstream source, with the patches its own build
+applies, and linked into the process the execution worker runs a model in. Its
+build takes third-party sources, each pinned by digest in its recipe: abseil,
+flatbuffers and onnx (Apache-2.0), protobuf, re2 and cpuinfo (BSD), date,
+nlohmann json, GSL and SafeInt (MIT), Boost.Mp11 (BSL-1.0) and Eigen
+(MPL-2.0).
 
 Enclavid's own components are Apache-2.0 — see ../LICENSE.

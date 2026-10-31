@@ -88,10 +88,11 @@ pub struct ChildLimits {
     ///
     /// What it bounds is a child an escape turns into native code: each task is
     /// a PID out of the guest's, and a few children creating threads without end
-    /// would leave the supervisor none to start the next child with. Boot checks
-    /// that the most children a runner runs at once, each at this cap, still
-    /// leave half the guest's PIDs. Too few, and an honest child cannot start
-    /// its runtime — its rounds fail, and nothing else does.
+    /// would leave the supervisor none to start the next child with. Each
+    /// coprocess beside a child has the same cap under its own identity. Boot
+    /// checks that the most processes a runner holds at once, each at this cap,
+    /// still leave half the guest's PIDs. Too few, and an honest child cannot
+    /// start its runtime — its rounds fail, and nothing else does.
     pub tasks: u64,
 }
 
@@ -166,15 +167,16 @@ struct Counters {
 }
 
 impl Cgroups {
-    /// Build the children's group for a runner that runs at most `children` at
-    /// once, at `limits`, or `None` where this build does not hold its children
-    /// to their memory.
+    /// Build the children's group for a runner that holds at most `processes`
+    /// at once — its children, and the coprocesses each may have beside it — at
+    /// `limits`, or `None` where this build does not hold its children to their
+    /// memory.
     ///
     /// Under `guest-hardening` — the feature the measured image builds with — it
     /// never returns `None`: it builds the group or stops the boot, naming the
     /// step that failed on the log device. It checks before it builds: what is
     /// mounted is cgroup v2 with the memory controller, this process sits at the
-    /// root, `children` at their task cap leave half the guest's PIDs, the
+    /// root, `processes` at their task cap leave half the guest's PIDs, the
     /// kernel log is closed to every reader without CAP_SYSLOG and `/dev/kmsg`
     /// to every reader at all, `/proc` shows no process another's entries
     /// unless it may trace it, and the limits hold one child at its max with at
@@ -185,12 +187,12 @@ impl Cgroups {
     ///
     /// Elsewhere it is `None`: a developer's machine has no cgroup v2 root this
     /// process may build under, and making one needs root.
-    pub fn create(limits: ChildLimits, children: usize) -> Option<Self> {
+    pub fn create(limits: ChildLimits, processes: usize) -> Option<Self> {
         #[cfg(all(target_os = "linux", feature = "guest-hardening"))]
         {
             use safe_logger::{debug, error_and_panic, reason, safe};
 
-            match Self::build(limits, children) {
+            match Self::build(limits, processes) {
                 Ok(cgroups) => Some(cgroups),
                 Err((step, e)) => {
                     debug!("{e}");
@@ -210,13 +212,13 @@ impl Cgroups {
         }
         #[cfg(not(all(target_os = "linux", feature = "guest-hardening")))]
         {
-            let _ = (limits, children);
+            let _ = (limits, processes);
             None
         }
     }
 
     #[cfg(all(target_os = "linux", feature = "guest-hardening"))]
-    fn build(limits: ChildLimits, children: usize) -> Result<Self, (&'static str, io::Error)> {
+    fn build(limits: ChildLimits, processes: usize) -> Result<Self, (&'static str, io::Error)> {
         use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::DirBuilderExt;
 
@@ -227,7 +229,7 @@ impl Cgroups {
             (step, io::Error::other(step))
         }
 
-        if children == 0 || limits.max > limits.total || limits.tasks == 0 {
+        if processes == 0 || limits.max > limits.total || limits.tasks == 0 {
             return Err(refused(
                 "checking the limits hold one child at its max, with a task to run in",
             ));
@@ -264,9 +266,9 @@ impl Cgroups {
             .trim()
             .parse::<u64>()
             .map_err(|_| refused("reading the guest's PID bound"))?;
-        if (children as u64).saturating_mul(limits.tasks) > pid_max / 2 {
+        if (processes as u64).saturating_mul(limits.tasks) > pid_max / 2 {
             return Err(refused(
-                "fitting every child's task cap within half the guest's PIDs",
+                "fitting every process's task cap within half the guest's PIDs",
             ));
         }
         // With the kernel log open to reading — and it is, to any identity,
@@ -408,9 +410,39 @@ impl Cgroups {
         };
         Ok((group, placement))
     }
+
+    /// What a coprocess started beside a child is given before its exec: the
+    /// child's group at `group`, so the two are held to the child's max
+    /// together and killed together, and an identity of its own. Numbered by
+    /// the same count as every child's, so it is no child's and no other
+    /// coprocess's: against it the child can neither signal nor trace the
+    /// coprocess, nor the coprocess the child. `inherited` is the length of
+    /// what the coprocess maps from the supervisor's memory; see
+    /// [`oom_score_adj`].
+    pub(crate) fn coprocess(&self, group: &Path, inherited: u64) -> io::Result<Placement> {
+        let n = self.made.fetch_add(1, Ordering::Relaxed);
+        let uid = child_uid(n)
+            .ok_or_else(|| io::Error::other("every child identity of this boot is used"))?;
+        let procs = std::fs::OpenOptions::new()
+            .write(true)
+            .open(group.join("cgroup.procs"))?;
+        Ok(Placement {
+            procs: Some(OwnedFd::from(procs)),
+            oom_score_adj: oom_score_adj(inherited, self.limits.total)
+                .to_string()
+                .into_bytes(),
+            uid,
+            tasks: self.limits.tasks,
+        })
+    }
 }
 
 impl ChildGroup {
+    /// The group's directory, which a coprocess started beside the child joins.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Kill everything in the group. The kernel delivers `SIGKILL` to every task
     /// in it and to any task forked into it while it does. Best effort: a
     /// failure here is followed by the wait for the group to empty.

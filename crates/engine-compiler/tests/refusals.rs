@@ -57,11 +57,12 @@ fn compile(policy: Vec<u8>, plugins: Vec<Vec<u8>>) -> Result<BundleParts, Compil
         .map(|(i, wasm)| PluginInstance {
             package: format!("test:plugin{i}"),
             wasm,
+            model_layers: Vec::new(),
         })
         .collect();
     Compiler::new()
         .expect("a compiler")
-        .compile_to_parts(policy, plugins)
+        .compile_to_parts(policy, Vec::new(), plugins)
         .map_err(|e| {
             e.downcast_ref::<CompileFault>()
                 .unwrap_or_else(|| panic!("a failure that names no fault: {e:?}"))

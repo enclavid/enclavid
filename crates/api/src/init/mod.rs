@@ -3,7 +3,8 @@
 //! Preparing a session ([`prepare`]) — asking the registry whether its bearers
 //! may pull what it pins, having its composition pulled, decrypted with its keys
 //! and compiled, held by the execution-worker, and its props read there against
-//! the type the composition declares — happens before any of the policy's code
+//! the type the composition declares, and its model files kept in L2 —
+//! happens before any of the policy's code
 //! runs: ahead of the first round when the consumer or the applicant asks for a
 //! warmup ([`warm`]), and before each round until one round's write records it
 //! done. When it fails for a reason that is the consumer's setup and asking
@@ -32,21 +33,26 @@ use storage_client::{MetadataOp, SessionStore, SetMetadata};
 use crate::boundary::ExecutionWorker;
 use crate::compositions::{Composition, Compositions, max_cwasm_bytes};
 use crate::executor::outbound_preparation;
+use crate::model_files;
 
 use pull_check::check_pull;
 
 /// Prepare `metadata`'s session to run. What has to hold before any of its
 /// policy's code does, in order: the registry lets the session's bearers pull
-/// every artifact it pins ([`check_pull`]); the execution-worker holds its
-/// composition — from its own cache, from L2, or compiled — and reads its props
-/// as the type the composition declares, into the WAVE every round of it is
-/// handed ([`settled`]).
+/// every artifact it pins ([`check_pull`]); then, side by side, the
+/// execution-worker holds its composition — from its own cache, from L2, or
+/// compiled — and reads its props as the type the composition declares, into
+/// the WAVE every round of it is handed ([`settled`]), while L2 is given every
+/// model file the composition carries that it does not hold yet
+/// ([`model_files::keep`]), so no round waits on a registry for one. Which
+/// files those are is kept with the props ([`Prepared::model_files`]).
 ///
 /// A session prepared already only has its composition held again: what a
 /// warmup asks of one whose rounds have begun.
 ///
 /// A compile another session or a warmup left in L2 spares this the pulls and
-/// the compile, never the manifests or the props.
+/// the compile, never the manifests or the props; model files left there spare
+/// it their pulls.
 pub async fn prepare(
     compositions: &Compositions,
     session_id: &str,
@@ -60,10 +66,21 @@ pub async fn prepare(
         hold(compositions, &composition, session_id, Preparing::Hold).await?;
         return Ok(prepared.clone());
     }
-    check_pull(compositions, session_id, metadata).await?;
+    let carried = check_pull(compositions, session_id, &composition).await?;
     let preparing = Preparing::Read(metadata.props.clone());
-    let read = hold(compositions, &composition, session_id, preparing).await?;
-    judged(read, metadata)
+    let (read, kept) = tokio::join!(
+        hold(compositions, &composition, session_id, preparing),
+        model_files::keep(compositions, &composition, &carried),
+    );
+    match (read, kept) {
+        // A model file that does not pull is the pins' answer, whatever the
+        // worker read.
+        (_, Err(e @ Unavailable::Init(_))) | (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+        (Ok(read), Ok(())) => judged(read, metadata).map(|prepared| Prepared {
+            model_files: model_files::carried(&carried),
+            ..prepared
+        }),
+    }
 }
 
 /// What the worker read of the props, judged. Each answer it can give is judged
@@ -164,7 +181,10 @@ fn settled(read: PropsRead) -> Result<Result<Prepared, Unavailable>, StatusCode>
             {
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
-            Ok(Ok(Prepared { props }))
+            Ok(Ok(Prepared {
+                props,
+                model_files: Vec::new(),
+            }))
         }
         PropsRead::Refused(_) | PropsRead::NotRead => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }

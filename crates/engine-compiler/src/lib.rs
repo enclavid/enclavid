@@ -20,6 +20,7 @@ mod compose;
 mod decls;
 mod disclosure_fields;
 mod icons;
+mod models;
 mod props;
 mod texts;
 
@@ -38,7 +39,9 @@ use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
 
 use engine_types::compile::{Artifact, CompileFault};
-use engine_types::composition::{EmbeddedImport, PluginInstance};
+use engine_types::composition::{
+    EmbeddedImport, ModelFile, ModelImport, ModelLayer, PluginInstance,
+};
 use engine_types::embedded::ComponentDecls;
 use engine_types::limits::MAX_EMBEDDED_SECTION_BYTES;
 
@@ -58,6 +61,10 @@ pub struct Composition {
     pub embedded_imports: Vec<EmbeddedImport>,
     /// Same as [`BundleParts::catalogs`].
     pub catalogs: Vec<([u8; 32], ComponentDecls)>,
+    /// Same as [`BundleParts::models`].
+    pub models: Vec<ModelImport>,
+    /// Same as [`BundleParts::files`].
+    pub files: Vec<ModelFile>,
 }
 
 /// The serializable output of a compile, in engine-native types (NO rpc
@@ -74,6 +81,11 @@ pub struct BundleParts {
     /// nested ones included, the policy's first — the registry-builder
     /// inputs.
     pub catalogs: Vec<([u8; 32], ComponentDecls)>,
+    /// The functions of the slots the components' models come through, each
+    /// with its resource, its `run`'s shape and its files.
+    pub models: Vec<ModelImport>,
+    /// The model files — graphs and data files — each once.
+    pub files: Vec<ModelFile>,
 }
 
 /// The compile engine: owns a wasmtime [`Engine`] configured for Cranelift
@@ -129,13 +141,20 @@ impl Compiler {
     pub fn compose(
         &self,
         policy_wasm: &[u8],
+        policy_model_layers: &[ModelLayer],
         plugins: &[PluginInstance],
     ) -> wasmtime::Result<Composition> {
-        let prepared = prepare(policy_wasm.to_vec(), lent(plugins))?;
+        let prepared = prepare(
+            policy_wasm.to_vec(),
+            policy_model_layers.to_vec(),
+            lent(plugins),
+        )?;
         Ok(Composition {
             component: self.compile(prepared.fused.bytes())?,
             embedded_imports: prepared.embedded_imports,
             catalogs: prepared.catalogs,
+            models: prepared.models,
+            files: prepared.files,
         })
     }
 
@@ -154,9 +173,10 @@ impl Compiler {
     pub fn compile_to_parts(
         &self,
         policy_wasm: Vec<u8>,
+        policy_model_layers: Vec<ModelLayer>,
         plugins: Vec<PluginInstance>,
     ) -> wasmtime::Result<BundleParts> {
-        let prepared = prepare(policy_wasm, plugins)?;
+        let prepared = prepare(policy_wasm, policy_model_layers, plugins)?;
         let cwasm = self
             .engine
             .precompile_component(prepared.fused.bytes())
@@ -165,6 +185,8 @@ impl Compiler {
             cwasm,
             embedded_imports: prepared.embedded_imports,
             catalogs: prepared.catalogs,
+            models: prepared.models,
+            files: prepared.files,
         })
     }
 }
@@ -174,6 +196,8 @@ struct Prepared {
     fused: Package,
     embedded_imports: Vec<EmbeddedImport>,
     catalogs: Vec<([u8; 32], ComponentDecls)>,
+    models: Vec<ModelImport>,
+    files: Vec<ModelFile>,
 }
 
 /// The composition a policy and its pinned plugins make: every artifact's
@@ -188,8 +212,17 @@ struct Prepared {
 /// `MAX_EMBEDDED_SECTION_BYTES`; then one whose catalogs break their format, or
 /// claim a slot or disclosure fields they may not, one that does not fuse, and
 /// one that, fused, still imports what nothing serves or declares props, icons,
-/// slots or disclosure fields in a shape the host cannot serve.
-fn prepare(policy_wasm: Vec<u8>, plugins: Vec<PluginInstance>) -> wasmtime::Result<Prepared> {
+/// slots or disclosure fields in a shape the host cannot serve, and one whose
+/// models are not the model files its artifacts carry (`models::declared`).
+///
+/// Which artifact a slot's models are served from is read from each artifact's
+/// own imports before fusion (`models::owners`): fused, every component's
+/// import of a slot is one.
+fn prepare(
+    policy_wasm: Vec<u8>,
+    policy_model_layers: Vec<ModelLayer>,
+    mut plugins: Vec<PluginInstance>,
+) -> wasmtime::Result<Prepared> {
     let components = || {
         std::iter::once((Artifact::Policy, &policy_wasm)).chain(
             plugins
@@ -209,11 +242,33 @@ fn prepare(policy_wasm: Vec<u8>, plugins: Vec<PluginInstance>) -> wasmtime::Resu
         return Err(wasmtime::Error::new(CompileFault::CatalogsPastCap));
     }
     let mut artifacts = Vec::with_capacity(1 + plugins.len());
+    let mut imports = Vec::with_capacity(1 + plugins.len());
     for (artifact, wasm) in components() {
         let catalogs = load_embedded_nested(wasm).map_err(|e| unreadable(artifact.clone(), e))?;
+        let own = top_level_imports(wasm)
+            .map_err(|e| e.context(CompileFault::NotAComponent(artifact.clone())))?;
         artifacts.push((artifact, catalogs));
+        imports.push(own);
     }
     let slots = compose::slots(&artifacts)?;
+
+    // The model files stay here: fusion takes the components alone.
+    let layers: Vec<Vec<ModelLayer>> = std::iter::once(policy_model_layers)
+        .chain(
+            plugins
+                .iter_mut()
+                .map(|p| std::mem::take(&mut p.model_layers)),
+        )
+        .collect();
+    let carried: Vec<(&Artifact, Vec<String>, &[ModelLayer])> = artifacts
+        .iter()
+        .zip(imports)
+        .zip(&layers)
+        .map(|(((artifact, _), imports), layers)| (artifact, imports, layers.as_slice()))
+        .collect();
+    let models = models::owners(&carried).map_err(wasmtime::Error::new)?;
+    let model_layers = carried.iter().map(|&(a, _, l)| (a, l)).collect();
+    drop(carried);
 
     let plugged = !plugins.is_empty();
     let bytes = if plugged {
@@ -228,8 +283,10 @@ fn prepare(policy_wasm: Vec<u8>, plugins: Vec<PluginInstance>) -> wasmtime::Resu
             .flat_map(|(_, catalogs)| catalogs)
             .flat_map(|catalog| catalog.decls.disclosure_fields.iter().map(String::as_str))
             .collect(),
+        models,
+        model_layers,
     };
-    let (fused, embedded_imports) = compose::served(bytes, plugged, &declared)?;
+    let served = compose::served(bytes, plugged, &declared)?;
     drop(declared);
 
     let catalogs = artifacts
@@ -238,9 +295,11 @@ fn prepare(policy_wasm: Vec<u8>, plugins: Vec<PluginInstance>) -> wasmtime::Resu
         .map(|c| (c.hash, c.decls))
         .collect();
     Ok(Prepared {
-        fused,
-        embedded_imports,
+        fused: served.package,
+        embedded_imports: served.embedded_imports,
         catalogs,
+        models: served.models,
+        files: served.files,
     })
 }
 
@@ -252,6 +311,7 @@ fn lent(plugins: &[PluginInstance]) -> Vec<PluginInstance> {
         .map(|p| PluginInstance {
             package: p.package.clone(),
             wasm: p.wasm.clone(),
+            model_layers: p.model_layers.clone(),
         })
         .collect()
 }

@@ -2,7 +2,8 @@
 //! catalogs — its texts, under `i18n/` or in one `i18n.json`, and for a
 //! policy its disclosure fields — checked against the keys its WIT declares by
 //! `enclavid_embedded::embed`, the same rules the TEE holds them to at load,
-//! and what is wrong printed where it is.
+//! and what is wrong printed where it is. `validate` checks the files of its
+//! models as well ([`crate::models`]).
 //!
 //! Policies and plugins differ by their slot: a policy's is
 //! `enclavid-ext:policy`, which holds its texts and its disclosure fields, the
@@ -51,9 +52,14 @@ fn check(wit: PathBuf, i18n: PathBuf, role: Role) -> Result<Checked> {
     Ok(checked)
 }
 
-/// Lint the project in `dir`: its `wit/` and its texts at `i18n` in it.
-pub fn validate(dir: &Path, i18n: &Path, role: Role) -> Result<()> {
+/// Lint the project in `dir`: its `wit/`, its texts at `i18n` in it, and the
+/// files of its models at `models` in it ([`crate::models`]).
+pub fn validate(dir: &Path, i18n: &Path, models: &Path, role: Role) -> Result<()> {
     let checked = check(dir.join("wit"), dir.join(i18n), role)?;
+    let models = crate::models::check(&dir.join("wit"), &checked.slot, &dir.join(models))?;
+    for error in &models.errors {
+        println!("error: {error}");
+    }
     println!("{} {} at {}:", role.label(), checked.package, dir.display());
     println!("  slot: enclavid-ext:{}", checked.slot);
     println!(
@@ -70,11 +76,13 @@ pub fn validate(dir: &Path, i18n: &Path, role: Role) -> Result<()> {
             checked.disclosure_fields.as_ref().map_or(0, Vec::len)
         );
     }
-    if !checked.report.ok() {
-        bail!(
-            "{} error(s) found — fix before pushing.",
-            checked.report.errors.len()
-        );
+    println!("  models: {}", models.models.len());
+    for model in &models.models {
+        println!("    {model}");
+    }
+    let errors = checked.report.errors.len() + models.errors.len();
+    if errors > 0 {
+        bail!("{errors} error(s) found — fix before pushing.");
     }
     match checked.report.warnings.len() {
         0 => println!("✓ Declarations valid."),

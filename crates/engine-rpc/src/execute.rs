@@ -25,10 +25,19 @@
 //! keyless one; a return value is not. `compat_token` keys L2, so a fleet
 //! version bump repartitions the cache instead of feeding a stale cwasm to an
 //! incompatible runtime.
+//!
+//! What the worker does ask for mid-round is an item of what api already chose
+//! for that round: a capture of the session ([`RemoteCallbacks::media_load`]),
+//! and a model file of the composition ([`RemoteCallbacks::model_file_load`]),
+//! the first time any round of it runs a model of that file. It says WHEN, and
+//! which of the items the round names; api answers only for an item it chose,
+//! so the worker never names what api fetches.
 
+use fleet_stream::{BlobHeader, bin};
 use serde::{Deserialize, Serialize};
 pub use serde_bytes::ByteBuf;
 
+use engine_types::limits::MAX_MODEL_FILE_BYTES;
 use engine_types::props::PropsRefusal;
 use session_types::{Decision, Event, Prompt, SessionState};
 
@@ -221,6 +230,43 @@ pub struct MediaBytes(#[serde(with = "serde_bytes")] pub Vec<u8>);
 /// [`CallbackError`], so this one value is all the reply ever says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Committed;
+
+/// What [`RemoteCallbacks::model_file_load`] names a model file by: the SHA-256
+/// the composition's bundle gives it. api serves only a file its pins name for
+/// the round's composition.
+///
+/// One CBOR byte string, for the reason [`MediaHash`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelFileDigest(#[serde(with = "serde_bytes")] pub [u8; 32]);
+
+/// A model file as [`RemoteCallbacks::model_file_load`] hands it back: its
+/// length and digest in the reply, its bytes on a `bin` end beside it — one
+/// stream, held to both before the worker keeps a byte of it.
+///
+/// `deny_unknown_fields` for the reason [`RunRequest`] carries it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelFileStream {
+    pub header: BlobHeader<MAX_MODEL_FILE_BYTES>,
+    pub body: bin::Receiver,
+}
+
+impl ModelFileStream {
+    /// Receive the file whole into `sink`: held to its header's length and
+    /// digest, within `deadline`, and with no gap between pieces past `idle`.
+    /// On an error what is in `sink` is not the file.
+    pub async fn receive<W: std::io::Write + ?Sized>(
+        self,
+        sink: &mut W,
+        deadline: std::time::Duration,
+        idle: std::time::Duration,
+    ) -> Result<(), fleet_stream::StreamError> {
+        let whole = fleet_stream::recv_exact(self.body, &self.header, idle, sink);
+        tokio::time::timeout(deadline, whole)
+            .await
+            .map_err(|_| fleet_stream::StreamError::Deadline)?
+    }
+}
 
 /// One reducer round's inputs on the wire. `session_state`/`event`/`props` are the
 /// round's already-decrypted inputs (the seal key stays orchestrator-side).
@@ -466,6 +512,16 @@ pub trait RemoteCallbacks {
         state: Padded<SessionState>,
         decision: Padded<Option<Decision>>,
     ) -> Result<Committed, CallbackError>;
+
+    /// One of the model files of the composition the round runs, by the digest
+    /// its bundle gives it: a graph or a data file of a model the round runs,
+    /// the first time any round of the composition runs it. api serves only a
+    /// file its pins name for the round's composition, so the worker says when,
+    /// and which of the files api chose — never what to fetch.
+    async fn model_file_load(
+        &self,
+        digest: ModelFileDigest,
+    ) -> Result<ModelFileStream, CallbackError>;
 }
 
 /// The execute boundary as a remote trait. The execution-worker serves it; the
@@ -586,12 +642,12 @@ pub trait RemoteChild {
 
 /// The supervisor-served callback boundary a per-round engine-executor-child calls BACK
 /// during a run. The supervisor already resolved and primed the bundle before
-/// spawning the child, so the process running UNTRUSTED wasm has nothing to ask
-/// for and is handed no way to ask — blast-radius minimization. The supervisor's
-/// relay implements this and forwards each call to api, which holds the seal key,
-/// through [`Callbacks`](crate::Callbacks) at its own end. The two traits carry the
-/// same pair of methods, `media_load` / `session_change`, so the relay is a
-/// straight forward.
+/// spawning the child, so the process running UNTRUSTED wasm has no composition to
+/// ask for and is handed no way to ask — blast-radius minimization. The supervisor's
+/// relay implements this and forwards `media_load` / `session_change` to api, which
+/// holds the seal key, through [`Callbacks`](crate::Callbacks) at its own end — a
+/// straight forward. `start_model` it answers itself: it fills its own files of the
+/// model, asking api for each the first time, and starts the model's process.
 #[remoc::rtc::remote]
 pub trait RemoteChildCallbacks {
     /// Rehydrate a stored blob by content hash (api unseals). `None` = miss.
@@ -606,6 +662,13 @@ pub trait RemoteChildCallbacks {
         state: SessionState,
         decision: Option<Decision>,
     ) -> Result<Committed, CallbackError>;
+
+    /// Start the process the round's model `index` runs in, in the order of its
+    /// bundle's models, with its files filled first if no round has filled them:
+    /// answered once the process is started, so the child writes to its socket
+    /// to that process only then. Once per model a round; a second start of
+    /// the same model is refused.
+    async fn start_model(&self, index: u32) -> Result<(), CallbackError>;
 }
 
 #[cfg(test)]
@@ -665,6 +728,12 @@ mod execute_tests {
             let decision = decision.open().map_err(|_| CallbackError)?;
             self.state_calls.lock().unwrap().push(decision);
             Ok(Committed)
+        }
+        async fn model_file_load(
+            &self,
+            _digest: ModelFileDigest,
+        ) -> Result<ModelFileStream, CallbackError> {
+            Err(CallbackError)
         }
     }
 
@@ -957,6 +1026,8 @@ mod execute_tests {
             &crate::bundle::BundleMeta {
                 embedded_imports: Vec::new(),
                 catalogs: Vec::new(),
+                models: Vec::new(),
+                files: Vec::new(),
             },
             &mut meta,
         )

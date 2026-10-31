@@ -45,7 +45,10 @@ fn a_refusal_is_kept_only_before_a_round_and_as_the_props_bear_it_out() {
     assert_eq!(fault.problem, PropsProblem::OutOfRange);
 
     let started = SessionMetadata {
-        prepared: Some(Prepared { props: None }),
+        prepared: Some(Prepared {
+            props: None,
+            model_files: Vec::new(),
+        }),
         ..metadata.clone()
     };
     assert!(matches!(

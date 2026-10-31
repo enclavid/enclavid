@@ -1,0 +1,53 @@
+[package]
+name = "engine-executor-inference"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The COPROCESS a round's models run in: started beside the round at its word,
+# in the round's group under an identity of its own, it loads the composition's
+# models into ONNX Runtime and answers the round's requests over the socket the
+# two were paired with. ONNX Runtime lives here and nowhere else in the fleet,
+# so the process that parses and runs a vendor's graph holds a round's input to
+# a model and the models' weights, and nothing of the round's own.
+#
+# Its own package, like engine-executor-child and for the same reason: this
+# manifest is the statement of what the process can name. Built on its own
+# (`cargo build -p …`), as image/app builds every part.
+#
+# ONNX Runtime is LINKED, never loaded from a path: a guest has no dynamic
+# loader. `ort-sys` takes the build from `ORT_LIB_LOCATION` — image/onnxruntime's
+# `static` output, archives linked in; or, where a host has a loader and
+# `ORT_PREFER_DYNAMIC_LINK` is set, a shared library. Without either it checks
+# but does not link.
+[features]
+# Nothing to compile in: the coprocess says nothing, in any build. Here so a
+# role's debug build asks every one of its parts for the same feature.
+debug = []
+
+[dependencies]
+# The graph's check and the protocol.
+enclavid-inference = { path = "../inference" }
+# A release candidate, so pinned exactly. `half` for tensors and weights of
+# 16-bit floats.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "half"] }
+half = "2.7"
+# A weight's bytes read as its elements where they lie in the mapped file.
+zerocopy = "0.8"
+# The graph and the data file mapped rather than read: a mapping has no file
+# offset, which a descriptor shared with the supervisor would.
+memmap2 = "0.9"
+libc = "0.2"
+
+# The filter it narrows itself with once its models are loaded.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.4"
+
+[dev-dependencies]
+enclavid-inference = { path = "../inference", features = ["test-models"] }
+# Started as a runner starts it: on a socket, its files handed from fd 3, under
+# the coprocess's filters.
+engine-supervisor = { path = "../engine-supervisor" }
+tokio = { version = "1", features = ["macros", "rt"] }
+tempfile = "3"

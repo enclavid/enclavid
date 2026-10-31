@@ -1,0 +1,10 @@
+package enclavid:test-models@0.1.0;
+
+/// A policy that runs its models, through the policy's own slot, over tensors
+/// it makes itself. The round's state is what the models gave back, so the
+/// test can hold it to what their processes computed.
+world policy {
+    import enclavid-ext:policy/models@0.1.0;
+
+    export enclavid:policy/policy@0.1.0;
+}

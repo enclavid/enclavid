@@ -74,7 +74,7 @@ use crate::compiler::Compiled;
 /// metadata's encoding (a field of `BundleMeta` added / removed / retyped, or a
 /// nested serde type's shape changes). A bump re-partitions the cache: old
 /// entries get a different `cache_id` and are never read (guard 1).
-const CACHE_FORMAT_VERSION: u32 = 3;
+const CACHE_FORMAT_VERSION: u32 = 4;
 
 /// What an entry's first read takes, before where its metadata ends is known:
 /// one sealed segment. What precedes the metadata is in it, and an ordinary
