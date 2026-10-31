@@ -364,7 +364,7 @@ fn host_tensor(resolve: &Resolve, mut id: TypeId) -> Option<Element> {
 
 /// The model files in `dir` — every `.onnx` and `.onnx.data` — by name; none
 /// where there is no `dir`.
-fn files(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+pub(crate) fn files(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(Vec::new());
     };

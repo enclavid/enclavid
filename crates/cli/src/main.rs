@@ -249,10 +249,11 @@ enum PluginCommand {
 #[derive(Subcommand)]
 enum OciCommand {
     /// Push an Enclavid artifact (a policy OR a plugin wasm component)
-    /// to an OCI registry as a single `application/wasm` layer. Role-
-    /// agnostic: the bytes are self-contained (the `policy` / `plugin
-    /// embed` step welded the embedded declarations in), push just ships
-    /// them; the TEE re-verifies the layer digest on pull.
+    /// to an OCI registry as an `application/wasm` layer, and the files of
+    /// its models beside it. Role-agnostic: the bytes are self-contained
+    /// (the `policy` / `plugin embed` step welded the embedded declarations
+    /// in), push just ships them; the TEE re-verifies every layer digest on
+    /// pull.
     ///
     /// Registry auth resolution (first match wins):
     ///   1. `--auth "<scheme> <token>"` flag.
@@ -292,6 +293,14 @@ enum OciCommand {
         /// into the artifact's digest-pinned `enc.keys.*` annotation.
         #[arg(long)]
         kbs_resource: Option<String>,
+
+        /// The models' files to push beside the component: every
+        /// `<function>.onnx` and `<function>.onnx.data` in this directory,
+        /// each a layer of its own named for its file — as `validate
+        /// --models` checks them. Pushed in the clear, so not with
+        /// `--encrypt`. Omit for an artifact with no models.
+        #[arg(long)]
+        models: Option<PathBuf>,
     },
 }
 
@@ -454,7 +463,11 @@ async fn main() -> Result<()> {
                 auth,
                 encrypt,
                 kbs_resource,
-            } => commands::oci::push::run(artifact, reference, auth, encrypt, kbs_resource).await,
+                models,
+            } => {
+                commands::oci::push::run(artifact, reference, auth, encrypt, kbs_resource, models)
+                    .await
+            }
         },
         Commands::Session { command } => match command {
             SessionCommand::Create {

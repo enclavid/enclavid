@@ -1,6 +1,6 @@
 //! `enclavid oci push` — uploads an Enclavid artifact (a policy OR a
-//! plugin wasm component) to an OCI registry as a single
-//! `application/wasm` layer.
+//! plugin wasm component) to an OCI registry as an `application/wasm`
+//! layer, and beside it the files of its models, each a layer of its own.
 //!
 //! Role-agnostic: a policy and a plugin are the same kind of thing on
 //! the wire. The artifact is self-contained (the `policy` / `plugin`
@@ -11,11 +11,13 @@
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use engine_types::limits::MAX_MODEL_FILE_BYTES;
 use oci_client::Reference;
+use oci_client::annotations::ORG_OPENCONTAINERS_IMAGE_TITLE;
 use oci_client::client::{Client, ClientConfig, ClientProtocol, Config, ImageLayer};
 use oci_client::manifest::OciImageManifest;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,10 +26,17 @@ use enclavid_crypto::ocicrypt;
 use crate::EncryptMode;
 use crate::registry_auth;
 
+#[cfg(test)]
+mod tests;
+
 /// Wasm layer media type — unified for policies and plugins. Matches
 /// the TEE-side constant in `crates/api/src/policy_pull.rs::WASM_LAYER`
 /// and `wkg`'s pull whitelist (see `[[project-wkg-wac-poc-findings]]`).
 const WASM_LAYER_MEDIA_TYPE: &str = "application/wasm";
+/// A model file's layer media type: a weight layer neither archived nor
+/// compressed, as the CNCF ModelPack specification names one, a graph and
+/// its data file alike. Matches `crates/api/src/policy_pull.rs::MODEL_LAYER`.
+const MODEL_LAYER_MEDIA_TYPE: &str = "application/vnd.cncf.model.weight.v1.raw";
 const POLICY_CONFIG_MEDIA_TYPE: &str = "application/vnd.enclavid.policy.config.v1+json";
 /// Keyprovider name for the KBS resource-URI annotation
 /// (`org.opencontainers.image.enc.keys.provider.enclavid-kbs`).
@@ -39,6 +48,7 @@ pub async fn run(
     auth_override: Option<String>,
     encrypt: Option<EncryptMode>,
     kbs_resource: Option<String>,
+    models: Option<PathBuf>,
 ) -> Result<()> {
     let parsed_ref = Reference::from_str(&reference)
         .with_context(|| format!("invalid OCI reference: {reference}"))?;
@@ -54,6 +64,16 @@ pub async fn run(
     //   --auth flag → ENCLAVID_REGISTRY_AUTH → ~/.docker/config.json
     let auth_creds = registry_auth::resolve(&registry, auth_override.as_deref()).await?;
 
+    // The models' files go in the clear, so an encrypted artifact carries
+    // none rather than one whose weights are readable beside it.
+    if encrypt.is_some() && models.is_some() {
+        bail!("model files cannot be encrypted: push them without --encrypt");
+    }
+    let model_layers = match &models {
+        Some(dir) => model_layers(dir)?,
+        None => Vec::new(),
+    };
+
     let bytes =
         std::fs::read(&artifact).with_context(|| format!("reading {}", artifact.display()))?;
 
@@ -61,7 +81,8 @@ pub async fn run(
     let (layer_bytes, layer_media_type, layer_annotations) =
         build_layer(bytes, encrypt, kbs_resource.as_deref())?;
     let wasm_layer = ImageLayer::new(layer_bytes, layer_media_type, layer_annotations);
-    let layers: Vec<ImageLayer> = vec![wasm_layer];
+    let mut layers: Vec<ImageLayer> = vec![wasm_layer];
+    layers.extend(model_layers);
 
     // Empty config blob — manifest digest depends only on layer content, not on
     // mutable metadata like name/tag. Discrimination of artifact kind is done
@@ -100,6 +121,14 @@ pub async fn run(
         repository,
         tag
     );
+    for layer in &layers[1..] {
+        let name = layer
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(ORG_OPENCONTAINERS_IMAGE_TITLE))
+            .map_or("", String::as_str);
+        println!("  with {name} ({} bytes)", layer.data.len());
+    }
     println!("Digest:     {digest}");
     println!("Pinned ref: {registry}/{repository}@{digest}");
     println!();
@@ -132,6 +161,42 @@ fn default_tag() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("ts-{secs}")
+}
+
+/// The model files in `dir` — every `<function>.onnx` and
+/// `<function>.onnx.data` — each a layer of its own named for its file, in
+/// the order of their names. None there is an error: `--models` names files
+/// to push.
+fn model_layers(dir: &Path) -> Result<Vec<ImageLayer>> {
+    let files = crate::models::files(dir)?;
+    if files.is_empty() {
+        bail!(
+            "no model files (`<function>.onnx`, `<function>.onnx.data`) in {}",
+            dir.display()
+        );
+    }
+    files
+        .into_iter()
+        .map(|(name, path)| {
+            let len = std::fs::metadata(&path)
+                .with_context(|| format!("reading {}", path.display()))?
+                .len();
+            if len > MAX_MODEL_FILE_BYTES {
+                bail!(
+                    "{}: past the {MAX_MODEL_FILE_BYTES} bytes a model file may hold",
+                    path.display()
+                );
+            }
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            let title = BTreeMap::from([(ORG_OPENCONTAINERS_IMAGE_TITLE.to_string(), name)]);
+            Ok(ImageLayer::new(
+                bytes,
+                MODEL_LAYER_MEDIA_TYPE.to_string(),
+                Some(title),
+            ))
+        })
+        .collect()
 }
 
 fn detect_protocol(registry: &str) -> ClientProtocol {
