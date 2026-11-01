@@ -1,13 +1,9 @@
-# Plugins workspace — a SEPARATE build unit from the host `crates/*`
-# workspace: everything here targets wasm32-unknown-unknown (sandboxed
-# components), not the native host. Shared generic crates (`onnx-core`,
-# `vision`, `face-detect`) + the plugin crates that build on them.
-#
-# well-known stays standalone (its own [workspace]) — it has no ML, so it
-# doesn't depend on the shared crates.
+# The plugins' workspace — a SEPARATE build unit from the host `crates/*`
+# workspace: every crate here is a plugin, built for wasm32-unknown-unknown
+# (`.cargo/config.toml`) into a sandboxed component.
 [workspace]
 resolver = "2"
-members = ["onnx-core", "vision", "face-detect", "preprocess", "face-age"]
+members = ["well-known", "vision", "face-detect", "face-age"]
 
 [profile.release]
 opt-level = "s"

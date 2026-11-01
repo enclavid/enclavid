@@ -1,7 +1,7 @@
 //! `enclavid:face-detect` — locate the face in a `decoded-frame` → `face`
 //! geometry the crop consumers (age, liveness, face-match) reuse.
 //!
-//! Detection runs ONCE here; the pixels stay in the preprocess sandbox (this
+//! Detection runs ONCE here; the pixels stay in the vision plugin (this
 //! plugin pulls the detector input via `decoded-frame.region`), and only
 //! WHERE the face is (bbox + landmarks) crosses the boundary — each consumer
 //! derives its own crop. The detector lives in [`detect`]: a compile-time

@@ -1,150 +1,51 @@
 //! Face-age inference on a face crop pulled from the decoded frame: shape the
 //! crop as the model takes it (per-model profile) → run the model → decode.
-//! The JPEG decode and the crop moved OUT to the preprocess / face-detect
-//! plugins — this plugin asks `decoded-frame.region` (in [`lib`]) for the face
-//! patch at the size its profile wants, and holds only the model-specific
+//! The JPEG decode and the face's box are other plugins' (vision,
+//! face-detect) — this plugin asks `decoded-frame.region` (in [`lib`]) for the
+//! face patch at the size its profile wants, and holds only the model-specific
 //! adapter: input format (size, channel order, normalization), which model,
 //! and output decode.
 //!
 //! Profile selection is compile-time:
-//!   * default            → [`placeholder`]: a no-op graph in the sandbox, no
-//!                          weights.
-//!   * `--features age-googlenet` → [`age_googlenet`]: in the sandbox, the
-//!                          real reference (224² BGR mean-subtracted, 8-bucket
-//!                          Adience).
+//!   * default → [`placeholder`]: no model, an age from the crop's brightness
+//!     (dev/tests).
 //!   * `--features mivolo` → [`mivolo`]: MiVOLO, run by the host from the
-//!                          model files beside this component (384²
-//!                          letterboxed RGB, ImageNet-normalized, the face
-//!                          beside an empty body).
+//!     model files beside this component (384² letterboxed RGB,
+//!     ImageNet-normalized, the face beside an empty body).
 
-#[cfg(all(feature = "mivolo", feature = "age-googlenet"))]
-compile_error!("one age model per artifact: `mivolo` or `age-googlenet`");
-
-#[cfg(feature = "age-googlenet")]
-use age_googlenet as profile;
 #[cfg(feature = "mivolo")]
 use mivolo as profile;
-#[cfg(not(any(feature = "age-googlenet", feature = "mivolo")))]
+#[cfg(not(feature = "mivolo"))]
 use placeholder as profile;
 
 /// Context margin the crop box is grown by (about its center) before the
-/// model sees it — Adience-class models want some hair/chin/background.
+/// model sees it.
 pub const MARGIN: f32 = profile::MARGIN;
 
 /// Estimate age (years) from the face crop `region` reads: a source rect of
 /// `crop` pixels, resampled to the size it is asked for, row-major RGB8.
-/// `None` if the model fails to build/run, or gives no age.
+/// `None` if the face is unusable, or the model gives no age.
 pub fn estimate(crop: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<f32> {
     profile::estimate(crop, region)
 }
 
-/// A profile run in the sandbox, on a square crop of its input side.
+// ---------------------------------------------------------------------
+// Profile: placeholder (default) — no model
+// ---------------------------------------------------------------------
+
 #[cfg(not(feature = "mivolo"))]
-mod in_sandbox {
-    use onnx_core::Model;
-
-    /// Estimate age (years) from an `input×input` row-major RGB8 face crop,
-    /// through the profile's `normalize`, model and `decode`.
-    pub fn estimate(
-        input: usize,
-        rgb: &[u8],
-        normalize: fn(&[u8]) -> Vec<f32>,
-        build: fn() -> onnx_core::TractResult<Model>,
-        decode: fn(&[f32]) -> f32,
-    ) -> Option<f32> {
-        let chw = normalize(rgb);
-        let model = build().ok()?;
-        let out = onnx_core::run(&model, &[1, 3, input, input], chw).ok()?;
-        Some(decode(&out))
-    }
-}
-
-// ---------------------------------------------------------------------
-// Profile: placeholder (default) — no weights, shape-correct no-op
-// ---------------------------------------------------------------------
-
-#[cfg(not(any(feature = "age-googlenet", feature = "mivolo")))]
 mod placeholder {
-    use onnx_core::Model;
-
-    pub const INPUT: usize = 64;
+    /// The side the crop is read at: enough for a mean.
+    pub const SIDE: u32 = 8;
     pub const MARGIN: f32 = 1.0;
 
+    /// An age from the crop's mean brightness, from 0 for black to 60 for
+    /// white — so the pipeline runs end to end with no model, and a gray
+    /// frame reads 30.
     pub fn estimate(_crop: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<f32> {
-        let side = INPUT as u32;
-        super::in_sandbox::estimate(INPUT, &region(side, side), normalize, build, decode)
-    }
-
-    /// RGB, normalized `[0,1]`, NCHW `[1,3,64,64]`.
-    pub fn normalize(rgb: &[u8]) -> Vec<f32> {
-        let plane = INPUT * INPUT;
-        let mut chw = vec![0f32; 3 * plane];
-        for i in 0..plane {
-            chw[i] = rgb[i * 3] as f32 / 255.0;
-            chw[plane + i] = rgb[i * 3 + 1] as f32 / 255.0;
-            chw[2 * plane + i] = rgb[i * 3 + 2] as f32 / 255.0;
-        }
-        chw
-    }
-
-    /// No-op graph so the pipeline runs without weights.
-    pub fn build() -> onnx_core::TractResult<Model> {
-        onnx_core::noop(&[1, 3, INPUT, INPUT])
-    }
-
-    /// Placeholder decode: map mean brightness to a plausible age band.
-    pub fn decode(out: &[f32]) -> f32 {
-        let mean = out.iter().sum::<f32>() / out.len().max(1) as f32;
-        mean * 30.0
-    }
-}
-
-// ---------------------------------------------------------------------
-// Profile: age_googlenet (real reference, `--features age-googlenet`)
-// ---------------------------------------------------------------------
-
-#[cfg(feature = "age-googlenet")]
-mod age_googlenet {
-    use onnx_core::Model;
-
-    pub const INPUT: usize = 224;
-    /// +40% context: the Adience faces the model trained on are loosely
-    /// cropped, so the detector's tight box is grown to match.
-    pub const MARGIN: f32 = 1.4;
-
-    /// The ONNX age model, embedded from the `FACE_AGE_MODEL` build-time
-    /// path (a build-input, never committed).
-    const WEIGHTS: &[u8] = include_bytes!(env!("FACE_AGE_MODEL"));
-
-    pub fn estimate(_crop: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<f32> {
-        let side = INPUT as u32;
-        super::in_sandbox::estimate(INPUT, &region(side, side), normalize, build, decode)
-    }
-
-    /// BGR channel order, Caffe mean-subtract `[104,117,123]`, no scale,
-    /// NCHW `[1,3,224,224]` — age_googlenet's documented preprocessing.
-    pub fn normalize(rgb: &[u8]) -> Vec<f32> {
-        const MEAN: [f32; 3] = [104.0, 117.0, 123.0]; // B, G, R
-        let plane = INPUT * INPUT;
-        let mut chw = vec![0f32; 3 * plane];
-        for i in 0..plane {
-            chw[i] = rgb[i * 3 + 2] as f32 - MEAN[0]; // B plane
-            chw[plane + i] = rgb[i * 3 + 1] as f32 - MEAN[1]; // G plane
-            chw[2 * plane + i] = rgb[i * 3] as f32 - MEAN[2]; // R plane
-        }
-        chw
-    }
-
-    pub fn build() -> onnx_core::TractResult<Model> {
-        onnx_core::load(WEIGHTS)
-    }
-
-    /// Adience 8-group softmax → expected age (Σ pᵢ·centerᵢ). Coarse — the
-    /// policy treats this as a buffer/pre-filter signal, not a precise 18
-    /// cut, and escalates the buffer zone to the document DOB.
-    pub fn decode(out: &[f32]) -> f32 {
-        const CENTERS: [f32; 8] = [1.0, 5.0, 10.0, 17.5, 28.5, 40.5, 50.5, 65.0];
-        out.iter().zip(CENTERS).map(|(p, c)| p * c).sum()
+        let rgb = region(SIDE, SIDE);
+        let mean = rgb.iter().map(|&v| f32::from(v)).sum::<f32>() / rgb.len().max(1) as f32;
+        Some(mean / 255.0 * 60.0)
     }
 }
 
@@ -238,21 +139,19 @@ mod mivolo {
 
 #[cfg(test)]
 mod tests {
-    // Full inference tail on a flat gray patch through the in-sandbox
-    // profile (placeholder by default, age_googlenet under the feature). Age
-    // must land in a sane range. Run native:
+    // The placeholder reads a gray crop as 30, at the size it asks for. Run
+    // native:
     //   cargo test -p face-age --target aarch64-apple-darwin
     #[cfg(not(feature = "mivolo"))]
     #[test]
-    fn estimate_gray_patch() {
+    fn the_placeholder_reads_gray_as_thirty() {
         use super::{estimate, profile};
-        let side = profile::INPUT;
-        let age = estimate((side as u32, side as u32), |w, h| {
+        let age = estimate((300, 300), |w, h| {
+            assert_eq!((w, h), (profile::SIDE, profile::SIDE));
             vec![128u8; (w * h * 3) as usize]
         })
         .expect("estimate");
-        eprintln!("age={age}");
-        assert!((0.0..=100.0).contains(&age), "age out of range: {age}");
+        assert!((age - 30.1).abs() < 0.1, "{age}");
     }
 
     // The MiVOLO profile's shaping, native — the model itself runs on the

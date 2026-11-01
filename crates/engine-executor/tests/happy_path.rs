@@ -1014,8 +1014,8 @@ async fn a_capture_step_carries_the_icon_it_named() {
 async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let runner = TestRunner::new().unwrap();
 
-    // CORE: policy + well-known + preprocess + face-age baked. The policy
-    // still imports extra/tag (unsatisfied — a runtime import of the core).
+    // CORE: policy + well-known + vision + face-age baked. The policy still
+    // imports extra/tag (unsatisfied — a runtime import of the core).
     let baked = vec![
         PluginInstance {
             package: fixtures::WELL_KNOWN_PACKAGE.to_string(),
@@ -1023,8 +1023,8 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
             model_layers: Vec::new(),
         },
         PluginInstance {
-            package: fixtures::PREPROCESS_PACKAGE.to_string(),
-            wasm: fixtures::preprocess().to_vec(),
+            package: fixtures::VISION_PACKAGE.to_string(),
+            wasm: fixtures::vision().to_vec(),
             model_layers: Vec::new(),
         },
         PluginInstance {
@@ -1236,8 +1236,8 @@ fn assert_media(status: &RunStatus, ctx: &str) {
 
 /// A single-step fake capture result (both passport and selfie specs are
 /// single-shot, so the clip fills step index 0). The frame is a REAL
-/// encoded JPEG so the face-age plugin's in-sandbox decode → preprocess →
-/// inference pipeline (run on the selfie round) has something to decode.
+/// encoded JPEG so the in-sandbox decode → detect → estimate pipeline (run
+/// on the selfie round) has something to decode.
 fn fake_capture() -> MediaResult {
     capture_of(jpeg_frame())
 }

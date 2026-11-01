@@ -8,30 +8,13 @@ publish = false
 crate-type = ["cdylib"]
 
 [features]
-# Build the real reference artifact: embeds an ONNX age model from the
-# FACE_AGE_MODEL build-time path (include_bytes) and switches the profile to
-# age_googlenet's format (224² BGR mean-subtracted, 8-bucket decode).
-# Default (off) = placeholder graph, no model, tests green, no committed
-# weights. Enable with a model present:
-#   FACE_AGE_MODEL=/abs/age_googlenet.onnx cargo build --features age-googlenet ...
-age-googlenet = []
 # Build the artifact whose model the host runs: the `with-models` world, which
 # imports this plugin's slot, `enclavid-ext:face-age/models`, whose `age` is
 # MiVOLO. The model is not in the component: its graph and data file are
 # pushed beside it as the layers `age.onnx` and `age.onnx.data`. Profile: 384²
 # letterboxed RGB, ImageNet-normalized, the face beside an empty body.
+# Default (off) = placeholder (an age from the crop's brightness, no model).
 mivolo = []
 
 [dependencies]
 wit-bindgen = "0.57"
-# Generic in-sandbox ONNX runtime. face-age no longer decodes or crops —
-# preprocess hands it a `decoded-frame`, from which it pulls its crop via
-# `region`; the plugin holds only the per-model normalize + model + decode.
-onnx-core = { path = "../onnx-core" }
-
-# getrandom (pulled transitively via onnx-core → tract for hashmap seeding)
-# has no backend on wasm32-unknown-unknown; the `custom` feature + the no-op
-# registration in lib.rs cover it. Scoped to wasm so native builds (unit
-# tests) use the OS backend.
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2", features = ["custom"] }

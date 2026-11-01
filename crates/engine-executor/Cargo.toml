@@ -230,11 +230,11 @@ wasm-encoder = "0.247"
 wit-component = { version = "0.247", features = ["dummy-module"] }
 wit-parser = "0.247"
 enclavid-embedded = { path = "../embedded" }
-# fake_capture emits a real JPEG so the face-age plugin's in-sandbox
-# decode → preprocess → inference pipeline has something to decode.
+# fake_capture emits a real JPEG so the vision plugin's in-sandbox
+# decode → detect → estimate pipeline has something to decode.
 jpeg-encoder = "0.6"
 # The fixture catalog + the shared build→componentize→embed pipeline — the SAME
-# code `xtask push-plugins` uses, so tested and shipped artifacts match.
+# code `xtask build-plugins` uses, so tested and shipped artifacts match.
 xtask = { path = "../../xtask" }
 # A vendor-style model built in code, which the worker's model test runs in
 # the coprocess.

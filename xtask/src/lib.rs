@@ -2,7 +2,7 @@
 //! its core module, and embed its catalogs.
 //!
 //! This is the ONE home for the build→componentize→embed pipeline. Both
-//! the `xtask push-plugins` binary and the engine's `happy_path` test call
+//! `cargo xtask build-plugins` and the engine's `happy_path` test call
 //! these, so a published artifact is byte-identical to the one the test
 //! exercises in-process (same `wit_component::ComponentEncoder`, same
 //! embedding as `enclavid {policy,plugin} embed`) — no drift between "what
