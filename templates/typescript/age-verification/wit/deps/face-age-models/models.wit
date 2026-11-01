@@ -1,0 +1,16 @@
+package enclavid-ext:face-age@0.1.0;
+
+/// The models this artifact carries beside its component, each run by the
+/// host in a process of its own.
+interface models {
+    use enclavid:host/tensors@0.1.0.{tensor-f32};
+
+    /// MiVOLO: a face and a body, six planes of 384² side by side, in; two
+    /// gender logits and the age, scaled, out.
+    resource age-model {
+        run: func(input: borrow<tensor-f32>) -> tensor-f32;
+    }
+
+    /// MiVOLO on the face, from `age.onnx` and `age.onnx.data`.
+    age: func() -> age-model;
+}

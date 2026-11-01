@@ -1,0 +1,90 @@
+package enclavid:well-known@0.1.0;
+
+/// DisplayField helpers for canonical KYC fields.
+///
+/// Each helper takes one of the POLICY's disclosure fields — the
+/// `disclosure-field-ref` it mints from a case of the `key` in its
+/// `enclavid-ext:policy/disclosure-fields`, the single source of truth for
+/// what's disclosable to the consumer — and returns a `display-field` of
+/// that field, labelled with THIS PLUGIN's text for it (applicant-facing).
+///
+/// A helper is meant for the field of its own name: `passport-number`
+/// labels a passport number, so the policy passes it its
+/// `passport-number` field. The consent screen shows every field's key
+/// beside its label, so a field passed to another field's helper is on
+/// the applicant's screen for them to see.
+interface disclosure-fields {
+    use enclavid:host/types@0.1.0.{disclosure-field-ref};
+    use enclavid:shared-types/disclosure@0.1.0.{display-field};
+
+    // ─── Document identifiers ──────────────────────────────────────
+
+    passport-number: func(field: disclosure-field-ref, value: string) -> display-field;
+    id-card-number: func(field: disclosure-field-ref, value: string) -> display-field;
+    drivers-license-number: func(field: disclosure-field-ref, value: string) -> display-field;
+    document-issuing-country: func(field: disclosure-field-ref, value: string) -> display-field;
+    document-expiry: func(field: disclosure-field-ref, value: string) -> display-field;
+    document-issued: func(field: disclosure-field-ref, value: string) -> display-field;
+
+    // ─── Identity ──────────────────────────────────────────────────
+
+    given-name: func(field: disclosure-field-ref, value: string) -> display-field;
+    family-name: func(field: disclosure-field-ref, value: string) -> display-field;
+    full-name: func(field: disclosure-field-ref, value: string) -> display-field;
+    date-of-birth: func(field: disclosure-field-ref, value: string) -> display-field;
+    sex: func(field: disclosure-field-ref, value: string) -> display-field;
+    nationality: func(field: disclosure-field-ref, value: string) -> display-field;
+
+    // ─── Contact / location ────────────────────────────────────────
+
+    residence-country: func(field: disclosure-field-ref, value: string) -> display-field;
+    address: func(field: disclosure-field-ref, value: string) -> display-field;
+    email: func(field: disclosure-field-ref, value: string) -> display-field;
+    phone: func(field: disclosure-field-ref, value: string) -> display-field;
+
+    // ─── Other ─────────────────────────────────────────────────────
+
+    tax-id: func(field: disclosure-field-ref, value: string) -> display-field;
+}
+
+/// Pre-baked MediaSpec / CaptureStep helpers for common KYC documents.
+///
+/// `*_spec` functions return a complete `media-spec` for
+/// `action::render(prompt::media)`. For multi-side documents (id-card, drivers-license)
+/// the spec includes both sides as separate steps.
+///
+/// `*_step` functions return individual `capture-step`s for tenants
+/// who want to compose custom flows mixing sides.
+///
+/// The texts inside the returned records (labels, instructions) are
+/// THIS PLUGIN's own (`enclavid-ext:well-known/i18n`) — applicant-facing
+/// only, no policy whitelist needed — and the icons are the host's own
+/// (`enclavid:host-icons/icons`).
+interface capture {
+    use enclavid:shared-types/capture@0.1.0.{capture-step, media-spec};
+
+    // Full MediaSpecs
+    passport: func() -> media-spec;
+    id-card: func() -> media-spec;
+    drivers-license: func() -> media-spec;
+    selfie: func() -> media-spec;
+
+    // Individual steps for multi-side documents
+    id-card-front-step: func() -> capture-step;
+    id-card-back-step: func() -> capture-step;
+    drivers-license-front-step: func() -> capture-step;
+    drivers-license-back-step: func() -> capture-step;
+}
+
+world well-known {
+    export disclosure-fields;
+    export capture;
+
+    // Every ref the plugin returns comes from the host:
+    //   * `i18n` — this plugin's own texts, through its slot, which the
+    //     host serves from the catalog its embedding writes in.
+    //   * `icons` — one of the names the frontend draws.
+    // A field's key is the policy's: the helpers take it.
+    import enclavid-ext:well-known/i18n@0.1.0;
+    import enclavid:host-icons/icons@0.1.0;
+}

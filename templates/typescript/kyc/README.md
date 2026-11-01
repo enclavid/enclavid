@@ -19,6 +19,8 @@ npm run build
 enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
 ```
 
+`npm run format` formats `src/` with Prettier.
+
 ## What is where
 
 - `src/policy.ts` — the policy. Its state is a value of its own type; see

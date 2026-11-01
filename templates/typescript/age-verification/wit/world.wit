@@ -1,0 +1,42 @@
+package local:policy@0.1.0;
+
+// What this policy imports and exports. Every interface imported here is
+// the policy's own, the host's, or a plugin's; the consumer pins an
+// implementation of each plugin package (here `enclavid:well-known`,
+// `enclavid:vision`, `enclavid:face-detect` and `enclavid:face-age`) when it
+// creates a session.
+world policy {
+    // The selfie's capture spec.
+    import enclavid:well-known/capture@0.1.0;
+    // The selfie decoded once, into a frame the face plugins read from.
+    import enclavid:vision/decode@0.1.0;
+    // The face found in the frame, and the age read from it.
+    import enclavid:face-detect/detect@0.1.0;
+    import enclavid:face-age/check@0.1.0;
+    import enclavid-ext:policy/props@0.1.0;
+    // The round's randomness, which `@enclavid/policy-quickjs` serves
+    // `Math.random` and `crypto.getRandomValues` from.
+    import wasi:random/random@0.2.12;
+    export enclavid:policy/policy@0.1.0;
+}
+
+// The policy's slot: what the host serves this policy, of types that are its
+// own, so they are written here rather than taken from `deps/`. It shows no
+// texts of its own and discloses no field, so its slot holds its props alone.
+package enclavid-ext:policy@0.1.0 {
+    // The props this policy takes: what the consumer sets for each session.
+    // The interface's name and its `get` are the host's, which serves them;
+    // the record is this policy's own. The consumer gives the props as a JSON
+    // object keyed by these field names when it creates a session, and a
+    // session whose props do not fit the record fails.
+    interface props {
+        record props {
+            // The age the face must be read as, at least, for the session to
+            // be approved. A face's age is read to within a few years either
+            // way, so a check of 18 may ask for more.
+            min-age: u8,
+        }
+
+        get: func() -> props;
+    }
+}
