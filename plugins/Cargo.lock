@@ -196,8 +196,6 @@ dependencies = [
 name = "face-detect"
 version = "0.1.0"
 dependencies = [
- "getrandom",
- "onnx-core",
  "wit-bindgen",
 ]
 

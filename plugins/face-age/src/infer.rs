@@ -162,6 +162,11 @@ mod mivolo {
     /// The detector's box as it is: MiVOLO takes the face as a detector
     /// boxes it.
     pub const MARGIN: f32 = 1.0;
+    /// The smallest face, in pixels of the frame it is cut from, that MiVOLO
+    /// reads an age from. A smaller one is blown up to the graph's side and
+    /// read far off: a face of 42 read 17 at 13 pixels and 31 at 23, and 38
+    /// to 44 from 48 up — a margin above that for a real camera's blur.
+    pub const MIN_SIDE: u32 = 64;
     /// ImageNet's per-channel mean and spread, RGB, over values in `[0, 1]`.
     const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
     const STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -170,6 +175,9 @@ mod mivolo {
     const MIDDLE: f32 = 61.0;
 
     pub fn estimate(crop: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<f32> {
+        if crop.0.min(crop.1) < MIN_SIDE {
+            return None;
+        }
         let (w, h) = fit(crop)?;
         let face = letterbox(&region(w, h), w as usize, h as usize)?;
         let input = TensorF32::new(&[1, 6, SIDE as u64, SIDE as u64], &input(&face));
@@ -252,7 +260,16 @@ mod tests {
     //   cargo test -p face-age --features mivolo --target aarch64-apple-darwin
     #[cfg(feature = "mivolo")]
     mod mivolo {
-        use super::super::mivolo::{SIDE, decode, fit, input, letterbox};
+        use super::super::mivolo::{MIN_SIDE, SIDE, decode, estimate, fit, input, letterbox};
+
+        /// A face smaller than MiVOLO reads gives no age, and its pixels are
+        /// never asked for.
+        #[test]
+        fn a_face_too_small_gives_no_age() {
+            let never = |_, _| -> Vec<u8> { unreachable!("no pixels read") };
+            assert_eq!(estimate((MIN_SIDE - 1, 300), never), None);
+            assert_eq!(estimate((300, MIN_SIDE - 1), never), None);
+        }
 
         /// A crop fits the square whole, its longer side on the square's,
         /// its aspect kept — scaled up or down alike.

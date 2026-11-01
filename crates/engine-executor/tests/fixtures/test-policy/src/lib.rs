@@ -250,9 +250,11 @@ impl Guest for TestPolicy {
                 // Vision DAG on the SELFIE frame: preprocess decodes it into a
                 // plugin-owned `decoded-frame`, face-detect locates the `face`,
                 // face-age reads its crop and estimates. The policy threads the
-                // handles.
+                // handles. Half the camera's size leaves a selfie's face a
+                // hundred pixels and more, which an age model reads; an eighth
+                // leaves it a few dozen.
                 let age = result.clip.frames.first().and_then(|frame| {
-                    preprocess::decode(frame, preprocess::Scale::Eighth).and_then(|df| {
+                    preprocess::decode(frame, preprocess::Scale::Half).and_then(|df| {
                         face_detect::detect(&df).and_then(|face| face_age::estimate(&df, &face))
                     })
                 });

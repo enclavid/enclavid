@@ -25,3 +25,12 @@ world face-detect {
     import enclavid:vision/types@0.1.0;
     export detect;
 }
+
+/// A detector whose model the host runs: the model's graph is a layer beside
+/// the component — named for the function of its slot that hands the model
+/// out — and only the frame, at the model's side, leaves the sandbox, to that
+/// model, in a process of its own.
+world with-models {
+    include face-detect;
+    import enclavid-ext:face-detect/models@0.1.0;
+}

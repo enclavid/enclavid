@@ -5,28 +5,22 @@
 //! plugin pulls the detector input via `decoded-frame.region`), and only
 //! WHERE the face is (bbox + landmarks) crosses the boundary — each consumer
 //! derives its own crop. The detector lives in [`detect`]: a compile-time
-//! profile (placeholder / blazeface). Default builds run the weightless
-//! placeholder (whole frame as the face); `--features blazeface` embeds
-//! MediaPipe BlazeFace.
+//! profile. Default builds run the weightless placeholder (whole frame as the
+//! face); built with `blazeface`, MediaPipe's BlazeFace is run by the host from
+//! the model file beside this component.
 
 mod detect;
 
-// getrandom has no backend on wasm32-unknown-unknown. Only the blazeface
-// profile pulls tract (which seeds hashmaps over trusted model keys), so a
-// deterministic no-op is safe there; the placeholder build pulls no tract, so
-// the registration is gated on the feature. Wasm-only; native tests use the
-// OS backend.
-#[cfg(all(target_arch = "wasm32", feature = "blazeface"))]
-getrandom::register_custom_getrandom!(no_entropy);
-#[cfg(all(target_arch = "wasm32", feature = "blazeface"))]
-fn no_entropy(buf: &mut [u8]) -> Result<(), getrandom::Error> {
-    buf.fill(0);
-    Ok(())
-}
-
+#[cfg(not(feature = "blazeface"))]
 wit_bindgen::generate!({
     path: "wit",
     world: "enclavid:face-detect/face-detect@0.1.0",
+    generate_all,
+});
+#[cfg(feature = "blazeface")]
+wit_bindgen::generate!({
+    path: "wit",
+    world: "enclavid:face-detect/with-models@0.1.0",
     generate_all,
 });
 
@@ -41,12 +35,10 @@ impl Guest for FaceDetect {
         if dim.width == 0 || dim.height == 0 {
             return None;
         }
-        // The whole frame stretched to the detector's input — a stretch
-        // preserves normalized coords, so the box maps 1:1 back onto the
-        // frame. `region(0,0,w,h, INPUT, INPUT)` == a whole-frame stretch.
-        let s = detect::INPUT as u32;
-        let rgb = frame.region(0, 0, dim.width, dim.height, s, s);
-        let d = detect::detect(&rgb)?;
+        // The whole frame, at the size the profile asks for it.
+        let d = detect::detect((dim.width, dim.height), |w, h| {
+            frame.region(0, 0, dim.width, dim.height, w, h)
+        })?;
         Some(Face {
             bbox: Bbox {
                 x: d.bbox[0],

@@ -1,26 +1,21 @@
-//! Face-detection logic — the per-model profile (input size, normalization,
-//! output decode). Works on an ALREADY-RESIZED `INPUT×INPUT` RGB8 patch (the
-//! plugin pulls the whole frame stretched to the detector input via
-//! `decoded-frame.region` — a stretch preserves normalized coords, so the
-//! returned box maps 1:1 back onto the frame). Returns an internal
-//! [`Detection`]; [`crate`]'s WIT glue maps it to the shared `face`.
-//! Bindgen-free.
+//! Face-detection logic — the per-model profile: how the frame is shaped for
+//! the detector, which detector, and how its answer maps back onto the frame.
+//! The plugin hands a profile the frame's size and a `region` that reads the
+//! whole frame, resampled to the size it is asked for; the profile returns an
+//! internal [`Detection`], which [`crate`]'s WIT glue maps to the shared
+//! `face`. Bindgen-free but for the model the host runs.
 //!
 //! Profile selection is compile-time:
-//!   * default            → [`placeholder`]: whole frame as the "face", no
-//!                          model, no weights (dev/tests).
-//!   * `--features blazeface` → [`blazeface`]: MediaPipe BlazeFace (front,
-//!                          128², RGB `[-1,1]`) embedded from
-//!                          `FACE_DETECT_MODEL`; the export bakes
-//!                          anchor-decode + sigmoid + NMS into the graph.
+//!   * default → [`placeholder`]: whole frame as the "face", no model
+//!     (dev/tests).
+//!   * `--features blazeface` → [`blazeface`]: MediaPipe BlazeFace (short
+//!     range, 128², RGB `[-1,1]`), run by the host from the model file beside
+//!     this component; its graph does the anchor decoding, sigmoid and NMS.
 
-#[cfg(not(feature = "blazeface"))]
-use placeholder as profile;
 #[cfg(feature = "blazeface")]
 use blazeface as profile;
-
-/// The detector's square input side. The plugin asks `region` for `INPUT²`.
-pub const INPUT: usize = profile::INPUT;
+#[cfg(not(feature = "blazeface"))]
+use placeholder as profile;
 
 /// A detected face in NORMALIZED `[0,1]` coords over the source frame.
 pub struct Detection {
@@ -31,10 +26,11 @@ pub struct Detection {
     pub score: f32,
 }
 
-/// Detect the single most prominent face from an `INPUT×INPUT` RGB8 patch.
-/// `None` = no usable face → retake.
-pub fn detect(rgb: &[u8]) -> Option<Detection> {
-    profile::detect(rgb)
+/// Detect the single most prominent face in a frame of `size` pixels, read
+/// through `region`: the whole frame, resampled to the size it is asked for,
+/// row-major RGB8. `None` = no usable face → retake.
+pub fn detect(size: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<Detection> {
+    profile::detect(size, region)
 }
 
 // ---------------------------------------------------------------------
@@ -45,12 +41,13 @@ pub fn detect(rgb: &[u8]) -> Option<Detection> {
 mod placeholder {
     use super::Detection;
 
-    /// Arbitrary — the placeholder ignores the pixels.
-    pub const INPUT: usize = 64;
-
     /// The whole frame as the "face", so the pipeline runs weightless —
-    /// cropping the full box reproduces a centered square crop.
-    pub fn detect(_rgb: &[u8]) -> Option<Detection> {
+    /// cropping the full box reproduces a centered square crop. The pixels
+    /// are not read.
+    pub fn detect(
+        _size: (u32, u32),
+        _region: impl FnOnce(u32, u32) -> Vec<u8>,
+    ) -> Option<Detection> {
         Some(Detection {
             bbox: [0.0, 0.0, 1.0, 1.0],
             landmarks: Vec::new(),
@@ -60,84 +57,228 @@ mod placeholder {
 }
 
 // ---------------------------------------------------------------------
-// Profile: blazeface (real, `--features blazeface`)
+// Profile: BlazeFace, run by the host (`--features blazeface`)
 // ---------------------------------------------------------------------
 
 #[cfg(feature = "blazeface")]
 mod blazeface {
     use super::Detection;
-    use onnx_core::{Input, Model};
+    use crate::enclavid::host::tensors::{TensorF32, TensorI64};
+    use crate::enclavid_ext::face_detect::models;
 
-    pub const INPUT: usize = 128;
-    // Post-process thresholds this export takes as graph inputs. Conservative
-    // conf (single frontal selfie); MediaPipe's default IoU; a small det cap.
+    /// The graph's square input side.
+    pub const SIDE: u32 = 128;
+    // The thresholds the graph decodes with, fed as its inputs: MediaPipe's
+    // confidence and overlap for this model, and room for a few faces — the
+    // largest is the one taken.
     const CONF: f32 = 0.5;
     const IOU: f32 = 0.3;
     const MAX_DET: i64 = 25;
+    /// The values of one face in the graph's answer: its box's corners, `y`
+    /// before `x`, then six keypoints `(x, y)`.
+    const ROW: usize = 16;
 
-    /// The BlazeFace ONNX, embedded from the `FACE_DETECT_MODEL` build-time
-    /// path (a build-input, never committed).
-    const WEIGHTS: &[u8] = include_bytes!(env!("FACE_DETECT_MODEL"));
-
-    /// `rgb` is the whole frame stretched to `INPUT²`. Normalize to `[-1,1]`
-    /// (NCHW) and run — the graph does anchor-decode + sigmoid + NMS, so the
-    /// output is a flat `N×16` row set: `top_y, top_x, bot_y, bot_x` then 6
-    /// `(x, y)` keypoints, all normalized `[0,1]`. `N = 0` → `None`.
-    ///
-    /// `x/127.5 - 1.0` is LOAD-BEARING and silent if wrong: this export does
-    /// NO in-graph normalization (verified by graph trace) and the weights
-    /// were trained on `[-1,1]` (the README's `/255` is wrong; golden-
-    /// validated by anatomically-correct landmarks on a real portrait).
-    pub fn detect(rgb: &[u8]) -> Option<Detection> {
-        let plane = INPUT * INPUT;
-        let mut chw = vec![0f32; 3 * plane];
-        for i in 0..plane {
-            chw[i] = rgb[i * 3] as f32 / 127.5 - 1.0;
-            chw[plane + i] = rgb[i * 3 + 1] as f32 / 127.5 - 1.0;
-            chw[2 * plane + i] = rgb[i * 3 + 2] as f32 / 127.5 - 1.0;
-        }
-        let model = build().ok()?;
-        let out = onnx_core::run_multi(
-            &model,
-            vec![
-                Input::F32(vec![1, 3, INPUT, INPUT], chw),
-                Input::F32(vec![1], vec![CONF]),
-                Input::I64(vec![1], vec![MAX_DET]),
-                Input::F32(vec![1], vec![IOU]),
-            ],
-        )
-        .ok()?;
-        // Most prominent = largest area.
-        let best = out.chunks_exact(16).max_by(|a, b| area(a).total_cmp(&area(b)))?;
-        let (top_y, top_x, bot_y, bot_x) = (best[0], best[1], best[2], best[3]);
-        let landmarks = best[4..16].chunks_exact(2).map(|p| (p[0], p[1])).collect();
-        Some(Detection {
-            bbox: [top_x, top_y, (bot_x - top_x).max(0.0), (bot_y - top_y).max(0.0)],
-            landmarks,
-            // This export folds conf-thresholding into the graph and emits no
-            // per-box score, so every returned box already cleared `CONF`.
-            score: 1.0,
-        })
+    pub fn detect(size: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<Detection> {
+        let fit = Fit::of(size)?;
+        let square = fit.square(&region(fit.w, fit.h))?;
+        let side = u64::from(SIDE);
+        let rows = models::detector()
+            .run(
+                &TensorF32::new(&[1, 3, side, side], &input(&square)),
+                &TensorF32::new(&[1], &[CONF]),
+                &TensorI64::new(&[1], &[MAX_DET]),
+                &TensorF32::new(&[1], &[IOU]),
+            )
+            .data();
+        // The most prominent face: the largest. No face, no row.
+        let best = rows
+            .chunks_exact(ROW)
+            .max_by(|a, b| area(a).total_cmp(&area(b)))?;
+        Some(fit.detection(best))
     }
 
+    /// Where a frame lies on the graph's square: resampled to `w×h`, its
+    /// aspect kept, centered, the rest black — as MediaPipe letterboxes a
+    /// frame for this model. A stretched frame would show the detector a face
+    /// of another shape, and have it boxed so.
+    pub(super) struct Fit {
+        pub w: u32,
+        pub h: u32,
+        left: u32,
+        top: u32,
+    }
+
+    impl Fit {
+        /// How a frame of `w×h` fits the square. `None` for an empty one.
+        pub(super) fn of((w, h): (u32, u32)) -> Option<Fit> {
+            if w == 0 || h == 0 {
+                return None;
+            }
+            let side = SIDE as f32;
+            let r = (side / w as f32).min(side / h as f32);
+            let scaled = |n: u32| ((n as f32 * r).round() as u32).clamp(1, SIDE);
+            let (w, h) = (scaled(w), scaled(h));
+            Some(Fit {
+                w,
+                h,
+                left: (SIDE - w) / 2,
+                top: (SIDE - h) / 2,
+            })
+        }
+
+        /// `rgb`, `w×h`, in its place on the black square. `None` for pixels
+        /// that are not `w×h`.
+        pub(super) fn square(&self, rgb: &[u8]) -> Option<Vec<u8>> {
+            let (w, side) = (self.w as usize, SIDE as usize);
+            if rgb.len() != w * self.h as usize * 3 {
+                return None;
+            }
+            let mut square = vec![0u8; side * side * 3];
+            for (y, row) in rgb.chunks_exact(w * 3).enumerate() {
+                let at = ((self.top as usize + y) * side + self.left as usize) * 3;
+                square[at..at + w * 3].copy_from_slice(row);
+            }
+            Some(square)
+        }
+
+        /// A row of the graph's answer, over the square, as a detection over
+        /// the frame, held within it.
+        pub(super) fn detection(&self, row: &[f32]) -> Detection {
+            let side = SIDE as f32;
+            let x = |v: f32| ((v * side - self.left as f32) / self.w as f32).clamp(0.0, 1.0);
+            let y = |v: f32| ((v * side - self.top as f32) / self.h as f32).clamp(0.0, 1.0);
+            let (x0, y0, x1, y1) = (x(row[1]), y(row[0]), x(row[3]), y(row[2]));
+            Detection {
+                bbox: [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)],
+                landmarks: row[4..ROW]
+                    .chunks_exact(2)
+                    .map(|p| (x(p[0]), y(p[1])))
+                    .collect(),
+                // The graph thresholds the confidence itself and gives no
+                // score: every face it keeps cleared `CONF`.
+                score: 1.0,
+            }
+        }
+    }
+
+    /// The graph's input from the square: its RGB planes in `[-1, 1]`, NCHW
+    /// `[1, 3, SIDE, SIDE]`. The range is load-bearing and silent if wrong:
+    /// the graph does no normalization of its own, and its weights were
+    /// trained on `[-1, 1]` — `[0, 1]` still runs, and boxes faces a little
+    /// off.
+    pub(super) fn input(square: &[u8]) -> Vec<f32> {
+        let plane = (SIDE * SIDE) as usize;
+        let mut chw = vec![0f32; 3 * plane];
+        for (i, pixel) in square.chunks_exact(3).enumerate() {
+            for (c, &value) in pixel.iter().enumerate() {
+                chw[c * plane + i] = value as f32 / 127.5 - 1.0;
+            }
+        }
+        chw
+    }
+
+    /// A row's box area, over the square.
     fn area(row: &[f32]) -> f32 {
         (row[3] - row[1]).max(0.0) * (row[2] - row[0]).max(0.0)
-    }
-
-    fn build() -> onnx_core::TractResult<Model> {
-        onnx_core::load(WEIGHTS)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    // Placeholder detect on a flat patch returns the whole-frame box.
+    // The placeholder boxes the whole frame and reads no pixels. Run native:
+    //   cargo test -p face-detect --target aarch64-apple-darwin
+    #[cfg(not(feature = "blazeface"))]
     #[test]
-    fn placeholder_full_frame() {
-        let rgb = vec![128u8; INPUT * INPUT * 3];
-        let d = detect(&rgb).expect("detection");
+    fn the_placeholder_boxes_the_whole_frame() {
+        let d = super::detect((64, 48), |_, _| unreachable!("no pixels read")).expect("detection");
         assert_eq!(d.bbox, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    // BlazeFace's shaping, native — the model itself runs on the host:
+    //   cargo test -p face-detect --features blazeface --target aarch64-apple-darwin
+    #[cfg(feature = "blazeface")]
+    mod blazeface {
+        use super::super::blazeface::{Fit, SIDE, input};
+
+        /// A frame fits the square whole, its longer side on the square's, its
+        /// aspect kept, centered — scaled up or down alike.
+        #[test]
+        fn a_frame_fits_the_square_with_its_aspect() {
+            let at = |size| Fit::of(size).map(|f| (f.w, f.h));
+            assert_eq!(at((1920, 1080)), Some((128, 72)));
+            assert_eq!(at((1080, 1920)), Some((72, 128)));
+            assert_eq!(at((64, 64)), Some((128, 128)));
+            assert_eq!(at((1, 4000)), Some((1, 128)));
+            assert!(Fit::of((0, 10)).is_none());
+        }
+
+        /// A frame sits centered on black, every pixel of it where it was.
+        #[test]
+        fn a_frame_sits_centered_on_black() {
+            let fit = Fit::of((1920, 1080)).unwrap();
+            let rgb: Vec<u8> = (0..fit.w * fit.h * 3)
+                .map(|i| (i % 250) as u8 + 1)
+                .collect();
+            let square = fit.square(&rgb).expect("fits");
+            let side = SIDE as usize;
+            assert_eq!(square.len(), side * side * 3);
+            let top = (side - fit.h as usize) / 2;
+            assert_eq!(top, 28);
+            for y in 0..fit.h as usize {
+                let at = (top + y) * side * 3;
+                let from = y * fit.w as usize * 3;
+                assert_eq!(square[at..at + side * 3], rgb[from..from + side * 3]);
+            }
+            let lit = square.iter().filter(|&&v| v != 0).count();
+            assert_eq!(lit, rgb.len(), "everything else is black");
+            assert!(fit.square(&rgb[3..]).is_none());
+        }
+
+        /// A box over the square maps back onto the frame: a square on the
+        /// square is a square in the frame's pixels, and a face cut by the
+        /// frame's edge is held within it.
+        #[test]
+        fn a_box_maps_back_onto_the_frame() {
+            let fit = Fit::of((1920, 1080)).unwrap();
+            let mut row = [0f32; 16];
+            // Corners `y` before `x`: 0.25..0.5 across, 0.5..0.75 down.
+            row[..4].copy_from_slice(&[0.5, 0.25, 0.75, 0.5]);
+            row[4..6].copy_from_slice(&[0.375, 0.625]);
+            let d = fit.detection(&row);
+            let [x, y, w, h] = d.bbox;
+            let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+            assert!(close(x, 0.25) && close(y, 36.0 / 72.0), "{:?}", d.bbox);
+            assert!(
+                close(w * 1920.0, 480.0) && close(h * 1080.0, 480.0),
+                "{:?}",
+                d.bbox
+            );
+            let (kx, ky) = d.landmarks[0];
+            assert!(close(kx, 0.375) && close(ky, (0.625 * 128.0 - 28.0) / 72.0));
+            assert_eq!(d.landmarks.len(), 6);
+
+            // Into the black above the frame: held at its top edge.
+            row[..4].copy_from_slice(&[0.1, 0.25, 0.4, 0.5]);
+            let d = fit.detection(&row);
+            assert_eq!(d.bbox[1], 0.0);
+            assert!(close(d.bbox[3], (0.4 * 128.0 - 28.0) / 72.0));
+        }
+
+        /// The square's planes, in `[-1, 1]`, plane after plane.
+        #[test]
+        fn the_square_is_given_in_minus_one_to_one() {
+            let side = SIDE as usize;
+            let square = [0u8, 255, 51].repeat(side * side);
+            let chw = input(&square);
+            let plane = side * side;
+            assert_eq!(chw.len(), 3 * plane);
+            assert!(chw[..plane].iter().all(|&v| v == -1.0));
+            assert!(chw[plane..2 * plane].iter().all(|&v| v == 1.0));
+            assert!(
+                chw[2 * plane..]
+                    .iter()
+                    .all(|&v| (v - (51.0 / 127.5 - 1.0)).abs() < 1e-6)
+            );
+        }
     }
 }

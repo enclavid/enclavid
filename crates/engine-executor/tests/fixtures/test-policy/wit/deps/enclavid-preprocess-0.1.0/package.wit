@@ -9,9 +9,9 @@ interface decode {
   use enclavid:vision/types@0.1.0.{decoded-frame};
 
   /// Source-decode fidelity tier. The caller materializes the tier(s) its
-  /// plugin set needs — `eighth` for detection / age / liveness (small
-  /// inputs, low-frequency cues); higher only when a high-fidelity crop
-  /// (e.g. face-deepfake) is pinned.
+  /// plugin set needs — `eighth` for a detector alone (it reads the whole
+  /// frame at a small side); `half` and up where a model reads the face's
+  /// own crop, which an eighth of a selfie leaves a few dozen pixels.
   enum scale {
     eighth,
     quarter,

@@ -212,31 +212,46 @@ impl ModelStarter for NoModels {
     }
 }
 
-/// The one model of a composition, its graph and data file, run in the
-/// coprocess binary as the execution-worker starts it: each start counted, and
-/// each process held — killed — until the test is done with this.
-struct OneModel {
+/// The models of a composition, each its graph and data file, run in the
+/// coprocess binary as the execution-worker starts them: each start counted
+/// per model, and each process held — killed — until the test is done with
+/// this.
+struct Models {
     exe: PathBuf,
-    graph: File,
-    data: File,
-    started: AtomicUsize,
+    /// Each model's graph and data file, in the composition's order of its
+    /// models; one with no data file is handed an empty file, as the worker
+    /// hands it.
+    files: Vec<(File, File)>,
+    started: Vec<AtomicUsize>,
     processes: Mutex<Vec<tokio::process::Child>>,
 }
 
-impl ModelStarter for OneModel {
+impl Models {
+    /// How many times each model was started.
+    fn started(&self) -> Vec<usize> {
+        self.started
+            .iter()
+            .map(|n| n.load(Ordering::SeqCst))
+            .collect()
+    }
+}
+
+impl ModelStarter for Models {
     fn start(&self, index: u32) -> Pin<Box<dyn Future<Output = RunResult<File>> + Send + '_>> {
         use std::os::fd::{AsFd, OwnedFd};
 
-        self.started.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
-            if index != 0 {
-                return Err(RunError::msg("no such model"));
-            }
+            let index = index as usize;
+            let (graph, data) = self
+                .files
+                .get(index)
+                .ok_or_else(|| RunError::msg("no such model"))?;
+            self.started[index].fetch_add(1, Ordering::SeqCst);
             let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
             let process = engine_supervisor::spawn_coprocess(
                 &self.exe,
                 OwnedFd::from(theirs),
-                &[self.graph.as_fd(), self.data.as_fd()],
+                &[graph.as_fd(), data.as_fd()],
                 cfg!(target_os = "linux"),
             )?;
             self.processes.lock().unwrap().push(process);
@@ -420,26 +435,31 @@ async fn passport_selfie_consent_accept_reaches_approved_over_the_rendered_field
     listener.finished_with(Decision::Approved);
 }
 
-/// The selfie round on MiVOLO as its vendor ships it: face-age built
-/// `--features mivolo` hands its face crop to its slot's model `age`, whose
-/// graph and data file are the layers `age.onnx` and `age.onnx.data` beside
-/// it. The compile pairs them, the round starts the model's process once, and
-/// the estimate reaches the consent screen. Neither the model nor the process
-/// is in the repository: `MIVOLO_MODEL` names the directory of a vendor's
-/// `mivolo.onnx` and `mivolo.onnx.data`, and `ENCLAVID_INFERENCE_BIN` the
-/// coprocess binary built with ONNX Runtime linked in:
-///   cargo test -p engine-executor --test happy_path -- --ignored mivolo
+/// The selfie round on vendors' models as they ship them: face-detect built
+/// `--features blazeface` hands the frame to its slot's model `detector`,
+/// whose graph is the layer `detector.onnx`, and face-age built `--features
+/// mivolo` hands the face found to its slot's model `age`, whose graph and data
+/// file are the layers `age.onnx` and `age.onnx.data`. The compile pairs each
+/// with its files. A frame with no face ends its round on the detector alone,
+/// asking for a retake; a photo of a face reaches MiVOLO, and its estimate the
+/// consent screen. Neither the models, the coprocess nor the photo is in the
+/// repository: `BLAZEFACE_MODEL` names BlazeFace's graph, `MIVOLO_MODEL` the
+/// directory of a vendor's `mivolo.onnx` and `mivolo.onnx.data`, `FACE_PHOTO`
+/// a JPEG of one face as a camera frames a selfie, and
+/// `ENCLAVID_INFERENCE_BIN` the coprocess binary built with ONNX Runtime
+/// linked in:
+///   cargo test -p engine-executor --test happy_path -- --ignored vendor
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs MIVOLO_MODEL and ENCLAVID_INFERENCE_BIN"]
-async fn the_selfie_age_is_estimated_on_a_vendors_mivolo() {
-    let dir = PathBuf::from(
-        std::env::var_os("MIVOLO_MODEL").expect("MIVOLO_MODEL names MiVOLO's directory"),
-    );
+#[ignore = "needs BLAZEFACE_MODEL, MIVOLO_MODEL, FACE_PHOTO and ENCLAVID_INFERENCE_BIN"]
+async fn the_selfie_age_is_read_by_vendor_models() {
+    let path = |var: &str| {
+        PathBuf::from(std::env::var_os(var).unwrap_or_else(|| panic!("{var} is not set")))
+    };
+    let detector = path("BLAZEFACE_MODEL");
+    let dir = path("MIVOLO_MODEL");
     let (graph, data) = (dir.join("mivolo.onnx"), dir.join("mivolo.onnx.data"));
-    let exe = PathBuf::from(
-        std::env::var_os("ENCLAVID_INFERENCE_BIN")
-            .expect("ENCLAVID_INFERENCE_BIN names the coprocess binary"),
-    );
+    let photo = std::fs::read(path("FACE_PHOTO")).expect("the photo is there");
+    let exe = path("ENCLAVID_INFERENCE_BIN");
     let layer = |name: &str, path: &PathBuf, sha: u8| ModelLayer {
         name: name.into(),
         sha256: [sha; 32],
@@ -448,38 +468,72 @@ async fn the_selfie_age_is_estimated_on_a_vendors_mivolo() {
             .len(),
     };
     let mut plugins = all_plugins();
-    let face_age = plugins
-        .iter_mut()
-        .find(|p| p.package == fixtures::FACE_AGE_PACKAGE)
-        .expect("face-age is among the plugins");
-    face_age.wasm = fixtures::face_age_mivolo().to_vec();
-    face_age.model_layers = vec![
-        layer("age.onnx", &graph, 1),
-        layer("age.onnx.data", &data, 2),
-    ];
-    let model = Arc::new(OneModel {
+    for plugin in &mut plugins {
+        if plugin.package == fixtures::FACE_DETECT_PACKAGE {
+            plugin.wasm = fixtures::face_detect_blazeface().to_vec();
+            plugin.model_layers = vec![layer("detector.onnx", &detector, 1)];
+        } else if plugin.package == fixtures::FACE_AGE_PACKAGE {
+            plugin.wasm = fixtures::face_age_mivolo().to_vec();
+            plugin.model_layers = vec![
+                layer("age.onnx", &graph, 2),
+                layer("age.onnx.data", &data, 3),
+            ];
+        }
+    }
+    let models = Arc::new(Models {
         exe,
-        graph: File::open(&graph).unwrap(),
-        data: File::open(&data).unwrap(),
-        started: AtomicUsize::new(0),
+        files: vec![
+            (
+                File::open(&detector).unwrap(),
+                File::open("/dev/null").unwrap(),
+            ),
+            (File::open(&graph).unwrap(), File::open(&data).unwrap()),
+        ],
+        started: vec![AtomicUsize::new(0), AtomicUsize::new(0)],
         processes: Mutex::new(Vec::new()),
     });
-    let h = Harness::with(&plugins, model.clone());
+    let h = Harness::with(&plugins, models.clone());
     assert_eq!(
         h.models,
-        vec![ModelImport {
-            instance_name: "enclavid-ext:face-age/models@0.1.0".into(),
-            function: "age".into(),
-            resource: "age-model".into(),
-            graph: 0,
-            data: Some(1),
-        }]
+        vec![
+            ModelImport {
+                instance_name: "enclavid-ext:face-detect/models@0.1.0".into(),
+                function: "detector".into(),
+                resource: "detector-model".into(),
+                graph: 0,
+                data: None,
+            },
+            ModelImport {
+                instance_name: "enclavid-ext:face-age/models@0.1.0".into(),
+                function: "age".into(),
+                resource: "age-model".into(),
+                graph: 1,
+                data: Some(2),
+            },
+        ]
     );
 
+    // A gray frame: no face, so the round asks for a retake and never starts
+    // MiVOLO.
     let listener = Arc::new(PersistListener::default());
-    let session = h.drive_to_consent(&listener).await;
-    let Some(Prompt::ConsentDisclosure(screen)) = session.current_prompt else {
-        panic!("drive_to_consent must leave a consent screen as current_prompt");
+    let session = h.drive_to_selfie(&listener).await;
+    let (status, _) = h
+        .run(session, Event::Media(fake_capture()), &listener)
+        .await;
+    assert!(
+        matches!(status, RunStatus::Completed(Decision::RejectedRetryable)),
+        "no face, a retake"
+    );
+    assert_eq!(models.started(), [1, 0], "the detector alone");
+
+    // A face: MiVOLO reads its age, and the estimate reaches the screen.
+    let listener = Arc::new(PersistListener::default());
+    let session = h.drive_to_selfie(&listener).await;
+    let (status, _) = h
+        .run(session, Event::Media(capture_of(photo)), &listener)
+        .await;
+    let RunStatus::AwaitingInput(Prompt::ConsentDisclosure(screen)) = status else {
+        panic!("a face found and read leads to the consent screen");
     };
     let age: i32 = screen
         .fields
@@ -489,8 +543,9 @@ async fn the_selfie_age_is_estimated_on_a_vendors_mivolo() {
         .value
         .parse()
         .expect("the estimate is a whole number of years");
+    eprintln!("estimated age: {age}");
     assert!((0..=122).contains(&age), "MiVOLO's range holds {age}");
-    assert_eq!(model.started.load(Ordering::SeqCst), 1, "started once");
+    assert_eq!(models.started(), [2, 1], "each model once a round");
 }
 
 #[tokio::test]
@@ -1134,9 +1189,9 @@ impl Harness {
             .expect("reducer round")
     }
 
-    /// Drive the common prefix: start → passport → selfie, leaving the
-    /// session sitting on the consent-disclosure prompt.
-    async fn drive_to_consent(&self, listener: &Arc<PersistListener>) -> Session {
+    /// Drive start → passport, leaving the session sitting on the selfie
+    /// prompt.
+    async fn drive_to_selfie(&self, listener: &Arc<PersistListener>) -> Session {
         // Round 1: start → render media(passport).
         let (status, session) = self.run(Session::default(), Event::Start, listener).await;
         assert_media(&status, "round 1 (passport)");
@@ -1146,6 +1201,13 @@ impl Harness {
             .run(session, Event::Media(fake_capture()), listener)
             .await;
         assert_media(&status, "round 2 (selfie)");
+        session
+    }
+
+    /// Drive the common prefix: start → passport → selfie, leaving the
+    /// session sitting on the consent-disclosure prompt.
+    async fn drive_to_consent(&self, listener: &Arc<PersistListener>) -> Session {
+        let session = self.drive_to_selfie(listener).await;
 
         // Round 3: media(selfie) → render consent-disclosure.
         let (status, session) = self
@@ -1177,10 +1239,15 @@ fn assert_media(status: &RunStatus, ctx: &str) {
 /// encoded JPEG so the face-age plugin's in-sandbox decode → preprocess →
 /// inference pipeline (run on the selfie round) has something to decode.
 fn fake_capture() -> MediaResult {
+    capture_of(jpeg_frame())
+}
+
+/// A single-step capture of `frame`.
+fn capture_of(frame: Vec<u8>) -> MediaResult {
     MediaResult {
         slot: 0,
         clip: Clip {
-            frames: vec![jpeg_frame()],
+            frames: vec![frame],
         },
     }
 }

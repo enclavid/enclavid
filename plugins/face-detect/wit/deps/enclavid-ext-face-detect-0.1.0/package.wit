@@ -1,0 +1,19 @@
+package enclavid-ext:face-detect@0.1.0;
+
+/// The models this artifact carries beside its component, each run by the
+/// host in a process of its own.
+interface models {
+  use enclavid:host/tensors@0.1.0.{tensor-f32, tensor-i64};
+
+  /// BlazeFace with its decoding in the graph: a frame of 128², RGB in
+  /// `[-1, 1]`, and the thresholds it decodes with, in; a row of 16 for
+  /// each face it keeps, out — its box's corners, `y` before `x`, then six
+  /// keypoints `(x, y)`, all over the frame's side.
+  resource detector-model {
+    run: func(image: borrow<tensor-f32>, conf-threshold: borrow<tensor-f32>, max-detections: borrow<tensor-i64>, iou-threshold: borrow<tensor-f32>) -> tensor-f32;
+  }
+
+  /// BlazeFace, short range, from `detector.onnx`.
+  detector: func() -> detector-model;
+}
+

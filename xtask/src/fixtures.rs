@@ -176,6 +176,30 @@ pub fn face_detect() -> &'static [u8] {
         .as_slice()
 }
 
+/// The `enclavid:face-detect` plugin built as the artifact whose detector the
+/// host runs (`--features blazeface`): its `with-models` world imports its
+/// slot, `enclavid-ext:face-detect/models`, whose `detector` is BlazeFace. The
+/// model is not in it: a composition names its graph as the layer
+/// `detector.onnx`. Built in a target directory of its own, so it and the
+/// default build never stand in for each other.
+pub fn face_detect_blazeface() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| {
+            let dir = plugin_dir("face-detect");
+            let target = format!("{}/../plugins/target/blazeface", env!("CARGO_MANIFEST_DIR"));
+            let module = format!("{target}/wasm32-unknown-unknown/release/face_detect.wasm");
+            crate::embed_sections(
+                crate::build_componentized_with(&dir, &["blazeface"], &target, &module)
+                    .expect("build_componentized_with"),
+                &dir,
+                Role::Plugin,
+            )
+            .expect("the catalogs embed")
+        })
+        .as_slice()
+}
+
 /// The `test-models` policy: the test entry's graph through its own slot's
 /// models. It has no texts and no disclosure fields, so it is componentized
 /// and not embedded.
