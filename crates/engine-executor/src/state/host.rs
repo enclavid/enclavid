@@ -98,7 +98,7 @@ impl HostState {
 // traits via `bindgen!`. Implementing them on `HostState` satisfies the
 // linker bound — there's nothing to actually implement.
 impl crate::enclavid::policy::types::Host for HostState {}
-impl crate::enclavid::shared_types::capture::Host for HostState {}
-impl crate::enclavid::shared_types::disclosure::Host for HostState {}
-// `enclavid:host/types::Host` + the three ref-resource destructors live
+impl crate::enclavid::host_capture::capture::Host for HostState {}
+impl crate::enclavid::host_disclosure::disclosure::Host for HostState {}
+// `enclavid:host/refs::Host` + the three ref-resource destructors live
 // in `embedded::host`, next to the resolvers that mint them.

@@ -114,7 +114,8 @@ wasmtime::component::bindgen!({
         package enclavid:engine@0.1.0;
 
         world host {
-            import enclavid:host/types@0.1.0;
+            import enclavid:host/refs@0.1.0;
+            import enclavid:host/blob@0.1.0;
             import enclavid:host/tensors@0.1.0;
             export enclavid:policy/policy@0.1.0;
         }
@@ -127,7 +128,8 @@ wasmtime::component::bindgen!({
     // `runner::register_disclosure_fields`.
     path: [
         "../../wit/host",
-        "../../wit/shared-types",
+        "../../wit/host-capture",
+        "../../wit/host-disclosure",
         "../../wit/policy",
     ],
     imports: { default: async | trappable },
@@ -137,13 +139,12 @@ wasmtime::component::bindgen!({
     // the action-boundary deref in `runner::convert` is self-contained.
     // `blob` is likewise host-owned — its rep holds one stored blob's
     // bytes + content ref (see `media`); the runtime mints a handle per
-    // captured frame into `event::media`'s `clip` record. `clip` itself is a
-    // plain policy-side record (no rep).
+    // capture into `event::media`.
     with: {
-        "enclavid:host/types.localized-ref": crate::embedded::LocalizedRef,
-        "enclavid:host/types.icon-ref": crate::embedded::IconRef,
-        "enclavid:host/types.disclosure-field-ref": crate::embedded::DisclosureFieldRef,
-        "enclavid:host/types.blob": crate::media::BlobRep,
+        "enclavid:host/refs.localized-ref": crate::embedded::LocalizedRef,
+        "enclavid:host/refs.icon-ref": crate::embedded::IconRef,
+        "enclavid:host/refs.disclosure-field-ref": crate::embedded::DisclosureFieldRef,
+        "enclavid:host/blob.blob": crate::media::BlobRep,
         // A model's tensors, each element type a resource and a Rust type of
         // its own (`tensors`): one served for another would be one type.
         "enclavid:host/tensors.tensor-f32": crate::tensors::TensorF32,

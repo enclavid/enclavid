@@ -1,0 +1,133 @@
+package enclavid:host-capture@0.1.0;
+
+/// Capture-flow shapes — `media-spec` / `capture-step` and friends. Pure
+/// value types used by the `enclavid:policy` contract
+/// (`action::render(prompt::media)` + `event::media`) and helper plugins
+/// (e.g. `enclavid:well-known`). The host capabilities that mint the refs
+/// these records carry live in `enclavid:host`.
+interface capture {
+  use enclavid:host/refs@0.1.0.{localized-ref, icon-ref};
+
+  /// Which physical camera the capture step should use.
+  variant camera-facing {
+    /// The one facing the applicant, for a selfie.
+    front,
+    /// The one facing away, for documents.
+    rear,
+    /// The browser picks; useful for laptops without a rear lens.
+    any,
+  }
+
+  /// Where a face must get to, and for how long: an oval in the frame's own
+  /// space, as the camera sees it — the page mirrors a front camera's view
+  /// for display alone. Its height is 1.618 times its width, the proportion
+  /// of a face.
+  record oval-spec {
+    /// The centre, from the frame's left edge, as a fraction of its width;
+    /// held to the frame.
+    center-x: f32,
+    /// The centre, from the frame's top edge, as a fraction of its height;
+    /// held to the frame.
+    center-y: f32,
+    /// As a fraction of the frame's shorter side, so the oval keeps its
+    /// size on a frame of either orientation; held to 0.1–0.6, where the
+    /// oval's height still fits that side.
+    width: f32,
+    /// How long the face must fill the oval, in milliseconds; held to
+    /// 5000.
+    hold-ms: u16,
+  }
+
+  /// A turn of the head, held.
+  record turn-spec {
+    /// How far, negative to the applicant's left; held to ±45.
+    degrees: s8,
+    /// How long to hold it, in milliseconds; held to 5000.
+    hold-ms: u16,
+  }
+
+  /// What the page shows over the camera to direct the applicant, and waits
+  /// for before it moves on.
+  ///
+  /// Each is held to its ranges, and its fractions rounded to hundredths,
+  /// where the prompt is built: past those, a guide no longer fits the
+  /// screen or a face, and further digits are a difference the applicant
+  /// cannot see.
+  variant guide {
+    /// A document frame of this width:height aspect, held to 0.5–2.0
+    /// (1.42 passport, 1.585 ID-1).
+    rect(f32),
+    /// A face oval.
+    oval(oval-spec),
+    /// A turn of the head.
+    turn(turn-spec),
+  }
+
+  /// A photo: one frame, which the applicant sees and keeps or retakes
+  /// before it is sent.
+  record photo-spec {
+    /// The frame drawn over the camera, if any.
+    guide: option<guide>,
+    /// The check shown under the photo on the review screen ("Make sure
+    /// the MRZ is sharp and free of glare").
+    review-hint: localized-ref,
+  }
+
+  /// A video. There is no review screen: what was on screen while it
+  /// recorded is what is sent.
+  record video-spec {
+    /// What the page shows while it records, in order, each held before
+    /// the next. The reply says where each was held.
+    guides: list<guide>,
+  }
+
+  /// What one capture step records.
+  variant capture-kind {
+    /// One frame, which the applicant keeps.
+    photo(photo-spec),
+    /// A video, recorded while guides are shown.
+    video(video-spec),
+  }
+
+  /// One step within a capture. For two-sided documents: front + back. For
+  /// multi-page documents: one step per page. Single-shot captures
+  /// (passport photo page, selfie) use a single step. The steps of ONE media
+  /// render belong to the SAME artifact: their captures come back together,
+  /// in one `event::media`, and plugins analyse them together. A step is one
+  /// continuous capture; a break the applicant must take between two (flip
+  /// the card, turn the page) is a step boundary.
+  record capture-step {
+    /// An `icon-ref` minted by one of the functions of
+    /// `enclavid:host-icons/icons`, one per icon the frontend draws, so a
+    /// step carries an icon from that fixed set and never a free-form
+    /// string. Not a text-ref because there's nothing to localise — the
+    /// name is a frontend dispatch token, never displayed verbatim.
+    icon: option<icon-ref>,
+    /// The pre-capture intro body, a text of the component's `i18n`
+    /// catalog. Paired with `icon` to form "what you're about to do".
+    /// Shown before the camera turns on for THIS step — even between
+    /// steps of a multi-step capture ("now flip to the back").
+    instructions: localized-ref,
+    /// The short on-camera overlay shown during capture ("Photo page",
+    /// "Back side"), a text of the component's `i18n` catalog.
+    label: localized-ref,
+    /// The camera the step uses.
+    camera: camera-facing,
+    /// What the step records.
+    kind: capture-kind,
+  }
+
+  /// Spec for one media render (`prompt::media`). Use multiple steps
+  /// for multi-side / multi-page captures of the same artifact. Use
+  /// multiple media renders for independent artifacts (e.g.,
+  /// shareholder passports).
+  record media-spec {
+    /// The overall artifact title surfaced as context on every screen of
+    /// the capture flow ("Your passport"). Per-step copy — pre-capture
+    /// instructions, on-camera prompt — lives on `capture-step`.
+    label: localized-ref,
+    /// The steps, in the order the applicant takes them.
+    captures: list<capture-step>,
+  }
+}
+

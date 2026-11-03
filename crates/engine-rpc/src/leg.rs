@@ -705,9 +705,8 @@ impl<B: 'static> CompilerLeg<B> {
 mod door_tests {
     use enclavid_boundary::{Asserted, AuthN, Exposed, Untrusted};
     use enclavid_boundary_macros::boundary;
-    use session_types::{
-        Clip, Decision, Event, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MediaResult, SessionState,
-    };
+    use engine_types::limits::MAX_CAPTURE_STEPS;
+    use session_types::{Capture, Decision, Event, MAX_MEDIA_BYTES, MediaResult, SessionState};
 
     use super::{
         Callbacks, DEFAULT_CALLBACK_REQUEST_BUFFER, DEFAULT_REQUEST_BUFFER, ExecutorLeg,
@@ -1064,8 +1063,7 @@ mod door_tests {
         let leg = leg(CallingWorker).await;
         let callbacks = RecordingCallbacks::default();
         let event = Event::Media(MediaResult {
-            slot: 0,
-            clip: Clip { frames: Vec::new() },
+            captures: Vec::new(),
         });
         let outcome = leg
             .run(round(event), callbacks.clone())
@@ -1093,10 +1091,10 @@ mod door_tests {
     /// The round that failed in the field: a full capture, during a cache miss,
     /// with a bundle that put the request past one remoc item.
     #[tokio::test]
-    async fn a_full_clip_and_a_bundle_that_overflowed_one_item_cross_in_one_round() {
+    async fn a_full_capture_and_a_bundle_that_overflowed_one_item_cross_in_one_round() {
         let cwasm: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         assert!(
-            MAX_CLIP_BYTES + <SessionState as Framed>::FRAME + cwasm.len()
+            MAX_MEDIA_BYTES + <SessionState as Framed>::FRAME + cwasm.len()
                 > remoc::rch::DEFAULT_MAX_ITEM_SIZE,
             "the premise: inside the request, this bundle would not fit"
         );
@@ -1105,10 +1103,10 @@ mod door_tests {
         })
         .await;
         let event = Event::Media(MediaResult {
-            slot: 0,
-            clip: Clip {
-                frames: vec![vec![0xEE; MAX_CLIP_BYTES / MAX_CLIP_FRAMES]; MAX_CLIP_FRAMES],
-            },
+            captures: vec![
+                Capture::Photo(vec![0xEE; MAX_MEDIA_BYTES / MAX_CAPTURE_STEPS]);
+                MAX_CAPTURE_STEPS
+            ],
         });
         let bundle = CompiledBundle {
             cwasm,

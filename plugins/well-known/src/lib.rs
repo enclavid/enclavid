@@ -15,10 +15,12 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::host::types::{DisclosureFieldRef, IconRef};
+use enclavid::host::refs::{DisclosureFieldRef, IconRef};
+use enclavid::host_capture::capture::{
+    CameraFacing, CaptureKind, CaptureStep, Guide, MediaSpec, OvalSpec, PhotoSpec,
+};
+use enclavid::host_disclosure::disclosure::DisplayField;
 use enclavid::host_icons::icons;
-use enclavid::shared_types::capture::{CameraFacing, CaptureGuide, CaptureStep, MediaSpec};
-use enclavid::shared_types::disclosure::DisplayField;
 use enclavid_ext::well_known::i18n::{Key, localized};
 use exports::enclavid::well_known::capture::Guest as CaptureGuest;
 use exports::enclavid::well_known::disclosure_fields::Guest as DisclosureFieldsGuest;
@@ -103,6 +105,14 @@ impl DisclosureFieldsGuest for WellKnown {
 const PASSPORT_ASPECT: f32 = 1.42;
 /// ICAO TD1 ID-1 card aspect (85.6x54mm → ~1.585).
 const ID1_ASPECT: f32 = 1.585;
+/// A selfie's face oval: in the middle of the frame, half its shorter side
+/// wide. No hold: the applicant takes the photo.
+const SELFIE_OVAL: OvalSpec = OvalSpec {
+    center_x: 0.5,
+    center_y: 0.5,
+    width: 0.5,
+    hold_ms: 0,
+};
 
 /// The three texts of a capture step.
 struct StepTexts {
@@ -111,20 +121,22 @@ struct StepTexts {
     review_hint: Key,
 }
 
-/// Build a CaptureStep, minting its texts through the host.
+/// Build a photo step, minting its texts through the host.
 fn step(
     texts: StepTexts,
     icon: Option<IconRef>,
     camera: CameraFacing,
-    guide: CaptureGuide,
+    guide: Guide,
 ) -> CaptureStep {
     CaptureStep {
         icon,
         instructions: localized(texts.instructions),
         label: localized(texts.label),
         camera,
-        guide,
-        review_hint: localized(texts.review_hint),
+        kind: CaptureKind::Photo(PhotoSpec {
+            guide: Some(guide),
+            review_hint: localized(texts.review_hint),
+        }),
     }
 }
 
@@ -137,7 +149,7 @@ fn passport_step() -> CaptureStep {
         },
         Some(icons::passport()),
         CameraFacing::Rear,
-        CaptureGuide::Rect(PASSPORT_ASPECT),
+        Guide::Rect(PASSPORT_ASPECT),
     )
 }
 
@@ -150,7 +162,7 @@ fn id_card_front_step_inner() -> CaptureStep {
         },
         Some(icons::id_card()),
         CameraFacing::Rear,
-        CaptureGuide::Rect(ID1_ASPECT),
+        Guide::Rect(ID1_ASPECT),
     )
 }
 
@@ -163,7 +175,7 @@ fn id_card_back_step_inner() -> CaptureStep {
         },
         Some(icons::id_card()),
         CameraFacing::Rear,
-        CaptureGuide::Rect(ID1_ASPECT),
+        Guide::Rect(ID1_ASPECT),
     )
 }
 
@@ -176,7 +188,7 @@ fn drivers_license_front_step_inner() -> CaptureStep {
         },
         Some(icons::drivers_license()),
         CameraFacing::Rear,
-        CaptureGuide::Rect(ID1_ASPECT),
+        Guide::Rect(ID1_ASPECT),
     )
 }
 
@@ -189,7 +201,7 @@ fn drivers_license_back_step_inner() -> CaptureStep {
         },
         Some(icons::drivers_license()),
         CameraFacing::Rear,
-        CaptureGuide::Rect(ID1_ASPECT),
+        Guide::Rect(ID1_ASPECT),
     )
 }
 
@@ -202,7 +214,7 @@ fn selfie_step_inner() -> CaptureStep {
         },
         Some(icons::selfie()),
         CameraFacing::Front,
-        CaptureGuide::Oval,
+        Guide::Oval(SELFIE_OVAL),
     )
 }
 

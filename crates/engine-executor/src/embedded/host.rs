@@ -21,23 +21,23 @@ use crate::state::HostState;
 use wasmtime::component::Resource;
 
 // Resource destructors. The rep is a plain owned value in the table;
-// dropping the handle just removes it. The types interface (`Host`)
+// dropping the handle just removes it. The refs interface (`Host`)
 // carries no functions of its own.
-impl crate::enclavid::host::types::Host for HostState {}
+impl crate::enclavid::host::refs::Host for HostState {}
 
-impl crate::enclavid::host::types::HostLocalizedRef for HostState {
+impl crate::enclavid::host::refs::HostLocalizedRef for HostState {
     async fn drop(&mut self, rep: Resource<LocalizedRef>) -> wasmtime::Result<()> {
         self.table.delete(rep)?;
         Ok(())
     }
 }
-impl crate::enclavid::host::types::HostIconRef for HostState {
+impl crate::enclavid::host::refs::HostIconRef for HostState {
     async fn drop(&mut self, rep: Resource<IconRef>) -> wasmtime::Result<()> {
         self.table.delete(rep)?;
         Ok(())
     }
 }
-impl crate::enclavid::host::types::HostDisclosureFieldRef for HostState {
+impl crate::enclavid::host::refs::HostDisclosureFieldRef for HostState {
     async fn drop(&mut self, rep: Resource<DisclosureFieldRef>) -> wasmtime::Result<()> {
         self.table.delete(rep)?;
         Ok(())

@@ -19,12 +19,19 @@
 // ----- HTTP / multipart body caps -----
 
 /// Body-limit applied to `/api/v1/sessions/{id}/input/{slot_id}` (multipart).
-/// Headroom for the largest legitimate payload: ~12 JPEG frames at
-/// ~200 KB plus multipart overhead. Enforced via axum's
+/// Headroom for the largest legitimate payload: a capture for every step of
+/// one media spec — a photo a few hundred KB, a video of some seconds about
+/// a megabyte — plus multipart overhead. Enforced via axum's
 /// `DefaultBodyLimit::max(...)` at the route layer so handler logic
 /// stays free of byte arithmetic. Bounded from above by the one remoc item
-/// the capture then travels in — see the wire assertion below.
+/// the captures then travel in — see the wire assertion below.
 pub const APPLICANT_INPUT_BODY_LIMIT: usize = 12 * 1024 * 1024;
+
+/// The most bytes of a video step's `guides` part: where the page saw each of
+/// the step's guides held, as JSON pairs of frame indices — at most
+/// [`engine_types::limits::MAX_VIDEO_GUIDES`] of them, a couple of dozen
+/// bytes each.
+pub const MAX_GUIDES_PART_BYTES: usize = 1024;
 
 // ----- The consumer's props -----
 
@@ -87,35 +94,36 @@ const _: () = assert!(
     "the props cap admits more bytes than the worker will accept"
 );
 const _: () = assert!(
-    APPLICANT_INPUT_BODY_LIMIT <= session_types::MAX_CLIP_BYTES,
-    "a legal applicant body can exceed the clip budget the worker will accept"
+    APPLICANT_INPUT_BODY_LIMIT <= session_types::MAX_MEDIA_BYTES,
+    "a legal applicant body can exceed the media budget the worker will accept"
 );
 
-/// What a request carries besides the clip and the round's state frame: the
-/// seal on each frame and on the state, the metadata written with them, CBOR
+/// What a request carries besides the captures and the round's state frame: the
+/// seal on each capture and on the state, the metadata written with them, CBOR
 /// framing.
 const WIRE_HEADROOM: usize = 1024 * 1024;
 
-// The largest clip, with the state frame, travels as ONE remoc item twice: in the
-// run request to the execution-worker, and in the round's write to the
+// The largest captures, with the state frame, travel as ONE remoc item twice: in
+// the run request to the execution-worker, and in the round's write to the
 // storage-CVM. An item past the limit is refused, and remoc closes the channel it
 // was refused on for good — every later call on that leg fails until it is
-// redialled. So a clip api admits must fit, or the 413 the applicant should have
+// redialled. So captures api admits must fit, or the 413 the applicant should have
 // had becomes a dropped leg. The write's door also measures every write before
 // handing it over, since the metadata a session has grown rides in it too: a
 // write that would not fit fails that session's round alone.
 const _: () = assert!(
-    session_types::MAX_CLIP_BYTES + session_types::SEALED_STATE_PLAINTEXT_BYTES + WIRE_HEADROOM
+    session_types::MAX_MEDIA_BYTES + session_types::SEALED_STATE_PLAINTEXT_BYTES + WIRE_HEADROOM
         <= remoc::rch::DEFAULT_MAX_ITEM_SIZE,
-    "the largest clip with the state frame no longer fits one remoc item"
+    "the largest captures with the state frame no longer fit one remoc item"
 );
-// The frame COUNT has no derivation to check, which is the gap it exists to close:
-// an empty multipart part costs only its framing, so a legal body admits frames by
-// the hundred thousand. This asserts the opposite direction from the three above —
-// that the cap still BINDS, i.e. is well below what a legal body could carry at
-// some tens of bytes a part. A count raised past that would be decoration.
+// The capture COUNT has no derivation to check, which is the gap it exists to
+// close: an empty multipart part costs only its framing, so a legal body admits
+// parts by the hundred thousand. This asserts the opposite direction from the
+// three above — that the cap still BINDS, i.e. is well below what a legal body
+// could carry at some tens of bytes a part. A count raised past that would be
+// decoration.
 const _: () = assert!(
-    session_types::MAX_CLIP_FRAMES > 0
-        && session_types::MAX_CLIP_FRAMES * 32 < APPLICANT_INPUT_BODY_LIMIT,
-    "the frame count cap no longer binds — a legal body cannot reach it"
+    engine_types::limits::MAX_CAPTURE_STEPS > 0
+        && engine_types::limits::MAX_CAPTURE_STEPS * 32 < APPLICANT_INPUT_BODY_LIMIT,
+    "the capture count cap no longer binds — a legal body cannot reach it"
 );

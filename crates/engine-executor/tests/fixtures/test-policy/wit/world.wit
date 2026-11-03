@@ -19,7 +19,7 @@ world policy {
     // texts, through its own slot.
     import enclavid:extra/tag@0.1.0;
 
-    // The vision substrate. The vision plugin decodes the selfie `clip` into
+    // The vision substrate. The vision plugin decodes the selfie photo into
     // a plugin-owned `decoded-frame`; face-detect locates the `face` in it;
     // face-age reads its crop and estimates. The policy just threads the
     // handles decode → detect → estimate. `enclavid:vision/types` carries the

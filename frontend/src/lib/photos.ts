@@ -2,12 +2,12 @@
 //
 // A body over the limit is refused with 413, and on that device it would be
 // refused on every retry — the applicant has nothing they could change. So
-// the frames are brought under a budget here, before anything is sent: a
+// the photos are brought under a budget here, before anything is sent: a
 // capture that already fits goes as it is; one that does not is re-encoded,
 // lower JPEG quality first and a smaller picture only if that is not enough,
 // so the detail a check needs is the last thing given up.
 
-/// The share of the server's limit the frames may take together. The rest is
+/// The share of the server's limit the photos may take together. The rest is
 /// the multipart framing around them, with a wide margin — an upload that
 /// lands just over the line is the one outcome worth any amount of headroom.
 const BUDGET_SHARE = 2 / 3;
@@ -15,16 +15,16 @@ const BUDGET_SHARE = 2 / 3;
 const QUALITIES = [0.75, 0.6, 0.45];
 const SCALES = [1, 0.75, 0.5];
 
-/// Frames that fit the capture budget for `maxUploadBytes`. Throws when even
+/// Photos that fit the capture budget for `maxUploadBytes`. Throws when even
 /// the smallest re-encoding does not.
-export async function fitFrames(
-  frames: Blob[],
+export async function fitPhotos(
+  photos: Blob[],
   maxUploadBytes: number,
 ): Promise<Blob[]> {
   const budget = Math.floor(maxUploadBytes * BUDGET_SHARE);
-  if (totalSize(frames) <= budget) return frames;
+  if (totalSize(photos) <= budget) return photos;
 
-  const bitmaps = await Promise.all(frames.map((f) => createImageBitmap(f)));
+  const bitmaps = await Promise.all(photos.map((f) => createImageBitmap(f)));
   try {
     for (const scale of SCALES) {
       for (const quality of QUALITIES) {
@@ -40,8 +40,8 @@ export async function fitFrames(
   throw new Error("the capture does not fit the upload limit");
 }
 
-function totalSize(frames: Blob[]): number {
-  return frames.reduce((n, f) => n + f.size, 0);
+function totalSize(photos: Blob[]): number {
+  return photos.reduce((n, f) => n + f.size, 0);
 }
 
 async function encode(

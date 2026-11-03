@@ -4,6 +4,7 @@ import { ContinueOnPhone } from "@/components/ContinueOnPhone";
 import { MediaCapture } from "@/components/MediaCapture";
 import { MediaInstructions } from "@/components/MediaInstructions";
 import { Spinner } from "@/components/icons";
+import { fitPhotos } from "@/lib/photos";
 import { Completed } from "@/screens/Completed";
 import type { RequestView, SessionProgress } from "@/types";
 
@@ -17,8 +18,8 @@ type Props = {
   /// to api/v1/sessions/:id/input/:awaiting_seq/:slot_id as
   /// multipart/form-data. App owns the network call + key + state
   /// update; Verify just hands it the wait the screen was rendered for,
-  /// the slot identifier and the assembled FormData (frames as parts for
-  /// media captures, an `accepted` text part for consent).
+  /// the slot identifier and the assembled FormData (one step's capture for
+  /// media, as `media-<step>`; an `accepted` text part for consent).
   onSubmit: (awaitingSeq: number, slotId: string, form: FormData) => Promise<void>;
   /// The session was taken over from a code a capture step showed: `refused`,
   /// the key this page asked with, opens it no more.
@@ -115,34 +116,39 @@ function RequestRenderer({
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  // The step on screen: the first whose capture the server does not hold yet,
+  // so a reload carries on from where the applicant was.
+  const index = request.kind === "media" ? request.next_step : 0;
   // The step whose instruction screen the user has tapped "Start" on —
-  // the wait and the slot together, since every wait is a step of its
-  // own, a retake of the same prompt included. Compared with the step on
-  // screen rather than reset when it changes, so the render that brings
-  // a new step already shows its instructions: a reset after the fact
-  // would leave one frame of the old step's capture screen, its "Use
-  // photo" live, under the new step.
-  const slotKey =
-    request.kind === "media" ? `${awaitingSeq}/${request.next_slot_id}` : null;
+  // the wait and the step together. Compared with the step on screen
+  // rather than reset when it changes, so the render that brings a new
+  // step already shows its instructions: a reset after the fact would
+  // leave one frame of the old step's capture screen, its "Use photo"
+  // live, under the new step.
+  const stepKey = `${awaitingSeq}/${index}`;
   const [startedFor, setStartedFor] = useState<string | null>(null);
-  const startedCapture = slotKey !== null && startedFor === slotKey;
+  const startedCapture = startedFor === stepKey;
 
   if (request.kind === "media") {
-    // `next_slot_id` is the URL the host wants the next clip POSTed
-    // to. We derive the step it refers to from `media-<N>` and read
-    // that entry from `captures` to drive the on-screen guide.
-    const nextIndex = parseStepIndex(request.next_slot_id);
     const total = request.captures.length;
-    const step =
-      nextIndex !== null && nextIndex < total
-        ? request.captures[nextIndex]
-        : null;
+    const step = request.captures[index];
 
-    const handle = async (form: FormData) => {
+    // Each step's photo is sent as it is kept, fitted under its share of what
+    // the steps not sent yet may hold together. The last step's runs the
+    // round; any other's leaves the session at the next step. A failed send
+    // leaves the step on screen, its photo still there to send again or
+    // retake.
+    const keep = async (photo: Blob) => {
       setLocalError(null);
       setSubmitting(true);
       try {
-        await onSubmit(awaitingSeq, request.next_slot_id, form);
+        const share = Math.floor(request.max_upload_bytes / (total - index));
+        const [fitted] = await fitPhotos([photo], share).catch(() => {
+          throw new Error("This photo is too large to send.");
+        });
+        const form = new FormData();
+        form.append("photo", fitted, `${index}.jpg`);
+        await onSubmit(awaitingSeq, `media-${index}`, form);
       } catch (e) {
         setLocalError(
           e instanceof Error ? e.message : "Could not submit the photo.",
@@ -153,14 +159,17 @@ function RequestRenderer({
     };
 
     if (!step) {
-      // Backend handed us a slot we can't render — shouldn't happen
-      // under a well-formed RequestView, but better to surface than
-      // crash silently.
+      // A spec of no steps — the runtime refuses to render one, but
+      // better to surface than crash silently.
       return (
         <main className="flex min-h-dvh items-center justify-center px-6 text-sm text-destructive">
           Unexpected capture state. Please refresh.
         </main>
       );
+    }
+
+    if (step.kind === "video") {
+      return <VideoUnavailable />;
     }
 
     // Per-step intro: shown before the camera turns on for EVERY
@@ -175,9 +184,9 @@ function RequestRenderer({
           artifactLabel={request.label}
           icon={step.icon}
           instructions={step.instructions}
-          stepNumber={(nextIndex ?? 0) + 1}
+          stepNumber={index + 1}
           totalSteps={total}
-          onStart={() => setStartedFor(slotKey)}
+          onStart={() => setStartedFor(stepKey)}
           secondaryAction={
             <ContinueOnPhone sessionId={sessionId} onMoved={onMoved} />
           }
@@ -188,15 +197,14 @@ function RequestRenderer({
     return (
       <>
         <MediaCapture
-          // A step of its own: frames, preview and buttons start over, so
+          // A step of its own: photo, preview and buttons start over, so
           // nothing taken for one step can be sent for the next.
-          key={slotKey}
+          key={stepKey}
           promptLabel={request.label}
           step={step}
-          stepNumber={(nextIndex ?? 0) + 1}
+          stepNumber={index + 1}
           totalSteps={total}
-          onCapture={handle}
-          maxUploadBytes={request.max_upload_bytes}
+          onCapture={(photo) => void keep(photo)}
           sending={submitting}
         />
         <StatusOverlay
@@ -271,13 +279,22 @@ function RequestRenderer({
   );
 }
 
-/// Parse `media-<N>` slot ids back to their integer index. Returns
-/// `null` for malformed values (caller surfaces "unexpected state").
-function parseStepIndex(slotId: string): number | null {
-  const m = slotId.match(/^media-(\d+)$/);
-  if (!m) return null;
-  const n = parseInt(m[1], 10);
-  return Number.isFinite(n) ? n : null;
+/// A step that records a video, which this page does not yet record.
+function VideoUnavailable() {
+  return (
+    <main
+      className="flex min-h-dvh flex-col items-center justify-center gap-3 px-6 text-center"
+      style={{
+        paddingTop: "max(env(safe-area-inset-top), 1rem)",
+        paddingBottom: "max(env(safe-area-inset-bottom), 1.5rem)",
+      }}
+    >
+      <h1 className="text-xl font-semibold">Video is not available yet</h1>
+      <p className="text-sm text-muted-foreground">
+        This step records a video, which this page cannot do yet.
+      </p>
+    </main>
+  );
 }
 
 /// Floating panel pinned above the safe area. Two modes:

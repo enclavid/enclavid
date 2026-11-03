@@ -42,11 +42,12 @@ type Copy = (&'static str, &'static str, Option<&'static str>);
 
 /// What every template copies: the platform's WIT, and well-known's, for the
 /// capture specs.
-const PLATFORM: [Copy; 6] = [
+const PLATFORM: [Copy; 7] = [
     ("host", "wit/host", None),
+    ("host-capture", "wit/host-capture", None),
+    ("host-disclosure", "wit/host-disclosure", None),
     ("host-icons", "wit/host-icons", None),
     ("policy", "wit/policy", None),
-    ("shared-types", "wit/shared-types", None),
     ("well-known", "plugins/well-known/wit", Some("world.wit")),
     (
         "well-known-texts",

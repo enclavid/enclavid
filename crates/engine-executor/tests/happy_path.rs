@@ -5,7 +5,7 @@
 //! The policy is `handle(state, event) -> (state, action)`.
 //! The harness owns the mailbox: each round it inspects the previous
 //! round's `current_prompt`, fabricates the matching applicant input
-//! (a fake clip for a media prompt, an accept/reject bool for a consent
+//! (a fake photo for a media prompt, an accept/reject bool for a consent
 //! prompt), and calls `run` again.
 //!
 //! Two flows are driven:
@@ -40,7 +40,7 @@ use engine_executor::{
 };
 use engine_types::composition::ModelLayer;
 use engine_types::text::Localized;
-use session_types::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
+use session_types::{Capture, Decision, Event, MediaResult, Prompt, SessionState as Session};
 use xtask::fixtures;
 
 /// The test policy's props when the consumer gives none, as api writes them:
@@ -306,15 +306,15 @@ impl PersistListener {
         );
     }
 
-    /// Content-address the event's frames and store them — what api does before
-    /// the round, over the bytes it is about to send.
+    /// Content-address the event's captures and store them — what api does
+    /// before the round, over the bytes it is about to send.
     fn capture(&self, event: &Event) {
         let Event::Media(result) = event else {
             return;
         };
         let mut store = self.media.lock().unwrap();
-        for frame in &result.clip.frames {
-            store.insert(blake3::hash(frame).into(), Arc::new(frame.clone()));
+        for blob in result.blobs() {
+            store.insert(blake3::hash(blob).into(), Arc::new(blob.to_vec()));
         }
     }
 }
@@ -557,13 +557,13 @@ async fn media_rounds_keep_state_minimal() {
     let (_s0, after_genesis) = h.run(Session::default(), Event::Start, &listener).await;
     let baseline = after_genesis.state.len();
 
-    // passport clip → render media(selfie)
+    // passport photo → render media(selfie)
     let (_s1, after_passport) = h
         .run(after_genesis, Event::Media(fake_capture()), &listener)
         .await;
     let after_passport_len = after_passport.state.len();
 
-    // selfie clip → render consent-disclosure
+    // selfie photo → render consent-disclosure
     let (_s2, after_selfie) = h
         .run(after_passport, Event::Media(fake_capture()), &listener)
         .await;
@@ -678,7 +678,7 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
 }
 
 #[tokio::test]
-async fn empty_passport_clip_is_retryable() {
+async fn a_passport_without_a_photo_is_retryable() {
     let h = Harness::new();
     let listener = Arc::new(PersistListener::default());
 
@@ -686,52 +686,43 @@ async fn empty_passport_clip_is_retryable() {
     let (status, session) = h.run(Session::default(), Event::Start, &listener).await;
     assert_media(&status, "genesis (passport)");
 
-    // Feed a capture with ZERO frames. The policy reads the host-owned
-    // `clip` resource (`frame_count` / `frame`), sees an empty capture,
-    // and returns a retryable rejection — proving the frames reach the
-    // policy as a readable resource handle, not as bytes lowered into its
-    // linear memory.
-    let empty = MediaResult {
-        slot: 0,
-        clip: Clip { frames: vec![] },
-    };
+    // Feed a capture with NO photo. The policy finds no photo among the
+    // captures and returns a retryable rejection.
+    let empty = MediaResult { captures: vec![] };
     let (status, _session) = h.run(session, Event::Media(empty), &listener).await;
     match status {
         RunStatus::Completed(Decision::RejectedRetryable) => {}
-        _ => panic!("empty passport clip must yield Completed(RejectedRetryable)"),
+        _ => panic!("a passport without a photo must yield Completed(RejectedRetryable)"),
     }
 }
 
 #[tokio::test]
-async fn empty_selfie_clip_is_retryable_via_plugin() {
+async fn an_empty_selfie_is_retryable_via_plugin() {
     let h = Harness::new();
     let listener = Arc::new(PersistListener::default());
 
     // genesis → passport prompt
     let (status, session) = h.run(Session::default(), Event::Start, &listener).await;
     assert_media(&status, "genesis (passport)");
-    // passport clip → selfie prompt
+    // passport photo → selfie prompt
     let (status, session) = h
         .run(session, Event::Media(fake_capture()), &listener)
         .await;
     assert_media(&status, "passport → selfie");
 
-    // Feed a selfie capture with ZERO frames. On the selfie round the
-    // policy hands the clip to the FUSED face-age plugin; the plugin reads
-    // 0 frames and returns confidence 0; the policy maps that to a
-    // retryable rejection. Proves the plugin was invoked across the fused
-    // boundary during `handle` and actually read the clip resource — the
-    // full clip-consumer path, not just the policy-side read.
-    let empty = MediaResult {
-        slot: 0,
-        clip: Clip { frames: vec![] },
-    };
-    let (status, _session) = h.run(session, Event::Media(empty), &listener).await;
+    // Feed a selfie photo of ZERO bytes. On the selfie round the policy hands
+    // it to the FUSED vision plugin, which cannot decode it; the policy maps
+    // that to a retryable rejection. Proves the plugin was invoked across the
+    // fused boundary during `handle` and actually read the blob resource —
+    // the full capture-consumer path, not just the policy-side read.
+    let (status, _session) = h
+        .run(session, Event::Media(capture_of(Vec::new())), &listener)
+        .await;
     match status {
         RunStatus::Completed(Decision::RejectedRetryable) => {}
-        _ => panic!(
-            "empty selfie clip must yield Completed(RejectedRetryable) via the face-age plugin"
-        ),
+        _ => {
+            panic!("an empty selfie must yield Completed(RejectedRetryable) via the vision plugin")
+        }
     }
 }
 
@@ -1235,20 +1226,17 @@ fn assert_media(status: &RunStatus, ctx: &str) {
 }
 
 /// A single-step fake capture result (both passport and selfie specs are
-/// single-shot, so the clip fills step index 0). The frame is a REAL
-/// encoded JPEG so the in-sandbox decode → detect → estimate pipeline (run
-/// on the selfie round) has something to decode.
+/// one photo step). The photo is a REAL encoded JPEG so the in-sandbox
+/// decode → detect → estimate pipeline (run on the selfie round) has
+/// something to decode.
 fn fake_capture() -> MediaResult {
     capture_of(jpeg_frame())
 }
 
-/// A single-step capture of `frame`.
-fn capture_of(frame: Vec<u8>) -> MediaResult {
+/// A single-step capture of the photo `jpeg`.
+fn capture_of(jpeg: Vec<u8>) -> MediaResult {
     MediaResult {
-        slot: 0,
-        clip: Clip {
-            frames: vec![frame],
-        },
+        captures: vec![Capture::Photo(jpeg)],
     }
 }
 

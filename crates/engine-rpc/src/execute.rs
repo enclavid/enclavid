@@ -277,7 +277,7 @@ impl ModelFileStream {
 /// silently dropped into a round that then runs on a partial request.
 ///
 /// Every field is bounded by its own decoder — the key by its shape, the props and
-/// the state by their exact frames, the event's frames by the ingress budget. That
+/// the state by their exact frames, the event's captures by the ingress budget. That
 /// is what lets the serving role write a discharge that names a check instead of
 /// naming its caller.
 ///
@@ -312,10 +312,11 @@ pub struct RunRequest {
 #[derive(Serialize, Deserialize)]
 pub struct RoundProps(#[serde(with = "props")] pub Vec<u8>);
 
-/// What a round request carries besides the clip's bytes, the two frames and the
-/// bundle header: the key, the ceiling, the frames' and the event's CBOR heads, and remoc's
+/// What a round request carries besides the captures' bytes, the two frames and
+/// the bundle header: the key, the ceiling, the frames' CBOR heads, the event's
+/// CBOR around the captures' bytes — a video's frame ranges with it — and remoc's
 /// own envelope with the reply, callback and two bundle-stream ports — some
-/// 10 KiB with every field at its bound; the rest is margin.
+/// 35 KiB with every field at its bound; the rest is margin.
 pub(crate) const RUN_REQUEST_HEADROOM: usize = 64 * 1024;
 
 // A round request travels as ONE remoc item, and an item past the limit fails the
@@ -323,7 +324,7 @@ pub(crate) const RUN_REQUEST_HEADROOM: usize = 64 * 1024;
 // beside the call — so what has to fit is the round itself plus the header naming
 // the bundle. `run` sends the same request without the header.
 const _: () = assert!(
-    session_types::MAX_CLIP_BYTES
+    session_types::MAX_MEDIA_BYTES
         + <SessionState as Framed>::FRAME
         + <RoundProps as Framed>::FRAME
         + crate::stream::BUNDLE_HEADER_MAX_ENCODED
@@ -348,7 +349,7 @@ mod props {
     }
 
     pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        // Bounded after the decode, as `Clip`'s frames are: what the decode itself
+        // Bounded after the decode, as the event's captures are: what the decode itself
         // may allocate is bounded by the one remoc item the request travels in.
         let props = serde_bytes::ByteBuf::deserialize(d)?;
         if props.len() > MAX_PROPS_BYTES {
@@ -1346,10 +1347,11 @@ mod execute_tests {
 mod request_bound_tests {
     use super::*;
     use crate::MAX_CWASM_BYTES;
+    use engine_types::limits::MAX_CAPTURE_STEPS;
     use engine_types::limits::MAX_PROPS_BYTES;
     use serde::Serialize;
     use serde_bytes::Bytes;
-    use session_types::{Clip, MAX_CLIP_FRAMES, MediaResult};
+    use session_types::{Capture, MediaResult};
 
     /// A stand-in with the same field names and no bounds, so a test can put on
     /// the wire what the real type will not produce.
@@ -1432,15 +1434,12 @@ mod request_bound_tests {
         assert!(req.props.open().is_err());
     }
 
-    /// The event's frames are bounded by their own type, and the request decoder
-    /// inherits that rather than restating it.
+    /// The event's captures are bounded by their own type, and the request
+    /// decoder inherits that rather than restating it.
     #[test]
     fn an_event_over_the_capture_bound_is_refused() {
         let event = Event::Media(MediaResult {
-            slot: 0,
-            clip: Clip {
-                frames: vec![vec![1u8]; MAX_CLIP_FRAMES + 1],
-            },
+            captures: vec![Capture::Photo(vec![1u8]); MAX_CAPTURE_STEPS + 1],
         });
         let props = props_frame(b"");
         assert!(decode(&loose(&a_key(), &props, event)).is_err());

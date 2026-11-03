@@ -17,7 +17,7 @@ import * as props from "enclavid-ext:policy/props@0.1.0";
 
 // The state is this policy's own: kept between rounds, sealed, never seen by
 // anyone but the policy — the step the session is at. Plain data only: the
-// passport's frame cannot be kept, but the hash that names it can.
+// passport's photo cannot be kept, but the hash that names it can.
 type StatePassport = { step: "passport" };
 type StateSelfie = { step: "selfie"; passport: string };
 type StateConsent = { step: "consent" };
@@ -86,20 +86,15 @@ export const policy = definePolicy(
       const round = { ...state, event } as Round;
       switch (round.step) {
         case "passport": {
-          const page = round.event.val.clip.frames[0];
-          // Nothing captured. Captures are checked on the applicant's page
-          // before they are sent, so this is rare: ask again as is — or ask
-          // with a media-spec of your own that says what went wrong, or
-          // reject.
-          if (!page) return steps.passport();
+          // A capture for each step of the spec, of the kind the step asked
+          // for: the passport's spec is one photo.
+          const [page] = round.event.val.captures;
+          if (page?.tag !== "photo") return steps.passport();
           // The props are the consumer's, the same in every round.
           if (props.get().selfie === false) return steps.consent();
-          return steps.selfie(page.hash());
+          return steps.selfie(page.val.hash());
         }
         case "selfie":
-          if (!round.event.val.clip.frames[0]) {
-            return steps.selfie(round.passport);
-          }
           return steps.consent();
         case "consent":
           return round.event.val ? steps.approve() : steps.reject();

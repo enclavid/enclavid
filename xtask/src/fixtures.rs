@@ -29,7 +29,7 @@ pub const EXTRA_PACKAGE: &str = "enclavid:extra@0.1.0";
 /// Package id of the face-age plugin the policy calls on the selfie round.
 /// Ships no embedded catalog, so it imports no slot.
 pub const FACE_AGE_PACKAGE: &str = "enclavid:face-age@0.1.0";
-/// Package id of the vision plugin — decodes the selfie `clip` into the
+/// Package id of the vision plugin — decodes the selfie photo into the
 /// plugin-owned `decoded-frame` the policy threads to face-detect and
 /// face-age.
 pub const VISION_PACKAGE: &str = "enclavid:vision@0.1.0";

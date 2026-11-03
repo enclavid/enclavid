@@ -531,7 +531,8 @@ mod tests {
             "tests/wit/wasi/cli.wit",
             "../../wit/host",
             "../../wit/host-icons",
-            "../../wit/shared-types",
+            "../../wit/host-capture",
+            "../../wit/host-disclosure",
             "../../wit/policy",
         ] {
             resolve
@@ -548,7 +549,7 @@ mod tests {
              package enclavid-ext:policy@{version} {{
                  interface props {{ {body} }}
                  interface disclosure-fields {{
-                     use enclavid:host/types@0.1.0.{{disclosure-field-ref}};
+                     use enclavid:host/refs@0.1.0.{{disclosure-field-ref}};
                      enum key {{ full-name }}
                      disclosure-field: func(key: key) -> disclosure-field-ref;
                  }}
@@ -677,7 +678,7 @@ mod tests {
             ("0.1.0", FLAG),
             "package enclavid:host-icons@0.1.7 {
                  interface icons {
-                     use enclavid:host/types@0.1.0.{icon-ref};
+                     use enclavid:host/refs@0.1.0.{icon-ref};
                      passport: func() -> icon-ref;
                      selfie: func() -> icon-ref;
                  }

@@ -296,14 +296,14 @@ fn props_of_any_value_the_host_serves_compile() {
 /// in the interface; a policy importing it as anything else is refused.
 #[test]
 fn props_imported_as_what_the_host_does_not_serve_are_refused() {
-    let host_types = "package enclavid:host@0.1.0 { interface types { resource icon-ref; } }";
+    let host_refs = "package enclavid:host@0.1.0 { interface refs { resource icon-ref; } }";
     let returns_a_handle = importing(
         "enclavid-ext:policy/props@0.1.0",
         &format!(
-            "{host_types}
+            "{host_refs}
              package enclavid-ext:policy@0.1.0 {{
                  interface props {{
-                     use enclavid:host/types@0.1.0.{{icon-ref}};
+                     use enclavid:host/refs@0.1.0.{{icon-ref}};
                      get: func() -> icon-ref;
                  }}
              }}"
@@ -336,11 +336,11 @@ fn with_icons(version: &str, body: &str) -> Vec<u8> {
         &format!("enclavid:host-icons/icons@{version}"),
         &format!(
             "package enclavid:host@0.1.0 {{
-                 interface types {{ resource icon-ref; resource localized-ref; }}
+                 interface refs {{ resource icon-ref; resource localized-ref; }}
              }}
              package enclavid:host-icons@{version} {{
                  interface icons {{
-                     use enclavid:host/types@0.1.0.{{icon-ref, localized-ref}};
+                     use enclavid:host/refs@0.1.0.{{icon-ref, localized-ref}};
                      {body}
                  }}
              }}"

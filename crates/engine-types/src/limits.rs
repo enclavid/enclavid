@@ -121,6 +121,17 @@ pub const MAX_VALUE_LENGTH: usize = 4096;
 /// rejected; [`MAX_TEXT_VALUE_HARD_BYTES`] is the rejection threshold.
 pub const MAX_TEXT_VALUE_SOFT_CHARS: usize = 1000;
 
+// ----- The capture -----
+
+/// The most steps one media spec may have, and so the most captures one
+/// `event::media` carries: each a blob written and a resource minted in the
+/// round. A two-sided card is two; a document of many pages, a step a page.
+pub const MAX_CAPTURE_STEPS: usize = 16;
+
+/// The most guides one video step may show, and so the most frame ranges its
+/// capture carries.
+pub const MAX_VIDEO_GUIDES: usize = 16;
+
 // ----- The capture guide -----
 
 /// The narrowest width:height a `rect` capture guide is drawn at. The
@@ -134,12 +145,35 @@ pub const GUIDE_ASPECT_MIN: f32 = 0.5;
 /// ID-1 card 1.586.
 pub const GUIDE_ASPECT_MAX: f32 = 2.0;
 
-/// How many steps of a `rect` guide's aspect there are per unit: it is
-/// drawn rounded to hundredths. The policy picks the aspect freely, and
-/// past what the applicant can tell apart on screen every further digit
-/// would carry bits no one can see; held to the range above, the choice
-/// is one of 151.
-pub const GUIDE_ASPECT_STEPS_PER_UNIT: f32 = 100.0;
+/// The narrowest an `oval` guide is drawn, as a fraction of the frame's
+/// shorter side: below it a face is too far off to read.
+pub const GUIDE_OVAL_WIDTH_MIN: f32 = 0.1;
+
+/// The widest an `oval` guide is drawn, as a fraction of the frame's shorter
+/// side: at it, the oval's height — [`GUIDE_OVAL_ASPECT`] times its width —
+/// still fits that side.
+pub const GUIDE_OVAL_WIDTH_MAX: f32 = 0.6;
+
+/// An `oval` guide's height over its width, fixed: the golden ratio, the
+/// proportion of a face.
+pub const GUIDE_OVAL_ASPECT: f32 = 1.618;
+
+// The widest oval's height still fits the frame's shorter side.
+const _: () = assert!(GUIDE_OVAL_WIDTH_MAX * GUIDE_OVAL_ASPECT <= 1.0);
+
+/// How many steps per unit there are of a guide's fractions — a `rect`'s
+/// aspect, an `oval`'s centre and size: each is drawn rounded to
+/// hundredths. The policy picks them freely, and past what the applicant
+/// can tell apart on screen every further digit would carry bits no one
+/// can see; held to its range, an aspect is one of 151.
+pub const GUIDE_STEPS_PER_UNIT: f32 = 100.0;
+
+/// The longest a guide may ask to be held, in milliseconds.
+pub const GUIDE_HOLD_MS_MAX: u16 = 5000;
+
+/// The furthest a `turn` guide may ask the head to turn, in degrees either
+/// way: past it the face is in profile.
+pub const GUIDE_TURN_DEGREES_MAX: i8 = 45;
 
 // ----- The consumer's embedded catalogs, as a whole -----
 

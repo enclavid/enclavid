@@ -12,10 +12,10 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-// The host `blob` resource — one stored byte-blob (here, a captured JPEG
-// frame). Distinct name from this plugin's own `Frame` (the decoded RGB
-// buffer below).
-use enclavid::host::types::Blob;
+// The host `blob` resource — one stored byte-blob (here, a photo's JPEG).
+// Distinct name from this plugin's own `Frame` (the decoded RGB buffer
+// below).
+use enclavid::host::blob::Blob;
 use exports::enclavid::vision::decode::{Guest as DecodeGuest, Scale};
 use exports::enclavid::vision::types::{
     DecodedFrame, Guest as TypesGuest, GuestDecodedFrame, Size,

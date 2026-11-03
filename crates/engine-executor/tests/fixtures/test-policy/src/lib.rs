@@ -22,9 +22,9 @@
 //! field with the plugin's text, imported by the plugin's slot.
 
 wit_bindgen::generate!({
-    // wkg vendors the full dependency tree (embedded / shared-types /
-    // policy / well-known) under `wit/deps`, so the local package dir is
-    // the single resolution root.
+    // wkg vendors the full dependency tree (host / host-capture /
+    // host-disclosure / policy / well-known) under `wit/deps`, so the local
+    // package dir is the single resolution root.
     path: "wit",
     world: "enclavid:test-policy/policy@0.1.0",
     generate_all,
@@ -32,17 +32,17 @@ wit_bindgen::generate!({
 
 // Mints the policy's `disclosure-field-ref`s, each a case of its own list:
 // those it hands the well-known helpers, and its own face-age estimate.
-use enclavid::shared_types::disclosure::DisplayField;
+use enclavid::host_disclosure::disclosure::DisplayField;
 use enclavid_ext::policy::disclosure_fields::{Key as Field, disclosure_field};
 // The policy's own texts.
 use enclavid_ext::policy::i18n::{Key as Text, localized};
 // The well-known plugin's texts, by its slot.
 use enclavid_ext::well_known::i18n::{Key as WellKnownText, localized as well_known_text};
-// The host `blob` resource + its content ref: on the passport round we stash
-// the frame blob's `blob-ref` (a hex string) in `state`, then rehydrate it on
-// the selfie round via `Blob::from_blob_ref` — proving cross-round reload.
-use enclavid::host::types::Blob;
-use enclavid::policy::types::{Action, Decision, Disclosure, Event, Prompt};
+// The host `blob` resource: on the passport round we stash the photo's hash (a
+// hex string) in `state`, then rehydrate it on the selfie round through the
+// `Blob` constructor — proving cross-round reload.
+use enclavid::host::blob::Blob;
+use enclavid::policy::types::{Action, Capture, Decision, Disclosure, Event, Prompt};
 // The well-known plugin (linked at /connect) supplies the capture specs
 // and the canonical KYC `display-field` helpers.
 use enclavid::well_known::capture;
@@ -51,8 +51,8 @@ use enclavid::well_known::disclosure_fields as wk;
 // `extra-tag`, one of the extra plugin's own texts.
 use enclavid::extra::tag;
 // The vision substrate, threaded across the fused boundary: the vision plugin
-// decodes the selfie clip into a plugin-owned `decoded-frame`, face-detect
-// locates the `face` in it, face-age reads its crop and estimates.
+// decodes the selfie into a plugin-owned `decoded-frame`, face-detect locates
+// the `face` in it, face-age reads its crop and estimates.
 use enclavid::face_age::check as face_age;
 use enclavid::face_detect::detect as face_detect;
 use enclavid::vision::decode as vision;
@@ -206,28 +206,28 @@ impl Guest for TestPolicy {
             }
 
             // Passport captured → validate the capture, then ask for the
-            // selfie. Exercises the host-owned `frame` resource: the pixels
+            // selfie. Exercises the host-owned `blob` resource: the pixels
             // live host-side, so the policy is a pure router. We stash the
-            // first frame's `blob-ref` (32 bytes) in `state` — the host has
-            // already sealed the frame into its blob store — to rehydrate it on
-            // the selfie round. Only the ref lives in state; the pixels never
-            // do. An empty capture is retryable.
-            (STEP_AWAIT_PASSPORT, Event::Media(result)) => match result.clip.frames.first() {
-                None => (
+            // photo's hash in `state` — the host has already sealed the photo
+            // into its blob store — to rehydrate it on the selfie round. Only
+            // the hash lives in state; the pixels never do. A capture without
+            // a photo is retryable.
+            (STEP_AWAIT_PASSPORT, Event::Media(result)) => match result.captures.first() {
+                Some(Capture::Photo(photo)) => {
+                    // Stash the photo's content `hash` (a hex string) after the
+                    // step tag. Only the opaque token lives in state — never pixels.
+                    let mut next = vec![STEP_AWAIT_SELFIE];
+                    next.extend_from_slice(photo.hash().as_bytes());
+                    (next, Action::Render(Prompt::Media(capture::selfie())))
+                }
+                _ => (
                     state_at(STEP_AWAIT_PASSPORT),
                     Action::Finish(Decision::RejectedRetryable),
                 ),
-                Some(frame) => {
-                    // Stash the frame's content `hash` (a hex string) after the
-                    // step tag. Only the opaque token lives in state — never pixels.
-                    let mut next = vec![STEP_AWAIT_SELFIE];
-                    next.extend_from_slice(frame.hash().as_bytes());
-                    (next, Action::Render(Prompt::Media(capture::selfie())))
-                }
             },
 
             // Selfie captured → the full vision substrate across the fused
-            // boundary: the vision plugin decodes the clip into a plugin-owned
+            // boundary: the vision plugin decodes the photo into a plugin-owned
             // `decoded-frame` (pixels stay in that plugin's sandbox),
             // face-detect locates the `face`, face-age pulls its crop via
             // `region` and estimates. The policy just threads the handles.
@@ -236,28 +236,30 @@ impl Guest for TestPolicy {
             // document escalation) and lands with the real flow; here the
             // decode → detect → estimate plugin chain is what's exercised.
             (STEP_AWAIT_SELFIE, Event::Media(result)) => {
-                // Rehydrate the passport frame stashed last round from its
-                // `blob-ref` (the 32 bytes after the step tag). `from-blob-ref`
-                // returns a COLD handle (no load yet); reading `bytes()` is what
+                // Rehydrate the passport photo stashed last round from its hash
+                // (the bytes after the step tag). The constructor returns a
+                // COLD handle (no load yet); reading `bytes()` is what
                 // triggers the LAZY pull — proving the cross-round reload — and a
-                // miss traps THERE. A legitimately-stashed ref always resolves,
+                // miss traps THERE. A legitimately-stashed hash always resolves,
                 // so there's no miss branch to handle.
                 let passport_hash = core::str::from_utf8(&state[1..]).unwrap_or_default();
                 let passport = Blob::new(passport_hash);
                 if !skip_passport_read() {
                     let _passport_bytes = passport.bytes();
                 }
-                // Vision DAG on the SELFIE frame: the vision plugin decodes it
+                // Vision DAG on the SELFIE: the vision plugin decodes it
                 // into a plugin-owned `decoded-frame`, face-detect locates the
                 // `face`, face-age reads its crop and estimates. The policy
                 // threads the handles. Half the camera's size leaves a selfie's
                 // face a hundred pixels and more, which an age model reads; an
                 // eighth leaves it a few dozen.
-                let age = result.clip.frames.first().and_then(|frame| {
-                    vision::decode(frame, vision::Scale::Half).and_then(|df| {
-                        face_detect::detect(&df).and_then(|face| face_age::estimate(&df, &face))
-                    })
-                });
+                let age = match result.captures.first() {
+                    Some(Capture::Photo(photo)) => vision::decode(photo, vision::Scale::Half)
+                        .and_then(|df| {
+                            face_detect::detect(&df).and_then(|face| face_age::estimate(&df, &face))
+                        }),
+                    _ => None,
+                };
                 match age {
                     Some(est) => (
                         state_at(STEP_AWAIT_CONSENT),

@@ -5,10 +5,10 @@ package enclavid:vision@0.1.0;
 /// `face`; age / liveness / face-match consume it). The plugins share ONE
 /// type, which this package's plugin defines and serves.
 ///
-/// Unlike `clip` (host-owned, in `enclavid:host/types` — the TRUSTED,
+/// Unlike `blob` (host-owned, in `enclavid:host/blob` — the TRUSTED,
 /// unforgeable capture input the runtime mints), `decoded-frame` is DERIVED
-/// by this plugin from a `clip`, so it is PLUGIN-owned: the decode of the
-/// untrusted JPEG, the pixel storage, and the `region` resample all stay
+/// by this plugin from a photo's `blob`, so it is PLUGIN-owned: the decode of
+/// the untrusted JPEG, the pixel storage, and the `region` resample all stay
 /// inside this plugin's sandbox — the host / TCB touches no pixels.
 interface types {
     /// A region of interest, normalized `[0,1]` over the source frame.
@@ -57,12 +57,12 @@ interface types {
     }
 }
 
-/// Decode a capture frame into a shared `decoded-frame`. The decode of the
-/// untrusted JPEG runs HERE (sandboxed), and the pixels stay in this
-/// plugin's memory — downstream face checks pull crops via
-/// `decoded-frame.region`, so one decode serves all of them.
+/// Decode a photo into a shared `decoded-frame`. The decode of the untrusted
+/// JPEG runs HERE (sandboxed), and the pixels stay in this plugin's memory —
+/// downstream face checks pull crops via `decoded-frame.region`, so one
+/// decode serves all of them.
 interface decode {
-    use enclavid:host/types@0.1.0.{blob};
+    use enclavid:host/blob@0.1.0.{blob};
     use types.{decoded-frame};
 
     /// Source-decode fidelity tier. The caller materializes the tier(s) its
@@ -76,15 +76,14 @@ interface decode {
         full,
     }
 
-    /// Decode one captured frame `blob` at `scale` → a `decoded-frame`.
-    /// `none` = the blob is undecodable (the caller asks for a retake). The
-    /// caller picks which frame of the clip to decode and borrows it here.
+    /// Decode a photo's `blob` at `scale` → a `decoded-frame`. `none` = the
+    /// blob is undecodable (the caller asks for a retake).
     decode: func(frame: borrow<blob>, scale: scale) -> option<decoded-frame>;
 }
 
 world vision {
     // Reads the applicant's capture, and owns the frames decoded from it.
-    import enclavid:host/types@0.1.0;
+    import enclavid:host/blob@0.1.0;
     export types;
     export decode;
 }

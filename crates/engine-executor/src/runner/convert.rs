@@ -22,19 +22,22 @@ use std::sync::Arc;
 use wasmtime::component::{Resource, ResourceTable};
 
 use session_types::{
-    CameraFacing as DCameraFacing, CaptureGuide as DCaptureGuide, CaptureStep as DCaptureStep,
-    Decision as DDecision, Disclosure as DDisclosure, DisplayField as DDisplayField, Event,
-    GuideNone, GuideOval, GuideRect, Localized as DLocalized, MediaSpec as DMediaSpec, Prompt,
-    capture_guide,
+    CameraFacing as DCameraFacing, Capture, CaptureKind as DCaptureKind,
+    CaptureStep as DCaptureStep, Decision as DDecision, Disclosure as DDisclosure,
+    DisplayField as DDisplayField, Event, FrameRange, Guide as DGuide, Localized as DLocalized,
+    MediaSpec as DMediaSpec, OvalSpec as DOvalSpec, PhotoSpec as DPhotoSpec, Prompt,
+    TurnSpec as DTurnSpec, VideoSpec as DVideoSpec,
 };
 
 use crate::embedded::{DisclosureFieldRef, EmbeddedRegistry, IconRef, LocalizedRef};
+use crate::enclavid::host_capture::capture as wit_capture;
 use crate::enclavid::policy::types as wit_policy;
-use crate::enclavid::shared_types::capture as wit_capture;
 use crate::limits::{
-    GUIDE_ASPECT_MAX, GUIDE_ASPECT_MIN, GUIDE_ASPECT_STEPS_PER_UNIT, MAX_CONSENT_FIELDS,
-    MAX_VALUE_LENGTH,
+    GUIDE_ASPECT_MAX, GUIDE_ASPECT_MIN, GUIDE_HOLD_MS_MAX, GUIDE_OVAL_WIDTH_MAX,
+    GUIDE_OVAL_WIDTH_MIN, GUIDE_STEPS_PER_UNIT, GUIDE_TURN_DEGREES_MAX, MAX_CAPTURE_STEPS,
+    MAX_CONSENT_FIELDS, MAX_VALUE_LENGTH, MAX_VIDEO_GUIDES,
 };
+use crate::media::BlobRep;
 use crate::sanitize;
 
 // ---------------------------------------------------------------------
@@ -42,17 +45,17 @@ use crate::sanitize;
 // ---------------------------------------------------------------------
 
 /// Lower a domain [`Event`] into the WIT `event` the policy's `handle`
-/// consumes. The captured pixels don't cross into the policy's linear memory —
-/// each frame is content-addressed (BLAKE3) and pushed into the run's
-/// [`ResourceTable`] host-side as an unforgeable `frame` handle; the policy
-/// receives a `clip` record bundling the handles and forwards one to a plugin.
-/// Minting handles needs `&mut table`, so this runs before the `handle` call
-/// while the store is otherwise idle.
+/// consumes. The captured bytes don't cross into the policy's linear memory —
+/// each capture's blob is content-addressed (BLAKE3) and pushed into the run's
+/// [`ResourceTable`] host-side as an unforgeable `blob` handle; the policy
+/// receives one capture per step and forwards it to a plugin. Minting handles
+/// needs `&mut table`, so this runs before the `handle` call while the store is
+/// otherwise idle.
 ///
 /// The `(hash, bytes)` pairs are NOT reported back. The orchestrator sent these
-/// very frames in this very event and derives the same BLAKE3 over the same
-/// bytes, so what it would be receiving is a copy of what it already holds — from
-/// the process it has the least reason to take copies from.
+/// very bytes in this very event and derives the same BLAKE3 over them, so what
+/// it would be receiving is a copy of what it already holds — from the process
+/// it has the least reason to take copies from.
 pub fn event_to_wit(
     table: &mut ResourceTable,
     event: Event,
@@ -61,25 +64,54 @@ pub fn event_to_wit(
         Event::Start => wit_policy::Event::Start,
         Event::ConsentDisclosure(accepted) => wit_policy::Event::ConsentDisclosure(accepted),
         Event::Media(result) => {
-            let mut frames = Vec::with_capacity(result.clip.frames.len());
-            for frame_bytes in result.clip.frames {
-                let hash: [u8; 32] = blake3::hash(&frame_bytes).into();
-                let arc = Arc::new(frame_bytes);
-                // Ingest blob: bytes are in hand from `/input`, so it's minted
-                // "warm" (`Some`) — no lazy pull needed. Only rehydrated
-                // (`from-blob-ref`) blobs start cold.
-                let handle = table.push(crate::media::BlobRep {
-                    bytes: Some(arc.clone()),
-                    content_hash: hash,
-                })?;
-                frames.push(handle);
+            let mut captures = Vec::with_capacity(result.captures.len());
+            for capture in result.captures {
+                captures.push(match capture {
+                    Capture::Photo(jpeg) => wit_policy::Capture::Photo(blob(table, jpeg)?),
+                    Capture::Video(video) => wit_policy::Capture::Video(wit_policy::Video {
+                        data: blob(table, video.data)?,
+                        guides: video.guides.into_iter().map(frame_range_to_wit).collect(),
+                    }),
+                });
             }
-            wit_policy::Event::Media(wit_policy::MediaResult {
-                slot: result.slot,
-                clip: wit_policy::Clip { frames },
-            })
+            wit_policy::Event::Media(wit_policy::MediaResult { captures })
         }
     })
+}
+
+/// Mint a `blob` handle for bytes the applicant sent. Minted "warm" (`Some`):
+/// the bytes are in hand from `/input`, so no lazy pull is needed. Only a blob
+/// rehydrated by its hash starts cold.
+fn blob(table: &mut ResourceTable, bytes: Vec<u8>) -> wasmtime::Result<Resource<BlobRep>> {
+    let content_hash: [u8; 32] = blake3::hash(&bytes).into();
+    Ok(table.push(BlobRep {
+        bytes: Some(Arc::new(bytes)),
+        content_hash,
+    })?)
+}
+
+fn frame_range_to_wit(range: FrameRange) -> wit_policy::FrameRange {
+    wit_policy::FrameRange {
+        guide: guide_to_wit(range.guide),
+        first: range.first,
+        last: range.last,
+    }
+}
+
+fn guide_to_wit(guide: DGuide) -> wit_capture::Guide {
+    match guide {
+        DGuide::Rect(aspect) => wit_capture::Guide::Rect(aspect),
+        DGuide::Oval(o) => wit_capture::Guide::Oval(wit_capture::OvalSpec {
+            center_x: o.center_x,
+            center_y: o.center_y,
+            width: o.width,
+            hold_ms: o.hold_ms,
+        }),
+        DGuide::Turn(t) => wit_capture::Guide::Turn(wit_capture::TurnSpec {
+            degrees: t.degrees,
+            hold_ms: t.hold_ms,
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -174,6 +206,9 @@ fn disclosure_to_domain(
 // Media spec — resolve + lower
 // ---------------------------------------------------------------------
 
+/// Resolve refs on a media render and lower it. A spec of no steps, or of
+/// more than [`MAX_CAPTURE_STEPS`], and a video step of no guides, or of more
+/// than [`MAX_VIDEO_GUIDES`], trap: none is an applicant's doing.
 fn media_spec_to_domain(
     spec: wit_capture::MediaSpec,
     table: &ResourceTable,
@@ -182,6 +217,11 @@ fn media_spec_to_domain(
         return Err(wasmtime::Error::msg(
             "media render spec has no capture steps",
         ));
+    }
+    if spec.captures.len() > MAX_CAPTURE_STEPS {
+        return Err(wasmtime::Error::msg(format!(
+            "media render spec exceeds {MAX_CAPTURE_STEPS} capture steps"
+        )));
     }
     let label = localized(table, &spec.label)?;
     let captures = spec
@@ -200,13 +240,31 @@ fn capture_step_to_domain(
         Some(r) => Some(icon_name(table, r)?),
         None => None,
     };
+    let kind = match s.kind {
+        wit_capture::CaptureKind::Photo(photo) => DCaptureKind::Photo(DPhotoSpec {
+            guide: photo.guide.map(guide_to_domain),
+            review_hint: localized(table, &photo.review_hint)?,
+        }),
+        wit_capture::CaptureKind::Video(video) => {
+            if video.guides.is_empty() {
+                return Err(wasmtime::Error::msg("a video capture step has no guides"));
+            }
+            if video.guides.len() > MAX_VIDEO_GUIDES {
+                return Err(wasmtime::Error::msg(format!(
+                    "a video capture step exceeds {MAX_VIDEO_GUIDES} guides"
+                )));
+            }
+            DCaptureKind::Video(DVideoSpec {
+                guides: video.guides.into_iter().map(guide_to_domain).collect(),
+            })
+        }
+    };
     Ok(DCaptureStep {
         icon,
         instructions: localized(table, &s.instructions)?,
         label: localized(table, &s.label)?,
         camera: camera_to_domain(s.camera),
-        guide: Some(guide_to_domain(s.guide)),
-        review_hint: localized(table, &s.review_hint)?,
+        kind,
     })
 }
 
@@ -218,32 +276,94 @@ fn camera_to_domain(c: wit_capture::CameraFacing) -> DCameraFacing {
     }
 }
 
-fn guide_to_domain(g: wit_capture::CaptureGuide) -> DCaptureGuide {
-    let kind = match g {
-        wit_capture::CaptureGuide::None => capture_guide::Kind::None(GuideNone {}),
-        wit_capture::CaptureGuide::Rect(aspect) => capture_guide::Kind::Rect(GuideRect {
-            aspect: drawn_aspect(aspect),
+/// A guide as it is drawn: each of its numbers held to its range and its
+/// fractions rounded, as the WIT `guide` says.
+fn guide_to_domain(g: wit_capture::Guide) -> DGuide {
+    match g {
+        wit_capture::Guide::Rect(aspect) => DGuide::Rect(drawn_aspect(aspect)),
+        wit_capture::Guide::Oval(o) => DGuide::Oval(DOvalSpec {
+            center_x: drawn(o.center_x, 0.0, 1.0, 0.5),
+            center_y: drawn(o.center_y, 0.0, 1.0, 0.5),
+            width: drawn(o.width, GUIDE_OVAL_WIDTH_MIN, GUIDE_OVAL_WIDTH_MAX, 0.5),
+            hold_ms: o.hold_ms.min(GUIDE_HOLD_MS_MAX),
         }),
-        wit_capture::CaptureGuide::Oval => capture_guide::Kind::Oval(GuideOval {}),
-    };
-    DCaptureGuide { kind: Some(kind) }
+        wit_capture::Guide::Turn(t) => DGuide::Turn(DTurnSpec {
+            degrees: t
+                .degrees
+                .clamp(-GUIDE_TURN_DEGREES_MAX, GUIDE_TURN_DEGREES_MAX),
+            hold_ms: t.hold_ms.min(GUIDE_HOLD_MS_MAX),
+        }),
+    }
 }
 
 /// The aspect a `rect` guide is drawn at: the policy's, held to
-/// [`GUIDE_ASPECT_MIN`]..=[`GUIDE_ASPECT_MAX`] and rounded to the step
-/// [`GUIDE_ASPECT_STEPS_PER_UNIT`] sets; a square for NaN, which has no
-/// place in the range.
+/// [`GUIDE_ASPECT_MIN`]..=[`GUIDE_ASPECT_MAX`] and rounded; a square for
+/// NaN, which has no place in the range.
 fn drawn_aspect(aspect: f32) -> f32 {
-    if aspect.is_nan() {
-        return 1.0;
+    drawn(aspect, GUIDE_ASPECT_MIN, GUIDE_ASPECT_MAX, 1.0)
+}
+
+/// `value` held to `min..=max` and rounded to the step
+/// [`GUIDE_STEPS_PER_UNIT`] sets; `nan` for NaN, which has no place in the
+/// range.
+fn drawn(value: f32, min: f32, max: f32, nan: f32) -> f32 {
+    if value.is_nan() {
+        return nan;
     }
-    let held = aspect.clamp(GUIDE_ASPECT_MIN, GUIDE_ASPECT_MAX);
-    (held * GUIDE_ASPECT_STEPS_PER_UNIT).round() / GUIDE_ASPECT_STEPS_PER_UNIT
+    (value.clamp(min, max) * GUIDE_STEPS_PER_UNIT).round() / GUIDE_STEPS_PER_UNIT
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An oval is drawn inside the frame at a width a face can fill, to
+    /// hundredths, and held no longer than the longest hold; a turn no
+    /// further than a face in profile.
+    #[test]
+    fn a_guide_is_drawn_within_its_ranges() {
+        for (given, drawn) in [
+            (0.01, GUIDE_OVAL_WIDTH_MIN),
+            (0.456_78, 0.46),
+            (0.9, GUIDE_OVAL_WIDTH_MAX),
+            (f32::NAN, 0.5),
+        ] {
+            let oval = guide_to_domain(wit_capture::Guide::Oval(wit_capture::OvalSpec {
+                center_x: -0.2,
+                center_y: 1.7,
+                width: given,
+                hold_ms: u16::MAX,
+            }));
+            assert_eq!(
+                oval,
+                DGuide::Oval(DOvalSpec {
+                    center_x: 0.0,
+                    center_y: 1.0,
+                    width: drawn,
+                    hold_ms: GUIDE_HOLD_MS_MAX,
+                }),
+                "{given}"
+            );
+        }
+        for (given, drawn) in [
+            (i8::MIN, -GUIDE_TURN_DEGREES_MAX),
+            (30, 30),
+            (i8::MAX, GUIDE_TURN_DEGREES_MAX),
+        ] {
+            let turn = guide_to_domain(wit_capture::Guide::Turn(wit_capture::TurnSpec {
+                degrees: given,
+                hold_ms: 700,
+            }));
+            assert_eq!(
+                turn,
+                DGuide::Turn(DTurnSpec {
+                    degrees: drawn,
+                    hold_ms: 700
+                }),
+                "{given}"
+            );
+        }
+    }
 
     /// Inside the range an aspect is drawn to hundredths, and written out as
     /// no more than that: the digits past them carry nothing to the page.

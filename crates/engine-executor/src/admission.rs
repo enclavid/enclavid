@@ -67,7 +67,7 @@
 //! numbers that describe what the code holds are constants.
 
 use engine_types::limits::MAX_MODELS;
-use session_types::{MAX_CLIP_BYTES, SEALED_STATE_PLAINTEXT_BYTES};
+use session_types::{MAX_MEDIA_BYTES, SEALED_STATE_PLAINTEXT_BYTES};
 
 /// Bound on L1 ENTRIES unless the host says otherwise (the
 /// `bundle-cache-entries` setting), enforced through the charge rather than
@@ -124,7 +124,7 @@ const FD_HEADROOM: u64 = 128;
 
 /// What a running child's round holds in THIS process, reasoned from the code
 /// rather than measured: the round's own request until its handler returns —
-/// the clip until it is sent, the state frame and the state opened from it,
+/// the captures until they are sent, the state frame and the state opened from it,
 /// about 15 MiB — a relayed `media_load` blob in both its encodings, the
 /// metadata as `prime` encodes it, and the framed state. About 45 MiB, rounded
 /// up.
@@ -169,7 +169,7 @@ pub fn supervisor_per_child(waiting_per_child: usize) -> u64 {
 /// nothing.
 ///
 /// Sized for a round at its bounds, reasoned from the code. What its process
-/// holds of its own: the clip, up to `MAX_CLIP_BYTES` (12 MiB), held as
+/// holds of its own: the captures, up to `MAX_MEDIA_BYTES` (12 MiB), held as
 /// received, again as the blobs it decodes into, and once more as the copy a
 /// host function hands the policy; state frames of 1.25 MiB — the one
 /// received, the one returned, the prompt, and the encode `session_change`
@@ -191,8 +191,8 @@ pub const DEFAULT_ROUND_MAX_BYTES: u64 = 384 * 1024 * 1024;
 /// total, and in the guest's available memory — read before each spawn — unless
 /// the host says otherwise (the `round-headroom-bytes` setting).
 ///
-/// About an honest round's own cost with a clip at its bound — the clip three
-/// times over, its state frames, its engine — plus room for the policy's own
+/// About an honest round's own cost with captures at their bound — the
+/// captures three times over, its state frames, its engine — plus room for the policy's own
 /// working memory. Reasoned, not measured; a debug build logs each round's peak
 /// as its group empties, which is what to set it from.
 ///
@@ -212,14 +212,14 @@ const _: () = assert!(DEFAULT_ROUND_HEADROOM_BYTES <= DEFAULT_ROUND_MAX_BYTES);
 
 /// What a round holds in this supervisor while it waits — for a fill slot, for
 /// another round's fill of the same composition, or for a child: its request as
-/// decoded. A clip at its bound, the state frame and
+/// decoded. Captures at their bound, the state frame and
 /// the state opened from it, and the props; about 15 MiB, rounded up.
 const QUEUED_ROUND_BYTES: u64 = 16 * 1024 * 1024;
 
-// A waiting round's reserve holds its request's bulk: the clip, and the state
-// twice — framed, and opened from the frame.
+// A waiting round's reserve holds its request's bulk: the captures, and the
+// state twice — framed, and opened from the frame.
 const _: () = assert!(
-    (MAX_CLIP_BYTES + 2 * SEALED_STATE_PLAINTEXT_BYTES) as u64 <= QUEUED_ROUND_BYTES,
+    (MAX_MEDIA_BYTES + 2 * SEALED_STATE_PLAINTEXT_BYTES) as u64 <= QUEUED_ROUND_BYTES,
     "a waiting round's reserve is under its request's bulk"
 );
 

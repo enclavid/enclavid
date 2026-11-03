@@ -1,8 +1,9 @@
 [overrides]
 "enclavid:well-known" = { path = "../../../../../plugins/well-known/wit" }
-"enclavid:shared-types" = { path = "../../../../../wit/shared-types" }
 "enclavid:policy" = { path = "../../../../../wit/policy" }
 "enclavid:host" = { path = "../../../../../wit/host" }
+"enclavid:host-capture" = { path = "../../../../../wit/host-capture" }
+"enclavid:host-disclosure" = { path = "../../../../../wit/host-disclosure" }
 "enclavid:host-icons" = { path = "../../../../../wit/host-icons" }
 "enclavid:extra" = { path = "../test-extra/wit" }
 "enclavid:face-age" = { path = "../../../../../plugins/face-age/wit" }

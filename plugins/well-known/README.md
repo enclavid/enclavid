@@ -56,7 +56,7 @@ disclose, by convention named as the helpers are:
 ```wit
 package enclavid-ext:policy@0.1.0 {
     interface disclosure-fields {
-        use enclavid:host/types@0.1.0.{disclosure-field-ref};
+        use enclavid:host/refs@0.1.0.{disclosure-field-ref};
 
         enum key {
             passport-number,

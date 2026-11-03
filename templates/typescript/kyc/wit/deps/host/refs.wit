@@ -1,0 +1,59 @@
+/// Capabilities the TEE host provides to the policy live in the RESERVED
+/// `enclavid:host` package, and in any `enclavid:host-*` one: a composed plugin
+/// may `import` an interface there (reading the same host surface the policy
+/// does), but it must never SATISFY one. Runtime fusion refuses to wire a plugin
+/// export into a host-reserved import and rejects outright any plugin that
+/// exports one — host interfaces are served exclusively by the TEE `Linker`.
+/// New host capabilities land as new interfaces in these packages, so the trust
+/// boundary stays a single prefix check rather than a denylist that must be kept
+/// in sync.
+///
+/// `enclavid:host-icons` holds the icons the applicant frontend draws, in a
+/// package of its own so that a new icon moves that package's version alone.
+/// `enclavid:host-capture` and `enclavid:host-disclosure` hold the shapes the
+/// host renders a capture and a consent screen from, each in a package of its
+/// own so that each moves its own version.
+///
+/// What a component declares itself, because the types are its own, it
+/// declares in its slot, a package of the `enclavid-ext` namespace the host
+/// serves as well. Every component's texts: `enclavid-ext:<slot>/i18n`, whose
+/// `key` enum has a case for each text and whose `localized` mints the text of
+/// a case, served from the catalog that names the slot. A plugin's slot is named
+/// for its package; the policy's is `enclavid-ext:policy`, which holds as well
+/// `props`, whose `get` returns the props the consumer gave the session
+/// in whatever record the policy declares for them, and `disclosure-fields`,
+/// whose `key` lists the fields its disclosures may name. A component may import
+/// another's texts by its slot.
+///
+/// A component's models: `enclavid-ext:<slot>/models`, a function for each ONNX
+/// model its artifact carries beside its component — a layer `<function>.onnx`,
+/// the graph, and where its weights are large `<function>.onnx.data`, the data
+/// file the graph points into — returning a resource the slot declares, whose
+/// one method `run` borrows a tensor of `enclavid:host/tensors` for each input
+/// of the graph and returns one for each output: as itself, or a tuple or a
+/// record of them for more than one. The host serves the resource: the model
+/// runs in a process of its own beside the round, started the first time a
+/// round calls the function. Only the one artifact that imports a slot's models
+/// is served them, and only its own files.
+package enclavid:host@0.1.0;
+
+/// The handles the host mints for what a prompt is made of: RESOURCES a
+/// component cannot construct, minted only through a slot's `i18n`, the
+/// policy's `disclosure-fields`, and `enclavid:host-icons/icons`. The handle IS
+/// the proof the key was declared, so membership needs no crypto token. A
+/// plugin's helper that names a field takes the `disclosure-field-ref` the
+/// policy minted. They live HERE (a shared interface) rather than inside each
+/// interface that mints them, so every slot's `i18n` mints the SAME resource
+/// type that the records a prompt is made of carry, and every version of
+/// `enclavid:host-icons` mints the one `icon-ref` that `capture-step` carries.
+interface refs {
+    /// One of a component's texts, in every language its catalog has it in —
+    /// surfaces as UI text once the host picks the applicant's language.
+    resource localized-ref;
+    /// An icon from `enclavid:host-icons/icons`, which the applicant
+    /// frontend draws by its name.
+    resource icon-ref;
+    /// One of the policy's disclosure fields — surfaces as the machine
+    /// `display-field.key` the consumer receives.
+    resource disclosure-field-ref;
+}

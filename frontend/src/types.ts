@@ -40,12 +40,38 @@ export type ConsentFieldView = {
 
 export type CameraFacing = "front" | "rear" | "any";
 
-export type CaptureGuide =
-  | { kind: "none" }
-  | { kind: "rect"; aspect: number }
-  | { kind: "oval" };
+/// What the page shows over the camera (mirror `GuideView`).
+export type Guide =
+  /// A rectangular overlay for a document.
+  | {
+      kind: "rect";
+      /// Its width:height aspect.
+      aspect: number;
+    }
+  /// A face oval, in the frame as the camera sees it.
+  | {
+      kind: "oval";
+      /// The centre, as a fraction of the frame's width.
+      center_x: number;
+      /// The centre, as a fraction of the frame's height.
+      center_y: number;
+      /// As a fraction of the frame's shorter side.
+      width: number;
+      /// As a fraction of the frame's shorter side.
+      height: number;
+      /// How long a face must fill it, in milliseconds.
+      hold_ms: number;
+    }
+  /// A turn of the head.
+  | {
+      kind: "turn";
+      /// How far, negative to the applicant's left.
+      degrees: number;
+      /// How long to hold it, in milliseconds.
+      hold_ms: number;
+    };
 
-export type CaptureStep = {
+type CaptureStepCommon = {
   /// Optional icon name dispatched against the frontend's bundled
   /// SVG library. `null` skips the icon area entirely. The name is
   /// one of the host's own (`enclavid:host-icons/icons`).
@@ -56,12 +82,30 @@ export type CaptureStep = {
   /// Short on-camera overlay text shown during capture.
   label: string;
   camera: CameraFacing;
-  guide: CaptureGuide;
-  /// Post-capture review-screen copy ("Make sure the MRZ is sharp,
-  /// no glare"). Policy-supplied via `capture-step.review-hint` so
-  /// each artifact type gets its own targeted check.
-  review_hint: string;
 };
+
+/// One step of a capture (mirror `CaptureStepView`), by what it records.
+export type CaptureStep = CaptureStepCommon &
+  (
+    /// One frame, which the applicant keeps or retakes.
+    | {
+        kind: "photo";
+        /// The frame drawn over the camera, if any.
+        guide: Guide | null;
+        /// Post-capture review-screen copy ("Make sure the MRZ is
+        /// sharp, no glare"). Policy-supplied via `photo-spec.review-hint`
+        /// so each artifact type gets its own targeted check.
+        review_hint: string;
+      }
+    /// A video, recorded while guides are shown.
+    | {
+        kind: "video";
+        /// What the page shows while it records, in order.
+        guides: Guide[];
+      }
+  );
+
+export type PhotoStep = Extract<CaptureStep, { kind: "photo" }>;
 
 export type MediaSpec = {
   label: string;
@@ -74,14 +118,13 @@ export type RequestView =
       /// Overall artifact title surfaced on every screen of the
       /// capture flow as context ("Your passport").
       label: string;
+      /// Each step's capture is POSTed as it is taken, in order, to
+      /// `/input/<awaiting_seq>/media-<step>`.
       captures: CaptureStep[];
-      /// Step indices already captured (subset of 0..captures.length).
-      filled: number[];
-      /// Slot id to POST the next step to
-      /// (`/input/<awaiting_seq>/<slot_id>`): `media-<step>`.
-      next_slot_id: string;
-      /// The most bytes one step's upload may be, multipart framing
-      /// included; past it the server answers 413.
+      /// The step to show: the first whose capture is not sent yet.
+      next_step: number;
+      /// The most bytes the captures of the steps not sent yet may be
+      /// together; past it the server answers 413.
       max_upload_bytes: number;
     }
   | {

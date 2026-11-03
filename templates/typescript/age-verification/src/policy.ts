@@ -59,15 +59,17 @@ export const policy = definePolicy(
   }),
 );
 
-// The age of the face in a selfie, or none: a selfie with no frame, a frame
-// that does not decode, holds no face, or a face too small to read. The
-// vision plugin decodes the frame once, at half the camera's size, where a
-// selfie's face is a hundred pixels and more; face-detect finds the face in
-// it, and face-age reads its age from the face's own crop.
+// The age of the face in a selfie, or none: a photo that does not decode,
+// holds no face, or a face too small to read. The vision plugin decodes the
+// photo once, at half the camera's size, where a selfie's face is a hundred
+// pixels and more; face-detect finds the face in it, and face-age reads its
+// age from the face's own crop.
 function estimateAge(media: MediaResult): number | undefined {
-  const frame = media.clip.frames[0];
-  if (!frame) return;
-  const picture = decode(frame, "half");
+  // A capture for each step of the spec, of the kind the step asked for: the
+  // selfie's spec is one photo.
+  const [selfie] = media.captures;
+  if (selfie?.tag !== "photo") return;
+  const picture = decode(selfie.val, "half");
   if (!picture) return;
   const face = detect(picture);
   if (!face) return;

@@ -1,24 +1,26 @@
-//! The host-owned `enclavid:host/types.blob` resource.
+//! The host-owned `enclavid:host/blob.blob` resource.
 //!
-//! A `blob` is one stored byte-blob — a captured JPEG frame today, an uploaded
-//! document / PDF later; the host owns and hands them out identically. The
-//! runtime mints a handle per captured frame when it builds `event::media` from
-//! the applicant's `/input` bytes (see [`runner::convert::event_to_wit`]); the
-//! policy receives a `clip` record bundling the handles, forwards one to a
-//! verification plugin (fused into the same store), which pulls the pixels via
-//! [`bytes`](HostBlob::bytes). The bytes therefore enter a component's linear
-//! memory only at the point of use — never the policy's, which is a pure router.
+//! A `blob` is one stored byte-blob — a photo's JPEG or a video's WebM today,
+//! an uploaded document / PDF later; the host owns and hands them out
+//! identically. The runtime mints a handle per capture when it builds
+//! `event::media` from the applicant's `/input` bytes (see
+//! [`runner::convert::event_to_wit`]); the policy receives one capture per step
+//! of the spec, forwards one to a verification plugin (fused into the same
+//! store), which pulls the bytes via [`bytes`](HostBlob::bytes). The bytes
+//! therefore enter a component's linear memory only at the point of use —
+//! never the policy's, which is a pure router.
 //!
-//! Each blob also carries its own `blob-ref` (the 32-byte BLAKE3 of its bytes).
-//! The policy stashes the refs it wants in the sealed `state`, and rehydrates a
-//! blob in a later round via [`from-blob-ref`](HostBlob::from_blob_ref) — which
-//! returns a COLD handle (no host IO). The sealed bytes are pulled LAZILY from
-//! the injected [`MediaStore`](crate::media_store::MediaStore) on the first
+//! Each blob also carries its own `blob-hash` (the 32-byte BLAKE3 of its
+//! bytes). The policy stashes the hashes it wants in the sealed `state`, and
+//! rehydrates a blob in a later round via the constructor
+//! ([`new`](HostBlob::new)) — which returns a COLD handle (no host IO). The
+//! sealed bytes are pulled LAZILY from the injected
+//! [`MediaStore`](crate::media_store::MediaStore) on the first
 //! [`bytes()`](HostBlob::bytes) and memoized, so a handle the policy makes but
 //! never reads costs nothing. Live handles are meaningless across rounds
-//! (dropped with the Store); only the value `blob-ref` survives.
+//! (dropped with the Store); only the value `blob-hash` survives.
 //!
-//! Data-minimization tradeoff: the runtime stores EVERY captured frame,
+//! Data-minimization tradeoff: the runtime stores EVERY capture,
 //! AEAD-sealed, host-side for the session lifetime (the api's `MediaStore`
 //! impl seals each blob under the double-AEAD layers and co-commits it with
 //! the reducer state). This is more retained data than the old
@@ -31,8 +33,11 @@ use std::sync::Arc;
 
 use wasmtime::component::Resource;
 
-use crate::enclavid::host::types::BlobHash;
+use crate::enclavid::host::blob::{BlobHash, HostBlob};
 use crate::state::HostState;
+
+// The blob interface carries no functions of its own beside the resource's.
+impl crate::enclavid::host::blob::Host for HostState {}
 
 /// Backing rep for a `blob` handle: its content hash plus, once materialized,
 /// the bytes. Owned by the run's
@@ -51,7 +56,7 @@ pub struct BlobRep {
     pub content_hash: [u8; 32],
 }
 
-impl crate::enclavid::host::types::HostBlob for HostState {
+impl HostBlob for HostState {
     /// Materialize the bytes into the caller's linear memory. For a cold
     /// (rehydrated) blob this is where the LAZY pull happens: hit the injected
     /// store, memoize the `Arc` back into the rep, and copy out. A store miss

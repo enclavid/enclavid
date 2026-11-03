@@ -14,8 +14,8 @@ package enclavid:well-known@0.1.0;
 /// beside its label, so a field passed to another field's helper is on
 /// the applicant's screen for them to see.
 interface disclosure-fields {
-  use enclavid:host/types@0.1.0.{disclosure-field-ref};
-  use enclavid:shared-types/disclosure@0.1.0.{display-field};
+  use enclavid:host/refs@0.1.0.{disclosure-field-ref};
+  use enclavid:host-disclosure/disclosure@0.1.0.{display-field};
 
   /// ─── Document identifiers ──────────────────────────────────────
   passport-number: func(field: disclosure-field-ref, value: string) -> display-field;
@@ -70,7 +70,7 @@ interface disclosure-fields {
 /// only, no policy whitelist needed — and the icons are the host's own
 /// (`enclavid:host-icons/icons`).
 interface capture {
-  use enclavid:shared-types/capture@0.1.0.{capture-step, media-spec};
+  use enclavid:host-capture/capture@0.1.0.{capture-step, media-spec};
 
   /// Full MediaSpecs
   passport: func() -> media-spec;
@@ -92,11 +92,11 @@ interface capture {
 }
 
 world well-known {
-  import enclavid:host/types@0.1.0;
+  import enclavid:host/refs@0.1.0;
   import enclavid-ext:well-known/i18n@0.1.0;
   import enclavid:host-icons/icons@0.1.0;
-  import enclavid:shared-types/disclosure@0.1.0;
-  import enclavid:shared-types/capture@0.1.0;
+  import enclavid:host-disclosure/disclosure@0.1.0;
+  import enclavid:host-capture/capture@0.1.0;
 
   export disclosure-fields;
   export capture;

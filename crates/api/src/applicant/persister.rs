@@ -45,7 +45,8 @@ use tokio::sync::Mutex;
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
 use enclavid_crypto::seal_to_recipient;
 use session_types::{
-    Decision, DisplayField, Event, Prepared, Prompt, SessionMetadata, SessionState, SessionStatus,
+    Decision, DisplayField, Event, Prepared, Prompt, SentStep, SessionMetadata, SessionState,
+    SessionStatus,
 };
 use storage_client::boundary::Storage;
 use storage_client::{
@@ -156,8 +157,8 @@ pub(super) struct SessionPersister {
 /// is not.
 pub(super) type RoundConsent = Arc<Mutex<Option<Vec<DisplayField>>>>;
 
-/// The round's sole strong hold on the frames it captured, held by the round's
-/// own frame exactly as [`RoundConsent`] is.
+/// The round's sole strong hold on the captures it was answered with, held by
+/// the round's own frame exactly as [`RoundConsent`] is.
 pub(super) type RoundCaptures = Arc<Vec<([u8; 32], Vec<u8>)>>;
 
 /// The round's sole strong hold on the prompt its own write left the session
@@ -165,20 +166,23 @@ pub(super) type RoundCaptures = Arc<Vec<([u8; 32], Vec<u8>)>>;
 /// Empty until that write lands.
 pub(super) type RoundAwaiting = Arc<Mutex<Option<Prompt>>>;
 
-/// The frames this round captured, content-addressed on THIS side.
+/// The captures this round was answered with that are not stored yet, one blob
+/// each, content-addressed on THIS side. Those of the steps the page sent
+/// before the last (`sent`) were stored as they arrived, and are not written
+/// again.
 ///
 /// They are the applicant's own bytes, read off `/input` and sent to the worker
 /// in this very event; the worker derives the same BLAKE3 over the same bytes
 /// (`engine-executor`'s `runner::convert`). So there is nothing here to accept
 /// from it — only something to recompute, which is the cheaper of the two and
 /// the only one that means anything.
-pub(super) fn round_captures(event: &Event) -> RoundCaptures {
+pub(super) fn round_captures(event: &Event, sent: &[SentStep]) -> RoundCaptures {
     Arc::new(match event {
         Event::Media(result) => result
-            .clip
-            .frames
-            .iter()
-            .map(|frame| (blake3::hash(frame).into(), frame.clone()))
+            .blobs()
+            .map(|blob| (<[u8; 32]>::from(blake3::hash(blob)), blob))
+            .filter(|(hash, _)| !sent.iter().any(|step| step.hash == *hash))
+            .map(|(hash, blob)| (hash, blob.to_vec()))
             .collect(),
         _ => Vec::new(),
     })
@@ -269,8 +273,10 @@ impl SessionPersister {
         mut state: SessionState,
         decision: Option<Decision>,
     ) -> Result<(), CallbackError> {
-        // The wait this round ends in is numbered here, not by the worker.
+        // The wait this round ends in is numbered here, not by the worker, and
+        // none of its steps is sent yet.
         state.awaiting_seq = self.awaiting_seq;
+        state.sent = Vec::new();
         // Serialize the whole critical section on the metadata guard, taken
         // before the acceptance is claimed: a second callback in the same round
         // waits here rather than interleaving with this one.
@@ -741,44 +747,69 @@ fn pad_envelope(bytes: &mut Vec<u8>) -> Result<(), CallbackError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use session_types::{Clip, DisplayField, MediaResult};
+    use session_types::{Capture, DisplayField, MediaResult, Video};
     use storage_client::{Metadata, SealedState, StoreError, lock_data_keys, unlock_data_keys};
 
-    fn media_round(frames: Vec<&[u8]>) -> Event {
+    /// A media answer of one photo for each of `photos`.
+    fn media_round(photos: Vec<&[u8]>) -> Event {
         Event::Media(MediaResult {
-            slot: 0,
-            clip: Clip {
-                frames: frames.into_iter().map(<[u8]>::to_vec).collect(),
-            },
+            captures: photos
+                .into_iter()
+                .map(|photo| Capture::Photo(photo.to_vec()))
+                .collect(),
         })
     }
 
     /// The whole point of the change: the pairs are a function of the applicant's
     /// own bytes, computed here. Nothing is accepted from the worker, so nothing
     /// is checked — but the derivation itself has to be right, because a later
-    /// `from-blob-ref` resolves against exactly these hashes and the worker
-    /// derives its own copy independently.
+    /// rehydrate resolves against exactly these hashes and the worker derives its
+    /// own copy independently. A video's blob is its data.
     #[test]
-    fn captures_are_this_side_s_blake3_over_the_applicants_frames() {
-        let frames: Vec<&[u8]> = vec![b"passport-frame-1", b"passport-frame-2"];
-        let captured = round_captures(&media_round(frames.clone()));
+    fn captures_are_this_side_s_blake3_over_the_applicants_bytes() {
+        let blobs: [&[u8]; 2] = [b"id-card-front", b"liveness-video"];
+        let event = Event::Media(MediaResult {
+            captures: vec![
+                Capture::Photo(blobs[0].to_vec()),
+                Capture::Video(Video {
+                    data: blobs[1].to_vec(),
+                    guides: Vec::new(),
+                }),
+            ],
+        });
+        let captured = round_captures(&event, &[]);
 
-        assert_eq!(captured.len(), 2, "every frame is recorded, in order");
+        assert_eq!(captured.len(), 2, "every capture is recorded, in order");
         for (i, (hash, bytes)) in captured.iter().enumerate() {
-            assert_eq!(bytes.as_slice(), frames[i], "the applicant's own bytes");
+            assert_eq!(bytes.as_slice(), blobs[i], "the applicant's own bytes");
             assert_eq!(
                 hash,
-                blake3::hash(frames[i]).as_bytes(),
+                blake3::hash(blobs[i]).as_bytes(),
                 "the content address the engine will independently derive",
             );
         }
     }
 
-    /// A repeated frame keeps both entries: the seal upserts the same bytes under
-    /// the same key, and the gate-set extend dedups on the way in.
+    /// The captures of steps sent before the last were stored as they
+    /// arrived: the round records only the rest.
     #[test]
-    fn a_repeated_frame_is_recorded_twice_under_one_address() {
-        let captured = round_captures(&media_round(vec![b"same", b"same"]));
+    fn the_steps_sent_before_are_not_recorded_again() {
+        let event = media_round(vec![b"front", b"back"]);
+        let front = SentStep {
+            hash: blake3::hash(b"front").into(),
+            len: 5,
+            guides: Vec::new(),
+        };
+        let captured = round_captures(&event, &[front]);
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].1, b"back");
+    }
+
+    /// A repeated capture keeps both entries: the seal upserts the same bytes
+    /// under the same key, and the gate-set extend dedups on the way in.
+    #[test]
+    fn a_repeated_capture_is_recorded_twice_under_one_address() {
+        let captured = round_captures(&media_round(vec![b"same", b"same"]), &[]);
         assert_eq!(captured.len(), 2);
         assert_eq!(captured[0].0, captured[1].0);
     }
@@ -787,9 +818,9 @@ mod tests {
     /// write blobs, and the genesis round has none to write.
     #[test]
     fn a_round_without_a_capture_records_nothing() {
-        assert!(round_captures(&Event::Start).is_empty());
-        assert!(round_captures(&Event::ConsentDisclosure(true)).is_empty());
-        assert!(round_captures(&media_round(vec![])).is_empty());
+        assert!(round_captures(&Event::Start, &[]).is_empty());
+        assert!(round_captures(&Event::ConsentDisclosure(true), &[]).is_empty());
+        assert!(round_captures(&media_round(vec![]), &[]).is_empty());
     }
 
     fn field(key: &str, value: &str) -> DisplayField {
@@ -914,7 +945,7 @@ mod tests {
     async fn persist_round(store: &Arc<SessionStore>, id: &str, key: &[u8], event: Event, n: u8) {
         let loaded = load(store, id, key).await.unwrap();
         let consent = round_consent(&event, &None);
-        let captures = round_captures(&event);
+        let captures = round_captures(&event, &[]);
         let awaiting = RoundAwaiting::default();
         let persister = persister_for(store, id, &loaded, 1, &consent, &captures, &awaiting);
         let state = SessionState {
@@ -1007,25 +1038,32 @@ mod tests {
         ));
     }
 
-    /// The wait a round ends in is numbered by this side: the state written
-    /// carries the number the round was given, whatever the worker put there.
+    /// The wait a round ends in is numbered by this side, and starts with no
+    /// step sent: the state written carries the number the round was given and
+    /// an empty list, whatever the worker put there.
     #[tokio::test]
     async fn a_round_s_wait_is_numbered_by_this_side() {
         let (_disk, store) = create(&SessionMetadata::default()).await;
 
         let loaded = load(&store, ID, &KEY).await.unwrap();
         let consent = round_consent(&Event::Start, &None);
-        let captures = round_captures(&Event::Start);
+        let captures = round_captures(&Event::Start, &[]);
         let awaiting = RoundAwaiting::default();
         let persister = persister_for(&store, ID, &loaded, 5, &consent, &captures, &awaiting);
         let from_the_worker = SessionState {
             current_prompt: Some(Prompt::Media(Default::default())),
             awaiting_seq: 999,
+            sent: vec![SentStep {
+                hash: [1; 32],
+                len: 1,
+                guides: Vec::new(),
+            }],
             ..Default::default()
         };
         persister.persist(from_the_worker, None).await.unwrap();
 
         let state = load(&store, ID, &KEY).await.unwrap().state.unwrap();
         assert_eq!(state.awaiting_seq, 5);
+        assert!(state.sent.is_empty());
     }
 }

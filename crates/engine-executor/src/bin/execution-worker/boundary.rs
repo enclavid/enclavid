@@ -23,7 +23,7 @@
 //!     a digest rendering and nothing else.
 //!   * `session_state`, `props` — `Padded`'s exact-frame decode; the props also
 //!     the byte bound where the frame opens.
-//!   * `event` — the frame count and clip budget in `Clip`'s decoder.
+//!   * `event` — the capture count and media budget in `MediaResult`'s decoder.
 //!   * `max_cwasm_bytes` — any number: it only decides whether the caller's own
 //!     entry is a hit or a miss, and refuses a bundle of more.
 //!
