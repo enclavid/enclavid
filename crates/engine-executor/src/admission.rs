@@ -66,7 +66,7 @@
 //! host at launch, outside its measurement, and reads them once. The
 //! numbers that describe what the code holds are constants.
 
-use engine_types::limits::MAX_MODELS;
+use engine_types::limits::{MAX_MEDIA_DECODES, MAX_MODELS};
 use session_types::{MAX_MEDIA_BYTES, SEALED_STATE_PLAINTEXT_BYTES};
 
 /// Bound on L1 ENTRIES unless the host says otherwise (the
@@ -116,6 +116,11 @@ const FDS_PER_CHILD: u64 = 7;
 /// opens and the group's process list. Generous for the reason
 /// [`FDS_PER_CHILD`] is.
 const FDS_PER_MODEL: u64 = 8;
+
+/// Descriptors each capture a round may decode costs the SUPERVISOR while the
+/// round runs: a model's, but for its two files — the decode is handed none.
+/// Generous for the reason [`FDS_PER_CHILD`] is.
+const FDS_PER_DECODE: u64 = FDS_PER_MODEL - 2;
 
 /// Descriptors the role needs for everything that is neither an L1 entry nor a
 /// child: the listener, the health port, one accepted api connection and the
@@ -305,14 +310,17 @@ pub const DEFAULT_CAPACITY_WAIT_SECS: u64 = 10;
 /// The descriptor budget this role must be able to reach, given how many children
 /// it may run at once and how many entries its cache may hold
 /// ([`DEFAULT_BUNDLE_CACHE_ENTRIES`]). The entries and the fills streaming in are
-/// one term; each child, with every model its round may start, another.
+/// one term; each child, with every model and every capture's decode its round
+/// may start, another.
 ///
 /// Stated as a function rather than a constant because both counts are the
 /// host's to set, and they are only meaningful together with the descriptors:
 /// raising either without the descriptors to back it turns a capacity knob into
 /// a way to wedge the worker at its own peak.
 pub fn fd_budget(max_children: u64, cache_entries: u64) -> u64 {
-    let per_child = FDS_PER_CHILD + MAX_MODELS as u64 * FDS_PER_MODEL;
+    let per_child = FDS_PER_CHILD
+        + MAX_MODELS as u64 * FDS_PER_MODEL
+        + MAX_MEDIA_DECODES as u64 * FDS_PER_DECODE;
     cache_entries
         .saturating_add(max_children.saturating_mul(per_child))
         .saturating_add(FD_HEADROOM)

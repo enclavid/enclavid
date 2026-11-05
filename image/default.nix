@@ -120,12 +120,17 @@ let
     };
     # Eight: a round is CPU the whole time it runs — inference inside the
     # sandbox above all — and the worker runs twelve at once. Beside the child
-    # each round runs in, the process a round's model runs in.
+    # each round runs in, the process a round's model runs in, and the one a
+    # round's video is decoded in.
     execution-worker = {
       kernel = kernel.execution-worker;
       binary = "execution-worker";
       vcpus = 8;
-      siblings = [ "engine-executor-child" "engine-executor-inference" ];
+      siblings = [
+        "engine-executor-child"
+        "engine-executor-inference"
+        "engine-executor-media"
+      ];
     };
     # The fleet's one way out: the only role with a network interface. Two: its
     # work is waiting on registries and brokers, and a stream crossing it is one

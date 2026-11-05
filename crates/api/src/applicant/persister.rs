@@ -747,7 +747,7 @@ fn pad_envelope(bytes: &mut Vec<u8>) -> Result<(), CallbackError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use session_types::{Capture, DisplayField, MediaResult, Video};
+    use session_types::{Capture, DisplayField, MediaResult, VideoCapture};
     use storage_client::{Metadata, SealedState, StoreError, lock_data_keys, unlock_data_keys};
 
     /// A media answer of one photo for each of `photos`.
@@ -764,15 +764,15 @@ mod tests {
     /// own bytes, computed here. Nothing is accepted from the worker, so nothing
     /// is checked — but the derivation itself has to be right, because a later
     /// rehydrate resolves against exactly these hashes and the worker derives its
-    /// own copy independently. A video's blob is its data.
+    /// own copy independently. A video capture's blob is its video.
     #[test]
     fn captures_are_this_side_s_blake3_over_the_applicants_bytes() {
         let blobs: [&[u8]; 2] = [b"id-card-front", b"liveness-video"];
         let event = Event::Media(MediaResult {
             captures: vec![
                 Capture::Photo(blobs[0].to_vec()),
-                Capture::Video(Video {
-                    data: blobs[1].to_vec(),
+                Capture::Video(VideoCapture {
+                    video: blobs[1].to_vec(),
                     guides: Vec::new(),
                 }),
             ],

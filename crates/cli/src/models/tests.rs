@@ -5,7 +5,7 @@ use enclavid_inference::fixture;
 /// The host's package, its tensors among it, as a project's WIT has it.
 const HOST: [(&str, &str); 3] = [
     ("refs.wit", include_str!("../../../../wit/host/refs.wit")),
-    ("blob.wit", include_str!("../../../../wit/host/blob.wit")),
+    ("media.wit", include_str!("../../../../wit/host/media.wit")),
     (
         "tensors.wit",
         include_str!("../../../../wit/host/tensors.wit"),

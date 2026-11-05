@@ -15,7 +15,6 @@ import type {
   MediaResult,
 } from "enclavid:policy/types@0.1.0";
 import * as capture from "enclavid:well-known/capture@0.1.0";
-import { decode } from "enclavid:vision/decode@0.1.0";
 import { detect } from "enclavid:face-detect/detect@0.1.0";
 import { estimate } from "enclavid:face-age/check@0.1.0";
 import * as props from "enclavid-ext:policy/props@0.1.0";
@@ -60,18 +59,17 @@ export const policy = definePolicy(
 );
 
 // The age of the face in a selfie, or none: a photo that does not decode,
-// holds no face, or a face too small to read. The vision plugin decodes the
-// photo once, at half the camera's size, where a selfie's face is a hundred
-// pixels and more; face-detect finds the face in it, and face-age reads its
-// age from the face's own crop.
+// holds no face, or a face too small to read. The platform decodes the photo
+// into an image; face-detect finds the face in it, and face-age reads its age
+// from the face's own crop, at the image's full size.
 function estimateAge(media: MediaResult): number | undefined {
   // A capture for each step of the spec, of the kind the step asked for: the
   // selfie's spec is one photo.
   const [selfie] = media.captures;
   if (selfie?.tag !== "photo") return;
-  const picture = decode(selfie.val, "half");
-  if (!picture) return;
-  const face = detect(picture);
+  const image = selfie.val.image();
+  if (!image) return;
+  const face = detect(image);
   if (!face) return;
-  return estimate(picture, face)?.age;
+  return estimate(image, face)?.age;
 }

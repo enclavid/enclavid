@@ -10,6 +10,7 @@ members = [
     "crates/engine-executor",
     "crates/engine-executor-child",
     "crates/engine-executor-inference",
+    "crates/engine-executor-media",
     "crates/engine-types",
     "crates/hatch",
     "crates/hatch-client",
@@ -32,6 +33,8 @@ members = [
     "crates/storage-client",
     "crates/storage",
     "crates/timesync",
+    "crates/media",
+    "crates/coprocess-channel",
     "xtask",
 ]
 
@@ -47,4 +50,12 @@ repository = "https://github.com/enclavid/enclavid"
 overflow-checks = true
 
 [profile.release.package.engine-executor-inference]
+overflow-checks = true
+
+# Likewise what reads the applicant's media and the round's requests for its
+# frames.
+[profile.release.package.enclavid-media]
+overflow-checks = true
+
+[profile.release.package.engine-executor-media]
 overflow-checks = true

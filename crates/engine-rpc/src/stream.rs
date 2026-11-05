@@ -237,8 +237,8 @@ mod tests {
     use crate::padded::{Framed, Padded};
     use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_VIDEO_GUIDES};
     use session_types::{
-        Capture, Event, FrameRange, Guide, MAX_MEDIA_BYTES, MediaResult, OvalSpec, SessionState,
-        Video,
+        Capture, Event, FrameRange, Guide, MAX_MEDIA_BYTES, MediaResult, RectSpec, SessionState,
+        VideoCapture,
     };
 
     /// The header with no bounds, so a test can put on the wire what the real type
@@ -288,10 +288,10 @@ mod tests {
     #[test]
     fn a_round_request_at_its_bounds_fits_its_budget() {
         let range = FrameRange {
-            guide: Guide::Oval(OvalSpec {
-                center_x: 0.123_456,
-                center_y: 0.654_321,
-                width: 0.587_654,
+            // A document frame: of the guides, the one whose encoding is the
+            // longest.
+            guide: Guide::Rect(RectSpec {
+                aspect: 1.587_654,
                 hold_ms: u16::MAX,
             }),
             first: u32::MAX,
@@ -308,8 +308,8 @@ mod tests {
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Media(MediaResult {
                 captures: vec![
-                    Capture::Video(Video {
-                        data: vec![0xFF; MAX_MEDIA_BYTES / MAX_CAPTURE_STEPS],
+                    Capture::Video(VideoCapture {
+                        video: vec![0xFF; MAX_MEDIA_BYTES / MAX_CAPTURE_STEPS],
                         guides: vec![range; MAX_VIDEO_GUIDES],
                     });
                     MAX_CAPTURE_STEPS

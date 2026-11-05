@@ -19,7 +19,7 @@
 mod child;
 pub mod fixtures;
 
-pub use child::child_binary;
+pub use child::{child_binary, media_binary};
 
 use std::process::Command;
 

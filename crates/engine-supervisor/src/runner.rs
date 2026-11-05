@@ -8,7 +8,7 @@ mod tests;
 use std::future::Future;
 use std::io;
 use std::os::fd::{BorrowedFd, OwnedFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -56,8 +56,8 @@ impl Default for ChildTimes {
 pub struct RunnerConfig {
     /// The child binary.
     pub exe: PathBuf,
-    /// What a child's coprocesses run, and how many one child may have; `None`
-    /// for a runner whose children never have one.
+    /// How many coprocesses one child may have; `None` for a runner whose
+    /// children never have one.
     pub coprocess: Option<CoprocessConfig>,
     /// How many children may be alive at once — one process each, and the
     /// coprocesses each may have beside it.
@@ -72,12 +72,11 @@ pub struct RunnerConfig {
     pub times: ChildTimes,
 }
 
-/// What a child's coprocesses run, and how many one child may start.
+/// How many coprocesses one child may start. Which binary each runs, its
+/// caller names as it starts it ([`Coprocess::start`]).
 #[derive(Clone, Debug)]
 pub struct CoprocessConfig {
-    /// The coprocess binary.
-    pub exe: PathBuf,
-    /// How many one child may start, together.
+    /// How many one child may start, together, whatever each runs.
     pub max: usize,
 }
 
@@ -118,9 +117,9 @@ pub enum SupervisorError {
 /// Why a [`Coprocess`] was not started.
 #[derive(Debug, thiserror::Error)]
 pub enum CoprocessError {
-    /// The runner has no coprocess binary: its children never have one.
+    /// The runner's children never have a coprocess.
     #[error("this runner's children have no coprocess")]
-    NoBinary,
+    NoCoprocesses,
     /// The child it would run beside has ended, or is being ended.
     #[error("the child has ended")]
     ChildEnded,
@@ -334,7 +333,7 @@ pub struct Coprocess {
 }
 
 impl Coprocess {
-    /// Start a coprocess: `socket` on its fd 0, `inherit` from
+    /// Start `exe` as a coprocess: `socket` on its fd 0, `inherit` from
     /// [`INHERITED_FD`](crate::INHERITED_FD) up, read only up to the spawn, and
     /// `keep` — what it maps through those descriptors — held until it is
     /// gone.
@@ -343,11 +342,12 @@ impl Coprocess {
     /// the kill that ends the child — and once the child has as many as it may.
     pub fn start<K: Send + 'static>(
         &self,
+        exe: &Path,
         socket: OwnedFd,
         inherit: &[BorrowedFd<'_>],
         keep: K,
     ) -> Result<(), CoprocessError> {
-        let config = self.config.as_ref().ok_or(CoprocessError::NoBinary)?;
+        let config = self.config.as_ref().ok_or(CoprocessError::NoCoprocesses)?;
         // Held across the spawn, so the child's kill finds a coprocess started
         // or refused, never between the two.
         let mut state = lock(&self.state);
@@ -365,7 +365,7 @@ impl Coprocess {
             ),
             _ => None,
         };
-        let process = spawn_placed_coprocess(&config.exe, socket, inherit, placement)
+        let process = spawn_placed_coprocess(exe, socket, inherit, placement)
             .map_err(CoprocessError::Spawn)?;
         state.started.push(Started {
             process,

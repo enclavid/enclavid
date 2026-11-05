@@ -4,8 +4,8 @@
 //! `engine-compiler-child` with an output file at its inherited descriptor, stream
 //! one compile's components to it, take its answer and the cwasm it wrote, fail
 //! safe, exit. The happy-path compile itself is covered by engine-compiler's own
-//! tests of the pieces `compile_to_parts` calls, and a real multi-MiB cwasm reaching
-//! a spawned child is covered by the executor child's
+//! tests of the pieces `compile_to_parts` calls, and a real composition's cwasm
+//! reaching a spawned child is covered by the executor child's
 //! `spawned_child_primes_runs_relays_then_exits` (same engine-supervisor, same
 //! transport).
 //!
@@ -224,8 +224,9 @@ async fn dead_child_surfaces_error_not_hang() {
 }
 
 /// A REAL compile, all the way through the spawned child: the fixture policy
-/// fused with its plugins, Cranelift codegen, and a multi-MiB `cwasm` written to
-/// the output file the child was handed — exactly the length and digest it says.
+/// fused with its plugins, Cranelift codegen, and a `cwasm` larger than all the
+/// wasm it was made from written to the output file the child was handed —
+/// exactly the length and digest it says.
 ///
 /// Every other test here feeds the child garbage, which fails in the validator
 /// long before codegen. So until this existed, no test had ever run Cranelift's
@@ -245,6 +246,8 @@ async fn a_real_policy_compiles_through_the_spawned_child() {
             model_layers: Vec::new(),
         })
         .collect();
+    let wasm =
+        xtask::fixtures::test_policy().len() + plugins.iter().map(|p| p.wasm.len()).sum::<usize>();
 
     let mut spawned = spawn_with(true).await;
 
@@ -271,9 +274,11 @@ async fn a_real_policy_compiles_through_the_spawned_child() {
         .output
         .read_to_end(&mut cwasm)
         .expect("read the cwasm the child wrote");
+    // Cranelift's code for the whole composition outgrows the wasm it was made
+    // from, where a stub's would not.
     assert!(
-        cwasm.len() > 1_000_000,
-        "a real composition's cwasm should be multi-MiB, got {} bytes",
+        cwasm.len() > wasm,
+        "a real composition's cwasm should outgrow its {wasm} bytes of wasm, got {} bytes",
         cwasm.len(),
     );
     assert!(

@@ -9,7 +9,7 @@ interface types {
   use enclavid:host-capture/capture@0.1.0.{media-spec, guide};
   use enclavid:host-disclosure/disclosure@0.1.0.{display-field};
   use enclavid:host/refs@0.1.0.{localized-ref};
-  use enclavid:host/blob@0.1.0.{blob};
+  use enclavid:host/media@0.1.0.{photo, video};
 
   /// Terminal outcome carried by `action::finish`. The platform renders
   /// UI from this fixed enum — policy controls no free text. The consumer
@@ -62,25 +62,29 @@ interface types {
     last: u32,
   }
 
+  /// A photo step's capture: the photo the applicant kept on the review
+  /// screen.
+  type photo-capture = photo;
+
   /// A video step's capture.
-  record video {
-    /// The applicant's video: a WebM of VP8 frames.
-    data: blob,
+  record video-capture {
+    /// The applicant's video.
+    video: video,
     /// One range for each guide of the step, in the step's order: the
     /// page's account of the video. A message of the platform, not the
-    /// applicant's material, so it is not in the blob: a policy that needs
-    /// it in a later round keeps it in its `state`.
+    /// applicant's material, so it is not stored with the video: a policy
+    /// that needs it in a later round keeps it in its `state`.
     guides: list<frame-range>,
   }
 
-  /// One capture step's capture, of the kind the step asked for. Its bytes
-  /// are a host-owned `blob`: the policy is a pure router, forwarding it to
-  /// a verification plugin, which reads what it needs.
+  /// One capture step's capture, of the kind the step asked for, held by
+  /// the host: the policy is a pure router, forwarding it to a verification
+  /// plugin, which reads what it needs.
   variant capture {
-    /// One JPEG: the frame the applicant kept on the review screen.
-    photo(blob),
+    /// The photo the applicant kept on the review screen.
+    photo(photo-capture),
     /// The video, and where each of its guides was held.
-    video(video),
+    video(video-capture),
   }
 
   /// The captured artifact of one `media-spec`, carried by `event::media`.

@@ -8,7 +8,7 @@ use axum::routing::{MethodRouter, post};
 
 use session_types::{
     Capture, CaptureKind, Event, FrameRange, Guide, MAX_MEDIA_BYTES, MediaResult, Prompt,
-    SessionState, Video,
+    SessionState, VideoCapture,
 };
 
 use crate::limits::{APPLICANT_INPUT_BODY_LIMIT, MAX_GUIDES_PART_BYTES};
@@ -193,10 +193,10 @@ async fn read_step(
 ) -> Result<Capture, StatusCode> {
     let capture = match kind {
         CaptureKind::Photo(_) => Capture::Photo(media_part(&mut multipart, "photo", budget).await?),
-        CaptureKind::Video(video) => {
-            let data = media_part(&mut multipart, "video", budget).await?;
-            let guides = guides_part(&mut multipart, &video.guides).await?;
-            Capture::Video(Video { data, guides })
+        CaptureKind::Video(spec) => {
+            let video = media_part(&mut multipart, "video", budget).await?;
+            let guides = guides_part(&mut multipart, &spec.guides).await?;
+            Capture::Video(VideoCapture { video, guides })
         }
     };
     if multipart
@@ -307,8 +307,6 @@ mod tests {
     use super::*;
 
     const OVAL: Guide = Guide::Oval(OvalSpec {
-        center_x: 0.5,
-        center_y: 0.5,
         width: 0.5,
         hold_ms: 1000,
     });
@@ -374,8 +372,8 @@ mod tests {
         .await;
         assert_eq!(
             video,
-            Ok(Capture::Video(Video {
-                data: b"webm".to_vec(),
+            Ok(Capture::Video(VideoCapture {
+                video: b"webm".to_vec(),
                 guides: vec![
                     FrameRange {
                         guide: OVAL,

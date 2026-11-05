@@ -1,9 +1,10 @@
 //! Face-detection logic — the per-model profile: how the frame is shaped for
 //! the detector, which detector, and how its answer maps back onto the frame.
 //! The plugin hands a profile the frame's size and a `region` that reads the
-//! whole frame, resampled to the size it is asked for; the profile returns an
-//! internal [`Detection`], which [`crate`]'s WIT glue maps to the shared
-//! `face`. Bindgen-free but for the model the host runs.
+//! whole frame, resampled to the size it is asked for — or nothing, where the
+//! frame does not decode; the profile returns an internal [`Detection`], which
+//! [`crate`]'s WIT glue maps to the shared `face`. Bindgen-free but for the
+//! model the host runs.
 //!
 //! Profile selection is compile-time:
 //!   * default → [`placeholder`]: whole frame as the "face", no model
@@ -28,8 +29,12 @@ pub struct Detection {
 
 /// Detect the single most prominent face in a frame of `size` pixels, read
 /// through `region`: the whole frame, resampled to the size it is asked for,
-/// row-major RGB8. `None` = no usable face → retake.
-pub fn detect(size: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<Detection> {
+/// row-major RGB8, or `None` where it does not decode. `None` = no usable face
+/// → retake.
+pub fn detect(
+    size: (u32, u32),
+    region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
+) -> Option<Detection> {
     profile::detect(size, region)
 }
 
@@ -46,7 +51,7 @@ mod placeholder {
     /// are not read.
     pub fn detect(
         _size: (u32, u32),
-        _region: impl FnOnce(u32, u32) -> Vec<u8>,
+        _region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
     ) -> Option<Detection> {
         Some(Detection {
             bbox: [0.0, 0.0, 1.0, 1.0],
@@ -78,9 +83,12 @@ mod blazeface {
     /// before `x`, then six keypoints `(x, y)`.
     const ROW: usize = 16;
 
-    pub fn detect(size: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<Detection> {
+    pub fn detect(
+        size: (u32, u32),
+        region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
+    ) -> Option<Detection> {
         let fit = Fit::of(size)?;
-        let square = fit.square(&region(fit.w, fit.h))?;
+        let square = fit.square(&region(fit.w, fit.h)?)?;
         let side = u64::from(SIDE);
         let rows = models::detector()
             .run(

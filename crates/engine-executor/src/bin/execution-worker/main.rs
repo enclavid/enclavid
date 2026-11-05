@@ -75,7 +75,11 @@ use engine_executor::admission::{children_total, fd_budget, rounds_held, supervi
 use engine_executor::compat_token;
 use engine_rpc::{CompatToken, LegSettings};
 use engine_supervisor::{Cgroups, ChildLimits, ChildRunner, CoprocessConfig, RunnerConfig};
-use engine_types::limits::MAX_MODELS;
+use engine_types::limits::{MAX_MEDIA_DECODES, MAX_MODELS};
+
+/// How many processes a round may start beside its child: one for each of its
+/// models, and one for each capture it decodes.
+const MAX_COPROCESSES: usize = MAX_MODELS + MAX_MEDIA_DECODES;
 use fleet_transport::LegFailure;
 use safe_logger::{debug, info, reason, safe, warn};
 use tokio::sync::Semaphore;
@@ -104,6 +108,17 @@ fn inference_exe() -> std::path::PathBuf {
     sibling(
         "ENCLAVID_EXECUTION_WORKER_INFERENCE_BIN",
         "engine-executor-inference",
+    )
+}
+
+/// Locate the `engine-executor-media` binary, the process a round's video is
+/// decoded in: `ENCLAVID_EXECUTION_WORKER_MEDIA_BIN` if set, else the sibling
+/// of this supervisor's own executable, as [`child_exe`] does — the only binary
+/// that parses an applicant's video, and the only one that links libvpx.
+fn media_exe() -> std::path::PathBuf {
+    sibling(
+        "ENCLAVID_EXECUTION_WORKER_MEDIA_BIN",
+        "engine-executor-media",
     )
 }
 
@@ -360,7 +375,7 @@ async fn main() {
     // may have. In the measured image this builds the tree or stops the boot; a
     // build without `guest-hardening` holds nothing (see `Cgroups::create`).
     // Each child's group holds the processes of its round's models beside it,
-    // as many as a composition imports.
+    // as many as a composition imports, and of the captures its round decodes.
     let cgroups = Cgroups::create(
         ChildLimits {
             total,
@@ -368,11 +383,12 @@ async fn main() {
             headroom: round_headroom,
             tasks: child_max_tasks,
         },
-        max_children.saturating_mul(1 + MAX_MODELS),
+        max_children.saturating_mul(1 + MAX_COPROCESSES),
     );
 
     let child_exe = child_exe();
     let inference_exe = inference_exe();
+    let media_exe = media_exe();
     // What a model's process is handed for a data file where its graph has
     // none, opened once.
     let empty = std::fs::File::open("/dev/null").unwrap_or_else(|e| {
@@ -408,6 +424,8 @@ async fn main() {
         // makes this one number bound both.
         bundles: Arc::new(Bundles::new(bundle_cache_bytes, bundle_cache_entries)),
         empty: Arc::new(empty),
+        inference_exe: inference_exe.as_path().into(),
+        media_exe: media_exe.as_path().into(),
         rounds: Semaphore::new(rounds_held(max_children, waiting_per_child)),
         capacity_wait,
         bundle_stream,
@@ -417,10 +435,10 @@ async fn main() {
         runner: ChildRunner::new(
             RunnerConfig {
                 exe: child_exe.clone(),
-                // A round's models, each in a process of its own beside it.
+                // A round's models and the captures it decodes, each in a
+                // process of its own beside it.
                 coprocess: Some(CoprocessConfig {
-                    exe: inference_exe.clone(),
-                    max: MAX_MODELS,
+                    max: MAX_COPROCESSES,
                 }),
                 max_children,
                 deadline: round_deadline,
@@ -479,7 +497,7 @@ async fn main() {
     let beside_one_at_its_max = (total - round_max) / round_headroom;
     info!(
         "execution-worker (supervisor): listening on {}, engine-executor-child={}, \
-         engine-executor-inference={}, \
+         engine-executor-inference={}, engine-executor-media={}, \
          children={} sharing {} MiB of {} MiB memory (each to {} MiB; {} more at the \
          {} MiB headroom fit beside one at that max), waiting_per_child={}, \
          round_deadline={}s, round_fuel={}, bundle_cache={} MiB, bundle_idle={}s, \
@@ -491,6 +509,10 @@ async fn main() {
         ),
         safe(
             &inference_exe.display(),
+            reason!("a location inside the measured image")
+        ),
+        safe(
+            &media_exe.display(),
             reason!("a location inside the measured image")
         ),
         safe(

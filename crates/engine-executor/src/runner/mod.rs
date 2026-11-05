@@ -241,6 +241,7 @@ impl Executor {
         let listener = inputs.listener;
         let media_store = inputs.media_store;
         let models = inputs.models;
+        let media = inputs.media;
 
         // Instantiate the primed composition and call `handle` ONCE. The Linker
         // (imports) was built + type-checked in `prime`; here we only mint a
@@ -249,7 +250,7 @@ impl Executor {
         let round = Round::starting_now();
         let mut store = Store::new(
             &self.engine,
-            HostState::new(props, embedded.clone(), media_store, models, round),
+            HostState::new(props, embedded.clone(), media_store, models, media, round),
         );
         store.set_fuel(inputs.fuel)?;
         let bindings = primed.pre.instantiate_async(&mut store).await?;

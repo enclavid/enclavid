@@ -9,7 +9,8 @@ package enclavid:face-age@0.1.0;
 /// digest (measured / attested) — so the model name lives on the artifact
 /// (`face-age-ssrnet`, …), never in this WIT package.
 interface check {
-  use enclavid:vision/types@0.1.0.{decoded-frame, face};
+  use enclavid:host/media@0.1.0.{image};
+  use enclavid:vision/types@0.1.0.{face};
 
   /// The estimator's read on a face: `age` in years, a FACT the policy
   /// acts on. The policy owns the threshold — and because a facial
@@ -24,15 +25,17 @@ interface check {
     age: f32,
   }
 
-  /// Estimate the subject's age from the detected `face` in `frame`. The
+  /// Estimate the subject's age from the detected `face` in `image`. The
   /// plugin pulls its OWN crop (`face.bbox` grown by the model's context
-  /// margin) from `frame` via `region`, so it sees only the face patch at
+  /// margin) from `image` via `region`, so it sees only the face patch at
   /// its model resolution — one shared decode, per-model crop. `none` =
-  /// unusable input (the policy asks for a retake / escalates).
-  estimate: func(frame: borrow<decoded-frame>, face: face) -> option<age-estimate>;
+  /// unusable input, or an image that does not decode (the policy asks for
+  /// a retake / escalates).
+  estimate: func(image: borrow<image>, face: face) -> option<age-estimate>;
 }
 
 world face-age {
+  import enclavid:host/media@0.1.0;
   import enclavid:vision/types@0.1.0;
 
   export check;
@@ -44,6 +47,7 @@ world face-age {
 world with-models {
   import enclavid:host/tensors@0.1.0;
   import enclavid-ext:face-age/models@0.1.0;
+  import enclavid:host/media@0.1.0;
   import enclavid:vision/types@0.1.0;
 
   export check;

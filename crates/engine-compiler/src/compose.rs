@@ -76,10 +76,9 @@ pub(crate) fn fuse(
     // Functional wiring: satisfy each import that names a PLUGIN interface
     // with the plugin that exports it — for the POLICY and for every PLUGIN.
     // Plugin→plugin wiring is real: a face plugin (face-age, face-detect)
-    // imports the `enclavid:vision/types` `decoded-frame` that the vision
-    // plugin OWNS, so its `region` calls must dispatch to it. Without
-    // it, the consumer's plugin-interface import bubbles up unsatisfied and
-    // the fused component fails validation. Host-reserved imports
+    // imports the `enclavid:vision/types` face geometry that the vision
+    // plugin serves. Without it, the consumer's plugin-interface import
+    // bubbles up unsatisfied and the fused component fails validation. Host-reserved imports
     // (`is_host_reserved`) are deliberately excluded — served by the host
     // `Linker`, never a plugin — so they bubble up as composite imports
     // (covers `enclavid:host/*` and every slot's `enclavid-ext:<slot>/*`).

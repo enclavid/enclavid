@@ -335,6 +335,12 @@ fn each_call_ends_as_listed() {
             call!(libc::SYS_ioctl, 0, libc::TCGETS, &raw mut termios),
             Killed,
         ),
+        // `sendto` naming an address: `differ` has the one without.
+        (
+            "sendto, to an address",
+            call!(libc::SYS_sendto, -1, &raw mut byte, 1, 0, &raw mut byte, 1),
+            Killed,
+        ),
         // What every child and coprocess does.
         ("read", call!(libc::SYS_read, 0, &raw mut byte, 0), Survived),
         (
@@ -464,6 +470,12 @@ fn each_call_ends_as_listed() {
         (
             "recvfrom",
             call!(libc::SYS_recvfrom, -1, &raw mut byte, 1, 0, 0, 0),
+            Survived,
+            Killed,
+        ),
+        (
+            "sendto, no address",
+            call!(libc::SYS_sendto, -1, &raw mut byte, 1, 0, 0, 0),
             Survived,
             Killed,
         ),

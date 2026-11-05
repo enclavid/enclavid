@@ -31,8 +31,9 @@ enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
 The consumer pins an implementation of each when it creates a session:
 
 - `enclavid:well-known` — the selfie's capture spec.
-- `enclavid:vision` — decodes the selfie into a frame it owns; the face
-  plugins read their patches of it.
+- `enclavid:vision` — the face's geometry, which the face plugins share. The
+  selfie itself is decoded by the platform, into the image the face plugins
+  read their patches of.
 - `enclavid:face-detect` — finds the face. Its build with BlazeFace carries the
   model as a layer, `detector.onnx`.
 - `enclavid:face-age` — reads the face's age. Its build with MiVOLO carries the

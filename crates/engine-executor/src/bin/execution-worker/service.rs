@@ -4,6 +4,7 @@
 use std::fs::File;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,7 +31,7 @@ use crate::bundles::{
 use crate::cwasm::{Cwasm, Incoming};
 use crate::model_files::ModelFileSlot;
 use crate::relay::RelayCallbacks;
-use engine_types::limits::MAX_MODELS;
+use engine_types::limits::{MAX_MEDIA_DECODES, MAX_MODELS};
 
 /// A place for one round in this worker, taken as its handler starts and held
 /// until it answers; with none free the round answers [`ExecError::Busy`] at once,
@@ -41,6 +42,20 @@ pub(crate) fn round_place(rounds: &Semaphore) -> Result<SemaphorePermit<'_>, Exe
         TryAcquireError::NoPermits => ExecError::Busy,
         TryAcquireError::Closed => ExecError::Unknown,
     })
+}
+
+/// `n` socketpairs: the child's end of each, and this end, which the relay
+/// keeps until a process is started on it.
+fn socket_pairs(n: usize) -> Result<(Vec<OwnedFd>, Vec<Option<OwnedFd>>), ExecError> {
+    Ok((0..n)
+        .map(|_| UnixStream::pair().map(|(a, b)| (OwnedFd::from(a), Some(OwnedFd::from(b)))))
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|e| {
+            debug!("pair the coprocesses' sockets: {e}");
+            ExecError::Unknown
+        })?
+        .into_iter()
+        .unzip())
 }
 
 /// What the runner's own failure tells api.
@@ -108,6 +123,10 @@ pub(crate) struct Supervisor {
     /// A file with nothing in it, opened at boot: what the process of a model
     /// whose graph has no data file is handed for one.
     pub(crate) empty: Arc<File>,
+    /// The binary a model's process runs.
+    pub(crate) inference_exe: Arc<Path>,
+    /// The binary a capture's decode runs.
+    pub(crate) media_exe: Arc<Path>,
     /// One permit per round in flight, [`engine_executor::admission::rounds_held`]
     /// of the children in all, across every caller: taken without waiting as a
     /// handler starts, held until it answers.
@@ -279,9 +298,10 @@ impl Supervisor {
     /// which the entry holds open until then, so the entry stays in the budget
     /// for as long as its memory is in use.
     ///
-    /// Each model of the composition gets a socketpair: the child is handed one
-    /// end at spawn, after the cwasm, and the relay keeps the other until the
-    /// round starts the model in a process of its own on it.
+    /// Each model of the composition gets a socketpair, and so does each
+    /// capture the round may decode: the child is handed one end of each at
+    /// spawn, after the cwasm, and the relay keeps the other until the round
+    /// starts the model, or the decode, in a process of its own on it.
     async fn run_in_child(
         &self,
         lease: Lease,
@@ -291,18 +311,14 @@ impl Supervisor {
         callbacks: Callbacks<AnyCaller>,
     ) -> Result<RunStatus, ExecError> {
         let entry = lease.entry().clone();
-        let (theirs, ours): (Vec<OwnedFd>, Vec<Option<OwnedFd>>) = (0..entry.models.len())
-            .map(|_| UnixStream::pair().map(|(a, b)| (OwnedFd::from(a), Some(OwnedFd::from(b)))))
-            .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|e| {
-                debug!("pair the models' sockets: {e}");
-                ExecError::Unknown
-            })?
-            .into_iter()
-            .unzip();
-        // The cwasm's descriptor, then the child's end of each model's socket,
-        // in order.
+        let (decodes_theirs, decodes_ours) = socket_pairs(MAX_MEDIA_DECODES)?;
+        let (theirs, ours) = socket_pairs(entry.models.len())?;
+        // The cwasm's descriptor, then the child's end of each decode's socket,
+        // then of each model's, in order: the decodes' first, as many as a round
+        // may ask for, so the child tells the two apart without the count of
+        // the models.
         let inherit: Vec<BorrowedFd<'_>> = std::iter::once(entry.cwasm.as_fd())
+            .chain(decodes_theirs.iter().map(AsFd::as_fd))
             .chain(theirs.iter().map(AsFd::as_fd))
             .collect();
         // References to the entry's metadata, not copies of it: the child's
@@ -315,6 +331,7 @@ impl Supervisor {
         );
         let (fuel, callback_buffer) = (self.round_fuel, self.callback_request_buffer);
         let (relayed, bundles, empty) = (entry.clone(), self.bundles.clone(), self.empty.clone());
+        let (inference_exe, media_exe) = (self.inference_exe.clone(), self.media_exe.clone());
         let (capacity_wait, stream_deadline, stream_idle) = (
             self.capacity_wait,
             self.bundle_stream,
@@ -326,9 +343,9 @@ impl Supervisor {
         // and releases what it held, so it can't leak its slot), admitted — a
         // slot, and room for the
         // child — within the capacity wait. The runner installs the cwasm fd at
-        // `INHERITED_FD` in the child, and the child's end of each model's socket
-        // after it; the closure is the DOMAIN work: prime the child (MMAP the
-        // cwasm), stand up the callback relay, run.
+        // `INHERITED_FD` in the child, and the child's end of each decode's and
+        // each model's socket after it; the closure is the DOMAIN work: prime the
+        // child (MMAP the cwasm), stand up the callback relay, run.
         let outcome = self
             .runner
             .run(
@@ -360,7 +377,10 @@ impl Supervisor {
                         stream_idle,
                         coprocess,
                         sockets: Mutex::new(ours),
+                        decode_sockets: Mutex::new(decodes_ours),
                         empty,
+                        inference_exe,
+                        media_exe,
                     });
                     let (relay_server, relay_client) =
                         RemoteChildCallbacksServerShared::<_, Ciborium>::new(

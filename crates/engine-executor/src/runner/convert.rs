@@ -17,8 +17,6 @@
 //! locale from the carried translation sets. Disclosure field-count and
 //! value-length limits are enforced here, at the build seam.
 
-use std::sync::Arc;
-
 use wasmtime::component::{Resource, ResourceTable};
 
 use session_types::{
@@ -26,7 +24,7 @@ use session_types::{
     CaptureStep as DCaptureStep, Decision as DDecision, Disclosure as DDisclosure,
     DisplayField as DDisplayField, Event, FrameRange, Guide as DGuide, Localized as DLocalized,
     MediaSpec as DMediaSpec, OvalSpec as DOvalSpec, PhotoSpec as DPhotoSpec, Prompt,
-    TurnSpec as DTurnSpec, VideoSpec as DVideoSpec,
+    RectSpec as DRectSpec, TurnSpec as DTurnSpec, VideoSpec as DVideoSpec,
 };
 
 use crate::embedded::{DisclosureFieldRef, EmbeddedRegistry, IconRef, LocalizedRef};
@@ -37,7 +35,7 @@ use crate::limits::{
     GUIDE_OVAL_WIDTH_MIN, GUIDE_STEPS_PER_UNIT, GUIDE_TURN_DEGREES_MAX, MAX_CAPTURE_STEPS,
     MAX_CONSENT_FIELDS, MAX_VALUE_LENGTH, MAX_VIDEO_GUIDES,
 };
-use crate::media::BlobRep;
+use crate::media::{PhotoRep, VideoRep};
 use crate::sanitize;
 
 // ---------------------------------------------------------------------
@@ -46,11 +44,12 @@ use crate::sanitize;
 
 /// Lower a domain [`Event`] into the WIT `event` the policy's `handle`
 /// consumes. The captured bytes don't cross into the policy's linear memory —
-/// each capture's blob is content-addressed (BLAKE3) and pushed into the run's
-/// [`ResourceTable`] host-side as an unforgeable `blob` handle; the policy
-/// receives one capture per step and forwards it to a plugin. Minting handles
-/// needs `&mut table`, so this runs before the `handle` call while the store is
-/// otherwise idle.
+/// each capture is content-addressed (BLAKE3) and pushed into the run's
+/// [`ResourceTable`] host-side as an unforgeable `photo` or `video` handle,
+/// minted "warm": the bytes are in hand from `/input`, so no lazy pull is
+/// needed. The policy receives one capture per step and forwards it to a
+/// plugin. Minting handles needs `&mut table`, so this runs before the `handle`
+/// call while the store is otherwise idle.
 ///
 /// The `(hash, bytes)` pairs are NOT reported back. The orchestrator sent these
 /// very bytes in this very event and derives the same BLAKE3 over them, so what
@@ -67,27 +66,20 @@ pub fn event_to_wit(
             let mut captures = Vec::with_capacity(result.captures.len());
             for capture in result.captures {
                 captures.push(match capture {
-                    Capture::Photo(jpeg) => wit_policy::Capture::Photo(blob(table, jpeg)?),
-                    Capture::Video(video) => wit_policy::Capture::Video(wit_policy::Video {
-                        data: blob(table, video.data)?,
-                        guides: video.guides.into_iter().map(frame_range_to_wit).collect(),
-                    }),
+                    Capture::Photo(jpeg) => {
+                        wit_policy::Capture::Photo(table.push(PhotoRep::warm(jpeg))?)
+                    }
+                    Capture::Video(capture) => {
+                        wit_policy::Capture::Video(wit_policy::VideoCapture {
+                            video: table.push(VideoRep::warm(capture.video))?,
+                            guides: capture.guides.into_iter().map(frame_range_to_wit).collect(),
+                        })
+                    }
                 });
             }
             wit_policy::Event::Media(wit_policy::MediaResult { captures })
         }
     })
-}
-
-/// Mint a `blob` handle for bytes the applicant sent. Minted "warm" (`Some`):
-/// the bytes are in hand from `/input`, so no lazy pull is needed. Only a blob
-/// rehydrated by its hash starts cold.
-fn blob(table: &mut ResourceTable, bytes: Vec<u8>) -> wasmtime::Result<Resource<BlobRep>> {
-    let content_hash: [u8; 32] = blake3::hash(&bytes).into();
-    Ok(table.push(BlobRep {
-        bytes: Some(Arc::new(bytes)),
-        content_hash,
-    })?)
 }
 
 fn frame_range_to_wit(range: FrameRange) -> wit_policy::FrameRange {
@@ -100,10 +92,11 @@ fn frame_range_to_wit(range: FrameRange) -> wit_policy::FrameRange {
 
 fn guide_to_wit(guide: DGuide) -> wit_capture::Guide {
     match guide {
-        DGuide::Rect(aspect) => wit_capture::Guide::Rect(aspect),
+        DGuide::Rect(r) => wit_capture::Guide::Rect(wit_capture::RectSpec {
+            aspect: r.aspect,
+            hold_ms: r.hold_ms,
+        }),
         DGuide::Oval(o) => wit_capture::Guide::Oval(wit_capture::OvalSpec {
-            center_x: o.center_x,
-            center_y: o.center_y,
             width: o.width,
             hold_ms: o.hold_ms,
         }),
@@ -280,10 +273,11 @@ fn camera_to_domain(c: wit_capture::CameraFacing) -> DCameraFacing {
 /// fractions rounded, as the WIT `guide` says.
 fn guide_to_domain(g: wit_capture::Guide) -> DGuide {
     match g {
-        wit_capture::Guide::Rect(aspect) => DGuide::Rect(drawn_aspect(aspect)),
+        wit_capture::Guide::Rect(r) => DGuide::Rect(DRectSpec {
+            aspect: drawn_aspect(r.aspect),
+            hold_ms: r.hold_ms.min(GUIDE_HOLD_MS_MAX),
+        }),
         wit_capture::Guide::Oval(o) => DGuide::Oval(DOvalSpec {
-            center_x: drawn(o.center_x, 0.0, 1.0, 0.5),
-            center_y: drawn(o.center_y, 0.0, 1.0, 0.5),
             width: drawn(o.width, GUIDE_OVAL_WIDTH_MIN, GUIDE_OVAL_WIDTH_MAX, 0.5),
             hold_ms: o.hold_ms.min(GUIDE_HOLD_MS_MAX),
         }),
@@ -317,11 +311,23 @@ fn drawn(value: f32, min: f32, max: f32, nan: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// An oval is drawn inside the frame at a width a face can fill, to
-    /// hundredths, and held no longer than the longest hold; a turn no
-    /// further than a face in profile.
+    /// An oval is drawn at a width a face can fill, to hundredths, and held
+    /// no longer than the longest hold; a turn no
+    /// further than a face in profile; a document frame held no longer than
+    /// the longest hold either.
     #[test]
     fn a_guide_is_drawn_within_its_ranges() {
+        let rect = guide_to_domain(wit_capture::Guide::Rect(wit_capture::RectSpec {
+            aspect: 1.42,
+            hold_ms: u16::MAX,
+        }));
+        assert_eq!(
+            rect,
+            DGuide::Rect(DRectSpec {
+                aspect: 1.42,
+                hold_ms: GUIDE_HOLD_MS_MAX,
+            })
+        );
         for (given, drawn) in [
             (0.01, GUIDE_OVAL_WIDTH_MIN),
             (0.456_78, 0.46),
@@ -329,16 +335,12 @@ mod tests {
             (f32::NAN, 0.5),
         ] {
             let oval = guide_to_domain(wit_capture::Guide::Oval(wit_capture::OvalSpec {
-                center_x: -0.2,
-                center_y: 1.7,
                 width: given,
                 hold_ms: u16::MAX,
             }));
             assert_eq!(
                 oval,
                 DGuide::Oval(DOvalSpec {
-                    center_x: 0.0,
-                    center_y: 1.0,
                     width: drawn,
                     hold_ms: GUIDE_HOLD_MS_MAX,
                 }),

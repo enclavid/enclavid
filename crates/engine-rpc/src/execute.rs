@@ -648,7 +648,8 @@ pub trait RemoteChild {
 /// relay implements this and forwards `media_load` / `session_change` to api, which
 /// holds the seal key, through [`Callbacks`](crate::Callbacks) at its own end — a
 /// straight forward. `start_model` it answers itself: it fills its own files of the
-/// model, asking api for each the first time, and starts the model's process.
+/// model, asking api for each the first time, and starts the model's process. And
+/// `start_media`, which starts the process a capture is decoded in.
 #[remoc::rtc::remote]
 pub trait RemoteChildCallbacks {
     /// Rehydrate a stored blob by content hash (api unseals). `None` = miss.
@@ -670,6 +671,12 @@ pub trait RemoteChildCallbacks {
     /// to that process only then. Once per model a round; a second start of
     /// the same model is refused.
     async fn start_model(&self, index: u32) -> Result<(), CallbackError>;
+
+    /// Start the process the round's capture `decode` is decoded in, counted
+    /// from 0 and below `engine_types::limits::MAX_MEDIA_DECODES`: answered
+    /// once the process is started, as a model's is. Once per capture a round;
+    /// a second start of the same decode is refused.
+    async fn start_media(&self, decode: u32) -> Result<(), CallbackError>;
 }
 
 #[cfg(test)]

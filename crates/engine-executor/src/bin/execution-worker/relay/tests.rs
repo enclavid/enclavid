@@ -117,11 +117,14 @@ impl RemoteCallbacksAt<Api> for ApiCallbacks {
 }
 
 /// A worker of one child at a time, spawning `child`, and each model beside
-/// it in `inference`.
+/// it in `inference`. Its rounds decode no video: the binary a decode would
+/// run is none.
 fn supervisor(child: &Path, inference: &Path) -> Arc<Supervisor> {
     Arc::new(Supervisor {
         bundles: Arc::new(Bundles::new(256 << 20, DEFAULT_BUNDLE_CACHE_ENTRIES)),
         empty: Arc::new(std::fs::File::open("/dev/null").unwrap()),
+        inference_exe: inference.into(),
+        media_exe: Path::new("/nonexistent/engine-executor-media").into(),
         rounds: Semaphore::new(1),
         capacity_wait: WAIT,
         bundle_stream: engine_rpc::DEFAULT_BUNDLE_STREAM_DEADLINE,
@@ -131,10 +134,7 @@ fn supervisor(child: &Path, inference: &Path) -> Arc<Supervisor> {
         runner: ChildRunner::new(
             RunnerConfig {
                 exe: child.to_path_buf(),
-                coprocess: Some(CoprocessConfig {
-                    exe: inference.to_path_buf(),
-                    max: MAX_MODELS,
-                }),
+                coprocess: Some(CoprocessConfig { max: MAX_MODELS }),
                 max_children: 1,
                 deadline: WAIT,
                 admission_wait: Some(WAIT),

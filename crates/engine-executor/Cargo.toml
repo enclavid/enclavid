@@ -59,13 +59,17 @@ wasmtime-wasi = { version = "46", default-features = false, features = ["p2"] }
 # `wasi:io`'s own bindings and its `Pollable`, which the round's deadlines are.
 wasmtime-wasi-io = { version = "46", default-features = false, features = ["std"] }
 # Named by the library for the `AsyncWrite` in the stdio trait it implements
-# (`round`), and for the blocking pool a model's run waits on (`models`), so
-# the process keeps answering while one does. What the worker runs on it, it
-# asks for itself (`worker`).
-tokio = { version = "1", default-features = false, features = ["rt"] }
+# (`round`). What the worker runs on it, it asks for itself (`worker`).
+tokio = { version = "1", default-features = false }
+# The round's end of its channels to the processes its captures are decoded
+# and its models run in, awaited as the round's other IO is.
+coprocess-channel = { path = "../coprocess-channel", features = ["tokio"] }
 # What a round says to the process a model runs in, and reads back. The
 # protocol alone — no ONNX Runtime in this crate.
 enclavid-inference = { path = "../inference", default-features = false }
+# What a round says to the process a capture is decoded in, and reads back. The
+# protocol alone — no demuxer, no libvpx in this crate.
+enclavid-media = { path = "../media" }
 
 # --- execution-worker bin deps (optional) — pulled ONLY by the `worker`
 # feature, so the LIB stays rpc/remoc-free. The worker BIN is the deployable

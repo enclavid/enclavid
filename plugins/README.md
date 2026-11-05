@@ -8,8 +8,8 @@ workspace.
 | Plugin | Package | What it does |
 |---|---|---|
 | `well-known/` | `enclavid:well-known` | The capture specs (passport, selfie) and the labels of the KYC fields, in its own texts |
-| `vision/` | `enclavid:vision` | Decodes a capture's JPEG into a `decoded-frame` it owns; holds the types every plugin that reads a picture shares |
-| `face-detect/` | `enclavid:face-detect` | Finds the face in a frame |
+| `vision/` | `enclavid:vision` | The face geometry every plugin that reads a face shares; types alone — the platform decodes captures into the host's `image` |
+| `face-detect/` | `enclavid:face-detect` | Finds the face in an image |
 | `face-age/` | `enclavid:face-age` | Estimates the age of the face found |
 
 The vision plugin is the only one that reads the capture's bytes. The face

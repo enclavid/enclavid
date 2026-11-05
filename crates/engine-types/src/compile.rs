@@ -21,7 +21,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// `wasi:http`, so a composition importing them is refused.
 pub const HOST_INTERFACES: [&str; 26] = [
     "enclavid:host/refs@0.1.0",
-    "enclavid:host/blob@0.1.0",
+    "enclavid:host/media@0.1.0",
     TENSORS,
     crate::icons::INTERFACE,
     POLICY_PROPS,

@@ -132,6 +132,29 @@ pub const MAX_CAPTURE_STEPS: usize = 16;
 /// capture carries.
 pub const MAX_VIDEO_GUIDES: usize = 16;
 
+// ----- The decoding of a capture -----
+//
+// A photo or a video is decoded in a process of its own beside the round, one
+// a capture, in the round's memory group: these bound what one holds and how
+// many a round starts, so a capture of the applicant's — anything the page
+// chose to send — costs the round no more than they allow.
+
+/// The most captures one round decodes, each in a process of its own: its
+/// descriptors, the capture's bytes and what its decoder holds. As many as a
+/// prompt has steps.
+pub const MAX_MEDIA_DECODES: usize = MAX_CAPTURE_STEPS;
+
+/// The most frames of a video a decode reads: a minute at 15 a second. Past
+/// them the video ends.
+pub const MAX_VIDEO_FRAMES: u32 = 900;
+
+/// The longer side of a decoded picture at most, in pixels, whichever way it
+/// is turned.
+pub const MAX_PICTURE_LONG_SIDE: u32 = 1920;
+
+/// The shorter side of a decoded picture at most, in pixels.
+pub const MAX_PICTURE_SHORT_SIDE: u32 = 1080;
+
 // ----- The capture guide -----
 
 /// The narrowest width:height a `rect` capture guide is drawn at. The

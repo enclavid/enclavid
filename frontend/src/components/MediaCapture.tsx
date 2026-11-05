@@ -1,7 +1,16 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+  GuideOverlay,
+  cameraConstraints,
+  cameraError,
+  facesApplicant,
+  haptic,
+  pictureSize,
+  useFrameBox,
+} from "@/components/camera";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { Guide, PhotoStep } from "@/types";
+import type { PhotoStep } from "@/types";
 
 type Props = {
   /// Header shown at the top of the capture screen — describes
@@ -31,15 +40,6 @@ type Props = {
 type Phase = "initializing" | "streaming" | "taking" | "preview" | "error";
 
 const JPEG_QUALITY = 0.85;
-
-/// Best-effort haptic ping. iOS Safari silently ignores; Android /
-/// Chrome OS hit a short vibration. Wrapped so callers don't repeat
-/// the optional-chain dance everywhere.
-function haptic(pattern: number | number[]) {
-  if (typeof navigator !== "undefined" && navigator.vibrate) {
-    navigator.vibrate(pattern);
-  }
-}
 
 export function MediaCapture({
   promptLabel,
@@ -91,23 +91,15 @@ export function MediaCapture({
 
     void (async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: cameraFacingHint(step.camera),
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
-          audio: false,
-        });
+        const stream = await navigator.mediaDevices.getUserMedia(
+          cameraConstraints(step.camera),
+        );
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
         streamRef.current = stream;
-        // A computer's camera may not say which way it faces; one asked for
-        // as the front is taken to face the applicant.
-        const facing = stream.getVideoTracks()[0]?.getSettings().facingMode;
-        setMirrored(facing ? facing === "user" : step.camera === "front");
+        setMirrored(facesApplicant(stream, step.camera));
 
         const video = videoRef.current;
         if (!video) return;
@@ -118,15 +110,7 @@ export function MediaCapture({
       } catch (e) {
         if (cancelled) return;
         setPhase("error");
-        if (e instanceof DOMException && e.name === "NotAllowedError") {
-          setErrorMsg(
-            "Camera access was denied. Allow camera permission in your browser settings, then retry.",
-          );
-        } else if (e instanceof DOMException && e.name === "NotFoundError") {
-          setErrorMsg("No camera was found on this device.");
-        } else {
-          setErrorMsg("Could not start the camera.");
-        }
+        setErrorMsg(cameraError(e));
       }
     })();
 
@@ -152,16 +136,18 @@ export function MediaCapture({
     setPhase("taking");
     haptic(15);
 
+    // At the size the platform decodes the photo at, not one it would halve.
+    const { width, height } = pictureSize(video.videoWidth, video.videoHeight);
     const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    canvas.width = width;
+    canvas.height = height;
     const ctx = canvas.getContext("2d");
     if (!ctx) {
       setPhase("error");
       setErrorMsg("Could not capture the photo.");
       return;
     }
-    ctx.drawImage(video, 0, 0);
+    ctx.drawImage(video, 0, 0, width, height);
     const photo = await new Promise<Blob | null>((resolve) =>
       canvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY),
     );
@@ -242,7 +228,7 @@ export function MediaCapture({
         {showCamera && (
           <>
             {step.guide && (
-              <GuideOverlay guide={step.guide} frame={frame} mirrored={mirrored} />
+              <GuideOverlay guide={step.guide} frame={frame} />
             )}
             <div className="pointer-events-none absolute inset-x-6 top-6 space-y-1 text-center">
               <p className="text-xs uppercase tracking-wide text-white/70">
@@ -352,170 +338,4 @@ export function MediaCapture({
       </div>
     </main>
   );
-}
-
-/// Where the camera's frame lies on screen, in the video element's own box,
-/// as `object-cover` draws it: scaled to cover the box, centred, and cut at
-/// its edges.
-type FrameBox = { left: number; top: number; width: number; height: number };
-
-/// The [`FrameBox`] of `video`, kept as the camera's size or the element's
-/// changes; `null` until the camera says its size.
-function useFrameBox(
-  videoRef: RefObject<HTMLVideoElement | null>,
-): FrameBox | null {
-  const [box, setBox] = useState<FrameBox | null>(null);
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    const measure = () => {
-      const { videoWidth: w, videoHeight: h, clientWidth, clientHeight } = video;
-      if (!w || !h || !clientWidth || !clientHeight) {
-        setBox(null);
-        return;
-      }
-      const scale = Math.max(clientWidth / w, clientHeight / h);
-      setBox({
-        left: (clientWidth - w * scale) / 2,
-        top: (clientHeight - h * scale) / 2,
-        width: w * scale,
-        height: h * scale,
-      });
-    };
-    measure();
-    // `resize` is the element's own: the camera's size changed.
-    video.addEventListener("loadedmetadata", measure);
-    video.addEventListener("resize", measure);
-    const observer = new ResizeObserver(measure);
-    observer.observe(video);
-    return () => {
-      video.removeEventListener("loadedmetadata", measure);
-      video.removeEventListener("resize", measure);
-      observer.disconnect();
-    };
-  }, [videoRef]);
-  return box;
-}
-
-/// Render the on-screen capture guide overlaid on the camera preview,
-/// one flavour for each kind of the WIT `guide` variant.
-function GuideOverlay({
-  guide,
-  frame,
-  mirrored,
-}: {
-  guide: Guide;
-  frame: FrameBox | null;
-  mirrored: boolean;
-}) {
-  switch (guide.kind) {
-    case "rect":
-      return <RectGuide aspect={guide.aspect} />;
-    case "oval":
-      return frame ? (
-        <OvalGuide oval={guide} frame={frame} mirrored={mirrored} />
-      ) : null;
-    case "turn":
-      return <TurnGuide degrees={guide.degrees} />;
-  }
-}
-
-function RectGuide({ aspect }: { aspect: number }) {
-  return (
-    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-      <div
-        className="relative"
-        style={{
-          width: "min(86vw, 560px)",
-          aspectRatio: aspect,
-          boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.6)",
-          borderRadius: "1rem",
-        }}
-      >
-        <span
-          aria-hidden
-          className="absolute -left-0.5 -top-0.5 size-6 rounded-tl-2xl border-l-[3px] border-t-[3px] border-white"
-        />
-        <span
-          aria-hidden
-          className="absolute -right-0.5 -top-0.5 size-6 rounded-tr-2xl border-r-[3px] border-t-[3px] border-white"
-        />
-        <span
-          aria-hidden
-          className="absolute -right-0.5 -bottom-0.5 size-6 rounded-br-2xl border-r-[3px] border-b-[3px] border-white"
-        />
-        <span
-          aria-hidden
-          className="absolute -left-0.5 -bottom-0.5 size-6 rounded-bl-2xl border-l-[3px] border-b-[3px] border-white"
-        />
-      </div>
-    </div>
-  );
-}
-
-/// The oval where it lies in the frame: its centre at its fractions of the
-/// frame's width and height, its size at its fractions of the frame's shorter
-/// side. The frame is the camera's, so a mirrored view mirrors the oval too.
-function OvalGuide({
-  oval,
-  frame,
-  mirrored,
-}: {
-  oval: Extract<Guide, { kind: "oval" }>;
-  frame: FrameBox;
-  mirrored: boolean;
-}) {
-  const shorter = Math.min(frame.width, frame.height);
-  const width = oval.width * shorter;
-  const height = oval.height * shorter;
-  const centerX = mirrored ? 1 - oval.center_x : oval.center_x;
-  return (
-    <div className="pointer-events-none absolute inset-0 overflow-hidden">
-      <div
-        className="absolute border-[3px] border-white/80"
-        style={{
-          left: frame.left + centerX * frame.width - width / 2,
-          top: frame.top + oval.center_y * frame.height - height / 2,
-          width,
-          height,
-          borderRadius: "50%",
-          boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.6)",
-        }}
-      />
-    </div>
-  );
-}
-
-/// Which way to turn the head, said by the page: a turn's degrees are the
-/// applicant's own, negative to their left.
-function TurnGuide({ degrees }: { degrees: number }) {
-  const text =
-    degrees < 0
-      ? "Turn your head to your left"
-      : degrees > 0
-        ? "Turn your head to your right"
-        : "Look straight at the camera";
-  return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-6 flex justify-center">
-      <div className="rounded-full bg-black/60 px-4 py-1.5 text-sm font-medium">
-        {text}
-      </div>
-    </div>
-  );
-}
-
-/// Pick a sensible `facingMode` ideal for `getUserMedia` from the
-/// WIT camera-facing variant. `any` lets the browser default kick in
-/// — useful for laptops without a rear lens.
-function cameraFacingHint(
-  c: PhotoStep["camera"],
-): MediaTrackConstraints["facingMode"] {
-  switch (c) {
-    case "front":
-      return { ideal: "user" };
-    case "rear":
-      return { ideal: "environment" };
-    case "any":
-      return undefined;
-  }
 }

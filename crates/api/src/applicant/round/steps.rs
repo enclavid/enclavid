@@ -9,7 +9,9 @@
 use axum::http::StatusCode;
 
 use enclavid_boundary::{Covert, Replay, reason};
-use session_types::{Capture, CaptureKind, Prompt, SentStep, SessionMetadata, SessionState, Video};
+use session_types::{
+    Capture, CaptureKind, Prompt, SentStep, SessionMetadata, SessionState, VideoCapture,
+};
 use storage_client::boundary::Storage;
 use storage_client::{
     DataKeys, MediaOp, MetadataOp, SessionStore, SetMedia, SetMetadata, SetState, StateBinding,
@@ -99,7 +101,7 @@ async fn store_step(
         hash,
         len: bytes.len() as u64,
         guides: match capture {
-            Capture::Video(video) => video.guides.clone(),
+            Capture::Video(capture) => capture.guides.clone(),
             Capture::Photo(_) => Vec::new(),
         },
     });
@@ -188,8 +190,8 @@ async fn load_sent(
         }
         captures.push(match step.kind {
             CaptureKind::Photo(_) => Capture::Photo(bytes),
-            CaptureKind::Video(_) => Capture::Video(Video {
-                data: bytes,
+            CaptureKind::Video(_) => Capture::Video(VideoCapture {
+                video: bytes,
                 guides: sent.guides.clone(),
             }),
         });
@@ -302,8 +304,8 @@ mod tests {
             ..Default::default()
         };
         let photo = Capture::Photo(b"front".to_vec());
-        let video = Capture::Video(Video {
-            data: b"turning".to_vec(),
+        let video = Capture::Video(VideoCapture {
+            video: b"turning".to_vec(),
             guides: vec![FrameRange {
                 guide: TURN,
                 first: 4,

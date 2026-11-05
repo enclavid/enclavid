@@ -200,11 +200,15 @@ async fn sleeping(runner: &ChildRunner, kept: &Arc<()>) -> (Held, oneshot::Recei
 /// How many coprocesses the runners here let one child have.
 const MAX_COPROCESSES: usize = 2;
 
-/// The child's coprocesses as a runner of `exe` hands them out, beside `held`.
-fn coprocess_of(held: &Held, exe: Option<&str>) -> Coprocess {
+/// What the coprocesses here run: `cat` on its socket, which goes only when
+/// killed or when its socket closes.
+const CAT: &str = "/bin/cat";
+
+/// The child's coprocesses as a runner hands them out beside `held`: as many
+/// as [`MAX_COPROCESSES`], or none.
+fn coprocess_of(held: &Held, allowed: bool) -> Coprocess {
     Coprocess {
-        config: exe.map(|exe| CoprocessConfig {
-            exe: exe.into(),
+        config: allowed.then_some(CoprocessConfig {
             max: MAX_COPROCESSES,
         }),
         cgroups: None,
@@ -308,18 +312,18 @@ async fn a_child_has_no_more_coprocesses_than_its_max() {
     let runner = runner(None);
     let kept = Arc::new(());
     let (held, _settled) = sleeping(&runner, &kept).await;
-    let coprocesses = coprocess_of(&held, Some("/bin/cat"));
+    let coprocesses = coprocess_of(&held, true);
     let mut ours = Vec::new();
     for _ in 0..MAX_COPROCESSES {
         let (theirs, our) = socket();
         ours.push(our);
         coprocesses
-            .start(theirs, &[], ())
+            .start(Path::new(CAT), theirs, &[], ())
             .expect("a coprocess within the max starts");
     }
     let (theirs, _ours) = socket();
     assert!(matches!(
-        coprocesses.start(theirs, &[], ()),
+        coprocesses.start(Path::new(CAT), theirs, &[], ()),
         Err(CoprocessError::TooMany(MAX_COPROCESSES))
     ));
     assert_eq!(lock(&held.coprocesses).started.len(), MAX_COPROCESSES);
@@ -336,8 +340,8 @@ async fn a_started_coprocess_is_killed_with_its_child() {
     // Linux, when the coprocess's filters end it first; either way it is gone
     // before the slot comes back.
     let (theirs, _ours) = socket();
-    coprocess_of(&held, Some("/bin/cat"))
-        .start(theirs, &[], coprocess_kept.clone())
+    coprocess_of(&held, true)
+        .start(Path::new(CAT), theirs, &[], coprocess_kept.clone())
         .expect("the coprocess starts");
     let coprocess_pid = pid_of(
         &lock(&held.coprocesses)
@@ -361,26 +365,26 @@ async fn no_coprocess_starts_beside_an_ended_child() {
     let runner = runner(None);
     let kept = Arc::new(());
     let (mut held, _settled) = sleeping(&runner, &kept).await;
-    let coprocess = coprocess_of(&held, Some("/bin/cat"));
+    let coprocess = coprocess_of(&held, true);
     held.kill();
     let (theirs, _ours) = socket();
     assert!(matches!(
-        coprocess.start(theirs, &[], ()),
+        coprocess.start(Path::new(CAT), theirs, &[], ()),
         Err(CoprocessError::ChildEnded)
     ));
     assert!(lock(&held.coprocesses).started.is_empty());
 }
 
-/// A runner given no coprocess binary starts no coprocess.
+/// A runner whose children have no coprocesses starts none.
 #[tokio::test]
-async fn a_runner_without_a_coprocess_binary_starts_none() {
+async fn a_runner_without_coprocesses_starts_none() {
     let runner = runner(None);
     let kept = Arc::new(());
     let (held, _settled) = sleeping(&runner, &kept).await;
     let (theirs, _ours) = socket();
     assert!(matches!(
-        coprocess_of(&held, None).start(theirs, &[], ()),
-        Err(CoprocessError::NoBinary)
+        coprocess_of(&held, false).start(Path::new(CAT), theirs, &[], ()),
+        Err(CoprocessError::NoCoprocesses)
     ));
 }
 

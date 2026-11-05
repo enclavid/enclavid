@@ -1,10 +1,9 @@
-//! `enclavid:face-detect` — locate the face in a `decoded-frame` → `face`
-//! geometry the crop consumers (age, liveness, face-match) reuse.
+//! `enclavid:face-detect` — locate the face in an `image` → `face` geometry
+//! the crop consumers (age, liveness, face-match) reuse.
 //!
-//! Detection runs ONCE here; the pixels stay in the vision plugin (this
-//! plugin pulls the detector input via `decoded-frame.region`), and only
-//! WHERE the face is (bbox + landmarks) crosses the boundary — each consumer
-//! derives its own crop. The detector lives in [`detect`]: a compile-time
+//! Detection runs ONCE here; the pixels stay with the host (this plugin pulls
+//! the detector input via `image.region`), and only WHERE the face is (bbox +
+//! landmarks) crosses the boundary — each consumer derives its own crop. The detector lives in [`detect`]: a compile-time
 //! profile. Default builds run the weightless placeholder (whole frame as the
 //! face); built with `blazeface`, MediaPipe's BlazeFace is run by the host from
 //! the model file beside this component.
@@ -24,20 +23,30 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::vision::types::{Bbox, DecodedFrame, Face, Point};
+use enclavid::host::media::{Image, PixelsOptions, Resize, ResizeMode, Size};
+use enclavid::vision::types::{Bbox, Face, Point};
 use exports::enclavid::face_detect::detect::Guest;
 
 struct FaceDetect;
 
 impl Guest for FaceDetect {
-    fn detect(frame: &DecodedFrame) -> Option<Face> {
-        let dim = frame.size();
+    fn detect(image: &Image) -> Option<Face> {
+        let dim = image.size();
         if dim.width == 0 || dim.height == 0 {
             return None;
         }
-        // The whole frame, at the size the profile asks for it.
+        // The whole image, averaged down to the size the profile asks for it.
         let d = detect::detect((dim.width, dim.height), |w, h| {
-            frame.region(0, 0, dim.width, dim.height, w, h)
+            image.pixels(PixelsOptions {
+                crop: None,
+                resize: Some(Resize {
+                    size: Size {
+                        width: w,
+                        height: h,
+                    },
+                    mode: ResizeMode::Average,
+                }),
+            })
         })?;
         Some(Face {
             bbox: Bbox {

@@ -285,6 +285,22 @@ fn allowlist(of: Filters) -> BpfProgram {
                 .expect("build ioctl rule"),
             ],
         );
+
+        // `send` on a socket it was handed, which glibc makes as `sendto` with
+        // no address: std writes a `UnixStream` with `MSG_NOSIGNAL`, through
+        // `send`, and tokio writes one through std. With an address it is
+        // refused: every socket the child holds was connected for it, so an
+        // address could only name somewhere else.
+        rules.insert(
+            libc::SYS_sendto,
+            vec![
+                SeccompRule::new(vec![
+                    SeccompCondition::new(4, SeccompCmpArgLen::Qword, SeccompCmpOp::Eq, 0)
+                        .expect("build sendto-address condition"),
+                ])
+                .expect("build sendto rule"),
+            ],
+        );
     }
 
     SeccompFilter::new(
@@ -344,6 +360,7 @@ const ALLOWED: &[libc::c_long] = &[
     libc::SYS_recvfrom,
     libc::SYS_recvmsg, // reasoned: tokio's other read path
     libc::SYS_sendmsg, // reasoned: tokio's other write path
+    // `sendto` carries a condition: in `allowlist`.
     libc::SYS_close,
     libc::SYS_fcntl,
     // No socket, socketpair, connect or bind: it creates none of its own,

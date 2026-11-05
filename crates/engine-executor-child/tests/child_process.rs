@@ -95,6 +95,9 @@ impl RemoteChildCallbacks for MockCallbacks {
     async fn start_model(&self, _index: u32) -> Result<(), CallbackError> {
         Err(CallbackError)
     }
+    async fn start_media(&self, _decode: u32) -> Result<(), CallbackError> {
+        Err(CallbackError)
+    }
 }
 
 /// Compile the test policy + all plugins into a real wire `CompiledBundle`

@@ -11,8 +11,9 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+use coprocess_channel::{receive, send};
 use enclavid_inference::fixture;
-use enclavid_inference::protocol::{Data, Failure, Request, Tensor, read_answer, write_request};
+use enclavid_inference::protocol::{Data, Failure, MAX_MESSAGE_BYTES, Request, Response, Tensor};
 
 const DATA: &str = "linear.onnx.data";
 const W: [[f32; 2]; 3] = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]];
@@ -47,9 +48,11 @@ fn start(files: &[&[u8]]) -> (tokio::process::Child, UnixStream) {
     (coprocess, ours)
 }
 
-fn ask(socket: &mut UnixStream, model: u32, inputs: Vec<Tensor>) -> Result<Vec<Tensor>, Failure> {
-    write_request(socket, &Request { model, inputs }).expect("send the request");
-    read_answer(socket).expect("read the answer")
+fn ask(socket: &mut UnixStream, model: u32, inputs: Vec<Tensor>) -> Response {
+    send(socket, &Request { model, inputs }).expect("send the request");
+    receive(socket, MAX_MESSAGE_BYTES)
+        .expect("read the response")
+        .expect("a response")
 }
 
 fn x(rows: &[[f32; 3]]) -> Tensor {

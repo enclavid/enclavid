@@ -718,27 +718,27 @@ pub enum Capture {
     /// One JPEG: the frame the applicant kept on the review screen. One CBOR
     /// byte string — see [`SessionState::state`].
     Photo(#[serde(with = "serde_bytes")] Vec<u8>),
-    Video(Video),
+    Video(VideoCapture),
 }
 
 impl Capture {
-    /// The applicant's bytes: the photo, or the video's data.
+    /// The applicant's bytes: the photo, or the video.
     pub fn bytes(&self) -> &[u8] {
         match self {
             Capture::Photo(jpeg) => jpeg,
-            Capture::Video(video) => &video.data,
+            Capture::Video(capture) => &capture.video,
         }
     }
 }
 
-/// A video step's capture — sealed mirror of the WIT `video` record.
+/// A video step's capture — sealed mirror of the WIT `video-capture` record.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Video {
+pub struct VideoCapture {
     /// A WebM of VP8 frames, as the page's encoder wrote it. One CBOR byte
     /// string — see [`SessionState::state`].
     #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
+    pub video: Vec<u8>,
     /// One range for each guide of the step, in its order. Bounded on the way
     /// in.
     #[serde(deserialize_with = "guides::deserialize")]
@@ -806,7 +806,7 @@ mod captures {
     }
 }
 
-/// The decoder for [`Video::guides`]: at most
+/// The decoder for [`VideoCapture::guides`]: at most
 /// [`MAX_VIDEO_GUIDES`](engine_types::limits::MAX_VIDEO_GUIDES) ranges.
 mod guides {
     use engine_types::limits::MAX_VIDEO_GUIDES;
@@ -893,18 +893,23 @@ pub struct VideoSpec {
 /// built.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Guide {
-    /// A document frame of this width:height aspect.
-    Rect(f32),
+    Rect(RectSpec),
     Oval(OvalSpec),
     Turn(TurnSpec),
+}
+
+/// Sealed mirror of the WIT `rect-spec` record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RectSpec {
+    pub aspect: f32,
+    pub hold_ms: u16,
 }
 
 /// Sealed mirror of the WIT `oval-spec` record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OvalSpec {
-    pub center_x: f32,
-    pub center_y: f32,
     pub width: f32,
     pub hold_ms: u16,
 }
@@ -952,8 +957,8 @@ mod media_tests {
         encode(&MediaResult { captures }).expect("a media result encodes")
     }
 
-    /// A video of `data` with `guides` ranges.
-    fn video(data: Vec<u8>, guides: usize) -> Capture {
+    /// A capture of `video` with `guides` ranges.
+    fn video(video: Vec<u8>, guides: usize) -> Capture {
         let range = FrameRange {
             guide: Guide::Turn(TurnSpec {
                 degrees: -30,
@@ -962,8 +967,8 @@ mod media_tests {
             first: 3,
             last: 9,
         };
-        Capture::Video(Video {
-            data,
+        Capture::Video(VideoCapture {
+            video,
             guides: vec![range; guides],
         })
     }

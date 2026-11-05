@@ -47,14 +47,12 @@ export type Guide =
       kind: "rect";
       /// Its width:height aspect.
       aspect: number;
+      /// How long the document must fill it, in milliseconds.
+      hold_ms: number;
     }
-  /// A face oval, in the frame as the camera sees it.
+  /// A face oval at the centre of the frame.
   | {
       kind: "oval";
-      /// The centre, as a fraction of the frame's width.
-      center_x: number;
-      /// The centre, as a fraction of the frame's height.
-      center_y: number;
       /// As a fraction of the frame's shorter side.
       width: number;
       /// As a fraction of the frame's shorter side.
@@ -106,6 +104,7 @@ export type CaptureStep = CaptureStepCommon &
   );
 
 export type PhotoStep = Extract<CaptureStep, { kind: "photo" }>;
+export type VideoStep = Extract<CaptureStep, { kind: "video" }>;
 
 export type MediaSpec = {
   label: string;

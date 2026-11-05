@@ -54,6 +54,9 @@ interface props {
     /// Return what the round's WASI clocks and randomness read as the
     /// state from genesis, for the harness to check.
     wasi-probe: option<bool>,
+    /// Given a video, ask a region of its first frame larger than a
+    /// picture can be, which traps.
+    region-past-the-bound: option<bool>,
   }
 
   get: func() -> props;

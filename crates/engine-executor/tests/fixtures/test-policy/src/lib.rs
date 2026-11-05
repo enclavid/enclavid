@@ -9,6 +9,9 @@
 //!   consent-disclosure(true)    → finish(approved)
 //!   consent-disclosure(false)   → finish(rejected)
 //!
+//! A video in the passport's place is the probe of the host's decode: what
+//! decoding it gave is the state, and the walk ends there (`probe_video`).
+//!
 //! The reducer is stateless across calls except for the opaque `state`
 //! blob the runtime threads back in. We encode the current step as a
 //! single tag byte — no serde/bincode dependency needed for a 4-state
@@ -38,10 +41,11 @@ use enclavid_ext::policy::disclosure_fields::{Key as Field, disclosure_field};
 use enclavid_ext::policy::i18n::{Key as Text, localized};
 // The well-known plugin's texts, by its slot.
 use enclavid_ext::well_known::i18n::{Key as WellKnownText, localized as well_known_text};
-// The host `blob` resource: on the passport round we stash the photo's hash (a
+// The host `photo` resource: on the passport round we stash the photo's hash (a
 // hex string) in `state`, then rehydrate it on the selfie round through the
-// `Blob` constructor — proving cross-round reload.
-use enclavid::host::blob::Blob;
+// `Photo` constructor — proving cross-round reload. And the host `video`, whose
+// frames the probe reads, and the `image`s the host decodes a capture into.
+use enclavid::host::media::{Image, Photo, PixelsOptions, Rect, Resize, ResizeMode, Size, Video};
 use enclavid::policy::types::{Action, Capture, Decision, Disclosure, Event, Prompt};
 // The well-known plugin (linked at /connect) supplies the capture specs
 // and the canonical KYC `display-field` helpers.
@@ -50,12 +54,11 @@ use enclavid::well_known::disclosure_fields as wk;
 // Second plugin (linked at runtime in the hybrid test): its `get()` is
 // `extra-tag`, one of the extra plugin's own texts.
 use enclavid::extra::tag;
-// The vision substrate, threaded across the fused boundary: the vision plugin
-// decodes the selfie into a plugin-owned `decoded-frame`, face-detect locates
-// the `face` in it, face-age reads its crop and estimates.
+// The face plugins, threaded across the fused boundary over the host's image
+// of the selfie: face-detect locates the `face` in it, face-age reads its crop
+// and estimates.
 use enclavid::face_age::check as face_age;
 use enclavid::face_detect::detect as face_detect;
-use enclavid::vision::decode as vision;
 use exports::enclavid::policy::policy::Guest;
 
 struct TestPolicy;
@@ -79,6 +82,10 @@ const STEP_START: u8 = 0;
 const STEP_AWAIT_PASSPORT: u8 = 1;
 const STEP_AWAIT_SELFIE: u8 = 2;
 const STEP_AWAIT_CONSENT: u8 = 3;
+/// A video was probed and decoded: its frames follow.
+const STEP_VIDEO_DECODED: u8 = 4;
+/// A video was probed and did not decode.
+const STEP_VIDEO_UNDECODED: u8 = 5;
 
 /// Decode the step from the opaque state blob. Genesis (empty) ⇒ Start.
 fn step_of(state: &[u8]) -> u8 {
@@ -141,6 +148,76 @@ fn probe_state() -> Vec<u8> {
     }
     state.extend([u8::from(ready_before), u8::from(ready_after)]);
     state.extend(wasip2::random::random::get_random_bytes(16));
+    state
+}
+
+/// `image` at a quarter of its size each way: that size and its RGB, or
+/// `None` where it does not decode.
+fn quarter(image: &Image) -> Option<((u32, u32), Vec<u8>)> {
+    let size = image.size();
+    let (w, h) = ((size.width / 4).max(1), (size.height / 4).max(1));
+    let rgb = image.pixels(PixelsOptions {
+        crop: None,
+        resize: Some(Resize {
+            size: Size {
+                width: w,
+                height: h,
+            },
+            mode: ResizeMode::Nearest,
+        }),
+    })?;
+    Some(((w, h), rgb))
+}
+
+/// What decoding `video` gives, as a state: [`STEP_VIDEO_DECODED`], how many
+/// frames it has (4 bytes, big endian), then for each its index and its time
+/// (4 bytes each), whether it is a keyframe (a byte), and its image at a
+/// quarter of its size — its width and height (4 bytes each) and its RGB; then
+/// every pixel of the first frame, read after the last.
+/// [`STEP_VIDEO_UNDECODED`] alone where it has no frames, or one does not
+/// decode. The props' `region-past-the-bound` asks a region larger than a
+/// picture can be instead, which traps.
+fn probe_video(video: &Video) -> Vec<u8> {
+    let frames = video.frames(0, u32::MAX);
+    let Some(first) = frames.first() else {
+        return vec![STEP_VIDEO_UNDECODED];
+    };
+    if enclavid_ext::policy::props::get().region_past_the_bound == Some(true) {
+        let _ = first.image.pixels(PixelsOptions {
+            crop: Some(Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            }),
+            resize: Some(Resize {
+                size: Size {
+                    width: 1921,
+                    height: 1081,
+                },
+                mode: ResizeMode::Nearest,
+            }),
+        });
+    }
+    let mut state = vec![STEP_VIDEO_DECODED];
+    state.extend((frames.len() as u32).to_be_bytes());
+    for frame in &frames {
+        state.extend(frame.index.to_be_bytes());
+        state.extend(frame.timestamp_ms.to_be_bytes());
+        state.push(u8::from(frame.keyframe));
+        let Some(((w, h), rgb)) = quarter(&frame.image) else {
+            return vec![STEP_VIDEO_UNDECODED];
+        };
+        state.extend(w.to_be_bytes());
+        state.extend(h.to_be_bytes());
+        state.extend(rgb);
+    }
+    // The first frame again, whole and out of order: decoded again from its
+    // keyframe.
+    let Some(again) = first.image.all_pixels() else {
+        return vec![STEP_VIDEO_UNDECODED];
+    };
+    state.extend(again);
     state
 }
 
@@ -220,21 +297,24 @@ impl Guest for TestPolicy {
                     next.extend_from_slice(photo.hash().as_bytes());
                     (next, Action::Render(Prompt::Media(capture::selfie())))
                 }
+                Some(Capture::Video(capture)) => (
+                    probe_video(&capture.video),
+                    Action::Finish(Decision::Review),
+                ),
                 _ => (
                     state_at(STEP_AWAIT_PASSPORT),
                     Action::Finish(Decision::RejectedRetryable),
                 ),
             },
 
-            // Selfie captured → the full vision substrate across the fused
-            // boundary: the vision plugin decodes the photo into a plugin-owned
-            // `decoded-frame` (pixels stay in that plugin's sandbox),
-            // face-detect locates the `face`, face-age pulls its crop via
-            // `region` and estimates. The policy just threads the handles.
+            // Selfie captured → the face plugins across the fused boundary,
+            // over the host's image of the photo (its pixels stay with the
+            // host): face-detect locates the `face`, face-age pulls its crop
+            // via `region` and estimates. The policy just threads the handles.
             // `none` at any step (undecodable / no face / model failure) →
             // retake. The age threshold is the policy's call (buffer +
             // document escalation) and lands with the real flow; here the
-            // decode → detect → estimate plugin chain is what's exercised.
+            // image → detect → estimate chain is what's exercised.
             (STEP_AWAIT_SELFIE, Event::Media(result)) => {
                 // Rehydrate the passport photo stashed last round from its hash
                 // (the bytes after the step tag). The constructor returns a
@@ -243,21 +323,18 @@ impl Guest for TestPolicy {
                 // miss traps THERE. A legitimately-stashed hash always resolves,
                 // so there's no miss branch to handle.
                 let passport_hash = core::str::from_utf8(&state[1..]).unwrap_or_default();
-                let passport = Blob::new(passport_hash);
+                let passport = Photo::new(passport_hash);
                 if !skip_passport_read() {
                     let _passport_bytes = passport.bytes();
                 }
-                // Vision DAG on the SELFIE: the vision plugin decodes it
-                // into a plugin-owned `decoded-frame`, face-detect locates the
-                // `face`, face-age reads its crop and estimates. The policy
-                // threads the handles. Half the camera's size leaves a selfie's
-                // face a hundred pixels and more, which an age model reads; an
-                // eighth leaves it a few dozen.
+                // The face chain on the SELFIE: the host's image of it,
+                // face-detect locates the `face`, face-age reads its crop and
+                // estimates. The policy threads the handles.
                 let age = match result.captures.first() {
-                    Some(Capture::Photo(photo)) => vision::decode(photo, vision::Scale::Half)
-                        .and_then(|df| {
-                            face_detect::detect(&df).and_then(|face| face_age::estimate(&df, &face))
-                        }),
+                    Some(Capture::Photo(photo)) => photo.image().and_then(|image| {
+                        face_detect::detect(&image)
+                            .and_then(|face| face_age::estimate(&image, &face))
+                    }),
                     _ => None,
                 };
                 match age {

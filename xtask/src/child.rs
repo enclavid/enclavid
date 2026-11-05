@@ -61,10 +61,34 @@ const TARGET_DIR: &str = "target/child-under-test";
 /// would become the executor child's too — which is the same mistake at a
 /// different scale.
 pub fn child_binary(package: &str) -> PathBuf {
-    build(package).unwrap_or_else(|e| panic!("building {package} for the test: {e:#}"))
+    // The image builds with this, so this does too: it is what compiles the
+    // child's assertion that it carries no outward log tier, and a build that
+    // skipped it would not be the shape under test.
+    build(package, &["--features", "contained"], false)
+        .unwrap_or_else(|e| panic!("building {package} for the test: {e:#}"))
 }
 
-fn build(package: &str) -> Result<PathBuf> {
+/// The coprocess captures are decoded in, built in its own invocation as the
+/// image builds it but without `video`: libvpx is linked only where its build
+/// is given, which a test's machine may not have. Its photos are decoded as the
+/// image's are; a video opens as none.
+///
+/// Statically linked on Linux, as the image links it: a coprocess's filter
+/// maps no page executable, so a dynamic loader mapping a library dies there
+/// before the coprocess starts.
+pub fn media_binary() -> PathBuf {
+    const PACKAGE: &str = "engine-executor-media";
+    build(
+        PACKAGE,
+        &["--no-default-features"],
+        cfg!(target_os = "linux"),
+    )
+    .unwrap_or_else(|e| panic!("building {PACKAGE} for the test: {e:#}"))
+}
+
+/// Build `package` with `features`, `statically_linked` against the machine's
+/// own static libc or not.
+fn build(package: &str, features: &[&str], statically_linked: bool) -> Result<PathBuf> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask sits one level below the workspace root")
@@ -80,15 +104,26 @@ fn build(package: &str) -> Result<PathBuf> {
     let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     cmd.arg("build")
         .args(["-p", package])
-        // The image builds with this, so this does too: it is what compiles the
-        // child's assertion that it carries no outward log tier, and a build
-        // that skipped it would not be the shape under test.
-        .args(["--features", "contained"])
+        .args(features)
         .arg("--target-dir")
         .arg(&target_dir)
         .current_dir(&root);
     if release {
         cmd.arg("--release");
+    }
+    // A static link for the target alone, which naming the target is what
+    // keeps it to: build scripts and proc macros are built for the host apart
+    // from it, and cannot be linked statically.
+    let mut out = target_dir.clone();
+    if statically_linked {
+        let triple = format!("{}-unknown-linux-gnu", std::env::consts::ARCH);
+        let flags = format!(
+            "CARGO_TARGET_{}_RUSTFLAGS",
+            triple.to_uppercase().replace('-', "_")
+        );
+        cmd.args(["--target", &triple])
+            .env(flags, "-C target-feature=+crt-static");
+        out.push(triple);
     }
     // Inherited stdio: cargo's progress and any error go to the test's output,
     // where whoever is reading a failure is already looking.
@@ -99,7 +134,7 @@ fn build(package: &str) -> Result<PathBuf> {
         bail!("cargo build -p {package} failed (see the output above)");
     }
 
-    let bin = target_dir.join(profile).join(package);
+    let bin = out.join(profile).join(package);
     if !bin.is_file() {
         bail!("cargo reported success but {} is not there", bin.display());
     }

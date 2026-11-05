@@ -19,9 +19,10 @@
 //! state persistence ([`session_change`](engine_rpc::RemoteChildCallbacks::session_change))
 //! forward over the socketpair to the SUPERVISOR's relay, which forwards them on
 //! to api (the seal-key holder); a model of the composition
-//! ([`start_model`](engine_rpc::RemoteChildCallbacks::start_model)) the
-//! supervisor starts in a process of its own, on the other end of a socket it
-//! handed this process at spawn. Those three calls are the whole of the
+//! ([`start_model`](engine_rpc::RemoteChildCallbacks::start_model)), or a
+//! decode of a capture ([`start_media`](engine_rpc::RemoteChildCallbacks::start_media)),
+//! the supervisor starts in a process of its own, on the other end of a socket
+//! it handed this process at spawn. Those four calls are the whole of the
 //! [`RemoteChildCallbacks`] boundary: the supervisor primed this process with its
 //! bundle before starting it, so there is nothing here that can ask for a
 //! composition, and no OCI-pull or compile surface to ask with.
@@ -41,17 +42,19 @@
 safe_logger::assert_contained!();
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::future::Future;
 use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use remoc::codec::Ciborium;
 
+use engine_executor::limits::MAX_MEDIA_DECODES;
 use engine_executor::{
-    Component, EmbeddedRegistry, Event, Executor, MediaStore, ModelStarter, PrimedComposition,
-    RunError, RunInputs, RunResult, RunStatus, SessionChange, SessionListener, SessionState,
+    Component, EmbeddedRegistry, Event, Executor, MediaStarter, MediaStore, ModelStarter,
+    PrimedComposition, RunError, RunInputs, RunResult, RunStatus, SessionChange, SessionListener,
+    SessionState,
 };
 use engine_rpc::{
     BundleRef, Committed, ExecError, MediaHash, RemoteChild, RemoteChildCallbacks,
@@ -68,9 +71,11 @@ use safe_logger::debug;
 struct Child {
     executor: Arc<Executor>,
     primed: OnceLock<PrimedComposition>,
-    /// This process's end of each model's socket, in the order of the
-    /// composition's models, until the round starts the model.
-    sockets: Arc<Mutex<Vec<Option<OwnedFd>>>>,
+    /// This process's ends of the sockets the supervisor handed it at spawn,
+    /// after the cwasm's descriptor: one for each capture a round may decode,
+    /// then one for each of the composition's models, in their order. Taken by
+    /// the round.
+    sockets: Mutex<Vec<OwnedFd>>,
 }
 
 impl RemoteChild for Child {
@@ -138,14 +143,26 @@ impl RemoteChild for Child {
             callbacks: callbacks.clone(),
             memo: Mutex::new(HashMap::new()),
         });
+        // The decodes' sockets first, as many as a round may ask for, then the
+        // models'. A socket the round asks for and was not handed — the
+        // supervisor's doing, which hands one for each — ends the round then,
+        // as the starters find it missing.
+        let mut decodes =
+            std::mem::take(&mut *self.sockets.lock().unwrap_or_else(|e| e.into_inner()));
+        let models = decodes.split_off(decodes.len().min(MAX_MEDIA_DECODES));
         let models: Arc<dyn ModelStarter> = Arc::new(RelayModelStarter {
+            callbacks: callbacks.clone(),
+            sockets: Sockets::new(models),
+        });
+        let media: Arc<dyn MediaStarter> = Arc::new(RelayMediaStarter {
             callbacks,
-            sockets: self.sockets.clone(),
+            sockets: Sockets::new(decodes),
         });
         let inputs = RunInputs {
             listener,
             media_store,
             models,
+            media,
             fuel,
         };
 
@@ -312,33 +329,79 @@ impl MediaStore for RelayMediaStore {
 /// Once per model: its socket goes with the start.
 struct RelayModelStarter {
     callbacks: RemoteChildCallbacksClient<Ciborium>,
-    sockets: Arc<Mutex<Vec<Option<OwnedFd>>>>,
+    sockets: Sockets,
 }
 
 impl ModelStarter for RelayModelStarter {
-    fn start(&self, index: u32) -> Pin<Box<dyn Future<Output = RunResult<File>> + Send + '_>> {
+    fn start(
+        &self,
+        index: u32,
+    ) -> Pin<Box<dyn Future<Output = RunResult<UnixStream>> + Send + '_>> {
         Box::pin(async move {
             // A model this process has no socket for is the supervisor's
             // doing, not the policy's: it hands one for every model.
-            let socket = usize::try_from(index)
-                .ok()
-                .and_then(|i| {
-                    self.sockets
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get_mut(i)
-                        .and_then(Option::take)
-                })
-                .ok_or_else(|| {
-                    debug!("no socket for model {index}");
-                    RunError::new(CallbackFailed)
-                })?;
+            let socket = self.sockets.take(index).ok_or_else(|| {
+                debug!("no socket for model {index}");
+                RunError::new(CallbackFailed)
+            })?;
             self.callbacks.start_model(index).await.map_err(|e| {
                 debug!("start_model callback: {e}");
                 RunError::new(CallbackFailed)
             })?;
-            Ok(File::from(socket))
+            Ok(UnixStream::from(socket))
         })
+    }
+}
+
+/// `MediaStarter` over the sockets the supervisor handed this process at spawn,
+/// after the cwasm, one for each capture a round may decode: a decode's
+/// process is started through the supervisor's
+/// `RemoteChildCallbacks::start_media` on the other end of the decode's socket,
+/// which is then this round's to write to. Once per decode: its socket goes
+/// with the start.
+struct RelayMediaStarter {
+    callbacks: RemoteChildCallbacksClient<Ciborium>,
+    sockets: Sockets,
+}
+
+impl MediaStarter for RelayMediaStarter {
+    fn start(
+        &self,
+        decode: u32,
+    ) -> Pin<Box<dyn Future<Output = RunResult<UnixStream>> + Send + '_>> {
+        Box::pin(async move {
+            // The engine asks for no more decodes than the supervisor hands
+            // sockets for.
+            let socket = self.sockets.take(decode).ok_or_else(|| {
+                debug!("no socket for decode {decode}");
+                RunError::new(CallbackFailed)
+            })?;
+            self.callbacks.start_media(decode).await.map_err(|e| {
+                debug!("start_media callback: {e}");
+                RunError::new(CallbackFailed)
+            })?;
+            Ok(UnixStream::from(socket))
+        })
+    }
+}
+
+/// This process's ends of sockets a round starts processes on, each until it
+/// is taken.
+struct Sockets(Mutex<Vec<Option<OwnedFd>>>);
+
+impl Sockets {
+    fn new(sockets: Vec<OwnedFd>) -> Self {
+        Self(Mutex::new(sockets.into_iter().map(Some).collect()))
+    }
+
+    /// Socket `index`, taken: `None` past their end, or once taken before.
+    fn take(&self, index: u32) -> Option<OwnedFd> {
+        let index = usize::try_from(index).ok()?;
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(index)
+            .and_then(Option::take)
     }
 }
 
@@ -352,11 +415,11 @@ fn to_wire_status(s: RunStatus) -> engine_rpc::RunStatus {
 }
 
 fn main() {
-    // The sockets to the round's models, taken first: every slot after the
-    // cwasm's is one the supervisor placed, until something here opens a file
-    // into the next — the runtime below does.
+    // The sockets to the round's decodes and models, taken first: every slot
+    // after the cwasm's is one the supervisor placed, until something here
+    // opens a file into the next — the runtime below does.
     let sockets = engine_supervisor::take_inherited_rest()
-        .expect("engine-executor-child: take the models' sockets");
+        .expect("engine-executor-child: take the coprocesses' sockets");
     // Single-threaded runtime — one round, no background epoch (we use fuel,
     // not epochs), forward-compatible with a fork-from-zygote.
     tokio::runtime::Builder::new_current_thread()
@@ -379,7 +442,7 @@ async fn serve(sockets: Vec<OwnedFd>) {
     let child = Arc::new(Child {
         executor: Arc::new(Executor::new().expect("engine-executor-child: create executor engine")),
         primed: OnceLock::new(),
-        sockets: Arc::new(Mutex::new(sockets.into_iter().map(Some).collect())),
+        sockets: Mutex::new(sockets),
     });
     safe_logger::debug!("engine-executor-child: engine built, serving fd 0");
 

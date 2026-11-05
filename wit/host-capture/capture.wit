@@ -18,17 +18,20 @@ interface capture {
         any,
     }
 
-    /// Where a face must get to, and for how long: an oval in the frame's own
-    /// space, as the camera sees it — the page mirrors a front camera's view
-    /// for display alone. Its height is 1.618 times its width, the proportion
-    /// of a face.
+    /// A document frame, and how long the document is held in it.
+    record rect-spec {
+        /// Its width:height aspect, held to 0.5–2.0 (1.42 passport, 1.585
+        /// ID-1).
+        aspect: f32,
+        /// How long the document must fill the frame, in milliseconds; held
+        /// to 5000.
+        hold-ms: u16,
+    }
+
+    /// Where a face must get to, and for how long: an oval at the centre of
+    /// the frame. Its height is 1.618 times its width, the proportion of a
+    /// face.
     record oval-spec {
-        /// The centre, from the frame's left edge, as a fraction of its width;
-        /// held to the frame.
-        center-x: f32,
-        /// The centre, from the frame's top edge, as a fraction of its height;
-        /// held to the frame.
-        center-y: f32,
         /// As a fraction of the frame's shorter side, so the oval keeps its
         /// size on a frame of either orientation; held to 0.1–0.6, where the
         /// oval's height still fits that side.
@@ -54,9 +57,8 @@ interface capture {
     /// screen or a face, and further digits are a difference the applicant
     /// cannot see.
     variant guide {
-        /// A document frame of this width:height aspect, held to 0.5–2.0
-        /// (1.42 passport, 1.585 ID-1).
-        rect(f32),
+        /// A document frame.
+        rect(rect-spec),
         /// A face oval.
         oval(oval-spec),
         /// A turn of the head.
@@ -76,8 +78,10 @@ interface capture {
     /// A video. There is no review screen: what was on screen while it
     /// recorded is what is sent.
     record video-spec {
-        /// What the page shows while it records, in order, each held before
-        /// the next. The reply says where each was held.
+        /// What the page shows while it records, in order: each shown until
+        /// the applicant has had time to follow it, then held for its
+        /// `hold-ms` — for one frame where that is 0 — before the next. The
+        /// reply says where each was held.
         guides: list<guide>,
     }
 

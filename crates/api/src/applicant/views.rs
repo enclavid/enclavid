@@ -188,13 +188,11 @@ pub enum GuideView {
     Rect {
         /// Its width:height aspect (passport ≈ 1.42, ID-1 ≈ 1.59).
         aspect: f32,
+        /// How long the document must fill it, in milliseconds.
+        hold_ms: u16,
     },
-    /// A face oval, in the frame as the camera sees it.
+    /// A face oval at the centre of the frame.
     Oval {
-        /// The centre, as a fraction of the frame's width.
-        center_x: f32,
-        /// The centre, as a fraction of the frame's height.
-        center_y: f32,
         /// As a fraction of the frame's shorter side.
         width: f32,
         /// As a fraction of the frame's shorter side: the width times the
@@ -308,10 +306,11 @@ fn camera_view(c: CameraFacing) -> CameraFacingView {
 
 fn guide_view(g: Guide) -> GuideView {
     match g {
-        Guide::Rect(aspect) => GuideView::Rect { aspect },
+        Guide::Rect(r) => GuideView::Rect {
+            aspect: r.aspect,
+            hold_ms: r.hold_ms,
+        },
         Guide::Oval(o) => GuideView::Oval {
-            center_x: o.center_x,
-            center_y: o.center_y,
             width: o.width,
             height: o.width * GUIDE_OVAL_ASPECT,
             hold_ms: o.hold_ms,
@@ -325,7 +324,7 @@ fn guide_view(g: Guide) -> GuideView {
 
 #[cfg(test)]
 mod tests {
-    use session_types::{Localized, OvalSpec, PhotoSpec, TurnSpec, VideoSpec};
+    use session_types::{Localized, OvalSpec, PhotoSpec, RectSpec, TurnSpec, VideoSpec};
 
     use super::*;
 
@@ -379,14 +378,19 @@ mod tests {
             label: Localized::default(),
             captures: vec![
                 step(CaptureKind::Photo(PhotoSpec {
-                    guide: Some(Guide::Rect(1.42)),
+                    guide: Some(Guide::Rect(RectSpec {
+                        aspect: 1.42,
+                        hold_ms: 0,
+                    })),
                     review_hint: Localized::default(),
                 })),
                 step(CaptureKind::Video(VideoSpec {
                     guides: vec![
+                        Guide::Rect(RectSpec {
+                            aspect: 1.59,
+                            hold_ms: 2000,
+                        }),
                         Guide::Oval(OvalSpec {
-                            center_x: 0.5,
-                            center_y: 0.5,
                             width: 0.5,
                             hold_ms: 1000,
                         }),
@@ -410,9 +414,11 @@ mod tests {
         assert_eq!(photo["guide"]["kind"], "rect");
         assert!(photo.get("review_hint").is_some());
         assert_eq!(video["kind"], "video");
-        assert_eq!(video["guides"][0]["kind"], "oval");
-        assert_eq!(video["guides"][0]["hold_ms"], 1000);
-        assert_eq!(video["guides"][1]["kind"], "turn");
-        assert_eq!(video["guides"][1]["degrees"], -30);
+        assert_eq!(video["guides"][0]["kind"], "rect");
+        assert_eq!(video["guides"][0]["hold_ms"], 2000);
+        assert_eq!(video["guides"][1]["kind"], "oval");
+        assert_eq!(video["guides"][1]["hold_ms"], 1000);
+        assert_eq!(video["guides"][2]["kind"], "turn");
+        assert_eq!(video["guides"][2]["degrees"], -30);
     }
 }

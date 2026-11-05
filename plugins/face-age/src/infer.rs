@@ -1,10 +1,9 @@
-//! Face-age inference on a face crop pulled from the decoded frame: shape the
-//! crop as the model takes it (per-model profile) → run the model → decode.
-//! The JPEG decode and the face's box are other plugins' (vision,
-//! face-detect) — this plugin asks `decoded-frame.region` (in [`lib`]) for the
-//! face patch at the size its profile wants, and holds only the model-specific
-//! adapter: input format (size, channel order, normalization), which model,
-//! and output decode.
+//! Face-age inference on a face crop pulled from the image: shape the crop as
+//! the model takes it (per-model profile) → run the model → decode. The
+//! image's decode is the host's and the face's box face-detect's — this
+//! plugin asks `image.region` (in [`lib`]) for the face patch at the size its
+//! profile wants, and holds only the model-specific adapter: input format
+//! (size, channel order, normalization), which model, and output decode.
 //!
 //! Profile selection is compile-time:
 //!   * default → [`placeholder`]: no model, an age from the crop's brightness
@@ -23,9 +22,10 @@ use placeholder as profile;
 pub const MARGIN: f32 = profile::MARGIN;
 
 /// Estimate age (years) from the face crop `region` reads: a source rect of
-/// `crop` pixels, resampled to the size it is asked for, row-major RGB8.
-/// `None` if the face is unusable, or the model gives no age.
-pub fn estimate(crop: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<f32> {
+/// `crop` pixels, resampled to the size it is asked for, row-major RGB8 — or
+/// nothing, where the image does not decode. `None` if the face is unusable,
+/// or the model gives no age.
+pub fn estimate(crop: (u32, u32), region: impl FnOnce(u32, u32) -> Option<Vec<u8>>) -> Option<f32> {
     profile::estimate(crop, region)
 }
 
@@ -42,8 +42,11 @@ mod placeholder {
     /// An age from the crop's mean brightness, from 0 for black to 60 for
     /// white — so the pipeline runs end to end with no model, and a gray
     /// frame reads 30.
-    pub fn estimate(_crop: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<f32> {
-        let rgb = region(SIDE, SIDE);
+    pub fn estimate(
+        _crop: (u32, u32),
+        region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
+    ) -> Option<f32> {
+        let rgb = region(SIDE, SIDE)?;
         let mean = rgb.iter().map(|&v| f32::from(v)).sum::<f32>() / rgb.len().max(1) as f32;
         Some(mean / 255.0 * 60.0)
     }
@@ -75,12 +78,15 @@ mod mivolo {
     const SPAN: f32 = 122.0;
     const MIDDLE: f32 = 61.0;
 
-    pub fn estimate(crop: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<f32> {
+    pub fn estimate(
+        crop: (u32, u32),
+        region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
+    ) -> Option<f32> {
         if crop.0.min(crop.1) < MIN_SIDE {
             return None;
         }
         let (w, h) = fit(crop)?;
-        let face = letterbox(&region(w, h), w as usize, h as usize)?;
+        let face = letterbox(&region(w, h)?, w as usize, h as usize)?;
         let input = TensorF32::new(&[1, 6, SIDE as u64, SIDE as u64], &input(&face));
         decode(&models::age().run(&input).data())
     }
@@ -148,7 +154,7 @@ mod tests {
         use super::{estimate, profile};
         let age = estimate((300, 300), |w, h| {
             assert_eq!((w, h), (profile::SIDE, profile::SIDE));
-            vec![128u8; (w * h * 3) as usize]
+            Some(vec![128u8; (w * h * 3) as usize])
         })
         .expect("estimate");
         assert!((age - 30.1).abs() < 0.1, "{age}");
@@ -165,7 +171,7 @@ mod tests {
         /// never asked for.
         #[test]
         fn a_face_too_small_gives_no_age() {
-            let never = |_, _| -> Vec<u8> { unreachable!("no pixels read") };
+            let never = |_, _| -> Option<Vec<u8>> { unreachable!("no pixels read") };
             assert_eq!(estimate((MIN_SIDE - 1, 300), never), None);
             assert_eq!(estimate((300, MIN_SIDE - 1), never), None);
         }

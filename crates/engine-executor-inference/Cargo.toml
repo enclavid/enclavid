@@ -29,6 +29,8 @@ debug = []
 [dependencies]
 # The graph's check and the protocol.
 enclavid-inference = { path = "../inference" }
+# Its end of the channel to the round: blocking on its socket, no runtime.
+coprocess-channel = { path = "../coprocess-channel" }
 # A release candidate, so pinned exactly. `half` for tensors and weights of
 # 16-bit floats.
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "half"] }
