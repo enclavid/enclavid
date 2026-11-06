@@ -15,6 +15,16 @@ struct Other {
     number: u32,
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Listed {
+    #[serde(deserialize_with = "three")]
+    list: Vec<u32>,
+}
+
+fn three<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u32>, D::Error> {
+    at_most(deserializer, 3)
+}
+
 fn sent(message: &impl Serialize) -> Vec<u8> {
     let mut bytes = Vec::new();
     send(&mut bytes, message).expect("it sends");
@@ -92,6 +102,33 @@ fn a_byte_string_claiming_more_than_its_body_is_refused() {
         receive::<serde_bytes::ByteBuf>(&mut Cursor::new(framed(&body)), 64),
         Err(ChannelError::Malformed)
     ));
+}
+
+/// A list is read up to its bound and refused past it: one that says how long
+/// it is, one that does not, and a byte string read as a list alike.
+#[test]
+fn a_list_past_its_bound_is_refused() {
+    let full = Listed {
+        list: vec![1, 2, 3],
+    };
+    // CBOR: {"list": a list of no length said, 1, 2, 3}.
+    let unsaid = framed(&[0xa1, 0x64, b'l', b'i', b's', b't', 0x9f, 1, 2, 3, 0xff]);
+    for wire in [sent(&full), unsaid] {
+        let back = receive::<Listed>(&mut Cursor::new(wire), 64).unwrap();
+        assert_eq!(back.as_ref(), Some(&full));
+    }
+
+    let long = sent(&Listed {
+        list: vec![1, 2, 3, 4],
+    });
+    let unsaid = framed(&[0xa1, 0x64, b'l', b'i', b's', b't', 0x9f, 1, 2, 3, 4, 0xff]);
+    let bytes = framed(&[0xa1, 0x64, b'l', b'i', b's', b't', 0x44, 1, 2, 3, 4]);
+    for wire in [long, unsaid, bytes] {
+        assert!(matches!(
+            receive::<Listed>(&mut Cursor::new(wire), 64),
+            Err(ChannelError::Malformed)
+        ));
+    }
 }
 
 #[cfg(feature = "tokio")]

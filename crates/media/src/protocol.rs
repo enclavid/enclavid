@@ -6,15 +6,18 @@
 //! asked for, and nothing before.
 //!
 //! What the coprocess answers is taken as the applicant's bytes are: held to
-//! what a decode can give before the round makes anything of it — an open's to
-//! [`Opened::fits`], a region's pixels to exactly as many as [`Region::rgb_len`].
+//! what a decode can give before the round makes anything of it — a video's
+//! frames to [`MAX_VIDEO_FRAMES`] as they are read, an open's to
+//! [`Opened::fits`], a region's pixels to exactly as many as
+//! [`Region::rgb_len`].
 //!
 //! A failure ends the coprocess, but for a picture that does not decode: that
 //! is answered, and the next request read.
 
+use coprocess_channel::at_most;
 use engine_types::limits::MAX_VIDEO_FRAMES;
 pub use engine_types::picture::PictureBounds;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 pub use serde_bytes::{ByteBuf, Bytes};
 
 #[cfg(test)]
@@ -181,22 +184,28 @@ pub enum Opened {
     /// A photo, and the size it decodes at.
     Photo(Size),
     /// A video: the size of its frames, and its frames, in order.
-    Video { size: Size, frames: Vec<FrameInfo> },
+    Video {
+        size: Size,
+        #[serde(deserialize_with = "frames")]
+        frames: Vec<FrameInfo>,
+    },
 }
 
 impl Opened {
     /// Whether a decode held to `bounds` can tell this of a capture of `kind`:
-    /// of that kind, a size within them, and no more frames than a decode
-    /// reads.
+    /// of that kind, and a size within them.
     pub fn fits(&self, kind: Kind, bounds: PictureBounds) -> bool {
         match (self, kind) {
-            (Opened::Photo(size), Kind::Photo) => size.within(bounds),
-            (Opened::Video { size, frames }, Kind::Video) => {
-                size.within(bounds) && frames.len() <= MAX_VIDEO_FRAMES as usize
+            (Opened::Photo(size), Kind::Photo) | (Opened::Video { size, .. }, Kind::Video) => {
+                size.within(bounds)
             }
             _ => false,
         }
     }
+}
+
+fn frames<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<FrameInfo>, D::Error> {
+    at_most(deserializer, MAX_VIDEO_FRAMES as usize)
 }
 
 /// Why a request is answered with nothing but this. Fixed cases: what the

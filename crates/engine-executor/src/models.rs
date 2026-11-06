@@ -160,8 +160,10 @@ async fn run_model(
         .get_mut(&model.rep())
         .ok_or_else(|| wasmtime::Error::msg("a model the round has not started"))?;
     let request = Request { model: 0, inputs };
-    let response: Response = channel.ask(&request, MAX_MESSAGE_BYTES).await?;
-    let mut outputs = response.map_err(wasmtime::Error::new)?.into_iter();
+    let mut outputs = match channel.ask(&request, MAX_MESSAGE_BYTES).await? {
+        Response::Outputs(outputs) => outputs.into_iter(),
+        Response::Failed(failure) => return Err(wasmtime::Error::new(failure)),
+    };
     let given = give(&mut store, result, &mut outputs)?;
     if outputs.next().is_some() {
         return Err(wasmtime::Error::msg(

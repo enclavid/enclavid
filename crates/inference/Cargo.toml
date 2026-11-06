@@ -15,13 +15,12 @@ test-models = []
 # tensor crosses whole.
 zerocopy = "0.8"
 # The messages are serde values, which `coprocess-channel` carries; a tensor's
-# elements go as a byte string.
+# elements go as a byte string, and its lists are held to their bounds as they
+# are read.
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
+coprocess-channel = { path = "../coprocess-channel" }
 # A vendor's graph read for its check: the derive over the part of ONNX's
 # schema the check needs, nothing generated at build time.
 prost = "0.14"
 thiserror = "1"
-
-[dev-dependencies]
-coprocess-channel = { path = "../coprocess-channel" }

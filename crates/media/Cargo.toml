@@ -11,9 +11,8 @@ repository.workspace = true
 # The bounds a decode is held to.
 engine-types = { path = "../engine-types" }
 # The messages are serde values, which `coprocess-channel` carries; a capture's
-# bytes and a region's pixels go as byte strings.
+# bytes and a region's pixels go as byte strings, and a video's frames are held
+# to their bound as they are read.
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
-
-[dev-dependencies]
 coprocess-channel = { path = "../coprocess-channel" }

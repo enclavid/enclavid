@@ -6,13 +6,14 @@
 //! numbers it — its dimensions, and its elements' bytes as they lie in memory,
 //! little-endian. Each end reads what the other wrote and trusts none of it: a
 //! message is held to [`MAX_MESSAGE_BYTES`] before anything is allocated for
-//! it, and a tensor whose element type is none, whose rank is past
-//! [`MAX_RANK`], or whose bytes are not what its dimensions hold is not read
-//! as one. How many tensors a run takes and gives is its model's, which each
-//! end holds them to.
+//! it, its tensors to [`MAX_TENSORS`] and their dimensions to [`MAX_RANK`] as
+//! they are read, and a tensor whose element type is none or whose bytes are
+//! not what its dimensions hold is not read as one. How many tensors a run
+//! takes and gives is its model's, which each end holds them to.
 
+use coprocess_channel::at_most;
 use serde::ser::Error as _;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::{ByteBuf, Bytes};
 use zerocopy::IntoBytes;
 
@@ -139,6 +140,7 @@ pub struct Tensor {
 #[derive(Deserialize)]
 struct Wire {
     element: i32,
+    #[serde(deserialize_with = "dims")]
     dims: Vec<u64>,
     bytes: ByteBuf,
 }
@@ -173,9 +175,6 @@ impl TryFrom<Wire> for Tensor {
 
     fn try_from(wire: Wire) -> Result<Self, Self::Error> {
         let element = Element::of(wire.element).ok_or("an element type that is none")?;
-        if wire.dims.len() > MAX_RANK as usize {
-            return Err("more dimensions than a tensor has");
-        }
         let held = elements(&wire.dims)
             .filter(|&n| n.checked_mul(element.size()) == Some(wire.bytes.len() as u64))
             .ok_or("bytes that are not what the dimensions hold")?;
@@ -192,12 +191,18 @@ impl TryFrom<Wire> for Tensor {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub model: u32,
+    #[serde(deserialize_with = "tensors")]
     pub inputs: Vec<Tensor>,
 }
 
-/// The coprocess's response to a request: the outputs, in the model's order,
-/// or why there are none.
-pub type Response = Result<Vec<Tensor>, Failure>;
+/// The coprocess's response to a request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Response {
+    /// The outputs, in the model's order.
+    Outputs(#[serde(deserialize_with = "tensors")] Vec<Tensor>),
+    /// Why there are none.
+    Failed(Failure),
+}
 
 /// Why a request has no outputs. Fixed cases, and nothing else: a run's own
 /// errors are ONNX Runtime's text, which is the model's to shape and not for a
@@ -215,4 +220,12 @@ pub enum Failure {
 /// How many elements `dims` hold, if that can be counted.
 fn elements(dims: &[u64]) -> Option<u64> {
     dims.iter().try_fold(1u64, |n, &d| n.checked_mul(d))
+}
+
+fn dims<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u64>, D::Error> {
+    at_most(deserializer, MAX_RANK as usize)
+}
+
+fn tensors<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Tensor>, D::Error> {
+    at_most(deserializer, MAX_TENSORS as usize)
 }

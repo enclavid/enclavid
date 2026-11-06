@@ -40,13 +40,17 @@ fn messages_read_back_as_sent() {
                 dims: vec![1],
                 data: Data::F16(vec![0x3c00]),
             },
+            tensor(&[1; MAX_RANK as usize]),
         ],
     };
     let back: Option<Request> =
         receive(&mut Cursor::new(sent(&request)), MAX_MESSAGE_BYTES).unwrap();
     assert_eq!(back, Some(request));
 
-    let responses: [Response; 2] = [Ok(vec![tensor(&[1, 3])]), Err(Failure::Inputs)];
+    let responses = [
+        Response::Outputs(vec![tensor(&[1, 3])]),
+        Response::Failed(Failure::Inputs),
+    ];
     for response in responses {
         let back: Option<Response> =
             receive(&mut Cursor::new(sent(&response)), MAX_MESSAGE_BYTES).unwrap();
@@ -141,6 +145,36 @@ fn a_tensor_that_cannot_be_is_refused() {
             Err(ChannelError::Malformed)
         ));
     }
+}
+
+/// A run's tensors are read up to as many as a run takes or gives, and
+/// refused past them, in a request and a response alike.
+#[test]
+fn more_tensors_than_a_run_takes_are_refused() {
+    let full = vec![tensor(&[]); MAX_TENSORS as usize];
+    let request = Request {
+        model: 0,
+        inputs: full.clone(),
+    };
+    let back: Option<Request> =
+        receive(&mut Cursor::new(sent(&request)), MAX_MESSAGE_BYTES).unwrap();
+    assert_eq!(back, Some(request));
+
+    let mut long = full;
+    long.push(tensor(&[]));
+    let request = sent(&Request {
+        model: 0,
+        inputs: long.clone(),
+    });
+    assert!(matches!(
+        receive::<Request>(&mut Cursor::new(request), MAX_MESSAGE_BYTES),
+        Err(ChannelError::Malformed)
+    ));
+    let response = sent(&Response::Outputs(long));
+    assert!(matches!(
+        receive::<Response>(&mut Cursor::new(response), MAX_MESSAGE_BYTES),
+        Err(ChannelError::Malformed)
+    ));
 }
 
 /// The bound holds the largest message there is: as many tensors as a run

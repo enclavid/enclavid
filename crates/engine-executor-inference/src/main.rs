@@ -50,9 +50,11 @@ fn serve() -> Result<(), Stop> {
     drop((graph, data));
     narrow()?;
     while let Some(request) = receive::<Request>(&mut socket, MAX_MESSAGE_BYTES)? {
-        let response: Response = match (request.model, model.as_mut()) {
-            (0, Some(model)) => model.run(&request.inputs),
-            _ => Err(Failure::NoModel),
+        let response = match (request.model, model.as_mut()) {
+            (0, Some(model)) => model
+                .run(&request.inputs)
+                .map_or_else(Response::Failed, Response::Outputs),
+            _ => Response::Failed(Failure::NoModel),
         };
         send(&mut socket, &response)?;
     }

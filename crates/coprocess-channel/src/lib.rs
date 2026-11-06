@@ -5,18 +5,21 @@
 //!
 //! Each end reads what the other wrote and trusts none of it: a message's
 //! length is held to the most its reader takes before anything is allocated
-//! for it, and its body must be exactly one value of the type asked for. CBOR
-//! decodes a byte string by reading it, never by reserving the length it
-//! claims, so no body makes its reader hold more than the body.
+//! for it, and its body must be exactly one value of the type asked for. A
+//! byte string is read, never reserved at the length it claims; a list can
+//! decode to more than its bytes, so a message holds each of its lists to a
+//! bound with [`at_most`].
 //!
 //! A coprocess's end, [`send`] and [`receive`], blocks on its socket and links
 //! no runtime: a coprocess keeps itself to reading and writing that socket.
 //! The round's end, [`Channel`] behind the `tokio` feature, awaits it.
 
+use std::fmt;
 use std::io::{self, Read, Write};
+use std::marker::PhantomData;
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::de::{self, DeserializeOwned, Deserializer, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "tokio")]
 mod round;
@@ -62,6 +65,42 @@ pub fn receive<T: DeserializeOwned>(
     let mut body = vec![0u8; length(head, max)?];
     from.read_exact(&mut body)?;
     decode(&body).map(Some)
+}
+
+/// A list of at most `max` elements, for a message's
+/// `#[serde(deserialize_with)]`: refused where it says it holds more, or at
+/// the element past them.
+pub fn at_most<'de, D, T>(deserializer: D, max: usize) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    deserializer.deserialize_seq(AtMost(max, PhantomData))
+}
+
+struct AtMost<T>(usize, PhantomData<fn() -> T>);
+
+impl<'de, T: Deserialize<'de>> Visitor<'de> for AtMost<T> {
+    type Value = Vec<T>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "a list of at most {}", self.0)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+        let said = seq.size_hint().unwrap_or(0);
+        if said > self.0 {
+            return Err(de::Error::invalid_length(said, &self));
+        }
+        let mut list = Vec::with_capacity(said);
+        while let Some(element) = seq.next_element()? {
+            if list.len() == self.0 {
+                return Err(de::Error::invalid_length(self.0 + 1, &self));
+            }
+            list.push(element);
+        }
+        Ok(list)
+    }
 }
 
 /// `message` as it is written: the head that gives its length, and its body.

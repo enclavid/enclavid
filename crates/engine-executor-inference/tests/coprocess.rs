@@ -48,11 +48,15 @@ fn start(files: &[&[u8]]) -> (tokio::process::Child, UnixStream) {
     (coprocess, ours)
 }
 
-fn ask(socket: &mut UnixStream, model: u32, inputs: Vec<Tensor>) -> Response {
+fn ask(socket: &mut UnixStream, model: u32, inputs: Vec<Tensor>) -> Result<Vec<Tensor>, Failure> {
     send(socket, &Request { model, inputs }).expect("send the request");
-    receive(socket, MAX_MESSAGE_BYTES)
+    match receive(socket, MAX_MESSAGE_BYTES)
         .expect("read the response")
         .expect("a response")
+    {
+        Response::Outputs(outputs) => Ok(outputs),
+        Response::Failed(failure) => Err(failure),
+    }
 }
 
 fn x(rows: &[[f32; 3]]) -> Tensor {

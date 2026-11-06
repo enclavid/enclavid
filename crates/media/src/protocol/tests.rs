@@ -144,8 +144,8 @@ fn a_picture_is_bounded_in_either_orientation() {
     }
 }
 
-/// An open's response fits only what a decode can tell: the kind opened, a size
-/// within the bounds, no more frames than a decode reads.
+/// An open's response fits only what a decode can tell: the kind opened, and a
+/// size within the bounds.
 #[test]
 fn an_open_answers_only_what_a_decode_can_tell() {
     let photo = Opened::Photo(LANDSCAPE);
@@ -159,20 +159,43 @@ fn an_open_answers_only_what_a_decode_can_tell() {
     });
     assert!(!wide.fits(Kind::Photo, BOUNDS));
 
-    let frame = FrameInfo {
-        timestamp_ms: 0,
-        keyframe: true,
-    };
-    let full = Opened::Video {
+    let video = Opened::Video {
         size: LANDSCAPE,
-        frames: vec![frame; MAX_VIDEO_FRAMES as usize],
+        frames: Vec::new(),
     };
-    assert!(full.fits(Kind::Video, BOUNDS));
-    let long = Opened::Video {
-        size: LANDSCAPE,
-        frames: vec![frame; MAX_VIDEO_FRAMES as usize + 1],
+    assert!(video.fits(Kind::Video, BOUNDS));
+    assert!(!video.fits(Kind::Photo, BOUNDS));
+    assert!(!video.fits(Kind::Video, SMALLER));
+}
+
+/// A video's frames are read up to as many as a decode reads, and refused
+/// past them.
+#[test]
+fn more_frames_than_a_decode_reads_are_refused() {
+    let opened = |count| {
+        Response::Opened(Opened::Video {
+            size: LANDSCAPE,
+            frames: vec![
+                FrameInfo {
+                    timestamp_ms: 0,
+                    keyframe: true,
+                };
+                count
+            ],
+        })
     };
-    assert!(!long.fits(Kind::Video, BOUNDS));
+    let read = |response: &Response| {
+        coprocess_channel::receive::<Response>(
+            &mut Cursor::new(sent(response)),
+            max_response_bytes(BOUNDS),
+        )
+    };
+    let full = opened(MAX_VIDEO_FRAMES as usize);
+    assert_eq!(read(&full).unwrap(), Some(full));
+    assert!(matches!(
+        read(&opened(MAX_VIDEO_FRAMES as usize + 1)),
+        Err(coprocess_channel::ChannelError::Malformed)
+    ));
 }
 
 /// A region past the bounds gives no length, whichever side is past them —

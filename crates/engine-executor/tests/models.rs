@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use coprocess_channel::{receive, send};
-use enclavid_inference::protocol::{Data, Failure, MAX_MESSAGE_BYTES, Request, Tensor};
+use enclavid_inference::protocol::{Data, Failure, MAX_MESSAGE_BYTES, Request, Response, Tensor};
 use engine_compiler::Compiler;
 use engine_executor::{
     DEFAULT_ROUND_FUEL, EmbeddedRegistry, Executor, MediaStarter, MediaStore, ModelStarter,
@@ -149,7 +149,8 @@ impl ModelStarter for StandIns {
                     return;
                 }
                 while let Ok(Some(request)) = receive::<Request>(&mut socket, MAX_MESSAGE_BYTES) {
-                    let reply = answered(answer, index, request.inputs);
+                    let reply = answered(answer, index, request.inputs)
+                        .map_or_else(Response::Failed, Response::Outputs);
                     if send(&mut socket, &reply).is_err() {
                         return;
                     }
