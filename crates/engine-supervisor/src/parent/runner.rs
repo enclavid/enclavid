@@ -15,8 +15,8 @@ use std::time::Duration;
 use remoc::RemoteSend;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
-use crate::cgroup::{Cgroups, ChildGroup, ExitCause};
-use crate::spawn::{SpawnError, connect, inherited_len, spawn_child, spawn_placed_coprocess};
+use super::cgroup::{CHILD_PART, Cgroups, ChildGroup, ExitCause, GroupLimits, Left, WORK};
+use super::spawn::{SpawnError, connect, inherited_len, spawn_child, spawn_placed_coprocess};
 
 /// How long a runner waits on a child at the steps a request's own deadline does
 /// not cover, as the role's launch settings give them or as [`Default`] has
@@ -72,12 +72,33 @@ pub struct RunnerConfig {
     pub times: ChildTimes,
 }
 
-/// How many coprocesses one child may start. Which binary each runs, its
-/// caller names as it starts it ([`Coprocess::start`]).
+/// How many coprocesses one child may start, and of what kinds. Which binary
+/// each runs, its caller names as it starts it ([`Coprocess::start`]).
 #[derive(Clone, Debug)]
 pub struct CoprocessConfig {
     /// How many one child may start, together, whatever each runs.
     pub max: usize,
+    /// The kinds a coprocess is of, each with a part of the child's group of
+    /// its own; a coprocess names its kind by its index here as it starts.
+    pub kinds: Vec<CoprocessKind>,
+}
+
+/// One kind of coprocess a child may start: its part of the child's group,
+/// held to a limit of its own ([`GroupLimits::kinds`](crate::GroupLimits)),
+/// and how the kernel treats it where memory runs out.
+#[derive(Clone, Copy, Debug)]
+pub struct CoprocessKind {
+    /// Its part's name in the child's group: a plain word, unlike any other
+    /// kind's, and neither `child` nor `work`.
+    pub name: &'static str,
+    /// Whether the child can do without one of these. An expendable kind's
+    /// part lies beside the child's work, held to its own limit alone, and
+    /// the kernel takes one of its processes alone — at its part's limit, and
+    /// before any other process of any child where the children's total or
+    /// the guest runs short. A kind that is not expendable is part of the
+    /// work, held to the work's limit with the child, and goes, at its part's
+    /// limit, with every process of its kind.
+    pub expendable: bool,
 }
 
 /// A failure of the SUPERVISOR itself — distinct from the domain call's own error
@@ -100,6 +121,11 @@ pub enum SupervisorError {
     /// The child's own group could not be made.
     #[error("make the child's group: {0}")]
     Group(io::Error),
+    /// What the child maps of this process's memory leaves its part of its
+    /// group, or its work, nothing: its limits do not hold it. Nothing was
+    /// spawned.
+    #[error("the child maps more than its limits hold")]
+    TooLarge,
     /// The child could not be started, or did not hand over its client.
     #[error("start the child: {0}")]
     Spawn(SpawnError),
@@ -126,6 +152,9 @@ pub enum CoprocessError {
     /// The child has as many coprocesses as it may.
     #[error("the child has its {0} coprocesses already")]
     TooMany(usize),
+    /// The runner's children have no coprocess of this kind.
+    #[error("no coprocess kind {0}")]
+    NoSuchKind(usize),
     /// Its identity, or its place in the child's group, could not be made.
     #[error("place the coprocess: {0}")]
     Place(io::Error),
@@ -237,6 +266,9 @@ impl Drop for Child {
 struct CoprocessState {
     ended: bool,
     started: Vec<Started>,
+    /// What is left of the child's limits as its coprocesses start, for a
+    /// runner with [`Cgroups`].
+    left: Option<Left>,
 }
 
 /// A started coprocess: its process, and the caller's `keep` for it.
@@ -317,13 +349,14 @@ impl Held {
 /// [`ChildRunner::run`] hands it to the caller's closure with the child's
 /// client.
 ///
-/// A coprocess runs in the child's group, so it and the child are held to the
-/// child's max together and killed together, under an identity of its own —
-/// no other coprocess's, nor the child's — and syscall filters narrower than
-/// the child's. It talks to whoever holds the other end of the socket it is
-/// given — the caller hands that end to the child — so the two speak with no
-/// supervisor between them. The child's slot comes back only once all of them
-/// are gone.
+/// A coprocess runs in its kind's part of the child's group, so it is held to
+/// its part's limit — and, for a kind the child cannot do without, to the
+/// work's with the child — and killed with the group. It runs under an
+/// identity of its own — no other coprocess's, nor the child's — and syscall
+/// filters narrower than the child's. It talks to whoever holds the other end of the socket it
+/// is given — the caller hands that end to the child — so the two speak with
+/// no supervisor between them. The child's slot comes back only once all of
+/// them are gone.
 pub struct Coprocess {
     config: Option<CoprocessConfig>,
     cgroups: Option<Arc<Cgroups>>,
@@ -333,21 +366,29 @@ pub struct Coprocess {
 }
 
 impl Coprocess {
-    /// Start `exe` as a coprocess: `socket` on its fd 0, `inherit` from
-    /// [`INHERITED_FD`](crate::INHERITED_FD) up, read only up to the spawn, and
-    /// `keep` — what it maps through those descriptors — held until it is
-    /// gone.
+    /// Start `exe` as a coprocess of the runner's `kind`-th kind: `socket` on
+    /// its fd 0, `inherit` from [`INHERITED_FD`](crate::INHERITED_FD) up, read
+    /// only up to the spawn, and `keep` — what it maps through those
+    /// descriptors — held until it is gone. What it maps comes off its part's
+    /// limit and, for a kind of the work, off the work's, before it starts;
+    /// where the child's group already holds more than that leaves, the
+    /// kernel makes room as at any limit, before this returns.
     ///
     /// Refused once the child is being ended — one started then would outlive
     /// the kill that ends the child — and once the child has as many as it may.
     pub fn start<K: Send + 'static>(
         &self,
+        kind: usize,
         exe: &Path,
         socket: OwnedFd,
         inherit: &[BorrowedFd<'_>],
         keep: K,
     ) -> Result<(), CoprocessError> {
         let config = self.config.as_ref().ok_or(CoprocessError::NoCoprocesses)?;
+        let of = config
+            .kinds
+            .get(kind)
+            .ok_or(CoprocessError::NoSuchKind(kind))?;
         // Held across the spawn, so the child's kill finds a coprocess started
         // or refused, never between the two.
         let mut state = lock(&self.state);
@@ -357,10 +398,10 @@ impl Coprocess {
         if state.started.len() >= config.max {
             return Err(CoprocessError::TooMany(config.max));
         }
-        let placement = match (&self.cgroups, &self.group) {
-            (Some(cgroups), Some(group)) => Some(
+        let placement = match (&self.cgroups, &self.group, state.left.as_mut()) {
+            (Some(cgroups), Some(group), Some(left)) => Some(
                 cgroups
-                    .coprocess(group, inherited_len(inherit))
+                    .coprocess(group, kind, of, inherited_len(inherit), left)
                     .map_err(CoprocessError::Place)?,
             ),
             _ => None,
@@ -379,7 +420,23 @@ impl ChildRunner {
     /// A runner of `config`. `cgroups` is the kernel's hold on the children's
     /// memory, built for `config.max_children`, or `None` for a runner without
     /// one: with it, each child gets a group and an identity of its own.
+    ///
+    /// Panics on a coprocess kind whose name is no plain word, the child's
+    /// part's or the work's, or another kind's: each names a directory of the
+    /// child's group.
     pub fn new(config: RunnerConfig, cgroups: Option<Cgroups>) -> Self {
+        let kinds = config.coprocess.iter().flat_map(|c| c.kinds.iter());
+        for (k, kind) in kinds.clone().enumerate() {
+            assert!(
+                !kind.name.is_empty()
+                    && kind.name.bytes().all(|b| b.is_ascii_lowercase())
+                    && kind.name != CHILD_PART
+                    && kind.name != WORK
+                    && kinds.clone().take(k).all(|other| other.name != kind.name),
+                "a coprocess kind named {:?}",
+                kind.name
+            );
+        }
         Self {
             exe: config.exe,
             coprocess: config.coprocess,
@@ -452,12 +509,17 @@ impl ChildRunner {
     /// `inherit` goes to the child in order from
     /// [`INHERITED_FD`](crate::INHERITED_FD) up (see
     /// [`spawn_and_connect`](crate::spawn_and_connect)), read only up to the
-    /// spawn. `keep` is what must outlive the child — what it maps through
-    /// those descriptors — and is let go of once the child has exited and its
-    /// group is empty, which can be well after this call returns.
+    /// spawn. `limits` are what the child's group is held to, by a runner with
+    /// [`Cgroups`], less what the child maps through those descriptors; one
+    /// they leave nothing is refused before anything waits
+    /// ([`SupervisorError::TooLarge`]). `keep` is what must outlive the child —
+    /// what it maps through those descriptors — and is let go of once the
+    /// child has exited and its group is empty, which can be well after this
+    /// call returns.
     pub async fn run<Cli, F, Fut, T, K>(
         &self,
         inherit: &[BorrowedFd<'_>],
+        limits: &GroupLimits,
         keep: K,
         f: F,
     ) -> Result<(T, Exit), SupervisorError>
@@ -467,23 +529,36 @@ impl ChildRunner {
         Fut: Future<Output = T>,
         K: Send + 'static,
     {
+        let left = match &self.cgroups {
+            Some(cgroups) => Some(
+                cgroups
+                    .left(limits, inherited_len(inherit))
+                    .ok_or(SupervisorError::TooLarge)?,
+            ),
+            None => None,
+        };
         let slot = self.admit().await?;
         // A group and an identity made for this child alone, when the runner
         // holds its children's memory. On a blocking thread, as is the group's
         // removal: making and removing a group wait on one kernel lock over
         // every group in the guest.
-        let (group, placement) = match &self.cgroups {
-            Some(cgroups) => {
-                let (cgroups, inherited) = (Arc::clone(cgroups), inherited_len(inherit));
+        let (group, placement) = match (&self.cgroups, &left) {
+            (Some(cgroups), Some(left)) => {
+                let (cgroups, left) = (Arc::clone(cgroups), left.clone());
+                let kinds: Vec<CoprocessKind> = self
+                    .coprocess
+                    .iter()
+                    .flat_map(|config| config.kinds.iter().copied())
+                    .collect();
                 let (group, placement) =
-                    tokio::task::spawn_blocking(move || cgroups.new_child(inherited))
+                    tokio::task::spawn_blocking(move || cgroups.new_child(&left, &kinds))
                         .await
                         .map_err(io::Error::other)
                         .and_then(std::convert::identity)
                         .map_err(SupervisorError::Group)?;
                 (Some(group), Some(placement))
             }
-            None => (None, None),
+            _ => (None, None),
         };
         // Always filtered. The filter is a confidentiality control, and the host
         // provisions this process's settings, so it is not one of them: turning
@@ -499,7 +574,10 @@ impl ChildRunner {
             }
         };
         let (cause, settled) = oneshot::channel();
-        let state = Arc::new(Mutex::new(CoprocessState::default()));
+        let state = Arc::new(Mutex::new(CoprocessState {
+            left,
+            ..CoprocessState::default()
+        }));
         let coprocess = Coprocess {
             config: self.coprocess.clone(),
             cgroups: self.cgroups.clone(),

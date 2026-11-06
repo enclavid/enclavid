@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use engine_types::picture::PictureBounds;
 use wasmtime::component::{ResourceTable, Val};
 
 use crate::embedded::EmbeddedRegistry;
@@ -18,9 +19,9 @@ use crate::round::Round;
 /// runner fires the listener once the round is over, not from a host-fn body.
 ///
 /// No memory limiter either. What the round may hold — its linear
-/// memories and everything else in its process — is the kernel's to
-/// hold it to (the round's max, `admission::DEFAULT_ROUND_MAX_BYTES`); fuel
-/// is set on the Store directly.
+/// memories and everything else in its process — is the kernel's to hold it
+/// to (the composition's max, `admission::DEFAULT_COMPOSITION_MAX_BYTES`);
+/// fuel is set on the Store directly.
 pub struct HostState {
     /// The props the consumer gave the session, as the type the policy
     /// declares for them, which `enclavid-ext:policy/props.get`
@@ -57,6 +58,9 @@ pub struct HostState {
     /// Where the round's captures are decoded — what `photo.image` and
     /// `video.frames` start, once a capture.
     pub media: Arc<dyn MediaStarter>,
+    /// What the pictures of the round's captures, and the regions read of
+    /// them, are held to.
+    pub(crate) picture_bounds: PictureBounds,
     /// The captures the round decodes, each as its open found it, and the
     /// socket to the process decoding it.
     pub(crate) decodes: Decodes,
@@ -83,6 +87,9 @@ pub struct RunInputs {
     /// [`DEFAULT_ROUND_FUEL`](crate::DEFAULT_ROUND_FUEL) unless the host says
     /// otherwise.
     pub fuel: u64,
+    /// What the pictures of the round's captures are held to:
+    /// [`PictureBounds::DEFAULT`] unless the host says otherwise.
+    pub picture_bounds: PictureBounds,
 }
 
 impl HostState {
@@ -92,6 +99,7 @@ impl HostState {
         media_store: Arc<dyn MediaStore>,
         models: Arc<dyn ModelStarter>,
         media: Arc<dyn MediaStarter>,
+        picture_bounds: PictureBounds,
         round: Round,
     ) -> Self {
         Self {
@@ -102,6 +110,7 @@ impl HostState {
             models,
             started: Started::default(),
             media,
+            picture_bounds,
             decodes: Decodes::default(),
             round,
         }

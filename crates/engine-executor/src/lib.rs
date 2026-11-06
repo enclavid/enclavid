@@ -70,7 +70,8 @@ pub use embedded::{
     EmbeddedRegistryBuilder, Localized, LocalizedStore, RefKind, RefStore, Translation,
 };
 pub use engine_types::composition::ModelImport;
-pub use image::MediaStarter;
+pub use engine_types::picture::PictureBounds;
+pub use image::{DecoderFailed, MediaStarter};
 pub use listener::{SessionChange, SessionListener};
 pub use media_store::MediaStore;
 pub use models::ModelStarter;

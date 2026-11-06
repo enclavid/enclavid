@@ -1,8 +1,9 @@
 //! What a round and the coprocess decoding one of its captures say to each
 //! other over their channel (`coprocess-channel`). The round opens the capture
-//! once — a photo or a video — and then asks for regions of its pictures: the
-//! photo's, or a frame's of the video, by its index. The coprocess decodes what
-//! a region needs when it is asked for, and nothing before.
+//! once — a photo or a video, and the bounds its pictures are held to — and
+//! then asks for regions of its pictures: the photo's, or a frame's of the
+//! video, by its index. The coprocess decodes what a region needs when it is
+//! asked for, and nothing before.
 //!
 //! What the coprocess answers is taken as the applicant's bytes are: held to
 //! what a decode can give before the round makes anything of it — an open's to
@@ -11,7 +12,8 @@
 //! A failure ends the coprocess, but for a picture that does not decode: that
 //! is answered, and the next request read.
 
-use engine_types::limits::{MAX_PICTURE_LONG_SIDE, MAX_PICTURE_SHORT_SIDE, MAX_VIDEO_FRAMES};
+use engine_types::limits::MAX_VIDEO_FRAMES;
+pub use engine_types::picture::PictureBounds;
 use serde::{Deserialize, Serialize};
 pub use serde_bytes::{ByteBuf, Bytes};
 
@@ -26,12 +28,17 @@ pub const MAX_OPEN_BYTES: usize = 16 << 20;
 /// bound, and room for the rest of it.
 pub const MAX_REQUEST_BYTES: usize = MAX_OPEN_BYTES + 1024;
 
-/// The most pixels one region gives: a picture at its bounds.
-pub const MAX_REGION_PIXELS: u64 = MAX_PICTURE_LONG_SIDE as u64 * MAX_PICTURE_SHORT_SIDE as u64;
+/// The room a response has beside a region's pixels: more than a video's
+/// frames take, whatever the bounds.
+const RESPONSE_ROOM: usize = 64 << 10;
 
-/// The most bytes a response is, as the channel carries it: a region at its
-/// bound, and room for the rest of it — more than a video's frames take.
-pub const MAX_RESPONSE_BYTES: usize = MAX_REGION_PIXELS as usize * 3 + 1024;
+/// The most bytes a response is, as the channel carries it, where pictures are
+/// held to `bounds`: a region at them, and room for the rest of it.
+pub fn max_response_bytes(bounds: PictureBounds) -> usize {
+    usize::try_from(bounds.pixels().saturating_mul(3))
+        .unwrap_or(usize::MAX)
+        .saturating_add(RESPONSE_ROOM)
+}
 
 /// What a capture is, as the round opens it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -72,10 +79,20 @@ pub enum ResizeMode {
 
 impl Region {
     /// The bytes of RGB8 the region gives — at least a pixel each way — or
-    /// `None` past [`MAX_REGION_PIXELS`].
-    pub fn rgb_len(&self) -> Option<usize> {
-        let pixels = u64::from(self.out_w.max(1)) * u64::from(self.out_h.max(1));
-        (pixels <= MAX_REGION_PIXELS).then(|| pixels as usize * 3)
+    /// `None` where it gives a picture past `bounds`: either side, not only
+    /// the pixels together, so no shape asks more of the resampling than a
+    /// picture at the bounds does.
+    pub fn rgb_len(&self, bounds: PictureBounds) -> Option<usize> {
+        let out = Size {
+            width: self.out_w.max(1),
+            height: self.out_h.max(1),
+        };
+        if !out.within(bounds) {
+            return None;
+        }
+        usize::try_from(u64::from(out.width) * u64::from(out.height))
+            .ok()?
+            .checked_mul(3)
     }
 
     /// The region with its crop held inside a picture of `width` × `height`:
@@ -101,7 +118,12 @@ impl Region {
 pub enum Request<B = ByteBuf> {
     /// The capture to decode, of its kind: the first request, and the only
     /// one of its kind.
-    Open { kind: Kind, bytes: B },
+    Open {
+        kind: Kind,
+        bytes: B,
+        /// What its pictures are held to.
+        bounds: PictureBounds,
+    },
     /// A region of a picture, as RGB8.
     Region {
         /// Which: a video's frame by its index, from 0; 0 for a photo.
@@ -130,16 +152,16 @@ pub struct Size {
 }
 
 impl Size {
-    /// Whether a decode gives a picture of this size: a pixel at least, its
-    /// longer side no more than [`MAX_PICTURE_LONG_SIDE`] and its shorter no
-    /// more than [`MAX_PICTURE_SHORT_SIDE`], whichever way it is turned.
-    pub fn within_bounds(&self) -> bool {
+    /// Whether a decode held to `bounds` gives a picture of this size: a pixel
+    /// at least, its longer side no more than theirs and its shorter no more
+    /// than theirs, whichever way it is turned.
+    pub fn within(&self, bounds: PictureBounds) -> bool {
         let (long, short) = if self.width >= self.height {
             (self.width, self.height)
         } else {
             (self.height, self.width)
         };
-        short >= 1 && long <= MAX_PICTURE_LONG_SIDE && short <= MAX_PICTURE_SHORT_SIDE
+        short >= 1 && long <= bounds.long && short <= bounds.short
     }
 }
 
@@ -163,13 +185,14 @@ pub enum Opened {
 }
 
 impl Opened {
-    /// Whether a decode can tell this of a capture of `kind`: of that kind, a
-    /// size within the bounds, and no more frames than a decode reads.
-    pub fn fits(&self, kind: Kind) -> bool {
+    /// Whether a decode held to `bounds` can tell this of a capture of `kind`:
+    /// of that kind, a size within them, and no more frames than a decode
+    /// reads.
+    pub fn fits(&self, kind: Kind, bounds: PictureBounds) -> bool {
         match (self, kind) {
-            (Opened::Photo(size), Kind::Photo) => size.within_bounds(),
+            (Opened::Photo(size), Kind::Photo) => size.within(bounds),
             (Opened::Video { size, frames }, Kind::Video) => {
-                size.within_bounds() && frames.len() <= MAX_VIDEO_FRAMES as usize
+                size.within(bounds) && frames.len() <= MAX_VIDEO_FRAMES as usize
             }
             _ => false,
         }

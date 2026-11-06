@@ -52,9 +52,9 @@ use remoc::codec::Ciborium;
 
 use engine_executor::limits::MAX_MEDIA_DECODES;
 use engine_executor::{
-    Component, EmbeddedRegistry, Event, Executor, MediaStarter, MediaStore, ModelStarter,
-    PrimedComposition, RunError, RunInputs, RunResult, RunStatus, SessionChange, SessionListener,
-    SessionState,
+    Component, DecoderFailed, EmbeddedRegistry, Event, Executor, MediaStarter, MediaStore,
+    ModelStarter, PictureBounds, PrimedComposition, RunError, RunInputs, RunResult, RunStatus,
+    SessionChange, SessionListener, SessionState,
 };
 use engine_rpc::{
     BundleRef, Committed, ExecError, MediaHash, RemoteChild, RemoteChildCallbacks,
@@ -126,6 +126,7 @@ impl RemoteChild for Child {
         event: Event,
         props: engine_rpc::ByteBuf,
         fuel: u64,
+        picture_bounds: PictureBounds,
         callbacks: RemoteChildCallbacksClient<Ciborium>,
     ) -> Result<engine_rpc::RunStatus, ExecError> {
         let primed = self.primed.get().ok_or_else(|| {
@@ -164,6 +165,7 @@ impl RemoteChild for Child {
             models,
             media,
             fuel,
+            picture_bounds,
         };
 
         let (status, _next_state) = self
@@ -219,11 +221,13 @@ impl std::error::Error for CallbackFailed {}
 /// on the round that succeeds, and a policy can trap deliberately and retry.
 ///
 /// Almost everything reaching here IS the policy: a trap, out of fuel, a host
-/// function refusing a key no catalog declared. The exception is a failed
+/// function refusing a key no catalog declared. The exceptions are a failed
 /// callback to api — the seal-key holder's own leg went away, and saying "the
-/// policy failed" about that would be attributing our outage to the consumer.
-/// It is recovered as a VALUE by `downcast`, never by reading a rendering, because
-/// by the time it arrives here it has unwound as an ordinary `wasmtime::Error`.
+/// policy failed" about that would be attributing our outage to the consumer —
+/// and a process decoding a capture that answered what no decoder answers
+/// ([`DecoderFailed`]): the platform's own process failing. Each is recovered as
+/// a VALUE by `downcast`, never by reading a rendering, because by the time it
+/// arrives here it has unwound as an ordinary `wasmtime::Error`.
 ///
 /// A round past its memory never gets here: the kernel kills the process at
 /// its max, and the supervisor reads from the kernel's record whether the
@@ -236,9 +240,10 @@ impl std::error::Error for CallbackFailed {}
 /// outward tier is a channel to the host, who may be the policy's author too.
 fn round_failure(e: RunError) -> ExecError {
     debug!("round failed: {e:#}");
-    if e.chain()
-        .any(|cause| cause.downcast_ref::<CallbackFailed>().is_some())
-    {
+    if e.chain().any(|cause| {
+        cause.downcast_ref::<CallbackFailed>().is_some()
+            || cause.downcast_ref::<DecoderFailed>().is_some()
+    }) {
         return ExecError::Unknown;
     }
     ExecError::Policy
@@ -510,6 +515,17 @@ mod round_failure_tests {
     fn a_failed_callback_is_not_attributed_to_the_policy() {
         let unwound = RunError::new(CallbackFailed)
             .context("error while executing at wasm backtrace: 0x1234");
+        assert_eq!(round_failure(unwound), ExecError::Unknown);
+    }
+
+    /// Nor is a process decoding a capture that answered what no decoder
+    /// answers: the platform's own process failed the round.
+    #[test]
+    fn a_failed_decoder_is_not_attributed_to_the_policy() {
+        let unwound = RunError::new(DecoderFailed {
+            why: "a response no open of the capture has".into(),
+        })
+        .context("error while executing at wasm backtrace: 0x1234");
         assert_eq!(round_failure(unwound), ExecError::Unknown);
     }
 }

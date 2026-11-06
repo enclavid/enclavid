@@ -2,7 +2,7 @@
 //! decoded when a region first asks for them — at its own size, or at half of
 //! it where its own is past the bounds a decoded picture is held to.
 
-use enclavid_media::protocol::{Failure, Region, ResizeMode, Size};
+use enclavid_media::protocol::{Failure, PictureBounds, Region, ResizeMode, Size};
 use zune_jpeg::JpegDecoder;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
@@ -16,15 +16,17 @@ pub struct Photo {
     own: Size,
     /// The size it decodes at: its own, or half of it.
     pub size: Size,
+    /// What its picture and the regions of it are held to.
+    bounds: PictureBounds,
     /// Its pixels at `size`, once decoded; why it does not decode, once that
     /// was found.
     pixels: Option<Result<Vec<u8>, Failure>>,
 }
 
 impl Photo {
-    /// Read `jpeg`'s header for its size: within the bounds, or within them
-    /// at half of it.
-    pub fn open(jpeg: Vec<u8>) -> Result<Self, Failure> {
+    /// Read `jpeg`'s header for its size: within `bounds`, or within them at
+    /// half of it.
+    pub fn open(jpeg: Vec<u8>, bounds: PictureBounds) -> Result<Self, Failure> {
         let mut decoder = JpegDecoder::new_with_options(jpeg.as_slice(), options());
         decoder.decode_headers().map_err(|_| Failure::NotMedia)?;
         let (width, height) = decoder.dimensions().ok_or(Failure::NotMedia)?;
@@ -36,9 +38,9 @@ impl Photo {
             width: own.width.div_ceil(2),
             height: own.height.div_ceil(2),
         };
-        let size = if own.within_bounds() {
+        let size = if own.within(bounds) {
             own
-        } else if half.within_bounds() {
+        } else if half.within(bounds) {
             half
         } else {
             return Err(Failure::PastBounds);
@@ -47,6 +49,7 @@ impl Photo {
             jpeg,
             own,
             size,
+            bounds,
             pixels: None,
         })
     }
@@ -57,7 +60,7 @@ impl Photo {
         if frame != 0 {
             return Err(Failure::OutOfTurn);
         }
-        if region.rgb_len().is_none() {
+        if region.rgb_len(self.bounds).is_none() {
             return Err(Failure::PastBounds);
         }
         let Photo {
@@ -65,6 +68,7 @@ impl Photo {
             own,
             size,
             pixels,
+            ..
         } = self;
         let pixels = pixels
             .get_or_insert_with(|| decode(jpeg, *own, *size))

@@ -615,8 +615,9 @@ pub trait RemoteChild {
 
     /// Drive one reducer round against the primed composition.
     /// `session_state`/`event`/`props` are the round's already-decrypted inputs
-    /// (the seal key never reaches this process), and `fuel` is what the round
-    /// may burn — the supervisor's setting, the same for every round it runs.
+    /// (the seal key never reaches this process), `fuel` is what the round may
+    /// burn, and `picture_bounds` what its captures' pictures are held to —
+    /// the supervisor's settings, the same for every round it runs.
     /// `callbacks` points at the
     /// SUPERVISOR's relay, which forwards `media_load` / `session_change` on to
     /// api — so this keyless process rehydrates blobs + persists state without
@@ -632,6 +633,7 @@ pub trait RemoteChild {
         event: Event,
         props: ByteBuf,
         fuel: u64,
+        picture_bounds: engine_types::picture::PictureBounds,
         callbacks: RemoteChildCallbacksClient<remoc::codec::Ciborium>,
     ) -> Result<RunStatus, ExecError>;
 

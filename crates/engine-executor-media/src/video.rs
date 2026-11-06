@@ -7,7 +7,7 @@
 use std::io::Cursor;
 use std::ops::Range;
 
-use enclavid_media::protocol::{Failure, FrameInfo, Region, Size};
+use enclavid_media::protocol::{Failure, FrameInfo, PictureBounds, Region, Size};
 use engine_types::limits::MAX_VIDEO_FRAMES;
 use webm_iterable::WebmIterator;
 use webm_iterable::matroska_spec::{Block, Master, MatroskaSpec, SimpleBlock};
@@ -61,6 +61,8 @@ struct Listed {
 pub struct Video {
     /// The size of its frames.
     pub size: Size,
+    /// What the regions of its frames are held to.
+    bounds: PictureBounds,
     listed: Vec<Listed>,
     /// The frames of the track's blocks, one after another.
     data: Vec<u8>,
@@ -80,14 +82,15 @@ pub struct Video {
 }
 
 impl Video {
-    /// Read `webm` once: its first VP8 track, and the frames of that track's
-    /// blocks, up to the first the reading cannot take.
-    pub fn open(webm: Vec<u8>) -> Result<Self, Failure> {
+    /// Read `webm` once: its first VP8 track — its frames within `bounds` —
+    /// and the frames of that track's blocks, up to the first the reading
+    /// cannot take.
+    pub fn open(webm: Vec<u8>, bounds: PictureBounds) -> Result<Self, Failure> {
         let mut tags = WebmIterator::new(Cursor::new(webm.as_slice()), &[]);
         // A tag's bytes are held before they are read: never more of them
         // than the file has.
         tags.set_max_allowable_tag_size(Some(webm.len()));
-        let mut reading = Reading::new();
+        let mut reading = Reading::new(bounds);
         for tag in tags {
             let Ok(tag) = tag else {
                 break;
@@ -99,6 +102,7 @@ impl Video {
         let (_, size) = reading.track.ok_or(Failure::NotMedia)?;
         Ok(Self {
             size,
+            bounds,
             listed: reading.listed,
             data: reading.data,
             blocks: reading.blocks,
@@ -119,7 +123,7 @@ impl Video {
     /// decoder does not hold it.
     pub fn region(&mut self, frame: u32, region: &Region) -> Result<Vec<u8>, Failure> {
         let listed = self.listed.get(frame as usize).ok_or(Failure::OutOfTurn)?;
-        if region.rgb_len().is_none() {
+        if region.rgb_len(self.bounds).is_none() {
             return Err(Failure::PastBounds);
         }
         if self.holding != Some(frame) {
@@ -286,6 +290,8 @@ struct Entry {
 
 /// What reading a WebM has found so far.
 struct Reading {
+    /// What the video's frames are held to.
+    bounds: PictureBounds,
     /// The nanoseconds a tick of the container's clock is.
     tick_ns: u64,
     /// The track entry being read.
@@ -306,8 +312,9 @@ struct Reading {
 }
 
 impl Reading {
-    fn new() -> Self {
+    fn new(bounds: PictureBounds) -> Self {
         Self {
+            bounds,
             tick_ns: DEFAULT_TICK_NS,
             entry: Entry::default(),
             track: None,
@@ -377,7 +384,7 @@ impl Reading {
             width: u32::try_from(entry.width).map_err(|_| Failure::PastBounds)?,
             height: u32::try_from(entry.height).map_err(|_| Failure::PastBounds)?,
         };
-        if !size.within_bounds() {
+        if !size.within(self.bounds) {
             return Err(Failure::PastBounds);
         }
         self.track = Some((entry.number, size));

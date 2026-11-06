@@ -72,10 +72,11 @@ pub fn rgb_of(planes: &Planes) -> Option<Vec<u8>> {
 
 /// `region` of `picture` as RGB8, row by row: its crop held inside the
 /// picture, brought to its output size, a pixel at least each way. `None` for
-/// a region past [`MAX_REGION_PIXELS`](enclavid_media::protocol::MAX_REGION_PIXELS),
-/// or pixels fewer than its size says.
+/// pixels fewer than the picture's size says. What output a caller may ask
+/// for, the caller holds to the bounds before.
 pub fn rgb_region(picture: &Rgb, region: &Region) -> Option<Vec<u8>> {
-    let length = region.rgb_len()?;
+    let pixels = u64::from(region.out_w.max(1)) * u64::from(region.out_h.max(1));
+    let length = usize::try_from(pixels).ok()?.checked_mul(3)?;
     let source = ImageRef::new(
         picture.width,
         picture.height,

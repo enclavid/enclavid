@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use engine_compiler::Compiler;
-use engine_executor::{DEFAULT_ROUND_FUEL, Event, SessionState};
+use engine_executor::{DEFAULT_ROUND_FUEL, Event, PictureBounds, SessionState};
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 
@@ -186,6 +186,7 @@ async fn spawned_child_primes_runs_relays_then_exits() {
             Event::Start,
             no_props(),
             DEFAULT_ROUND_FUEL,
+            PictureBounds::DEFAULT,
             cb_client,
         )
         .await
@@ -314,6 +315,7 @@ async fn spawned_child_runs_a_round_under_the_production_filter() {
             Event::Start,
             no_props(),
             DEFAULT_ROUND_FUEL,
+            PictureBounds::DEFAULT,
             cb_client,
         )
         .await
@@ -554,6 +556,7 @@ async fn measure_per_round_cost() {
                 Event::Start,
                 no_props(),
                 DEFAULT_ROUND_FUEL,
+                PictureBounds::DEFAULT,
                 cb_client,
             )
             .await

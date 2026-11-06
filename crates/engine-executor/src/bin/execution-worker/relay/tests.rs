@@ -15,7 +15,7 @@ use std::time::Duration;
 use enclavid_boundary::{Asserted, AuthN, Exposed, Untrusted};
 use enclavid_boundary_macros::boundary;
 use enclavid_inference::fixture;
-use engine_executor::admission::DEFAULT_BUNDLE_CACHE_ENTRIES;
+use engine_executor::admission::{DEFAULT_BUNDLE_CACHE_ENTRIES, DEFAULT_COMPOSITION_MAX_BYTES};
 use engine_executor::{DEFAULT_ROUND_FUEL, Decision, Event, SessionState, compat_token};
 use engine_rpc::{
     BundleSource, BundleStream, CallbackError, CatalogEntry, Committed, CompatToken,
@@ -30,7 +30,7 @@ use tokio::sync::Semaphore;
 
 use crate::boundary::AnyCaller;
 use crate::bundles::Bundles;
-use crate::service::{Caller, Supervisor};
+use crate::service::{COPROCESS_KINDS, Caller, Supervisor, group_limits};
 
 /// How long anything here may wait: room, a stream, a round.
 const WAIT: Duration = Duration::from_secs(60);
@@ -130,11 +130,21 @@ fn supervisor(child: &Path, inference: &Path) -> Arc<Supervisor> {
         bundle_stream: engine_rpc::DEFAULT_BUNDLE_STREAM_DEADLINE,
         bundle_stream_idle: engine_rpc::DEFAULT_BUNDLE_STREAM_IDLE,
         round_fuel: DEFAULT_ROUND_FUEL,
+        picture_bounds: engine_executor::PictureBounds::DEFAULT,
         callback_request_buffer: engine_rpc::DEFAULT_CALLBACK_REQUEST_BUFFER,
+        limits: group_limits(
+            DEFAULT_COMPOSITION_MAX_BYTES,
+            DEFAULT_COMPOSITION_MAX_BYTES,
+            DEFAULT_COMPOSITION_MAX_BYTES,
+            DEFAULT_COMPOSITION_MAX_BYTES,
+        ),
         runner: ChildRunner::new(
             RunnerConfig {
                 exe: child.to_path_buf(),
-                coprocess: Some(CoprocessConfig { max: MAX_MODELS }),
+                coprocess: Some(CoprocessConfig {
+                    max: MAX_MODELS,
+                    kinds: COPROCESS_KINDS.to_vec(),
+                }),
                 max_children: 1,
                 deadline: WAIT,
                 admission_wait: Some(WAIT),

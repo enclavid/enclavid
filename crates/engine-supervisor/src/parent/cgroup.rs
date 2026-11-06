@@ -1,13 +1,18 @@
 //! What the children take in memory, held by the kernel rather than reserved.
 //!
 //! A child is given memory as it touches it. The kernel's memory controller
-//! holds every child of a runner together to one total, and each alone to a max:
-//! a control group `children/` with the total as its limit, built once at boot
-//! ([`Cgroups::create`]), and inside it a group of the child's own with the max
-//! as its limit. A child past its max, or the one the kernel picks when the
-//! total is reached, is killed with everything in its group — the kernel does
-//! not refuse memory at a limit, it kills. What it records about that kill is
-//! what [`ExitCause`] reads.
+//! holds every child of a runner together to one total: a control group
+//! `children/` with the total as its limit, built once at boot
+//! ([`Cgroups::create`]). Inside it each child has a group of its own, held to
+//! the limits the child starts with ([`GroupLimits`]): its work — the child's
+//! own process and the coprocesses of every kind it cannot do without
+//! ([`CoprocessKind`]) — to one limit, and inside the work each of those to a
+//! part of its own; beside the work, each expendable kind to a part of its
+//! own. What a process maps of the supervisor's memory counts against its part
+//! and the work as what it holds does. The kernel does not refuse memory at a
+//! limit, it kills, and whom it picks is set by each process's score
+//! ([`oom_score_adj`]). What it records about the kills is what
+//! [`ExitCause`] reads.
 //!
 //! Nothing a child had is handed to the next. Each child gets a group made for
 //! it ([`ChildGroup`]) and removed once it is empty, and an identity no other
@@ -21,6 +26,8 @@ use std::io;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use super::runner::CoprocessKind;
 
 /// A child group's `memory.peak`, where a build keeps one.
 #[cfg(feature = "debug")]
@@ -77,7 +84,7 @@ pub struct ChildLimits {
     /// boot and never lowered — the kernel meets a lowered limit by reclaiming
     /// and then killing until usage fits.
     pub total: u64,
-    /// One child alone: its own group's `memory.max`.
+    /// The most any of a child's [`GroupLimits`] is set to.
     pub max: u64,
     /// What must be free before a child is started, in the children's total and
     /// in the guest's available memory alike. A gate read before each spawn, not
@@ -96,19 +103,51 @@ pub struct ChildLimits {
     pub tasks: u64,
 }
 
+/// What one child's group is held to, set as the child starts: budgets, each
+/// held to the runner's [`ChildLimits::max`]. What a process maps of the
+/// supervisor's memory — the descriptors it inherits — comes off its part's
+/// and, for a process of the work, off the work's, from its start until the
+/// group goes: its pages are charged where the supervisor wrote them, so this
+/// is what counts them against the group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupLimits {
+    /// The child's work: its own process and every coprocess of a kind it
+    /// cannot do without, together.
+    pub max: u64,
+    /// The child's own process.
+    pub child: u64,
+    /// Each kind of coprocess, in the order of the runner's
+    /// [`CoprocessKind`]s; a kind given none is held to the work's alone, or
+    /// to nothing of its own if it is expendable.
+    pub kinds: Vec<u64>,
+}
+
 /// Why a child's life ended, as far as the kernel's record of it can say. Read
 /// once the child's group is empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitCause {
-    /// Killed at its own max, while the children's total was never reached
-    /// during its life. The kernel's record reads the same for one other end: a
-    /// child that reached its max without being killed there, and was later
-    /// killed because the whole guest ran short.
+    /// Killed at a limit of its own — its part's, or its work's — while the
+    /// children's total was never reached during its life. The kernel's
+    /// record reads the same for one other end: a child whose work reached a
+    /// limit unkilled, and that was later killed because the whole guest ran
+    /// short.
     OutgrewItsMax,
     /// Anything else — it exited, its runner killed it, it was the one the
     /// kernel picked when the total or the guest ran short, or a kill whose
     /// cause the record does not settle.
     Unattributed,
+}
+
+/// What is left of a child's limits as its processes start, each less what
+/// the processes started so far map of the supervisor's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Left {
+    /// The work's.
+    work: u64,
+    /// The child's part's.
+    child: u64,
+    /// Each kind's part's, in the runner's order.
+    kinds: Vec<u64>,
 }
 
 /// The children's group, built at boot, and the count every child's group and
@@ -122,9 +161,14 @@ pub struct Cgroups {
 }
 
 /// One child's own group, made for it before its spawn and removed as it
-/// drops.
+/// drops: the group and its work, with no process of their own; inside the
+/// work the child's part, [`CHILD_PART`], and a part for each kind of
+/// coprocess it cannot do without; beside the work a part for each
+/// expendable kind. Each kind's part is named after it.
 pub(crate) struct ChildGroup {
     path: PathBuf,
+    /// The kinds' parts, in the runner's order.
+    kinds: Vec<PathBuf>,
     /// The children's group's `memory.events.local`, where a kill at the total
     /// is counted.
     total_events: PathBuf,
@@ -132,10 +176,26 @@ pub(crate) struct ChildGroup {
     /// made: [`ExitCause`] asks whether that moved during its life.
     total_oom_before: u64,
     /// What the group's drop asks the kernel to reclaim before the group goes:
-    /// the child's max, which is the most it could have left charged.
-    max: u64,
+    /// the most it could have left charged.
+    reclaim: u64,
     #[cfg_attr(not(feature = "debug"), allow(dead_code))]
     peak: Peak,
+}
+
+/// The child's own part of its work.
+pub(crate) const CHILD_PART: &str = "child";
+
+/// The child's work in its group.
+pub(crate) const WORK: &str = "work";
+
+/// Where `kind`'s part lies in the group at `group`: in the work, unless the
+/// kind is expendable.
+fn part(group: &Path, kind: &CoprocessKind) -> PathBuf {
+    if kind.expendable {
+        group.join(kind.name)
+    } else {
+        group.join(WORK).join(kind.name)
+    }
 }
 
 /// What a child is given before its exec, besides its fds: its group, its
@@ -143,9 +203,10 @@ pub(crate) struct ChildGroup {
 /// the post-fork code allocates nothing.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct Placement {
-    /// The child's group's `cgroup.procs`, written `0` — the writer itself —
-    /// first. `None` places the identity alone. Opened for this spawn: it closes
-    /// at the child's exec and with the spawn in the parent.
+    /// The `cgroup.procs` of the part of the child's group it runs in, written
+    /// `0` — the writer itself — first. `None` places the identity alone.
+    /// Opened for this spawn: it closes at the child's exec and with the spawn
+    /// in the parent.
     pub(crate) procs: Option<OwnedFd>,
     /// The decimal text written to `/proc/self/oom_score_adj`.
     pub(crate) oom_score_adj: Vec<u8>,
@@ -180,7 +241,10 @@ impl Cgroups {
     /// kernel log is closed to every reader without CAP_SYSLOG and `/dev/kmsg`
     /// to every reader at all, `/proc` shows no process another's entries
     /// unless it may trace it, and the limits hold one child at its max with at
-    /// least one task. Then it builds the group.
+    /// least one task. Then it builds the group, and scores this process
+    /// `-1000`, the one score the kernel never kills at: every process of a
+    /// child's group is scored above it, so a kill for the whole guest takes
+    /// one of theirs before the process they all depend on.
     /// `children/` must not exist yet: this process runs once per boot, so a
     /// group already there was built by something else, with limits this
     /// process did not set.
@@ -329,6 +393,13 @@ impl Cgroups {
             "setting the children's total",
             write(&group.join("memory.max"), &limits.total.to_string()),
         )?;
+        // Last for every kill: each child's process and coprocess is scored
+        // above this one. A child inherits the score at its fork and writes
+        // its own before its exec, or does not exec.
+        at(
+            "scoring this process last for the kernel's kills",
+            write(Path::new("/proc/self/oom_score_adj"), "-1000"),
+        )?;
 
         Ok(Self {
             limits,
@@ -355,14 +426,33 @@ impl Cgroups {
         ))
     }
 
-    /// Make the next child's group, at the child's max, and what the child is
-    /// given before its exec to enter it under its own identity. `inherited` is
-    /// the length of what it maps from the supervisor's memory; see
-    /// [`oom_score_adj`].
+    /// What is left of `limits`, each held to the runner's max, once the child
+    /// maps its `inherited` bytes of the supervisor's: off its part and off
+    /// the work. `None` where that leaves either nothing — the child would map
+    /// more than its limits hold.
+    pub(crate) fn left(&self, limits: &GroupLimits, inherited: u64) -> Option<Left> {
+        let held = |limit: u64| limit.min(self.limits.max);
+        let after = |limit: u64| held(limit).checked_sub(inherited).filter(|&left| left > 0);
+        Some(Left {
+            work: after(limits.max)?,
+            child: after(limits.child)?,
+            kinds: limits.kinds.iter().map(|&limit| held(limit)).collect(),
+        })
+    }
+
+    /// Make the next child's group at `left` — the group, its work with the
+    /// child's part and a part for each of `kinds` it cannot do without, and
+    /// beside the work a part for each expendable kind — and what the child is
+    /// given before its exec to enter its part under its own identity and
+    /// score ([`oom_score_adj`]).
     ///
     /// Fails once this boot has run through every identity it may give, rather
     /// than give one twice.
-    pub(crate) fn new_child(&self, inherited: u64) -> io::Result<(ChildGroup, Placement)> {
+    pub(crate) fn new_child(
+        &self,
+        left: &Left,
+        kinds: &[CoprocessKind],
+    ) -> io::Result<(ChildGroup, Placement)> {
         let n = self.made.fetch_add(1, Ordering::Relaxed);
         let uid = child_uid(n)
             .ok_or_else(|| io::Error::other("every child identity of this boot is used"))?;
@@ -370,15 +460,38 @@ impl Cgroups {
         let total_oom_before = read_counters(&total_events)?.oom;
 
         let path = self.group.join(format!("c{n}"));
-        std::fs::create_dir(&path)?;
+        let work = path.join(WORK);
+        let child = work.join(CHILD_PART);
+        let parts: Vec<PathBuf> = kinds.iter().map(|kind| part(&path, kind)).collect();
         let made = (|| -> io::Result<(OwnedFd, Peak)> {
-            write(&path.join("memory.max"), &self.limits.max.to_string())?;
-            // A kill in this group takes everything in it, never one task of
-            // several.
-            write(&path.join("memory.oom.group"), "1")?;
+            // Neither the group nor the work holds a process itself: the
+            // kernel allows controllers below a group only when it does not.
+            // Their `memory.oom.group` stays 0, so a kill at the work's limit
+            // takes one part's processes, not the work's every one.
+            std::fs::create_dir(&path)?;
+            write(&path.join("cgroup.subtree_control"), "+memory")?;
+            std::fs::create_dir(&work)?;
+            write(&work.join("memory.max"), &left.work.to_string())?;
+            write(&work.join("cgroup.subtree_control"), "+memory")?;
+            std::fs::create_dir(&child)?;
+            write(&child.join("memory.max"), &left.child.to_string())?;
+            // A kill in the child's part takes everything in it.
+            write(&child.join("memory.oom.group"), "1")?;
+            for (k, (part, kind)) in parts.iter().zip(kinds).enumerate() {
+                std::fs::create_dir(part)?;
+                if let Some(limit) = left.kinds.get(k) {
+                    write(&part.join("memory.max"), &limit.to_string())?;
+                }
+                // A kill in the part of a kind the child cannot do without
+                // takes every process of it; in an expendable kind's, the one
+                // the kernel picks, alone.
+                if !kind.expendable {
+                    write(&part.join("memory.oom.group"), "1")?;
+                }
+            }
             let procs = std::fs::OpenOptions::new()
                 .write(true)
-                .open(path.join("cgroup.procs"))?;
+                .open(child.join("cgroup.procs"))?;
             #[cfg(feature = "debug")]
             let peak = std::fs::File::open(path.join("memory.peak"))?;
             #[cfg(not(feature = "debug"))]
@@ -388,49 +501,82 @@ impl Cgroups {
         let (procs, peak) = match made {
             Ok(made) => made,
             Err(e) => {
+                for part in &parts {
+                    let _ = std::fs::remove_dir(part);
+                }
+                let _ = std::fs::remove_dir(&child);
+                let _ = std::fs::remove_dir(&work);
                 let _ = std::fs::remove_dir(&path);
                 return Err(e);
             }
         };
 
+        let expendable_room = parts
+            .iter()
+            .zip(kinds)
+            .enumerate()
+            .filter(|(_, (_, kind))| kind.expendable)
+            .map(|(k, _)| left.kinds.get(k).copied().unwrap_or(self.limits.max))
+            .fold(0, u64::saturating_add);
         let group = ChildGroup {
             path,
+            kinds: parts,
             total_events,
             total_oom_before,
-            max: self.limits.max,
+            reclaim: left.work.saturating_add(expendable_room),
             peak,
         };
         let placement = Placement {
             procs: Some(procs),
-            oom_score_adj: oom_score_adj(inherited, self.limits.total)
-                .to_string()
-                .into_bytes(),
+            oom_score_adj: oom_score_adj(false).to_string().into_bytes(),
             uid,
             tasks: self.limits.tasks,
         };
         Ok((group, placement))
     }
 
-    /// What a coprocess started beside a child is given before its exec: the
-    /// child's group at `group`, so the two are held to the child's max
-    /// together and killed together, and an identity of its own. Numbered by
-    /// the same count as every child's, so it is no child's and no other
-    /// coprocess's: against it the child can neither signal nor trace the
-    /// coprocess, nor the coprocess the child. `inherited` is the length of
-    /// what the coprocess maps from the supervisor's memory; see
-    /// [`oom_score_adj`].
-    pub(crate) fn coprocess(&self, group: &Path, inherited: u64) -> io::Result<Placement> {
+    /// What the `k`-th of the runner's kinds, `kind`, a coprocess started
+    /// beside a child, is given before its exec: its kind's part of the
+    /// child's group at `group`, so it is held to its part's limit — and the
+    /// work's, for a kind the child cannot do without — and killed with the
+    /// group; its score ([`oom_score_adj`]); and an identity of its own.
+    /// Numbered by the same count as every child's, so it is no child's and
+    /// no other coprocess's: against it the child can neither signal nor trace
+    /// the coprocess, nor the coprocess the child.
+    ///
+    /// What it maps of the supervisor's, its `inherited` bytes, comes off its
+    /// part's limit and, in the work, off the work's, before it starts: from
+    /// `left`, which keeps what is left. A limit lowered below what its part
+    /// already holds is met by the kernel as one reached: it kills there
+    /// before the write returns, and a limit left with nothing ends all of it.
+    pub(crate) fn coprocess(
+        &self,
+        group: &Path,
+        k: usize,
+        kind: &CoprocessKind,
+        inherited: u64,
+        left: &mut Left,
+    ) -> io::Result<Placement> {
         let n = self.made.fetch_add(1, Ordering::Relaxed);
         let uid = child_uid(n)
             .ok_or_else(|| io::Error::other("every child identity of this boot is used"))?;
+        let part = part(group, kind);
+        if inherited > 0 {
+            if let Some(limit) = left.kinds.get_mut(k) {
+                *limit = limit.saturating_sub(inherited);
+                write(&part.join("memory.max"), &limit.to_string())?;
+            }
+            if !kind.expendable {
+                left.work = left.work.saturating_sub(inherited);
+                write(&group.join(WORK).join("memory.max"), &left.work.to_string())?;
+            }
+        }
         let procs = std::fs::OpenOptions::new()
             .write(true)
-            .open(group.join("cgroup.procs"))?;
+            .open(part.join("cgroup.procs"))?;
         Ok(Placement {
             procs: Some(OwnedFd::from(procs)),
-            oom_score_adj: oom_score_adj(inherited, self.limits.total)
-                .to_string()
-                .into_bytes(),
+            oom_score_adj: oom_score_adj(kind.expendable).to_string().into_bytes(),
             uid,
             tasks: self.limits.tasks,
         })
@@ -438,7 +584,8 @@ impl Cgroups {
 }
 
 impl ChildGroup {
-    /// The group's directory, which a coprocess started beside the child joins.
+    /// The group's directory, whose parts the coprocesses started beside the
+    /// child join.
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -469,14 +616,16 @@ impl ChildGroup {
     /// kernel counts a kill before it sends it. A record that cannot be read
     /// attributes nothing.
     pub(crate) fn exit_cause(&self) -> ExitCause {
-        let own = read_counters(&self.path.join("memory.events.local"));
-        let total = read_counters(&self.total_events);
-        match (own, total) {
-            (Ok(own), Ok(total)) if outgrew_max(own, self.total_oom_before, total.oom) => {
-                ExitCause::OutgrewItsMax
-            }
-            _ => ExitCause::Unattributed,
-        }
+        let work = self.path.join(WORK);
+        let read = || -> io::Result<Record> {
+            Ok(Record {
+                child: read_counters(&work.join(CHILD_PART).join("memory.events.local"))?,
+                work: read_counters(&work.join("memory.events.local"))?,
+                total_oom_before: self.total_oom_before,
+                total_oom_after: read_counters(&self.total_events)?.oom,
+            })
+        };
+        read().map_or(ExitCause::Unattributed, |record| record.cause())
     }
 
     /// The highest the group reached, in bytes.
@@ -500,7 +649,13 @@ impl ChildGroup {
 /// done on the dropping thread.
 impl Drop for ChildGroup {
     fn drop(&mut self) {
-        let _ = write(&self.path.join("memory.reclaim"), &self.max.to_string());
+        let _ = write(&self.path.join("memory.reclaim"), &self.reclaim.to_string());
+        for part in &self.kinds {
+            let _ = std::fs::remove_dir(part);
+        }
+        let work = self.path.join(WORK);
+        let _ = std::fs::remove_dir(work.join(CHILD_PART));
+        let _ = std::fs::remove_dir(&work);
         let _ = std::fs::remove_dir(&self.path);
         #[cfg(feature = "debug")]
         self.log_removal();
@@ -651,53 +806,74 @@ fn mem_available(meminfo: &str) -> Option<u64> {
     kib.checked_mul(1024)
 }
 
-/// Killed at its own max and at no other limit: the child's group reached its
-/// own limit, the kernel killed in it, and the children's group never reached
-/// the total meanwhile — its `oom` still where it was when the child was made.
-/// The child's own counters started at zero with its group.
-///
-/// All three, because each alone admits an innocent child. A kill at the total
-/// raises the victim's `oom_kill` and the children's `oom`, not the child's
-/// `oom`. A group can reach its limit with nothing killed, when memory came
-/// free in time, and then be the victim of a kill at the total. The one case
-/// this still calls the child's own is a group that reached its limit unkilled
-/// and was later the victim of a kill for the whole guest, which raises no
-/// group's `oom`.
-fn outgrew_max(own: Counters, total_oom_before: u64, total_oom_after: u64) -> bool {
-    own.oom > 0 && own.oom_kill > 0 && total_oom_after == total_oom_before
+/// What the kernel counted in a child's work over its life, read once the
+/// group is empty: each counter started at zero with its group.
+struct Record {
+    /// The child's own part.
+    child: Counters,
+    /// The work: its `oom` is its limit reached.
+    work: Counters,
+    /// The children's total reached, as many times as when the child was made.
+    total_oom_before: u64,
+    /// And as many times once the group was empty.
+    total_oom_after: u64,
 }
 
-/// A child's `oom_score_adj`: `1000` less its `inherited` bytes in thousandths
-/// of the children's `total`, never below `0`.
-///
-/// The kernel picks the victim of a kill at the total by what each process
-/// maps — resident pages, page tables — plus this score in thousandths of the
-/// total. A child maps its cwasm, and the cwasm is not charged to the child:
-/// the supervisor wrote it, so its pages count in the root group. An honest
-/// round with a large cwasm would otherwise outscore a hostile one holding more
-/// memory of its own, and killing it would free only what is its own. Taking
-/// the inherited bytes back out of the score, in the score's own unit, leaves
-/// what the child holds. It over-corrects for cwasm pages the child never
-/// touched, in the direction of sparing large compositions — and a consumer
-/// can buy that: a cwasm padded with bytes its rounds never touch has the
-/// padding taken off their score all the same, up to the cwasm bound, so the
-/// kernel can pass over such a round at the total and kill an honest one
-/// holding less. What that costs is availability, not confidentiality: the
-/// round killed instead is answered as unattributed, and its retry runs.
-///
-/// Never negative, so a kill for the whole guest — which scores in thousandths
-/// of the guest's memory instead — still takes a child before the supervisor,
-/// whose score is `0`. Never `-1000`: a process there is never chosen, and a
-/// group whose every process is unchosen leaves the charge that reached the
-/// limit waiting for good. Written before the identity changes, by a holder of
-/// CAP_SYS_RESOURCE, so it is also the floor the child cannot lower itself
-/// below.
-fn oom_score_adj(inherited: u64, total: u64) -> i32 {
-    1000 - inherited
-        .saturating_mul(1000)
-        .div_ceil(total.max(1))
-        .min(1000) as i32
+impl Record {
+    /// Why the child ended, by what was counted where: its own where it was
+    /// killed at its part's limit or at its work's — the limit reached there,
+    /// and the kernel killing it — and the children's total never reached
+    /// meanwhile.
+    ///
+    /// All of that, because each part alone admits an innocent child. A kill
+    /// at the total raises the victim's `oom_kill` and the children's `oom`,
+    /// not the part's or the work's `oom`. A limit can be reached with nothing
+    /// killed, when memory came free in time, and the child then be the victim
+    /// of a kill at the total, which the total's count tells. The one case this
+    /// still calls the child's own is a work that reached a limit unkilled and
+    /// was later the victim of a kill for the whole guest, which raises no
+    /// group's `oom`. What is in the work is the child's and what it cannot do
+    /// without, so the kernel's pick inside it — by what each process has
+    /// resident — needs no more telling apart. An expendable coprocess has its
+    /// part beside the work, and nothing it holds reaches the work's limit.
+    fn cause(&self) -> ExitCause {
+        let own_limit = self.child.oom > 0 || self.work.oom > 0;
+        if self.total_oom_after == self.total_oom_before && own_limit && self.child.oom_kill > 0 {
+            ExitCause::OutgrewItsMax
+        } else {
+            ExitCause::Unattributed
+        }
+    }
 }
+
+/// The `oom_score_adj` of a process of a child's group: [`EXPENDABLE_SCORE`]
+/// for a coprocess of an expendable kind, `0` — the kernel's own — for the
+/// child and every other coprocess.
+///
+/// Where the children's total or the whole guest runs short, the kernel picks
+/// the victim by what each process has resident — its pages, page tables —
+/// plus its score in thousandths of that limit: a score of 1000 adds a whole
+/// limit, so it takes an expendable coprocess before any other process of any
+/// child. Inside a work, the rest are compared by what they have resident,
+/// which counts what they map of the supervisor's — a child's cwasm, a model's
+/// files — though their group is not charged for it: the pick in a work ends
+/// the work's own either way.
+///
+/// No other process of a group is scored below `0`: the guest's own
+/// long-running processes keep the kernel's `0`, and a child's process scored
+/// below them could see them killed first in a kill for the whole guest. The
+/// supervisor alone is scored `-1000` ([`Cgroups::create`]), the one score
+/// the kernel never kills at — never a child's process: a group whose every
+/// process is unchosen leaves the charge that reached the limit waiting for
+/// good. Written before the identity changes, by a holder of
+/// CAP_SYS_RESOURCE, so it is also the floor the process cannot lower itself
+/// below.
+fn oom_score_adj(expendable: bool) -> i32 {
+    if expendable { EXPENDABLE_SCORE } else { 0 }
+}
+
+/// The score of a coprocess of an expendable kind: the most there is.
+const EXPENDABLE_SCORE: i32 = 1000;
 
 #[cfg(test)]
 mod tests {
@@ -705,7 +881,7 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
 
-    fn own(oom: u64, oom_kill: u64) -> Counters {
+    fn counted(oom: u64, oom_kill: u64) -> Counters {
         Counters { oom, oom_kill }
     }
 
@@ -753,7 +929,7 @@ mod tests {
     #[test]
     fn counters_read_the_kernels_format() {
         let text = "low 0\nhigh 0\nmax 12\noom 3\noom_kill 2\noom_group_kill 1\n";
-        assert_eq!(counters(text), Some(own(3, 2)));
+        assert_eq!(counters(text), Some(counted(3, 2)));
         assert_eq!(counters(""), None);
         assert_eq!(counters("oom 1\n"), None);
         assert_eq!(counters("oom x\noom_kill 1\n"), None);
@@ -811,38 +987,98 @@ mod tests {
         assert!(!proc_hides_entries(""));
     }
 
+    /// A work's record: the child's part, the work, and the children's total
+    /// reached `before` and `after`.
+    fn record(child: Counters, work: Counters, before: u64, after: u64) -> Record {
+        Record {
+            child,
+            work,
+            total_oom_before: before,
+            total_oom_after: after,
+        }
+    }
+
+    const NONE: Counters = Counters {
+        oom: 0,
+        oom_kill: 0,
+    };
+
+    /// Killed at its own part's limit, or at its work's: its own. A kill in a
+    /// part whose processes go together counts its victim twice, once picked
+    /// and once with the rest.
     #[test]
-    fn a_kill_at_its_own_max_is_its_own() {
-        assert!(outgrew_max(own(1, 1), 5, 5));
+    fn a_kill_at_a_limit_of_its_own_is_its_own() {
+        assert_eq!(
+            record(counted(1, 2), NONE, 5, 5).cause(),
+            ExitCause::OutgrewItsMax
+        );
+        assert_eq!(
+            record(counted(0, 2), counted(1, 0), 5, 5).cause(),
+            ExitCause::OutgrewItsMax
+        );
     }
 
     #[test]
     fn the_victim_of_a_kill_at_the_total_is_not() {
-        assert!(!outgrew_max(own(0, 1), 5, 6));
+        let at_total = record(counted(0, 1), NONE, 5, 6);
+        assert_eq!(at_total.cause(), ExitCause::Unattributed);
+        let reached_then = record(counted(1, 1), NONE, 5, 6);
+        assert_eq!(reached_then.cause(), ExitCause::Unattributed);
     }
 
     #[test]
-    fn its_max_reached_while_the_total_was_is_not() {
-        assert!(!outgrew_max(own(1, 1), 5, 6));
+    fn a_limit_reached_without_a_kill_is_not() {
+        let unkilled = record(counted(1, 0), counted(1, 0), 5, 5);
+        assert_eq!(unkilled.cause(), ExitCause::Unattributed);
+        assert_eq!(record(NONE, NONE, 5, 5).cause(), ExitCause::Unattributed);
     }
 
-    #[test]
-    fn its_max_reached_without_a_kill_is_not() {
-        assert!(!outgrew_max(own(1, 0), 5, 5));
+    /// A runner whose groups are held to `max` at most.
+    fn cgroups(max: u64) -> Cgroups {
+        Cgroups {
+            limits: ChildLimits {
+                total: 4 * max,
+                max,
+                headroom: MIB,
+                tasks: DEFAULT_CHILD_MAX_TASKS,
+            },
+            group: PathBuf::new(),
+            made: AtomicU64::new(0),
+        }
     }
 
+    /// What the child maps comes off its part and its work, each first held
+    /// to the runner's max; a child that would map all of either has nothing
+    /// to run with.
     #[test]
-    fn the_score_takes_out_what_the_child_maps_from_the_supervisor() {
-        let total = 2048 * MIB;
-        assert_eq!(oom_score_adj(0, total), 1000);
-        assert_eq!(oom_score_adj(12 * MIB, total), 994);
-        assert_eq!(oom_score_adj(total, total), 0);
-        assert_eq!(oom_score_adj(2 * total, total), 0);
-        assert_eq!(oom_score_adj(1, 0), 0);
-        assert_eq!(oom_score_adj(u64::MAX, total), 0);
-        // the largest cwasm the contract carries against the smallest total a
-        // runner boots with stays well clear of the supervisor's 0
-        assert_eq!(oom_score_adj(256 * MIB, 384 * MIB), 333);
+    fn what_the_child_maps_comes_off_its_part_and_its_work() {
+        let limits = GroupLimits {
+            max: 384 * MIB,
+            child: 512 * MIB,
+            kinds: vec![256 * MIB, 1024 * MIB],
+        };
+        assert_eq!(
+            cgroups(384 * MIB).left(&limits, 15 * MIB),
+            Some(Left {
+                work: 369 * MIB,
+                child: 369 * MIB,
+                kinds: vec![256 * MIB, 384 * MIB],
+            })
+        );
+        assert_eq!(cgroups(384 * MIB).left(&limits, 384 * MIB), None);
+        let small_child = GroupLimits {
+            child: 15 * MIB,
+            ..limits
+        };
+        assert_eq!(cgroups(384 * MIB).left(&small_child, 15 * MIB), None);
+    }
+
+    /// The kernel takes an expendable coprocess before anything else; the rest
+    /// keep its own score.
+    #[test]
+    fn an_expendable_kind_is_scored_first_and_the_rest_as_the_kernel_does() {
+        assert_eq!(oom_score_adj(true), 1000);
+        assert_eq!(oom_score_adj(false), 0);
     }
 
     #[test]

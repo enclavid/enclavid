@@ -47,7 +47,8 @@ package enclavid:host@0.1.0;
 ///
 /// A capture's pictures — a photo's, a video's frames — are `image`s, which
 /// the platform decodes in a process of its own, one a capture: the one place
-/// the applicant's media is parsed. A round decodes 16 captures at most: the
+/// the applicant's media is parsed. A capture whose bytes end that process
+/// does not decode again that round. A round decodes 16 captures at most: the
 /// 17th traps.
 ///
 /// A capture's type says which kind of step took it, not that its bytes are
@@ -69,14 +70,28 @@ interface media {
     height: u32,
   }
 
-  /// A rectangle of a picture, in its pixels.
+  /// A rectangle of a picture, in fractions of its width and height: 0 its
+  /// left or top edge, 1 its right or bottom.
   record rect {
     /// Its left edge.
-    x: u32,
+    x: f32,
     /// Its top edge.
-    y: u32,
-    width: u32,
-    height: u32,
+    y: f32,
+    width: f32,
+    height: f32,
+  }
+
+  /// A part of a picture, and how many of the picture's pixels it must
+  /// span.
+  record crop {
+    /// Where it lies, held to the picture: its left and top edges on the
+    /// pixels they fall in, its right and bottom on the pixels past them,
+    /// a pixel at least each way.
+    rect: rect,
+    /// The fewest pixels it may span across; one where none.
+    min-width: option<u32>,
+    /// The fewest pixels it may span down; one where none.
+    min-height: option<u32>,
   }
 
   /// How pixels are brought to another size.
@@ -99,10 +114,19 @@ interface media {
 
   /// Which of a picture's pixels, and at what size.
   record pixels-options {
-    /// Only these, held to the picture; the whole picture where none.
-    crop: option<rect>,
+    /// Only this part of it; the whole picture where none.
+    crop: option<crop>,
     /// Brought to another size; at their own where none.
     resize: option<resize>,
+  }
+
+  /// Why a picture's pixels are not given.
+  enum pixels-error {
+    /// The picture does not decode.
+    undecoded,
+    /// The part asked for spans fewer of the picture's pixels than it
+    /// must.
+    too-small,
   }
 
   /// A picture of the applicant's — a photo, or a frame of a video — as the
@@ -110,18 +134,17 @@ interface media {
   /// reading them again decodes nothing again, and a video's frame read out
   /// of order is decoded from the nearest keyframe before it.
   resource image {
-    /// Its size: its longer side at most 1920 pixels and its shorter
-    /// 1080, whichever way it is turned.
+    /// Its size in pixels: its capture's own — or, for a photo larger
+    /// than the platform decodes whole, half of it each way. Whether so
+    /// many are enough is the reader's to judge.
     size: func() -> size;
     /// Every pixel of it, at its size, RGB8 row by row, decoding the
     /// image first where nothing did; `none` where it does not decode.
-    /// Traps where the process decoding it has stopped answering.
     all-pixels: func() -> option<list<u8>>;
     /// The pixels `options` pick, RGB8 row by row, decoding the image
-    /// first where nothing did; `none` where it does not decode. Traps
-    /// for an output over 1920×1080 pixels, or where the process
-    /// decoding it has stopped answering.
-    pixels: func(options: pixels-options) -> option<list<u8>>;
+    /// first where nothing did. Traps for a crop whose numbers are not
+    /// finite, or an output larger either way than the platform gives.
+    pixels: func(options: pixels-options) -> result<list<u8>, pixels-error>;
   }
 
   /// A photo the applicant kept on the review screen: one JPEG, as the
@@ -143,8 +166,7 @@ interface media {
     /// later round.
     hash: func() -> media-hash;
     /// The photo as an image; `none` where it is not a JPEG the platform
-    /// decodes. One past the image's bounds is decoded at half its size
-    /// where that fits them, and is none where it does not.
+    /// decodes, or one too large for it even at half its size.
     image: func() -> option<image>;
   }
 
@@ -178,8 +200,8 @@ interface media {
     /// `frame-range` names them; none is decoded until its image is read.
     /// The list ends at the video's last frame, its 900th, or the frame
     /// before a keyframe of another size than the video's; it is empty
-    /// where the video is not a WebM of VP8 frames within the image's
-    /// bounds.
+    /// where the video is not a WebM of VP8 frames of a size the platform
+    /// decodes.
     frames: func(first: u32, last: u32) -> list<frame>;
   }
 }

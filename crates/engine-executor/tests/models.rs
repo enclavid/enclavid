@@ -14,7 +14,8 @@ use enclavid_inference::protocol::{Data, Failure, MAX_MESSAGE_BYTES, Request, Te
 use engine_compiler::Compiler;
 use engine_executor::{
     DEFAULT_ROUND_FUEL, EmbeddedRegistry, Executor, MediaStarter, MediaStore, ModelStarter,
-    PrimedComposition, RunError, RunInputs, RunResult, RunStatus, SessionChange, SessionListener,
+    PictureBounds, PrimedComposition, RunError, RunInputs, RunResult, RunStatus, SessionChange,
+    SessionListener,
 };
 use engine_types::composition::{ModelFile, ModelImport, ModelLayer};
 use session_types::{Decision, Event, SessionState};
@@ -248,6 +249,7 @@ async fn round(
                 models,
                 media: Arc::new(NoDecoding),
                 fuel: DEFAULT_ROUND_FUEL,
+                picture_bounds: PictureBounds::DEFAULT,
             },
         )
         .await

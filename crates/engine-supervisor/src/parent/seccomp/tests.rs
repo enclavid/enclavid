@@ -9,7 +9,7 @@ use libc::c_long;
 use rustix::process::{Pid, WaitOptions, waitpid};
 
 use super::filters;
-use crate::spawn::Filters;
+use crate::parent::spawn::Filters;
 
 /// How a probe ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

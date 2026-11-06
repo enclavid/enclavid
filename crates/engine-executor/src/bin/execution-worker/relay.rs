@@ -20,6 +20,7 @@ use tokio::time::Instant;
 use crate::boundary::AnyCaller;
 use crate::bundles::{Bundles, CompositionEntry};
 use crate::model_files::ModelFileSlot;
+use crate::service::{INFERENCE, MEDIA};
 
 #[cfg(test)]
 mod tests;
@@ -195,6 +196,7 @@ impl RemoteChildCallbacks for RelayCallbacks {
         let data = data.as_ref().map_or(self.empty.as_fd(), AsFd::as_fd);
         self.coprocess
             .start(
+                INFERENCE,
                 &self.inference_exe,
                 socket,
                 &[graph.as_fd(), data],
@@ -216,7 +218,7 @@ impl RemoteChildCallbacks for RelayCallbacks {
             CallbackError
         })?;
         self.coprocess
-            .start(&self.media_exe, socket, &[], ())
+            .start(MEDIA, &self.media_exe, socket, &[], ())
             .map_err(|e| {
                 debug!("start_media: {e}");
                 CallbackError

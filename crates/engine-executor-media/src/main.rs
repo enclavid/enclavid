@@ -25,7 +25,7 @@ use std::os::fd::{AsFd, AsRawFd, RawFd};
 
 use coprocess_channel::{receive, send};
 use enclavid_media::protocol::{
-    Failure, Kind, MAX_REQUEST_BYTES, Opened, Region, Request, Response,
+    Failure, Kind, MAX_REQUEST_BYTES, Opened, PictureBounds, Region, Request, Response,
 };
 
 type Stop = Box<dyn std::error::Error>;
@@ -38,13 +38,13 @@ enum Capture {
 }
 
 impl Capture {
-    /// Open `bytes` as a capture of `kind`. A build without `video` opens no
-    /// video: it is not one it decodes.
-    fn open(kind: Kind, bytes: Vec<u8>) -> Result<Self, Failure> {
+    /// Open `bytes` as a capture of `kind`, its pictures held to `bounds`. A
+    /// build without `video` opens no video: it is not one it decodes.
+    fn open(kind: Kind, bytes: Vec<u8>, bounds: PictureBounds) -> Result<Self, Failure> {
         Ok(match kind {
-            Kind::Photo => Capture::Photo(photo::Photo::open(bytes)?),
+            Kind::Photo => Capture::Photo(photo::Photo::open(bytes, bounds)?),
             #[cfg(feature = "video")]
-            Kind::Video => Capture::Video(Box::new(video::Video::open(bytes)?)),
+            Kind::Video => Capture::Video(Box::new(video::Video::open(bytes, bounds)?)),
             #[cfg(not(feature = "video"))]
             Kind::Video => return Err(Failure::NotMedia),
         })
@@ -102,11 +102,16 @@ fn serve() -> Result<(), Stop> {
     let socket = &mut *socket;
     let first: Option<Request> = receive(socket, MAX_REQUEST_BYTES)?;
     narrow(socket.as_raw_fd())?;
-    let Some(Request::Open { kind, bytes }) = first else {
+    let Some(Request::Open {
+        kind,
+        bytes,
+        bounds,
+    }) = first
+    else {
         send(socket, &Response::Failed(Failure::OutOfTurn))?;
         return Ok(());
     };
-    let mut capture = match Capture::open(kind, bytes.into_vec()) {
+    let mut capture = match Capture::open(kind, bytes.into_vec(), bounds) {
         Ok(capture) => capture,
         Err(failure) => {
             send(socket, &Response::Failed(failure))?;

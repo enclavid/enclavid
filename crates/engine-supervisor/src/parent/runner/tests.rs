@@ -32,6 +32,16 @@ fn exit_wait() -> Duration {
     ChildTimes::default().exit_wait
 }
 
+/// What a child's group is held to, which a runner without cgroups — every
+/// runner here — does not read.
+fn limits() -> GroupLimits {
+    GroupLimits {
+        max: 0,
+        child: 0,
+        kinds: Vec::new(),
+    }
+}
+
 /// Take the runner's one slot from outside, the way a running child holds it.
 fn hold(runner: &ChildRunner) -> OwnedSemaphorePermit {
     runner
@@ -92,7 +102,7 @@ async fn without_a_wait_a_full_runner_keeps_waiting() {
 async fn a_request_not_admitted_spawns_nothing() {
     let runner = runner(Some(WAIT));
     let _held = hold(&runner);
-    let out = runner.run(&[], (), |_: (), _| async {}).await;
+    let out = runner.run(&[], &limits(), (), |_: (), _| async {}).await;
     assert!(matches!(out, Err(SupervisorError::Busy(_))));
 }
 
@@ -117,7 +127,7 @@ async fn a_request_not_admitted_takes_no_slot() {
 #[tokio::test(start_paused = true)]
 async fn a_failed_spawn_returns_its_slot() {
     let runner = runner(Some(WAIT));
-    let out = runner.run(&[], (), |_: (), _| async {}).await;
+    let out = runner.run(&[], &limits(), (), |_: (), _| async {}).await;
     assert!(matches!(out, Err(SupervisorError::Spawn(_))));
     every_slot_comes_back(&runner, 1).await;
 }
@@ -128,9 +138,12 @@ async fn a_request_cancelled_while_waiting_holds_nothing() {
     let runner = runner(Some(WAIT));
     let held = hold(&runner);
     assert!(
-        tokio::time::timeout(WAIT / 2, runner.run(&[], (), |_: (), _| async {}))
-            .await
-            .is_err()
+        tokio::time::timeout(
+            WAIT / 2,
+            runner.run(&[], &limits(), (), |_: (), _| async {})
+        )
+        .await
+        .is_err()
     );
     drop(held);
     assert_eq!(runner.slots.available_permits(), 1);
@@ -143,9 +156,12 @@ async fn a_request_cancelled_while_waiting_holds_nothing() {
 async fn a_request_cancelled_after_admission_returns_its_slot() {
     let runner = runner_of("/bin/cat", Some(WAIT));
     assert!(
-        tokio::time::timeout(WAIT / 2, runner.run(&[], (), |_: (), _| async {}))
-            .await
-            .is_err()
+        tokio::time::timeout(
+            WAIT / 2,
+            runner.run(&[], &limits(), (), |_: (), _| async {})
+        )
+        .await
+        .is_err()
     );
     every_slot_comes_back(&runner, 1).await;
 }
@@ -156,7 +172,7 @@ async fn a_request_cancelled_after_admission_returns_its_slot() {
 #[tokio::test(start_paused = true)]
 async fn a_child_that_never_connects_returns_its_slot() {
     let runner = runner_of("/bin/cat", Some(WAIT));
-    let out = runner.run(&[], (), |_: (), _| async {}).await;
+    let out = runner.run(&[], &limits(), (), |_: (), _| async {}).await;
     assert!(matches!(
         out,
         Err(SupervisorError::Handshake(_) | SupervisorError::Spawn(_))
@@ -210,6 +226,10 @@ fn coprocess_of(held: &Held, allowed: bool) -> Coprocess {
     Coprocess {
         config: allowed.then_some(CoprocessConfig {
             max: MAX_COPROCESSES,
+            kinds: vec![CoprocessKind {
+                name: "cat",
+                expendable: false,
+            }],
         }),
         cgroups: None,
         group: None,
@@ -318,12 +338,12 @@ async fn a_child_has_no_more_coprocesses_than_its_max() {
         let (theirs, our) = socket();
         ours.push(our);
         coprocesses
-            .start(Path::new(CAT), theirs, &[], ())
+            .start(0, Path::new(CAT), theirs, &[], ())
             .expect("a coprocess within the max starts");
     }
     let (theirs, _ours) = socket();
     assert!(matches!(
-        coprocesses.start(Path::new(CAT), theirs, &[], ()),
+        coprocesses.start(0, Path::new(CAT), theirs, &[], ()),
         Err(CoprocessError::TooMany(MAX_COPROCESSES))
     ));
     assert_eq!(lock(&held.coprocesses).started.len(), MAX_COPROCESSES);
@@ -341,7 +361,7 @@ async fn a_started_coprocess_is_killed_with_its_child() {
     // before the slot comes back.
     let (theirs, _ours) = socket();
     coprocess_of(&held, true)
-        .start(Path::new(CAT), theirs, &[], coprocess_kept.clone())
+        .start(0, Path::new(CAT), theirs, &[], coprocess_kept.clone())
         .expect("the coprocess starts");
     let coprocess_pid = pid_of(
         &lock(&held.coprocesses)
@@ -369,7 +389,7 @@ async fn no_coprocess_starts_beside_an_ended_child() {
     held.kill();
     let (theirs, _ours) = socket();
     assert!(matches!(
-        coprocess.start(Path::new(CAT), theirs, &[], ()),
+        coprocess.start(0, Path::new(CAT), theirs, &[], ()),
         Err(CoprocessError::ChildEnded)
     ));
     assert!(lock(&held.coprocesses).started.is_empty());
@@ -383,7 +403,7 @@ async fn a_runner_without_coprocesses_starts_none() {
     let (held, _settled) = sleeping(&runner, &kept).await;
     let (theirs, _ours) = socket();
     assert!(matches!(
-        coprocess_of(&held, false).start(Path::new(CAT), theirs, &[], ()),
+        coprocess_of(&held, false).start(0, Path::new(CAT), theirs, &[], ()),
         Err(CoprocessError::NoCoprocesses)
     ));
 }

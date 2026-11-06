@@ -32,11 +32,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use coprocess_channel::{receive, send};
+use enclavid_media::protocol::{MAX_REQUEST_BYTES, Opened, Request, Response, Size};
 use engine_compiler::Compiler;
 use engine_executor::{
-    Component, ComponentDecls, DEFAULT_ROUND_FUEL, EmbeddedImport, EmbeddedRegistry, Executor,
-    MediaStarter, MediaStore, ModelImport, ModelStarter, PluginInstance, PrimedComposition,
-    RunError, RunInputs, RunResult, RunStatus, SessionChange, SessionListener,
+    Component, ComponentDecls, DEFAULT_ROUND_FUEL, DecoderFailed, EmbeddedImport, EmbeddedRegistry,
+    Executor, MediaStarter, MediaStore, ModelImport, ModelStarter, PictureBounds, PluginInstance,
+    PrimedComposition, RunError, RunInputs, RunResult, RunStatus, SessionChange, SessionListener,
 };
 use engine_types::composition::ModelLayer;
 use engine_types::text::Localized;
@@ -320,6 +322,43 @@ impl MediaStarter for Decoders {
             Ok(ours)
         })
     }
+}
+
+/// A stand-in for the process decoding a capture, on a thread of the test's:
+/// it reads each request and writes the next of its answers back as they are,
+/// then lets go of its socket, as a process that has ended does.
+struct Answering(Vec<Vec<u8>>);
+
+impl MediaStarter for Answering {
+    fn start(
+        &self,
+        _: u32,
+    ) -> Pin<Box<dyn Future<Output = RunResult<std::os::unix::net::UnixStream>> + Send + '_>> {
+        use std::io::Write;
+
+        Box::pin(async move {
+            let (ours, mut theirs) = std::os::unix::net::UnixStream::pair()?;
+            let answers = self.0.clone();
+            std::thread::spawn(move || {
+                for answer in answers {
+                    let Ok(Some(_)) = receive::<Request>(&mut theirs, MAX_REQUEST_BYTES) else {
+                        return;
+                    };
+                    if theirs.write_all(&answer).is_err() {
+                        return;
+                    }
+                }
+            });
+            Ok(ours)
+        })
+    }
+}
+
+/// `response` as the channel carries it.
+fn framed(response: &Response) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    send(&mut bytes, response).expect("a response encodes");
+    bytes
 }
 
 /// Stands in for the orchestrator: keeps the blob store the applicant's frames
@@ -784,21 +823,91 @@ async fn a_build_without_video_lists_no_frames() {
     assert_eq!(decoders.started(), 1);
 }
 
-/// A process decoding a capture that stops answering traps the round, rather
-/// than passing for a photo that does not decode: in a living round it is the
-/// platform's own process that failed.
+/// A WebM whose one block is too short to hold its own header, which
+/// webm-iterable panics on: the process decoding it ends before it answers.
+const CUT_BLOCK: &[u8] = &[
+    // The EBML header: a WebM.
+    0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84, b'w', b'e', b'b', b'm',
+    // A segment, of a size it does not say.
+    0x18, 0x53, 0x80, 0x67, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    // A cluster of 6 bytes: its time, 0, and a block of 1 byte, its track
+    // number alone.
+    0x1f, 0x43, 0xb6, 0x75, 0x86, 0xe7, 0x81, 0x00, 0xa3, 0x81, 0x81,
+];
+
+/// A video that ends the process decoding it has no frames, as bytes that are
+/// not a video have, and the round goes on. Needs the coprocess, as the tests
+/// above.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_decoder_that_stops_answering_traps_the_round() {
-    let h = Harness::new().decoding(Decoders::of("true".into()));
+#[ignore = "needs ENCLAVID_MEDIA_BIN"]
+async fn a_video_that_ends_its_decoder_has_no_frames() {
+    let decoders = decoders_of_videos();
+    let h = Harness::new().decoding(decoders.clone());
     let listener = Arc::new(PersistListener::default());
-    let session = h.drive_to_selfie(&listener).await;
-    let fires = *listener.fires.lock().unwrap();
-    assert!(
-        h.round(session, Event::Media(fake_capture()), NO_PROPS, &listener)
+    let (_, session) = h.run(Session::default(), Event::Start, &listener).await;
+    let (status, session) = h.run(session, video(CUT_BLOCK), &listener).await;
+    assert!(matches!(status, RunStatus::Completed(Decision::Review)));
+    assert_eq!(session.state, [VIDEO_UNDECODED]);
+    let mut process = decoders
+        .processes
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("a process for the video");
+    let ended = process.wait().await.unwrap();
+    assert!(!ended.success(), "the video ended it: {ended}");
+}
+
+/// A process decoding a capture that ends — the applicant's bytes can end it
+/// — leaves its capture undecoded, and the round goes on: one gone before it
+/// answers the open gives the selfie no image, one gone at the first region
+/// gives the image no pixels. Either way the policy asks for a retake.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decoder_that_ends_leaves_its_capture_undecoded() {
+    let opened = framed(&Response::Opened(Opened::Photo(Size {
+        width: 64,
+        height: 64,
+    })));
+    let gone_before_the_open: Arc<dyn MediaStarter> = Decoders::of("true".into());
+    let gone_at_a_region: Arc<dyn MediaStarter> = Arc::new(Answering(vec![opened]));
+    for media in [gone_before_the_open, gone_at_a_region] {
+        let h = Harness::new().decoding(media);
+        let listener = Arc::new(PersistListener::default());
+        let session = h.drive_to_selfie(&listener).await;
+        let (status, _) = h
+            .run(session, Event::Media(fake_capture()), &listener)
+            .await;
+        assert!(matches!(
+            status,
+            RunStatus::Completed(Decision::RejectedRetryable)
+        ));
+    }
+}
+
+/// A process decoding a capture that answers what no decoder answers — bytes
+/// that are no response, a response to another request — fails the round as
+/// the platform's own failure, not the policy's: [`DecoderFailed`]. Nothing
+/// is persisted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decoder_answering_out_of_turn_fails_the_round() {
+    let no_response = vec![0, 0, 0, 1, 0xff];
+    let pixels_to_the_open = framed(&Response::Pixels(Vec::new()));
+    for answer in [no_response, pixels_to_the_open] {
+        let h = Harness::new().decoding(Arc::new(Answering(vec![answer])));
+        let listener = Arc::new(PersistListener::default());
+        let session = h.drive_to_selfie(&listener).await;
+        let fires = *listener.fires.lock().unwrap();
+        let failure = h
+            .round(session, Event::Media(fake_capture()), NO_PROPS, &listener)
             .await
-            .is_err()
-    );
-    assert_eq!(*listener.fires.lock().unwrap(), fires, "nothing persisted");
+            .err()
+            .expect("the round fails");
+        assert!(
+            failure.chain().any(|cause| cause.is::<DecoderFailed>()),
+            "{failure:#}"
+        );
+        assert_eq!(*listener.fires.lock().unwrap(), fires, "nothing persisted");
+    }
 }
 
 #[tokio::test]
@@ -861,6 +970,7 @@ async fn reload_by_ref_misses() {
         models: Arc::new(NoModels),
         media: Decoders::of_photos(),
         fuel: DEFAULT_ROUND_FUEL,
+        picture_bounds: PictureBounds::DEFAULT,
     };
     let round = |session, event: Event| {
         listener.capture(&event);
@@ -907,6 +1017,7 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
             models: Arc::new(NoModels),
             media: Decoders::of_photos(),
             fuel: DEFAULT_ROUND_FUEL,
+            picture_bounds: PictureBounds::DEFAULT,
         };
         let round = |session, event: Event| {
             listener.capture(&event);
@@ -1159,6 +1270,7 @@ async fn static_fused_artifact_resolves_strictly() {
         models: Arc::new(NoModels),
         media: Decoders::of_photos(),
         fuel: DEFAULT_ROUND_FUEL,
+        picture_bounds: PictureBounds::DEFAULT,
     };
     let round = |session, event: Event| {
         listener.capture(&event);
@@ -1310,6 +1422,7 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
         models: Arc::new(NoModels),
         media: Decoders::of_photos(),
         fuel: DEFAULT_ROUND_FUEL,
+        picture_bounds: PictureBounds::DEFAULT,
     };
     // start → media(passport) → media(selfie) → consent-disclosure.
     let round = |session, event: Event| {
@@ -1422,6 +1535,7 @@ impl Harness {
             models: self.starter.clone(),
             media: self.media.clone(),
             fuel: DEFAULT_ROUND_FUEL,
+            picture_bounds: PictureBounds::DEFAULT,
         }
     }
 

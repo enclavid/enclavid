@@ -21,12 +21,13 @@
 //!     filters, drive the caller's closure under the request's deadline, and
 //!     kill the child as the call ends, giving its slot back once it is gone.
 //!   * [`Coprocess`] — the processes a child may have beside it, started at
-//!     the caller's word: in the child's group, each under an identity of its
-//!     own and narrower filters, talking to the child over a socket the caller
-//!     pairs.
+//!     the caller's word: each in its kind's part of the child's group, under
+//!     an identity of its own and narrower filters, talking to the child over a
+//!     socket the caller pairs.
 //!   * [`Cgroups`] — the kernel's hold on the children's memory, built at boot:
-//!     all of them to one total, each to its own max, each in a group and under
-//!     an identity of its own.
+//!     all of them to one total, each child's group to the limits it starts
+//!     with ([`GroupLimits`]) and each part of it to its own, each process
+//!     under an identity of its own.
 //!   * [`spawn_and_connect`], [`spawn_coprocess`] — one child on its
 //!     socketpair, or one coprocess on a given socket, with the caller's
 //!     descriptors from [`INHERITED_FD`] up, for a bench or a test.
@@ -62,24 +63,6 @@ pub use child::{
 };
 
 #[cfg(feature = "parent")]
-mod cgroup;
+mod parent;
 #[cfg(feature = "parent")]
-mod preconditions;
-#[cfg(feature = "parent")]
-mod runner;
-#[cfg(all(feature = "parent", target_os = "linux"))]
-mod seccomp;
-#[cfg(feature = "parent")]
-mod spawn;
-
-#[cfg(feature = "parent")]
-pub use cgroup::{Cgroups, ChildLimits, DEFAULT_CHILD_MAX_TASKS, ExitCause};
-#[cfg(feature = "parent")]
-pub use preconditions::{physical_memory, require_fd_budget, require_ptrace_scope};
-#[cfg(feature = "parent")]
-pub use runner::{
-    ChildRunner, ChildTimes, Coprocess, CoprocessConfig, CoprocessError, Exit, RunnerConfig,
-    SupervisorError,
-};
-#[cfg(feature = "parent")]
-pub use spawn::{SpawnError, spawn_and_connect, spawn_coprocess};
+pub use parent::*;

@@ -11,7 +11,7 @@ use rustix::process::{Pid, WaitOptions, geteuid, waitpid};
 use rustix::thread::{Gid, Uid, set_thread_groups, set_thread_res_gid, set_thread_res_uid};
 
 use super::*;
-use crate::cgroup::{CHILD_UID_BASE, DEFAULT_CHILD_MAX_TASKS};
+use crate::parent::cgroup::{CHILD_UID_BASE, DEFAULT_CHILD_MAX_TASKS};
 
 fn root() -> bool {
     let root = geteuid().is_root();

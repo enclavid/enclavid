@@ -45,7 +45,9 @@ use enclavid_ext::well_known::i18n::{Key as WellKnownText, localized as well_kno
 // hex string) in `state`, then rehydrate it on the selfie round through the
 // `Photo` constructor — proving cross-round reload. And the host `video`, whose
 // frames the probe reads, and the `image`s the host decodes a capture into.
-use enclavid::host::media::{Image, Photo, PixelsOptions, Rect, Resize, ResizeMode, Size, Video};
+use enclavid::host::media::{
+    Crop, Image, Photo, PixelsOptions, Rect, Resize, ResizeMode, Size, Video,
+};
 use enclavid::policy::types::{Action, Capture, Decision, Disclosure, Event, Prompt};
 // The well-known plugin (linked at /connect) supplies the capture specs
 // and the canonical KYC `display-field` helpers.
@@ -156,16 +158,18 @@ fn probe_state() -> Vec<u8> {
 fn quarter(image: &Image) -> Option<((u32, u32), Vec<u8>)> {
     let size = image.size();
     let (w, h) = ((size.width / 4).max(1), (size.height / 4).max(1));
-    let rgb = image.pixels(PixelsOptions {
-        crop: None,
-        resize: Some(Resize {
-            size: Size {
-                width: w,
-                height: h,
-            },
-            mode: ResizeMode::Nearest,
-        }),
-    })?;
+    let rgb = image
+        .pixels(PixelsOptions {
+            crop: None,
+            resize: Some(Resize {
+                size: Size {
+                    width: w,
+                    height: h,
+                },
+                mode: ResizeMode::Nearest,
+            }),
+        })
+        .ok()?;
     Some(((w, h), rgb))
 }
 
@@ -184,11 +188,15 @@ fn probe_video(video: &Video) -> Vec<u8> {
     };
     if enclavid_ext::policy::props::get().region_past_the_bound == Some(true) {
         let _ = first.image.pixels(PixelsOptions {
-            crop: Some(Rect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
+            crop: Some(Crop {
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.01,
+                    height: 0.01,
+                },
+                min_width: None,
+                min_height: None,
             }),
             resize: Some(Resize {
                 size: Size {

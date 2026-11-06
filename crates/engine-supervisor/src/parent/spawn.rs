@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use remoc::RemoteSend;
 use remoc::codec::Ciborium;
 
+use super::cgroup::Placement;
 use crate::INHERITED_FD;
-use crate::cgroup::Placement;
 use crate::channel::channel_config;
 
 /// Why a child or a coprocess could not be started, or a child did not hand
@@ -205,7 +205,7 @@ fn spawn(
     cmd.kill_on_drop(true);
 
     #[cfg(target_os = "linux")]
-    let filters = filters.map(crate::seccomp::filters);
+    let filters = filters.map(super::seccomp::filters);
     #[cfg(not(target_os = "linux"))]
     let _ = (filters, placement); // no filter or placement off Linux
 
@@ -356,6 +356,17 @@ fn spawn(
     Ok(process)
 }
 
+/// What a process maps from the supervisor's memory: the length of the
+/// descriptors it inherits, together — a socket's is none. Zero for one that
+/// cannot be measured.
+pub(crate) fn inherited_len(inherit: &[BorrowedFd<'_>]) -> u64 {
+    inherit
+        .iter()
+        .filter_map(|fd| rustix::fs::fstat(fd).ok())
+        .filter_map(|stat| u64::try_from(stat.st_size).ok())
+        .fold(0, u64::saturating_add)
+}
+
 /// The handshake half of [`spawn_and_connect`]: frame the supervisor's end with
 /// remoc and receive the child's service client on the base channel.
 pub(crate) async fn connect<Cli>(sup_end: std::os::unix::net::UnixStream) -> Result<Cli, SpawnError>
@@ -374,15 +385,4 @@ where
         .await
         .map_err(SpawnError::Receive)?
         .ok_or(SpawnError::Closed)
-}
-
-/// What the child maps from the supervisor's memory: the length of the
-/// descriptors it inherits, together. Zero for one that cannot be measured,
-/// which only leaves that child's score less reduced.
-pub(crate) fn inherited_len(inherit: &[BorrowedFd<'_>]) -> u64 {
-    inherit
-        .iter()
-        .filter_map(|fd| rustix::fs::fstat(fd).ok())
-        .filter_map(|stat| u64::try_from(stat.st_size).ok())
-        .fold(0, u64::saturating_add)
 }

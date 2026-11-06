@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use coprocess_channel::{receive, send};
 use enclavid_media::protocol::{
-    Bytes, Failure, Kind, MAX_RESPONSE_BYTES, Opened, Region, Request, ResizeMode, Response, Size,
+    Bytes, Failure, Kind, Opened, PictureBounds, Region, Request, ResizeMode, Response, Size,
+    max_response_bytes,
 };
 
 const VIDEO: &[u8] = include_bytes!("fixtures/square.webm");
@@ -45,12 +46,30 @@ fn started() -> (Child, UnixStream) {
     (child, ours)
 }
 
-/// The coprocess, sent `bytes` as a capture of `kind`, and what it said of
-/// them.
+/// The coprocess, sent `bytes` as a capture of `kind` held to the default
+/// bounds, and what it said of them.
 fn open(kind: Kind, bytes: &[u8]) -> (Child, UnixStream, Result<Opened, Failure>) {
+    open_within(kind, bytes, PictureBounds::DEFAULT)
+}
+
+/// The coprocess, sent `bytes` as a capture of `kind` held to `bounds`, and
+/// what it said of them.
+fn open_within(
+    kind: Kind,
+    bytes: &[u8],
+    bounds: PictureBounds,
+) -> (Child, UnixStream, Result<Opened, Failure>) {
     let (child, mut socket) = started();
     let bytes = Bytes::new(bytes);
-    send(&mut socket, &Request::Open { kind, bytes }).unwrap();
+    send(
+        &mut socket,
+        &Request::Open {
+            kind,
+            bytes,
+            bounds,
+        },
+    )
+    .unwrap();
     let said = opened(&mut socket);
     (child, socket, said)
 }
@@ -77,7 +96,7 @@ fn region(socket: &mut UnixStream, frame: u32, region: Region) -> Result<Vec<u8>
 
 /// The coprocess's next response.
 fn response(socket: &mut UnixStream) -> Response {
-    receive(socket, MAX_RESPONSE_BYTES)
+    receive(socket, max_response_bytes(PictureBounds::DEFAULT))
         .unwrap()
         .expect("a response")
 }
@@ -240,6 +259,53 @@ fn a_photo_past_the_bounds_decodes_at_half() {
     let_go(child, socket);
 
     let (child, socket, opened) = open(Kind::Photo, &jpeg(3842, 10));
+    assert_eq!(opened, Err(Failure::PastBounds));
+    let_go(child, socket);
+}
+
+/// The bounds are the ones the round opens a capture with: a photo past them
+/// decodes at half, and is refused where half is past them too; a video past
+/// them is refused; a region past them is answered so, which ends the
+/// coprocess.
+#[test]
+fn the_bounds_are_the_ones_the_round_opens_with() {
+    let small = PictureBounds {
+        long: 32,
+        short: 24,
+    };
+    let (child, mut socket, opened) = open_within(Kind::Photo, &jpeg(64, 48), small);
+    assert_eq!(
+        opened,
+        Ok(Opened::Photo(Size {
+            width: 32,
+            height: 24
+        }))
+    );
+    let past = Region {
+        x: 0,
+        y: 0,
+        w: 32,
+        h: 24,
+        out_w: 33,
+        out_h: 24,
+        mode: ResizeMode::Nearest,
+    };
+    assert_eq!(region(&mut socket, 0, past), Err(Failure::PastBounds));
+    let_go(child, socket);
+
+    let smaller = PictureBounds {
+        long: 16,
+        short: 12,
+    };
+    let (child, socket, opened) = open_within(Kind::Photo, &jpeg(64, 48), smaller);
+    assert_eq!(opened, Err(Failure::PastBounds));
+    let_go(child, socket);
+
+    let square = PictureBounds {
+        long: 100,
+        short: 100,
+    };
+    let (child, socket, opened) = open_within(Kind::Video, VIDEO, square);
     assert_eq!(opened, Err(Failure::PastBounds));
     let_go(child, socket);
 }

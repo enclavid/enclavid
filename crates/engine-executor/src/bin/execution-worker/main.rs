@@ -85,7 +85,7 @@ use safe_logger::{debug, info, reason, safe, warn};
 use tokio::sync::Semaphore;
 
 use crate::bundles::Bundles;
-use crate::service::{Caller, Supervisor};
+use crate::service::{COPROCESS_KINDS, Caller, Supervisor, group_limits};
 
 /// Locate the `engine-executor-child` binary: `ENCLAVID_EXECUTION_WORKER_CHILD_BIN`
 /// if set, else the sibling of this supervisor's own executable. They SHIP
@@ -300,10 +300,14 @@ async fn main() {
         bundle_cache_entries,
         bundle_idle,
         base_reserve,
-        round_max,
+        composition_max,
+        policy_max,
+        inference_max,
+        media_max,
         round_headroom,
         round_deadline,
         round_fuel,
+        picture_bounds,
         capacity_wait,
         bundle_stream,
         bundle_stream_idle,
@@ -316,9 +320,9 @@ async fn main() {
     } = s;
 
     // What the children may hold together: this guest's memory less what this
-    // process keeps for itself and for each child's round. Each child alone is
-    // held to the round's max; a total that cannot hold one child there runs
-    // nothing.
+    // process keeps for itself and for each child's round. Each round alone is
+    // held to its composition's max and its decodes' beside it; a total that
+    // cannot hold one round at both runs nothing.
     let physical = engine_supervisor::physical_memory();
     let total = children_total(
         physical,
@@ -327,13 +331,14 @@ async fn main() {
         max_children as u64,
         waiting_per_child,
     );
+    let round_max = composition_max.saturating_add(media_max);
     if total < round_max {
         safe_logger::error_and_panic!(
             "execution-worker: {} MiB of memory leaves the round children {} MiB beside a \
              {} MiB bundle cache, a {} MiB base reserve and {} MiB \
-             in this process for each of {} children — not one child could run to its {} \
-             MiB max. Give this guest more memory, or the cache, the reserve, the children \
-             or the rounds waiting behind them less. Stopping.",
+             in this process for each of {} children — not one round could run to its {} \
+             MiB of composition and decodes. Give this guest more memory, or the cache, the \
+             reserve, the children or the rounds waiting behind them less. Stopping.",
             safe(&(physical >> 20), reason!("a size the host provisioned")),
             safe(
                 &(total >> 20),
@@ -357,7 +362,7 @@ async fn main() {
             ),
             safe(
                 &(round_max >> 20),
-                reason!("the host's own setting, or this build's default")
+                reason!("derived from two of the host's settings, or this build's defaults")
             ),
             reason!("a constant, emitted once at boot before any request exists")
         );
@@ -375,11 +380,14 @@ async fn main() {
     // may have. In the measured image this builds the tree or stops the boot; a
     // build without `guest-hardening` holds nothing (see `Cgroups::create`).
     // Each child's group holds the processes of its round's models beside it,
-    // as many as a composition imports, and of the captures its round decodes.
+    // as many as a composition imports, and of the captures its round decodes,
+    // each kind in a part of the group of its own (`COPROCESS_KINDS`). No
+    // limit of a group is above the larger of the composition's and the
+    // decodes'.
     let cgroups = Cgroups::create(
         ChildLimits {
             total,
-            max: round_max,
+            max: composition_max.max(media_max),
             headroom: round_headroom,
             tasks: child_max_tasks,
         },
@@ -431,7 +439,9 @@ async fn main() {
         bundle_stream,
         bundle_stream_idle,
         round_fuel,
+        picture_bounds,
         callback_request_buffer,
+        limits: group_limits(composition_max, policy_max, inference_max, media_max),
         runner: ChildRunner::new(
             RunnerConfig {
                 exe: child_exe.clone(),
@@ -439,6 +449,7 @@ async fn main() {
                 // process of its own beside it.
                 coprocess: Some(CoprocessConfig {
                     max: MAX_COPROCESSES,
+                    kinds: COPROCESS_KINDS.to_vec(),
                 }),
                 max_children,
                 deadline: round_deadline,
@@ -498,9 +509,10 @@ async fn main() {
     info!(
         "execution-worker (supervisor): listening on {}, engine-executor-child={}, \
          engine-executor-inference={}, engine-executor-media={}, \
-         children={} sharing {} MiB of {} MiB memory (each to {} MiB; {} more at the \
-         {} MiB headroom fit beside one at that max), waiting_per_child={}, \
-         round_deadline={}s, round_fuel={}, bundle_cache={} MiB, bundle_idle={}s, \
+         children={} sharing {} MiB of {} MiB memory (each to {} MiB: its composition \
+         {} MiB, policy {} MiB and inference {} MiB within it, and media {} MiB; {} more \
+         at the {} MiB headroom fit beside one at that), waiting_per_child={}, \
+         round_deadline={}s, round_fuel={}, pictures={}x{}, bundle_cache={} MiB, bundle_idle={}s, \
          base_reserve={} MiB, capacity_wait={}s, bundle_stream={}s, bundle_stream_idle={}s",
         safe(&addr, reason!("on the measured command line")),
         safe(
@@ -526,11 +538,27 @@ async fn main() {
         safe(&(physical >> 20), reason!("a size the host provisioned")),
         safe(
             &(round_max >> 20),
+            reason!("derived from two of the host's settings, or this build's defaults")
+        ),
+        safe(
+            &(composition_max >> 20),
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &(policy_max >> 20),
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &(inference_max >> 20),
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &(media_max >> 20),
             reason!("the host's own setting, or this build's default")
         ),
         safe(
             &beside_one_at_its_max,
-            reason!("derived from the total and two of the host's settings")
+            reason!("derived from the total and three of the host's settings")
         ),
         safe(
             &(round_headroom >> 20),
@@ -546,6 +574,14 @@ async fn main() {
         ),
         safe(
             &round_fuel,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &picture_bounds.long,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &picture_bounds.short,
             reason!("the host's own setting, or this build's default")
         ),
         safe(

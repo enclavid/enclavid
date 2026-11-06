@@ -17,7 +17,9 @@ use engine_rpc::{
     RemoteChild, RemoteChildCallbacksServerShared, RemoteChildClient, RemoteExecutorAt, RunOutcome,
     RunReply, RunRequest, RunStatus,
 };
-use engine_supervisor::{ChildRunner, Exit, ExitCause, SupervisorError};
+use engine_supervisor::{
+    ChildRunner, CoprocessKind, Exit, ExitCause, GroupLimits, SupervisorError,
+};
 use remoc::codec::Ciborium;
 use remoc::rtc::ServerShared;
 use safe_logger::{debug, reason};
@@ -44,6 +46,51 @@ pub(crate) fn round_place(rounds: &Semaphore) -> Result<SemaphorePermit<'_>, Exe
     })
 }
 
+/// The kinds of coprocess a round starts beside its child, in the order the
+/// runner holds them: the process a model runs in, part of the round's
+/// composition, and the one a capture is decoded in, which the round can do
+/// without — the platform's, beside the composition and held to its own
+/// limit; where it runs out, or the guest's memory does, the kernel takes a
+/// decode first, and its capture does not decode.
+pub(crate) const COPROCESS_KINDS: [CoprocessKind; 2] = [
+    CoprocessKind {
+        name: "inference",
+        expendable: false,
+    },
+    CoprocessKind {
+        name: "media",
+        expendable: true,
+    },
+];
+
+/// A model's process, among [`COPROCESS_KINDS`].
+pub(crate) const INFERENCE: usize = 0;
+
+/// A capture's decode, among [`COPROCESS_KINDS`].
+pub(crate) const MEDIA: usize = 1;
+
+/// What each round's group is held to, as the host set it: its composition
+/// (`composition-max-bytes`) as its work, its policy's process
+/// (`policy-max-bytes`), its models (`inference-max-bytes`) and its decodes
+/// (`media-max-bytes`). The runner takes what each process maps of this
+/// worker's memory — the cwasm, a model's files — off its part and, in the
+/// composition, off the composition's.
+pub(crate) fn group_limits(
+    composition: u64,
+    policy: u64,
+    inference: u64,
+    media: u64,
+) -> GroupLimits {
+    let mut kinds = vec![0; COPROCESS_KINDS.len()];
+    kinds[INFERENCE] = inference;
+    kinds[MEDIA] = media;
+    GroupLimits {
+        max: composition,
+        child: policy,
+        kinds,
+    }
+}
+
 /// `n` socketpairs: the child's end of each, and this end, which the relay
 /// keeps until a process is started on it.
 fn socket_pairs(n: usize) -> Result<(Vec<OwnedFd>, Vec<Option<OwnedFd>>), ExecError> {
@@ -61,14 +108,17 @@ fn socket_pairs(n: usize) -> Result<(Vec<OwnedFd>, Vec<Option<OwnedFd>>), ExecEr
 /// What the runner's own failure tells api.
 ///
 /// A round the runner never admitted ran nothing, and that is the one failure it
-/// can name. Everything else is `Unknown`, and the deadline is the interesting
-/// case: a policy CAN provoke it by hanging, so calling it `Policy` would be
-/// defensible — but a spawn failure arrives the same way and is ours. This side
-/// cannot tell them apart, so it says it cannot.
+/// can name as busy. One whose composition maps more of this worker's memory —
+/// its cwasm — than its limits hold is the composition's, every round of it
+/// alike: `Policy`. Everything else is `Unknown`, and the deadline is the
+/// interesting case: a policy CAN provoke it by hanging, so calling it `Policy`
+/// would be defensible — but a spawn failure arrives the same way and is ours.
+/// This side cannot tell them apart, so it says it cannot.
 fn runner_failure(e: SupervisorError) -> ExecError {
     debug!("child supervisor: {e}");
     match e {
         SupervisorError::Busy(_) => ExecError::Busy,
+        SupervisorError::TooLarge => ExecError::Policy,
         SupervisorError::Room(_)
         | SupervisorError::Group(_)
         | SupervisorError::Spawn(_)
@@ -88,12 +138,12 @@ fn runner_failure(e: SupervisorError) -> ExecError {
 ///
 /// A child that died without answering reaches here as `Unknown` — the leg to it
 /// closed — and the kernel's record of its life says whether its work was the
-/// cause: killed at its own max, with the children's total never reached
-/// meanwhile, is the composition's, the same as a trap — what a child holds
-/// besides the engine is the consumer's composition and, in a round, its policy's
-/// state; anything else stays `Unknown`. Only then is the exit waited for, and
-/// never long: see [`Exit::cause`]. A reply the child did send is kept whatever
-/// became of it.
+/// cause: killed at a limit of its own composition's, with the children's total
+/// never reached meanwhile, is the composition's, the same as a trap — what a
+/// child holds besides the engine is the consumer's composition and, in a round,
+/// its policy's state; anything else stays `Unknown`. Only then is the exit
+/// waited for, and never long: see [`Exit::cause`]. A reply the child did send
+/// is kept whatever became of it.
 async fn child_reply<T>(
     outcome: Result<(Result<T, ExecError>, Exit), SupervisorError>,
 ) -> Result<T, ExecError> {
@@ -143,9 +193,14 @@ pub(crate) struct Supervisor {
     /// The fuel each round's child is given to burn
     /// ([`engine_executor::DEFAULT_ROUND_FUEL`]).
     pub(crate) round_fuel: u64,
+    /// What each round's captures' pictures are held to
+    /// ([`engine_executor::PictureBounds::DEFAULT`]).
+    pub(crate) picture_bounds: engine_executor::PictureBounds,
     /// How many of a child's callbacks may wait on its relay
     /// ([`engine_rpc::DEFAULT_CALLBACK_REQUEST_BUFFER`]).
     pub(crate) callback_request_buffer: usize,
+    /// What each round's group is held to ([`group_limits`]).
+    pub(crate) limits: GroupLimits,
     /// The disposable per-round child runner (spawn + concurrency bound + round
     /// deadline + release), shared with the compile-worker. Its slots are the child
     /// bound, and a round is admitted to one only with room for one more child
@@ -329,7 +384,11 @@ impl Supervisor {
             entry.catalogs.clone(),
             entry.models.clone(),
         );
-        let (fuel, callback_buffer) = (self.round_fuel, self.callback_request_buffer);
+        let (fuel, picture_bounds, callback_buffer) = (
+            self.round_fuel,
+            self.picture_bounds,
+            self.callback_request_buffer,
+        );
         let (relayed, bundles, empty) = (entry.clone(), self.bundles.clone(), self.empty.clone());
         let (inference_exe, media_exe) = (self.inference_exe.clone(), self.media_exe.clone());
         let (capacity_wait, stream_deadline, stream_idle) = (
@@ -350,6 +409,7 @@ impl Supervisor {
             .runner
             .run(
                 &inherit,
+                &self.limits,
                 lease,
                 move |client: RemoteChildClient<Ciborium>, coprocess| async move {
                     // Prime: the child re-opens its inherited fd
@@ -397,6 +457,7 @@ impl Supervisor {
                             event,
                             ByteBuf::from(props),
                             fuel,
+                            picture_bounds,
                             relay_client,
                         )
                         .await
@@ -438,6 +499,7 @@ impl Supervisor {
             .runner
             .run(
                 &[cwasm_fd],
+                &self.limits,
                 lease,
                 move |client: RemoteChildClient<Ciborium>, _| async move {
                     let bundle_ref = BundleRef {
@@ -844,6 +906,13 @@ mod tests {
         ] {
             assert_eq!(runner_failure(e), ExecError::Unknown);
         }
+    }
+
+    /// A composition whose cwasm its limits cannot hold is refused every
+    /// round alike: its own.
+    #[test]
+    fn a_composition_its_limits_cannot_hold_is_the_policy() {
+        assert_eq!(runner_failure(SupervisorError::TooLarge), ExecError::Policy);
     }
 
     fn unattributed() -> Exit {

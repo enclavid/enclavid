@@ -21,7 +21,7 @@ use seccompiler::{
     SeccompRule, TargetArch,
 };
 
-use crate::spawn::Filters;
+use super::spawn::Filters;
 
 /// The architecture the filters are built for. The guest is x86_64; an aarch64
 /// port would have to revisit the lists against its own libc.

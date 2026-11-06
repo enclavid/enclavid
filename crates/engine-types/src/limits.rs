@@ -148,13 +148,6 @@ pub const MAX_MEDIA_DECODES: usize = MAX_CAPTURE_STEPS;
 /// them the video ends.
 pub const MAX_VIDEO_FRAMES: u32 = 900;
 
-/// The longer side of a decoded picture at most, in pixels, whichever way it
-/// is turned.
-pub const MAX_PICTURE_LONG_SIDE: u32 = 1920;
-
-/// The shorter side of a decoded picture at most, in pixels.
-pub const MAX_PICTURE_SHORT_SIDE: u32 = 1080;
-
 // ----- The capture guide -----
 
 /// The narrowest width:height a `rect` capture guide is drawn at. The

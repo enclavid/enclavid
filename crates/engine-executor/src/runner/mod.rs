@@ -250,7 +250,15 @@ impl Executor {
         let round = Round::starting_now();
         let mut store = Store::new(
             &self.engine,
-            HostState::new(props, embedded.clone(), media_store, models, media, round),
+            HostState::new(
+                props,
+                embedded.clone(),
+                media_store,
+                models,
+                media,
+                inputs.picture_bounds,
+                round,
+            ),
         );
         store.set_fuel(inputs.fuel)?;
         let bindings = primed.pre.instantiate_async(&mut store).await?;

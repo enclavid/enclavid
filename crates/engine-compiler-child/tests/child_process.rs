@@ -332,8 +332,15 @@ async fn a_child_starts_and_serves_under_the_production_filter() {
 async fn a_runner_answers_and_gives_back_what_its_child_held() {
     use std::sync::Arc;
 
-    use engine_supervisor::{ChildRunner, ChildTimes, ExitCause, RunnerConfig};
+    use engine_supervisor::{ChildRunner, ChildTimes, ExitCause, GroupLimits, RunnerConfig};
 
+    // Read only by a runner that holds its children's memory, which this one
+    // does not.
+    let limits = GroupLimits {
+        max: 0,
+        child: 0,
+        kinds: Vec::new(),
+    };
     let runner = ChildRunner::new(
         RunnerConfig {
             exe: xtask::child_binary("engine-compiler-child"),
@@ -351,6 +358,7 @@ async fn a_runner_answers_and_gives_back_what_its_child_held() {
         let (answer, exit) = runner
             .run(
                 &[output.as_fd()],
+                &limits,
                 kept.clone(),
                 |client: RemoteCompileChildClient<Ciborium>, _| async move {
                     compile(&client, b"not a wasm component".to_vec(), vec![]).await

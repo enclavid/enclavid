@@ -6,10 +6,12 @@ license.workspace = true
 repository.workspace = true
 
 # The COPROCESS the applicant's captures are decoded in: started beside the
-# round at its word, in the round's group under an identity of its own, one a
-# capture, it reads the photo or the video the round sends — a JPEG, or a WebM
-# of VP8 frames, which libvpx decodes — and answers the round's requests for
-# regions of its pictures over the socket the two were paired with. The parsing
+# round at its word, in the media part of the round's group under an identity
+# of its own: the platform's, beside the round's composition, held to a limit
+# of its own and the first the kernel takes where memory runs out.
+# One a capture, it reads the photo or the video the round sends — a JPEG, or a
+# WebM of VP8 frames, which libvpx decodes — and answers the round's requests
+# for regions of its pictures over the socket the two were paired with. The parsing
 # of the applicant's media lives here and nowhere else in the fleet, so the
 # process that parses it holds that one capture and nothing of the round's own.
 #

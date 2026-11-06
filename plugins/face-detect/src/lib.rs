@@ -37,16 +37,18 @@ impl Guest for FaceDetect {
         }
         // The whole image, averaged down to the size the profile asks for it.
         let d = detect::detect((dim.width, dim.height), |w, h| {
-            image.pixels(PixelsOptions {
-                crop: None,
-                resize: Some(Resize {
-                    size: Size {
-                        width: w,
-                        height: h,
-                    },
-                    mode: ResizeMode::Average,
-                }),
-            })
+            image
+                .pixels(PixelsOptions {
+                    crop: None,
+                    resize: Some(Resize {
+                        size: Size {
+                            width: w,
+                            height: h,
+                        },
+                        mode: ResizeMode::Average,
+                    }),
+                })
+                .ok()
         })?;
         Some(Face {
             bbox: Bbox {
