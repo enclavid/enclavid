@@ -75,8 +75,7 @@ interface capture {
     review-hint: localized-ref,
   }
 
-  /// A video. There is no review screen: what was on screen while it
-  /// recorded is what is sent.
+  /// A video, sent with no review screen.
   record video-spec {
     /// What the page shows while it records, in order: each shown until
     /// the applicant has had time to follow it, then held for its

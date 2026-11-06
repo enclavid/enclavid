@@ -93,9 +93,9 @@ interface media {
     }
 
     /// A picture of the applicant's — a photo, or a frame of a video — as the
-    /// platform decodes it. Nothing is decoded until its pixels are read;
-    /// reading them again decodes nothing again, and a video's frame read out
-    /// of order is decoded from the nearest keyframe before it.
+    /// platform decodes it, when its pixels are first read. Of a video only
+    /// the frame read last is kept: a frame read out of order is decoded
+    /// again from the keyframe before it.
     resource image {
         /// Its size in pixels: its capture's own — or, for a photo larger
         /// than the platform decodes whole, half of it each way. Whether so
@@ -133,7 +133,7 @@ interface media {
         image: func() -> option<image>;
     }
 
-    /// One frame of a video, as its container lists it.
+    /// One frame of a video, as the container the applicant sent lists it.
     record frame {
         /// Its index in the video, from 0.
         index: u32,
