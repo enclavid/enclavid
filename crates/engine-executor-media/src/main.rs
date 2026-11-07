@@ -5,17 +5,19 @@
 //! capture first — a JPEG, or a WebM of VP8 frames: the applicant's upload —
 //! and the coprocess narrows itself to what a decode needs before it parses a
 //! byte of it: read and write on that socket, memory that is never executable,
-//! and an exit. Then it reads what the capture holds — a photo's size, a
-//! video's frames as its container lists them — and answers the round's
-//! requests for regions of its pictures one at a time, decoding a picture when
-//! a region of it is first asked for, until the round lets go of the socket
-//! or a failure ends it.
+//! and an exit, with no clock to time anything by. Then it reads what the
+//! capture holds — a photo's size, a video's frames as its container lists
+//! them — and answers the round's requests for regions of its pictures one at
+//! a time, decoding a picture when a region of it is first asked for, until
+//! the round lets go of the socket or a failure ends it.
 //!
 //! What it makes of the bytes crosses as a fixed failure code, never in
 //! libvpx's or the JPEG decoder's words.
 
 mod photo;
 mod picture;
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tests;
 #[cfg(feature = "video")]
 mod video;
 
@@ -142,16 +144,38 @@ fn serve() -> Result<(), Stop> {
 }
 
 /// Before a byte of the capture is parsed, the coprocess keeps only what a
-/// decode needs: read and write on `socket`, anonymous memory that is never
-/// executable, and its exit. On top of the filter it was started under, which
-/// can only be narrowed, any other call ends it — whatever the applicant's
-/// bytes have made of the demuxer, libvpx or the JPEG decoder.
+/// decode needs: read and write on `socket`, memory as its allocator asks for
+/// it — private, anonymous, read and written, never executed — and its exit.
+/// On top of the filter it was started under, which can only be narrowed, any
+/// other call ends it — whatever the applicant's bytes have made of the
+/// demuxer, libvpx or the JPEG decoder.
 #[cfg(target_os = "linux")]
 fn narrow(socket: RawFd) -> Result<(), Stop> {
+    narrow_to(&filter(socket)?)
+}
+
+/// Take the time-stamp counter, then install `filter` over every thread: with
+/// no call that tells the time, the counter is the one clock left.
+#[cfg(target_os = "linux")]
+fn narrow_to(filter: &seccompiler::BpfProgram) -> Result<(), Stop> {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: changes nothing but whether this process may read the counter.
+    if unsafe { libc::prctl(libc::PR_SET_TSC, libc::PR_TSC_SIGSEGV, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    seccompiler::apply_filter_all_threads(filter)?;
+    Ok(())
+}
+
+/// The filter [`narrow`] installs. The allocator was measured mapping memory
+/// with these protections and flags alone, and calling no `madvise`; `mremap`,
+/// reasoned, is glibc's `realloc` of a block it mapped on its own.
+#[cfg(target_os = "linux")]
+fn filter(socket: RawFd) -> Result<seccompiler::BpfProgram, Stop> {
     use std::collections::BTreeMap;
 
     use seccompiler::{
-        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
         SeccompRule, TargetArch,
     };
 
@@ -161,52 +185,47 @@ fn narrow(socket: RawFd) -> Result<(), Stop> {
     const ARCH: TargetArch = TargetArch::aarch64;
 
     let socket = u64::try_from(socket)?;
-    let on_socket = || -> Result<Vec<SeccompRule>, Stop> {
-        Ok(vec![SeccompRule::new(vec![SeccompCondition::new(
-            0,
-            SeccompCmpArgLen::Dword,
-            SeccompCmpOp::Eq,
-            socket,
-        )?])?])
+    let arg = |index, value| {
+        SeccompCondition::new(index, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, value)
     };
-    let not_executable = SeccompCondition::new(
-        2,
-        SeccompCmpArgLen::Dword,
-        SeccompCmpOp::MaskedEq(libc::PROT_EXEC as u64),
-        0,
-    )?;
-    let anonymous = SeccompCondition::new(
-        3,
-        SeccompCmpArgLen::Dword,
-        SeccompCmpOp::MaskedEq(libc::MAP_ANONYMOUS as u64),
-        libc::MAP_ANONYMOUS as u64,
-    )?;
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
-    rules.insert(libc::SYS_read, on_socket()?);
-    rules.insert(libc::SYS_write, on_socket()?);
+    rules.insert(
+        libc::SYS_read,
+        vec![SeccompRule::new(vec![arg(0, socket)?])?],
+    );
+    rules.insert(
+        libc::SYS_write,
+        vec![SeccompRule::new(vec![arg(0, socket)?])?],
+    );
     rules.insert(
         libc::SYS_mmap,
-        vec![SeccompRule::new(vec![not_executable, anonymous])?],
+        vec![SeccompRule::new(vec![
+            arg(2, (libc::PROT_READ | libc::PROT_WRITE) as u64)?,
+            arg(3, (libc::MAP_PRIVATE | libc::MAP_ANONYMOUS) as u64)?,
+        ])?],
+    );
+    rules.insert(
+        libc::SYS_mremap,
+        vec![SeccompRule::new(vec![arg(
+            3,
+            libc::MREMAP_MAYMOVE as u64,
+        )?])?],
     );
     for sys in [
         libc::SYS_munmap,
-        libc::SYS_mremap,
         libc::SYS_brk,
-        libc::SYS_madvise,
         libc::SYS_exit,
         libc::SYS_exit_group,
     ] {
         rules.insert(sys, Vec::new());
     }
-    let filter: BpfProgram = SeccompFilter::new(
+    Ok(SeccompFilter::new(
         rules,
         SeccompAction::KillProcess,
         SeccompAction::Allow,
         ARCH,
     )?
-    .try_into()?;
-    seccompiler::apply_filter_all_threads(&filter)?;
-    Ok(())
+    .try_into()?)
 }
 
 #[cfg(not(target_os = "linux"))]

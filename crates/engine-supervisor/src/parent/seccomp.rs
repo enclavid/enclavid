@@ -206,11 +206,12 @@ fn allowlist(of: Filters) -> BpfProgram {
     //
     // `FIONBIO` is a `c_ulong` on glibc and a `c_int` on musl.
     // A coprocess may narrow itself further once it is ready — a filter of its
-    // own on top of this one, which can only refuse more — and do nothing else
-    // with either call: `no_new_privs`, which it already has, and a filter
-    // installed over every thread at once, `TSYNC`, and with no other flag.
-    // Another flag could open a listener another process answers its calls
-    // through, or let speculation past what the kernel guards it with.
+    // own on top of this one, which can only refuse more, and the time-stamp
+    // counter taken from itself — and do nothing else with either call:
+    // `no_new_privs`, which it already has, and a filter installed over every
+    // thread at once, `TSYNC`, and with no other flag. Another flag could open
+    // a listener another process answers its calls through, or let
+    // speculation past what the kernel guards it with.
     //
     // And its memory is memory it writes or reads, never memory it runs: ONNX
     // Runtime's CPU kernels are compiled in and nothing in a coprocess makes
@@ -246,6 +247,23 @@ fn allowlist(of: Filters) -> BpfProgram {
                     .expect("build prctl-option condition"),
                 ])
                 .expect("build prctl rule"),
+                SeccompRule::new(vec![
+                    SeccompCondition::new(
+                        0,
+                        SeccompCmpArgLen::Dword,
+                        SeccompCmpOp::Eq,
+                        libc::PR_SET_TSC as u64,
+                    )
+                    .expect("build prctl-option condition"),
+                    SeccompCondition::new(
+                        1,
+                        SeccompCmpArgLen::Qword,
+                        SeccompCmpOp::Eq,
+                        libc::PR_TSC_SIGSEGV as u64,
+                    )
+                    .expect("build prctl-tsc condition"),
+                ])
+                .expect("build prctl-tsc rule"),
             ],
         );
         rules.insert(

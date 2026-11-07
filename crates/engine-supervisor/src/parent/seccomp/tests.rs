@@ -373,6 +373,19 @@ fn each_call_ends_as_listed() {
         call!(libc::SYS_prctl, libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0),
         Survived,
     ));
+    // The time-stamp counter taken from itself, never given back.
+    rows.push((
+        "prctl(PR_SET_TSC, PR_TSC_SIGSEGV)",
+        call!(
+            libc::SYS_prctl,
+            libc::PR_SET_TSC,
+            libc::PR_TSC_SIGSEGV,
+            0,
+            0,
+            0
+        ),
+        Survived,
+    ));
     rows.push((
         "seccomp(SET_MODE_FILTER, NEW_LISTENER)",
         call!(
@@ -403,6 +416,19 @@ fn each_call_ends_as_listed() {
         (
             "prctl(PR_SET_NAME)",
             call!(libc::SYS_prctl, libc::PR_SET_NAME, c"probe".as_ptr()),
+            Survived,
+            Killed,
+        ),
+        (
+            "prctl(PR_SET_TSC, PR_TSC_ENABLE)",
+            call!(
+                libc::SYS_prctl,
+                libc::PR_SET_TSC,
+                libc::PR_TSC_ENABLE,
+                0,
+                0,
+                0
+            ),
             Survived,
             Killed,
         ),

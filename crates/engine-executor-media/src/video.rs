@@ -6,6 +6,7 @@
 
 use std::io::Cursor;
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use enclavid_media::protocol::{Failure, FrameInfo, PictureBounds, Region, Size};
 use engine_types::limits::MAX_VIDEO_FRAMES;
@@ -47,6 +48,10 @@ const VIDEO_TRACK: u64 = 1;
 /// The nanoseconds a tick of the container's clock is where it does not say.
 const DEFAULT_TICK_NS: u64 = 1_000_000;
 
+/// Whether this process has opened a video: the shim holds one decoder a
+/// process, so one opens.
+static OPENED: AtomicBool = AtomicBool::new(false);
+
 /// One frame of the video, as the container lists it.
 struct Listed {
     info: FrameInfo,
@@ -86,6 +91,9 @@ impl Video {
     /// and the frames of that track's blocks, up to the first the reading
     /// cannot take.
     pub fn open(webm: Vec<u8>, bounds: PictureBounds) -> Result<Self, Failure> {
+        if OPENED.swap(true, Ordering::Relaxed) {
+            return Err(Failure::OutOfTurn);
+        }
         let mut tags = WebmIterator::new(Cursor::new(webm.as_slice()), &[]);
         // A tag's bytes are held before they are read: never more of them
         // than the file has.
@@ -246,7 +254,9 @@ impl Video {
         // SAFETY: libvpx's I420 picture holds `stride` bytes a row for each
         // row of each plane — at least its width, as just checked — so each
         // slice lies inside its plane; and the picture stays as it is until
-        // the next decode, which the borrow of `self` rules out.
+        // the next decode, which the borrow of `self` rules out. The stride's
+        // padding past a row's border, which libvpx never writes, lies inside
+        // the slices too; nothing reads it, a row being read to its width.
         let (y, u, v) = unsafe {
             (
                 std::slice::from_raw_parts(y, y_len),
