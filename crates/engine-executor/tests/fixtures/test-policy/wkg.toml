@@ -6,9 +6,10 @@
 "enclavid:host-icons" = { path = "../../../../../wit/host-icons" }
 "enclavid:extra" = { path = "../test-extra/wit" }
 "enclavid:face-age" = { path = "../../../../../plugins/face-age/wit" }
-"enclavid:preprocess" = { path = "../../../../../plugins/preprocess/wit" }
 "enclavid:face-detect" = { path = "../../../../../plugins/face-detect/wit" }
 "enclavid:vision" = { path = "../../../../../plugins/vision/wit" }
 "enclavid-ext:policy" = { path = "ext" }
 "enclavid-ext:well-known" = { path = "../../../../../plugins/well-known/ext" }
 "enclavid-ext:extra" = { path = "../test-extra/ext" }
+"enclavid-ext:face-age" = { path = "../../../../../plugins/face-age/ext" }
+"enclavid-ext:face-detect" = { path = "../../../../../plugins/face-detect/ext" }

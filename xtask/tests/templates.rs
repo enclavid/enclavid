@@ -14,8 +14,8 @@ fn repo() -> PathBuf {
         .to_path_buf()
 }
 
-/// Every `.wit` file in `dir`, by name.
-fn wit_files(dir: &Path) -> Vec<String> {
+/// Every name in `dir` that `keep` keeps, sorted.
+fn names(dir: &Path, keep: impl Fn(&str) -> bool) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
         .map(|entry| {
@@ -25,46 +25,99 @@ fn wit_files(dir: &Path) -> Vec<String> {
                 .into_string()
                 .expect("a UTF-8 name")
         })
-        .filter(|name| name.ends_with(".wit"))
+        .filter(|name| keep(name))
         .collect();
     names.sort();
     names
 }
 
+/// Every `.wit` file in `dir`, by name.
+fn wit_files(dir: &Path) -> Vec<String> {
+    names(dir, |name| name.ends_with(".wit"))
+}
+
+/// A copy under `wit/deps`: its directory, its source, and the one file it
+/// copies of the source, or all of them.
+type Copy = (&'static str, &'static str, Option<&'static str>);
+
+/// What every template copies: the platform's WIT, and well-known's, for the
+/// capture specs.
+const PLATFORM: [Copy; 6] = [
+    ("host", "wit/host", None),
+    ("host-icons", "wit/host-icons", None),
+    ("policy", "wit/policy", None),
+    ("shared-types", "wit/shared-types", None),
+    ("well-known", "plugins/well-known/wit", Some("world.wit")),
+    (
+        "well-known-texts",
+        "plugins/well-known/ext",
+        Some("i18n.wit"),
+    ),
+];
+
+/// What a template that reads a face copies besides: the vision plugin's
+/// package and the face plugins', whose packages name their slots.
+const FACES: [Copy; 5] = [
+    ("vision", "plugins/vision/wit", Some("world.wit")),
+    ("face-detect", "plugins/face-detect/wit", Some("world.wit")),
+    (
+        "face-detect-models",
+        "plugins/face-detect/ext",
+        Some("models.wit"),
+    ),
+    ("face-age", "plugins/face-age/wit", Some("world.wit")),
+    (
+        "face-age-models",
+        "plugins/face-age/ext",
+        Some("models.wit"),
+    ),
+];
+
+/// WASI's copy is not checked: it is the registry's, and the host serves any
+/// 0.2.x of it on its semver track.
+const WASI: &str = "wasi-random";
+
 #[test]
-fn the_typescript_template_carries_the_wit_it_copies() {
+fn the_typescript_templates_carry_the_wit_they_copy() {
     let repo = repo();
-    let deps = repo.join("templates/policy-ts-qjs/wit/deps");
-    // A copy of a whole directory, or of the one file named. WASI's copy is not
-    // among them: it is the registry's, and the host serves any 0.2.x of it on
-    // its semver track.
-    for (copy, source, only) in [
-        ("host", "wit/host", None),
-        ("policy", "wit/policy", None),
-        ("shared-types", "wit/shared-types", None),
-        ("well-known", "plugins/well-known/wit", Some("world.wit")),
-    ] {
-        let copy = deps.join(copy);
-        let source = repo.join(source);
-        let names = wit_files(&copy);
-        if let Some(only) = only {
-            assert_eq!(names, [only], "{}", copy.display());
-        } else {
-            assert_eq!(
-                names,
-                wit_files(&source),
-                "{} lists other files",
-                copy.display()
-            );
-        }
-        for name in names {
-            assert_eq!(
-                fs::read(copy.join(&name)).expect("the copy"),
-                fs::read(source.join(&name)).expect("its source"),
-                "{} differs from {}; copy it again",
-                copy.join(&name).display(),
-                source.join(&name).display(),
-            );
+    let faces: Vec<Copy> = PLATFORM.iter().chain(&FACES).copied().collect();
+    for (template, copies) in [("kyc", &PLATFORM[..]), ("age-verification", &faces[..])] {
+        let deps = repo
+            .join("templates/typescript")
+            .join(template)
+            .join("wit/deps");
+        let mut expected: Vec<String> = copies.iter().map(|(copy, ..)| copy.to_string()).collect();
+        expected.push(WASI.into());
+        expected.sort();
+        assert_eq!(
+            names(&deps, |_| true),
+            expected,
+            "{} holds other copies",
+            deps.display()
+        );
+        for &(copy, source, only) in copies {
+            let copy = deps.join(copy);
+            let source = repo.join(source);
+            let names = wit_files(&copy);
+            if let Some(only) = only {
+                assert_eq!(names, [only], "{}", copy.display());
+            } else {
+                assert_eq!(
+                    names,
+                    wit_files(&source),
+                    "{} lists other files",
+                    copy.display()
+                );
+            }
+            for name in names {
+                assert_eq!(
+                    fs::read(copy.join(&name)).expect("the copy"),
+                    fs::read(source.join(&name)).expect("its source"),
+                    "{} differs from {}; copy it again",
+                    copy.join(&name).display(),
+                    source.join(&name).display(),
+                );
+            }
         }
     }
 }

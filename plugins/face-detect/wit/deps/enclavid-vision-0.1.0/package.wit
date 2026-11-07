@@ -1,17 +1,15 @@
 package enclavid:vision@0.1.0;
 
-/// Shared vision-pipeline vocabulary — the `decoded-frame` pixel resource
-/// plus face geometry, referenced by every vision plugin (preprocess
-/// produces `decoded-frame`; face-detect produces `face`; age / liveness /
-/// face-match consume). A NEUTRAL package (not the host, not any single
-/// plugin's namespace) so all plugins share ONE type without coupling to
-/// each other.
+/// The vocabulary every plugin that reads a picture shares — the
+/// `decoded-frame` pixel resource plus face geometry (face-detect produces
+/// `face`; age / liveness / face-match consume it). The plugins share ONE
+/// type, which this package's plugin defines and serves.
 ///
 /// Unlike `clip` (host-owned, in `enclavid:host/types` — the TRUSTED,
 /// unforgeable capture input the runtime mints), `decoded-frame` is DERIVED
-/// by the preprocess plugin from a `clip`, so it is PLUGIN-owned: the decode
-/// of the untrusted JPEG, the pixel storage, and the `region` resample all
-/// stay inside the preprocess sandbox — the host / TCB touches no pixels.
+/// by this plugin from a `clip`, so it is PLUGIN-owned: the decode of the
+/// untrusted JPEG, the pixel storage, and the `region` resample all stay
+/// inside this plugin's sandbox — the host / TCB touches no pixels.
 interface types {
   /// A region of interest, normalized `[0,1]` over the source frame.
   record bbox {
@@ -39,17 +37,17 @@ interface types {
     score: f32,
   }
 
-  /// Decoded pixels of one frame, produced and OWNED by the preprocess
-  /// plugin. `region` crops `[x,y,w,h]` (source px, clamped) and
-  /// nearest-neighbour resamples to `out-w × out-h` RGB8 (row-major), so
-  /// every consumer pulls ITS resolution from ONE decode. No constructor:
-  /// only the preprocess plugin (the implementer) creates instances.
   /// The pixel dimensions of a decoded frame.
   record size {
     width: u32,
     height: u32,
   }
 
+  /// Decoded pixels of one frame, produced and OWNED by this plugin.
+  /// `region` crops `[x,y,w,h]` (source px, clamped) and nearest-neighbour
+  /// resamples to `out-w × out-h` RGB8 (row-major), so every consumer pulls
+  /// ITS resolution from ONE decode. No constructor: only this plugin
+  /// creates instances, by `decode`.
   resource decoded-frame {
     /// Source dimensions of the decoded buffer — both in one call (every
     /// consumer needs the pair to map a normalized box to source px).
@@ -59,3 +57,34 @@ interface types {
   }
 }
 
+/// Decode a capture frame into a shared `decoded-frame`. The decode of the
+/// untrusted JPEG runs HERE (sandboxed), and the pixels stay in this
+/// plugin's memory — downstream face checks pull crops via
+/// `decoded-frame.region`, so one decode serves all of them.
+interface decode {
+  use enclavid:host/types@0.1.0.{blob};
+  use types.{decoded-frame};
+
+  /// Source-decode fidelity tier. The caller materializes the tier(s) its
+  /// plugin set needs — `eighth` for a detector alone (it reads the whole
+  /// frame at a small side); `half` and up where a model reads the face's
+  /// own crop, which an eighth of a selfie leaves a few dozen pixels.
+  enum scale {
+    eighth,
+    quarter,
+    half,
+    full,
+  }
+
+  /// Decode one captured frame `blob` at `scale` → a `decoded-frame`.
+  /// `none` = the blob is undecodable (the caller asks for a retake). The
+  /// caller picks which frame of the clip to decode and borrows it here.
+  decode: func(frame: borrow<blob>, scale: scale) -> option<decoded-frame>;
+}
+
+world vision {
+  import enclavid:host/types@0.1.0;
+
+  export types;
+  export decode;
+}

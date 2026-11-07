@@ -29,9 +29,10 @@ pub const EXTRA_PACKAGE: &str = "enclavid:extra@0.1.0";
 /// Package id of the face-age plugin the policy calls on the selfie round.
 /// Ships no embedded catalog, so it imports no slot.
 pub const FACE_AGE_PACKAGE: &str = "enclavid:face-age@0.1.0";
-/// Package id of the preprocess plugin — decodes the selfie `clip` into the
-/// plugin-owned `decoded-frame` the policy threads to face-age.
-pub const PREPROCESS_PACKAGE: &str = "enclavid:preprocess@0.1.0";
+/// Package id of the vision plugin — decodes the selfie `clip` into the
+/// plugin-owned `decoded-frame` the policy threads to face-detect and
+/// face-age.
+pub const VISION_PACKAGE: &str = "enclavid:vision@0.1.0";
 /// Package id of the face-detect plugin — locates the `face` in the
 /// decoded-frame, which the policy threads to face-age.
 pub const FACE_DETECT_PACKAGE: &str = "enclavid:face-detect@0.1.0";
@@ -49,7 +50,7 @@ fn plugin_dir(name: &str) -> String {
     format!("{}/../plugins/{name}", env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Plugins that are members of the `plugins/` workspace emit into its SHARED
+/// The plugins, all members of the `plugins/` workspace, emit into its SHARED
 /// target dir, not their own crate dir.
 fn shared_plugin_module(name: &str) -> String {
     format!(
@@ -85,9 +86,11 @@ pub fn well_known() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
         .get_or_init(|| {
-            let dir = plugin_dir("well-known");
-            let module = format!("{dir}/target/wasm32-unknown-unknown/release/well_known.wasm");
-            build(dir, module, Role::Plugin)
+            build(
+                plugin_dir("well-known"),
+                shared_plugin_module("well_known"),
+                Role::Plugin,
+            )
         })
         .as_slice()
 }
@@ -145,15 +148,16 @@ pub fn face_age_mivolo() -> &'static [u8] {
         .as_slice()
 }
 
-/// The `enclavid:preprocess` plugin — OWNS the `decoded-frame` resource
-/// (exports `enclavid:vision/types`) and imports the host `clip`; no texts.
-pub fn preprocess() -> &'static [u8] {
+/// The `enclavid:vision` plugin — OWNS the `decoded-frame` resource (exports
+/// `enclavid:vision/types`), decodes the host `clip` into it
+/// (`enclavid:vision/decode`); no texts.
+pub fn vision() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
         .get_or_init(|| {
             build(
-                plugin_dir("preprocess"),
-                shared_plugin_module("preprocess"),
+                plugin_dir("vision"),
+                shared_plugin_module("vision"),
                 Role::Plugin,
             )
         })
@@ -161,7 +165,7 @@ pub fn preprocess() -> &'static [u8] {
 }
 
 /// The `enclavid:face-detect` plugin — imports `enclavid:vision/types` (reads
-/// the preprocess-owned `decoded-frame`) and exports `detect`; no texts.
+/// the vision plugin's `decoded-frame`) and exports `detect`; no texts.
 /// The default build is the weightless placeholder (whole frame as the face).
 pub fn face_detect() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
@@ -172,6 +176,30 @@ pub fn face_detect() -> &'static [u8] {
                 shared_plugin_module("face_detect"),
                 Role::Plugin,
             )
+        })
+        .as_slice()
+}
+
+/// The `enclavid:face-detect` plugin built as the artifact whose detector the
+/// host runs (`--features blazeface`): its `with-models` world imports its
+/// slot, `enclavid-ext:face-detect/models`, whose `detector` is BlazeFace. The
+/// model is not in it: a composition names its graph as the layer
+/// `detector.onnx`. Built in a target directory of its own, so it and the
+/// default build never stand in for each other.
+pub fn face_detect_blazeface() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| {
+            let dir = plugin_dir("face-detect");
+            let target = format!("{}/../plugins/target/blazeface", env!("CARGO_MANIFEST_DIR"));
+            let module = format!("{target}/wasm32-unknown-unknown/release/face_detect.wasm");
+            crate::embed_sections(
+                crate::build_componentized_with(&dir, &["blazeface"], &target, &module)
+                    .expect("build_componentized_with"),
+                &dir,
+                Role::Plugin,
+            )
+            .expect("the catalogs embed")
         })
         .as_slice()
 }
@@ -201,7 +229,7 @@ pub fn all_plugins() -> Vec<(&'static str, &'static [u8])> {
     vec![
         (WELL_KNOWN_PACKAGE, well_known()),
         (EXTRA_PACKAGE, extra()),
-        (PREPROCESS_PACKAGE, preprocess()),
+        (VISION_PACKAGE, vision()),
         (FACE_DETECT_PACKAGE, face_detect()),
         (FACE_AGE_PACKAGE, face_age()),
     ]

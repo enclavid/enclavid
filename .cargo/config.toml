@@ -1,5 +1,5 @@
 [alias]
 # `cargo xtask <cmd>` — repo dev tasks (see the `xtask` crate). E.g.
-# `cargo xtask push-plugins` builds + componentizes + embeds + pushes the
-# plugins to the OCI registry.
+# `cargo xtask build-plugins <dir>` builds + componentizes + embeds every
+# plugin as it is published.
 xtask = "run --package xtask --"

@@ -50,12 +50,12 @@ use enclavid::well_known::disclosure_fields as wk;
 // Second plugin (linked at runtime in the hybrid test): its `get()` is
 // `extra-tag`, one of the extra plugin's own texts.
 use enclavid::extra::tag;
-// The vision substrate, threaded across the fused boundary: preprocess
+// The vision substrate, threaded across the fused boundary: the vision plugin
 // decodes the selfie clip into a plugin-owned `decoded-frame`, face-detect
 // locates the `face` in it, face-age reads its crop and estimates.
 use enclavid::face_age::check as face_age;
 use enclavid::face_detect::detect as face_detect;
-use enclavid::preprocess::decode as preprocess;
+use enclavid::vision::decode as vision;
 use exports::enclavid::policy::policy::Guest;
 
 struct TestPolicy;
@@ -227,8 +227,8 @@ impl Guest for TestPolicy {
             },
 
             // Selfie captured → the full vision substrate across the fused
-            // boundary: preprocess decodes the clip into a plugin-owned
-            // `decoded-frame` (pixels stay in the preprocess sandbox),
+            // boundary: the vision plugin decodes the clip into a plugin-owned
+            // `decoded-frame` (pixels stay in that plugin's sandbox),
             // face-detect locates the `face`, face-age pulls its crop via
             // `region` and estimates. The policy just threads the handles.
             // `none` at any step (undecodable / no face / model failure) →
@@ -247,12 +247,14 @@ impl Guest for TestPolicy {
                 if !skip_passport_read() {
                     let _passport_bytes = passport.bytes();
                 }
-                // Vision DAG on the SELFIE frame: preprocess decodes it into a
-                // plugin-owned `decoded-frame`, face-detect locates the `face`,
-                // face-age reads its crop and estimates. The policy threads the
-                // handles.
+                // Vision DAG on the SELFIE frame: the vision plugin decodes it
+                // into a plugin-owned `decoded-frame`, face-detect locates the
+                // `face`, face-age reads its crop and estimates. The policy
+                // threads the handles. Half the camera's size leaves a selfie's
+                // face a hundred pixels and more, which an age model reads; an
+                // eighth leaves it a few dozen.
                 let age = result.clip.frames.first().and_then(|frame| {
-                    preprocess::decode(frame, preprocess::Scale::Eighth).and_then(|df| {
+                    vision::decode(frame, vision::Scale::Half).and_then(|df| {
                         face_detect::detect(&df).and_then(|face| face_age::estimate(&df, &face))
                     })
                 });

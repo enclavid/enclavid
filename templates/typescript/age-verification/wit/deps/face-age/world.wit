@@ -1,0 +1,51 @@
+package enclavid:face-age@0.1.0;
+
+/// Facial age estimation from a detected face.
+///
+/// This is a MODEL-AGNOSTIC contract: any estimator (SSR-Net, genderage,
+/// MiVOLO, …) satisfies it by shipping a distinct OCI artifact that exports
+/// this interface. The model is chosen per session via the pinned
+/// `impl_ref` in `POST /sessions`, and its identity is the artifact's OCI
+/// digest (measured / attested) — so the model name lives on the artifact
+/// (`face-age-ssrnet`, …), never in this WIT package.
+interface check {
+    use enclavid:vision/types@0.1.0.{decoded-frame, face};
+
+    /// The estimator's read on a face: `age` in years, a FACT the policy
+    /// acts on. The policy owns the threshold — and because a facial
+    /// estimate is inherently fuzzy and can't resolve a precise 18 cut, it
+    /// applies a conservative BUFFER (a challenge-age well above 18) and
+    /// escalates the buffer zone to the authoritative document DOB.
+    ///
+    /// No `confidence`: it isn't uniform across models (softmax has one,
+    /// regression doesn't); the policy handles uncertainty via the buffer +
+    /// capture-quality checks.
+    record age-estimate {
+        age: f32,
+    }
+
+    /// Estimate the subject's age from the detected `face` in `frame`. The
+    /// plugin pulls its OWN crop (`face.bbox` grown by the model's context
+    /// margin) from `frame` via `region`, so it sees only the face patch at
+    /// its model resolution — one shared decode, per-model crop. `none` =
+    /// unusable input (the policy asks for a retake / escalates).
+    estimate: func(frame: borrow<decoded-frame>, face: face) -> option<age-estimate>;
+}
+
+world face-age {
+    // The shared vision vocabulary: `decoded-frame` (owned by the vision
+    // plugin — face-age just reads crops from it) and `face` geometry (from
+    // the face-detect plugin). No host dependency, no embedded catalog → no
+    // strict-routing twin.
+    import enclavid:vision/types@0.1.0;
+    export check;
+}
+
+/// An estimator whose model the host runs: the model's graph and its data
+/// file are layers beside the component — named for the function of its slot
+/// that hands the model out — and only the face crop leaves the sandbox, to
+/// that model, in a process of its own.
+world with-models {
+    include face-age;
+    import enclavid-ext:face-age/models@0.1.0;
+}

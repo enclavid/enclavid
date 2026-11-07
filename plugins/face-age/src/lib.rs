@@ -1,28 +1,15 @@
 //! `enclavid:face-age` — facial age estimation from a detected face.
 //!
-//! The pipeline is now split across plugins: the preprocess plugin decodes
-//! the capture into a `decoded-frame`, the face-detect plugin locates the
-//! face (`face` geometry), and this plugin pulls its OWN crop from the frame
+//! The pipeline is split across plugins: the vision plugin decodes the
+//! capture into a `decoded-frame`, the face-detect plugin locates the face
+//! (`face` geometry), and this plugin pulls its OWN crop from the frame
 //! (`face.bbox` grown by the model's margin, via `region`) and runs the age
-//! model. The pixels stay in the preprocess sandbox; face-age reads only the
-//! face patch at its model resolution. Inference lives in [`infer`]: the
-//! per-model profile (normalize + model + decode) — in the sandbox, or, built
-//! with `mivolo`, MiVOLO run by the host from the model files beside this
-//! component.
+//! model. The pixels stay in the vision plugin's sandbox; face-age reads only
+//! the face patch at its model resolution. Inference lives in [`infer`]: the
+//! per-model profile — a placeholder with no model, or, built with `mivolo`,
+//! MiVOLO run by the host from the model files beside this component.
 
 mod infer;
-
-// getrandom has no backend on wasm32-unknown-unknown (no OS, no WASI, no
-// JS). tract pulls it only for hashmap seeding over trusted (embedded
-// model) keys, so a deterministic no-op is safe. Wasm-only; native builds
-// (unit tests) use the OS backend.
-#[cfg(target_arch = "wasm32")]
-getrandom::register_custom_getrandom!(no_entropy);
-#[cfg(target_arch = "wasm32")]
-fn no_entropy(buf: &mut [u8]) -> Result<(), getrandom::Error> {
-    buf.fill(0);
-    Ok(())
-}
 
 #[cfg(not(feature = "mivolo"))]
 wit_bindgen::generate!({
@@ -65,8 +52,8 @@ impl Guest for FaceAge {
             return None;
         }
         // Pull the face patch at the size the model's profile asks for — one
-        // shared decode (owned by preprocess), the crop resampled in that
-        // sandbox.
+        // shared decode (owned by the vision plugin), the crop resampled in
+        // that sandbox.
         let (x, y, w, h) = crop_px(&face.bbox, dim.width, dim.height, infer::MARGIN);
         infer::estimate((w, h), |out_w, out_h| {
             frame.region(x, y, w, h, out_w, out_h)

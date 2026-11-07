@@ -6838,7 +6838,6 @@ dependencies = [
  "anyhow",
  "clap",
  "enclavid-embedded",
- "serde_json",
  "wit-component 0.247.0",
 ]
 

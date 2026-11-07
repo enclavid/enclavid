@@ -33,7 +33,7 @@ interface check {
 }
 
 world face-age {
-    // The shared vision vocabulary: `decoded-frame` (owned by the preprocess
+    // The shared vision vocabulary: `decoded-frame` (owned by the vision
     // plugin — face-age just reads crops from it) and `face` geometry (from
     // the face-detect plugin). No host dependency, no embedded catalog → no
     // strict-routing twin.

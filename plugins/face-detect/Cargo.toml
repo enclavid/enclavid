@@ -8,26 +8,14 @@ publish = false
 crate-type = ["cdylib"]
 
 [features]
-# Real detector: embeds a BlazeFace ONNX from the FACE_DETECT_MODEL build
-# path (include_bytes) and switches the profile to a 128² RGB [-1,1] forward
-# pass. The garavv export bakes anchor-decode + sigmoid + NMS into the graph
-# → tract returns already-decoded, already-NMS'd boxes (no anchor table / NMS
-# in Rust). Default (off) = placeholder (whole frame, no model, no weights).
-# Enable with a model present:
-#   FACE_DETECT_MODEL=/abs/blaze.onnx cargo build --features blazeface ...
-blazeface = ["dep:onnx-core"]
+# Build the artifact whose detector the host runs: the `with-models` world,
+# which imports this plugin's slot, `enclavid-ext:face-detect/models`, whose
+# `detector` is MediaPipe's BlazeFace (short range) with its anchor decoding,
+# sigmoid and NMS in the graph. The model is not in the component: its graph is
+# pushed beside it as the layer `detector.onnx`. Profile: the frame kept whole
+# on a black square of 128², RGB in `[-1, 1]`. Default (off) = placeholder
+# (whole frame, no model).
+blazeface = []
 
 [dependencies]
 wit-bindgen = "0.57"
-# tract runtime — only the real detector profile pulls it (the placeholder
-# needs no model). No `vision` dep: the plugin resizes the whole frame to the
-# detector input via `decoded-frame.region`, so the detector logic works on
-# an already-resized RGB patch.
-onnx-core = { path = "../onnx-core", optional = true }
-
-# getrandom (pulled transitively via onnx-core → tract for hashmap seeding)
-# has no backend on wasm32-unknown-unknown; the `custom` feature + the no-op
-# registration in lib.rs cover it. The default (placeholder) build pulls no
-# tract, so the registration is gated on `blazeface`.
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2", features = ["custom"] }
