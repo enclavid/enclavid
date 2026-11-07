@@ -148,6 +148,13 @@ pub const MAX_MEDIA_DECODES: usize = MAX_CAPTURE_STEPS;
 /// them the video ends.
 pub const MAX_VIDEO_FRAMES: u32 = 900;
 
+/// How long one ask of a decoding process may take, in seconds. Past it the
+/// capture is undecoded from there on, and the round goes on rather than
+/// waiting out its own deadline: a process that has not answered by now is one
+/// the applicant's bytes have stalled. Measured, the longest a decode took of
+/// a capture at the bounds was under two seconds.
+pub const MEDIA_ASK_SECS: u64 = 30;
+
 // ----- The capture guide -----
 
 /// The narrowest width:height a `rect` capture guide is drawn at. The

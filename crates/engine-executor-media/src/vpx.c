@@ -35,15 +35,21 @@ int enclavid_vpx_start(void) {
 }
 
 // Decodes one compressed frame. Returns 1 when a picture came out, 0 when none
-// did, -1 when the frame does not decode or its picture is not I420. The
-// picture stays readable until the next call.
+// did, -1 when the frame does not decode, its picture is not I420, or the
+// decoder built that picture over data it reports as damaged — which is the
+// decoder's own reconstruction, not what the camera recorded. The picture
+// stays readable until the next call.
 int enclavid_vpx_decode(const uint8_t *data, uint32_t size) {
   picture = NULL;
   if (vpx_codec_decode(&ctx, data, size, NULL, 0) != VPX_CODEC_OK) return -1;
   vpx_codec_iter_t it = NULL;
   picture = vpx_codec_get_frame(&ctx, &it);
   if (!picture) return 0;
-  if (picture->fmt != VPX_IMG_FMT_I420) {
+  int damaged = 0;
+  if (picture->fmt != VPX_IMG_FMT_I420 ||
+      vpx_codec_control(&ctx, VP8D_GET_FRAME_CORRUPTED, &damaged) !=
+          VPX_CODEC_OK ||
+      damaged) {
     picture = NULL;
     return -1;
   }

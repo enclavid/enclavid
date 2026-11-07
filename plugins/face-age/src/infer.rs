@@ -21,6 +21,11 @@ use placeholder as profile;
 /// model sees it.
 pub const MARGIN: f32 = profile::MARGIN;
 
+/// The fewest of the picture's pixels the crop must span each way for the
+/// profile to read an age from it; `None` where it reads any. The host holds
+/// the crop to it and gives no pixels for a smaller one.
+pub const MIN: Option<u32> = profile::MIN;
+
 /// Estimate age (years) from the face crop `region` reads: a source rect of
 /// `crop` pixels, resampled to the size it is asked for, row-major RGB8 — or
 /// nothing, where the image does not decode. `None` if the face is unusable,
@@ -38,6 +43,8 @@ mod placeholder {
     /// The side the crop is read at: enough for a mean.
     pub const SIDE: u32 = 8;
     pub const MARGIN: f32 = 1.0;
+    /// A mean reads at any size.
+    pub const MIN: Option<u32> = None;
 
     /// An age from the crop's mean brightness, from 0 for black to 60 for
     /// white — so the pipeline runs end to end with no model, and a gray
@@ -70,7 +77,7 @@ mod mivolo {
     /// reads an age from. A smaller one is blown up to the graph's side and
     /// read far off: a face of 42 read 17 at 13 pixels and 31 at 23, and 38
     /// to 44 from 48 up — a margin above that for a real camera's blur.
-    pub const MIN_SIDE: u32 = 64;
+    pub const MIN: Option<u32> = Some(64);
     /// ImageNet's per-channel mean and spread, RGB, over values in `[0, 1]`.
     const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
     const STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -82,9 +89,6 @@ mod mivolo {
         crop: (u32, u32),
         region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
     ) -> Option<f32> {
-        if crop.0.min(crop.1) < MIN_SIDE {
-            return None;
-        }
         let (w, h) = fit(crop)?;
         let face = letterbox(&region(w, h)?, w as usize, h as usize)?;
         let input = TensorF32::new(&[1, 6, SIDE as u64, SIDE as u64], &input(&face));
@@ -165,15 +169,15 @@ mod tests {
     //   cargo test -p face-age --features mivolo --target aarch64-apple-darwin
     #[cfg(feature = "mivolo")]
     mod mivolo {
-        use super::super::mivolo::{MIN_SIDE, SIDE, decode, estimate, fit, input, letterbox};
+        use super::super::mivolo::{MIN, SIDE, decode, estimate, fit, input, letterbox};
 
-        /// A face smaller than MiVOLO reads gives no age, and its pixels are
-        /// never asked for.
+        /// A face the host gives no pixels for — one spanning fewer than
+        /// [`MIN`] of them — gives no age.
         #[test]
         fn a_face_too_small_gives_no_age() {
-            let never = |_, _| -> Option<Vec<u8>> { unreachable!("no pixels read") };
-            assert_eq!(estimate((MIN_SIDE - 1, 300), never), None);
-            assert_eq!(estimate((300, MIN_SIDE - 1), never), None);
+            let small = MIN.expect("a minimum") - 1;
+            assert_eq!(estimate((small, 300), |_, _| None), None);
+            assert_eq!(estimate((300, small), |_, _| None), None);
         }
 
         /// A crop fits the square whole, its longer side on the square's,

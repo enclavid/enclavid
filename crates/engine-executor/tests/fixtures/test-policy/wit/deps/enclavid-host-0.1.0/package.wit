@@ -124,9 +124,9 @@ interface media {
   enum pixels-error {
     /// The picture does not decode.
     undecoded,
-    /// The part asked for spans fewer of the picture's pixels than it
-    /// must.
-    too-small,
+    /// The part asked for spans fewer of the picture's pixels than the
+    /// crop's minimum.
+    below-minimum,
   }
 
   /// A picture of the applicant's — a photo, or a frame of a video — as the

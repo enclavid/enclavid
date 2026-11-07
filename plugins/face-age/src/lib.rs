@@ -55,8 +55,8 @@ impl Guest for FaceAge {
         // decode, the host's, the crop averaged down by the platform's
         // process that holds it.
         let rect = grown(&face.bbox, infer::MARGIN);
-        // About as many of the picture's pixels as the crop spans: what the
-        // model's profile judges the face by.
+        // About as many of the picture's pixels as the crop spans: the shape
+        // the model's profile asks for its pixels in.
         let spanned = (
             (rect.width * dim.width as f32).max(1.0) as u32,
             (rect.height * dim.height as f32).max(1.0) as u32,
@@ -66,8 +66,8 @@ impl Guest for FaceAge {
                 .pixels(PixelsOptions {
                     crop: Some(Crop {
                         rect,
-                        min_width: None,
-                        min_height: None,
+                        min_width: infer::MIN,
+                        min_height: infer::MIN,
                     }),
                     resize: Some(Resize {
                         size: Size {

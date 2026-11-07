@@ -354,6 +354,29 @@ impl MediaStarter for Answering {
     }
 }
 
+/// A stand-in for a process that reads the round's request and neither
+/// answers it nor lets go of its socket: one the applicant's bytes have
+/// stalled, which only the bound on an ask tells from one still working.
+struct Stalling;
+
+impl MediaStarter for Stalling {
+    fn start(
+        &self,
+        _: u32,
+    ) -> Pin<Box<dyn Future<Output = RunResult<std::os::unix::net::UnixStream>> + Send + '_>> {
+        Box::pin(async move {
+            let (ours, mut theirs) = std::os::unix::net::UnixStream::pair()?;
+            std::thread::spawn(move || {
+                let _ = receive::<Request>(&mut theirs, MAX_REQUEST_BYTES);
+                loop {
+                    std::thread::park();
+                }
+            });
+            Ok(ours)
+        })
+    }
+}
+
 /// `response` as the channel carries it.
 fn framed(response: &Response) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -882,6 +905,24 @@ async fn a_decoder_that_ends_leaves_its_capture_undecoded() {
             RunStatus::Completed(Decision::RejectedRetryable)
         ));
     }
+}
+
+/// A process decoding a capture that stalls — neither answering nor ending —
+/// leaves its capture undecoded once the ask is past its bound, so the round
+/// goes on instead of waiting out its own deadline. The clock is the test's,
+/// so no test waits that bound out.
+#[tokio::test(start_paused = true)]
+async fn a_decoder_that_stalls_leaves_its_capture_undecoded() {
+    let h = Harness::new().decoding(Arc::new(Stalling));
+    let listener = Arc::new(PersistListener::default());
+    let session = h.drive_to_selfie(&listener).await;
+    let (status, _) = h
+        .run(session, Event::Media(fake_capture()), &listener)
+        .await;
+    assert!(matches!(
+        status,
+        RunStatus::Completed(Decision::RejectedRetryable)
+    ));
 }
 
 /// A process decoding a capture that answers what no decoder answers — bytes

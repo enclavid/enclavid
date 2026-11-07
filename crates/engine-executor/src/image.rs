@@ -9,8 +9,8 @@
 //! and what it says of them — not a photo, not a video, a picture that does
 //! not decode — is what the component sees: no image, no frames, `none`. Its
 //! end is taken so too, since the applicant's bytes can end it: a coprocess
-//! gone before it answers leaves its capture undecoded from there on, and the
-//! round goes on. A kill for memory is such an end as well: the coprocesses
+//! gone before it answers — or stalled past the bound one ask of it is held
+//! to — leaves its capture undecoded from there on, and the round goes on. A kill for memory is such an end as well: the coprocesses
 //! decoding a round's captures are the platform's, held to a limit of their
 //! own beside the round's composition, and the first the kernel takes, alone,
 //! where that or the guest's memory runs out
@@ -23,13 +23,14 @@ use std::future::Future;
 use std::os::unix::net::UnixStream;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use coprocess_channel::{Channel, ChannelError};
 use enclavid_media::protocol::{
     Bytes, Failure, FrameInfo, Kind, MAX_OPEN_BYTES, Opened, Region, Request, ResizeMode, Response,
     Size, max_response_bytes,
 };
-use engine_types::limits::MAX_MEDIA_DECODES;
+use engine_types::limits::{MAX_MEDIA_DECODES, MEDIA_ASK_SECS};
 use wasmtime::component::Resource;
 
 use crate::enclavid::host::media::{self, HostImage};
@@ -170,7 +171,7 @@ pub(crate) async fn open(
             bytes: Bytes::new(&bytes),
             bounds,
         };
-        match answered(channel.ask(&open, max_response_bytes(bounds)).await)? {
+        match answered(channel.ask(&open, max_response_bytes(bounds))).await? {
             Some(Response::Opened(opened)) if opened.fits(kind, bounds) => match opened {
                 Opened::Photo(size) => (Decoded::Photo(size), Some(channel)),
                 Opened::Video { size, frames } => {
@@ -213,7 +214,7 @@ impl HostState {
             return Ok(None);
         };
         let request: Request = Request::Region { frame, region };
-        match answered(channel.ask(&request, max_response_bytes(bounds)).await)? {
+        match answered(channel.ask(&request, max_response_bytes(bounds))).await? {
             Some(Response::Pixels(rgb)) if rgb.len() == length => Ok(Some(rgb)),
             Some(Response::Failed(Failure::Corrupt)) => Ok(None),
             Some(Response::Failed(failure)) => Err(failed(format!("{failure:?}"))),
@@ -226,14 +227,18 @@ impl HostState {
     }
 }
 
-/// What an ask of the process decoding a capture came to: its response, or
-/// `None` where the process ended before it answered. Anything else the
-/// channel reads is no answer of a decoder's.
-fn answered(asked: Result<Response, ChannelError>) -> wasmtime::Result<Option<Response>> {
-    match asked {
-        Ok(response) => Ok(Some(response)),
-        Err(ChannelError::Io(_)) => Ok(None),
-        Err(e) => Err(failed(e)),
+/// What `ask` of the process decoding a capture came to: its response, or
+/// `None` where the process ended before it answered, or has not answered
+/// within [`MEDIA_ASK_SECS`] — a stall being an end the round cannot tell
+/// apart, and need not. Anything else the channel reads is no answer of a
+/// decoder's.
+async fn answered(
+    ask: impl Future<Output = Result<Response, ChannelError>>,
+) -> wasmtime::Result<Option<Response>> {
+    match tokio::time::timeout(Duration::from_secs(MEDIA_ASK_SECS), ask).await {
+        Ok(Ok(response)) => Ok(Some(response)),
+        Ok(Err(ChannelError::Io(_))) | Err(_) => Ok(None),
+        Ok(Err(e)) => Err(failed(e)),
     }
 }
 
@@ -326,7 +331,7 @@ impl HostImage for HostState {
     ) -> wasmtime::Result<Result<Vec<u8>, media::PixelsError>> {
         let size = self.table.get(&self_)?.size;
         let Some(region) = picked(size, &options)? else {
-            return Ok(Err(media::PixelsError::TooSmall));
+            return Ok(Err(media::PixelsError::BelowMinimum));
         };
         Ok(self
             .read(&self_, region)
