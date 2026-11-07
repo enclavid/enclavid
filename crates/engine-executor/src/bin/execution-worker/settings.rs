@@ -451,7 +451,10 @@ mod tests {
         DEFAULT_ROUND_HEADROOM_BYTES, DEFAULT_WAITING_PER_CHILD, children_total,
     };
 
+    use engine_supervisor::DEFAULT_CHILD_MAX_TASKS;
+
     use super::{DEFAULT_BUNDLE_CACHE_BYTES, DEFAULT_MAX_CHILDREN};
+    use crate::MAX_COPROCESSES;
 
     /// The default child bound against the guest it was chosen for: a 10 GiB
     /// launch, which its kernel reports as 9000 MiB. Every round but one at the
@@ -476,5 +479,31 @@ mod tests {
             "{} MiB for the children",
             total >> 20
         );
+    }
+
+    /// The processes the default bounds hold at once, each at its task cap,
+    /// against the PIDs the measured command line gives the guest: the
+    /// supervisor refuses to boot where they do not leave half of them
+    /// (`engine_supervisor::Cgroups::create`), so these are one choice written
+    /// in two files.
+    #[test]
+    fn the_default_bounds_fit_the_guests_pids() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../image/cmdline");
+        let processes = DEFAULT_MAX_CHILDREN as u64 * (1 + MAX_COPROCESSES as u64);
+        for variant in ["production", "debug"] {
+            let path = format!("{dir}/execution-worker/{variant}");
+            let cmdline = std::fs::read_to_string(&path).expect("the measured command line");
+            let pid_max: u64 = cmdline
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix("sysctl.kernel.pid_max="))
+                .unwrap_or_else(|| panic!("{path} gives the guest no PID bound"))
+                .parse()
+                .expect("a number of PIDs");
+            assert!(
+                processes * DEFAULT_CHILD_MAX_TASKS <= pid_max / 2,
+                "{variant}: {processes} processes at {DEFAULT_CHILD_MAX_TASKS} tasks each, \
+                 against {pid_max} PIDs"
+            );
+        }
     }
 }

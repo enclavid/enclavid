@@ -98,8 +98,9 @@ pub struct ChildLimits {
     /// would leave the supervisor none to start the next child with. Each
     /// coprocess beside a child has the same cap under its own identity. Boot
     /// checks that the most processes a runner holds at once, each at this cap,
-    /// still leave half the guest's PIDs. Too few, and an honest child cannot
-    /// start its runtime — its rounds fail, and nothing else does.
+    /// still leave half the guest's PIDs — as many as the measured command line
+    /// gives the guest (`sysctl.kernel.pid_max`). Too few, and an honest child
+    /// cannot start its runtime — its rounds fail, and nothing else does.
     pub tasks: u64,
 }
 
