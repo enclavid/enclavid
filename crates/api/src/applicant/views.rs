@@ -17,8 +17,8 @@ use serde::Serialize;
 
 use engine_types::limits::GUIDE_OVAL_ASPECT;
 use session_types::{
-    CameraFacing, CaptureKind, CaptureStep, Disclosure as PromptDisclosure, Guide, MAX_MEDIA_BYTES,
-    MediaSpec, Prompt, SentStep,
+    CameraFacing, CaptureKind, CaptureStep, Disclosure as PromptDisclosure, MAX_MEDIA_BYTES,
+    MediaSpec, Prompt, SentStep, StaticGuide, VideoGuide,
 };
 // The run outcome comes back from the execution-worker as the `engine_rpc::RunStatus`
 // wire mirror (it wraps the same session_types `Prompt` / `Decision`).
@@ -158,16 +158,16 @@ pub struct CaptureStepView {
 pub enum CaptureKindView {
     /// One frame, which the applicant keeps or retakes on a review screen.
     Photo {
-        /// The frame drawn over the camera, if any.
-        guide: Option<GuideView>,
+        /// The shape drawn over the camera, if any.
+        guide: Option<StaticGuideView>,
         /// Post-capture review-screen check ("Make sure the MRZ is
         /// sharp, no glare").
         review_hint: String,
     },
     /// A video, recorded while guides are shown.
     Video {
-        /// What the page shows while it records, in order.
-        guides: Vec<GuideView>,
+        /// What the video asks, in order.
+        guides: Vec<VideoGuideView>,
     },
 }
 
@@ -179,19 +179,17 @@ pub enum CameraFacingView {
     Any,
 }
 
-/// Mirrors `session_types::Guide`. Tagged JSON enum so the frontend can
+/// Mirrors `session_types::StaticGuide`. Tagged JSON enum so the frontend can
 /// dispatch via the `kind` field.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum GuideView {
-    /// A rectangular overlay for a document.
+pub enum StaticGuideView {
+    /// A rectangle at the centre of the frame.
     Rect {
         /// Its width:height aspect (passport ≈ 1.42, ID-1 ≈ 1.59).
         aspect: f32,
-        /// How long the document must fill it, in milliseconds.
-        hold_ms: u16,
     },
-    /// A face oval at the centre of the frame.
+    /// An oval at the centre of the frame.
     Oval {
         /// As a fraction of the frame's shorter side.
         width: f32,
@@ -199,14 +197,34 @@ pub enum GuideView {
         /// oval's fixed proportion, worked out here so the page draws it as
         /// it is told.
         height: f32,
-        /// How long a face must fill it, in milliseconds.
+    },
+}
+
+/// Mirrors `session_types::VideoGuide`, tagged as [`StaticGuideView`] is.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VideoGuideView {
+    /// A shape the applicant says with a button they have followed.
+    StaticGuide {
+        guide: StaticGuideView,
+        /// How long it is held after the button, in milliseconds.
         hold_ms: u16,
     },
-    /// A turn of the head.
-    Turn {
+    /// A face the page finds at the centre of the frame, and draws an oval
+    /// for.
+    Face {
+        /// The oval's width, as a fraction of the frame's shorter side.
+        width: f32,
+        /// Its height, worked out here as an `oval`'s is.
+        height: f32,
+        /// How long the face stays there, in milliseconds.
+        hold_ms: u16,
+    },
+    /// A turn of the head the page reads.
+    HeadTurn {
         /// How far, negative to the applicant's left.
         degrees: i8,
-        /// How long to hold it, in milliseconds.
+        /// How long it is held, in milliseconds.
         hold_ms: u16,
     },
 }
@@ -286,11 +304,11 @@ fn capture_step_view(s: &CaptureStep, locale: &Locale) -> CaptureStepView {
         camera: camera_view(s.camera),
         kind: match &s.kind {
             CaptureKind::Photo(photo) => CaptureKindView::Photo {
-                guide: photo.guide.map(guide_view),
+                guide: photo.guide.map(static_guide_view),
                 review_hint: dto::pick_localized(&photo.review_hint, locale),
             },
             CaptureKind::Video(video) => CaptureKindView::Video {
-                guides: video.guides.iter().copied().map(guide_view).collect(),
+                guides: video.guides.iter().copied().map(video_guide_view).collect(),
             },
         },
     }
@@ -304,18 +322,28 @@ fn camera_view(c: CameraFacing) -> CameraFacingView {
     }
 }
 
-fn guide_view(g: Guide) -> GuideView {
+fn static_guide_view(g: StaticGuide) -> StaticGuideView {
     match g {
-        Guide::Rect(r) => GuideView::Rect {
-            aspect: r.aspect,
-            hold_ms: r.hold_ms,
-        },
-        Guide::Oval(o) => GuideView::Oval {
+        StaticGuide::Rect(r) => StaticGuideView::Rect { aspect: r.aspect },
+        StaticGuide::Oval(o) => StaticGuideView::Oval {
             width: o.width,
             height: o.width * GUIDE_OVAL_ASPECT,
-            hold_ms: o.hold_ms,
         },
-        Guide::Turn(t) => GuideView::Turn {
+    }
+}
+
+fn video_guide_view(g: VideoGuide) -> VideoGuideView {
+    match g {
+        VideoGuide::StaticGuide(s) => VideoGuideView::StaticGuide {
+            guide: static_guide_view(s.guide),
+            hold_ms: s.hold_ms,
+        },
+        VideoGuide::Face(f) => VideoGuideView::Face {
+            width: f.width,
+            height: f.width * GUIDE_OVAL_ASPECT,
+            hold_ms: f.hold_ms,
+        },
+        VideoGuide::HeadTurn(t) => VideoGuideView::HeadTurn {
             degrees: t.degrees,
             hold_ms: t.hold_ms,
         },
@@ -324,7 +352,9 @@ fn guide_view(g: Guide) -> GuideView {
 
 #[cfg(test)]
 mod tests {
-    use session_types::{Localized, OvalSpec, PhotoSpec, RectSpec, TurnSpec, VideoSpec};
+    use session_types::{
+        FaceSpec, HeadTurnSpec, Localized, PhotoSpec, RectSpec, StaticSpec, VideoSpec,
+    };
 
     use super::*;
 
@@ -378,23 +408,20 @@ mod tests {
             label: Localized::default(),
             captures: vec![
                 step(CaptureKind::Photo(PhotoSpec {
-                    guide: Some(Guide::Rect(RectSpec {
-                        aspect: 1.42,
-                        hold_ms: 0,
-                    })),
+                    guide: Some(StaticGuide::Rect(RectSpec { aspect: 1.42 })),
                     review_hint: Localized::default(),
                 })),
                 step(CaptureKind::Video(VideoSpec {
                     guides: vec![
-                        Guide::Rect(RectSpec {
-                            aspect: 1.59,
+                        VideoGuide::StaticGuide(StaticSpec {
+                            guide: StaticGuide::Rect(RectSpec { aspect: 1.59 }),
                             hold_ms: 2000,
                         }),
-                        Guide::Oval(OvalSpec {
+                        VideoGuide::Face(FaceSpec {
                             width: 0.5,
                             hold_ms: 1000,
                         }),
-                        Guide::Turn(TurnSpec {
+                        VideoGuide::HeadTurn(HeadTurnSpec {
                             degrees: -30,
                             hold_ms: 800,
                         }),
@@ -414,11 +441,13 @@ mod tests {
         assert_eq!(photo["guide"]["kind"], "rect");
         assert!(photo.get("review_hint").is_some());
         assert_eq!(video["kind"], "video");
-        assert_eq!(video["guides"][0]["kind"], "rect");
+        assert_eq!(video["guides"][0]["kind"], "static_guide");
+        assert_eq!(video["guides"][0]["guide"]["kind"], "rect");
         assert_eq!(video["guides"][0]["hold_ms"], 2000);
-        assert_eq!(video["guides"][1]["kind"], "oval");
+        assert_eq!(video["guides"][1]["kind"], "face");
         assert_eq!(video["guides"][1]["hold_ms"], 1000);
-        assert_eq!(video["guides"][2]["kind"], "turn");
+        assert!(video["guides"][1].get("height").is_some());
+        assert_eq!(video["guides"][2]["kind"], "head_turn");
         assert_eq!(video["guides"][2]["degrees"], -30);
     }
 }

@@ -750,7 +750,7 @@ pub struct VideoCapture {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrameRange {
     /// The step's own guide, which api copies from the prompt.
-    pub guide: Guide,
+    pub guide: VideoGuide,
     /// The first frame the guide was held in: the page's word.
     pub first: u32,
     /// The last frame the guide was held in: the page's word.
@@ -877,7 +877,7 @@ pub enum CaptureKind {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PhotoSpec {
-    pub guide: Option<Guide>,
+    pub guide: Option<StaticGuide>,
     pub review_hint: Localized,
 }
 
@@ -885,17 +885,16 @@ pub struct PhotoSpec {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VideoSpec {
-    pub guides: Vec<Guide>,
+    pub guides: Vec<VideoGuide>,
 }
 
-/// What the page shows over the camera — sealed mirror of the WIT `guide`
+/// A shape drawn over the camera — sealed mirror of the WIT `static-guide`
 /// variant, held to its ranges and rounded by the engine where the prompt is
-/// built.
+/// built, as every guide is.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Guide {
+pub enum StaticGuide {
     Rect(RectSpec),
     Oval(OvalSpec),
-    Turn(TurnSpec),
 }
 
 /// Sealed mirror of the WIT `rect-spec` record.
@@ -903,7 +902,6 @@ pub enum Guide {
 #[serde(default)]
 pub struct RectSpec {
     pub aspect: f32,
-    pub hold_ms: u16,
 }
 
 /// Sealed mirror of the WIT `oval-spec` record.
@@ -911,13 +909,35 @@ pub struct RectSpec {
 #[serde(default)]
 pub struct OvalSpec {
     pub width: f32,
+}
+
+/// One thing a video asks — sealed mirror of the WIT `video-guide` variant.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum VideoGuide {
+    StaticGuide(StaticSpec),
+    Face(FaceSpec),
+    HeadTurn(HeadTurnSpec),
+}
+
+/// Sealed mirror of the WIT `static-spec` record.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StaticSpec {
+    pub guide: StaticGuide,
     pub hold_ms: u16,
 }
 
-/// Sealed mirror of the WIT `turn-spec` record.
+/// Sealed mirror of the WIT `face-spec` record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct TurnSpec {
+pub struct FaceSpec {
+    pub width: f32,
+    pub hold_ms: u16,
+}
+
+/// Sealed mirror of the WIT `head-turn-spec` record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeadTurnSpec {
     pub degrees: i8,
     pub hold_ms: u16,
 }
@@ -960,7 +980,7 @@ mod media_tests {
     /// A capture of `video` with `guides` ranges.
     fn video(video: Vec<u8>, guides: usize) -> Capture {
         let range = FrameRange {
-            guide: Guide::Turn(TurnSpec {
+            guide: VideoGuide::HeadTurn(HeadTurnSpec {
                 degrees: -30,
                 hold_ms: 800,
             }),

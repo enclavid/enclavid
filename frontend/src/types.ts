@@ -40,32 +40,49 @@ export type ConsentFieldView = {
 
 export type CameraFacing = "front" | "rear" | "any";
 
-/// What the page shows over the camera (mirror `GuideView`).
-export type Guide =
-  /// A rectangular overlay for a document.
+/// A shape drawn over the camera, which the page does not read (mirror
+/// `StaticGuideView`).
+export type StaticGuide =
+  /// A rectangle at the centre of the frame.
   | {
       kind: "rect";
       /// Its width:height aspect.
       aspect: number;
-      /// How long the document must fill it, in milliseconds.
-      hold_ms: number;
     }
-  /// A face oval at the centre of the frame.
+  /// An oval at the centre of the frame.
   | {
       kind: "oval";
       /// As a fraction of the frame's shorter side.
       width: number;
       /// As a fraction of the frame's shorter side.
       height: number;
-      /// How long a face must fill it, in milliseconds.
+    };
+
+/// One thing a video asks (mirror `VideoGuideView`).
+export type VideoGuide =
+  /// A shape the applicant says with a button they have followed.
+  | {
+      kind: "static_guide";
+      guide: StaticGuide;
+      /// How long it is held after the button, in milliseconds.
       hold_ms: number;
     }
-  /// A turn of the head.
+  /// A face the page finds at the centre of the frame, in an oval it draws.
   | {
-      kind: "turn";
+      kind: "face";
+      /// The oval's width, as a fraction of the frame's shorter side.
+      width: number;
+      /// Its height, as a fraction of the frame's shorter side.
+      height: number;
+      /// How long the face stays there, in milliseconds.
+      hold_ms: number;
+    }
+  /// A turn of the head the page reads.
+  | {
+      kind: "head_turn";
       /// How far, negative to the applicant's left.
       degrees: number;
-      /// How long to hold it, in milliseconds.
+      /// How long it is held, in milliseconds.
       hold_ms: number;
     };
 
@@ -88,8 +105,8 @@ export type CaptureStep = CaptureStepCommon &
     /// One frame, which the applicant keeps or retakes.
     | {
         kind: "photo";
-        /// The frame drawn over the camera, if any.
-        guide: Guide | null;
+        /// The shape drawn over the camera, if any.
+        guide: StaticGuide | null;
         /// Post-capture review-screen copy ("Make sure the MRZ is
         /// sharp, no glare"). Policy-supplied via `photo-spec.review-hint`
         /// so each artifact type gets its own targeted check.
@@ -98,8 +115,8 @@ export type CaptureStep = CaptureStepCommon &
     /// A video, recorded while guides are shown.
     | {
         kind: "video";
-        /// What the page shows while it records, in order.
-        guides: Guide[];
+        /// What the video asks, in order.
+        guides: VideoGuide[];
       }
   );
 

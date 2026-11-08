@@ -6,7 +6,7 @@ package enclavid:policy@0.1.0;
 /// so helper plugins can `use` the records without importing the `handle`
 /// export.
 interface types {
-    use enclavid:host-capture/capture@0.1.0.{media-spec, guide};
+    use enclavid:host-capture/capture@0.1.0.{media-spec, video-guide};
     use enclavid:host-disclosure/disclosure@0.1.0.{display-field};
     use enclavid:host/refs@0.1.0.{localized-ref};
     use enclavid:host/media@0.1.0.{photo, video};
@@ -53,7 +53,7 @@ interface types {
     record frame-range {
         /// The guide the step asked for, copied by the runtime from the
         /// prompt.
-        guide: guide,
+        guide: video-guide,
         /// The first frame the guide was held in: the page's word, which a
         /// check verifies against the frames.
         first: u32,

@@ -169,7 +169,7 @@ pub const GUIDE_ASPECT_MIN: f32 = 0.5;
 pub const GUIDE_ASPECT_MAX: f32 = 2.0;
 
 /// The narrowest an `oval` guide is drawn, as a fraction of the frame's
-/// shorter side: below it a face is too far off to read.
+/// shorter side.
 pub const GUIDE_OVAL_WIDTH_MIN: f32 = 0.1;
 
 /// The widest an `oval` guide is drawn, as a fraction of the frame's shorter
@@ -177,26 +177,35 @@ pub const GUIDE_OVAL_WIDTH_MIN: f32 = 0.1;
 /// still fits that side.
 pub const GUIDE_OVAL_WIDTH_MAX: f32 = 0.6;
 
-/// An `oval` guide's height over its width, fixed: the golden ratio, the
-/// proportion of a face.
+/// The height over the width of an `oval` guide, and of the oval the page
+/// draws for a `face`: the golden ratio, the proportion of a face.
 pub const GUIDE_OVAL_ASPECT: f32 = 1.618;
 
 // The widest oval's height still fits the frame's shorter side.
 const _: () = assert!(GUIDE_OVAL_WIDTH_MAX * GUIDE_OVAL_ASPECT <= 1.0);
 
+/// The smallest a `face` guide asks the face to be, as a fraction of the
+/// frame's shorter side. The page's detector, reading the whole frame at
+/// 128 pixels, loses a face at about 0.18 of it.
+pub const GUIDE_FACE_WIDTH_MIN: f32 = 0.25;
+
+/// The largest a `face` guide asks the face to be: an `oval`'s widest, since
+/// the page draws one for it.
+pub const GUIDE_FACE_WIDTH_MAX: f32 = GUIDE_OVAL_WIDTH_MAX;
+
 /// How many steps per unit there are of a guide's fractions — a `rect`'s
-/// aspect, an `oval`'s centre and size: each is drawn rounded to
+/// aspect, an `oval`'s or a `face`'s size: each is drawn rounded to
 /// hundredths. The policy picks them freely, and past what the applicant
 /// can tell apart on screen every further digit would carry bits no one
 /// can see; held to its range, an aspect is one of 151.
 pub const GUIDE_STEPS_PER_UNIT: f32 = 100.0;
 
-/// The longest a guide may ask to be held, in milliseconds.
+/// The longest a video's guide may ask to be held, in milliseconds.
 pub const GUIDE_HOLD_MS_MAX: u16 = 5000;
 
-/// The furthest a `turn` guide may ask the head to turn, in degrees either
-/// way: past it the face is in profile.
-pub const GUIDE_TURN_DEGREES_MAX: i8 = 45;
+/// The furthest a `head-turn` guide may ask the head to turn, in degrees
+/// either way: past it the face is in profile.
+pub const GUIDE_HEAD_TURN_DEGREES_MAX: i8 = 45;
 
 // ----- The consumer's embedded catalogs, as a whole -----
 

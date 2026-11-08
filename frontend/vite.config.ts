@@ -1,5 +1,6 @@
 import path from "path";
 import { defineConfig } from "vite";
+import basicSsl from "@vitejs/plugin-basic-ssl";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
@@ -20,6 +21,12 @@ const GATEWAY = process.env.ENCLAVID_GATEWAY;
 // camera the secure context it needs there.
 const DEV_HOSTS = process.env.ENCLAVID_DEV_HOSTS?.split(",").filter(Boolean);
 
+// Set to `1`, the dev server answers over HTTPS with a certificate it makes
+// itself, so a phone on the same network opens it at the computer's address
+// with the secure context the camera and WebCrypto need, once the certificate
+// is accepted.
+const DEV_HTTPS = process.env.ENCLAVID_DEV_HTTPS === "1";
+
 export default defineConfig({
   // Every reference the built page makes is relative to the document,
   // because the document is not always at the root of its origin. Behind
@@ -33,10 +40,11 @@ export default defineConfig({
   // without one to. Straight from api the document sits at `/`, or
   // `/<session id>`, beside the same files.
   base: "./",
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), ...(DEV_HTTPS ? [basicSsl()] : [])],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@mediapipe/face_detection": path.resolve(__dirname, "./src/lib/mediapipe-stub.ts"),
     },
   },
   // Dev-server only: forward API paths to the running api binary. The

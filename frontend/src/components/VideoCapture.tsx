@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   GuideOverlay,
+  ShutterButton,
   cameraConstraints,
   cameraError,
   facesApplicant,
@@ -9,6 +10,8 @@ import {
   useFrameBox,
 } from "@/components/camera";
 import { Button } from "@/components/ui/button";
+import { type Detector, loadDetector } from "@/lib/faces";
+import { Head, type Hint, hintFor } from "@/lib/guides";
 import {
   FPS,
   type RecorderKind,
@@ -18,7 +21,7 @@ import {
   startRecording,
 } from "@/lib/recorder";
 import { cn } from "@/lib/utils";
-import type { Guide, VideoStep } from "@/types";
+import type { VideoGuide, VideoStep } from "@/types";
 
 type Props = {
   /// Header shown at the top of the capture screen — describes the artifact
@@ -46,57 +49,57 @@ type Props = {
   instead: ReactNode;
 };
 
-/// How long the applicant is given to follow a guide before it counts as held.
-const LEAD_MS = 1500;
+/// How long a guide the page reads waits to be followed before the recording
+/// stops.
+const FOLLOW_MS = 10_000;
+/// How long a hold outlasts frames that do not follow its guide.
+const GRACE_MS = 300;
+/// How long the face may be gone while a guide that reads it is shown.
+const LOST_MS = 1500;
+/// How long the applicant follows the first guide before the recording starts
+/// by itself.
+const GATE_MS = 300;
+/// The longest recording, in milliseconds: inside the 900 frames of a video
+/// the enclave reads, at the page's rate.
+const MAX_MS = (900 / FPS) * 1000 - 5000;
 /// The longer side of the recorded frames at most, in pixels.
 const MAX_SIDE = 1280;
 /// The bits a second the recording is held between.
 const MIN_BITRATE = 250_000;
 const MAX_BITRATE = 1_500_000;
 
-/// When one guide is shown, in milliseconds from the recording's start.
-type Segment = {
-  guide: Guide;
-  /// When it is shown.
-  start: number;
-  /// When it counts as held: the applicant has had the lead to follow it.
-  held: number;
-  /// When the next guide is shown: its hold after `held`.
-  end: number;
-};
+/// Whether the page reads the applicant's face for `guide`: every guide but a
+/// static one, which the applicant confirms.
+const reads = (guide: VideoGuide) => guide.kind !== "static_guide";
 
-/// The guides one after another, each with its lead and its own hold.
-function segments(guides: Guide[]): Segment[] {
-  let at = 0;
-  return guides.map((guide) => {
-    const segment = {
-      guide,
-      start: at,
-      held: at + LEAD_MS,
-      end: at + LEAD_MS + guide.hold_ms,
-    };
-    at = segment.end;
-    return segment;
-  });
+/// What the page waits for before it records a step whose first guide it
+/// reads, `first`: that face, or a head turned no way.
+function entryOf(first: VideoGuide): VideoGuide {
+  return first.kind === "head_turn" ? { kind: "head_turn", degrees: 0, hold_ms: 0 } : first;
 }
 
-/// Whether a frame `elapsed` milliseconds in is one `segment`'s guide is held
-/// in, given whether the guide has a frame held already: every frame during
-/// its hold, or — where none was, as for a hold of 0 — the first after it
-/// began.
-function heldIn(segment: Segment, elapsed: number, hasFrame: boolean): boolean {
-  return elapsed >= segment.held && (elapsed < segment.end || !hasFrame);
+/// The longest a recording of `guides` may last: as long as a recording may
+/// where a static guide waits on the applicant.
+function longest(guides: VideoGuide[]): number {
+  if (!guides.every(reads)) return MAX_MS;
+  return Math.min(
+    MAX_MS,
+    guides.reduce((ms, g) => ms + FOLLOW_MS + g.hold_ms, 0),
+  );
 }
 
-/// For each guide, in order, the first and the last of the video's frames —
-/// at `times`, milliseconds from the first — it was held in; `null` where the
-/// video ends before one was.
-function rangesOf(plan: Segment[], times: number[]): [number, number][] | null {
+/// For each of the guides' holds, in order — milliseconds from the first
+/// frame — the first and the last of the video's frames, at `times`, inside
+/// it; `null` where one has none.
+function rangesOf(holds: [number, number][], times: number[]): [number, number][] | null {
+  // Half a frame either way: the recording's own times are not the page's to
+  // the millisecond.
+  const slack = 500 / FPS;
   const ranges: [number, number][] = [];
-  for (const segment of plan) {
+  for (const [from, to] of holds) {
     let range: [number, number] | null = null;
     for (const [index, time] of times.entries()) {
-      if (!heldIn(segment, time, range !== null)) continue;
+      if (time < from - slack || time > to + slack) continue;
       range = range ? [range[0], index] : [index, index];
     }
     if (!range) return null;
@@ -120,37 +123,101 @@ function bitrateFor(maxBytes: number, ms: number): number {
   return Math.round(Math.min(MAX_BITRATE, Math.max(MIN_BITRATE, bits)));
 }
 
-/// What the applicant is asked to do in a guide's lead.
-function leadText(guide: Guide): string {
+/// What the applicant is first asked to do for a guide.
+function leadText(guide: VideoGuide): string {
   switch (guide.kind) {
-    case "rect":
-      return "Fit the document in the frame";
-    case "oval":
+    case "static_guide":
+      return guide.guide.kind === "rect"
+        ? "Line it up with the frame"
+        : "Line it up with the oval";
+    case "face":
       return "Fit your face in the oval";
-    case "turn":
+    case "head_turn":
       return turnText(guide.degrees);
+  }
+}
+
+/// What the applicant is told about `guide`: by `hint`, where the page reads
+/// their face, else by whether the guide is held.
+function instructionFor(guide: VideoGuide, hint: Hint | null, holding: boolean): string {
+  switch (hint) {
+    case null:
+      return holding ? "Hold still" : leadText(guide);
+    case "show-face":
+      return "Show your face to the camera";
+    case "one-face":
+      return "Only one face, please";
+    case "closer":
+      return "Move closer";
+    case "back":
+      return "Move back";
+    case "left":
+      return "Move left";
+    case "right":
+      return "Move right";
+    case "centre":
+      return "Center your face in the oval";
+    case "turn":
+      return leadText(guide);
+    case "further":
+      return "A little further";
+    case "hold":
+      return "Hold still";
   }
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/// How far a hold that began at `heldAt`, on the page's clock, is through
+/// `holdMs`, from 0 to 1, redrawn every display frame; `undefined` while
+/// nothing is held.
+function useHoldFill(heldAt: number | null, holdMs: number): number | undefined {
+  const [fill, setFill] = useState<number>();
+  useEffect(() => {
+    if (heldAt === null) {
+      setFill(undefined);
+      return;
+    }
+    let frame = requestAnimationFrame(function tick() {
+      const share = holdMs > 0 ? Math.min(1, (performance.now() - heldAt) / holdMs) : 1;
+      setFill(share);
+      if (share < 1) frame = requestAnimationFrame(tick);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [heldAt, holdMs]);
+  return fill;
+}
+
 type Phase =
   | { kind: "initializing" }
-  /// The camera is on, the first guide shown, the recording not started.
-  | { kind: "ready" }
+  /// The camera is on and the first guide shown, the recording not started.
+  | {
+      kind: "ready";
+      /// What the applicant is told, where the page reads their face.
+      hint: Hint | null;
+    }
   | {
       kind: "recording";
       /// The guide on screen.
-      segment: number;
-      /// Whether it counts as held.
-      held: boolean;
-      /// Milliseconds from the recording's start.
-      elapsed: number;
+      index: number;
+      /// What the applicant is told about it, where the page reads their
+      /// face.
+      hint: Hint | null;
+      /// When its hold began, on the page's clock; `null` while it is not
+      /// held.
+      heldAt: number | null;
+      /// How far through the guides, from 0 to 1.
+      progress: number;
     }
   /// Recorded, and handed to the parent to send.
   | { kind: "recorded" }
-  /// This browser records no WebM of VP8 frames.
-  | { kind: "unsupported" }
+  /// This browser records no WebM of VP8 frames, or runs no face detector
+  /// for a step that reads faces.
+  | {
+      kind: "unsupported";
+      /// Why, where something said so; shown in a development build.
+      reason: string | null;
+    }
   | { kind: "error"; message: string };
 
 /// How this browser records, and the canvas it records from at what bitrate.
@@ -168,8 +235,12 @@ export function VideoCapture({
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const plan = useMemo(() => segments(step.guides), [step.guides]);
-  const total = plan.length ? plan[plan.length - 1].end : 0;
+  const plan = step.guides;
+  const readsFaces = useMemo(() => plan.some(reads), [plan]);
+  // The face detector, for a step that reads faces; the camera waits for it.
+  const [detector, setDetector] = useState<Detector>();
+  // The applicant's head, followed through the preview and the recording.
+  const headRef = useRef(new Head());
   // Set once the camera says its size.
   const setupRef = useRef<Setup | null>(null);
   // The video recorded and where its guides were held, kept to send again.
@@ -182,6 +253,8 @@ export function VideoCapture({
   // Set when the page was hidden during the recording: a hidden page draws
   // no frames on time, so what was held is not on record.
   const hiddenRef = useRef(false);
+  // Set when the applicant presses the shutter on the static guide on screen.
+  const shutterRef = useRef(false);
   // Bumped on Try again to start the camera over.
   const [attempt, setAttempt] = useState(0);
   const [phase, setPhase] = useState<Phase>({ kind: "initializing" });
@@ -192,11 +265,35 @@ export function VideoCapture({
   const [sendFailed, setSendFailed] = useState(false);
   const wasSending = useRef(false);
   const frame = useFrameBox(videoRef);
+  // The recording starts by itself where the page reads the first guide, and
+  // on the shutter where it is a static one.
+  const auto = detector !== undefined && reads(plan[0]);
 
   useEffect(() => {
     if (wasSending.current && !sending) setSendFailed(true);
     wasSending.current = sending;
   }, [sending]);
+
+  useEffect(() => {
+    if (!readsFaces) return;
+    let cancelled = false;
+    loadDetector().then(
+      (loaded) => {
+        if (!cancelled) setDetector(loaded);
+      },
+      (error: unknown) => {
+        if (cancelled) return;
+        console.warn("The face detector did not load:", error);
+        setPhase({
+          kind: "unsupported",
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [readsFaces]);
 
   function stopCamera() {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -204,6 +301,8 @@ export function VideoCapture({
   }
 
   useEffect(() => {
+    // A step the page reads faces for cannot be taken without the detector.
+    if (readsFaces && !detector) return;
     let cancelled = false;
 
     void (async () => {
@@ -224,19 +323,19 @@ export function VideoCapture({
         await video.play();
 
         const { width, height } = recordedSize(video.videoWidth, video.videoHeight);
-        const bitrate = bitrateFor(maxBytes, total);
+        const bitrate = bitrateFor(maxBytes, longest(plan));
         const kind = await recorderFor(width, height, bitrate);
         if (cancelled) return;
         if (!kind) {
           stopCamera();
-          setPhase({ kind: "unsupported" });
+          setPhase({ kind: "unsupported", reason: null });
           return;
         }
         const canvas = document.createElement("canvas");
         canvas.width = width;
         canvas.height = height;
         setupRef.current = { kind, canvas, bitrate };
-        setPhase({ kind: "ready" });
+        setPhase({ kind: "ready", hint: null });
       } catch (e) {
         if (cancelled) return;
         setPhase({ kind: "error", message: cameraError(e) });
@@ -249,7 +348,7 @@ export function VideoCapture({
       stopCamera();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attempt, step.camera]);
+  }, [attempt, step.camera, detector]);
 
   useEffect(() => {
     const onVisibility = () => {
@@ -259,13 +358,58 @@ export function VideoCapture({
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, []);
 
-  /// Record the step: each guide shown in turn, by the clock, every frame
-  /// drawn from the camera; then hand the video to the parent.
+  // Before the recording: the applicant's face read against the first guide,
+  // and the recording started once they have followed it for a moment.
+  useEffect(() => {
+    if (phase.kind !== "ready" || !auto || !detector) return;
+    const entry = entryOf(plan[0]);
+    const head = headRef.current;
+    let stopped = false;
+    let since: number | null = null;
+    const look = async () => {
+      const video = videoRef.current;
+      if (stopped || !video) return;
+      const { videoWidth: width, videoHeight: height } = video;
+      if (width && height) {
+        const faces = await detector.faces(video, width, height);
+        if (stopped) return;
+        const hint = hintFor(entry, faces, head, width, height, mirrored);
+        setPhase({ kind: "ready", hint });
+        if (hint !== "hold") {
+          since = null;
+        } else {
+          since ??= performance.now();
+          if (performance.now() - since >= GATE_MS) {
+            head.settle();
+            void record();
+            return;
+          }
+        }
+      }
+      setTimeout(() => void look(), 1000 / FPS);
+    };
+    void look();
+    return () => {
+      stopped = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase.kind, auto, mirrored]);
+
+  /// The applicant presses the shutter on the static guide on screen; the
+  /// first one starts the recording.
+  function capture() {
+    shutterRef.current = true;
+    if (phase.kind === "ready") void record();
+  }
+
+  /// Record the step: each guide shown in turn until the applicant has held
+  /// it — a static one from the shutter — every frame drawn from the camera;
+  /// then hand the video to the parent.
   async function record() {
     const setup = setupRef.current;
     const video = videoRef.current;
     const context = setup?.canvas.getContext("2d");
-    if (phase.kind !== "ready" || !setup || !video || !context) return;
+    if (phase.kind !== "ready" || runningRef.current || !setup || !video || !context) return;
     const fail = (message: string) => {
       runningRef.current = false;
       stopCamera();
@@ -283,8 +427,20 @@ export function VideoCapture({
       return;
     }
 
-    // Which guides a frame was held in already.
-    const opened: boolean[] = plan.map(() => false);
+    const { width, height } = setup.canvas;
+    const head = headRef.current;
+    // Each guide's hold, from the first frame and to the last it lasted.
+    const holds: [number, number][] = [];
+    let index = 0;
+    // When the guide on screen was shown, its hold began — `null` while it is
+    // not held — and it was last followed.
+    let shown = 0;
+    let held: number | null = null;
+    let followed = 0;
+    // When a face was last seen, or a guide shown that reads none.
+    let seen = 0;
+    // When the first frame was drawn: the recording's own times count from it.
+    let origin: number | null = null;
     const start = performance.now();
     let next = start;
     try {
@@ -299,21 +455,61 @@ export function VideoCapture({
           return;
         }
         const elapsed = performance.now() - start;
-        // Each guide in this frame or not, by its hold.
-        const holding = plan.map((s, i) => heldIn(s, elapsed, opened[i]));
-        // Past the last guide's hold, with every guide held in a frame.
-        if (elapsed >= total && !holding.includes(true)) break;
-        // On screen: the guide whose hold has not ended, or the last.
-        const ahead = plan.findIndex((s) => elapsed < s.end);
-        const at = ahead === -1 ? plan.length - 1 : ahead;
-        context.drawImage(video, 0, 0, setup.canvas.width, setup.canvas.height);
+        origin ??= elapsed;
+        const guide = plan[index];
+        context.drawImage(video, 0, 0, width, height);
+        let hint: Hint | null = null;
+        let follows: boolean;
+        if (detector && reads(guide)) {
+          const faces = await detector.faces(setup.canvas, width, height);
+          if (faces.length) seen = elapsed;
+          hint = hintFor(guide, faces, head, width, height, mirrored);
+          follows = hint === "hold";
+        } else {
+          seen = elapsed;
+          follows = shutterRef.current;
+        }
+        const begins = follows && held === null;
+        if (follows) {
+          held ??= elapsed;
+          followed = elapsed;
+        } else if (held !== null && elapsed - followed > GRACE_MS) {
+          held = null;
+        }
         // The first frame a guide is held in is written whole, a picture of
         // its own as a photo is, for what reads the face in it.
-        await recording.frame(holding.some((h, i) => h && !opened[i]));
-        holding.forEach((h, i) => {
-          if (h) opened[i] = true;
+        await recording.frame(begins);
+        if (held !== null && elapsed - held >= guide.hold_ms) {
+          holds.push([held - origin, elapsed - origin]);
+          if (index === plan.length - 1) break;
+          index += 1;
+          shown = elapsed;
+          held = null;
+          seen = elapsed;
+          shutterRef.current = false;
+        } else if (held === null && reads(guide) && elapsed - shown > FOLLOW_MS) {
+          recording.cancel();
+          fail("The prompt was not followed in time. Try again.");
+          return;
+        } else if (elapsed - seen > LOST_MS) {
+          recording.cancel();
+          fail("Your face left the camera. Try again.");
+          return;
+        } else if (elapsed > MAX_MS) {
+          recording.cancel();
+          fail("The recording took too long. Try again.");
+          return;
+        }
+        const current = plan[index];
+        const share =
+          held === null ? 0 : Math.min(1, (elapsed - held) / Math.max(1, current.hold_ms));
+        setPhase({
+          kind: "recording",
+          index,
+          hint,
+          heldAt: held === null ? null : start + held,
+          progress: (holds.length + share) / plan.length,
         });
-        setPhase({ kind: "recording", segment: at, held: holding[at], elapsed });
         next += 1000 / FPS;
         const wait = next - performance.now();
         if (wait > 0) await sleep(wait);
@@ -334,7 +530,7 @@ export function VideoCapture({
         back &&
         back.width === setup.canvas.width &&
         back.height === setup.canvas.height &&
-        rangesOf(plan, back.times);
+        rangesOf(holds, back.times);
       if (!guides) {
         fail("The recording did not come out right. Try again.");
         return;
@@ -361,23 +557,26 @@ export function VideoCapture({
     runningRef.current = false;
     recordedRef.current = null;
     setupRef.current = null;
+    headRef.current = new Head();
+    shutterRef.current = false;
     setSendFailed(false);
     setPhase({ kind: "initializing" });
     setAttempt((a) => a + 1);
   }
 
   const showCamera = phase.kind === "ready" || phase.kind === "recording";
-  const segment = phase.kind === "recording" ? plan[phase.segment] : plan[0];
+  const guide = phase.kind === "recording" ? plan[phase.index] : plan[0];
+  const hint = phase.kind === "ready" || phase.kind === "recording" ? phase.hint : null;
+  const heldAt = phase.kind === "recording" ? phase.heldAt : null;
+  const holding = heldAt !== null;
+  // A static guide is taken with the shutter, which fills while it is held.
+  const shutter = showCamera && guide?.kind === "static_guide";
+  const fill = useHoldFill(shutter ? heldAt : null, guide?.hold_ms ?? 0);
   const stepHint =
     totalSteps > 1 ? `Step ${stepNumber} of ${totalSteps}. ${step.label}` : step.label;
-  const instruction =
-    phase.kind === "recording"
-      ? phase.held
-        ? "Hold still"
-        : leadText(segment.guide)
-      : segment
-        ? leadText(segment.guide)
-        : null;
+  const instruction = guide
+    ? instructionFor(phase.kind === "ready" && auto ? entryOf(guide) : guide, hint, holding)
+    : null;
 
   if (phase.kind === "unsupported") {
     return (
@@ -393,6 +592,9 @@ export function VideoCapture({
           This step records a short video, which this browser cannot do. Continue
           on another device, or open this page in an up-to-date browser.
         </p>
+        {import.meta.env.DEV && phase.reason && (
+          <p className="wrap-break-word font-mono text-xs text-muted-foreground">{phase.reason}</p>
+        )}
         {instead}
       </main>
     );
@@ -419,11 +621,16 @@ export function VideoCapture({
             !showCamera && "invisible",
           )}
         />
-        {showCamera && segment && (
+        {showCamera && guide && (
           <>
-            {/* A turn is said by the instruction below, not drawn. */}
-            {segment.guide.kind !== "turn" && (
-              <GuideOverlay guide={segment.guide} frame={frame} />
+            {/* A head turn is said by the instruction below, not drawn. */}
+            {guide.kind === "static_guide" && <GuideOverlay guide={guide.guide} frame={frame} />}
+            {guide.kind === "face" && (
+              <GuideOverlay
+                guide={{ kind: "oval", width: guide.width, height: guide.height }}
+                frame={frame}
+                met={hint === "hold"}
+              />
             )}
             <div className="pointer-events-none absolute inset-x-6 top-6 space-y-2 text-center">
               <p className="text-xs uppercase tracking-wide text-white/70">
@@ -434,7 +641,7 @@ export function VideoCapture({
                 <div className="h-1 overflow-hidden rounded-full bg-white/20">
                   <div
                     className="h-full bg-white"
-                    style={{ width: `${Math.min(100, (phase.elapsed / total) * 100)}%` }}
+                    style={{ width: `${Math.min(100, phase.progress * 100)}%` }}
                   />
                 </div>
               )}
@@ -444,9 +651,7 @@ export function VideoCapture({
                 <div
                   className={cn(
                     "rounded-full px-4 py-1.5 text-sm font-medium",
-                    phase.kind === "recording" && phase.held
-                      ? "bg-white text-black"
-                      : "bg-black/60",
+                    holding || hint === "hold" ? "bg-white text-black" : "bg-black/60",
                   )}
                 >
                   {instruction}
@@ -454,6 +659,18 @@ export function VideoCapture({
               </div>
             )}
           </>
+        )}
+
+        {phase.kind === "initializing" && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <p className="inline-flex items-center gap-2 text-sm text-white/80">
+              <span
+                aria-hidden
+                className="size-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white"
+              />
+              Getting ready…
+            </p>
+          </div>
         )}
 
         {phase.kind === "recorded" && (
@@ -508,20 +725,21 @@ export function VideoCapture({
               Send again
             </Button>
           </>
+        ) : shutter ? (
+          <ShutterButton
+            label={fill === undefined ? "Capture" : "Capturing — hold still"}
+            onClick={capture}
+            fill={fill}
+          />
         ) : phase.kind === "recording" ? (
           <p className="inline-flex h-12 items-center gap-2 text-sm">
             <span aria-hidden className="size-2.5 animate-pulse rounded-full bg-red-500" />
             Recording
           </p>
         ) : (
-          <Button
-            size="lg"
-            className="h-12 flex-1 bg-white text-black hover:bg-white/90"
-            onClick={() => void record()}
-            disabled={phase.kind !== "ready"}
-          >
-            Start recording
-          </Button>
+          <p className="inline-flex h-12 items-center text-sm text-white/80">
+            The recording starts when you follow the prompt
+          </p>
         )}
       </div>
     </main>

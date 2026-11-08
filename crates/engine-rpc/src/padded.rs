@@ -423,13 +423,13 @@ mod tests {
     #[test]
     fn a_state_at_the_engine_cap_fits_the_frame() {
         use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_VIDEO_GUIDES};
-        use session_types::{FrameRange, Guide, RectSpec, SentStep};
+        use session_types::{FrameRange, RectSpec, SentStep, StaticGuide, StaticSpec, VideoGuide};
 
         let range = FrameRange {
-            // A document frame: of the guides, the one whose encoding is the
+            // A static rectangle: of the guides, the one whose encoding is the
             // longest.
-            guide: Guide::Rect(RectSpec {
-                aspect: 1.587_654,
+            guide: VideoGuide::StaticGuide(StaticSpec {
+                guide: StaticGuide::Rect(RectSpec { aspect: 1.587_654 }),
                 hold_ms: u16::MAX,
             }),
             first: u32::MAX,

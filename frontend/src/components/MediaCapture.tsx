@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   GuideOverlay,
+  ShutterButton,
   cameraConstraints,
   cameraError,
   facesApplicant,
@@ -319,19 +320,11 @@ export function MediaCapture({
                 Cancel
               </Button>
             )}
-            <button
-              type="button"
-              aria-label="Capture"
+            <ShutterButton
+              label="Capture"
               disabled={phase !== "streaming"}
               onClick={() => void takePhoto()}
-              className={cn(
-                "flex size-16 items-center justify-center rounded-full border-4 border-white/80 transition-all duration-150",
-                phase === "streaming" && "active:scale-95",
-                phase !== "streaming" && "opacity-40 cursor-not-allowed",
-              )}
-            >
-              <span className="block size-12 rounded-full bg-white" />
-            </button>
+            />
             {onCancel && <span className="size-12" aria-hidden />}
           </>
         )}

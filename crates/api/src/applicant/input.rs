@@ -7,8 +7,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, post};
 
 use session_types::{
-    Capture, CaptureKind, Event, FrameRange, Guide, MAX_MEDIA_BYTES, MediaResult, Prompt,
-    SessionState, VideoCapture,
+    Capture, CaptureKind, Event, FrameRange, MAX_MEDIA_BYTES, MediaResult, Prompt, SessionState,
+    VideoCapture, VideoGuide,
 };
 
 use crate::limits::{APPLICANT_INPUT_BODY_LIMIT, MAX_GUIDES_PART_BYTES};
@@ -247,7 +247,7 @@ async fn media_part(
 /// to verify against the video.
 async fn guides_part(
     multipart: &mut Multipart,
-    guides: &[Guide],
+    guides: &[VideoGuide],
 ) -> Result<Vec<FrameRange>, StatusCode> {
     let bytes = next_part(multipart, "guides")
         .await?
@@ -302,15 +302,15 @@ mod tests {
     use axum::body::Body;
     use axum::extract::FromRequest;
     use axum::http::Request;
-    use session_types::{OvalSpec, PhotoSpec, TurnSpec, VideoSpec};
+    use session_types::{FaceSpec, HeadTurnSpec, PhotoSpec, VideoSpec};
 
     use super::*;
 
-    const OVAL: Guide = Guide::Oval(OvalSpec {
+    const FACE: VideoGuide = VideoGuide::Face(FaceSpec {
         width: 0.5,
         hold_ms: 1000,
     });
-    const TURN: Guide = Guide::Turn(TurnSpec {
+    const TURN: VideoGuide = VideoGuide::HeadTurn(HeadTurnSpec {
         degrees: -30,
         hold_ms: 800,
     });
@@ -322,7 +322,7 @@ mod tests {
     /// A video step of two guides.
     fn video_step() -> CaptureKind {
         CaptureKind::Video(VideoSpec {
-            guides: vec![OVAL, TURN],
+            guides: vec![FACE, TURN],
         })
     }
 
@@ -376,7 +376,7 @@ mod tests {
                 video: b"webm".to_vec(),
                 guides: vec![
                     FrameRange {
-                        guide: OVAL,
+                        guide: FACE,
                         first: 0,
                         last: 10,
                     },

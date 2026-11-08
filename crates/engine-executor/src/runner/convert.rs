@@ -22,18 +22,21 @@ use wasmtime::component::{Resource, ResourceTable};
 use session_types::{
     CameraFacing as DCameraFacing, Capture, CaptureKind as DCaptureKind,
     CaptureStep as DCaptureStep, Decision as DDecision, Disclosure as DDisclosure,
-    DisplayField as DDisplayField, Event, FrameRange, Guide as DGuide, Localized as DLocalized,
-    MediaSpec as DMediaSpec, OvalSpec as DOvalSpec, PhotoSpec as DPhotoSpec, Prompt,
-    RectSpec as DRectSpec, TurnSpec as DTurnSpec, VideoSpec as DVideoSpec,
+    DisplayField as DDisplayField, Event, FaceSpec as DFaceSpec, FrameRange,
+    HeadTurnSpec as DHeadTurnSpec, Localized as DLocalized, MediaSpec as DMediaSpec,
+    OvalSpec as DOvalSpec, PhotoSpec as DPhotoSpec, Prompt, RectSpec as DRectSpec,
+    StaticGuide as DStaticGuide, StaticSpec as DStaticSpec, VideoGuide as DVideoGuide,
+    VideoSpec as DVideoSpec,
 };
 
 use crate::embedded::{DisclosureFieldRef, EmbeddedRegistry, IconRef, LocalizedRef};
 use crate::enclavid::host_capture::capture as wit_capture;
 use crate::enclavid::policy::types as wit_policy;
 use crate::limits::{
-    GUIDE_ASPECT_MAX, GUIDE_ASPECT_MIN, GUIDE_HOLD_MS_MAX, GUIDE_OVAL_WIDTH_MAX,
-    GUIDE_OVAL_WIDTH_MIN, GUIDE_STEPS_PER_UNIT, GUIDE_TURN_DEGREES_MAX, MAX_CAPTURE_STEPS,
-    MAX_CONSENT_FIELDS, MAX_VALUE_LENGTH, MAX_VIDEO_GUIDES,
+    GUIDE_ASPECT_MAX, GUIDE_ASPECT_MIN, GUIDE_FACE_WIDTH_MAX, GUIDE_FACE_WIDTH_MIN,
+    GUIDE_HEAD_TURN_DEGREES_MAX, GUIDE_HOLD_MS_MAX, GUIDE_OVAL_WIDTH_MAX, GUIDE_OVAL_WIDTH_MIN,
+    GUIDE_STEPS_PER_UNIT, MAX_CAPTURE_STEPS, MAX_CONSENT_FIELDS, MAX_VALUE_LENGTH,
+    MAX_VIDEO_GUIDES,
 };
 use crate::media::{PhotoRep, VideoRep};
 use crate::sanitize;
@@ -84,26 +87,39 @@ pub fn event_to_wit(
 
 fn frame_range_to_wit(range: FrameRange) -> wit_policy::FrameRange {
     wit_policy::FrameRange {
-        guide: guide_to_wit(range.guide),
+        guide: video_guide_to_wit(range.guide),
         first: range.first,
         last: range.last,
     }
 }
 
-fn guide_to_wit(guide: DGuide) -> wit_capture::Guide {
+fn video_guide_to_wit(guide: DVideoGuide) -> wit_capture::VideoGuide {
     match guide {
-        DGuide::Rect(r) => wit_capture::Guide::Rect(wit_capture::RectSpec {
-            aspect: r.aspect,
-            hold_ms: r.hold_ms,
+        DVideoGuide::StaticGuide(s) => {
+            wit_capture::VideoGuide::StaticGuide(wit_capture::StaticSpec {
+                guide: static_guide_to_wit(s.guide),
+                hold_ms: s.hold_ms,
+            })
+        }
+        DVideoGuide::Face(f) => wit_capture::VideoGuide::Face(wit_capture::FaceSpec {
+            width: f.width,
+            hold_ms: f.hold_ms,
         }),
-        DGuide::Oval(o) => wit_capture::Guide::Oval(wit_capture::OvalSpec {
-            width: o.width,
-            hold_ms: o.hold_ms,
-        }),
-        DGuide::Turn(t) => wit_capture::Guide::Turn(wit_capture::TurnSpec {
+        DVideoGuide::HeadTurn(t) => wit_capture::VideoGuide::HeadTurn(wit_capture::HeadTurnSpec {
             degrees: t.degrees,
             hold_ms: t.hold_ms,
         }),
+    }
+}
+
+fn static_guide_to_wit(guide: DStaticGuide) -> wit_capture::StaticGuide {
+    match guide {
+        DStaticGuide::Rect(r) => {
+            wit_capture::StaticGuide::Rect(wit_capture::RectSpec { aspect: r.aspect })
+        }
+        DStaticGuide::Oval(o) => {
+            wit_capture::StaticGuide::Oval(wit_capture::OvalSpec { width: o.width })
+        }
     }
 }
 
@@ -235,7 +251,7 @@ fn capture_step_to_domain(
     };
     let kind = match s.kind {
         wit_capture::CaptureKind::Photo(photo) => DCaptureKind::Photo(DPhotoSpec {
-            guide: photo.guide.map(guide_to_domain),
+            guide: photo.guide.map(static_guide_to_domain),
             review_hint: localized(table, &photo.review_hint)?,
         }),
         wit_capture::CaptureKind::Video(video) => {
@@ -248,7 +264,11 @@ fn capture_step_to_domain(
                 )));
             }
             DCaptureKind::Video(DVideoSpec {
-                guides: video.guides.into_iter().map(guide_to_domain).collect(),
+                guides: video
+                    .guides
+                    .into_iter()
+                    .map(video_guide_to_domain)
+                    .collect(),
             })
         }
     };
@@ -269,22 +289,35 @@ fn camera_to_domain(c: wit_capture::CameraFacing) -> DCameraFacing {
     }
 }
 
-/// A guide as it is drawn: each of its numbers held to its range and its
-/// fractions rounded, as the WIT `guide` says.
-fn guide_to_domain(g: wit_capture::Guide) -> DGuide {
+/// A shape as it is drawn: its number held to its range and rounded, as the
+/// WIT `static-guide` says of every guide.
+fn static_guide_to_domain(g: wit_capture::StaticGuide) -> DStaticGuide {
     match g {
-        wit_capture::Guide::Rect(r) => DGuide::Rect(DRectSpec {
+        wit_capture::StaticGuide::Rect(r) => DStaticGuide::Rect(DRectSpec {
             aspect: drawn_aspect(r.aspect),
-            hold_ms: r.hold_ms.min(GUIDE_HOLD_MS_MAX),
         }),
-        wit_capture::Guide::Oval(o) => DGuide::Oval(DOvalSpec {
+        wit_capture::StaticGuide::Oval(o) => DStaticGuide::Oval(DOvalSpec {
             width: drawn(o.width, GUIDE_OVAL_WIDTH_MIN, GUIDE_OVAL_WIDTH_MAX, 0.5),
-            hold_ms: o.hold_ms.min(GUIDE_HOLD_MS_MAX),
         }),
-        wit_capture::Guide::Turn(t) => DGuide::Turn(DTurnSpec {
+    }
+}
+
+/// A video's guide as it is shown: each of its numbers held to its range and
+/// its fractions rounded.
+fn video_guide_to_domain(g: wit_capture::VideoGuide) -> DVideoGuide {
+    match g {
+        wit_capture::VideoGuide::StaticGuide(s) => DVideoGuide::StaticGuide(DStaticSpec {
+            guide: static_guide_to_domain(s.guide),
+            hold_ms: s.hold_ms.min(GUIDE_HOLD_MS_MAX),
+        }),
+        wit_capture::VideoGuide::Face(f) => DVideoGuide::Face(DFaceSpec {
+            width: drawn(f.width, GUIDE_FACE_WIDTH_MIN, GUIDE_FACE_WIDTH_MAX, 0.5),
+            hold_ms: f.hold_ms.min(GUIDE_HOLD_MS_MAX),
+        }),
+        wit_capture::VideoGuide::HeadTurn(t) => DVideoGuide::HeadTurn(DHeadTurnSpec {
             degrees: t
                 .degrees
-                .clamp(-GUIDE_TURN_DEGREES_MAX, GUIDE_TURN_DEGREES_MAX),
+                .clamp(-GUIDE_HEAD_TURN_DEGREES_MAX, GUIDE_HEAD_TURN_DEGREES_MAX),
             hold_ms: t.hold_ms.min(GUIDE_HOLD_MS_MAX),
         }),
     }
@@ -311,20 +344,22 @@ fn drawn(value: f32, min: f32, max: f32, nan: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// An oval is drawn at a width a face can fill, to hundredths, and held
-    /// no longer than the longest hold; a turn no
-    /// further than a face in profile; a document frame held no longer than
-    /// the longest hold either.
+    /// A shape is drawn within its range, to hundredths. In a video every
+    /// guide is held no longer than the longest hold, a face asked for at a
+    /// size the page finds, and a head turned no further than a face in
+    /// profile.
     #[test]
     fn a_guide_is_drawn_within_its_ranges() {
-        let rect = guide_to_domain(wit_capture::Guide::Rect(wit_capture::RectSpec {
-            aspect: 1.42,
-            hold_ms: u16::MAX,
-        }));
+        let frame = video_guide_to_domain(wit_capture::VideoGuide::StaticGuide(
+            wit_capture::StaticSpec {
+                guide: wit_capture::StaticGuide::Rect(wit_capture::RectSpec { aspect: 1.42 }),
+                hold_ms: u16::MAX,
+            },
+        ));
         assert_eq!(
-            rect,
-            DGuide::Rect(DRectSpec {
-                aspect: 1.42,
+            frame,
+            DVideoGuide::StaticGuide(DStaticSpec {
+                guide: DStaticGuide::Rect(DRectSpec { aspect: 1.42 }),
                 hold_ms: GUIDE_HOLD_MS_MAX,
             })
         );
@@ -334,13 +369,30 @@ mod tests {
             (0.9, GUIDE_OVAL_WIDTH_MAX),
             (f32::NAN, 0.5),
         ] {
-            let oval = guide_to_domain(wit_capture::Guide::Oval(wit_capture::OvalSpec {
-                width: given,
-                hold_ms: u16::MAX,
-            }));
+            let oval =
+                static_guide_to_domain(wit_capture::StaticGuide::Oval(wit_capture::OvalSpec {
+                    width: given,
+                }));
             assert_eq!(
                 oval,
-                DGuide::Oval(DOvalSpec {
+                DStaticGuide::Oval(DOvalSpec { width: drawn }),
+                "{given}"
+            );
+        }
+        for (given, drawn) in [
+            (0.1, GUIDE_FACE_WIDTH_MIN),
+            (0.456_78, 0.46),
+            (0.9, GUIDE_FACE_WIDTH_MAX),
+            (f32::NAN, 0.5),
+        ] {
+            let face =
+                video_guide_to_domain(wit_capture::VideoGuide::Face(wit_capture::FaceSpec {
+                    width: given,
+                    hold_ms: u16::MAX,
+                }));
+            assert_eq!(
+                face,
+                DVideoGuide::Face(DFaceSpec {
                     width: drawn,
                     hold_ms: GUIDE_HOLD_MS_MAX,
                 }),
@@ -348,17 +400,19 @@ mod tests {
             );
         }
         for (given, drawn) in [
-            (i8::MIN, -GUIDE_TURN_DEGREES_MAX),
+            (i8::MIN, -GUIDE_HEAD_TURN_DEGREES_MAX),
             (30, 30),
-            (i8::MAX, GUIDE_TURN_DEGREES_MAX),
+            (i8::MAX, GUIDE_HEAD_TURN_DEGREES_MAX),
         ] {
-            let turn = guide_to_domain(wit_capture::Guide::Turn(wit_capture::TurnSpec {
-                degrees: given,
-                hold_ms: 700,
-            }));
+            let turn = video_guide_to_domain(wit_capture::VideoGuide::HeadTurn(
+                wit_capture::HeadTurnSpec {
+                    degrees: given,
+                    hold_ms: 700,
+                },
+            ));
             assert_eq!(
                 turn,
-                DGuide::Turn(DTurnSpec {
+                DVideoGuide::HeadTurn(DHeadTurnSpec {
                     degrees: drawn,
                     hold_ms: 700
                 }),

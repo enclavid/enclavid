@@ -17,7 +17,7 @@ wit_bindgen::generate!({
 
 use enclavid::host::refs::{DisclosureFieldRef, IconRef};
 use enclavid::host_capture::capture::{
-    CameraFacing, CaptureKind, CaptureStep, Guide, MediaSpec, OvalSpec, PhotoSpec, RectSpec,
+    CameraFacing, CaptureKind, CaptureStep, MediaSpec, OvalSpec, PhotoSpec, RectSpec, StaticGuide,
 };
 use enclavid::host_disclosure::disclosure::DisplayField;
 use enclavid::host_icons::icons;
@@ -101,24 +101,12 @@ impl DisclosureFieldsGuest for WellKnown {
 
 // ─── capture ──────────────────────────────────────────────────────
 
-/// The frame of an ICAO TD3 passport photo page (125x88mm → ~1.42). No
-/// hold: the applicant takes the photo.
-const PASSPORT_FRAME: RectSpec = RectSpec {
-    aspect: 1.42,
-    hold_ms: 0,
-};
-/// The frame of an ICAO TD1 ID-1 card (85.6x54mm → ~1.585). No hold, as
-/// above.
-const ID1_FRAME: RectSpec = RectSpec {
-    aspect: 1.585,
-    hold_ms: 0,
-};
-/// A selfie's face oval: half the frame's shorter side wide. No hold: the
-/// applicant takes the photo.
-const SELFIE_OVAL: OvalSpec = OvalSpec {
-    width: 0.5,
-    hold_ms: 0,
-};
+/// The frame of an ICAO TD3 passport photo page (125x88mm → ~1.42).
+const PASSPORT_FRAME: RectSpec = RectSpec { aspect: 1.42 };
+/// The frame of an ICAO TD1 ID-1 card (85.6x54mm → ~1.585).
+const ID1_FRAME: RectSpec = RectSpec { aspect: 1.585 };
+/// A selfie's face oval: half the frame's shorter side wide.
+const SELFIE_OVAL: OvalSpec = OvalSpec { width: 0.5 };
 
 /// The three texts of a capture step.
 struct StepTexts {
@@ -132,7 +120,7 @@ fn step(
     texts: StepTexts,
     icon: Option<IconRef>,
     camera: CameraFacing,
-    guide: Guide,
+    guide: StaticGuide,
 ) -> CaptureStep {
     CaptureStep {
         icon,
@@ -155,7 +143,7 @@ fn passport_step() -> CaptureStep {
         },
         Some(icons::passport()),
         CameraFacing::Rear,
-        Guide::Rect(PASSPORT_FRAME),
+        StaticGuide::Rect(PASSPORT_FRAME),
     )
 }
 
@@ -168,7 +156,7 @@ fn id_card_front_step_inner() -> CaptureStep {
         },
         Some(icons::id_card()),
         CameraFacing::Rear,
-        Guide::Rect(ID1_FRAME),
+        StaticGuide::Rect(ID1_FRAME),
     )
 }
 
@@ -181,7 +169,7 @@ fn id_card_back_step_inner() -> CaptureStep {
         },
         Some(icons::id_card()),
         CameraFacing::Rear,
-        Guide::Rect(ID1_FRAME),
+        StaticGuide::Rect(ID1_FRAME),
     )
 }
 
@@ -194,7 +182,7 @@ fn drivers_license_front_step_inner() -> CaptureStep {
         },
         Some(icons::drivers_license()),
         CameraFacing::Rear,
-        Guide::Rect(ID1_FRAME),
+        StaticGuide::Rect(ID1_FRAME),
     )
 }
 
@@ -207,7 +195,7 @@ fn drivers_license_back_step_inner() -> CaptureStep {
         },
         Some(icons::drivers_license()),
         CameraFacing::Rear,
-        Guide::Rect(ID1_FRAME),
+        StaticGuide::Rect(ID1_FRAME),
     )
 }
 
@@ -220,7 +208,7 @@ fn selfie_step_inner() -> CaptureStep {
         },
         Some(icons::selfie()),
         CameraFacing::Front,
-        Guide::Oval(SELFIE_OVAL),
+        StaticGuide::Oval(SELFIE_OVAL),
     )
 }
 

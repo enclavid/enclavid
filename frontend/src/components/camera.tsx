@@ -1,5 +1,6 @@
 import { useEffect, useState, type RefObject } from "react";
-import type { CameraFacing, Guide } from "@/types";
+import { cn } from "@/lib/utils";
+import type { CameraFacing, StaticGuide } from "@/types";
 
 /// Best-effort haptic ping. iOS Safari silently ignores; Android /
 /// Chrome OS hit a short vibration. Wrapped so callers don't repeat
@@ -107,20 +108,68 @@ export function useFrameBox(
   return box;
 }
 
-/// Render the on-screen capture guide overlaid on the camera preview,
-/// one flavour for each kind of the WIT `guide` variant.
-export function GuideOverlay({ guide, frame }: { guide: Guide; frame: FrameBox | null }) {
+/// The round shutter: a white disc in a ring. Given `fill`, from 0 to 1, the
+/// disc fills that far round instead, while what it took is held.
+export function ShutterButton({
+  label,
+  disabled = false,
+  onClick,
+  fill,
+}: {
+  label: string;
+  disabled?: boolean;
+  onClick: () => void;
+  fill?: number;
+}) {
+  const filling = fill !== undefined;
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled || filling}
+      onClick={onClick}
+      className={cn(
+        "flex size-16 items-center justify-center rounded-full border-4 transition-all duration-150",
+        filling ? "cursor-default border-white/40" : "border-white/80",
+        !disabled && !filling && "active:scale-95",
+        disabled && "cursor-not-allowed opacity-40",
+      )}
+    >
+      <span
+        className={cn("block size-12 rounded-full", !filling && "bg-white")}
+        style={
+          filling
+            ? {
+                background: `conic-gradient(from -90deg, white 0deg ${fill * 360}deg, rgba(255,255,255,0.25) ${fill * 360}deg 360deg)`,
+              }
+            : undefined
+        }
+      />
+    </button>
+  );
+}
+
+/// Render a shape overlaid on the camera preview, one flavour for each kind
+/// of the WIT `static-guide` variant.
+export function GuideOverlay({
+  guide,
+  frame,
+  met = false,
+}: {
+  guide: StaticGuide;
+  frame: FrameBox | null;
+  /// Whether the face the page reads fills it, which an oval shows in green.
+  met?: boolean;
+}) {
   switch (guide.kind) {
     case "rect":
       return <RectGuide aspect={guide.aspect} />;
     case "oval":
-      return frame ? <OvalGuide oval={guide} frame={frame} /> : null;
-    case "turn":
-      return <TurnGuide degrees={guide.degrees} />;
+      return frame ? <OvalGuide oval={guide} frame={frame} met={met} /> : null;
   }
 }
 
-/// The document frame at the centre of the camera's area, at the policy's
+/// The frame at the centre of the camera's area, at the policy's
 /// aspect and as large as fits there: 86% of the area's width or of its
 /// height, whichever binds, and no wider than 560 px.
 function RectGuide({ aspect }: { aspect: number }) {
@@ -161,14 +210,25 @@ function RectGuide({ aspect }: { aspect: number }) {
 
 /// The oval at the centre of the frame, its size at its fractions of the
 /// frame's shorter side.
-function OvalGuide({ oval, frame }: { oval: Extract<Guide, { kind: "oval" }>; frame: FrameBox }) {
+function OvalGuide({
+  oval,
+  frame,
+  met,
+}: {
+  oval: Extract<StaticGuide, { kind: "oval" }>;
+  frame: FrameBox;
+  met: boolean;
+}) {
   const shorter = Math.min(frame.width, frame.height);
   const width = oval.width * shorter;
   const height = oval.height * shorter;
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
       <div
-        className="absolute border-[3px] border-white/80"
+        className={cn(
+          "absolute border-[3px] transition-colors",
+          met ? "border-green-500" : "border-white/80",
+        )}
         style={{
           left: frame.left + (frame.width - width) / 2,
           top: frame.top + (frame.height - height) / 2,
@@ -190,16 +250,6 @@ export function turnText(degrees: number): string {
     : degrees > 0
       ? "Turn your head to your right"
       : "Look straight at the camera";
-}
-
-function TurnGuide({ degrees }: { degrees: number }) {
-  return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-6 flex justify-center">
-      <div className="rounded-full bg-black/60 px-4 py-1.5 text-sm font-medium">
-        {turnText(degrees)}
-      </div>
-    </div>
-  );
 }
 
 /// Pick a sensible `facingMode` ideal for `getUserMedia` from the
