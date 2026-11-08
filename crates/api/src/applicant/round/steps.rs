@@ -47,7 +47,49 @@ impl SessionRunCtx {
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
         Ok(SessionProgress::AwaitingInput {
             awaiting_seq: session_state.awaiting_seq,
-            request: prompt_view(prompt, &session_state.sent, &self.locale),
+            request: prompt_view(
+                prompt,
+                &session_state.sent,
+                session_state.started_at_ms,
+                &self.locale,
+            ),
+        })
+    }
+
+    /// Start the media prompt the session awaits ([`store_start`]), once: a
+    /// prompt started already keeps its time. The session stays in its wait.
+    pub(in crate::applicant) async fn keep_start(
+        self,
+        session_state: SessionState,
+    ) -> Result<SessionProgress, StatusCode> {
+        let session_state = match session_state.started_at_ms {
+            Some(_) => session_state,
+            None => {
+                store_start(
+                    &self.state.session_store,
+                    &self.session_id,
+                    self.version,
+                    &self.metadata,
+                    self.new_lock.as_ref(),
+                    &self.data_keys,
+                    session_state,
+                    crate::applicant::now_ms(),
+                )
+                .await?
+            }
+        };
+        let prompt = session_state
+            .current_prompt
+            .as_ref()
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(SessionProgress::AwaitingInput {
+            awaiting_seq: session_state.awaiting_seq,
+            request: prompt_view(
+                prompt,
+                &session_state.sent,
+                session_state.started_at_ms,
+                &self.locale,
+            ),
         })
     }
 
@@ -155,6 +197,69 @@ async fn store_step(
     }
 }
 
+/// Write the start of the media prompt the session `id` awaits, as read at
+/// `version`: `now_ms` as its `started_at_ms`, and, as a round's write would,
+/// the lock of the data key the state is sealed under, in one write. Gives
+/// back the state as written.
+///
+/// 409 when the session moved since the read, as [`store_step`] answers.
+#[allow(clippy::too_many_arguments)]
+async fn store_start(
+    store: &SessionStore,
+    id: &str,
+    version: u64,
+    metadata: &SessionMetadata,
+    new_lock: Option<&Vec<u8>>,
+    data_keys: &DataKeys,
+    mut session_state: SessionState,
+    now_ms: u64,
+) -> Result<SessionState, StatusCode> {
+    let mut metadata = metadata.clone();
+    if metadata.data_key_lock.is_none() {
+        metadata.data_key_lock = new_lock.cloned();
+    }
+    session_state.started_at_ms = Some(now_ms);
+
+    let key = data_keys.current();
+    let set_metadata = SetMetadata(Storage::expose_builder::<MetadataOp, _>(&metadata).vouch(
+        reason!(
+            Covert::AlreadyHeld,
+            "sealed under tee_seal_key; the metadata as read, the data key's lock added only \
+             where a round's write would add it"
+        ),
+    ));
+    let set_state = SetState {
+        state: Storage::expose_builder::<StateOp, _>(&session_state)
+            .vouch_with(Covert::Transformed, encode_padded)
+            .map_err(|e| {
+                safe_logger::debug!("store_start: the state does not fit its frame: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?,
+        data_key: key,
+        binding: StateBinding::of(&metadata),
+    };
+    let ops = store
+        .seal(id, &[&set_state, &set_metadata])
+        .map_err(|e| {
+            safe_logger::debug!("store_start: sealing failed for {id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .vouch(reason!(
+            Covert::Bounded,
+            "a fixed two, a state and a metadata op, once for each media prompt the applicant \
+             starts: the page starts every one, with a time limit or not, so the write says \
+             only that a capture began"
+        ));
+    match store.write(Some(version), ops).await {
+        Ok(_) => Ok(session_state),
+        Err(StoreError::VersionMismatch) => Err(StatusCode::CONFLICT),
+        Err(e) => {
+            safe_logger::debug!("store_start: the write failed for {id}: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 /// The captures of the steps of session `id` already sent, read back from its
 /// media store in the order of the spec it awaits, each of its step's kind.
 async fn load_sent(
@@ -230,6 +335,7 @@ mod tests {
                 step(CaptureKind::Photo(PhotoSpec::default())),
                 step(CaptureKind::Video(VideoSpec { guides: vec![TURN] })),
             ],
+            time_limit_secs: Some(30),
         }
     }
 
@@ -376,6 +482,51 @@ mod tests {
                 &keys,
                 waiting,
                 &photo
+            )
+            .await,
+            Err(StatusCode::CONFLICT)
+        );
+    }
+
+    /// A start writes its time into the state, which opens beside the metadata
+    /// the same write left, the wait as it was; a start whose read the session
+    /// has moved past since writes nothing.
+    #[tokio::test]
+    async fn a_start_is_written_where_the_session_stands() {
+        let (_disk, store) = create().await;
+        let waiting = SessionState {
+            current_prompt: Some(Prompt::Media(spec())),
+            awaiting_seq: 4,
+            ..Default::default()
+        };
+        let (metadata, keys, lock, _, version) = load(&store).await;
+        store_start(
+            &store,
+            ID,
+            version,
+            &metadata,
+            lock.as_ref(),
+            &keys,
+            waiting.clone(),
+            12_345,
+        )
+        .await
+        .unwrap();
+        let (_, _, lock_after, state, _) = load(&store).await;
+        assert_eq!(lock_after, None, "the start's write locked the session");
+        let state = state.expect("the state opens beside its metadata");
+        assert_eq!(state.started_at_ms, Some(12_345));
+        assert_eq!(state.awaiting_seq, 4, "a start does not move the wait");
+        assert_eq!(
+            store_start(
+                &store,
+                ID,
+                version,
+                &metadata,
+                lock.as_ref(),
+                &keys,
+                waiting,
+                67_890
             )
             .await,
             Err(StatusCode::CONFLICT)

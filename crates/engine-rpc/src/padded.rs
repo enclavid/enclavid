@@ -325,6 +325,7 @@ mod tests {
             current_prompt: None,
             awaiting_seq: u64::MAX,
             sent: Vec::new(),
+            started_at_ms: Some(u64::MAX),
         };
         let padded = Padded::seal(&state).expect("fits the frame");
         assert_eq!(padded.open().expect("decodes"), state);
@@ -340,6 +341,7 @@ mod tests {
             current_prompt: None,
             awaiting_seq: u64::MAX,
             sent: Vec::new(),
+            started_at_ms: Some(u64::MAX),
         })
         .expect("fits");
 
@@ -452,6 +454,7 @@ mod tests {
                 };
                 MAX_CAPTURE_STEPS
             ],
+            started_at_ms: Some(u64::MAX),
         };
         Padded::seal(&at_cap).expect("a state at POLICY_MAX_STATE_BYTES must fit its frame");
     }

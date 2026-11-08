@@ -9,7 +9,7 @@ interface capture {
     use enclavid:host/refs@0.1.0.{localized-ref, icon-ref};
 
     /// Which physical camera the capture step should use.
-    variant camera-facing {
+    enum camera-facing {
         /// The one facing the applicant, for a selfie.
         front,
         /// The one facing away, for documents.
@@ -149,5 +149,11 @@ interface capture {
         label: localized-ref,
         /// The steps, in the order the applicant takes them.
         captures: list<capture-step>,
+        /// The seconds the applicant has for every step together, from when
+        /// the page starts them. The page is given the steps' kinds only
+        /// then, so what they ask is not known before; past the limit, the
+        /// reply is `event::timed-out`. None: no limit, and the steps are
+        /// given whole with the prompt.
+        time-limit-secs: option<u16>,
     }
 }

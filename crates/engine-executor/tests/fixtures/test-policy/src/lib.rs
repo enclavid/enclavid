@@ -413,6 +413,9 @@ impl Guest for TestPolicy {
                 (state_at(STEP_AWAIT_CONSENT), Action::Finish(decision))
             }
 
+            // A media prompt's time ran out: the applicant may try again.
+            (_, Event::TimedOut) => (state, Action::Finish(Decision::RejectedRetryable)),
+
             // Any other (step, event) pairing is a runtime/replay bug —
             // fail loud with a finish(rejected) rather than silently
             // looping. (The harness never drives this path.)

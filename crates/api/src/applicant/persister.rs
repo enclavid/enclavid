@@ -274,9 +274,10 @@ impl SessionPersister {
         decision: Option<Decision>,
     ) -> Result<(), CallbackError> {
         // The wait this round ends in is numbered here, not by the worker, and
-        // none of its steps is sent yet.
+        // none of its steps is sent yet, nor started.
         state.awaiting_seq = self.awaiting_seq;
         state.sent = Vec::new();
+        state.started_at_ms = None;
         // Serialize the whole critical section on the metadata guard, taken
         // before the acceptance is claimed: a second callback in the same round
         // waits here rather than interleaving with this one.

@@ -103,6 +103,9 @@ interface types {
         consent-disclosure(bool),
         /// The reply to `prompt::media`: every step captured.
         media(media-result),
+        /// The reply to `prompt::media` with a time limit when its steps were
+        /// not all captured within it. None of its captures is kept.
+        timed-out,
     }
 
     /// OUTBOUND: the action the policy returns from `handle`. The round ends

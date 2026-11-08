@@ -217,6 +217,7 @@ impl CaptureGuest for WellKnown {
         MediaSpec {
             label: localized(Key::PassportTitle),
             captures: vec![passport_step()],
+            time_limit_secs: None,
         }
     }
 
@@ -224,6 +225,7 @@ impl CaptureGuest for WellKnown {
         MediaSpec {
             label: localized(Key::IdCardTitle),
             captures: vec![id_card_front_step_inner(), id_card_back_step_inner()],
+            time_limit_secs: None,
         }
     }
 
@@ -234,6 +236,7 @@ impl CaptureGuest for WellKnown {
                 drivers_license_front_step_inner(),
                 drivers_license_back_step_inner(),
             ],
+            time_limit_secs: None,
         }
     }
 
@@ -241,6 +244,7 @@ impl CaptureGuest for WellKnown {
         MediaSpec {
             label: localized(Key::SelfieTitle),
             captures: vec![selfie_step_inner()],
+            time_limit_secs: None,
         }
     }
 

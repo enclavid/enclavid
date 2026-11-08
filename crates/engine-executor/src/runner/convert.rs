@@ -82,6 +82,7 @@ pub fn event_to_wit(
             }
             wit_policy::Event::Media(wit_policy::MediaResult { captures })
         }
+        Event::TimedOut => wit_policy::Event::TimedOut,
     })
 }
 
@@ -216,8 +217,9 @@ fn disclosure_to_domain(
 // ---------------------------------------------------------------------
 
 /// Resolve refs on a media render and lower it. A spec of no steps, or of
-/// more than [`MAX_CAPTURE_STEPS`], and a video step of no guides, or of more
-/// than [`MAX_VIDEO_GUIDES`], trap: none is an applicant's doing.
+/// more than [`MAX_CAPTURE_STEPS`], a time limit of no seconds, and a video
+/// step of no guides, or of more than [`MAX_VIDEO_GUIDES`], trap: none is an
+/// applicant's doing.
 fn media_spec_to_domain(
     spec: wit_capture::MediaSpec,
     table: &ResourceTable,
@@ -232,13 +234,22 @@ fn media_spec_to_domain(
             "media render spec exceeds {MAX_CAPTURE_STEPS} capture steps"
         )));
     }
+    if spec.time_limit_secs == Some(0) {
+        return Err(wasmtime::Error::msg(
+            "media render spec has a time limit of no seconds",
+        ));
+    }
     let label = localized(table, &spec.label)?;
     let captures = spec
         .captures
         .into_iter()
         .map(|c| capture_step_to_domain(c, table))
         .collect::<wasmtime::Result<Vec<_>>>()?;
-    Ok(DMediaSpec { label, captures })
+    Ok(DMediaSpec {
+        label,
+        captures,
+        time_limit_secs: spec.time_limit_secs,
+    })
 }
 
 fn capture_step_to_domain(

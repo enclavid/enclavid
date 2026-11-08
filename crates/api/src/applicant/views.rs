@@ -88,6 +88,14 @@ pub enum RequestView {
         /// under a number of its own, so the two cannot drift apart. The
         /// build's media budget, less what the steps sent already hold.
         max_upload_bytes: usize,
+        /// The seconds the applicant has for the steps together, from when
+        /// the page starts them; none where the prompt has no limit.
+        time_limit_secs: Option<u16>,
+        /// What is left of that limit since the page started the steps, in
+        /// milliseconds by api's clock; none before the start, and where there
+        /// is no limit. While a limit is not started, the steps carry no
+        /// `kind`: the page starts the prompt to be given them.
+        remaining_ms: Option<u64>,
     },
     Consent {
         fields: Vec<dto::ConsentFieldView>,
@@ -147,9 +155,10 @@ pub struct CaptureStepView {
     /// Short on-camera overlay during capture.
     pub label: String,
     pub camera: CameraFacingView,
-    /// What the step records, its `kind` tagged beside the fields above.
+    /// What the step records, its `kind` tagged beside the fields above; none
+    /// in a prompt with a time limit the page has not started.
     #[serde(flatten)]
-    pub kind: CaptureKindView,
+    pub kind: Option<CaptureKindView>,
 }
 
 /// Mirrors `session_types::CaptureKind`.
@@ -240,19 +249,24 @@ pub(super) fn progress_from(
         RunStatus::Completed(decision) => SessionProgress::Completed {
             decision: decision.into(),
         },
-        // A round's wait starts with none of its steps sent.
+        // A round's wait starts with none of its steps sent, nor started.
         RunStatus::AwaitingInput(prompt) => SessionProgress::AwaitingInput {
             awaiting_seq,
-            request: prompt_view(&prompt, &[], locale),
+            request: prompt_view(&prompt, &[], None, locale),
         },
     }
 }
 
 /// The prompt the session awaits, with `sent` the steps of a media prompt the
-/// page has sent already.
-pub(super) fn prompt_view(prompt: &Prompt, sent: &[SentStep], locale: &Locale) -> RequestView {
+/// page has sent already, and `started_at_ms` when it started them.
+pub(super) fn prompt_view(
+    prompt: &Prompt,
+    sent: &[SentStep],
+    started_at_ms: Option<u64>,
+    locale: &Locale,
+) -> RequestView {
     match prompt {
-        Prompt::Media(spec) => media_view(spec, sent, locale),
+        Prompt::Media(spec) => media_view(spec, sent, started_at_ms, locale),
         Prompt::ConsentDisclosure(d) => consent_view(d, locale),
     }
 }
@@ -277,11 +291,19 @@ pub(super) fn consent_view(d: &PromptDisclosure, locale: &Locale) -> RequestView
     }
 }
 
-fn media_view(spec: &MediaSpec, sent: &[SentStep], locale: &Locale) -> RequestView {
+fn media_view(
+    spec: &MediaSpec,
+    sent: &[SentStep],
+    started_at_ms: Option<u64>,
+    locale: &Locale,
+) -> RequestView {
+    // What the steps ask is given only once a limit's time runs, so it is not
+    // known before.
+    let shown = spec.time_limit_secs.is_none() || started_at_ms.is_some();
     let captures: Vec<CaptureStepView> = spec
         .captures
         .iter()
-        .map(|c| capture_step_view(c, locale))
+        .map(|c| capture_step_view(c, shown, locale))
         .collect();
     let held: u64 = sent.iter().map(|step| step.len).sum();
     let left = (MAX_MEDIA_BYTES as u64).saturating_sub(held);
@@ -291,10 +313,21 @@ fn media_view(spec: &MediaSpec, sent: &[SentStep], locale: &Locale) -> RequestVi
         next_step: sent.len(),
         max_upload_bytes: crate::limits::APPLICANT_INPUT_BODY_LIMIT
             .min(usize::try_from(left).unwrap_or(usize::MAX)),
+        time_limit_secs: spec.time_limit_secs,
+        remaining_ms: spec
+            .time_limit_secs
+            .zip(started_at_ms)
+            .map(|(limit, started)| remaining_ms(limit, started, super::now_ms())),
     }
 }
 
-fn capture_step_view(s: &CaptureStep, locale: &Locale) -> CaptureStepView {
+/// What is left at `now_ms` of a limit of `limit_secs` started at
+/// `started_at_ms`, in milliseconds.
+pub(super) fn remaining_ms(limit_secs: u16, started_at_ms: u64, now_ms: u64) -> u64 {
+    (u64::from(limit_secs) * 1000).saturating_sub(now_ms.saturating_sub(started_at_ms))
+}
+
+fn capture_step_view(s: &CaptureStep, with_kind: bool, locale: &Locale) -> CaptureStepView {
     CaptureStepView {
         // Already the icon name (engine deref'd the ref); the frontend
         // draws it from its bundled library.
@@ -302,7 +335,7 @@ fn capture_step_view(s: &CaptureStep, locale: &Locale) -> CaptureStepView {
         instructions: dto::pick_localized(&s.instructions, locale),
         label: dto::pick_localized(&s.label, locale),
         camera: camera_view(s.camera),
-        kind: match &s.kind {
+        kind: with_kind.then(|| match &s.kind {
             CaptureKind::Photo(photo) => CaptureKindView::Photo {
                 guide: photo.guide.map(static_guide_view),
                 review_hint: dto::pick_localized(&photo.review_hint, locale),
@@ -310,7 +343,7 @@ fn capture_step_view(s: &CaptureStep, locale: &Locale) -> CaptureStepView {
             CaptureKind::Video(video) => CaptureKindView::Video {
                 guides: video.guides.iter().copied().map(video_guide_view).collect(),
             },
-        },
+        }),
     }
 }
 
@@ -386,11 +419,74 @@ mod tests {
         let json = serde_json::to_value(prompt_view(
             &Prompt::Media(MediaSpec::default()),
             &sent,
+            None,
             &Locale::default(),
         ))
         .unwrap();
         assert_eq!(json["next_step"], 2);
         assert_eq!(json["max_upload_bytes"], MAX_MEDIA_BYTES - 3_000);
+    }
+
+    /// A prompt with a time limit gives its steps' kinds only once started,
+    /// then with the time left; one without a limit gives them whole, started
+    /// or not.
+    #[test]
+    fn a_timed_prompt_gives_its_steps_once_started() {
+        let step = CaptureStep {
+            icon: None,
+            instructions: Localized::default(),
+            label: Localized::default(),
+            camera: CameraFacing::Front,
+            kind: CaptureKind::Video(VideoSpec {
+                guides: vec![VideoGuide::Face(FaceSpec {
+                    width: 0.5,
+                    hold_ms: 1000,
+                })],
+            }),
+        };
+        let spec = |time_limit_secs| MediaSpec {
+            label: Localized::default(),
+            captures: vec![step.clone()],
+            time_limit_secs,
+        };
+        let view = |spec, started_at_ms| {
+            serde_json::to_value(prompt_view(
+                &Prompt::Media(spec),
+                &[],
+                started_at_ms,
+                &Locale::default(),
+            ))
+            .unwrap()
+        };
+
+        let waiting = view(spec(Some(30)), None);
+        assert_eq!(waiting["time_limit_secs"], 30);
+        assert!(waiting["remaining_ms"].is_null());
+        assert!(waiting["captures"][0].get("kind").is_none());
+        assert!(waiting["captures"][0].get("guides").is_none());
+        assert!(waiting["captures"][0].get("label").is_some());
+
+        let started = view(spec(Some(30)), Some(crate::applicant::now_ms()));
+        assert_eq!(started["captures"][0]["kind"], "video");
+        let left = started["remaining_ms"].as_u64().unwrap();
+        assert!(left <= 30_000 && left > 25_000, "{left}");
+
+        for started_at_ms in [None, Some(1)] {
+            let whole = view(spec(None), started_at_ms);
+            assert_eq!(whole["captures"][0]["kind"], "video");
+            assert!(whole["time_limit_secs"].is_null() && whole["remaining_ms"].is_null());
+        }
+    }
+
+    /// What is left of a limit runs down from it to nothing, and no further.
+    #[test]
+    fn the_time_left_runs_down_to_nothing() {
+        assert_eq!(remaining_ms(30, 1_000, 1_000), 30_000);
+        assert_eq!(remaining_ms(30, 1_000, 11_000), 20_000);
+        assert_eq!(remaining_ms(30, 1_000, 31_000), 0);
+        assert_eq!(remaining_ms(30, 1_000, 99_000), 0);
+        // A clock read before the start, as after a restart, leaves it whole.
+        assert_eq!(remaining_ms(30, 5_000, 1_000), 30_000);
     }
 
     /// A step's kind is tagged beside its other fields, and each guide by its
@@ -428,10 +524,15 @@ mod tests {
                     ],
                 })),
             ],
+            time_limit_secs: None,
         };
-        let text =
-            serde_json::to_string(&prompt_view(&Prompt::Media(spec), &[], &Locale::default()))
-                .unwrap();
+        let text = serde_json::to_string(&prompt_view(
+            &Prompt::Media(spec),
+            &[],
+            None,
+            &Locale::default(),
+        ))
+        .unwrap();
         // A photo's aspect reads as the engine rounded it, not as a widened f32.
         assert!(text.contains(r#""aspect":1.42"#), "{text}");
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();

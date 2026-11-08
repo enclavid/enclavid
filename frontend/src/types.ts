@@ -123,6 +123,10 @@ export type CaptureStep = CaptureStepCommon &
 export type PhotoStep = Extract<CaptureStep, { kind: "photo" }>;
 export type VideoStep = Extract<CaptureStep, { kind: "video" }>;
 
+/// A step of a prompt with a time limit the page has not started: what its
+/// intro screen shows, not yet what it records — that comes with the start.
+export type UnstartedStep = CaptureStepCommon & { kind?: undefined };
+
 export type MediaSpec = {
   label: string;
   captures: CaptureStep[];
@@ -136,12 +140,18 @@ export type RequestView =
       label: string;
       /// Each step's capture is POSTed as it is taken, in order, to
       /// `/input/<awaiting_seq>/media-<step>`.
-      captures: CaptureStep[];
+      captures: (CaptureStep | UnstartedStep)[];
       /// The step to show: the first whose capture is not sent yet.
       next_step: number;
       /// The most bytes the captures of the steps not sent yet may be
       /// together; past it the server answers 413.
       max_upload_bytes: number;
+      /// The seconds the steps have together from their start; null for no
+      /// limit.
+      time_limit_secs: number | null;
+      /// The milliseconds left of that limit, as the server counted them when
+      /// it answered; null before the start, and where there is no limit.
+      remaining_ms: number | null;
     }
   | {
       kind: "consent";

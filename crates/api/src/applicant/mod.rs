@@ -41,11 +41,13 @@ pub(crate) mod media_store;
 mod persister;
 mod reset;
 mod round;
+mod start;
 mod status;
 mod views;
 mod warmup;
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::http::header::AUTHORIZATION;
@@ -83,6 +85,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/sessions/{id}/connect",
             connect::post_connect().layer(auth()),
+        )
+        .route(
+            "/api/v1/sessions/{id}/start/{awaiting_seq}",
+            start::post_start().layer(auth()),
         )
         .route(
             "/api/v1/sessions/{id}/input/{awaiting_seq}/{slot_id}",
@@ -130,6 +136,14 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// against what the bundler actually emits — Vite inlines module preloads — and
 /// an unverified one that breaks the page is worse than a narrow one that holds.
 const PAGE_POLICY: &str = "frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
+
+/// Milliseconds since the Unix epoch by api's clock, which the guest's time
+/// sync holds to true time (`timesync::guard`).
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
 
 /// Serve the compiled-in page at `/`, and its files at their own paths, for
 /// anything no API route claimed — see `crate::assets::lookup`. A file the

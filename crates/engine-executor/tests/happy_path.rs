@@ -487,6 +487,20 @@ async fn passport_selfie_consent_reject_reaches_rejected() {
     listener.finished_with(Decision::Rejected);
 }
 
+/// A media prompt whose time ran out reaches the policy as its own event, which
+/// the test policy answers as the applicant's to try again.
+#[tokio::test]
+async fn a_timed_out_prompt_reaches_the_policy() {
+    let h = Harness::new();
+    let listener = Arc::new(PersistListener::default());
+    let session = h.drive_to_selfie(&listener).await;
+    let (status, _session) = h.run(session, Event::TimedOut, &listener).await;
+    assert!(
+        matches!(status, RunStatus::Completed(Decision::RejectedRetryable)),
+        "the policy's answer to a time-out"
+    );
+}
+
 #[tokio::test]
 async fn passport_selfie_consent_accept_reaches_approved_over_the_rendered_fields() {
     let h = Harness::new();

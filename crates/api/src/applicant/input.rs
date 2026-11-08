@@ -16,7 +16,7 @@ use crate::state::AppState;
 
 use super::consent;
 use super::round::SessionRunCtx;
-use super::views::{SessionProgress, prompt_view};
+use super::views::{SessionProgress, prompt_view, remaining_ms};
 
 /// Route factory. Auth attached at router level via
 /// `.layer(auth())` — see `applicant::router`.
@@ -45,6 +45,14 @@ pub(super) fn post_input() -> MethodRouter<Arc<AppState>> {
 ///     (the host-minted digest of the screen the applicant confirmed); builds
 ///     an [`Event::ConsentDisclosure`]. On accept the digest must match the
 ///     current disclosure or the round is refused (409) — show == seal.
+///   * `timed-out` — no parts: the page's word that the time of a media
+///     prompt with a time limit ran out, or that the applicant gave it up;
+///     builds an [`Event::TimedOut`].
+///
+/// A step of a prompt with a time limit that its steps can no longer meet —
+/// one not started, or started more than its limit ago, by this side's clock
+/// — runs the round with an [`Event::TimedOut`] instead, its body unread: the
+/// page keeps the time, and this side holds it to it.
 ///
 /// The `slot_id` must match the kind/shape of the prompt persisted as
 /// `current_prompt`. A mismatch returns 409 (kind/shape desync) or 400
@@ -78,6 +86,12 @@ async fn input(
         return moved_on(&session_state, &ctx);
     }
     if let Some(step) = parse_media_slot(&slot_id) {
+        if past_limit(&session_state, super::now_ms()) {
+            return ctx
+                .run(session_state, Event::TimedOut)
+                .await
+                .into_response();
+        }
         return media_step(ctx, session_state, step, multipart).await;
     }
     let event = match slot_id.as_str() {
@@ -85,20 +99,44 @@ async fn input(
             Ok(event) => event,
             Err(status) => return status.into_response(),
         },
+        "timed-out" => match session_state.current_prompt.as_ref() {
+            Some(Prompt::Media(spec)) if spec.time_limit_secs.is_some() => Event::TimedOut,
+            _ => return StatusCode::CONFLICT.into_response(),
+        },
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
     ctx.run(session_state, event).await.into_response()
 }
 
+/// Whether the session awaits a media prompt with a time limit that its steps
+/// can no longer meet at `now_ms`: one not started, or started more than its
+/// limit ago.
+fn past_limit(session_state: &SessionState, now_ms: u64) -> bool {
+    let Some(Prompt::Media(spec)) = session_state.current_prompt.as_ref() else {
+        return false;
+    };
+    let Some(limit) = spec.time_limit_secs else {
+        return false;
+    };
+    session_state
+        .started_at_ms
+        .is_none_or(|started| remaining_ms(limit, started, now_ms) == 0)
+}
+
 /// The refusal of an answer to where the session no longer is: 409, with the
 /// wait it is in now, as `/connect` would answer it.
-fn moved_on(session_state: &SessionState, ctx: &SessionRunCtx) -> Response {
+pub(super) fn moved_on(session_state: &SessionState, ctx: &SessionRunCtx) -> Response {
     let Some(prompt) = session_state.current_prompt.as_ref() else {
         return StatusCode::CONFLICT.into_response();
     };
     let mut response = SessionProgress::AwaitingInput {
         awaiting_seq: session_state.awaiting_seq,
-        request: prompt_view(prompt, &session_state.sent, &ctx.locale),
+        request: prompt_view(
+            prompt,
+            &session_state.sent,
+            session_state.started_at_ms,
+            &ctx.locale,
+        ),
     }
     .into_response();
     *response.status_mut() = StatusCode::CONFLICT;
@@ -429,5 +467,24 @@ mod tests {
             read_step(&photo_step(), multipart(&parts).await, 3).await,
             Err(StatusCode::PAYLOAD_TOO_LARGE)
         );
+    }
+
+    /// A prompt with a time limit is past it when not started, or once its
+    /// limit has run since the start; one without a limit never is.
+    #[test]
+    fn a_timed_prompt_is_past_its_limit_unstarted_or_once_run() {
+        let waiting = |time_limit_secs, started_at_ms| SessionState {
+            current_prompt: Some(Prompt::Media(session_types::MediaSpec {
+                time_limit_secs,
+                ..Default::default()
+            })),
+            started_at_ms,
+            ..Default::default()
+        };
+        assert!(past_limit(&waiting(Some(30), None), 5_000));
+        assert!(!past_limit(&waiting(Some(30), Some(5_000)), 34_999));
+        assert!(past_limit(&waiting(Some(30), Some(5_000)), 35_000));
+        assert!(!past_limit(&waiting(None, None), 99_000));
+        assert!(!past_limit(&SessionState::default(), 99_000));
     }
 }

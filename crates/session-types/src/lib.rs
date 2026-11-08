@@ -489,6 +489,13 @@ pub struct SessionState {
     /// api's own, as `awaiting_seq` is: it adds a step as it stores it, and a
     /// round's write leaves the list empty, whatever the runtime put here.
     pub sent: Vec<SentStep>,
+    /// When the page started the awaited media prompt, in milliseconds since
+    /// the Unix epoch by api's clock: set once, by its start, for a prompt
+    /// with a time limit; none before, and in any other wait.
+    ///
+    /// api's own, as `awaiting_seq` is: a round's write leaves it none,
+    /// whatever the runtime put here.
+    pub started_at_ms: Option<u64>,
 }
 
 /// One step of the awaited media prompt the page has sent: where its capture's
@@ -659,6 +666,9 @@ pub enum Event {
     ConsentDisclosure(bool),
     /// Reply to [`Prompt::Media`] — every step of the spec captured.
     Media(MediaResult),
+    /// Reply to a [`Prompt::Media`] with a time limit whose steps were not all
+    /// captured within it.
+    TimedOut,
 }
 
 /// OUTBOUND from the policy reducer — sealed mirror of the WIT `action`
@@ -851,6 +861,9 @@ mod guides {
 pub struct MediaSpec {
     pub label: Localized,
     pub captures: Vec<CaptureStep>,
+    /// The seconds the applicant has for every step together, from when the
+    /// page starts them; none for no limit.
+    pub time_limit_secs: Option<u16>,
 }
 
 /// One step of a capture — sealed mirror of the WIT `capture-step` record.
