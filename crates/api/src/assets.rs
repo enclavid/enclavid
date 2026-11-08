@@ -13,6 +13,9 @@ pub struct Asset {
     pub path: &'static str,
     pub content_type: &'static str,
     pub bytes: &'static [u8],
+    /// The same bytes brotli-compressed by the build, for a browser that takes
+    /// them; none where the file does not shrink.
+    pub brotli: Option<&'static [u8]>,
 }
 
 include!(concat!(env!("OUT_DIR"), "/assets.rs"));
@@ -71,6 +74,27 @@ pub fn cache_control(asset: &Asset) -> &'static str {
     }
 }
 
+/// Whether a request's `Accept-Encoding` takes brotli: `br`, or else `*`,
+/// listed without a weight of zero.
+pub fn accepts_brotli(accept: &str) -> bool {
+    let mut any = false;
+    for item in accept.split(',') {
+        let mut parts = item.split(';');
+        let coding = parts.next().unwrap_or_default().trim();
+        let weight = parts
+            .filter_map(|p| p.trim().strip_prefix("q="))
+            .find_map(|q| q.trim().parse::<f32>().ok())
+            .unwrap_or(1.0);
+        if coding.eq_ignore_ascii_case("br") {
+            return weight > 0.0;
+        }
+        if coding == "*" {
+            any = weight > 0.0;
+        }
+    }
+    any
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,13 +147,51 @@ mod tests {
             path: "/assets/index-abc123.js",
             content_type: "text/javascript; charset=utf-8",
             bytes: b"",
+            brotli: None,
         };
         let document = Asset {
             path: "/index.html",
             content_type: "text/html; charset=utf-8",
             bytes: b"",
+            brotli: None,
         };
         assert!(cache_control(&hashed).contains("immutable"));
         assert_eq!(cache_control(&document), "no-store");
+    }
+
+    #[test]
+    fn brotli_is_taken_where_listed_without_a_zero_weight() {
+        for takes in [
+            "br",
+            "gzip, deflate, br",
+            "BR",
+            "br;q=0.5",
+            "gzip, *;q=0.1",
+            "*",
+        ] {
+            assert!(accepts_brotli(takes), "{takes}");
+        }
+        for not in [
+            "",
+            "gzip",
+            "gzip, deflate",
+            "br;q=0",
+            "br; q=0.0",
+            "*;q=0",
+            "br;q=0, *",
+        ] {
+            assert!(!accepts_brotli(not), "{not}");
+        }
+    }
+
+    /// A copy the build made is a brotli stream of the file's own bytes.
+    #[test]
+    fn each_copy_is_its_file() {
+        for asset in ASSETS {
+            let Some(packed) = asset.brotli else { continue };
+            let mut bytes = Vec::new();
+            brotli::BrotliDecompress(&mut &packed[..], &mut bytes).expect("a brotli stream");
+            assert_eq!(bytes, asset.bytes, "{}", asset.path);
+        }
     }
 }
