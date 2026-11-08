@@ -310,7 +310,7 @@ mod tests {
 
     use enclavid_boundary::AuthZ;
     use session_types::{
-        CameraFacing, CaptureStep, FrameRange, HeadTurnSpec, Localized, MediaSpec, PhotoSpec,
+        CameraFacing, CaptureStep, FrameRange, HeadTurnGuide, Localized, MediaSpec, PhotoSpec,
         VideoGuide, VideoSpec,
     };
     use storage_client::{Metadata, SealedState, lock_data_keys, unlock_data_keys};
@@ -339,7 +339,7 @@ mod tests {
         }
     }
 
-    const TURN: VideoGuide = VideoGuide::HeadTurn(HeadTurnSpec {
+    const TURN: VideoGuide = VideoGuide::HeadTurn(HeadTurnGuide {
         degrees: 30,
         hold_ms: 700,
     });

@@ -96,6 +96,8 @@ world well-known {
   import enclavid-ext:well-known/i18n@0.1.0;
   import enclavid:host-icons/icons@0.1.0;
   import enclavid:host-disclosure/disclosure@0.1.0;
+  import enclavid:host-capture/photo@0.1.0;
+  import enclavid:host-capture/video@0.1.0;
   import enclavid:host-capture/capture@0.1.0;
 
   export disclosure-fields;

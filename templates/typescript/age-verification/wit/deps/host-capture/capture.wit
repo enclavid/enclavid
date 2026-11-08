@@ -7,6 +7,8 @@ package enclavid:host-capture@0.1.0;
 /// these records carry live in `enclavid:host`.
 interface capture {
     use enclavid:host/refs@0.1.0.{localized-ref, icon-ref};
+    use photo.{photo-spec};
+    use video.{video-spec};
 
     /// Which physical camera the capture step should use.
     enum camera-facing {
@@ -16,90 +18,6 @@ interface capture {
         rear,
         /// The browser picks; useful for laptops without a rear lens.
         any,
-    }
-
-    /// A rectangle at the centre of the frame, as large as fits.
-    record rect-spec {
-        /// Its width:height aspect, held to 0.5–2.0 (1.42 passport, 1.585
-        /// ID-1).
-        aspect: f32,
-    }
-
-    /// An oval at the centre of the frame, 1.618 times as tall as it is wide.
-    record oval-spec {
-        /// As a fraction of the frame's shorter side, so the oval keeps its
-        /// size on a frame of either orientation; held to 0.1–0.6, where its
-        /// height still fits that side.
-        width: f32,
-    }
-
-    /// A shape drawn over the camera. The page does not read what is in it:
-    /// the applicant fits into it whatever they are asked to, and says when
-    /// they have.
-    ///
-    /// Every guide's numbers are held to their ranges, and its fractions
-    /// rounded to hundredths, where the prompt is built: past those, a guide
-    /// no longer fits the screen or a face, and further digits are a
-    /// difference the applicant cannot see.
-    variant static-guide {
-        rect(rect-spec),
-        oval(oval-spec),
-    }
-
-    /// A static guide in a video, which the applicant says with a button they
-    /// have followed.
-    record static-spec {
-        guide: static-guide,
-        /// How long it is held after the button, in milliseconds; held to
-        /// 5000.
-        hold-ms: u16,
-    }
-
-    /// A face the page finds at the centre of the frame, at a size. The page
-    /// draws an oval for it, 1.618 times as tall as it is wide.
-    record face-spec {
-        /// The face's width as a fraction of the frame's shorter side; held to
-        /// 0.25–0.6: smaller, the page does not find a face reliably; larger,
-        /// the oval no longer fits.
-        width: f32,
-        /// How long the face stays there, in milliseconds; held to 5000.
-        hold-ms: u16,
-    }
-
-    /// A turn of the head the page reads.
-    record head-turn-spec {
-        /// How far, negative to the applicant's left; held to ±45.
-        degrees: s8,
-        /// How long it is held, in milliseconds; held to 5000.
-        hold-ms: u16,
-    }
-
-    /// One thing a video asks the applicant to do. Each is held before the
-    /// next is shown: a static guide from the applicant's button, a face and
-    /// a head turn from when the page reads them in the frames.
-    variant video-guide {
-        static-guide(static-spec),
-        face(face-spec),
-        head-turn(head-turn-spec),
-    }
-
-    /// A photo: one frame, which the applicant sees and keeps or retakes
-    /// before it is sent.
-    record photo-spec {
-        /// The shape drawn over the camera, if any, which the shutter says is
-        /// followed.
-        guide: option<static-guide>,
-        /// The check shown under the photo on the review screen ("Make sure
-        /// the MRZ is sharp and free of glare").
-        review-hint: localized-ref,
-    }
-
-    /// A video, sent with no review screen.
-    record video-spec {
-        /// What it asks, in order, each held for its `hold-ms` — for one frame
-        /// where that is 0 — before the next. The reply says where each was
-        /// held.
-        guides: list<video-guide>,
     }
 
     /// What one capture step records.

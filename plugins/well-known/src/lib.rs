@@ -16,9 +16,8 @@ wit_bindgen::generate!({
 });
 
 use enclavid::host::refs::{DisclosureFieldRef, IconRef};
-use enclavid::host_capture::capture::{
-    CameraFacing, CaptureKind, CaptureStep, MediaSpec, OvalSpec, PhotoSpec, RectSpec, StaticGuide,
-};
+use enclavid::host_capture::capture::{CameraFacing, CaptureKind, CaptureStep, MediaSpec};
+use enclavid::host_capture::photo::{OvalGuide, PhotoSpec, RectGuide, StaticGuide};
 use enclavid::host_disclosure::disclosure::DisplayField;
 use enclavid::host_icons::icons;
 use enclavid_ext::well_known::i18n::{Key, localized};
@@ -102,11 +101,11 @@ impl DisclosureFieldsGuest for WellKnown {
 // ─── capture ──────────────────────────────────────────────────────
 
 /// The frame of an ICAO TD3 passport photo page (125x88mm → ~1.42).
-const PASSPORT_FRAME: RectSpec = RectSpec { aspect: 1.42 };
+const PASSPORT_FRAME: RectGuide = RectGuide { aspect: 1.42 };
 /// The frame of an ICAO TD1 ID-1 card (85.6x54mm → ~1.585).
-const ID1_FRAME: RectSpec = RectSpec { aspect: 1.585 };
+const ID1_FRAME: RectGuide = RectGuide { aspect: 1.585 };
 /// A selfie's face oval: half the frame's shorter side wide.
-const SELFIE_OVAL: OvalSpec = OvalSpec { width: 0.5 };
+const SELFIE_OVAL: OvalGuide = OvalGuide { width: 0.5 };
 
 /// The three texts of a capture step.
 struct StepTexts {

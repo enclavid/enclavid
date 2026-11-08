@@ -1,0 +1,46 @@
+package enclavid:host-capture@0.1.0;
+
+/// A photo step, and the shapes drawn over the camera, which a video shows
+/// too.
+interface photo {
+    use enclavid:host/refs@0.1.0.{localized-ref};
+
+    /// A rectangle at the centre of the frame, as large as fits.
+    record rect-guide {
+        /// Its width:height aspect, held to 0.5–2.0 (1.42 passport, 1.585
+        /// ID-1).
+        aspect: f32,
+    }
+
+    /// An oval at the centre of the frame, 1.618 times as tall as it is wide.
+    record oval-guide {
+        /// As a fraction of the frame's shorter side, so the oval keeps its
+        /// size on a frame of either orientation; held to 0.1–0.6, where its
+        /// height still fits that side.
+        width: f32,
+    }
+
+    /// A shape drawn over the camera. The page does not read what is in it:
+    /// the applicant fits into it whatever they are asked to, and says when
+    /// they have.
+    ///
+    /// Every guide's numbers are held to their ranges, and its fractions
+    /// rounded to hundredths, where the prompt is built: past those, a guide
+    /// no longer fits the screen or a face, and further digits are a
+    /// difference the applicant cannot see.
+    variant static-guide {
+        rect(rect-guide),
+        oval(oval-guide),
+    }
+
+    /// A photo: one frame, which the applicant sees and keeps or retakes
+    /// before it is sent.
+    record photo-spec {
+        /// The shape drawn over the camera, if any, which the shutter says is
+        /// followed.
+        guide: option<static-guide>,
+        /// The check shown under the photo on the review screen ("Make sure
+        /// the MRZ is sharp and free of glare").
+        review-hint: localized-ref,
+    }
+}

@@ -340,15 +340,15 @@ mod tests {
     use axum::body::Body;
     use axum::extract::FromRequest;
     use axum::http::Request;
-    use session_types::{FaceSpec, HeadTurnSpec, PhotoSpec, VideoSpec};
+    use session_types::{FaceGuide, HeadTurnGuide, PhotoSpec, VideoSpec};
 
     use super::*;
 
-    const FACE: VideoGuide = VideoGuide::Face(FaceSpec {
+    const FACE: VideoGuide = VideoGuide::Face(FaceGuide {
         width: 0.5,
         hold_ms: 1000,
     });
-    const TURN: VideoGuide = VideoGuide::HeadTurn(HeadTurnSpec {
+    const TURN: VideoGuide = VideoGuide::HeadTurn(HeadTurnGuide {
         degrees: -30,
         hold_ms: 800,
     });

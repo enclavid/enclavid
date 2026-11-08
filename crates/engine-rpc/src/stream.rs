@@ -237,8 +237,8 @@ mod tests {
     use crate::padded::{Framed, Padded};
     use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_VIDEO_GUIDES};
     use session_types::{
-        Capture, Event, FrameRange, MAX_MEDIA_BYTES, MediaResult, RectSpec, SessionState,
-        StaticGuide, StaticSpec, VideoCapture, VideoGuide,
+        Capture, Event, FrameRange, MAX_MEDIA_BYTES, MediaResult, RectGuide, SessionState,
+        StaticGuide, StaticVideoGuide, VideoCapture, VideoGuide,
     };
 
     /// The header with no bounds, so a test can put on the wire what the real type
@@ -290,8 +290,8 @@ mod tests {
         let range = FrameRange {
             // A static rectangle: of the guides, the one whose encoding is the
             // longest.
-            guide: VideoGuide::StaticGuide(StaticSpec {
-                guide: StaticGuide::Rect(RectSpec { aspect: 1.587_654 }),
+            guide: VideoGuide::StaticGuide(StaticVideoGuide {
+                guide: StaticGuide::Rect(RectGuide { aspect: 1.587_654 }),
                 hold_ms: u16::MAX,
             }),
             first: u32::MAX,

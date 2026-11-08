@@ -906,51 +906,51 @@ pub struct VideoSpec {
 /// built, as every guide is.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum StaticGuide {
-    Rect(RectSpec),
-    Oval(OvalSpec),
+    Rect(RectGuide),
+    Oval(OvalGuide),
 }
 
-/// Sealed mirror of the WIT `rect-spec` record.
+/// Sealed mirror of the WIT `rect-guide` record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct RectSpec {
+pub struct RectGuide {
     pub aspect: f32,
 }
 
-/// Sealed mirror of the WIT `oval-spec` record.
+/// Sealed mirror of the WIT `oval-guide` record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct OvalSpec {
+pub struct OvalGuide {
     pub width: f32,
 }
 
 /// One thing a video asks — sealed mirror of the WIT `video-guide` variant.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum VideoGuide {
-    StaticGuide(StaticSpec),
-    Face(FaceSpec),
-    HeadTurn(HeadTurnSpec),
+    StaticGuide(StaticVideoGuide),
+    Face(FaceGuide),
+    HeadTurn(HeadTurnGuide),
 }
 
-/// Sealed mirror of the WIT `static-spec` record.
+/// Sealed mirror of the WIT `static-video-guide` record.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct StaticSpec {
+pub struct StaticVideoGuide {
     pub guide: StaticGuide,
     pub hold_ms: u16,
 }
 
-/// Sealed mirror of the WIT `face-spec` record.
+/// Sealed mirror of the WIT `face-guide` record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct FaceSpec {
+pub struct FaceGuide {
     pub width: f32,
     pub hold_ms: u16,
 }
 
-/// Sealed mirror of the WIT `head-turn-spec` record.
+/// Sealed mirror of the WIT `head-turn-guide` record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct HeadTurnSpec {
+pub struct HeadTurnGuide {
     pub degrees: i8,
     pub hold_ms: u16,
 }
@@ -993,7 +993,7 @@ mod media_tests {
     /// A capture of `video` with `guides` ranges.
     fn video(video: Vec<u8>, guides: usize) -> Capture {
         let range = FrameRange {
-            guide: VideoGuide::HeadTurn(HeadTurnSpec {
+            guide: VideoGuide::HeadTurn(HeadTurnGuide {
                 degrees: -30,
                 hold_ms: 800,
             }),

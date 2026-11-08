@@ -6,7 +6,8 @@ package enclavid:policy@0.1.0;
 /// so helper plugins can `use` the records without importing the `handle`
 /// export.
 interface types {
-    use enclavid:host-capture/capture@0.1.0.{media-spec, video-guide};
+    use enclavid:host-capture/capture@0.1.0.{media-spec};
+    use enclavid:host-capture/video@0.1.0.{video-guide};
     use enclavid:host-disclosure/disclosure@0.1.0.{display-field};
     use enclavid:host/refs@0.1.0.{localized-ref};
     use enclavid:host/media@0.1.0.{photo, video};

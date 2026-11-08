@@ -386,7 +386,7 @@ fn video_guide_view(g: VideoGuide) -> VideoGuideView {
 #[cfg(test)]
 mod tests {
     use session_types::{
-        FaceSpec, HeadTurnSpec, Localized, PhotoSpec, RectSpec, StaticSpec, VideoSpec,
+        FaceGuide, HeadTurnGuide, Localized, PhotoSpec, RectGuide, StaticVideoGuide, VideoSpec,
     };
 
     use super::*;
@@ -438,7 +438,7 @@ mod tests {
             label: Localized::default(),
             camera: CameraFacing::Front,
             kind: CaptureKind::Video(VideoSpec {
-                guides: vec![VideoGuide::Face(FaceSpec {
+                guides: vec![VideoGuide::Face(FaceGuide {
                     width: 0.5,
                     hold_ms: 1000,
                 })],
@@ -504,20 +504,20 @@ mod tests {
             label: Localized::default(),
             captures: vec![
                 step(CaptureKind::Photo(PhotoSpec {
-                    guide: Some(StaticGuide::Rect(RectSpec { aspect: 1.42 })),
+                    guide: Some(StaticGuide::Rect(RectGuide { aspect: 1.42 })),
                     review_hint: Localized::default(),
                 })),
                 step(CaptureKind::Video(VideoSpec {
                     guides: vec![
-                        VideoGuide::StaticGuide(StaticSpec {
-                            guide: StaticGuide::Rect(RectSpec { aspect: 1.59 }),
+                        VideoGuide::StaticGuide(StaticVideoGuide {
+                            guide: StaticGuide::Rect(RectGuide { aspect: 1.59 }),
                             hold_ms: 2000,
                         }),
-                        VideoGuide::Face(FaceSpec {
+                        VideoGuide::Face(FaceGuide {
                             width: 0.5,
                             hold_ms: 1000,
                         }),
-                        VideoGuide::HeadTurn(HeadTurnSpec {
+                        VideoGuide::HeadTurn(HeadTurnGuide {
                             degrees: -30,
                             hold_ms: 800,
                         }),
