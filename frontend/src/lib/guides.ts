@@ -81,7 +81,7 @@ export function hintFor(
 
 function ovalHint(
   face: Face,
-  oval: Extract<VideoGuide, { kind: "face" }>,
+  oval: { width: number; height: number },
   width: number,
   height: number,
   mirrored: boolean,

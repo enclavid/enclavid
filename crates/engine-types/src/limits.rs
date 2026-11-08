@@ -193,19 +193,25 @@ pub const GUIDE_FACE_WIDTH_MIN: f32 = 0.25;
 /// the page draws one for it.
 pub const GUIDE_FACE_WIDTH_MAX: f32 = GUIDE_OVAL_WIDTH_MAX;
 
-/// How many steps per unit there are of a guide's fractions — a `rect`'s
-/// aspect, an `oval`'s or a `face`'s size: each is drawn rounded to
-/// hundredths. The policy picks them freely, and past what the applicant
-/// can tell apart on screen every further digit would carry bits no one
-/// can see; held to its range, an aspect is one of 151.
-pub const GUIDE_STEPS_PER_UNIT: f32 = 100.0;
-
 /// The longest a video's guide may ask to be held, in milliseconds.
 pub const GUIDE_HOLD_MS_MAX: u16 = 5000;
 
 /// The furthest a `head-turn` guide may ask the head to turn, in degrees
 /// either way: past it the face is in profile.
 pub const GUIDE_HEAD_TURN_DEGREES_MAX: i8 = 45;
+
+/// The shortest a `face-flashes` guide shows each colour, in milliseconds: two
+/// flashes a second at most, under the three past which flashing may bring on
+/// a seizure (WCAG 2.3.1), and four of the page's frames to each.
+pub const GUIDE_FLASH_MS_MIN: u16 = 250;
+
+/// The longest a `face-flashes` guide shows each colour, in milliseconds: in a
+/// longer flash the camera's white balance and exposure even the colour out of
+/// the reflection.
+pub const GUIDE_FLASH_MS_MAX: u16 = 1000;
+
+/// The most colours one `face-flashes` guide may show.
+pub const MAX_FLASH_COLORS: usize = 16;
 
 // ----- The consumer's embedded catalogs, as a whole -----
 

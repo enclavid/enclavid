@@ -303,7 +303,11 @@ async fn guides_part(
     Ok(guides
         .iter()
         .zip(pairs)
-        .map(|(&guide, (first, last))| FrameRange { guide, first, last })
+        .map(|(guide, (first, last))| FrameRange {
+            guide: guide.clone(),
+            first,
+            last,
+        })
         .collect())
 }
 

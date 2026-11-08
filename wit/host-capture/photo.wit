@@ -24,10 +24,8 @@ interface photo {
     /// the applicant fits into it whatever they are asked to, and says when
     /// they have.
     ///
-    /// Every guide's numbers are held to their ranges, and its fractions
-    /// rounded to hundredths, where the prompt is built: past those, a guide
-    /// no longer fits the screen or a face, and further digits are a
-    /// difference the applicant cannot see.
+    /// Every guide's numbers are held to their ranges where the prompt is
+    /// built: past those, a guide no longer fits the screen or a face.
     variant static-guide {
         rect(rect-guide),
         oval(oval-guide),

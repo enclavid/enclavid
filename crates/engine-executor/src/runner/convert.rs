@@ -22,11 +22,11 @@ use wasmtime::component::{Resource, ResourceTable};
 use session_types::{
     CameraFacing as DCameraFacing, Capture, CaptureKind as DCaptureKind,
     CaptureStep as DCaptureStep, Decision as DDecision, Disclosure as DDisclosure,
-    DisplayField as DDisplayField, Event, FaceGuide as DFaceGuide, FrameRange,
-    HeadTurnGuide as DHeadTurnGuide, Localized as DLocalized, MediaSpec as DMediaSpec,
-    OvalGuide as DOvalGuide, PhotoSpec as DPhotoSpec, Prompt, RectGuide as DRectGuide,
-    StaticGuide as DStaticGuide, StaticVideoGuide as DStaticVideoGuide, VideoGuide as DVideoGuide,
-    VideoSpec as DVideoSpec,
+    DisplayField as DDisplayField, Event, FaceFlashesGuide as DFaceFlashesGuide,
+    FaceGuide as DFaceGuide, FrameRange, HeadTurnGuide as DHeadTurnGuide, Localized as DLocalized,
+    MediaSpec as DMediaSpec, OvalGuide as DOvalGuide, PhotoSpec as DPhotoSpec, Prompt,
+    RectGuide as DRectGuide, Rgb as DRgb, StaticGuide as DStaticGuide,
+    StaticVideoGuide as DStaticVideoGuide, VideoGuide as DVideoGuide, VideoSpec as DVideoSpec,
 };
 
 use crate::embedded::{DisclosureFieldRef, EmbeddedRegistry, IconRef, LocalizedRef};
@@ -36,9 +36,9 @@ use crate::enclavid::host_capture::{
 use crate::enclavid::policy::types as wit_policy;
 use crate::limits::{
     GUIDE_ASPECT_MAX, GUIDE_ASPECT_MIN, GUIDE_FACE_WIDTH_MAX, GUIDE_FACE_WIDTH_MIN,
-    GUIDE_HEAD_TURN_DEGREES_MAX, GUIDE_HOLD_MS_MAX, GUIDE_OVAL_WIDTH_MAX, GUIDE_OVAL_WIDTH_MIN,
-    GUIDE_STEPS_PER_UNIT, MAX_CAPTURE_STEPS, MAX_CONSENT_FIELDS, MAX_VALUE_LENGTH,
-    MAX_VIDEO_GUIDES,
+    GUIDE_FLASH_MS_MAX, GUIDE_FLASH_MS_MIN, GUIDE_HEAD_TURN_DEGREES_MAX, GUIDE_HOLD_MS_MAX,
+    GUIDE_OVAL_WIDTH_MAX, GUIDE_OVAL_WIDTH_MIN, MAX_CAPTURE_STEPS, MAX_CONSENT_FIELDS,
+    MAX_FLASH_COLORS, MAX_VALUE_LENGTH, MAX_VIDEO_GUIDES,
 };
 use crate::media::{PhotoRep, VideoRep};
 use crate::sanitize;
@@ -112,6 +112,21 @@ fn video_guide_to_wit(guide: DVideoGuide) -> wit_video::VideoGuide {
             degrees: t.degrees,
             hold_ms: t.hold_ms,
         }),
+        DVideoGuide::FaceFlashes(f) => {
+            wit_video::VideoGuide::FaceFlashes(wit_video::FaceFlashesGuide {
+                width: f.width,
+                colors: f
+                    .colors
+                    .into_iter()
+                    .map(|c| wit_video::Rgb {
+                        red: c.red,
+                        green: c.green,
+                        blue: c.blue,
+                    })
+                    .collect(),
+                flash_ms: f.flash_ms,
+            })
+        }
     }
 }
 
@@ -219,9 +234,10 @@ fn disclosure_to_domain(
 // ---------------------------------------------------------------------
 
 /// Resolve refs on a media render and lower it. A spec of no steps, or of
-/// more than [`MAX_CAPTURE_STEPS`], a time limit of no seconds, and a video
-/// step of no guides, or of more than [`MAX_VIDEO_GUIDES`], trap: none is an
-/// applicant's doing.
+/// more than [`MAX_CAPTURE_STEPS`], a time limit of no seconds, a video step
+/// of no guides, or of more than [`MAX_VIDEO_GUIDES`], and flashes of no
+/// colours, or of more than [`MAX_FLASH_COLORS`], trap: none is an applicant's
+/// doing.
 fn media_spec_to_domain(
     spec: wit_capture::MediaSpec,
     table: &ResourceTable,
@@ -281,7 +297,7 @@ fn capture_step_to_domain(
                     .guides
                     .into_iter()
                     .map(video_guide_to_domain)
-                    .collect(),
+                    .collect::<wasmtime::Result<Vec<_>>>()?,
             })
         }
     };
@@ -302,8 +318,8 @@ fn camera_to_domain(c: wit_capture::CameraFacing) -> DCameraFacing {
     }
 }
 
-/// A shape as it is drawn: its number held to its range and rounded, as the
-/// WIT `static-guide` says of every guide.
+/// A shape as it is drawn: its number held to its range, as the WIT
+/// `static-guide` says of every guide.
 fn static_guide_to_domain(g: wit_photo::StaticGuide) -> DStaticGuide {
     match g {
         wit_photo::StaticGuide::Rect(r) => DStaticGuide::Rect(DRectGuide {
@@ -315,10 +331,9 @@ fn static_guide_to_domain(g: wit_photo::StaticGuide) -> DStaticGuide {
     }
 }
 
-/// A video's guide as it is shown: each of its numbers held to its range and
-/// its fractions rounded.
-fn video_guide_to_domain(g: wit_video::VideoGuide) -> DVideoGuide {
-    match g {
+/// A video's guide as it is shown: each of its numbers held to its range.
+fn video_guide_to_domain(g: wit_video::VideoGuide) -> wasmtime::Result<DVideoGuide> {
+    Ok(match g {
         wit_video::VideoGuide::StaticGuide(s) => DVideoGuide::StaticGuide(DStaticVideoGuide {
             guide: static_guide_to_domain(s.guide),
             hold_ms: s.hold_ms.min(GUIDE_HOLD_MS_MAX),
@@ -333,34 +348,55 @@ fn video_guide_to_domain(g: wit_video::VideoGuide) -> DVideoGuide {
                 .clamp(-GUIDE_HEAD_TURN_DEGREES_MAX, GUIDE_HEAD_TURN_DEGREES_MAX),
             hold_ms: t.hold_ms.min(GUIDE_HOLD_MS_MAX),
         }),
-    }
+        wit_video::VideoGuide::FaceFlashes(f) => {
+            if f.colors.is_empty() {
+                return Err(wasmtime::Error::msg("a face-flashes guide has no colours"));
+            }
+            if f.colors.len() > MAX_FLASH_COLORS {
+                return Err(wasmtime::Error::msg(format!(
+                    "a face-flashes guide exceeds {MAX_FLASH_COLORS} colours"
+                )));
+            }
+            DVideoGuide::FaceFlashes(DFaceFlashesGuide {
+                width: drawn(f.width, GUIDE_FACE_WIDTH_MIN, GUIDE_FACE_WIDTH_MAX, 0.5),
+                colors: f
+                    .colors
+                    .into_iter()
+                    .map(|c| DRgb {
+                        red: c.red,
+                        green: c.green,
+                        blue: c.blue,
+                    })
+                    .collect(),
+                flash_ms: f.flash_ms.clamp(GUIDE_FLASH_MS_MIN, GUIDE_FLASH_MS_MAX),
+            })
+        }
+    })
 }
 
 /// The aspect a `rect` guide is drawn at: the policy's, held to
-/// [`GUIDE_ASPECT_MIN`]..=[`GUIDE_ASPECT_MAX`] and rounded; a square for
-/// NaN, which has no place in the range.
+/// [`GUIDE_ASPECT_MIN`]..=[`GUIDE_ASPECT_MAX`]; a square for NaN, which has no
+/// place in the range.
 fn drawn_aspect(aspect: f32) -> f32 {
     drawn(aspect, GUIDE_ASPECT_MIN, GUIDE_ASPECT_MAX, 1.0)
 }
 
-/// `value` held to `min..=max` and rounded to the step
-/// [`GUIDE_STEPS_PER_UNIT`] sets; `nan` for NaN, which has no place in the
+/// `value` held to `min..=max`; `nan` for NaN, which has no place in the
 /// range.
 fn drawn(value: f32, min: f32, max: f32, nan: f32) -> f32 {
     if value.is_nan() {
         return nan;
     }
-    (value.clamp(min, max) * GUIDE_STEPS_PER_UNIT).round() / GUIDE_STEPS_PER_UNIT
+    value.clamp(min, max)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A shape is drawn within its range, to hundredths. In a video every
-    /// guide is held no longer than the longest hold, a face asked for at a
-    /// size the page finds, and a head turned no further than a face in
-    /// profile.
+    /// A shape is drawn within its range. In a video every guide is held no
+    /// longer than the longest hold, a face asked for at a size the page
+    /// finds, and a head turned no further than a face in profile.
     #[test]
     fn a_guide_is_drawn_within_its_ranges() {
         let frame = video_guide_to_domain(wit_video::VideoGuide::StaticGuide(
@@ -368,7 +404,8 @@ mod tests {
                 guide: wit_photo::StaticGuide::Rect(wit_photo::RectGuide { aspect: 1.42 }),
                 hold_ms: u16::MAX,
             },
-        ));
+        ))
+        .unwrap();
         assert_eq!(
             frame,
             DVideoGuide::StaticGuide(DStaticVideoGuide {
@@ -378,7 +415,7 @@ mod tests {
         );
         for (given, drawn) in [
             (0.01, GUIDE_OVAL_WIDTH_MIN),
-            (0.456_78, 0.46),
+            (0.456_78, 0.456_78),
             (0.9, GUIDE_OVAL_WIDTH_MAX),
             (f32::NAN, 0.5),
         ] {
@@ -393,14 +430,15 @@ mod tests {
         }
         for (given, drawn) in [
             (0.1, GUIDE_FACE_WIDTH_MIN),
-            (0.456_78, 0.46),
+            (0.456_78, 0.456_78),
             (0.9, GUIDE_FACE_WIDTH_MAX),
             (f32::NAN, 0.5),
         ] {
             let face = video_guide_to_domain(wit_video::VideoGuide::Face(wit_video::FaceGuide {
                 width: given,
                 hold_ms: u16::MAX,
-            }));
+            }))
+            .unwrap();
             assert_eq!(
                 face,
                 DVideoGuide::Face(DFaceGuide {
@@ -419,7 +457,8 @@ mod tests {
                 video_guide_to_domain(wit_video::VideoGuide::HeadTurn(wit_video::HeadTurnGuide {
                     degrees: given,
                     hold_ms: 700,
-                }));
+                }))
+                .unwrap();
             assert_eq!(
                 turn,
                 DVideoGuide::HeadTurn(DHeadTurnGuide {
@@ -431,19 +470,105 @@ mod tests {
         }
     }
 
-    /// Inside the range an aspect is drawn to hundredths, and written out as
-    /// no more than that: the digits past them carry nothing to the page.
+    /// Flashes are of a face at a size the page finds, each colour shown as the
+    /// policy gave it, for no shorter and no longer than a flash may be.
     #[test]
-    fn an_aspect_is_drawn_to_hundredths() {
+    fn flashes_are_shown_within_their_ranges() {
+        let colors = [(0, 0, 0), (255, 136, 0), (17, 34, 51)];
+        let flashes = |width, flash_ms| {
+            video_guide_to_domain(wit_video::VideoGuide::FaceFlashes(
+                wit_video::FaceFlashesGuide {
+                    width,
+                    colors: colors
+                        .iter()
+                        .map(|&(red, green, blue)| wit_video::Rgb { red, green, blue })
+                        .collect(),
+                    flash_ms,
+                },
+            ))
+            .unwrap()
+        };
         for (given, drawn) in [
-            (1.42_f32, "1.42"),
-            (1.419_999_9, "1.42"),
-            (1.585, "1.59"),
-            (1.234_567_8, "1.23"),
-            (1.0, "1"),
+            ((0.1, 0), (GUIDE_FACE_WIDTH_MIN, GUIDE_FLASH_MS_MIN)),
+            ((0.456_78, 300), (0.456_78, 300)),
+            ((f32::NAN, u16::MAX), (0.5, GUIDE_FLASH_MS_MAX)),
         ] {
-            assert_eq!(drawn_aspect(given).to_string(), drawn, "{given}");
+            assert_eq!(
+                flashes(given.0, given.1),
+                DVideoGuide::FaceFlashes(DFaceFlashesGuide {
+                    width: drawn.0,
+                    colors: colors
+                        .iter()
+                        .map(|&(red, green, blue)| DRgb { red, green, blue })
+                        .collect(),
+                    flash_ms: drawn.1,
+                }),
+                "{given:?}"
+            );
         }
+    }
+
+    /// Flashes of no colours, or of more than a guide may show, are the
+    /// policy's error, not the applicant's.
+    #[test]
+    fn flashes_of_no_colours_or_too_many_trap() {
+        let flashes = |count| {
+            video_guide_to_domain(wit_video::VideoGuide::FaceFlashes(
+                wit_video::FaceFlashesGuide {
+                    width: 0.5,
+                    colors: vec![
+                        wit_video::Rgb {
+                            red: 255,
+                            green: 255,
+                            blue: 255,
+                        };
+                        count
+                    ],
+                    flash_ms: 300,
+                },
+            ))
+        };
+        assert!(flashes(0).is_err());
+        assert!(flashes(1).is_ok());
+        assert!(flashes(MAX_FLASH_COLORS).is_ok());
+        assert!(flashes(MAX_FLASH_COLORS + 1).is_err());
+    }
+
+    /// A range reaches the policy with the guide the prompt had, flashes with
+    /// their colours.
+    #[test]
+    fn a_range_reaches_the_policy_with_its_guide() {
+        let range = frame_range_to_wit(FrameRange {
+            guide: DVideoGuide::FaceFlashes(DFaceFlashesGuide {
+                width: 0.5,
+                colors: vec![
+                    DRgb {
+                        red: 255,
+                        green: 136,
+                        blue: 0,
+                    },
+                    DRgb {
+                        red: 0,
+                        green: 10,
+                        blue: 171,
+                    },
+                ],
+                flash_ms: 300,
+            }),
+            first: 3,
+            last: 9,
+        });
+        assert_eq!((range.first, range.last), (3, 9));
+        let wit_video::VideoGuide::FaceFlashes(flashes) = range.guide else {
+            panic!("the guide is not the prompt's");
+        };
+        assert_eq!((flashes.width, flashes.flash_ms), (0.5, 300));
+        let colors: Vec<_> = flashes
+            .colors
+            .iter()
+            .map(|c| (c.red, c.green, c.blue))
+            .collect();
+        assert_eq!(colors, [(255, 136, 0), (0, 10, 171)]);
     }
 
     /// Past either end an aspect is drawn at that end, and NaN, which is

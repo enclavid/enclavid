@@ -40,14 +40,17 @@ fn wit_files(dir: &Path) -> Vec<String> {
 /// copies of the source, or all of them.
 type Copy = (&'static str, &'static str, Option<&'static str>);
 
-/// What every template copies: the platform's WIT, and well-known's, for the
-/// capture specs.
-const PLATFORM: [Copy; 7] = [
+/// What every template copies: the platform's WIT.
+const PLATFORM: [Copy; 5] = [
     ("host", "wit/host", None),
     ("host-capture", "wit/host-capture", None),
     ("host-disclosure", "wit/host-disclosure", None),
     ("host-icons", "wit/host-icons", None),
     ("policy", "wit/policy", None),
+];
+
+/// What a template that asks for well-known's capture specs copies besides.
+const WELL_KNOWN: [Copy; 2] = [
     ("well-known", "plugins/well-known/wit", Some("world.wit")),
     (
         "well-known-texts",
@@ -56,9 +59,9 @@ const PLATFORM: [Copy; 7] = [
     ),
 ];
 
-/// What a template that reads a face copies besides: the vision plugin's
-/// package and the face plugins', whose packages name their slots.
-const FACES: [Copy; 5] = [
+/// What a template that finds a face copies besides: the vision plugin's
+/// package and face-detect's, whose package names its slot.
+const FACES: [Copy; 3] = [
     ("vision", "plugins/vision/wit", Some("world.wit")),
     ("face-detect", "plugins/face-detect/wit", Some("world.wit")),
     (
@@ -66,10 +69,26 @@ const FACES: [Copy; 5] = [
         "plugins/face-detect/ext",
         Some("models.wit"),
     ),
+];
+
+/// The package of a plugin a template reads the face with, and its slot's.
+const AGE: [Copy; 2] = [
     ("face-age", "plugins/face-age/wit", Some("world.wit")),
     (
         "face-age-models",
         "plugins/face-age/ext",
+        Some("models.wit"),
+    ),
+];
+const LIVENESS: [Copy; 2] = [
+    (
+        "face-liveness",
+        "plugins/face-liveness/wit",
+        Some("world.wit"),
+    ),
+    (
+        "face-liveness-models",
+        "plugins/face-liveness/ext",
         Some("models.wit"),
     ),
 ];
@@ -81,8 +100,15 @@ const WASI: &str = "wasi-random";
 #[test]
 fn the_typescript_templates_carry_the_wit_they_copy() {
     let repo = repo();
-    let faces: Vec<Copy> = PLATFORM.iter().chain(&FACES).copied().collect();
-    for (template, copies) in [("kyc", &PLATFORM[..]), ("age-verification", &faces[..])] {
+    let templates = [
+        ("kyc", [&PLATFORM[..], &WELL_KNOWN].concat()),
+        (
+            "age-verification",
+            [&PLATFORM[..], &WELL_KNOWN, &FACES, &AGE].concat(),
+        ),
+        ("liveness", [&PLATFORM[..], &FACES, &LIVENESS].concat()),
+    ];
+    for (template, copies) in &templates {
         let deps = repo
             .join("templates/typescript")
             .join(template)

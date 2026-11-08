@@ -1,0 +1,77 @@
+package enclavid:host-capture@0.1.0;
+
+/// A video step, and what it asks the applicant to do.
+interface video {
+    use photo.{static-guide};
+
+    /// A static guide in a video, which the applicant says with a button they
+    /// have followed.
+    record static-video-guide {
+        guide: static-guide,
+        /// How long it is held after the button, in milliseconds; held to
+        /// 5000.
+        hold-ms: u16,
+    }
+
+    /// A face the page finds at the centre of the frame, at a size. The page
+    /// draws an oval for it, 1.618 times as tall as it is wide.
+    record face-guide {
+        /// The face's width as a fraction of the frame's shorter side; held to
+        /// 0.25–0.6: smaller, the page does not find a face reliably; larger,
+        /// the oval no longer fits.
+        width: f32,
+        /// How long the face stays there, in milliseconds; held to 5000.
+        hold-ms: u16,
+    }
+
+    /// A turn of the head the page reads.
+    record head-turn-guide {
+        /// How far, negative to the applicant's left; held to ±45.
+        degrees: s8,
+        /// How long it is held, in milliseconds; held to 5000.
+        hold-ms: u16,
+    }
+
+    /// A colour on screen, by its red, green and blue, as `#rrggbb` writes
+    /// them.
+    record rgb {
+        red: u8,
+        green: u8,
+        blue: u8,
+    }
+
+    /// A face the page finds at the centre of the frame, at a size, held there
+    /// while the screen lights it: around the oval the page draws for it, as
+    /// for a `face`, the screen shows each colour in turn. The flashes begin
+    /// once the face has been in the oval for a moment, or at once where a
+    /// `face` or flashes guide before them held it there, and start over if
+    /// the face leaves.
+    record face-flashes-guide {
+        /// The face's width as a fraction of the frame's shorter side; held to
+        /// 0.25–0.6, as a `face`'s is.
+        width: f32,
+        /// The colours, in the order shown; 1 to 16 of them.
+        colors: list<rgb>,
+        /// How long each colour is shown, in milliseconds; held to 250–1000.
+        flash-ms: u16,
+    }
+
+    /// One thing a video asks the applicant to do. Each is held before the
+    /// next is shown: a static guide from the applicant's button; a face,
+    /// with its flashes or without, and a head turn from when the page reads
+    /// them in the frames.
+    variant video-guide {
+        static-guide(static-video-guide),
+        face(face-guide),
+        head-turn(head-turn-guide),
+        face-flashes(face-flashes-guide),
+    }
+
+    /// A video, sent with no review screen.
+    record video-spec {
+        /// What it asks, in order, each held for its `hold-ms` or through all
+        /// its flashes — for one frame where that is 0 — before the next. The
+        /// reply says where each was held.
+        guides: list<video-guide>,
+    }
+}

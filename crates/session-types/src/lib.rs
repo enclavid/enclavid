@@ -757,7 +757,7 @@ pub struct VideoCapture {
 
 /// Where the page saw one guide of a video step held, by frame index into the
 /// video — sealed mirror of the WIT `frame-range` record.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrameRange {
     /// The step's own guide, which api copies from the prompt.
     pub guide: VideoGuide,
@@ -902,8 +902,8 @@ pub struct VideoSpec {
 }
 
 /// A shape drawn over the camera — sealed mirror of the WIT `static-guide`
-/// variant, held to its ranges and rounded by the engine where the prompt is
-/// built, as every guide is.
+/// variant, held to its ranges by the engine where the prompt is built, as
+/// every guide is.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum StaticGuide {
     Rect(RectGuide),
@@ -925,11 +925,12 @@ pub struct OvalGuide {
 }
 
 /// One thing a video asks — sealed mirror of the WIT `video-guide` variant.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum VideoGuide {
     StaticGuide(StaticVideoGuide),
     Face(FaceGuide),
     HeadTurn(HeadTurnGuide),
+    FaceFlashes(FaceFlashesGuide),
 }
 
 /// Sealed mirror of the WIT `static-video-guide` record.
@@ -953,6 +954,79 @@ pub struct FaceGuide {
 pub struct HeadTurnGuide {
     pub degrees: i8,
     pub hold_ms: u16,
+}
+
+/// Sealed mirror of the WIT `face-flashes-guide` record.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FaceFlashesGuide {
+    pub width: f32,
+    /// Bounded on the way in, as the ranges that carry it are.
+    #[serde(deserialize_with = "colors::deserialize")]
+    pub colors: Vec<Rgb>,
+    pub flash_ms: u16,
+}
+
+/// Sealed mirror of the WIT `rgb` record. Encoded as its three bytes rather
+/// than by its fields' names: a prompt may hold 4096 of them, and its ranges
+/// as many again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "[u8; 3]", into = "[u8; 3]")]
+pub struct Rgb {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+impl From<[u8; 3]> for Rgb {
+    fn from([red, green, blue]: [u8; 3]) -> Self {
+        Rgb { red, green, blue }
+    }
+}
+
+impl From<Rgb> for [u8; 3] {
+    fn from(c: Rgb) -> Self {
+        [c.red, c.green, c.blue]
+    }
+}
+
+/// The decoder for [`FaceFlashesGuide::colors`]: at most
+/// [`MAX_FLASH_COLORS`](engine_types::limits::MAX_FLASH_COLORS) colours.
+mod colors {
+    use engine_types::limits::MAX_FLASH_COLORS;
+    use serde::de::{self, SeqAccess, Visitor};
+
+    use super::Rgb;
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Vec<Rgb>, D::Error> {
+        struct Colors;
+
+        impl<'de> Visitor<'de> for Colors {
+            type Value = Vec<Rgb>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "at most {MAX_FLASH_COLORS} colours")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                // Grown into what arrives, as the captures are.
+                let mut out: Vec<Rgb> = Vec::new();
+                while let Some(color) = seq.next_element::<Rgb>()? {
+                    if out.len() == MAX_FLASH_COLORS {
+                        return Err(de::Error::custom(format!(
+                            "more than {MAX_FLASH_COLORS} colours"
+                        )));
+                    }
+                    out.push(color);
+                }
+                Ok(out)
+            }
+        }
+
+        d.deserialize_seq(Colors)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -982,7 +1056,7 @@ pub use engine_types::text::{Localized, Translation};
 
 #[cfg(test)]
 mod media_tests {
-    use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_VIDEO_GUIDES};
+    use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_FLASH_COLORS, MAX_VIDEO_GUIDES};
 
     use super::*;
 
@@ -1072,6 +1146,41 @@ mod media_tests {
         assert!(decode::<MediaResult>(&over).is_err());
         let at = media(vec![video(vec![], MAX_VIDEO_GUIDES)]);
         assert!(decode::<MediaResult>(&at).is_ok());
+    }
+
+    /// And a range's flashes, at as many colours as a guide may show.
+    #[test]
+    fn more_colors_than_a_guide_may_show_are_refused() {
+        let flashes = |colors| {
+            let range = FrameRange {
+                guide: VideoGuide::FaceFlashes(FaceFlashesGuide {
+                    width: 0.5,
+                    colors: vec![Rgb::default(); colors],
+                    flash_ms: 300,
+                }),
+                first: 3,
+                last: 9,
+            };
+            media(vec![Capture::Video(VideoCapture {
+                video: vec![],
+                guides: vec![range],
+            })])
+        };
+        assert!(decode::<MediaResult>(&flashes(MAX_FLASH_COLORS + 1)).is_err());
+        assert!(decode::<MediaResult>(&flashes(MAX_FLASH_COLORS)).is_ok());
+    }
+
+    /// A colour crosses as its three bytes, and comes back as itself.
+    #[test]
+    fn a_color_crosses_as_its_three_bytes() {
+        let color = Rgb {
+            red: 255,
+            green: 136,
+            blue: 0,
+        };
+        let bytes = encode(&color).expect("a colour encodes");
+        assert_eq!(bytes, [0x83, 0x18, 0xFF, 0x18, 0x88, 0x00]);
+        assert_eq!(decode::<Rgb>(&bytes).expect("it decodes"), color);
     }
 }
 

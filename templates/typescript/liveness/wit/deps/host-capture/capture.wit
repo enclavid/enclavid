@@ -1,0 +1,77 @@
+package enclavid:host-capture@0.1.0;
+
+/// Capture-flow shapes — `media-spec` / `capture-step` and friends. Pure
+/// value types used by the `enclavid:policy` contract
+/// (`action::render(prompt::media)` + `event::media`) and helper plugins
+/// (e.g. `enclavid:well-known`). The host capabilities that mint the refs
+/// these records carry live in `enclavid:host`.
+interface capture {
+    use enclavid:host/refs@0.1.0.{localized-ref, icon-ref};
+    use photo.{photo-spec};
+    use video.{video-spec};
+
+    /// Which physical camera the capture step should use.
+    enum camera-facing {
+        /// The one facing the applicant, for a selfie.
+        front,
+        /// The one facing away, for documents.
+        rear,
+        /// The browser picks; useful for laptops without a rear lens.
+        any,
+    }
+
+    /// What one capture step records.
+    variant capture-kind {
+        /// One frame, which the applicant keeps.
+        photo(photo-spec),
+        /// A video, recorded while guides are shown.
+        video(video-spec),
+    }
+
+    /// One step within a capture. For two-sided documents: front + back. For
+    /// multi-page documents: one step per page. Single-shot captures
+    /// (passport photo page, selfie) use a single step. The steps of ONE media
+    /// render belong to the SAME artifact: their captures come back together,
+    /// in one `event::media`, and plugins analyse them together. A step is one
+    /// continuous capture; a break the applicant must take between two (flip
+    /// the card, turn the page) is a step boundary.
+    record capture-step {
+        /// An `icon-ref` minted by one of the functions of
+        /// `enclavid:host-icons/icons`, one per icon the frontend draws, so a
+        /// step carries an icon from that fixed set and never a free-form
+        /// string. Not a text-ref because there's nothing to localise — the
+        /// name is a frontend dispatch token, never displayed verbatim.
+        icon: option<icon-ref>,
+        /// The pre-capture intro body, a text of the component's `i18n`
+        /// catalog. Paired with `icon` to form "what you're about to do".
+        /// Shown before the camera turns on for THIS step — even between
+        /// steps of a multi-step capture ("now flip to the back").
+        instructions: localized-ref,
+        /// The short on-camera overlay shown during capture ("Photo page",
+        /// "Back side"), a text of the component's `i18n` catalog.
+        label: localized-ref,
+        /// The camera the step uses.
+        camera: camera-facing,
+        /// What the step records.
+        kind: capture-kind,
+    }
+
+    /// Spec for one media render (`prompt::media`). Use multiple steps
+    /// for multi-side / multi-page captures of the same artifact. Use
+    /// multiple media renders for independent artifacts (e.g.,
+    /// shareholder passports).
+    record media-spec {
+        /// The overall artifact title surfaced as context on every screen of
+        /// the capture flow ("Your passport"). Per-step copy — pre-capture
+        /// instructions, on-camera prompt — lives on `capture-step`.
+        label: localized-ref,
+        /// The steps, in the order the applicant takes them.
+        captures: list<capture-step>,
+        /// The seconds the applicant has for every step together, from when
+        /// the page starts them. The page is given the steps' kinds only
+        /// then, so what they ask is not known before; past the limit, the
+        /// reply is `event::timed-out`. None: no limit, and the steps are
+        /// given whole with the prompt.
+        time-limit-secs: option<u16>,
+    }
+}

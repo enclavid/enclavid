@@ -424,17 +424,23 @@ mod tests {
     /// as a video step has guides.
     #[test]
     fn a_state_at_the_engine_cap_fits_the_frame() {
-        use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_VIDEO_GUIDES};
-        use session_types::{
-            FrameRange, RectGuide, SentStep, StaticGuide, StaticVideoGuide, VideoGuide,
-        };
+        use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_FLASH_COLORS, MAX_VIDEO_GUIDES};
+        use session_types::{FaceFlashesGuide, FrameRange, Rgb, SentStep, VideoGuide};
 
         let range = FrameRange {
-            // A static rectangle: of the guides, the one whose encoding is the
-            // longest.
-            guide: VideoGuide::StaticGuide(StaticVideoGuide {
-                guide: StaticGuide::Rect(RectGuide { aspect: 1.587_654 }),
-                hold_ms: u16::MAX,
+            // Flashes of the most colours: of the guides, the one whose encoding
+            // is the longest.
+            guide: VideoGuide::FaceFlashes(FaceFlashesGuide {
+                width: 0.587_654,
+                colors: vec![
+                    Rgb {
+                        red: 255,
+                        green: 255,
+                        blue: 255,
+                    };
+                    MAX_FLASH_COLORS
+                ],
+                flash_ms: u16::MAX,
             }),
             first: u32::MAX,
             last: u32::MAX,

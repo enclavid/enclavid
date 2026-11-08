@@ -84,6 +84,19 @@ export type VideoGuide =
       degrees: number;
       /// How long it is held, in milliseconds.
       hold_ms: number;
+    }
+  /// A face the page finds in an oval, as for `face`, then lights with the
+  /// screen around the oval, one colour after another.
+  | {
+      kind: "face_flashes";
+      /// The oval's width, as a fraction of the frame's shorter side.
+      width: number;
+      /// Its height, as a fraction of the frame's shorter side.
+      height: number;
+      /// Each as `#rrggbb`, in the order shown.
+      colors: string[];
+      /// How long each is shown, in milliseconds.
+      flash_ms: number;
     };
 
 type CaptureStepCommon = {

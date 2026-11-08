@@ -32,20 +32,46 @@ interface video {
         hold-ms: u16,
     }
 
+    /// A colour on screen, by its red, green and blue, as `#rrggbb` writes
+    /// them.
+    record rgb {
+        red: u8,
+        green: u8,
+        blue: u8,
+    }
+
+    /// A face the page finds at the centre of the frame, at a size, held there
+    /// while the screen lights it: around the oval the page draws for it, as
+    /// for a `face`, the screen shows each colour in turn. The flashes begin
+    /// once the face has been in the oval for a moment, or at once where a
+    /// `face` or flashes guide before them held it there, and start over if
+    /// the face leaves.
+    record face-flashes-guide {
+        /// The face's width as a fraction of the frame's shorter side; held to
+        /// 0.25–0.6, as a `face`'s is.
+        width: f32,
+        /// The colours, in the order shown; 1 to 16 of them.
+        colors: list<rgb>,
+        /// How long each colour is shown, in milliseconds; held to 250–1000.
+        flash-ms: u16,
+    }
+
     /// One thing a video asks the applicant to do. Each is held before the
-    /// next is shown: a static guide from the applicant's button, a face and
-    /// a head turn from when the page reads them in the frames.
+    /// next is shown: a static guide from the applicant's button; a face,
+    /// with its flashes or without, and a head turn from when the page reads
+    /// them in the frames.
     variant video-guide {
         static-guide(static-video-guide),
         face(face-guide),
         head-turn(head-turn-guide),
+        face-flashes(face-flashes-guide),
     }
 
     /// A video, sent with no review screen.
     record video-spec {
-        /// What it asks, in order, each held for its `hold-ms` — for one frame
-        /// where that is 0 — before the next. The reply says where each was
-        /// held.
+        /// What it asks, in order, each held for its `hold-ms` or through all
+        /// its flashes — for one frame where that is 0 — before the next. The
+        /// reply says where each was held.
         guides: list<video-guide>,
     }
 }

@@ -316,7 +316,7 @@ pub struct RoundProps(#[serde(with = "props")] pub Vec<u8>);
 /// the bundle header: the key, the ceiling, the frames' CBOR heads, the event's
 /// CBOR around the captures' bytes — a video's frame ranges with it — and remoc's
 /// own envelope with the reply, callback and two bundle-stream ports — some
-/// 35 KiB with every field at its bound; the rest is margin.
+/// 47 KiB with every field at its bound; the rest is margin.
 pub(crate) const RUN_REQUEST_HEADROOM: usize = 64 * 1024;
 
 // A round request travels as ONE remoc item, and an item past the limit fails the

@@ -236,6 +236,18 @@ pub enum VideoGuideView {
         /// How long it is held, in milliseconds.
         hold_ms: u16,
     },
+    /// A face the page finds in an oval, as for `Face`, then lights with the
+    /// screen around the oval, one colour after another.
+    FaceFlashes {
+        /// The oval's width, as a fraction of the frame's shorter side.
+        width: f32,
+        /// Its height, worked out here as an `oval`'s is.
+        height: f32,
+        /// Each as `#rrggbb`, in the order shown.
+        colors: Vec<String>,
+        /// How long each is shown, in milliseconds.
+        flash_ms: u16,
+    },
 }
 
 /// A round's result as the applicant sees it: the decision, or the wait it
@@ -341,7 +353,7 @@ fn capture_step_view(s: &CaptureStep, with_kind: bool, locale: &Locale) -> Captu
                 review_hint: dto::pick_localized(&photo.review_hint, locale),
             },
             CaptureKind::Video(video) => CaptureKindView::Video {
-                guides: video.guides.iter().copied().map(video_guide_view).collect(),
+                guides: video.guides.iter().map(video_guide_view).collect(),
             },
         }),
     }
@@ -365,7 +377,7 @@ fn static_guide_view(g: StaticGuide) -> StaticGuideView {
     }
 }
 
-fn video_guide_view(g: VideoGuide) -> VideoGuideView {
+fn video_guide_view(g: &VideoGuide) -> VideoGuideView {
     match g {
         VideoGuide::StaticGuide(s) => VideoGuideView::StaticGuide {
             guide: static_guide_view(s.guide),
@@ -380,13 +392,24 @@ fn video_guide_view(g: VideoGuide) -> VideoGuideView {
             degrees: t.degrees,
             hold_ms: t.hold_ms,
         },
+        VideoGuide::FaceFlashes(f) => VideoGuideView::FaceFlashes {
+            width: f.width,
+            height: f.width * GUIDE_OVAL_ASPECT,
+            colors: f
+                .colors
+                .iter()
+                .map(|c| format!("#{:02x}{:02x}{:02x}", c.red, c.green, c.blue))
+                .collect(),
+            flash_ms: f.flash_ms,
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use session_types::{
-        FaceGuide, HeadTurnGuide, Localized, PhotoSpec, RectGuide, StaticVideoGuide, VideoSpec,
+        FaceFlashesGuide, FaceGuide, HeadTurnGuide, Localized, PhotoSpec, RectGuide, Rgb,
+        StaticVideoGuide, VideoSpec,
     };
 
     use super::*;
@@ -521,6 +544,22 @@ mod tests {
                             degrees: -30,
                             hold_ms: 800,
                         }),
+                        VideoGuide::FaceFlashes(FaceFlashesGuide {
+                            width: 0.5,
+                            colors: vec![
+                                Rgb {
+                                    red: 255,
+                                    green: 136,
+                                    blue: 0,
+                                },
+                                Rgb {
+                                    red: 0,
+                                    green: 10,
+                                    blue: 171,
+                                },
+                            ],
+                            flash_ms: 300,
+                        }),
                     ],
                 })),
             ],
@@ -533,7 +572,7 @@ mod tests {
             &Locale::default(),
         ))
         .unwrap();
-        // A photo's aspect reads as the engine rounded it, not as a widened f32.
+        // A photo's aspect reads as the policy gave it, not as a widened f32.
         assert!(text.contains(r#""aspect":1.42"#), "{text}");
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         let [photo, video] = [&json["captures"][0], &json["captures"][1]];
@@ -550,5 +589,10 @@ mod tests {
         assert!(video["guides"][1].get("height").is_some());
         assert_eq!(video["guides"][2]["kind"], "head_turn");
         assert_eq!(video["guides"][2]["degrees"], -30);
+        assert_eq!(video["guides"][3]["kind"], "face_flashes");
+        assert_eq!(video["guides"][3]["colors"][0], "#ff8800");
+        assert_eq!(video["guides"][3]["colors"][1], "#000aab");
+        assert_eq!(video["guides"][3]["flash_ms"], 300);
+        assert!(video["guides"][3].get("height").is_some());
     }
 }

@@ -149,30 +149,36 @@ export function ShutterButton({
   );
 }
 
+/// The camera around a guide, dimmed.
+const DIM = "rgba(0, 0, 0, 0.6)";
+
 /// Render a shape overlaid on the camera preview, one flavour for each kind
 /// of the WIT `static-guide` variant.
 export function GuideOverlay({
   guide,
   frame,
   met = false,
+  surround = DIM,
 }: {
   guide: StaticGuide;
   frame: FrameBox | null;
   /// Whether the face the page reads fills it, which an oval shows in green.
   met?: boolean;
+  /// What the screen shows around it: the camera dimmed, or a colour.
+  surround?: string;
 }) {
   switch (guide.kind) {
     case "rect":
-      return <RectGuide aspect={guide.aspect} />;
+      return <RectGuide aspect={guide.aspect} surround={surround} />;
     case "oval":
-      return frame ? <OvalGuide oval={guide} frame={frame} met={met} /> : null;
+      return frame ? <OvalGuide oval={guide} frame={frame} met={met} surround={surround} /> : null;
   }
 }
 
 /// The frame at the centre of the camera's area, at the policy's
 /// aspect and as large as fits there: 86% of the area's width or of its
 /// height, whichever binds, and no wider than 560 px.
-function RectGuide({ aspect }: { aspect: number }) {
+function RectGuide({ aspect, surround }: { aspect: number; surround: string }) {
   return (
     <div
       className="pointer-events-none absolute inset-0 flex items-center justify-center"
@@ -183,7 +189,7 @@ function RectGuide({ aspect }: { aspect: number }) {
         style={{
           width: `min(86cqw, 560px, calc(86cqh * ${aspect}))`,
           aspectRatio: aspect,
-          boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.6)",
+          boxShadow: `0 0 0 9999px ${surround}`,
           borderRadius: "1rem",
         }}
       >
@@ -214,10 +220,12 @@ function OvalGuide({
   oval,
   frame,
   met,
+  surround,
 }: {
   oval: Extract<StaticGuide, { kind: "oval" }>;
   frame: FrameBox;
   met: boolean;
+  surround: string;
 }) {
   const shorter = Math.min(frame.width, frame.height);
   const width = oval.width * shorter;
@@ -235,7 +243,7 @@ function OvalGuide({
           width,
           height,
           borderRadius: "50%",
-          boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.6)",
+          boxShadow: `0 0 0 9999px ${surround}`,
         }}
       />
     </div>

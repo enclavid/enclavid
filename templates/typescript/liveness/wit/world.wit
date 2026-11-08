@@ -1,0 +1,40 @@
+package local:policy@0.1.0;
+
+// What this policy imports and exports. Every interface imported here is
+// the policy's own, the host's, or a plugin's; the consumer pins an
+// implementation of each plugin package (here `enclavid:vision`,
+// `enclavid:face-detect` and `enclavid:face-liveness`) when it creates a
+// session.
+world policy {
+    // The face found in each frame, and how live the faces of the frontal
+    // frames look; the face's geometry is `enclavid:vision`'s.
+    import enclavid:face-detect/detect@0.1.0;
+    import enclavid:face-liveness/video@0.1.0;
+    // The icon of the video's step.
+    import enclavid:host-icons/icons@0.1.0;
+    import enclavid-ext:policy/i18n@0.1.0;
+    // The round's randomness, which `@enclavid/policy-quickjs` serves
+    // `Math.random` and `crypto.getRandomValues` from.
+    import wasi:random/random@0.2.12;
+    export enclavid:policy/policy@0.1.0;
+}
+
+// The policy's slot: what the host serves this policy, of types that are its
+// own, so they are written here rather than taken from `deps/`. It discloses
+// no field and takes no props, so its slot holds its texts alone.
+package enclavid-ext:policy@0.1.0 {
+    // The policy's texts: a case of `key` for each. The texts themselves are
+    // in `i18n/`, one JSON file per language (`en.json` to start), and
+    // `enclavid policy embed` checks them against these keys.
+    interface i18n {
+        use enclavid:host/refs@0.1.0.{localized-ref};
+
+        enum key {
+            title,
+            instructions,
+            label,
+        }
+
+        localized: func(key: key) -> localized-ref;
+    }
+}

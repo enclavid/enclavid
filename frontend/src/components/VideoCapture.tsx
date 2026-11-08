@@ -56,8 +56,8 @@ const FOLLOW_MS = 10_000;
 const GRACE_MS = 300;
 /// How long the face may be gone while a guide that reads it is shown.
 const LOST_MS = 1500;
-/// How long the applicant follows the first guide before the recording starts
-/// by itself.
+/// How long the applicant follows a guide before the page goes on by itself:
+/// the recording starts, or flashes begin.
 const GATE_MS = 300;
 /// The longest recording, in milliseconds: inside the 900 frames of a video
 /// the enclave reads, at the page's rate.
@@ -72,6 +72,14 @@ const MAX_BITRATE = 1_500_000;
 /// static one, which the applicant confirms.
 const reads = (guide: VideoGuide) => guide.kind !== "static_guide";
 
+type Flashes = Extract<VideoGuide, { kind: "face_flashes" }>;
+
+/// How long `guide` is held once followed, in milliseconds: flashes through
+/// all their colours.
+function holdMsOf(guide: VideoGuide): number {
+  return guide.kind === "face_flashes" ? guide.colors.length * guide.flash_ms : guide.hold_ms;
+}
+
 /// What the page waits for before it records a step whose first guide it
 /// reads, `first`: that face, or a head turned no way.
 function entryOf(first: VideoGuide): VideoGuide {
@@ -84,7 +92,7 @@ function longest(guides: VideoGuide[]): number {
   if (!guides.every(reads)) return MAX_MS;
   return Math.min(
     MAX_MS,
-    guides.reduce((ms, g) => ms + FOLLOW_MS + g.hold_ms, 0),
+    guides.reduce((ms, g) => ms + FOLLOW_MS + holdMsOf(g), 0),
   );
 }
 
@@ -134,6 +142,8 @@ function leadText(guide: VideoGuide): string {
       return "Fit your face in the oval";
     case "head_turn":
       return turnText(guide.degrees);
+    case "face_flashes":
+      return "Fit your face in the oval. The screen will flash";
   }
 }
 
@@ -186,6 +196,27 @@ function useHoldFill(heldAt: number | null, holdMs: number): number | undefined 
     return () => cancelAnimationFrame(frame);
   }, [heldAt, holdMs]);
   return fill;
+}
+
+/// The colour `flashes` show at this display frame, from their hold that
+/// began at `heldAt` on the page's clock, the last one past their end;
+/// `undefined` while nothing is held.
+function useFlash(heldAt: number | null, flashes: Flashes | null): string | undefined {
+  const [color, setColor] = useState<string>();
+  useEffect(() => {
+    if (heldAt === null || !flashes) {
+      setColor(undefined);
+      return;
+    }
+    const { colors, flash_ms } = flashes;
+    let frame = requestAnimationFrame(function tick() {
+      const index = Math.floor((performance.now() - heldAt) / flash_ms);
+      setColor(colors[Math.min(index, colors.length - 1)]);
+      if (index < colors.length) frame = requestAnimationFrame(tick);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [heldAt, flashes]);
+  return color;
 }
 
 type Phase =
@@ -439,6 +470,11 @@ export function VideoCapture({
     let followed = 0;
     // When a face was last seen, or a guide shown that reads none.
     let seen = 0;
+    // Whether the face is held already for the flashes on screen, as the
+    // recording's start and a face guide before them leave it; and since when
+    // it has been in their oval otherwise.
+    let captured = true;
+    let settled: number | null = null;
     // When the first frame was drawn: the recording's own times count from it.
     let origin: number | null = null;
     const start = performance.now();
@@ -469,17 +505,35 @@ export function VideoCapture({
           seen = elapsed;
           follows = shutterRef.current;
         }
+        // Flashes begin once the face has been in their oval for a moment, at
+        // once where it is held there already.
+        if (guide.kind === "face_flashes" && held === null) {
+          if (follows) {
+            settled ??= elapsed;
+            follows = captured || elapsed - settled >= GATE_MS;
+          } else {
+            captured = false;
+            settled = null;
+          }
+        }
         const begins = follows && held === null;
         if (follows) {
           held ??= elapsed;
           followed = elapsed;
         } else if (held !== null && elapsed - followed > GRACE_MS) {
           held = null;
+          // Flashes broken off start over from their first colour, with the
+          // time a guide is given to be followed.
+          if (guide.kind === "face_flashes") {
+            captured = false;
+            settled = null;
+            shown = elapsed;
+          }
         }
         // The first frame a guide is held in is written whole, a picture of
         // its own as a photo is, for what reads the face in it.
         await recording.frame(begins);
-        if (held !== null && elapsed - held >= guide.hold_ms) {
+        if (held !== null && elapsed - held >= holdMsOf(guide)) {
           holds.push([held - origin, elapsed - origin]);
           if (index === plan.length - 1) break;
           index += 1;
@@ -487,6 +541,8 @@ export function VideoCapture({
           held = null;
           seen = elapsed;
           shutterRef.current = false;
+          captured = guide.kind === "face" || guide.kind === "face_flashes";
+          settled = null;
         } else if (held === null && reads(guide) && elapsed - shown > FOLLOW_MS) {
           recording.cancel();
           fail("The prompt was not followed in time. Try again.");
@@ -502,7 +558,7 @@ export function VideoCapture({
         }
         const current = plan[index];
         const share =
-          held === null ? 0 : Math.min(1, (elapsed - held) / Math.max(1, current.hold_ms));
+          held === null ? 0 : Math.min(1, (elapsed - held) / Math.max(1, holdMsOf(current)));
         setPhase({
           kind: "recording",
           index,
@@ -571,7 +627,8 @@ export function VideoCapture({
   const holding = heldAt !== null;
   // A static guide is taken with the shutter, which fills while it is held.
   const shutter = showCamera && guide?.kind === "static_guide";
-  const fill = useHoldFill(shutter ? heldAt : null, guide?.hold_ms ?? 0);
+  const fill = useHoldFill(shutter ? heldAt : null, guide ? holdMsOf(guide) : 0);
+  const flash = useFlash(heldAt, guide?.kind === "face_flashes" ? guide : null);
   const stepHint =
     totalSteps > 1 ? `Step ${stepNumber} of ${totalSteps}. ${step.label}` : step.label;
   const instruction = guide
@@ -625,11 +682,12 @@ export function VideoCapture({
           <>
             {/* A head turn is said by the instruction below, not drawn. */}
             {guide.kind === "static_guide" && <GuideOverlay guide={guide.guide} frame={frame} />}
-            {guide.kind === "face" && (
+            {(guide.kind === "face" || guide.kind === "face_flashes") && (
               <GuideOverlay
                 guide={{ kind: "oval", width: guide.width, height: guide.height }}
                 frame={frame}
                 met={hint === "hold"}
+                surround={flash}
               />
             )}
             <div className="pointer-events-none absolute inset-x-6 top-6 space-y-2 text-center">
