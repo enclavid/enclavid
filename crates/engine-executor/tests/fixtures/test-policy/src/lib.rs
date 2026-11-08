@@ -59,6 +59,11 @@ use enclavid::extra::tag;
 // and estimates.
 use enclavid::face_age::check as face_age;
 use enclavid::face_detect::detect as face_detect;
+// The face-liveness plugin, on a probe: whether the selfie's face is live, or
+// the faces of a video's frames.
+use enclavid::face_liveness::image as face_liveness_image;
+use enclavid::face_liveness::types::LivenessEstimate;
+use enclavid::face_liveness::video::{self as face_liveness_video, FrameFace};
 use exports::enclavid::policy::policy::Guest;
 
 struct TestPolicy;
@@ -86,6 +91,9 @@ const STEP_AWAIT_CONSENT: u8 = 3;
 const STEP_VIDEO_DECODED: u8 = 4;
 /// A video was probed and did not decode.
 const STEP_VIDEO_UNDECODED: u8 = 5;
+/// How live a face is was probed: its score follows (an `f32`, big endian),
+/// or nothing where no face was usable.
+const STEP_LIVENESS: u8 = 6;
 
 /// Decode the step from the opaque state blob. Genesis (empty) ⇒ Start.
 fn step_of(state: &[u8]) -> u8 {
@@ -115,6 +123,25 @@ fn skip_passport_read() -> bool {
     enclavid_ext::policy::props::get()
         .skip_passport_read
         .unwrap_or(false)
+}
+
+/// The optional `liveness-probe` prop. When set, the selfie round returns how
+/// live its face is, and a video's round how live the faces of its frames are,
+/// as the state. Absent on every real flow.
+fn liveness_probe() -> bool {
+    enclavid_ext::policy::props::get()
+        .liveness_probe
+        .unwrap_or(false)
+}
+
+/// What the liveness probe read, as a state: [`STEP_LIVENESS`], then the score
+/// where there is one.
+fn liveness_state(estimate: Option<LivenessEstimate>) -> Vec<u8> {
+    let mut state = vec![STEP_LIVENESS];
+    if let Some(estimate) = estimate {
+        state.extend(estimate.live.to_be_bytes());
+    }
+    state
 }
 
 /// The optional `wasi-probe` prop. When set, genesis returns what the round's
@@ -178,12 +205,26 @@ fn quarter(image: &Image) -> Option<((u32, u32), Vec<u8>)> {
 /// every pixel of the first frame, read after the last.
 /// [`STEP_VIDEO_UNDECODED`] alone where it has no frames, or one does not
 /// decode. The props' `region-past-the-bound` asks a region larger than a
-/// picture can be instead, which traps.
+/// picture can be instead, which traps; their `liveness-probe` reads how live
+/// the faces found in its frames are instead.
 fn probe_video(video: &Video) -> Vec<u8> {
     let frames = video.frames(0, u32::MAX);
     let Some(first) = frames.first() else {
         return vec![STEP_VIDEO_UNDECODED];
     };
+    if liveness_probe() {
+        let faces: Vec<FrameFace> = frames
+            .iter()
+            .filter_map(|frame| {
+                let face = face_detect::detect(&frame.image)?;
+                Some(FrameFace {
+                    index: frame.index,
+                    face,
+                })
+            })
+            .collect();
+        return liveness_state(face_liveness_video::estimate(video, &faces));
+    }
     if enclavid_ext::policy::props::get().region_past_the_bound == Some(true) {
         let _ = first.image.pixels(PixelsOptions {
             crop: Some(Rect {
@@ -331,14 +372,21 @@ impl Guest for TestPolicy {
                 }
                 // The face chain on the SELFIE: the host's image of it,
                 // face-detect locates the `face`, face-age reads its crop and
-                // estimates. The policy threads the handles.
-                let age = match result.captures.first() {
-                    Some(Capture::Photo(photo)) => photo.image().and_then(|image| {
-                        face_detect::detect(&image)
-                            .and_then(|face| face_age::estimate(&image, &face))
-                    }),
+                // estimates — or, on the probe, face-liveness reads its crops.
+                // The policy threads the handles.
+                let image = match result.captures.first() {
+                    Some(Capture::Photo(photo)) => photo.image(),
                     _ => None,
                 };
+                let found = image
+                    .as_ref()
+                    .and_then(|image| Some((image, face_detect::detect(image)?)));
+                if liveness_probe() {
+                    let live =
+                        found.and_then(|(image, face)| face_liveness_image::estimate(image, &face));
+                    return (liveness_state(live), Action::Finish(Decision::Review));
+                }
+                let age = found.and_then(|(image, face)| face_age::estimate(image, &face));
                 match age {
                     Some(est) => (
                         state_at(STEP_AWAIT_CONSENT),

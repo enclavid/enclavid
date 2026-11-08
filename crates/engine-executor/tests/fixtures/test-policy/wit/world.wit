@@ -31,6 +31,11 @@ world policy {
     // own, so no slot.
     import enclavid:face-age/check@0.1.0;
 
+    // The face-liveness plugin, on a probe: whether the face of the selfie
+    // is live, or the faces of a video's frames.
+    import enclavid:face-liveness/image@0.1.0;
+    import enclavid:face-liveness/video@0.1.0;
+
     // The policy's slot, `enclavid-ext:policy` (`ext/`): its own texts; its
     // disclosure fields, those it hands the well-known helpers and its OWN
     // face-age estimate, which no helper covers; and the props the session

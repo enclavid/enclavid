@@ -35,6 +35,9 @@ pub const VISION_PACKAGE: &str = "enclavid:vision@0.1.0";
 /// Package id of the face-detect plugin — locates the `face` in the host's
 /// image of the selfie, which the policy threads to face-age.
 pub const FACE_DETECT_PACKAGE: &str = "enclavid:face-detect@0.1.0";
+/// Package id of the face-liveness plugin, which the policy asks on a probe
+/// whether the faces of a photo or of a video's frames are live.
+pub const FACE_LIVENESS_PACKAGE: &str = "enclavid:face-liveness@0.1.0";
 
 /// The fixtures live under the executor's `tests/`, where they were written and
 /// where the flow they encode is asserted.
@@ -203,6 +206,51 @@ pub fn face_detect_blazeface() -> &'static [u8] {
         .as_slice()
 }
 
+/// The `enclavid:face-liveness` plugin — reads the host's pictures, imports
+/// `enclavid:vision/types` (the `face` it is given) and exports `types`,
+/// `image` and `video`; no texts. The default build is the weightless
+/// placeholder (a score from the face's brightness).
+pub fn face_liveness() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| {
+            build(
+                plugin_dir("face-liveness"),
+                shared_plugin_module("face_liveness"),
+                Role::Plugin,
+            )
+        })
+        .as_slice()
+}
+
+/// The `enclavid:face-liveness` plugin built as the artifact whose models the
+/// host runs (`--features minifasnet`): its `with-models` world imports its
+/// slot, `enclavid-ext:face-liveness/models`, whose `minifasnet-v2` and
+/// `minifasnet-v1se` are MiniFASNet. The models are not in it: a composition
+/// names their graphs as the layers `minifasnet-v2.onnx` and
+/// `minifasnet-v1se.onnx`. Built in a target directory of its own, so it and
+/// the default build never stand in for each other.
+pub fn face_liveness_minifasnet() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| {
+            let dir = plugin_dir("face-liveness");
+            let target = format!(
+                "{}/../plugins/target/minifasnet",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let module = format!("{target}/wasm32-unknown-unknown/release/face_liveness.wasm");
+            crate::embed_sections(
+                crate::build_componentized_with(&dir, &["minifasnet"], &target, &module)
+                    .expect("build_componentized_with"),
+                &dir,
+                Role::Plugin,
+            )
+            .expect("the catalogs embed")
+        })
+        .as_slice()
+}
+
 /// The `test-models` policy: the test entry's graph through its own slot's
 /// models. It has no texts and no disclosure fields, so it is componentized
 /// and not embedded.
@@ -219,8 +267,8 @@ pub fn test_models() -> &'static [u8] {
 
 /// Every plugin the policy imports, as `(package id, component wasm)`. All must
 /// be present in a composition, since the policy calls into each — well-known
-/// for specs/DF, extra for the requester tag, and the vision trio on the selfie
-/// round.
+/// for specs/DF, extra for the requester tag, and the face plugins on the
+/// selfie round.
 ///
 /// Pairs rather than `PluginInstance`, so this build tool keeps no dependency on
 /// the engine's wire types; each caller maps them in a line.
@@ -231,5 +279,6 @@ pub fn all_plugins() -> Vec<(&'static str, &'static [u8])> {
         (VISION_PACKAGE, vision()),
         (FACE_DETECT_PACKAGE, face_detect()),
         (FACE_AGE_PACKAGE, face_age()),
+        (FACE_LIVENESS_PACKAGE, face_liveness()),
     ]
 }

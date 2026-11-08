@@ -1,0 +1,23 @@
+package enclavid-ext:face-liveness@0.1.0;
+
+/// The models this artifact carries beside its component, each run by the
+/// host in a process of its own.
+interface models {
+  use enclavid:host/tensors@0.1.0.{tensor-f32};
+
+  /// MiniFASNet: a crop of the face and what is around it, three planes of
+  /// 80², blue, green and red from 0 to 255, in; the scores of its three
+  /// classes, of which the second is live, out.
+  resource liveness-model {
+    run: func(input: borrow<tensor-f32>) -> tensor-f32;
+  }
+
+  /// MiniFASNetV2, on the crop at 2.7 times the face's box, from
+  /// `minifasnet-v2.onnx`.
+  minifasnet-v2: func() -> liveness-model;
+
+  /// MiniFASNetV1SE, on the crop at 4 times the face's box, from
+  /// `minifasnet-v1se.onnx`.
+  minifasnet-v1se: func() -> liveness-model;
+}
+

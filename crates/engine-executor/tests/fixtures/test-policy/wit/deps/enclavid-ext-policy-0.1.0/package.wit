@@ -57,6 +57,9 @@ interface props {
     /// Given a video, ask a region of its first frame larger than a
     /// picture can be, which traps.
     region-past-the-bound: option<bool>,
+    /// Return how live the face of the selfie is, or the faces of a
+    /// video's frames, as the state, for the harness to check.
+    liveness-probe: option<bool>,
   }
 
   get: func() -> props;

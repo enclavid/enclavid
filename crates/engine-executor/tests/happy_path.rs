@@ -832,6 +832,162 @@ async fn a_region_past_the_bound_traps_the_round() {
     assert_eq!(*listener.fires.lock().unwrap(), fires, "nothing persisted");
 }
 
+/// The props that have the test policy probe liveness.
+const LIVENESS_PROBE: &[u8] = b"{liveness-probe: some(true)}";
+
+/// The test policy's state tag for the liveness it probed.
+const LIVENESS: u8 = 6;
+
+/// The score the liveness probe wrote after [`LIVENESS`]; `None` where no face
+/// was usable.
+fn liveness(state: &[u8]) -> Option<f32> {
+    let (&tag, rest) = state.split_first().expect("a state");
+    assert_eq!(tag, LIVENESS, "the liveness probed");
+    Some(f32::from_be_bytes(rest.try_into().ok()?))
+}
+
+/// The liveness probe's rounds of a session created with its props: start,
+/// the passport, then `selfie`; the probe's state and how the last ended.
+async fn probe_liveness(h: &Harness, selfie: MediaResult) -> (RunStatus, Session) {
+    let listener = Arc::new(PersistListener::default());
+    let mut session = Session::default();
+    for event in [Event::Start, Event::Media(fake_capture())] {
+        (_, session) = h
+            .round(session, event, LIVENESS_PROBE, &listener)
+            .await
+            .expect("a round before the selfie");
+    }
+    h.round(session, Event::Media(selfie), LIVENESS_PROBE, &listener)
+        .await
+        .expect("the selfie round")
+}
+
+/// The selfie's face reaches face-liveness through its `image` interface, and
+/// its score the policy: the placeholder's, from the face's brightness — the
+/// whole mid-gray frame, about a half.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_selfies_liveness_reaches_the_policy() {
+    let (status, session) = probe_liveness(&Harness::new(), fake_capture()).await;
+    assert!(matches!(status, RunStatus::Completed(Decision::Review)));
+    let live = liveness(&session.state).expect("a face read");
+    assert!((live - 128.0 / 255.0).abs() < 0.01, "{live}");
+}
+
+/// A video's frames reach face-liveness through its `video` interface, each
+/// with the face found in it, and one score for all of them the policy.
+/// Needs the coprocess, as the video tests above.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ENCLAVID_MEDIA_BIN"]
+async fn a_videos_liveness_reaches_the_policy() {
+    let h = Harness::new().decoding(decoders_of_videos());
+    let listener = Arc::new(PersistListener::default());
+    let (_, session) = h
+        .round(Session::default(), Event::Start, LIVENESS_PROBE, &listener)
+        .await
+        .expect("the start round");
+    let (status, session) = h
+        .round(session, video(SQUARE), LIVENESS_PROBE, &listener)
+        .await
+        .expect("the video round");
+    assert!(matches!(status, RunStatus::Completed(Decision::Review)));
+    let live = liveness(&session.state).expect("faces read");
+    assert!((0.0..=1.0).contains(&live), "{live}");
+}
+
+/// The selfie's face on MiniFASNet as the plugin ships it: face-detect built
+/// `--features blazeface` finds the face, and face-liveness built `--features
+/// minifasnet` hands its crops to its slot's models `minifasnet-v2` and
+/// `minifasnet-v1se`, whose graphs are the layers `minifasnet-v2.onnx` and
+/// `minifasnet-v1se.onnx`. The original repository's own samples read as there:
+/// its live face live, its printed one not. Neither the models, the coprocess
+/// nor the samples are in this repository: `BLAZEFACE_MODEL` names BlazeFace's
+/// graph, `MINIFASNET_MODEL` the directory of the two graphs and of the
+/// original's samples `image_T1.jpg` (live) and `image_F1.jpg` (a print), and
+/// `ENCLAVID_INFERENCE_BIN` the coprocess binary built with ONNX Runtime
+/// linked in:
+///   cargo test -p engine-executor --test happy_path -- --ignored vendor
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs BLAZEFACE_MODEL, MINIFASNET_MODEL and ENCLAVID_INFERENCE_BIN"]
+async fn the_selfies_liveness_is_read_by_vendor_models() {
+    let path = |var: &str| {
+        PathBuf::from(std::env::var_os(var).unwrap_or_else(|| panic!("{var} is not set")))
+    };
+    let detector = path("BLAZEFACE_MODEL");
+    let dir = path("MINIFASNET_MODEL");
+    let (v2, v1se) = (
+        dir.join("minifasnet-v2.onnx"),
+        dir.join("minifasnet-v1se.onnx"),
+    );
+    let exe = path("ENCLAVID_INFERENCE_BIN");
+    let layer = |name: &str, path: &PathBuf, sha: u8| ModelLayer {
+        name: name.into(),
+        sha256: [sha; 32],
+        length: std::fs::metadata(path)
+            .expect("the model file is there")
+            .len(),
+    };
+    let mut plugins = all_plugins();
+    for plugin in &mut plugins {
+        if plugin.package == fixtures::FACE_DETECT_PACKAGE {
+            plugin.wasm = fixtures::face_detect_blazeface().to_vec();
+            plugin.model_layers = vec![layer("detector.onnx", &detector, 1)];
+        } else if plugin.package == fixtures::FACE_LIVENESS_PACKAGE {
+            plugin.wasm = fixtures::face_liveness_minifasnet().to_vec();
+            plugin.model_layers = vec![
+                layer("minifasnet-v2.onnx", &v2, 2),
+                layer("minifasnet-v1se.onnx", &v1se, 3),
+            ];
+        }
+    }
+    let empty = || File::open("/dev/null").unwrap();
+    let models = Arc::new(Models {
+        exe,
+        files: vec![
+            (File::open(&detector).unwrap(), empty()),
+            (File::open(&v2).unwrap(), empty()),
+            (File::open(&v1se).unwrap(), empty()),
+        ],
+        started: vec![
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+        ],
+        processes: Mutex::new(Vec::new()),
+    });
+    let h = Harness::with(&plugins, models.clone());
+    let liveness_model = |function: &str, graph| ModelImport {
+        instance_name: "enclavid-ext:face-liveness/models@0.1.0".into(),
+        function: function.into(),
+        resource: "liveness-model".into(),
+        graph,
+        data: None,
+    };
+    assert_eq!(
+        h.models,
+        vec![
+            ModelImport {
+                instance_name: "enclavid-ext:face-detect/models@0.1.0".into(),
+                function: "detector".into(),
+                resource: "detector-model".into(),
+                graph: 0,
+                data: None,
+            },
+            liveness_model("minifasnet-v2", 1),
+            liveness_model("minifasnet-v1se", 2),
+        ]
+    );
+
+    for (sample, live) in [("image_T1.jpg", true), ("image_F1.jpg", false)] {
+        let photo = std::fs::read(dir.join(sample)).expect("the sample is there");
+        let (status, session) = probe_liveness(&h, capture_of(photo)).await;
+        assert!(matches!(status, RunStatus::Completed(Decision::Review)));
+        let score = liveness(&session.state).expect("a face read");
+        eprintln!("{sample}: live {score:.3}");
+        assert_eq!(score > 0.5, live, "{sample}: {score}");
+    }
+    assert_eq!(models.started(), [2, 2, 2], "each model once a round");
+}
+
 /// Where the platform decodes no video, a video has no frames: the policy
 /// sees a video that does not decode, and the round goes on.
 #[tokio::test(flavor = "multi_thread")]
@@ -1414,7 +1570,7 @@ async fn a_capture_step_carries_the_icon_it_named() {
 async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let runner = TestRunner::new().unwrap();
 
-    // CORE: policy + well-known + vision + face-age baked. The policy still
+    // CORE: policy + well-known + the face plugins baked. The policy still
     // imports extra/tag (unsatisfied — a runtime import of the core).
     let baked = vec![
         PluginInstance {
@@ -1435,6 +1591,11 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
         PluginInstance {
             package: fixtures::FACE_AGE_PACKAGE.to_string(),
             wasm: fixtures::face_age().to_vec(),
+            model_layers: Vec::new(),
+        },
+        PluginInstance {
+            package: fixtures::FACE_LIVENESS_PACKAGE.to_string(),
+            wasm: fixtures::face_liveness().to_vec(),
             model_layers: Vec::new(),
         },
     ];
