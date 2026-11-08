@@ -7,7 +7,7 @@ package enclavid:vision@0.1.0;
 /// (`enclavid:host/media`), which the platform decodes: this package holds no
 /// pixels.
 interface types {
-  /// A region of interest, normalized `[0,1]` over the image.
+  /// A region of interest, in the image's pixels from its top-left corner.
   record bbox {
     x: f32,
     y: f32,
@@ -15,7 +15,7 @@ interface types {
     h: f32,
   }
 
-  /// One keypoint, normalized `[0,1]`.
+  /// One keypoint, in the image's pixels from its top-left corner.
   record point {
     x: f32,
     y: f32,

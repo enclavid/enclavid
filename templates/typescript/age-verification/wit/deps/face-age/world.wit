@@ -27,7 +27,7 @@ interface check {
 
     /// Estimate the subject's age from the detected `face` in `image`. The
     /// plugin pulls its OWN crop (`face.bbox` grown by the model's context
-    /// margin) from `image` via `region`, so it sees only the face patch at
+    /// margin) from `image` via `pixels`, so it sees only the face patch at
     /// its model resolution — one shared decode, per-model crop. `none` =
     /// unusable input, or an image that does not decode (the policy asks for
     /// a retake / escalates).

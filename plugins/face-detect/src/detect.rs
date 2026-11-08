@@ -18,7 +18,7 @@ use blazeface as profile;
 #[cfg(not(feature = "blazeface"))]
 use placeholder as profile;
 
-/// A detected face in NORMALIZED `[0,1]` coords over the source frame.
+/// A detected face, in the frame's pixels.
 pub struct Detection {
     /// `[x, y, w, h]`.
     pub bbox: [f32; 4],
@@ -50,11 +50,11 @@ mod placeholder {
     /// cropping the full box reproduces a centered square crop. The pixels
     /// are not read.
     pub fn detect(
-        _size: (u32, u32),
+        (w, h): (u32, u32),
         _region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
     ) -> Option<Detection> {
         Some(Detection {
-            bbox: [0.0, 0.0, 1.0, 1.0],
+            bbox: [0.0, 0.0, w as f32, h as f32],
             landmarks: Vec::new(),
             score: 1.0,
         })
@@ -114,11 +114,14 @@ mod blazeface {
         pub h: u32,
         left: u32,
         top: u32,
+        /// The frame's own size.
+        frame: (u32, u32),
     }
 
     impl Fit {
         /// How a frame of `w×h` fits the square. `None` for an empty one.
-        pub(super) fn of((w, h): (u32, u32)) -> Option<Fit> {
+        pub(super) fn of(frame: (u32, u32)) -> Option<Fit> {
+            let (w, h) = frame;
             if w == 0 || h == 0 {
                 return None;
             }
@@ -131,6 +134,7 @@ mod blazeface {
                 h,
                 left: (SIDE - w) / 2,
                 top: (SIDE - h) / 2,
+                frame,
             })
         }
 
@@ -149,12 +153,15 @@ mod blazeface {
             Some(square)
         }
 
-        /// A row of the graph's answer, over the square, as a detection over
-        /// the frame, held within it.
+        /// A row of the graph's answer, over the square, as a detection in
+        /// the frame's pixels, held within it.
         pub(super) fn detection(&self, row: &[f32]) -> Detection {
             let side = SIDE as f32;
-            let x = |v: f32| ((v * side - self.left as f32) / self.w as f32).clamp(0.0, 1.0);
-            let y = |v: f32| ((v * side - self.top as f32) / self.h as f32).clamp(0.0, 1.0);
+            let (width, height) = (self.frame.0 as f32, self.frame.1 as f32);
+            let x =
+                |v: f32| ((v * side - self.left as f32) / self.w as f32).clamp(0.0, 1.0) * width;
+            let y =
+                |v: f32| ((v * side - self.top as f32) / self.h as f32).clamp(0.0, 1.0) * height;
             let (x0, y0, x1, y1) = (x(row[1]), y(row[0]), x(row[3]), y(row[2]));
             Detection {
                 bbox: [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)],
@@ -199,7 +206,7 @@ mod tests {
     #[test]
     fn the_placeholder_boxes_the_whole_frame() {
         let d = super::detect((64, 48), |_, _| unreachable!("no pixels read")).expect("detection");
-        assert_eq!(d.bbox, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(d.bbox, [0.0, 0.0, 64.0, 48.0]);
     }
 
     // BlazeFace's shaping, native — the model itself runs on the host:
@@ -242,8 +249,8 @@ mod tests {
             assert!(fit.square(&rgb[3..]).is_none());
         }
 
-        /// A box over the square maps back onto the frame: a square on the
-        /// square is a square in the frame's pixels, and a face cut by the
+        /// A box over the square maps back onto the frame's pixels: a square
+        /// on the square is a square in the frame, and a face cut by the
         /// frame's edge is held within it.
         #[test]
         fn a_box_maps_back_onto_the_frame() {
@@ -254,22 +261,18 @@ mod tests {
             row[4..6].copy_from_slice(&[0.375, 0.625]);
             let d = fit.detection(&row);
             let [x, y, w, h] = d.bbox;
-            let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
-            assert!(close(x, 0.25) && close(y, 36.0 / 72.0), "{:?}", d.bbox);
-            assert!(
-                close(w * 1920.0, 480.0) && close(h * 1080.0, 480.0),
-                "{:?}",
-                d.bbox
-            );
+            let close = |a: f32, b: f32| (a - b).abs() < 1e-2;
+            assert!(close(x, 480.0) && close(y, 540.0), "{:?}", d.bbox);
+            assert!(close(w, 480.0) && close(h, 480.0), "{:?}", d.bbox);
             let (kx, ky) = d.landmarks[0];
-            assert!(close(kx, 0.375) && close(ky, (0.625 * 128.0 - 28.0) / 72.0));
+            assert!(close(kx, 720.0) && close(ky, 780.0), "{kx} {ky}");
             assert_eq!(d.landmarks.len(), 6);
 
             // Into the black above the frame: held at its top edge.
             row[..4].copy_from_slice(&[0.1, 0.25, 0.4, 0.5]);
             let d = fit.detection(&row);
             assert_eq!(d.bbox[1], 0.0);
-            assert!(close(d.bbox[3], (0.4 * 128.0 - 28.0) / 72.0));
+            assert!(close(d.bbox[3], 348.0), "{:?}", d.bbox);
         }
 
         /// The square's planes, in `[-1, 1]`, plane after plane.

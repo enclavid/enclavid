@@ -78,6 +78,9 @@ pub enum ResizeMode {
     Nearest,
     /// Each output pixel is the mean of the source pixels it covers.
     Average,
+    /// Each output pixel is weighed from the four source pixels around its
+    /// place, as OpenCV's `INTER_LINEAR` does.
+    Bilinear,
 }
 
 impl Region {

@@ -33,28 +33,14 @@ interface media {
         height: u32,
     }
 
-    /// A rectangle of a picture, in fractions of its width and height: 0 its
-    /// left or top edge, 1 its right or bottom.
+    /// A rectangle of a picture, in the pixels its `size` counts.
     record rect {
-        /// Its left edge.
-        x: f32,
-        /// Its top edge.
-        y: f32,
-        width: f32,
-        height: f32,
-    }
-
-    /// A part of a picture, and how many of the picture's pixels it must
-    /// span.
-    record crop {
-        /// Where it lies, held to the picture: its left and top edges on the
-        /// pixels they fall in, its right and bottom on the pixels past them,
-        /// a pixel at least each way.
-        rect: rect,
-        /// The fewest pixels it may span across; one where none.
-        min-width: option<u32>,
-        /// The fewest pixels it may span down; one where none.
-        min-height: option<u32>,
+        /// Its left edge: the first column it takes.
+        x: u32,
+        /// Its top edge: the first row it takes.
+        y: u32,
+        width: u32,
+        height: u32,
     }
 
     /// How pixels are brought to another size.
@@ -66,6 +52,10 @@ interface media {
         /// shrunk picture without aliasing, and a single pixel the mean of
         /// all.
         average,
+        /// Each output pixel is weighed from the four source pixels around
+        /// its place, as OpenCV's `INTER_LINEAR` does: the pixels a model
+        /// trained on such crops reads.
+        bilinear,
     }
 
     /// Pixels brought to another size.
@@ -78,7 +68,7 @@ interface media {
     /// Which of a picture's pixels, and at what size.
     record pixels-options {
         /// Only this part of it; the whole picture where none.
-        crop: option<crop>,
+        crop: option<rect>,
         /// Brought to another size; at their own where none.
         resize: option<resize>,
     }
@@ -87,9 +77,9 @@ interface media {
     enum pixels-error {
         /// The picture does not decode.
         undecoded,
-        /// The part asked for spans fewer of the picture's pixels than the
-        /// crop's minimum.
-        below-minimum,
+        /// The crop is not inside the picture: it reaches past an edge, or
+        /// spans no pixels.
+        out-of-bounds,
     }
 
     /// A picture of the applicant's — a photo, or a frame of a video — as the
@@ -105,8 +95,8 @@ interface media {
         /// image first where nothing did; `none` where it does not decode.
         all-pixels: func() -> option<list<u8>>;
         /// The pixels `options` pick, RGB8 row by row, decoding the image
-        /// first where nothing did. Traps for a crop whose numbers are not
-        /// finite, or an output larger either way than the platform gives.
+        /// first where nothing did. Traps for an output larger either way
+        /// than the platform gives.
         pixels: func(options: pixels-options) -> result<list<u8>, pixels-error>;
     }
 

@@ -45,9 +45,7 @@ use enclavid_ext::well_known::i18n::{Key as WellKnownText, localized as well_kno
 // hex string) in `state`, then rehydrate it on the selfie round through the
 // `Photo` constructor — proving cross-round reload. And the host `video`, whose
 // frames the probe reads, and the `image`s the host decodes a capture into.
-use enclavid::host::media::{
-    Crop, Image, Photo, PixelsOptions, Rect, Resize, ResizeMode, Size, Video,
-};
+use enclavid::host::media::{Image, Photo, PixelsOptions, Rect, Resize, ResizeMode, Size, Video};
 use enclavid::policy::types::{Action, Capture, Decision, Disclosure, Event, Prompt};
 // The well-known plugin (linked at /connect) supplies the capture specs
 // and the canonical KYC `display-field` helpers.
@@ -188,15 +186,11 @@ fn probe_video(video: &Video) -> Vec<u8> {
     };
     if enclavid_ext::policy::props::get().region_past_the_bound == Some(true) {
         let _ = first.image.pixels(PixelsOptions {
-            crop: Some(Crop {
-                rect: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 0.01,
-                    height: 0.01,
-                },
-                min_width: None,
-                min_height: None,
+            crop: Some(Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
             }),
             resize: Some(Resize {
                 size: Size {
@@ -318,7 +312,7 @@ impl Guest for TestPolicy {
             // Selfie captured → the face plugins across the fused boundary,
             // over the host's image of the photo (its pixels stay with the
             // host): face-detect locates the `face`, face-age pulls its crop
-            // via `region` and estimates. The policy just threads the handles.
+            // via `pixels` and estimates. The policy just threads the handles.
             // `none` at any step (undecodable / no face / model failure) →
             // retake. The age threshold is the policy's call (buffer +
             // document escalation) and lands with the real flow; here the

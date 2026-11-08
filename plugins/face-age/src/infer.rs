@@ -1,7 +1,7 @@
 //! Face-age inference on a face crop pulled from the image: shape the crop as
 //! the model takes it (per-model profile) → run the model → decode. The
 //! image's decode is the host's and the face's box face-detect's — this
-//! plugin asks `image.region` (in [`lib`]) for the face patch at the size its
+//! plugin asks `image.pixels` (in [`lib`]) for the face patch at the size its
 //! profile wants, and holds only the model-specific adapter: input format
 //! (size, channel order, normalization), which model, and output decode.
 //!
@@ -22,15 +22,18 @@ use placeholder as profile;
 pub const MARGIN: f32 = profile::MARGIN;
 
 /// The fewest of the picture's pixels the crop must span each way for the
-/// profile to read an age from it; `None` where it reads any. The host holds
-/// the crop to it and gives no pixels for a smaller one.
-pub const MIN: Option<u32> = profile::MIN;
+/// profile to read an age from it; `None` where it reads any.
+const MIN: Option<u32> = profile::MIN;
 
 /// Estimate age (years) from the face crop `region` reads: a source rect of
 /// `crop` pixels, resampled to the size it is asked for, row-major RGB8 — or
-/// nothing, where the image does not decode. `None` if the face is unusable,
-/// or the model gives no age.
+/// nothing, where the image does not decode. `None` if the face is unusable —
+/// fewer than [`MIN`] pixels either way, its pixels then not read — or the
+/// model gives no age.
 pub fn estimate(crop: (u32, u32), region: impl FnOnce(u32, u32) -> Option<Vec<u8>>) -> Option<f32> {
+    if MIN.is_some_and(|min| crop.0 < min || crop.1 < min) {
+        return None;
+    }
     profile::estimate(crop, region)
 }
 
@@ -169,15 +172,22 @@ mod tests {
     //   cargo test -p face-age --features mivolo --target aarch64-apple-darwin
     #[cfg(feature = "mivolo")]
     mod mivolo {
-        use super::super::mivolo::{MIN, SIDE, decode, estimate, fit, input, letterbox};
+        use super::super::estimate;
+        use super::super::mivolo::{MIN, SIDE, decode, fit, input, letterbox};
 
-        /// A face the host gives no pixels for — one spanning fewer than
-        /// [`MIN`] of them — gives no age.
+        /// A face spanning fewer than [`MIN`] of the picture's pixels either
+        /// way gives no age, its pixels not asked for.
         #[test]
         fn a_face_too_small_gives_no_age() {
             let small = MIN.expect("a minimum") - 1;
-            assert_eq!(estimate((small, 300), |_, _| None), None);
-            assert_eq!(estimate((300, small), |_, _| None), None);
+            assert_eq!(
+                estimate((small, 300), |_, _| unreachable!("no pixels read")),
+                None
+            );
+            assert_eq!(
+                estimate((300, small), |_, _| unreachable!("no pixels read")),
+                None
+            );
         }
 
         /// A crop fits the square whole, its longer side on the square's,

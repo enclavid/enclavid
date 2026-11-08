@@ -24,51 +24,45 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::host::media::{Crop, Image, PixelsOptions, Rect, Resize, ResizeMode, Size};
+use enclavid::host::media::{Image, PixelsOptions, Rect, Resize, ResizeMode, Size};
 use enclavid::vision::types::{Bbox, Face};
 use exports::enclavid::face_age::check::{AgeEstimate, Guest};
 
 struct FaceAge;
 
-/// `bbox` grown by `margin` about its center, held to the picture: a part of
-/// it in fractions of its width and height, as `bbox` is.
-fn grown(bbox: &Bbox, margin: f32) -> Rect {
-    let cx = bbox.x + bbox.w / 2.0;
-    let cy = bbox.y + bbox.h / 2.0;
-    let width = (bbox.w * margin).clamp(0.0, 1.0);
-    let height = (bbox.h * margin).clamp(0.0, 1.0);
-    Rect {
-        x: (cx - width / 2.0).clamp(0.0, 1.0),
-        y: (cy - height / 2.0).clamp(0.0, 1.0),
+/// `bbox` grown by `margin` about its center, cut to a picture of `size`: the
+/// pixels it touches. `None` where it touches none.
+fn grown(bbox: &Bbox, margin: f32, size: &Size) -> Option<Rect> {
+    let (x, width) = spanned(bbox.x + bbox.w / 2.0, bbox.w * margin, size.width)?;
+    let (y, height) = spanned(bbox.y + bbox.h / 2.0, bbox.h * margin, size.height)?;
+    Some(Rect {
+        x,
+        y,
         width,
         height,
-    }
+    })
+}
+
+/// The pixels of a side of `side` that `length` about `center` touches: the
+/// first, on the pixel the span starts in, and how many, to the pixel past
+/// its end — none past the side. `None` where it touches none.
+fn spanned(center: f32, length: f32, side: u32) -> Option<(u32, u32)> {
+    let side = side as f32;
+    let from = (center - length / 2.0).floor().clamp(0.0, side);
+    let to = (center + length / 2.0).ceil().clamp(0.0, side);
+    (to > from).then_some((from as u32, (to - from) as u32))
 }
 
 impl Guest for FaceAge {
     fn estimate(image: &Image, face: Face) -> Option<AgeEstimate> {
-        let dim = image.size();
-        if dim.width == 0 || dim.height == 0 {
-            return None;
-        }
+        let rect = grown(&face.bbox, infer::MARGIN, &image.size())?;
         // Pull the face patch at the size the model's profile asks for — one
         // decode, the host's, the crop averaged down by the platform's
         // process that holds it.
-        let rect = grown(&face.bbox, infer::MARGIN);
-        // About as many of the picture's pixels as the crop spans: the shape
-        // the model's profile asks for its pixels in.
-        let spanned = (
-            (rect.width * dim.width as f32).max(1.0) as u32,
-            (rect.height * dim.height as f32).max(1.0) as u32,
-        );
-        infer::estimate(spanned, |out_w, out_h| {
+        infer::estimate((rect.width, rect.height), |out_w, out_h| {
             image
                 .pixels(PixelsOptions {
-                    crop: Some(Crop {
-                        rect,
-                        min_width: infer::MIN,
-                        min_height: infer::MIN,
-                    }),
+                    crop: Some(rect),
                     resize: Some(Resize {
                         size: Size {
                             width: out_w,
@@ -84,3 +78,23 @@ impl Guest for FaceAge {
 }
 
 export!(FaceAge);
+
+#[cfg(test)]
+mod tests {
+    use super::spanned;
+
+    /// A span takes the pixels it touches, from the one its start falls in to
+    /// the one its end does, cut to the side; none where it touches none.
+    #[test]
+    fn a_span_takes_the_pixels_it_touches() {
+        assert_eq!(spanned(50.0, 20.0, 100), Some((40, 20)));
+        assert_eq!(spanned(50.5, 20.0, 100), Some((40, 21)));
+        assert_eq!(spanned(5.0, 20.0, 100), Some((0, 15)));
+        assert_eq!(spanned(95.0, 20.0, 100), Some((85, 15)));
+        assert_eq!(spanned(50.0, 300.0, 100), Some((0, 100)));
+        assert_eq!(spanned(150.0, 20.0, 100), None);
+        assert_eq!(spanned(50.0, 0.0, 100), None);
+        assert_eq!(spanned(50.0, -4.0, 100), None);
+        assert_eq!(spanned(f32::NAN, 20.0, 100), None);
+    }
+}

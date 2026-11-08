@@ -89,6 +89,8 @@ pub fn rgb_region(picture: &Rgb, region: &Region) -> Option<Vec<u8>> {
     let algorithm = match held.mode {
         ResizeMode::Nearest => ResizeAlg::Nearest,
         ResizeMode::Average => ResizeAlg::Convolution(FilterType::Box),
+        // A kernel of the source's own pixel, not widened as it shrinks.
+        ResizeMode::Bilinear => ResizeAlg::Interpolation(FilterType::Bilinear),
     };
     let options = ResizeOptions::new().resize_alg(algorithm).crop(
         f64::from(held.x),
@@ -232,7 +234,59 @@ mod tests {
         assert_eq!(one, [15, 50, 7]);
     }
 
-    /// At its own size, by either mode, a crop's pixels are its own.
+    /// Bilinear, each output pixel is OpenCV's `INTER_LINEAR`, to within its
+    /// rounding: the values below are `cv2.resize`'s of the same picture.
+    #[test]
+    fn a_bilinear_resize_is_opencvs() {
+        // 8 × 6, each pixel [(31 col + 7 row) % 256, (41 row + 3 col) % 256,
+        // (col² + 5 row²) % 256].
+        let pixels: Vec<u8> = (0..6u32)
+            .flat_map(|row| {
+                (0..8u32).flat_map(move |col| {
+                    [
+                        (31 * col + 7 * row) % 256,
+                        (41 * row + 3 * col) % 256,
+                        (col * col + 5 * row * row) % 256,
+                    ]
+                    .map(|v| v as u8)
+                })
+            })
+            .collect();
+        let photo = Rgb {
+            width: 8,
+            height: 6,
+            pixels: &pixels,
+        };
+        let shrunk: [((u32, u32), &[u8]); 2] = [
+            (
+                (3, 2),
+                &[
+                    33, 44, 6, 116, 52, 18, 198, 59, 43, 54, 167, 81, 137, 175, 93, 219, 182, 118,
+                ],
+            ),
+            (
+                (5, 4),
+                &[
+                    11, 11, 1, 60, 16, 5, 110, 21, 14, 160, 25, 27, 209, 30, 46, 21, 72, 16, 71,
+                    77, 20, 121, 82, 29, 170, 87, 42, 220, 92, 61, 32, 134, 54, 81, 139, 57, 131,
+                    144, 66, 181, 148, 80, 230, 153, 99, 42, 195, 114, 92, 200, 117, 142, 205, 126,
+                    191, 210, 140, 241, 215, 159,
+                ],
+            ),
+        ];
+        for ((out_w, out_h), opencv) in shrunk {
+            let rgb = rgb_region(&photo, &whole(8, 6, out_w, out_h, ResizeMode::Bilinear)).unwrap();
+            assert_eq!(rgb.len(), opencv.len());
+            for (i, (&ours, &theirs)) in rgb.iter().zip(opencv).enumerate() {
+                assert!(
+                    ours.abs_diff(theirs) <= 1,
+                    "{out_w}x{out_h} at {i}: {ours}, OpenCV's {theirs}"
+                );
+            }
+        }
+    }
+
+    /// At its own size, by any mode, a crop's pixels are its own.
     #[test]
     fn a_region_at_its_own_size_is_its_pixels() {
         let pixels = gradient();
@@ -241,7 +295,11 @@ mod tests {
             height: 2,
             pixels: &pixels,
         };
-        for mode in [ResizeMode::Nearest, ResizeMode::Average] {
+        for mode in [
+            ResizeMode::Nearest,
+            ResizeMode::Average,
+            ResizeMode::Bilinear,
+        ] {
             let rgb = rgb_region(&photo, &whole(4, 2, 4, 2, mode)).unwrap();
             assert_eq!(rgb, pixels, "{mode:?}");
         }
@@ -257,7 +315,11 @@ mod tests {
             height: 2,
             pixels: &pixels,
         };
-        for mode in [ResizeMode::Nearest, ResizeMode::Average] {
+        for mode in [
+            ResizeMode::Nearest,
+            ResizeMode::Average,
+            ResizeMode::Bilinear,
+        ] {
             let past_the_edge = Region {
                 x: 9,
                 y: 9,

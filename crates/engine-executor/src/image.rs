@@ -249,27 +249,18 @@ fn failed(why: impl std::fmt::Display) -> wasmtime::Error {
     })
 }
 
-/// The region `options` pick of a picture of `size`: the pixels the crop
-/// spans, the whole picture where there is none, brought to the size the
-/// resize asks — or kept at their own, pixel for pixel, where there is none.
-/// `None` where the crop spans fewer pixels than it must; an error for a crop
-/// whose numbers are not finite.
-fn picked(size: Size, options: &media::PixelsOptions) -> wasmtime::Result<Option<Region>> {
+/// The region `options` pick of a picture of `size`: the crop, the whole
+/// picture where there is none, brought to the size the resize asks — or kept
+/// at its own, pixel for pixel, where there is none. `None` where the crop is
+/// not inside the picture.
+fn picked(size: Size, options: &media::PixelsOptions) -> Option<Region> {
     let (x, y, w, h) = match &options.crop {
         Some(crop) => {
-            let rect = &crop.rect;
-            if ![rect.x, rect.y, rect.width, rect.height]
-                .iter()
-                .all(|n| n.is_finite())
+            if !within(crop.x, crop.width, size.width) || !within(crop.y, crop.height, size.height)
             {
-                return Err(wasmtime::Error::msg("a crop whose numbers are not finite"));
+                return None;
             }
-            let (x, w) = spanned(rect.x, rect.width, size.width);
-            let (y, h) = spanned(rect.y, rect.height, size.height);
-            if w < crop.min_width.unwrap_or(1) || h < crop.min_height.unwrap_or(1) {
-                return Ok(None);
-            }
-            (x, y, w, h)
+            (crop.x, crop.y, crop.width, crop.height)
         }
         None => (0, 0, size.width, size.height),
     };
@@ -280,11 +271,12 @@ fn picked(size: Size, options: &media::PixelsOptions) -> wasmtime::Result<Option
             match resize.mode {
                 media::ResizeMode::Nearest => ResizeMode::Nearest,
                 media::ResizeMode::Average => ResizeMode::Average,
+                media::ResizeMode::Bilinear => ResizeMode::Bilinear,
             },
         ),
         None => (w, h, ResizeMode::Nearest),
     };
-    Ok(Some(Region {
+    Some(Region {
         x,
         y,
         w,
@@ -292,19 +284,13 @@ fn picked(size: Size, options: &media::PixelsOptions) -> wasmtime::Result<Option
         out_w,
         out_h,
         mode,
-    }))
+    })
 }
 
-/// The pixels a span of `side` pixels covers from `start` for `length`, both
-/// fractions of it: its first, on the pixel `start` falls in, and how many, to
-/// the pixel past its end — held to the side, a pixel at least.
-fn spanned(start: f32, length: f32, side: u32) -> (u32, u32) {
-    let pixels = f64::from(side);
-    let from = f64::from(start).clamp(0.0, 1.0);
-    let to = (f64::from(start) + f64::from(length)).clamp(from, 1.0);
-    let first = ((from * pixels).floor() as u32).min(side.saturating_sub(1));
-    let past = ((to * pixels).ceil() as u32).clamp(first + 1, side.max(first + 1));
-    (first, past - first)
+/// Whether `length` pixels from `start` lie within a side of `side`: a pixel
+/// at least, and none past its end.
+fn within(start: u32, length: u32, side: u32) -> bool {
+    length > 0 && start.checked_add(length).is_some_and(|end| end <= side)
 }
 
 impl HostImage for HostState {
@@ -330,8 +316,8 @@ impl HostImage for HostState {
         options: media::PixelsOptions,
     ) -> wasmtime::Result<Result<Vec<u8>, media::PixelsError>> {
         let size = self.table.get(&self_)?.size;
-        let Some(region) = picked(size, &options)? else {
-            return Ok(Err(media::PixelsError::BelowMinimum));
+        let Some(region) = picked(size, &options) else {
+            return Ok(Err(media::PixelsError::OutOfBounds));
         };
         Ok(self
             .read(&self_, region)
@@ -354,48 +340,25 @@ mod tests {
         height: 2,
     };
 
-    /// The crop `x`, `y`, `width`, `height` of the picture, at least
-    /// `min` pixels each way where given, kept at its own size.
-    fn crop(
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        min: Option<(u32, u32)>,
-    ) -> media::PixelsOptions {
+    /// The crop `x`, `y`, `width`, `height` of the picture, kept at its own
+    /// size.
+    fn crop(x: u32, y: u32, width: u32, height: u32) -> media::PixelsOptions {
         media::PixelsOptions {
-            crop: Some(media::Crop {
-                rect: media::Rect {
-                    x,
-                    y,
-                    width,
-                    height,
-                },
-                min_width: min.map(|(w, _)| w),
-                min_height: min.map(|(_, h)| h),
+            crop: Some(media::Rect {
+                x,
+                y,
+                width,
+                height,
             }),
             resize: None,
         }
     }
 
-    /// A span starts on the pixel its start falls in and ends on the pixel
-    /// past its end, held to the side, a pixel at least.
+    /// A crop picks its own pixels, at their own size where nothing resizes
+    /// them; one reaching past an edge of the picture, or of no pixels, picks
+    /// nothing.
     #[test]
-    fn a_span_covers_the_pixels_it_touches() {
-        assert_eq!(spanned(0.0, 1.0, 4), (0, 4));
-        assert_eq!(spanned(0.25, 0.5, 4), (1, 2));
-        assert_eq!(spanned(0.3, 0.4, 4), (1, 2));
-        assert_eq!(spanned(-1.0, 3.0, 4), (0, 4));
-        assert_eq!(spanned(1.0, 0.5, 4), (3, 1));
-        assert_eq!(spanned(0.5, 0.0, 4), (2, 1));
-        assert_eq!(spanned(0.5, -0.25, 4), (2, 1));
-    }
-
-    /// A crop picks the pixels it spans, at their own size where nothing
-    /// resizes them; one spanning fewer than it must picks nothing, and one
-    /// whose numbers are not finite is refused.
-    #[test]
-    fn a_crop_picks_the_pixels_it_spans() {
+    fn a_crop_picks_its_pixels_inside_the_picture() {
         let right = Region {
             x: 2,
             y: 0,
@@ -405,13 +368,14 @@ mod tests {
             out_h: 2,
             mode: ResizeMode::Nearest,
         };
-        let half = |min| picked(SIZE, &crop(0.5, 0.0, 0.5, 1.0, min));
-        assert_eq!(half(None).unwrap(), Some(right));
-        assert_eq!(half(Some((2, 2))).unwrap(), Some(right));
-        assert_eq!(half(Some((3, 1))).unwrap(), None);
-        assert_eq!(half(Some((1, 3))).unwrap(), None);
-        assert!(picked(SIZE, &crop(f32::NAN, 0.0, 0.5, 1.0, None)).is_err());
-        assert!(picked(SIZE, &crop(0.0, 0.0, f32::INFINITY, 1.0, None)).is_err());
+        assert_eq!(picked(SIZE, &crop(2, 0, 2, 2)), Some(right));
+        let whole = picked(SIZE, &crop(0, 0, 4, 2)).map(|r| (r.w, r.h));
+        assert_eq!(whole, Some((4, 2)));
+        assert_eq!(picked(SIZE, &crop(3, 0, 2, 2)), None);
+        assert_eq!(picked(SIZE, &crop(0, 1, 1, 2)), None);
+        assert_eq!(picked(SIZE, &crop(1, 0, 0, 1)), None);
+        assert_eq!(picked(SIZE, &crop(1, 0, 1, 0)), None);
+        assert_eq!(picked(SIZE, &crop(u32::MAX, 0, 1, 1)), None);
     }
 
     /// Without a crop the whole picture is picked, brought to the size a
@@ -437,6 +401,6 @@ mod tests {
             out_h: 1,
             mode: ResizeMode::Average,
         };
-        assert_eq!(picked(SIZE, &options).unwrap(), Some(whole));
+        assert_eq!(picked(SIZE, &options), Some(whole));
     }
 }

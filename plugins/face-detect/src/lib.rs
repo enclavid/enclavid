@@ -2,8 +2,9 @@
 //! the crop consumers (age, liveness, face-match) reuse.
 //!
 //! Detection runs ONCE here; the pixels stay with the host (this plugin pulls
-//! the detector input via `image.region`), and only WHERE the face is (bbox +
-//! landmarks) crosses the boundary — each consumer derives its own crop. The detector lives in [`detect`]: a compile-time
+//! the detector input via `image.pixels`), and only WHERE the face is (bbox +
+//! landmarks, in the image's pixels) crosses the boundary — each consumer
+//! derives its own crop. The detector lives in [`detect`]: a compile-time
 //! profile. Default builds run the weightless placeholder (whole frame as the
 //! face); built with `blazeface`, MediaPipe's BlazeFace is run by the host from
 //! the model file beside this component.

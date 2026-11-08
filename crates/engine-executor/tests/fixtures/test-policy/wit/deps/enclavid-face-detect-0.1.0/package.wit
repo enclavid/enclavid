@@ -2,7 +2,7 @@ package enclavid:face-detect@0.1.0;
 
 /// Locate the face in an image → `face` geometry the crop consumers (age,
 /// liveness, face-match) reuse. Detection runs ONCE here; the pixels stay with
-/// the host (this plugin pulls the detector input via `image.region`), and only
+/// the host (this plugin pulls the detector input via `image.pixels`), and only
 /// WHERE the face is crosses the boundary — each consumer derives its own crop.
 ///
 /// MODEL-AGNOSTIC contract: any detector (BlazeFace, RetinaFace, YuNet, …)
@@ -14,8 +14,8 @@ interface detect {
 
   /// Detect the single most prominent face (a KYC capture is
   /// single-subject). `none` = no usable face, or an image that does not
-  /// decode → the policy asks for a retake. The returned box + landmarks
-  /// are normalized `[0,1]` over the image.
+  /// decode → the policy asks for a retake. The returned box and
+  /// landmarks are in the image's pixels.
   detect: func(image: borrow<image>) -> option<face>;
 }
 
