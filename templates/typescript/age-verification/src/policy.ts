@@ -14,7 +14,7 @@ import type {
   Event as AnyEvent,
   MediaResult,
 } from "enclavid:policy/types@0.1.0";
-import * as capture from "enclavid:well-known/capture@0.1.0";
+import * as photo from "enclavid:well-known/photo@0.1.0";
 import { detect } from "enclavid:face-detect/detect@0.1.0";
 import { estimate } from "enclavid:face-age/check@0.1.0";
 import * as props from "enclavid-ext:policy/props@0.1.0";
@@ -32,12 +32,12 @@ type Event = Extract<AnyEvent, { tag: "start" | "media" }>;
 
 // What the policy can do: ask the applicant for something, or end the
 // session. Functions, not values: a step's action is made in the round that
-// takes it, since a plugin (`capture.selfie()`) cannot be asked when the
+// takes it, since a plugin (`photo.selfie()`) cannot be asked when the
 // module first runs, as the policy is built.
 const steps = {
   selfie: (): Step => [
     null,
-    { tag: "render", val: { tag: "media", val: capture.selfie() } },
+    { tag: "render", val: { tag: "media", val: photo.selfie() } },
   ],
   approve: (): Step => [null, { tag: "finish", val: "approved" }],
   reject: (): Step => [null, { tag: "finish", val: "rejected" }],

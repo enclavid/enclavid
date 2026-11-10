@@ -9,7 +9,7 @@
 import "@enclavid/policy-quickjs";
 import { definePolicy, withStart } from "@enclavid/policy";
 import type { Action, Event } from "enclavid:policy/types@0.1.0";
-import * as capture from "enclavid:well-known/capture@0.1.0";
+import * as photo from "enclavid:well-known/photo@0.1.0";
 import * as fields from "enclavid:well-known/disclosure-fields@0.1.0";
 import { disclosureField as df } from "enclavid-ext:policy/disclosure-fields@0.1.0";
 import { localized as t } from "enclavid-ext:policy/i18n@0.1.0";
@@ -38,16 +38,16 @@ type Round =
 
 // What the policy can do: ask the applicant for something, or end the
 // session. Functions, not values: a step's action is made in the round that
-// takes it, since a plugin (`capture.passport()`) cannot be asked when the
+// takes it, since a plugin (`photo.passport()`) cannot be asked when the
 // module first runs, as the policy is built.
 const steps = {
   passport: (): Step => [
     { step: "passport" },
-    { tag: "render", val: { tag: "media", val: capture.passport() } },
+    { tag: "render", val: { tag: "media", val: photo.passport() } },
   ],
   selfie: (passport: string): Step => [
     { step: "selfie", passport },
-    { tag: "render", val: { tag: "media", val: capture.selfie() } },
+    { tag: "render", val: { tag: "media", val: photo.selfie() } },
   ],
   // The fields the consumer receives if the applicant accepts. Each is one of
   // the policy's disclosure fields (`wit/world.wit`), which a well-known

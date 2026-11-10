@@ -19,11 +19,110 @@ interface detect {
   detect: func(image: borrow<image>) -> option<face>;
 }
 
+/// What a face's keypoints say of its pose, read as this detector places
+/// them: an implementation exports it where its keypoints tell.
+interface pose {
+  use enclavid:vision/types@0.1.0.{face};
+
+  /// How far the head of `faces` — one head in frames of a video, as this
+  /// detector found it — is turned, read from them together: in degrees,
+  /// negative to its own left, as a `head-turn` guide counts them. A head
+  /// reads a few degrees off even straight on, so a turn is the difference
+  /// from its own straight reading. None where no face's keypoints tell.
+  head-turn: func(faces: list<face>) -> option<f32>;
+}
+
+/// The face in a picture — a photo's image, or a frame's — read against a
+/// static guide.
+interface photo {
+  use enclavid:host/media@0.1.0.{image};
+  use enclavid:host-capture/photo@0.1.0.{static-guide};
+  use enclavid:vision/types@0.1.0.{face};
+
+  /// Whether the face followed the guide, or how it broke it.
+  enum status {
+    followed,
+    /// No face — in a rect, none inside it — or a picture that does not
+    /// decode.
+    no-face,
+    /// A second face; in a rect, a second inside it.
+    extra-face,
+    /// The face does not fill the oval: too small, too large, or off its
+    /// centre.
+    off-oval,
+  }
+
+  /// The face in a picture, read against a static guide.
+  record reading {
+    /// The most prominent face found — in a rect, inside it — if any.
+    face: option<face>,
+    status: status,
+  }
+
+  /// The face in `image` read against `guide`: in an oval, a face that
+  /// fills it; in a rect, a face inside it.
+  read: func(image: borrow<image>, guide: static-guide) -> reading;
+}
+
+/// The face in a video, read in the frames the page held each of its guides
+/// in: where the face was and how the head turned, not the colours of
+/// flashes. A guide reads as followed where its frames show what the page
+/// held it to.
+interface video {
+  use enclavid:host/media@0.1.0.{video};
+  use enclavid:host-capture/video@0.1.0.{video-guide};
+  use enclavid:policy/types@0.1.0.{frame-range};
+  use enclavid:vision/types@0.1.0.{frame-face};
+
+  /// Whether the face followed a guide, or how it broke it for longer than
+  /// the page lets it.
+  enum status {
+    followed,
+    /// A frame of the guide's range holds no face — in a rect, none inside
+    /// it — or does not decode.
+    no-face,
+    /// A frame holds a second face; in a rect, a second inside it.
+    extra-face,
+    /// The face does not fill the oval: too small, too large, or off its
+    /// centre.
+    off-oval,
+    /// The head did not turn to the side asked, or not as far.
+    wrong-turn,
+    /// The guide's frames span less than it is held for, or run past the
+    /// video.
+    short-hold,
+  }
+
+  /// The face in one guide's frames.
+  record reading {
+    guide: video-guide,
+    /// The face in each of its frames where one is found: the most
+    /// prominent; in a rect, the most prominent inside it.
+    faces: list<frame-face>,
+    status: status,
+  }
+
+  /// The face in `video` read in the frames of each of `guides`, one
+  /// reading for each, in their order: in an oval — a face guide's, with its
+  /// flashes or without, or a static one — a face that fills it; in a
+  /// static rect, a face inside it; in a head turn, the head turned so.
+  read: func(video: borrow<video>, guides: list<frame-range>) -> list<reading>;
+}
+
 world face-detect {
   import enclavid:host/media@0.1.0;
+  import enclavid:host/refs@0.1.0;
+  import enclavid:host-capture/photo@0.1.0;
+  import enclavid:host-capture/video@0.1.0;
+  import enclavid:host-capture/capture@0.1.0;
+  import enclavid:host-disclosure/disclosure@0.1.0;
+  import enclavid:policy/types@0.1.0;
   import enclavid:vision/types@0.1.0;
 
   export detect;
+  export pose;
+  export photo;
+  export video;
 }
 /// A detector whose model the host runs: the model's graph is a layer beside
 /// the component — named for the function of its slot that hands the model
@@ -33,7 +132,16 @@ world with-models {
   import enclavid:host/tensors@0.1.0;
   import enclavid-ext:face-detect/models@0.1.0;
   import enclavid:host/media@0.1.0;
+  import enclavid:host/refs@0.1.0;
+  import enclavid:host-capture/photo@0.1.0;
+  import enclavid:host-capture/video@0.1.0;
+  import enclavid:host-capture/capture@0.1.0;
+  import enclavid:host-disclosure/disclosure@0.1.0;
+  import enclavid:policy/types@0.1.0;
   import enclavid:vision/types@0.1.0;
 
   export detect;
+  export pose;
+  export photo;
+  export video;
 }

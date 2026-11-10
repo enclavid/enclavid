@@ -1,5 +1,5 @@
-//! `enclavid:well-known` — canonical KYC field labels and pre-baked
-//! capture flows. Drop-in helpers so policy authors don't hand-roll
+//! `enclavid:well-known` — canonical KYC field labels, standard guides and
+//! pre-baked captures. Drop-in helpers so policy authors don't hand-roll
 //! text-refs for standard data shapes.
 //!
 //! Every ref this plugin hands back (localized label, icon) is minted by
@@ -15,14 +15,22 @@ wit_bindgen::generate!({
     generate_all,
 });
 
+mod sets;
+
 use enclavid::host::refs::{DisclosureFieldRef, IconRef};
 use enclavid::host_capture::capture::{CameraFacing, CaptureKind, CaptureStep, MediaSpec};
 use enclavid::host_capture::photo::{OvalGuide, PhotoSpec, RectGuide, StaticGuide};
+use enclavid::host_capture::video::{
+    FaceFlashesGuide, FaceGuide, HeadTurnGuide, Rgb, VideoGuide, VideoSpec,
+};
 use enclavid::host_disclosure::disclosure::DisplayField;
 use enclavid::host_icons::icons;
 use enclavid_ext::well_known::i18n::{Key, localized};
-use exports::enclavid::well_known::capture::Guest as CaptureGuest;
 use exports::enclavid::well_known::disclosure_fields::Guest as DisclosureFieldsGuest;
+use exports::enclavid::well_known::photo::Guest as PhotoGuest;
+use exports::enclavid::well_known::static_guides::Guest as StaticGuidesGuest;
+use exports::enclavid::well_known::video::Guest as VideoGuest;
+use exports::enclavid::well_known::video_guides::Guest as VideoGuidesGuest;
 
 struct WellKnown;
 
@@ -98,14 +106,90 @@ impl DisclosureFieldsGuest for WellKnown {
     }
 }
 
-// ─── capture ──────────────────────────────────────────────────────
+// ─── static-guides ────────────────────────────────────────────────
 
 /// The frame of an ICAO TD3 passport photo page (125x88mm → ~1.42).
-const PASSPORT_FRAME: RectGuide = RectGuide { aspect: 1.42 };
+const PASSPORT_FRAME: StaticGuide = StaticGuide::Rect(RectGuide { aspect: 1.42 });
 /// The frame of an ICAO TD1 ID-1 card (85.6x54mm → ~1.585).
-const ID1_FRAME: RectGuide = RectGuide { aspect: 1.585 };
+const CARD_FRAME: StaticGuide = StaticGuide::Rect(RectGuide { aspect: 1.585 });
 /// A selfie's face oval: half the frame's shorter side wide.
-const SELFIE_OVAL: OvalGuide = OvalGuide { width: 0.5 };
+const SELFIE_OVAL: StaticGuide = StaticGuide::Oval(OvalGuide { width: 0.5 });
+
+impl StaticGuidesGuest for WellKnown {
+    fn passport_frame() -> StaticGuide {
+        PASSPORT_FRAME
+    }
+    fn card_frame() -> StaticGuide {
+        CARD_FRAME
+    }
+    fn selfie_oval() -> StaticGuide {
+        SELFIE_OVAL
+    }
+}
+
+// ─── video-guides ─────────────────────────────────────────────────
+
+/// How long the face is held in its oval, in milliseconds.
+const FACE_HOLD_MS: u16 = 800;
+/// How long each colour is flashed, in milliseconds.
+const FLASH_MS: u16 = 300;
+/// How long a turn of the head is held, in milliseconds.
+const TURN_HOLD_MS: u16 = 500;
+
+impl VideoGuidesGuest for WellKnown {
+    fn liveness(seed: u32) -> Vec<VideoGuide> {
+        let sets::Liveness {
+            width,
+            colors,
+            turns,
+        } = sets::liveness(seed);
+        let colors = colors
+            .into_iter()
+            .map(|(red, green, blue)| Rgb { red, green, blue })
+            .collect();
+        let mut guides = vec![
+            VideoGuide::Face(FaceGuide {
+                width,
+                hold_ms: FACE_HOLD_MS,
+            }),
+            VideoGuide::FaceFlashes(FaceFlashesGuide {
+                width,
+                colors,
+                flash_ms: FLASH_MS,
+            }),
+        ];
+        guides.extend(turns.map(|degrees| {
+            VideoGuide::HeadTurn(HeadTurnGuide {
+                degrees,
+                hold_ms: TURN_HOLD_MS,
+            })
+        }));
+        guides
+    }
+}
+
+// ─── video ────────────────────────────────────────────────────────
+
+/// The seconds a liveness video's guides are given together.
+const LIVENESS_TIME_LIMIT_SECS: u16 = 60;
+
+impl VideoGuest for WellKnown {
+    fn liveness(guides: Vec<VideoGuide>) -> MediaSpec {
+        MediaSpec {
+            label: localized(Key::LivenessTitle),
+            captures: vec![CaptureStep {
+                icon: Some(icons::selfie()),
+                instructions: localized(Key::LivenessInstructions),
+                label: localized(Key::LivenessStep),
+                camera: CameraFacing::Front,
+                kind: CaptureKind::Video(VideoSpec { guides }),
+            }],
+            time_limit_secs: Some(LIVENESS_TIME_LIMIT_SECS),
+        }
+    }
+}
+
+// ─── photo ────────────────────────────────────────────────────────
 
 /// The three texts of a capture step.
 struct StepTexts {
@@ -142,7 +226,7 @@ fn passport_step() -> CaptureStep {
         },
         Some(icons::passport()),
         CameraFacing::Rear,
-        StaticGuide::Rect(PASSPORT_FRAME),
+        PASSPORT_FRAME,
     )
 }
 
@@ -155,7 +239,7 @@ fn id_card_front_step_inner() -> CaptureStep {
         },
         Some(icons::id_card()),
         CameraFacing::Rear,
-        StaticGuide::Rect(ID1_FRAME),
+        CARD_FRAME,
     )
 }
 
@@ -168,7 +252,7 @@ fn id_card_back_step_inner() -> CaptureStep {
         },
         Some(icons::id_card()),
         CameraFacing::Rear,
-        StaticGuide::Rect(ID1_FRAME),
+        CARD_FRAME,
     )
 }
 
@@ -181,7 +265,7 @@ fn drivers_license_front_step_inner() -> CaptureStep {
         },
         Some(icons::drivers_license()),
         CameraFacing::Rear,
-        StaticGuide::Rect(ID1_FRAME),
+        CARD_FRAME,
     )
 }
 
@@ -194,7 +278,7 @@ fn drivers_license_back_step_inner() -> CaptureStep {
         },
         Some(icons::drivers_license()),
         CameraFacing::Rear,
-        StaticGuide::Rect(ID1_FRAME),
+        CARD_FRAME,
     )
 }
 
@@ -207,11 +291,11 @@ fn selfie_step_inner() -> CaptureStep {
         },
         Some(icons::selfie()),
         CameraFacing::Front,
-        StaticGuide::Oval(SELFIE_OVAL),
+        SELFIE_OVAL,
     )
 }
 
-impl CaptureGuest for WellKnown {
+impl PhotoGuest for WellKnown {
     fn passport() -> MediaSpec {
         MediaSpec {
             label: localized(Key::PassportTitle),

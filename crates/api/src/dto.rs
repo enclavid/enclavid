@@ -629,13 +629,13 @@ mod tests {
                 "artifact": { "kind": "policy" },
             })
         );
-        let name = InterfaceName::new("enclavid:well-known/capture@0.1.0").unwrap();
+        let name = InterfaceName::new("enclavid:well-known/photo@0.1.0").unwrap();
         assert_eq!(
             view(InitError::Compile(CompileFault::Unsatisfied(name))),
             serde_json::json!({
                 "kind": "compile",
                 "problem": "unsatisfied_import",
-                "interface": "enclavid:well-known/capture@0.1.0",
+                "interface": "enclavid:well-known/photo@0.1.0",
             })
         );
         assert_eq!(

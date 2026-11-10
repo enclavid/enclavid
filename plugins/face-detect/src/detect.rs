@@ -2,9 +2,9 @@
 //! the detector, which detector, and how its answer maps back onto the frame.
 //! The plugin hands a profile the frame's size and a `region` that reads the
 //! whole frame, resampled to the size it is asked for — or nothing, where the
-//! frame does not decode; the profile returns an internal [`Detection`], which
-//! [`crate`]'s WIT glue maps to the shared `face`. Bindgen-free but for the
-//! model the host runs.
+//! frame does not decode; the profile returns an internal [`Detection`] for
+//! each face, which [`crate`]'s WIT glue maps to the shared `face`.
+//! Bindgen-free but for the model the host runs.
 //!
 //! Profile selection is compile-time:
 //!   * default → [`placeholder`]: whole frame as the "face", no model
@@ -19,6 +19,7 @@ use blazeface as profile;
 use placeholder as profile;
 
 /// A detected face, in the frame's pixels.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Detection {
     /// `[x, y, w, h]`.
     pub bbox: [f32; 4],
@@ -27,15 +28,15 @@ pub struct Detection {
     pub score: f32,
 }
 
-/// Detect the single most prominent face in a frame of `size` pixels, read
-/// through `region`: the whole frame, resampled to the size it is asked for,
-/// row-major RGB8, or `None` where it does not decode. `None` = no usable face
-/// → retake.
-pub fn detect(
+/// Every face in a frame of `size` pixels, read through `region`: the whole
+/// frame, resampled to the size it is asked for, row-major RGB8, or `None`
+/// where it does not decode. The most prominent — the largest — first; none
+/// where the frame does not decode.
+pub fn detect_all(
     size: (u32, u32),
     region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
-) -> Option<Detection> {
-    profile::detect(size, region)
+) -> Vec<Detection> {
+    profile::detect_all(size, region)
 }
 
 // ---------------------------------------------------------------------
@@ -49,15 +50,15 @@ mod placeholder {
     /// The whole frame as the "face", so the pipeline runs weightless —
     /// cropping the full box reproduces a centered square crop. The pixels
     /// are not read.
-    pub fn detect(
+    pub fn detect_all(
         (w, h): (u32, u32),
         _region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
-    ) -> Option<Detection> {
-        Some(Detection {
+    ) -> Vec<Detection> {
+        vec![Detection {
             bbox: [0.0, 0.0, w as f32, h as f32],
             landmarks: Vec::new(),
             score: 1.0,
-        })
+        }]
     }
 }
 
@@ -83,14 +84,18 @@ mod blazeface {
     /// before `x`, then six keypoints `(x, y)`.
     const ROW: usize = 16;
 
-    pub fn detect(
+    pub fn detect_all(
         size: (u32, u32),
         region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
-    ) -> Option<Detection> {
-        let fit = Fit::of(size)?;
-        let square = fit.square(&region(fit.w, fit.h)?)?;
+    ) -> Vec<Detection> {
+        let Some(fit) = Fit::of(size) else {
+            return Vec::new();
+        };
+        let Some(square) = region(fit.w, fit.h).and_then(|rgb| fit.square(&rgb)) else {
+            return Vec::new();
+        };
         let side = u64::from(SIDE);
-        let rows = models::detector()
+        let data = models::detector()
             .run(
                 &TensorF32::new(&[1, 3, side, side], &input(&square)),
                 &TensorF32::new(&[1], &[CONF]),
@@ -98,11 +103,10 @@ mod blazeface {
                 &TensorF32::new(&[1], &[IOU]),
             )
             .data();
-        // The most prominent face: the largest. No face, no row.
-        let best = rows
-            .chunks_exact(ROW)
-            .max_by(|a, b| area(a).total_cmp(&area(b)))?;
-        Some(fit.detection(best))
+        // A row for each face the graph keeps, the largest first.
+        let mut rows: Vec<&[f32]> = data.chunks_exact(ROW).collect();
+        rows.sort_by(|a, b| area(b).total_cmp(&area(a)));
+        rows.into_iter().map(|row| fit.detection(row)).collect()
     }
 
     /// Where a frame lies on the graph's square: resampled to `w×h`, its
@@ -205,8 +209,9 @@ mod tests {
     #[cfg(not(feature = "blazeface"))]
     #[test]
     fn the_placeholder_boxes_the_whole_frame() {
-        let d = super::detect((64, 48), |_, _| unreachable!("no pixels read")).expect("detection");
-        assert_eq!(d.bbox, [0.0, 0.0, 64.0, 48.0]);
+        let found = super::detect_all((64, 48), |_, _| unreachable!("no pixels read"));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].bbox, [0.0, 0.0, 64.0, 48.0]);
     }
 
     // BlazeFace's shaping, native — the model itself runs on the host:

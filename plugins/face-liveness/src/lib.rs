@@ -26,10 +26,10 @@ wit_bindgen::generate!({
 });
 
 use enclavid::host::media::{Image, PixelsOptions, Rect, Resize, ResizeMode, Size, Video};
-use enclavid::vision::types::Face;
+use enclavid::vision::types::{Face, FrameFace};
 use exports::enclavid::face_liveness::image::Guest as ImageGuest;
 use exports::enclavid::face_liveness::types::LivenessEstimate;
-use exports::enclavid::face_liveness::video::{FrameFace, Guest as VideoGuest};
+use exports::enclavid::face_liveness::video::Guest as VideoGuest;
 
 struct FaceLiveness;
 

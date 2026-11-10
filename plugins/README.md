@@ -7,9 +7,9 @@ workspace.
 
 | Plugin | Package | What it does |
 |---|---|---|
-| `well-known/` | `enclavid:well-known` | The capture specs (passport, selfie) and the labels of the KYC fields, in its own texts |
+| `well-known/` | `enclavid:well-known` | The standard guides, the capture specs (passport, selfie, the liveness video) and the labels of the KYC fields, in its own texts |
 | `vision/` | `enclavid:vision` | The face geometry every plugin that reads a face shares; types alone — the platform decodes captures into the host's `image` |
-| `face-detect/` | `enclavid:face-detect` | Finds the face in an image |
+| `face-detect/` | `enclavid:face-detect` | Finds the face in an image, and reads it against the guides of a capture, by the page's own rules: a photo's static guide (`photo`), a video's guides (`video`) |
 | `face-age/` | `enclavid:face-age` | Estimates the age of the face found |
 | `face-liveness/` | `enclavid:face-liveness` | Estimates whether the face found is a live person's, in one picture (`image`) or over a video's frames (`video`) |
 

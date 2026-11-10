@@ -32,15 +32,8 @@ interface image {
 /// Liveness from frames of a video.
 interface video {
     use enclavid:host/media@0.1.0.{video};
-    use enclavid:vision/types@0.1.0.{face};
+    use enclavid:vision/types@0.1.0.{frame-face};
     use types.{liveness-estimate};
-
-    /// A face found in a frame of the video.
-    record frame-face {
-        /// The frame's index in the video, from 0.
-        index: u32,
-        face: face,
-    }
 
     /// Estimate whether the faces found in frames of `video` are a live
     /// person's: one estimate for them together — a model of single pictures

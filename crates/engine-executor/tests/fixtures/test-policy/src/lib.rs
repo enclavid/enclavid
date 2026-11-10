@@ -49,8 +49,8 @@ use enclavid::host::media::{Image, Photo, PixelsOptions, Rect, Resize, ResizeMod
 use enclavid::policy::types::{Action, Capture, Decision, Disclosure, Event, Prompt};
 // The well-known plugin (linked at /connect) supplies the capture specs
 // and the canonical KYC `display-field` helpers.
-use enclavid::well_known::capture;
 use enclavid::well_known::disclosure_fields as wk;
+use enclavid::well_known::photo::{passport, selfie};
 // Second plugin (linked at runtime in the hybrid test): its `get()` is
 // `extra-tag`, one of the extra plugin's own texts.
 use enclavid::extra::tag;
@@ -63,7 +63,8 @@ use enclavid::face_detect::detect as face_detect;
 // the faces of a video's frames.
 use enclavid::face_liveness::image as face_liveness_image;
 use enclavid::face_liveness::types::LivenessEstimate;
-use enclavid::face_liveness::video::{self as face_liveness_video, FrameFace};
+use enclavid::face_liveness::video as face_liveness_video;
+use enclavid::vision::types::FrameFace;
 use exports::enclavid::policy::policy::Guest;
 
 struct TestPolicy;
@@ -322,7 +323,7 @@ impl Guest for TestPolicy {
                     None if wasi_probe() => probe_state(),
                     None => state_at(STEP_AWAIT_PASSPORT),
                 };
-                (state, Action::Render(Prompt::Media(capture::passport())))
+                (state, Action::Render(Prompt::Media(passport())))
             }
 
             // Passport captured → validate the capture, then ask for the
@@ -338,7 +339,7 @@ impl Guest for TestPolicy {
                     // step tag. Only the opaque token lives in state — never pixels.
                     let mut next = vec![STEP_AWAIT_SELFIE];
                     next.extend_from_slice(photo.hash().as_bytes());
-                    (next, Action::Render(Prompt::Media(capture::selfie())))
+                    (next, Action::Render(Prompt::Media(selfie())))
                 }
                 Some(Capture::Video(capture)) => (
                     probe_video(&capture.video),

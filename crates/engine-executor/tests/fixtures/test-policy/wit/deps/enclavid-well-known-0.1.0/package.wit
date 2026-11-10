@@ -56,23 +56,49 @@ interface disclosure-fields {
   tax-id: func(field: disclosure-field-ref, value: string) -> display-field;
 }
 
-/// Pre-baked MediaSpec / CaptureStep helpers for common KYC documents.
+/// The shapes a document or a selfie is photographed in, with the values this
+/// plugin picks for them.
+interface static-guides {
+  use enclavid:host-capture/photo@0.1.0.{static-guide};
+
+  /// The frame of an ICAO TD3 passport's photo page, 125 × 88 mm.
+  passport-frame: func() -> static-guide;
+
+  /// The frame of an ICAO TD1 card — ID cards and driving licences —
+  /// 85.6 × 54 mm.
+  card-frame: func() -> static-guide;
+
+  /// The oval of a selfie, half the frame's shorter side wide.
+  selfie-oval: func() -> static-guide;
+}
+
+/// Ready sets of video guides for a check, their values drawn from a seed the
+/// policy picks at random for each attempt: the same seed gives the same
+/// guides.
+interface video-guides {
+  use enclavid:host-capture/video@0.1.0.{video-guide};
+
+  /// A liveness check: the face in an oval 0.40–0.55 of the frame's shorter
+  /// side wide, held 0.8 s; flashes of 5 bright colours in that oval, 0.3 s
+  /// each; then a turn of the head by 20–30° to one side and one to the
+  /// other, each held 0.5 s.
+  liveness: func(seed: u32) -> list<video-guide>;
+}
+
+/// Photo captures of documents and a selfie, in `static-guides`' shapes.
 ///
-/// `*_spec` functions return a complete `media-spec` for
-/// `action::render(prompt::media)`. For multi-side documents (id-card, drivers-license)
-/// the spec includes both sides as separate steps.
-///
-/// `*_step` functions return individual `capture-step`s for tenants
-/// who want to compose custom flows mixing sides.
+/// A document's function returns a whole `media-spec` for
+/// `action::render(prompt::media)`, both sides of a two-sided one as steps
+/// of their own; the `*-step` functions return those steps alone, for a
+/// policy composing its own flow.
 ///
 /// The texts inside the returned records (labels, instructions) are
 /// THIS PLUGIN's own (`enclavid-ext:well-known/i18n`) — applicant-facing
 /// only, no policy whitelist needed — and the icons are the host's own
 /// (`enclavid:host-icons/icons`).
-interface capture {
+interface photo {
   use enclavid:host-capture/capture@0.1.0.{capture-step, media-spec};
 
-  /// Full MediaSpecs
   passport: func() -> media-spec;
 
   id-card: func() -> media-spec;
@@ -81,7 +107,6 @@ interface capture {
 
   selfie: func() -> media-spec;
 
-  /// Individual steps for multi-side documents
   id-card-front-step: func() -> capture-step;
 
   id-card-back-step: func() -> capture-step;
@@ -89,6 +114,18 @@ interface capture {
   drivers-license-front-step: func() -> capture-step;
 
   drivers-license-back-step: func() -> capture-step;
+}
+
+/// Video captures, with this plugin's texts and the host's icons, as
+/// `photo`'s are.
+interface video {
+  use enclavid:host-capture/capture@0.1.0.{media-spec};
+  use enclavid:host-capture/video@0.1.0.{video-guide};
+
+  /// A liveness video: one step on the front camera asking `guides` in
+  /// order — `video-guides` makes ready ones — with a time limit of 60 s.
+  /// Any field of the spec is the policy's to change.
+  liveness: func(guides: list<video-guide>) -> media-spec;
 }
 
 world well-known {
@@ -101,5 +138,8 @@ world well-known {
   import enclavid:host-capture/capture@0.1.0;
 
   export disclosure-fields;
-  export capture;
+  export static-guides;
+  export video-guides;
+  export photo;
+  export video;
 }

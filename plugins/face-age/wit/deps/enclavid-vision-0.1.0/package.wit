@@ -32,6 +32,13 @@ interface types {
     landmarks: list<point>,
     score: f32,
   }
+
+  /// A face found in a frame of a video.
+  record frame-face {
+    /// The frame's index in the video, from 0.
+    index: u32,
+    face: face,
+  }
 }
 
 world vision {

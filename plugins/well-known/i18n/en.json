@@ -44,5 +44,9 @@
 
   "selfie-instructions": "Hold the camera at eye level and align your face inside the oval.",
   "selfie-step": "Look straight ahead",
-  "selfie-review-hint": "Check your face is clearly visible and well-lit."
+  "selfie-review-hint": "Check your face is clearly visible and well-lit.",
+
+  "liveness-title": "A short video of you",
+  "liveness-instructions": "Look at the camera and follow the prompts on the screen.",
+  "liveness-step": "Your face"
 }

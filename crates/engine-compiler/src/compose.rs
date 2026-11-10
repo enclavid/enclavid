@@ -527,7 +527,7 @@ mod tests {
     fn host_reserved_excludes_plugin_and_policy_interfaces() {
         // Plugin exports stay plugin-satisfiable; the policy's own export
         // stays policy-owned. Neither may be mistaken for a host cap.
-        assert!(!is_host_reserved("enclavid:well-known/capture@0.1.0"));
+        assert!(!is_host_reserved("enclavid:well-known/photo@0.1.0"));
         assert!(!is_host_reserved("enclavid:extra/tag@0.1.0"));
         assert!(!is_host_reserved("enclavid:policy/policy@0.1.0"));
         // Load-bearing distinction: the well-known plugin's `disclosure-fields`

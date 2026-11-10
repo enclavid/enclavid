@@ -1,9 +1,9 @@
 # enclavid:well-known
 
-Canonical KYC field labels and pre-baked capture flows for Enclavid
-policies. Drop-in helpers so policy authors don't hand-roll text-refs
-for standard data shapes. Icons are not this plugin's: a capture step
-names one of the host's own (`enclavid:host-icons/icons`).
+Canonical KYC field labels, standard guides and pre-baked captures for
+Enclavid policies. Drop-in helpers so policy authors don't hand-roll
+text-refs for standard data shapes. Icons are not this plugin's: a
+capture step names one of the host's own (`enclavid:host-icons/icons`).
 
 ## What it provides
 
@@ -11,11 +11,18 @@ names one of the host's own (`enclavid:host-icons/icons`).
   KYC fields. Each takes one of the policy's disclosure fields and a
   value, and returns a `display-field` of that field whose `label` is
   the plugin's text for it.
-- **`capture`** — `MediaSpec`/`CaptureStep` constructors for the four
-  standard capture flows: passport, ID card, driver's license,
+- **`static-guides`** — the shapes a document or a selfie is
+  photographed in: a passport's page, an ID-1 card, a selfie's oval.
+- **`video-guides`** — ready sets of video guides for a check, their
+  values drawn from a seed the policy picks at random: `liveness`.
+  The plugin draws nothing at random itself.
+- **`photo`** — `MediaSpec`/`CaptureStep` constructors for the four
+  standard photo captures: passport, ID card, driver's license,
   selfie. Each returns a complete `media-spec` ready for
   `action::render(prompt::media)`; multi-side documents include
   front+back as separate steps.
+- **`video`** — the liveness video: one step asking the guides it is
+  given, with a time limit.
 - **Its texts**, in its slot `enclavid-ext:well-known/i18n`: the
   labels and the captures' texts. A policy may import them to label
   fields of its own.
@@ -23,11 +30,11 @@ names one of the host's own (`enclavid:host-icons/icons`).
 ## Usage from a policy
 
 ```rust
-use enclavid::well_known::{capture, disclosure_fields};
+use enclavid::well_known::{disclosure_fields, photo};
 use enclavid_ext::policy::disclosure_fields::{Key as Field, disclosure_field};
 
 // One-line passport capture (single step, rear camera, ICAO TD3 aspect):
-let action = Action::Render(Prompt::Media(capture::passport()));
+let action = Action::Render(Prompt::Media(photo::passport()));
 
 // One-line consent screen:
 let action = Action::Render(Prompt::ConsentDisclosure(Disclosure {
@@ -145,12 +152,18 @@ wit fetch` them; it does not ship the implementation.
 
 ## Capture settings (baked in by each helper)
 
-| Helper                      | Camera | Guide                          |
-| --------------------------- | ------ | ------------------------------ |
-| `passport()`                | rear   | rect(1.42) — ICAO TD3          |
-| `id-card()` (front + back)  | rear   | rect(1.585) — ICAO TD1 (ID-1)  |
-| `drivers-license()` (f+b)   | rear   | rect(1.585) — ID-1             |
-| `selfie()`                  | front  | oval                           |
+| Helper                            | Camera | Guides                                  |
+| --------------------------------- | ------ | --------------------------------------- |
+| `photo.passport()`                | rear   | rect(1.42) — ICAO TD3                   |
+| `photo.id-card()` (front + back)  | rear   | rect(1.585) — ICAO TD1 (ID-1)           |
+| `photo.drivers-license()` (f+b)   | rear   | rect(1.585) — ID-1                      |
+| `photo.selfie()`                  | front  | oval(0.5)                               |
+| `video.liveness(guides)`          | front  | `guides`; 60 s for all of them          |
+
+`video-guides.liveness(seed)` asks, from the seed: the face in an oval
+0.40–0.55 wide, held 0.8 s; flashes of 5 bright colours in that oval,
+0.3 s each; a turn of the head by 20–30° to one side, then to the
+other, each held 0.5 s.
 
 If your KYC flow needs different settings (e.g., non-standard
 document aspect), construct `CaptureStep` manually instead of using

@@ -53,6 +53,9 @@ interface i18n {
         selfie-instructions,
         selfie-step,
         selfie-review-hint,
+        liveness-title,
+        liveness-instructions,
+        liveness-step,
     }
 
     localized: func(key: key) -> localized-ref;

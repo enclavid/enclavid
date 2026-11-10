@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn an_interface_name_is_held_to_its_length_and_alphabet() {
-        assert!(InterfaceName::new("enclavid:well-known/capture@0.1.0").is_some());
+        assert!(InterfaceName::new("enclavid:well-known/photo@0.1.0").is_some());
         assert!(InterfaceName::new("wasi:io/poll@0.2.0-rc+build.1").is_some());
         assert!(InterfaceName::new(&"a".repeat(InterfaceName::MAX_BYTES)).is_some());
         for refused in [

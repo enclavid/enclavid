@@ -106,7 +106,10 @@ fn the_typescript_templates_carry_the_wit_they_copy() {
             "age-verification",
             [&PLATFORM[..], &WELL_KNOWN, &FACES, &AGE].concat(),
         ),
-        ("liveness", [&PLATFORM[..], &FACES, &LIVENESS].concat()),
+        (
+            "liveness",
+            [&PLATFORM[..], &WELL_KNOWN, &FACES, &LIVENESS].concat(),
+        ),
     ];
     for (template, copies) in &templates {
         let deps = repo

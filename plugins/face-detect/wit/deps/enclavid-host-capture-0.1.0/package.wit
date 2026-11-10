@@ -1,0 +1,197 @@
+package enclavid:host-capture@0.1.0;
+
+/// A photo step, and the shapes drawn over the camera, which a video shows
+/// too.
+interface photo {
+  use enclavid:host/refs@0.1.0.{localized-ref};
+
+  /// A rectangle at the centre of the frame, as large as fits.
+  record rect-guide {
+    /// Its width:height aspect, held to 0.5–2.0 (1.42 passport, 1.585
+    /// ID-1).
+    aspect: f32,
+  }
+
+  /// An oval at the centre of the frame, 1.618 times as tall as it is wide.
+  record oval-guide {
+    /// As a fraction of the frame's shorter side, so the oval keeps its
+    /// size on a frame of either orientation; held to 0.1–0.6, where its
+    /// height still fits that side.
+    width: f32,
+  }
+
+  /// A shape drawn over the camera. The page does not read what is in it:
+  /// the applicant fits into it whatever they are asked to, and says when
+  /// they have.
+  ///
+  /// Every guide's numbers are held to their ranges where the prompt is
+  /// built: past those, a guide no longer fits the screen or a face.
+  variant static-guide {
+    rect(rect-guide),
+    oval(oval-guide),
+  }
+
+  /// A photo: one frame, which the applicant sees and keeps or retakes
+  /// before it is sent.
+  record photo-spec {
+    /// The shape drawn over the camera, if any, which the shutter says is
+    /// followed.
+    guide: option<static-guide>,
+    /// The check shown under the photo on the review screen ("Make sure
+    /// the MRZ is sharp and free of glare").
+    review-hint: localized-ref,
+  }
+}
+
+/// A video step, and what it asks the applicant to do.
+interface video {
+  use photo.{static-guide};
+
+  /// A static guide in a video, which the applicant says with a button they
+  /// have followed.
+  record static-video-guide {
+    guide: static-guide,
+    /// How long it is held after the button, in milliseconds; held to
+    /// 5000.
+    hold-ms: u16,
+  }
+
+  /// A face the page finds at the centre of the frame, at a size. The page
+  /// draws an oval for it, 1.618 times as tall as it is wide.
+  record face-guide {
+    /// The face's width as a fraction of the frame's shorter side; held to
+    /// 0.25–0.6: smaller, the page does not find a face reliably; larger,
+    /// the oval no longer fits.
+    width: f32,
+    /// How long the face stays there, in milliseconds; held to 5000.
+    hold-ms: u16,
+  }
+
+  /// A turn of the head the page reads.
+  record head-turn-guide {
+    /// How far, negative to the applicant's left; held to ±45.
+    degrees: s8,
+    /// How long it is held, in milliseconds; held to 5000.
+    hold-ms: u16,
+  }
+
+  /// A colour on screen, by its red, green and blue, as `#rrggbb` writes
+  /// them.
+  record rgb {
+    red: u8,
+    green: u8,
+    blue: u8,
+  }
+
+  /// A face the page finds at the centre of the frame, at a size, held there
+  /// while the screen lights it: around the oval the page draws for it, as
+  /// for a `face`, the screen shows each colour in turn. The flashes begin
+  /// once the face has been in the oval for a moment, or at once where a
+  /// `face` or flashes guide before them held it there, and start over if
+  /// the face leaves.
+  record face-flashes-guide {
+    /// The face's width as a fraction of the frame's shorter side; held to
+    /// 0.25–0.6, as a `face`'s is.
+    width: f32,
+    /// The colours, in the order shown; 1 to 16 of them.
+    colors: list<rgb>,
+    /// How long each colour is shown, in milliseconds; held to 250–1000.
+    flash-ms: u16,
+  }
+
+  /// One thing a video asks the applicant to do. Each is held before the
+  /// next is shown: a static guide from the applicant's button; a face,
+  /// with its flashes or without, and a head turn from when the page reads
+  /// them in the frames.
+  variant video-guide {
+    static-guide(static-video-guide),
+    face(face-guide),
+    head-turn(head-turn-guide),
+    face-flashes(face-flashes-guide),
+  }
+
+  /// A video, sent with no review screen.
+  record video-spec {
+    /// What it asks, in order, each held for its `hold-ms` or through all
+    /// its flashes — for one frame where that is 0 — before the next. The
+    /// reply says where each was held.
+    guides: list<video-guide>,
+  }
+}
+
+/// Capture-flow shapes — `media-spec` / `capture-step` and friends. Pure
+/// value types used by the `enclavid:policy` contract
+/// (`action::render(prompt::media)` + `event::media`) and helper plugins
+/// (e.g. `enclavid:well-known`). The host capabilities that mint the refs
+/// these records carry live in `enclavid:host`.
+interface capture {
+  use enclavid:host/refs@0.1.0.{localized-ref, icon-ref};
+  use photo.{photo-spec};
+  use video.{video-spec};
+
+  /// Which physical camera the capture step should use.
+  enum camera-facing {
+    /// The one facing the applicant, for a selfie.
+    front,
+    /// The one facing away, for documents.
+    rear,
+    /// The browser picks; useful for laptops without a rear lens.
+    any,
+  }
+
+  /// What one capture step records.
+  variant capture-kind {
+    /// One frame, which the applicant keeps.
+    photo(photo-spec),
+    /// A video, recorded while guides are shown.
+    video(video-spec),
+  }
+
+  /// One step within a capture. For two-sided documents: front + back. For
+  /// multi-page documents: one step per page. Single-shot captures
+  /// (passport photo page, selfie) use a single step. The steps of ONE media
+  /// render belong to the SAME artifact: their captures come back together,
+  /// in one `event::media`, and plugins analyse them together. A step is one
+  /// continuous capture; a break the applicant must take between two (flip
+  /// the card, turn the page) is a step boundary.
+  record capture-step {
+    /// An `icon-ref` minted by one of the functions of
+    /// `enclavid:host-icons/icons`, one per icon the frontend draws, so a
+    /// step carries an icon from that fixed set and never a free-form
+    /// string. Not a text-ref because there's nothing to localise — the
+    /// name is a frontend dispatch token, never displayed verbatim.
+    icon: option<icon-ref>,
+    /// The pre-capture intro body, a text of the component's `i18n`
+    /// catalog. Paired with `icon` to form "what you're about to do".
+    /// Shown before the camera turns on for THIS step — even between
+    /// steps of a multi-step capture ("now flip to the back").
+    instructions: localized-ref,
+    /// The short on-camera overlay shown during capture ("Photo page",
+    /// "Back side"), a text of the component's `i18n` catalog.
+    label: localized-ref,
+    /// The camera the step uses.
+    camera: camera-facing,
+    /// What the step records.
+    kind: capture-kind,
+  }
+
+  /// Spec for one media render (`prompt::media`). Use multiple steps
+  /// for multi-side / multi-page captures of the same artifact. Use
+  /// multiple media renders for independent artifacts (e.g.,
+  /// shareholder passports).
+  record media-spec {
+    /// The overall artifact title surfaced as context on every screen of
+    /// the capture flow ("Your passport"). Per-step copy — pre-capture
+    /// instructions, on-camera prompt — lives on `capture-step`.
+    label: localized-ref,
+    /// The steps, in the order the applicant takes them.
+    captures: list<capture-step>,
+    /// The seconds the applicant has for every step together, from when
+    /// the page starts them. The page is given the steps' kinds only
+    /// then, so what they ask is not known before; past the limit, the
+    /// reply is `event::timed-out`. None: no limit, and the steps are
+    /// given whole with the prompt.
+    time-limit-secs: option<u16>,
+  }
+}
+
