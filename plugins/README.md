@@ -19,7 +19,10 @@ asks for, at the size its model takes.
 
 ## A plugin's directory
 
-- `wit/` — its package: what it exports, which a policy imports.
+- `wit/` — its package: what it exports, which a policy imports, in
+  `world.wit`. A plugin whose models the host runs is built as the world in
+  `with-models.wit`, whose slot names them; a policy's project does not copy
+  it.
 - `ext/` — its slot, `enclavid-ext:<plugin>`, if it has one: the keys of its
   texts, or the models the host runs for it.
 - `i18n/` — its texts, one JSON file per language.

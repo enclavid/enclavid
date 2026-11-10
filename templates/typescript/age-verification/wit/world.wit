@@ -31,8 +31,9 @@ package enclavid-ext:policy@0.1.0 {
     interface props {
         record props {
             // The age the face must be read as, at least, for the session to
-            // be approved. A face's age is read to within a few years either
-            // way, so a check of 18 may ask for more.
+            // be approved. A face's age is an estimate, as close as the
+            // face-age implementation the session pins reads it, so a check of
+            // 18 may ask for more.
             min-age: u8,
         }
 

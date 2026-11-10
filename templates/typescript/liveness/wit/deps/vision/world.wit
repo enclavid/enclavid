@@ -22,7 +22,8 @@ interface types {
     }
 
     /// A detected face — GEOMETRY ONLY (the pixels live in the `image` it was
-    /// found in). The keypoint set is detector-specific (BlazeFace: 6 points).
+    /// found in). The keypoints are the detector's own: which points, and in
+    /// which order, is its implementation's to say.
     /// Each consumer derives its OWN crop from `bbox` at its own resolution /
     /// alignment — a fixed pre-crop would break liveness (which needs an
     /// enlarged, unaligned crop), so the substrate shares WHERE the face is,

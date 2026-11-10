@@ -15,9 +15,9 @@ but what they cast on it is read by a check of its own, which this template
 does not run.
 
 What it stops: a photo or a print held up to the camera, which does not turn
-as asked; most replays on a screen, which MiniFASNet reads as not live; and a
-video recorded beforehand, since the page is given the oval's size and the
-turns only once the applicant starts. What it does not stop: a camera replaced
+as asked; a replay on a screen, where the face-liveness implementation the
+session pins reads it as not live; and a video recorded beforehand, since the
+page is given the oval's size and the turns only once the applicant starts. What it does not stop: a camera replaced
 by software that draws a face as it is asked, nor a person other than the one
 a document shows: matching faces is a plugin of its own.
 
@@ -39,10 +39,8 @@ enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
   no texts of its own — the video's are well-known's — takes no props and
   discloses no field, so it has no slot.
 - `wit/deps/` — the WIT it builds against: the platform's, and each plugin's
-  package. The plugins' packages name their slots — well-known's texts and the
-  models the host runs for the face plugins — so those come along too
-  (`well-known-texts`, `face-detect-models`, `face-liveness-models`); the
-  policy imports none of them.
+  package. Well-known's package names the slot of its texts, so that comes
+  along too (`well-known-texts`); the policy does not import it.
 
 ## Plugins
 
@@ -55,10 +53,8 @@ The consumer pins an implementation of each when it creates a session:
   read their patches of.
 - `enclavid:face-detect` — reads the face in the frames of each guide: whether
   it filled the oval and turned as asked, by the rules the page holds the
-  guides to, and where it was. Its build with BlazeFace carries the model as a
-  layer, `detector.onnx`.
-- `enclavid:face-liveness` — how live the face held in the oval looks. Its
-  build with MiniFASNet carries the models as layers, `minifasnet-v2.onnx` and
-  `minifasnet-v1se.onnx`.
+  guides to, and where it was.
+- `enclavid:face-liveness` — how live the face held in the oval looks.
 
-The repository's `plugins/README.md` says how each is built and pushed.
+Which model reads the face is the implementation's, chosen by the pin. The
+repository's `plugins/README.md` says how the platform's are built and pushed.

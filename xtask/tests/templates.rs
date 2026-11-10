@@ -60,38 +60,21 @@ const WELL_KNOWN: [Copy; 2] = [
 ];
 
 /// What a template that finds a face copies besides: the vision plugin's
-/// package and face-detect's, whose package names its slot.
-const FACES: [Copy; 3] = [
+/// package and face-detect's. A face plugin's `world.wit` holds its contract
+/// alone; the world an implementation is built as, whose slot names the models
+/// it runs, is in a file of its own, which no template copies.
+const FACES: [Copy; 2] = [
     ("vision", "plugins/vision/wit", Some("world.wit")),
     ("face-detect", "plugins/face-detect/wit", Some("world.wit")),
-    (
-        "face-detect-models",
-        "plugins/face-detect/ext",
-        Some("models.wit"),
-    ),
 ];
 
-/// The package of a plugin a template reads the face with, and its slot's.
-const AGE: [Copy; 2] = [
-    ("face-age", "plugins/face-age/wit", Some("world.wit")),
-    (
-        "face-age-models",
-        "plugins/face-age/ext",
-        Some("models.wit"),
-    ),
-];
-const LIVENESS: [Copy; 2] = [
-    (
-        "face-liveness",
-        "plugins/face-liveness/wit",
-        Some("world.wit"),
-    ),
-    (
-        "face-liveness-models",
-        "plugins/face-liveness/ext",
-        Some("models.wit"),
-    ),
-];
+/// The package of a plugin a template reads the face with.
+const AGE: [Copy; 1] = [("face-age", "plugins/face-age/wit", Some("world.wit"))];
+const LIVENESS: [Copy; 1] = [(
+    "face-liveness",
+    "plugins/face-liveness/wit",
+    Some("world.wit"),
+)];
 
 /// WASI's copy is not checked: it is the registry's, and the host serves any
 /// 0.2.x of it on its semver track.

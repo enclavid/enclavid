@@ -52,6 +52,8 @@ world face-liveness {
   export image;
   export video;
 }
+/// The world this implementation is built as, apart from `world.wit`, which a
+/// policy's project copies: its slot names the models it runs.
 /// An estimator whose models the host runs: the models' graphs are layers
 /// beside the component — named for the functions of its slot that hand them
 /// out — and only the crops leave the sandbox, to those models, each in a

@@ -5,9 +5,9 @@ package enclavid:face-detect@0.1.0;
 /// the host (this plugin pulls the detector input via `image.pixels`), and only
 /// WHERE the face is crosses the boundary — each consumer derives its own crop.
 ///
-/// MODEL-AGNOSTIC contract: any detector (BlazeFace, RetinaFace, YuNet, …)
-/// satisfies it by shipping a distinct OCI artifact exporting this
-/// interface; the model is pinned per session via `impl_ref`.
+/// MODEL-AGNOSTIC contract: any detector satisfies it by shipping a distinct
+/// OCI artifact exporting this interface; the model is pinned per session via
+/// `impl_ref`.
 interface detect {
   use enclavid:host/media@0.1.0.{image};
   use enclavid:vision/types@0.1.0.{face};
@@ -124,6 +124,8 @@ world face-detect {
   export photo;
   export video;
 }
+/// The world this implementation is built as, apart from `world.wit`, which a
+/// policy's project copies: its slot names the model it runs.
 /// A detector whose model the host runs: the model's graph is a layer beside
 /// the component — named for the function of its slot that hands the model
 /// out — and only the frame, at the model's side, leaves the sandbox, to that

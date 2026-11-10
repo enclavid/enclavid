@@ -29,9 +29,9 @@ import { estimate } from "enclavid:face-liveness/video@0.1.0";
 // How many times the video is asked for: a second time, with new values,
 // where the first ran out of time.
 const ATTEMPTS = 2;
-// How live the face held in the oval must look, at least: MiniFASNet's score.
-// It passes live faces and catches most screens; prints are stopped by the
-// turns.
+// How live the face held in the oval must look, at least: face-liveness's
+// score, from 0 for a spoof to 1 for a live face. A score, not a probability:
+// the threshold that suits is the one the implementation pinned is meant for.
 const LIVE_MIN = 0.5;
 
 // How many times the video has been asked for.
