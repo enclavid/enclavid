@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   GuideOverlay,
   ShutterButton,
+  TurnGuide,
   cameraConstraints,
   cameraError,
   facesApplicant,
@@ -67,6 +68,11 @@ const MAX_SIDE = 1280;
 /// The bits a second the recording is held between.
 const MIN_BITRATE = 250_000;
 const MAX_BITRATE = 1_500_000;
+/// How opaque a flash's colour is drawn over the camera, as the alpha digits a
+/// `#rrggbb` takes: around the oval nearly whole, and inside it so the face
+/// still shows through — AWS's own, 0.9 and 0.75.
+const FLASH_AROUND = "e6";
+const FLASH_INSIDE = "bf";
 
 /// Whether the page reads the applicant's face for `guide`: every guide but a
 /// static one, which the applicant confirms.
@@ -78,6 +84,18 @@ type Flashes = Extract<VideoGuide, { kind: "face_flashes" }>;
 /// all their colours.
 function holdMsOf(guide: VideoGuide): number {
   return guide.kind === "face_flashes" ? guide.colors.length * guide.flash_ms : guide.hold_ms;
+}
+
+/// The oval of the last guide before `index` that draws one: where the face
+/// was last asked to be.
+function ovalBefore(guides: VideoGuide[], index: number): { width: number; height: number } | null {
+  for (let i = index - 1; i >= 0; i--) {
+    const guide = guides[i];
+    if (guide.kind === "face" || guide.kind === "face_flashes") {
+      return { width: guide.width, height: guide.height };
+    }
+  }
+  return null;
 }
 
 /// What the page waits for before it records a step whose first guide it
@@ -239,6 +257,9 @@ type Phase =
       heldAt: number | null;
       /// How far through the guides, from 0 to 1.
       progress: number;
+      /// How far the head is turned, in degrees, negative to its own left,
+      /// while a turn is on screen.
+      turn: number | null;
     }
   /// Recorded, and handed to the parent to send.
   | { kind: "recorded" }
@@ -495,11 +516,13 @@ export function VideoCapture({
         const guide = plan[index];
         context.drawImage(video, 0, 0, width, height);
         let hint: Hint | null = null;
+        let turn: number | null = null;
         let follows: boolean;
         if (detector && reads(guide)) {
           const faces = await detector.faces(setup.canvas, width, height);
           if (faces.length) seen = elapsed;
           hint = hintFor(guide, faces, head, width, height, mirrored);
+          if (guide.kind === "head_turn") turn = head.turn();
           follows = hint === "hold";
         } else {
           seen = elapsed;
@@ -565,6 +588,7 @@ export function VideoCapture({
           hint,
           heldAt: held === null ? null : start + held,
           progress: (holds.length + share) / plan.length,
+          turn,
         });
         next += 1000 / FPS;
         const wait = next - performance.now();
@@ -621,9 +645,13 @@ export function VideoCapture({
   }
 
   const showCamera = phase.kind === "ready" || phase.kind === "recording";
-  const guide = phase.kind === "recording" ? plan[phase.index] : plan[0];
+  const index = phase.kind === "recording" ? phase.index : 0;
+  const guide = plan[index];
+  // What is drawn for it: before the recording, what starts it.
+  const drawn = guide && phase.kind === "ready" && auto ? entryOf(guide) : guide;
   const hint = phase.kind === "ready" || phase.kind === "recording" ? phase.hint : null;
   const heldAt = phase.kind === "recording" ? phase.heldAt : null;
+  const turn = phase.kind === "recording" ? phase.turn : null;
   const holding = heldAt !== null;
   // A static guide is taken with the shutter, which fills while it is held.
   const shutter = showCamera && guide?.kind === "static_guide";
@@ -631,9 +659,7 @@ export function VideoCapture({
   const flash = useFlash(heldAt, guide?.kind === "face_flashes" ? guide : null);
   const stepHint =
     totalSteps > 1 ? `Step ${stepNumber} of ${totalSteps}. ${step.label}` : step.label;
-  const instruction = guide
-    ? instructionFor(phase.kind === "ready" && auto ? entryOf(guide) : guide, hint, holding)
-    : null;
+  const instruction = drawn ? instructionFor(drawn, hint, holding) : null;
 
   if (phase.kind === "unsupported") {
     return (
@@ -678,16 +704,26 @@ export function VideoCapture({
             !showCamera && "invisible",
           )}
         />
-        {showCamera && guide && (
+        {showCamera && drawn && (
           <>
-            {/* A head turn is said by the instruction below, not drawn. */}
-            {guide.kind === "static_guide" && <GuideOverlay guide={guide.guide} frame={frame} />}
-            {(guide.kind === "face" || guide.kind === "face_flashes") && (
+            {drawn.kind === "static_guide" && <GuideOverlay guide={drawn.guide} frame={frame} />}
+            {(drawn.kind === "face" || drawn.kind === "face_flashes") && (
               <GuideOverlay
-                guide={{ kind: "oval", width: guide.width, height: guide.height }}
+                guide={{ kind: "oval", width: drawn.width, height: drawn.height }}
                 frame={frame}
                 met={hint === "hold"}
-                surround={flash}
+                surround={flash && `${flash}${FLASH_AROUND}`}
+                inside={flash && `${flash}${FLASH_INSIDE}`}
+              />
+            )}
+            {drawn.kind === "head_turn" && (
+              <TurnGuide
+                oval={ovalBefore(plan, index)}
+                frame={frame}
+                degrees={drawn.degrees}
+                turn={turn}
+                met={hint === "hold"}
+                mirrored={mirrored}
               />
             )}
             <div className="pointer-events-none absolute inset-x-6 top-6 space-y-2 text-center">

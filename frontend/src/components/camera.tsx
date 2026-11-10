@@ -159,6 +159,7 @@ export function GuideOverlay({
   frame,
   met = false,
   surround = DIM,
+  inside,
 }: {
   guide: StaticGuide;
   frame: FrameBox | null;
@@ -166,12 +167,17 @@ export function GuideOverlay({
   met?: boolean;
   /// What the screen shows around it: the camera dimmed, or a colour.
   surround?: string;
+  /// A colour drawn over the camera inside an oval; none where it shows the
+  /// camera as it is.
+  inside?: string;
 }) {
   switch (guide.kind) {
     case "rect":
       return <RectGuide aspect={guide.aspect} surround={surround} />;
     case "oval":
-      return frame ? <OvalGuide oval={guide} frame={frame} met={met} surround={surround} /> : null;
+      return frame ? (
+        <OvalGuide oval={guide} frame={frame} met={met} surround={surround} inside={inside} />
+      ) : null;
   }
 }
 
@@ -221,11 +227,13 @@ function OvalGuide({
   frame,
   met,
   surround,
+  inside,
 }: {
   oval: Extract<StaticGuide, { kind: "oval" }>;
   frame: FrameBox;
   met: boolean;
   surround: string;
+  inside?: string;
 }) {
   const shorter = Math.min(frame.width, frame.height);
   const width = oval.width * shorter;
@@ -244,9 +252,136 @@ function OvalGuide({
           height,
           borderRadius: "50%",
           boxShadow: `0 0 0 9999px ${surround}`,
+          background: inside,
         }}
       />
     </div>
+  );
+}
+
+/// How far in from an oval's edge the arc of a turn is drawn, in pixels: half
+/// its stroke, so the stroke stays inside the oval's box.
+const ARC_INSET = 3;
+
+/// A turn of the head, drawn: the oval the face was last asked to fill, if
+/// any, its side toward the turn filling out from the middle as the head turns,
+/// and chevrons pointing that way. A mirror shows the applicant's left on the
+/// screen's left.
+export function TurnGuide({
+  oval,
+  frame,
+  degrees,
+  turn,
+  met,
+  mirrored,
+}: {
+  oval: { width: number; height: number } | null;
+  frame: FrameBox | null;
+  /// The turn asked for, negative to the applicant's left; 0 for none.
+  degrees: number;
+  /// How far the head is turned now, in the same degrees; `null` where it is
+  /// not read.
+  turn: number | null;
+  /// Whether the turn is held, which the arc shows whole and in green.
+  met: boolean;
+  mirrored: boolean;
+}) {
+  const box =
+    oval && frame
+      ? (() => {
+          const shorter = Math.min(frame.width, frame.height);
+          const width = oval.width * shorter;
+          const height = oval.height * shorter;
+          return {
+            left: frame.left + (frame.width - width) / 2,
+            top: frame.top + (frame.height - height) / 2,
+            width,
+            height,
+          };
+        })()
+      : null;
+  const ring = oval && frame && (
+    <OvalGuide oval={{ kind: "oval", ...oval }} frame={frame} met={met} surround={DIM} />
+  );
+  if (degrees === 0) return ring;
+  const left = degrees < 0 === mirrored;
+  const toward = turn !== null && Math.sign(turn) === Math.sign(degrees) ? Math.abs(turn) : 0;
+  const share = met ? 1 : Math.min(1, toward / Math.abs(degrees));
+  const chevrons = (
+    <div className={cn("flex", left && "flex-row-reverse")}>
+      {[0, 1, 2].map((i) => (
+        <svg
+          key={i}
+          viewBox="0 0 24 24"
+          className="size-7 animate-pulse text-white drop-shadow"
+          style={{ animationDelay: `${i * 200}ms` }}
+        >
+          <path
+            d={left ? "M15 5l-7 7 7 7" : "M9 5l7 7-7 7"}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={3}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      ))}
+    </div>
+  );
+  if (!box) {
+    return (
+      <div
+        className={cn(
+          "pointer-events-none absolute top-1/2 -translate-y-1/2",
+          left ? "left-4" : "right-4",
+        )}
+      >
+        {chevrons}
+      </div>
+    );
+  }
+  const { width: w, height: h } = box;
+  const rx = w / 2 - ARC_INSET;
+  const ry = h / 2 - ARC_INSET;
+  const side = left ? ARC_INSET : w - ARC_INSET;
+  // From the side's middle up to the top and down to the bottom: the sweep
+  // that goes round that side.
+  const arcs = [
+    `M ${side} ${h / 2} A ${rx} ${ry} 0 0 ${left ? 1 : 0} ${w / 2} ${ARC_INSET}`,
+    `M ${side} ${h / 2} A ${rx} ${ry} 0 0 ${left ? 0 : 1} ${w / 2} ${h - ARC_INSET}`,
+  ];
+  return (
+    <>
+      {ring}
+      <svg
+        className="pointer-events-none absolute overflow-visible"
+        style={{ left: box.left, top: box.top, width: w, height: h }}
+        viewBox={`0 0 ${w} ${h}`}
+      >
+        {share > 0 &&
+          arcs.map((d) => (
+            <path
+              key={d}
+              d={d}
+              pathLength={1}
+              strokeDasharray={`${share} 1`}
+              fill="none"
+              stroke={met ? "#22c55e" : "white"}
+              strokeWidth={ARC_INSET * 2}
+              strokeLinecap="round"
+            />
+          ))}
+      </svg>
+      <div
+        className="pointer-events-none absolute -translate-y-1/2"
+        style={{
+          top: box.top + h / 2,
+          ...(left ? { right: `calc(100% - ${box.left - 4}px)` } : { left: box.left + w + 4 }),
+        }}
+      >
+        {chevrons}
+      </div>
+    </>
   );
 }
 
