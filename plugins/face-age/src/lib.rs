@@ -38,8 +38,7 @@ fn grown(bbox: &Bbox, margin: f32, size: &Size) -> Option<Rect> {
     Some(Rect {
         x,
         y,
-        width,
-        height,
+        size: Size { width, height },
     })
 }
 
@@ -59,7 +58,7 @@ impl Guest for FaceAge {
         // Pull the face patch at the size the model's profile asks for — one
         // decode, the host's, the crop averaged down by the platform's
         // process that holds it.
-        infer::estimate((rect.width, rect.height), |out_w, out_h| {
+        infer::estimate((rect.size.width, rect.size.height), |out_w, out_h| {
             image
                 .pixels(PixelsOptions {
                     crop: Some(rect),

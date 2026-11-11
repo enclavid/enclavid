@@ -64,20 +64,20 @@ interface media {
   /// key).
   type media-hash = string;
 
-  /// A picture's size in pixels.
+  /// A size in pixels.
   record size {
     width: u32,
     height: u32,
   }
 
-  /// A rectangle of a picture, in the pixels its `size` counts.
+  /// A rectangle of a picture, in its pixels.
   record rect {
     /// Its left edge: the first column it takes.
     x: u32,
     /// Its top edge: the first row it takes.
     y: u32,
-    width: u32,
-    height: u32,
+    /// How many columns and rows it takes.
+    size: size,
   }
 
   /// How pixels are brought to another size.

@@ -256,11 +256,11 @@ fn failed(why: impl std::fmt::Display) -> wasmtime::Error {
 fn picked(size: Size, options: &media::PixelsOptions) -> Option<Region> {
     let (x, y, w, h) = match &options.crop {
         Some(crop) => {
-            if !within(crop.x, crop.width, size.width) || !within(crop.y, crop.height, size.height)
-            {
+            let (w, h) = (crop.size.width, crop.size.height);
+            if !within(crop.x, w, size.width) || !within(crop.y, h, size.height) {
                 return None;
             }
-            (crop.x, crop.y, crop.width, crop.height)
+            (crop.x, crop.y, w, h)
         }
         None => (0, 0, size.width, size.height),
     };
@@ -347,8 +347,7 @@ mod tests {
             crop: Some(media::Rect {
                 x,
                 y,
-                width,
-                height,
+                size: media::Size { width, height },
             }),
             resize: None,
         }

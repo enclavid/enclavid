@@ -231,8 +231,10 @@ fn probe_video(video: &Video) -> Vec<u8> {
             crop: Some(Rect {
                 x: 0,
                 y: 0,
-                width: 1,
-                height: 1,
+                size: Size {
+                    width: 1,
+                    height: 1,
+                },
             }),
             resize: Some(Resize {
                 size: Size {

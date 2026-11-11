@@ -85,8 +85,7 @@ fn crop_of(image: &Image, [x, y, width, height]: infer::Crop, side: u32) -> Opti
             crop: Some(Rect {
                 x,
                 y,
-                width,
-                height,
+                size: Size { width, height },
             }),
             resize: Some(Resize {
                 size: Size {
