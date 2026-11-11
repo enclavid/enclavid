@@ -88,10 +88,11 @@ interface types {
     video(video-capture),
   }
 
-  /// The captured artifact of one `media-spec`, carried by `event::media`.
-  record media-result {
-    /// One capture for each step, in the order of the spec's `captures`.
-    captures: list<capture>,
+  /// Why a `prompt::media` was answered with no captures.
+  enum media-error {
+    /// Its time limit ran out before every step was captured; none of its
+    /// captures is kept.
+    timed-out,
   }
 
   /// INBOUND: the result of a prior `action`, fed by the runtime to
@@ -102,11 +103,9 @@ interface types {
     /// The reply to `prompt::consent-disclosure`: accepted? `true` means
     /// the disclosure is already sealed.
     consent-disclosure(bool),
-    /// The reply to `prompt::media`: every step captured.
-    media(media-result),
-    /// The reply to `prompt::media` with a time limit when its steps were
-    /// not all captured within it. None of its captures is kept.
-    timed-out,
+    /// The reply to `prompt::media`: one capture for each step, in the
+    /// order of the spec's `captures`, or why there are none.
+    media(result<list<capture>, media-error>),
   }
 
   /// OUTBOUND: the action the policy returns from `handle`. The round ends

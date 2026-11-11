@@ -86,9 +86,11 @@ export const policy = definePolicy(
       const round = { ...state, event } as Round;
       switch (round.step) {
         case "passport": {
-          // A capture for each step of the spec, of the kind the step asked
-          // for: the passport's spec is one photo.
-          const [page] = round.event.val.captures;
+          // The passport has no time limit, so its reply is its captures: one
+          // for each step of the spec, of the kind the step asked for — the
+          // passport's spec is one photo.
+          const [page] =
+            round.event.val.tag === "ok" ? round.event.val.val : [];
           if (page?.tag !== "photo") return steps.passport();
           // The props are the consumer's, the same in every round.
           if (props.get().selfie === false) return steps.consent();

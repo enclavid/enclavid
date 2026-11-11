@@ -13,8 +13,8 @@ import "@enclavid/policy-quickjs";
 import { definePolicy, withStart } from "@enclavid/policy";
 import type {
   Action,
+  Capture,
   Event as AnyEvent,
-  MediaResult,
 } from "enclavid:policy/types@0.1.0";
 import * as videoGuides from "enclavid:well-known/video-guides@0.1.0";
 import * as video from "enclavid:well-known/video@0.1.0";
@@ -38,7 +38,7 @@ type Step = [State, Action];
 // The events this policy gets: `start`, then the answer to the video it
 // rendered last — it renders media prompts alone, and the runtime delivers no
 // other answer.
-type Event = Extract<AnyEvent, { tag: "start" | "media" | "timed-out" }>;
+type Event = Extract<AnyEvent, { tag: "start" | "media" }>;
 
 const steps = {
   // The guides are new for each attempt, drawn from a seed of the round's
@@ -67,12 +67,18 @@ export const policy = definePolicy(
     start: () => steps.video(1),
     handle: (state, event) => {
       switch (event.tag) {
-        case "media":
-          return passes(event.val) ? steps.approve(state) : steps.reject(state);
-        case "timed-out":
-          return state.attempts < ATTEMPTS
-            ? steps.video(state.attempts + 1)
-            : steps.reject(state);
+        case "media": {
+          const reply = event.val;
+          if (reply.tag === "err") {
+            switch (reply.val) {
+              case "timed-out":
+                return state.attempts < ATTEMPTS
+                  ? steps.video(state.attempts + 1)
+                  : steps.reject(state);
+            }
+          }
+          return passes(reply.val) ? steps.approve(state) : steps.reject(state);
+        }
       }
     },
   }),
@@ -81,8 +87,8 @@ export const policy = definePolicy(
 // Whether the video passes: the applicant followed every guide, and the face
 // they held in the oval looks live. The guides are the prompt's own, which the
 // runtime hands back with the frames the page says each was held in.
-function passes(media: MediaResult): boolean {
-  const [capture] = media.captures;
+function passes(captures: Capture[]): boolean {
+  const [capture] = captures;
   if (capture?.tag !== "video") return false;
   const { video: recording, guides } = capture.val;
   const readings = read(recording, guides);

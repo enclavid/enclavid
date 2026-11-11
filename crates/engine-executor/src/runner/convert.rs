@@ -85,9 +85,9 @@ pub fn event_to_wit(
                     }
                 });
             }
-            wit_policy::Event::Media(wit_policy::MediaResult { captures })
+            wit_policy::Event::Media(Ok(captures))
         }
-        Event::TimedOut => wit_policy::Event::TimedOut,
+        Event::TimedOut => wit_policy::Event::Media(Err(wit_policy::MediaError::TimedOut)),
     })
 }
 

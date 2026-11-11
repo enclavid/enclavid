@@ -11,8 +11,8 @@ import "@enclavid/policy-quickjs";
 import { definePolicy, withStart } from "@enclavid/policy";
 import type {
   Action,
+  Capture,
   Event as AnyEvent,
-  MediaResult,
 } from "enclavid:policy/types@0.1.0";
 import * as photo from "enclavid:well-known/photo@0.1.0";
 import { detect } from "enclavid:face-detect/detect@0.1.0";
@@ -47,7 +47,9 @@ export const policy = definePolicy(
   withStart<State, Event, Action>({
     start: () => steps.selfie(),
     handle: (_state, event) => {
-      const age = estimateAge(event.val);
+      // The selfie has no time limit, so its reply is its captures.
+      const age =
+        event.val.tag === "ok" ? estimateAge(event.val.val) : undefined;
       // No face to read. Captures are checked on the applicant's page before
       // they are sent, so this is rare: ask again as is — or ask with a
       // media-spec of your own that says what went wrong, or reject.
@@ -62,10 +64,10 @@ export const policy = definePolicy(
 // holds no face, or a face too small to read. The platform decodes the photo
 // into an image; face-detect finds the face in it, and face-age reads its age
 // from the face's own crop, at the image's full size.
-function estimateAge(media: MediaResult): number | undefined {
+function estimateAge(captures: Capture[]): number | undefined {
   // A capture for each step of the spec, of the kind the step asked for: the
   // selfie's spec is one photo.
-  const [selfie] = media.captures;
+  const [selfie] = captures;
   if (selfie?.tag !== "photo") return;
   const image = selfie.val.image();
   if (!image) return;

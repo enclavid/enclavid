@@ -214,8 +214,8 @@ interface capture {
     /// The seconds the applicant has for every step together, from when
     /// the page starts them. The page is given the steps' kinds only
     /// then, so what they ask is not known before; past the limit, the
-    /// reply is `event::timed-out`. None: no limit, and the steps are
-    /// given whole with the prompt.
+    /// reply is `event::media` with `media-error::timed-out`. None: no
+    /// limit, and the steps are given whole with the prompt.
     time-limit-secs: option<u16>,
   }
 }

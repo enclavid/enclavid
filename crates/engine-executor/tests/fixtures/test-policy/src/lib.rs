@@ -46,7 +46,7 @@ use enclavid_ext::well_known::i18n::{Key as WellKnownText, localized as well_kno
 // `Photo` constructor — proving cross-round reload. And the host `video`, whose
 // frames the probe reads, and the `image`s the host decodes a capture into.
 use enclavid::host::media::{Image, Photo, PixelsOptions, Rect, Resize, ResizeMode, Size, Video};
-use enclavid::policy::types::{Action, Capture, Decision, Disclosure, Event, Prompt};
+use enclavid::policy::types::{Action, Capture, Decision, Disclosure, Event, MediaError, Prompt};
 // The well-known plugin (linked at /connect) supplies the capture specs
 // and the canonical KYC `display-field` helpers.
 use enclavid::well_known::disclosure_fields as wk;
@@ -335,7 +335,7 @@ impl Guest for TestPolicy {
             // into its blob store — to rehydrate it on the selfie round. Only
             // the hash lives in state; the pixels never do. A capture without
             // a photo is retryable.
-            (STEP_AWAIT_PASSPORT, Event::Media(result)) => match result.captures.first() {
+            (STEP_AWAIT_PASSPORT, Event::Media(Ok(captures))) => match captures.first() {
                 Some(Capture::Photo(photo)) => {
                     // Stash the photo's content `hash` (a hex string) after the
                     // step tag. Only the opaque token lives in state — never pixels.
@@ -361,7 +361,7 @@ impl Guest for TestPolicy {
             // retake. The age threshold is the policy's call (buffer +
             // document escalation) and lands with the real flow; here the
             // image → detect → estimate chain is what's exercised.
-            (STEP_AWAIT_SELFIE, Event::Media(result)) => {
+            (STEP_AWAIT_SELFIE, Event::Media(Ok(captures))) => {
                 // Rehydrate the passport photo stashed last round from its hash
                 // (the bytes after the step tag). The constructor returns a
                 // COLD handle (no load yet); reading `bytes()` is what
@@ -377,7 +377,7 @@ impl Guest for TestPolicy {
                 // face-detect locates the `face`, face-age reads its crop and
                 // estimates — or, on the probe, face-liveness reads its crops.
                 // The policy threads the handles.
-                let image = match result.captures.first() {
+                let image = match captures.first() {
                     Some(Capture::Photo(photo)) => photo.image(),
                     _ => None,
                 };
@@ -417,7 +417,9 @@ impl Guest for TestPolicy {
             }
 
             // A media prompt's time ran out: the applicant may try again.
-            (_, Event::TimedOut) => (state, Action::Finish(Decision::RejectedRetryable)),
+            (_, Event::Media(Err(MediaError::TimedOut))) => {
+                (state, Action::Finish(Decision::RejectedRetryable))
+            }
 
             // Any other (step, event) pairing is a runtime/replay bug —
             // fail loud with a finish(rejected) rather than silently
