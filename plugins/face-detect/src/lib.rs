@@ -1,6 +1,7 @@
 //! `enclavid:face-detect` — locate the face in an `image` → `face` geometry
 //! the crop consumers (age, liveness, face-match) reuse, and read the face
-//! against the guides of a capture: a photo's static guide, a video's guides.
+//! against the guides of a capture — a photo's static guide, a video's guides
+//! — in this package's copies of the platform's.
 //!
 //! Detection runs ONCE here; the pixels stay with the host (this plugin pulls
 //! the detector input via `image.pixels`), and only WHERE the face is (bbox +
@@ -9,8 +10,8 @@
 //! profile. Default builds run the weightless placeholder (whole frame as the
 //! face); built with `blazeface`, MediaPipe's BlazeFace is run by the host from
 //! the model file beside this component. What the keypoints say of the head's
-//! pose is [`pose`]'s; where a face sits against a shape, [`shape`]'s; how a
-//! video's frames hold its guides, [`hold`]'s, by the page's rules.
+//! pose is [`pose`]'s; where a face sits against a region, [`shape`]'s; how a
+//! picture or a video's frames follow a guide, [`hold`]'s, by the page's rules.
 
 mod detect;
 mod hold;
@@ -33,18 +34,17 @@ wit_bindgen::generate!({
 use std::collections::HashMap;
 
 use enclavid::host::media::{Image, PixelsOptions, Resize, ResizeMode, Size, Video};
-use enclavid::host_capture::photo::StaticGuide;
-use enclavid::host_capture::video::VideoGuide;
-use enclavid::policy::types::FrameRange;
+use enclavid::host_capture::constants::oval_aspect;
 use enclavid::vision::types::{Bbox, Face, FrameFace, Point};
 use exports::enclavid::face_detect::detect::Guest as DetectGuest;
+use exports::enclavid::face_detect::guides::{StaticGuide, VideoGuide};
 use exports::enclavid::face_detect::photo::{self, Guest as PhotoGuest};
 use exports::enclavid::face_detect::pose::Guest as PoseGuest;
-use exports::enclavid::face_detect::video::{self, Guest as VideoGuest};
+use exports::enclavid::face_detect::video::{self, FrameRange, Guest as VideoGuest};
 
 use detect::Detection;
-use hold::{Ask, Status};
-use shape::{Fit, Shape};
+use hold::Status;
+use shape::{Place, Region};
 
 struct FaceDetect;
 
@@ -68,31 +68,36 @@ impl PhotoGuest for FaceDetect {
     fn read(image: &Image, guide: StaticGuide) -> photo::Reading {
         let size = image.size();
         let faces = faces_in(image);
-        let (at, fit) = shape::fit(&faces, shape_of(&guide), (size.width, size.height));
+        let expect = still(&guide, oval_aspect());
+        let (found, status) = hold::picture(&faces, (size.width, size.height), expect);
         photo::Reading {
-            face: at.map(|i| face(&faces[i])),
-            status: match fit {
-                Fit::Followed => photo::Status::Followed,
-                Fit::NoFace => photo::Status::NoFace,
-                Fit::ExtraFace => photo::Status::ExtraFace,
-                Fit::OffOval => photo::Status::OffOval,
+            face: found.map(face),
+            status: match status {
+                Status::Followed => photo::Status::Followed,
+                Status::NoFace => photo::Status::NoFace,
+                Status::ExtraFace => photo::Status::ExtraFace,
+                Status::OffRegion => photo::Status::OffOval,
+                Status::WrongTurn | Status::ShortHold => {
+                    unreachable!("a static guide asks no turn, and a picture holds for no time")
+                }
             },
         }
     }
 }
 
 impl VideoGuest for FaceDetect {
-    fn read(video: &Video, guides: Vec<FrameRange>) -> Vec<video::Reading> {
+    fn read(video: &Video, ranges: Vec<FrameRange>) -> Vec<video::Reading> {
+        let aspect = oval_aspect();
         // Each frame is found in once: the video keeps only the frame read
-        // last decoded, and the frames before a guide may be another's.
+        // last decoded, and the frames before a range may be another's.
         let mut found: HashMap<u32, hold::Frame> = HashMap::new();
-        // The first frame no guide before has taken in.
+        // The first frame no range before has taken in.
         let mut after = 0;
-        let ranges: Vec<hold::Range> = guides
+        let held: Vec<hold::Range> = ranges
             .iter()
             .map(|range| {
-                let (ask, hold_ms) = ask_of(&range.guide);
-                let from = if ask.reads_head() {
+                let (expect, hold_ms, grace_ms) = expect_of(&range.guide, aspect);
+                let from = if expect.reads_head() {
                     range.first.saturating_sub(hold::BEFORE).max(after)
                 } else {
                     range.first
@@ -107,17 +112,18 @@ impl VideoGuest for FaceDetect {
                     .checked_sub(range.first)
                     .is_some_and(|n| frames.len() as u64 == u64::from(n) + 1);
                 hold::Range {
-                    ask,
+                    expect,
                     hold_ms,
+                    grace_ms,
                     before,
                     frames,
                     whole,
                 }
             })
             .collect();
-        guides
+        ranges
             .into_iter()
-            .zip(hold::read(&ranges))
+            .zip(hold::read(&held))
             .map(|(range, reading)| video::Reading {
                 guide: range.guide,
                 faces: reading
@@ -132,7 +138,7 @@ impl VideoGuest for FaceDetect {
                     Status::Followed => video::Status::Followed,
                     Status::NoFace => video::Status::NoFace,
                     Status::ExtraFace => video::Status::ExtraFace,
-                    Status::OffOval => video::Status::OffOval,
+                    Status::OffRegion => video::Status::OffOval,
                     Status::WrongTurn => video::Status::WrongTurn,
                     Status::ShortHold => video::Status::ShortHold,
                 },
@@ -141,48 +147,73 @@ impl VideoGuest for FaceDetect {
     }
 }
 
-/// What `guide` asks of the face in its frames, and how long it is held, in
-/// milliseconds: flashes through all their colours.
-fn ask_of(guide: &VideoGuide) -> (Ask, u32) {
+/// What `guide` asks of the face, as the page reads it, how long it is held
+/// and the longest break in it forgiven, in milliseconds; the page's ovals
+/// `aspect` wide for their height.
+fn expect_of(guide: &VideoGuide, aspect: f32) -> (hold::Expect, u32, u32) {
     match guide {
-        VideoGuide::StaticGuide(still) => (
-            Ask::Shape {
-                shape: shape_of(&still.guide),
-                head: false,
-            },
-            u32::from(still.hold_ms),
+        VideoGuide::StaticGuide(s) => (
+            still(&s.guide, aspect),
+            u32::from(s.hold_ms),
+            hold::GRACE_MS,
         ),
-        VideoGuide::Face(face) => (
-            Ask::Shape {
-                shape: Shape::Oval { width: face.width },
-                head: true,
-            },
-            u32::from(face.hold_ms),
+        VideoGuide::Face(f) => (
+            face_oval(f.width, aspect),
+            u32::from(f.hold_ms),
+            u32::from(f.grace_ms),
         ),
-        VideoGuide::HeadTurn(turn) => (
-            Ask::Turn {
-                degrees: turn.degrees,
-            },
-            u32::from(turn.hold_ms),
+        VideoGuide::HeadTurn(t) => (
+            hold::Expect::Turn { degrees: t.degrees },
+            u32::from(t.hold_ms),
+            u32::from(t.grace_ms),
         ),
-        VideoGuide::FaceFlashes(flashes) => (
-            Ask::Shape {
-                shape: Shape::Oval {
-                    width: flashes.width,
-                },
-                head: true,
-            },
-            flashes.colors.len() as u32 * u32::from(flashes.flash_ms),
-        ),
+        VideoGuide::FaceFlashes(f) => {
+            let flashes = u32::try_from(f.colors.len()).unwrap_or(u32::MAX);
+            (
+                face_oval(f.width, aspect),
+                flashes.saturating_mul(u32::from(f.flash_ms)),
+                u32::from(f.grace_ms),
+            )
+        }
     }
 }
 
-fn shape_of(guide: &StaticGuide) -> Shape {
+/// A face guide's oval, `width` of the frame's shorter side wide: filled, the
+/// head read in it.
+fn face_oval(width: f32, aspect: f32) -> hold::Expect {
+    hold::Expect::Region {
+        region: oval(width, aspect),
+        place: Place::Fill,
+        head: true,
+    }
+}
+
+/// What a static guide asks of the face: to fill its oval, or to lie inside
+/// its rect, as large as fits; the head is read in neither.
+fn still(guide: &StaticGuide, aspect: f32) -> hold::Expect {
     match guide {
-        StaticGuide::Rect(rect) => Shape::Rect {
-            aspect: rect.aspect,
+        StaticGuide::Oval(o) => hold::Expect::Region {
+            region: oval(o.width, aspect),
+            place: Place::Fill,
+            head: false,
         },
-        StaticGuide::Oval(oval) => Shape::Oval { width: oval.width },
+        StaticGuide::Rect(r) => hold::Expect::Region {
+            region: Region {
+                aspect: r.aspect,
+                width: None,
+                oval: false,
+            },
+            place: Place::Inside,
+            head: false,
+        },
+    }
+}
+
+fn oval(width: f32, aspect: f32) -> Region {
+    Region {
+        aspect,
+        width: Some(width),
+        oval: true,
     }
 }
 

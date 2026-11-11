@@ -946,6 +946,7 @@ pub struct StaticVideoGuide {
 pub struct FaceGuide {
     pub width: f32,
     pub hold_ms: u16,
+    pub grace_ms: u16,
 }
 
 /// Sealed mirror of the WIT `head-turn-guide` record.
@@ -954,6 +955,7 @@ pub struct FaceGuide {
 pub struct HeadTurnGuide {
     pub degrees: i8,
     pub hold_ms: u16,
+    pub grace_ms: u16,
 }
 
 /// Sealed mirror of the WIT `face-flashes-guide` record.
@@ -965,6 +967,7 @@ pub struct FaceFlashesGuide {
     #[serde(deserialize_with = "colors::deserialize")]
     pub colors: Vec<Rgb>,
     pub flash_ms: u16,
+    pub grace_ms: u16,
 }
 
 /// Sealed mirror of the WIT `rgb` record. Encoded as its three bytes rather
@@ -1070,6 +1073,7 @@ mod media_tests {
             guide: VideoGuide::HeadTurn(HeadTurnGuide {
                 degrees: -30,
                 hold_ms: 800,
+                grace_ms: 300,
             }),
             first: 3,
             last: 9,
@@ -1157,6 +1161,7 @@ mod media_tests {
                     width: 0.5,
                     colors: vec![Rgb::default(); colors],
                     flash_ms: 300,
+                    grace_ms: 300,
                 }),
                 first: 3,
                 last: 9,

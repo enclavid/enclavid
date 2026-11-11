@@ -76,6 +76,8 @@ export type VideoGuide =
       height: number;
       /// How long the face stays there, in milliseconds.
       hold_ms: number;
+      /// The longest break in the hold the page forgives, in milliseconds.
+      grace_ms: number;
     }
   /// A turn of the head the page reads.
   | {
@@ -84,6 +86,8 @@ export type VideoGuide =
       degrees: number;
       /// How long it is held, in milliseconds.
       hold_ms: number;
+      /// The longest break in the hold the page forgives, in milliseconds.
+      grace_ms: number;
     }
   /// A face the page finds in an oval, as for `face`, then lights with the
   /// screen around the oval, one colour after another.
@@ -97,6 +101,8 @@ export type VideoGuide =
       colors: string[];
       /// How long each is shown, in milliseconds.
       flash_ms: number;
+      /// The longest break in the flashes the page forgives, in milliseconds.
+      grace_ms: number;
     };
 
 type CaptureStepCommon = {

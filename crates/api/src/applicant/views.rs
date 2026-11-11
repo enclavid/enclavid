@@ -228,6 +228,8 @@ pub enum VideoGuideView {
         height: f32,
         /// How long the face stays there, in milliseconds.
         hold_ms: u16,
+        /// The longest break in the hold the page forgives, in milliseconds.
+        grace_ms: u16,
     },
     /// A turn of the head the page reads.
     HeadTurn {
@@ -235,6 +237,8 @@ pub enum VideoGuideView {
         degrees: i8,
         /// How long it is held, in milliseconds.
         hold_ms: u16,
+        /// The longest break in the hold the page forgives, in milliseconds.
+        grace_ms: u16,
     },
     /// A face the page finds in an oval, as for `Face`, then lights with the
     /// screen around the oval, one colour after another.
@@ -247,6 +251,9 @@ pub enum VideoGuideView {
         colors: Vec<String>,
         /// How long each is shown, in milliseconds.
         flash_ms: u16,
+        /// The longest break in the flashes the page forgives, in
+        /// milliseconds.
+        grace_ms: u16,
     },
 }
 
@@ -372,7 +379,7 @@ fn static_guide_view(g: StaticGuide) -> StaticGuideView {
         StaticGuide::Rect(r) => StaticGuideView::Rect { aspect: r.aspect },
         StaticGuide::Oval(o) => StaticGuideView::Oval {
             width: o.width,
-            height: o.width * GUIDE_OVAL_ASPECT,
+            height: o.width / GUIDE_OVAL_ASPECT,
         },
     }
 }
@@ -385,22 +392,25 @@ fn video_guide_view(g: &VideoGuide) -> VideoGuideView {
         },
         VideoGuide::Face(f) => VideoGuideView::Face {
             width: f.width,
-            height: f.width * GUIDE_OVAL_ASPECT,
+            height: f.width / GUIDE_OVAL_ASPECT,
             hold_ms: f.hold_ms,
+            grace_ms: f.grace_ms,
         },
         VideoGuide::HeadTurn(t) => VideoGuideView::HeadTurn {
             degrees: t.degrees,
             hold_ms: t.hold_ms,
+            grace_ms: t.grace_ms,
         },
         VideoGuide::FaceFlashes(f) => VideoGuideView::FaceFlashes {
             width: f.width,
-            height: f.width * GUIDE_OVAL_ASPECT,
+            height: f.width / GUIDE_OVAL_ASPECT,
             colors: f
                 .colors
                 .iter()
                 .map(|c| format!("#{:02x}{:02x}{:02x}", c.red, c.green, c.blue))
                 .collect(),
             flash_ms: f.flash_ms,
+            grace_ms: f.grace_ms,
         },
     }
 }
@@ -464,6 +474,7 @@ mod tests {
                 guides: vec![VideoGuide::Face(FaceGuide {
                     width: 0.5,
                     hold_ms: 1000,
+                    grace_ms: 300,
                 })],
             }),
         };
@@ -539,10 +550,12 @@ mod tests {
                         VideoGuide::Face(FaceGuide {
                             width: 0.5,
                             hold_ms: 1000,
+                            grace_ms: 300,
                         }),
                         VideoGuide::HeadTurn(HeadTurnGuide {
                             degrees: -30,
                             hold_ms: 800,
+                            grace_ms: 200,
                         }),
                         VideoGuide::FaceFlashes(FaceFlashesGuide {
                             width: 0.5,
@@ -559,6 +572,7 @@ mod tests {
                                 },
                             ],
                             flash_ms: 300,
+                            grace_ms: 400,
                         }),
                     ],
                 })),
@@ -586,13 +600,16 @@ mod tests {
         assert_eq!(video["guides"][0]["hold_ms"], 2000);
         assert_eq!(video["guides"][1]["kind"], "face");
         assert_eq!(video["guides"][1]["hold_ms"], 1000);
+        assert_eq!(video["guides"][1]["grace_ms"], 300);
         assert!(video["guides"][1].get("height").is_some());
         assert_eq!(video["guides"][2]["kind"], "head_turn");
         assert_eq!(video["guides"][2]["degrees"], -30);
+        assert_eq!(video["guides"][2]["grace_ms"], 200);
         assert_eq!(video["guides"][3]["kind"], "face_flashes");
         assert_eq!(video["guides"][3]["colors"][0], "#ff8800");
         assert_eq!(video["guides"][3]["colors"][1], "#000aab");
         assert_eq!(video["guides"][3]["flash_ms"], 300);
+        assert_eq!(video["guides"][3]["grace_ms"], 400);
         assert!(video["guides"][3].get("height").is_some());
     }
 }

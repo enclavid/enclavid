@@ -19,10 +19,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// toolchains' runtimes import beside them, served empty: the environment,
 /// stdio, the filesystem with nothing opened. Nothing of `wasi:sockets` or
 /// `wasi:http`, so a composition importing them is refused.
-pub const HOST_INTERFACES: [&str; 26] = [
+pub const HOST_INTERFACES: [&str; 27] = [
     "enclavid:host/refs@0.1.0",
     "enclavid:host/media@0.1.0",
     TENSORS,
+    "enclavid:host-capture/constants@0.1.0",
     crate::icons::INTERFACE,
     POLICY_PROPS,
     POLICY_DISCLOSURE_FIELDS,

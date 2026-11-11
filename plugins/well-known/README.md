@@ -160,10 +160,14 @@ wit fetch` them; it does not ship the implementation.
 | `photo.selfie()`                  | front  | oval(0.5)                               |
 | `video.liveness(guides)`          | front  | `guides`; 60 s for all of them          |
 
-`video-guides.liveness(seed)` asks, from the seed: the face in an oval
-0.40–0.55 wide, held 0.8 s; flashes of 5 bright colours in that oval,
-0.3 s each; a turn of the head by 20–30° to one side, then to the
-other, each held 0.5 s.
+`video-guides` holds two sets, each drawn from a seed and starting with
+the face in an oval 0.40–0.55 wide, held 0.8 s. The same seed gives both
+the same oval.
+
+- `liveness-turns(seed)` — then a turn of the head by 20–30° to one side,
+  then to the other, each held 0.5 s.
+- `liveness-colors(seed)` — then flashes of 5 bright colours in that oval,
+  0.3 s each.
 
 If your KYC flow needs different settings (e.g., non-standard
 document aspect), construct `CaptureStep` manually instead of using

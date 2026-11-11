@@ -342,6 +342,7 @@ mod tests {
     const TURN: VideoGuide = VideoGuide::HeadTurn(HeadTurnGuide {
         degrees: 30,
         hold_ms: 700,
+        grace_ms: 300,
     });
 
     /// A session no applicant holds yet, as created.

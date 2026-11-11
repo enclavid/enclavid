@@ -117,6 +117,12 @@ impl HostState {
     }
 }
 
+impl crate::enclavid::host_capture::constants::Host for HostState {
+    async fn oval_aspect(&mut self) -> wasmtime::Result<f32> {
+        Ok(crate::limits::GUIDE_OVAL_ASPECT)
+    }
+}
+
 // Pure-types interfaces (no host functions) still generate empty `Host`
 // traits via `bindgen!`. Implementing them on `HostState` satisfies the
 // linker bound — there's nothing to actually implement.

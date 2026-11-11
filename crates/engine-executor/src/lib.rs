@@ -120,6 +120,7 @@ wasmtime::component::bindgen!({
             import enclavid:host/refs@0.1.0;
             import enclavid:host/media@0.1.0;
             import enclavid:host/tensors@0.1.0;
+            import enclavid:host-capture/constants@0.1.0;
             export enclavid:policy/policy@0.1.0;
         }
     "#,

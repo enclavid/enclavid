@@ -12,7 +12,8 @@ interface photo {
         aspect: f32,
     }
 
-    /// An oval at the centre of the frame, 1.618 times as tall as it is wide.
+    /// An oval at the centre of the frame, as wide for its height as
+    /// `constants.oval-aspect` says.
     record oval-guide {
         /// As a fraction of the frame's shorter side, so the oval keeps its
         /// size on a frame of either orientation; held to 0.1–0.6, where its

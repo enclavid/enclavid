@@ -53,8 +53,6 @@ type Props = {
 /// How long a guide the page reads waits to be followed before the recording
 /// stops.
 const FOLLOW_MS = 10_000;
-/// How long a hold outlasts frames that do not follow its guide.
-const GRACE_MS = 300;
 /// How long the face may be gone while a guide that reads it is shown.
 const LOST_MS = 1500;
 /// How long the applicant follows a guide before the page goes on by itself:
@@ -86,6 +84,12 @@ function holdMsOf(guide: VideoGuide): number {
   return guide.kind === "face_flashes" ? guide.colors.length * guide.flash_ms : guide.hold_ms;
 }
 
+/// How long a hold of `guide` outlasts frames that do not follow it, in
+/// milliseconds: none for a static one, which the shutter holds.
+function graceMsOf(guide: VideoGuide): number {
+  return guide.kind === "static_guide" ? 0 : guide.grace_ms;
+}
+
 /// The oval of the last guide before `index` that draws one: where the face
 /// was last asked to be.
 function ovalBefore(guides: VideoGuide[], index: number): { width: number; height: number } | null {
@@ -101,7 +105,9 @@ function ovalBefore(guides: VideoGuide[], index: number): { width: number; heigh
 /// What the page waits for before it records a step whose first guide it
 /// reads, `first`: that face, or a head turned no way.
 function entryOf(first: VideoGuide): VideoGuide {
-  return first.kind === "head_turn" ? { kind: "head_turn", degrees: 0, hold_ms: 0 } : first;
+  return first.kind === "head_turn"
+    ? { kind: "head_turn", degrees: 0, hold_ms: 0, grace_ms: 0 }
+    : first;
 }
 
 /// The longest a recording of `guides` may last: as long as a recording may
@@ -543,7 +549,7 @@ export function VideoCapture({
         if (follows) {
           held ??= elapsed;
           followed = elapsed;
-        } else if (held !== null && elapsed - followed > GRACE_MS) {
+        } else if (held !== null && elapsed - followed > graceMsOf(guide)) {
           held = null;
           // Flashes broken off start over from their first colour, with the
           // time a guide is given to be followed.

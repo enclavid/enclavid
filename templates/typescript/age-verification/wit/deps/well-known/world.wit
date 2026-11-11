@@ -67,11 +67,15 @@ interface static-guides {
 interface video-guides {
     use enclavid:host-capture/video@0.1.0.{video-guide};
 
-    /// A liveness check: the face in an oval 0.40–0.55 of the frame's shorter
-    /// side wide, held 0.8 s; flashes of 5 bright colours in that oval, 0.3 s
-    /// each; then a turn of the head by 20–30° to one side and one to the
-    /// other, each held 0.5 s.
-    liveness: func(seed: u32) -> list<video-guide>;
+    /// A liveness check by turns: the face in an oval 0.40–0.55 of the frame's
+    /// shorter side wide, held 0.8 s; then a turn of the head by 20–30° to one
+    /// side and one to the other, each held 0.5 s.
+    liveness-turns: func(seed: u32) -> list<video-guide>;
+
+    /// A liveness check by colours: the face in an oval 0.40–0.55 of the
+    /// frame's shorter side wide, held 0.8 s; then flashes of 5 bright colours
+    /// in that oval, 0.3 s each. A seed gives both sets the same oval.
+    liveness-colors: func(seed: u32) -> list<video-guide>;
 }
 
 /// Photo captures of documents and a selfie, in `static-guides`' shapes.

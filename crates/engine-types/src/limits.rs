@@ -173,16 +173,17 @@ pub const GUIDE_ASPECT_MAX: f32 = 2.0;
 pub const GUIDE_OVAL_WIDTH_MIN: f32 = 0.1;
 
 /// The widest an `oval` guide is drawn, as a fraction of the frame's shorter
-/// side: at it, the oval's height — [`GUIDE_OVAL_ASPECT`] times its width —
+/// side: at it, the oval's height — its width over [`GUIDE_OVAL_ASPECT`] —
 /// still fits that side.
 pub const GUIDE_OVAL_WIDTH_MAX: f32 = 0.6;
 
-/// The height over the width of an `oval` guide, and of the oval the page
-/// draws for a `face`: the golden ratio, the proportion of a face.
-pub const GUIDE_OVAL_ASPECT: f32 = 1.618;
+/// The width over the height of an `oval` guide, and of the oval the page
+/// draws for a `face`: one to the golden ratio, the proportion of a face.
+/// Served to components as `constants.oval-aspect`.
+pub const GUIDE_OVAL_ASPECT: f32 = 1.0 / 1.618;
 
 // The widest oval's height still fits the frame's shorter side.
-const _: () = assert!(GUIDE_OVAL_WIDTH_MAX * GUIDE_OVAL_ASPECT <= 1.0);
+const _: () = assert!(GUIDE_OVAL_WIDTH_MAX / GUIDE_OVAL_ASPECT <= 1.0);
 
 /// The smallest a `face` guide asks the face to be, as a fraction of the
 /// frame's shorter side. The page's detector, reading the whole frame at
@@ -195,6 +196,10 @@ pub const GUIDE_FACE_WIDTH_MAX: f32 = GUIDE_OVAL_WIDTH_MAX;
 
 /// The longest a video's guide may ask to be held, in milliseconds.
 pub const GUIDE_HOLD_MS_MAX: u16 = 5000;
+
+/// The longest break in a guide's hold the page may be asked to forgive, in
+/// milliseconds: a face gone for longer is no longer a slip.
+pub const GUIDE_GRACE_MS_MAX: u16 = 1000;
 
 /// The furthest a `head-turn` guide may ask the head to turn, in degrees
 /// either way: past it the face is in profile.

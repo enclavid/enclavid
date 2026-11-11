@@ -135,37 +135,48 @@ const FACE_HOLD_MS: u16 = 800;
 const FLASH_MS: u16 = 300;
 /// How long a turn of the head is held, in milliseconds.
 const TURN_HOLD_MS: u16 = 500;
+/// The longest break in a guide's hold the page forgives, in milliseconds.
+const GRACE_MS: u16 = 300;
 
 impl VideoGuidesGuest for WellKnown {
-    fn liveness(seed: u32) -> Vec<VideoGuide> {
-        let sets::Liveness {
-            width,
-            colors,
-            turns,
-        } = sets::liveness(seed);
-        let colors = colors
-            .into_iter()
-            .map(|(red, green, blue)| Rgb { red, green, blue })
-            .collect();
-        let mut guides = vec![
-            VideoGuide::Face(FaceGuide {
-                width,
-                hold_ms: FACE_HOLD_MS,
-            }),
-            VideoGuide::FaceFlashes(FaceFlashesGuide {
-                width,
-                colors,
-                flash_ms: FLASH_MS,
-            }),
-        ];
+    fn liveness_turns(seed: u32) -> Vec<VideoGuide> {
+        let sets::Turns { width, turns } = sets::turns(seed);
+        let mut guides = vec![face(width)];
         guides.extend(turns.map(|degrees| {
             VideoGuide::HeadTurn(HeadTurnGuide {
                 degrees,
                 hold_ms: TURN_HOLD_MS,
+                grace_ms: GRACE_MS,
             })
         }));
         guides
     }
+
+    fn liveness_colors(seed: u32) -> Vec<VideoGuide> {
+        let sets::Colors { width, colors } = sets::colors(seed);
+        let colors = colors
+            .into_iter()
+            .map(|(red, green, blue)| Rgb { red, green, blue })
+            .collect();
+        vec![
+            face(width),
+            VideoGuide::FaceFlashes(FaceFlashesGuide {
+                width,
+                colors,
+                flash_ms: FLASH_MS,
+                grace_ms: GRACE_MS,
+            }),
+        ]
+    }
+}
+
+/// The face held in an oval `width` of the frame's shorter side wide.
+fn face(width: f32) -> VideoGuide {
+    VideoGuide::Face(FaceGuide {
+        width,
+        hold_ms: FACE_HOLD_MS,
+        grace_ms: GRACE_MS,
+    })
 }
 
 // ─── video ────────────────────────────────────────────────────────

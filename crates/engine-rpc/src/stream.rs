@@ -301,6 +301,7 @@ mod tests {
                     MAX_FLASH_COLORS
                 ],
                 flash_ms: u16::MAX,
+                grace_ms: u16::MAX,
             }),
             first: u32::MAX,
             last: u32::MAX,

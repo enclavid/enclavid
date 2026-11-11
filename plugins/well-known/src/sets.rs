@@ -1,27 +1,46 @@
 //! The values of ready sets of video guides, drawn from a seed: the same seed
 //! gives the same values. Bindgen-free.
 
-/// What a liveness check asks, before its holds and timings.
+/// What a liveness check by turns asks, before its holds.
 #[derive(Debug, PartialEq)]
-pub struct Liveness {
+pub struct Turns {
+    /// The face's oval, as a fraction of the frame's shorter side.
+    pub width: f32,
+    /// The turns of the head, in degrees, negative to the applicant's left.
+    pub turns: [i8; 2],
+}
+
+/// What a liveness check by colours asks, before its holds and timings.
+#[derive(Debug, PartialEq)]
+pub struct Colors {
     /// The face's oval, as a fraction of the frame's shorter side.
     pub width: f32,
     /// The colours flashed in the oval, `(red, green, blue)`, in order.
     pub colors: Vec<(u8, u8, u8)>,
-    /// The turns of the head, in degrees, negative to the applicant's left.
-    pub turns: [i8; 2],
 }
 
 /// How many colours a liveness check flashes.
 const COLORS: usize = 5;
 
-/// A liveness check's values, drawn from `seed`: the oval 0.40–0.55 wide;
-/// bright colours of hues spread round the circle from one of the seed's, in
-/// an order of its; then a turn by 20–30° to a side of its, and one to the
-/// other.
-pub fn liveness(seed: u32) -> Liveness {
+/// A liveness check by turns, drawn from `seed`: its oval, then a turn by
+/// 20–30° to a side of the seed's, and one to the other.
+pub fn turns(seed: u32) -> Turns {
     let mut draws = Draws(u64::from(seed));
-    let width = draws.between(0.40, 0.55) as f32;
+    let width = oval(&mut draws);
+    let side: i8 = if draws.next() & 1 == 0 { -1 } else { 1 };
+    let mut degrees = || draws.between(20.0, 30.0).round() as i8;
+    Turns {
+        width,
+        turns: [side * degrees(), -side * degrees()],
+    }
+}
+
+/// A liveness check by colours, drawn from `seed`: its oval, then bright
+/// colours of hues spread round the circle from one of the seed's, in an order
+/// of its.
+pub fn colors(seed: u32) -> Colors {
+    let mut draws = Draws(u64::from(seed));
+    let width = oval(&mut draws);
     let start = draws.between(0.0, 360.0);
     let mut colors: Vec<(u8, u8, u8)> = (0..COLORS)
         .map(|i| bright(start + 360.0 * i as f64 / COLORS as f64))
@@ -29,13 +48,13 @@ pub fn liveness(seed: u32) -> Liveness {
     for i in (1..colors.len()).rev() {
         colors.swap(i, (draws.next() % (i as u64 + 1)) as usize);
     }
-    let side: i8 = if draws.next() & 1 == 0 { -1 } else { 1 };
-    let mut degrees = || draws.between(20.0, 30.0).round() as i8;
-    Liveness {
-        width,
-        colors,
-        turns: [side * degrees(), -side * degrees()],
-    }
+    Colors { width, colors }
+}
+
+/// An oval 0.40–0.55 wide: a seed's first draw, so every set of the seed has
+/// the same.
+fn oval(draws: &mut Draws) -> f32 {
+    draws.between(0.40, 0.55) as f32
 }
 
 /// SplitMix64, each output a bijection of a counter's: enough to spread a
@@ -75,24 +94,29 @@ fn bright(hue: f64) -> (u8, u8, u8) {
 mod tests {
     use super::*;
 
-    /// A seed gives its values every time, and another seed others.
+    /// A seed gives its values every time, and another seed others; both sets
+    /// of a seed have the same oval.
     #[test]
     fn a_seed_gives_its_values() {
-        assert_eq!(liveness(7), liveness(7));
-        assert_ne!(liveness(7), liveness(8));
+        assert_eq!(turns(7), turns(7));
+        assert_ne!(turns(7), turns(8));
+        assert_eq!(colors(7), colors(7));
+        assert_ne!(colors(7), colors(8));
+        assert_eq!(turns(7).width, colors(7).width);
     }
 
-    /// Every seed's values are within their ranges: the oval, five bright
-    /// colours of hues apart, and two turns to either side.
+    /// Every seed's values are within their ranges: the oval, two turns to
+    /// either side, and five bright colours of hues apart.
     #[test]
     fn the_values_are_within_their_ranges() {
         for seed in (0..2000).chain([u32::MAX]) {
-            let Liveness {
-                width,
-                colors,
-                turns,
-            } = liveness(seed);
+            let Turns { width, turns } = turns(seed);
             assert!((0.40..=0.55).contains(&width), "{seed}: {width}");
+            assert_eq!(turns[0].signum(), -turns[1].signum(), "{seed}: {turns:?}");
+            for turn in turns {
+                assert!((20..=30).contains(&turn.abs()), "{seed}: {turns:?}");
+            }
+            let Colors { colors, .. } = colors(seed);
             assert_eq!(colors.len(), COLORS, "{seed}");
             for &(r, g, b) in &colors {
                 assert_eq!(r.max(g).max(b), 255, "{seed}: {colors:?}");
@@ -100,10 +124,6 @@ mod tests {
             }
             for (i, a) in colors.iter().enumerate() {
                 assert!(!colors[i + 1..].contains(a), "{seed}: {colors:?}");
-            }
-            assert_eq!(turns[0].signum(), -turns[1].signum(), "{seed}: {turns:?}");
-            for turn in turns {
-                assert!((20..=30).contains(&turn.abs()), "{seed}: {turns:?}");
             }
         }
     }

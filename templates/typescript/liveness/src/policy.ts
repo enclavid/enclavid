@@ -1,14 +1,9 @@
-// A liveness check by video: well-known's liveness guides, new for each
-// attempt — the applicant fits their face in an oval of a size picked at
-// random, holds it while the screen flashes colours, then turns their head to
-// one side and the other. The session ends approved when the applicant
-// followed every guide and the face they held in the oval looks live;
-// rejected when not. Nothing is disclosed and nothing is kept: the consumer
-// learns the decision alone.
-//
-// The flashes are shown, not checked: the face is held in the oval through
-// them, but what they cast on it is read by a check of its own, which this
-// template does not run.
+// A liveness check by video: well-known's guides of a check by turns, new for
+// each attempt — the applicant fits their face in an oval of a size picked at
+// random, then turns their head to one side and the other. The session ends
+// approved when the applicant followed every guide and the face they held in
+// the oval looks live; rejected when not. Nothing is disclosed and nothing is
+// kept: the consumer learns the decision alone.
 //
 // The runtime calls `start` on a session's first round and `handle` on every
 // round after it, with the event that brought it. Each returns the state to
@@ -56,7 +51,9 @@ const steps = {
       val: {
         tag: "media",
         val: video.liveness(
-          videoGuides.liveness(crypto.getRandomValues(new Uint32Array(1))[0]),
+          videoGuides.livenessTurns(
+            crypto.getRandomValues(new Uint32Array(1))[0],
+          ),
         ),
       },
     },

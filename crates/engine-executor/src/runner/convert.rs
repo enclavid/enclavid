@@ -36,9 +36,9 @@ use crate::enclavid::host_capture::{
 use crate::enclavid::policy::types as wit_policy;
 use crate::limits::{
     GUIDE_ASPECT_MAX, GUIDE_ASPECT_MIN, GUIDE_FACE_WIDTH_MAX, GUIDE_FACE_WIDTH_MIN,
-    GUIDE_FLASH_MS_MAX, GUIDE_FLASH_MS_MIN, GUIDE_HEAD_TURN_DEGREES_MAX, GUIDE_HOLD_MS_MAX,
-    GUIDE_OVAL_WIDTH_MAX, GUIDE_OVAL_WIDTH_MIN, MAX_CAPTURE_STEPS, MAX_CONSENT_FIELDS,
-    MAX_FLASH_COLORS, MAX_VALUE_LENGTH, MAX_VIDEO_GUIDES,
+    GUIDE_FLASH_MS_MAX, GUIDE_FLASH_MS_MIN, GUIDE_GRACE_MS_MAX, GUIDE_HEAD_TURN_DEGREES_MAX,
+    GUIDE_HOLD_MS_MAX, GUIDE_OVAL_WIDTH_MAX, GUIDE_OVAL_WIDTH_MIN, MAX_CAPTURE_STEPS,
+    MAX_CONSENT_FIELDS, MAX_FLASH_COLORS, MAX_VALUE_LENGTH, MAX_VIDEO_GUIDES,
 };
 use crate::media::{PhotoRep, VideoRep};
 use crate::sanitize;
@@ -107,10 +107,12 @@ fn video_guide_to_wit(guide: DVideoGuide) -> wit_video::VideoGuide {
         DVideoGuide::Face(f) => wit_video::VideoGuide::Face(wit_video::FaceGuide {
             width: f.width,
             hold_ms: f.hold_ms,
+            grace_ms: f.grace_ms,
         }),
         DVideoGuide::HeadTurn(t) => wit_video::VideoGuide::HeadTurn(wit_video::HeadTurnGuide {
             degrees: t.degrees,
             hold_ms: t.hold_ms,
+            grace_ms: t.grace_ms,
         }),
         DVideoGuide::FaceFlashes(f) => {
             wit_video::VideoGuide::FaceFlashes(wit_video::FaceFlashesGuide {
@@ -125,6 +127,7 @@ fn video_guide_to_wit(guide: DVideoGuide) -> wit_video::VideoGuide {
                     })
                     .collect(),
                 flash_ms: f.flash_ms,
+                grace_ms: f.grace_ms,
             })
         }
     }
@@ -341,13 +344,20 @@ fn video_guide_to_domain(g: wit_video::VideoGuide) -> wasmtime::Result<DVideoGui
         wit_video::VideoGuide::Face(f) => DVideoGuide::Face(DFaceGuide {
             width: drawn(f.width, GUIDE_FACE_WIDTH_MIN, GUIDE_FACE_WIDTH_MAX, 0.5),
             hold_ms: f.hold_ms.min(GUIDE_HOLD_MS_MAX),
+            grace_ms: f.grace_ms.min(GUIDE_GRACE_MS_MAX),
         }),
-        wit_video::VideoGuide::HeadTurn(t) => DVideoGuide::HeadTurn(DHeadTurnGuide {
-            degrees: t
-                .degrees
-                .clamp(-GUIDE_HEAD_TURN_DEGREES_MAX, GUIDE_HEAD_TURN_DEGREES_MAX),
-            hold_ms: t.hold_ms.min(GUIDE_HOLD_MS_MAX),
-        }),
+        wit_video::VideoGuide::HeadTurn(t) => {
+            if t.degrees == 0 {
+                return Err(wasmtime::Error::msg("a head-turn guide turns no degrees"));
+            }
+            DVideoGuide::HeadTurn(DHeadTurnGuide {
+                degrees: t
+                    .degrees
+                    .clamp(-GUIDE_HEAD_TURN_DEGREES_MAX, GUIDE_HEAD_TURN_DEGREES_MAX),
+                hold_ms: t.hold_ms.min(GUIDE_HOLD_MS_MAX),
+                grace_ms: t.grace_ms.min(GUIDE_GRACE_MS_MAX),
+            })
+        }
         wit_video::VideoGuide::FaceFlashes(f) => {
             if f.colors.is_empty() {
                 return Err(wasmtime::Error::msg("a face-flashes guide has no colours"));
@@ -369,6 +379,7 @@ fn video_guide_to_domain(g: wit_video::VideoGuide) -> wasmtime::Result<DVideoGui
                     })
                     .collect(),
                 flash_ms: f.flash_ms.clamp(GUIDE_FLASH_MS_MIN, GUIDE_FLASH_MS_MAX),
+                grace_ms: f.grace_ms.min(GUIDE_GRACE_MS_MAX),
             })
         }
     })
@@ -437,6 +448,7 @@ mod tests {
             let face = video_guide_to_domain(wit_video::VideoGuide::Face(wit_video::FaceGuide {
                 width: given,
                 hold_ms: u16::MAX,
+                grace_ms: u16::MAX,
             }))
             .unwrap();
             assert_eq!(
@@ -444,6 +456,7 @@ mod tests {
                 DVideoGuide::Face(DFaceGuide {
                     width: drawn,
                     hold_ms: GUIDE_HOLD_MS_MAX,
+                    grace_ms: GUIDE_GRACE_MS_MAX,
                 }),
                 "{given}"
             );
@@ -457,17 +470,31 @@ mod tests {
                 video_guide_to_domain(wit_video::VideoGuide::HeadTurn(wit_video::HeadTurnGuide {
                     degrees: given,
                     hold_ms: 700,
+                    grace_ms: 300,
                 }))
                 .unwrap();
             assert_eq!(
                 turn,
                 DVideoGuide::HeadTurn(DHeadTurnGuide {
                     degrees: drawn,
-                    hold_ms: 700
+                    hold_ms: 700,
+                    grace_ms: 300,
                 }),
                 "{given}"
             );
         }
+    }
+
+    /// A turn of no degrees asks nothing of the head: the policy's error.
+    #[test]
+    fn a_turn_of_no_degrees_traps() {
+        let turn =
+            video_guide_to_domain(wit_video::VideoGuide::HeadTurn(wit_video::HeadTurnGuide {
+                degrees: 0,
+                hold_ms: 700,
+                grace_ms: 300,
+            }));
+        assert!(turn.is_err());
     }
 
     /// Flashes are of a face at a size the page finds, each colour shown as the
@@ -484,6 +511,7 @@ mod tests {
                         .map(|&(red, green, blue)| wit_video::Rgb { red, green, blue })
                         .collect(),
                     flash_ms,
+                    grace_ms: u16::MAX,
                 },
             ))
             .unwrap()
@@ -502,6 +530,7 @@ mod tests {
                         .map(|&(red, green, blue)| DRgb { red, green, blue })
                         .collect(),
                     flash_ms: drawn.1,
+                    grace_ms: GUIDE_GRACE_MS_MAX,
                 }),
                 "{given:?}"
             );
@@ -525,6 +554,7 @@ mod tests {
                         count
                     ],
                     flash_ms: 300,
+                    grace_ms: 300,
                 },
             ))
         };
@@ -554,6 +584,7 @@ mod tests {
                     },
                 ],
                 flash_ms: 300,
+                grace_ms: 250,
             }),
             first: 3,
             last: 9,
@@ -562,7 +593,10 @@ mod tests {
         let wit_video::VideoGuide::FaceFlashes(flashes) = range.guide else {
             panic!("the guide is not the prompt's");
         };
-        assert_eq!((flashes.width, flashes.flash_ms), (0.5, 300));
+        assert_eq!(
+            (flashes.width, flashes.flash_ms, flashes.grace_ms),
+            (0.5, 300, 250)
+        );
         let colors: Vec<_> = flashes
             .colors
             .iter()

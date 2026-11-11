@@ -351,10 +351,12 @@ mod tests {
     const FACE: VideoGuide = VideoGuide::Face(FaceGuide {
         width: 0.5,
         hold_ms: 1000,
+        grace_ms: 300,
     });
     const TURN: VideoGuide = VideoGuide::HeadTurn(HeadTurnGuide {
         degrees: -30,
         hold_ms: 800,
+        grace_ms: 300,
     });
 
     fn photo_step() -> CaptureKind {
