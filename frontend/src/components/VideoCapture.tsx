@@ -155,13 +155,15 @@ function bitrateFor(maxBytes: number, ms: number): number {
   return Math.round(Math.min(MAX_BITRATE, Math.max(MIN_BITRATE, bits)));
 }
 
-/// What the applicant is first asked to do for a guide.
+/// What the applicant is first asked to do for a guide: for a static one, what
+/// the policy says to line up, then with what.
 function leadText(guide: VideoGuide): string {
   switch (guide.kind) {
-    case "static_guide":
-      return guide.guide.kind === "rect"
-        ? "Line it up with the frame"
-        : "Line it up with the oval";
+    case "static_guide": {
+      const shape =
+        guide.guide.kind === "rect" ? "Line it up with the frame" : "Line it up with the oval";
+      return guide.label ? `${guide.label}. ${shape}` : shape;
+    }
     case "face":
       return "Fit your face in the oval";
     case "head_turn":

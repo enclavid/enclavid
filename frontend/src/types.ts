@@ -64,6 +64,8 @@ export type VideoGuide =
   | {
       kind: "static_guide";
       guide: StaticGuide;
+      /// What the applicant lines up with it, the policy's text.
+      label: string;
       /// How long it is held after the button, in milliseconds.
       hold_ms: number;
     }

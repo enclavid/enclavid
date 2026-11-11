@@ -216,6 +216,8 @@ pub enum VideoGuideView {
     /// A shape the applicant says with a button they have followed.
     StaticGuide {
         guide: StaticGuideView,
+        /// What the applicant lines up with it, in the request's locale.
+        label: String,
         /// How long it is held after the button, in milliseconds.
         hold_ms: u16,
     },
@@ -360,7 +362,11 @@ fn capture_step_view(s: &CaptureStep, with_kind: bool, locale: &Locale) -> Captu
                 review_hint: dto::pick_localized(&photo.review_hint, locale),
             },
             CaptureKind::Video(video) => CaptureKindView::Video {
-                guides: video.guides.iter().map(video_guide_view).collect(),
+                guides: video
+                    .guides
+                    .iter()
+                    .map(|g| video_guide_view(g, locale))
+                    .collect(),
             },
         }),
     }
@@ -384,10 +390,11 @@ fn static_guide_view(g: StaticGuide) -> StaticGuideView {
     }
 }
 
-fn video_guide_view(g: &VideoGuide) -> VideoGuideView {
+fn video_guide_view(g: &VideoGuide, locale: &Locale) -> VideoGuideView {
     match g {
         VideoGuide::StaticGuide(s) => VideoGuideView::StaticGuide {
             guide: static_guide_view(s.guide),
+            label: dto::pick_localized(&s.label, locale),
             hold_ms: s.hold_ms,
         },
         VideoGuide::Face(f) => VideoGuideView::Face {
@@ -545,6 +552,12 @@ mod tests {
                     guides: vec![
                         VideoGuide::StaticGuide(StaticVideoGuide {
                             guide: StaticGuide::Rect(RectGuide { aspect: 1.59 }),
+                            label: Localized {
+                                translations: vec![session_types::Translation {
+                                    language: "en".into(),
+                                    text: "Your card".into(),
+                                }],
+                            },
                             hold_ms: 2000,
                         }),
                         VideoGuide::Face(FaceGuide {
@@ -597,6 +610,7 @@ mod tests {
         assert_eq!(video["kind"], "video");
         assert_eq!(video["guides"][0]["kind"], "static_guide");
         assert_eq!(video["guides"][0]["guide"]["kind"], "rect");
+        assert_eq!(video["guides"][0]["label"], "Your card");
         assert_eq!(video["guides"][0]["hold_ms"], 2000);
         assert_eq!(video["guides"][1]["kind"], "face");
         assert_eq!(video["guides"][1]["hold_ms"], 1000);

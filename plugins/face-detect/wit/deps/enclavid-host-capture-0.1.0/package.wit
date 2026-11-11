@@ -54,12 +54,17 @@ interface photo {
 
 /// A video step, and what it asks the applicant to do.
 interface video {
+  use enclavid:host/refs@0.1.0.{localized-ref};
   use photo.{static-guide};
 
   /// A static guide in a video, which the applicant says with a button they
   /// have followed.
   record static-video-guide {
     guide: static-guide,
+    /// What the applicant lines up with it, shown on camera while it is
+    /// held ("The photo page of your passport"): a text of the component's
+    /// `i18n` catalog.
+    label: localized-ref,
     /// How long it is held after the button, in milliseconds; held to
     /// 5000.
     hold-ms: u16,

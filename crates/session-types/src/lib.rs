@@ -934,9 +934,10 @@ pub enum VideoGuide {
 }
 
 /// Sealed mirror of the WIT `static-video-guide` record.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StaticVideoGuide {
     pub guide: StaticGuide,
+    pub label: Localized,
     pub hold_ms: u16,
 }
 
