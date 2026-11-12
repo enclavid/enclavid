@@ -457,7 +457,7 @@ mod tests {
 
         package enclavid-ext:policy@0.1.0 {
             interface i18n {
-                use enclavid:host/types@0.1.0.{localized-ref};
+                use enclavid:host/refs@0.1.0.{localized-ref};
                 enum key { greeting, title }
                 localized: func(key: key) -> localized-ref;
             }
@@ -470,7 +470,7 @@ mod tests {
 
         package enclavid-ext:ocr@0.1.0 {
             interface i18n {
-                use enclavid:host/types@0.1.0.{localized-ref};
+                use enclavid:host/refs@0.1.0.{localized-ref};
                 enum key { retake }
                 localized: func(key: key) -> localized-ref;
             }
@@ -500,9 +500,9 @@ mod tests {
         fs::create_dir_all(wit.join("deps/host")).unwrap();
         fs::write(wit.join("world.wit"), world).unwrap();
         fs::write(
-            wit.join("deps/host/types.wit"),
+            wit.join("deps/host/refs.wit"),
             "package enclavid:host@0.1.0;
-             interface types { resource localized-ref; resource disclosure-field-ref; }",
+             interface refs { resource localized-ref; resource disclosure-field-ref; }",
         )
         .unwrap();
         for (path, source) in files {
@@ -590,7 +590,7 @@ mod tests {
             "{WORLD}
             package enclavid-ext:ocr@0.1.0 {{
                 interface i18n {{
-                    use enclavid:host/types@0.1.0.{{localized-ref}};
+                    use enclavid:host/refs@0.1.0.{{localized-ref}};
                     enum key {{ retake }}
                     localized: func(key: key) -> localized-ref;
                 }}
@@ -656,7 +656,7 @@ mod tests {
         let world = WORLD.replace(
             "interface i18n {",
             "interface disclosure-fields {
-                use enclavid:host/types@0.1.0.{disclosure-field-ref};
+                use enclavid:host/refs@0.1.0.{disclosure-field-ref};
                 enum key { full-name, date-of-birth }
                 disclosure-field: func(key: key) -> disclosure-field-ref;
             }

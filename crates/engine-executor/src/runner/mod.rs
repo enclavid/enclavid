@@ -241,6 +241,7 @@ impl Executor {
         let listener = inputs.listener;
         let media_store = inputs.media_store;
         let models = inputs.models;
+        let media = inputs.media;
 
         // Instantiate the primed composition and call `handle` ONCE. The Linker
         // (imports) was built + type-checked in `prime`; here we only mint a
@@ -249,7 +250,15 @@ impl Executor {
         let round = Round::starting_now();
         let mut store = Store::new(
             &self.engine,
-            HostState::new(props, embedded.clone(), media_store, models, round),
+            HostState::new(
+                props,
+                embedded.clone(),
+                media_store,
+                models,
+                media,
+                inputs.picture_bounds,
+                round,
+            ),
         );
         store.set_fuel(inputs.fuel)?;
         let bindings = primed.pre.instantiate_async(&mut store).await?;
@@ -531,7 +540,8 @@ mod tests {
             "tests/wit/wasi/cli.wit",
             "../../wit/host",
             "../../wit/host-icons",
-            "../../wit/shared-types",
+            "../../wit/host-capture",
+            "../../wit/host-disclosure",
             "../../wit/policy",
         ] {
             resolve
@@ -548,7 +558,7 @@ mod tests {
              package enclavid-ext:policy@{version} {{
                  interface props {{ {body} }}
                  interface disclosure-fields {{
-                     use enclavid:host/types@0.1.0.{{disclosure-field-ref}};
+                     use enclavid:host/refs@0.1.0.{{disclosure-field-ref}};
                      enum key {{ full-name }}
                      disclosure-field: func(key: key) -> disclosure-field-ref;
                  }}
@@ -677,7 +687,7 @@ mod tests {
             ("0.1.0", FLAG),
             "package enclavid:host-icons@0.1.7 {
                  interface icons {
-                     use enclavid:host/types@0.1.0.{icon-ref};
+                     use enclavid:host/refs@0.1.0.{icon-ref};
                      passport: func() -> icon-ref;
                      selfie: func() -> icon-ref;
                  }

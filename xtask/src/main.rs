@@ -39,8 +39,8 @@ fn main() -> Result<()> {
 }
 
 /// The plugins as published: well-known and vision as they are; face-detect
-/// with BlazeFace and face-age with MiVOLO, each the build whose model the
-/// host runs from the files pushed beside it.
+/// with BlazeFace, face-age with MiVOLO and face-liveness with MiniFASNet, each
+/// the build whose models the host runs from the files pushed beside it.
 fn build_plugins(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     for (name, wasm) in [
@@ -48,6 +48,7 @@ fn build_plugins(dir: &Path) -> Result<()> {
         ("vision", fixtures::vision()),
         ("face-detect", fixtures::face_detect_blazeface()),
         ("face-age", fixtures::face_age_mivolo()),
+        ("face-liveness", fixtures::face_liveness_minifasnet()),
     ] {
         let file = dir.join(format!("{name}.wasm"));
         std::fs::write(&file, wasm).with_context(|| format!("writing {}", file.display()))?;

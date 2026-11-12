@@ -5,7 +5,7 @@ world policy {
     // capture flows and `display-field` helpers. Satisfied at /connect via
     // runtime composition — the consumer pins the plugin's `impl_ref` in
     // POST /sessions; the policy carries only these imports.
-    import enclavid:well-known/capture@0.1.0;
+    import enclavid:well-known/photo@0.1.0;
     import enclavid:well-known/disclosure-fields@0.1.0;
 
     // The well-known plugin's texts, by its slot: the policy labels one of
@@ -19,18 +19,22 @@ world policy {
     // texts, through its own slot.
     import enclavid:extra/tag@0.1.0;
 
-    // The vision substrate. The vision plugin decodes the selfie `clip` into
-    // a plugin-owned `decoded-frame`; face-detect locates the `face` in it;
-    // face-age reads its crop and estimates. The policy just threads the
-    // handles decode → detect → estimate. `enclavid:vision/types` carries the
-    // shared `decoded-frame` / `face` vocabulary the policy holds in between.
-    import enclavid:vision/decode@0.1.0;
+    // The face plugins over the host's image of the selfie: face-detect
+    // locates the `face` in it; face-age reads its crop and estimates. The
+    // policy just threads the handles image → detect → estimate.
+    // `enclavid:vision/types` carries the shared `face` vocabulary the policy
+    // holds in between.
     import enclavid:face-detect/detect@0.1.0;
     import enclavid:vision/types@0.1.0;
 
-    // The face-age plugin: a real decoded-frame + face consumer. No texts
-    // of its own, so no slot.
+    // The face-age plugin: a real image + face consumer. No texts of its
+    // own, so no slot.
     import enclavid:face-age/check@0.1.0;
+
+    // The face-liveness plugin, on a probe: whether the face of the selfie
+    // is live, or the faces of a video's frames.
+    import enclavid:face-liveness/image@0.1.0;
+    import enclavid:face-liveness/video@0.1.0;
 
     // The policy's slot, `enclavid-ext:policy` (`ext/`): its own texts; its
     // disclosure fields, those it hands the well-known helpers and its OWN

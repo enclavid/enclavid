@@ -6,9 +6,12 @@ package enclavid:policy@0.1.0;
 /// so helper plugins can `use` the records without importing the `handle`
 /// export.
 interface types {
-    use enclavid:shared-types/capture@0.1.0.{media-spec};
-    use enclavid:shared-types/disclosure@0.1.0.{display-field};
-    use enclavid:host/types@0.1.0.{localized-ref, blob};
+    use enclavid:host-capture/capture@0.1.0.{media-spec};
+    use enclavid:host-capture/photo@0.1.0.{guide as photo-guide};
+    use enclavid:host-capture/video@0.1.0.{guide as video-guide};
+    use enclavid:host-disclosure/disclosure@0.1.0.{display-field};
+    use enclavid:host/refs@0.1.0.{localized-ref};
+    use enclavid:host/media@0.1.0.{photo, video};
 
     /// Terminal outcome carried by `action::finish`. The platform renders
     /// UI from this fixed enum — policy controls no free text. The consumer
@@ -22,66 +25,108 @@ interface types {
         review,
     }
 
-    /// One consent-and-disclosure. The `fields` are BOTH what the
-    /// applicant is shown on the consent screen AND — if they accept —
-    /// the exact set the runtime seals to the consumer. Show == seal,
-    /// structurally: the applicant audits precisely what leaves. `reason`
-    /// and `requester` are `localized-ref`s shown on the screen; `reason`
-    /// is bound to the consent record, `requester` is applicant-facing
-    /// only (never sealed to the consumer).
+    /// One consent-and-disclosure: the consent screen the applicant is
+    /// shown, and what leaves to the consumer if they accept.
     record disclosure {
+        /// BOTH what the applicant is shown on the consent screen AND — if
+        /// they accept — the exact set the runtime seals to the consumer.
+        /// Show == seal, structurally: the applicant audits precisely what
+        /// leaves.
         fields: list<display-field>,
+        /// Shown on the screen, and bound to the consent record.
         reason: localized-ref,
+        /// Shown on the screen to the applicant alone: never sealed to the
+        /// consumer.
         requester: localized-ref,
     }
 
     /// What the runtime renders to the applicant. Its reply comes back as
     /// the matching `event` on a later turn.
     variant prompt {
-        media(media-spec),                // capture one artifact; reply → event::media
-        consent-disclosure(disclosure),   // consent-to-disclose screen; ON ACCEPT the runtime seals it to the consumer
+        /// Capture one artifact; the reply is `event::media`.
+        media(media-spec),
+        /// The consent-to-disclose screen; ON ACCEPT the runtime seals it to
+        /// the consumer.
+        consent-disclosure(disclosure),
     }
 
-    /// One captured artifact's frame stream — typically 8–12 JPEG frames over
-    /// ~1s. A plain record grouping the frames in order; each frame is a
-    /// host-owned `blob` handle (owned by `enclavid:host/types`) — "frame" is
-    /// the semantic role, `blob` the storage unit. The policy is a pure router
-    /// — it forwards a frame blob to a verification plugin, which reads the
-    /// pixels it needs. Anti-replay / forensic signals (parallax, glare drift,
-    /// hand jitter) live in inter-frame differences — which is why a capture is
-    /// a clip, not a single photo.
-    record clip {
-        frames: list<blob>,
+    /// Where the page saw one guide of a video step held, by frame index into
+    /// the video.
+    record frame-range {
+        /// The guide the step asked for, copied by the runtime from the
+        /// prompt.
+        guide: video-guide,
+        /// The first frame the guide was held in: the page's word, which a
+        /// check verifies against the frames.
+        first: u32,
+        /// The last frame the guide was held in, the page's word as `first`
+        /// is.
+        last: u32,
     }
 
-    /// The captured artifact for one `media-spec` step (carried by
-    /// `event::media`). `slot` is the capture-step index it fills; `clip`
-    /// bundles the host-owned frame blob handles — the policy forwards a frame
-    /// to a verification plugin rather than reading pixels itself.
-    record media-result {
-        slot: u32,
-        clip: clip,
+    /// A photo step's capture.
+    record photo-capture {
+        /// The applicant's photo: the one they kept on the review screen,
+        /// where the step has one.
+        photo: photo,
+        /// The guide the step drew, copied by the runtime from the prompt;
+        /// none where it drew none.
+        guide: option<photo-guide>,
+    }
+
+    /// A video step's capture.
+    record video-capture {
+        /// The applicant's video.
+        video: video,
+        /// One range for each guide of the step, in the step's order: the
+        /// page's account of the video. A message of the platform, not the
+        /// applicant's material, so it is not stored with the video: a policy
+        /// that needs it in a later round keeps it in its `state`.
+        guides: list<frame-range>,
+    }
+
+    /// One capture step's capture, of the kind the step asked for, held by
+    /// the host: the policy is a pure router, forwarding it to a verification
+    /// plugin, which reads what it needs.
+    variant capture {
+        /// The photo, and the guide it was taken to.
+        photo(photo-capture),
+        /// The video, and where each of its guides was held.
+        video(video-capture),
+    }
+
+    /// Why a `prompt::media` was answered with no captures.
+    enum media-error {
+        /// Its time limit ran out before every step was captured; none of its
+        /// captures is kept.
+        timed-out,
     }
 
     /// INBOUND: the result of a prior `action`, fed by the runtime to
     /// `handle`, one per call.
     variant event {
-        start,                          // genesis: session opened (props via `enclavid-ext:policy/props`)
-        consent-disclosure(bool),       // ← reply to prompt::consent-disclosure: accepted? (true ⇒ disclosure already sealed)
-        media(media-result),            // ← reply to prompt::media: one capture step completed
+        /// Genesis: the session opened (props via `enclavid-ext:policy/props`).
+        start,
+        /// The reply to `prompt::consent-disclosure`: accepted? `true` means
+        /// the disclosure is already sealed.
+        consent-disclosure(bool),
+        /// The reply to `prompt::media`: one capture for each step, in the
+        /// order of the spec's `captures`, or why there are none.
+        media(result<list<capture>, media-error>),
     }
 
-    /// OUTBOUND: the action the policy returns from `handle`. `render` is
-    /// result-producing — its reply arrives as a future `event`; `finish`
-    /// is terminal. The round ends in exactly one of these two outward
-    /// states: awaiting applicant input, or done. Disclosure to the consumer
-    /// is NOT a separate action — it IS
+    /// OUTBOUND: the action the policy returns from `handle`. The round ends
+    /// in exactly one of these two outward states: awaiting applicant input,
+    /// or done. Disclosure to the consumer is NOT a separate action — it IS
     /// `render(prompt::consent-disclosure(disclosure))`, sealed by the
     /// runtime only on accept, so what the applicant audits is exactly what
     /// leaves. The `decision` in `finish` is the exception: the consumer
     /// learns it whatever the applicant accepted.
     variant action {
-        render(prompt),          // result-producing → applicant; reply is a future `event`
-        finish(decision),        // terminal; the decision reaches the consumer unconditionally
+        /// Result-producing: shown to the applicant, whose reply arrives as a
+        /// future `event`.
+        render(prompt),
+        /// Terminal; the decision reaches the consumer unconditionally.
+        finish(decision),
     }
 }

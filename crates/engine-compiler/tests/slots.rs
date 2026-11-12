@@ -18,7 +18,7 @@ use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_compon
 use wit_parser::{ManglingAndAbi, Resolve};
 
 const HOST: &str = "package enclavid:host@0.1.0;
-    interface types { resource localized-ref; resource disclosure-field-ref; }";
+    interface refs { resource localized-ref; resource disclosure-field-ref; }";
 
 const API: &str = "package test:api@0.1.0;
     interface api { ping: func(); }";
@@ -28,7 +28,7 @@ fn texts_of(slot: &str, version: &str, cases: &str) -> String {
     format!(
         "package enclavid-ext:{slot}@{version} {{
              interface i18n {{
-                 use enclavid:host/types@0.1.0.{{localized-ref}};
+                 use enclavid:host/refs@0.1.0.{{localized-ref}};
                  enum key {{ {cases} }}
                  localized: func(key: key) -> localized-ref;
              }}
@@ -46,7 +46,7 @@ fn texts_dep(slot: &str, cases: &str) -> String {
     format!(
         "package enclavid-ext:{slot}@0.1.0;
          interface i18n {{
-             use enclavid:host/types@0.1.0.{{localized-ref}};
+             use enclavid:host/refs@0.1.0.{{localized-ref}};
              enum key {{ {cases} }}
              localized: func(key: key) -> localized-ref;
          }}"
@@ -243,9 +243,9 @@ fn the_texts_by_a_string_key_are_not_served() {
         &[(
             "host",
             "package enclavid:host@0.1.0;
-             interface types { resource localized-ref; resource disclosure-field-ref; }
+             interface refs { resource localized-ref; resource disclosure-field-ref; }
              interface embedded-i18n {
-                 use types.{localized-ref};
+                 use refs.{localized-ref};
                  localized: func(key: string) -> localized-ref;
              }",
         )],
@@ -423,7 +423,7 @@ fn a_slot_whose_key_is_not_an_enum_is_refused() {
          world policy { import enclavid-ext:policy/i18n@0.1.0; }
          package enclavid-ext:policy@0.1.0 {
              interface i18n {
-                 use enclavid:host/types@0.1.0.{localized-ref};
+                 use enclavid:host/refs@0.1.0.{localized-ref};
                  variant key { greeting, title }
                  localized: func(key: key) -> localized-ref;
              }
@@ -450,7 +450,7 @@ fn with_disclosure_fields(function: &str) -> Built {
              world policy {{ import enclavid-ext:policy/disclosure-fields@0.1.0; }}
              package enclavid-ext:policy@0.1.0 {{
                  interface disclosure-fields {{
-                     use enclavid:host/types@0.1.0.{{disclosure-field-ref}};
+                     use enclavid:host/refs@0.1.0.{{disclosure-field-ref}};
                      enum key {{ passport-number, full-name }}
                      {function}
                  }}

@@ -1,10 +1,9 @@
-//! Face-age inference on a face crop pulled from the decoded frame: shape the
-//! crop as the model takes it (per-model profile) → run the model → decode.
-//! The JPEG decode and the face's box are other plugins' (vision,
-//! face-detect) — this plugin asks `decoded-frame.region` (in [`lib`]) for the
-//! face patch at the size its profile wants, and holds only the model-specific
-//! adapter: input format (size, channel order, normalization), which model,
-//! and output decode.
+//! Face-age inference on a face crop pulled from the image: shape the crop as
+//! the model takes it (per-model profile) → run the model → decode. The
+//! image's decode is the host's and the face's box face-detect's — this
+//! plugin asks `image.pixels` (in [`lib`]) for the face patch at the size its
+//! profile wants, and holds only the model-specific adapter: input format
+//! (size, channel order, normalization), which model, and output decode.
 //!
 //! Profile selection is compile-time:
 //!   * default → [`placeholder`]: no model, an age from the crop's brightness
@@ -22,10 +21,19 @@ use placeholder as profile;
 /// model sees it.
 pub const MARGIN: f32 = profile::MARGIN;
 
+/// The fewest of the picture's pixels the crop must span each way for the
+/// profile to read an age from it; `None` where it reads any.
+const MIN: Option<u32> = profile::MIN;
+
 /// Estimate age (years) from the face crop `region` reads: a source rect of
-/// `crop` pixels, resampled to the size it is asked for, row-major RGB8.
-/// `None` if the face is unusable, or the model gives no age.
-pub fn estimate(crop: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<f32> {
+/// `crop` pixels, resampled to the size it is asked for, row-major RGB8 — or
+/// nothing, where the image does not decode. `None` if the face is unusable —
+/// fewer than [`MIN`] pixels either way, its pixels then not read — or the
+/// model gives no age.
+pub fn estimate(crop: (u32, u32), region: impl FnOnce(u32, u32) -> Option<Vec<u8>>) -> Option<f32> {
+    if MIN.is_some_and(|min| crop.0 < min || crop.1 < min) {
+        return None;
+    }
     profile::estimate(crop, region)
 }
 
@@ -38,12 +46,17 @@ mod placeholder {
     /// The side the crop is read at: enough for a mean.
     pub const SIDE: u32 = 8;
     pub const MARGIN: f32 = 1.0;
+    /// A mean reads at any size.
+    pub const MIN: Option<u32> = None;
 
     /// An age from the crop's mean brightness, from 0 for black to 60 for
     /// white — so the pipeline runs end to end with no model, and a gray
     /// frame reads 30.
-    pub fn estimate(_crop: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<f32> {
-        let rgb = region(SIDE, SIDE);
+    pub fn estimate(
+        _crop: (u32, u32),
+        region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
+    ) -> Option<f32> {
+        let rgb = region(SIDE, SIDE)?;
         let mean = rgb.iter().map(|&v| f32::from(v)).sum::<f32>() / rgb.len().max(1) as f32;
         Some(mean / 255.0 * 60.0)
     }
@@ -67,7 +80,7 @@ mod mivolo {
     /// reads an age from. A smaller one is blown up to the graph's side and
     /// read far off: a face of 42 read 17 at 13 pixels and 31 at 23, and 38
     /// to 44 from 48 up — a margin above that for a real camera's blur.
-    pub const MIN_SIDE: u32 = 64;
+    pub const MIN: Option<u32> = Some(64);
     /// ImageNet's per-channel mean and spread, RGB, over values in `[0, 1]`.
     const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
     const STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -75,12 +88,12 @@ mod mivolo {
     const SPAN: f32 = 122.0;
     const MIDDLE: f32 = 61.0;
 
-    pub fn estimate(crop: (u32, u32), region: impl FnOnce(u32, u32) -> Vec<u8>) -> Option<f32> {
-        if crop.0.min(crop.1) < MIN_SIDE {
-            return None;
-        }
+    pub fn estimate(
+        crop: (u32, u32),
+        region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
+    ) -> Option<f32> {
         let (w, h) = fit(crop)?;
-        let face = letterbox(&region(w, h), w as usize, h as usize)?;
+        let face = letterbox(&region(w, h)?, w as usize, h as usize)?;
         let input = TensorF32::new(&[1, 6, SIDE as u64, SIDE as u64], &input(&face));
         decode(&models::age().run(&input).data())
     }
@@ -148,7 +161,7 @@ mod tests {
         use super::{estimate, profile};
         let age = estimate((300, 300), |w, h| {
             assert_eq!((w, h), (profile::SIDE, profile::SIDE));
-            vec![128u8; (w * h * 3) as usize]
+            Some(vec![128u8; (w * h * 3) as usize])
         })
         .expect("estimate");
         assert!((age - 30.1).abs() < 0.1, "{age}");
@@ -159,15 +172,22 @@ mod tests {
     //   cargo test -p face-age --features mivolo --target aarch64-apple-darwin
     #[cfg(feature = "mivolo")]
     mod mivolo {
-        use super::super::mivolo::{MIN_SIDE, SIDE, decode, estimate, fit, input, letterbox};
+        use super::super::estimate;
+        use super::super::mivolo::{MIN, SIDE, decode, fit, input, letterbox};
 
-        /// A face smaller than MiVOLO reads gives no age, and its pixels are
-        /// never asked for.
+        /// A face spanning fewer than [`MIN`] of the picture's pixels either
+        /// way gives no age, its pixels not asked for.
         #[test]
         fn a_face_too_small_gives_no_age() {
-            let never = |_, _| -> Vec<u8> { unreachable!("no pixels read") };
-            assert_eq!(estimate((MIN_SIDE - 1, 300), never), None);
-            assert_eq!(estimate((300, MIN_SIDE - 1), never), None);
+            let small = MIN.expect("a minimum") - 1;
+            assert_eq!(
+                estimate((small, 300), |_, _| unreachable!("no pixels read")),
+                None
+            );
+            assert_eq!(
+                estimate((300, small), |_, _| unreachable!("no pixels read")),
+                None
+            );
         }
 
         /// A crop fits the square whole, its longer side on the square's,

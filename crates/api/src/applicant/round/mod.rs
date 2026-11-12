@@ -7,10 +7,13 @@
 //! extract.rs     ← loading the session for a round; one that has ended is
 //!                  answered there and runs nothing
 //! resolve.rs     ← a worker's cache miss: the composition from L2, or compiled
+//! steps.rs       ← a media prompt's steps before its last, stored as they
+//!                  arrive, and read back for the round the last one runs
 //! ```
 
 mod extract;
 mod resolve;
+mod steps;
 
 use std::sync::Arc;
 
@@ -147,9 +150,10 @@ impl SessionRunCtx {
         // applicant's plaintext fields live exactly as long as this frame —
         // however the frame ends.
         let consent = persister::round_consent(&event, &session_state.current_prompt);
-        // The applicant's own frames, content-addressed here. Sent to the worker
-        // in the event below and never taken back from it.
-        let captures = persister::round_captures(&event);
+        // The applicant's own captures, content-addressed here. Sent to the
+        // worker in the event below and never taken back from it. Those of the
+        // steps sent before the last are stored already.
+        let captures = persister::round_captures(&event, &session_state.sent);
         // The round's request, framed ONCE for both phases: the peel that closes
         // `Covert` produces the wire value, so the retry below re-sends the same
         // constant-size frames rather than re-encoding identical ones. The props

@@ -3,7 +3,7 @@
 # (`.cargo/config.toml`) into a sandboxed component.
 [workspace]
 resolver = "2"
-members = ["well-known", "vision", "face-detect", "face-age"]
+members = ["well-known", "vision", "face-detect", "face-age", "face-liveness"]
 
 [profile.release]
 opt-level = "s"

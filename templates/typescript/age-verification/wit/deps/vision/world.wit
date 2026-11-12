@@ -1,17 +1,13 @@
 package enclavid:vision@0.1.0;
 
-/// The vocabulary every plugin that reads a picture shares — the
-/// `decoded-frame` pixel resource plus face geometry (face-detect produces
-/// `face`; age / liveness / face-match consume it). The plugins share ONE
-/// type, which this package's plugin defines and serves.
-///
-/// Unlike `clip` (host-owned, in `enclavid:host/types` — the TRUSTED,
-/// unforgeable capture input the runtime mints), `decoded-frame` is DERIVED
-/// by this plugin from a `clip`, so it is PLUGIN-owned: the decode of the
-/// untrusted JPEG, the pixel storage, and the `region` resample all stay
-/// inside this plugin's sandbox — the host / TCB touches no pixels.
+/// The vocabulary every plugin that reads a face shares — face geometry:
+/// face-detect produces `face`; age / liveness / face-match consume it. The
+/// plugins share ONE type, which this package's plugin serves. The pictures
+/// they find and read a face in are the host's `image`s
+/// (`enclavid:host/media`), which the platform decodes: this package holds no
+/// pixels.
 interface types {
-    /// A region of interest, normalized `[0,1]` over the source frame.
+    /// A region of interest, in the image's pixels from its top-left corner.
     record bbox {
         x: f32,
         y: f32,
@@ -19,72 +15,33 @@ interface types {
         h: f32,
     }
 
-    /// One keypoint, normalized `[0,1]`.
+    /// One keypoint, in the image's pixels from its top-left corner.
     record point {
         x: f32,
         y: f32,
     }
 
-    /// A detected face — GEOMETRY ONLY (the pixels live in the
-    /// `decoded-frame` it was found in). The keypoint set is
-    /// detector-specific (BlazeFace: 6 points). Each consumer derives its
-    /// OWN crop from `bbox` at its own resolution / alignment — a fixed
-    /// pre-crop would break liveness (which needs an enlarged, unaligned
-    /// crop), so the substrate shares WHERE the face is, not a ready crop.
+    /// A detected face — GEOMETRY ONLY (the pixels live in the `image` it was
+    /// found in). The keypoints are the detector's own: which points, and in
+    /// which order, is its implementation's to say.
+    /// Each consumer derives its OWN crop from `bbox` at its own resolution /
+    /// alignment — a fixed pre-crop would break liveness (which needs an
+    /// enlarged, unaligned crop), so the substrate shares WHERE the face is,
+    /// not a ready crop.
     record face {
         bbox: bbox,
         landmarks: list<point>,
         score: f32,
     }
 
-    /// The pixel dimensions of a decoded frame.
-    record size {
-        width: u32,
-        height: u32,
+    /// A face found in a frame of a video.
+    record frame-face {
+        /// The frame's index in the video, from 0.
+        index: u32,
+        face: face,
     }
-
-    /// Decoded pixels of one frame, produced and OWNED by this plugin.
-    /// `region` crops `[x,y,w,h]` (source px, clamped) and nearest-neighbour
-    /// resamples to `out-w × out-h` RGB8 (row-major), so every consumer pulls
-    /// ITS resolution from ONE decode. No constructor: only this plugin
-    /// creates instances, by `decode`.
-    resource decoded-frame {
-        /// Source dimensions of the decoded buffer — both in one call (every
-        /// consumer needs the pair to map a normalized box to source px).
-        size: func() -> size;
-        /// Crop `[x,y,w,h]` (source px) → RGB8 resampled to `out-w × out-h`.
-        region: func(x: u32, y: u32, w: u32, h: u32, out-w: u32, out-h: u32) -> list<u8>;
-    }
-}
-
-/// Decode a capture frame into a shared `decoded-frame`. The decode of the
-/// untrusted JPEG runs HERE (sandboxed), and the pixels stay in this
-/// plugin's memory — downstream face checks pull crops via
-/// `decoded-frame.region`, so one decode serves all of them.
-interface decode {
-    use enclavid:host/types@0.1.0.{blob};
-    use types.{decoded-frame};
-
-    /// Source-decode fidelity tier. The caller materializes the tier(s) its
-    /// plugin set needs — `eighth` for a detector alone (it reads the whole
-    /// frame at a small side); `half` and up where a model reads the face's
-    /// own crop, which an eighth of a selfie leaves a few dozen pixels.
-    enum scale {
-        eighth,
-        quarter,
-        half,
-        full,
-    }
-
-    /// Decode one captured frame `blob` at `scale` → a `decoded-frame`.
-    /// `none` = the blob is undecodable (the caller asks for a retake). The
-    /// caller picks which frame of the clip to decode and borrows it here.
-    decode: func(frame: borrow<blob>, scale: scale) -> option<decoded-frame>;
 }
 
 world vision {
-    // Reads the applicant's capture, and owns the frames decoded from it.
-    import enclavid:host/types@0.1.0;
     export types;
-    export decode;
 }

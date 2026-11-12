@@ -7,11 +7,10 @@ package local:policy@0.1.0;
 // creates a session.
 world policy {
     // The selfie's capture spec.
-    import enclavid:well-known/capture@0.1.0;
-    // The selfie decoded once, into a frame the face plugins read from.
-    import enclavid:vision/decode@0.1.0;
-    // The face found in the frame, and the age read from it.
-    import enclavid:face-detect/detect@0.1.0;
+    import enclavid:well-known/photo@0.1.0;
+    // The face read in the selfie's image against the guide it was taken to,
+    // and the age read from it; the face's geometry is `enclavid:vision`'s.
+    import enclavid:face-detect/photo@0.1.0;
     import enclavid:face-age/check@0.1.0;
     import enclavid-ext:policy/props@0.1.0;
     // The round's randomness, which `@enclavid/policy-quickjs` serves
@@ -32,8 +31,9 @@ package enclavid-ext:policy@0.1.0 {
     interface props {
         record props {
             // The age the face must be read as, at least, for the session to
-            // be approved. A face's age is read to within a few years either
-            // way, so a check of 18 may ask for more.
+            // be approved. A face's age is an estimate, as close as the
+            // face-age implementation the session pins reads it, so a check of
+            // 18 may ask for more.
             min-age: u8,
         }
 

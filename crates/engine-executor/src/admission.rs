@@ -53,9 +53,10 @@
 //! children. A child is given memory as it touches it; nothing is reserved for
 //! it up front. The kernel holds the children together to [`children_total`] —
 //! this guest's memory less the cache, a base, and what the supervisor holds for
-//! each child's round — and each child alone to the round's max
-//! ([`DEFAULT_ROUND_MAX_BYTES`]), killing a child past either rather than
-//! refusing it memory. The rounds waiting for a child are held to
+//! each child's round — and each round's composition alone to its max
+//! ([`DEFAULT_COMPOSITION_MAX_BYTES`]) and its captures' decodes to theirs
+//! ([`DEFAULT_MEDIA_MAX_BYTES`]), killing past any of them rather than
+//! refusing memory. The rounds waiting for a child are held to
 //! [`rounds_held`]. A round that finds no place to wait answers busy at once;
 //! one that within the capacity wait ([`DEFAULT_CAPACITY_WAIT_SECS`]) finds no
 //! child free, or no room for one more ([`DEFAULT_ROUND_HEADROOM_BYTES`]),
@@ -66,8 +67,8 @@
 //! host at launch, outside its measurement, and reads them once. The
 //! numbers that describe what the code holds are constants.
 
-use engine_types::limits::MAX_MODELS;
-use session_types::{MAX_CLIP_BYTES, SEALED_STATE_PLAINTEXT_BYTES};
+use engine_types::limits::{MAX_MEDIA_DECODES, MAX_MODELS};
+use session_types::{MAX_MEDIA_BYTES, SEALED_STATE_PLAINTEXT_BYTES};
 
 /// Bound on L1 ENTRIES unless the host says otherwise (the
 /// `bundle-cache-entries` setting), enforced through the charge rather than
@@ -117,6 +118,11 @@ const FDS_PER_CHILD: u64 = 7;
 /// [`FDS_PER_CHILD`] is.
 const FDS_PER_MODEL: u64 = 8;
 
+/// Descriptors each capture a round may decode costs the SUPERVISOR while the
+/// round runs: a model's, but for its two files — the decode is handed none.
+/// Generous for the reason [`FDS_PER_CHILD`] is.
+const FDS_PER_DECODE: u64 = FDS_PER_MODEL - 2;
+
 /// Descriptors the role needs for everything that is neither an L1 entry nor a
 /// child: the listener, the health port, one accepted api connection and the
 /// runtime's own wakers.
@@ -124,7 +130,7 @@ const FD_HEADROOM: u64 = 128;
 
 /// What a running child's round holds in THIS process, reasoned from the code
 /// rather than measured: the round's own request until its handler returns —
-/// the clip until it is sent, the state frame and the state opened from it,
+/// the captures until they are sent, the state frame and the state opened from it,
 /// about 15 MiB — a relayed `media_load` blob in both its encodings, the
 /// metadata as `prime` encodes it, and the framed state. About 45 MiB, rounded
 /// up.
@@ -150,49 +156,79 @@ pub fn supervisor_per_child(waiting_per_child: usize) -> u64 {
         .saturating_add(SUPERVISOR_ROUND_BYTES)
 }
 
-/// The most memory one round may hold, unless the host says otherwise
-/// (the `round-max-bytes` setting): every linear memory its
-/// composition touches — policy and pinned plugins together, however many
-/// there are — and everything else its process holds beside them, counted by
-/// the pages it touches rather than by what it reserves.
+/// The most memory a round's composition may hold, unless the host says
+/// otherwise (the `composition-max-bytes` setting): its policy's process —
+/// every linear memory the composition touches, policy and pinned plugins
+/// together, and everything else that process holds beside them — the
+/// processes its models run in, and what those map of this worker's memory:
+/// the composition's cwasm, and the files of each model the round has
+/// started. Counted by the pages touched rather than by what is reserved.
+/// What the round's captures take to decode is not the composition's: the
+/// platform's, beside it ([`DEFAULT_MEDIA_MAX_BYTES`]).
 ///
-/// Held by the kernel, not by wasmtime. In the measured image each round runs
-/// in a process of its own, in a memory group with this as its `memory.max`
-/// (`engine_supervisor::Cgroups`), and nothing in that process can
-/// step around it — not a plugin count, not a table, not a host structure the
-/// policy fills. The kernel does not refuse memory at a limit, it kills: a
-/// round past this ends there and is answered as the policy's failure, the same
-/// answer a trap gets. A refused `memory.grow` ended the round the same way, so
-/// a store-level limiter in front of this one would only be a second number for
-/// the same outcome, and one that charged linear memory alone. A build without
-/// that group — a developer's machine, every test — holds a round's memory to
-/// nothing.
+/// Held by the kernel, not by wasmtime. In the measured image each round's
+/// composition runs in a memory group of its own (`engine_supervisor::Cgroups`)
+/// whose `memory.max` is this less the cwasm, and less a model's files from
+/// the moment its process starts: the worker wrote those, so their pages are
+/// charged to it and not to the round, and taking them out of the limit counts
+/// them against the round as what it holds is counted. Inside it the policy's
+/// process and the models' each have a budget of their own
+/// ([`DEFAULT_POLICY_MAX_BYTES`], [`DEFAULT_INFERENCE_MAX_BYTES`]), less what
+/// each maps. Nothing in a process can step around it — not a plugin count,
+/// not a table, not a host structure the policy fills. The kernel does not
+/// refuse memory at a limit, it kills: a composition past this, or a part
+/// past its own, ends the round there, answered as the policy's failure, the
+/// same answer a trap gets. A refused `memory.grow` ended the round the same
+/// way, so a store-level limiter in front of this one would only be a second
+/// number for the same outcome, and one that charged linear memory alone. A
+/// build without the group — a developer's machine, every test — holds a
+/// round's memory to nothing.
 ///
-/// Sized for a round at its bounds, reasoned from the code. What its process
-/// holds of its own: the clip, up to `MAX_CLIP_BYTES` (12 MiB), held as
-/// received, again as the blobs it decodes into, and once more as the copy a
-/// host function hands the policy; state frames of 1.25 MiB — the one
-/// received, the one returned, the prompt, and the encode `session_change`
-/// makes; the engine and the process itself. And room above that for what
-/// grows with the composition: ML-bearing work (decoded JPEG frames, ONNX
-/// intermediates), the media memo, which keeps every distinct capture the round
-/// loads, and the consumer's catalogs as decoded, twice — the reference and the
-/// registry built from it. The kernel charges a round only the pages it
-/// touches, and not the cwasm's own, which the supervisor wrote and every child
-/// of one composition maps. An availability setting like the rest:
-/// the host choosing it decides how much a round may hold, which is a promise
-/// about the service. Set low, it ends rounds as their policy's failure; what
-/// the host learns from where they end is set out in `engine_types::limits`.
-/// A debug build logs each round's peak as its group empties
-/// (`engine_supervisor`, `debug` feature), which is what to set it from.
-pub const DEFAULT_ROUND_MAX_BYTES: u64 = 384 * 1024 * 1024;
+/// 384 MiB: what a round held when all of it ran in its one process. A round
+/// of the age check by a selfie measured 176 MiB charged — its policy and its
+/// MiVOLO — beside MiVOLO's 115 MiB of weights, which the worker holds. An
+/// availability setting like the rest: the host choosing it decides how much
+/// a round may hold, which is a promise about the service. Set low, it ends
+/// rounds as their policy's failure; what the host learns from where they end
+/// is set out in `engine_types::limits`. A debug build logs each round's peak
+/// as its group empties (`engine_supervisor`, `debug` feature), which is what
+/// to set it from.
+pub const DEFAULT_COMPOSITION_MAX_BYTES: u64 = 384 * 1024 * 1024;
+
+/// The most a round's policy may hold — its process, and the cwasm it maps —
+/// unless the host says otherwise (the `policy-max-bytes` setting). The
+/// composition's own max: each part may take all of it, and the composition's
+/// max holds them together.
+pub const DEFAULT_POLICY_MAX_BYTES: u64 = DEFAULT_COMPOSITION_MAX_BYTES;
+
+/// The most a round's models may hold together — the processes they run in,
+/// and the files they map — unless the host says otherwise (the
+/// `inference-max-bytes` setting). The composition's own max, as the
+/// policy's is.
+pub const DEFAULT_INFERENCE_MAX_BYTES: u64 = DEFAULT_COMPOSITION_MAX_BYTES;
+
+/// The most the processes a round decodes its captures in may hold together,
+/// unless the host says otherwise (the `media-max-bytes` setting): the
+/// platform's own budget for the applicant's captures, beside the
+/// composition's and none of it. What a decode holds is the capture's and the
+/// picture bounds' doing, which a policy can neither see nor bound; it chooses
+/// only how many captures it decodes at once. So a decode past this ends alone
+/// — the first the kernel takes, here and wherever the children's total or the
+/// guest runs short — and its capture does not decode, which costs the policy
+/// a retake and is never its failure.
+///
+/// The composition's max over again. The heaviest capture the default picture
+/// bounds take — a progressive 3840 × 3840 JPEG, decoded whole and then at
+/// half — measured 129 MiB; a video of 1920 × 1920 frames at the upload's
+/// bound, every frame read whole, 69 MiB; a camera's photo 19 MiB.
+pub const DEFAULT_MEDIA_MAX_BYTES: u64 = DEFAULT_COMPOSITION_MAX_BYTES;
 
 /// What must be free before one more child is started — under the children's
 /// total, and in the guest's available memory — read before each spawn — unless
 /// the host says otherwise (the `round-headroom-bytes` setting).
 ///
-/// About an honest round's own cost with a clip at its bound — the clip three
-/// times over, its state frames, its engine — plus room for the policy's own
+/// About an honest round's own cost with captures at their bound — the
+/// captures three times over, its state frames, its engine — plus room for the policy's own
 /// working memory. Reasoned, not measured; a debug build logs each round's peak
 /// as its group empties, which is what to set it from.
 ///
@@ -202,24 +238,24 @@ pub const DEFAULT_ROUND_MAX_BYTES: u64 = 384 * 1024 * 1024;
 /// than the child bound was chosen for, the round that would not fit answers
 /// busy before anything starts, rather than a running one being killed for it.
 /// So an availability setting: set low, an overload kills running rounds; set
-/// high, rounds answer busy while memory is free. Never above the round's max,
-/// which the worker checks at boot.
+/// high, rounds answer busy while memory is free. Never above the
+/// composition's max, which the worker checks at boot.
 pub const DEFAULT_ROUND_HEADROOM_BYTES: u64 = 128 * 1024 * 1024;
 
 // The defaults pass the worker's own boot check: the gate never asks for more
 // room than one child may hold.
-const _: () = assert!(DEFAULT_ROUND_HEADROOM_BYTES <= DEFAULT_ROUND_MAX_BYTES);
+const _: () = assert!(DEFAULT_ROUND_HEADROOM_BYTES <= DEFAULT_COMPOSITION_MAX_BYTES);
 
 /// What a round holds in this supervisor while it waits — for a fill slot, for
 /// another round's fill of the same composition, or for a child: its request as
-/// decoded. A clip at its bound, the state frame and
+/// decoded. Captures at their bound, the state frame and
 /// the state opened from it, and the props; about 15 MiB, rounded up.
 const QUEUED_ROUND_BYTES: u64 = 16 * 1024 * 1024;
 
-// A waiting round's reserve holds its request's bulk: the clip, and the state
-// twice — framed, and opened from the frame.
+// A waiting round's reserve holds its request's bulk: the captures, and the
+// state twice — framed, and opened from the frame.
 const _: () = assert!(
-    (MAX_CLIP_BYTES + 2 * SEALED_STATE_PLAINTEXT_BYTES) as u64 <= QUEUED_ROUND_BYTES,
+    (MAX_MEDIA_BYTES + 2 * SEALED_STATE_PLAINTEXT_BYTES) as u64 <= QUEUED_ROUND_BYTES,
     "a waiting round's reserve is under its request's bulk"
 );
 
@@ -266,7 +302,8 @@ pub const DEFAULT_BASE_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 /// `l1_budget` — which holds the fills streaming into the cache as well as its
 /// entries — the `base_reserve`, and [`supervisor_per_child`] for each of
 /// `children` with `waiting_per_child` behind it. The kernel holds the children
-/// to it as one total, and each alone to the round's max.
+/// to it as one total, and each round alone to its composition's max and its
+/// decodes' beside it.
 ///
 /// Derived from the memory the guest has rather than configured beside it,
 /// because the guest's size is chosen where it is launched and is not part of
@@ -305,14 +342,17 @@ pub const DEFAULT_CAPACITY_WAIT_SECS: u64 = 10;
 /// The descriptor budget this role must be able to reach, given how many children
 /// it may run at once and how many entries its cache may hold
 /// ([`DEFAULT_BUNDLE_CACHE_ENTRIES`]). The entries and the fills streaming in are
-/// one term; each child, with every model its round may start, another.
+/// one term; each child, with every model and every capture's decode its round
+/// may start, another.
 ///
 /// Stated as a function rather than a constant because both counts are the
 /// host's to set, and they are only meaningful together with the descriptors:
 /// raising either without the descriptors to back it turns a capacity knob into
 /// a way to wedge the worker at its own peak.
 pub fn fd_budget(max_children: u64, cache_entries: u64) -> u64 {
-    let per_child = FDS_PER_CHILD + MAX_MODELS as u64 * FDS_PER_MODEL;
+    let per_child = FDS_PER_CHILD
+        + MAX_MODELS as u64 * FDS_PER_MODEL
+        + MAX_MEDIA_DECODES as u64 * FDS_PER_DECODE;
     cache_entries
         .saturating_add(max_children.saturating_mul(per_child))
         .saturating_add(FD_HEADROOM)

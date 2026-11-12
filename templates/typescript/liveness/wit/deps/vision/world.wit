@@ -1,0 +1,47 @@
+package enclavid:vision@0.1.0;
+
+/// The vocabulary every plugin that reads a face shares — face geometry:
+/// face-detect produces `face`; age / liveness / face-match consume it. The
+/// plugins share ONE type, which this package's plugin serves. The pictures
+/// they find and read a face in are the host's `image`s
+/// (`enclavid:host/media`), which the platform decodes: this package holds no
+/// pixels.
+interface types {
+    /// A region of interest, in the image's pixels from its top-left corner.
+    record bbox {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    }
+
+    /// One keypoint, in the image's pixels from its top-left corner.
+    record point {
+        x: f32,
+        y: f32,
+    }
+
+    /// A detected face — GEOMETRY ONLY (the pixels live in the `image` it was
+    /// found in). The keypoints are the detector's own: which points, and in
+    /// which order, is its implementation's to say.
+    /// Each consumer derives its OWN crop from `bbox` at its own resolution /
+    /// alignment — a fixed pre-crop would break liveness (which needs an
+    /// enlarged, unaligned crop), so the substrate shares WHERE the face is,
+    /// not a ready crop.
+    record face {
+        bbox: bbox,
+        landmarks: list<point>,
+        score: f32,
+    }
+
+    /// A face found in a frame of a video.
+    record frame-face {
+        /// The frame's index in the video, from 0.
+        index: u32,
+        face: face,
+    }
+}
+
+world vision {
+    export types;
+}

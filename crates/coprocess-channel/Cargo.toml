@@ -1,0 +1,26 @@
+[package]
+name = "coprocess-channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The channel between a round and a coprocess it started: one message at a
+# time over the socket the supervisor paired them with. A coprocess's end
+# blocks on its socket and links no runtime; the round's end, behind `tokio`,
+# awaits it.
+[dependencies]
+# A message is a serde value, in CBOR: the codec remoc's legs use.
+serde = "1"
+ciborium = "0.2"
+thiserror = "1"
+# The round's end: its socket, awaited as the round's other IO is.
+tokio = { version = "1", default-features = false, features = ["net", "io-util"], optional = true }
+
+[features]
+tokio = ["dep:tokio"]
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }

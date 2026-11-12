@@ -1,0 +1,55 @@
+package enclavid:face-liveness@0.1.0;
+
+/// What the checks give, `image`'s and `video`'s alike: an implementation
+/// exports it with whichever of them it has.
+interface types {
+    /// The estimator's read on a face.
+    record liveness-estimate {
+        /// How live the face looks, from 0 for a photo, a screen or a mask to
+        /// 1 for a live person: a model's score, not a probability, so the
+        /// policy sets its own threshold.
+        live: f32,
+    }
+}
+
+/// Liveness from one picture: a photo's image, or a frame.
+///
+/// A MODEL-AGNOSTIC contract, as `video` is: an implementation exports what
+/// its model serves — a model of single pictures `image`, of clips `video`, or
+/// both — and is chosen per session via the pinned `impl_ref`.
+interface image {
+    use enclavid:host/media@0.1.0.{image};
+    use enclavid:vision/types@0.1.0.{face};
+    use types.{liveness-estimate};
+
+    /// Estimate whether the detected `face` in `image` is a live person's.
+    /// The plugin pulls its OWN crops from `image` via `pixels` — the face
+    /// and what is around it, at its model's resolution. `none` = unusable
+    /// input, or an image that does not decode.
+    estimate: func(image: borrow<image>, face: face) -> option<liveness-estimate>;
+}
+
+/// Liveness from frames of a video.
+interface video {
+    use enclavid:host/media@0.1.0.{video};
+    use enclavid:vision/types@0.1.0.{frame-face};
+    use types.{liveness-estimate};
+
+    /// Estimate whether the faces found in frames of `video` are a live
+    /// person's: one estimate for them together — a model of single pictures
+    /// reads each and combines them, a model of clips reads them as one. The
+    /// frames are read in the order of their indices, whatever the list's.
+    /// `none` where no face is usable; a frame the video does not have, or
+    /// one that does not decode, counts as unusable.
+    estimate: func(video: borrow<video>, faces: list<frame-face>) -> option<liveness-estimate>;
+}
+
+world face-liveness {
+    // The host's pictures, which face-liveness reads crops from, and the
+    // shared `face` geometry, from the face-detect plugin.
+    import enclavid:host/media@0.1.0;
+    import enclavid:vision/types@0.1.0;
+    export types;
+    export image;
+    export video;
+}

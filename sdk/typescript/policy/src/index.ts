@@ -5,7 +5,7 @@
 // sealed, for the next. The first round has no state and the event `start`.
 // `definePolicy` turns those bytes into the policy's own value and back, so the
 // policy never sees them; `withStart` gives the first round a function of its
-// own.
+// own. `hex` reads a guide's colour as CSS writes it.
 //
 // The event `E` and the action `A` are whatever the policy's world says, as
 // `jco guest-types` writes them; this package names neither.
@@ -110,4 +110,15 @@ export function encode<S>(state: S): Uint8Array {
 /** The state `bytes` hold. */
 export function decode<S>(bytes: Uint8Array): S {
   return devalue.parse(new TextDecoder().decode(bytes)) as S;
+}
+
+/**
+ * A colour for a `face-flashes` guide, from `#rrggbb` with or without its `#`,
+ * in either case. Anything else throws.
+ */
+export function hex(color: string): { red: number; green: number; blue: number } {
+  const digits = color.startsWith("#") ? color.slice(1) : color;
+  if (!/^[0-9a-f]{6}$/i.test(digits)) throw new Error(`not a colour as #rrggbb: ${color}`);
+  const value = Number.parseInt(digits, 16);
+  return { red: value >> 16, green: (value >> 8) & 0xff, blue: value & 0xff };
 }

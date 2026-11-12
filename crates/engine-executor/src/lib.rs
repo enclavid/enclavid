@@ -53,6 +53,7 @@ pub fn compat_token() -> String {
         wasmtime::ModuleVersionStrategy::WasmtimeVersion.as_str()
     )
 }
+mod image;
 mod listener;
 mod media;
 mod media_store;
@@ -69,6 +70,8 @@ pub use embedded::{
     EmbeddedRegistryBuilder, Localized, LocalizedStore, RefKind, RefStore, Translation,
 };
 pub use engine_types::composition::ModelImport;
+pub use engine_types::picture::PictureBounds;
+pub use image::{DecoderFailed, MediaStarter};
 pub use listener::{SessionChange, SessionListener};
 pub use media_store::MediaStore;
 pub use models::ModelStarter;
@@ -114,8 +117,10 @@ wasmtime::component::bindgen!({
         package enclavid:engine@0.1.0;
 
         world host {
-            import enclavid:host/types@0.1.0;
+            import enclavid:host/refs@0.1.0;
+            import enclavid:host/media@0.1.0;
             import enclavid:host/tensors@0.1.0;
+            import enclavid:host-capture/constants@0.1.0;
             export enclavid:policy/policy@0.1.0;
         }
     "#,
@@ -127,7 +132,8 @@ wasmtime::component::bindgen!({
     // `runner::register_disclosure_fields`.
     path: [
         "../../wit/host",
-        "../../wit/shared-types",
+        "../../wit/host-capture",
+        "../../wit/host-disclosure",
         "../../wit/policy",
     ],
     imports: { default: async | trappable },
@@ -135,15 +141,18 @@ wasmtime::component::bindgen!({
     // The three embedded refs are host-owned resources; back each with
     // the rep that carries its RESOLVED data (see `embedded::store`), so
     // the action-boundary deref in `runner::convert` is self-contained.
-    // `blob` is likewise host-owned — its rep holds one stored blob's
-    // bytes + content ref (see `media`); the runtime mints a handle per
-    // captured frame into `event::media`'s `clip` record. `clip` itself is a
-    // plain policy-side record (no rep).
+    // `photo` and `video` are likewise host-owned — each rep holds one stored
+    // capture's bytes + content hash (see `media`), a Rust type of its own so
+    // one cannot be served as the other; the runtime mints a handle per
+    // capture into `event::media`. Their pictures' `image`s reach the process
+    // the capture is decoded in (see `image`).
     with: {
-        "enclavid:host/types.localized-ref": crate::embedded::LocalizedRef,
-        "enclavid:host/types.icon-ref": crate::embedded::IconRef,
-        "enclavid:host/types.disclosure-field-ref": crate::embedded::DisclosureFieldRef,
-        "enclavid:host/types.blob": crate::media::BlobRep,
+        "enclavid:host/refs.localized-ref": crate::embedded::LocalizedRef,
+        "enclavid:host/refs.icon-ref": crate::embedded::IconRef,
+        "enclavid:host/refs.disclosure-field-ref": crate::embedded::DisclosureFieldRef,
+        "enclavid:host/media.photo": crate::media::PhotoRep,
+        "enclavid:host/media.video": crate::media::VideoRep,
+        "enclavid:host/media.image": crate::image::ImageRep,
         // A model's tensors, each element type a resource and a Rust type of
         // its own (`tensors`): one served for another would be one type.
         "enclavid:host/tensors.tensor-f32": crate::tensors::TensorF32,

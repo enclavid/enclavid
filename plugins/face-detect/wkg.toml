@@ -1,4 +1,5 @@
 [overrides]
 "enclavid:host" = { path = "../../wit/host" }
+"enclavid:host-capture" = { path = "../../wit/host-capture" }
 "enclavid:vision" = { path = "../vision/wit" }
 "enclavid-ext:face-detect" = { path = "ext" }

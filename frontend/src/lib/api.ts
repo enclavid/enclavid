@@ -57,6 +57,21 @@ export async function connect(
   return parseOrThrow(res);
 }
 
+/// Start the media prompt the session awaits, as the camera is about to open:
+/// a prompt with a time limit is given its steps whole then, and its time runs
+/// from the first start. Every media prompt is started, timed or not.
+export async function startPrompt(
+  sessionId: string,
+  awaitingSeq: number,
+  applicantKey: Uint8Array,
+): Promise<SessionProgress> {
+  const res = await fetch(endpoint(sessionId, `/start/${awaitingSeq}`), {
+    method: "POST",
+    headers: bearer(applicantKey),
+  });
+  return movedOrParsed(res);
+}
+
 export async function submitInput(
   sessionId: string,
   awaitingSeq: number,
@@ -78,6 +93,10 @@ export async function submitInput(
       body,
     },
   );
+  return movedOrParsed(res);
+}
+
+async function movedOrParsed(res: Response): Promise<SessionProgress> {
   // A 409 that carries a step is the session having moved on past the wait
   // this answered — a second tap, a retry after a lost reply, another tab.
   // The answer was not taken; the step it carries is where the session is.

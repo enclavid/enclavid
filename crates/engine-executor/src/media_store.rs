@@ -7,23 +7,23 @@
 //! owns the seal keys, so engine stays free of `SessionStore` / AEAD-key
 //! knowledge (mirrors [`SessionListener`](crate::listener::SessionListener)).
 //!
-//! Reads are lazy and per-round: the policy's [`blob::from-blob-ref`](crate::
-//! media::BlobRep) calls [`load`](MediaStore::load) mid-`handle` to rehydrate
-//! a stored blob. Writes are NOT on this trait, nor on the listener — the
-//! orchestrator stores a round's captures itself, from the frames it sent, in
-//! the same atomic write as the reducer state.
+//! Reads are lazy and per-round: a capture the policy rehydrated by its hash
+//! ([`Held`](crate::media::Held)) calls [`load`](MediaStore::load) mid-`handle`
+//! on its first `bytes()`. Writes are NOT on this trait, nor on the listener —
+//! the orchestrator stores a round's captures itself, from the bytes it sent,
+//! in the same atomic write as the reducer state.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 /// Loads one sealed blob's plaintext bytes by its content hash. `Ok(None)` = no
-/// such blob in this session (unknown / never-stored ref) — the engine TRAPS the
-/// round on a `None` (`blob::from-blob-ref` has no recoverable miss branch).
+/// such blob in this session (unknown / never-stored hash) — the engine TRAPS
+/// the round on a `None` (a rehydrated capture has no recoverable miss branch).
 /// `Err` = a genuine transport / decrypt failure, also a trap.
 ///
 /// Returns `Arc<Vec<u8>>` rather than `Vec<u8>` so a pull-through cache can hand
-/// the SAME allocation to the run's `BlobRep` with no host-side copy — the
+/// the SAME allocation to the run's [`Held`](crate::media::Held) with no host-side copy — the
 /// bytes are copied into wasm only at `bytes()`, which is the one unavoidable
 /// (sandbox-boundary) copy.
 ///

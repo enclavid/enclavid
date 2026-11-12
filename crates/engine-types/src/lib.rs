@@ -24,6 +24,7 @@ pub mod composition;
 pub mod embedded;
 pub mod icons;
 pub mod limits;
+pub mod picture;
 pub mod props;
 pub mod sanitize;
 

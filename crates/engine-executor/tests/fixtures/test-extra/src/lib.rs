@@ -10,7 +10,7 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use enclavid::host::types::LocalizedRef;
+use enclavid::host::refs::LocalizedRef;
 use enclavid_ext::extra::i18n::{Key, localized};
 use exports::enclavid::extra::tag::Guest;
 

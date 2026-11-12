@@ -1,0 +1,159 @@
+package enclavid:host@0.1.0;
+
+/// The applicant's captures as the host holds them: each stored once, sealed,
+/// by the hash of its bytes; minted by the runtime into `event::media` and
+/// rehydrated across rounds by that hash. They live in the host package, not
+/// in `enclavid:policy`, so the policy and any verification plugin hold the
+/// SAME resource types and can pass a handle across the fused policy↔plugin
+/// boundary; the bytes stay host-side and enter a component's linear memory
+/// only when it pulls them.
+///
+/// A capture's pictures — a photo's, a video's frames — are `image`s, which
+/// the platform decodes in a process of its own, one a capture: the one place
+/// the applicant's media is parsed. A capture whose bytes end that process
+/// does not decode again that round. A round decodes 16 captures at most: the
+/// 17th traps.
+///
+/// A capture's type says which kind of step took it, not that its bytes are
+/// what that kind should hold: the applicant's page sent them, so whatever
+/// reads them must expect anything.
+interface media {
+    /// A capture's content ADDRESS — the hex-encoded 32-byte BLAKE3 of its
+    /// bytes. A serializable value, unlike the opaque per-round handles: the
+    /// policy stashes it in its sealed `state` and hands it to a constructor
+    /// to rehydrate the capture in a later round; it never inspects it. A
+    /// string rather than bytes for every language's sake: JSON-safe,
+    /// `==`-comparable, usable as a map key (`[]byte` cannot even be a Go map
+    /// key).
+    type media-hash = string;
+
+    /// A size in pixels.
+    record size {
+        width: u32,
+        height: u32,
+    }
+
+    /// A rectangle of a picture, in its pixels.
+    record rect {
+        /// Its left edge: the first column it takes.
+        x: u32,
+        /// Its top edge: the first row it takes.
+        y: u32,
+        /// How many columns and rows it takes.
+        size: size,
+    }
+
+    /// How pixels are brought to another size.
+    enum resize-mode {
+        /// Each output pixel is the source pixel nearest its place: the
+        /// quicker, and no colour the picture does not have.
+        nearest,
+        /// Each output pixel is the mean of the source pixels it covers: a
+        /// shrunk picture without aliasing, and a single pixel the mean of
+        /// all.
+        average,
+        /// Each output pixel is weighed from the four source pixels around
+        /// its place, as OpenCV's `INTER_LINEAR` does: the pixels a model
+        /// trained on such crops reads.
+        bilinear,
+    }
+
+    /// Pixels brought to another size.
+    record resize {
+        /// The size they are brought to.
+        size: size,
+        mode: resize-mode,
+    }
+
+    /// Which of a picture's pixels, and at what size.
+    record pixels-options {
+        /// Only this part of it; the whole picture where none.
+        crop: option<rect>,
+        /// Brought to another size; at their own where none.
+        resize: option<resize>,
+    }
+
+    /// Why a picture's pixels are not given.
+    enum pixels-error {
+        /// The picture does not decode.
+        undecoded,
+        /// The crop is not inside the picture: it reaches past an edge, or
+        /// spans no pixels.
+        out-of-bounds,
+    }
+
+    /// A picture of the applicant's — a photo, or a frame of a video — as the
+    /// platform decodes it, when its pixels are first read. Of a video only
+    /// the frame read last is kept: a frame read out of order is decoded
+    /// again from the keyframe before it.
+    resource image {
+        /// Its size in pixels: its capture's own — or, for a photo larger
+        /// than the platform decodes whole, half of it each way. Whether so
+        /// many are enough is the reader's to judge.
+        size: func() -> size;
+        /// Every pixel of it, at its size, RGB8 row by row, decoding the
+        /// image first where nothing did; `none` where it does not decode.
+        all-pixels: func() -> option<list<u8>>;
+        /// The pixels `options` pick, RGB8 row by row, decoding the image
+        /// first where nothing did. Traps for an output larger either way
+        /// than the platform gives.
+        pixels: func(options: pixels-options) -> result<list<u8>, pixels-error>;
+    }
+
+    /// A photo the applicant sent: one JPEG, as the camera page encoded it.
+    resource photo {
+        /// Rehydrate the photo with this hash from the session's store.
+        /// Own-session only (cross-session is cryptographically blocked).
+        /// Returns a COLD handle — no host IO yet; the bytes are pulled on the
+        /// first `bytes()`. TRAPS on a miss (an unknown or malformed hash): a
+        /// correct policy only stashes hashes it got from a real `hash()`, so
+        /// a fabricated one fails loud rather than handing it a recoverable
+        /// branch.
+        constructor(hash: media-hash);
+        /// Pull the photo's bytes into the caller's linear memory: for a
+        /// rehydrated photo, the lazy load point. Bounded by the round's
+        /// memory max: a round that goes past it is ended.
+        bytes: func() -> list<u8>;
+        /// The photo's hash — stash it in `state` to rehydrate the photo in a
+        /// later round.
+        hash: func() -> media-hash;
+        /// The photo as an image; `none` where it is not a JPEG the platform
+        /// decodes, or one too large for it even at half its size.
+        image: func() -> option<image>;
+    }
+
+    /// One frame of a video, as the container the applicant sent lists it.
+    record frame {
+        /// Its index in the video, from 0.
+        index: u32,
+        /// When it is shown, in milliseconds from the video's first frame, as
+        /// the page's encoder stamped it.
+        timestamp-ms: u32,
+        /// Whether the encoder wrote it whole, not as a change to the frames
+        /// before it.
+        keyframe: bool,
+        /// Its picture.
+        image: image,
+    }
+
+    /// A video the applicant recorded: a WebM of VP8 frames, as the page's
+    /// encoder wrote it.
+    resource video {
+        /// Rehydrate the video with this hash from the session's store, as
+        /// `photo`'s constructor does.
+        constructor(hash: media-hash);
+        /// Pull the video's bytes into the caller's linear memory, as
+        /// `photo`'s `bytes` does.
+        bytes: func() -> list<u8>;
+        /// The video's hash — stash it in `state` to rehydrate the video in a
+        /// later round.
+        hash: func() -> media-hash;
+        /// Frames `first` to `last` of the video, in order, as a guide's
+        /// `frame-range` names them; none is decoded until its image is read.
+        /// The list ends at the video's last frame, its 900th, or the frame
+        /// before a keyframe of another size than the video's; it is empty
+        /// where the video is not a WebM of VP8 frames of a size the platform
+        /// decodes.
+        frames: func(first: u32, last: u32) -> list<frame>;
+    }
+}

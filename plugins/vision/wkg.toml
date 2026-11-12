@@ -1,2 +1,1 @@
 [overrides]
-"enclavid:host" = { path = "../../wit/host" }

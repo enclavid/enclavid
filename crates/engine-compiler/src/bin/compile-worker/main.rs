@@ -40,7 +40,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use engine_supervisor::{
-    Cgroups, ChildLimits, ChildRunner, ChildTimes, DEFAULT_CHILD_MAX_TASKS, ExitCause, RunnerConfig,
+    Cgroups, ChildLimits, ChildRunner, ChildTimes, DEFAULT_CHILD_MAX_TASKS, ExitCause, GroupLimits,
+    RunnerConfig,
 };
 use fleet_stream::bin;
 use remoc::codec::Ciborium;
@@ -118,6 +119,9 @@ const DEFAULT_CWASM_READ_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).un
 /// api connections.
 struct Supervisor {
     runner: ChildRunner,
+    /// What each compile's child is held to: the compile max, for the child
+    /// alone, which has nothing beside it.
+    limits: GroupLimits,
     cwasm_read: NonZeroUsize,
 }
 
@@ -149,6 +153,7 @@ impl RemoteCompilerAt<AnyCaller> for Supervisor {
             .runner
             .run(
                 &[output.as_fd()],
+                &self.limits,
                 (),
                 move |client: RemoteCompileChildClient<Ciborium>, _| async move {
                     let mut call = std::pin::pin!(client.compile(onward));
@@ -633,6 +638,11 @@ async fn main() {
 
     let svc = Arc::new(Supervisor {
         cwasm_read,
+        limits: GroupLimits {
+            max: compile_max,
+            child: compile_max,
+            kinds: Vec::new(),
+        },
         runner: ChildRunner::new(
             RunnerConfig {
                 exe: child_exe.clone(),

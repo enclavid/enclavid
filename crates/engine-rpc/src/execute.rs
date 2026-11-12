@@ -277,7 +277,7 @@ impl ModelFileStream {
 /// silently dropped into a round that then runs on a partial request.
 ///
 /// Every field is bounded by its own decoder — the key by its shape, the props and
-/// the state by their exact frames, the event's frames by the ingress budget. That
+/// the state by their exact frames, the event's captures by the ingress budget. That
 /// is what lets the serving role write a discharge that names a check instead of
 /// naming its caller.
 ///
@@ -312,10 +312,11 @@ pub struct RunRequest {
 #[derive(Serialize, Deserialize)]
 pub struct RoundProps(#[serde(with = "props")] pub Vec<u8>);
 
-/// What a round request carries besides the clip's bytes, the two frames and the
-/// bundle header: the key, the ceiling, the frames' and the event's CBOR heads, and remoc's
+/// What a round request carries besides the captures' bytes, the two frames and
+/// the bundle header: the key, the ceiling, the frames' CBOR heads, the event's
+/// CBOR around the captures' bytes — a video's frame ranges with it — and remoc's
 /// own envelope with the reply, callback and two bundle-stream ports — some
-/// 10 KiB with every field at its bound; the rest is margin.
+/// 47 KiB with every field at its bound; the rest is margin.
 pub(crate) const RUN_REQUEST_HEADROOM: usize = 64 * 1024;
 
 // A round request travels as ONE remoc item, and an item past the limit fails the
@@ -323,7 +324,7 @@ pub(crate) const RUN_REQUEST_HEADROOM: usize = 64 * 1024;
 // beside the call — so what has to fit is the round itself plus the header naming
 // the bundle. `run` sends the same request without the header.
 const _: () = assert!(
-    session_types::MAX_CLIP_BYTES
+    session_types::MAX_MEDIA_BYTES
         + <SessionState as Framed>::FRAME
         + <RoundProps as Framed>::FRAME
         + crate::stream::BUNDLE_HEADER_MAX_ENCODED
@@ -348,7 +349,7 @@ mod props {
     }
 
     pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        // Bounded after the decode, as `Clip`'s frames are: what the decode itself
+        // Bounded after the decode, as the event's captures are: what the decode itself
         // may allocate is bounded by the one remoc item the request travels in.
         let props = serde_bytes::ByteBuf::deserialize(d)?;
         if props.len() > MAX_PROPS_BYTES {
@@ -614,8 +615,9 @@ pub trait RemoteChild {
 
     /// Drive one reducer round against the primed composition.
     /// `session_state`/`event`/`props` are the round's already-decrypted inputs
-    /// (the seal key never reaches this process), and `fuel` is what the round
-    /// may burn — the supervisor's setting, the same for every round it runs.
+    /// (the seal key never reaches this process), `fuel` is what the round may
+    /// burn, and `picture_bounds` what its captures' pictures are held to —
+    /// the supervisor's settings, the same for every round it runs.
     /// `callbacks` points at the
     /// SUPERVISOR's relay, which forwards `media_load` / `session_change` on to
     /// api — so this keyless process rehydrates blobs + persists state without
@@ -631,6 +633,7 @@ pub trait RemoteChild {
         event: Event,
         props: ByteBuf,
         fuel: u64,
+        picture_bounds: engine_types::picture::PictureBounds,
         callbacks: RemoteChildCallbacksClient<remoc::codec::Ciborium>,
     ) -> Result<RunStatus, ExecError>;
 
@@ -647,7 +650,8 @@ pub trait RemoteChild {
 /// relay implements this and forwards `media_load` / `session_change` to api, which
 /// holds the seal key, through [`Callbacks`](crate::Callbacks) at its own end — a
 /// straight forward. `start_model` it answers itself: it fills its own files of the
-/// model, asking api for each the first time, and starts the model's process.
+/// model, asking api for each the first time, and starts the model's process. And
+/// `start_media`, which starts the process a capture is decoded in.
 #[remoc::rtc::remote]
 pub trait RemoteChildCallbacks {
     /// Rehydrate a stored blob by content hash (api unseals). `None` = miss.
@@ -669,6 +673,12 @@ pub trait RemoteChildCallbacks {
     /// to that process only then. Once per model a round; a second start of
     /// the same model is refused.
     async fn start_model(&self, index: u32) -> Result<(), CallbackError>;
+
+    /// Start the process the round's capture `decode` is decoded in, counted
+    /// from 0 and below `engine_types::limits::MAX_MEDIA_DECODES`: answered
+    /// once the process is started, as a model's is. Once per capture a round;
+    /// a second start of the same decode is refused.
+    async fn start_media(&self, decode: u32) -> Result<(), CallbackError>;
 }
 
 #[cfg(test)]
@@ -1346,10 +1356,11 @@ mod execute_tests {
 mod request_bound_tests {
     use super::*;
     use crate::MAX_CWASM_BYTES;
+    use engine_types::limits::MAX_CAPTURE_STEPS;
     use engine_types::limits::MAX_PROPS_BYTES;
     use serde::Serialize;
     use serde_bytes::Bytes;
-    use session_types::{Clip, MAX_CLIP_FRAMES, MediaResult};
+    use session_types::{Capture, MediaResult, PhotoCapture};
 
     /// A stand-in with the same field names and no bounds, so a test can put on
     /// the wire what the real type will not produce.
@@ -1432,15 +1443,18 @@ mod request_bound_tests {
         assert!(req.props.open().is_err());
     }
 
-    /// The event's frames are bounded by their own type, and the request decoder
-    /// inherits that rather than restating it.
+    /// The event's captures are bounded by their own type, and the request
+    /// decoder inherits that rather than restating it.
     #[test]
     fn an_event_over_the_capture_bound_is_refused() {
         let event = Event::Media(MediaResult {
-            slot: 0,
-            clip: Clip {
-                frames: vec![vec![1u8]; MAX_CLIP_FRAMES + 1],
-            },
+            captures: vec![
+                Capture::Photo(PhotoCapture {
+                    photo: vec![1u8],
+                    guide: None,
+                });
+                MAX_CAPTURE_STEPS + 1
+            ],
         });
         let props = props_frame(b"");
         assert!(decode(&loose(&a_key(), &props, event)).is_err());

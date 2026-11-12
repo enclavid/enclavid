@@ -1,0 +1,13 @@
+package enclavid:face-age@0.1.0;
+
+// The world this implementation is built as, apart from `world.wit`, which a
+// policy's project copies: its slot names the model it runs.
+
+/// An estimator whose model the host runs: the model's graph and its data
+/// file are layers beside the component — named for the function of its slot
+/// that hands the model out — and only the face crop leaves the sandbox, to
+/// that model, in a process of its own.
+world with-models {
+    include face-age;
+    import enclavid-ext:face-age/models@0.1.0;
+}

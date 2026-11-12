@@ -7,7 +7,7 @@ package enclavid-ext:policy@0.1.0;
 /// `wkg`, which reads a package it does not find in a registry only from a
 /// path.
 interface i18n {
-    use enclavid:host/types@0.1.0.{localized-ref};
+    use enclavid:host/refs@0.1.0.{localized-ref};
 
     enum key {
         consent-reason,

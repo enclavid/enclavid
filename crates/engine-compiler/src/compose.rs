@@ -34,8 +34,8 @@ use engine_types::composition::{
 use crate::decls::EmbeddedCatalog;
 use crate::{disclosure_fields, icons, models, props, texts};
 
-/// The interface the resources the host mints belong to.
-const HOST_TYPES: &str = "enclavid:host/types@0.1.0";
+/// The interface the refs the host mints belong to.
+const HOST_REFS: &str = "enclavid:host/refs@0.1.0";
 
 /// Package label for the policy in the composition graph. Only a
 /// registration key (its uniqueness against the plugin labels is all
@@ -76,10 +76,9 @@ pub(crate) fn fuse(
     // Functional wiring: satisfy each import that names a PLUGIN interface
     // with the plugin that exports it — for the POLICY and for every PLUGIN.
     // Plugin→plugin wiring is real: a face plugin (face-age, face-detect)
-    // imports the `enclavid:vision/types` `decoded-frame` that the vision
-    // plugin OWNS, so its `region` calls must dispatch to it. Without
-    // it, the consumer's plugin-interface import bubbles up unsatisfied and
-    // the fused component fails validation. Host-reserved imports
+    // imports the `enclavid:vision/types` face geometry that the vision
+    // plugin serves. Without it, the consumer's plugin-interface import
+    // bubbles up unsatisfied and the fused component fails validation. Host-reserved imports
     // (`is_host_reserved`) are deliberately excluded — served by the host
     // `Linker`, never a plugin — so they bubble up as composite imports
     // (covers `enclavid:host/*` and every slot's `enclavid-ext:<slot>/*`).
@@ -387,7 +386,7 @@ pub(crate) fn needs_serving(types: &Types, kind: &ItemKind) -> bool {
 }
 
 /// Whether the resource `id` is, through any aliases, the resource `name` of
-/// the host's types interface — one the host mints — rather than another of
+/// the host's refs interface — one the host mints — rather than another of
 /// the host's resources or one a component declares itself.
 pub(crate) fn is_host_resource(types: &Types, id: ResourceId, name: &str) -> bool {
     let Some(alias) = &types[id].alias else {
@@ -397,7 +396,7 @@ pub(crate) fn is_host_resource(types: &Types, id: ResourceId, name: &str) -> boo
         types[owner]
             .id
             .as_deref()
-            .is_some_and(|owner| same_interface(owner, HOST_TYPES))
+            .is_some_and(|owner| same_interface(owner, HOST_REFS))
     });
     (from_host && types[alias.source].name == name) || is_host_resource(types, alias.source, name)
 }
@@ -528,7 +527,7 @@ mod tests {
     fn host_reserved_excludes_plugin_and_policy_interfaces() {
         // Plugin exports stay plugin-satisfiable; the policy's own export
         // stays policy-owned. Neither may be mistaken for a host cap.
-        assert!(!is_host_reserved("enclavid:well-known/capture@0.1.0"));
+        assert!(!is_host_reserved("enclavid:well-known/photo@0.1.0"));
         assert!(!is_host_reserved("enclavid:extra/tag@0.1.0"));
         assert!(!is_host_reserved("enclavid:policy/policy@0.1.0"));
         // Load-bearing distinction: the well-known plugin's `disclosure-fields`

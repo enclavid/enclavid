@@ -5,17 +5,18 @@
 //! None of them reaches what a round discloses or how its traffic is shaped for
 //! the host: the framing that holds a round's sizes constant, the policy's state
 //! cap and the consent limits are the build's (`engine_types::limits`). These
-//! are the service's capacity. The round's memory max and fuel are the two whose
-//! value a round can cross, and what the host learns from choosing them is set
-//! out there.
+//! are the service's capacity. A round's memory limits and its fuel are the
+//! ones whose value a round can cross, and what the host learns from choosing
+//! them is set out there.
 
 use std::time::Duration;
 
-use engine_executor::DEFAULT_ROUND_FUEL;
 use engine_executor::admission::{
     DEFAULT_BASE_RESERVE_BYTES, DEFAULT_BUNDLE_CACHE_ENTRIES, DEFAULT_CAPACITY_WAIT_SECS,
-    DEFAULT_ROUND_HEADROOM_BYTES, DEFAULT_ROUND_MAX_BYTES, DEFAULT_WAITING_PER_CHILD,
+    DEFAULT_COMPOSITION_MAX_BYTES, DEFAULT_INFERENCE_MAX_BYTES, DEFAULT_MEDIA_MAX_BYTES,
+    DEFAULT_POLICY_MAX_BYTES, DEFAULT_ROUND_HEADROOM_BYTES, DEFAULT_WAITING_PER_CHILD,
 };
+use engine_executor::{DEFAULT_ROUND_FUEL, PictureBounds};
 use engine_rpc::{
     DEFAULT_BUNDLE_STREAM_DEADLINE, DEFAULT_BUNDLE_STREAM_IDLE, DEFAULT_CALLBACK_REQUEST_BUFFER,
     DEFAULT_REQUEST_BUFFER, LegSettings, MAX_BUNDLE_META_BYTES, MAX_CWASM_BYTES,
@@ -81,9 +82,9 @@ const DEFAULT_BUNDLE_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Twelve, because twelve rounds on the guest's eight CPUs are already one and
 /// a half to each, beside the supervisor's own work. Against a 10 GiB guest, which its kernel reports as 9000 MiB, that
 /// leaves the children about 3.8 GiB at the other defaults — room for eleven
-/// rounds at the headroom beside one at its max with some 2 GiB to spare, so
-/// one round growing to its max does not by itself reach the total and take a
-/// neighbour with it. An availability setting: a guest whose kernel reports
+/// rounds at the headroom beside one at its maxes, its composition's and its
+/// decodes', with some 1.7 GiB to spare, so one round growing to its maxes
+/// does not by itself reach the total and take a neighbour with it. An availability setting: a guest whose kernel reports
 /// below about 5.4 GiB does not boot with it, and below about 6.5 GiB the count
 /// is more than the memory holds at the headroom, so rounds past what it holds
 /// answer busy.
@@ -107,10 +108,24 @@ pub(crate) struct Settings {
     /// and by default [`MAX_IDLE`]).
     pub(crate) bundle_idle: Duration,
     pub(crate) base_reserve: u64,
-    pub(crate) round_max: u64,
+    /// What a round's composition holds — its policy and its models together
+    /// (`composition-max-bytes`, [`DEFAULT_COMPOSITION_MAX_BYTES`]).
+    pub(crate) composition_max: u64,
+    /// What a round's policy holds (`policy-max-bytes`,
+    /// [`DEFAULT_POLICY_MAX_BYTES`]).
+    pub(crate) policy_max: u64,
+    /// What a round's models hold together (`inference-max-bytes`,
+    /// [`DEFAULT_INFERENCE_MAX_BYTES`]).
+    pub(crate) inference_max: u64,
+    /// What the decodes of a round's captures hold together, beside the
+    /// composition (`media-max-bytes`, [`DEFAULT_MEDIA_MAX_BYTES`]).
+    pub(crate) media_max: u64,
     pub(crate) round_headroom: u64,
     pub(crate) round_deadline: Duration,
     pub(crate) round_fuel: u64,
+    /// What a round's captures' pictures are held to (`picture-long-side`,
+    /// `picture-short-side`, [`PictureBounds::DEFAULT`]).
+    pub(crate) picture_bounds: PictureBounds,
     pub(crate) capacity_wait: Duration,
     pub(crate) bundle_stream: Duration,
     pub(crate) bundle_stream_idle: Duration,
@@ -166,7 +181,18 @@ pub(crate) fn load() -> Settings {
             "base-reserve-bytes",
             DEFAULT_BASE_RESERVE_BYTES,
         ),
-        round_max: setting(&mut launch, "round-max-bytes", DEFAULT_ROUND_MAX_BYTES),
+        composition_max: setting(
+            &mut launch,
+            "composition-max-bytes",
+            DEFAULT_COMPOSITION_MAX_BYTES,
+        ),
+        policy_max: setting(&mut launch, "policy-max-bytes", DEFAULT_POLICY_MAX_BYTES),
+        inference_max: setting(
+            &mut launch,
+            "inference-max-bytes",
+            DEFAULT_INFERENCE_MAX_BYTES,
+        ),
+        media_max: setting(&mut launch, "media-max-bytes", DEFAULT_MEDIA_MAX_BYTES),
         round_headroom: setting(
             &mut launch,
             "round-headroom-bytes",
@@ -178,6 +204,18 @@ pub(crate) fn load() -> Settings {
             Duration::from_secs(DEFAULT_ROUND_DEADLINE_SECS),
         ),
         round_fuel: setting(&mut launch, "round-fuel", DEFAULT_ROUND_FUEL),
+        picture_bounds: PictureBounds {
+            long: setting(
+                &mut launch,
+                "picture-long-side",
+                PictureBounds::DEFAULT.long,
+            ),
+            short: setting(
+                &mut launch,
+                "picture-short-side",
+                PictureBounds::DEFAULT.short,
+            ),
+        },
         capacity_wait: secs(
             &mut launch,
             "capacity-wait-secs",
@@ -264,6 +302,25 @@ impl Settings {
             );
         }
 
+        // A picture has a pixel at least each way, and its longer side is the
+        // longer: bounds the other way round are not what the host meant.
+        let bounds = self.picture_bounds;
+        if bounds.short == 0 || bounds.short > bounds.long {
+            safe_logger::error_and_panic!(
+                "execution-worker: picture bounds of {} by {} must be above zero, the shorter \
+                 side no longer than the longer. Stopping.",
+                safe(
+                    &bounds.long,
+                    reason!("the host's own setting, or this build's default")
+                ),
+                safe(
+                    &bounds.short,
+                    reason!("the host's own setting, or this build's default")
+                ),
+                reason!("a constant, emitted once at boot before any request exists")
+            );
+        }
+
         if let Some(refusal) = self.leg.refusal() {
             safe_logger::error_and_panic!(
                 "execution-worker: {} cannot hold a leg up. Stopping.",
@@ -295,19 +352,52 @@ impl Settings {
             );
         }
 
+        // Each part of the composition holds something and no more than the
+        // composition does — a part's limit above it is held by the
+        // composition's — and the decodes beside it hold something.
+        let parts = [self.policy_max, self.inference_max];
+        if self.media_max == 0
+            || parts
+                .iter()
+                .any(|&part| part == 0 || part > self.composition_max)
+        {
+            safe_logger::error_and_panic!(
+                "execution-worker: policy and inference maxes of {} and {} MiB must each be \
+                 above zero and within the {} MiB composition max, and a {} MiB media max \
+                 above zero. Stopping.",
+                safe(
+                    &(self.policy_max >> 20),
+                    reason!("the host's own setting, or this build's default")
+                ),
+                safe(
+                    &(self.inference_max >> 20),
+                    reason!("the host's own setting, or this build's default")
+                ),
+                safe(
+                    &(self.composition_max >> 20),
+                    reason!("the host's own setting, or this build's default")
+                ),
+                safe(
+                    &(self.media_max >> 20),
+                    reason!("the host's own setting, or this build's default")
+                ),
+                reason!("a constant, emitted once at boot before any request exists")
+            );
+        }
+
         // The room a child needs to start must be above zero — there is nothing
-        // to divide by below otherwise — and within a round's max, or no child
-        // could ever start.
-        if self.round_headroom == 0 || self.round_headroom > self.round_max {
+        // to divide by below otherwise — and within a composition's max, or no
+        // child could ever start.
+        if self.round_headroom == 0 || self.round_headroom > self.composition_max {
             safe_logger::error_and_panic!(
                 "execution-worker: a {} MiB round headroom must be above zero and within \
-                 the {} MiB round max. Stopping.",
+                 the {} MiB composition max. Stopping.",
                 safe(
                     &(self.round_headroom >> 20),
                     reason!("the host's own setting, or this build's default")
                 ),
                 safe(
-                    &(self.round_max >> 20),
+                    &(self.composition_max >> 20),
                     reason!("the host's own setting, or this build's default")
                 ),
                 reason!("a constant, emitted once at boot before any request exists")
@@ -357,16 +447,20 @@ fn refused(e: LaunchError) -> ! {
 #[cfg(test)]
 mod tests {
     use engine_executor::admission::{
-        DEFAULT_BASE_RESERVE_BYTES, DEFAULT_ROUND_HEADROOM_BYTES, DEFAULT_ROUND_MAX_BYTES,
-        DEFAULT_WAITING_PER_CHILD, children_total,
+        DEFAULT_BASE_RESERVE_BYTES, DEFAULT_COMPOSITION_MAX_BYTES, DEFAULT_MEDIA_MAX_BYTES,
+        DEFAULT_ROUND_HEADROOM_BYTES, DEFAULT_WAITING_PER_CHILD, children_total,
     };
 
+    use engine_supervisor::DEFAULT_CHILD_MAX_TASKS;
+
     use super::{DEFAULT_BUNDLE_CACHE_BYTES, DEFAULT_MAX_CHILDREN};
+    use crate::MAX_COPROCESSES;
 
     /// The default child bound against the guest it was chosen for: a 10 GiB
     /// launch, which its kernel reports as 9000 MiB. Every round but one at the
-    /// headroom and that one at its max fit the children's total, so one round
-    /// growing to its max does not by itself reach the total.
+    /// headroom and that one at its maxes — its composition's and its
+    /// decodes' — fit the children's total, so one round growing to its maxes
+    /// does not by itself reach the total.
     #[test]
     fn the_default_bound_fits_a_10_gib_guest() {
         const REPORTED: u64 = 9000 * 1024 * 1024;
@@ -379,10 +473,37 @@ mod tests {
         );
         assert!(
             total
-                >= DEFAULT_ROUND_MAX_BYTES
+                >= DEFAULT_COMPOSITION_MAX_BYTES
+                    + DEFAULT_MEDIA_MAX_BYTES
                     + (DEFAULT_MAX_CHILDREN as u64 - 1) * DEFAULT_ROUND_HEADROOM_BYTES,
             "{} MiB for the children",
             total >> 20
         );
+    }
+
+    /// The processes the default bounds hold at once, each at its task cap,
+    /// against the PIDs the measured command line gives the guest: the
+    /// supervisor refuses to boot where they do not leave half of them
+    /// (`engine_supervisor::Cgroups::create`), so these are one choice written
+    /// in two files.
+    #[test]
+    fn the_default_bounds_fit_the_guests_pids() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../image/cmdline");
+        let processes = DEFAULT_MAX_CHILDREN as u64 * (1 + MAX_COPROCESSES as u64);
+        for variant in ["production", "debug"] {
+            let path = format!("{dir}/execution-worker/{variant}");
+            let cmdline = std::fs::read_to_string(&path).expect("the measured command line");
+            let pid_max: u64 = cmdline
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix("sysctl.kernel.pid_max="))
+                .unwrap_or_else(|| panic!("{path} gives the guest no PID bound"))
+                .parse()
+                .expect("a number of PIDs");
+            assert!(
+                processes * DEFAULT_CHILD_MAX_TASKS <= pid_max / 2,
+                "{variant}: {processes} processes at {DEFAULT_CHILD_MAX_TASKS} tasks each, \
+                 against {pid_max} PIDs"
+            );
+        }
     }
 }

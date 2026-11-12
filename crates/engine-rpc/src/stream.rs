@@ -2,14 +2,14 @@
 //!
 //! A round request travels as ONE remoc item, and an item past remoc's limit fails
 //! the channel it was sent on for good. The request already carries the round's
-//! clip and state frame, so a bundle inside it decided whether a round fit at all —
+//! captures and state frame, so a bundle inside it decided whether a round fit at all —
 //! and on a cache miss during a media round, it did not. Beside the call, the
 //! request is the round alone and stays one bounded item whatever the bundle weighs.
 //!
 //! Two blobs, two ends, one header: the cwasm and the [`BundleMeta`] it is
 //! registered with, each a `fleet_stream` blob under its own bound. The metadata is
 //! a blob rather than a header field because at its bound
-//! ([`MAX_BUNDLE_META_BYTES`]) it would share one request's limit with a full clip.
+//! ([`MAX_BUNDLE_META_BYTES`]) it would share one request's limit with full captures.
 //!
 //! The sender need not hold the cwasm whole: a [`BundleSource`] names it by its
 //! length and digest and passes its pieces on as they come, from wherever the
@@ -235,7 +235,11 @@ mod tests {
     use crate::execute::{RUN_REQUEST_HEADROOM, RoundProps, RunRequest};
     use crate::keys::CompositionKey;
     use crate::padded::{Framed, Padded};
-    use session_types::{Clip, Event, MAX_CLIP_BYTES, MAX_CLIP_FRAMES, MediaResult, SessionState};
+    use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_FLASH_COLORS, MAX_VIDEO_GUIDES};
+    use session_types::{
+        Capture, Event, FaceFlashesGuide, FrameRange, MAX_MEDIA_BYTES, MediaResult, Rgb,
+        SessionState, VideoCapture, VideoGuide,
+    };
 
     /// The header with no bounds, so a test can put on the wire what the real type
     /// will not produce.
@@ -279,8 +283,29 @@ mod tests {
 
     /// The const assertion beside `RunRequest`, held against a real encoding: a
     /// request with every field at its bound, plus the header naming its bundle.
+    /// The event at its widest: every step a video, every video with as many
+    /// ranges as a step has guides, each of the widest guide.
     #[test]
     fn a_round_request_at_its_bounds_fits_its_budget() {
+        let range = FrameRange {
+            // Flashes of the most colours: of the guides, the one whose encoding
+            // is the longest.
+            guide: VideoGuide::FaceFlashes(FaceFlashesGuide {
+                width: 0.587_654,
+                colors: vec![
+                    Rgb {
+                        red: 255,
+                        green: 255,
+                        blue: 255,
+                    };
+                    MAX_FLASH_COLORS
+                ],
+                flash_ms: u16::MAX,
+                grace_ms: u16::MAX,
+            }),
+            first: u32::MAX,
+            last: u32::MAX,
+        };
         let req = RunRequest {
             composition_key: CompositionKey::from_digest([0xFF; 32]),
             max_cwasm_bytes: u64::MAX,
@@ -291,15 +316,18 @@ mod tests {
             .expect("props at their bound fit their frame"),
             session_state: Padded::seal(&SessionState::default()).expect("fits the frame"),
             event: Event::Media(MediaResult {
-                slot: u32::MAX,
-                clip: Clip {
-                    frames: vec![vec![0xFF; MAX_CLIP_BYTES / MAX_CLIP_FRAMES]; MAX_CLIP_FRAMES],
-                },
+                captures: vec![
+                    Capture::Video(VideoCapture {
+                        video: vec![0xFF; MAX_MEDIA_BYTES / MAX_CAPTURE_STEPS],
+                        guides: vec![range; MAX_VIDEO_GUIDES],
+                    });
+                    MAX_CAPTURE_STEPS
+                ],
             }),
         };
         let mut b = Vec::new();
         ciborium::into_writer(&(&req, &widest_header()), &mut b).unwrap();
-        let budget = MAX_CLIP_BYTES
+        let budget = MAX_MEDIA_BYTES
             + <SessionState as Framed>::FRAME
             + <RoundProps as Framed>::FRAME
             + BUNDLE_HEADER_MAX_ENCODED

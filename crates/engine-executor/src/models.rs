@@ -6,9 +6,9 @@
 //! A model runs in a process of its own beside the round's. The first time
 //! the round calls a model's function, the host has that process started
 //! ([`ModelStarter`]) and hands the component a handle to the model; a second
-//! call hands out another handle to the same process. A `run` writes its
-//! tensors to the process and reads the graph's outputs back, off the round's
-//! thread, so the process keeps answering whoever drives it.
+//! call hands out another handle to the same process. A `run` sends its
+//! tensors to the process and awaits the graph's outputs, as the round awaits
+//! the rest of its IO, so the process keeps answering whoever drives it.
 //!
 //! A `run` is served as whatever its slot declares it to be — tensors of any
 //! element types in, a tensor or a tuple or a record of them out — so it is
@@ -21,12 +21,13 @@
 //! round, as every failure of the host's does.
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::future::Future;
+use std::os::unix::net::UnixStream;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use enclavid_inference::protocol::{self, Request, Tensor};
+use coprocess_channel::Channel;
+use enclavid_inference::protocol::{MAX_MESSAGE_BYTES, Request, Response, Tensor};
 use wasmtime::StoreContextMut;
 use wasmtime::component::types::Type;
 use wasmtime::component::{Linker, ResourceAny, ResourceDynamic, ResourceType, Val};
@@ -43,12 +44,12 @@ pub trait ModelStarter: Send + Sync {
     fn start(
         &self,
         index: u32,
-    ) -> Pin<Box<dyn Future<Output = wasmtime::Result<File>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = wasmtime::Result<UnixStream>> + Send + '_>>;
 }
 
-/// The sockets to the processes of the models a round has started, by model.
+/// The channels to the processes of the models a round has started, by model.
 #[derive(Default)]
-pub(crate) struct Started(HashMap<u32, Arc<Mutex<File>>>);
+pub(crate) struct Started(HashMap<u32, Channel>);
 
 /// Register each slot's models in the instance the fused composition imports
 /// the slot as: each resource once, as a type of its own, with its `run`; and
@@ -118,25 +119,20 @@ pub(crate) fn register_models(
     Ok(())
 }
 
-/// The socket to model `index`'s process: the one the round started, or the
-/// process started now.
-async fn started(
-    store: &mut StoreContextMut<'_, HostState>,
-    index: u32,
-) -> wasmtime::Result<Arc<Mutex<File>>> {
-    if let Some(socket) = store.data().started.0.get(&index) {
-        return Ok(socket.clone());
+/// Model `index`'s process, started now unless the round has started it.
+async fn started(store: &mut StoreContextMut<'_, HostState>, index: u32) -> wasmtime::Result<()> {
+    if store.data().started.0.contains_key(&index) {
+        return Ok(());
     }
     let starter = store.data().models.clone();
-    let socket = Arc::new(Mutex::new(starter.start(index).await?));
-    store.data_mut().started.0.insert(index, socket.clone());
-    Ok(socket)
+    let channel = Channel::new(starter.start(index).await?)?;
+    store.data_mut().started.0.insert(index, channel);
+    Ok(())
 }
 
 /// A `run` of a resource of type `ty`: the model its handle names — one of
 /// `served`, or the round traps — run over the tensors `params` borrow, in its
-/// process and off the round's thread, and what it gives back made the
-/// `result` the `run` returns.
+/// process, and what it gives back made the `result` the `run` returns.
 async fn run_model(
     mut store: StoreContextMut<'_, HostState>,
     ty: u32,
@@ -157,21 +153,17 @@ async fn run_model(
         .iter()
         .map(|input| lift(&mut store, handle(input)?))
         .collect::<wasmtime::Result<Vec<_>>>()?;
-    let socket = store
-        .data()
+    let channel = store
+        .data_mut()
         .started
         .0
-        .get(&model.rep())
-        .cloned()
+        .get_mut(&model.rep())
         .ok_or_else(|| wasmtime::Error::msg("a model the round has not started"))?;
     let request = Request { model: 0, inputs };
-    let answer = tokio::task::spawn_blocking(move || {
-        let mut socket = socket.lock().unwrap_or_else(|e| e.into_inner());
-        protocol::write_request(&mut *socket, &request)?;
-        protocol::read_answer(&mut *socket).map_err(wasmtime::Error::new)
-    })
-    .await??;
-    let mut outputs = answer.map_err(wasmtime::Error::new)?.into_iter();
+    let mut outputs = match channel.ask(&request, MAX_MESSAGE_BYTES).await? {
+        Response::Outputs(outputs) => outputs.into_iter(),
+        Response::Failed(failure) => return Err(wasmtime::Error::new(failure)),
+    };
     let given = give(&mut store, result, &mut outputs)?;
     if outputs.next().is_some() {
         return Err(wasmtime::Error::msg(

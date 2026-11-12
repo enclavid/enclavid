@@ -239,7 +239,7 @@ What each measurement-relevant part is doing:
   every role takes them from one fw_cfg entry, `opt/com.enclavid/settings`,
   as `key=value` pairs ended by `;` or a newline
   (`crates/fleet-transport/src/launch.rs`). `enclavid-boot-cvm` passes one as
-  `FW_CFG="settings=max-children=8;round-max-bytes=536870912"`, and the fleet
+  `FW_CFG="settings=max-children=8;composition-max-bytes=536870912"`, and the fleet
   module as `enclavid.cvms.<role>.settings`. Each is optional; a value that
   does not parse, a key given twice, or a key the role does not know stops the
   boot. A developer's build without vsock reads each from the environment
@@ -253,10 +253,15 @@ What each measurement-relevant part is doing:
   | | `bundle-cache-entries` | 512 |
   | | `bundle-idle-secs` | 3600, at most 3600 |
   | | `base-reserve-bytes` | 256 MiB |
-  | | `round-max-bytes` | 384 MiB |
+  | | `composition-max-bytes` | 384 MiB, the policy and its models with the cache they map |
+  | | `policy-max-bytes` | 384 MiB, no more than the composition's |
+  | | `inference-max-bytes` | 384 MiB, no more than the composition's |
+  | | `media-max-bytes` | 384 MiB, the decodes, beside the composition |
   | | `round-headroom-bytes` | 128 MiB |
   | | `round-deadline-secs` | 120 |
   | | `round-fuel` | 10 000 000 000 |
+  | | `picture-long-side` | 1920 |
+  | | `picture-short-side` | 1920, no longer than the long side |
   | | `capacity-wait-secs` | 10 |
   | | `bundle-stream-secs` | 120 |
   | | `bundle-stream-idle-secs` | 20 |

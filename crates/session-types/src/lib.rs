@@ -481,6 +481,35 @@ pub struct SessionState {
     /// it persists it, whatever the runtime that wrote the rest of this value
     /// put here. Only a wait moves it, so no other write to the session does.
     pub awaiting_seq: u64,
+    /// The steps of the awaited media prompt the page has sent so far, in the
+    /// spec's order: each step's capture already stored as a media blob, kept
+    /// until the last step's arrives and the round runs with them all. Empty
+    /// in any other wait.
+    ///
+    /// api's own, as `awaiting_seq` is: it adds a step as it stores it, and a
+    /// round's write leaves the list empty, whatever the runtime put here.
+    pub sent: Vec<SentStep>,
+    /// When the page started the awaited media prompt, in milliseconds since
+    /// the Unix epoch by api's clock: set once, by its start, for a prompt
+    /// with a time limit; none before, and in any other wait.
+    ///
+    /// api's own, as `awaiting_seq` is: a round's write leaves it none,
+    /// whatever the runtime put here.
+    pub started_at_ms: Option<u64>,
+}
+
+/// One step of the awaited media prompt the page has sent: where its capture's
+/// blob is, and what api read beside it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SentStep {
+    /// The BLAKE3 of the step's blob, which the media store keeps it by.
+    #[serde(with = "serde_bytes")]
+    pub hash: [u8; 32],
+    /// The blob's length, which the media budget counts.
+    pub len: u64,
+    /// Where the page saw each guide held, for a video step; empty for a
+    /// photo.
+    pub guides: Vec<FrameRange>,
 }
 
 // ---------------------------------------------------------------------
@@ -635,8 +664,11 @@ pub enum Event {
     Start,
     /// Reply to [`Prompt::ConsentDisclosure`] — accepted?
     ConsentDisclosure(bool),
-    /// Reply to [`Prompt::Media`] — one capture step completed.
+    /// Reply to [`Prompt::Media`] — every step of the spec captured.
     Media(MediaResult),
+    /// Reply to a [`Prompt::Media`] with a time limit whose steps were not all
+    /// captured within it.
+    TimedOut,
 }
 
 /// OUTBOUND from the policy reducer — sealed mirror of the WIT `action`
@@ -649,123 +681,203 @@ pub enum Action {
     Finish(Decision),
 }
 
-/// The captured frames for one `media-spec` step — sealed mirror of the
-/// WIT `media-result` record. `slot` is the capture-step index it fills.
+/// The captures of one `media-spec` — sealed mirror of the WIT
+/// `media-result` record.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MediaResult {
-    pub slot: u32,
-    pub clip: Clip,
+    /// One capture for each step of the spec, in its order. Bounded on the
+    /// way in, by count and by bytes: a `Vec` decoded with no bound is a
+    /// peer's choice of how much this side allocates.
+    #[serde(deserialize_with = "captures::deserialize")]
+    pub captures: Vec<Capture>,
+}
+
+impl MediaResult {
+    /// The applicant's material, one blob for each capture, in order.
+    pub fn blobs(&self) -> impl Iterator<Item = &[u8]> {
+        self.captures.iter().map(Capture::bytes)
+    }
 }
 
 // ---------------------------------------------------------------------
 // Capture / media
 // ---------------------------------------------------------------------
 
-/// Frames one [`Clip`] may carry.
+/// Bytes one [`MediaResult`] may carry in all, its captures' blobs summed.
 ///
 /// Derived from what api will accept at ingress, not chosen: the applicant's
-/// multipart body is capped at `enclavid_api::limits::APPLICANT_INPUT_BODY_LIMIT`
-/// and sized there for roughly a dozen JPEG frames. A body of that size made
-/// entirely of empty parts would otherwise yield hundreds of thousands of frames,
-/// each one a separate blob write and a separate WIT resource in the round.
+/// multipart body is capped at `enclavid_api::limits::APPLICANT_INPUT_BODY_LIMIT`,
+/// and this is that limit, counted the way it is counted at ingress. A per-blob
+/// cap is deliberately not a second number: api admits a body of this size
+/// whatever shape it has, so a tighter per-blob rule would be one this side
+/// invented and the other side does not enforce.
 ///
 /// It is restated here, away from api, because the party that must enforce it is
 /// the execution-worker, which accepts any attested guest: "api already capped
-/// the body" is a claim about a peer the worker cannot identify.
-pub const MAX_CLIP_FRAMES: usize = 64;
+/// the body" is a claim about a peer the worker cannot identify. So is the count,
+/// [`MAX_CAPTURE_STEPS`](engine_types::limits::MAX_CAPTURE_STEPS): a body of this
+/// size made of empty parts would otherwise be hundreds of thousands of captures,
+/// each a blob write and a WIT resource in the round.
+pub const MAX_MEDIA_BYTES: usize = 12 * 1024 * 1024;
 
-/// Bytes one clip may carry in total — the same ingress limit, counted the way it
-/// is counted at ingress. A per-FRAME cap is deliberately not a second number:
-/// api admits a body of this size whatever shape it has, so a tighter per-frame
-/// rule would be one this side invented and the other side does not enforce.
-pub const MAX_CLIP_BYTES: usize = 12 * 1024 * 1024;
-
-/// One captured artifact — a sequence of JPEG frames over ~1s.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Clip {
-    /// Encoded as one CBOR byte string PER FRAME, and bounded on the way back in.
-    ///
-    /// Both halves are the same field's business and neither is optional. A bare
-    /// `Vec<Vec<u8>>` serialises element-by-element — two bytes for every byte
-    /// over 0x17 — so a full capture cost about 1.9x its length on each of the two
-    /// hops it crosses; the same mistake has now been paid for on `cwasm`,
-    /// `PluginInstance::wasm` and `SessionState::state`. And a `Vec` decoded with
-    /// no bound is a peer's choice of how much this side allocates.
-    #[serde(
-        serialize_with = "frames::serialize",
-        deserialize_with = "frames::deserialize"
-    )]
-    pub frames: Vec<Vec<u8>>,
+/// One step's capture, of the kind the step asked for — sealed mirror of the
+/// WIT `capture` variant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Capture {
+    Photo(PhotoCapture),
+    Video(VideoCapture),
 }
 
-/// The codec for [`Clip::frames`]: byte strings out, bounded byte strings in.
-mod frames {
-    use super::{MAX_CLIP_BYTES, MAX_CLIP_FRAMES};
-    use serde::de::{self, SeqAccess, Visitor};
-    use serde::ser::SerializeSeq;
-
-    pub(super) fn serialize<S: serde::Serializer>(
-        frames: &[Vec<u8>],
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
-        let mut seq = s.serialize_seq(Some(frames.len()))?;
-        for f in frames {
-            seq.serialize_element(serde_bytes::Bytes::new(f))?;
+impl Capture {
+    /// The applicant's bytes: the photo, or the video.
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Capture::Photo(capture) => &capture.photo,
+            Capture::Video(capture) => &capture.video,
         }
-        seq.end()
     }
+}
+
+/// A photo step's capture — sealed mirror of the WIT `photo-capture` record.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhotoCapture {
+    /// One JPEG: the frame the applicant took. One CBOR byte string — see
+    /// [`SessionState::state`].
+    #[serde(with = "serde_bytes")]
+    pub photo: Vec<u8>,
+    /// The step's own guide, which api copies from the prompt.
+    pub guide: Option<PhotoGuide>,
+}
+
+/// A video step's capture — sealed mirror of the WIT `video-capture` record.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VideoCapture {
+    /// A WebM of VP8 frames, as the page's encoder wrote it. One CBOR byte
+    /// string — see [`SessionState::state`].
+    #[serde(with = "serde_bytes")]
+    pub video: Vec<u8>,
+    /// One range for each guide of the step, in its order. Bounded on the way
+    /// in.
+    #[serde(deserialize_with = "guides::deserialize")]
+    pub guides: Vec<FrameRange>,
+}
+
+/// Where the page saw one guide of a video step held, by frame index into the
+/// video — sealed mirror of the WIT `frame-range` record.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FrameRange {
+    /// The step's own guide, which api copies from the prompt.
+    pub guide: VideoGuide,
+    /// The first frame the guide was held in: the page's word.
+    pub first: u32,
+    /// The last frame the guide was held in: the page's word.
+    pub last: u32,
+}
+
+/// The decoder for [`MediaResult::captures`]: at most
+/// [`MAX_CAPTURE_STEPS`](engine_types::limits::MAX_CAPTURE_STEPS) captures, of
+/// at most [`MAX_MEDIA_BYTES`] together.
+mod captures {
+    use engine_types::limits::MAX_CAPTURE_STEPS;
+    use serde::de::{self, SeqAccess, Visitor};
+
+    use super::{Capture, MAX_MEDIA_BYTES};
 
     pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
         d: D,
-    ) -> Result<Vec<Vec<u8>>, D::Error> {
-        struct Frames;
+    ) -> Result<Vec<Capture>, D::Error> {
+        struct Captures;
 
-        impl<'de> Visitor<'de> for Frames {
-            type Value = Vec<Vec<u8>>;
+        impl<'de> Visitor<'de> for Captures {
+            type Value = Vec<Capture>;
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "at most {MAX_CLIP_FRAMES} capture frames")
+                write!(f, "at most {MAX_CAPTURE_STEPS} captures")
             }
 
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                 // NOT `with_capacity(seq.size_hint())`: the hint is the sender's
                 // claim, and reserving against it is the allocation this bound
                 // exists to refuse. It grows into what actually arrives.
-                let mut out: Vec<Vec<u8>> = Vec::new();
+                let mut out: Vec<Capture> = Vec::new();
                 let mut total = 0usize;
-                while let Some(frame) = seq.next_element::<serde_bytes::ByteBuf>()? {
-                    if out.len() == MAX_CLIP_FRAMES {
+                while let Some(capture) = seq.next_element::<Capture>()? {
+                    if out.len() == MAX_CAPTURE_STEPS {
                         return Err(de::Error::custom(format!(
-                            "more than {MAX_CLIP_FRAMES} capture frames"
+                            "more than {MAX_CAPTURE_STEPS} captures"
                         )));
                     }
-                    total = total.saturating_add(frame.len());
-                    if total > MAX_CLIP_BYTES {
+                    total = total.saturating_add(capture.bytes().len());
+                    if total > MAX_MEDIA_BYTES {
                         return Err(de::Error::custom(format!(
-                            "a clip over {MAX_CLIP_BYTES} bytes"
+                            "captures over {MAX_MEDIA_BYTES} bytes"
                         )));
                     }
-                    out.push(frame.into_vec());
+                    out.push(capture);
                 }
                 Ok(out)
             }
         }
 
-        d.deserialize_seq(Frames)
+        d.deserialize_seq(Captures)
     }
 }
 
+/// The decoder for [`VideoCapture::guides`]: at most
+/// [`MAX_VIDEO_GUIDES`](engine_types::limits::MAX_VIDEO_GUIDES) ranges.
+mod guides {
+    use engine_types::limits::MAX_VIDEO_GUIDES;
+    use serde::de::{self, SeqAccess, Visitor};
+
+    use super::FrameRange;
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Vec<FrameRange>, D::Error> {
+        struct Guides;
+
+        impl<'de> Visitor<'de> for Guides {
+            type Value = Vec<FrameRange>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "at most {MAX_VIDEO_GUIDES} frame ranges")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                // Grown into what arrives, as the captures are.
+                let mut out: Vec<FrameRange> = Vec::new();
+                while let Some(range) = seq.next_element::<FrameRange>()? {
+                    if out.len() == MAX_VIDEO_GUIDES {
+                        return Err(de::Error::custom(format!(
+                            "more than {MAX_VIDEO_GUIDES} frame ranges"
+                        )));
+                    }
+                    out.push(range);
+                }
+                Ok(out)
+            }
+        }
+
+        d.deserialize_seq(Guides)
+    }
+}
+
+/// Spec for one media render — sealed mirror of the WIT `media-spec` record.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MediaSpec {
     pub label: Localized,
     pub captures: Vec<CaptureStep>,
+    /// The seconds the applicant has for every step together, from when the
+    /// page starts them; none for no limit.
+    pub time_limit_secs: Option<u16>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+/// One step of a capture — sealed mirror of the WIT `capture-step` record.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CaptureStep {
     /// Resolved icon NAME (locale-agnostic) the applicant frontend
     /// dispatches; `None` when the step declared no icon.
@@ -773,39 +885,186 @@ pub struct CaptureStep {
     pub instructions: Localized,
     pub label: Localized,
     pub camera: CameraFacing,
-    pub guide: Option<CaptureGuide>,
-    pub review_hint: Localized,
+    pub kind: CaptureKind,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CaptureGuide {
-    pub kind: Option<capture_guide::Kind>,
+/// What one capture step records — sealed mirror of the WIT `capture-kind`
+/// variant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CaptureKind {
+    Photo(PhotoSpec),
+    Video(VideoSpec),
 }
 
-pub mod capture_guide {
-    use serde::{Deserialize, Serialize};
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-    pub enum Kind {
-        None(super::GuideNone),
-        Rect(super::GuideRect),
-        Oval(super::GuideOval),
-    }
+/// A photo step — sealed mirror of the WIT `photo-spec` record.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhotoSpec {
+    pub guide: Option<PhotoGuide>,
+    /// None: no review screen.
+    pub review_hint: Option<Localized>,
 }
 
+/// A video step — sealed mirror of the WIT `video-spec` record.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GuideNone {}
+pub struct VideoSpec {
+    pub guides: Vec<VideoGuide>,
+}
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// A shape drawn over the camera — sealed mirror of the WIT `photo.shape`
+/// variant, held to its ranges by the engine where the prompt is built, as
+/// every guide is.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Shape {
+    Rect(RectShape),
+    Oval(OvalShape),
+}
+
+/// Sealed mirror of the WIT `rect-shape` record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GuideRect {
+pub struct RectShape {
     pub aspect: f32,
 }
 
+/// Sealed mirror of the WIT `oval-shape` record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OvalShape {
+    pub width: f32,
+}
+
+/// What a photo's camera shows — sealed mirror of the WIT `photo.guide`
+/// variant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PhotoGuide {
+    Shape(PhotoShapeGuide),
+    Face(PhotoFaceGuide),
+}
+
+/// Sealed mirror of the WIT `photo.shape-guide` record.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PhotoShapeGuide {
+    pub shape: Shape,
+    pub label: Localized,
+}
+
+/// Sealed mirror of the WIT `photo.face-guide` record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhotoFaceGuide {
+    pub width: f32,
+}
+
+/// One thing a video asks — sealed mirror of the WIT `video.guide` variant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum VideoGuide {
+    Shape(VideoShapeGuide),
+    Face(FaceGuide),
+    HeadTurn(HeadTurnGuide),
+    FaceFlashes(FaceFlashesGuide),
+}
+
+/// Sealed mirror of the WIT `video.shape-guide` record.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoShapeGuide {
+    pub shape: Shape,
+    pub label: Localized,
+    pub hold_ms: u16,
+}
+
+/// Sealed mirror of the WIT `video.face-guide` record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FaceGuide {
+    pub width: f32,
+    pub hold_ms: u16,
+    pub grace_ms: u16,
+}
+
+/// Sealed mirror of the WIT `head-turn-guide` record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeadTurnGuide {
+    pub degrees: i8,
+    pub hold_ms: u16,
+    pub grace_ms: u16,
+}
+
+/// Sealed mirror of the WIT `face-flashes-guide` record.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GuideOval {}
+pub struct FaceFlashesGuide {
+    pub width: f32,
+    /// Bounded on the way in, as the ranges that carry it are.
+    #[serde(deserialize_with = "colors::deserialize")]
+    pub colors: Vec<Rgb>,
+    pub flash_ms: u16,
+    pub grace_ms: u16,
+}
+
+/// Sealed mirror of the WIT `rgb` record. Encoded as its three bytes rather
+/// than by its fields' names: a prompt may hold 4096 of them, and its ranges
+/// as many again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "[u8; 3]", into = "[u8; 3]")]
+pub struct Rgb {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+impl From<[u8; 3]> for Rgb {
+    fn from([red, green, blue]: [u8; 3]) -> Self {
+        Rgb { red, green, blue }
+    }
+}
+
+impl From<Rgb> for [u8; 3] {
+    fn from(c: Rgb) -> Self {
+        [c.red, c.green, c.blue]
+    }
+}
+
+/// The decoder for [`FaceFlashesGuide::colors`]: at most
+/// [`MAX_FLASH_COLORS`](engine_types::limits::MAX_FLASH_COLORS) colours.
+mod colors {
+    use engine_types::limits::MAX_FLASH_COLORS;
+    use serde::de::{self, SeqAccess, Visitor};
+
+    use super::Rgb;
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Vec<Rgb>, D::Error> {
+        struct Colors;
+
+        impl<'de> Visitor<'de> for Colors {
+            type Value = Vec<Rgb>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "at most {MAX_FLASH_COLORS} colours")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                // Grown into what arrives, as the captures are.
+                let mut out: Vec<Rgb> = Vec::new();
+                while let Some(color) = seq.next_element::<Rgb>()? {
+                    if out.len() == MAX_FLASH_COLORS {
+                        return Err(de::Error::custom(format!(
+                            "more than {MAX_FLASH_COLORS} colours"
+                        )));
+                    }
+                    out.push(color);
+                }
+                Ok(out)
+            }
+        }
+
+        d.deserialize_seq(Colors)
+    }
+}
 
 // ---------------------------------------------------------------------
 // Consent
@@ -833,66 +1092,139 @@ pub struct DisplayField {
 pub use engine_types::text::{Localized, Translation};
 
 #[cfg(test)]
-mod clip_tests {
+mod media_tests {
+    use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_FLASH_COLORS, MAX_VIDEO_GUIDES};
+
     use super::*;
 
-    fn clip(frames: Vec<Vec<u8>>) -> Vec<u8> {
-        encode(&Clip { frames }).expect("a clip encodes")
+    fn media(captures: Vec<Capture>) -> Vec<u8> {
+        encode(&MediaResult { captures }).expect("a media result encodes")
     }
 
-    /// The ordinary shape survives the codec unchanged — frames keep their order
-    /// and their bytes.
-    #[test]
-    fn a_capture_round_trips() {
-        let frames = vec![vec![0xFF, 0xD8, 0xFF], vec![], vec![1, 2, 3, 4]];
-        let back: Clip = decode(&clip(frames.clone())).expect("a clip decodes");
-        assert_eq!(back.frames, frames);
+    /// A capture of `photo`, taken to the face guide.
+    fn photo(photo: Vec<u8>) -> Capture {
+        Capture::Photo(PhotoCapture {
+            photo,
+            guide: Some(PhotoGuide::Face(PhotoFaceGuide { width: 0.5 })),
+        })
     }
 
-    /// Each frame crosses as ONE CBOR byte string, so a capture costs its own
-    /// length rather than about twice it. Asserted as a size bound rather than by
-    /// reading the encoding: 1 KiB of frames in ~1 KiB of CBOR can only be byte
-    /// strings, and the integer-array form this replaced could not fit.
+    /// A capture of `video` with `guides` ranges.
+    fn video(video: Vec<u8>, guides: usize) -> Capture {
+        let range = FrameRange {
+            guide: VideoGuide::HeadTurn(HeadTurnGuide {
+                degrees: -30,
+                hold_ms: 800,
+                grace_ms: 300,
+            }),
+            first: 3,
+            last: 9,
+        };
+        Capture::Video(VideoCapture {
+            video,
+            guides: vec![range; guides],
+        })
+    }
+
+    /// The ordinary shape survives the codec unchanged — captures keep their
+    /// order, their kinds and their bytes.
     #[test]
-    fn a_frame_costs_its_own_length_on_the_wire() {
-        let frames = vec![vec![0x80u8; 1024]];
-        let encoded = clip(frames);
-        assert!(
-            encoded.len() < 1024 + 64,
-            "a 1 KiB frame encoded to {} bytes — not a byte string",
-            encoded.len()
+    fn a_media_result_round_trips() {
+        let captures = vec![
+            photo(vec![0xFF, 0xD8, 0xFF]),
+            Capture::Photo(PhotoCapture::default()),
+            video(vec![0x1A, 0x45, 0xDF, 0xA3], 2),
+        ];
+        let back: MediaResult = decode(&media(captures.clone())).expect("it decodes");
+        assert_eq!(back.captures, captures);
+        let blobs: Vec<&[u8]> = back.blobs().collect();
+        assert_eq!(
+            blobs,
+            [&[0xFF, 0xD8, 0xFF][..], &[], &[0x1A, 0x45, 0xDF, 0xA3]]
         );
+    }
+
+    /// Each blob crosses as ONE CBOR byte string, so a capture costs its own
+    /// length rather than about twice it. Asserted as a size bound rather than by
+    /// reading the encoding: 1 KiB of bytes in ~1 KiB of CBOR can only be byte
+    /// strings, and the integer-array form could not fit.
+    #[test]
+    fn a_capture_costs_its_own_length_on_the_wire() {
+        for capture in [photo(vec![0x80u8; 1024]), video(vec![0x80u8; 1024], 0)] {
+            let encoded = media(vec![capture]);
+            assert!(
+                encoded.len() < 1024 + 64,
+                "a 1 KiB capture encoded to {} bytes — not a byte string",
+                encoded.len()
+            );
+        }
     }
 
     /// The count bound, refused at the decoder rather than trusted upstream.
     #[test]
-    fn more_frames_than_a_capture_can_hold_are_refused() {
-        let frames = vec![vec![7u8]; MAX_CLIP_FRAMES + 1];
-        assert!(decode::<Clip>(&clip(frames)).is_err());
+    fn more_captures_than_a_spec_has_steps_are_refused() {
+        let captures = vec![photo(vec![7u8]); MAX_CAPTURE_STEPS + 1];
+        assert!(decode::<MediaResult>(&media(captures)).is_err());
         // And the boundary itself still decodes, so the cap is a ceiling and not
         // an off-by-one.
-        let frames = vec![vec![7u8]; MAX_CLIP_FRAMES];
-        assert!(decode::<Clip>(&clip(frames)).is_ok());
+        let captures = vec![photo(vec![7u8]); MAX_CAPTURE_STEPS];
+        assert!(decode::<MediaResult>(&media(captures)).is_ok());
     }
 
-    /// The aggregate bound. Split across several frames, because a sender that
-    /// wants the allocation will not put it in one.
+    /// The aggregate bound. Split across several captures, and across both
+    /// kinds, because a sender that wants the allocation will not put it in one.
     #[test]
-    fn a_clip_over_the_ingress_budget_is_refused() {
-        let chunk = MAX_CLIP_BYTES / 4;
-        let frames = vec![vec![0u8; chunk]; 5];
-        assert!(decode::<Clip>(&clip(frames)).is_err());
+    fn captures_over_the_ingress_budget_are_refused() {
+        let chunk = MAX_MEDIA_BYTES / 4;
+        let mut captures = vec![photo(vec![0u8; chunk]); 4];
+        assert!(decode::<MediaResult>(&media(captures.clone())).is_ok());
+        captures.push(video(vec![0u8; 1], 1));
+        assert!(decode::<MediaResult>(&media(captures)).is_err());
     }
 
-    /// An absent field is still an empty clip — the `serde(default)` discipline
-    /// the at-rest blobs rely on is not broken by taking over the codec.
+    /// A video's ranges are bounded too, at as many as a step has guides.
     #[test]
-    fn an_absent_frames_field_decodes_to_none() {
-        #[derive(Serialize)]
-        struct Empty {}
-        let bytes = encode(&Empty {}).expect("an empty map encodes");
-        let back: Clip = decode(&bytes).expect("an absent field defaults");
-        assert!(back.frames.is_empty());
+    fn more_ranges_than_a_step_has_guides_are_refused() {
+        let over = media(vec![video(vec![], MAX_VIDEO_GUIDES + 1)]);
+        assert!(decode::<MediaResult>(&over).is_err());
+        let at = media(vec![video(vec![], MAX_VIDEO_GUIDES)]);
+        assert!(decode::<MediaResult>(&at).is_ok());
+    }
+
+    /// And a range's flashes, at as many colours as a guide may show.
+    #[test]
+    fn more_colors_than_a_guide_may_show_are_refused() {
+        let flashes = |colors| {
+            let range = FrameRange {
+                guide: VideoGuide::FaceFlashes(FaceFlashesGuide {
+                    width: 0.5,
+                    colors: vec![Rgb::default(); colors],
+                    flash_ms: 300,
+                    grace_ms: 300,
+                }),
+                first: 3,
+                last: 9,
+            };
+            media(vec![Capture::Video(VideoCapture {
+                video: vec![],
+                guides: vec![range],
+            })])
+        };
+        assert!(decode::<MediaResult>(&flashes(MAX_FLASH_COLORS + 1)).is_err());
+        assert!(decode::<MediaResult>(&flashes(MAX_FLASH_COLORS)).is_ok());
+    }
+
+    /// A colour crosses as its three bytes, and comes back as itself.
+    #[test]
+    fn a_color_crosses_as_its_three_bytes() {
+        let color = Rgb {
+            red: 255,
+            green: 136,
+            blue: 0,
+        };
+        let bytes = encode(&color).expect("a colour encodes");
+        assert_eq!(bytes, [0x83, 0x18, 0xFF, 0x18, 0x88, 0x00]);
+        assert_eq!(decode::<Rgb>(&bytes).expect("it decodes"), color);
     }
 }
 

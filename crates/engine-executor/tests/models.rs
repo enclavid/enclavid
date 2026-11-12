@@ -4,18 +4,18 @@
 //! out and answered over its socket by a stand-in for its process, which
 //! speaks the coprocess's protocol and computes something simple of its own.
 
-use std::fs::File;
 use std::future::Future;
-use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use enclavid_inference::protocol::{self, Data, Failure, Tensor};
+use coprocess_channel::{receive, send};
+use enclavid_inference::protocol::{Data, Failure, MAX_MESSAGE_BYTES, Request, Response, Tensor};
 use engine_compiler::Compiler;
 use engine_executor::{
-    DEFAULT_ROUND_FUEL, EmbeddedRegistry, Executor, MediaStore, ModelStarter, PrimedComposition,
-    RunError, RunInputs, RunResult, RunStatus, SessionChange, SessionListener,
+    DEFAULT_ROUND_FUEL, EmbeddedRegistry, Executor, MediaStarter, MediaStore, ModelStarter,
+    PictureBounds, PrimedComposition, RunError, RunInputs, RunResult, RunStatus, SessionChange,
+    SessionListener,
 };
 use engine_types::composition::{ModelFile, ModelImport, ModelLayer};
 use session_types::{Decision, Event, SessionState};
@@ -135,7 +135,10 @@ impl StandIns {
 }
 
 impl ModelStarter for StandIns {
-    fn start(&self, index: u32) -> Pin<Box<dyn Future<Output = RunResult<File>> + Send + '_>> {
+    fn start(
+        &self,
+        index: u32,
+    ) -> Pin<Box<dyn Future<Output = RunResult<UnixStream>> + Send + '_>> {
         self.started.lock().unwrap().push(index);
         let answer = self.answer;
         Box::pin(async move {
@@ -145,15 +148,15 @@ impl ModelStarter for StandIns {
                 if let Answer::HungUp = answer {
                     return;
                 }
-                while let Ok(Some(request)) = protocol::read_request(&mut socket) {
-                    let reply = answered(answer, index, request.inputs);
-                    if protocol::write_answer(&mut socket, &reply).is_err() {
+                while let Ok(Some(request)) = receive::<Request>(&mut socket, MAX_MESSAGE_BYTES) {
+                    let reply = answered(answer, index, request.inputs)
+                        .map_or_else(Response::Failed, Response::Outputs);
+                    if send(&mut socket, &reply).is_err() {
                         return;
                     }
-                    let _ = socket.flush();
                 }
             });
-            Ok(File::from(std::os::fd::OwnedFd::from(ours)))
+            Ok(ours)
         })
     }
 }
@@ -166,6 +169,14 @@ impl MediaStore for NoMedia {
         _: &'a [u8; 32],
     ) -> Pin<Box<dyn Future<Output = RunResult<Option<Arc<Vec<u8>>>>> + Send + 'a>> {
         Box::pin(async { Ok(None) })
+    }
+}
+
+struct NoDecoding;
+
+impl MediaStarter for NoDecoding {
+    fn start(&self, _: u32) -> Pin<Box<dyn Future<Output = RunResult<UnixStream>> + Send + '_>> {
+        Box::pin(async { Err(RunError::msg("no round here decodes a capture")) })
     }
 }
 
@@ -237,7 +248,9 @@ async fn round(
                 listener: Arc::new(Discard),
                 media_store: Arc::new(NoMedia),
                 models,
+                media: Arc::new(NoDecoding),
                 fuel: DEFAULT_ROUND_FUEL,
+                picture_bounds: PictureBounds::DEFAULT,
             },
         )
         .await
@@ -302,7 +315,10 @@ async fn a_policys_models_run_as_their_processes_answer() {
 async fn what_a_run_does_not_return_traps_the_round() {
     struct NoStart;
     impl ModelStarter for NoStart {
-        fn start(&self, _: u32) -> Pin<Box<dyn Future<Output = RunResult<File>> + Send + '_>> {
+        fn start(
+            &self,
+            _: u32,
+        ) -> Pin<Box<dyn Future<Output = RunResult<UnixStream>> + Send + '_>> {
             Box::pin(async { Err(RunError::msg("no process")) })
         }
     }

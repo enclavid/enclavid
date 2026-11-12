@@ -41,15 +41,17 @@ pub(crate) mod media_store;
 mod persister;
 mod reset;
 mod round;
+mod start;
 mod status;
 mod views;
 mod warmup;
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::http::header::AUTHORIZATION;
-use axum::http::{Method, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::from_fn;
 use axum::response::{IntoResponse, Response};
 use tower_http::catch_panic::CatchPanicLayer;
@@ -83,6 +85,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/sessions/{id}/connect",
             connect::post_connect().layer(auth()),
+        )
+        .route(
+            "/api/v1/sessions/{id}/start/{awaiting_seq}",
+            start::post_start().layer(auth()),
         )
         .route(
             "/api/v1/sessions/{id}/input/{awaiting_seq}/{slot_id}",
@@ -131,16 +137,31 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// an unverified one that breaks the page is worse than a narrow one that holds.
 const PAGE_POLICY: &str = "frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
 
+/// Milliseconds since the Unix epoch by api's clock, which the guest's time
+/// sync holds to true time (`timesync::guard`).
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 /// Serve the compiled-in page at `/`, and its files at their own paths, for
-/// anything no API route claimed — see `crate::assets::lookup`.
-async fn page(method: Method, uri: Uri) -> Response {
+/// anything no API route claimed — see `crate::assets::lookup`. A file the
+/// build compressed goes out compressed to a browser that takes it.
+async fn page(method: Method, uri: Uri, headers: HeaderMap) -> Response {
     if !matches!(method, Method::GET | Method::HEAD) {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
     let Some(asset) = crate::assets::lookup(uri.path()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    (
+    let brotli = asset.brotli.filter(|_| {
+        headers
+            .get(header::ACCEPT_ENCODING)
+            .and_then(|accept| accept.to_str().ok())
+            .is_some_and(crate::assets::accepts_brotli)
+    });
+    let mut response = (
         [
             (header::CONTENT_TYPE, asset.content_type),
             (header::CACHE_CONTROL, crate::assets::cache_control(asset)),
@@ -152,7 +173,18 @@ async fn page(method: Method, uri: Uri) -> Response {
             // this api included — so none is sent.
             (header::REFERRER_POLICY, "no-referrer"),
         ],
-        asset.bytes,
+        brotli.unwrap_or(asset.bytes),
     )
-        .into_response()
+        .into_response();
+    if asset.brotli.is_some() {
+        response
+            .headers_mut()
+            .insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+    }
+    if brotli.is_some() {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
+    }
+    response
 }

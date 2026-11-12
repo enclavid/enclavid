@@ -7,10 +7,6 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+# Types alone: the face geometry the face plugins share. It decodes nothing.
 [dependencies]
 wit-bindgen = "0.57"
-# Pure-Rust JPEG decoder with DCT-scaled decoding (1/8, 1/4, 1/2) so a
-# 5-12 MP capture frame is IDCT'd straight down to a small buffer.
-# default-features off drops the `rayon` multithreading that doesn't exist on
-# wasm.
-jpeg-decoder = { version = "0.3", default-features = false }

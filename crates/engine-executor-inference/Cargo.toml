@@ -6,11 +6,12 @@ license.workspace = true
 repository.workspace = true
 
 # The COPROCESS a round's models run in: started beside the round at its word,
-# in the round's group under an identity of its own, it loads the composition's
-# models into ONNX Runtime and answers the round's requests over the socket the
-# two were paired with. ONNX Runtime lives here and nowhere else in the fleet,
-# so the process that parses and runs a vendor's graph holds a round's input to
-# a model and the models' weights, and nothing of the round's own.
+# in the inference part of the round's composition under an identity of its
+# own, it loads the composition's models into ONNX Runtime and answers the
+# round's requests over the socket the two were paired with. ONNX Runtime lives
+# here and nowhere else in the fleet, so the process that parses and runs a
+# vendor's graph holds a round's input to a model and the models' weights, and
+# nothing of the round's own.
 #
 # Its own package, like engine-executor-child and for the same reason: this
 # manifest is the statement of what the process can name. Built on its own
@@ -29,6 +30,8 @@ debug = []
 [dependencies]
 # The graph's check and the protocol.
 enclavid-inference = { path = "../inference" }
+# Its end of the channel to the round: blocking on its socket, no runtime.
+coprocess-channel = { path = "../coprocess-channel" }
 # A release candidate, so pinned exactly. `half` for tensors and weights of
 # 16-bit floats.
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "half"] }

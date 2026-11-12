@@ -3,8 +3,9 @@ use super::*;
 use enclavid_inference::fixture;
 
 /// The host's package, its tensors among it, as a project's WIT has it.
-const HOST: [(&str, &str); 2] = [
-    ("types.wit", include_str!("../../../../wit/host/types.wit")),
+const HOST: [(&str, &str); 3] = [
+    ("refs.wit", include_str!("../../../../wit/host/refs.wit")),
+    ("media.wit", include_str!("../../../../wit/host/media.wit")),
     (
         "tensors.wit",
         include_str!("../../../../wit/host/tensors.wit"),

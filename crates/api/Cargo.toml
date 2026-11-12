@@ -146,6 +146,12 @@ thiserror = "1"
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "service", "http1", "http2"], optional = true }
 hyper = { version = "1", features = ["server", "http1", "http2"], optional = true }
 
+[build-dependencies]
+# The page's brotli copies, made by `build.rs`: nothing in the binary compresses.
+brotli = "8"
+
 [dev-dependencies]
+# To read the build's brotli copies back in the test that checks them.
+brotli = "8"
 # A store in memory, served over the real leg, for the tests of what holds one.
 storage-client = { path = "../storage-client", features = ["memory"] }

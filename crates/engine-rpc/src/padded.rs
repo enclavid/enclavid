@@ -324,6 +324,8 @@ mod tests {
             state: vec![7u8; 4096],
             current_prompt: None,
             awaiting_seq: u64::MAX,
+            sent: Vec::new(),
+            started_at_ms: Some(u64::MAX),
         };
         let padded = Padded::seal(&state).expect("fits the frame");
         assert_eq!(padded.open().expect("decodes"), state);
@@ -338,6 +340,8 @@ mod tests {
             state: vec![0xAB; 512 * 1024],
             current_prompt: None,
             awaiting_seq: u64::MAX,
+            sent: Vec::new(),
+            started_at_ms: Some(u64::MAX),
         })
         .expect("fits");
 
@@ -416,8 +420,32 @@ mod tests {
     /// disagree and a policy obeying the one it is told about trips the other.
     /// They did disagree: without `serde_bytes` on `SessionState::state`, binary
     /// state encoded at ~1.9 bytes per byte and the real ceiling was ~640 KiB.
+    /// With it, the most steps a media prompt has, each sent with as many ranges
+    /// as a video step has guides.
     #[test]
     fn a_state_at_the_engine_cap_fits_the_frame() {
+        use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_FLASH_COLORS, MAX_VIDEO_GUIDES};
+        use session_types::{FaceFlashesGuide, FrameRange, Rgb, SentStep, VideoGuide};
+
+        let range = FrameRange {
+            // Flashes of the most colours: of the guides, the one whose encoding
+            // is the longest.
+            guide: VideoGuide::FaceFlashes(FaceFlashesGuide {
+                width: 0.587_654,
+                colors: vec![
+                    Rgb {
+                        red: 255,
+                        green: 255,
+                        blue: 255,
+                    };
+                    MAX_FLASH_COLORS
+                ],
+                flash_ms: u16::MAX,
+                grace_ms: u16::MAX,
+            }),
+            first: u32::MAX,
+            last: u32::MAX,
+        };
         let at_cap = SessionState {
             // Near-uniform bytes: the array encoding cost two bytes for each of
             // these, which is what put a legal state over the frame.
@@ -427,6 +455,15 @@ mod tests {
             current_prompt: None,
             // The widest the count encodes at.
             awaiting_seq: u64::MAX,
+            sent: vec![
+                SentStep {
+                    hash: [0xFF; 32],
+                    len: u64::MAX,
+                    guides: vec![range; MAX_VIDEO_GUIDES],
+                };
+                MAX_CAPTURE_STEPS
+            ],
+            started_at_ms: Some(u64::MAX),
         };
         Padded::seal(&at_cap).expect("a state at POLICY_MAX_STATE_BYTES must fit its frame");
     }

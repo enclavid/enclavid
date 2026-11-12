@@ -3,7 +3,7 @@ package enclavid:extra@0.1.0;
 /// Minimal second plugin for the hybrid composition test. Its single
 /// export is one of its OWN texts, through its own slot.
 interface tag {
-    use enclavid:host/types@0.1.0.{localized-ref};
+    use enclavid:host/refs@0.1.0.{localized-ref};
     get: func() -> localized-ref;
 }
 

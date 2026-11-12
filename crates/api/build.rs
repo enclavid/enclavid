@@ -20,6 +20,11 @@
 //! No crate is pulled in to do it. `include_dir` and `rust-embed` both exist and
 //! both would work, and neither earns a new dependency in a measured binary for
 //! what is a directory walk and a `write!`.
+//!
+//! A file that shrinks is carried brotli-compressed as well, compressed here
+//! rather than per request, so nothing in the binary compresses: the copy is
+//! measured like the file, and a response's length never depends on what is
+//! in a session.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -27,6 +32,10 @@ use std::path::{Path, PathBuf};
 /// Where the built page comes from. Set by `image/app`, which takes it from the
 /// nix derivation that builds `frontend/`.
 const DIST: &str = "ENCLAVID_FRONTEND_DIST";
+
+/// The fewest bytes a file has for a compressed copy of it to be kept: below,
+/// the copy saves less than the headers that announce it.
+const BROTLI_FROM: usize = 1024;
 
 fn main() {
     println!("cargo::rerun-if-env-changed={DIST}");
@@ -64,9 +73,13 @@ fn main() {
     let mut table = String::from("pub const ASSETS: &[Asset] = &[\n");
     for route in &files {
         let source = dist.join(route.trim_start_matches('/'));
+        let brotli = match compressed(&source, route, &out) {
+            Some(copy) => format!("Some(include_bytes!({copy:?}))"),
+            None => "None".to_owned(),
+        };
         writeln!(
             table,
-            "    Asset {{ path: {route:?}, content_type: {:?}, bytes: include_bytes!({:?}) }},",
+            "    Asset {{ path: {route:?}, content_type: {:?}, bytes: include_bytes!({:?}), brotli: {brotli} }},",
             content_type(route),
             source
         )
@@ -101,6 +114,41 @@ fn collect(root: &Path, dir: &Path, into: &mut Vec<String>) {
     }
 }
 
+/// `source`, the file at `route`, brotli-compressed into `out`: for a type that
+/// shrinks, at least [`BROTLI_FROM`] bytes long, where the copy is smaller.
+/// Fonts, pictures and a model's weights are compressed or noise already.
+fn compressed(source: &Path, route: &str, out: &Path) -> Option<PathBuf> {
+    let extension = route.rsplit_once('.').map(|(_, e)| e).unwrap_or_default();
+    if !matches!(
+        extension,
+        "html" | "css" | "js" | "json" | "svg" | "txt" | "wasm"
+    ) {
+        return None;
+    }
+    let bytes = std::fs::read(source).unwrap_or_else(|e| panic!("read {}: {e}", source.display()));
+    if bytes.len() < BROTLI_FROM {
+        return None;
+    }
+    let params = brotli::enc::BrotliEncoderParams {
+        quality: 11,
+        lgwin: 22,
+        ..Default::default()
+    };
+    let mut packed = Vec::new();
+    brotli::BrotliCompress(&mut bytes.as_slice(), &mut packed, &params)
+        .expect("compressing in memory");
+    if packed.len() >= bytes.len() {
+        return None;
+    }
+    let copy = out
+        .join("brotli")
+        .join(format!("{}.br", route.trim_start_matches('/')));
+    let dir = copy.parent().expect("a file has a directory");
+    std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
+    std::fs::write(&copy, packed).unwrap_or_else(|e| panic!("write {}: {e}", copy.display()));
+    Some(copy)
+}
+
 /// What to say a file is.
 ///
 /// A fixed table rather than sniffing, and it refuses what it does not know: an
@@ -113,6 +161,10 @@ fn content_type(route: &str) -> &'static str {
         "css" => "text/css; charset=utf-8",
         "js" => "text/javascript; charset=utf-8",
         "json" => "application/json",
+        // A browser compiles WebAssembly as it arrives only under this type.
+        "wasm" => "application/wasm",
+        // A model's weights, which the page reads as bytes.
+        "bin" => "application/octet-stream",
         "svg" => "image/svg+xml",
         "woff2" => "font/woff2",
         "png" => "image/png",

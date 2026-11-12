@@ -3,7 +3,10 @@ import { ConsentScreen } from "@/components/ConsentScreen";
 import { ContinueOnPhone } from "@/components/ContinueOnPhone";
 import { MediaCapture } from "@/components/MediaCapture";
 import { MediaInstructions } from "@/components/MediaInstructions";
+import { TimeLeft } from "@/components/TimeLeft";
+import { VideoCapture } from "@/components/VideoCapture";
 import { Spinner } from "@/components/icons";
+import { fitPhotos } from "@/lib/photos";
 import { Completed } from "@/screens/Completed";
 import type { RequestView, SessionProgress } from "@/types";
 
@@ -17,9 +20,13 @@ type Props = {
   /// to api/v1/sessions/:id/input/:awaiting_seq/:slot_id as
   /// multipart/form-data. App owns the network call + key + state
   /// update; Verify just hands it the wait the screen was rendered for,
-  /// the slot identifier and the assembled FormData (frames as parts for
-  /// media captures, an `accepted` text part for consent).
+  /// the slot identifier and the assembled FormData (one step's capture for
+  /// media, as `media-<step>` — a `photo` part, or a `video` part and a
+  /// `guides` part; an `accepted` text part for consent).
   onSubmit: (awaitingSeq: number, slotId: string, form: FormData) => Promise<void>;
+  /// Start the media prompt of the wait the screen was rendered for, as its
+  /// camera is about to open (api/v1/sessions/:id/start/:awaiting_seq).
+  onStart: (awaitingSeq: number) => Promise<void>;
   /// The session was taken over from a code a capture step showed: `refused`,
   /// the key this page asked with, opens it no more.
   onMoved: (refused: Uint8Array) => void;
@@ -30,6 +37,7 @@ export function Verify({
   progress,
   error,
   onSubmit,
+  onStart,
   onMoved,
 }: Props) {
   if (!progress) {
@@ -55,6 +63,7 @@ export function Verify({
       request={progress.request}
       error={error}
       onSubmit={onSubmit}
+      onStart={onStart}
       onMoved={onMoved}
     />
   );
@@ -102,6 +111,7 @@ function RequestRenderer({
   request,
   error,
   onSubmit,
+  onStart,
   onMoved,
 }: {
   sessionId: string;
@@ -111,51 +121,114 @@ function RequestRenderer({
   request: RequestView;
   error: string | null;
   onSubmit: (awaitingSeq: number, slotId: string, form: FormData) => Promise<void>;
+  onStart: (awaitingSeq: number) => Promise<void>;
   onMoved: (refused: Uint8Array) => void;
 }) {
   const [submitting, setSubmitting] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  // The step on screen: the first whose capture the server does not hold yet,
+  // so a reload carries on from where the applicant was.
+  const index = request.kind === "media" ? request.next_step : 0;
   // The step whose instruction screen the user has tapped "Start" on —
-  // the wait and the slot together, since every wait is a step of its
-  // own, a retake of the same prompt included. Compared with the step on
-  // screen rather than reset when it changes, so the render that brings
-  // a new step already shows its instructions: a reset after the fact
-  // would leave one frame of the old step's capture screen, its "Use
-  // photo" live, under the new step.
-  const slotKey =
-    request.kind === "media" ? `${awaitingSeq}/${request.next_slot_id}` : null;
+  // the wait and the step together. Compared with the step on screen
+  // rather than reset when it changes, so the render that brings a new
+  // step already shows its instructions: a reset after the fact would
+  // leave one frame of the old step's capture screen, its "Use photo"
+  // live, under the new step.
+  const stepKey = `${awaitingSeq}/${index}`;
   const [startedFor, setStartedFor] = useState<string | null>(null);
-  const startedCapture = slotKey !== null && startedFor === slotKey;
+  const startedCapture = startedFor === stepKey;
 
   if (request.kind === "media") {
-    // `next_slot_id` is the URL the host wants the next clip POSTed
-    // to. We derive the step it refers to from `media-<N>` and read
-    // that entry from `captures` to drive the on-screen guide.
-    const nextIndex = parseStepIndex(request.next_slot_id);
     const total = request.captures.length;
-    const step =
-      nextIndex !== null && nextIndex < total
-        ? request.captures[nextIndex]
-        : null;
+    const step = request.captures[index];
+    // What this step's capture may be: its share of what the steps not sent
+    // yet may hold together.
+    const share = Math.floor(request.max_upload_bytes / (total - index));
 
-    const handle = async (form: FormData) => {
+    // Each step's capture is sent as it is taken. The last step's runs the
+    // round; any other's leaves the session at the next step. A failed send
+    // leaves the step on screen, its capture still there to send again or
+    // take again.
+    const send = async (form: () => Promise<FormData>, failed: string) => {
       setLocalError(null);
       setSubmitting(true);
       try {
-        await onSubmit(awaitingSeq, request.next_slot_id, form);
+        await onSubmit(awaitingSeq, `media-${index}`, await form());
       } catch (e) {
-        setLocalError(
-          e instanceof Error ? e.message : "Could not submit the photo.",
-        );
+        setLocalError(e instanceof Error ? e.message : failed);
       } finally {
         setSubmitting(false);
       }
     };
 
+    // A photo, fitted under the step's share.
+    const keep = (photo: Blob) =>
+      send(async () => {
+        const [fitted] = await fitPhotos([photo], share).catch(() => {
+          throw new Error("This photo is too large to send.");
+        });
+        const form = new FormData();
+        form.append("photo", fitted, `${index}.jpg`);
+        return form;
+      }, "Could not submit the photo.");
+
+    // A video, recorded under the step's share, and the frames each of its
+    // guides was held in.
+    const sendVideo = (video: Blob, guides: [number, number][]) =>
+      send(async () => {
+        const form = new FormData();
+        form.append("video", video, `${index}.webm`);
+        form.append("guides", JSON.stringify(guides));
+        return form;
+      }, "Could not submit the video.");
+
+    // Every media prompt is started as its camera is about to open, with a
+    // time limit or not, so a start says nothing of which it has. One with a
+    // limit is given its steps whole then, and its time runs.
+    const begin = async () => {
+      if (starting) return;
+      setLocalError(null);
+      setStarting(true);
+      try {
+        await onStart(awaitingSeq);
+        setStartedFor(stepKey);
+      } catch (e) {
+        setLocalError(e instanceof Error ? e.message : "Could not start.");
+      } finally {
+        setStarting(false);
+      }
+    };
+
+    // The limit ran out before the steps were all sent: the session is told,
+    // and shows whatever its policy does next.
+    const timedOut = async () => {
+      setLocalError(null);
+      setSubmitting(true);
+      try {
+        await onSubmit(awaitingSeq, "timed-out", new FormData());
+      } catch (e) {
+        setLocalError(e instanceof Error ? e.message : "Could not reach the server.");
+      } finally {
+        setSubmitting(false);
+      }
+    };
+
+    // Counted down from what each answer says is left, on the intro as on the
+    // camera: the time runs from the start whichever is on screen.
+    const clock =
+      request.remaining_ms === null ? null : (
+        <TimeLeft
+          key={`${awaitingSeq}/${request.remaining_ms}`}
+          remainingMs={request.remaining_ms}
+          onExpired={() => void timedOut()}
+        />
+      );
+
     if (!step) {
-      // Backend handed us a slot we can't render — shouldn't happen
-      // under a well-formed RequestView, but better to surface than
-      // crash silently.
+      // A spec of no steps — the runtime refuses to render one, but
+      // better to surface than crash silently.
       return (
         <main className="flex min-h-dvh items-center justify-center px-6 text-sm text-destructive">
           Unexpected capture state. Please refresh.
@@ -168,35 +241,67 @@ function RequestRenderer({
     // on — each step gets its own intro screen, then its own camera,
     // then its own preview. Multi-step captures get "now flip to the
     // back" framing between shots instead of jumping directly
-    // into a different camera view.
-    if (!startedCapture) {
+    // into a different camera view. A step the start has not yet
+    // given stays on its intro.
+    if (!startedCapture || step.kind === undefined) {
       return (
-        <MediaInstructions
-          artifactLabel={request.label}
-          icon={step.icon}
-          instructions={step.instructions}
-          stepNumber={(nextIndex ?? 0) + 1}
-          totalSteps={total}
-          onStart={() => setStartedFor(slotKey)}
-          secondaryAction={
-            <ContinueOnPhone sessionId={sessionId} onMoved={onMoved} />
-          }
-        />
+        <>
+          <MediaInstructions
+            artifactLabel={request.label}
+            icon={step.icon}
+            instructions={step.instructions}
+            stepNumber={index + 1}
+            totalSteps={total}
+            onStart={() => void begin()}
+            secondaryAction={
+              <ContinueOnPhone sessionId={sessionId} onMoved={onMoved} />
+            }
+          />
+          {clock}
+          <StatusOverlay
+            submitting={submitting}
+            message={localError ?? error}
+          />
+        </>
+      );
+    }
+
+    if (step.kind === "video") {
+      return (
+        <>
+          {clock}
+          <VideoCapture
+            // A step of its own, as a photo step is.
+            key={stepKey}
+            promptLabel={request.label}
+            step={step}
+            stepNumber={index + 1}
+            totalSteps={total}
+            maxBytes={share}
+            onRecorded={(video, guides) => void sendVideo(video, guides)}
+            sending={submitting}
+            instead={<ContinueOnPhone sessionId={sessionId} onMoved={onMoved} />}
+          />
+          <StatusOverlay
+            submitting={submitting}
+            message={localError ?? error}
+          />
+        </>
       );
     }
 
     return (
       <>
+        {clock}
         <MediaCapture
-          // A step of its own: frames, preview and buttons start over, so
+          // A step of its own: photo, preview and buttons start over, so
           // nothing taken for one step can be sent for the next.
-          key={slotKey}
+          key={stepKey}
           promptLabel={request.label}
           step={step}
-          stepNumber={(nextIndex ?? 0) + 1}
+          stepNumber={index + 1}
           totalSteps={total}
-          onCapture={handle}
-          maxUploadBytes={request.max_upload_bytes}
+          onCapture={(photo) => void keep(photo)}
           sending={submitting}
         />
         <StatusOverlay
@@ -269,15 +374,6 @@ function RequestRenderer({
       </pre>
     </main>
   );
-}
-
-/// Parse `media-<N>` slot ids back to their integer index. Returns
-/// `null` for malformed values (caller surfaces "unexpected state").
-function parseStepIndex(slotId: string): number | null {
-  const m = slotId.match(/^media-(\d+)$/);
-  if (!m) return null;
-  const n = parseInt(m[1], 10);
-  return Number.isFinite(n) ? n : null;
 }
 
 /// Floating panel pinned above the safe area. Two modes:

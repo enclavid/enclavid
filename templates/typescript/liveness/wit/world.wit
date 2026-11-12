@@ -1,0 +1,21 @@
+package local:policy@0.1.0;
+
+// What this policy imports and exports. Every interface imported here is
+// the policy's own, the host's, or a plugin's; the consumer pins an
+// implementation of each plugin package (here `enclavid:well-known`,
+// `enclavid:vision`, `enclavid:face-detect` and `enclavid:face-liveness`)
+// when it creates a session. It shows no texts of its own, takes no props and
+// discloses no field, so it has no slot.
+world policy {
+    // The liveness video: its guides, and the step that asks them.
+    import enclavid:well-known/video-guides@0.1.0;
+    import enclavid:well-known/video@0.1.0;
+    // The face read in the frames of each guide, and how live the face held
+    // in the oval looks; the face's geometry is `enclavid:vision`'s.
+    import enclavid:face-detect/video@0.1.0;
+    import enclavid:face-liveness/video@0.1.0;
+    // The round's randomness, which `@enclavid/policy-quickjs` serves
+    // `Math.random` and `crypto.getRandomValues` from.
+    import wasi:random/random@0.2.12;
+    export enclavid:policy/policy@0.1.0;
+}

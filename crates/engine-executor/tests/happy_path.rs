@@ -5,7 +5,7 @@
 //! The policy is `handle(state, event) -> (state, action)`.
 //! The harness owns the mailbox: each round it inspects the previous
 //! round's `current_prompt`, fabricates the matching applicant input
-//! (a fake clip for a media prompt, an accept/reject bool for a consent
+//! (a fake photo for a media prompt, an accept/reject bool for a consent
 //! prompt), and calls `run` again.
 //!
 //! Two flows are driven:
@@ -30,17 +30,22 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use coprocess_channel::{receive, send};
+use enclavid_media::protocol::{MAX_REQUEST_BYTES, Opened, Request, Response, Size};
 use engine_compiler::Compiler;
 use engine_executor::{
-    Component, ComponentDecls, DEFAULT_ROUND_FUEL, EmbeddedImport, EmbeddedRegistry, Executor,
-    MediaStore, ModelImport, ModelStarter, PluginInstance, PrimedComposition, RunError, RunInputs,
-    RunResult, RunStatus, SessionChange, SessionListener,
+    Component, ComponentDecls, DEFAULT_ROUND_FUEL, DecoderFailed, EmbeddedImport, EmbeddedRegistry,
+    Executor, MediaStarter, MediaStore, ModelImport, ModelStarter, PictureBounds, PluginInstance,
+    PrimedComposition, RunError, RunInputs, RunResult, RunStatus, SessionChange, SessionListener,
 };
 use engine_types::composition::ModelLayer;
 use engine_types::text::Localized;
-use session_types::{Clip, Decision, Event, MediaResult, Prompt, SessionState as Session};
+use session_types::{
+    Capture, Decision, Event, MediaResult, PhotoCapture, Prompt, SessionState as Session,
+    VideoCapture,
+};
 use xtask::fixtures;
 
 /// The test policy's props when the consumer gives none, as api writes them:
@@ -207,7 +212,10 @@ fn all_plugins() -> Vec<PluginInstance> {
 struct NoModels;
 
 impl ModelStarter for NoModels {
-    fn start(&self, _: u32) -> Pin<Box<dyn Future<Output = RunResult<File>> + Send + '_>> {
+    fn start(
+        &self,
+        _: u32,
+    ) -> Pin<Box<dyn Future<Output = RunResult<std::os::unix::net::UnixStream>> + Send + '_>> {
         Box::pin(async { Err(RunError::msg("no composition here has models")) })
     }
 }
@@ -237,7 +245,10 @@ impl Models {
 }
 
 impl ModelStarter for Models {
-    fn start(&self, index: u32) -> Pin<Box<dyn Future<Output = RunResult<File>> + Send + '_>> {
+    fn start(
+        &self,
+        index: u32,
+    ) -> Pin<Box<dyn Future<Output = RunResult<std::os::unix::net::UnixStream>> + Send + '_>> {
         use std::os::fd::{AsFd, OwnedFd};
 
         Box::pin(async move {
@@ -255,9 +266,123 @@ impl ModelStarter for Models {
                 cfg!(target_os = "linux"),
             )?;
             self.processes.lock().unwrap().push(process);
-            Ok(File::from(OwnedFd::from(ours)))
+            Ok(ours)
         })
     }
+}
+
+/// Each capture a round decodes, decoded in the media coprocess binary as the
+/// execution-worker starts it: each start counted, and each process held —
+/// killed — until the test is done with this.
+struct Decoders {
+    exe: PathBuf,
+    started: AtomicUsize,
+    processes: Mutex<Vec<tokio::process::Child>>,
+}
+
+impl Decoders {
+    /// Decoders running `exe`.
+    fn of(exe: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            exe,
+            started: AtomicUsize::new(0),
+            processes: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Decoders of photos, as the image's decode them: the binary built
+    /// without `video`, which links no libvpx.
+    fn of_photos() -> Arc<Self> {
+        static EXE: OnceLock<PathBuf> = OnceLock::new();
+        Self::of(EXE.get_or_init(xtask::media_binary).clone())
+    }
+
+    /// How many the round started.
+    fn started(&self) -> usize {
+        self.started.load(Ordering::SeqCst)
+    }
+}
+
+impl MediaStarter for Decoders {
+    fn start(
+        &self,
+        _: u32,
+    ) -> Pin<Box<dyn Future<Output = RunResult<std::os::unix::net::UnixStream>> + Send + '_>> {
+        use std::os::fd::OwnedFd;
+
+        Box::pin(async move {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
+            let process = engine_supervisor::spawn_coprocess(
+                &self.exe,
+                OwnedFd::from(theirs),
+                &[],
+                cfg!(target_os = "linux"),
+            )?;
+            self.processes.lock().unwrap().push(process);
+            Ok(ours)
+        })
+    }
+}
+
+/// A stand-in for the process decoding a capture, on a thread of the test's:
+/// it reads each request and writes the next of its answers back as they are,
+/// then lets go of its socket, as a process that has ended does.
+struct Answering(Vec<Vec<u8>>);
+
+impl MediaStarter for Answering {
+    fn start(
+        &self,
+        _: u32,
+    ) -> Pin<Box<dyn Future<Output = RunResult<std::os::unix::net::UnixStream>> + Send + '_>> {
+        use std::io::Write;
+
+        Box::pin(async move {
+            let (ours, mut theirs) = std::os::unix::net::UnixStream::pair()?;
+            let answers = self.0.clone();
+            std::thread::spawn(move || {
+                for answer in answers {
+                    let Ok(Some(_)) = receive::<Request>(&mut theirs, MAX_REQUEST_BYTES) else {
+                        return;
+                    };
+                    if theirs.write_all(&answer).is_err() {
+                        return;
+                    }
+                }
+            });
+            Ok(ours)
+        })
+    }
+}
+
+/// A stand-in for a process that reads the round's request and neither
+/// answers it nor lets go of its socket: one the applicant's bytes have
+/// stalled, which only the bound on an ask tells from one still working.
+struct Stalling;
+
+impl MediaStarter for Stalling {
+    fn start(
+        &self,
+        _: u32,
+    ) -> Pin<Box<dyn Future<Output = RunResult<std::os::unix::net::UnixStream>> + Send + '_>> {
+        Box::pin(async move {
+            let (ours, mut theirs) = std::os::unix::net::UnixStream::pair()?;
+            std::thread::spawn(move || {
+                let _ = receive::<Request>(&mut theirs, MAX_REQUEST_BYTES);
+                loop {
+                    std::thread::park();
+                }
+            });
+            Ok(ours)
+        })
+    }
+}
+
+/// `response` as the channel carries it.
+fn framed(response: &Response) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    send(&mut bytes, response).expect("a response encodes");
+    bytes
 }
 
 /// Stands in for the orchestrator: keeps the blob store the applicant's frames
@@ -306,15 +431,15 @@ impl PersistListener {
         );
     }
 
-    /// Content-address the event's frames and store them — what api does before
-    /// the round, over the bytes it is about to send.
+    /// Content-address the event's captures and store them — what api does
+    /// before the round, over the bytes it is about to send.
     fn capture(&self, event: &Event) {
         let Event::Media(result) = event else {
             return;
         };
         let mut store = self.media.lock().unwrap();
-        for frame in &result.clip.frames {
-            store.insert(blake3::hash(frame).into(), Arc::new(frame.clone()));
+        for blob in result.blobs() {
+            store.insert(blake3::hash(blob).into(), Arc::new(blob.to_vec()));
         }
     }
 }
@@ -361,6 +486,20 @@ async fn passport_selfie_consent_reject_reaches_rejected() {
         _ => panic!("reject round expected Completed(Rejected)"),
     }
     listener.finished_with(Decision::Rejected);
+}
+
+/// A media prompt whose time ran out reaches the policy as its own event, which
+/// the test policy answers as the applicant's to try again.
+#[tokio::test]
+async fn a_timed_out_prompt_reaches_the_policy() {
+    let h = Harness::new();
+    let listener = Arc::new(PersistListener::default());
+    let session = h.drive_to_selfie(&listener).await;
+    let (status, _session) = h.run(session, Event::TimedOut, &listener).await;
+    assert!(
+        matches!(status, RunStatus::Completed(Decision::RejectedRetryable)),
+        "the policy's answer to a time-out"
+    );
 }
 
 #[tokio::test]
@@ -548,6 +687,441 @@ async fn the_selfie_age_is_read_by_vendor_models() {
     assert_eq!(models.started(), [2, 1], "each model once a round");
 }
 
+/// The video the media coprocess's own test decodes: 12 frames of 160×120 at
+/// 15 a second, a keyframe every 5, a dark luma gradient with a bright 16×16
+/// square that moves 8 px right each frame.
+const SQUARE: &[u8] = include_bytes!("../../engine-executor-media/tests/fixtures/square.webm");
+
+/// The test policy's state tag for a video it decoded, and for one that did
+/// not decode.
+const VIDEO_DECODED: u8 = 4;
+const VIDEO_UNDECODED: u8 = 5;
+
+/// A frame as the test policy's probe wrote it into its state.
+#[derive(Debug)]
+struct Probed {
+    index: u32,
+    timestamp_ms: u32,
+    keyframe: bool,
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
+}
+
+/// The frames the probe wrote after [`VIDEO_DECODED`], and every pixel of the
+/// first frame as it read it again after the last.
+fn probed(state: &[u8]) -> (Vec<Probed>, Vec<u8>) {
+    let (&tag, mut rest) = state.split_first().expect("a state");
+    assert_eq!(tag, VIDEO_DECODED, "the video decoded");
+    let u32_at = |rest: &mut &[u8]| {
+        let (n, tail) = rest.split_at(4);
+        *rest = tail;
+        u32::from_be_bytes(n.try_into().unwrap())
+    };
+    let count = u32_at(&mut rest);
+    let mut frames = Vec::new();
+    for _ in 0..count {
+        let index = u32_at(&mut rest);
+        let timestamp_ms = u32_at(&mut rest);
+        let (&keyframe, tail) = rest.split_first().unwrap();
+        rest = tail;
+        let (width, height) = (u32_at(&mut rest), u32_at(&mut rest));
+        let (rgb, tail) = rest.split_at((width * height * 3) as usize);
+        rest = tail;
+        frames.push(Probed {
+            index,
+            timestamp_ms,
+            keyframe: keyframe == 1,
+            width,
+            height,
+            rgb: rgb.to_vec(),
+        });
+    }
+    (frames, rest.to_vec())
+}
+
+/// Where across a quarter-size frame the square is: the mean column of the
+/// pixels brighter than the background can be, in the rows it crosses.
+fn square_column(frame: &Probed) -> f64 {
+    let (mut weight, mut moment) = (0.0, 0.0);
+    for (i, pixel) in frame.rgb.as_chunks::<3>().0.iter().enumerate() {
+        if (13..17).contains(&(i / frame.width as usize)) && pixel[0] > 160 {
+            weight += 1.0;
+            moment += (i % frame.width as usize) as f64;
+        }
+    }
+    moment / weight
+}
+
+/// The video `webm`, recorded at a one-step media prompt.
+fn video(webm: &[u8]) -> Event {
+    Event::Media(MediaResult {
+        captures: vec![Capture::Video(VideoCapture {
+            video: webm.to_vec(),
+            guides: Vec::new(),
+        })],
+    })
+}
+
+/// Decoders of videos too: the media coprocess binary built with libvpx
+/// linked in, which `ENCLAVID_MEDIA_BIN` names.
+fn decoders_of_videos() -> Arc<Decoders> {
+    let exe = std::env::var_os("ENCLAVID_MEDIA_BIN").expect("ENCLAVID_MEDIA_BIN is not set");
+    Decoders::of(exe.into())
+}
+
+/// A video in the passport's place reaches the policy as a `video` it lists
+/// the frames of and decodes through the host, in a process of the round's
+/// own: each frame in order, at its time, its keyframes marked, and each image
+/// read at a quarter of its size — the square seen moving right; the first
+/// frame read again after the last is itself. Bytes that are not a video have
+/// no frames, and the round goes on. Needs the coprocess:
+///   VPX_INCLUDE=… VPX_LIB=… cargo build -p engine-executor-media
+///   ENCLAVID_MEDIA_BIN=target/debug/engine-executor-media \
+///     cargo test -p engine-executor --test happy_path -- --ignored video
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ENCLAVID_MEDIA_BIN"]
+async fn a_video_is_decoded_in_a_process_of_its_own() {
+    let decoders = decoders_of_videos();
+    let h = Harness::new().decoding(decoders.clone());
+    let listener = Arc::new(PersistListener::default());
+
+    let (_, session) = h.run(Session::default(), Event::Start, &listener).await;
+    let (status, session) = h.run(session, video(SQUARE), &listener).await;
+    assert!(matches!(status, RunStatus::Completed(Decision::Review)));
+    let (frames, again) = probed(&session.state);
+    assert_eq!(frames.len(), 12);
+    // The first frame whole, read again out of order: 160 × 120, each of its
+    // quarter-size pixels the one at the middle of the four by four it
+    // covers, (4i + 2, 4j + 2).
+    assert_eq!(again.len(), 160 * 120 * 3);
+    for (at, quarter) in frames[0].rgb.as_chunks::<3>().0.iter().enumerate() {
+        let (i, j) = (at % 40, at / 40);
+        let whole = ((4 * j + 2) * 160 + 4 * i + 2) * 3;
+        assert_eq!(&again[whole..whole + 3], quarter, "pixel ({i}, {j})");
+    }
+    for (i, frame) in frames.iter().enumerate() {
+        assert_eq!(frame.index, i as u32);
+        // A frame each 66.7 ms, as the WebM's millisecond ticks round it.
+        assert!(
+            frame.timestamp_ms.abs_diff(i as u32 * 1000 / 15) <= 1,
+            "{frame:?}"
+        );
+        assert_eq!(frame.keyframe, i % 5 == 0, "frame {i}");
+        assert_eq!((frame.width, frame.height), (40, 30));
+        // The square's middle at 18 + 8i px is at (18 + 8i) / 4 a quarter
+        // the size, give or take a column for the codec and the sampling.
+        let column = square_column(frame);
+        let expected = (18 + 8 * i) as f64 / 4.0;
+        assert!(
+            (column - expected).abs() <= 1.0,
+            "frame {i}: column {column}"
+        );
+    }
+    assert_eq!(decoders.started(), 1, "one process for the video");
+
+    let (_, session) = h.run(Session::default(), Event::Start, &listener).await;
+    let (status, session) = h.run(session, video(b"not a webm"), &listener).await;
+    assert!(matches!(status, RunStatus::Completed(Decision::Review)));
+    assert_eq!(session.state, [VIDEO_UNDECODED]);
+}
+
+/// A region larger than a picture can be traps the round: the policy's own
+/// doing, whatever the video. Needs the coprocess, as the test above.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ENCLAVID_MEDIA_BIN"]
+async fn a_region_past_the_bound_traps_the_round() {
+    let props = b"{region-past-the-bound: some(true)}";
+    let h = Harness::new().decoding(decoders_of_videos());
+    let listener = Arc::new(PersistListener::default());
+    let (_, session) = h
+        .round(Session::default(), Event::Start, props, &listener)
+        .await
+        .expect("the start round");
+    let fires = *listener.fires.lock().unwrap();
+    assert!(
+        h.round(session, video(SQUARE), props, &listener)
+            .await
+            .is_err()
+    );
+    assert_eq!(*listener.fires.lock().unwrap(), fires, "nothing persisted");
+}
+
+/// The props that have the test policy probe liveness.
+const LIVENESS_PROBE: &[u8] = b"{liveness-probe: some(true)}";
+
+/// The test policy's state tag for the liveness it probed.
+const LIVENESS: u8 = 6;
+
+/// The score the liveness probe wrote after [`LIVENESS`]; `None` where no face
+/// was usable.
+fn liveness(state: &[u8]) -> Option<f32> {
+    let (&tag, rest) = state.split_first().expect("a state");
+    assert_eq!(tag, LIVENESS, "the liveness probed");
+    Some(f32::from_be_bytes(rest.try_into().ok()?))
+}
+
+/// The liveness probe's rounds of a session created with its props: start,
+/// the passport, then `selfie`; the probe's state and how the last ended.
+async fn probe_liveness(h: &Harness, selfie: MediaResult) -> (RunStatus, Session) {
+    let listener = Arc::new(PersistListener::default());
+    let mut session = Session::default();
+    for event in [Event::Start, Event::Media(fake_capture())] {
+        (_, session) = h
+            .round(session, event, LIVENESS_PROBE, &listener)
+            .await
+            .expect("a round before the selfie");
+    }
+    h.round(session, Event::Media(selfie), LIVENESS_PROBE, &listener)
+        .await
+        .expect("the selfie round")
+}
+
+/// The selfie's face reaches face-liveness through its `image` interface, and
+/// its score the policy: the placeholder's, from the face's brightness — the
+/// whole mid-gray frame, about a half.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_selfies_liveness_reaches_the_policy() {
+    let (status, session) = probe_liveness(&Harness::new(), fake_capture()).await;
+    assert!(matches!(status, RunStatus::Completed(Decision::Review)));
+    let live = liveness(&session.state).expect("a face read");
+    assert!((live - 128.0 / 255.0).abs() < 0.01, "{live}");
+}
+
+/// A video's frames reach face-liveness through its `video` interface, each
+/// with the face found in it, and one score for all of them the policy.
+/// Needs the coprocess, as the video tests above.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ENCLAVID_MEDIA_BIN"]
+async fn a_videos_liveness_reaches_the_policy() {
+    let h = Harness::new().decoding(decoders_of_videos());
+    let listener = Arc::new(PersistListener::default());
+    let (_, session) = h
+        .round(Session::default(), Event::Start, LIVENESS_PROBE, &listener)
+        .await
+        .expect("the start round");
+    let (status, session) = h
+        .round(session, video(SQUARE), LIVENESS_PROBE, &listener)
+        .await
+        .expect("the video round");
+    assert!(matches!(status, RunStatus::Completed(Decision::Review)));
+    let live = liveness(&session.state).expect("faces read");
+    assert!((0.0..=1.0).contains(&live), "{live}");
+}
+
+/// The selfie's face on MiniFASNet as the plugin ships it: face-detect built
+/// `--features blazeface` finds the face, and face-liveness built `--features
+/// minifasnet` hands its crops to its slot's models `minifasnet-v2` and
+/// `minifasnet-v1se`, whose graphs are the layers `minifasnet-v2.onnx` and
+/// `minifasnet-v1se.onnx`. The original repository's own samples read as there:
+/// its live face live, its printed one not. Neither the models, the coprocess
+/// nor the samples are in this repository: `BLAZEFACE_MODEL` names BlazeFace's
+/// graph, `MINIFASNET_MODEL` the directory of the two graphs and of the
+/// original's samples `image_T1.jpg` (live) and `image_F1.jpg` (a print), and
+/// `ENCLAVID_INFERENCE_BIN` the coprocess binary built with ONNX Runtime
+/// linked in:
+///   cargo test -p engine-executor --test happy_path -- --ignored vendor
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs BLAZEFACE_MODEL, MINIFASNET_MODEL and ENCLAVID_INFERENCE_BIN"]
+async fn the_selfies_liveness_is_read_by_vendor_models() {
+    let path = |var: &str| {
+        PathBuf::from(std::env::var_os(var).unwrap_or_else(|| panic!("{var} is not set")))
+    };
+    let detector = path("BLAZEFACE_MODEL");
+    let dir = path("MINIFASNET_MODEL");
+    let (v2, v1se) = (
+        dir.join("minifasnet-v2.onnx"),
+        dir.join("minifasnet-v1se.onnx"),
+    );
+    let exe = path("ENCLAVID_INFERENCE_BIN");
+    let layer = |name: &str, path: &PathBuf, sha: u8| ModelLayer {
+        name: name.into(),
+        sha256: [sha; 32],
+        length: std::fs::metadata(path)
+            .expect("the model file is there")
+            .len(),
+    };
+    let mut plugins = all_plugins();
+    for plugin in &mut plugins {
+        if plugin.package == fixtures::FACE_DETECT_PACKAGE {
+            plugin.wasm = fixtures::face_detect_blazeface().to_vec();
+            plugin.model_layers = vec![layer("detector.onnx", &detector, 1)];
+        } else if plugin.package == fixtures::FACE_LIVENESS_PACKAGE {
+            plugin.wasm = fixtures::face_liveness_minifasnet().to_vec();
+            plugin.model_layers = vec![
+                layer("minifasnet-v2.onnx", &v2, 2),
+                layer("minifasnet-v1se.onnx", &v1se, 3),
+            ];
+        }
+    }
+    let empty = || File::open("/dev/null").unwrap();
+    let models = Arc::new(Models {
+        exe,
+        files: vec![
+            (File::open(&detector).unwrap(), empty()),
+            (File::open(&v2).unwrap(), empty()),
+            (File::open(&v1se).unwrap(), empty()),
+        ],
+        started: vec![
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+        ],
+        processes: Mutex::new(Vec::new()),
+    });
+    let h = Harness::with(&plugins, models.clone());
+    let liveness_model = |function: &str, graph| ModelImport {
+        instance_name: "enclavid-ext:face-liveness/models@0.1.0".into(),
+        function: function.into(),
+        resource: "liveness-model".into(),
+        graph,
+        data: None,
+    };
+    assert_eq!(
+        h.models,
+        vec![
+            ModelImport {
+                instance_name: "enclavid-ext:face-detect/models@0.1.0".into(),
+                function: "detector".into(),
+                resource: "detector-model".into(),
+                graph: 0,
+                data: None,
+            },
+            liveness_model("minifasnet-v2", 1),
+            liveness_model("minifasnet-v1se", 2),
+        ]
+    );
+
+    for (sample, live) in [("image_T1.jpg", true), ("image_F1.jpg", false)] {
+        let photo = std::fs::read(dir.join(sample)).expect("the sample is there");
+        let (status, session) = probe_liveness(&h, capture_of(photo)).await;
+        assert!(matches!(status, RunStatus::Completed(Decision::Review)));
+        let score = liveness(&session.state).expect("a face read");
+        eprintln!("{sample}: live {score:.3}");
+        assert_eq!(score > 0.5, live, "{sample}: {score}");
+    }
+    assert_eq!(models.started(), [2, 2, 2], "each model once a round");
+}
+
+/// Where the platform decodes no video, a video has no frames: the policy
+/// sees a video that does not decode, and the round goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_build_without_video_lists_no_frames() {
+    let decoders = Decoders::of_photos();
+    let h = Harness::new().decoding(decoders.clone());
+    let listener = Arc::new(PersistListener::default());
+    let (_, session) = h.run(Session::default(), Event::Start, &listener).await;
+    let (status, session) = h.run(session, video(SQUARE), &listener).await;
+    assert!(matches!(status, RunStatus::Completed(Decision::Review)));
+    assert_eq!(session.state, [VIDEO_UNDECODED]);
+    assert_eq!(decoders.started(), 1);
+}
+
+/// A WebM whose one block is too short to hold its own header, which
+/// webm-iterable panics on: the process decoding it ends before it answers.
+const CUT_BLOCK: &[u8] = &[
+    // The EBML header: a WebM.
+    0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84, b'w', b'e', b'b', b'm',
+    // A segment, of a size it does not say.
+    0x18, 0x53, 0x80, 0x67, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    // A cluster of 6 bytes: its time, 0, and a block of 1 byte, its track
+    // number alone.
+    0x1f, 0x43, 0xb6, 0x75, 0x86, 0xe7, 0x81, 0x00, 0xa3, 0x81, 0x81,
+];
+
+/// A video that ends the process decoding it has no frames, as bytes that are
+/// not a video have, and the round goes on. Needs the coprocess, as the tests
+/// above.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ENCLAVID_MEDIA_BIN"]
+async fn a_video_that_ends_its_decoder_has_no_frames() {
+    let decoders = decoders_of_videos();
+    let h = Harness::new().decoding(decoders.clone());
+    let listener = Arc::new(PersistListener::default());
+    let (_, session) = h.run(Session::default(), Event::Start, &listener).await;
+    let (status, session) = h.run(session, video(CUT_BLOCK), &listener).await;
+    assert!(matches!(status, RunStatus::Completed(Decision::Review)));
+    assert_eq!(session.state, [VIDEO_UNDECODED]);
+    let mut process = decoders
+        .processes
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("a process for the video");
+    let ended = process.wait().await.unwrap();
+    assert!(!ended.success(), "the video ended it: {ended}");
+}
+
+/// A process decoding a capture that ends — the applicant's bytes can end it
+/// — leaves its capture undecoded, and the round goes on: one gone before it
+/// answers the open gives the selfie no image, one gone at the first region
+/// gives the image no pixels. Either way the policy asks for a retake.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decoder_that_ends_leaves_its_capture_undecoded() {
+    let opened = framed(&Response::Opened(Opened::Photo(Size {
+        width: 64,
+        height: 64,
+    })));
+    let gone_before_the_open: Arc<dyn MediaStarter> = Decoders::of("true".into());
+    let gone_at_a_region: Arc<dyn MediaStarter> = Arc::new(Answering(vec![opened]));
+    for media in [gone_before_the_open, gone_at_a_region] {
+        let h = Harness::new().decoding(media);
+        let listener = Arc::new(PersistListener::default());
+        let session = h.drive_to_selfie(&listener).await;
+        let (status, _) = h
+            .run(session, Event::Media(fake_capture()), &listener)
+            .await;
+        assert!(matches!(
+            status,
+            RunStatus::Completed(Decision::RejectedRetryable)
+        ));
+    }
+}
+
+/// A process decoding a capture that stalls — neither answering nor ending —
+/// leaves its capture undecoded once the ask is past its bound, so the round
+/// goes on instead of waiting out its own deadline. The clock is the test's,
+/// so no test waits that bound out.
+#[tokio::test(start_paused = true)]
+async fn a_decoder_that_stalls_leaves_its_capture_undecoded() {
+    let h = Harness::new().decoding(Arc::new(Stalling));
+    let listener = Arc::new(PersistListener::default());
+    let session = h.drive_to_selfie(&listener).await;
+    let (status, _) = h
+        .run(session, Event::Media(fake_capture()), &listener)
+        .await;
+    assert!(matches!(
+        status,
+        RunStatus::Completed(Decision::RejectedRetryable)
+    ));
+}
+
+/// A process decoding a capture that answers what no decoder answers — bytes
+/// that are no response, a response to another request — fails the round as
+/// the platform's own failure, not the policy's: [`DecoderFailed`]. Nothing
+/// is persisted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decoder_answering_out_of_turn_fails_the_round() {
+    let no_response = vec![0, 0, 0, 1, 0xff];
+    let pixels_to_the_open = framed(&Response::Pixels(Vec::new()));
+    for answer in [no_response, pixels_to_the_open] {
+        let h = Harness::new().decoding(Arc::new(Answering(vec![answer])));
+        let listener = Arc::new(PersistListener::default());
+        let session = h.drive_to_selfie(&listener).await;
+        let fires = *listener.fires.lock().unwrap();
+        let failure = h
+            .round(session, Event::Media(fake_capture()), NO_PROPS, &listener)
+            .await
+            .err()
+            .expect("the round fails");
+        assert!(
+            failure.chain().any(|cause| cause.is::<DecoderFailed>()),
+            "{failure:#}"
+        );
+        assert_eq!(*listener.fires.lock().unwrap(), fires, "nothing persisted");
+    }
+}
+
 #[tokio::test]
 async fn media_rounds_keep_state_minimal() {
     let h = Harness::new();
@@ -557,13 +1131,13 @@ async fn media_rounds_keep_state_minimal() {
     let (_s0, after_genesis) = h.run(Session::default(), Event::Start, &listener).await;
     let baseline = after_genesis.state.len();
 
-    // passport clip → render media(selfie)
+    // passport photo → render media(selfie)
     let (_s1, after_passport) = h
         .run(after_genesis, Event::Media(fake_capture()), &listener)
         .await;
     let after_passport_len = after_passport.state.len();
 
-    // selfie clip → render consent-disclosure
+    // selfie photo → render consent-disclosure
     let (_s2, after_selfie) = h
         .run(after_passport, Event::Media(fake_capture()), &listener)
         .await;
@@ -606,7 +1180,9 @@ async fn reload_by_ref_misses() {
         listener: listener.clone(),
         media_store: empty_store.clone(),
         models: Arc::new(NoModels),
+        media: Decoders::of_photos(),
         fuel: DEFAULT_ROUND_FUEL,
+        picture_bounds: PictureBounds::DEFAULT,
     };
     let round = |session, event: Event| {
         listener.capture(&event);
@@ -651,7 +1227,9 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
             listener: listener.clone(),
             media_store: store.clone(),
             models: Arc::new(NoModels),
+            media: Decoders::of_photos(),
             fuel: DEFAULT_ROUND_FUEL,
+            picture_bounds: PictureBounds::DEFAULT,
         };
         let round = |session, event: Event| {
             listener.capture(&event);
@@ -678,7 +1256,7 @@ async fn from_blob_ref_is_lazy_load_on_bytes() {
 }
 
 #[tokio::test]
-async fn empty_passport_clip_is_retryable() {
+async fn a_passport_without_a_photo_is_retryable() {
     let h = Harness::new();
     let listener = Arc::new(PersistListener::default());
 
@@ -686,52 +1264,43 @@ async fn empty_passport_clip_is_retryable() {
     let (status, session) = h.run(Session::default(), Event::Start, &listener).await;
     assert_media(&status, "genesis (passport)");
 
-    // Feed a capture with ZERO frames. The policy reads the host-owned
-    // `clip` resource (`frame_count` / `frame`), sees an empty capture,
-    // and returns a retryable rejection — proving the frames reach the
-    // policy as a readable resource handle, not as bytes lowered into its
-    // linear memory.
-    let empty = MediaResult {
-        slot: 0,
-        clip: Clip { frames: vec![] },
-    };
+    // Feed a capture with NO photo. The policy finds no photo among the
+    // captures and returns a retryable rejection.
+    let empty = MediaResult { captures: vec![] };
     let (status, _session) = h.run(session, Event::Media(empty), &listener).await;
     match status {
         RunStatus::Completed(Decision::RejectedRetryable) => {}
-        _ => panic!("empty passport clip must yield Completed(RejectedRetryable)"),
+        _ => panic!("a passport without a photo must yield Completed(RejectedRetryable)"),
     }
 }
 
 #[tokio::test]
-async fn empty_selfie_clip_is_retryable_via_plugin() {
+async fn an_empty_selfie_is_retryable_via_plugin() {
     let h = Harness::new();
     let listener = Arc::new(PersistListener::default());
 
     // genesis → passport prompt
     let (status, session) = h.run(Session::default(), Event::Start, &listener).await;
     assert_media(&status, "genesis (passport)");
-    // passport clip → selfie prompt
+    // passport photo → selfie prompt
     let (status, session) = h
         .run(session, Event::Media(fake_capture()), &listener)
         .await;
     assert_media(&status, "passport → selfie");
 
-    // Feed a selfie capture with ZERO frames. On the selfie round the
-    // policy hands the clip to the FUSED face-age plugin; the plugin reads
-    // 0 frames and returns confidence 0; the policy maps that to a
-    // retryable rejection. Proves the plugin was invoked across the fused
-    // boundary during `handle` and actually read the clip resource — the
-    // full clip-consumer path, not just the policy-side read.
-    let empty = MediaResult {
-        slot: 0,
-        clip: Clip { frames: vec![] },
-    };
-    let (status, _session) = h.run(session, Event::Media(empty), &listener).await;
+    // Feed a selfie photo of ZERO bytes. On the selfie round the policy hands
+    // it to the FUSED vision plugin, which cannot decode it; the policy maps
+    // that to a retryable rejection. Proves the plugin was invoked across the
+    // fused boundary during `handle` and actually read the blob resource —
+    // the full capture-consumer path, not just the policy-side read.
+    let (status, _session) = h
+        .run(session, Event::Media(capture_of(Vec::new())), &listener)
+        .await;
     match status {
         RunStatus::Completed(Decision::RejectedRetryable) => {}
-        _ => panic!(
-            "empty selfie clip must yield Completed(RejectedRetryable) via the face-age plugin"
-        ),
+        _ => {
+            panic!("an empty selfie must yield Completed(RejectedRetryable) via the vision plugin")
+        }
     }
 }
 
@@ -911,7 +1480,9 @@ async fn static_fused_artifact_resolves_strictly() {
         listener: listener.clone(),
         media_store: listener.media_store(),
         models: Arc::new(NoModels),
+        media: Decoders::of_photos(),
         fuel: DEFAULT_ROUND_FUEL,
+        picture_bounds: PictureBounds::DEFAULT,
     };
     let round = |session, event: Event| {
         listener.capture(&event);
@@ -1014,7 +1585,7 @@ async fn a_capture_step_carries_the_icon_it_named() {
 async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
     let runner = TestRunner::new().unwrap();
 
-    // CORE: policy + well-known + vision + face-age baked. The policy still
+    // CORE: policy + well-known + the face plugins baked. The policy still
     // imports extra/tag (unsatisfied — a runtime import of the core).
     let baked = vec![
         PluginInstance {
@@ -1035,6 +1606,11 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
         PluginInstance {
             package: fixtures::FACE_AGE_PACKAGE.to_string(),
             wasm: fixtures::face_age().to_vec(),
+            model_layers: Vec::new(),
+        },
+        PluginInstance {
+            package: fixtures::FACE_LIVENESS_PACKAGE.to_string(),
+            wasm: fixtures::face_liveness().to_vec(),
             model_layers: Vec::new(),
         },
     ];
@@ -1061,7 +1637,9 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
         listener: listener.clone(),
         media_store: listener.media_store(),
         models: Arc::new(NoModels),
+        media: Decoders::of_photos(),
         fuel: DEFAULT_ROUND_FUEL,
+        picture_bounds: PictureBounds::DEFAULT,
     };
     // start → media(passport) → media(selfie) → consent-disclosure.
     let round = |session, event: Event| {
@@ -1122,6 +1700,8 @@ struct Harness {
     models: Vec<ModelImport>,
     /// What starts the processes every round of it runs its models in.
     starter: Arc<dyn ModelStarter>,
+    /// What starts the processes every round of it decodes its videos in.
+    media: Arc<dyn MediaStarter>,
 }
 
 impl Harness {
@@ -1155,7 +1735,14 @@ impl Harness {
             embedded,
             models: composition.models,
             starter,
+            media: Decoders::of_photos(),
         }
+    }
+
+    /// This, its rounds decoding their videos in the processes `media`
+    /// starts.
+    fn decoding(self, media: Arc<dyn MediaStarter>) -> Self {
+        Self { media, ..self }
     }
 
     fn inputs(&self, listener: &Arc<PersistListener>) -> RunInputs {
@@ -1163,7 +1750,9 @@ impl Harness {
             listener: listener.clone(),
             media_store: listener.media_store(),
             models: self.starter.clone(),
+            media: self.media.clone(),
             fuel: DEFAULT_ROUND_FUEL,
+            picture_bounds: PictureBounds::DEFAULT,
         }
     }
 
@@ -1174,19 +1763,25 @@ impl Harness {
         event: Event,
         listener: &Arc<PersistListener>,
     ) -> (RunStatus, Session) {
+        self.round(session, event, NO_PROPS, listener)
+            .await
+            .expect("reducer round")
+    }
+
+    /// One reducer round, of a session created with `props`.
+    async fn round(
+        &self,
+        session: Session,
+        event: Event,
+        props: &[u8],
+        listener: &Arc<PersistListener>,
+    ) -> RunResult<(RunStatus, Session)> {
         // Store the frames BEFORE the round, over the bytes about to be sent —
         // the orchestrator's order, and the reason it needs nothing back.
         listener.capture(&event);
         self.runner
-            .run(
-                &self.primed,
-                session,
-                event,
-                NO_PROPS,
-                self.inputs(listener),
-            )
+            .run(&self.primed, session, event, props, self.inputs(listener))
             .await
-            .expect("reducer round")
     }
 
     /// Drive start → passport, leaving the session sitting on the selfie
@@ -1235,20 +1830,20 @@ fn assert_media(status: &RunStatus, ctx: &str) {
 }
 
 /// A single-step fake capture result (both passport and selfie specs are
-/// single-shot, so the clip fills step index 0). The frame is a REAL
-/// encoded JPEG so the in-sandbox decode → detect → estimate pipeline (run
-/// on the selfie round) has something to decode.
+/// one photo step). The photo is a REAL encoded JPEG so the in-sandbox
+/// decode → detect → estimate pipeline (run on the selfie round) has
+/// something to decode.
 fn fake_capture() -> MediaResult {
     capture_of(jpeg_frame())
 }
 
-/// A single-step capture of `frame`.
-fn capture_of(frame: Vec<u8>) -> MediaResult {
+/// A single-step capture of the photo `jpeg`, taken to no guide.
+fn capture_of(jpeg: Vec<u8>) -> MediaResult {
     MediaResult {
-        slot: 0,
-        clip: Clip {
-            frames: vec![frame],
-        },
+        captures: vec![Capture::Photo(PhotoCapture {
+            photo: jpeg,
+            guide: None,
+        })],
     }
 }
 

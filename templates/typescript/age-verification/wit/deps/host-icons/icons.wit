@@ -9,7 +9,7 @@ package enclavid:host-icons@0.1.0;
 /// component built against an earlier version keeps running on a host that
 /// serves a later one.
 interface icons {
-    use enclavid:host/types@0.1.0.{icon-ref};
+    use enclavid:host/refs@0.1.0.{icon-ref};
 
     @since(version = 0.1.0)
     passport: func() -> icon-ref;

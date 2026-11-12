@@ -1,0 +1,21 @@
+[package]
+name = "face-liveness"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+# Build the artifact whose models the host runs: the `with-models` world, which
+# imports this plugin's slot, `enclavid-ext:face-liveness/models`, whose
+# `minifasnet-v2` and `minifasnet-v1se` are MiniFASNet on the face's crops at
+# 2.7 and 4 times its box. The models are not in the component: their graphs
+# are pushed beside it as the layers `minifasnet-v2.onnx` and
+# `minifasnet-v1se.onnx`. Profile: 80² BGR, from 0 to 255.
+# Default (off) = placeholder (a score from the face's brightness, no model).
+minifasnet = []
+
+[dependencies]
+wit-bindgen = "0.57"

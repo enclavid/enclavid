@@ -1,0 +1,69 @@
+[package]
+name = "engine-executor-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The COPROCESS the applicant's captures are decoded in: started beside the
+# round at its word, in the media part of the round's group under an identity
+# of its own: the platform's, beside the round's composition, held to a limit
+# of its own and the first the kernel takes where memory runs out.
+# One a capture, it reads the photo or the video the round sends — a JPEG, or a
+# WebM of VP8 frames, which libvpx decodes — and answers the round's requests
+# for regions of its pictures over the socket the two were paired with. The parsing
+# of the applicant's media lives here and nowhere else in the fleet, so the
+# process that parses it holds that one capture and nothing of the round's own.
+#
+# Its own package, like engine-executor-inference and for the same reason: this
+# manifest is the statement of what the process can name.
+#
+# libvpx is LINKED, never loaded from a path: `VPX_INCLUDE` names its headers
+# and `VPX_LIB` the directory holding `libvpx.a`. Without them it checks but
+# does not link — unless built without `video`.
+[features]
+default = ["video"]
+# Videos decoded: the WebM read for its VP8 frames, which libvpx decodes.
+# Without it a video opens as no video at all, and libvpx is not linked — the
+# build a test makes where it has no libvpx to link; the photos it decodes are
+# decoded as with it.
+video = ["dep:webm-iterable"]
+# Nothing to compile in: the coprocess says nothing, in any build. Here so a
+# role's debug build asks every one of its parts for the same feature.
+debug = []
+
+[dependencies]
+# What the round says to it, and what it answers.
+enclavid-media = { path = "../media" }
+# Its end of the channel to the round: blocking on its socket, no runtime.
+coprocess-channel = { path = "../coprocess-channel" }
+# The most frames a video lists.
+engine-types = { path = "../engine-types" }
+# The WebM container read once, in order, tag by tag, for its VP8 track and
+# its frames: no tag held larger than the file, and no jump to where the
+# file's own index points.
+webm-iterable = { version = "0.7", optional = true }
+# A photo's JPEG, decoded in Rust on the one thread the coprocess has: the
+# narrowed filter starts no other. (`jpeg-decoder` starts threads of its own
+# for any picture past 128×128, `rayon` or not.)
+zune-jpeg = "0.4"
+# A frame's I420 as RGB8 — BT.601, limited range, which VP8 is coded in — by
+# SIMD paths chosen at run time (its default features). Without `rayon`, no
+# thread of its own.
+yuv = "0.8"
+# A region of a picture cropped and brought to the size asked: nearest, or a
+# box filter over the source pixels each output pixel covers. Without
+# `rayon`, no thread of its own.
+fast_image_resize = { version = "5", default-features = false }
+libc = "0.2"
+
+# The filter it narrows itself with once the video has arrived.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.4"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+# The test's photos, made in code.
+jpeg-encoder = "0.6"

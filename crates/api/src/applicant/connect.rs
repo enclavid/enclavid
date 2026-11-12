@@ -34,7 +34,7 @@ async fn connect(ctx: SessionRunCtx) -> Result<SessionProgress, StatusCode> {
     {
         return Ok(SessionProgress::AwaitingInput {
             awaiting_seq: state.awaiting_seq,
-            request: prompt_view(prompt, &ctx.locale),
+            request: prompt_view(prompt, &state.sent, state.started_at_ms, &ctx.locale),
         });
     }
     ctx.run(SessionState::default(), Event::Start).await

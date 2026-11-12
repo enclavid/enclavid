@@ -213,8 +213,9 @@ mod tests {
 
     #[test]
     fn pairs_end_with_a_semicolon_or_a_newline() {
-        let given = parse(b"max-children=12;round-max-bytes=402653184\ncapacity-wait-secs=10;\n")
-            .expect("the entry parses");
+        let given =
+            parse(b"max-children=12;composition-max-bytes=402653184\ncapacity-wait-secs=10;\n")
+                .expect("the entry parses");
         assert_eq!(given.len(), 3);
         assert_eq!(given[&key("max-children")], "12");
         assert_eq!(given[&key("capacity-wait-secs")], "10");

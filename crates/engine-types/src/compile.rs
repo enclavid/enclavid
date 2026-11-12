@@ -19,9 +19,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// toolchains' runtimes import beside them, served empty: the environment,
 /// stdio, the filesystem with nothing opened. Nothing of `wasi:sockets` or
 /// `wasi:http`, so a composition importing them is refused.
-pub const HOST_INTERFACES: [&str; 25] = [
-    "enclavid:host/types@0.1.0",
+pub const HOST_INTERFACES: [&str; 27] = [
+    "enclavid:host/refs@0.1.0",
+    "enclavid:host/media@0.1.0",
     TENSORS,
+    "enclavid:host-capture/constants@0.1.0",
     crate::icons::INTERFACE,
     POLICY_PROPS,
     POLICY_DISCLOSURE_FIELDS,
@@ -229,7 +231,7 @@ mod tests {
 
     #[test]
     fn an_interface_name_is_held_to_its_length_and_alphabet() {
-        assert!(InterfaceName::new("enclavid:well-known/capture@0.1.0").is_some());
+        assert!(InterfaceName::new("enclavid:well-known/photo@0.1.0").is_some());
         assert!(InterfaceName::new("wasi:io/poll@0.2.0-rc+build.1").is_some());
         assert!(InterfaceName::new(&"a".repeat(InterfaceName::MAX_BYTES)).is_some());
         for refused in [

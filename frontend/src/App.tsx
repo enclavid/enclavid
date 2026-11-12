@@ -27,6 +27,7 @@ import {
   connect,
   getStatus,
   resetState,
+  startPrompt,
   submitInput,
   warmup,
   ApiError,
@@ -310,6 +311,28 @@ function Session({
     }
   }
 
+  // The media prompt the session awaits started, and shown as the start gives
+  // it back: a prompt with a time limit now whole, with the time left.
+  async function startAndRender(awaitingSeq: number): Promise<void> {
+    const key = loadKey(sessionId);
+    if (!key) throw new Error("No applicant key available.");
+    setError(null);
+    try {
+      show(await startPrompt(sessionId, awaitingSeq, key));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 403) {
+        setTerminal("elsewhere");
+      } else {
+        setError(
+          e instanceof ApiError
+            ? `Server returned ${e.status}.`
+            : "Could not reach the server.",
+        );
+      }
+      throw e;
+    }
+  }
+
   // A key of this browser's own for the session — drawn, or made at random
   // when the link says to skip the drawing — and on to the session.
   function beginKey() {
@@ -406,6 +429,7 @@ function Session({
           progress={progress}
           error={error}
           onSubmit={submitAndRender}
+          onStart={startAndRender}
           onMoved={moved}
         />
       </Route>

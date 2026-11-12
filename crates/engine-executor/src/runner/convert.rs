@@ -17,42 +17,50 @@
 //! locale from the carried translation sets. Disclosure field-count and
 //! value-length limits are enforced here, at the build seam.
 
-use std::sync::Arc;
-
 use wasmtime::component::{Resource, ResourceTable};
 
 use session_types::{
-    CameraFacing as DCameraFacing, CaptureGuide as DCaptureGuide, CaptureStep as DCaptureStep,
-    Decision as DDecision, Disclosure as DDisclosure, DisplayField as DDisplayField, Event,
-    GuideNone, GuideOval, GuideRect, Localized as DLocalized, MediaSpec as DMediaSpec, Prompt,
-    capture_guide,
+    CameraFacing as DCameraFacing, Capture, CaptureKind as DCaptureKind,
+    CaptureStep as DCaptureStep, Decision as DDecision, Disclosure as DDisclosure,
+    DisplayField as DDisplayField, Event, FaceFlashesGuide as DFaceFlashesGuide,
+    FaceGuide as DFaceGuide, FrameRange, HeadTurnGuide as DHeadTurnGuide, Localized as DLocalized,
+    MediaSpec as DMediaSpec, OvalShape as DOvalShape, PhotoFaceGuide as DPhotoFaceGuide,
+    PhotoGuide as DPhotoGuide, PhotoShapeGuide as DPhotoShapeGuide, PhotoSpec as DPhotoSpec,
+    Prompt, RectShape as DRectShape, Rgb as DRgb, Shape as DShape, VideoGuide as DVideoGuide,
+    VideoShapeGuide as DVideoShapeGuide, VideoSpec as DVideoSpec,
 };
 
 use crate::embedded::{DisclosureFieldRef, EmbeddedRegistry, IconRef, LocalizedRef};
-use crate::enclavid::policy::types as wit_policy;
-use crate::enclavid::shared_types::capture as wit_capture;
-use crate::limits::{
-    GUIDE_ASPECT_MAX, GUIDE_ASPECT_MIN, GUIDE_ASPECT_STEPS_PER_UNIT, MAX_CONSENT_FIELDS,
-    MAX_VALUE_LENGTH,
+use crate::enclavid::host_capture::{
+    capture as wit_capture, photo as wit_photo, video as wit_video,
 };
+use crate::enclavid::policy::types as wit_policy;
+use crate::limits::{
+    GUIDE_ASPECT_MAX, GUIDE_ASPECT_MIN, GUIDE_FACE_WIDTH_MAX, GUIDE_FACE_WIDTH_MIN,
+    GUIDE_FLASH_MS_MAX, GUIDE_FLASH_MS_MIN, GUIDE_GRACE_MS_MAX, GUIDE_HEAD_TURN_DEGREES_MAX,
+    GUIDE_HOLD_MS_MAX, GUIDE_OVAL_WIDTH_MAX, GUIDE_OVAL_WIDTH_MIN, MAX_CAPTURE_STEPS,
+    MAX_CONSENT_FIELDS, MAX_FLASH_COLORS, MAX_VALUE_LENGTH, MAX_VIDEO_GUIDES,
+};
+use crate::media::{PhotoRep, VideoRep};
 use crate::sanitize;
 
 // ---------------------------------------------------------------------
-// Inbound: domain Event → WIT event (no refs)
+// Inbound: domain Event → WIT event (a shape's text minted anew)
 // ---------------------------------------------------------------------
 
 /// Lower a domain [`Event`] into the WIT `event` the policy's `handle`
-/// consumes. The captured pixels don't cross into the policy's linear memory —
-/// each frame is content-addressed (BLAKE3) and pushed into the run's
-/// [`ResourceTable`] host-side as an unforgeable `frame` handle; the policy
-/// receives a `clip` record bundling the handles and forwards one to a plugin.
-/// Minting handles needs `&mut table`, so this runs before the `handle` call
-/// while the store is otherwise idle.
+/// consumes. The captured bytes don't cross into the policy's linear memory —
+/// each capture is content-addressed (BLAKE3) and pushed into the run's
+/// [`ResourceTable`] host-side as an unforgeable `photo` or `video` handle,
+/// minted "warm": the bytes are in hand from `/input`, so no lazy pull is
+/// needed. The policy receives one capture per step and forwards it to a
+/// plugin. Minting handles needs `&mut table`, so this runs before the `handle`
+/// call while the store is otherwise idle.
 ///
 /// The `(hash, bytes)` pairs are NOT reported back. The orchestrator sent these
-/// very frames in this very event and derives the same BLAKE3 over the same
-/// bytes, so what it would be receiving is a copy of what it already holds — from
-/// the process it has the least reason to take copies from.
+/// very bytes in this very event and derives the same BLAKE3 over them, so what
+/// it would be receiving is a copy of what it already holds — from the process
+/// it has the least reason to take copies from.
 pub fn event_to_wit(
     table: &mut ResourceTable,
     event: Event,
@@ -61,25 +69,103 @@ pub fn event_to_wit(
         Event::Start => wit_policy::Event::Start,
         Event::ConsentDisclosure(accepted) => wit_policy::Event::ConsentDisclosure(accepted),
         Event::Media(result) => {
-            let mut frames = Vec::with_capacity(result.clip.frames.len());
-            for frame_bytes in result.clip.frames {
-                let hash: [u8; 32] = blake3::hash(&frame_bytes).into();
-                let arc = Arc::new(frame_bytes);
-                // Ingest blob: bytes are in hand from `/input`, so it's minted
-                // "warm" (`Some`) — no lazy pull needed. Only rehydrated
-                // (`from-blob-ref`) blobs start cold.
-                let handle = table.push(crate::media::BlobRep {
-                    bytes: Some(arc.clone()),
-                    content_hash: hash,
-                })?;
-                frames.push(handle);
+            let mut captures = Vec::with_capacity(result.captures.len());
+            for capture in result.captures {
+                captures.push(match capture {
+                    Capture::Photo(capture) => {
+                        let photo = table.push(PhotoRep::warm(capture.photo))?;
+                        let guide = match capture.guide {
+                            Some(guide) => Some(photo_guide_to_wit(guide, table)?),
+                            None => None,
+                        };
+                        wit_policy::Capture::Photo(wit_policy::PhotoCapture { photo, guide })
+                    }
+                    Capture::Video(capture) => {
+                        let video = table.push(VideoRep::warm(capture.video))?;
+                        let guides = capture
+                            .guides
+                            .into_iter()
+                            .map(|range| frame_range_to_wit(range, table))
+                            .collect::<wasmtime::Result<_>>()?;
+                        wit_policy::Capture::Video(wit_policy::VideoCapture { video, guides })
+                    }
+                });
             }
-            wit_policy::Event::Media(wit_policy::MediaResult {
-                slot: result.slot,
-                clip: wit_policy::Clip { frames },
-            })
+            wit_policy::Event::Media(Ok(captures))
         }
+        Event::TimedOut => wit_policy::Event::Media(Err(wit_policy::MediaError::TimedOut)),
     })
+}
+
+/// A range as the policy gets it back: its guide's texts minted anew as the
+/// handles they were asked with.
+fn frame_range_to_wit(
+    range: FrameRange,
+    table: &mut ResourceTable,
+) -> wasmtime::Result<wit_policy::FrameRange> {
+    Ok(wit_policy::FrameRange {
+        guide: video_guide_to_wit(range.guide, table)?,
+        first: range.first,
+        last: range.last,
+    })
+}
+
+/// A photo's guide as the policy gets it back, its shape's text minted anew.
+fn photo_guide_to_wit(
+    guide: DPhotoGuide,
+    table: &mut ResourceTable,
+) -> wasmtime::Result<wit_photo::Guide> {
+    Ok(match guide {
+        DPhotoGuide::Shape(s) => wit_photo::Guide::Shape(wit_photo::ShapeGuide {
+            shape: shape_to_wit(s.shape),
+            label: table.push(LocalizedRef(s.label))?,
+        }),
+        DPhotoGuide::Face(f) => wit_photo::Guide::Face(wit_photo::FaceGuide { width: f.width }),
+    })
+}
+
+fn video_guide_to_wit(
+    guide: DVideoGuide,
+    table: &mut ResourceTable,
+) -> wasmtime::Result<wit_video::Guide> {
+    Ok(match guide {
+        DVideoGuide::Shape(s) => wit_video::Guide::Shape(wit_video::ShapeGuide {
+            shape: shape_to_wit(s.shape),
+            label: table.push(LocalizedRef(s.label))?,
+            hold_ms: s.hold_ms,
+        }),
+        DVideoGuide::Face(f) => wit_video::Guide::Face(wit_video::FaceGuide {
+            width: f.width,
+            hold_ms: f.hold_ms,
+            grace_ms: f.grace_ms,
+        }),
+        DVideoGuide::HeadTurn(t) => wit_video::Guide::HeadTurn(wit_video::HeadTurnGuide {
+            degrees: t.degrees,
+            hold_ms: t.hold_ms,
+            grace_ms: t.grace_ms,
+        }),
+        DVideoGuide::FaceFlashes(f) => wit_video::Guide::FaceFlashes(wit_video::FaceFlashesGuide {
+            width: f.width,
+            colors: f
+                .colors
+                .into_iter()
+                .map(|c| wit_video::Rgb {
+                    red: c.red,
+                    green: c.green,
+                    blue: c.blue,
+                })
+                .collect(),
+            flash_ms: f.flash_ms,
+            grace_ms: f.grace_ms,
+        }),
+    })
+}
+
+fn shape_to_wit(shape: DShape) -> wit_photo::Shape {
+    match shape {
+        DShape::Rect(r) => wit_photo::Shape::Rect(wit_photo::RectShape { aspect: r.aspect }),
+        DShape::Oval(o) => wit_photo::Shape::Oval(wit_photo::OvalShape { width: o.width }),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -174,6 +260,11 @@ fn disclosure_to_domain(
 // Media spec — resolve + lower
 // ---------------------------------------------------------------------
 
+/// Resolve refs on a media render and lower it. A spec of no steps, or of
+/// more than [`MAX_CAPTURE_STEPS`], a time limit of no seconds, a video step
+/// of no guides, or of more than [`MAX_VIDEO_GUIDES`], and flashes of no
+/// colours, or of more than [`MAX_FLASH_COLORS`], trap: none is an applicant's
+/// doing.
 fn media_spec_to_domain(
     spec: wit_capture::MediaSpec,
     table: &ResourceTable,
@@ -183,13 +274,27 @@ fn media_spec_to_domain(
             "media render spec has no capture steps",
         ));
     }
+    if spec.captures.len() > MAX_CAPTURE_STEPS {
+        return Err(wasmtime::Error::msg(format!(
+            "media render spec exceeds {MAX_CAPTURE_STEPS} capture steps"
+        )));
+    }
+    if spec.time_limit_secs == Some(0) {
+        return Err(wasmtime::Error::msg(
+            "media render spec has a time limit of no seconds",
+        ));
+    }
     let label = localized(table, &spec.label)?;
     let captures = spec
         .captures
         .into_iter()
         .map(|c| capture_step_to_domain(c, table))
         .collect::<wasmtime::Result<Vec<_>>>()?;
-    Ok(DMediaSpec { label, captures })
+    Ok(DMediaSpec {
+        label,
+        captures,
+        time_limit_secs: spec.time_limit_secs,
+    })
 }
 
 fn capture_step_to_domain(
@@ -200,13 +305,41 @@ fn capture_step_to_domain(
         Some(r) => Some(icon_name(table, r)?),
         None => None,
     };
+    let kind = match s.kind {
+        wit_capture::CaptureKind::Photo(photo) => DCaptureKind::Photo(DPhotoSpec {
+            guide: match photo.guide {
+                Some(guide) => Some(photo_guide_to_domain(guide, table)?),
+                None => None,
+            },
+            review_hint: match &photo.review_hint {
+                Some(hint) => Some(localized(table, hint)?),
+                None => None,
+            },
+        }),
+        wit_capture::CaptureKind::Video(video) => {
+            if video.guides.is_empty() {
+                return Err(wasmtime::Error::msg("a video capture step has no guides"));
+            }
+            if video.guides.len() > MAX_VIDEO_GUIDES {
+                return Err(wasmtime::Error::msg(format!(
+                    "a video capture step exceeds {MAX_VIDEO_GUIDES} guides"
+                )));
+            }
+            DCaptureKind::Video(DVideoSpec {
+                guides: video
+                    .guides
+                    .into_iter()
+                    .map(|guide| video_guide_to_domain(guide, table))
+                    .collect::<wasmtime::Result<Vec<_>>>()?,
+            })
+        }
+    };
     Ok(DCaptureStep {
         icon,
         instructions: localized(table, &s.instructions)?,
         label: localized(table, &s.label)?,
         camera: camera_to_domain(s.camera),
-        guide: Some(guide_to_domain(s.guide)),
-        review_hint: localized(table, &s.review_hint)?,
+        kind,
     })
 }
 
@@ -218,46 +351,405 @@ fn camera_to_domain(c: wit_capture::CameraFacing) -> DCameraFacing {
     }
 }
 
-fn guide_to_domain(g: wit_capture::CaptureGuide) -> DCaptureGuide {
-    let kind = match g {
-        wit_capture::CaptureGuide::None => capture_guide::Kind::None(GuideNone {}),
-        wit_capture::CaptureGuide::Rect(aspect) => capture_guide::Kind::Rect(GuideRect {
-            aspect: drawn_aspect(aspect),
+/// A shape as it is drawn: its number held to its range, as the WIT `shape`
+/// says of every guide.
+fn shape_to_domain(g: wit_photo::Shape) -> DShape {
+    match g {
+        wit_photo::Shape::Rect(r) => DShape::Rect(DRectShape {
+            aspect: drawn_aspect(r.aspect),
         }),
-        wit_capture::CaptureGuide::Oval => capture_guide::Kind::Oval(GuideOval {}),
-    };
-    DCaptureGuide { kind: Some(kind) }
+        wit_photo::Shape::Oval(o) => DShape::Oval(DOvalShape {
+            width: drawn(o.width, GUIDE_OVAL_WIDTH_MIN, GUIDE_OVAL_WIDTH_MAX, 0.5),
+        }),
+    }
+}
+
+/// A photo's guide as it is shown: its numbers held to their ranges, its
+/// shape's text read.
+fn photo_guide_to_domain(
+    g: wit_photo::Guide,
+    table: &ResourceTable,
+) -> wasmtime::Result<DPhotoGuide> {
+    Ok(match g {
+        wit_photo::Guide::Shape(s) => DPhotoGuide::Shape(DPhotoShapeGuide {
+            shape: shape_to_domain(s.shape),
+            label: localized(table, &s.label)?,
+        }),
+        wit_photo::Guide::Face(f) => DPhotoGuide::Face(DPhotoFaceGuide {
+            width: drawn(f.width, GUIDE_FACE_WIDTH_MIN, GUIDE_FACE_WIDTH_MAX, 0.5),
+        }),
+    })
+}
+
+/// A video's guide as it is shown: each of its numbers held to its range.
+fn video_guide_to_domain(
+    g: wit_video::Guide,
+    table: &ResourceTable,
+) -> wasmtime::Result<DVideoGuide> {
+    Ok(match g {
+        wit_video::Guide::Shape(s) => DVideoGuide::Shape(DVideoShapeGuide {
+            shape: shape_to_domain(s.shape),
+            label: localized(table, &s.label)?,
+            hold_ms: s.hold_ms.min(GUIDE_HOLD_MS_MAX),
+        }),
+        wit_video::Guide::Face(f) => DVideoGuide::Face(DFaceGuide {
+            width: drawn(f.width, GUIDE_FACE_WIDTH_MIN, GUIDE_FACE_WIDTH_MAX, 0.5),
+            hold_ms: f.hold_ms.min(GUIDE_HOLD_MS_MAX),
+            grace_ms: f.grace_ms.min(GUIDE_GRACE_MS_MAX),
+        }),
+        wit_video::Guide::HeadTurn(t) => {
+            if t.degrees == 0 {
+                return Err(wasmtime::Error::msg("a head-turn guide turns no degrees"));
+            }
+            DVideoGuide::HeadTurn(DHeadTurnGuide {
+                degrees: t
+                    .degrees
+                    .clamp(-GUIDE_HEAD_TURN_DEGREES_MAX, GUIDE_HEAD_TURN_DEGREES_MAX),
+                hold_ms: t.hold_ms.min(GUIDE_HOLD_MS_MAX),
+                grace_ms: t.grace_ms.min(GUIDE_GRACE_MS_MAX),
+            })
+        }
+        wit_video::Guide::FaceFlashes(f) => {
+            if f.colors.is_empty() {
+                return Err(wasmtime::Error::msg("a face-flashes guide has no colours"));
+            }
+            if f.colors.len() > MAX_FLASH_COLORS {
+                return Err(wasmtime::Error::msg(format!(
+                    "a face-flashes guide exceeds {MAX_FLASH_COLORS} colours"
+                )));
+            }
+            DVideoGuide::FaceFlashes(DFaceFlashesGuide {
+                width: drawn(f.width, GUIDE_FACE_WIDTH_MIN, GUIDE_FACE_WIDTH_MAX, 0.5),
+                colors: f
+                    .colors
+                    .into_iter()
+                    .map(|c| DRgb {
+                        red: c.red,
+                        green: c.green,
+                        blue: c.blue,
+                    })
+                    .collect(),
+                flash_ms: f.flash_ms.clamp(GUIDE_FLASH_MS_MIN, GUIDE_FLASH_MS_MAX),
+                grace_ms: f.grace_ms.min(GUIDE_GRACE_MS_MAX),
+            })
+        }
+    })
 }
 
 /// The aspect a `rect` guide is drawn at: the policy's, held to
-/// [`GUIDE_ASPECT_MIN`]..=[`GUIDE_ASPECT_MAX`] and rounded to the step
-/// [`GUIDE_ASPECT_STEPS_PER_UNIT`] sets; a square for NaN, which has no
+/// [`GUIDE_ASPECT_MIN`]..=[`GUIDE_ASPECT_MAX`]; a square for NaN, which has no
 /// place in the range.
 fn drawn_aspect(aspect: f32) -> f32 {
-    if aspect.is_nan() {
-        return 1.0;
+    drawn(aspect, GUIDE_ASPECT_MIN, GUIDE_ASPECT_MAX, 1.0)
+}
+
+/// `value` held to `min..=max`; `nan` for NaN, which has no place in the
+/// range.
+fn drawn(value: f32, min: f32, max: f32, nan: f32) -> f32 {
+    if value.is_nan() {
+        return nan;
     }
-    let held = aspect.clamp(GUIDE_ASPECT_MIN, GUIDE_ASPECT_MAX);
-    (held * GUIDE_ASPECT_STEPS_PER_UNIT).round() / GUIDE_ASPECT_STEPS_PER_UNIT
+    value.clamp(min, max)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Inside the range an aspect is drawn to hundredths, and written out as
-    /// no more than that: the digits past them carry nothing to the page.
-    #[test]
-    fn an_aspect_is_drawn_to_hundredths() {
-        for (given, drawn) in [
-            (1.42_f32, "1.42"),
-            (1.419_999_9, "1.42"),
-            (1.585, "1.59"),
-            (1.234_567_8, "1.23"),
-            (1.0, "1"),
-        ] {
-            assert_eq!(drawn_aspect(given).to_string(), drawn, "{given}");
+    /// A text as a catalog has it, in one language.
+    fn text(words: &str) -> DLocalized {
+        DLocalized {
+            translations: vec![session_types::Translation {
+                language: "en".into(),
+                text: words.into(),
+            }],
         }
+    }
+
+    /// A shape is drawn within its range. In a video every guide is held no
+    /// longer than the longest hold, a face asked for at a size the page
+    /// finds, and a head turned no further than a face in profile.
+    #[test]
+    fn a_guide_is_drawn_within_its_ranges() {
+        let mut table = ResourceTable::new();
+        let label = table.push(LocalizedRef(text("Your card"))).unwrap();
+        let frame = video_guide_to_domain(
+            wit_video::Guide::Shape(wit_video::ShapeGuide {
+                shape: wit_photo::Shape::Rect(wit_photo::RectShape { aspect: 1.42 }),
+                label,
+                hold_ms: u16::MAX,
+            }),
+            &table,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            DVideoGuide::Shape(DVideoShapeGuide {
+                shape: DShape::Rect(DRectShape { aspect: 1.42 }),
+                label: text("Your card"),
+                hold_ms: GUIDE_HOLD_MS_MAX,
+            })
+        );
+        for (given, drawn) in [
+            (0.01, GUIDE_OVAL_WIDTH_MIN),
+            (0.456_78, 0.456_78),
+            (0.9, GUIDE_OVAL_WIDTH_MAX),
+            (f32::NAN, 0.5),
+        ] {
+            let oval = shape_to_domain(wit_photo::Shape::Oval(wit_photo::OvalShape {
+                width: given,
+            }));
+            assert_eq!(oval, DShape::Oval(DOvalShape { width: drawn }), "{given}");
+        }
+        for (given, drawn) in [
+            (0.1, GUIDE_FACE_WIDTH_MIN),
+            (0.456_78, 0.456_78),
+            (0.9, GUIDE_FACE_WIDTH_MAX),
+            (f32::NAN, 0.5),
+        ] {
+            let face = photo_guide_to_domain(
+                wit_photo::Guide::Face(wit_photo::FaceGuide { width: given }),
+                &table,
+            )
+            .unwrap();
+            assert_eq!(
+                face,
+                DPhotoGuide::Face(DPhotoFaceGuide { width: drawn }),
+                "{given}"
+            );
+            let face = video_guide_to_domain(
+                wit_video::Guide::Face(wit_video::FaceGuide {
+                    width: given,
+                    hold_ms: u16::MAX,
+                    grace_ms: u16::MAX,
+                }),
+                &table,
+            )
+            .unwrap();
+            assert_eq!(
+                face,
+                DVideoGuide::Face(DFaceGuide {
+                    width: drawn,
+                    hold_ms: GUIDE_HOLD_MS_MAX,
+                    grace_ms: GUIDE_GRACE_MS_MAX,
+                }),
+                "{given}"
+            );
+        }
+        for (given, drawn) in [
+            (i8::MIN, -GUIDE_HEAD_TURN_DEGREES_MAX),
+            (30, 30),
+            (i8::MAX, GUIDE_HEAD_TURN_DEGREES_MAX),
+        ] {
+            let turn = video_guide_to_domain(
+                wit_video::Guide::HeadTurn(wit_video::HeadTurnGuide {
+                    degrees: given,
+                    hold_ms: 700,
+                    grace_ms: 300,
+                }),
+                &table,
+            )
+            .unwrap();
+            assert_eq!(
+                turn,
+                DVideoGuide::HeadTurn(DHeadTurnGuide {
+                    degrees: drawn,
+                    hold_ms: 700,
+                    grace_ms: 300,
+                }),
+                "{given}"
+            );
+        }
+    }
+
+    /// A turn of no degrees asks nothing of the head: the policy's error.
+    #[test]
+    fn a_turn_of_no_degrees_traps() {
+        let turn = video_guide_to_domain(
+            wit_video::Guide::HeadTurn(wit_video::HeadTurnGuide {
+                degrees: 0,
+                hold_ms: 700,
+                grace_ms: 300,
+            }),
+            &ResourceTable::new(),
+        );
+        assert!(turn.is_err());
+    }
+
+    /// Flashes are of a face at a size the page finds, each colour shown as the
+    /// policy gave it, for no shorter and no longer than a flash may be.
+    #[test]
+    fn flashes_are_shown_within_their_ranges() {
+        let colors = [(0, 0, 0), (255, 136, 0), (17, 34, 51)];
+        let flashes = |width, flash_ms| {
+            video_guide_to_domain(
+                wit_video::Guide::FaceFlashes(wit_video::FaceFlashesGuide {
+                    width,
+                    colors: colors
+                        .iter()
+                        .map(|&(red, green, blue)| wit_video::Rgb { red, green, blue })
+                        .collect(),
+                    flash_ms,
+                    grace_ms: u16::MAX,
+                }),
+                &ResourceTable::new(),
+            )
+            .unwrap()
+        };
+        for (given, drawn) in [
+            ((0.1, 0), (GUIDE_FACE_WIDTH_MIN, GUIDE_FLASH_MS_MIN)),
+            ((0.456_78, 300), (0.456_78, 300)),
+            ((f32::NAN, u16::MAX), (0.5, GUIDE_FLASH_MS_MAX)),
+        ] {
+            assert_eq!(
+                flashes(given.0, given.1),
+                DVideoGuide::FaceFlashes(DFaceFlashesGuide {
+                    width: drawn.0,
+                    colors: colors
+                        .iter()
+                        .map(|&(red, green, blue)| DRgb { red, green, blue })
+                        .collect(),
+                    flash_ms: drawn.1,
+                    grace_ms: GUIDE_GRACE_MS_MAX,
+                }),
+                "{given:?}"
+            );
+        }
+    }
+
+    /// Flashes of no colours, or of more than a guide may show, are the
+    /// policy's error, not the applicant's.
+    #[test]
+    fn flashes_of_no_colours_or_too_many_trap() {
+        let flashes = |count| {
+            video_guide_to_domain(
+                wit_video::Guide::FaceFlashes(wit_video::FaceFlashesGuide {
+                    width: 0.5,
+                    colors: vec![
+                        wit_video::Rgb {
+                            red: 255,
+                            green: 255,
+                            blue: 255,
+                        };
+                        count
+                    ],
+                    flash_ms: 300,
+                    grace_ms: 300,
+                }),
+                &ResourceTable::new(),
+            )
+        };
+        assert!(flashes(0).is_err());
+        assert!(flashes(1).is_ok());
+        assert!(flashes(MAX_FLASH_COLORS).is_ok());
+        assert!(flashes(MAX_FLASH_COLORS + 1).is_err());
+    }
+
+    /// A range reaches the policy with the guide the prompt had, flashes with
+    /// their colours.
+    #[test]
+    fn a_range_reaches_the_policy_with_its_guide() {
+        let mut table = ResourceTable::new();
+        let range = frame_range_to_wit(
+            FrameRange {
+                guide: DVideoGuide::FaceFlashes(DFaceFlashesGuide {
+                    width: 0.5,
+                    colors: vec![
+                        DRgb {
+                            red: 255,
+                            green: 136,
+                            blue: 0,
+                        },
+                        DRgb {
+                            red: 0,
+                            green: 10,
+                            blue: 171,
+                        },
+                    ],
+                    flash_ms: 300,
+                    grace_ms: 250,
+                }),
+                first: 3,
+                last: 9,
+            },
+            &mut table,
+        )
+        .unwrap();
+        assert_eq!((range.first, range.last), (3, 9));
+        let wit_video::Guide::FaceFlashes(flashes) = range.guide else {
+            panic!("the guide is not the prompt's");
+        };
+        assert_eq!(
+            (flashes.width, flashes.flash_ms, flashes.grace_ms),
+            (0.5, 300, 250)
+        );
+        let colors: Vec<_> = flashes
+            .colors
+            .iter()
+            .map(|c| (c.red, c.green, c.blue))
+            .collect();
+        assert_eq!(colors, [(255, 136, 0), (0, 10, 171)]);
+    }
+
+    /// A shape reaches the policy with its text, as a handle of its own to the
+    /// text the prompt had.
+    #[test]
+    fn a_shape_reaches_the_policy_with_its_text() {
+        let mut table = ResourceTable::new();
+        let range = frame_range_to_wit(
+            FrameRange {
+                guide: DVideoGuide::Shape(DVideoShapeGuide {
+                    shape: DShape::Rect(DRectShape { aspect: 1.585 }),
+                    label: text("Your card"),
+                    hold_ms: 500,
+                }),
+                first: 0,
+                last: 7,
+            },
+            &mut table,
+        )
+        .unwrap();
+        let wit_video::Guide::Shape(shape) = range.guide else {
+            panic!("the guide is not the prompt's");
+        };
+        assert_eq!(shape.hold_ms, 500);
+        assert_eq!(localized(&table, &shape.label).unwrap(), text("Your card"));
+    }
+
+    /// A photo reaches the policy with the guide it was taken to, its shape's
+    /// text a handle of its own.
+    #[test]
+    fn a_photo_reaches_the_policy_with_its_guide() {
+        let mut table = ResourceTable::new();
+        let photo = |guide| {
+            Capture::Photo(session_types::PhotoCapture {
+                photo: vec![0xFF, 0xD8, 0xFF],
+                guide,
+            })
+        };
+        let shape = DPhotoGuide::Shape(DPhotoShapeGuide {
+            shape: DShape::Oval(DOvalShape { width: 0.5 }),
+            label: text("Your face"),
+        });
+        let event = Event::Media(session_types::MediaResult {
+            captures: vec![photo(Some(shape)), photo(None)],
+        });
+        let wit_policy::Event::Media(Ok(captures)) = event_to_wit(&mut table, event).unwrap()
+        else {
+            panic!("not the media reply");
+        };
+        let [
+            wit_policy::Capture::Photo(shaped),
+            wit_policy::Capture::Photo(bare),
+        ] = captures.as_slice()
+        else {
+            panic!("not the two photos");
+        };
+        let Some(wit_photo::Guide::Shape(guide)) = &shaped.guide else {
+            panic!("the guide is not the prompt's");
+        };
+        assert_eq!(localized(&table, &guide.label).unwrap(), text("Your face"));
+        assert!(bare.guide.is_none());
     }
 
     /// Past either end an aspect is drawn at that end, and NaN, which is

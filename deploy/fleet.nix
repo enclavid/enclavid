@@ -375,7 +375,7 @@ let
         settings = mkOption {
           type = types.attrsOf types.ints.unsigned;
           default = { };
-          example = { max-children = 8; round-max-bytes = 536870912; };
+          example = { max-children = 8; composition-max-bytes = 536870912; };
           description = ''
             Its launch settings: how many, how much, how long — each a key the
             role knows (image/RUNNING.md lists them) and its value. Outside its

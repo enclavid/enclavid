@@ -41,6 +41,10 @@ let
   # static binary links — see image/onnxruntime.
   onnxruntime = import ../onnxruntime;
 
+  # libvpx's VP8 decoder alone, as the archive a static binary links — see
+  # image/libvpx.
+  libvpx = import ../libvpx;
+
   # ONE cargo invocation over ONE package, and the binaries to keep from it.
   #
   # `noDefaultFeatures` is per part rather than blanket: `--no-default-features`
@@ -294,6 +298,18 @@ builtins.foldl' (a: b: a // b) { } [
         binaries = [ "engine-executor-inference" ];
         preBuild = ''
           export ORT_LIB_LOCATION=${onnxruntime.static}/lib
+        '';
+      }
+      # The process a round's video is decoded in, and the one binary in the
+      # fleet that parses an applicant's video and links libvpx: the archive
+      # image/libvpx builds, its headers and its directory named to the build
+      # script. Its own invocation, as every part is.
+      {
+        package = "engine-executor-media";
+        binaries = [ "engine-executor-media" ];
+        preBuild = ''
+          export VPX_INCLUDE=${libvpx}/include
+          export VPX_LIB=${libvpx}/lib
         '';
       }
     ];

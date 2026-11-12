@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { decode, definePolicy, encode, withStart } from "./index.js";
+import { decode, definePolicy, encode, hex, withStart } from "./index.js";
 
 // The shape of a world's event and action, as `jco guest-types` writes them.
 type Event = { tag: "start" } | { tag: "consent-disclosure"; val: boolean } | { tag: "media"; val: null };
@@ -46,6 +46,14 @@ test("withStart calls start on the event start, and handle on every other", () =
   assert.deepEqual(calls, ["start", "passport media", "selfie media"]);
   assert.deepEqual(decode(third), { step: "selfie", passport: "ab12" });
   assert.deepEqual(action, approved);
+});
+
+test("hex reads a colour with its # or without, in either case, and nothing else", () => {
+  assert.deepEqual(hex("#ff8800"), { red: 255, green: 136, blue: 0 });
+  assert.deepEqual(hex("00AAff"), { red: 0, green: 170, blue: 255 });
+  for (const color of ["#ff880", "ff88000", "#gg0000", "##ff8800", "", "#"]) {
+    assert.throws(() => hex(color), color);
+  }
 });
 
 test("a state is never encoded to no bytes", () => {

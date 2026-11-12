@@ -16,8 +16,9 @@ use std::fs::File;
 use std::os::fd::{AsFd, FromRawFd, OwnedFd, RawFd};
 use std::process::ExitCode;
 
+use coprocess_channel::{receive, send};
 use enclavid_inference::graph::{self, DataFile, Dim, Element, Port, Weight};
-use enclavid_inference::protocol::{self, Data, Failure, Tensor};
+use enclavid_inference::protocol::{Data, Failure, MAX_MESSAGE_BYTES, Request, Response, Tensor};
 use half::slice::{HalfBitsSliceExt, HalfFloatSliceExt};
 use half::{bf16, f16};
 use memmap2::Mmap;
@@ -48,12 +49,14 @@ fn serve() -> Result<(), Stop> {
     let mut model = Model::load(&environment, &graph, &data).ok();
     drop((graph, data));
     narrow()?;
-    while let Some(request) = protocol::read_request(&mut socket)? {
-        let answer = match (request.model, model.as_mut()) {
-            (0, Some(model)) => model.run(&request.inputs),
-            _ => Err(Failure::NoModel),
+    while let Some(request) = receive::<Request>(&mut socket, MAX_MESSAGE_BYTES)? {
+        let response = match (request.model, model.as_mut()) {
+            (0, Some(model)) => model
+                .run(&request.inputs)
+                .map_or_else(Response::Failed, Response::Outputs),
+            _ => Response::Failed(Failure::NoModel),
         };
-        protocol::write_answer(&mut socket, &answer)?;
+        send(&mut socket, &response)?;
     }
     Ok(())
 }

@@ -1,8 +1,9 @@
 //! The child's callbacks: relayed to api, and its models started here, their
-//! files filled first.
+//! files filled first, as are its captures' decodes.
 
 use std::fs::File;
 use std::os::fd::{AsFd, OwnedFd};
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use tokio::time::Instant;
 use crate::boundary::AnyCaller;
 use crate::bundles::{Bundles, CompositionEntry};
 use crate::model_files::ModelFileSlot;
+use crate::service::{INFERENCE, MEDIA};
 
 #[cfg(test)]
 mod tests;
@@ -31,7 +33,8 @@ mod tests;
 /// A model the child asks for is started here, in a process of its own beside
 /// the child, on the socket whose other end the child was handed at spawn; its
 /// files are the entry's own, filled here, once, from api, the first time any
-/// round of the composition runs a model of them.
+/// round of the composition runs a model of them. A capture's decode likewise,
+/// with no files: the round sends the capture over the socket.
 pub(crate) struct RelayCallbacks {
     pub(crate) upstream: Callbacks<AnyCaller>,
     /// The entry the round runs, whose model files its models' processes map.
@@ -48,9 +51,27 @@ pub(crate) struct RelayCallbacks {
     /// This end of each model's socket, in the order of the entry's models,
     /// until the model's process is started on it.
     pub(crate) sockets: Mutex<Vec<Option<OwnedFd>>>,
+    /// This end of each decode's socket, in the order the round asks for
+    /// them, until the decode's process is started on it.
+    pub(crate) decode_sockets: Mutex<Vec<Option<OwnedFd>>>,
     /// What a model's process is handed for a data file where its graph has
     /// none: a file with nothing in it.
     pub(crate) empty: Arc<File>,
+    /// The binary a model's process runs.
+    pub(crate) inference_exe: Arc<Path>,
+    /// The binary a decode's process runs.
+    pub(crate) media_exe: Arc<Path>,
+}
+
+/// The socket `index` of `sockets`, taken: `None` past their end, or once
+/// taken before.
+fn take_socket(sockets: &Mutex<Vec<Option<OwnedFd>>>, index: u32) -> Option<OwnedFd> {
+    let index = usize::try_from(index).ok()?;
+    sockets
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_mut(index)
+        .and_then(Option::take)
 }
 
 impl RelayCallbacks {
@@ -151,19 +172,10 @@ impl RemoteChildCallbacks for RelayCallbacks {
             .ok()
             .and_then(|i| self.entry.models.get(i))
             .ok_or(CallbackError)?;
-        let socket = usize::try_from(index)
-            .ok()
-            .and_then(|i| {
-                self.sockets
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .get_mut(i)
-                    .and_then(Option::take)
-            })
-            .ok_or_else(|| {
-                debug!("start_model: a model started a second time");
-                CallbackError
-            })?;
+        let socket = take_socket(&self.sockets, index).ok_or_else(|| {
+            debug!("start_model: a model started a second time");
+            CallbackError
+        })?;
         let opened = |slot: &ModelFileSlot| {
             slot.reader().map_err(|e| {
                 debug!("start_model: {e}");
@@ -183,9 +195,32 @@ impl RemoteChildCallbacks for RelayCallbacks {
         };
         let data = data.as_ref().map_or(self.empty.as_fd(), AsFd::as_fd);
         self.coprocess
-            .start(socket, &[graph.as_fd(), data], self.entry.clone())
+            .start(
+                INFERENCE,
+                &self.inference_exe,
+                socket,
+                &[graph.as_fd(), data],
+                self.entry.clone(),
+            )
             .map_err(|e| {
                 debug!("start_model: {e}");
+                CallbackError
+            })
+    }
+
+    /// Start decode `decode` of the round: a process of its own beside the
+    /// child, on this end of the decode's socket, handed nothing else — the
+    /// round sends it the capture. Once per decode a round: its socket goes
+    /// with the start.
+    async fn start_media(&self, decode: u32) -> Result<(), CallbackError> {
+        let socket = take_socket(&self.decode_sockets, decode).ok_or_else(|| {
+            debug!("start_media: no decode {decode}, or it started a second time");
+            CallbackError
+        })?;
+        self.coprocess
+            .start(MEDIA, &self.media_exe, socket, &[], ())
+            .map_err(|e| {
+                debug!("start_media: {e}");
                 CallbackError
             })
     }

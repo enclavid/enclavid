@@ -1,0 +1,9 @@
+package enclavid:host-capture@0.1.0;
+
+/// The numbers the page draws guides by, which the host serves.
+interface constants {
+    /// The width over the height of every oval the page draws: an `oval`
+    /// guide's, and the one around the face of a `face` or `face-flashes`
+    /// guide.
+    oval-aspect: func() -> f32;
+}
