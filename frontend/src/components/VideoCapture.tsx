@@ -7,8 +7,11 @@ import {
   cameraError,
   facesApplicant,
   haptic,
+  hintText,
+  shapeText,
   turnText,
   useFrameBox,
+  useHoldFill,
 } from "@/components/camera";
 import { Button } from "@/components/ui/button";
 import { type Detector, loadDetector } from "@/lib/faces";
@@ -73,8 +76,8 @@ const FLASH_AROUND = "e6";
 const FLASH_INSIDE = "bf";
 
 /// Whether the page reads the applicant's face for `guide`: every guide but a
-/// static one, which the applicant confirms.
-const reads = (guide: VideoGuide) => guide.kind !== "static_guide";
+/// shape, which the applicant confirms.
+const reads = (guide: VideoGuide) => guide.kind !== "shape";
 
 type Flashes = Extract<VideoGuide, { kind: "face_flashes" }>;
 
@@ -85,9 +88,9 @@ function holdMsOf(guide: VideoGuide): number {
 }
 
 /// How long a hold of `guide` outlasts frames that do not follow it, in
-/// milliseconds: none for a static one, which the shutter holds.
+/// milliseconds: none for a shape, which the shutter holds.
 function graceMsOf(guide: VideoGuide): number {
-  return guide.kind === "static_guide" ? 0 : guide.grace_ms;
+  return guide.kind === "shape" ? 0 : guide.grace_ms;
 }
 
 /// The oval of the last guide before `index` that draws one: where the face
@@ -111,7 +114,7 @@ function entryOf(first: VideoGuide): VideoGuide {
 }
 
 /// The longest a recording of `guides` may last: as long as a recording may
-/// where a static guide waits on the applicant.
+/// where a shape waits on the applicant.
 function longest(guides: VideoGuide[]): number {
   if (!guides.every(reads)) return MAX_MS;
   return Math.min(
@@ -155,15 +158,12 @@ function bitrateFor(maxBytes: number, ms: number): number {
   return Math.round(Math.min(MAX_BITRATE, Math.max(MIN_BITRATE, bits)));
 }
 
-/// What the applicant is first asked to do for a guide: for a static one, what
-/// the policy says to line up, then with what.
+/// What the applicant is first asked to do for a guide: for a shape, what the
+/// policy says to line up, then with what.
 function leadText(guide: VideoGuide): string {
   switch (guide.kind) {
-    case "static_guide": {
-      const shape =
-        guide.guide.kind === "rect" ? "Line it up with the frame" : "Line it up with the oval";
-      return guide.label ? `${guide.label}. ${shape}` : shape;
-    }
+    case "shape":
+      return shapeText(guide.shape, guide.label);
     case "face":
       return "Fit your face in the oval";
     case "head_turn":
@@ -176,53 +176,11 @@ function leadText(guide: VideoGuide): string {
 /// What the applicant is told about `guide`: by `hint`, where the page reads
 /// their face, else by whether the guide is held.
 function instructionFor(guide: VideoGuide, hint: Hint | null, holding: boolean): string {
-  switch (hint) {
-    case null:
-      return holding ? "Hold still" : leadText(guide);
-    case "show-face":
-      return "Show your face to the camera";
-    case "one-face":
-      return "Only one face, please";
-    case "closer":
-      return "Move closer";
-    case "back":
-      return "Move back";
-    case "left":
-      return "Move left";
-    case "right":
-      return "Move right";
-    case "centre":
-      return "Center your face in the oval";
-    case "turn":
-      return leadText(guide);
-    case "further":
-      return "A little further";
-    case "hold":
-      return "Hold still";
-  }
+  if (hint === null) return holding ? "Hold still" : leadText(guide);
+  return hintText(hint, leadText(guide));
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-/// How far a hold that began at `heldAt`, on the page's clock, is through
-/// `holdMs`, from 0 to 1, redrawn every display frame; `undefined` while
-/// nothing is held.
-function useHoldFill(heldAt: number | null, holdMs: number): number | undefined {
-  const [fill, setFill] = useState<number>();
-  useEffect(() => {
-    if (heldAt === null) {
-      setFill(undefined);
-      return;
-    }
-    let frame = requestAnimationFrame(function tick() {
-      const share = holdMs > 0 ? Math.min(1, (performance.now() - heldAt) / holdMs) : 1;
-      setFill(share);
-      if (share < 1) frame = requestAnimationFrame(tick);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [heldAt, holdMs]);
-  return fill;
-}
 
 /// The colour `flashes` show at this display frame, from their hold that
 /// began at `heldAt` on the page's clock, the last one past their end;
@@ -313,7 +271,7 @@ export function VideoCapture({
   // Set when the page was hidden during the recording: a hidden page draws
   // no frames on time, so what was held is not on record.
   const hiddenRef = useRef(false);
-  // Set when the applicant presses the shutter on the static guide on screen.
+  // Set when the applicant presses the shutter on the shape on screen.
   const shutterRef = useRef(false);
   // Bumped on Try again to start the camera over.
   const [attempt, setAttempt] = useState(0);
@@ -326,7 +284,7 @@ export function VideoCapture({
   const wasSending = useRef(false);
   const frame = useFrameBox(videoRef);
   // The recording starts by itself where the page reads the first guide, and
-  // on the shutter where it is a static one.
+  // on the shutter where it is a shape.
   const auto = detector !== undefined && reads(plan[0]);
 
   useEffect(() => {
@@ -455,15 +413,15 @@ export function VideoCapture({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase.kind, auto, mirrored]);
 
-  /// The applicant presses the shutter on the static guide on screen; the
-  /// first one starts the recording.
+  /// The applicant presses the shutter on the shape on screen; the first one
+  /// starts the recording.
   function capture() {
     shutterRef.current = true;
     if (phase.kind === "ready") void record();
   }
 
   /// Record the step: each guide shown in turn until the applicant has held
-  /// it — a static one from the shutter — every frame drawn from the camera;
+  /// it — a shape from the shutter — every frame drawn from the camera;
   /// then hand the video to the parent.
   async function record() {
     const setup = setupRef.current;
@@ -661,8 +619,8 @@ export function VideoCapture({
   const heldAt = phase.kind === "recording" ? phase.heldAt : null;
   const turn = phase.kind === "recording" ? phase.turn : null;
   const holding = heldAt !== null;
-  // A static guide is taken with the shutter, which fills while it is held.
-  const shutter = showCamera && guide?.kind === "static_guide";
+  // A shape is taken with the shutter, which fills while it is held.
+  const shutter = showCamera && guide?.kind === "shape";
   const fill = useHoldFill(shutter ? heldAt : null, guide ? holdMsOf(guide) : 0);
   const flash = useFlash(heldAt, guide?.kind === "face_flashes" ? guide : null);
   const stepHint =
@@ -714,10 +672,10 @@ export function VideoCapture({
         />
         {showCamera && drawn && (
           <>
-            {drawn.kind === "static_guide" && <GuideOverlay guide={drawn.guide} frame={frame} />}
+            {drawn.kind === "shape" && <GuideOverlay shape={drawn.shape} frame={frame} />}
             {(drawn.kind === "face" || drawn.kind === "face_flashes") && (
               <GuideOverlay
-                guide={{ kind: "oval", width: drawn.width, height: drawn.height }}
+                shape={{ kind: "oval", width: drawn.width, height: drawn.height }}
                 frame={frame}
                 met={hint === "hold"}
                 surround={flash && `${flash}${FLASH_AROUND}`}

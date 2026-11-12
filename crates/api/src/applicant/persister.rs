@@ -748,16 +748,21 @@ fn pad_envelope(bytes: &mut Vec<u8>) -> Result<(), CallbackError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use session_types::{Capture, DisplayField, MediaResult, VideoCapture};
+    use session_types::{Capture, DisplayField, MediaResult, PhotoCapture, VideoCapture};
     use storage_client::{Metadata, SealedState, StoreError, lock_data_keys, unlock_data_keys};
+
+    /// A capture of the photo `photo`, taken to no guide.
+    fn photo(photo: &[u8]) -> Capture {
+        Capture::Photo(PhotoCapture {
+            photo: photo.to_vec(),
+            guide: None,
+        })
+    }
 
     /// A media answer of one photo for each of `photos`.
     fn media_round(photos: Vec<&[u8]>) -> Event {
         Event::Media(MediaResult {
-            captures: photos
-                .into_iter()
-                .map(|photo| Capture::Photo(photo.to_vec()))
-                .collect(),
+            captures: photos.into_iter().map(photo).collect(),
         })
     }
 
@@ -771,7 +776,7 @@ mod tests {
         let blobs: [&[u8]; 2] = [b"id-card-front", b"liveness-video"];
         let event = Event::Media(MediaResult {
             captures: vec![
-                Capture::Photo(blobs[0].to_vec()),
+                photo(blobs[0]),
                 Capture::Video(VideoCapture {
                     video: blobs[1].to_vec(),
                     guides: Vec::new(),

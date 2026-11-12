@@ -1,7 +1,7 @@
 // What the page reads from the faces in a frame against the guide on screen:
 // BlazeFace's six keypoints, in the frame's own unmirrored pixels.
 
-import type { VideoGuide } from "@/types";
+import type { PhotoGuide, VideoGuide } from "@/types";
 
 export type Point = { x: number; y: number };
 
@@ -45,7 +45,8 @@ const NOSE_DEPTH = 0.64;
 /// How many of the latest frames a turn is read from.
 const TURN_FRAMES = 5;
 
-type Box = { left: number; top: number; right: number; bottom: number };
+/// A box in a frame's pixels, by its edges.
+export type Box = { left: number; top: number; right: number; bottom: number };
 
 const mid = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 const dist = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -57,17 +58,17 @@ function median(values: number[]): number {
 
 /// What the applicant is told about `guide` from the faces in a frame of
 /// `width` × `height` pixels shown `mirrored` or not — `"hold"` while they
-/// follow it — or `null` for a static guide, which the page does not read.
-/// The face is taken into `head`.
+/// follow it — or `null` for a shape, which the page does not read. The face
+/// is taken into `head`.
 export function hintFor(
-  guide: VideoGuide,
+  guide: VideoGuide | PhotoGuide,
   faces: Face[],
   head: Head,
   width: number,
   height: number,
   mirrored: boolean,
 ): Hint | null {
-  if (guide.kind === "static_guide") return null;
+  if (guide.kind === "shape") return null;
   if (faces.length === 0) return "show-face";
   if (faces.length > 1) return "one-face";
   const [face] = faces;
@@ -105,7 +106,7 @@ function ovalHint(
 /// The face's box as AWS's liveness page builds it from the keypoints: as wide
 /// as the eyes and the eyes-to-mouth height say, of the oval's shape, and out
 /// to the ears.
-function faceBox(face: Face, shape: number): Box {
+export function faceBox(face: Face, shape: number): Box {
   const eyes = mid(face.leftEye, face.rightEye);
   const width = (2 * dist(face.leftEye, face.rightEye) + 1.8 * dist(eyes, face.mouthCenter)) / 2;
   const height = shape * width;
@@ -116,6 +117,18 @@ function faceBox(face: Face, shape: number): Box {
     top: centre.y - height / 2,
     bottom: centre.y + height / 2,
   };
+}
+
+/// How far a face moved from its box `before` to its box `after`: the larger
+/// of its centre's shift and its width's change, as a share of its width.
+export function moved(before: Box, after: Box): number {
+  const width = before.right - before.left;
+  const shift = Math.hypot(
+    (after.left + after.right - before.left - before.right) / 2,
+    (after.top + after.bottom - before.top - before.bottom) / 2,
+  );
+  const grown = Math.abs(after.right - after.left - width);
+  return Math.max(shift, grown) / width;
 }
 
 function overlap(a: Box, b: Box): number {

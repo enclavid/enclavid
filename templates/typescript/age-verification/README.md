@@ -2,9 +2,11 @@
 
 The applicant takes a selfie; the policy reads the age of the face in it; the
 session ends approved when that age is at least the consumer's `min-age`, and
-rejected when it is not. A selfie with no face the policy can read is asked
-for again. Nothing is disclosed and nothing is kept: the consumer learns the
-decision alone.
+rejected when it is not. The page takes the selfie once the face fills its
+oval; the policy reads the face against that oval again, and a selfie whose
+face does not fill it — half a face, a face off to the side, two faces — is
+asked for again. Nothing is disclosed and nothing is kept: the consumer learns
+the decision alone.
 
 It is built and pushed as the [kyc template](../kyc/README.md) is, which also
 covers props, texts, disclosure fields and the runtime:
@@ -29,11 +31,13 @@ enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
 
 The consumer pins an implementation of each when it creates a session:
 
-- `enclavid:well-known` — the selfie's capture spec.
+- `enclavid:well-known` — the selfie's capture spec, with the face guide whose
+  oval the page takes it in.
 - `enclavid:vision` — the face's geometry, which the face plugins share. The
   selfie itself is decoded by the platform, into the image the face plugins
   read their patches of.
-- `enclavid:face-detect` — finds the face.
+- `enclavid:face-detect` — reads the face against the guide the selfie was
+  taken to: whether it fills the oval, the only face there, and where it is.
 - `enclavid:face-age` — reads the face's age.
 
 Which model reads the face is the implementation's, chosen by the pin. The

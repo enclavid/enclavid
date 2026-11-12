@@ -24,22 +24,27 @@
 
   "passport-instructions": "Take a photo of the photo page of your passport.",
   "passport-step": "Photo page",
+  "passport-guide": "The photo page of your passport",
   "passport-review-hint": "Check the photo page is sharp and free of glare.",
 
   "id-card-front-instructions": "Take a photo of the front of your ID card.",
   "id-card-front-step": "Front side",
+  "id-card-front-guide": "The front of your ID card",
   "id-card-front-review-hint": "Check all text is sharp and corners are visible.",
 
   "id-card-back-instructions": "Now flip the card and take a photo of the back.",
   "id-card-back-step": "Back side",
+  "id-card-back-guide": "The back of your ID card",
   "id-card-back-review-hint": "Check all text is sharp and corners are visible.",
 
   "drivers-license-front-instructions": "Take a photo of the front of your driver's license.",
   "drivers-license-front-step": "Front side",
+  "drivers-license-front-guide": "The front of your driver's license",
   "drivers-license-front-review-hint": "Check all text is sharp and free of glare.",
 
   "drivers-license-back-instructions": "Now flip the card and take a photo of the back.",
   "drivers-license-back-step": "Back side",
+  "drivers-license-back-guide": "The back of your driver's license",
   "drivers-license-back-review-hint": "Check all text is sharp and free of glare.",
 
   "selfie-instructions": "Hold the camera at eye level and align your face inside the oval.",

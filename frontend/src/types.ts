@@ -41,8 +41,8 @@ export type ConsentFieldView = {
 export type CameraFacing = "front" | "rear" | "any";
 
 /// A shape drawn over the camera, which the page does not read (mirror
-/// `StaticGuideView`).
-export type StaticGuide =
+/// `ShapeView`).
+export type Shape =
   /// A rectangle at the centre of the frame.
   | {
       kind: "rect";
@@ -58,12 +58,31 @@ export type StaticGuide =
       height: number;
     };
 
+/// What a photo's camera shows (mirror `PhotoGuideView`).
+export type PhotoGuide =
+  /// A shape the applicant fills, and says with the shutter they have.
+  | {
+      kind: "shape";
+      shape: Shape;
+      /// What the applicant fits into it, the policy's text.
+      label: string;
+    }
+  /// A face the page finds in the oval it draws, and takes the photo of once
+  /// it fills it.
+  | {
+      kind: "face";
+      /// The oval's width, as a fraction of the frame's shorter side.
+      width: number;
+      /// Its height, as a fraction of the frame's shorter side.
+      height: number;
+    };
+
 /// One thing a video asks (mirror `VideoGuideView`).
 export type VideoGuide =
   /// A shape the applicant says with a button they have followed.
   | {
-      kind: "static_guide";
-      guide: StaticGuide;
+      kind: "shape";
+      shape: Shape;
       /// What the applicant lines up with it, the policy's text.
       label: string;
       /// How long it is held after the button, in milliseconds.
@@ -123,15 +142,16 @@ type CaptureStepCommon = {
 /// One step of a capture (mirror `CaptureStepView`), by what it records.
 export type CaptureStep = CaptureStepCommon &
   (
-    /// One frame, which the applicant keeps or retakes.
+    /// One frame.
     | {
         kind: "photo";
-        /// The shape drawn over the camera, if any.
-        guide: StaticGuide | null;
+        /// What the camera shows, if anything.
+        guide: PhotoGuide | null;
         /// Post-capture review-screen copy ("Make sure the MRZ is
         /// sharp, no glare"). Policy-supplied via `photo-spec.review-hint`
-        /// so each artifact type gets its own targeted check.
-        review_hint: string;
+        /// so each artifact type gets its own targeted check; `null`: no
+        /// review screen, the photo is sent as taken.
+        review_hint: string | null;
       }
     /// A video, recorded while guides are shown.
     | {

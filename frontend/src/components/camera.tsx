@@ -1,6 +1,7 @@
 import { useEffect, useState, type RefObject } from "react";
+import type { Hint } from "@/lib/guides";
 import { cn } from "@/lib/utils";
-import type { CameraFacing, StaticGuide } from "@/types";
+import type { CameraFacing, Shape } from "@/types";
 
 /// Best-effort haptic ping. iOS Safari silently ignores; Android /
 /// Chrome OS hit a short vibration. Wrapped so callers don't repeat
@@ -108,6 +109,26 @@ export function useFrameBox(
   return box;
 }
 
+/// How far a hold that began at `heldAt`, on the page's clock, is through
+/// `holdMs`, from 0 to 1, redrawn every display frame; `undefined` while
+/// nothing is held.
+export function useHoldFill(heldAt: number | null, holdMs: number): number | undefined {
+  const [fill, setFill] = useState<number>();
+  useEffect(() => {
+    if (heldAt === null) {
+      setFill(undefined);
+      return;
+    }
+    let frame = requestAnimationFrame(function tick() {
+      const share = holdMs > 0 ? Math.min(1, (performance.now() - heldAt) / holdMs) : 1;
+      setFill(share);
+      if (share < 1) frame = requestAnimationFrame(tick);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [heldAt, holdMs]);
+  return fill;
+}
+
 /// The round shutter: a white disc in a ring. Given `fill`, from 0 to 1, the
 /// disc fills that far round instead, while what it took is held.
 export function ShutterButton({
@@ -153,15 +174,16 @@ export function ShutterButton({
 const DIM = "rgba(0, 0, 0, 0.6)";
 
 /// Render a shape overlaid on the camera preview, one flavour for each kind
-/// of the WIT `static-guide` variant.
+/// of the WIT `shape` variant.
 export function GuideOverlay({
-  guide,
+  shape,
   frame,
   met = false,
   surround = DIM,
   inside,
+  fill,
 }: {
-  guide: StaticGuide;
+  shape: Shape;
   frame: FrameBox | null;
   /// Whether the face the page reads fills it, which an oval shows in green.
   met?: boolean;
@@ -170,13 +192,23 @@ export function GuideOverlay({
   /// A colour drawn over the camera inside an oval; none where it shows the
   /// camera as it is.
   inside?: string;
+  /// How far round from its top an oval's outline is filled, from 0 to 1,
+  /// while the face is held in it; none while it is not.
+  fill?: number;
 }) {
-  switch (guide.kind) {
+  switch (shape.kind) {
     case "rect":
-      return <RectGuide aspect={guide.aspect} surround={surround} />;
+      return <RectGuide aspect={shape.aspect} surround={surround} />;
     case "oval":
       return frame ? (
-        <OvalGuide oval={guide} frame={frame} met={met} surround={surround} inside={inside} />
+        <OvalGuide
+          oval={shape}
+          frame={frame}
+          met={met}
+          surround={surround}
+          inside={inside}
+          fill={fill}
+        />
       ) : null;
   }
 }
@@ -228,16 +260,20 @@ function OvalGuide({
   met,
   surround,
   inside,
+  fill,
 }: {
-  oval: Extract<StaticGuide, { kind: "oval" }>;
+  oval: Extract<Shape, { kind: "oval" }>;
   frame: FrameBox;
   met: boolean;
   surround: string;
   inside?: string;
+  fill?: number;
 }) {
   const shorter = Math.min(frame.width, frame.height);
   const width = oval.width * shorter;
   const height = oval.height * shorter;
+  const left = frame.left + (frame.width - width) / 2;
+  const top = frame.top + (frame.height - height) / 2;
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
       <div
@@ -246,8 +282,8 @@ function OvalGuide({
           met ? "border-green-500" : "border-white/80",
         )}
         style={{
-          left: frame.left + (frame.width - width) / 2,
-          top: frame.top + (frame.height - height) / 2,
+          left,
+          top,
           width,
           height,
           borderRadius: "50%",
@@ -255,13 +291,42 @@ function OvalGuide({
           background: inside,
         }}
       />
+      {fill !== undefined && fill > 0 && (
+        <svg
+          className="absolute overflow-visible"
+          style={{ left, top, width, height }}
+          viewBox={`0 0 ${width} ${height}`}
+        >
+          <path
+            d={outline(width, height)}
+            pathLength={1}
+            strokeDasharray={`${fill} 1`}
+            fill="none"
+            stroke="#22c55e"
+            strokeWidth={ARC_INSET * 2}
+            strokeLinecap="round"
+          />
+        </svg>
+      )}
     </div>
   );
 }
 
-/// How far in from an oval's edge the arc of a turn is drawn, in pixels: half
-/// its stroke, so the stroke stays inside the oval's box.
+/// How far in from an oval's edge an arc is drawn on it, in pixels: half its
+/// stroke, so the stroke stays inside the oval's box.
 const ARC_INSET = 3;
+
+/// The outline of an oval `w` × `h` pixels, from its top round clockwise and
+/// back.
+function outline(w: number, h: number): string {
+  const rx = w / 2 - ARC_INSET;
+  const ry = h / 2 - ARC_INSET;
+  return [
+    `M ${w / 2} ${ARC_INSET}`,
+    `A ${rx} ${ry} 0 0 1 ${w / 2} ${h - ARC_INSET}`,
+    `A ${rx} ${ry} 0 0 1 ${w / 2} ${ARC_INSET}`,
+  ].join(" ");
+}
 
 /// A turn of the head, drawn: the oval the face was last asked to fill, if
 /// any, its side toward the turn filling out from the middle as the head turns,
@@ -393,6 +458,40 @@ export function turnText(degrees: number): string {
     : degrees > 0
       ? "Turn your head to your right"
       : "Look straight at the camera";
+}
+
+/// What the applicant is asked to do with `shape`: line up what the policy's
+/// `label` names with it.
+export function shapeText(shape: Shape, label: string): string {
+  const fit = shape.kind === "rect" ? "Line it up with the frame" : "Line it up with the oval";
+  return label ? `${label}. ${fit}` : fit;
+}
+
+/// What the applicant is told for `hint` about a guide the page reads their
+/// face for; `lead`, what the guide asks, where they are yet to do it.
+export function hintText(hint: Hint, lead: string): string {
+  switch (hint) {
+    case "show-face":
+      return "Show your face to the camera";
+    case "one-face":
+      return "Only one face, please";
+    case "closer":
+      return "Move closer";
+    case "back":
+      return "Move back";
+    case "left":
+      return "Move left";
+    case "right":
+      return "Move right";
+    case "centre":
+      return "Center your face in the oval";
+    case "turn":
+      return lead;
+    case "further":
+      return "A little further";
+    case "hold":
+      return "Hold still";
+  }
 }
 
 /// Pick a sensible `facingMode` ideal for `getUserMedia` from the

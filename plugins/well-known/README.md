@@ -11,8 +11,9 @@ capture step names one of the host's own (`enclavid:host-icons/icons`).
   KYC fields. Each takes one of the policy's disclosure fields and a
   value, and returns a `display-field` of that field whose `label` is
   the plugin's text for it.
-- **`static-guides`** — the shapes a document or a selfie is
-  photographed in: a passport's page, an ID-1 card, a selfie's oval.
+- **`shapes`** — the shapes a document or a selfie is photographed
+  in: a passport's page, an ID-1 card, and a selfie's oval for a
+  selfie taken with the shutter, the page reading no face.
 - **`video-guides`** — ready sets of video guides for a check, their
   values drawn from a seed the policy picks at random: `liveness`.
   The plugin draws nothing at random itself.
@@ -152,13 +153,13 @@ wit fetch` them; it does not ship the implementation.
 
 ## Capture settings (baked in by each helper)
 
-| Helper                            | Camera | Guides                                  |
-| --------------------------------- | ------ | --------------------------------------- |
-| `photo.passport()`                | rear   | rect(1.42) — ICAO TD3                   |
-| `photo.id-card()` (front + back)  | rear   | rect(1.585) — ICAO TD1 (ID-1)           |
-| `photo.drivers-license()` (f+b)   | rear   | rect(1.585) — ID-1                      |
-| `photo.selfie()`                  | front  | oval(0.5)                               |
-| `video.liveness(guides)`          | front  | `guides`; 60 s for all of them          |
+| Helper                            | Camera | Guides                                       |
+| --------------------------------- | ------ | -------------------------------------------- |
+| `photo.passport()`                | rear   | rect(1.42) — ICAO TD3; review screen         |
+| `photo.id-card()` (front + back)  | rear   | rect(1.585) — ICAO TD1 (ID-1); review screen |
+| `photo.drivers-license()` (f+b)   | rear   | rect(1.585) — ID-1; review screen            |
+| `photo.selfie()`                  | front  | face(0.5), taken by the page; review screen  |
+| `video.liveness(guides)`          | front  | `guides`; 60 s for all of them               |
 
 `video-guides` holds two sets, each drawn from a seed and starting with
 the face in an oval 0.40–0.55 wide, held 0.8 s. The same seed gives both

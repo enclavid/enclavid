@@ -7,8 +7,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, post};
 
 use session_types::{
-    Capture, CaptureKind, Event, FrameRange, MAX_MEDIA_BYTES, MediaResult, Prompt, SessionState,
-    VideoCapture, VideoGuide,
+    Capture, CaptureKind, Event, FrameRange, MAX_MEDIA_BYTES, MediaResult, PhotoCapture, Prompt,
+    SessionState, VideoCapture, VideoGuide,
 };
 
 use crate::limits::{APPLICANT_INPUT_BODY_LIMIT, MAX_GUIDES_PART_BYTES};
@@ -230,7 +230,10 @@ async fn read_step(
     budget: usize,
 ) -> Result<Capture, StatusCode> {
     let capture = match kind {
-        CaptureKind::Photo(_) => Capture::Photo(media_part(&mut multipart, "photo", budget).await?),
+        CaptureKind::Photo(spec) => Capture::Photo(PhotoCapture {
+            photo: media_part(&mut multipart, "photo", budget).await?,
+            guide: spec.guide.clone(),
+        }),
         CaptureKind::Video(spec) => {
             let video = media_part(&mut multipart, "video", budget).await?;
             let guides = guides_part(&mut multipart, &spec.guides).await?;
@@ -344,9 +347,13 @@ mod tests {
     use axum::body::Body;
     use axum::extract::FromRequest;
     use axum::http::Request;
-    use session_types::{FaceGuide, HeadTurnGuide, PhotoSpec, VideoSpec};
+    use session_types::{
+        FaceGuide, HeadTurnGuide, PhotoFaceGuide, PhotoGuide, PhotoSpec, VideoSpec,
+    };
 
     use super::*;
+
+    const SELFIE: PhotoGuide = PhotoGuide::Face(PhotoFaceGuide { width: 0.5 });
 
     const FACE: VideoGuide = VideoGuide::Face(FaceGuide {
         width: 0.5,
@@ -360,7 +367,10 @@ mod tests {
     });
 
     fn photo_step() -> CaptureKind {
-        CaptureKind::Photo(PhotoSpec::default())
+        CaptureKind::Photo(PhotoSpec {
+            guide: Some(SELFIE),
+            review_hint: None,
+        })
     }
 
     /// A video step of two guides.
@@ -397,8 +407,9 @@ mod tests {
         Multipart::from_request(request, &()).await.unwrap()
     }
 
-    /// A step is read as its kind is: a photo's one JPEG, a video's data with
-    /// ranges that take the prompt's guides, the page naming only the frames.
+    /// A step is read as its kind is: a photo's one JPEG with the prompt's
+    /// guide, a video's data with ranges that take the prompt's guides, the
+    /// page naming only the frames.
     #[tokio::test]
     async fn a_step_is_read_with_the_prompts_guides() {
         let photo = read_step(
@@ -407,7 +418,13 @@ mod tests {
             MAX_MEDIA_BYTES,
         )
         .await;
-        assert_eq!(photo, Ok(Capture::Photo(b"jpeg".to_vec())));
+        assert_eq!(
+            photo,
+            Ok(Capture::Photo(PhotoCapture {
+                photo: b"jpeg".to_vec(),
+                guide: Some(SELFIE),
+            }))
+        );
         let video = read_step(
             &video_step(),
             multipart(&[("video", b"webm"), ("guides", b"[[0, 10], [11, 30]]")]).await,

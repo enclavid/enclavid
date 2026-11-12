@@ -14,7 +14,7 @@ interface photo {
   use enclavid:host/refs@0.1.0.{localized-ref};
 
   /// A rectangle at the centre of the frame, as large as fits.
-  record rect-guide {
+  record rect-shape {
     /// Its width:height aspect, held to 0.5–2.0 (1.42 passport, 1.585
     /// ID-1).
     aspect: f32,
@@ -22,45 +22,70 @@ interface photo {
 
   /// An oval at the centre of the frame, as wide for its height as
   /// `constants.oval-aspect` says.
-  record oval-guide {
+  record oval-shape {
     /// As a fraction of the frame's shorter side, so the oval keeps its
     /// size on a frame of either orientation; held to 0.1–0.6, where its
     /// height still fits that side.
     width: f32,
   }
 
-  /// A shape drawn over the camera. The page does not read what is in it:
-  /// the applicant fits into it whatever they are asked to, and says when
-  /// they have.
-  ///
-  /// Every guide's numbers are held to their ranges where the prompt is
-  /// built: past those, a guide no longer fits the screen or a face.
-  variant static-guide {
-    rect(rect-guide),
-    oval(oval-guide),
+  /// A shape drawn over the camera. Every guide's numbers are held to their
+  /// ranges where the prompt is built: past those, a guide no longer fits
+  /// the screen or a face.
+  variant shape {
+    rect(rect-shape),
+    oval(oval-shape),
   }
 
-  /// A photo: one frame, which the applicant sees and keeps or retakes
-  /// before it is sent.
+  /// A shape the page does not read: the applicant fits into it whatever
+  /// they are asked to, and says with the shutter when they have.
+  record shape-guide {
+    shape: shape,
+    /// What the applicant fits into it, shown on camera ("The photo page
+    /// of your passport"): a text of the component's `i18n` catalog.
+    label: localized-ref,
+  }
+
+  /// A face the page finds at the centre of the frame, at a size, in the
+  /// oval it draws for it, as wide for its height as
+  /// `constants.oval-aspect` says. The page takes the photo once the face
+  /// fills the oval.
+  record face-guide {
+    /// The face's width as a fraction of the frame's shorter side; held to
+    /// 0.25–0.6: smaller, the page does not find a face reliably; larger,
+    /// the oval no longer fits.
+    width: f32,
+  }
+
+  /// What a photo's camera shows, and what takes the photo: the shutter for
+  /// a shape, the page for a face it reads.
+  variant guide {
+    shape(shape-guide),
+    face(face-guide),
+  }
+
+  /// A photo: one frame.
   record photo-spec {
-    /// The shape drawn over the camera, if any, which the shutter says is
-    /// followed.
-    guide: option<static-guide>,
-    /// The check shown under the photo on the review screen ("Make sure
-    /// the MRZ is sharp and free of glare").
-    review-hint: localized-ref,
+    /// What the camera shows, if anything; none: nothing drawn, and the
+    /// shutter takes the photo.
+    guide: option<guide>,
+    /// The check shown under the photo on the review screen, where the
+    /// applicant keeps it or takes it again ("Make sure the MRZ is sharp
+    /// and free of glare"); none: no review screen, the photo is sent as
+    /// taken.
+    review-hint: option<localized-ref>,
   }
 }
 
 /// A video step, and what it asks the applicant to do.
 interface video {
   use enclavid:host/refs@0.1.0.{localized-ref};
-  use photo.{static-guide};
+  use photo.{shape};
 
-  /// A static guide in a video, which the applicant says with a button they
-  /// have followed.
-  record static-video-guide {
-    guide: static-guide,
+  /// A shape in a video, which the page does not read: the applicant says
+  /// with a button they have followed it.
+  record shape-guide {
+    shape: shape,
     /// What the applicant lines up with it, shown on camera while it is
     /// held ("The photo page of your passport"): a text of the component's
     /// `i18n` catalog.
@@ -125,11 +150,11 @@ interface video {
   }
 
   /// One thing a video asks the applicant to do. Each is held before the
-  /// next is shown: a static guide from the applicant's button; a face,
-  /// with its flashes or without, and a head turn from when the page reads
-  /// them in the frames.
-  variant video-guide {
-    static-guide(static-video-guide),
+  /// next is shown: a shape from the applicant's button; a face, with its
+  /// flashes or without, and a head turn from when the page reads them in
+  /// the frames.
+  variant guide {
+    shape(shape-guide),
     face(face-guide),
     head-turn(head-turn-guide),
     face-flashes(face-flashes-guide),
@@ -140,7 +165,7 @@ interface video {
     /// What it asks, in order, each held for its `hold-ms` or through all
     /// its flashes — for one frame where that is 0 — before the next. The
     /// reply says where each was held.
-    guides: list<video-guide>,
+    guides: list<guide>,
   }
 }
 

@@ -336,11 +336,11 @@ impl Guest for TestPolicy {
             // the hash lives in state; the pixels never do. A capture without
             // a photo is retryable.
             (STEP_AWAIT_PASSPORT, Event::Media(Ok(captures))) => match captures.first() {
-                Some(Capture::Photo(photo)) => {
+                Some(Capture::Photo(capture)) => {
                     // Stash the photo's content `hash` (a hex string) after the
                     // step tag. Only the opaque token lives in state — never pixels.
                     let mut next = vec![STEP_AWAIT_SELFIE];
-                    next.extend_from_slice(photo.hash().as_bytes());
+                    next.extend_from_slice(capture.photo.hash().as_bytes());
                     (next, Action::Render(Prompt::Media(selfie())))
                 }
                 Some(Capture::Video(capture)) => (
@@ -378,7 +378,7 @@ impl Guest for TestPolicy {
                 // estimates — or, on the probe, face-liveness reads its crops.
                 // The policy threads the handles.
                 let image = match captures.first() {
-                    Some(Capture::Photo(photo)) => photo.image(),
+                    Some(Capture::Photo(capture)) => capture.photo.image(),
                     _ => None,
                 };
                 let found = image

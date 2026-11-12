@@ -7,7 +7,8 @@ package enclavid:policy@0.1.0;
 /// export.
 interface types {
   use enclavid:host-capture/capture@0.1.0.{media-spec};
-  use enclavid:host-capture/video@0.1.0.{video-guide};
+  use enclavid:host-capture/photo@0.1.0.{guide as photo-guide};
+  use enclavid:host-capture/video@0.1.0.{guide as video-guide};
   use enclavid:host-disclosure/disclosure@0.1.0.{display-field};
   use enclavid:host/refs@0.1.0.{localized-ref};
   use enclavid:host/media@0.1.0.{photo, video};
@@ -63,9 +64,15 @@ interface types {
     last: u32,
   }
 
-  /// A photo step's capture: the photo the applicant kept on the review
-  /// screen.
-  type photo-capture = photo;
+  /// A photo step's capture.
+  record photo-capture {
+    /// The applicant's photo: the one they kept on the review screen,
+    /// where the step has one.
+    photo: photo,
+    /// The guide the step drew, copied by the runtime from the prompt;
+    /// none where it drew none.
+    guide: option<photo-guide>,
+  }
 
   /// A video step's capture.
   record video-capture {
@@ -82,7 +89,7 @@ interface types {
   /// the host: the policy is a pure router, forwarding it to a verification
   /// plugin, which reads what it needs.
   variant capture {
-    /// The photo the applicant kept on the review screen.
+    /// The photo, and the guide it was taken to.
     photo(photo-capture),
     /// The video, and where each of its guides was held.
     video(video-capture),

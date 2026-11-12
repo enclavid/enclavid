@@ -8,9 +8,9 @@ package local:policy@0.1.0;
 world policy {
     // The selfie's capture spec.
     import enclavid:well-known/photo@0.1.0;
-    // The face found in the selfie's image, and the age read from it; the
-    // face's geometry is `enclavid:vision`'s.
-    import enclavid:face-detect/detect@0.1.0;
+    // The face read in the selfie's image against the guide it was taken to,
+    // and the age read from it; the face's geometry is `enclavid:vision`'s.
+    import enclavid:face-detect/photo@0.1.0;
     import enclavid:face-age/check@0.1.0;
     import enclavid-ext:policy/props@0.1.0;
     // The round's randomness, which `@enclavid/policy-quickjs` serves

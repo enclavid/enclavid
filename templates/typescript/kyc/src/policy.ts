@@ -94,7 +94,7 @@ export const policy = definePolicy(
           if (page?.tag !== "photo") return steps.passport();
           // The props are the consumer's, the same in every round.
           if (props.get().selfie === false) return steps.consent();
-          return steps.selfie(page.val.hash());
+          return steps.selfie(page.val.photo.hash());
         }
         case "selfie":
           return steps.consent();

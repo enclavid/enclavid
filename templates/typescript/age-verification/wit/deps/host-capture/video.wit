@@ -3,12 +3,12 @@ package enclavid:host-capture@0.1.0;
 /// A video step, and what it asks the applicant to do.
 interface video {
     use enclavid:host/refs@0.1.0.{localized-ref};
-    use photo.{static-guide};
+    use photo.{shape};
 
-    /// A static guide in a video, which the applicant says with a button they
-    /// have followed.
-    record static-video-guide {
-        guide: static-guide,
+    /// A shape in a video, which the page does not read: the applicant says
+    /// with a button they have followed it.
+    record shape-guide {
+        shape: shape,
         /// What the applicant lines up with it, shown on camera while it is
         /// held ("The photo page of your passport"): a text of the component's
         /// `i18n` catalog.
@@ -73,11 +73,11 @@ interface video {
     }
 
     /// One thing a video asks the applicant to do. Each is held before the
-    /// next is shown: a static guide from the applicant's button; a face,
-    /// with its flashes or without, and a head turn from when the page reads
-    /// them in the frames.
-    variant video-guide {
-        static-guide(static-video-guide),
+    /// next is shown: a shape from the applicant's button; a face, with its
+    /// flashes or without, and a head turn from when the page reads them in
+    /// the frames.
+    variant guide {
+        shape(shape-guide),
         face(face-guide),
         head-turn(head-turn-guide),
         face-flashes(face-flashes-guide),
@@ -88,6 +88,6 @@ interface video {
         /// What it asks, in order, each held for its `hold-ms` or through all
         /// its flashes — for one frame where that is 0 — before the next. The
         /// reply says where each was held.
-        guides: list<video-guide>,
+        guides: list<guide>,
     }
 }

@@ -43,7 +43,8 @@ use engine_executor::{
 use engine_types::composition::ModelLayer;
 use engine_types::text::Localized;
 use session_types::{
-    Capture, Decision, Event, MediaResult, Prompt, SessionState as Session, VideoCapture,
+    Capture, Decision, Event, MediaResult, PhotoCapture, Prompt, SessionState as Session,
+    VideoCapture,
 };
 use xtask::fixtures;
 
@@ -1836,10 +1837,13 @@ fn fake_capture() -> MediaResult {
     capture_of(jpeg_frame())
 }
 
-/// A single-step capture of the photo `jpeg`.
+/// A single-step capture of the photo `jpeg`, taken to no guide.
 fn capture_of(jpeg: Vec<u8>) -> MediaResult {
     MediaResult {
-        captures: vec![Capture::Photo(jpeg)],
+        captures: vec![Capture::Photo(PhotoCapture {
+            photo: jpeg,
+            guide: None,
+        })],
     }
 }
 

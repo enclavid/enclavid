@@ -10,7 +10,8 @@ use axum::http::StatusCode;
 
 use enclavid_boundary::{Covert, Replay, reason};
 use session_types::{
-    Capture, CaptureKind, Prompt, SentStep, SessionMetadata, SessionState, VideoCapture,
+    Capture, CaptureKind, PhotoCapture, Prompt, SentStep, SessionMetadata, SessionState,
+    VideoCapture,
 };
 use storage_client::boundary::Storage;
 use storage_client::{
@@ -293,8 +294,11 @@ async fn load_sent(
         if <[u8; 32]>::from(blake3::hash(&bytes)) != sent.hash {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
-        captures.push(match step.kind {
-            CaptureKind::Photo(_) => Capture::Photo(bytes),
+        captures.push(match &step.kind {
+            CaptureKind::Photo(spec) => Capture::Photo(PhotoCapture {
+                photo: bytes,
+                guide: spec.guide.clone(),
+            }),
             CaptureKind::Video(_) => Capture::Video(VideoCapture {
                 video: bytes,
                 guides: sent.guides.clone(),
@@ -310,8 +314,8 @@ mod tests {
 
     use enclavid_boundary::AuthZ;
     use session_types::{
-        CameraFacing, CaptureStep, FrameRange, HeadTurnGuide, Localized, MediaSpec, PhotoSpec,
-        VideoGuide, VideoSpec,
+        CameraFacing, CaptureStep, FrameRange, HeadTurnGuide, Localized, MediaSpec, PhotoFaceGuide,
+        PhotoGuide, PhotoSpec, VideoGuide, VideoSpec,
     };
     use storage_client::{Metadata, SealedState, lock_data_keys, unlock_data_keys};
 
@@ -332,11 +336,24 @@ mod tests {
         MediaSpec {
             label: Localized::default(),
             captures: vec![
-                step(CaptureKind::Photo(PhotoSpec::default())),
+                step(CaptureKind::Photo(PhotoSpec {
+                    guide: Some(SELFIE),
+                    review_hint: None,
+                })),
                 step(CaptureKind::Video(VideoSpec { guides: vec![TURN] })),
             ],
             time_limit_secs: Some(30),
         }
+    }
+
+    const SELFIE: PhotoGuide = PhotoGuide::Face(PhotoFaceGuide { width: 0.5 });
+
+    /// The photo step's capture of `photo`, with the guide the prompt drew.
+    fn photo(photo: &[u8]) -> Capture {
+        Capture::Photo(PhotoCapture {
+            photo: photo.to_vec(),
+            guide: Some(SELFIE),
+        })
     }
 
     const TURN: VideoGuide = VideoGuide::HeadTurn(HeadTurnGuide {
@@ -410,7 +427,7 @@ mod tests {
             awaiting_seq: 1,
             ..Default::default()
         };
-        let photo = Capture::Photo(b"front".to_vec());
+        let photo = photo(b"front");
         let video = Capture::Video(VideoCapture {
             video: b"turning".to_vec(),
             guides: vec![FrameRange {
@@ -459,7 +476,7 @@ mod tests {
             current_prompt: Some(Prompt::Media(spec())),
             ..Default::default()
         };
-        let photo = Capture::Photo(b"front".to_vec());
+        let photo = photo(b"front");
         let (metadata, keys, lock, _, version) = load(&store).await;
         store_step(
             &store,

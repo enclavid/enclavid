@@ -1,14 +1,24 @@
-// The faces in the camera's frames, for a video step's guides: MediaPipe's
+// The faces in the camera's frames, for the guides the page reads: MediaPipe's
 // BlazeFace (short range), the model the enclave's face-detect runs, through
-// TF.js on its wasm backend in one thread. Loaded only when a video step asks
-// for it.
+// TF.js on its wasm backend in one thread; and how sharp a face is, by TF.js's
+// own operations. Loaded only when a step asks for it.
 
-import type { Face } from "@/lib/guides";
+import type { Tensor4D } from "@tensorflow/tfjs-core";
+import type { Box, Face } from "@/lib/guides";
 
 /// The longer side of the picture the detector is handed, in pixels. The model
 /// reads 128×128; the frame is shrunk to it here, averaged as the enclave
 /// shrinks its own, rather than sampled by the detector.
 const SIDE = 128;
+
+/// The width a face is brought to before its sharpness is measured, in pixels:
+/// the same for every frame, so frames of one face compare.
+const MEASURED_WIDTH = 256;
+
+/// The Laplacian: each pixel against the four beside it. How much it varies
+/// over a picture is the usual measure of focus — edges make it vary, blur
+/// evens it out.
+const LAPLACIAN = [0, 1, 0, 1, -4, 1, 0, 1, 0];
 
 /// How long the detector may take to load.
 const LOAD_MS = 30_000;
@@ -17,6 +27,9 @@ export type Detector = {
   /// The faces in `source`, a picture of `width` × `height` pixels, each by its
   /// keypoints in those pixels.
   faces(source: CanvasImageSource, width: number, height: number): Promise<Face[]>;
+  /// How sharp the face in `box` of `picture` is: the variance of its
+  /// Laplacian, which compares frames of one face, larger for the sharper.
+  sharpness(picture: HTMLCanvasElement, box: Box): number;
 };
 
 let loading: Promise<Detector> | null = null;
@@ -73,7 +86,11 @@ async function load(): Promise<Detector> {
   );
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) throw new Error("This browser draws no 2D canvas.");
+  // The face whose sharpness is measured, drawn at the width it is measured at.
+  const measured = document.createElement("canvas");
+  const measuredContext = measured.getContext("2d", { willReadFrequently: true });
+  if (!context || !measuredContext) throw new Error("This browser draws no 2D canvas.");
+  const laplacian = tf.tensor4d(LAPLACIAN, [3, 3, 1, 1]);
   return {
     async faces(source, width, height) {
       const scale = SIDE / Math.max(width, height);
@@ -100,6 +117,21 @@ async function load(): Promise<Detector> {
           rightEarTragion: at("rightEarTragion"),
           leftEarTragion: at("leftEarTragion"),
         };
+      });
+    },
+    sharpness(picture, box) {
+      const width = box.right - box.left;
+      const height = box.bottom - box.top;
+      measured.width = MEASURED_WIDTH;
+      measured.height = Math.round((MEASURED_WIDTH * height) / width);
+      measuredContext.drawImage(picture, box.left, box.top, width, height, 0, 0, measured.width, measured.height);
+      return tf.tidy(() => {
+        // Grey as the mean of the colours: the wasm backend has no kernel for
+        // `rgbToGrayscale`'s weighted one, and frames of one face compare
+        // either way.
+        const grey = tf.mean(tf.cast(tf.browser.fromPixels(measured), "float32"), -1, true);
+        const edges = tf.conv2d(tf.expandDims<Tensor4D>(grey, 0), laplacian, 1, "valid");
+        return tf.moments(edges).variance.dataSync()[0];
       });
     },
   };

@@ -15,7 +15,7 @@ import type {
   Event as AnyEvent,
 } from "enclavid:policy/types@0.1.0";
 import * as photo from "enclavid:well-known/photo@0.1.0";
-import { detect } from "enclavid:face-detect/detect@0.1.0";
+import { read } from "enclavid:face-detect/photo@0.1.0";
 import { estimate } from "enclavid:face-age/check@0.1.0";
 import * as props from "enclavid-ext:policy/props@0.1.0";
 
@@ -50,8 +50,7 @@ export const policy = definePolicy(
       // The selfie has no time limit, so its reply is its captures.
       const age =
         event.val.tag === "ok" ? estimateAge(event.val.val) : undefined;
-      // No face to read. Captures are checked on the applicant's page before
-      // they are sent, so this is rare: ask again as is — or ask with a
+      // No face in the oval to read: ask again as is — or ask with a
       // media-spec of your own that says what went wrong, or reject.
       if (age === undefined) return steps.selfie();
       // The props are the consumer's, the same in every round.
@@ -60,18 +59,19 @@ export const policy = definePolicy(
   }),
 );
 
-// The age of the face in a selfie, or none: a photo that does not decode,
-// holds no face, or a face too small to read. The platform decodes the photo
-// into an image; face-detect finds the face in it, and face-age reads its age
-// from the face's own crop, at the image's full size.
+// The age of the face in a selfie, or none: a photo that does not decode, no
+// face filling the oval or more than one face, or a face too small to read.
+// The platform decodes the photo into an image; face-detect reads the face in
+// it against the guide the selfie was taken to, its oval, and face-age reads
+// its age from the face's own crop, at the image's full size.
 function estimateAge(captures: Capture[]): number | undefined {
   // A capture for each step of the spec, of the kind the step asked for: the
-  // selfie's spec is one photo.
+  // selfie's spec is one photo, with the guide the runtime copied from it.
   const [selfie] = captures;
-  if (selfie?.tag !== "photo") return;
-  const image = selfie.val.image();
+  if (selfie?.tag !== "photo" || !selfie.val.guide) return;
+  const image = selfie.val.photo.image();
   if (!image) return;
-  const face = detect(image);
-  if (!face) return;
+  const { face, status } = read(image, selfie.val.guide);
+  if (status !== "followed" || !face) return;
   return estimate(image, face)?.age;
 }

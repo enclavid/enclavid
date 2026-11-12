@@ -32,32 +32,84 @@ interface pose {
   head-turn: func(faces: list<face>) -> option<f32>;
 }
 
-/// The guides of a capture, copied from `enclavid:host-capture` under the same
-/// names and fields, so a policy hands the platform's over as they are. A kind
-/// the platform adds is read once a version of this package copies it; until
-/// then a policy leaves it out.
-interface guides {
+/// The face in a picture — a photo's image, or a frame's — read against a
+/// photo's guide.
+///
+/// The guides here and in `video` are copied from `enclavid:host-capture`'s
+/// interfaces of the same names, under the same names and fields but those
+/// this reader has no use for, so a policy hands the platform's over as they
+/// are. A kind the platform adds is read once a version of this package copies
+/// it; until then a policy leaves it out.
+interface photo {
+  use enclavid:host/media@0.1.0.{image};
+  use enclavid:vision/types@0.1.0.{face};
+
   /// Read: a face inside it, the only one there, as a document's portrait
   /// lies; faces outside it do not count. Drawn as large as fits the frame.
-  record rect-guide {
+  record rect-shape {
     aspect: f32,
   }
 
   /// Read: the face filling it, the only face in the picture. As wide for
   /// its height as `enclavid:host-capture/constants.oval-aspect` says.
-  record oval-guide {
+  record oval-shape {
     width: f32,
   }
 
-  variant static-guide {
-    rect(rect-guide),
-    oval(oval-guide),
+  variant shape {
+    rect(rect-shape),
+    oval(oval-shape),
   }
 
-  /// Read as its static guide is, through `hold-ms`, forgiving breaks as
+  /// Read as its shape is.
+  record shape-guide {
+    shape: shape,
+  }
+
+  /// Read: the face filling the oval drawn for it, as an `oval-shape` is.
+  record face-guide {
+    width: f32,
+  }
+
+  variant guide {
+    shape(shape-guide),
+    face(face-guide),
+  }
+
+  /// Whether the face followed the guide, or how it did not.
+  enum status {
+    followed,
+    /// No face — for a rect, none inside it — or a picture that does not
+    /// decode.
+    no-face,
+    /// A second face; for a rect, a second inside it.
+    extra-face,
+    /// The face does not fill the oval: too small, too large, or off its
+    /// centre.
+    off-oval,
+  }
+
+  record reading {
+    /// The face read: the most prominent; for a rect, the most prominent
+    /// inside it.
+    face: option<face>,
+    status: status,
+  }
+
+  /// Whether the face in `image` follows `guide`.
+  read: func(image: borrow<image>, guide: guide) -> reading;
+}
+
+/// The face in frames of a video, read against the guides held in them.
+interface video {
+  use enclavid:host/media@0.1.0.{video};
+  use enclavid:vision/types@0.1.0.{frame-face};
+  use photo.{shape};
+
+  /// Read as its shape is in a photo, through `hold-ms`, forgiving breaks as
   /// this reader does by itself; the head is not read.
-  record static-video-guide {
-    guide: static-guide,
+  record shape-guide {
+    shape: shape,
     hold-ms: u16,
   }
 
@@ -93,55 +145,17 @@ interface guides {
     grace-ms: u16,
   }
 
-  variant video-guide {
-    static-guide(static-video-guide),
+  variant guide {
+    shape(shape-guide),
     face(face-guide),
     head-turn(head-turn-guide),
     face-flashes(face-flashes-guide),
   }
-}
-
-/// The face in a picture — a photo's image, or a frame's — read against a
-/// static guide.
-interface photo {
-  use enclavid:host/media@0.1.0.{image};
-  use enclavid:vision/types@0.1.0.{face};
-  use guides.{static-guide};
-
-  /// Whether the face followed the guide, or how it did not.
-  enum status {
-    followed,
-    /// No face — for a rect, none inside it — or a picture that does not
-    /// decode.
-    no-face,
-    /// A second face; for a rect, a second inside it.
-    extra-face,
-    /// The face does not fill the oval: too small, too large, or off its
-    /// centre.
-    off-oval,
-  }
-
-  record reading {
-    /// The face read: the most prominent; for a rect, the most prominent
-    /// inside it.
-    face: option<face>,
-    status: status,
-  }
-
-  /// Whether the face in `image` follows `guide`.
-  read: func(image: borrow<image>, guide: static-guide) -> reading;
-}
-
-/// The face in frames of a video, read against the guides held in them.
-interface video {
-  use enclavid:host/media@0.1.0.{video};
-  use enclavid:vision/types@0.1.0.{frame-face};
-  use guides.{video-guide};
 
   /// Where a guide was held, by frame index into the video: the platform's
   /// `frame-range`, copied.
   record frame-range {
-    guide: video-guide,
+    guide: guide,
     first: u32,
     last: u32,
   }
@@ -169,7 +183,7 @@ interface video {
   /// The face in one guide's frames.
   record reading {
     /// The guide, as given.
-    guide: video-guide,
+    guide: guide,
     /// The face in each frame where one is found, as `photo` finds it.
     faces: list<frame-face>,
     status: status,
@@ -186,7 +200,6 @@ world face-detect {
 
   export detect;
   export pose;
-  export guides;
   export photo;
   export video;
 }
@@ -205,7 +218,6 @@ world with-models {
 
   export detect;
   export pose;
-  export guides;
   export photo;
   export video;
 }

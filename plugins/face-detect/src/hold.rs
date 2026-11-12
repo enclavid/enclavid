@@ -273,7 +273,7 @@ mod tests {
         head: true,
     };
 
-    /// A static guide's oval of the same size: filled, the head not read.
+    /// A shape's oval of the same size: filled, the head not read.
     const STILL: Expect = Expect::Region {
         region: OVAL,
         place: Place::Fill,
@@ -459,12 +459,12 @@ mod tests {
         assert_eq!(status(turn), Status::Followed);
     }
 
-    /// A static guide does not move the head, as the page does not read the
-    /// face in it: a head tilted in a static oval, or a portrait in a card,
-    /// between the face guide and the turn leaves the turn read against the
-    /// face guide's oval.
+    /// A shape does not move the head, as the page does not read the face in
+    /// it: a head tilted in an oval shape, or a portrait in a card, between
+    /// the face guide and the turn leaves the turn read against the face
+    /// guide's oval.
     #[test]
-    fn a_static_guide_does_not_move_the_head() {
+    fn a_shape_does_not_move_the_head() {
         let oval = range(FACE, 800, frames(0, held(13)));
         let tilted = range(STILL, 500, frames(13, vec![turned_by(offset_of(-20.0)); 8]));
         let portrait = vec![vec![face(640.0, 360.0, 0.3, offset_of(-20.0))]; 8];

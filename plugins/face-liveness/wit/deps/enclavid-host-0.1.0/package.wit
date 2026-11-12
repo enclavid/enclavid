@@ -137,8 +137,7 @@ interface media {
     pixels: func(options: pixels-options) -> result<list<u8>, pixels-error>;
   }
 
-  /// A photo the applicant kept on the review screen: one JPEG, as the
-  /// camera page encoded it.
+  /// A photo the applicant sent: one JPEG, as the camera page encoded it.
   resource photo {
     /// Rehydrate the photo with this hash from the session's store.
     /// Own-session only (cross-session is cryptographically blocked).

@@ -49,36 +49,39 @@ interface disclosure-fields {
 
 /// The shapes a document or a selfie is photographed in, with the values this
 /// plugin picks for them.
-interface static-guides {
-    use enclavid:host-capture/photo@0.1.0.{static-guide};
+interface shapes {
+    use enclavid:host-capture/photo@0.1.0.{shape};
 
     /// The frame of an ICAO TD3 passport's photo page, 125 × 88 mm.
-    passport-frame: func() -> static-guide;
+    passport-frame: func() -> shape;
     /// The frame of an ICAO TD1 card — ID cards and driving licences —
     /// 85.6 × 54 mm.
-    card-frame: func() -> static-guide;
-    /// The oval of a selfie, half the frame's shorter side wide.
-    selfie-oval: func() -> static-guide;
+    card-frame: func() -> shape;
+    /// The oval of a selfie taken with the shutter, the page reading no face
+    /// in it: half the frame's shorter side wide, as `photo.selfie`'s is.
+    selfie-oval: func() -> shape;
 }
 
 /// Ready sets of video guides for a check, their values drawn from a seed the
 /// policy picks at random for each attempt: the same seed gives the same
 /// guides.
 interface video-guides {
-    use enclavid:host-capture/video@0.1.0.{video-guide};
+    use enclavid:host-capture/video@0.1.0.{guide};
 
     /// A liveness check by turns: the face in an oval 0.40–0.55 of the frame's
     /// shorter side wide, held 0.8 s; then a turn of the head by 20–30° to one
     /// side and one to the other, each held 0.5 s.
-    liveness-turns: func(seed: u32) -> list<video-guide>;
+    liveness-turns: func(seed: u32) -> list<guide>;
 
     /// A liveness check by colours: the face in an oval 0.40–0.55 of the
     /// frame's shorter side wide, held 0.8 s; then flashes of 5 bright colours
     /// in that oval, 0.3 s each. A seed gives both sets the same oval.
-    liveness-colors: func(seed: u32) -> list<video-guide>;
+    liveness-colors: func(seed: u32) -> list<guide>;
 }
 
-/// Photo captures of documents and a selfie, in `static-guides`' shapes.
+/// Photo captures of documents, in `shapes`' frames, and a selfie, which the
+/// page takes once the face fills its oval, half the frame's shorter side
+/// wide; each kept or taken again on a review screen.
 ///
 /// A document's function returns a whole `media-spec` for
 /// `action::render(prompt::media)`, both sides of a two-sided one as steps
@@ -107,17 +110,17 @@ interface photo {
 /// `photo`'s are.
 interface video {
     use enclavid:host-capture/capture@0.1.0.{media-spec};
-    use enclavid:host-capture/video@0.1.0.{video-guide};
+    use enclavid:host-capture/video@0.1.0.{guide};
 
     /// A liveness video: one step on the front camera asking `guides` in
     /// order — `video-guides` makes ready ones — with a time limit of 60 s.
     /// Any field of the spec is the policy's to change.
-    liveness: func(guides: list<video-guide>) -> media-spec;
+    liveness: func(guides: list<guide>) -> media-spec;
 }
 
 world well-known {
     export disclosure-fields;
-    export static-guides;
+    export shapes;
     export video-guides;
     export photo;
     export video;

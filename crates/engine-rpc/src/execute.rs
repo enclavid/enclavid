@@ -1360,7 +1360,7 @@ mod request_bound_tests {
     use engine_types::limits::MAX_PROPS_BYTES;
     use serde::Serialize;
     use serde_bytes::Bytes;
-    use session_types::{Capture, MediaResult};
+    use session_types::{Capture, MediaResult, PhotoCapture};
 
     /// A stand-in with the same field names and no bounds, so a test can put on
     /// the wire what the real type will not produce.
@@ -1448,7 +1448,13 @@ mod request_bound_tests {
     #[test]
     fn an_event_over_the_capture_bound_is_refused() {
         let event = Event::Media(MediaResult {
-            captures: vec![Capture::Photo(vec![1u8]); MAX_CAPTURE_STEPS + 1],
+            captures: vec![
+                Capture::Photo(PhotoCapture {
+                    photo: vec![1u8],
+                    guide: None,
+                });
+                MAX_CAPTURE_STEPS + 1
+            ],
         });
         let props = props_frame(b"");
         assert!(decode(&loose(&a_key(), &props, event)).is_err());

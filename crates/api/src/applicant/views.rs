@@ -18,7 +18,7 @@ use serde::Serialize;
 use engine_types::limits::GUIDE_OVAL_ASPECT;
 use session_types::{
     CameraFacing, CaptureKind, CaptureStep, Disclosure as PromptDisclosure, MAX_MEDIA_BYTES,
-    MediaSpec, Prompt, SentStep, StaticGuide, VideoGuide,
+    MediaSpec, PhotoGuide, Prompt, SentStep, Shape, VideoGuide,
 };
 // The run outcome comes back from the execution-worker as the `engine_rpc::RunStatus`
 // wire mirror (it wraps the same session_types `Prompt` / `Decision`).
@@ -165,13 +165,13 @@ pub struct CaptureStepView {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CaptureKindView {
-    /// One frame, which the applicant keeps or retakes on a review screen.
+    /// One frame.
     Photo {
-        /// The shape drawn over the camera, if any.
-        guide: Option<StaticGuideView>,
+        /// What the camera shows, if anything.
+        guide: Option<PhotoGuideView>,
         /// Post-capture review-screen check ("Make sure the MRZ is
-        /// sharp, no glare").
-        review_hint: String,
+        /// sharp, no glare"); none: no review screen.
+        review_hint: Option<String>,
     },
     /// A video, recorded while guides are shown.
     Video {
@@ -188,11 +188,11 @@ pub enum CameraFacingView {
     Any,
 }
 
-/// Mirrors `session_types::StaticGuide`. Tagged JSON enum so the frontend can
+/// Mirrors `session_types::Shape`. Tagged JSON enum so the frontend can
 /// dispatch via the `kind` field.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum StaticGuideView {
+pub enum ShapeView {
     /// A rectangle at the centre of the frame.
     Rect {
         /// Its width:height aspect (passport ≈ 1.42, ID-1 ≈ 1.59).
@@ -209,13 +209,33 @@ pub enum StaticGuideView {
     },
 }
 
-/// Mirrors `session_types::VideoGuide`, tagged as [`StaticGuideView`] is.
+/// Mirrors `session_types::PhotoGuide`, tagged as [`ShapeView`] is.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PhotoGuideView {
+    /// A shape the applicant fills, and says with the shutter they have.
+    Shape {
+        shape: ShapeView,
+        /// What the applicant fits into it, in the request's locale.
+        label: String,
+    },
+    /// A face the page finds in the oval it draws, and takes the photo of
+    /// once it fills it.
+    Face {
+        /// The oval's width, as a fraction of the frame's shorter side.
+        width: f32,
+        /// Its height, worked out here as an `oval`'s is.
+        height: f32,
+    },
+}
+
+/// Mirrors `session_types::VideoGuide`, tagged as [`ShapeView`] is.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VideoGuideView {
     /// A shape the applicant says with a button they have followed.
-    StaticGuide {
-        guide: StaticGuideView,
+    Shape {
+        shape: ShapeView,
         /// What the applicant lines up with it, in the request's locale.
         label: String,
         /// How long it is held after the button, in milliseconds.
@@ -358,8 +378,11 @@ fn capture_step_view(s: &CaptureStep, with_kind: bool, locale: &Locale) -> Captu
         camera: camera_view(s.camera),
         kind: with_kind.then(|| match &s.kind {
             CaptureKind::Photo(photo) => CaptureKindView::Photo {
-                guide: photo.guide.map(static_guide_view),
-                review_hint: dto::pick_localized(&photo.review_hint, locale),
+                guide: photo.guide.as_ref().map(|g| photo_guide_view(g, locale)),
+                review_hint: photo
+                    .review_hint
+                    .as_ref()
+                    .map(|hint| dto::pick_localized(hint, locale)),
             },
             CaptureKind::Video(video) => CaptureKindView::Video {
                 guides: video
@@ -380,20 +403,33 @@ fn camera_view(c: CameraFacing) -> CameraFacingView {
     }
 }
 
-fn static_guide_view(g: StaticGuide) -> StaticGuideView {
+fn shape_view(g: Shape) -> ShapeView {
     match g {
-        StaticGuide::Rect(r) => StaticGuideView::Rect { aspect: r.aspect },
-        StaticGuide::Oval(o) => StaticGuideView::Oval {
+        Shape::Rect(r) => ShapeView::Rect { aspect: r.aspect },
+        Shape::Oval(o) => ShapeView::Oval {
             width: o.width,
             height: o.width / GUIDE_OVAL_ASPECT,
         },
     }
 }
 
+fn photo_guide_view(g: &PhotoGuide, locale: &Locale) -> PhotoGuideView {
+    match g {
+        PhotoGuide::Shape(s) => PhotoGuideView::Shape {
+            shape: shape_view(s.shape),
+            label: dto::pick_localized(&s.label, locale),
+        },
+        PhotoGuide::Face(f) => PhotoGuideView::Face {
+            width: f.width,
+            height: f.width / GUIDE_OVAL_ASPECT,
+        },
+    }
+}
+
 fn video_guide_view(g: &VideoGuide, locale: &Locale) -> VideoGuideView {
     match g {
-        VideoGuide::StaticGuide(s) => VideoGuideView::StaticGuide {
-            guide: static_guide_view(s.guide),
+        VideoGuide::Shape(s) => VideoGuideView::Shape {
+            shape: shape_view(s.shape),
             label: dto::pick_localized(&s.label, locale),
             hold_ms: s.hold_ms,
         },
@@ -425,11 +461,21 @@ fn video_guide_view(g: &VideoGuide, locale: &Locale) -> VideoGuideView {
 #[cfg(test)]
 mod tests {
     use session_types::{
-        FaceFlashesGuide, FaceGuide, HeadTurnGuide, Localized, PhotoSpec, RectGuide, Rgb,
-        StaticVideoGuide, VideoSpec,
+        FaceFlashesGuide, FaceGuide, HeadTurnGuide, Localized, PhotoFaceGuide, PhotoShapeGuide,
+        PhotoSpec, RectShape, Rgb, VideoShapeGuide, VideoSpec,
     };
 
     use super::*;
+
+    /// A text as a catalog has it, in English.
+    fn text(words: &str) -> Localized {
+        Localized {
+            translations: vec![session_types::Translation {
+                language: "en".into(),
+                text: words.into(),
+            }],
+        }
+    }
 
     /// The wait's number travels beside the request, not inside it, so any kind
     /// of wait carries one.
@@ -545,19 +591,21 @@ mod tests {
             label: Localized::default(),
             captures: vec![
                 step(CaptureKind::Photo(PhotoSpec {
-                    guide: Some(StaticGuide::Rect(RectGuide { aspect: 1.42 })),
-                    review_hint: Localized::default(),
+                    guide: Some(PhotoGuide::Shape(PhotoShapeGuide {
+                        shape: Shape::Rect(RectShape { aspect: 1.42 }),
+                        label: text("Your passport"),
+                    })),
+                    review_hint: Some(text("Make sure it is sharp")),
+                })),
+                step(CaptureKind::Photo(PhotoSpec {
+                    guide: Some(PhotoGuide::Face(PhotoFaceGuide { width: 0.5 })),
+                    review_hint: None,
                 })),
                 step(CaptureKind::Video(VideoSpec {
                     guides: vec![
-                        VideoGuide::StaticGuide(StaticVideoGuide {
-                            guide: StaticGuide::Rect(RectGuide { aspect: 1.59 }),
-                            label: Localized {
-                                translations: vec![session_types::Translation {
-                                    language: "en".into(),
-                                    text: "Your card".into(),
-                                }],
-                            },
+                        VideoGuide::Shape(VideoShapeGuide {
+                            shape: Shape::Rect(RectShape { aspect: 1.59 }),
+                            label: text("Your card"),
                             hold_ms: 2000,
                         }),
                         VideoGuide::Face(FaceGuide {
@@ -592,7 +640,7 @@ mod tests {
             ],
             time_limit_secs: None,
         };
-        let text = serde_json::to_string(&prompt_view(
+        let encoded = serde_json::to_string(&prompt_view(
             &Prompt::Media(spec),
             &[],
             None,
@@ -600,16 +648,21 @@ mod tests {
         ))
         .unwrap();
         // A photo's aspect reads as the policy gave it, not as a widened f32.
-        assert!(text.contains(r#""aspect":1.42"#), "{text}");
-        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let [photo, video] = [&json["captures"][0], &json["captures"][1]];
+        assert!(encoded.contains(r#""aspect":1.42"#), "{encoded}");
+        let json: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let [photo, face, video] = [0, 1, 2].map(|i| &json["captures"][i]);
         assert_eq!(photo["kind"], "photo");
         assert_eq!(photo["camera"], "front");
-        assert_eq!(photo["guide"]["kind"], "rect");
-        assert!(photo.get("review_hint").is_some());
+        assert_eq!(photo["guide"]["kind"], "shape");
+        assert_eq!(photo["guide"]["shape"]["kind"], "rect");
+        assert_eq!(photo["guide"]["label"], "Your passport");
+        assert_eq!(photo["review_hint"], "Make sure it is sharp");
+        assert_eq!(face["guide"]["kind"], "face");
+        assert!(face["guide"].get("height").is_some());
+        assert!(face["review_hint"].is_null());
         assert_eq!(video["kind"], "video");
-        assert_eq!(video["guides"][0]["kind"], "static_guide");
-        assert_eq!(video["guides"][0]["guide"]["kind"], "rect");
+        assert_eq!(video["guides"][0]["kind"], "shape");
+        assert_eq!(video["guides"][0]["shape"]["kind"], "rect");
         assert_eq!(video["guides"][0]["label"], "Your card");
         assert_eq!(video["guides"][0]["hold_ms"], 2000);
         assert_eq!(video["guides"][1]["kind"], "face");

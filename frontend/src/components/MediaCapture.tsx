@@ -6,10 +6,15 @@ import {
   cameraError,
   facesApplicant,
   haptic,
+  hintText,
   pictureSize,
+  shapeText,
   useFrameBox,
+  useHoldFill,
 } from "@/components/camera";
 import { Button } from "@/components/ui/button";
+import { type Detector, loadDetector } from "@/lib/faces";
+import { type Box, Head, type Hint, faceBox, hintFor, moved } from "@/lib/guides";
 import { cn } from "@/lib/utils";
 import type { PhotoStep } from "@/types";
 
@@ -18,14 +23,16 @@ type Props = {
   /// the artifact as a whole (e.g. "Your passport", "Holder A's ID").
   promptLabel: string;
   /// One photo step of the artifact's capture sequence. Drives camera
-  /// facing, the overlay guide and the per-step hint label.
+  /// facing, the overlay guide, the per-step hint label and whether the photo
+  /// is reviewed.
   step: PhotoStep;
   /// One-based step index plus total — surfaced in the hint as
   /// "Step N of M" when M > 1.
   stepNumber: number;
   totalSteps: number;
-  /// Fired once the user keeps the photo: the one frame shown on the
-  /// review screen, JPEG-encoded — what is shown is what is sent.
+  /// Fired once the user keeps the photo — at once where the step has no
+  /// review screen: the one frame shown, JPEG-encoded — what is shown is what
+  /// is sent.
   onCapture: (photo: Blob) => void;
   /// True while the parent is submitting the capture. Disables both
   /// Retake and Use-photo buttons so the user can't double-tap or
@@ -41,6 +48,18 @@ type Props = {
 type Phase = "initializing" | "streaming" | "taking" | "preview" | "error";
 
 const JPEG_QUALITY = 0.85;
+/// How long the face holds still in a face guide's oval before the page takes
+/// the photo — the sharpest of the frames meanwhile — in milliseconds, while
+/// the oval's outline fills round.
+const STEADY_MS = 1000;
+/// How far the face may move from one look to the next and still be holding
+/// still, as a share of its width: past what the detector's own jitter moves
+/// it.
+const STILL_SHIFT = 0.1;
+/// How often the face is looked for, in milliseconds.
+const LOOK_MS = 1000 / 15;
+/// What a face guide asks.
+const FACE_TEXT = "Fit your face in the oval";
 
 export function MediaCapture({
   promptLabel,
@@ -86,8 +105,42 @@ export function MediaCapture({
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const frame = useFrameBox(videoRef);
+  const guide = step.guide;
+  const face = guide?.kind === "face" ? guide : null;
+  const readsFace = face !== null;
+  // The face detector, for a face guide: `undefined` while it loads, `null`
+  // where this browser runs none — the shutter takes the photo then. The
+  // camera waits for it.
+  const [detector, setDetector] = useState<Detector | null>();
+  // What the applicant is told about the face guide, from the latest frame.
+  const [hint, setHint] = useState<Hint | null>(null);
+  // Since when the face has held still in the guide's oval, on the page's
+  // clock; `null` while it has not.
+  const [heldAt, setHeldAt] = useState<number | null>(null);
+  const fill = useHoldFill(heldAt, STEADY_MS);
+  // The page takes the photo itself where it reads the face.
+  const auto = readsFace && !!detector;
 
   useEffect(() => {
+    if (!readsFace) return;
+    let cancelled = false;
+    loadDetector().then(
+      (loaded) => {
+        if (!cancelled) setDetector(loaded);
+      },
+      (error: unknown) => {
+        if (cancelled) return;
+        console.warn("The face detector did not load:", error);
+        setDetector(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [readsFace]);
+
+  useEffect(() => {
+    if (readsFace && detector === undefined) return;
     let cancelled = false;
 
     void (async () => {
@@ -121,7 +174,7 @@ export function MediaCapture({
       streamRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attempt, step.camera]);
+  }, [attempt, step.camera, detector]);
 
   useEffect(() => {
     return () => {
@@ -129,7 +182,73 @@ export function MediaCapture({
     };
   }, []);
 
-  async function takePhoto() {
+  // A face guide: the applicant's face read against its oval, and the photo
+  // taken once it has held still there for a moment: the sharpest frame of
+  // that moment.
+  useEffect(() => {
+    if (phase !== "streaming" || !face || !detector) return;
+    const head = new Head();
+    let stopped = false;
+    // Since when the face has held still in the oval, its box at the last
+    // look, and the sharpest frame since then, at the photo's size.
+    let since: number | null = null;
+    let last: Box | null = null;
+    let best: { frame: HTMLCanvasElement; sharpness: number } | null = null;
+    let spare = document.createElement("canvas");
+    const look = async () => {
+      const video = videoRef.current;
+      if (stopped || !video) return;
+      const { videoWidth: width, videoHeight: height } = video;
+      if (width && height) {
+        const faces = await detector.faces(video, width, height);
+        if (stopped) return;
+        const next = hintFor(face, faces, head, width, height, mirrored);
+        setHint(next);
+        const box = next === "hold" ? faceBox(faces[0], face.height / face.width) : null;
+        const still = box !== null && last !== null && moved(last, box) <= STILL_SHIFT;
+        last = box;
+        if (!still) {
+          since = null;
+          best = null;
+        } else {
+          since ??= performance.now();
+          const size = pictureSize(width, height);
+          if (spare.width !== size.width || spare.height !== size.height) {
+            spare.width = size.width;
+            spare.height = size.height;
+          }
+          spare.getContext("2d")?.drawImage(video, 0, 0, size.width, size.height);
+          const k = size.width / width;
+          const sharp = detector.sharpness(spare, {
+            left: box.left * k,
+            top: box.top * k,
+            right: box.right * k,
+            bottom: box.bottom * k,
+          });
+          if (!best || sharp > best.sharpness) {
+            const previous = best?.frame;
+            best = { frame: spare, sharpness: sharp };
+            spare = previous ?? document.createElement("canvas");
+          }
+          if (performance.now() - since >= STEADY_MS) {
+            void takePhoto(best.frame);
+            return;
+          }
+        }
+        setHeldAt(since);
+      }
+      setTimeout(() => void look(), LOOK_MS);
+    };
+    void look();
+    return () => {
+      stopped = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, detector, mirrored]);
+
+  /// Take the photo: `frame`, a frame the page picked, drawn at the photo's
+  /// size; none: the camera's frame now.
+  async function takePhoto(frame?: HTMLCanvasElement) {
     if (phase !== "streaming") return;
     const video = videoRef.current;
     if (!video || video.videoWidth === 0) return;
@@ -137,20 +256,24 @@ export function MediaCapture({
     setPhase("taking");
     haptic(15);
 
-    // At the size the platform decodes the photo at, not one it would halve.
-    const { width, height } = pictureSize(video.videoWidth, video.videoHeight);
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      setPhase("error");
-      setErrorMsg("Could not capture the photo.");
-      return;
+    let canvas = frame;
+    if (!canvas) {
+      // At the size the platform decodes the photo at, not one it would halve.
+      const { width, height } = pictureSize(video.videoWidth, video.videoHeight);
+      canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        setPhase("error");
+        setErrorMsg("Could not capture the photo.");
+        return;
+      }
+      ctx.drawImage(video, 0, 0, width, height);
     }
-    ctx.drawImage(video, 0, 0, width, height);
+    const picture = canvas;
     const photo = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY),
+      picture.toBlob(resolve, "image/jpeg", JPEG_QUALITY),
     );
     if (!photo) {
       setPhase("error");
@@ -167,6 +290,9 @@ export function MediaCapture({
     setPreviewUrl(previewUrlRef.current);
 
     setPhase("preview");
+    // With no review screen the photo is sent as taken; the preview stays
+    // while it is sent, and its buttons come back if the send fails.
+    if (step.review_hint === null) keep();
   }
 
   function retake() {
@@ -176,6 +302,8 @@ export function MediaCapture({
     }
     setPreviewUrl(null);
     photoRef.current = null;
+    setHint(null);
+    setHeldAt(null);
     setPhase("initializing");
     setAttempt((a) => a + 1);
   }
@@ -201,6 +329,14 @@ export function MediaCapture({
       ? `Step ${stepNumber} of ${totalSteps}. ${stepText}`
       : stepText;
   const lastStep = stepNumber === totalSteps;
+  const instruction =
+    guide?.kind === "shape"
+      ? shapeText(guide.shape, guide.label)
+      : face
+        ? hint === null
+          ? FACE_TEXT
+          : hintText(hint, FACE_TEXT)
+        : null;
 
   return (
     <main
@@ -228,8 +364,16 @@ export function MediaCapture({
         />
         {showCamera && (
           <>
-            {step.guide && (
-              <GuideOverlay guide={step.guide} frame={frame} />
+            {guide?.kind === "shape" && (
+              <GuideOverlay shape={guide.shape} frame={frame} />
+            )}
+            {face && (
+              <GuideOverlay
+                shape={{ kind: "oval", width: face.width, height: face.height }}
+                frame={frame}
+                met={hint === "hold"}
+                fill={fill}
+              />
             )}
             <div className="pointer-events-none absolute inset-x-6 top-6 space-y-1 text-center">
               <p className="text-xs uppercase tracking-wide text-white/70">
@@ -239,7 +383,31 @@ export function MediaCapture({
                 {stepHint}
               </p>
             </div>
+            {instruction && (
+              <div className="pointer-events-none absolute inset-x-0 bottom-6 flex justify-center px-6">
+                <div
+                  className={cn(
+                    "rounded-full px-4 py-1.5 text-center text-sm font-medium",
+                    hint === "hold" ? "bg-white text-black" : "bg-black/60",
+                  )}
+                >
+                  {instruction}
+                </div>
+              </div>
+            )}
           </>
+        )}
+
+        {phase === "initializing" && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <p className="inline-flex items-center gap-2 text-sm text-white/80">
+              <span
+                aria-hidden
+                className="size-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white"
+              />
+              Getting ready…
+            </p>
+          </div>
         )}
 
         {phase === "preview" && previewUrl && (
@@ -249,14 +417,16 @@ export function MediaCapture({
               alt="Captured preview"
               className="absolute inset-0 size-full object-contain"
             />
-            <div
-              className="pointer-events-none absolute inset-x-6 top-6 rounded-md bg-black/70 px-3 py-2 text-center text-sm"
-              style={{
-                paddingTop: "max(env(safe-area-inset-top), 0.5rem)",
-              }}
-            >
-              {step.review_hint}
-            </div>
+            {step.review_hint !== null && (
+              <div
+                className="pointer-events-none absolute inset-x-6 top-6 rounded-md bg-black/70 px-3 py-2 text-center text-sm"
+                style={{
+                  paddingTop: "max(env(safe-area-inset-top), 0.5rem)",
+                }}
+              >
+                {step.review_hint}
+              </div>
+            )}
           </>
         )}
 
@@ -320,11 +490,17 @@ export function MediaCapture({
                 Cancel
               </Button>
             )}
-            <ShutterButton
-              label="Capture"
-              disabled={phase !== "streaming"}
-              onClick={() => void takePhoto()}
-            />
+            {auto ? (
+              <p className="inline-flex h-12 items-center text-sm text-white/80">
+                The photo is taken when your face fills the oval
+              </p>
+            ) : (
+              <ShutterButton
+                label="Capture"
+                disabled={phase !== "streaming"}
+                onClick={() => void takePhoto()}
+              />
+            )}
             {onCancel && <span className="size-12" aria-hidden />}
           </>
         )}

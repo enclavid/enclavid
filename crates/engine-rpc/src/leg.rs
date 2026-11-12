@@ -706,7 +706,9 @@ mod door_tests {
     use enclavid_boundary::{Asserted, AuthN, Exposed, Untrusted};
     use enclavid_boundary_macros::boundary;
     use engine_types::limits::MAX_CAPTURE_STEPS;
-    use session_types::{Capture, Decision, Event, MAX_MEDIA_BYTES, MediaResult, SessionState};
+    use session_types::{
+        Capture, Decision, Event, MAX_MEDIA_BYTES, MediaResult, PhotoCapture, SessionState,
+    };
 
     use super::{
         Callbacks, DEFAULT_CALLBACK_REQUEST_BUFFER, DEFAULT_REQUEST_BUFFER, ExecutorLeg,
@@ -1104,7 +1106,10 @@ mod door_tests {
         .await;
         let event = Event::Media(MediaResult {
             captures: vec![
-                Capture::Photo(vec![0xEE; MAX_MEDIA_BYTES / MAX_CAPTURE_STEPS]);
+                Capture::Photo(PhotoCapture {
+                    photo: vec![0xEE; MAX_MEDIA_BYTES / MAX_CAPTURE_STEPS],
+                    guide: None,
+                });
                 MAX_CAPTURE_STEPS
             ],
         });

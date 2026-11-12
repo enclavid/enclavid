@@ -725,9 +725,7 @@ pub const MAX_MEDIA_BYTES: usize = 12 * 1024 * 1024;
 /// WIT `capture` variant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Capture {
-    /// One JPEG: the frame the applicant kept on the review screen. One CBOR
-    /// byte string — see [`SessionState::state`].
-    Photo(#[serde(with = "serde_bytes")] Vec<u8>),
+    Photo(PhotoCapture),
     Video(VideoCapture),
 }
 
@@ -735,10 +733,22 @@ impl Capture {
     /// The applicant's bytes: the photo, or the video.
     pub fn bytes(&self) -> &[u8] {
         match self {
-            Capture::Photo(jpeg) => jpeg,
+            Capture::Photo(capture) => &capture.photo,
             Capture::Video(capture) => &capture.video,
         }
     }
+}
+
+/// A photo step's capture — sealed mirror of the WIT `photo-capture` record.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhotoCapture {
+    /// One JPEG: the frame the applicant took. One CBOR byte string — see
+    /// [`SessionState::state`].
+    #[serde(with = "serde_bytes")]
+    pub photo: Vec<u8>,
+    /// The step's own guide, which api copies from the prompt.
+    pub guide: Option<PhotoGuide>,
 }
 
 /// A video step's capture — sealed mirror of the WIT `video-capture` record.
@@ -890,8 +900,9 @@ pub enum CaptureKind {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PhotoSpec {
-    pub guide: Option<StaticGuide>,
-    pub review_hint: Localized,
+    pub guide: Option<PhotoGuide>,
+    /// None: no review screen.
+    pub review_hint: Option<Localized>,
 }
 
 /// A video step — sealed mirror of the WIT `video-spec` record.
@@ -901,47 +912,69 @@ pub struct VideoSpec {
     pub guides: Vec<VideoGuide>,
 }
 
-/// A shape drawn over the camera — sealed mirror of the WIT `static-guide`
+/// A shape drawn over the camera — sealed mirror of the WIT `photo.shape`
 /// variant, held to its ranges by the engine where the prompt is built, as
 /// every guide is.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum StaticGuide {
-    Rect(RectGuide),
-    Oval(OvalGuide),
+pub enum Shape {
+    Rect(RectShape),
+    Oval(OvalShape),
 }
 
-/// Sealed mirror of the WIT `rect-guide` record.
+/// Sealed mirror of the WIT `rect-shape` record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct RectGuide {
+pub struct RectShape {
     pub aspect: f32,
 }
 
-/// Sealed mirror of the WIT `oval-guide` record.
+/// Sealed mirror of the WIT `oval-shape` record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct OvalGuide {
+pub struct OvalShape {
     pub width: f32,
 }
 
-/// One thing a video asks — sealed mirror of the WIT `video-guide` variant.
+/// What a photo's camera shows — sealed mirror of the WIT `photo.guide`
+/// variant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PhotoGuide {
+    Shape(PhotoShapeGuide),
+    Face(PhotoFaceGuide),
+}
+
+/// Sealed mirror of the WIT `photo.shape-guide` record.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PhotoShapeGuide {
+    pub shape: Shape,
+    pub label: Localized,
+}
+
+/// Sealed mirror of the WIT `photo.face-guide` record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhotoFaceGuide {
+    pub width: f32,
+}
+
+/// One thing a video asks — sealed mirror of the WIT `video.guide` variant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum VideoGuide {
-    StaticGuide(StaticVideoGuide),
+    Shape(VideoShapeGuide),
     Face(FaceGuide),
     HeadTurn(HeadTurnGuide),
     FaceFlashes(FaceFlashesGuide),
 }
 
-/// Sealed mirror of the WIT `static-video-guide` record.
+/// Sealed mirror of the WIT `video.shape-guide` record.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct StaticVideoGuide {
-    pub guide: StaticGuide,
+pub struct VideoShapeGuide {
+    pub shape: Shape,
     pub label: Localized,
     pub hold_ms: u16,
 }
 
-/// Sealed mirror of the WIT `face-guide` record.
+/// Sealed mirror of the WIT `video.face-guide` record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FaceGuide {
@@ -1068,6 +1101,14 @@ mod media_tests {
         encode(&MediaResult { captures }).expect("a media result encodes")
     }
 
+    /// A capture of `photo`, taken to the face guide.
+    fn photo(photo: Vec<u8>) -> Capture {
+        Capture::Photo(PhotoCapture {
+            photo,
+            guide: Some(PhotoGuide::Face(PhotoFaceGuide { width: 0.5 })),
+        })
+    }
+
     /// A capture of `video` with `guides` ranges.
     fn video(video: Vec<u8>, guides: usize) -> Capture {
         let range = FrameRange {
@@ -1090,8 +1131,8 @@ mod media_tests {
     #[test]
     fn a_media_result_round_trips() {
         let captures = vec![
-            Capture::Photo(vec![0xFF, 0xD8, 0xFF]),
-            Capture::Photo(vec![]),
+            photo(vec![0xFF, 0xD8, 0xFF]),
+            Capture::Photo(PhotoCapture::default()),
             video(vec![0x1A, 0x45, 0xDF, 0xA3], 2),
         ];
         let back: MediaResult = decode(&media(captures.clone())).expect("it decodes");
@@ -1109,10 +1150,7 @@ mod media_tests {
     /// strings, and the integer-array form could not fit.
     #[test]
     fn a_capture_costs_its_own_length_on_the_wire() {
-        for capture in [
-            Capture::Photo(vec![0x80u8; 1024]),
-            video(vec![0x80u8; 1024], 0),
-        ] {
+        for capture in [photo(vec![0x80u8; 1024]), video(vec![0x80u8; 1024], 0)] {
             let encoded = media(vec![capture]);
             assert!(
                 encoded.len() < 1024 + 64,
@@ -1125,11 +1163,11 @@ mod media_tests {
     /// The count bound, refused at the decoder rather than trusted upstream.
     #[test]
     fn more_captures_than_a_spec_has_steps_are_refused() {
-        let captures = vec![Capture::Photo(vec![7u8]); MAX_CAPTURE_STEPS + 1];
+        let captures = vec![photo(vec![7u8]); MAX_CAPTURE_STEPS + 1];
         assert!(decode::<MediaResult>(&media(captures)).is_err());
         // And the boundary itself still decodes, so the cap is a ceiling and not
         // an off-by-one.
-        let captures = vec![Capture::Photo(vec![7u8]); MAX_CAPTURE_STEPS];
+        let captures = vec![photo(vec![7u8]); MAX_CAPTURE_STEPS];
         assert!(decode::<MediaResult>(&media(captures)).is_ok());
     }
 
@@ -1138,7 +1176,7 @@ mod media_tests {
     #[test]
     fn captures_over_the_ingress_budget_are_refused() {
         let chunk = MAX_MEDIA_BYTES / 4;
-        let mut captures = vec![Capture::Photo(vec![0u8; chunk]); 4];
+        let mut captures = vec![photo(vec![0u8; chunk]); 4];
         assert!(decode::<MediaResult>(&media(captures.clone())).is_ok());
         captures.push(video(vec![0u8; 1], 1));
         assert!(decode::<MediaResult>(&media(captures)).is_err());
