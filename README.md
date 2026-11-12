@@ -21,6 +21,17 @@ data of its own.
 
 Apache-2.0.
 
+## Playground
+
+[playground.enclavid.com](https://playground.enclavid.com) runs policies on the
+public sandbox — the platform on AMD SEV-SNP hardware, in production images —
+with nothing to install. Pick a template — an age check by selfie, a KYC flow
+with a passport photo and a consent screen, or a liveness check by video — edit
+the policy in TypeScript in the browser, and build it. Then start a session,
+open the applicant's page on your phone, and see what a consumer's backend
+receives: the decision, and what the applicant agreed to share, sealed to a key
+your browser holds.
+
 ## Design goal
 
 - The platform **provably cannot learn who it verifies** — the applicant's
@@ -56,7 +67,7 @@ flowchart LR
     gateway["gateway<br/>public TLS terminates here"]
     api["api — orchestrator"]
     comp["compile-worker<br/>(Cranelift)"]
-    exec["execution-worker<br/>(WASM policy + plugins)"]
+    exec["execution-worker<br/>policy + plugins (WASM);<br/>each model, each decode<br/>in a process of its own"]
     storage[("storage<br/>ciphertext only")]
     hatch["hatch<br/>OCI pull · KBS relay"]
     gateway -->|"RA-TLS, api proves the build<br/>the consumer names"| api
@@ -105,10 +116,11 @@ Trust boundaries:
   with the group that created them — the api instances of one build on one chip
   — and links carry the group and the build.
 - **api ↔ its workers and storage** — mutually attested RA-TLS: api pins each
-  worker's build; the workers accept any attested api. The storage CVM holds
-  durable session state (and a cache of compiled policies) as
-  **encrypted-only data**: everything is sealed enclave-side, so it never holds
-  a key or plaintext.
+  worker's build; the workers accept any attested api. Blind relays on the host
+  carry these links over vsock, as they do every link between enclaves, and see
+  only TLS ciphertext. The storage CVM holds durable session state (and a cache
+  of compiled policies) as **encrypted-only data**: everything is sealed
+  enclave-side, so it never holds a key or plaintext.
 - **api → the hatch → the outside** — no enclave has a NIC but the hatch, an
   attested enclave api pins as it does its workers. The hatch fetches
   artifacts and relays to a consumer's KBS over the host's network, with TLS
@@ -161,12 +173,12 @@ given the VCEK; a CLI command for the whole check is next on the list.
 
 ## Status
 
-**Early alpha.** The trusted runtime works end to end on AMD SEV-SNP hardware,
-on one host in a development setup (debug images, consumer token checks off): a
-session created with a test client went through capture and consent in a
-browser, its disclosure was opened, and the gateway's quote matched a
-measurement rebuilt from source. The KYC product on top of it is earlier than
-that: the verification plugins are placeholders so far.
+**Alpha.** A public sandbox runs the whole platform on one AMD SEV-SNP host, in
+production images, and anyone can try a policy on it through the
+[playground](#playground): capture on the applicant's own phone, the policy and
+its plugins in the enclave, consent, and the sealed disclosure opened by the
+consumer. It is for trying policies, not yet for real applicants' documents:
+what is under [Not yet](#not-yet) comes first.
 
 ### Works today
 
@@ -198,30 +210,33 @@ that: the verification plugins are placeholders so far.
   its own control socket. Each application holds only the capabilities it
   needs (the api, storage and the gateway as a user of their own), and the
   clock keeper only the right to set the clock, under a syscall filter.
+- **Time and randomness for policies** — a policy reads the enclave's trusted
+  clock and draws random numbers through the standard WASI interfaces.
+- **Face plugins** — face detection, an age estimate and a liveness check. Each
+  plugin's model runs inside the enclave in a process of its own, and only the
+  picture the plugin hands it reaches it.
+- **Guided capture** — the applicant's page draws what to line up, a
+  document's frame or a face's oval; it reads the face in the browser to coach
+  the applicant, and takes the selfie itself once the face holds still. Videos
+  are recorded through prompts such as head turns and colour flashes, and a
+  plugin checks each prompt again in the enclave.
 - **Tooling** — a command-line client for authoring and pushing policies and
-  plugins, and a web frontend served from the enclave.
+  plugins, a TypeScript policy SDK with templates (`sdk/typescript`,
+  `templates/typescript`), a web frontend served from the enclave, and the
+  [playground](#playground).
 
 ### Not yet
 
-- **The KYC pipeline** — document reading (MRZ / OCR), liveness, face match and
-  sanctions screening. Face detection (BlazeFace) and a coarse age estimate
-  exist only in a build with their model weights supplied; the default build
-  uses placeholders.
+- **The rest of the KYC pipeline** — document reading (MRZ / OCR), face match
+  and sanctions screening.
 - **Hardware-attested key release** — the KBS path is wired, but presents
   placeholder evidence rather than an SEV-SNP report, so a KBS cannot yet limit
   release to the attested enclave.
-- **Time and randomness for policies** — a policy cannot yet read the date (for
-  a passport's expiry, or an age) or draw random numbers. The trusted clock is
-  in place; the interfaces that hand it, and randomness, to a policy are next.
 - **Consumer tooling** — a command that verifies the gateway's attestation, and
   client SDKs.
 - **Webhooks** — notifying the consumer of status changes and ready disclosures.
 - **Sharing media** through the consent flow — the plumbing exists; the share
   path does not yet.
-- **Side-by-side releases in the shipped deployment** — `deploy/` replaces api in
-  place on one host.
-- **Several gateway hosts behind one public name**, with certificate issuance
-  working across them.
 
 ## Next: tooling and hardening
 
@@ -229,23 +244,15 @@ that: the verification plugins are placeholders so far.
 
 - A CLI review, starting with the gateway check above as one command.
 - Client SDKs, first in TypeScript and Rust.
-- A playground site where anyone can run a session.
 
 ### Hardening
 
-- **Hatch egress** — the hatch's outbound requests, registry pulls and the KBS
-  relay alike, restricted to public addresses over HTTPS, re-checked on every
-  redirect and token request, with size limits and a fixed request shape for
-  the relay, so a consumer cannot steer it at the host's own network.
-- **Applicant key storage** — derived from a passkey where the browser supports
-  it rather than kept in web storage, portable across the applicant's devices,
-  and gone once the session ends.
 - **Hardware-attested key release** — SEV-SNP evidence on the KBS path.
 - **Published measurements** — builds in CI, with every release's measurements
   signed into a public transparency log.
 
-After that: the KYC plugins, sanctions screening, webhooks, and compiling a
-session's policy before the applicant arrives.
+After that: document reading and face match, sanctions screening, webhooks,
+and compiling a session's policy before the applicant arrives.
 
 ## License
 
