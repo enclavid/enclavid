@@ -15,7 +15,8 @@
 //! The wasmtime-coupled pieces stay in the engine crates: the section
 //! parsers (`load_embedded`) + fusion + the `Compiler` live in
 //! `engine-compiler`; the bindgen ref resource reps (`LocalizedRef` /
-//! `IconRef` / `DisclosureFieldRef`) + the `Executor` live in
+//! `IconRef` / `DisclosureFieldKeyRef` / `DisclosureFieldValueRef`) + the
+//! `Executor` live in
 //! `engine-executor`. Each re-exports the types here it needs at
 //! ergonomic paths.
 

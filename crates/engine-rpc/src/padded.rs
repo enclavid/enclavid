@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn a_state_at_the_engine_cap_fits_the_frame() {
         use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_FLASH_COLORS, MAX_VIDEO_GUIDES};
-        use session_types::{FaceFlashesGuide, FrameRange, Rgb, SentStep, VideoGuide};
+        use session_types::{Color, FaceFlashesGuide, FrameRange, SentStep, VideoGuide};
 
         let range = FrameRange {
             // Flashes of the most colours: of the guides, the one whose encoding
@@ -433,7 +433,7 @@ mod tests {
             guide: VideoGuide::FaceFlashes(FaceFlashesGuide {
                 width: 0.587_654,
                 colors: vec![
-                    Rgb {
+                    Color {
                         red: 255,
                         green: 255,
                         blue: 255,

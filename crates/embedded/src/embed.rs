@@ -502,7 +502,7 @@ mod tests {
         fs::write(
             wit.join("deps/host/refs.wit"),
             "package enclavid:host@0.1.0;
-             interface refs { resource localized-ref; resource disclosure-field-ref; }",
+             interface refs { resource localized-ref; resource disclosure-field-key-ref; }",
         )
         .unwrap();
         for (path, source) in files {
@@ -656,9 +656,9 @@ mod tests {
         let world = WORLD.replace(
             "interface i18n {",
             "interface disclosure-fields {
-                use enclavid:host/refs@0.1.0.{disclosure-field-ref};
+                use enclavid:host/refs@0.1.0.{disclosure-field-key-ref};
                 enum key { full-name, date-of-birth }
-                disclosure-field: func(key: key) -> disclosure-field-ref;
+                disclosure-field: func(key: key) -> disclosure-field-key-ref;
             }
             interface i18n {",
         );

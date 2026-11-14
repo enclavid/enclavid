@@ -52,7 +52,10 @@ macro_rules! tensors {
                     Ok(self.table.push($rep { dims, data })?)
                 }
 
-                async fn dims(&mut self, tensor: Resource<$rep>) -> wasmtime::Result<Vec<u64>> {
+                async fn dimensions(
+                    &mut self,
+                    tensor: Resource<$rep>,
+                ) -> wasmtime::Result<Vec<u64>> {
                     Ok(self.table.get(&tensor)?.dims.clone())
                 }
 

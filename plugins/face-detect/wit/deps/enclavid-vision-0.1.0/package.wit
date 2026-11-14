@@ -7,31 +7,51 @@ package enclavid:vision@0.1.0;
 /// (`enclavid:host/media`), which the platform decodes: this package holds no
 /// pixels.
 interface types {
-  /// A region of interest, in the image's pixels from its top-left corner.
-  record bbox {
+  /// Where a face lies in the picture it was found in, in that picture's
+  /// pixels from its top-left corner, 0 at the first pixel's corner. How
+  /// closely it bounds the face is the detector's own; it may reach past the
+  /// picture's edges.
+  record bounding-box {
     x: f32,
     y: f32,
-    w: f32,
-    h: f32,
+    width: f32,
+    height: f32,
   }
 
-  /// One keypoint, in the image's pixels from its top-left corner.
+  /// One place in a picture, in its pixels from its top-left corner.
   record point {
     x: f32,
     y: f32,
   }
 
+  /// Where a face's eyes, nose and mouth are: the same anatomy whichever
+  /// detector found the face. Right and left are the face's own: an
+  /// unmirrored picture shows its right eye on its left.
+  record keypoints {
+    /// The centre of the right eye.
+    right-eye: point,
+    /// The centre of the left eye.
+    left-eye: point,
+    /// The tip of the nose.
+    nose-tip: point,
+    /// The middle of the mouth.
+    mouth: point,
+  }
+
   /// A detected face — GEOMETRY ONLY (the pixels live in the `image` it was
-  /// found in). The keypoints are the detector's own: which points, and in
-  /// which order, is its implementation's to say.
-  /// Each consumer derives its OWN crop from `bbox` at its own resolution /
-  /// alignment — a fixed pre-crop would break liveness (which needs an
-  /// enlarged, unaligned crop), so the substrate shares WHERE the face is,
-  /// not a ready crop.
+  /// found in). Each consumer derives its OWN crop from it at its own
+  /// resolution / alignment — a fixed pre-crop would break liveness (which
+  /// needs an enlarged, unaligned crop), so the substrate shares WHERE the
+  /// face is, not a ready crop. What a detector gives beyond these, its own
+  /// points or score, it gives through an interface of its own.
   record face {
-    bbox: bbox,
-    landmarks: list<point>,
-    score: f32,
+    bounding-box: bounding-box,
+    /// The chance, from 0 to 1, that the box holds a face, calibrated
+    /// alike for every detector: of the faces reported at p, a share p are
+    /// faces. None where the implementation has no calibrated chance.
+    score: option<f32>,
+    /// None where the detector places no points.
+    keypoints: option<keypoints>,
   }
 
   /// A face found in a frame of a video.

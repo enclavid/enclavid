@@ -12,7 +12,7 @@
 //! `disclosure-field` return an opaque WIT `resource` handle it cannot
 //! forge (wasmtime owns the handle table). The host mints a resource
 //! whose rep IS the resolved data — [`LocalizedRef`] / [`IconRef`] /
-//! [`DisclosureFieldRef`], defined below. These reps are the one
+//! [`DisclosureFieldKeyRef`] / [`DisclosureFieldValueRef`], defined below. These reps are the one
 //! wasmtime-coupled piece (bindgen's `with:` maps each WIT resource to
 //! the matching type here), so they stay in `engine-executor`; the engine
 //! dereferences a rep at the action boundary (`runner::convert`), so the
@@ -34,6 +34,9 @@ pub struct LocalizedRef(pub engine_types::text::Localized);
 /// Backing rep of `enclavid:host/refs.icon-ref` — the icon name, one of
 /// the host's own, that the applicant frontend dispatches.
 pub struct IconRef(pub String);
-/// Backing rep of `enclavid:host/refs.disclosure-field-ref` — the
+/// Backing rep of `enclavid:host/refs.disclosure-field-key-ref` — the
 /// resolved machine `display-field.key` the consumer receives.
-pub struct DisclosureFieldRef(pub String);
+pub struct DisclosureFieldKeyRef(pub String);
+/// Backing rep of `enclavid:host/refs.disclosure-field-value-ref` — the
+/// `display-field.value` the field shows and seals.
+pub struct DisclosureFieldValueRef(pub String);

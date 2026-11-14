@@ -3,7 +3,7 @@ package enclavid:well-known@0.1.0;
 /// DisplayField helpers for canonical KYC fields.
 ///
 /// Each helper takes one of the POLICY's disclosure fields — the
-/// `disclosure-field-ref` it mints from a case of the `key` in its
+/// `disclosure-field-key-ref` it mints from a case of the `key` in its
 /// `enclavid-ext:policy/disclosure-fields`, the single source of truth for
 /// what's disclosable to the consumer — and returns a `display-field` of
 /// that field, labelled with THIS PLUGIN's text for it (applicant-facing).
@@ -14,46 +14,46 @@ package enclavid:well-known@0.1.0;
 /// beside its label, so a field passed to another field's helper is on
 /// the applicant's screen for them to see.
 interface disclosure-fields {
-  use enclavid:host/refs@0.1.0.{disclosure-field-ref};
+  use enclavid:host/refs@0.1.0.{disclosure-field-key-ref};
   use enclavid:host-disclosure/disclosure@0.1.0.{display-field};
 
   /// ─── Document identifiers ──────────────────────────────────────
-  passport-number: func(field: disclosure-field-ref, value: string) -> display-field;
+  passport-number: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  id-card-number: func(field: disclosure-field-ref, value: string) -> display-field;
+  id-card-number: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  drivers-license-number: func(field: disclosure-field-ref, value: string) -> display-field;
+  drivers-license-number: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  document-issuing-country: func(field: disclosure-field-ref, value: string) -> display-field;
+  document-issuing-country: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  document-expiry: func(field: disclosure-field-ref, value: string) -> display-field;
+  document-expiry: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  document-issued: func(field: disclosure-field-ref, value: string) -> display-field;
+  document-issued: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
   /// ─── Identity ──────────────────────────────────────────────────
-  given-name: func(field: disclosure-field-ref, value: string) -> display-field;
+  given-name: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  family-name: func(field: disclosure-field-ref, value: string) -> display-field;
+  family-name: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  full-name: func(field: disclosure-field-ref, value: string) -> display-field;
+  full-name: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  date-of-birth: func(field: disclosure-field-ref, value: string) -> display-field;
+  date-of-birth: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  sex: func(field: disclosure-field-ref, value: string) -> display-field;
+  sex: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  nationality: func(field: disclosure-field-ref, value: string) -> display-field;
+  nationality: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
   /// ─── Contact / location ────────────────────────────────────────
-  residence-country: func(field: disclosure-field-ref, value: string) -> display-field;
+  residence-country: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  address: func(field: disclosure-field-ref, value: string) -> display-field;
+  address: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  email: func(field: disclosure-field-ref, value: string) -> display-field;
+  email: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
-  phone: func(field: disclosure-field-ref, value: string) -> display-field;
+  phone: func(field: disclosure-field-key-ref, value: string) -> display-field;
 
   /// ─── Other ─────────────────────────────────────────────────────
-  tax-id: func(field: disclosure-field-ref, value: string) -> display-field;
+  tax-id: func(field: disclosure-field-key-ref, value: string) -> display-field;
 }
 
 /// The shapes a document or a selfie is photographed in, with the values this
@@ -139,6 +139,7 @@ world well-known {
   import enclavid:host/refs@0.1.0;
   import enclavid-ext:well-known/i18n@0.1.0;
   import enclavid:host-icons/icons@0.1.0;
+  import enclavid:host-disclosure/values@0.1.0;
   import enclavid:host-disclosure/disclosure@0.1.0;
   import enclavid:host-capture/photo@0.1.0;
   import enclavid:host-capture/video@0.1.0;

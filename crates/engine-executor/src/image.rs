@@ -252,7 +252,7 @@ fn failed(why: impl std::fmt::Display) -> wasmtime::Error {
 /// The region `options` pick of a picture of `size`: the crop, the whole
 /// picture where there is none, brought to the size the resize asks — or kept
 /// at its own, pixel for pixel, where there is none. `None` where the crop is
-/// not inside the picture.
+/// not inside the picture, or the crop or the size asked spans no pixels.
 fn picked(size: Size, options: &media::PixelsOptions) -> Option<Region> {
     let (x, y, w, h) = match &options.crop {
         Some(crop) => {
@@ -276,6 +276,9 @@ fn picked(size: Size, options: &media::PixelsOptions) -> Option<Region> {
         ),
         None => (w, h, ResizeMode::Nearest),
     };
+    if out_w == 0 || out_h == 0 {
+        return None;
+    }
     Some(Region {
         x,
         y,
@@ -307,22 +310,21 @@ impl HostImage for HostState {
             crop: None,
             resize: None,
         };
-        Ok(self.pixels(self_, options).await?.ok())
+        self.pixels(self_, options).await
     }
 
     async fn pixels(
         &mut self,
         self_: Resource<ImageRep>,
         options: media::PixelsOptions,
-    ) -> wasmtime::Result<Result<Vec<u8>, media::PixelsError>> {
+    ) -> wasmtime::Result<Option<Vec<u8>>> {
         let size = self.table.get(&self_)?.size;
         let Some(region) = picked(size, &options) else {
-            return Ok(Err(media::PixelsError::OutOfBounds));
+            return Err(wasmtime::Error::msg(
+                "a crop past the picture's edges, or of no pixels",
+            ));
         };
-        Ok(self
-            .read(&self_, region)
-            .await?
-            .ok_or(media::PixelsError::Undecoded))
+        self.read(&self_, region).await
     }
 
     async fn drop(&mut self, rep: Resource<ImageRep>) -> wasmtime::Result<()> {
@@ -375,6 +377,21 @@ mod tests {
         assert_eq!(picked(SIZE, &crop(1, 0, 0, 1)), None);
         assert_eq!(picked(SIZE, &crop(1, 0, 1, 0)), None);
         assert_eq!(picked(SIZE, &crop(u32::MAX, 0, 1, 1)), None);
+    }
+
+    /// A resize to a size of no pixels picks nothing, as a crop of none does.
+    #[test]
+    fn a_resize_to_no_pixels_picks_nothing() {
+        let to = |width, height| media::PixelsOptions {
+            crop: None,
+            resize: Some(media::Resize {
+                size: media::Size { width, height },
+                mode: media::ResizeMode::Nearest,
+            }),
+        };
+        assert_eq!(picked(SIZE, &to(0, 1)), None);
+        assert_eq!(picked(SIZE, &to(1, 0)), None);
+        assert!(picked(SIZE, &to(1, 1)).is_some());
     }
 
     /// Without a crop the whole picture is picked, brought to the size a

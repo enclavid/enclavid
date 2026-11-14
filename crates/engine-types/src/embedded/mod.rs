@@ -9,7 +9,7 @@
 //! ```
 //!
 //! The wasmtime-coupled pieces live in `engine-executor`: the bindgen ref
-//! resource reps (`LocalizedRef` / `IconRef` / `DisclosureFieldRef`) and
+//! resource reps (`LocalizedRef` / `IconRef` / `DisclosureFieldKeyRef`) and
 //! the section parsers (`load_embedded`), which import these types. Icons
 //! keep no catalog: their names are the host's own ([`crate::icons`]).
 

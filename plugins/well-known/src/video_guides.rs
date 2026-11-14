@@ -2,7 +2,7 @@
 
 use crate::WellKnown;
 use crate::enclavid::host_capture::video::{
-    FaceFlashesGuide, FaceGuide, Guide, HeadTurnGuide, Rgb,
+    Color, FaceFlashesGuide, FaceGuide, Guide, HeadTurnGuide,
 };
 use crate::exports::enclavid::well_known::video_guides::Guest;
 use crate::sets;
@@ -34,7 +34,7 @@ impl Guest for WellKnown {
         let sets::Colors { width, colors } = sets::colors(seed);
         let colors = colors
             .into_iter()
-            .map(|(red, green, blue)| Rgb { red, green, blue })
+            .map(|(red, green, blue)| Color { red, green, blue })
             .collect();
         vec![
             face(width),

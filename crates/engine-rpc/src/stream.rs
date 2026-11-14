@@ -237,7 +237,7 @@ mod tests {
     use crate::padded::{Framed, Padded};
     use engine_types::limits::{MAX_CAPTURE_STEPS, MAX_FLASH_COLORS, MAX_VIDEO_GUIDES};
     use session_types::{
-        Capture, Event, FaceFlashesGuide, FrameRange, MAX_MEDIA_BYTES, MediaResult, Rgb,
+        Capture, Color, Event, FaceFlashesGuide, FrameRange, MAX_MEDIA_BYTES, MediaResult,
         SessionState, VideoCapture, VideoGuide,
     };
 
@@ -293,7 +293,7 @@ mod tests {
             guide: VideoGuide::FaceFlashes(FaceFlashesGuide {
                 width: 0.587_654,
                 colors: vec![
-                    Rgb {
+                    Color {
                         red: 255,
                         green: 255,
                         blue: 255,

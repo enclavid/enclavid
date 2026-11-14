@@ -41,7 +41,7 @@ package enclavid-ext:policy@0.1.0 {
     // a well-known helper then labels. `enclavid policy embed` writes the list
     // into the policy, and the applicant is shown how long it is.
     interface disclosure-fields {
-        use enclavid:host/refs@0.1.0.{disclosure-field-ref};
+        use enclavid:host/refs@0.1.0.{disclosure-field-key-ref};
 
         enum key {
             full-name,
@@ -49,7 +49,7 @@ package enclavid-ext:policy@0.1.0 {
             nationality,
         }
 
-        disclosure-field: func(key: key) -> disclosure-field-ref;
+        disclosure-field: func(key: key) -> disclosure-field-key-ref;
     }
 
     // The props this policy takes: what the consumer sets for each session.

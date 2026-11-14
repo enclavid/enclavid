@@ -8,11 +8,6 @@ world policy {
     import enclavid:well-known/photo@0.1.0;
     import enclavid:well-known/disclosure-fields@0.1.0;
 
-    // The well-known plugin's texts, by its slot: the policy labels one of
-    // its fields with the plugin's text for it, served from the plugin's
-    // catalog.
-    import enclavid-ext:well-known/i18n@0.1.0;
-
     // A second plugin, imported to exercise HYBRID composition: baked
     // into no core, linked at runtime on top of a pre-fused (policy +
     // well-known) core. `tag::get()` is one of the extra plugin's OWN
@@ -29,7 +24,7 @@ world policy {
 
     // The face-age plugin: a real image + face consumer. No texts of its
     // own, so no slot.
-    import enclavid:face-age/check@0.1.0;
+    import enclavid:face-age/image@0.1.0;
 
     // The face-liveness plugin, on a probe: whether the face of the selfie
     // is live, or the faces of a video's frames.
@@ -46,5 +41,7 @@ world policy {
     import enclavid-ext:policy/i18n@0.1.0;
     import enclavid-ext:policy/disclosure-fields@0.1.0;
     import enclavid-ext:policy/props@0.1.0;
+    // The value of its own field, as the host mints it.
+    import enclavid:host-disclosure/values@0.1.0;
     export enclavid:policy/policy@0.1.0;
 }

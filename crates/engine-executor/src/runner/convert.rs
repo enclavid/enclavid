@@ -21,16 +21,18 @@ use wasmtime::component::{Resource, ResourceTable};
 
 use session_types::{
     CameraFacing as DCameraFacing, Capture, CaptureKind as DCaptureKind,
-    CaptureStep as DCaptureStep, Decision as DDecision, Disclosure as DDisclosure,
+    CaptureStep as DCaptureStep, Color as DColor, Decision as DDecision, Disclosure as DDisclosure,
     DisplayField as DDisplayField, Event, FaceFlashesGuide as DFaceFlashesGuide,
     FaceGuide as DFaceGuide, FrameRange, HeadTurnGuide as DHeadTurnGuide, Localized as DLocalized,
     MediaSpec as DMediaSpec, OvalShape as DOvalShape, PhotoFaceGuide as DPhotoFaceGuide,
     PhotoGuide as DPhotoGuide, PhotoShapeGuide as DPhotoShapeGuide, PhotoSpec as DPhotoSpec,
-    Prompt, RectShape as DRectShape, Rgb as DRgb, Shape as DShape, VideoGuide as DVideoGuide,
+    Prompt, RectShape as DRectShape, Shape as DShape, VideoGuide as DVideoGuide,
     VideoShapeGuide as DVideoShapeGuide, VideoSpec as DVideoSpec,
 };
 
-use crate::embedded::{DisclosureFieldRef, EmbeddedRegistry, IconRef, LocalizedRef};
+use crate::embedded::{
+    DisclosureFieldKeyRef, DisclosureFieldValueRef, EmbeddedRegistry, IconRef, LocalizedRef,
+};
 use crate::enclavid::host_capture::{
     capture as wit_capture, photo as wit_photo, video as wit_video,
 };
@@ -149,7 +151,7 @@ fn video_guide_to_wit(
             colors: f
                 .colors
                 .into_iter()
-                .map(|c| wit_video::Rgb {
+                .map(|c| wit_video::Color {
                     red: c.red,
                     green: c.green,
                     blue: c.blue,
@@ -182,8 +184,17 @@ fn icon_name(table: &ResourceTable, r: &Resource<IconRef>) -> wasmtime::Result<S
     Ok(table.get(r)?.0.clone())
 }
 
-/// Read a `disclosure-field-ref` handle into the resolved machine key.
-fn df_key(table: &ResourceTable, r: &Resource<DisclosureFieldRef>) -> wasmtime::Result<String> {
+/// Read a `disclosure-field-key-ref` handle into the resolved machine key.
+fn df_key(table: &ResourceTable, r: &Resource<DisclosureFieldKeyRef>) -> wasmtime::Result<String> {
+    Ok(table.get(r)?.0.clone())
+}
+
+/// Read a `disclosure-field-value-ref` handle into the value it was minted
+/// with.
+fn df_value(
+    table: &ResourceTable,
+    r: &Resource<DisclosureFieldValueRef>,
+) -> wasmtime::Result<String> {
     Ok(table.get(r)?.0.clone())
 }
 
@@ -237,7 +248,8 @@ fn disclosure_to_domain(
     }
     let mut fields = Vec::with_capacity(d.fields.len());
     for f in d.fields {
-        if f.value.len() > MAX_VALUE_LENGTH {
+        let value = df_value(table, &f.value)?;
+        if value.len() > MAX_VALUE_LENGTH {
             return Err(wasmtime::Error::msg(format!(
                 "consent-disclosure value exceeds {MAX_VALUE_LENGTH} bytes"
             )));
@@ -245,7 +257,7 @@ fn disclosure_to_domain(
         fields.push(DDisplayField {
             key: df_key(table, &f.key)?,
             label: localized(table, &f.label)?,
-            value: sanitize::sanitize_string(&f.value),
+            value: sanitize::sanitize_string(&value),
         });
     }
     Ok(DDisclosure {
@@ -423,7 +435,7 @@ fn video_guide_to_domain(
                 colors: f
                     .colors
                     .into_iter()
-                    .map(|c| DRgb {
+                    .map(|c| DColor {
                         red: c.red,
                         green: c.green,
                         blue: c.blue,
@@ -587,7 +599,7 @@ mod tests {
                     width,
                     colors: colors
                         .iter()
-                        .map(|&(red, green, blue)| wit_video::Rgb { red, green, blue })
+                        .map(|&(red, green, blue)| wit_video::Color { red, green, blue })
                         .collect(),
                     flash_ms,
                     grace_ms: u16::MAX,
@@ -607,7 +619,7 @@ mod tests {
                     width: drawn.0,
                     colors: colors
                         .iter()
-                        .map(|&(red, green, blue)| DRgb { red, green, blue })
+                        .map(|&(red, green, blue)| DColor { red, green, blue })
                         .collect(),
                     flash_ms: drawn.1,
                     grace_ms: GUIDE_GRACE_MS_MAX,
@@ -626,7 +638,7 @@ mod tests {
                 wit_video::Guide::FaceFlashes(wit_video::FaceFlashesGuide {
                     width: 0.5,
                     colors: vec![
-                        wit_video::Rgb {
+                        wit_video::Color {
                             red: 255,
                             green: 255,
                             blue: 255,
@@ -655,12 +667,12 @@ mod tests {
                 guide: DVideoGuide::FaceFlashes(DFaceFlashesGuide {
                     width: 0.5,
                     colors: vec![
-                        DRgb {
+                        DColor {
                             red: 255,
                             green: 136,
                             blue: 0,
                         },
-                        DRgb {
+                        DColor {
                             red: 0,
                             green: 10,
                             blue: 171,

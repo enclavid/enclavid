@@ -36,7 +36,7 @@ use wasmtime::{Config, Engine, Store};
 use crate::Host_ as GeneratedHost;
 use crate::Host_Pre as GeneratedHostPre;
 use crate::embedded::{
-    DisclosureFieldRef, DisclosureFields, IconRef, Localized, LocalizedRef, undeclared_trap,
+    DisclosureFieldKeyRef, DisclosureFields, IconRef, Localized, LocalizedRef, undeclared_trap,
 };
 use crate::limits::POLICY_MAX_STATE_BYTES;
 use crate::listener::SessionChange;
@@ -413,7 +413,7 @@ fn register_disclosure_fields(linker: &mut Linker<HostState>) -> wasmtime::Resul
                     .resolve_first_match(case)
                     .ok_or_else(|| undeclared_trap::<DisclosureFields>(case))?
                     .clone();
-                let minted = store.data_mut().table.push(DisclosureFieldRef(key))?;
+                let minted = store.data_mut().table.push(DisclosureFieldKeyRef(key))?;
                 *result = Val::Resource(ResourceAny::try_from_resource(minted, &mut store)?);
                 Ok(())
             })
@@ -558,9 +558,9 @@ mod tests {
              package enclavid-ext:policy@{version} {{
                  interface props {{ {body} }}
                  interface disclosure-fields {{
-                     use enclavid:host/refs@0.1.0.{{disclosure-field-ref}};
+                     use enclavid:host/refs@0.1.0.{{disclosure-field-key-ref}};
                      enum key {{ full-name }}
-                     disclosure-field: func(key: key) -> disclosure-field-ref;
+                     disclosure-field: func(key: key) -> disclosure-field-key-ref;
                  }}
              }}
              {packages}"

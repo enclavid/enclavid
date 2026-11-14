@@ -2,8 +2,9 @@ package enclavid-ext:well-known@0.1.0;
 
 /// The plugin's texts, a case of `key` for each; `i18n/en.json` holds
 /// them. Applicant-facing: the host picks a text's language inside the
-/// TEE, the applicant's, and it never reaches the consumer. A policy may
-/// import them too, to label fields of its own with the plugin's texts.
+/// TEE, the applicant's, and it never reaches the consumer. The plugin's
+/// alone: `key` gains a case with every text the plugin adds, so a policy
+/// that imported it would not compose with the next version.
 ///
 /// Kept out of `wit/` and vendored into `wit/deps` by `wkg`, which reads
 /// a package it does not find in a registry only from a path.

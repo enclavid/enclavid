@@ -33,14 +33,14 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-// Mints the policy's `disclosure-field-ref`s, each a case of its own list:
-// those it hands the well-known helpers, and its own face-age estimate.
+// Mints the policy's `disclosure-field-key-ref`s, each a case of its own list:
+// those it hands the well-known helpers, and its own face-age estimate, whose
+// value the host mints too.
 use enclavid::host_disclosure::disclosure::DisplayField;
+use enclavid::host_disclosure::values::text;
 use enclavid_ext::policy::disclosure_fields::{Key as Field, disclosure_field};
 // The policy's own texts.
 use enclavid_ext::policy::i18n::{Key as Text, localized};
-// The well-known plugin's texts, by its slot.
-use enclavid_ext::well_known::i18n::{Key as WellKnownText, localized as well_known_text};
 // The host `photo` resource: on the passport round we stash the photo's hash (a
 // hex string) in `state`, then rehydrate it on the selfie round through the
 // `Photo` constructor — proving cross-round reload. And the host `video`, whose
@@ -57,7 +57,7 @@ use enclavid::extra::tag;
 // The face plugins, threaded across the fused boundary over the host's image
 // of the selfie: face-detect locates the `face` in it, face-age reads its crop
 // and estimates.
-use enclavid::face_age::check as face_age;
+use enclavid::face_age::image as face_age;
 use enclavid::face_detect::detect as face_detect;
 // The face-liveness plugin, on a probe: whether the selfie's face is live, or
 // the faces of a video's frames.
@@ -140,7 +140,7 @@ fn liveness_probe() -> bool {
 fn liveness_state(estimate: Option<LivenessEstimate>) -> Vec<u8> {
     let mut state = vec![STEP_LIVENESS];
     if let Some(estimate) = estimate {
-        state.extend(estimate.live.to_be_bytes());
+        state.extend(estimate.liveness.to_be_bytes());
     }
     state
 }
@@ -184,18 +184,16 @@ fn probe_state() -> Vec<u8> {
 fn quarter(image: &Image) -> Option<((u32, u32), Vec<u8>)> {
     let size = image.size();
     let (w, h) = ((size.width / 4).max(1), (size.height / 4).max(1));
-    let rgb = image
-        .pixels(PixelsOptions {
-            crop: None,
-            resize: Some(Resize {
-                size: Size {
-                    width: w,
-                    height: h,
-                },
-                mode: ResizeMode::Nearest,
-            }),
-        })
-        .ok()?;
+    let rgb = image.pixels(PixelsOptions {
+        crop: None,
+        resize: Some(Resize {
+            size: Size {
+                width: w,
+                height: h,
+            },
+            mode: ResizeMode::Nearest,
+        }),
+    })?;
     Some(((w, h), rgb))
 }
 
@@ -275,27 +273,21 @@ fn build_consent(age_years: i32) -> Disclosure {
     let mut fields = vec![
         wk::full_name(disclosure_field(Field::FullName), HOLDER),
         wk::date_of_birth(disclosure_field(Field::DateOfBirth), "1990-04-12"),
-        // Built by the policy itself, labelled with the plugin's text for the
-        // field: one import of the plugin's slot, the policy's and the
-        // plugin's, served from the plugin's catalog.
-        DisplayField {
-            key: disclosure_field(Field::Nationality),
-            label: well_known_text(WellKnownText::NationalityLabel),
-            value: "Utopia".into(),
-        },
+        wk::nationality(disclosure_field(Field::Nationality), "Utopia"),
         wk::passport_number(disclosure_field(Field::PassportNumber), "X1234567"),
         wk::document_expiry(disclosure_field(Field::DocumentExpiry), "2030-01-01"),
         wk::address(disclosure_field(Field::Address), LONG_ADDRESS),
     ];
     // The face-age estimate, disclosed as a POLICY-owned field. Its key isn't
-    // a well-known helper, so the policy mints the `disclosure-field-ref`
-    // itself, a case of its own list, plus its own label. Shown on the consent
-    // screen and sealed only on accept (show == seal) — the sanctioned path
-    // for a plugin-computed value to reach the consumer (never auto-shared).
+    // a well-known helper, so the policy mints the `disclosure-field-key-ref`
+    // itself, a case of its own list, plus its own label and its value. Shown
+    // on the consent screen and sealed only on accept (show == seal) — the
+    // sanctioned path for a plugin-computed value to reach the consumer (never
+    // auto-shared).
     fields.push(DisplayField {
         key: disclosure_field(Field::EstimatedAge),
         label: localized(Text::EstimatedAgeLabel),
-        value: age_years.to_string(),
+        value: text(&age_years.to_string()),
     });
     let reason = localized(Text::ConsentReason);
     Disclosure {
@@ -386,10 +378,10 @@ impl Guest for TestPolicy {
                     .and_then(|image| Some((image, face_detect::detect(image)?)));
                 if liveness_probe() {
                     let live =
-                        found.and_then(|(image, face)| face_liveness_image::estimate(image, &face));
+                        found.and_then(|(image, face)| face_liveness_image::estimate(image, face));
                     return (liveness_state(live), Action::Finish(Decision::Review));
                 }
-                let age = found.and_then(|(image, face)| face_age::estimate(image, &face));
+                let age = found.and_then(|(image, face)| face_age::estimate(image, face));
                 match age {
                     Some(est) => (
                         state_at(STEP_AWAIT_CONSENT),

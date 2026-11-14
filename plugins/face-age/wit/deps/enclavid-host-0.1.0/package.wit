@@ -22,8 +22,11 @@
 /// for its package; the policy's is `enclavid-ext:policy`, which holds as well
 /// `props`, whose `get` returns the props the consumer gave the session
 /// in whatever record the policy declares for them, and `disclosure-fields`,
-/// whose `key` lists the fields its disclosures may name. A component may import
-/// another's texts by its slot.
+/// whose `key` lists the fields its disclosures may name. A component imports
+/// its own slot alone: another's `key` gains a case with every text its
+/// component adds, and a composition holding both the old and the new `key`
+/// does not compose. A component whose texts others may show hands them out by
+/// functions of an interface it exports.
 ///
 /// A component's models: `enclavid-ext:<slot>/models`, a function for each ONNX
 /// model its artifact carries beside its component — a layer `<function>.onnx`,
@@ -110,15 +113,6 @@ interface media {
     resize: option<resize>,
   }
 
-  /// Why a picture's pixels are not given.
-  enum pixels-error {
-    /// The picture does not decode.
-    undecoded,
-    /// The crop is not inside the picture: it reaches past an edge, or
-    /// spans no pixels.
-    out-of-bounds,
-  }
-
   /// A picture of the applicant's — a photo, or a frame of a video — as the
   /// platform decodes it, when its pixels are first read. Of a video only
   /// the frame read last is kept: a frame read out of order is decoded
@@ -129,12 +123,16 @@ interface media {
     /// many are enough is the reader's to judge.
     size: func() -> size;
     /// Every pixel of it, at its size, RGB8 row by row, decoding the
-    /// image first where nothing did; `none` where it does not decode.
+    /// image first where nothing did; `none` where it does not decode, or
+    /// the process decoding it ended or stalled.
     all-pixels: func() -> option<list<u8>>;
     /// The pixels `options` pick, RGB8 row by row, decoding the image
-    /// first where nothing did. Traps for an output larger either way
-    /// than the platform gives.
-    pixels: func(options: pixels-options) -> result<list<u8>, pixels-error>;
+    /// first where nothing did; `none` where it does not decode, or the
+    /// process decoding it ended or stalled. Traps for a crop past an edge
+    /// of the picture, a crop or a size of no pixels, and an output larger
+    /// either way than the platform gives: each the caller's own to avoid,
+    /// by the picture's `size`.
+    pixels: func(options: pixels-options) -> option<list<u8>>;
   }
 
   /// A photo the applicant sent: one JPEG, as the camera page encoded it.
@@ -155,7 +153,8 @@ interface media {
     /// later round.
     hash: func() -> media-hash;
     /// The photo as an image; `none` where it is not a JPEG the platform
-    /// decodes, or one too large for it even at half its size.
+    /// decodes, one too large for it even at half its size, or where the
+    /// process decoding it ended or stalled.
     image: func() -> option<image>;
   }
 
@@ -190,20 +189,22 @@ interface media {
     /// The list ends at the video's last frame, its 900th, or the frame
     /// before a keyframe of another size than the video's; it is empty
     /// where the video is not a WebM of VP8 frames of a size the platform
-    /// decodes.
+    /// decodes, where the process decoding it ended or stalled, and where
+    /// no frame of it lies from `first` to `last`.
     frames: func(first: u32, last: u32) -> list<frame>;
   }
 }
 
 /// The handles the host mints for what a prompt is made of: RESOURCES a
 /// component cannot construct, minted only through a slot's `i18n`, the
-/// policy's `disclosure-fields`, and `enclavid:host-icons/icons`. The handle IS
-/// the proof the key was declared, so membership needs no crypto token. A
-/// plugin's helper that names a field takes the `disclosure-field-ref` the
-/// policy minted. They live HERE (a shared interface) rather than inside each
-/// interface that mints them, so every slot's `i18n` mints the SAME resource
-/// type that the records a prompt is made of carry, and every version of
-/// `enclavid:host-icons` mints the one `icon-ref` that `capture-step` carries.
+/// policy's `disclosure-fields`, `enclavid:host-disclosure/values`, and
+/// `enclavid:host-icons/icons`. The handle IS the proof the key was declared,
+/// so membership needs no crypto token. A plugin's helper that names a field
+/// takes the `disclosure-field-key-ref` the policy minted. They live HERE (a
+/// shared interface) rather than inside each interface that mints them, so
+/// every slot's `i18n` mints the SAME resource type that the records a prompt
+/// is made of carry, and every version of `enclavid:host-icons` mints the one
+/// `icon-ref` that `capture-step` carries.
 interface refs {
   /// One of a component's texts, in every language its catalog has it in —
   /// surfaces as UI text once the host picks the applicant's language.
@@ -215,7 +216,12 @@ interface refs {
 
   /// One of the policy's disclosure fields — surfaces as the machine
   /// `display-field.key` the consumer receives.
-  resource disclosure-field-ref;
+  resource disclosure-field-key-ref;
+
+  /// What a disclosure field shows and, on accept, seals:
+  /// `display-field.value`. Minted by `enclavid:host-disclosure/values`, a
+  /// function for each kind of value.
+  resource disclosure-field-value-ref;
 }
 
 /// The tensors a model's `run` takes and gives: one resource for each element
@@ -228,74 +234,74 @@ interface refs {
 /// upper half of an `f32` for `bf16`.
 interface tensors {
   resource tensor-f32 {
-    constructor(dims: list<u64>, data: list<f32>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<f32>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<f32>;
   }
 
   resource tensor-f64 {
-    constructor(dims: list<u64>, data: list<f64>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<f64>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<f64>;
   }
 
   resource tensor-f16 {
-    constructor(dims: list<u64>, data: list<u16>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<u16>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<u16>;
   }
 
   resource tensor-bf16 {
-    constructor(dims: list<u64>, data: list<u16>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<u16>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<u16>;
   }
 
   resource tensor-i8 {
-    constructor(dims: list<u64>, data: list<s8>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<s8>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<s8>;
   }
 
   resource tensor-u8 {
-    constructor(dims: list<u64>, data: list<u8>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<u8>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<u8>;
   }
 
   resource tensor-i16 {
-    constructor(dims: list<u64>, data: list<s16>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<s16>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<s16>;
   }
 
   resource tensor-u16 {
-    constructor(dims: list<u64>, data: list<u16>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<u16>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<u16>;
   }
 
   resource tensor-i32 {
-    constructor(dims: list<u64>, data: list<s32>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<s32>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<s32>;
   }
 
   resource tensor-u32 {
-    constructor(dims: list<u64>, data: list<u32>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<u32>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<u32>;
   }
 
   resource tensor-i64 {
-    constructor(dims: list<u64>, data: list<s64>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<s64>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<s64>;
   }
 
   resource tensor-u64 {
-    constructor(dims: list<u64>, data: list<u64>);
-    dims: func() -> list<u64>;
+    constructor(dimensions: list<u64>, data: list<u64>);
+    dimensions: func() -> list<u64>;
     data: func() -> list<u64>;
   }
 }

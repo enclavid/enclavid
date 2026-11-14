@@ -15,7 +15,7 @@ interface detect {
     /// Detect the single most prominent face (a KYC capture is
     /// single-subject). `none` = no usable face, or an image that does not
     /// decode → the policy asks for a retake. The returned box and
-    /// landmarks are in the image's pixels.
+    /// keypoints are in the image's pixels.
     detect: func(image: borrow<image>) -> option<face>;
 }
 
@@ -44,8 +44,10 @@ interface photo {
     use enclavid:host/media@0.1.0.{image};
     use enclavid:vision/types@0.1.0.{face};
 
-    /// Read: a face inside it, the only one there, as a document's portrait
-    /// lies; faces outside it do not count. Drawn as large as fits the frame.
+    /// Read: a face inside it, as a document's portrait lies, the largest
+    /// there; a second inside counts only at a comparable size, so a
+    /// document's smaller ghost portrait does not, and faces outside it do
+    /// not count. Drawn as large as fits the frame.
     record rect-shape {
         aspect: f32,
     }
@@ -82,7 +84,8 @@ interface photo {
         /// No face — for a rect, none inside it — or a picture that does not
         /// decode.
         no-face,
-        /// A second face; for a rect, a second inside it.
+        /// A second face; for a rect, a second inside it of a comparable
+        /// size.
         extra-face,
         /// The face does not fill the oval: too small, too large, or off its
         /// centre.
@@ -131,7 +134,7 @@ interface video {
         grace-ms: u16,
     }
 
-    record rgb {
+    record color {
         red: u8,
         green: u8,
         blue: u8,
@@ -140,7 +143,7 @@ interface video {
     /// Read as a `face-guide` is, through all its flashes.
     record face-flashes-guide {
         width: f32,
-        colors: list<rgb>,
+        colors: list<color>,
         flash-ms: u16,
         grace-ms: u16,
     }
@@ -167,7 +170,8 @@ interface video {
         /// A frame holds no face — for a rect, none inside it — or does not
         /// decode.
         no-face,
-        /// A frame holds a second face; for a rect, a second inside it.
+        /// A frame holds a second face; for a rect, a second inside it of a
+        /// comparable size.
         extra-face,
         /// The face does not fill the oval: too small, too large, or off its
         /// centre.
@@ -176,7 +180,7 @@ interface video {
         /// other way.
         wrong-turn,
         /// The frames span less than the guide is held for, or run past the
-        /// video.
+        /// video — a video that does not decode has none.
         short-hold,
     }
 

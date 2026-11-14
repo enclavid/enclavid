@@ -121,6 +121,7 @@ wasmtime::component::bindgen!({
             import enclavid:host/media@0.1.0;
             import enclavid:host/tensors@0.1.0;
             import enclavid:host-capture/constants@0.1.0;
+            import enclavid:host-disclosure/values@0.1.0;
             export enclavid:policy/policy@0.1.0;
         }
     "#,
@@ -138,9 +139,9 @@ wasmtime::component::bindgen!({
     ],
     imports: { default: async | trappable },
     exports: { default: async },
-    // The three embedded refs are host-owned resources; back each with
-    // the rep that carries its RESOLVED data (see `embedded::store`), so
-    // the action-boundary deref in `runner::convert` is self-contained.
+    // The refs are host-owned resources; back each with the rep that carries
+    // its RESOLVED data (see `embedded::store`), so the action-boundary deref
+    // in `runner::convert` is self-contained.
     // `photo` and `video` are likewise host-owned — each rep holds one stored
     // capture's bytes + content hash (see `media`), a Rust type of its own so
     // one cannot be served as the other; the runtime mints a handle per
@@ -149,7 +150,8 @@ wasmtime::component::bindgen!({
     with: {
         "enclavid:host/refs.localized-ref": crate::embedded::LocalizedRef,
         "enclavid:host/refs.icon-ref": crate::embedded::IconRef,
-        "enclavid:host/refs.disclosure-field-ref": crate::embedded::DisclosureFieldRef,
+        "enclavid:host/refs.disclosure-field-key-ref": crate::embedded::DisclosureFieldKeyRef,
+        "enclavid:host/refs.disclosure-field-value-ref": crate::embedded::DisclosureFieldValueRef,
         "enclavid:host/media.photo": crate::media::PhotoRep,
         "enclavid:host/media.video": crate::media::VideoRep,
         "enclavid:host/media.image": crate::image::ImageRep,

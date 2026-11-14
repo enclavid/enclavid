@@ -73,15 +73,6 @@ interface media {
         resize: option<resize>,
     }
 
-    /// Why a picture's pixels are not given.
-    enum pixels-error {
-        /// The picture does not decode.
-        undecoded,
-        /// The crop is not inside the picture: it reaches past an edge, or
-        /// spans no pixels.
-        out-of-bounds,
-    }
-
     /// A picture of the applicant's — a photo, or a frame of a video — as the
     /// platform decodes it, when its pixels are first read. Of a video only
     /// the frame read last is kept: a frame read out of order is decoded
@@ -92,12 +83,16 @@ interface media {
         /// many are enough is the reader's to judge.
         size: func() -> size;
         /// Every pixel of it, at its size, RGB8 row by row, decoding the
-        /// image first where nothing did; `none` where it does not decode.
+        /// image first where nothing did; `none` where it does not decode, or
+        /// the process decoding it ended or stalled.
         all-pixels: func() -> option<list<u8>>;
         /// The pixels `options` pick, RGB8 row by row, decoding the image
-        /// first where nothing did. Traps for an output larger either way
-        /// than the platform gives.
-        pixels: func(options: pixels-options) -> result<list<u8>, pixels-error>;
+        /// first where nothing did; `none` where it does not decode, or the
+        /// process decoding it ended or stalled. Traps for a crop past an edge
+        /// of the picture, a crop or a size of no pixels, and an output larger
+        /// either way than the platform gives: each the caller's own to avoid,
+        /// by the picture's `size`.
+        pixels: func(options: pixels-options) -> option<list<u8>>;
     }
 
     /// A photo the applicant sent: one JPEG, as the camera page encoded it.
@@ -118,7 +113,8 @@ interface media {
         /// later round.
         hash: func() -> media-hash;
         /// The photo as an image; `none` where it is not a JPEG the platform
-        /// decodes, or one too large for it even at half its size.
+        /// decodes, one too large for it even at half its size, or where the
+        /// process decoding it ended or stalled.
         image: func() -> option<image>;
     }
 
@@ -153,7 +149,8 @@ interface media {
         /// The list ends at the video's last frame, its 900th, or the frame
         /// before a keyframe of another size than the video's; it is empty
         /// where the video is not a WebM of VP8 frames of a size the platform
-        /// decodes.
+        /// decodes, where the process decoding it ended or stalled, and where
+        /// no frame of it lies from `first` to `last`.
         frames: func(first: u32, last: u32) -> list<frame>;
     }
 }

@@ -38,7 +38,8 @@ pub struct HostState {
     /// some catalog declared.
     pub embedded: Arc<EmbeddedRegistry>,
     /// Handle table backing the host-owned ref resources
-    /// (`localized-ref` / `icon-ref` / `disclosure-field-ref`) and the media
+    /// (`localized-ref` / `icon-ref` / `disclosure-field-key-ref` /
+    /// `disclosure-field-value-ref`) and the media
     /// resources (`photo` / `video`, and their pictures' `image`s). The
     /// host funcs push resolved data / captures here and hand the component
     /// an unforgeable handle; the runner dereferences the ref handles the

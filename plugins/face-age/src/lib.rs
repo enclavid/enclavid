@@ -2,8 +2,8 @@
 //!
 //! The pipeline is split: the host decodes the capture — the `image` the
 //! policy hands on — the face-detect plugin locates the face (`face`
-//! geometry), and this plugin pulls its OWN crop from the image (`face.bbox`
-//! grown by the model's margin, via `pixels`) and runs the age model. The
+//! geometry), and this plugin pulls its OWN crop from the image (the face's
+//! box grown by the model's margin, via `pixels`) and runs the age model. The
 //! pixels stay with the host; face-age reads only the face patch at its model
 //! resolution. Inference lives in [`infer`]: the per-model profile — a
 //! placeholder with no model, or, built with `mivolo`, MiVOLO run by the host
@@ -25,16 +25,21 @@ wit_bindgen::generate!({
 });
 
 use enclavid::host::media::{Image, PixelsOptions, Rect, Resize, ResizeMode, Size};
-use enclavid::vision::types::{Bbox, Face};
-use exports::enclavid::face_age::check::{AgeEstimate, Guest};
+use enclavid::vision::types::{BoundingBox, Face};
+use exports::enclavid::face_age::image::Guest;
+use exports::enclavid::face_age::types::AgeEstimate;
 
 struct FaceAge;
 
-/// `bbox` grown by `margin` about its center, cut to a picture of `size`: the
+/// `face` grown by `margin` about its center, cut to a picture of `size`: the
 /// pixels it touches. `None` where it touches none.
-fn grown(bbox: &Bbox, margin: f32, size: &Size) -> Option<Rect> {
-    let (x, width) = spanned(bbox.x + bbox.w / 2.0, bbox.w * margin, size.width)?;
-    let (y, height) = spanned(bbox.y + bbox.h / 2.0, bbox.h * margin, size.height)?;
+fn grown(face: &BoundingBox, margin: f32, size: &Size) -> Option<Rect> {
+    let (x, width) = spanned(face.x + face.width / 2.0, face.width * margin, size.width)?;
+    let (y, height) = spanned(
+        face.y + face.height / 2.0,
+        face.height * margin,
+        size.height,
+    )?;
     Some(Rect {
         x,
         y,
@@ -54,23 +59,21 @@ fn spanned(center: f32, length: f32, side: u32) -> Option<(u32, u32)> {
 
 impl Guest for FaceAge {
     fn estimate(image: &Image, face: Face) -> Option<AgeEstimate> {
-        let rect = grown(&face.bbox, infer::MARGIN, &image.size())?;
+        let rect = grown(&face.bounding_box, infer::MARGIN, &image.size())?;
         // Pull the face patch at the size the model's profile asks for — one
         // decode, the host's, the crop averaged down by the platform's
         // process that holds it.
         infer::estimate((rect.size.width, rect.size.height), |out_w, out_h| {
-            image
-                .pixels(PixelsOptions {
-                    crop: Some(rect),
-                    resize: Some(Resize {
-                        size: Size {
-                            width: out_w,
-                            height: out_h,
-                        },
-                        mode: ResizeMode::Average,
-                    }),
-                })
-                .ok()
+            image.pixels(PixelsOptions {
+                crop: Some(rect),
+                resize: Some(Resize {
+                    size: Size {
+                        width: out_w,
+                        height: out_h,
+                    },
+                    mode: ResizeMode::Average,
+                }),
+            })
         })
         .map(|age| AgeEstimate { age })
     }
