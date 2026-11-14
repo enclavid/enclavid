@@ -35,8 +35,8 @@ struct FaceLiveness;
 
 impl ImageGuest for FaceLiveness {
     fn estimate(image: &Image, face: Face) -> Option<LivenessEstimate> {
-        let live = live(&infer::Models::new(), image, &face)?;
-        Some(LivenessEstimate { live })
+        let liveness = live(&infer::Models::new(), image, &face)?;
+        Some(LivenessEstimate { liveness })
     }
 }
 
@@ -60,18 +60,18 @@ impl VideoGuest for FaceLiveness {
         if lives.is_empty() {
             return None;
         }
-        let live = lives.iter().sum::<f32>() / lives.len() as f32;
-        Some(LivenessEstimate { live })
+        let liveness = lives.iter().sum::<f32>() / lives.len() as f32;
+        Some(LivenessEstimate { liveness })
     }
 }
 
 /// How live `face` in `image` looks, by `models`.
 fn live(models: &infer::Models, image: &Image, face: &Face) -> Option<f32> {
     let size = image.size();
-    let b = &face.bbox;
+    let b = &face.bounding_box;
     models.estimate(
         (size.width, size.height),
-        [b.x, b.y, b.w, b.h],
+        [b.x, b.y, b.width, b.height],
         |crop, side| crop_of(image, crop, side),
     )
 }
@@ -80,22 +80,20 @@ fn live(models: &infer::Models, image: &Image, face: &Face) -> Option<f32> {
 /// training crops were, by the platform's process that holds the decode; none
 /// where the image does not decode.
 fn crop_of(image: &Image, [x, y, width, height]: infer::Crop, side: u32) -> Option<Vec<u8>> {
-    image
-        .pixels(PixelsOptions {
-            crop: Some(Rect {
-                x,
-                y,
-                size: Size { width, height },
-            }),
-            resize: Some(Resize {
-                size: Size {
-                    width: side,
-                    height: side,
-                },
-                mode: ResizeMode::Bilinear,
-            }),
-        })
-        .ok()
+    image.pixels(PixelsOptions {
+        crop: Some(Rect {
+            x,
+            y,
+            size: Size { width, height },
+        }),
+        resize: Some(Resize {
+            size: Size {
+                width: side,
+                height: side,
+            },
+            mode: ResizeMode::Bilinear,
+        }),
+    })
 }
 
 export!(FaceLiveness);

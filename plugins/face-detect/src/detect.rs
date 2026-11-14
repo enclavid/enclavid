@@ -18,14 +18,13 @@ use blazeface as profile;
 #[cfg(not(feature = "blazeface"))]
 use placeholder as profile;
 
-/// A detected face, in the frame's pixels.
+/// A detected face, in the frame's pixels; past its edges where the face is.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Detection {
     /// `[x, y, w, h]`.
     pub bbox: [f32; 4],
     /// Detector-native keypoints `(x, y)` (BlazeFace: 6). Empty if none.
     pub landmarks: Vec<(f32, f32)>,
-    pub score: f32,
 }
 
 /// Every face in a frame of `size` pixels, read through `region`: the whole
@@ -57,7 +56,6 @@ mod placeholder {
         vec![Detection {
             bbox: [0.0, 0.0, w as f32, h as f32],
             landmarks: Vec::new(),
-            score: 1.0,
         }]
     }
 }
@@ -158,14 +156,14 @@ mod blazeface {
         }
 
         /// A row of the graph's answer, over the square, as a detection in
-        /// the frame's pixels, held within it.
+        /// the frame's pixels: where the graph places a face cut by the
+        /// frame's edge on the black around it, past that edge. The graph
+        /// thresholds its confidence itself and gives none.
         pub(super) fn detection(&self, row: &[f32]) -> Detection {
             let side = SIDE as f32;
             let (width, height) = (self.frame.0 as f32, self.frame.1 as f32);
-            let x =
-                |v: f32| ((v * side - self.left as f32) / self.w as f32).clamp(0.0, 1.0) * width;
-            let y =
-                |v: f32| ((v * side - self.top as f32) / self.h as f32).clamp(0.0, 1.0) * height;
+            let x = |v: f32| (v * side - self.left as f32) / self.w as f32 * width;
+            let y = |v: f32| (v * side - self.top as f32) / self.h as f32 * height;
             let (x0, y0, x1, y1) = (x(row[1]), y(row[0]), x(row[3]), y(row[2]));
             Detection {
                 bbox: [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)],
@@ -173,9 +171,6 @@ mod blazeface {
                     .chunks_exact(2)
                     .map(|p| (x(p[0]), y(p[1])))
                     .collect(),
-                // The graph thresholds the confidence itself and gives no
-                // score: every face it keeps cleared `CONF`.
-                score: 1.0,
             }
         }
     }
@@ -256,7 +251,7 @@ mod tests {
 
         /// A box over the square maps back onto the frame's pixels: a square
         /// on the square is a square in the frame, and a face cut by the
-        /// frame's edge is held within it.
+        /// frame's edge reaches past it.
         #[test]
         fn a_box_maps_back_onto_the_frame() {
             let fit = Fit::of((1920, 1080)).unwrap();
@@ -273,11 +268,11 @@ mod tests {
             assert!(close(kx, 720.0) && close(ky, 780.0), "{kx} {ky}");
             assert_eq!(d.landmarks.len(), 6);
 
-            // Into the black above the frame: held at its top edge.
+            // Into the black above the frame: past its top edge.
             row[..4].copy_from_slice(&[0.1, 0.25, 0.4, 0.5]);
             let d = fit.detection(&row);
-            assert_eq!(d.bbox[1], 0.0);
-            assert!(close(d.bbox[3], 348.0), "{:?}", d.bbox);
+            assert!(close(d.bbox[1], -228.0), "{:?}", d.bbox);
+            assert!(close(d.bbox[3], 576.0), "{:?}", d.bbox);
         }
 
         /// The square's planes, in `[-1, 1]`, plane after plane.

@@ -34,7 +34,7 @@ impl Guest for TestModels {
 
         let mut state = Vec::new();
         for tensor in [first, parts.a, parts.b, parts.sum, wide] {
-            state.extend(tensor.dims().into_iter().flat_map(u64::to_le_bytes));
+            state.extend(tensor.dimensions().into_iter().flat_map(u64::to_le_bytes));
             state.extend(tensor.data().into_iter().flat_map(f32::to_le_bytes));
         }
         (state, Action::Finish(Decision::Approved))

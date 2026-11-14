@@ -999,30 +999,30 @@ pub struct FaceFlashesGuide {
     pub width: f32,
     /// Bounded on the way in, as the ranges that carry it are.
     #[serde(deserialize_with = "colors::deserialize")]
-    pub colors: Vec<Rgb>,
+    pub colors: Vec<Color>,
     pub flash_ms: u16,
     pub grace_ms: u16,
 }
 
-/// Sealed mirror of the WIT `rgb` record. Encoded as its three bytes rather
+/// Sealed mirror of the WIT `color` record. Encoded as its three bytes rather
 /// than by its fields' names: a prompt may hold 4096 of them, and its ranges
 /// as many again.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(from = "[u8; 3]", into = "[u8; 3]")]
-pub struct Rgb {
+pub struct Color {
     pub red: u8,
     pub green: u8,
     pub blue: u8,
 }
 
-impl From<[u8; 3]> for Rgb {
+impl From<[u8; 3]> for Color {
     fn from([red, green, blue]: [u8; 3]) -> Self {
-        Rgb { red, green, blue }
+        Color { red, green, blue }
     }
 }
 
-impl From<Rgb> for [u8; 3] {
-    fn from(c: Rgb) -> Self {
+impl From<Color> for [u8; 3] {
+    fn from(c: Color) -> Self {
         [c.red, c.green, c.blue]
     }
 }
@@ -1033,15 +1033,15 @@ mod colors {
     use engine_types::limits::MAX_FLASH_COLORS;
     use serde::de::{self, SeqAccess, Visitor};
 
-    use super::Rgb;
+    use super::Color;
 
     pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
         d: D,
-    ) -> Result<Vec<Rgb>, D::Error> {
+    ) -> Result<Vec<Color>, D::Error> {
         struct Colors;
 
         impl<'de> Visitor<'de> for Colors {
-            type Value = Vec<Rgb>;
+            type Value = Vec<Color>;
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "at most {MAX_FLASH_COLORS} colours")
@@ -1049,8 +1049,8 @@ mod colors {
 
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                 // Grown into what arrives, as the captures are.
-                let mut out: Vec<Rgb> = Vec::new();
-                while let Some(color) = seq.next_element::<Rgb>()? {
+                let mut out: Vec<Color> = Vec::new();
+                while let Some(color) = seq.next_element::<Color>()? {
                     if out.len() == MAX_FLASH_COLORS {
                         return Err(de::Error::custom(format!(
                             "more than {MAX_FLASH_COLORS} colours"
@@ -1198,7 +1198,7 @@ mod media_tests {
             let range = FrameRange {
                 guide: VideoGuide::FaceFlashes(FaceFlashesGuide {
                     width: 0.5,
-                    colors: vec![Rgb::default(); colors],
+                    colors: vec![Color::default(); colors],
                     flash_ms: 300,
                     grace_ms: 300,
                 }),
@@ -1217,14 +1217,14 @@ mod media_tests {
     /// A colour crosses as its three bytes, and comes back as itself.
     #[test]
     fn a_color_crosses_as_its_three_bytes() {
-        let color = Rgb {
+        let color = Color {
             red: 255,
             green: 136,
             blue: 0,
         };
         let bytes = encode(&color).expect("a colour encodes");
         assert_eq!(bytes, [0x83, 0x18, 0xFF, 0x18, 0x88, 0x00]);
-        assert_eq!(decode::<Rgb>(&bytes).expect("it decodes"), color);
+        assert_eq!(decode::<Color>(&bytes).expect("it decodes"), color);
     }
 }
 

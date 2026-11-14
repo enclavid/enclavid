@@ -11,6 +11,10 @@ const FILL_OVERLAP: f32 = 0.6;
 /// video's encoder, this detector after it, and at the page's lowest bitrate
 /// the encoder moves a frame's overlap by up to about this much.
 const OVERLAP_MARGIN: f32 = 0.06;
+/// How wide, against the largest face inside a region, a second there must be
+/// to count as one: a smaller one is the ghost portrait many ID cards and
+/// driving licences print beside the main one, at about half its size.
+const SECOND_FACE: f32 = 0.8;
 
 /// A region drawn at the centre of a frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,7 +33,7 @@ pub struct Region {
 pub enum Place {
     /// Fill it, the only face in the picture.
     Fill,
-    /// Lie inside it, the only face there.
+    /// Lie inside it, with no second face there of a comparable size.
     Inside,
 }
 
@@ -44,7 +48,8 @@ pub enum Fit {
 
 /// Which of `faces` — those of a picture of `size` pixels, the largest first —
 /// the region is read by, and how it fits: to fill it, the largest, alone in
-/// the picture; to lie inside it, the largest inside it, alone there.
+/// the picture; to lie inside it, the largest inside it, with no second there
+/// of a comparable size.
 pub fn fit(
     faces: &[Detection],
     region: Region,
@@ -64,13 +69,16 @@ pub fn fit(
         }
         Place::Inside => {
             let mut inside = (0..faces.len()).filter(|&i| within(&faces[i], &bounds, region.oval));
-            let first = inside.next();
-            let fit = match (first, inside.next()) {
-                (None, _) => Fit::NoFace,
-                (Some(_), None) => Fit::Followed,
-                (Some(_), Some(_)) => Fit::ExtraFace,
+            let Some(first) = inside.next() else {
+                return (None, Fit::NoFace);
             };
-            (first, fit)
+            let width = faces[first].bbox[2];
+            let fit = if inside.any(|i| faces[i].bbox[2] >= SECOND_FACE * width) {
+                Fit::ExtraFace
+            } else {
+                Fit::Followed
+            };
+            (Some(first), fit)
         }
     }
 }
@@ -216,7 +224,6 @@ pub(crate) mod tests {
                 at(-170.0, 0.0),
                 at(170.0, 0.0),
             ],
-            score: 1.0,
         }
     }
 
@@ -257,7 +264,6 @@ pub(crate) mod tests {
         let boxed = Detection {
             bbox: [460.0, 360.0 - oh / 2.0, 360.0, oh],
             landmarks: Vec::new(),
-            score: 1.0,
         };
         assert_eq!(
             fit(&[boxed], OVAL, Place::Fill, FRAME),
@@ -266,7 +272,8 @@ pub(crate) mod tests {
     }
 
     /// Inside a card's rect, as large as fits, the face inside it counts and
-    /// those outside it do not; two inside are one too many.
+    /// those outside it do not; two inside of a size are one too many, while a
+    /// ghost portrait half the size is no second face.
     #[test]
     fn a_rect_holds_the_face_inside_it() {
         let card = Region {
@@ -286,6 +293,8 @@ pub(crate) mod tests {
             (Some(1), Fit::Followed)
         );
         assert_eq!(inside(&[outside]), (None, Fit::NoFace));
+        let ghost = face(800.0, 360.0, 0.15, 0.0);
+        assert_eq!(inside(&[small.clone(), ghost]), (Some(0), Fit::Followed));
         let another = face(500.0, 360.0, 0.25, 0.0);
         assert_eq!(inside(&[small, another]), (Some(0), Fit::ExtraFace));
     }

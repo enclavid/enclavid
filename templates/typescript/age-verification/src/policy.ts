@@ -16,7 +16,7 @@ import type {
 } from "enclavid:policy/types@0.1.0";
 import * as photo from "enclavid:well-known/photo@0.1.0";
 import { read } from "enclavid:face-detect/photo@0.1.0";
-import { estimate } from "enclavid:face-age/check@0.1.0";
+import { estimate } from "enclavid:face-age/image@0.1.0";
 import * as props from "enclavid-ext:policy/props@0.1.0";
 
 // The policy keeps nothing between rounds.

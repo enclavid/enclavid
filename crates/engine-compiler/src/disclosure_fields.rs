@@ -1,7 +1,7 @@
 //! The disclosure fields a policy declares: the interface it imports
 //! [`POLICY_DISCLOSURE_FIELDS`] as, held to what the host serves —
 //! [`DISCLOSURE_FIELD`], taking its `key` and returning an owned
-//! `disclosure-field-ref` — and the cases of its `key` to the disclosure
+//! `disclosure-field-key-ref` — and the cases of its `key` to the disclosure
 //! fields the composition's catalogs declare, the set the consent screen
 //! counts.
 
@@ -14,7 +14,7 @@ use engine_types::compile::{Artifact, CompileFault, DISCLOSURE_FIELD, POLICY_DIS
 use crate::compose::{defined, is_host_resource, needs_serving, same_interface};
 
 /// The resource a disclosure field is minted as.
-const DISCLOSURE_FIELD_REF: &str = "disclosure-field-ref";
+const DISCLOSURE_FIELD_REF: &str = "disclosure-field-key-ref";
 
 /// Whether the disclosure fields a composition declares, if it imports
 /// [`POLICY_DISCLOSURE_FIELDS`], are what the host serves: [`DISCLOSURE_FIELD`]
@@ -56,7 +56,7 @@ pub(crate) fn declared(
 }
 
 /// The cases of the `key` [`DISCLOSURE_FIELD`] takes, if it is what the host
-/// serves: one parameter, an enum, and an owned `disclosure-field-ref`
+/// serves: one parameter, an enum, and an owned `disclosure-field-key-ref`
 /// returned.
 fn field_keys<'t>(types: &'t Types, func: &FuncType) -> Option<Vec<&'t str>> {
     if func.is_async || func.params.len() != 1 {

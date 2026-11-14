@@ -461,8 +461,8 @@ fn video_guide_view(g: &VideoGuide, locale: &Locale) -> VideoGuideView {
 #[cfg(test)]
 mod tests {
     use session_types::{
-        FaceFlashesGuide, FaceGuide, HeadTurnGuide, Localized, PhotoFaceGuide, PhotoShapeGuide,
-        PhotoSpec, RectShape, Rgb, VideoShapeGuide, VideoSpec,
+        Color, FaceFlashesGuide, FaceGuide, HeadTurnGuide, Localized, PhotoFaceGuide,
+        PhotoShapeGuide, PhotoSpec, RectShape, VideoShapeGuide, VideoSpec,
     };
 
     use super::*;
@@ -621,12 +621,12 @@ mod tests {
                         VideoGuide::FaceFlashes(FaceFlashesGuide {
                             width: 0.5,
                             colors: vec![
-                                Rgb {
+                                Color {
                                     red: 255,
                                     green: 136,
                                     blue: 0,
                                 },
-                                Rgb {
+                                Color {
                                     red: 0,
                                     green: 10,
                                     blue: 171,

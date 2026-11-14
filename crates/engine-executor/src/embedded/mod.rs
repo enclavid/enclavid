@@ -31,5 +31,6 @@ pub use registry::{
     EmbeddedRegistryBuilder, LocalizedStore, Translation,
 };
 pub use store::{
-    DisclosureFieldRef, DisclosureFields, IconRef, Localized, LocalizedRef, RefKind, RefStore,
+    DisclosureFieldKeyRef, DisclosureFieldValueRef, DisclosureFields, IconRef, Localized,
+    LocalizedRef, RefKind, RefStore,
 };

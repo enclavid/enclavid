@@ -7,8 +7,11 @@ interface types {
     record liveness-estimate {
         /// How live the face looks, from 0 for a photo, a screen or a mask to
         /// 1 for a live person: a model's score, not a probability, so the
-        /// policy sets its own threshold.
-        live: f32,
+        /// policy sets its own threshold. The model reads crops around the
+        /// face's box, and how closely a box bounds the face is each
+        /// detector's own: the score, and a threshold set for it, hold with
+        /// the face-detect the implementation was fitted to.
+        liveness: f32,
     }
 }
 

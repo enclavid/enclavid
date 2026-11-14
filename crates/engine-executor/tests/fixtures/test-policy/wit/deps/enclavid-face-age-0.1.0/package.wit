@@ -1,16 +1,8 @@
 package enclavid:face-age@0.1.0;
 
-/// Facial age estimation from a detected face.
-///
-/// This is a MODEL-AGNOSTIC contract: any estimator satisfies it by shipping a
-/// distinct OCI artifact that exports this interface. The model is chosen per
-/// session via the pinned `impl_ref` in `POST /sessions`, and its identity is
-/// the artifact's OCI digest (measured / attested) — so the model's name lives
-/// on the artifact, never in this WIT package.
-interface check {
-  use enclavid:host/media@0.1.0.{image};
-  use enclavid:vision/types@0.1.0.{face};
-
+/// What the estimate gives, in an interface of its own, so an estimate from
+/// another kind of capture can come as an interface beside `image`.
+interface types {
   /// The estimator's read on a face: `age` in years, a FACT the policy
   /// acts on. The policy owns the threshold — and because a facial
   /// estimate is inherently fuzzy and can't resolve a precise 18 cut, it
@@ -23,13 +15,26 @@ interface check {
   record age-estimate {
     age: f32,
   }
+}
+
+/// Facial age estimation from a detected face in one picture.
+///
+/// This is a MODEL-AGNOSTIC contract: any estimator satisfies it by shipping a
+/// distinct OCI artifact that exports this interface. The model is chosen per
+/// session via the pinned `impl_ref` in `POST /sessions`, and its identity is
+/// the artifact's OCI digest (measured / attested) — so the model's name lives
+/// on the artifact, never in this WIT package.
+interface image {
+  use enclavid:host/media@0.1.0.{image};
+  use enclavid:vision/types@0.1.0.{face};
+  use types.{age-estimate};
 
   /// Estimate the subject's age from the detected `face` in `image`. The
-  /// plugin pulls its OWN crop (`face.bbox` grown by the model's context
-  /// margin) from `image` via `pixels`, so it sees only the face patch at
-  /// its model resolution — one shared decode, per-model crop. `none` =
-  /// unusable input, or an image that does not decode (the policy asks for
-  /// a retake / escalates).
+  /// plugin pulls its OWN crop (`face.bounding-box` grown by the model's
+  /// context margin) from `image` via `pixels`, so it sees only the face
+  /// patch at its model resolution — one shared decode, per-model crop.
+  /// `none` = unusable input, or an image that does not decode (the policy
+  /// asks for a retake / escalates).
   estimate: func(image: borrow<image>, face: face) -> option<age-estimate>;
 }
 
@@ -37,7 +42,8 @@ world face-age {
   import enclavid:host/media@0.1.0;
   import enclavid:vision/types@0.1.0;
 
-  export check;
+  export types;
+  export image;
 }
 /// The world this implementation is built as, apart from `world.wit`, which a
 /// policy's project copies: its slot names the model it runs.
@@ -51,5 +57,6 @@ world with-models {
   import enclavid:host/media@0.1.0;
   import enclavid:vision/types@0.1.0;
 
-  export check;
+  export types;
+  export image;
 }

@@ -16,7 +16,9 @@
 //!   * FIRST MATCH across catalogs — the policy's disclosure fields, the one
 //!     list a composition has, in `runner::register_disclosure_fields`.
 
-use super::store::{DisclosureFieldRef, IconRef, LocalizedRef, RefKind};
+use super::store::{
+    DisclosureFieldKeyRef, DisclosureFieldValueRef, IconRef, LocalizedRef, RefKind,
+};
 use crate::state::HostState;
 use wasmtime::component::Resource;
 
@@ -37,10 +39,25 @@ impl crate::enclavid::host::refs::HostIconRef for HostState {
         Ok(())
     }
 }
-impl crate::enclavid::host::refs::HostDisclosureFieldRef for HostState {
-    async fn drop(&mut self, rep: Resource<DisclosureFieldRef>) -> wasmtime::Result<()> {
+impl crate::enclavid::host::refs::HostDisclosureFieldKeyRef for HostState {
+    async fn drop(&mut self, rep: Resource<DisclosureFieldKeyRef>) -> wasmtime::Result<()> {
         self.table.delete(rep)?;
         Ok(())
+    }
+}
+impl crate::enclavid::host::refs::HostDisclosureFieldValueRef for HostState {
+    async fn drop(&mut self, rep: Resource<DisclosureFieldValueRef>) -> wasmtime::Result<()> {
+        self.table.delete(rep)?;
+        Ok(())
+    }
+}
+
+/// A field's value, minted as the policy or a plugin writes it; the sanitising
+/// and the bound are the action boundary's, where the field is read
+/// (`runner::convert`).
+impl crate::enclavid::host_disclosure::values::Host for HostState {
+    async fn text(&mut self, value: String) -> wasmtime::Result<Resource<DisclosureFieldValueRef>> {
+        Ok(self.table.push(DisclosureFieldValueRef(value))?)
     }
 }
 

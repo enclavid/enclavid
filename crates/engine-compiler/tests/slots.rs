@@ -18,7 +18,7 @@ use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_compon
 use wit_parser::{ManglingAndAbi, Resolve};
 
 const HOST: &str = "package enclavid:host@0.1.0;
-    interface refs { resource localized-ref; resource disclosure-field-ref; }";
+    interface refs { resource localized-ref; resource disclosure-field-key-ref; }";
 
 const API: &str = "package test:api@0.1.0;
     interface api { ping: func(); }";
@@ -243,7 +243,7 @@ fn the_texts_by_a_string_key_are_not_served() {
         &[(
             "host",
             "package enclavid:host@0.1.0;
-             interface refs { resource localized-ref; resource disclosure-field-ref; }
+             interface refs { resource localized-ref; resource disclosure-field-key-ref; }
              interface embedded-i18n {
                  use refs.{localized-ref};
                  localized: func(key: string) -> localized-ref;
@@ -450,7 +450,7 @@ fn with_disclosure_fields(function: &str) -> Built {
              world policy {{ import enclavid-ext:policy/disclosure-fields@0.1.0; }}
              package enclavid-ext:policy@0.1.0 {{
                  interface disclosure-fields {{
-                     use enclavid:host/refs@0.1.0.{{disclosure-field-ref}};
+                     use enclavid:host/refs@0.1.0.{{disclosure-field-key-ref}};
                      enum key {{ passport-number, full-name }}
                      {function}
                  }}
@@ -461,7 +461,7 @@ fn with_disclosure_fields(function: &str) -> Built {
     )
 }
 
-const DISCLOSURE_FIELD: &str = "disclosure-field: func(key: key) -> disclosure-field-ref;";
+const DISCLOSURE_FIELD: &str = "disclosure-field: func(key: key) -> disclosure-field-key-ref;";
 
 /// A policy's disclosure fields are the cases of its `key`, which its
 /// embedding lists in its catalog — what the consent screen counts.
@@ -487,9 +487,9 @@ fn disclosure_fields_the_catalogs_do_not_list_are_refused() {
     );
 
     for function in [
-        "disclosure-field: func(key: string) -> disclosure-field-ref;",
+        "disclosure-field: func(key: string) -> disclosure-field-key-ref;",
         "disclosure-field: func(key: key) -> string;",
-        "disclosure-field: func(key: key) -> disclosure-field-ref; other: func();",
+        "disclosure-field: func(key: key) -> disclosure-field-key-ref; other: func();",
     ] {
         let built = with_disclosure_fields(function);
         assert_eq!(

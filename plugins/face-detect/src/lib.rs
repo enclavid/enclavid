@@ -4,8 +4,8 @@
 //! this package's copies of the platform's.
 //!
 //! Detection runs ONCE here; the pixels stay with the host (this plugin pulls
-//! the detector input via `image.pixels`), and only WHERE the face is (bbox +
-//! landmarks, in the image's pixels) crosses the boundary — each consumer
+//! the detector input via `image.pixels`), and only WHERE the face is (its box
+//! and keypoints, in the image's pixels) crosses the boundary — each consumer
 //! derives its own crop. The detector lives in [`detect`]: a compile-time
 //! profile. Default builds run the weightless placeholder (whole frame as the
 //! face); built with `blazeface`, MediaPipe's BlazeFace is run by the host from
@@ -35,7 +35,7 @@ use std::collections::HashMap;
 
 use enclavid::host::media::{Image, PixelsOptions, Resize, ResizeMode, Size, Video};
 use enclavid::host_capture::constants::oval_aspect;
-use enclavid::vision::types::{Bbox, Face, FrameFace, Point};
+use enclavid::vision::types::{BoundingBox, Face, FrameFace, Keypoints, Point};
 use exports::enclavid::face_detect::detect::Guest as DetectGuest;
 use exports::enclavid::face_detect::photo::{self, Guest as PhotoGuest, Shape};
 use exports::enclavid::face_detect::pose::Guest as PoseGuest;
@@ -55,11 +55,12 @@ impl DetectGuest for FaceDetect {
 
 impl PoseGuest for FaceDetect {
     fn head_turn(faces: Vec<Face>) -> Option<f32> {
-        let keypoints: Vec<Vec<(f32, f32)>> = faces
+        let keypoints: Vec<[(f32, f32); 3]> = faces
             .iter()
-            .map(|face| face.landmarks.iter().map(|p| (p.x, p.y)).collect())
+            .filter_map(|face| face.keypoints)
+            .map(|k| [k.right_eye, k.left_eye, k.nose_tip].map(|p| (p.x, p.y)))
             .collect();
-        pose::head_turn(keypoints.iter().map(Vec::as_slice))
+        pose::head_turn(keypoints.iter().map(<[_; 3]>::as_slice))
     }
 }
 
@@ -269,31 +270,42 @@ fn faces_in(image: &Image) -> Vec<Detection> {
         return Vec::new();
     }
     detect::detect_all((dim.width, dim.height), |w, h| {
-        image
-            .pixels(PixelsOptions {
-                crop: None,
-                resize: Some(Resize {
-                    size: Size {
-                        width: w,
-                        height: h,
-                    },
-                    mode: ResizeMode::Average,
-                }),
-            })
-            .ok()
+        image.pixels(PixelsOptions {
+            crop: None,
+            resize: Some(Resize {
+                size: Size {
+                    width: w,
+                    height: h,
+                },
+                mode: ResizeMode::Average,
+            }),
+        })
     })
 }
 
+/// `d` as the shared `face`: its box, and the four named points among its own,
+/// which BlazeFace places first in that order. No calibrated chance: the
+/// detector gives none.
 fn face(d: &Detection) -> Face {
+    let [x, y, width, height] = d.bbox;
+    let point = |(x, y): (f32, f32)| Point { x, y };
     Face {
-        bbox: Bbox {
-            x: d.bbox[0],
-            y: d.bbox[1],
-            w: d.bbox[2],
-            h: d.bbox[3],
+        bounding_box: BoundingBox {
+            x,
+            y,
+            width,
+            height,
         },
-        landmarks: d.landmarks.iter().map(|&(x, y)| Point { x, y }).collect(),
-        score: d.score,
+        score: None,
+        keypoints: match d.landmarks[..] {
+            [right_eye, left_eye, nose_tip, mouth, ..] => Some(Keypoints {
+                right_eye: point(right_eye),
+                left_eye: point(left_eye),
+                nose_tip: point(nose_tip),
+                mouth: point(mouth),
+            }),
+            _ => None,
+        },
     }
 }
 

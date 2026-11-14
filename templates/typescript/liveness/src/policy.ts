@@ -94,6 +94,6 @@ function passes(captures: Capture[]): boolean {
   const readings = read(recording, guides);
   if (!readings.every(({ status }) => status === "followed")) return false;
   const held = readings.find(({ guide }) => guide.tag === "face");
-  const live = held && estimate(recording, held.faces)?.live;
-  return (live ?? 0) >= LIVE_MIN;
+  const liveness = held && estimate(recording, held.faces)?.liveness;
+  return (liveness ?? 0) >= LIVE_MIN;
 }

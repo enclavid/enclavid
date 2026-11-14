@@ -9,7 +9,7 @@
 //! the handle table). So the store carries no keyed-hash /
 //! reverse-index: membership is a plain `key → data` lookup, and the
 //! host (in `engine-executor`) mints a resource whose rep IS the
-//! resolved data (`LocalizedRef` / `DisclosureFieldRef`; `IconRef` too,
+//! resolved data (`LocalizedRef` / `DisclosureFieldKeyRef`; `IconRef` too,
 //! from a name no store holds). The engine dereferences that rep at the action
 //! boundary, so the resolved data is self-contained (no registry needed
 //! to render it later).

@@ -47,7 +47,7 @@ interface video {
 
     /// A colour on screen, by its red, green and blue, as `#rrggbb` writes
     /// them.
-    record rgb {
+    record color {
         red: u8,
         green: u8,
         blue: u8,
@@ -64,7 +64,7 @@ interface video {
         /// 0.25–0.6, as a `face`'s is.
         width: f32,
         /// The colours, in the order shown; 1 to 16 of them.
-        colors: list<rgb>,
+        colors: list<color>,
         /// How long each colour is shown, in milliseconds; held to 250–1000.
         flash-ms: u16,
         /// The longest break in the flashes the page forgives, in

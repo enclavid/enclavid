@@ -539,8 +539,7 @@ async fn passport_selfie_consent_accept_reaches_approved_over_the_rendered_field
     );
     // The keys are the policy's disclosure fields, the cases of its `key`,
     // which it hands the well-known helpers; the labels are texts — the
-    // nationality's the plugin's own, which the policy took by the plugin's
-    // slot.
+    // helpers' the plugin's own.
     let keys: Vec<&str> = screen.fields.iter().map(|f| f.key.as_str()).collect();
     assert_eq!(
         keys,
@@ -1440,9 +1439,9 @@ async fn static_fused_artifact_resolves_strictly() {
         .unwrap();
 
     // The slots survive the fusion as distinct imports, one per slot:
-    // policy + well-known + extra = 3 — the policy's import of well-known's
-    // texts and well-known's own made one. The vision plugins have no texts,
-    // so they import none, and icons are the host's own.
+    // policy + well-known + extra = 3, each imported by its own component
+    // alone. The vision plugins have no texts, so they import none, and icons
+    // are the host's own.
     let imports = engine_compiler::top_level_imports(&fused).unwrap();
     let mut slots: Vec<&str> = imports
         .iter()
