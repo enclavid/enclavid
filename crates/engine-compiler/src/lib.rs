@@ -36,7 +36,7 @@ pub use seam::{
 
 use wac_graph::types::Package;
 use wasmtime::component::Component;
-use wasmtime::{Config, Engine};
+use wasmtime::{Config, Engine, WasmFeatures};
 
 use engine_types::compile::{Artifact, CompileFault};
 use engine_types::composition::{
@@ -316,6 +316,17 @@ fn lent(plugins: &[PluginInstance]) -> Vec<PluginInstance> {
         .collect()
 }
 
+/// The wasm proposals a component may use. wasmtime's defaults beyond them
+/// stay off, so an upgrade of it enables none by itself.
+pub const WASM_FEATURES: WasmFeatures = WasmFeatures::WASM2
+    .difference(WasmFeatures::GC_TYPES)
+    .union(WasmFeatures::MULTI_MEMORY)
+    .union(WasmFeatures::RELAXED_SIMD)
+    .union(WasmFeatures::TAIL_CALL)
+    .union(WasmFeatures::EXTENDED_CONST)
+    .union(WasmFeatures::MEMORY64)
+    .union(WasmFeatures::COMPONENT_MODEL);
+
 /// The wasmtime [`Config`] both fleet halves build their [`Engine`] from.
 /// It MUST be identical on the compile and execute sides: `consume_fuel`
 /// compiles fuel checks INTO the code, so a mismatch would make a cwasm
@@ -323,11 +334,24 @@ fn lent(plugins: &[PluginInstance]) -> Vec<PluginInstance> {
 /// the compiler crate (the producer) and mirrored verbatim by the executor.
 pub fn engine_config() -> Config {
     let mut config = Config::new();
-    config.wasm_component_model(true);
+    config.wasm_features(WasmFeatures::all(), false);
+    config.wasm_features(WASM_FEATURES, true);
     // Enable fuel accounting so per-Store budgets actually trap out a
     // runaway policy at run time. The flag affects codegen (fuel checks
     // are compiled in), so it must be set HERE, at compile time, to match
     // the executor's engine.
     config.consume_fuel(true);
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The engine takes the proposals listed, whatever wasmtime's defaults.
+    #[test]
+    fn the_engine_takes_the_proposals_listed() {
+        let engine = Engine::new(&engine_config()).unwrap();
+        assert_eq!(engine.get_wasm_features(), WASM_FEATURES);
+    }
 }

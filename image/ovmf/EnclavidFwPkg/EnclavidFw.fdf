@@ -3,7 +3,7 @@
 #  and the modules a guest with no NIC, no USB, no display, no keyboard and no
 #  firmware-visible disk would never reach left out. 95 modules become 52.
 #
-#  A COPY of OvmfPkg/AmdSev/AmdSevX64.fdf (edk2-stable202602), not an include:
+#  A COPY of OvmfPkg/AmdSev/AmdSevX64.fdf (edk2-stable202608), not an include:
 #  neither DSC nor FDF has a directive that removes an entry, so leaving a
 #  module out means owning the list. The shared fragments this still `!include`s
 #  -- the flash layout, the variable store, MEMFD -- stay upstream, which is

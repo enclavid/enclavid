@@ -30,9 +30,9 @@
 # has to happen for the system the image is built for.
 { pkgs ? import
     (builtins.fetchTarball {
-      # nixos-26.05 @ 2026-08-23 — same pin as the rest of image/.
-      url = "https://github.com/NixOS/nixpkgs/archive/a3b98866eecd08edac6e61a3081e69540a35020f.tar.gz";
-      sha256 = "0gy7jvdm3yfr2mddcch4yr7l8nw5y21gfls5in05j1f282bcr9mh";
+      # nixos-unstable @ 2026-11-13 — same pin as the rest of image/.
+      url = "https://github.com/NixOS/nixpkgs/archive/d5cc6833999746cffdfe0598f7bc801a57b887a9.tar.gz";
+      sha256 = "08yyqnikwdgacdyxg29chdygmj3vn6l8zwpf0v470nnq3zpzz72s";
     })
     { system = "x86_64-linux"; }
 }:
@@ -83,7 +83,7 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
     # below is a hash OF. Required rather than defaulted, deliberately: a
     # fetcher that silently changed shape would change every hash in the tree at
     # once, and nobody could tell that from a dependency having moved.
-    fetcherVersion = 3;
+    fetcherVersion = 5;
 
     # THE BUNDLER IS A NATIVE BINARY, and so are two more of these tools:
     #
@@ -112,7 +112,7 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
     #
     # It changes when the lockfile changes, which is the point: a dependency
     # cannot move without moving a line in this file.
-    hash = "sha256-yTbftMd8/zc+x5r0EJY0t5T/7DNqxiEzAVSVsy2xFB0=";
+    hash = "sha256-W7ejdbrbTReJAMVCPHyDDJY7YoufPgii5/XSETvd7M4=";
   };
 
   buildPhase = ''

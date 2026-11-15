@@ -165,7 +165,7 @@ struct Place(&'static AtomicUsize);
 impl Place {
     fn take(count: &'static AtomicUsize, ceiling: usize) -> Option<Place> {
         count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |now| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |now| {
                 (now < ceiling).then_some(now + 1)
             })
             .ok()

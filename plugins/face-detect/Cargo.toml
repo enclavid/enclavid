@@ -18,4 +18,4 @@ crate-type = ["cdylib"]
 blazeface = []
 
 [dependencies]
-wit-bindgen = "0.57"
+wit-bindgen = "0.63"

@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # Same componentize + embedding the engine's happy_path test and the CLI's
 # `embed` use, so an artifact this tool publishes is byte-identical to the
 # tested in-process path.
-wit-component = "0.247"
+wit-component = "0.258"
 enclavid-embedded = { path = "../crates/embedded", features = ["embed"] }
 
 anyhow = "1"

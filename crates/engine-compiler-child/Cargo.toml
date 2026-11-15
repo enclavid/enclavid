@@ -82,7 +82,7 @@ engine-supervisor = { path = "../engine-supervisor", features = ["parent"] }
 xtask = { path = "../../xtask" }
 # A component carrying an embedded section, for the refusal the child answers.
 enclavid-embedded = { path = "../embedded" }
-wasm-encoder = "0.247"
+wasm-encoder = "0.258"
 # The output file a test hands the child, as the supervisor's memfd; and the
 # metadata it answers with, decoded.
 tempfile = "3"

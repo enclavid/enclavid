@@ -5,10 +5,7 @@
 // module of its own, imported before anything that draws.
 import { getRandomBytes } from "wasi:random/random@0.2.12";
 
-// componentize-qjs 0.4.5 takes a u64 as a `number` (a `bigint` traps), while the
-// generated types say `bigint`.
-const bytes = (length: number): Uint8Array =>
-  getRandomBytes(length as unknown as bigint);
+const bytes = (length: number): Uint8Array => getRandomBytes(BigInt(length));
 
 // 53 random bits, the most a double holds exactly: the low 5 bits of the first
 // of 7 bytes, then the other 6. Always below 1.

@@ -31,7 +31,7 @@ fn exports_policy(wasm: &[u8]) -> Result<bool> {
             Payload::ComponentExportSection(reader) => {
                 for export in reader {
                     let export = export.context("reading a component export")?;
-                    if export.name.0.starts_with(POLICY_EXPORT_PREFIX) {
+                    if export.name.name.starts_with(POLICY_EXPORT_PREFIX) {
                         return Ok(true);
                     }
                 }

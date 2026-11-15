@@ -13,9 +13,9 @@
     "@enclavid/policy-quickjs": "^0.1.0"
   },
   "devDependencies": {
-    "@bytecodealliance/jco": "1.37.0",
-    "componentize-qjs": "0.4.5",
-    "prettier": "3.9.10",
+    "@bytecodealliance/jco": "1.42.0",
+    "componentize-qjs": "0.6.0",
+    "prettier": "3.10.1",
     "typescript": "~6.0.3"
   }
 }

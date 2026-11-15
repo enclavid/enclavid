@@ -9,4 +9,4 @@ crate-type = ["cdylib"]
 
 # Types alone: the face geometry the face plugins share. It decodes nothing.
 [dependencies]
-wit-bindgen = "0.57"
+wit-bindgen = "0.63"

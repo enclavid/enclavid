@@ -196,7 +196,7 @@ pub fn top_level_imports(wasm_bytes: &[u8]) -> wasmtime::Result<Vec<String>> {
                     let import = import.map_err(|e| {
                         wasmtime::Error::msg(format!("component import parse: {e}"))
                     })?;
-                    out.push(import.name.0.to_string());
+                    out.push(import.name.name.to_string());
                 }
             }
             _ => {}
