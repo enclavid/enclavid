@@ -1,12 +1,14 @@
 package enclavid:host-capture@0.1.0;
 
 /// A video step, and what it asks the applicant to do.
+@since(version = 0.1.0)
 interface video {
     use enclavid:host/refs@0.1.0.{localized-ref};
     use photo.{shape};
 
     /// A shape in a video, which the page does not read: the applicant says
     /// with a button they have followed it.
+    @since(version = 0.1.0)
     record shape-guide {
         shape: shape,
         /// What the applicant lines up with it, shown on camera while it is
@@ -21,6 +23,7 @@ interface video {
     /// A face the page finds at the centre of the frame, at a size. The page
     /// draws an oval for it, as wide for its height as
     /// `constants.oval-aspect` says.
+    @since(version = 0.1.0)
     record face-guide {
         /// The face's width as a fraction of the frame's shorter side; held to
         /// 0.25–0.6: smaller, the page does not find a face reliably; larger,
@@ -34,6 +37,7 @@ interface video {
     }
 
     /// A turn of the head the page reads.
+    @since(version = 0.1.0)
     record head-turn-guide {
         /// How far, negative to the applicant's left; held to ±45. A turn of
         /// none is refused.
@@ -47,6 +51,7 @@ interface video {
 
     /// A colour on screen, by its red, green and blue, as `#rrggbb` writes
     /// them.
+    @since(version = 0.1.0)
     record color {
         red: u8,
         green: u8,
@@ -59,6 +64,7 @@ interface video {
     /// once the face has been in the oval for a moment, or at once where a
     /// `face` or flashes guide before them held it there, and start over if
     /// the face leaves for longer than `grace-ms`.
+    @since(version = 0.1.0)
     record face-flashes-guide {
         /// The face's width as a fraction of the frame's shorter side; held to
         /// 0.25–0.6, as a `face`'s is.
@@ -76,6 +82,7 @@ interface video {
     /// next is shown: a shape from the applicant's button; a face, with its
     /// flashes or without, and a head turn from when the page reads them in
     /// the frames.
+    @since(version = 0.1.0)
     variant guide {
         shape(shape-guide),
         face(face-guide),
@@ -84,6 +91,7 @@ interface video {
     }
 
     /// A video, sent with no review screen.
+    @since(version = 0.1.0)
     record video-spec {
         /// What it asks, in order, each held for its `hold-ms` or through all
         /// its flashes — for one frame where that is 0 — before the next. The

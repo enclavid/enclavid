@@ -8,6 +8,7 @@ package enclavid:host-icons@0.1.0;
 /// only grows, each new icon a function `@since` the version that adds it, so a
 /// component built against an earlier version keeps running on a host that
 /// serves a later one.
+@since(version = 0.1.0)
 interface icons {
     use enclavid:host/refs@0.1.0.{icon-ref};
 

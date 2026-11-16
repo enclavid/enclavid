@@ -5,12 +5,14 @@ package enclavid:host-capture@0.1.0;
 /// (`action::render(prompt::media)` + `event::media`) and helper plugins
 /// (e.g. `enclavid:well-known`). The host capabilities that mint the refs
 /// these records carry live in `enclavid:host`.
+@since(version = 0.1.0)
 interface capture {
     use enclavid:host/refs@0.1.0.{localized-ref, icon-ref};
     use photo.{photo-spec};
     use video.{video-spec};
 
     /// Which physical camera the capture step should use.
+    @since(version = 0.1.0)
     enum camera-facing {
         /// The one facing the applicant, for a selfie.
         front,
@@ -21,6 +23,7 @@ interface capture {
     }
 
     /// What one capture step records.
+    @since(version = 0.1.0)
     variant capture-kind {
         /// One frame, which the applicant keeps.
         photo(photo-spec),
@@ -35,6 +38,7 @@ interface capture {
     /// in one `event::media`, and plugins analyse them together. A step is one
     /// continuous capture; a break the applicant must take between two (flip
     /// the card, turn the page) is a step boundary.
+    @since(version = 0.1.0)
     record capture-step {
         /// An `icon-ref` minted by one of the functions of
         /// `enclavid:host-icons/icons`, one per icon the frontend draws, so a
@@ -60,6 +64,7 @@ interface capture {
     /// for multi-side / multi-page captures of the same artifact. Use
     /// multiple media renders for independent artifacts (e.g.,
     /// shareholder passports).
+    @since(version = 0.1.0)
     record media-spec {
         /// The overall artifact title surfaced as context on every screen of
         /// the capture flow ("Your passport"). Per-step copy — pre-capture

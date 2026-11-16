@@ -2,10 +2,12 @@ package enclavid:host-capture@0.1.0;
 
 /// A photo step, and the shapes drawn over the camera, which a video shows
 /// too.
+@since(version = 0.1.0)
 interface photo {
     use enclavid:host/refs@0.1.0.{localized-ref};
 
     /// A rectangle at the centre of the frame, as large as fits.
+    @since(version = 0.1.0)
     record rect-shape {
         /// Its width:height aspect, held to 0.5–2.0 (1.42 passport, 1.585
         /// ID-1).
@@ -14,6 +16,7 @@ interface photo {
 
     /// An oval at the centre of the frame, as wide for its height as
     /// `constants.oval-aspect` says.
+    @since(version = 0.1.0)
     record oval-shape {
         /// As a fraction of the frame's shorter side, so the oval keeps its
         /// size on a frame of either orientation; held to 0.1–0.6, where its
@@ -24,6 +27,7 @@ interface photo {
     /// A shape drawn over the camera. Every guide's numbers are held to their
     /// ranges where the prompt is built: past those, a guide no longer fits
     /// the screen or a face.
+    @since(version = 0.1.0)
     variant shape {
         rect(rect-shape),
         oval(oval-shape),
@@ -31,6 +35,7 @@ interface photo {
 
     /// A shape the page does not read: the applicant fits into it whatever
     /// they are asked to, and says with the shutter when they have.
+    @since(version = 0.1.0)
     record shape-guide {
         shape: shape,
         /// What the applicant fits into it, shown on camera ("The photo page
@@ -42,6 +47,7 @@ interface photo {
     /// oval it draws for it, as wide for its height as
     /// `constants.oval-aspect` says. The page takes the photo once the face
     /// fills the oval.
+    @since(version = 0.1.0)
     record face-guide {
         /// The face's width as a fraction of the frame's shorter side; held to
         /// 0.25–0.6: smaller, the page does not find a face reliably; larger,
@@ -51,12 +57,14 @@ interface photo {
 
     /// What a photo's camera shows, and what takes the photo: the shutter for
     /// a shape, the page for a face it reads.
+    @since(version = 0.1.0)
     variant guide {
         shape(shape-guide),
         face(face-guide),
     }
 
     /// A photo: one frame.
+    @since(version = 0.1.0)
     record photo-spec {
         /// What the camera shows, if anything; none: nothing drawn, and the
         /// shutter takes the photo.

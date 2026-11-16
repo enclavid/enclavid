@@ -23,3 +23,7 @@ enclavid-embedded = { path = "../crates/embedded", features = ["embed"] }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+# since.rs reads the platform's WIT for the version each item is there since.
+wit-parser = "0.258"

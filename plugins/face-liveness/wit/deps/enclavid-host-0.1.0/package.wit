@@ -57,6 +57,7 @@ package enclavid:host@0.1.0;
 /// A capture's type says which kind of step took it, not that its bytes are
 /// what that kind should hold: the applicant's page sent them, so whatever
 /// reads them must expect anything.
+@since(version = 0.1.0)
 interface media {
   /// A capture's content ADDRESS — the hex-encoded 32-byte BLAKE3 of its
   /// bytes. A serializable value, unlike the opaque per-round handles: the
@@ -65,15 +66,18 @@ interface media {
   /// string rather than bytes for every language's sake: JSON-safe,
   /// `==`-comparable, usable as a map key (`[]byte` cannot even be a Go map
   /// key).
+  @since(version = 0.1.0)
   type media-hash = string;
 
   /// A size in pixels.
+  @since(version = 0.1.0)
   record size {
     width: u32,
     height: u32,
   }
 
   /// A rectangle of a picture, in its pixels.
+  @since(version = 0.1.0)
   record rect {
     /// Its left edge: the first column it takes.
     x: u32,
@@ -84,6 +88,7 @@ interface media {
   }
 
   /// How pixels are brought to another size.
+  @since(version = 0.1.0)
   enum resize-mode {
     /// Each output pixel is the source pixel nearest its place: the
     /// quicker, and no colour the picture does not have.
@@ -99,6 +104,7 @@ interface media {
   }
 
   /// Pixels brought to another size.
+  @since(version = 0.1.0)
   record resize {
     /// The size they are brought to.
     size: size,
@@ -106,6 +112,7 @@ interface media {
   }
 
   /// Which of a picture's pixels, and at what size.
+  @since(version = 0.1.0)
   record pixels-options {
     /// Only this part of it; the whole picture where none.
     crop: option<rect>,
@@ -117,14 +124,17 @@ interface media {
   /// platform decodes it, when its pixels are first read. Of a video only
   /// the frame read last is kept: a frame read out of order is decoded
   /// again from the keyframe before it.
+  @since(version = 0.1.0)
   resource image {
     /// Its size in pixels: its capture's own — or, for a photo larger
     /// than the platform decodes whole, half of it each way. Whether so
     /// many are enough is the reader's to judge.
+    @since(version = 0.1.0)
     size: func() -> size;
     /// Every pixel of it, at its size, RGB8 row by row, decoding the
     /// image first where nothing did; `none` where it does not decode, or
     /// the process decoding it ended or stalled.
+    @since(version = 0.1.0)
     all-pixels: func() -> option<list<u8>>;
     /// The pixels `options` pick, RGB8 row by row, decoding the image
     /// first where nothing did; `none` where it does not decode, or the
@@ -132,10 +142,12 @@ interface media {
     /// of the picture, a crop or a size of no pixels, and an output larger
     /// either way than the platform gives: each the caller's own to avoid,
     /// by the picture's `size`.
+    @since(version = 0.1.0)
     pixels: func(options: pixels-options) -> option<list<u8>>;
   }
 
   /// A photo the applicant sent: one JPEG, as the camera page encoded it.
+  @since(version = 0.1.0)
   resource photo {
     /// Rehydrate the photo with this hash from the session's store.
     /// Own-session only (cross-session is cryptographically blocked).
@@ -144,21 +156,26 @@ interface media {
     /// correct policy only stashes hashes it got from a real `hash()`, so
     /// a fabricated one fails loud rather than handing it a recoverable
     /// branch.
+    @since(version = 0.1.0)
     constructor(hash: media-hash);
     /// Pull the photo's bytes into the caller's linear memory: for a
     /// rehydrated photo, the lazy load point. Bounded by the round's
     /// memory max: a round that goes past it is ended.
+    @since(version = 0.1.0)
     bytes: func() -> list<u8>;
     /// The photo's hash — stash it in `state` to rehydrate the photo in a
     /// later round.
+    @since(version = 0.1.0)
     hash: func() -> media-hash;
     /// The photo as an image; `none` where it is not a JPEG the platform
     /// decodes, one too large for it even at half its size, or where the
     /// process decoding it ended or stalled.
+    @since(version = 0.1.0)
     image: func() -> option<image>;
   }
 
   /// One frame of a video, as the container the applicant sent lists it.
+  @since(version = 0.1.0)
   record frame {
     /// Its index in the video, from 0.
     index: u32,
@@ -174,15 +191,19 @@ interface media {
 
   /// A video the applicant recorded: a WebM of VP8 frames, as the page's
   /// encoder wrote it.
+  @since(version = 0.1.0)
   resource video {
     /// Rehydrate the video with this hash from the session's store, as
     /// `photo`'s constructor does.
+    @since(version = 0.1.0)
     constructor(hash: media-hash);
     /// Pull the video's bytes into the caller's linear memory, as
     /// `photo`'s `bytes` does.
+    @since(version = 0.1.0)
     bytes: func() -> list<u8>;
     /// The video's hash — stash it in `state` to rehydrate the video in a
     /// later round.
+    @since(version = 0.1.0)
     hash: func() -> media-hash;
     /// Frames `first` to `last` of the video, in order, as a guide's
     /// `frame-range` names them; none is decoded until its image is read.
@@ -191,6 +212,7 @@ interface media {
     /// where the video is not a WebM of VP8 frames of a size the platform
     /// decodes, where the process decoding it ended or stalled, and where
     /// no frame of it lies from `first` to `last`.
+    @since(version = 0.1.0)
     frames: func(first: u32, last: u32) -> list<frame>;
   }
 }
@@ -205,22 +227,27 @@ interface media {
 /// every slot's `i18n` mints the SAME resource type that the records a prompt
 /// is made of carry, and every version of `enclavid:host-icons` mints the one
 /// `icon-ref` that `capture-step` carries.
+@since(version = 0.1.0)
 interface refs {
   /// One of a component's texts, in every language its catalog has it in —
   /// surfaces as UI text once the host picks the applicant's language.
+  @since(version = 0.1.0)
   resource localized-ref;
 
   /// An icon from `enclavid:host-icons/icons`, which the applicant
   /// frontend draws by its name.
+  @since(version = 0.1.0)
   resource icon-ref;
 
   /// One of the policy's disclosure fields — surfaces as the machine
   /// `display-field.key` the consumer receives.
+  @since(version = 0.1.0)
   resource disclosure-field-key-ref;
 
   /// What a disclosure field shows and, on accept, seals:
   /// `display-field.value`. Minted by `enclavid:host-disclosure/values`, a
   /// function for each kind of value.
+  @since(version = 0.1.0)
   resource disclosure-field-value-ref;
 }
 
@@ -232,76 +259,125 @@ interface refs {
 ///
 /// Half-precision elements are their bits: IEEE 754 binary16 for `f16`, the
 /// upper half of an `f32` for `bf16`.
+@since(version = 0.1.0)
 interface tensors {
+  @since(version = 0.1.0)
   resource tensor-f32 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<f32>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<f32>;
   }
 
+  @since(version = 0.1.0)
   resource tensor-f64 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<f64>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<f64>;
   }
 
+  @since(version = 0.1.0)
   resource tensor-f16 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<u16>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<u16>;
   }
 
+  @since(version = 0.1.0)
   resource tensor-bf16 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<u16>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<u16>;
   }
 
+  @since(version = 0.1.0)
   resource tensor-i8 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<s8>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<s8>;
   }
 
+  @since(version = 0.1.0)
   resource tensor-u8 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<u8>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<u8>;
   }
 
+  @since(version = 0.1.0)
   resource tensor-i16 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<s16>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<s16>;
   }
 
+  @since(version = 0.1.0)
   resource tensor-u16 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<u16>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<u16>;
   }
 
+  @since(version = 0.1.0)
   resource tensor-i32 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<s32>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<s32>;
   }
 
+  @since(version = 0.1.0)
   resource tensor-u32 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<u32>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<u32>;
   }
 
+  @since(version = 0.1.0)
   resource tensor-i64 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<s64>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<s64>;
   }
 
+  @since(version = 0.1.0)
   resource tensor-u64 {
+    @since(version = 0.1.0)
     constructor(dimensions: list<u64>, data: list<u64>);
+    @since(version = 0.1.0)
     dimensions: func() -> list<u64>;
+    @since(version = 0.1.0)
     data: func() -> list<u64>;
   }
 }

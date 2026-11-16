@@ -3,12 +3,14 @@ package enclavid:host-disclosure@0.1.0;
 /// Disclosure-flow shape — `display-field`, a consented (key, label,
 /// value) triple. Used by the `enclavid:policy` contract
 /// (`action::render(prompt::consent-disclosure)` + `event::consent-disclosure`).
+@since(version = 0.1.0)
 interface disclosure {
   use enclavid:host/refs@0.1.0.{disclosure-field-key-ref, disclosure-field-value-ref, localized-ref};
 
   /// One consented field surfaced on the applicant's consent
   /// screen and (modulo the label) included in the sealed
   /// disclosure envelope to the consumer.
+  @since(version = 0.1.0)
   record display-field {
     /// A ref the host mints, which no component can construct
     /// (closing the runtime ref-crafting channel) — minted by the
@@ -47,12 +49,14 @@ interface disclosure {
 
 /// The values a disclosure field shows and, on accept, seals: a function for
 /// each kind.
+@since(version = 0.1.0)
 interface values {
   use enclavid:host/refs@0.1.0.{disclosure-field-value-ref};
 
   /// A text, as the policy writes it. Sanitised host-side (control chars,
   /// BIDI overrides, zero-width and Unicode-tag chars stripped) and held to
   /// 4096 bytes; its format is the policy's call.
+  @since(version = 0.1.0)
   text: func(value: string) -> disclosure-field-value-ref;
 }
 

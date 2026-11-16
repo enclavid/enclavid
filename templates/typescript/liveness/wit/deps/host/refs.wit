@@ -50,18 +50,23 @@ package enclavid:host@0.1.0;
 /// every slot's `i18n` mints the SAME resource type that the records a prompt
 /// is made of carry, and every version of `enclavid:host-icons` mints the one
 /// `icon-ref` that `capture-step` carries.
+@since(version = 0.1.0)
 interface refs {
     /// One of a component's texts, in every language its catalog has it in —
     /// surfaces as UI text once the host picks the applicant's language.
+    @since(version = 0.1.0)
     resource localized-ref;
     /// An icon from `enclavid:host-icons/icons`, which the applicant
     /// frontend draws by its name.
+    @since(version = 0.1.0)
     resource icon-ref;
     /// One of the policy's disclosure fields — surfaces as the machine
     /// `display-field.key` the consumer receives.
+    @since(version = 0.1.0)
     resource disclosure-field-key-ref;
     /// What a disclosure field shows and, on accept, seals:
     /// `display-field.value`. Minted by `enclavid:host-disclosure/values`, a
     /// function for each kind of value.
+    @since(version = 0.1.0)
     resource disclosure-field-value-ref;
 }
