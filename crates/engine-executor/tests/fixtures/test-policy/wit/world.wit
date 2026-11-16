@@ -16,11 +16,9 @@ world policy {
 
     // The face plugins over the host's image of the selfie: face-detect
     // locates the `face` in it; face-age reads its crop and estimates. The
-    // policy just threads the handles image → detect → estimate.
-    // `enclavid:vision/types` carries the shared `face` vocabulary the policy
-    // holds in between.
+    // policy threads image → detect → estimate, handing the face over as the
+    // same record of each plugin's own package.
     import enclavid:face-detect/detect@0.1.0;
-    import enclavid:vision/types@0.1.0;
 
     // The face-age plugin: a real image + face consumer. No texts of its
     // own, so no slot.

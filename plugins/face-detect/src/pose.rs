@@ -1,8 +1,7 @@
 //! What a face's keypoints say of its pose. BlazeFace places six, in its
 //! order: the right eye, the left eye, the nose tip, the mouth's centre, then
 //! the right ear's tragion and the left's — right and left the face's own, so
-//! an unmirrored frame shows its right on the frame's left. The placeholder
-//! profile places none. Bindgen-free.
+//! an unmirrored frame shows its right on the frame's left. Bindgen-free.
 
 /// The nose tip's depth before the eyes, in eye distances, on MediaPipe's
 /// canonical face: 4.01 cm over 6.30 cm.

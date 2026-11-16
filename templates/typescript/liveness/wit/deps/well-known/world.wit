@@ -125,13 +125,11 @@ world well-known {
     export photo;
     export video;
 
-    // Every ref the plugin returns comes from the host:
-    //   * `i18n` — this plugin's own texts, through its slot, which the
-    //     host serves from the catalog its embedding writes in.
+    // Every ref the plugin returns comes from the host: its texts through
+    // the slot of the implementation, and:
     //   * `icons` — one of the names the frontend draws.
     //   * `values` — a field's value, from the text a helper is given.
     // A field's key is the policy's: the helpers take it.
-    import enclavid-ext:well-known/i18n@0.1.0;
     import enclavid:host-icons/icons@0.1.0;
     import enclavid:host-disclosure/values@0.1.0;
 }

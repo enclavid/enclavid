@@ -1,7 +1,7 @@
 package enclavid:face-liveness@0.1.0;
 
-/// What the checks give, `image`'s and `video`'s alike: an implementation
-/// exports it with whichever of them it has.
+/// What the checks give, `image`'s and `video`'s alike, and the faces they
+/// read: an implementation exports it with whichever of them it has.
 interface types {
   /// The estimator's read on a face.
   record liveness-estimate {
@@ -13,6 +13,39 @@ interface types {
     /// the face-detect the implementation was fitted to.
     liveness: f32,
   }
+
+  /// A face as `enclavid:face-detect/types` gives it, which says what each
+  /// record means: the same records, so a policy hands a face found there
+  /// over as it is.
+  record bounding-box {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+  }
+
+  record point {
+    x: f32,
+    y: f32,
+  }
+
+  record keypoints {
+    right-eye: point,
+    left-eye: point,
+    nose-tip: point,
+    mouth: point,
+  }
+
+  record face {
+    bounding-box: bounding-box,
+    score: option<f32>,
+    keypoints: option<keypoints>,
+  }
+
+  record frame-face {
+    index: u32,
+    face: face,
+  }
 }
 
 /// Liveness from one picture: a photo's image, or a frame.
@@ -22,8 +55,7 @@ interface types {
 /// both — and is chosen per session via the pinned `impl_ref`.
 interface image {
   use enclavid:host/media@0.1.0.{image};
-  use enclavid:vision/types@0.1.0.{face};
-  use types.{liveness-estimate};
+  use types.{face, liveness-estimate};
 
   /// Estimate whether the detected `face` in `image` is a live person's.
   /// The plugin pulls its OWN crops from `image` via `pixels` — the face
@@ -35,8 +67,7 @@ interface image {
 /// Liveness from frames of a video.
 interface video {
   use enclavid:host/media@0.1.0.{video};
-  use enclavid:vision/types@0.1.0.{frame-face};
-  use types.{liveness-estimate};
+  use types.{frame-face, liveness-estimate};
 
   /// Estimate whether the faces found in frames of `video` are a live
   /// person's: one estimate for them together — a model of single pictures
@@ -49,23 +80,6 @@ interface video {
 
 world face-liveness {
   import enclavid:host/media@0.1.0;
-  import enclavid:vision/types@0.1.0;
-
-  export types;
-  export image;
-  export video;
-}
-/// The world this implementation is built as, apart from `world.wit`, which a
-/// policy's project copies: its slot names the models it runs.
-/// An estimator whose models the host runs: the models' graphs are layers
-/// beside the component — named for the functions of its slot that hand them
-/// out — and only the crops leave the sandbox, to those models, each in a
-/// process of its own.
-world with-models {
-  import enclavid:host/tensors@0.1.0;
-  import enclavid-ext:face-liveness/models@0.1.0;
-  import enclavid:host/media@0.1.0;
-  import enclavid:vision/types@0.1.0;
 
   export types;
   export image;

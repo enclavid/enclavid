@@ -5,29 +5,20 @@
 //! geometry), and this plugin pulls its OWN crop from the image (the face's
 //! box grown by the model's margin, via `pixels`) and runs the age model. The
 //! pixels stay with the host; face-age reads only the face patch at its model
-//! resolution. Inference lives in [`infer`]: the per-model profile — a
-//! placeholder with no model, or, built with `mivolo`, MiVOLO run by the host
-//! from the model files beside this component.
+//! resolution. Inference lives in [`infer`]: the per-model profile, MiVOLO run
+//! by the host from the model files beside this component.
 
 mod infer;
 
-#[cfg(not(feature = "mivolo"))]
 wit_bindgen::generate!({
     path: "wit",
-    world: "enclavid:face-age/face-age@0.1.0",
-    generate_all,
-});
-#[cfg(feature = "mivolo")]
-wit_bindgen::generate!({
-    path: "wit",
-    world: "enclavid:face-age/with-models@0.1.0",
+    world: "enclavid-ext:face-age/with-models@0.1.0",
     generate_all,
 });
 
 use enclavid::host::media::{Image, PixelsOptions, Rect, Resize, ResizeMode, Size};
-use enclavid::vision::types::{BoundingBox, Face};
 use exports::enclavid::face_age::image::Guest;
-use exports::enclavid::face_age::types::AgeEstimate;
+use exports::enclavid::face_age::types::{AgeEstimate, BoundingBox, Face};
 
 struct FaceAge;
 

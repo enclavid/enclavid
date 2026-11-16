@@ -27,11 +27,7 @@ pub const WELL_KNOWN_PACKAGE: &str = "enclavid:well-known@0.1.0";
 /// supplies the consent requester).
 pub const EXTRA_PACKAGE: &str = "enclavid:extra@0.1.0";
 /// Package id of the face-age plugin the policy calls on the selfie round.
-/// Ships no embedded catalog, so it imports no slot.
 pub const FACE_AGE_PACKAGE: &str = "enclavid:face-age@0.1.0";
-/// Package id of the vision plugin — serves the `face` geometry the face
-/// plugins share; it decodes nothing.
-pub const VISION_PACKAGE: &str = "enclavid:vision@0.1.0";
 /// Package id of the face-detect plugin — locates the `face` in the host's
 /// image of the selfie, which the policy threads to face-age.
 pub const FACE_DETECT_PACKAGE: &str = "enclavid:face-detect@0.1.0";
@@ -110,9 +106,10 @@ pub fn extra() -> &'static [u8] {
         .as_slice()
 }
 
-/// The `enclavid:face-age` plugin. It has no texts, so embedding adds
-/// nothing — the artifact carries only its `check` export, the host's image
-/// it reads crops from, and the `enclavid:vision/types` import (the `face`).
+/// The `enclavid:face-age` plugin: its slot, `enclavid-ext:face-age/models`,
+/// hands out MiVOLO as `age`, whose graph and data file a composition names as
+/// the layers `age.onnx` and `age.onnx.data`. It has no texts, so embedding
+/// adds nothing.
 pub fn face_age() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
@@ -126,49 +123,9 @@ pub fn face_age() -> &'static [u8] {
         .as_slice()
 }
 
-/// The `enclavid:face-age` plugin built as the artifact whose model the host
-/// runs (`--features mivolo`): its `with-models` world imports its slot,
-/// `enclavid-ext:face-age/models`, whose `age` is MiVOLO. The model is not in
-/// it: a composition names its graph and data file as the layers `age.onnx`
-/// and `age.onnx.data`. Built in a target directory of its own, so it and the
-/// default build never stand in for each other.
-pub fn face_age_mivolo() -> &'static [u8] {
-    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-    COMPONENT
-        .get_or_init(|| {
-            let dir = plugin_dir("face-age");
-            let target = format!("{}/../plugins/target/mivolo", env!("CARGO_MANIFEST_DIR"));
-            let module = format!("{target}/wasm32-unknown-unknown/release/face_age.wasm");
-            crate::embed_sections(
-                crate::build_componentized_with(&dir, &["mivolo"], &target, &module)
-                    .expect("build_componentized_with"),
-                &dir,
-                Role::Plugin,
-            )
-            .expect("the catalogs embed")
-        })
-        .as_slice()
-}
-
-/// The `enclavid:vision` plugin — types alone: it exports
-/// `enclavid:vision/types`, the face geometry; no texts.
-pub fn vision() -> &'static [u8] {
-    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-    COMPONENT
-        .get_or_init(|| {
-            build(
-                plugin_dir("vision"),
-                shared_plugin_module("vision"),
-                Role::Plugin,
-            )
-        })
-        .as_slice()
-}
-
-/// The `enclavid:face-detect` plugin — reads the host's image, imports
-/// `enclavid:vision/types` (the `face` it gives) and exports `detect`; no
-/// texts.
-/// The default build is the weightless placeholder (whole frame as the face).
+/// The `enclavid:face-detect` plugin: its slot,
+/// `enclavid-ext:face-detect/models`, hands out BlazeFace as `detector`, whose
+/// graph a composition names as the layer `detector.onnx`. No texts.
 pub fn face_detect() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
@@ -182,34 +139,10 @@ pub fn face_detect() -> &'static [u8] {
         .as_slice()
 }
 
-/// The `enclavid:face-detect` plugin built as the artifact whose detector the
-/// host runs (`--features blazeface`): its `with-models` world imports its
-/// slot, `enclavid-ext:face-detect/models`, whose `detector` is BlazeFace. The
-/// model is not in it: a composition names its graph as the layer
-/// `detector.onnx`. Built in a target directory of its own, so it and the
-/// default build never stand in for each other.
-pub fn face_detect_blazeface() -> &'static [u8] {
-    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-    COMPONENT
-        .get_or_init(|| {
-            let dir = plugin_dir("face-detect");
-            let target = format!("{}/../plugins/target/blazeface", env!("CARGO_MANIFEST_DIR"));
-            let module = format!("{target}/wasm32-unknown-unknown/release/face_detect.wasm");
-            crate::embed_sections(
-                crate::build_componentized_with(&dir, &["blazeface"], &target, &module)
-                    .expect("build_componentized_with"),
-                &dir,
-                Role::Plugin,
-            )
-            .expect("the catalogs embed")
-        })
-        .as_slice()
-}
-
-/// The `enclavid:face-liveness` plugin — reads the host's pictures, imports
-/// `enclavid:vision/types` (the `face` it is given) and exports `types`,
-/// `image` and `video`; no texts. The default build is the weightless
-/// placeholder (a score from the face's brightness).
+/// The `enclavid:face-liveness` plugin: its slot,
+/// `enclavid-ext:face-liveness/models`, hands out MiniFASNet as
+/// `minifasnet-v2` and `minifasnet-v1se`, whose graphs a composition names as
+/// the layers `minifasnet-v2.onnx` and `minifasnet-v1se.onnx`. No texts.
 pub fn face_liveness() -> &'static [u8] {
     static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
     COMPONENT
@@ -219,34 +152,6 @@ pub fn face_liveness() -> &'static [u8] {
                 shared_plugin_module("face_liveness"),
                 Role::Plugin,
             )
-        })
-        .as_slice()
-}
-
-/// The `enclavid:face-liveness` plugin built as the artifact whose models the
-/// host runs (`--features minifasnet`): its `with-models` world imports its
-/// slot, `enclavid-ext:face-liveness/models`, whose `minifasnet-v2` and
-/// `minifasnet-v1se` are MiniFASNet. The models are not in it: a composition
-/// names their graphs as the layers `minifasnet-v2.onnx` and
-/// `minifasnet-v1se.onnx`. Built in a target directory of its own, so it and
-/// the default build never stand in for each other.
-pub fn face_liveness_minifasnet() -> &'static [u8] {
-    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-    COMPONENT
-        .get_or_init(|| {
-            let dir = plugin_dir("face-liveness");
-            let target = format!(
-                "{}/../plugins/target/minifasnet",
-                env!("CARGO_MANIFEST_DIR")
-            );
-            let module = format!("{target}/wasm32-unknown-unknown/release/face_liveness.wasm");
-            crate::embed_sections(
-                crate::build_componentized_with(&dir, &["minifasnet"], &target, &module)
-                    .expect("build_componentized_with"),
-                &dir,
-                Role::Plugin,
-            )
-            .expect("the catalogs embed")
         })
         .as_slice()
 }
@@ -265,10 +170,45 @@ pub fn test_models() -> &'static [u8] {
         .as_slice()
 }
 
+/// A member of `test-faces`, one of the face plugins as the tests run them:
+/// its contract implemented with no model. It has no texts, so it is
+/// componentized and not embedded.
+fn test_face(member: &str, module: &str) -> Vec<u8> {
+    let workspace = fixture_dir("test-faces");
+    let module = format!("{workspace}/target/wasm32-unknown-unknown/release/{module}.wasm");
+    crate::build_componentized(&format!("{workspace}/{member}"), &module)
+        .expect("build_componentized")
+}
+
+/// face-detect with no model: the whole frame is the face.
+pub fn test_face_detect() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| test_face("face-detect", "test_face_detect"))
+        .as_slice()
+}
+
+/// face-age with no model: an age from the face's brightness, 30 for gray.
+pub fn test_face_age() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| test_face("face-age", "test_face_age"))
+        .as_slice()
+}
+
+/// face-liveness with no model: a score from the face's brightness, about a
+/// half for gray.
+pub fn test_face_liveness() -> &'static [u8] {
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| test_face("face-liveness", "test_face_liveness"))
+        .as_slice()
+}
+
 /// Every plugin the policy imports, as `(package id, component wasm)`. All must
 /// be present in a composition, since the policy calls into each — well-known
 /// for specs/DF, extra for the requester tag, and the face plugins on the
-/// selfie round.
+/// selfie round, as `test-faces` implements them.
 ///
 /// Pairs rather than `PluginInstance`, so this build tool keeps no dependency on
 /// the engine's wire types; each caller maps them in a line.
@@ -276,9 +216,8 @@ pub fn all_plugins() -> Vec<(&'static str, &'static [u8])> {
     vec![
         (WELL_KNOWN_PACKAGE, well_known()),
         (EXTRA_PACKAGE, extra()),
-        (VISION_PACKAGE, vision()),
-        (FACE_DETECT_PACKAGE, face_detect()),
-        (FACE_AGE_PACKAGE, face_age()),
-        (FACE_LIVENESS_PACKAGE, face_liveness()),
+        (FACE_DETECT_PACKAGE, test_face_detect()),
+        (FACE_AGE_PACKAGE, test_face_age()),
+        (FACE_LIVENESS_PACKAGE, test_face_liveness()),
     ]
 }

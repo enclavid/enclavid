@@ -3,13 +3,13 @@ package local:policy@0.1.0;
 // What this policy imports and exports. Every interface imported here is
 // the policy's own, the host's, or a plugin's; the consumer pins an
 // implementation of each plugin package (here `enclavid:well-known`,
-// `enclavid:vision`, `enclavid:face-detect` and `enclavid:face-age`) when it
-// creates a session.
+// `enclavid:face-detect` and `enclavid:face-age`) when it creates a session.
 world policy {
     // The selfie's capture spec.
     import enclavid:well-known/photo@0.1.0;
     // The face read in the selfie's image against the guide it was taken to,
-    // and the age read from it; the face's geometry is `enclavid:vision`'s.
+    // and the age read from it; face-age takes the face as face-detect gives
+    // it.
     import enclavid:face-detect/photo@0.1.0;
     import enclavid:face-age/image@0.1.0;
     import enclavid-ext:policy/props@0.1.0;

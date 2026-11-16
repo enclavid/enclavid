@@ -5,25 +5,19 @@
 //! profile wants, and holds only the model-specific adapter: input format
 //! (size, channel order, normalization), which model, and output decode.
 //!
-//! Profile selection is compile-time:
-//!   * default → [`placeholder`]: no model, an age from the crop's brightness
-//!     (dev/tests).
-//!   * `--features mivolo` → [`mivolo`]: MiVOLO, run by the host from the
-//!     model files beside this component (384² letterboxed RGB,
-//!     ImageNet-normalized, the face beside an empty body).
+//! The profile is [`mivolo`]: MiVOLO, run by the host from the model files
+//! beside this component (384² letterboxed RGB, ImageNet-normalized, the face
+//! beside an empty body).
 
-#[cfg(feature = "mivolo")]
 use mivolo as profile;
-#[cfg(not(feature = "mivolo"))]
-use placeholder as profile;
 
 /// Context margin the crop box is grown by (about its center) before the
 /// model sees it.
 pub const MARGIN: f32 = profile::MARGIN;
 
 /// The fewest of the picture's pixels the crop must span each way for the
-/// profile to read an age from it; `None` where it reads any.
-const MIN: Option<u32> = profile::MIN;
+/// profile to read an age from it.
+const MIN: u32 = profile::MIN;
 
 /// Estimate age (years) from the face crop `region` reads: a source rect of
 /// `crop` pixels, resampled to the size it is asked for, row-major RGB8 — or
@@ -31,42 +25,16 @@ const MIN: Option<u32> = profile::MIN;
 /// fewer than [`MIN`] pixels either way, its pixels then not read — or the
 /// model gives no age.
 pub fn estimate(crop: (u32, u32), region: impl FnOnce(u32, u32) -> Option<Vec<u8>>) -> Option<f32> {
-    if MIN.is_some_and(|min| crop.0 < min || crop.1 < min) {
+    if crop.0 < MIN || crop.1 < MIN {
         return None;
     }
     profile::estimate(crop, region)
 }
 
 // ---------------------------------------------------------------------
-// Profile: placeholder (default) — no model
+// Profile: MiVOLO, run by the host
 // ---------------------------------------------------------------------
 
-#[cfg(not(feature = "mivolo"))]
-mod placeholder {
-    /// The side the crop is read at: enough for a mean.
-    pub const SIDE: u32 = 8;
-    pub const MARGIN: f32 = 1.0;
-    /// A mean reads at any size.
-    pub const MIN: Option<u32> = None;
-
-    /// An age from the crop's mean brightness, from 0 for black to 60 for
-    /// white — so the pipeline runs end to end with no model, and a gray
-    /// frame reads 30.
-    pub fn estimate(
-        _crop: (u32, u32),
-        region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
-    ) -> Option<f32> {
-        let rgb = region(SIDE, SIDE)?;
-        let mean = rgb.iter().map(|&v| f32::from(v)).sum::<f32>() / rgb.len().max(1) as f32;
-        Some(mean / 255.0 * 60.0)
-    }
-}
-
-// ---------------------------------------------------------------------
-// Profile: MiVOLO, run by the host (`--features mivolo`)
-// ---------------------------------------------------------------------
-
-#[cfg(feature = "mivolo")]
 mod mivolo {
     use crate::enclavid::host::tensors::TensorF32;
     use crate::enclavid_ext::face_age::models;
@@ -80,7 +48,7 @@ mod mivolo {
     /// reads an age from. A smaller one is blown up to the graph's side and
     /// read far off: a face of 42 read 17 at 13 pixels and 31 at 23, and 38
     /// to 44 from 48 up — a margin above that for a real camera's blur.
-    pub const MIN: Option<u32> = Some(64);
+    pub const MIN: u32 = 64;
     /// ImageNet's per-channel mean and spread, RGB, over values in `[0, 1]`.
     const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
     const STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -135,7 +103,7 @@ mod mivolo {
         let mut chw = vec![0f32; 6 * plane];
         for c in 0..3 {
             let (face_plane, body_plane) = (c * plane, (3 + c) * plane);
-            for (i, pixel) in face.chunks_exact(3).enumerate() {
+            for (i, pixel) in face.as_chunks::<3>().0.iter().enumerate() {
                 chw[face_plane + i] = (pixel[c] as f32 / 255.0 - MEAN[c]) / STD[c];
             }
             chw[body_plane..body_plane + plane].fill((0.0 - MEAN[c]) / STD[c]);
@@ -152,25 +120,9 @@ mod mivolo {
 
 #[cfg(test)]
 mod tests {
-    // The placeholder reads a gray crop as 30, at the size it asks for. Run
-    // native:
-    //   cargo test -p face-age --target aarch64-apple-darwin
-    #[cfg(not(feature = "mivolo"))]
-    #[test]
-    fn the_placeholder_reads_gray_as_thirty() {
-        use super::{estimate, profile};
-        let age = estimate((300, 300), |w, h| {
-            assert_eq!((w, h), (profile::SIDE, profile::SIDE));
-            Some(vec![128u8; (w * h * 3) as usize])
-        })
-        .expect("estimate");
-        assert!((age - 30.1).abs() < 0.1, "{age}");
-    }
-
     // The MiVOLO profile's shaping, native — the model itself runs on the
     // host:
-    //   cargo test -p face-age --features mivolo --target aarch64-apple-darwin
-    #[cfg(feature = "mivolo")]
+    //   cargo test -p face-age --target aarch64-apple-darwin
     mod mivolo {
         use super::super::estimate;
         use super::super::mivolo::{MIN, SIDE, decode, fit, input, letterbox};
@@ -179,7 +131,7 @@ mod tests {
         /// way gives no age, its pixels not asked for.
         #[test]
         fn a_face_too_small_gives_no_age() {
-            let small = MIN.expect("a minimum") - 1;
+            let small = MIN - 1;
             assert_eq!(
                 estimate((small, 300), |_, _| unreachable!("no pixels read")),
                 None

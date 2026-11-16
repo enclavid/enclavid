@@ -3,4 +3,4 @@
 "enclavid:host-capture" = { path = "../../wit/host-capture" }
 "enclavid:host-disclosure" = { path = "../../wit/host-disclosure" }
 "enclavid:host-icons" = { path = "../../wit/host-icons" }
-"enclavid-ext:well-known" = { path = "ext" }
+"enclavid:well-known" = { path = "wit-public" }

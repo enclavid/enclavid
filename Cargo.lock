@@ -7160,6 +7160,7 @@ dependencies = [
  "clap",
  "enclavid-embedded",
  "wit-component 0.258.3",
+ "wit-parser 0.258.3",
 ]
 
 [[package]]

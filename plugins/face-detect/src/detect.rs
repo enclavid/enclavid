@@ -1,22 +1,16 @@
 //! Face-detection logic — the per-model profile: how the frame is shaped for
 //! the detector, which detector, and how its answer maps back onto the frame.
-//! The plugin hands a profile the frame's size and a `region` that reads the
+//! The plugin hands the profile the frame's size and a `region` that reads the
 //! whole frame, resampled to the size it is asked for — or nothing, where the
 //! frame does not decode; the profile returns an internal [`Detection`] for
 //! each face, which [`crate`]'s WIT glue maps to the shared `face`.
 //! Bindgen-free but for the model the host runs.
 //!
-//! Profile selection is compile-time:
-//!   * default → [`placeholder`]: whole frame as the "face", no model
-//!     (dev/tests).
-//!   * `--features blazeface` → [`blazeface`]: MediaPipe BlazeFace (short
-//!     range, 128², RGB `[-1,1]`), run by the host from the model file beside
-//!     this component; its graph does the anchor decoding, sigmoid and NMS.
+//! The profile is [`blazeface`]: MediaPipe BlazeFace (short range, 128², RGB
+//! `[-1,1]`), run by the host from the model file beside this component; its
+//! graph does the anchor decoding, sigmoid and NMS.
 
-#[cfg(feature = "blazeface")]
 use blazeface as profile;
-#[cfg(not(feature = "blazeface"))]
-use placeholder as profile;
 
 /// A detected face, in the frame's pixels; past its edges where the face is.
 #[derive(Clone, Debug, PartialEq)]
@@ -39,32 +33,9 @@ pub fn detect_all(
 }
 
 // ---------------------------------------------------------------------
-// Profile: placeholder (default) — no model, whole frame as the face
+// Profile: BlazeFace, run by the host
 // ---------------------------------------------------------------------
 
-#[cfg(not(feature = "blazeface"))]
-mod placeholder {
-    use super::Detection;
-
-    /// The whole frame as the "face", so the pipeline runs weightless —
-    /// cropping the full box reproduces a centered square crop. The pixels
-    /// are not read.
-    pub fn detect_all(
-        (w, h): (u32, u32),
-        _region: impl FnOnce(u32, u32) -> Option<Vec<u8>>,
-    ) -> Vec<Detection> {
-        vec![Detection {
-            bbox: [0.0, 0.0, w as f32, h as f32],
-            landmarks: Vec::new(),
-        }]
-    }
-}
-
-// ---------------------------------------------------------------------
-// Profile: BlazeFace, run by the host (`--features blazeface`)
-// ---------------------------------------------------------------------
-
-#[cfg(feature = "blazeface")]
 mod blazeface {
     use super::Detection;
     use crate::enclavid::host::tensors::{TensorF32, TensorI64};
@@ -102,7 +73,7 @@ mod blazeface {
             )
             .data();
         // A row for each face the graph keeps, the largest first.
-        let mut rows: Vec<&[f32]> = data.chunks_exact(ROW).collect();
+        let mut rows: Vec<&[f32; ROW]> = data.as_chunks().0.iter().collect();
         rows.sort_by(|a, b| area(b).total_cmp(&area(a)));
         rows.into_iter().map(|row| fit.detection(row)).collect()
     }
@@ -168,8 +139,10 @@ mod blazeface {
             Detection {
                 bbox: [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)],
                 landmarks: row[4..ROW]
-                    .chunks_exact(2)
-                    .map(|p| (x(p[0]), y(p[1])))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&[px, py]| (x(px), y(py)))
                     .collect(),
             }
         }
@@ -183,7 +156,7 @@ mod blazeface {
     pub(super) fn input(square: &[u8]) -> Vec<f32> {
         let plane = (SIDE * SIDE) as usize;
         let mut chw = vec![0f32; 3 * plane];
-        for (i, pixel) in square.chunks_exact(3).enumerate() {
+        for (i, pixel) in square.as_chunks::<3>().0.iter().enumerate() {
             for (c, &value) in pixel.iter().enumerate() {
                 chw[c * plane + i] = value as f32 / 127.5 - 1.0;
             }
@@ -192,26 +165,15 @@ mod blazeface {
     }
 
     /// A row's box area, over the square.
-    fn area(row: &[f32]) -> f32 {
+    fn area(row: &[f32; ROW]) -> f32 {
         (row[3] - row[1]).max(0.0) * (row[2] - row[0]).max(0.0)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // The placeholder boxes the whole frame and reads no pixels. Run native:
-    //   cargo test -p face-detect --target aarch64-apple-darwin
-    #[cfg(not(feature = "blazeface"))]
-    #[test]
-    fn the_placeholder_boxes_the_whole_frame() {
-        let found = super::detect_all((64, 48), |_, _| unreachable!("no pixels read"));
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].bbox, [0.0, 0.0, 64.0, 48.0]);
-    }
-
     // BlazeFace's shaping, native — the model itself runs on the host:
-    //   cargo test -p face-detect --features blazeface --target aarch64-apple-darwin
-    #[cfg(feature = "blazeface")]
+    //   cargo test -p face-detect --target aarch64-apple-darwin
     mod blazeface {
         use super::super::blazeface::{Fit, SIDE, input};
 

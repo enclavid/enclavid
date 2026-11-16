@@ -30,6 +30,20 @@ wit_bindgen::generate!({
     // package dir is the single resolution root.
     path: "wit",
     world: "enclavid:test-policy/policy@0.1.0",
+    // face-age and face-liveness take the face as face-detect gives it, the
+    // same records in their own packages: bound to face-detect's, so the
+    // policy hands a face over as it is.
+    with: {
+        "enclavid:face-age/types@0.1.0/bounding-box": crate::enclavid::face_detect::types::BoundingBox,
+        "enclavid:face-age/types@0.1.0/point": crate::enclavid::face_detect::types::Point,
+        "enclavid:face-age/types@0.1.0/keypoints": crate::enclavid::face_detect::types::Keypoints,
+        "enclavid:face-age/types@0.1.0/face": crate::enclavid::face_detect::types::Face,
+        "enclavid:face-liveness/types@0.1.0/bounding-box": crate::enclavid::face_detect::types::BoundingBox,
+        "enclavid:face-liveness/types@0.1.0/point": crate::enclavid::face_detect::types::Point,
+        "enclavid:face-liveness/types@0.1.0/keypoints": crate::enclavid::face_detect::types::Keypoints,
+        "enclavid:face-liveness/types@0.1.0/face": crate::enclavid::face_detect::types::Face,
+        "enclavid:face-liveness/types@0.1.0/frame-face": crate::enclavid::face_detect::types::FrameFace,
+    },
     generate_all,
 });
 
@@ -61,10 +75,10 @@ use enclavid::face_age::image as face_age;
 use enclavid::face_detect::detect as face_detect;
 // The face-liveness plugin, on a probe: whether the selfie's face is live, or
 // the faces of a video's frames.
+use enclavid::face_detect::types::FrameFace;
 use enclavid::face_liveness::image as face_liveness_image;
 use enclavid::face_liveness::types::LivenessEstimate;
 use enclavid::face_liveness::video as face_liveness_video;
-use enclavid::vision::types::FrameFace;
 use exports::enclavid::policy::policy::Guest;
 
 struct TestPolicy;

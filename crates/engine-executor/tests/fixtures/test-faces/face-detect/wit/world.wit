@@ -1,0 +1,8 @@
+package test:face-detect@0.1.0;
+
+/// face-detect with no model: the whole frame is the face.
+world implementation {
+    import enclavid:host/media@0.1.0;
+    export enclavid:face-detect/types@0.1.0;
+    export enclavid:face-detect/detect@0.1.0;
+}

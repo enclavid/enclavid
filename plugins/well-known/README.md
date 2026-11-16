@@ -78,18 +78,18 @@ package enclavid-ext:policy@0.1.0 {
 }
 ```
 
-Its WIT is two packages: `enclavid:well-known` (`wit/`), the helpers,
-and `enclavid-ext:well-known` (`ext/`), its texts. A policy vendors
-both.
+Its WIT is two packages: `enclavid:well-known` (`wit-public/`), the
+helpers, and `enclavid-ext:well-known` (`wit/`), its texts and the world
+it is built as. A policy vendors the first alone.
 
 ## OCI artifacts
 
 Plugin is published as **two separate OCI artifacts** following the
 two-artifact pattern:
 
-- **WIT packages** — `enclavid:well-known@0.1.0` and its slot,
-  `enclavid-ext:well-known@0.1.0`. Interface contracts only. Consumed
-  by `wkg wit fetch` at policy build time.
+- **WIT package** — `enclavid:well-known@0.1.0`, the interface contract
+  only. Consumed by `wkg wit fetch` at policy build time. Its slot is the
+  implementation's own, and is not published.
 - **Component** — `enclavid/plugins/well-known:0.1.0`. The wasm
   implementation. Referenced by policy lockfile, pulled by TEE at
   runtime.
@@ -116,14 +116,12 @@ wasm-tools component new \
     target/wasm32-unknown-unknown/release/well_known.wasm \
     -o target/well-known.component.wasm
 
-# 4. Publish the WIT packages (interface contracts, for `wkg wit
-#    fetch`): the helpers, and the texts in the plugin's slot, which the
-#    helpers' world imports.
-wkg wit build --wit-dir wit -o target/well-known-wit.wasm
-wkg wit build --wit-dir ext -o target/well-known-ext-wit.wasm
+# 4. Publish the WIT package (the interface contract, for `wkg wit
+#    fetch`): `wit-public/` alone. wkg builds a package where no
+#    `wkg.toml` overrides that same package, so from inside it.
+(cd wit-public && wkg wit build -d . -o ../target/well-known-wit.wasm)
 wkg publish target/well-known-wit.wasm
-wkg publish target/well-known-ext-wit.wasm
-# → enclavid:well-known@0.1.0, enclavid-ext:well-known@0.1.0 (WIT packages)
+# → enclavid:well-known@0.1.0 (WIT package)
 
 # 5. Embed the plugin's texts (`i18n/`), checked against the keys of
 #    its slot's `i18n` — `enclavid-ext:well-known`, named for its
@@ -147,9 +145,9 @@ enclavid oci push target/well-known.embedded.wasm \
 
 The component (steps 3–5) ships as a single `application/wasm` OCI
 layer, integrity-pinned by digest; the TEE re-verifies the layer digest
-on pull. Step 4's `wkg publish` of the WIT *packages* is separate — it
-publishes the interface contracts so policies / other plugins can `wkg
-wit fetch` them; it does not ship the implementation.
+on pull. Step 4's `wkg publish` of the WIT *package* is separate — it
+publishes the interface contract so policies / other plugins can `wkg
+wit fetch` it; it does not ship the implementation.
 
 ## Capture settings (baked in by each helper)
 

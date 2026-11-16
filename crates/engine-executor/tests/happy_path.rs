@@ -192,7 +192,7 @@ impl MediaStore for CountingMediaStore {
     }
 }
 
-/// The plugins the policy imports — well-known + extra + the vision trio. All
+/// The plugins the policy imports — well-known + extra + the face plugins. All
 /// must be present in every composition, since the policy calls into each.
 /// Built by [`xtask::fixtures`], shared with `engine-executor-child`'s
 /// child-process test.
@@ -573,11 +573,11 @@ async fn passport_selfie_consent_accept_reaches_approved_over_the_rendered_field
     listener.finished_with(Decision::Approved);
 }
 
-/// The selfie round on vendors' models as they ship them: face-detect built
-/// `--features blazeface` hands the frame to its slot's model `detector`,
-/// whose graph is the layer `detector.onnx`, and face-age built `--features
-/// mivolo` hands the face found to its slot's model `age`, whose graph and data
-/// file are the layers `age.onnx` and `age.onnx.data`. The compile pairs each
+/// The selfie round on vendors' models as they ship them, the published
+/// plugins in place of `test-faces`': face-detect hands the frame to its slot's
+/// model `detector`, whose graph is the layer `detector.onnx`, and face-age
+/// hands the face found to its slot's model `age`, whose graph and data file
+/// are the layers `age.onnx` and `age.onnx.data`. The compile pairs each
 /// with its files. A frame with no face ends its round on the detector alone,
 /// asking for a retake; a photo of a face reaches MiVOLO, and its estimate the
 /// consent screen. Neither the models, the coprocess nor the photo is in the
@@ -608,10 +608,10 @@ async fn the_selfie_age_is_read_by_vendor_models() {
     let mut plugins = all_plugins();
     for plugin in &mut plugins {
         if plugin.package == fixtures::FACE_DETECT_PACKAGE {
-            plugin.wasm = fixtures::face_detect_blazeface().to_vec();
+            plugin.wasm = fixtures::face_detect().to_vec();
             plugin.model_layers = vec![layer("detector.onnx", &detector, 1)];
         } else if plugin.package == fixtures::FACE_AGE_PACKAGE {
-            plugin.wasm = fixtures::face_age_mivolo().to_vec();
+            plugin.wasm = fixtures::face_age().to_vec();
             plugin.model_layers = vec![
                 layer("age.onnx", &graph, 2),
                 layer("age.onnx.data", &data, 3),
@@ -877,8 +877,8 @@ async fn probe_liveness(h: &Harness, selfie: MediaResult) -> (RunStatus, Session
 }
 
 /// The selfie's face reaches face-liveness through its `image` interface, and
-/// its score the policy: the placeholder's, from the face's brightness — the
-/// whole mid-gray frame, about a half.
+/// its score the policy: `test-faces`', from the face's brightness — the whole
+/// mid-gray frame, about a half.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_selfies_liveness_reaches_the_policy() {
     let (status, session) = probe_liveness(&Harness::new(), fake_capture()).await;
@@ -908,9 +908,9 @@ async fn a_videos_liveness_reaches_the_policy() {
     assert!((0.0..=1.0).contains(&live), "{live}");
 }
 
-/// The selfie's face on MiniFASNet as the plugin ships it: face-detect built
-/// `--features blazeface` finds the face, and face-liveness built `--features
-/// minifasnet` hands its crops to its slot's models `minifasnet-v2` and
+/// The selfie's face on MiniFASNet as the plugin ships it, the published
+/// plugins in place of `test-faces`': face-detect finds the face, and
+/// face-liveness hands its crops to its slot's models `minifasnet-v2` and
 /// `minifasnet-v1se`, whose graphs are the layers `minifasnet-v2.onnx` and
 /// `minifasnet-v1se.onnx`. The original repository's own samples read as there:
 /// its live face live, its printed one not. Neither the models, the coprocess
@@ -943,10 +943,10 @@ async fn the_selfies_liveness_is_read_by_vendor_models() {
     let mut plugins = all_plugins();
     for plugin in &mut plugins {
         if plugin.package == fixtures::FACE_DETECT_PACKAGE {
-            plugin.wasm = fixtures::face_detect_blazeface().to_vec();
+            plugin.wasm = fixtures::face_detect().to_vec();
             plugin.model_layers = vec![layer("detector.onnx", &detector, 1)];
         } else if plugin.package == fixtures::FACE_LIVENESS_PACKAGE {
-            plugin.wasm = fixtures::face_liveness_minifasnet().to_vec();
+            plugin.wasm = fixtures::face_liveness().to_vec();
             plugin.model_layers = vec![
                 layer("minifasnet-v2.onnx", &v2, 2),
                 layer("minifasnet-v1se.onnx", &v1se, 3),
@@ -1274,7 +1274,7 @@ async fn a_passport_without_a_photo_is_retryable() {
 }
 
 #[tokio::test]
-async fn an_empty_selfie_is_retryable_via_plugin() {
+async fn an_empty_selfie_is_retryable() {
     let h = Harness::new();
     let listener = Arc::new(PersistListener::default());
 
@@ -1287,19 +1287,15 @@ async fn an_empty_selfie_is_retryable_via_plugin() {
         .await;
     assert_media(&status, "passport → selfie");
 
-    // Feed a selfie photo of ZERO bytes. On the selfie round the policy hands
-    // it to the FUSED vision plugin, which cannot decode it; the policy maps
-    // that to a retryable rejection. Proves the plugin was invoked across the
-    // fused boundary during `handle` and actually read the blob resource —
-    // the full capture-consumer path, not just the policy-side read.
+    // Feed a selfie photo of ZERO bytes. On the selfie round the host cannot
+    // decode it, so the photo has no image; the policy maps that to a
+    // retryable rejection.
     let (status, _session) = h
         .run(session, Event::Media(capture_of(Vec::new())), &listener)
         .await;
     match status {
         RunStatus::Completed(Decision::RejectedRetryable) => {}
-        _ => {
-            panic!("an empty selfie must yield Completed(RejectedRetryable) via the vision plugin")
-        }
+        _ => panic!("an empty selfie must yield Completed(RejectedRetryable)"),
     }
 }
 
@@ -1440,7 +1436,7 @@ async fn static_fused_artifact_resolves_strictly() {
 
     // The slots survive the fusion as distinct imports, one per slot:
     // policy + well-known + extra = 3, each imported by its own component
-    // alone. The vision plugins have no texts, so they import none, and icons
+    // alone. The face plugins have no texts, so they import none, and icons
     // are the host's own.
     let imports = engine_compiler::top_level_imports(&fused).unwrap();
     let mut slots: Vec<&str> = imports
@@ -1593,23 +1589,18 @@ async fn hybrid_core_plus_runtime_plugin_resolves_strictly() {
             model_layers: Vec::new(),
         },
         PluginInstance {
-            package: fixtures::VISION_PACKAGE.to_string(),
-            wasm: fixtures::vision().to_vec(),
-            model_layers: Vec::new(),
-        },
-        PluginInstance {
             package: fixtures::FACE_DETECT_PACKAGE.to_string(),
-            wasm: fixtures::face_detect().to_vec(),
+            wasm: fixtures::test_face_detect().to_vec(),
             model_layers: Vec::new(),
         },
         PluginInstance {
             package: fixtures::FACE_AGE_PACKAGE.to_string(),
-            wasm: fixtures::face_age().to_vec(),
+            wasm: fixtures::test_face_age().to_vec(),
             model_layers: Vec::new(),
         },
         PluginInstance {
             package: fixtures::FACE_LIVENESS_PACKAGE.to_string(),
-            wasm: fixtures::face_liveness().to_vec(),
+            wasm: fixtures::test_face_liveness().to_vec(),
             model_layers: Vec::new(),
         },
     ];
@@ -1829,9 +1820,9 @@ fn assert_media(status: &RunStatus, ctx: &str) {
 }
 
 /// A single-step fake capture result (both passport and selfie specs are
-/// one photo step). The photo is a REAL encoded JPEG so the in-sandbox
-/// decode → detect → estimate pipeline (run on the selfie round) has
-/// something to decode.
+/// one photo step). The photo is a REAL encoded JPEG so the host's decode →
+/// detect → estimate pipeline (run on the selfie round) has something to
+/// decode.
 fn fake_capture() -> MediaResult {
     capture_of(jpeg_frame())
 }

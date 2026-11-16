@@ -5,6 +5,7 @@ package enclavid:policy@0.1.0;
 /// behavioural `policy` interface (WASI-style types-vs-behaviour split)
 /// so helper plugins can `use` the records without importing the `handle`
 /// export.
+@since(version = 0.1.0)
 interface types {
   use enclavid:host-capture/capture@0.1.0.{media-spec};
   use enclavid:host-capture/photo@0.1.0.{guide as photo-guide};
@@ -18,6 +19,7 @@ interface types {
   /// reads it from the session unconditionally: no consent screen stands
   /// before it, so it is the one thing the policy hands the consumer
   /// without the applicant's accept.
+  @since(version = 0.1.0)
   enum decision {
     approved,
     rejected,
@@ -27,6 +29,7 @@ interface types {
 
   /// One consent-and-disclosure: the consent screen the applicant is
   /// shown, and what leaves to the consumer if they accept.
+  @since(version = 0.1.0)
   record disclosure {
     /// BOTH what the applicant is shown on the consent screen AND — if
     /// they accept — the exact set the runtime seals to the consumer.
@@ -42,6 +45,7 @@ interface types {
 
   /// What the runtime renders to the applicant. Its reply comes back as
   /// the matching `event` on a later turn.
+  @since(version = 0.1.0)
   variant prompt {
     /// Capture one artifact; the reply is `event::media`.
     media(media-spec),
@@ -52,6 +56,7 @@ interface types {
 
   /// Where the page saw one guide of a video step held, by frame index into
   /// the video.
+  @since(version = 0.1.0)
   record frame-range {
     /// The guide the step asked for, copied by the runtime from the
     /// prompt.
@@ -65,6 +70,7 @@ interface types {
   }
 
   /// A photo step's capture.
+  @since(version = 0.1.0)
   record photo-capture {
     /// The applicant's photo: the one they kept on the review screen,
     /// where the step has one.
@@ -75,6 +81,7 @@ interface types {
   }
 
   /// A video step's capture.
+  @since(version = 0.1.0)
   record video-capture {
     /// The applicant's video.
     video: video,
@@ -88,6 +95,7 @@ interface types {
   /// One capture step's capture, of the kind the step asked for, held by
   /// the host: the policy is a pure router, forwarding it to a verification
   /// plugin, which reads what it needs.
+  @since(version = 0.1.0)
   variant capture {
     /// The photo, and the guide it was taken to.
     photo(photo-capture),
@@ -96,6 +104,7 @@ interface types {
   }
 
   /// Why a `prompt::media` was answered with no captures.
+  @since(version = 0.1.0)
   enum media-error {
     /// Its time limit ran out before every step was captured; none of its
     /// captures is kept.
@@ -104,6 +113,7 @@ interface types {
 
   /// INBOUND: the result of a prior `action`, fed by the runtime to
   /// `handle`, one per call.
+  @since(version = 0.1.0)
   variant event {
     /// Genesis: the session opened (props via `enclavid-ext:policy/props`).
     start,
@@ -122,6 +132,7 @@ interface types {
   /// runtime only on accept, so what the applicant audits is exactly what
   /// leaves. The `decision` in `finish` is the exception: the consumer
   /// learns it whatever the applicant accepted.
+  @since(version = 0.1.0)
   variant action {
     /// Result-producing: shown to the applicant, whose reply arrives as a
     /// future `event`.
@@ -134,9 +145,11 @@ interface types {
 /// The policy's behaviour. `handle` reacts to one `event` and returns a
 /// new opaque `state` plus an `action` for the runtime to perform. A pure
 /// function: the runtime owns the mailbox, persistence, and effects.
+@since(version = 0.1.0)
 interface policy {
   use types.{event, action};
 
+  @since(version = 0.1.0)
   handle: func(state: list<u8>, event: event) -> tuple<list<u8>, action>;
 }
 
