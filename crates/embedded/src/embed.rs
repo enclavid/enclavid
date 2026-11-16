@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use wasm_encoder::{ComponentSection, CustomSection};
-use wit_parser::{PackageId, Resolve, Span, TypeDefKind};
+use wit_parser::{PackageId, Resolve, Span, TypeDefKind, WorldKey};
 
 use crate::keys;
 use crate::{
@@ -101,7 +101,10 @@ impl Report {
 /// A project read and checked: what was found, and the sections it embeds.
 pub struct Checked {
     pub report: Report,
-    /// `namespace:name` of the world's package.
+    /// `namespace:name` of what the project is: a policy's world's package; a
+    /// plugin's contract, the packages whose interfaces its world exports,
+    /// which its world, in its slot's package, may include from another — or
+    /// its world's package where that exports none.
     pub package: String,
     /// The component's slot: its texts are served through
     /// `enclavid-ext:<slot>`.
@@ -273,9 +276,13 @@ pub fn check(project: &Project) -> Result<Checked> {
         })
         .expect("a list of strings serializes")
     });
+    let contract = exported(&resolve, package);
     Ok(Checked {
         report,
-        package: package_name,
+        package: match project.role {
+            Role::Plugin if !contract.is_empty() => contract.join(", "),
+            _ => package_name,
+        },
         slot,
         keys: keys.map(|keys| keys.into_iter().map(|(key, _)| key).collect()),
         languages: catalog.keys().cloned().collect(),
@@ -314,6 +321,28 @@ pub fn embed(component: &[u8], checked: &Checked) -> Result<Vec<u8>> {
         }
     }
     Ok(wasm)
+}
+
+/// The packages whose interfaces the worlds of `package` export, `namespace:name`
+/// each, in the order the worlds list them.
+fn exported(resolve: &Resolve, package: PackageId) -> Vec<String> {
+    let mut names = Vec::new();
+    for world in resolve.packages[package].worlds.values() {
+        for key in resolve.worlds[*world].exports.keys() {
+            let WorldKey::Interface(interface) = key else {
+                continue;
+            };
+            let Some(owner) = resolve.interfaces[*interface].package else {
+                continue;
+            };
+            let name = &resolve.packages[owner].name;
+            let name = format!("{}:{}", name.namespace, name.name);
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
 }
 
 /// The package of the slot `slot`, `enclavid-ext:<slot>`, when the WIT has it.
