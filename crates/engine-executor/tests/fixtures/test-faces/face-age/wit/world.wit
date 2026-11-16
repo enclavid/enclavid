@@ -1,0 +1,8 @@
+package test:face-age@0.1.0;
+
+/// face-age with no model: an age from the face's brightness.
+world implementation {
+    import enclavid:host/media@0.1.0;
+    export enclavid:face-age/types@0.1.0;
+    export enclavid:face-age/image@0.1.0;
+}

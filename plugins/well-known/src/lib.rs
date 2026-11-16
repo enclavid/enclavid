@@ -11,7 +11,7 @@
 
 wit_bindgen::generate!({
     path: "wit",
-    world: "enclavid:well-known/well-known@0.1.0",
+    world: "enclavid-ext:well-known/with-texts@0.1.0",
     generate_all,
 });
 

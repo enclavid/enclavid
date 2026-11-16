@@ -1,0 +1,9 @@
+package test:face-liveness@0.1.0;
+
+/// face-liveness with no model: a score from the face's brightness.
+world implementation {
+    import enclavid:host/media@0.1.0;
+    export enclavid:face-liveness/types@0.1.0;
+    export enclavid:face-liveness/image@0.1.0;
+    export enclavid:face-liveness/video@0.1.0;
+}

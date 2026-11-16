@@ -24,8 +24,7 @@ enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
   exports. It shows no texts of its own — the selfie's are well-known's — and
   discloses no field, so it has neither `i18n/` nor a list of fields.
 - `wit/deps/` — the WIT it builds against: the platform's, and each plugin's
-  package. Well-known's package names the slot of its texts, so that comes
-  along too (`well-known-texts`); the policy does not import it.
+  package.
 
 ## Plugins
 
@@ -33,12 +32,13 @@ The consumer pins an implementation of each when it creates a session:
 
 - `enclavid:well-known` — the selfie's capture spec, with the face guide whose
   oval the page takes it in.
-- `enclavid:vision` — the face's geometry, which the face plugins share. The
-  selfie itself is decoded by the platform, into the image the face plugins
-  read their patches of.
 - `enclavid:face-detect` — reads the face against the guide the selfie was
   taken to: whether it fills the oval, the only face there, and where it is.
 - `enclavid:face-age` — reads the face's age.
+
+face-age takes the face as face-detect gives it: the same record, in its own
+package, so the policy hands it over as it is. The selfie itself is decoded by
+the platform, into the image the face plugins read their patches of.
 
 Which model reads the face is the implementation's, chosen by the pin. The
 repository's `plugins/README.md` says how the platform's are built and pushed.

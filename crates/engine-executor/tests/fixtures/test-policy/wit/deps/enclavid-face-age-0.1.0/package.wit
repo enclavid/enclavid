@@ -1,7 +1,8 @@
 package enclavid:face-age@0.1.0;
 
-/// What the estimate gives, in an interface of its own, so an estimate from
-/// another kind of capture can come as an interface beside `image`.
+/// What the estimate gives, and the face it reads, in an interface of its own,
+/// so an estimate from another kind of capture can come as an interface beside
+/// `image`.
 interface types {
   /// The estimator's read on a face: `age` in years, a FACT the policy
   /// acts on. The policy owns the threshold — and because a facial
@@ -15,6 +16,34 @@ interface types {
   record age-estimate {
     age: f32,
   }
+
+  /// A face as `enclavid:face-detect/types` gives it, which says what each
+  /// record means: the same records, so a policy hands a face found there
+  /// over as it is.
+  record bounding-box {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+  }
+
+  record point {
+    x: f32,
+    y: f32,
+  }
+
+  record keypoints {
+    right-eye: point,
+    left-eye: point,
+    nose-tip: point,
+    mouth: point,
+  }
+
+  record face {
+    bounding-box: bounding-box,
+    score: option<f32>,
+    keypoints: option<keypoints>,
+  }
 }
 
 /// Facial age estimation from a detected face in one picture.
@@ -26,8 +55,7 @@ interface types {
 /// on the artifact, never in this WIT package.
 interface image {
   use enclavid:host/media@0.1.0.{image};
-  use enclavid:vision/types@0.1.0.{face};
-  use types.{age-estimate};
+  use types.{face, age-estimate};
 
   /// Estimate the subject's age from the detected `face` in `image`. The
   /// plugin pulls its OWN crop (`face.bounding-box` grown by the model's
@@ -40,22 +68,6 @@ interface image {
 
 world face-age {
   import enclavid:host/media@0.1.0;
-  import enclavid:vision/types@0.1.0;
-
-  export types;
-  export image;
-}
-/// The world this implementation is built as, apart from `world.wit`, which a
-/// policy's project copies: its slot names the model it runs.
-/// An estimator whose model the host runs: the model's graph and its data
-/// file are layers beside the component — named for the function of its slot
-/// that hands the model out — and only the face crop leaves the sandbox, to
-/// that model, in a process of its own.
-world with-models {
-  import enclavid:host/tensors@0.1.0;
-  import enclavid-ext:face-age/models@0.1.0;
-  import enclavid:host/media@0.1.0;
-  import enclavid:vision/types@0.1.0;
 
   export types;
   export image;

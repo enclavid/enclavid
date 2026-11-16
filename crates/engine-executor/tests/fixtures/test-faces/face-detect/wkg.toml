@@ -1,0 +1,4 @@
+[overrides]
+"enclavid:host" = { path = "../../../../../../wit/host" }
+"enclavid:host-capture" = { path = "../../../../../../wit/host-capture" }
+"enclavid:face-detect" = { path = "../../../../../../plugins/face-detect/wit-public" }

@@ -5,17 +5,11 @@
 //! profile wants, and holds only the model-specific adapter: which crops,
 //! input format (size, channel order, range), which models, and output decode.
 //!
-//! Profile selection is compile-time:
-//!   * default → [`placeholder`]: no model, a score from the face's
-//!     brightness (dev/tests).
-//!   * `--features minifasnet` → [`minifasnet`]: MiniFASNet, run by the host
-//!     from the model files beside this component (two models, on crops at 2.7
-//!     and 4 times the face's box, 80² BGR from 0 to 255).
+//! The profile is [`minifasnet`]: MiniFASNet, run by the host from the model
+//! files beside this component (two models, on crops at 2.7 and 4 times the
+//! face's box, 80² BGR from 0 to 255).
 
-#[cfg(feature = "minifasnet")]
 use minifasnet as profile;
-#[cfg(not(feature = "minifasnet"))]
-use placeholder as profile;
 
 /// The profile's models, made once for the faces of one call; each reads
 /// whether a face is live with [`Models::estimate`]: how live the face boxed
@@ -34,59 +28,9 @@ pub type FaceBox = [f32; 4];
 pub type Crop = [u32; 4];
 
 // ---------------------------------------------------------------------
-// Profile: placeholder (default) — no model
+// Profile: MiniFASNet, run by the host
 // ---------------------------------------------------------------------
 
-#[cfg(not(feature = "minifasnet"))]
-mod placeholder {
-    use super::{Crop, FaceBox};
-
-    /// The side the face is read at: enough for a mean.
-    pub const SIDE: u32 = 8;
-
-    /// No model.
-    pub struct Models;
-
-    impl Models {
-        pub fn new() -> Self {
-            Models
-        }
-
-        /// A score from the face's mean brightness, from 0 for black to 1 for
-        /// white — so the pipeline runs end to end with no model, and a gray
-        /// frame reads about a half.
-        pub fn estimate(
-            &self,
-            size: (u32, u32),
-            face: FaceBox,
-            region: impl Fn(Crop, u32) -> Option<Vec<u8>>,
-        ) -> Option<f32> {
-            let rgb = region(covered(face, size)?, SIDE)?;
-            let mean = rgb.iter().map(|&v| f32::from(v)).sum::<f32>() / rgb.len().max(1) as f32;
-            Some(mean / 255.0)
-        }
-    }
-
-    /// The pixels `face` touches in a picture of `size`; `None` where it
-    /// touches none.
-    fn covered([x, y, w, h]: FaceBox, (width, height): (u32, u32)) -> Option<Crop> {
-        let span = |start: f32, length: f32, side: u32| {
-            let side = side as f32;
-            let from = start.floor().clamp(0.0, side);
-            let to = (start + length).ceil().clamp(0.0, side);
-            (to > from).then_some((from as u32, (to - from) as u32))
-        };
-        let (left, w) = span(x, w, width)?;
-        let (top, h) = span(y, h, height)?;
-        Some([left, top, w, h])
-    }
-}
-
-// ---------------------------------------------------------------------
-// Profile: MiniFASNet, run by the host (`--features minifasnet`)
-// ---------------------------------------------------------------------
-
-#[cfg(feature = "minifasnet")]
 mod minifasnet {
     use super::{Crop, FaceBox};
     use crate::enclavid::host::tensors::TensorF32;
@@ -211,7 +155,7 @@ mod minifasnet {
             return None;
         }
         let mut chw = vec![0f32; 3 * plane];
-        for (i, pixel) in rgb.chunks_exact(3).enumerate() {
+        for (i, pixel) in rgb.as_chunks::<3>().0.iter().enumerate() {
             for (c, &value) in pixel.iter().rev().enumerate() {
                 chw[c * plane + i] = f32::from(value);
             }
@@ -222,28 +166,9 @@ mod minifasnet {
 
 #[cfg(test)]
 mod tests {
-    // The placeholder reads a gray face as about a half, at the side it asks
-    // for. Run native:
-    //   cargo test -p face-liveness --target aarch64-apple-darwin
-    #[cfg(not(feature = "minifasnet"))]
-    #[test]
-    fn the_placeholder_reads_gray_as_a_half() {
-        use super::{Models, profile};
-        let face = [100.5, 50.25, 200.0, 220.0];
-        let live = Models::new()
-            .estimate((640, 480), face, |crop, side| {
-                assert_eq!(crop, [100, 50, 201, 221]);
-                assert_eq!(side, profile::SIDE);
-                Some(vec![128u8; (side * side * 3) as usize])
-            })
-            .expect("estimate");
-        assert!((live - 0.502).abs() < 0.001, "{live}");
-    }
-
     // The MiniFASNet profile's shaping, native — the models themselves run on
     // the host:
-    //   cargo test -p face-liveness --features minifasnet --target aarch64-apple-darwin
-    #[cfg(feature = "minifasnet")]
+    //   cargo test -p face-liveness --target aarch64-apple-darwin
     mod minifasnet {
         use super::super::minifasnet::{SIDE, enlarged, input, trained};
 

@@ -1,4 +1,3 @@
 [overrides]
 "enclavid:host" = { path = "../../wit/host" }
-"enclavid:vision" = { path = "../vision/wit" }
-"enclavid-ext:face-age" = { path = "ext" }
+"enclavid:face-age" = { path = "wit-public" }

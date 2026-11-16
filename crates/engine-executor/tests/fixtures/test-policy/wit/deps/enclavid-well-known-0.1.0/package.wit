@@ -137,7 +137,6 @@ interface video {
 
 world well-known {
   import enclavid:host/refs@0.1.0;
-  import enclavid-ext:well-known/i18n@0.1.0;
   import enclavid:host-icons/icons@0.1.0;
   import enclavid:host-disclosure/values@0.1.0;
   import enclavid:host-disclosure/disclosure@0.1.0;

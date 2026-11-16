@@ -64,8 +64,8 @@ localized("consent-reason");
 A text is shown as it is written: it takes no values.
 
 A plugin's texts are in its own slot, named for its package, and the policy
-may show them too: import the slot's `i18n`, with the plugin's WIT for it in
-`wit/deps/` (well-known's is `deps/well-known-texts/`):
+may show them too: import the slot's `i18n`, with a copy of its WIT in
+`wit/deps/` (well-known's is `wit/i18n.wit` in the plugin's directory):
 
 ```wit
 import enclavid-ext:well-known/i18n@0.1.0;

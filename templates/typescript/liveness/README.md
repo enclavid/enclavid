@@ -35,8 +35,7 @@ enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
   no texts of its own — the video's are well-known's — takes no props and
   discloses no field, so it has no slot.
 - `wit/deps/` — the WIT it builds against: the platform's, and each plugin's
-  package. Well-known's package names the slot of its texts, so that comes
-  along too (`well-known-texts`); the policy does not import it.
+  package.
 
 ## Plugins
 
@@ -45,14 +44,16 @@ The consumer pins an implementation of each when it creates a session:
 - `enclavid:well-known` — the guides of a check by turns, drawn from a seed
   the policy picks at random for each attempt, and the video step that asks
   them.
-- `enclavid:vision` — the face's geometry, which the face plugins share. The
-  video itself is decoded by the platform, into the frames the face plugins
-  read their patches of.
 - `enclavid:face-detect` — reads the face in the frames of each guide: whether
   it filled the oval and turned as asked, by the rules the page holds the
   guides to, and where it was. Its guides are copies of the platform's, so the
   policy hands them over as they are.
 - `enclavid:face-liveness` — how live the face held in the oval looks.
+
+face-liveness takes the faces as face-detect gives them: the same records, in
+its own package, so the policy hands them over as they are. The video itself
+is decoded by the platform, into the frames the face plugins read their
+patches of.
 
 Which model reads the face is the implementation's, chosen by the pin. The
 repository's `plugins/README.md` says how the platform's are built and pushed.

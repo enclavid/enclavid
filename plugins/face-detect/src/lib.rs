@@ -6,28 +6,20 @@
 //! Detection runs ONCE here; the pixels stay with the host (this plugin pulls
 //! the detector input via `image.pixels`), and only WHERE the face is (its box
 //! and keypoints, in the image's pixels) crosses the boundary — each consumer
-//! derives its own crop. The detector lives in [`detect`]: a compile-time
-//! profile. Default builds run the weightless placeholder (whole frame as the
-//! face); built with `blazeface`, MediaPipe's BlazeFace is run by the host from
-//! the model file beside this component. What the keypoints say of the head's
-//! pose is [`pose`]'s; where a face sits against a region, [`shape`]'s; how a
-//! picture or a video's frames follow a guide, [`hold`]'s, by the page's rules.
+//! derives its own crop. The detector lives in [`detect`]: MediaPipe's
+//! BlazeFace, run by the host from the model file beside this component. What
+//! the keypoints say of the head's pose is [`pose`]'s; where a face sits
+//! against a region, [`shape`]'s; how a picture or a video's frames follow a
+//! guide, [`hold`]'s, by the page's rules.
 
 mod detect;
 mod hold;
 mod pose;
 mod shape;
 
-#[cfg(not(feature = "blazeface"))]
 wit_bindgen::generate!({
     path: "wit",
-    world: "enclavid:face-detect/face-detect@0.1.0",
-    generate_all,
-});
-#[cfg(feature = "blazeface")]
-wit_bindgen::generate!({
-    path: "wit",
-    world: "enclavid:face-detect/with-models@0.1.0",
+    world: "enclavid-ext:face-detect/with-models@0.1.0",
     generate_all,
 });
 
@@ -35,10 +27,10 @@ use std::collections::HashMap;
 
 use enclavid::host::media::{Image, PixelsOptions, Resize, ResizeMode, Size, Video};
 use enclavid::host_capture::constants::oval_aspect;
-use enclavid::vision::types::{BoundingBox, Face, FrameFace, Keypoints, Point};
 use exports::enclavid::face_detect::detect::Guest as DetectGuest;
 use exports::enclavid::face_detect::photo::{self, Guest as PhotoGuest, Shape};
 use exports::enclavid::face_detect::pose::Guest as PoseGuest;
+use exports::enclavid::face_detect::types::{BoundingBox, Face, FrameFace, Keypoints, Point};
 use exports::enclavid::face_detect::video::{self, FrameRange, Guest as VideoGuest};
 
 use detect::Detection;

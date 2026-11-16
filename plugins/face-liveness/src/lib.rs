@@ -5,30 +5,22 @@
 //! image or video the policy hands on — the face-detect plugin locates the face
 //! (`face` geometry), and this plugin pulls its OWN crops from the picture (the
 //! face and what is around it, at its model's resolution, via `pixels`) and
-//! runs the models. Inference lives in [`infer`]: the per-model profile — a
-//! placeholder with no model, or, built with `minifasnet`, MiniFASNet run by
-//! the host from the model files beside this component. MiniFASNet reads
-//! single pictures, so a video's estimate is the mean of its frames'.
+//! runs the models. Inference lives in [`infer`]: the per-model profile,
+//! MiniFASNet run by the host from the model files beside this component.
+//! MiniFASNet reads single pictures, so a video's estimate is the mean of its
+//! frames'.
 
 mod infer;
 
-#[cfg(not(feature = "minifasnet"))]
 wit_bindgen::generate!({
     path: "wit",
-    world: "enclavid:face-liveness/face-liveness@0.1.0",
-    generate_all,
-});
-#[cfg(feature = "minifasnet")]
-wit_bindgen::generate!({
-    path: "wit",
-    world: "enclavid:face-liveness/with-models@0.1.0",
+    world: "enclavid-ext:face-liveness/with-models@0.1.0",
     generate_all,
 });
 
 use enclavid::host::media::{Image, PixelsOptions, Rect, Resize, ResizeMode, Size, Video};
-use enclavid::vision::types::{Face, FrameFace};
 use exports::enclavid::face_liveness::image::Guest as ImageGuest;
-use exports::enclavid::face_liveness::types::LivenessEstimate;
+use exports::enclavid::face_liveness::types::{Face, FrameFace, LivenessEstimate};
 use exports::enclavid::face_liveness::video::Guest as VideoGuest;
 
 struct FaceLiveness;

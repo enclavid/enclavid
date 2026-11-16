@@ -1,0 +1,10 @@
+# The face plugins as the engine's tests run them: each implements one plugin's
+# contract, `wit-public/` in its directory, with no model.
+[workspace]
+resolver = "2"
+members = ["face-detect", "face-age", "face-liveness"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
