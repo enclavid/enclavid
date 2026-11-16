@@ -13,8 +13,8 @@ let
 
   # system-manager, on its branch that tracks the images' nixpkgs release.
   system-manager = builtins.fetchTarball {
-    url = "https://github.com/numtide/system-manager/archive/185062bb39493a74599bb3cf7731ee0614cade9b.tar.gz";
-    sha256 = "13j0102wh7h9way5lprfz5209xli88jaa4544ky9l6hgqncw6ysh";
+    url = "https://github.com/numtide/system-manager/archive/d6acd046a24810781d447346149fcf5f8a6a4813.tar.gz";
+    sha256 = "0ql1jpy10spsw561v5gmjlix85dpay6imaycszd5dfy3agpi09h9";
   };
   systemManager = import "${system-manager}/nix/lib.nix" {
     nixpkgs = pkgs.path;

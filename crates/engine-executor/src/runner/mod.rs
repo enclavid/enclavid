@@ -31,7 +31,7 @@ use engine_types::composition::ModelImport;
 use session_types::{Event, SessionState};
 use wasmtime::component::types::ComponentFunc;
 use wasmtime::component::{Component, Linker, Resource, ResourceAny, Val};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Config, Engine, Store, WasmFeatures};
 
 use crate::Host_ as GeneratedHost;
 use crate::Host_Pre as GeneratedHostPre;
@@ -471,6 +471,17 @@ impl wasmtime::component::HasData for HasHost {
     type Data<'a> = &'a mut HostState;
 }
 
+/// The wasm proposals a component may use: engine-compiler's
+/// `WASM_FEATURES`, mirrored as `engine_config` is.
+const WASM_FEATURES: WasmFeatures = WasmFeatures::WASM2
+    .difference(WasmFeatures::GC_TYPES)
+    .union(WasmFeatures::MULTI_MEMORY)
+    .union(WasmFeatures::RELAXED_SIMD)
+    .union(WasmFeatures::TAIL_CALL)
+    .union(WasmFeatures::EXTENDED_CONST)
+    .union(WasmFeatures::MEMORY64)
+    .union(WasmFeatures::COMPONENT_MODEL);
+
 /// The wasmtime [`Config`] this executor builds its runtime [`Engine`] from.
 /// It MUST match engine-compiler's `engine_config` verbatim: `consume_fuel`
 /// compiles fuel checks INTO the code, so a mismatch would make a
@@ -480,7 +491,8 @@ impl wasmtime::component::HasData for HasHost {
 /// other's toolchain.
 fn engine_config() -> Config {
     let mut config = Config::new();
-    config.wasm_component_model(true);
+    config.wasm_features(WasmFeatures::all(), false);
+    config.wasm_features(WASM_FEATURES, true);
     config.consume_fuel(true);
     config
 }
@@ -495,6 +507,14 @@ mod tests {
     /// (The full compile→serialize→deserialize round-trip is exercised by
     /// the `TestRunner` in this crate's `happy_path` integration test, which
     /// holds both a `Compiler` and an `Executor`.)
+    /// The engine takes the proposals listed, the compiler's.
+    #[test]
+    fn the_engine_takes_the_compilers_proposals() {
+        assert_eq!(WASM_FEATURES, engine_compiler::WASM_FEATURES);
+        let engine = Engine::new(&engine_config()).unwrap();
+        assert_eq!(engine.get_wasm_features(), WASM_FEATURES);
+    }
+
     #[test]
     fn deserialize_rejects_non_cwasm() {
         let executor = Executor::new().unwrap();

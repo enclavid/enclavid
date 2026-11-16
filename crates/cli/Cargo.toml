@@ -34,7 +34,7 @@ enclavid-inference = { path = "../inference" }
 # models are held to.
 engine-types = { path = "../engine-types" }
 # The project's WIT, read for the models its slot declares.
-wit-parser = "0.247"
+wit-parser = "0.258"
 
 clap = { version = "4.5", features = ["derive"] }
 
@@ -63,9 +63,9 @@ dialoguer = "0.11"
 
 # Component parser — read a component's top-level interface exports so
 # `policy`/`plugin embed` can assert the artifact's WIT role matches the
-# command group. Pinned to the version wasmtime transitively pulls — keeps
-# the dep tree from fanning out across versions.
-wasmparser = "0.247"
+# command group. At the wasm-tools version the rest of the workspace uses,
+# wac-graph's, so the dep tree does not fan out across versions.
+wasmparser = "0.258"
 
 [dev-dependencies]
 # Vendor-style models built in code, which the models check is tested against.

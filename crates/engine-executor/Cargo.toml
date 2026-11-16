@@ -29,7 +29,7 @@ session-types = { path = "../session-types" }
 # run need the runtime; codegen (`Component::new`) lives in engine-compiler.
 # Same non-cranelift feature set otherwise so the `Config` (engine_config)
 # matches the compiler's and a compiler-produced cwasm loads here.
-wasmtime = { version = "46", default-features = false, features = [
+wasmtime = { version = "50", default-features = false, features = [
     "component-model",
     "runtime",
     "std",
@@ -50,14 +50,14 @@ serde_json = "1"
 # The semver track an import name is looked up on — the linker's own rule,
 # which `props::declared` finds the props' interface by. wasmtime's own
 # dependency, at its version; no codegen.
-wasmtime-environ = { version = "46", default-features = false, features = ["component-model"] }
+wasmtime-environ = { version = "50", default-features = false, features = ["component-model"] }
 # WASI 0.2 for what toolchains' runtimes import and a round has no use for: an
 # empty environment, stdio that reads nothing and writes nowhere, a filesystem
 # with nothing opened (`round`). Only `p2`: no preview 1, no async preview 3.
 # Its clocks are never linked (they read real time) and neither are sockets.
-wasmtime-wasi = { version = "46", default-features = false, features = ["p2"] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 # `wasi:io`'s own bindings and its `Pollable`, which the round's deadlines are.
-wasmtime-wasi-io = { version = "46", default-features = false, features = ["std"] }
+wasmtime-wasi-io = { version = "50", default-features = false, features = ["std"] }
 # Named by the library for the `AsyncWrite` in the stdio trait it implements
 # (`round`). What the worker runs on it, it asks for itself (`worker`).
 tokio = { version = "1", default-features = false }
@@ -227,12 +227,12 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"
 engine-compiler = { path = "../engine-compiler" }
 # load_copies.rs builds a component carrying a large data segment, to see what
 # loading its cwasm copies.
-wasm-encoder = "0.247"
+wasm-encoder = "0.258"
 # The props tests, and the runner's test that the host serves every interface
 # the compile counts as its own, build components from WIT alone — the latter
 # with the disclosure fields it declares listed, as embedding lists them.
-wit-component = { version = "0.247", features = ["dummy-module"] }
-wit-parser = "0.247"
+wit-component = { version = "0.258", features = ["dummy-module"] }
+wit-parser = "0.258"
 enclavid-embedded = { path = "../embedded" }
 # fake_capture emits a real JPEG so the vision plugin's in-sandbox
 # decode → detect → estimate pipeline has something to decode.

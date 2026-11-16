@@ -17,4 +17,4 @@ crate-type = ["cdylib"]
 mivolo = []
 
 [dependencies]
-wit-bindgen = "0.57"
+wit-bindgen = "0.63"

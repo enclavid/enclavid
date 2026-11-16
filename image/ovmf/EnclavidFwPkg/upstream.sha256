@@ -1,4 +1,4 @@
-# The upstream files this platform is a function of, at edk2-stable202602.
+# The upstream files this platform is a function of, at edk2-stable202608.
 #
 # `image/ovmf/default.nix` runs `sha256sum -c` on this from the edk2 source root
 # and refuses to build on a mismatch. The point is the direction a bump breaks
@@ -30,4 +30,4 @@ eb99548311454ca22ae3f90b95837f038bb8fe76318e4f198117ff760c0a172f  OvmfPkg/Librar
 1e248ea2a41487b8432eb86465db9feda3c02146fc56269661e16bc495cd2e87  OvmfPkg/QemuKernelLoaderFsDxe/QemuKernelLoaderFsDxe.c
 2d084505ef2b3e6f828cd88e1143029a3acaba3222ad86377d6de0d967134944  OvmfPkg/QemuKernelLoaderFsDxe/QemuKernelLoaderFsDxe.inf
 6bc8df16452293c3c3a042426e322a1c01a048524c521887a22eaf62614251a7  OvmfPkg/AmdSev/AmdSevX64.fdf
-eb570caf3ad416f42de8f9f2b950838b9ff80751a03ba77bfe74fcf79e23313d  OvmfPkg/AmdSev/AmdSevX64.dsc
+dfae16dff39241772086bf2b8e37c46055359d47fb1336313e270ff7e159925f  OvmfPkg/AmdSev/AmdSevX64.dsc

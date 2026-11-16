@@ -27,7 +27,7 @@ engine-types = { path = "../engine-types" }
 # executor's wasmtime so the `Config` (and hence the cwasm compatibility
 # header) matches bit-for-bit — a component serialized here must deserialize
 # on the executor's runtime-only engine.
-wasmtime = { version = "46", default-features = false, features = [
+wasmtime = { version = "50", default-features = false, features = [
     "cranelift",
     "parallel-compilation",
     "component-model",
@@ -37,19 +37,19 @@ wasmtime = { version = "46", default-features = false, features = [
 ] }
 
 # Single-store fusion: `compose::fuse` wires each plugin's exports into the
-# policy's imports via wac's hand-built composition graph. wac 0.10 emits
-# wasm-tools 0.247 encoding, which wasmtime 46 loads.
-wac-graph = "0.10"
+# policy's imports via wac's hand-built composition graph. wac 0.12 emits
+# wasm-tools 0.258 encoding, which wasmtime 50 loads.
+wac-graph = "0.12"
 
 # `alternate_lookup_key`, the rule wasmtime's linker matches an import's version
 # by: the compile refuses an import nothing serves by the rule the
 # execution-worker's linker would. The same crate wasmtime already links.
-wasmtime-environ = { version = "46", default-features = false, features = ["component-model"] }
+wasmtime-environ = { version = "50", default-features = false, features = ["component-model"] }
 
 # `decls::load_embedded` pulls the embedded custom sections (disclosure-
 # fields / i18n) straight out of a compiled component without
 # round-tripping through wasmtime instantiation.
-wasmparser = "0.247"
+wasmparser = "0.258"
 
 # Catalog content-hashing (`catalog_hash`), the section parsers and the
 # bounds the loader enforces, and the check of a catalog against the keys of
@@ -196,11 +196,11 @@ required-features = ["worker"]
 [dev-dependencies]
 # embedded_nested.rs builds synthetic (nested) components to exercise
 # load_embedded_nested's recursion without cargo-building fixtures.
-wasm-encoder = "0.247"
+wasm-encoder = "0.258"
 # refusals.rs builds policies and plugins from WIT alone, to see which
 # compositions the compile refuses and for what.
-wit-component = { version = "0.247", features = ["dummy-module"] }
-wit-parser = "0.247"
+wit-component = { version = "0.258", features = ["dummy-module"] }
+wit-parser = "0.258"
 # slots.rs embeds the components it builds as the CLI does, from projects it
 # writes out.
 enclavid-embedded = { path = "../embedded", features = ["embed"] }

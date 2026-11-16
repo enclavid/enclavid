@@ -153,7 +153,7 @@ fn importing_twice(interface: &str, first: &str, second: &str) -> Vec<u8> {
     let mut imports = ComponentImportSection::new();
     for version in [first, second] {
         imports.import(
-            &format!("{interface}@{version}"),
+            format!("{interface}@{version}"),
             ComponentTypeRef::Instance(0),
         );
     }

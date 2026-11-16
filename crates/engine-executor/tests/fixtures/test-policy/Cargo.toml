@@ -10,7 +10,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.57"
+wit-bindgen = "0.63"
 # The WASI the probe reads (`probe_state`), with its own WIT: WASI is not this
 # policy's world, so it carries no copy of it.
 wasip2 = "2"

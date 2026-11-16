@@ -27,9 +27,9 @@
 { measurements ? null }:
 let
   nixpkgs = builtins.fetchTarball {
-    # nixos-26.05 @ 2026-08-23 — same pin as the rest of image/.
-    url = "https://github.com/NixOS/nixpkgs/archive/a3b98866eecd08edac6e61a3081e69540a35020f.tar.gz";
-    sha256 = "0gy7jvdm3yfr2mddcch4yr7l8nw5y21gfls5in05j1f282bcr9mh";
+    # nixos-unstable @ 2026-11-13 — same pin as the rest of image/.
+    url = "https://github.com/NixOS/nixpkgs/archive/d5cc6833999746cffdfe0598f7bc801a57b887a9.tar.gz";
+    sha256 = "08yyqnikwdgacdyxg29chdygmj3vn6l8zwpf0v470nnq3zpzz72s";
   };
   pkgs = import nixpkgs { system = "x86_64-linux"; };
 
@@ -66,6 +66,10 @@ let
       # configures itself, and the hook would try to configure the source tree
       # as a cmake project before cargo ever runs.
       dontUseCmakeConfigure = true;
+
+      # The C libraries crates bundle (aws-lc, sqlite, zstd, …) are built from
+      # the sources Cargo.lock pins, not swapped for nixpkgs' own.
+      dontCargoUseSystemLibs = true;
 
       cargoLock.lockFile = ../../Cargo.lock;
 
