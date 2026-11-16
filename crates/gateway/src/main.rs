@@ -181,6 +181,10 @@ fn keys() -> Result<(identity::key::Identity, identity::account::Account), Strin
 /// A push that panics is the second: the table it would have replaced stays,
 /// and the port takes the next.
 #[tokio::main]
+#[allow(
+    unreachable_code,
+    reason = "none of the futures `select!` awaits returns, so its code past them never runs"
+)]
 async fn main() -> std::convert::Infallible {
     // First, so nothing can speak before the channel exists.
     //
