@@ -112,7 +112,7 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
     #
     # It changes when the lockfile changes, which is the point: a dependency
     # cannot move without moving a line in this file.
-    hash = "sha256-W7ejdbrbTReJAMVCPHyDDJY7YoufPgii5/XSETvd7M4=";
+    hash = "sha256-vBeUzv+K7ycZKONI1GnNOpNZgzRpZaH0M9XHkv7c4PA=";
   };
 
   buildPhase = ''
