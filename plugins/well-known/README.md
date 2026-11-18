@@ -137,7 +137,7 @@ enclavid plugin validate .
 
 # 6. Push the embedded component. `oci push` is role-agnostic — the same
 #    command pushes a policy. Auth comes from the docker-config chain
-#    after `enclavid cloud login`, or pass `--auth "Bearer <token>"`.
+#    (`docker login <registry-host>`), or pass `--auth "Bearer <token>"`.
 enclavid oci push target/well-known.embedded.wasm \
     <registry-host>/enclavid/plugins/well-known:0.1.0
 # → enclavid/plugins/well-known:0.1.0 (embedded component)

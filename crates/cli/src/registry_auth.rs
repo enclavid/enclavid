@@ -4,21 +4,24 @@
 //! for non-interactive CI:
 //!
 //! 1. `--auth "<scheme> <token>"`      — explicit, wins over everything.
-//! 2. `$ENCLAVID_REGISTRY_AUTH`        — same shape, for single-registry CI.
+//! 2. `$ENCLAVID_REGISTRY_AUTH`        — `<registry> <scheme> <token>`, for
+//!    CI: used for the registry it names alone.
 //! 3. `~/.docker/config.json`:
 //!    - `auths.<registry>.auth`        — base64("user:pass") form.
 //!    - `credHelpers.<registry>`       — per-registry helper subprocess.
 //!    - `credsStore`                   — global helper subprocess (osxkeychain etc.).
-//! 4. Bail with a helpful message listing the available remedies.
+//! 4. None: anonymous, as docker pushes to a registry it holds no
+//!    credentials for — the playground asks for none. A registry that
+//!    wants some refuses, which [`needs_credentials`] tells apart.
 //!
 //! Returns `oci_client::secrets::RegistryAuth` ready to hand to a
 //! `Client::push` call. No enclavid-specific carve-out for our own
-//! registry — `enclavid login` writes a credHelper entry which
-//! resolves via path 3b just like ECR's helper or `osxkeychain`.
+//! registry.
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use oci_client::errors::{OciDistributionError, OciErrorCode};
 use oci_client::secrets::RegistryAuth;
 use serde::Deserialize;
 use std::io::Write;
@@ -35,13 +38,50 @@ pub async fn resolve(registry: &str, override_auth: Option<&str>) -> Result<Regi
     if let Some(a) = override_auth {
         return parse_authorization_header(a).context("parsing --auth value");
     }
-    if let Ok(v) = std::env::var(ENV_AUTH) {
-        return parse_authorization_header(&v).with_context(|| format!("parsing ${ENV_AUTH}"));
+    if let Ok(v) = std::env::var(ENV_AUTH)
+        && let Some(creds) =
+            env_auth_for(registry, &v).with_context(|| format!("parsing ${ENV_AUTH}"))?
+    {
+        return Ok(creds);
     }
     if let Some(creds) = from_docker_config(registry)? {
         return Ok(creds);
     }
-    bail!(no_credentials_message(registry));
+    Ok(RegistryAuth::Anonymous)
+}
+
+/// The credentials `$ENCLAVID_REGISTRY_AUTH`, `value`, holds for
+/// `registry`: `<registry> <scheme> <token>` gives them to the registry it
+/// names, and to no other.
+fn env_auth_for(registry: &str, value: &str) -> Result<Option<RegistryAuth>> {
+    let value = value.trim();
+    let named = value
+        .split_once(char::is_whitespace)
+        .filter(|(host, _)| !matches!(*host, "Bearer" | "Basic"));
+    let Some((host, credentials)) = named else {
+        bail!(
+            "expected `<registry> Bearer <token>` or `<registry> Basic <base64>`: the registry it is for comes first"
+        );
+    };
+    if host != registry {
+        return Ok(None);
+    }
+    parse_authorization_header(credentials).map(Some)
+}
+
+/// Whether `e` is a registry refusing a request for its credentials:
+/// none were given, or not enough.
+pub fn needs_credentials(e: &OciDistributionError) -> bool {
+    match e {
+        OciDistributionError::UnauthorizedError { .. }
+        | OciDistributionError::AuthenticationFailure(_) => true,
+        OciDistributionError::ServerError { code, .. } => matches!(code, 401 | 403),
+        OciDistributionError::RegistryError { envelope, .. } => envelope
+            .errors
+            .iter()
+            .any(|e| matches!(e.code, OciErrorCode::Unauthorized | OciErrorCode::Denied)),
+        _ => false,
+    }
 }
 
 /// Accept full `Authorization` header values: `Bearer <token>` or
@@ -163,12 +203,44 @@ fn invoke_helper(name: &str, registry: &str) -> Result<RegistryAuth> {
     }
 }
 
-fn no_credentials_message(registry: &str) -> String {
+pub fn no_credentials_message(registry: &str) -> String {
     format!(
-        "no credentials found for registry `{registry}`.\n\n\
+        "the registry `{registry}` wants credentials.\n\n\
          Try one of:\n  \
          * docker login {registry}             (writes to ~/.docker/config.json)\n  \
-         * enclavid policy push ... --auth \"Bearer <token>\"\n  \
-         * export {ENV_AUTH}=\"Bearer <token>\""
+         * enclavid oci push ... --auth \"Bearer <token>\"\n  \
+         * export {ENV_AUTH}=\"{registry} Bearer <token>\""
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_environments_credentials_go_to_the_registry_they_name_alone() {
+        let value = "ghcr.io Bearer t0k3n";
+        assert!(matches!(
+            env_auth_for("ghcr.io", value).unwrap(),
+            Some(RegistryAuth::Bearer(token)) if token == "t0k3n"
+        ));
+        assert!(
+            env_auth_for("playground.enclavid.com", value)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            env_auth_for("ghcr.io.evil.example", value)
+                .unwrap()
+                .is_none()
+        );
+        // `user:pass`.
+        assert!(matches!(
+            env_auth_for("localhost:5000", " localhost:5000 Basic dXNlcjpwYXNz ").unwrap(),
+            Some(RegistryAuth::Basic(user, pass)) if user == "user" && pass == "pass"
+        ));
+        for unbound in ["Bearer t0k3n", "Basic dXNlcjpwYXNz", "ghcr.io"] {
+            assert!(env_auth_for("ghcr.io", unbound).is_err(), "{unbound}");
+        }
+    }
 }

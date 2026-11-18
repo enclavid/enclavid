@@ -4,6 +4,8 @@
 //! or `~/.config` on Linux, `~/Library/Application Support` on macOS,
 //! `%APPDATA%` on Windows:
 //!
+//! * `api` — the origin of the API the session was created at, where
+//!   every later request about it goes.
 //! * `token` — base64-decoded `client_session_token` from the
 //!   POST /sessions response (sent as `X-Session-Token` on every read).
 //! * `disclosure.key` — the disclosure secret, when `session create`
@@ -13,10 +15,10 @@
 //! * `group` — the group a gateway placed the session on,
 //!   `<label>.<build>`, from the POST /sessions response's
 //!   `x-enclavid-group`. Later requests put it in their path so the
-//!   gateway sends them to the same group. Absent when the session was
-//!   created against api directly.
+//!   gateway sends them to the same group. Absent when the API answered
+//!   with none.
 //!
-//! Mode `0700` directory + `0600` files — same posture as `auth.json`.
+//! Mode `0700` directory + `0600` files.
 //! No mtime/atime maintenance, no concurrent-access locking — sessions
 //! are written once at create and read N times after; concurrent
 //! `session create` for the same id wouldn't happen in practice.
@@ -29,11 +31,23 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-use super::is_group;
+use super::{bare_origin, is_group};
 
+/// The directory of the session `session_id`, an id as the API mints one,
+/// so that one an API — or a typo — gives cannot name another directory.
 pub fn session_dir(session_id: &str) -> Result<PathBuf> {
+    if !is_session_id(session_id) {
+        anyhow::bail!("`{session_id}` is not a session's id: `ses_` and 64 lowercase hex digits");
+    }
     let base = dirs::config_dir().context("no config dir on this platform")?;
     Ok(base.join("enclavid").join("sessions").join(session_id))
+}
+
+/// Whether `id` is a session's id as the API mints one.
+fn is_session_id(id: &str) -> bool {
+    id.strip_prefix("ses_").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 fn write_secret_file(path: &PathBuf, body: &[u8]) -> Result<()> {
@@ -58,6 +72,25 @@ fn write_secret_file(path: &PathBuf, body: &[u8]) -> Result<()> {
     f.write_all(body)
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+pub fn store_api(session_id: &str, origin: &str) -> Result<PathBuf> {
+    let path = session_dir(session_id)?.join("api");
+    write_secret_file(&path, origin.as_bytes())?;
+    Ok(path)
+}
+
+/// The cached API, held to the check `create` held it to before writing it:
+/// what it holds is where every later request about the session goes.
+pub fn read_api(session_id: &str) -> Result<String> {
+    let path = session_dir(session_id)?.join("api");
+    let body = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "reading {} — was the session created with this CLI? (file holds the API's origin)",
+            path.display(),
+        )
+    })?;
+    bare_origin(&path.display().to_string(), body.trim())
 }
 
 pub fn store_session_token(session_id: &str, token_b64: &str) -> Result<PathBuf> {
@@ -97,8 +130,8 @@ pub fn store_group(session_id: &str, group: &str) -> Result<PathBuf> {
 }
 
 /// The cached group, or `None` when there is no `group` file — the
-/// session was created against api directly, and its requests go
-/// there unmarked.
+/// API answered with none, and the session's requests go to it
+/// unmarked.
 pub fn read_group(session_id: &str) -> Result<Option<String>> {
     let path = session_dir(session_id)?.join("group");
     let body = match std::fs::read_to_string(&path) {
@@ -123,6 +156,22 @@ fn group_in(body: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_id_names_one_directory_of_the_cache() {
+        let id = format!("ses_{}", "0a".repeat(32));
+        assert!(session_dir(&id).unwrap().ends_with(&id));
+        for bad in [
+            "../x".to_string(),
+            "/etc".to_string(),
+            format!("ses_{}", "0A".repeat(32)),
+            format!("ses_{}/..", "0a".repeat(32)),
+            format!("ses_{}", "0a".repeat(31)),
+            String::new(),
+        ] {
+            assert!(session_dir(&bad).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn a_cached_group_is_checked_when_read() {

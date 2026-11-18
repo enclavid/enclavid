@@ -4,17 +4,16 @@ use std::path::PathBuf;
 
 mod auth;
 mod commands;
-mod config;
 mod declarations;
-mod discovery;
 mod docker_config;
 mod models;
+mod plain_http;
 mod registry_auth;
 mod wit_role;
 
 #[derive(Parser)]
 #[command(name = "enclavid")]
-#[command(about = "Manage Enclavid policies — embed, push, authenticate", long_about = None)]
+#[command(about = "Manage Enclavid policies — embed, push, run", long_about = None)]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -23,15 +22,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Operations against the Enclavid SaaS: authentication and
-    /// workspace selection. All commands that talk to Logto / our
-    /// platform live here, kept separate from the registry-agnostic
-    /// artifact tooling (`enclavid policy` / `plugin` / `oci`).
-    Cloud {
-        #[command(subcommand)]
-        command: CloudCommand,
-    },
-
     /// Author a **policy** artifact: embed its catalogs (texts and
     /// disclosure fields) and validate them. `embed` asserts the
     /// component exports the `enclavid:policy/policy` world. Registry
@@ -59,71 +49,14 @@ enum Commands {
         command: OciCommand,
     },
 
-    /// Lifecycle of verification sessions against an Enclavid API
-    /// instance. Useful for smoke-testing, dev iteration on policy,
-    /// and inspecting consented data after applicants finish their
-    /// flow. Talks to `$ENCLAVID_API_URL` (default `http://localhost:8001`).
+    /// Lifecycle of verification sessions against an Enclavid API:
+    /// enclavid's own, or the playground's, which answers as it does and
+    /// asks no credentials. Useful for smoke-testing, dev iteration on a
+    /// policy, and inspecting consented data after applicants finish
+    /// their flow.
     Session {
         #[command(subcommand)]
         command: SessionCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum CloudCommand {
-    /// Authenticate to Enclavid (interactive, opens browser). After
-    /// the device flow completes, prompts for workspace selection
-    /// (auto-confirms when the user is a member of exactly one).
-    /// Also wires the Enclavid registry into `~/.docker/config.json`
-    /// as a credential helper, so subsequent `docker push` / `oras
-    /// push` / `enclavid oci push` against that registry get
-    /// fresh tokens automatically — no relogin every hour.
-    Login {
-        /// Skip the interactive workspace picker by selecting a
-        /// specific workspace up-front. Accepts either a full id
-        /// (`ord_...`) or a unique substring of the workspace name.
-        /// Required when the user is a member of multiple workspaces
-        /// and stdin isn't a TTY (CI).
-        #[arg(long)]
-        workspace: Option<String>,
-    },
-
-    /// Remove locally-stored credentials and drop the credHelper
-    /// entry from `~/.docker/config.json`.
-    Logout,
-
-    /// Print a fresh access token to stdout. Useful for piping into
-    /// custom flows (`curl -H "Authorization: Bearer $(enclavid cloud
-    /// token)" ...`). For pushing artifacts prefer the credential-
-    /// helper path set up by `enclavid cloud login` — no manual token
-    /// plumbing.
-    Token,
-
-    /// Manage the active workspace (Logto organization). The active
-    /// workspace determines which `enclavid/<workspace-id>/policies/...`
-    /// namespace `enclavid oci push` writes to.
-    Workspace {
-        #[command(subcommand)]
-        command: Option<WorkspaceCommand>,
-    },
-}
-
-#[derive(Subcommand)]
-enum WorkspaceCommand {
-    /// Print the currently-active workspace and its push-path prefix.
-    /// Same as bare `enclavid cloud workspace`.
-    Show,
-
-    /// List all workspaces the authenticated user is a member of.
-    /// The active one is marked with `*`.
-    List,
-
-    /// Switch the active workspace. Arg can be either a full id
-    /// (`ord_...`) or a unique case-insensitive substring of the
-    /// workspace name.
-    Use {
-        /// Workspace id (`ord_...`) or substring of its name.
-        id_or_name: String,
     },
 }
 
@@ -257,8 +190,11 @@ enum OciCommand {
     ///
     /// Registry auth resolution (first match wins):
     ///   1. `--auth "<scheme> <token>"` flag.
-    ///   2. `ENCLAVID_REGISTRY_AUTH` env var.
+    ///   2. `ENCLAVID_REGISTRY_AUTH` env var, `<registry> <scheme> <token>`,
+    ///      for the registry it names alone.
     ///   3. `~/.docker/config.json` (static auths, credHelpers, credsStore).
+    ///   4. None: anonymous, as to the playground,
+    ///      `playground.enclavid.com/policies`, which asks for none.
     Push {
         /// Path to the (embedded) wasm component file.
         artifact: PathBuf,
@@ -276,17 +212,26 @@ enum OciCommand {
         #[arg(long)]
         auth: Option<String>,
 
-        /// Encrypt the artifact (ocicrypt `AES_256_CTR_HMAC_SHA256`).
-        /// Omit for a plaintext push (today's default).
-        ///   `inline` — prints the layer key for the client to pass as
+        /// Encrypt the artifact (ocicrypt `AES_256_CTR_HMAC_SHA256`) under a
+        /// new layer key, written to `--key-out`. Omit for a plaintext push
+        /// (today's default).
+        ///   `inline` — the client passes the key, base64, as
         ///     `"key": "<base64>"` in POST /sessions (owner == the
         ///     session creator).
         ///   `kbs` — writes the `--kbs-resource` URI into the artifact's
-        ///     `enc.keys.*` annotation and prints the layer key to register
-        ///     as that KBS resource; the client passes `"key": { "kbs":
-        ///     { endpoint } }` and the TEE fetches it under attestation.
-        #[arg(long, value_enum)]
+        ///     `enc.keys.*` annotation; the key is registered as that KBS
+        ///     resource, the client passes `"key": { "kbs": { endpoint } }`
+        ///     and the TEE fetches it under attestation.
+        #[arg(long, value_enum, requires = "key_out")]
         encrypt: Option<EncryptMode>,
+
+        /// Where the layer key of `--encrypt` goes: a new file, which only
+        /// its owner may read, or `-` for stdout — then everything else the
+        /// push says goes to stderr. Never printed otherwise: a key in a CI
+        /// log is anyone's who reads it. The key is in the form its mode
+        /// takes: base64 for `inline`, the JSON the resource holds for `kbs`.
+        #[arg(long, requires = "encrypt")]
+        key_out: Option<PathBuf>,
 
         /// KBS resource URI the layer key will be registered under, e.g.
         /// `kbs:///myrepo/key/1`. Required with `--encrypt kbs`; written
@@ -301,6 +246,12 @@ enum OciCommand {
         /// `--encrypt`. Omit for an artifact with no models.
         #[arg(long)]
         models: Option<PathBuf>,
+
+        /// Print the pinned reference alone, for another command to read:
+        /// `enclavid oci push ... --quiet | enclavid session create
+        /// --policy -`. Not with `--key-out -`, which writes the key there.
+        #[arg(long)]
+        quiet: bool,
     },
 }
 
@@ -314,20 +265,31 @@ enum EncryptMode {
 enum SessionCommand {
     /// Create a new verification session.
     ///
-    /// Two ways to specify the request body: `--policy <ref>` for the
-    /// trivial plaintext case, or `--from-file <spec.json>` for the full
-    /// `POST /sessions` payload (plugin pins, per-artifact keys,
+    /// Two ways to specify the request body: `--policy <ref>`, with its
+    /// `--props`, for the plaintext case, or `--from-file <spec.json>` for
+    /// the full `POST /sessions` payload (plugin pins, per-artifact keys,
     /// registry_auth). Either way the CLI generates an ephemeral
     /// disclosure keypair (unless one is supplied), caches the secret
     /// locally so subsequent `session disclosures` can decrypt, and caches
-    /// the returned `client_session_token` for `session get` /
+    /// the API and the returned `client_session_token` for `session get` /
     /// `session disclosures`.
+    ///
+    /// The playground runs a policy pushed to it with no credentials,
+    /// pinning its own plugins: `--api https://playground.enclavid.com
+    /// --applicants https://verify.enclavid.com`.
     Create {
-        /// Pinned OCI ref of the policy, `<registry>/<repo>@sha256:<hex>`.
-        /// Use the value printed by `enclavid oci push` as
-        /// `Pinned ref:`. Mutually exclusive with `--from-file`.
+        /// Pinned OCI ref of the policy, `<registry>/<repo>@sha256:<hex>`:
+        /// the value printed by `enclavid oci push` as `Pinned ref:`, or
+        /// `-` to read it from stdin, as `enclavid oci push --quiet`
+        /// writes it. Mutually exclusive with `--from-file`.
         #[arg(long, conflicts_with = "from_file")]
         policy: Option<String>,
+
+        /// The props the policy reads: a JSON object, `{"min-age": 18}`,
+        /// or `@<path>` of a file holding one. Mutually exclusive with
+        /// `--from-file`, whose body carries its own.
+        #[arg(long, conflicts_with = "from_file")]
+        props: Option<String>,
 
         /// Path to a JSON file holding the **entire** `POST /sessions`
         /// body — `policy`, `plugins: [{package, impl_ref, key?}]`,
@@ -357,11 +319,23 @@ enum SessionCommand {
         /// The api build the session must run on, as 96 lowercase hex
         /// characters (the launch measurement). Sent to a gateway in
         /// front of api, which places the session on a group running
-        /// that build; the group is cached so later `session` commands
-        /// and the applicant link name it. Falls back to
-        /// `$ENCLAVID_API_MEASUREMENT`; omit both against api directly.
+        /// that build. Falls back to `$ENCLAVID_API_MEASUREMENT`; omit
+        /// both against api directly, or against the playground, which
+        /// names its own.
         #[arg(long)]
         measurement: Option<String>,
+
+        /// The API's origin, `scheme://host[:port]`: where the session is
+        /// created, and every later `session` command about it goes. The
+        /// bearer in `$ENCLAVID_API_TOKEN` goes with these requests when
+        /// they go to the API `$ENCLAVID_API_URL` names, the one it is for.
+        #[arg(long, env = "ENCLAVID_API_URL")]
+        api: String,
+
+        /// The origin of the site applicants take a session at, which
+        /// the printed applicant link goes to.
+        #[arg(long, env = "ENCLAVID_APPLICANT_URL")]
+        applicants: String,
     },
 
     /// Fetch and print the session record (status, policy, disclosure
@@ -388,7 +362,10 @@ enum SessionCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Logs go to stderr: stdout is what a command answers, which another
+    // may read, as `session create --policy -` reads `oci push --quiet`.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "enclavid=info".into()),
@@ -397,43 +374,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Discovery is needed strictly for the Logto-talking commands
-    // (login / logout / token need OIDC endpoints). Workspace
-    // subcommands operate on cached local state — they only consult
-    // discovery (best-effort) to enrich output with the push-prefix
-    // hint. Pure-policy commands skip discovery entirely so they
-    // work offline.
-    let needs_discovery_strict = matches!(
-        cli.command,
-        Commands::Cloud {
-            command: CloudCommand::Login { .. } | CloudCommand::Logout | CloudCommand::Token,
-        },
-    );
-    let needs_discovery_best_effort = matches!(
-        cli.command,
-        Commands::Cloud {
-            command: CloudCommand::Workspace { .. },
-        } | Commands::Session { .. },
-    );
-    if needs_discovery_strict {
-        discovery::load().await?;
-    } else if needs_discovery_best_effort {
-        let _ = discovery::load().await;
-    }
-
     match cli.command {
-        Commands::Cloud { command } => match command {
-            CloudCommand::Login { workspace } => commands::cloud::login::run(workspace).await,
-            CloudCommand::Logout => commands::cloud::logout::run().await,
-            CloudCommand::Token => commands::cloud::token::run().await,
-            CloudCommand::Workspace { command } => match command {
-                None | Some(WorkspaceCommand::Show) => commands::cloud::workspace::show().await,
-                Some(WorkspaceCommand::List) => commands::cloud::workspace::list().await,
-                Some(WorkspaceCommand::Use { id_or_name }) => {
-                    commands::cloud::workspace::use_workspace(&id_or_name).await
-                }
-            },
-        },
         Commands::Policy { command } => match command {
             PolicyCommand::Embed {
                 wasm,
@@ -462,28 +403,45 @@ async fn main() -> Result<()> {
                 reference,
                 auth,
                 encrypt,
+                key_out,
                 kbs_resource,
                 models,
+                quiet,
             } => {
-                commands::oci::push::run(artifact, reference, auth, encrypt, kbs_resource, models)
-                    .await
+                commands::oci::push::run(commands::oci::push::Asked {
+                    artifact,
+                    reference,
+                    auth,
+                    encrypt,
+                    key_out,
+                    kbs_resource,
+                    models,
+                    quiet,
+                })
+                .await
             }
         },
         Commands::Session { command } => match command {
             SessionCommand::Create {
                 policy,
                 from_file,
+                props,
                 disclosure_key,
                 client_ref,
                 measurement,
+                api,
+                applicants,
             } => {
-                commands::session::create::run(
+                commands::session::create::run(commands::session::create::Asked {
                     policy,
                     from_file,
+                    props,
                     disclosure_key,
                     client_ref,
                     measurement,
-                )
+                    api,
+                    applicants,
+                })
                 .await
             }
             SessionCommand::Get { id } => commands::session::get::run(&id).await,

@@ -1,4 +1,3 @@
-pub mod cloud;
 pub mod oci;
 pub mod plugin;
 pub mod policy;

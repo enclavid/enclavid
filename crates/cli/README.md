@@ -1,109 +1,96 @@
 # enclavid-cli
 
-CLI for managing Enclavid policy (encrypted OCI artifacts that carry your verification logic). Single static binary, no runtime dependencies.
+CLI for Enclavid policies and plugins: embed a component's catalogs, validate them, push it to an OCI registry, and run it as a verification session. Single static binary, no runtime dependencies.
 
 ## Install
 
 ```bash
-cargo install --git https://github.com/enclavid/enclavid
+cargo install --git https://github.com/enclavid/enclavid enclavid-cli
 ```
-
-Installs two binaries: `enclavid` (the CLI) and `docker-credential-enclavid` (a docker credential helper auto-invoked by `docker push` / `oras push` / `enclavid policy push` to keep your Enclavid registry token fresh — see [Authentication](#authentication)).
-
-Prebuilt binaries for Linux / macOS / Windows will be published via GitHub Releases. Homebrew formula and `enclavid/setup-cli@v1` GitHub Action are on the roadmap.
 
 ## Command structure
 
 ```text
 enclavid
-├── cloud                          ← Enclavid workspace + Logto auth
-│   ├── login [--workspace <id>]
-│   ├── logout
-│   ├── token
-│   └── workspace
-│       ├── (bare)                 ← show active
-│       ├── list
-│       └── use <id-or-name>
-├── policy                         ← OCI artifact tooling (registry-agnostic)
-│   ├── embed [--wit wit] [--i18n i18n]
-│   ├── push [--auth ...]
-│   └── validate [dir] [--i18n i18n]
-├── plugin                         ← OCI artifact tooling for plugin components
-│   ├── embed [--wit wit] [--i18n i18n]
-│   └── validate [dir] [--i18n i18n]
+├── policy                         ← author a policy artifact
+│   ├── embed <wasm> [--wit wit] [--i18n i18n] [-o out]
+│   └── validate [dir] [--i18n i18n] [--models models]
+├── plugin                         ← author a plugin artifact
+│   ├── embed <wasm> [--wit wit] [--i18n i18n] [-o out]
+│   └── validate [dir] [--i18n i18n] [--models models]
+├── oci                            ← registry operations, role-agnostic
+│   └── push <artifact> <ref> [--auth ...] [--encrypt inline|kbs --key-out <file|->] [--models dir] [--quiet]
 └── session                        ← verification session lifecycle
-    ├── create --policy ... [--measurement <hex>]
+    ├── create --policy <ref|-> [--props <json|@file>] --api <origin> --applicants <origin>
     ├── get <id>
     └── disclosures <id>
 ```
 
-`cloud` and `policy` are intentionally separate groups. `cloud login` writes to `~/.docker/config.json` so subsequent pushes (including `docker push` and `oras push`, not just our own) refresh tokens automatically. `policy push` itself is **registry-agnostic** — pushing to ghcr/ECR/Docker Hub uses the same code path, with credentials resolved from the standard docker config chain.
+`policy embed` asserts the component exports `enclavid:policy/policy`; `plugin embed` asserts it does not. `oci push` is **registry-agnostic**: a policy and a plugin are the same kind of artifact on the wire, and pushing to ghcr, ECR or Docker Hub uses the same code path, with credentials resolved from the standard docker config chain. With `--encrypt`, the layer key goes only where `--key-out` says: a new file only its owner may read, or stdout for `-`, and then everything else the push says goes to stderr.
 
-## Quickstart
+## Quickstart: the playground
+
+The playground runs a policy with no account: it takes a push with no credentials, and creates a session of it as enclavid's API does, pinning its own plugins.
 
 ```bash
 # 1. Embed the policy's catalogs into the wasm component: its texts
 #    (`i18n/`, one JSON file per language — or `--i18n i18n.json`, every
 #    language in one file) and its disclosure fields, checked against the
 #    keys its slot, `enclavid-ext:policy` in its WIT (`wit/`), declares.
-enclavid policy embed path/to/policy.wasm -o policy.embedded.wasm
+enclavid policy embed path/to/policy.component.wasm -o policy.wasm
 
-# 2. Authenticate to Enclavid + auto-wire docker credentials. Prompts
-#    for workspace selection if you're a member of multiple workspaces.
-enclavid cloud login
-
-# 3. Push using a full OCI ref. Auth comes from the docker credHelper
-#    enclavid cloud login just registered — no extra flags needed.
-enclavid policy push policy.embedded.wasm \
-    registry.enclavid.com/enclavid/<workspace-id>/policies/kyc:v1.0.0
-# → prints Pinned ref: registry.enclavid.com/.../kyc@sha256:<hex>
-
-# 4. Smoke-test by creating a session against your running API.
-enclavid session create \
-    --policy registry.enclavid.com/enclavid/<workspace-id>/policies/kyc@sha256:<hex>
+# 2. Push it to the playground, and start a session of it there.
+enclavid oci push policy.wasm playground.enclavid.com/policies --quiet \
+  | enclavid session create --policy - --props '{"min-age": 18}' \
+      --api https://playground.enclavid.com --applicants https://verify.enclavid.com
 # → prints session_id + applicant URL to open in a browser
+
+# 3. Read it back once the applicant is done.
+enclavid session get <session_id>
+enclavid session disclosures <session_id>
 ```
 
-> Whole-bundle encryption (the old `client_policy_key` path) was
-> removed in Phase 1 of the encryption migration. Policies and
-> plugins currently ship as plaintext `application/wasm` layers in
-> OCI; Phase 2 reintroduces attestation-gated encryption via Trustee
-> KBS at the pull seam.
+`--quiet` prints the pinned reference alone, and `--policy -` reads it from stdin. Without them, `oci push` prints `Pinned ref: <registry>/<repository>@sha256:<hex>`, which `--policy` takes as it is. The pinned reference is the digest of the manifest the CLI pushed, never what the tag names when read back, which someone else's push may have moved by then.
 
-Every push takes a **full** OCI reference (`<registry>/<repository>[:tag]`). For the Enclavid registry, the path layout is `enclavid/<workspace_id>/policies/<name>` — this is enforced by the registry's access policy. After `enclavid cloud login` the exact prefix is printed; you can also get it later via `enclavid cloud workspace`.
+`--props '{...}'` is quoted for a POSIX shell; anywhere, `--props @props.json` reads them from a file.
 
-## Sessions through a gateway
+What is pushed to the playground is public: anyone may read it. The playground takes a policy of 4 MiB at most, and runs it with its own plugins: those of enclavid's templates.
 
-When a gateway sits in front of api, a creating request names the api build it requires, and the gateway places the session on a group of api instances running that build. Point `ENCLAVID_API_URL` at the gateway's api name and `ENCLAVID_APPLICANT_URL` at its applicant name, each as a bare origin (`https://<name>[:port]`, no path):
+## Sessions
+
+`session create` takes the API's origin from `--api` / `$ENCLAVID_API_URL`, and the origin of the site applicants take a session at from `--applicants` / `$ENCLAVID_APPLICANT_URL`. Both are bare origins (`https://<name>[:port]`, no path). The API is reached over https, or over plain http on this machine alone (`localhost`, `127.0.0.1`, `[::1]`) and then through no proxy; `oci push` holds a registry to the same.
+
+`$ENCLAVID_API_TOKEN` is the bearer for the API `$ENCLAVID_API_URL` names, and goes to that origin alone: a request to any other — `--api` naming another, as the playground — goes without it. So a token set for one API never reaches another:
 
 ```bash
-ENCLAVID_API_URL=https://<api name> ENCLAVID_APPLICANT_URL=https://<applicant name> \
-    enclavid session create --policy <pinned-ref> --measurement <96 lowercase hex>
-# or: ENCLAVID_API_MEASUREMENT=<96 lowercase hex> in place of --measurement
-# → also prints group: <label>.<build>
+export ENCLAVID_API_URL=https://api.enclavid.com ENCLAVID_API_TOKEN=<token>
+enclavid session create --policy <pinned-ref> --applicants https://verify.enclavid.com
 ```
 
-The CLI sends the build as `x-enclavid-measurement`, reads the group back from `x-enclavid-group`, and caches it beside the session token. From then on `session get` and `session disclosures` put the group in front of the path (`<api>/-<label>.<build>/api/v1/sessions/<id>/...`), and the printed applicant link goes under it too (`<applicant>/-<label>.<build>/<id>`), because the gateway routes a request by that marker alone.
+`create` caches the API, the session's token, the group it was placed on and the disclosure secret, so `session get` and `session disclosures` name the session alone.
 
-The gateway reads the marker only at the very start of the path, so a base that carries a path of its own would hide it: with a build named, the CLI refuses such a base before sending anything, and later commands refuse it too. Do not write the marker into either variable by hand — the CLI adds it, so it would appear twice.
+### Through a gateway
 
-Against api directly, leave the build out: no group comes back and paths carry no marker. If a build is named and no group comes back all the same, `session create` says so in a note, and the session is on no group.
+When a gateway sits in front of api, it places a session on a group of api instances and answers with that group, `x-enclavid-group`, which the CLI caches. From then on `session get` and `session disclosures` put the group in front of the path (`<api>/-<label>.<build>/api/v1/sessions/<id>/...`), and the printed applicant link goes under it too (`<applicant>/-<label>.<build>/<id>`), because the gateway routes a request by that marker alone. Do not write the marker into either origin by hand — the CLI adds it.
 
-## Authentication
+A creating request may name the api build it requires:
 
-`enclavid policy push` resolves registry credentials via the standard chain — same one docker, oras, podman, and skopeo follow — with two enclavid-specific overrides on top for CI:
+```bash
+enclavid session create --policy <pinned-ref> --measurement <96 lowercase hex> \
+    --api https://<api name> --applicants https://<applicant name>
+# or: ENCLAVID_API_MEASUREMENT=<96 lowercase hex> in place of --measurement
+```
+
+The CLI sends the build as `x-enclavid-measurement`, and refuses a group on another build. If a build is named and no group comes back, `session create` says so in a note, and the session is on no group.
+
+## Registry credentials
+
+`enclavid oci push` resolves registry credentials via the standard chain — same one docker, oras, podman, and skopeo follow — with two enclavid-specific overrides on top for CI:
 
 1. `--auth "Bearer <token>"` — explicit per-invocation.
-2. `$ENCLAVID_REGISTRY_AUTH` — same shape, for single-registry CI.
-3. `~/.docker/config.json` — `auths`, `credHelpers`, `credsStore` (in that order).
-
-There's no Enclavid-specific carve-out for our own registry. `enclavid cloud login` registers a credential helper entry in `~/.docker/config.json` for the Enclavid registry host, so step 3 resolves it via the same path that resolves ECR or `osxkeychain` creds. The helper (the second binary, `docker-credential-enclavid`) is what mints fresh JWTs on demand — including for `docker push` and `oras push`, not just `enclavid policy push`.
-
-The cred helper scopes minted JWTs to your **active workspace** (Logto `organization_id` claim). Switch workspaces with `enclavid cloud workspace use <id-or-name>` — the cached access token is invalidated, the next push gets a fresh token scoped to the new workspace, and your `enclavid/<workspace-id>/policies/...` path matches the registry's access policy.
-
-### Pushing to external registries
-
-`enclavid cloud login` only touches the Enclavid registry. For ghcr/ECR/Docker Hub, use whatever you'd use anyway:
+2. `$ENCLAVID_REGISTRY_AUTH` — `<registry> Bearer <token>` (or `<registry> Basic <base64>`), for CI: used for the registry it names, and no other.
+3. `~/.docker/config.json` — `auths`, `credHelpers`, `credsStore` (in that order), each for its own registry.
+4. None: the push goes anonymously, as to the playground. A registry that wants credentials refuses it, and the CLI says how to give some.
 
 ```bash
 # ghcr.io
@@ -112,68 +99,29 @@ docker login ghcr.io -u <gh-user> -p $GH_PAT
 # ECR
 aws ecr get-login-password | docker login --username AWS --password-stdin <acct>.dkr.ecr....
 
-# Docker Hub
-docker login -u <user>
-
-# After ANY of the above:
-enclavid policy push policy.wasm.age ghcr.io/me/policies/kyc:v1
+# After either:
+enclavid oci push policy.wasm ghcr.io/me/policies/kyc:v1
 ```
 
 ### CI
 
-For CI runners that don't want to write `~/.docker/config.json`:
-
 ```yaml
 - run: |
-    enclavid policy embed policy.wasm -o policy.embedded.wasm
-    enclavid policy push policy.embedded.wasm \
+    enclavid policy embed policy.component.wasm -o policy.wasm
+    enclavid oci push policy.wasm \
         ghcr.io/${{ github.repository }}/kyc:v${{ github.sha }} \
         --auth "Bearer ${{ secrets.GHCR_PAT }}"
 ```
 
-Or via env var:
-
-```yaml
-- run: enclavid policy push policy.embedded.wasm <ref>
-  env:
-    ENCLAVID_REGISTRY_AUTH: Bearer ${{ secrets.GHCR_PAT }}
-```
-
-## Using raw `oras` / `docker push`
-
-Both work transparently after `enclavid cloud login` (which writes the credential helper):
-
-```bash
-oras push registry.enclavid.com/enclavid/<workspace-id>/policies/kyc:v1 \
-    policy.embedded.wasm:application/wasm
-
-# or:
-docker push registry.enclavid.com/enclavid/<workspace-id>/policies/kyc:v1
-```
-
-Both invoke `docker-credential-enclavid get` per push to fetch a current JWT.
-
 ## Configuration
-
-The CLI fetches its endpoints (issuer, OAuth client id, scopes) from a discovery endpoint at startup and caches the result for 1 hour. Per-field env vars override what discovery returns.
 
 | Env var | Purpose |
 | --- | --- |
-| `ENCLAVID_REGISTRY_AUTH` | Registry credentials override (`Bearer ...` / `Basic <base64>`) |
-| `ENCLAVID_API_TOKEN` | Raw Bearer for API calls (sessions). Bypasses Logto entirely — for lightweight dev stacks or pre-minted tokens |
-| `ENCLAVID_API_URL` | Enclavid API base URL (sessions). Through a gateway, its api name as a bare origin, see [Sessions through a gateway](#sessions-through-a-gateway). Default: `http://localhost:8001` |
-| `ENCLAVID_API_MEASUREMENT` | The api build `session create` requires, as 96 lowercase hex characters; `--measurement` wins over it. Sent to a gateway in front of api, see [Sessions through a gateway](#sessions-through-a-gateway). Unset: no build is named, as against api directly |
-| `ENCLAVID_APPLICANT_URL` | Base of the applicant link printed after `session create` (`<base>/<id>`, or `<base>/-<group>/<id>` when a gateway placed the session on a group). Through a gateway, its applicant name as a bare origin; the CLI adds the marker itself. Default: `http://localhost:5173` |
-| `ENCLAVID_WORKSPACE_ID` | Active workspace override (CI: avoids the interactive picker in `cloud login`) |
-| `ENCLAVID_CLIENT_ID` | M2M client_id (Logto client_credentials grant for non-interactive auth) |
-| `ENCLAVID_CLIENT_SECRET` | M2M client_secret |
-| `ENCLAVID_DISCOVERY` | Override the discovery URL (default: `https://console.enclavid.com/api/cli-config`) |
-| `ENCLAVID_ISSUER` | Override the OIDC issuer URL |
-| `ENCLAVID_CLI_CLIENT_ID` | Override the OAuth client id used for the device flow |
-| `ENCLAVID_REGISTRY_RESOURCE` | Override the OAuth resource indicator for the Enclavid registry |
-| `ENCLAVID_REGISTRY_SCOPES` | Comma-separated registry scopes (e.g. `registry:read,registry:push`) |
-
-If the discovery endpoint is unreachable, set `ENCLAVID_ISSUER` / `ENCLAVID_CLI_CLIENT_ID` / `ENCLAVID_REGISTRY_RESOURCE` together to bypass discovery entirely.
+| `ENCLAVID_REGISTRY_AUTH` | Registry credentials for the registry named first: `<registry> Bearer <token>` / `<registry> Basic <base64>` |
+| `ENCLAVID_API_TOKEN` | Bearer for API calls (sessions) to the API `ENCLAVID_API_URL` names, and to no other |
+| `ENCLAVID_API_URL` | The API's origin for `session create`, in place of `--api` |
+| `ENCLAVID_APPLICANT_URL` | The applicants' site's origin for `session create`, in place of `--applicants` |
+| `ENCLAVID_API_MEASUREMENT` | The api build `session create` requires, as 96 lowercase hex characters; `--measurement` wins over it |
 
 ## Files written
 
@@ -181,14 +129,10 @@ If the discovery endpoint is unreachable, set `ENCLAVID_ISSUER` / `ENCLAVID_CLI_
 
 | Path | Contents |
 | --- | --- |
-| `<config>/enclavid/auth.json`, mode `0600` | access_token, refresh_token, id_token, workspaces list, active_workspace_id |
-| `~/.cache/enclavid/cli-config.json` (or platform equivalent) | Cached discovery response (TTL 1h) |
-| `~/.docker/config.json` `credHelpers` entry | Maps Enclavid registry host → `enclavid` helper |
+| `<config>/enclavid/sessions/<id>/api`, mode `0600` | The origin of the API the session was created at |
 | `<config>/enclavid/sessions/<id>/token`, mode `0600` | Per-session `X-Session-Token` (returned by `session create`) |
 | `<config>/enclavid/sessions/<id>/disclosure.key`, mode `0600` | Per-session disclosure secret, an X25519 secret key as hex (auto-generated, or copy of `--disclosure-key`); absent when `--from-file` brought its own `client_disclosure_pubkey` |
-| `<config>/enclavid/sessions/<id>/group`, mode `0600` | Per-session group `<label>.<build>` a gateway placed the session on, checked again whenever it is read; absent against api directly |
-
-`enclavid cloud logout` removes the auth file AND the credHelper entry.
+| `<config>/enclavid/sessions/<id>/group`, mode `0600` | Per-session group `<label>.<build>` a gateway placed the session on, checked again whenever it is read; absent when the API answered with none |
 
 ## License
 

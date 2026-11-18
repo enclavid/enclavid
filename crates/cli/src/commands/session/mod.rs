@@ -1,28 +1,31 @@
-//! `enclavid session ...` — talk to the Enclavid API for session
+//! `enclavid session ...` — talk to enclavid's API for session
 //! lifecycle: create, read state, pull + decrypt disclosures.
 //!
-//! Auth comes from `auth::get_access_token` (env API_TOKEN → M2M →
-//! cached cloud login). API endpoint comes from `$ENCLAVID_API_URL`
-//! (default `http://localhost:8001`). The applicant URL printed by
-//! `create` comes from `$ENCLAVID_APPLICANT_URL` (default
-//! `http://localhost:5173`).
+//! The API is the one `create` is given, `--api` / `$ENCLAVID_API_URL`:
+//! enclavid's own, or the playground's, which answers as it does. A
+//! request goes with the bearer in `$ENCLAVID_API_TOKEN` when it goes to
+//! the API that token is for, `$ENCLAVID_API_URL`'s, and with none
+//! otherwise — the playground asks for none (see [`crate::auth`]). The applicant
+//! link `create` prints goes to `--applicants` / `$ENCLAVID_APPLICANT_URL`,
+//! as `<base>/<id>`: the session's id is the path's one segment, never in
+//! the fragment, which a browser carries across a redirect to another
+//! site.
 //!
-//! `create` caches the returned `client_session_token` and the
-//! disclosure-key secret under `enclavid/sessions/<id>/` in the
-//! platform config directory (see [`cache`]) so subsequent `get` /
-//! `disclosures` work without re-passing them.
+//! `create` caches what later requests about the session need — the API
+//! it was created at, the returned `client_session_token`, the group it
+//! was placed on, and the disclosure-key secret — under
+//! `enclavid/sessions/<id>/` in the platform config directory (see
+//! [`cache`]), so `get` / `disclosures` name the session alone.
 //!
-//! In front of api there may be a gateway, which spreads sessions over
-//! groups of api instances. `create` then names the api build it
-//! requires (`--measurement` / `$ENCLAVID_API_MEASUREMENT`), the gateway
-//! answers with the group it placed the session on, and `create` caches
-//! that group beside the token. Every later request about the session
-//! names the group as a marker at the start of the path,
-//! `/-<label>.<build>/api/v1/...`, and so does the applicant link,
-//! because the gateway routes a request by that marker alone. That is
-//! why both bases must then be bare origins — see [`under_group`].
-//! Talking to api directly, no build is named, no group comes back, and
-//! paths carry no marker.
+//! In front of the API there may be a gateway, which spreads sessions over
+//! groups of API instances. It answers a creation with the group it placed
+//! the session on, which `create` caches, and `create` may name the build
+//! it requires (`--measurement` / `$ENCLAVID_API_MEASUREMENT`). Every later
+//! request about the session names the group as a marker at the start of
+//! the path, `/-<label>.<build>/api/v1/...`, and so does the applicant
+//! link, because the gateway routes a request by that marker alone. That
+//! is why both bases are bare origins — see [`bare_origin`]. An API that
+//! answers with no group gets paths with no marker.
 
 use anyhow::{Context, Result};
 
@@ -32,28 +35,11 @@ pub mod disclosures;
 pub mod get;
 mod transport;
 
-const API_URL_VAR: &str = "ENCLAVID_API_URL";
-const APPLICANT_URL_VAR: &str = "ENCLAVID_APPLICANT_URL";
+/// Where `create` takes the API's origin from.
+const API_URL: &str = "--api / $ENCLAVID_API_URL";
 
-/// `$ENCLAVID_API_URL` resolver — same lookup pattern as other CLI
-/// env overrides. Defaulting to localhost is fine because non-local
-/// production CLI usage will set this explicitly (or get it through
-/// discovery, when discovery starts publishing it).
-pub fn api_url() -> String {
-    std::env::var(API_URL_VAR).unwrap_or_else(|_| "http://localhost:8001".to_string())
-}
-
-/// `$ENCLAVID_APPLICANT_URL` resolver — base origin of the applicant
-/// SPA. Used only for printing the "open this in a browser" hint
-/// after `session create`, as `<base>/<id>`: the session's id is the
-/// path's one segment, never in the fragment, which a browser carries
-/// across a redirect to another site. When the session was placed on
-/// a group, the link goes under that group's marker — see
-/// [`under_group`]. Default targets `pnpm dev` on :5173; set to
-/// `http://localhost:8002` when api serves built static instead.
-pub fn applicant_url() -> String {
-    std::env::var(APPLICANT_URL_VAR).unwrap_or_else(|_| "http://localhost:5173".to_string())
-}
+/// Where `create` takes the applicants' site's origin from.
+const APPLICANT_URL: &str = "--applicants / $ENCLAVID_APPLICANT_URL";
 
 /// The api build `session create` requires, from `--measurement` or,
 /// failing that, `$ENCLAVID_API_MEASUREMENT`. `None` when neither is
@@ -109,7 +95,7 @@ fn is_group(value: &str) -> bool {
 }
 
 /// `base` as a bare origin, `scheme://host[:port]` with no trailing
-/// slash, or an error naming `var`, the variable it came from.
+/// slash, or an error naming `what`, where it came from.
 ///
 /// A gateway reads a group's marker only at the very start of the path,
 /// so a marker behind a path of the base's own —
@@ -117,35 +103,34 @@ fn is_group(value: &str) -> bool {
 /// refuses. A query or a fragment would swallow the marker the same
 /// way. The base cannot carry the marker itself either: the CLI adds
 /// it, so it would appear twice.
-fn bare_origin(var: &str, base: &str) -> Result<String> {
-    let url = url::Url::parse(base).with_context(|| format!("${var} is `{base}`, not a URL"))?;
+fn bare_origin(what: &str, base: &str) -> Result<String> {
+    let url = url::Url::parse(base).with_context(|| format!("{what} is `{base}`, not a URL"))?;
     if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
         anyhow::bail!(
-            "${var} is `{base}`, but through a gateway it must be a bare origin, \
-             scheme://host[:port]: the gateway reads the group marker only at the start of the path"
+            "{what} is `{base}`, but it must be a bare origin, scheme://host[:port]: \
+             a gateway reads the group marker only at the start of the path"
         );
     }
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
-/// `base` with the group's marker appended when there is a group, so
-/// the gateway sends what follows to that group: `<base>/-<group>`,
-/// `base` then held to a bare origin by [`bare_origin`]. Without a
-/// group, `base` as it is, path and all. Either way without a trailing
-/// slash, ready for the caller to append an absolute path.
-pub fn under_group(var: &str, base: &str, group: Option<&str>) -> Result<String> {
+/// `origin`, a bare origin, with the group's marker appended when there
+/// is a group, so the gateway sends what follows to that group:
+/// `<origin>/-<group>`. Ready for the caller to append an absolute path.
+pub fn under_group(origin: &str, group: Option<&str>) -> String {
     match group {
-        Some(group) => Ok(format!("{}/-{group}", bare_origin(var, base)?)),
-        None => Ok(base.trim_end_matches('/').to_string()),
+        Some(group) => format!("{origin}/-{group}"),
+        None => origin.to_string(),
     }
 }
 
-/// The api base for requests about an existing session: under the
-/// marker of the group `create` cached for it, or plain when it cached
-/// none.
+/// The API base for requests about an existing session: the API `create`
+/// cached for it, under the marker of the group it cached, or plain when
+/// it cached none.
 fn session_api(session_id: &str) -> Result<String> {
+    let api = cache::read_api(session_id)?;
     let group = cache::read_group(session_id)?;
-    under_group(API_URL_VAR, &api_url(), group.as_deref())
+    Ok(under_group(&api, group.as_deref()))
 }
 
 #[cfg(test)]
@@ -195,21 +180,25 @@ mod tests {
     fn a_group_goes_in_as_a_marker() {
         let group = format!("blue.{}", "0f".repeat(48));
         assert_eq!(
-            under_group("X", "https://api.example/", Some(&group)).unwrap(),
+            under_group("https://api.example", Some(&group)),
             format!("https://api.example/-{group}"),
         );
         assert_eq!(
-            under_group("X", "http://localhost:8001", Some(&group)).unwrap(),
-            format!("http://localhost:8001/-{group}"),
-        );
-        assert_eq!(
-            under_group("X", "https://api.example/", None).unwrap(),
+            under_group("https://api.example", None),
             "https://api.example"
         );
     }
 
     #[test]
-    fn under_a_group_a_base_must_be_a_bare_origin() {
+    fn a_base_is_a_bare_origin() {
+        assert_eq!(
+            bare_origin("X", "https://api.example/").unwrap(),
+            "https://api.example"
+        );
+        assert_eq!(
+            bare_origin("X", "http://localhost:8001").unwrap(),
+            "http://localhost:8001"
+        );
         let group = format!("blue.{}", "0f".repeat(48));
         for base in [
             "https://example/verify".to_string(),
@@ -219,15 +208,7 @@ mod tests {
             "https://example/#x".to_string(),
             "example".to_string(),
         ] {
-            assert!(under_group("X", &base, Some(&group)).is_err(), "{base:?}");
+            assert!(bare_origin("X", &base).is_err(), "{base:?}");
         }
-    }
-
-    #[test]
-    fn without_a_group_a_base_keeps_its_own_path() {
-        assert_eq!(
-            under_group("X", "https://example/verify/", None).unwrap(),
-            "https://example/verify",
-        );
     }
 }

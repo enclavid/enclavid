@@ -37,16 +37,11 @@ pub async fn run(session_id: &str, disclosure_key_override: Option<PathBuf>) -> 
     };
     let secret = load_secret(&key_path)?;
 
-    let jwt = transport::fetch_jwt().await?;
-    let client = transport::http_client()?;
-    let url = format!(
-        "{}/api/v1/sessions/{}/disclosures",
-        session_api(session_id)?,
-        session_id,
-    );
+    let api = session_api(session_id)?;
+    let client = transport::http_client(&api)?;
+    let url = format!("{api}/api/v1/sessions/{session_id}/disclosures");
 
-    let response =
-        transport::send(&client, Method::GET, &url, &jwt, Some(&token), None, None).await?;
+    let response = transport::send(&client, Method::GET, &url, Some(&token), None, None).await?;
     let response = transport::ensure_ok(response, "GET /api/v1/sessions/<id>/disclosures").await?;
     let body: DisclosuresResponse = response
         .json()
