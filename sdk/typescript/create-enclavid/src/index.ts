@@ -55,7 +55,7 @@ async function main() {
     return;
   }
 
-  intro("An Enclavid policy");
+  intro("An enclavid policy");
   const dir =
     positionals[0] ??
     answered(

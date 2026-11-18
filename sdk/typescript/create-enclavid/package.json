@@ -1,7 +1,7 @@
 {
   "name": "create-enclavid",
   "version": "0.1.0",
-  "description": "Start an Enclavid policy from one of its templates: npm create enclavid.",
+  "description": "Start an enclavid policy from one of its templates: npm create enclavid.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -23,7 +23,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "prepack": "tsc && node dist/pack.js",
+    "prepack": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc && node dist/pack.js",
     "test": "tsc && node --test dist/create.test.js dist/pack.test.js"
   },
   "devDependencies": {

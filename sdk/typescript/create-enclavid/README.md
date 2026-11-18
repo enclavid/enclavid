@@ -1,6 +1,6 @@
 # create-enclavid
 
-Start an Enclavid policy from one of its templates:
+Start an enclavid policy from one of its templates:
 
 ```
 npm create enclavid@latest my-policy

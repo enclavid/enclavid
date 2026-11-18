@@ -1,7 +1,7 @@
 {
   "name": "@enclavid/policy",
   "version": "0.1.0",
-  "description": "Write an Enclavid policy in TypeScript with a state of the policy's own type.",
+  "description": "Write an enclavid policy in TypeScript with a state of the policy's own type.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -19,8 +19,12 @@
     "dist",
     "!dist/*.test.*"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
+    "prepack": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
     "test": "tsc && node --test dist/index.test.js"
   },
   "dependencies": {
