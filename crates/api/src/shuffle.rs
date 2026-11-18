@@ -10,14 +10,11 @@
 //! is the user, not the attacker) and renders policy order
 //! unchanged for UX consistency.
 //!
-//! Engine doesn't pick its own randomness — host can subtly bias the
-//! Linux entropy pool inputs (interrupt timing, virtio-rng) even with
-//! CVM memory encryption protecting pool state. We dodge the entire
-//! surface by deriving the per-envelope shuffle seed from
-//! [`tee_seal_key`](crate::state::AppState::shuffle_key), an
-//! attested 32-byte secret only the enclave knows. Consumer can't
-//! reverse the shuffle to decode policy-encoded field order, host
-//! can't game the entropy to produce predictable shuffles.
+//! The per-envelope shuffle seed is derived from
+//! [`tee_seal_key`](crate::state::AppState::shuffle_key), an attested
+//! 32-byte secret only the enclave knows: the consumer can't reverse
+//! the shuffle to decode policy-encoded field order, and the host
+//! can't predict it.
 //!
 //! Derivation chain:
 //!

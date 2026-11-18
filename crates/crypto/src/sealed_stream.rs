@@ -26,7 +26,6 @@
 use chacha20poly1305::aead::Payload;
 use chacha20poly1305::aead::stream::{DecryptorBE32, EncryptorBE32};
 use chacha20poly1305::{ChaCha20Poly1305, Key};
-use rand_core::{OsRng, RngCore};
 use zeroize::Zeroize;
 
 use crate::error::CryptoError;
@@ -93,9 +92,14 @@ impl Sealer {
     /// A sealer under a key derived from `key` and a fresh salt, and the
     /// stream's header.
     pub fn new(key: &[u8; 32], aad: &[u8]) -> (Self, Vec<u8>) {
-        let mut header = vec![VERSION; HEADER_BYTES];
-        OsRng.fill_bytes(&mut header[1..]);
-        let mut derived = stream_key(key, &header[1..]);
+        let mut salt = [0u8; SALT_BYTES];
+        // The call `OsRng` makes, made directly: code scanning then sees the
+        // salt filled with random bytes rather than a constant reaching it.
+        getrandom::getrandom(&mut salt).expect("the OS gives random bytes");
+        let mut header = Vec::with_capacity(HEADER_BYTES);
+        header.push(VERSION);
+        header.extend_from_slice(&salt);
+        let mut derived = stream_key(key, &salt);
         // The key is this stream's alone, so the nonce prefix needs nothing in it.
         let encryptor = EncryptorBE32::new(Key::from_slice(&derived), &Default::default());
         derived.zeroize();

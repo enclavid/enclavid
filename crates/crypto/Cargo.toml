@@ -11,6 +11,7 @@ repository.workspace = true
 # construction a blob too large to hold whole is sealed with.
 chacha20poly1305 = { version = "0.10", features = ["stream"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+getrandom = "0.2"
 # Anonymous public-key sealing to the consumer's X25519 key. libsodium's
 # `crypto_box_seal` wire format, so a consumer decrypts with the libsodium
 # binding their language already has — no format-specific library, and no
