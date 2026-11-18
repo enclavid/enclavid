@@ -17,6 +17,8 @@ npm run build
 enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
 ```
 
+`npm run playground` runs it on the playground, with the props in `props.json`.
+
 ## What is where
 
 - `src/policy.ts` — the policy.

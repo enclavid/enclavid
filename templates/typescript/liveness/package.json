@@ -1,11 +1,13 @@
 {
   "name": "my-policy",
+  "description": "A liveness check by video: the face held in an oval, then turned as asked, and read as live.",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "types": "jco guest-types wit --world-name policy --variants-inline-cases -q -o types",
     "build": "node -e \"for (const d of ['dist', 'types']) require('node:fs').rmSync(d, { recursive: true, force: true })\" && jco guest-types wit --world-name policy --variants-inline-cases -q -o types && tsc && componentize-qjs --wit wit --world policy --js dist/policy.js --module-root . --sync --opt-size -o dist/policy.component.wasm && enclavid policy embed dist/policy.component.wasm -o dist/policy.wasm",
+    "playground": "npm run build && enclavid oci push dist/policy.wasm playground.enclavid.com/policies --quiet | enclavid session create --policy - --api https://playground.enclavid.com --applicants https://verify.enclavid.com",
     "format": "prettier --write src"
   },
   "dependencies": {

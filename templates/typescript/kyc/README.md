@@ -21,6 +21,21 @@ enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
 
 `npm run format` formats `src/` with Prettier.
 
+## On the playground
+
+`npm run playground` builds the policy and runs it on the playground, which
+asks for no account: it pushes the policy there, and starts a session of it
+with the props in `props.json`.
+
+```
+enclavid oci push dist/policy.wasm playground.enclavid.com/policies --quiet \
+  | enclavid session create --policy - --props @props.json \
+      --api https://playground.enclavid.com --applicants https://verify.enclavid.com
+```
+
+Open the applicant link it prints; `enclavid session get <id>` and
+`enclavid session disclosures <id>` show what came of it.
+
 ## What is where
 
 - `src/policy.ts` — the policy. Its state is a value of its own type; see

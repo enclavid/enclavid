@@ -1,11 +1,13 @@
 {
   "name": "my-policy",
+  "description": "An age check by selfie: approved when the face reads at least the consumer's min-age.",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "types": "jco guest-types wit --world-name policy --variants-inline-cases -q -o types",
     "build": "node -e \"for (const d of ['dist', 'types']) require('node:fs').rmSync(d, { recursive: true, force: true })\" && jco guest-types wit --world-name policy --variants-inline-cases -q -o types && tsc && componentize-qjs --wit wit --world policy --js dist/policy.js --module-root . --sync --opt-size -o dist/policy.component.wasm && enclavid policy embed dist/policy.component.wasm -o dist/policy.wasm",
+    "playground": "npm run build && enclavid oci push dist/policy.wasm playground.enclavid.com/policies --quiet | enclavid session create --policy - --props @props.json --api https://playground.enclavid.com --applicants https://verify.enclavid.com",
     "format": "prettier --write src"
   },
   "dependencies": {
