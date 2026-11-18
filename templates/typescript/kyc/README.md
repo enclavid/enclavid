@@ -4,6 +4,14 @@ A policy decides what an applicant is asked and what the session ends with. It
 runs inside the enclave, in a sandbox, as a WebAssembly component — this one
 built with `componentize-qjs`, which embeds the QuickJS engine.
 
+This one walks the steps of a KYC — the passport, a selfie, and a consent
+screen — but is not a whole one. It does not:
+
+- read the passport: the fields it discloses are fixed sample values;
+- check that the passport is genuine, not forged or altered;
+- match the selfie's face to the passport's photo;
+- screen the applicant against sanctions lists.
+
 ## Build
 
 Needs Node and the `enclavid` CLI on the path.

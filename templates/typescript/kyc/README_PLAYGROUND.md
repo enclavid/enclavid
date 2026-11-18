@@ -5,9 +5,12 @@ consumer turned it off, then sees a consent screen with the fields the
 consumer receives if they accept. The session ends approved on accept and
 rejected on decline.
 
-The fields are fixed sample values: the template shows the flow, not a
-document read. Reading the passport is a plugin's, which this template does
-not import.
+The template shows the flow, and is not a whole KYC. It does not:
+
+- read the passport: the fields are fixed sample values;
+- check that the passport is genuine, not forged or altered;
+- match the selfie's face to the passport's photo;
+- screen the applicant against sanctions lists.
 
 ## Files
 
