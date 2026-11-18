@@ -5,17 +5,17 @@ verifier's own policy inside a TEE — designed so the operator can learn neithe
 *who* is being verified nor *what* is being checked.**
 
 Identity and KYC verification normally means handing a person's documents and
-biometrics to a third party that gets to see all of it. Enclavid inverts that:
+biometrics to a third party that gets to see all of it. enclavid inverts that:
 the entire verification runs inside hardware-encrypted Confidential VMs (AMD
 SEV-SNP), so the party operating the infrastructure sees neither the applicant's
 data nor even which checks are being run.
 
 The verifier — a bank, exchange, or other consumer — brings **their own**
-verification policy: sandboxed WebAssembly they pin per session. Enclavid pulls
+verification policy: sandboxed WebAssembly they pin per session. enclavid pulls
 that policy and its verification plugins into the enclave, composes and runs them
 there over the applicant's data, and persists none of it. What returns to the
 consumer is only a verdict — `approved` / `rejected` / `rejected-retryable` /
-`review` — plus whatever the applicant explicitly consented to disclose. Enclavid
+`review` — plus whatever the applicant explicitly consented to disclose. enclavid
 the platform stays neutral: it authors no policy, makes no decision, and holds no
 data of its own.
 
@@ -31,6 +31,21 @@ the policy in TypeScript in the browser, and build it. Then start a session,
 open the applicant's page on your phone, and see what a consumer's backend
 receives: the decision, and what the applicant agreed to share, sealed to a key
 your browser holds.
+
+To change a policy in words, Ask AI opens ChatGPT or Claude with your files and
+links to the template's guide and types, and shows what the answer changes
+before you apply it.
+
+A policy built on your own machine runs there too, with no account:
+
+```sh
+cargo install --git https://github.com/enclavid/enclavid enclavid-cli
+npm create enclavid@latest my-policy -- --template kyc
+cd my-policy && npm install && npm run playground
+```
+
+`npm run playground` builds the policy, pushes it to the playground, and starts
+a session of it, printing the applicant's link. What is pushed there is public.
 
 ## Design goal
 
@@ -50,7 +65,7 @@ your browser holds.
   nowhere else. A breach therefore exposes at most what a single enclave is
   processing at that moment — never data at rest, never past sessions.
 
-Every link between Enclavid's own enclaves is attested by AMD SEV-SNP hardware,
+Every link between enclavid's own enclaves is attested by AMD SEV-SNP hardware,
 and the public gateway's quote can be checked against a measurement rebuilt from
 source — see [Verifying the gateway](#verifying-the-gateway). Key release from a
 KBS is not yet hardware-attested and release measurements are not yet
@@ -188,6 +203,11 @@ what is under [Not yet](#not-yet) comes first.
 - **Core engine** — runs a consumer's verification policy as sandboxed
   WebAssembly inside the enclave, composing the policy and its verification
   plugins per session; compilation runs in a separate worker.
+- **Sessions prepared ahead** — created with `"warmup": true`, or warmed
+  later, a session has its pins checked, its policy and plugins compiled and
+  its props read against the policy's type before the applicant connects. A
+  session that cannot run is marked `init_failed`, with what in the consumer's
+  own setup to change.
 - **Confidential storage** — session state is kept encrypted-only in a separate
   attested store; the host moves opaque bytes and never sees a key or plaintext.
 - **Consent & disclosure** — the applicant sees exactly what will be shared and
@@ -221,17 +241,19 @@ what is under [Not yet](#not-yet) comes first.
   are recorded through prompts such as head turns and colour flashes, and a
   plugin checks each prompt again in the enclave.
 - **Tooling** — a command-line client for authoring and pushing policies and
-  plugins, a TypeScript policy SDK with templates (`sdk/typescript`,
+  plugins and for creating and reading sessions, a TypeScript policy SDK with
+  templates and `npm create enclavid` to start from one (`sdk/typescript`,
   `templates/typescript`), a web frontend served from the enclave, and the
   [playground](#playground).
 
 ### Not yet
 
-- **The rest of the KYC pipeline** — document reading (MRZ / OCR), face match
-  and sanctions screening.
+- **The rest of the KYC pipeline** — document reading (MRZ / OCR), document
+  authenticity checks, face match and sanctions screening.
 - **Hardware-attested key release** — the KBS path is wired, but presents
   placeholder evidence rather than an SEV-SNP report, so a KBS cannot yet limit
-  release to the attested enclave.
+  release to the attested enclave; until it can, the production images take no
+  key from a KBS.
 - **Consumer tooling** — a command that verifies the gateway's attestation, and
   client SDKs.
 - **Webhooks** — notifying the consumer of status changes and ready disclosures.
@@ -242,7 +264,7 @@ what is under [Not yet](#not-yet) comes first.
 
 ### Tooling
 
-- A CLI review, starting with the gateway check above as one command.
+- The gateway check above, as one command of the CLI.
 - Client SDKs, first in TypeScript and Rust.
 
 ### Hardening
@@ -251,8 +273,8 @@ what is under [Not yet](#not-yet) comes first.
 - **Published measurements** — builds in CI, with every release's measurements
   signed into a public transparency log.
 
-After that: document reading and face match, sanctions screening, webhooks,
-and compiling a session's policy before the applicant arrives.
+After that: document reading, document authenticity and face match, sanctions
+screening, and webhooks.
 
 ## License
 
