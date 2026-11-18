@@ -1,0 +1,36 @@
+{
+  "name": "create-enclavid",
+  "version": "0.1.0",
+  "description": "Start an Enclavid policy from one of its templates: npm create enclavid.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/enclavid/enclavid",
+    "directory": "sdk/typescript/create-enclavid"
+  },
+  "type": "module",
+  "bin": {
+    "create-enclavid": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "templates",
+    "!dist/*.test.*",
+    "!dist/pack.*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepack": "tsc && node dist/pack.js",
+    "test": "tsc && node --test dist/create.test.js dist/pack.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~6.0.3"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.9.0"
+  }
+}
