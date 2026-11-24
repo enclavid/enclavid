@@ -25,19 +25,19 @@ use axum::routing::{MethodRouter, post};
 use session_types::SessionStatus;
 use storage_client::Metadata;
 
-use crate::client_state::ClientState;
 use crate::init;
 
 use super::auth::{Principal, SessionToken, trust_metadata};
+use super::state::ConsumerState;
 
 /// Route factory: bare `post(handler)` MethodRouter. Auth is attached at the
-/// router level via `.layer(auth(op))` — see `client::router`.
-pub(super) fn post_warmup() -> MethodRouter<Arc<ClientState>> {
+/// router level via `.layer(auth(op))` — see `consumer::router`.
+pub(super) fn post_warmup() -> MethodRouter<Arc<ConsumerState>> {
     post(warmup)
 }
 
 async fn warmup(
-    State(state): State<Arc<ClientState>>,
+    State(state): State<Arc<ConsumerState>>,
     Principal(presented_principal): Principal,
     SessionToken(presented_token): SessionToken,
     Path(session_id): Path<String>,

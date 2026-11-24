@@ -59,7 +59,7 @@ pub async fn prepare(
     metadata: &SessionMetadata,
 ) -> Result<Prepared, Unavailable> {
     let composition = Composition::of(metadata).ok_or_else(|| {
-        safe_logger::debug!("init: metadata.client missing for {session_id}");
+        safe_logger::debug!("init: metadata.consumer missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     if let Some(prepared) = &metadata.prepared {

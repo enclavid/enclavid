@@ -9,9 +9,9 @@
 //! and the client-only orchestrator name them without wasmtime.
 
 /// One plugin's component bytes bundled with the WIT package id it
-/// satisfies. The api crate constructs these from the client-supplied
+/// satisfies. The api crate constructs these from the consumer-supplied
 /// `PluginPin` list at session start (pull → bytes) and hands them to
-/// `Compiler::compose`. `package` is the value the client passed in
+/// `Compiler::compose`. `package` is the value the consumer passed in
 /// `PluginPin.package` (e.g. `"vendor:plugin@0.1.0"`); it identifies
 /// which set of imports declared in the policy's WIT world this plugin
 /// is meant to satisfy and names the plugin in the composition graph.

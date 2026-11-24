@@ -2,7 +2,7 @@
 //! `SessionStore`. The keyless execution-worker calls back once per `handle`
 //! round via `RemoteCallbacks::session_change` → [`SessionPersister::persist`];
 //! we age-encrypt the disclosure THIS side recorded for the round (present only
-//! when a consent-disclosure prompt was accepted) to the client recipient
+//! when a consent-disclosure prompt was accepted) to the consumer's recipient
 //! pubkey, then translate state + sealed disclosure into a single atomic Write
 //! RPC. The worker reports nothing about consent — see
 //! [`SessionPersister::consented`].
@@ -18,18 +18,18 @@
 //! Why encryption lives here, not in the executor: state and metadata are
 //! already sealed transparently inside storage-client (`SetState` /
 //! `SetMetadata` AEAD with `tee_seal_key`/the session's data key). Disclosures use
-//! a different scheme (age to the consumer's `client_disclosure_pubkey`)
+//! a different scheme (age to the consumer's `disclosure_pubkey`)
 //! but the architectural slot is the same — the orchestrator owns "I/O +
 //! encryption keys" and the worker never holds either, staying keyless.
 //!
-//! `client_disclosure_pubkey` is a public age recipient for outbound
+//! `disclosure_pubkey` is a public age recipient for outbound
 //! disclosure ciphertexts only — the consumer holds the matching
 //! secret. This persister is concerned with the disclosure flow; the
 //! policy artifact path is independent.
 //!
 //! Lifetime: one persister per round, built inside `SessionRunCtx::run` once
 //! the round's consent is known. Owns session-id, the session's data key (the
-//! inner AEAD layer of state and media), the client disclosure pubkey
+//! inner AEAD layer of state and media), the consumer's disclosure pubkey
 //! (disclosure age recipient), a mutable copy of session metadata (so we can
 //! update `disclosure_count` atomically with each persist), and the round's
 //! consent. How long the PERSISTER survives is partly the WORKER's choice — the
@@ -79,7 +79,7 @@ pub(super) struct SessionPersister {
     /// Pulled from session metadata at run start; provided by the
     /// platform consumer when creating the session, so the consumer
     /// holds the matching private key.
-    pub client_disclosure_pubkey: String,
+    pub disclosure_pubkey: String,
     /// Session version we expect on the host. Initialized from the
     /// read that precedes the run; updated after each successful
     /// `write` so subsequent writes within the same run don't
@@ -213,7 +213,7 @@ impl SessionPersister {
         session_id: String,
         data_keys: Weak<DataKeys>,
         new_lock: Option<Vec<u8>>,
-        client_disclosure_pubkey: String,
+        disclosure_pubkey: String,
         version: u64,
         awaiting_seq: u64,
         metadata: SessionMetadata,
@@ -228,7 +228,7 @@ impl SessionPersister {
             session_id,
             data_keys,
             new_lock,
-            client_disclosure_pubkey,
+            disclosure_pubkey,
             current_version: AtomicU64::new(version),
             metadata: Mutex::new(metadata),
             prepared,
@@ -458,7 +458,7 @@ impl SessionPersister {
                          not render"
                     ))
                     .vouch_with(AuthN::Verified, |bytes| -> Result<_, CallbackError> {
-                        seal_to_recipient(&bytes, &self.client_disclosure_pubkey)
+                        seal_to_recipient(&bytes, &self.disclosure_pubkey)
                             .map(DisclosureOp)
                             .map_err(|e| {
                                 safe_logger::debug!("disclosure seal failed: {e}");

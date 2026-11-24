@@ -10,9 +10,9 @@ use enclavid_boundary_macros::boundary;
 use fleet_stream::{StreamLen, bin};
 use futures::TryStreamExt;
 use hatch_rpc::{
-    AuthorizeError, AuthorizeRequest, BlobRequest, ClientOperation, HatchLeg, KbsError, KbsRequest,
-    KbsResponse, LegSettings, Manifest, ManifestRequest, PullError, RemoteHatchAt, SessionTerms,
-    Verdict,
+    AuthorizeError, AuthorizeRequest, BlobRequest, ConsumerOperation, HatchLeg, KbsError,
+    KbsRequest, KbsResponse, LegSettings, Manifest, ManifestRequest, PullError, RemoteHatchAt,
+    SessionTerms, Verdict,
 };
 
 use crate::{AuthClient, AuthVerdict, BridgeError, KbsClient, Link, Principal, RegistryClient};
@@ -182,7 +182,7 @@ async fn a_verdict_crosses_as_its_hatch_gave_it() {
     let ask = |header: &str| {
         Api::expose(AuthorizeRequest {
             authorization_header: header.into(),
-            operation: ClientOperation::SessionRead,
+            operation: ConsumerOperation::SessionRead,
         })
     };
     let verdict = auth

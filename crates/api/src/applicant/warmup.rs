@@ -2,7 +2,7 @@
 //! session to be made ready to run while the applicant is still drawing their
 //! key, so that the first round finds its composition held.
 //!
-//! The consumer's own warmup (`crate::client`) prepares a session when it is
+//! The consumer's own warmup (`crate::consumer`) prepares a session when it is
 //! created; one whose applicant comes days later finds that gone from the
 //! execution-worker's cache, and this brings it back, from L2 or compiled.
 //! What is prepared is what the session pins, read from its sealed metadata

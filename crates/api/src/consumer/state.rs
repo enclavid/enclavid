@@ -1,6 +1,6 @@
-//! State for the client-facing API listener (POST /sessions etc.).
+//! State for the consumer-facing API listener (POST /sessions etc.).
 //!
-//! Distinct from `AppState` (applicant-facing API): clients are authorized
+//! Distinct from `AppState` (applicant-facing API): consumers are authorized
 //! through the hatch (`AuthClient`), sessions are created here with attestation
 //! quotes; the applicant flow uses BearerKey and continues from a session that
 //! this listener already created.
@@ -20,7 +20,7 @@ use storage_client::SessionStore;
 use crate::boundary::Hatch;
 use crate::compositions::Compositions;
 
-pub struct ClientState {
+pub struct ConsumerState {
     pub auth: AuthClient<Hatch>,
     pub session_store: Arc<SessionStore>,
     pub attestor: Arc<dyn Attestor>,
@@ -32,7 +32,7 @@ pub struct ClientState {
     pub pull_deadline: std::time::Duration,
 }
 
-impl ClientState {
+impl ConsumerState {
     /// `authorize_deadline` is how long the hatch has to answer each
     /// authorization, over `hatch`.
     pub fn new(

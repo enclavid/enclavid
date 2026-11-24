@@ -26,7 +26,7 @@ use hyper::{Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 
-use hatch_rpc::{ClientOperation, SessionTerms};
+use hatch_rpc::{ConsumerOperation, SessionTerms};
 
 /// The longest principal a hook may name, in characters, as the contract's
 /// JSON Schema counts them. A principal is kept with every session its
@@ -105,12 +105,12 @@ enum Operation {
     DataRead,
 }
 
-impl From<ClientOperation> for Operation {
-    fn from(op: ClientOperation) -> Self {
+impl From<ConsumerOperation> for Operation {
+    fn from(op: ConsumerOperation) -> Self {
         match op {
-            ClientOperation::SessionCreate => Operation::SessionCreate,
-            ClientOperation::SessionRead => Operation::SessionRead,
-            ClientOperation::DataRead => Operation::DataRead,
+            ConsumerOperation::SessionCreate => Operation::SessionCreate,
+            ConsumerOperation::SessionRead => Operation::SessionRead,
+            ConsumerOperation::DataRead => Operation::DataRead,
         }
     }
 }
@@ -236,7 +236,7 @@ impl Hooks {
     pub async fn authorize(
         &self,
         authorization_header: &str,
-        operation: ClientOperation,
+        operation: ConsumerOperation,
     ) -> Result<Option<Authorization>, HookError> {
         let Some(addr) = &self.authorize else {
             return Ok(None);
@@ -480,7 +480,7 @@ mod tests {
     async fn a_hook_is_asked_and_its_answer_read() {
         let addr = hook().await;
         let hooks = Hooks::new(Some(addr.clone()), Some(addr), Duration::from_secs(5));
-        let ask = |h: &'static str| hooks.authorize(h, ClientOperation::SessionCreate);
+        let ask = |h: &'static str| hooks.authorize(h, ConsumerOperation::SessionCreate);
         assert_eq!(
             ask("Bearer good").await.unwrap(),
             Some(Authorization::Principal("org-1".into()))
@@ -513,7 +513,7 @@ mod tests {
         assert!(!hooks.authorizes());
         assert_eq!(
             hooks
-                .authorize("Bearer anything", ClientOperation::SessionCreate)
+                .authorize("Bearer anything", ConsumerOperation::SessionCreate)
                 .await
                 .unwrap(),
             None
@@ -533,7 +533,7 @@ mod tests {
         };
         let hooks = Hooks::new(Some(gone), None, Duration::from_secs(5));
         assert!(matches!(
-            hooks.authorize("", ClientOperation::SessionRead).await,
+            hooks.authorize("", ConsumerOperation::SessionRead).await,
             Err(HookError::Unreachable)
         ));
     }

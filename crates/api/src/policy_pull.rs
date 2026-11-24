@@ -623,7 +623,7 @@ pub fn split_pinned_ref(policy_ref: &str) -> Option<(&str, &str)> {
 /// hatch reaches the registry — is not part of it. Returns None for
 /// malformed refs (tag-form or non-sha256).
 ///
-/// Used to drive the `Client.registry_auth` hostname-keyed bearer
+/// Used to drive the `Consumer.registry_auth` hostname-keyed bearer
 /// lookup at pull time — same hostname rule for policy and plugin
 /// refs, so the API consumer only has to populate one entry per
 /// registry.
@@ -642,7 +642,7 @@ pub fn registry_hostname(oci_ref: &str) -> Option<&str> {
 }
 
 /// Look up the bearer for an OCI ref against the hostname-keyed
-/// `Client.registry_auth` map. Returns an empty slice when the
+/// `Consumer.registry_auth` map. Returns an empty slice when the
 /// hostname has no entry (anonymous pull) — the existing RegistryClient
 /// API treats empty bytes as "no Authorization header".
 pub fn bearer_for_ref<'a>(

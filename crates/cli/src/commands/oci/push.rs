@@ -362,7 +362,7 @@ struct Layer {
 /// annotation; they differ only in how the layer key (the private-opts
 /// JSON) reaches the TEE:
 /// - `None` → plaintext `application/wasm`, no annotations (today's path).
-/// - `inline` → the client passes the key, base64, as `"key": "<base64>"`
+/// - `inline` → the consumer passes the key, base64, as `"key": "<base64>"`
 ///   (owner == creator).
 /// - `kbs` → writes the `--kbs-resource` URI into the `enc.keys.*`
 ///   annotation (digest-pinned, the TEE reads it to locate the key); the key
@@ -486,7 +486,7 @@ fn say_key(say: Say, mode: EncryptMode, key_file: Option<&Path>, kbs_resource: O
                 "  curl -X POST <kbs>/kbs/v0/resource/{rel} \\\n       \
                  -H \"Authorization: Bearer <admin-token>\" --data-binary {data}"
             ));
-            say.line("Then the client passes  \"key\": { \"kbs\": { \"endpoint\": \"<kbs>\" } }");
+            say.line("Then the consumer passes  \"key\": { \"kbs\": { \"endpoint\": \"<kbs>\" } }");
             say.line("  in POST /api/v1/sessions (per policy / plugin).");
         }
     }

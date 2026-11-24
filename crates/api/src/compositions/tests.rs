@@ -159,13 +159,13 @@ fn composition_key_partitions_by_decryption_authority() {
 fn a_sessions_composition_has_the_key_its_pins_give() {
     let metadata = SessionMetadata {
         policy_ref: "reg/policy@sha256:aa".into(),
-        client: Some(Client {
+        consumer: Some(Consumer {
             plugins: vec![pin("p", "reg/p@sha256:11")],
             ..Default::default()
         }),
         ..Default::default()
     };
-    let composition = Composition::of(&metadata).expect("a client block");
+    let composition = Composition::of(&metadata).expect("a consumer block");
     assert_eq!(
         composition.key(),
         composition_key("reg/policy@sha256:aa", None, &[pin("p", "reg/p@sha256:11")])

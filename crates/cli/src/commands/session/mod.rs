@@ -12,7 +12,7 @@
 //! site.
 //!
 //! `create` caches what later requests about the session need — the API
-//! it was created at, the returned `client_session_token`, the group it
+//! it was created at, the returned `session_token`, the group it
 //! was placed on, and the disclosure-key secret — under
 //! `enclavid/sessions/<id>/` in the platform config directory (see
 //! [`cache`]), so `get` / `disclosures` name the session alone.

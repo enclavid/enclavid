@@ -11,16 +11,16 @@ use enclavid_boundary::{AuthN, AuthZ, Replay, reason};
 use session_types::SessionStatus;
 use storage_client::{Disclosure, Metadata};
 
-use crate::client_state::ClientState;
 use crate::disclosure_commit;
 
 use super::auth::{Principal, SessionToken, trust_metadata};
+use super::state::ConsumerState;
 
 #[derive(Serialize)]
 pub struct DisclosuresResponse {
     /// Each entry is one age-encrypted record sealed to the
-    /// consumer-supplied `client_disclosure_pubkey` (provided at
-    /// session create). Base64-standard for JSON wire safety; client
+    /// consumer-supplied `disclosure_pubkey` (provided at
+    /// session create). Base64-standard for JSON wire safety; the consumer
     /// decodes then opens with the matching age identity. **Order is
     /// UNSPECIFIED** — consumers MUST NOT rely on position. Attribute
     /// by session_id (KYC is per-natural-person, so distinct subjects
@@ -40,13 +40,13 @@ pub struct DisclosuresResponse {
 }
 
 /// Route factory: bare `get(handler)` MethodRouter. Auth attached at
-/// router level via `.layer(auth(op))` — see `client::router`.
-pub(super) fn get_disclosures() -> MethodRouter<Arc<ClientState>> {
+/// router level via `.layer(auth(op))` — see `consumer::router`.
+pub(super) fn get_disclosures() -> MethodRouter<Arc<ConsumerState>> {
     get(read)
 }
 
 async fn read(
-    State(state): State<Arc<ClientState>>,
+    State(state): State<Arc<ConsumerState>>,
     Principal(presented_principal): Principal,
     SessionToken(presented_token): SessionToken,
     Path(session_id): Path<String>,
@@ -108,8 +108,8 @@ async fn read(
             r#"
 TEE forwards opaque sealed bytes; only the holder of the consumer's
 disclosure private key can open them. This endpoint requires the
-client AuthN'd via the bearer middleware to match the
-metadata.client predicate (closed upstream), so the recipient is
+consumer AuthN'd via the bearer middleware to match the
+metadata.consumer predicate (closed upstream), so the recipient is
 both authenticated and the correct decryption target.
         "#
         ))

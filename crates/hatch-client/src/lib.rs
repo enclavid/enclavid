@@ -17,7 +17,7 @@ pub use link::Link;
 // The contract's own types, for the requests the typed clients take and the
 // terms a verdict carries.
 pub use hatch_rpc::{
-    AuthorizeRequest, BlobRequest, ClientOperation, KbsRequest, KbsResponse, MAX_BLOB_BYTES,
+    AuthorizeRequest, BlobRequest, ConsumerOperation, KbsRequest, KbsResponse, MAX_BLOB_BYTES,
     ManifestRequest, SessionTerms,
 };
 pub use kbs::{DEFAULT_RELAY_DEADLINE, KbsClient};

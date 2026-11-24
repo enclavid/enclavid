@@ -24,7 +24,7 @@ pub type ApplicantSessionToken = SecretBox<Vec<u8>>;
 pub struct AppState {
     /// Compiling a composition and keeping it — the COMPILE boundary api drives
     /// over rpc (it never compiles in-process: no Cranelift), L2, the registry
-    /// pulls, each consumer's turns, the KBS relay — shared with the client
+    /// pulls, each consumer's turns, the KBS relay — shared with the consumer
     /// surface, whose warmups ask for compiles ahead of the rounds that miss. See
     /// [`crate::compositions`].
     pub compositions: Arc<Compositions>,

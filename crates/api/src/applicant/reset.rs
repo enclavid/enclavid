@@ -86,7 +86,7 @@ async fn reset(
     };
 
     // The one state whose disclosures are readable is the one state a reset may
-    // not touch (`client::disclosures` serves `Completed` and nothing else).
+    // not touch (`consumer::disclosures` serves `Completed` and nothing else).
     // Every other state has served nobody, which is what makes deleting the
     // chain below a deletion of data rather than a retraction of data someone
     // already holds.

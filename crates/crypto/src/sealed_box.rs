@@ -2,7 +2,7 @@
 //! `crypto_box_seal` construction, byte-compatible with any libsodium binding.
 //!
 //! Used for outbound data the host stores opaquely but a downstream consumer
-//! reads: disclosure entries sealed to `client_disclosure_pubkey`.
+//! reads: disclosure entries sealed to `disclosure_pubkey`.
 //!
 //! Symmetric counterpart to [`crate::aead`], but for a recipient whose private
 //! key the TEE never holds. Two properties follow from the construction rather

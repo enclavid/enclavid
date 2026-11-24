@@ -1,10 +1,10 @@
-//! Per-route authorization for the client-facing API.
+//! Per-route authorization for the consumer-facing API.
 //!
 //! Composition strategy (assembled inline at the router):
 //!
 //!     post(handler).layer(
 //!         ServiceBuilder::new()
-//!             .layer(Extension(ClientOperation::Foo))            // outer
+//!             .layer(Extension(ConsumerOperation::Foo))            // outer
 //!             .layer(from_fn_with_state(state, auth::enforce))   // inner
 //!             .into_inner()
 //!     )
@@ -13,7 +13,7 @@
 //! the outermost (runs first on the request). So `Extension(op)` wraps
 //! `enforce` — at runtime the request hits Extension first, which
 //! inserts the per-route operation into request extensions, then
-//! `enforce` runs and reads it via the `Extension<ClientOperation>`
+//! `enforce` runs and reads it via the `Extension<ConsumerOperation>`
 //! extractor. On success it injects `Principal(principal)` into
 //! request extensions so the handler downstream can read it; on
 //! failure short-circuits 401 / 403, or 429 with `Retry-After`.
@@ -32,16 +32,17 @@ use axum::response::{IntoResponse, Response};
 use base64ct::{Base64, Encoding};
 
 use enclavid_boundary::{AuthN, AuthZ, Replay, Untrusted, reason};
-use hatch_client::{AuthVerdict, AuthorizeRequest, ClientOperation, SessionTerms};
+use hatch_client::{AuthVerdict, AuthorizeRequest, ConsumerOperation, SessionTerms};
 use session_types::SessionMetadata;
 use storage_client::boundary::Storage;
 
 use crate::boundary::Hatch;
-use crate::client_state::ClientState;
 
-/// Per-session capability header. Carries the `client_session_token`
+use super::state::ConsumerState;
+
+/// Per-session capability header. Carries the `session_token`
 /// the TEE issued at `POST /sessions` (base64-encoded 32 random bytes).
-/// Required on every client-side read endpoint. See docs/security-model.md
+/// Required on every consumer-side read endpoint. See docs/security-model.md
 /// → "HTTP transport convention".
 pub(super) const SESSION_TOKEN_HEADER: HeaderName = HeaderName::from_static("x-session-token");
 
@@ -51,7 +52,7 @@ pub(super) const SESSION_TOKEN_HEADER: HeaderName = HeaderName::from_static("x-s
 /// but anonymous; not currently used in MVP but the type allows for
 /// it). TEE doesn't act on the value — it's pure attribution data
 /// the create handler keeps in the session's sealed metadata
-/// (`client.access.principal`).
+/// (`consumer.access.principal`).
 #[derive(Clone, Debug)]
 pub(super) struct Principal(pub Option<String>);
 
@@ -97,9 +98,9 @@ where
     }
 }
 
-/// Per-session bearer the client supplies in `X-Session-Token`. Read
+/// Per-session bearer the consumer supplies in `X-Session-Token`. Read
 /// endpoints extract this and compare its SHA-256 against
-/// `SessionMetadata.client_session_token_hash`. Decoded from base64
+/// `SessionMetadata.consumer.access.session_token_hash`. Decoded from base64
 /// at extraction time so handlers compare raw bytes (constant-time).
 ///
 /// Missing or malformed header → 401 (transport-level auth failure).
@@ -127,8 +128,8 @@ where
 
 /// Peel both trust scopes off an already-decrypted
 /// `Untrusted<Option<SessionMetadata>, (AuthZ, Replay), Storage>` for a
-/// Client-side read endpoint: discharge AuthZ via
-/// `check_client_access` (token + principal match), trust Replay
+/// consumer-side read endpoint: discharge AuthZ via
+/// `check_consumer_access` (token + principal match), trust Replay
 /// (metadata fields stable across session lifetime), and unwrap the
 /// `Option`. Returns the verified `SessionMetadata` ready for the
 /// handler to consume.
@@ -137,7 +138,7 @@ where
 /// `SessionStore::read`; this function operates purely on the trust
 /// machinery wrapping the decrypted value.)
 ///
-/// Mirrors the applicant side's inline metadata trust for the Client
+/// Mirrors the applicant side's inline metadata trust for the consumer
 /// side: callers do the storage read themselves (so e.g. `/disclosures`
 /// keeps its batched `(Metadata, Disclosure)` read), then hand the
 /// resulting `Untrusted` here for the auth peel.
@@ -146,7 +147,7 @@ where
 ///   * `404 NOT_FOUND` — metadata absent, or token/principal mismatch
 ///     (uniform reject; no session-existence leak).
 ///   * `500 INTERNAL_SERVER_ERROR` — malformed metadata
-///     (`client`/`access` block absent — TEE-side invariant violation).
+///     (`consumer`/`access` block absent — TEE-side invariant violation).
 pub(super) fn trust_metadata(
     metadata: Untrusted<Option<SessionMetadata>, (AuthZ, Replay), Storage>,
     presented_token: &[u8],
@@ -156,14 +157,14 @@ pub(super) fn trust_metadata(
         .trust_with(AuthZ::Matched, |opt_md| -> Result<_, StatusCode> {
             {
                 let md = opt_md.as_ref().ok_or(StatusCode::NOT_FOUND)?;
-                check_client_access(md, presented_token, presented_principal)?;
+                check_consumer_access(md, presented_token, presented_principal)?;
             }
             Ok(opt_md)
         })?
         .trust(reason!(
             Replay::Harmless,
             r#"
-Metadata's ACCESS fields (client_session_token, principal) are immutable
+Metadata's ACCESS fields (session_token, principal) are immutable
 across the session, so the AuthZ gate above is unaffected by staleness. The
 mutable fields (status, disclosure_count/entry_hashes) CAN be stale — a stateless TEE
 cannot detect a compromised host replaying an older (genuine,
@@ -184,32 +185,32 @@ residual of the host-holds-all-state model.
         })
 }
 
-/// Client-side AuthZ predicate body — verifies both layers of the
+/// Consumer-side AuthZ predicate body — verifies both layers of the
 /// access gate against the session's sealed metadata:
 ///
-///   1. `client_session_token`: SHA-256 of the presented bearer must
-///      match `metadata.client.access.session_token_hash`. Defends
+///   1. `session_token`: SHA-256 of the presented bearer must
+///      match `metadata.consumer.access.session_token_hash`. Defends
 ///      against host-malice + intra-tenant insider.
 ///   2. `principal`: the auth verdict's principal must equal the one
 ///      pinned at create-time. Defends against cross-tenant attacks
 ///      via stolen credentials.
 ///
 /// Returned errors:
-///   * 500 — malformed metadata (`client` / `access` block absent;
+///   * 500 — malformed metadata (`consumer` / `access` block absent;
 ///     TEE-side invariant violation, not a runtime auth failure).
 ///   * 404 — token or principal mismatch (uniform reject — don't
 ///     leak session-existence info to wrong principals).
 ///
 /// Used as the predicate inside `.trust_with(AuthZ::Matched, ...)` on every
-/// client-side read endpoint so the AuthZ scope on metadata is
+/// consumer-side read endpoint so the AuthZ scope on metadata is
 /// **physically discharged by this check**, not blanket-trusted.
-pub(super) fn check_client_access(
+pub(super) fn check_consumer_access(
     metadata: &SessionMetadata,
     presented_token: &[u8],
     presented_principal: &Option<String>,
 ) -> Result<(), StatusCode> {
     let access = metadata
-        .client
+        .consumer
         .as_ref()
         .and_then(|c| c.access.as_ref())
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -254,8 +255,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// hatch, which asks the operator's hooks. On success injects
 /// `Principal(principal)` and `Terms(terms)` for the handler to extract.
 pub(super) async fn enforce(
-    State(state): State<Arc<ClientState>>,
-    Extension(op): Extension<ClientOperation>,
+    State(state): State<Arc<ConsumerState>>,
+    Extension(op): Extension<ConsumerOperation>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -288,7 +289,7 @@ pub(super) async fn enforce(
     //
     // Attestation still protects against spoofed session_ids: the
     // quote binds the session_id to TEE measurement, signed by
-    // AMD-SP. A real client tricked into using a fake id
+    // AMD-SP. A real consumer tricked into using a fake id
     // detects the mismatch on quote verification and refuses further
     // inputs.
     //

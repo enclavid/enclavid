@@ -139,7 +139,7 @@ enclavid oci push policy.wasm ghcr.io/me/policies/kyc:v1
 | --- | --- |
 | `<config>/enclavid/sessions/<id>/api`, mode `0600` | The origin of the API the session was created at |
 | `<config>/enclavid/sessions/<id>/token`, mode `0600` | Per-session `X-Session-Token` (returned by `session create`) |
-| `<config>/enclavid/sessions/<id>/disclosure.key`, mode `0600` | Per-session disclosure secret, an X25519 secret key as hex (auto-generated, or copy of `--disclosure-key`); absent when `--from-file` brought its own `client_disclosure_pubkey` |
+| `<config>/enclavid/sessions/<id>/disclosure.key`, mode `0600` | Per-session disclosure secret, an X25519 secret key as hex (auto-generated, or copy of `--disclosure-key`); absent when `--from-file` brought its own `disclosure_pubkey` |
 | `<config>/enclavid/sessions/<id>/group`, mode `0600` | Per-session group `<label>.<build>` a gateway placed the session on, checked again whenever it is read; absent when the API answered with none |
 
 ## License

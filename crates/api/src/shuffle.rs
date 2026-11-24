@@ -37,7 +37,7 @@ use sha2::Sha256;
 
 /// Process-lifetime shuffle key. Loaded once at startup from
 /// `tee_seal_key`; lives behind an `Arc` in
-/// [`AppState`](crate::state::AppState) so both client and applicant
+/// [`AppState`](crate::state::AppState) so both consumer and applicant
 /// routes can derive per-envelope seeds without re-running HKDF on
 /// the AEAD key. `SecretBox` zeroizes it on drop and keeps it out of any
 /// `Debug` — this is a `tee_seal_key`-derived subkey, held for the whole run.

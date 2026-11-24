@@ -1,6 +1,6 @@
 //! `METADATA` session field. Encrypted blob carrying per-session
 //! configuration (principal, policy ref, ephemeral pubkey, d_*,
-//! client disclosure pubkey, input claims, client_ref). AEAD'd with
+//! consumer's disclosure pubkey, input claims, consumer_ref). AEAD'd with
 //! `tee_seal_key`, bound (AAD) to the field and to the session that wrote it.
 
 use session_types::SessionMetadata;

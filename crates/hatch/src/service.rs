@@ -4,7 +4,7 @@
 use enclavid_boundary::{Exposed, Untrusted};
 use fleet_stream::bin;
 use hatch_rpc::{
-    AuthorizeError, AuthorizeRequest, BlobRequest, ClientOperation, KbsError, KbsRequest,
+    AuthorizeError, AuthorizeRequest, BlobRequest, ConsumerOperation, KbsError, KbsRequest,
     KbsResponse, Manifest, ManifestRequest, PullError, RemoteHatchAt, SessionTerms, Verdict,
 };
 
@@ -38,7 +38,7 @@ impl Hatch {
             Some(Authorization::Unauthenticated) => return Ok(Verdict::Unauthenticated),
             Some(Authorization::Denied) => return Ok(Verdict::Denied),
         };
-        if req.operation != ClientOperation::SessionCreate {
+        if req.operation != ConsumerOperation::SessionCreate {
             return Ok(Verdict::Allowed {
                 principal,
                 terms: SessionTerms::default(),
@@ -114,7 +114,7 @@ mod tests {
         }
     }
 
-    fn ask(operation: ClientOperation) -> Untrusted<AuthorizeRequest, (), AnyCaller> {
+    fn ask(operation: ConsumerOperation) -> Untrusted<AuthorizeRequest, (), AnyCaller> {
         inbound::<AnyCaller, _>(AuthorizeRequest {
             authorization_header: "Bearer anything".into(),
             operation,
@@ -128,7 +128,7 @@ mod tests {
         let h = hatch(Hooks::new(None, None, Duration::from_secs(1)));
         for _ in 0..100 {
             let verdict = h
-                .authorize(ask(ClientOperation::SessionCreate))
+                .authorize(ask(ConsumerOperation::SessionCreate))
                 .await
                 .unwrap()
                 .into_inner();

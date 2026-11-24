@@ -115,7 +115,7 @@ flowchart LR
 
 Trust boundaries:
 
-- **Client / applicant ↔ gateway** — public TLS terminates *inside* an attested
+- **Consumer / applicant ↔ gateway** — public TLS terminates *inside* an attested
   gateway enclave. Its certificate is issued for a key that never leaves it,
   under an ACME account whose key is derived inside it too: the host runs the
   issuer's protocol, but only the gateway signs, and CAA records can pin
@@ -254,7 +254,7 @@ what is under [Not yet](#not-yet) comes first.
   release to the attested enclave; until it can, the production images take no
   key from a KBS.
 - **Consumer tooling** — a command that verifies the gateway's attestation, and
-  client SDKs.
+  consumer SDKs.
 - **Webhooks** — notifying the consumer of status changes and ready disclosures.
 - **Sharing media** through the consent flow — the plumbing exists; the share
   path does not yet.
@@ -264,7 +264,7 @@ what is under [Not yet](#not-yet) comes first.
 ### Tooling
 
 - The gateway check above, as one command of the CLI.
-- Client SDKs, first in TypeScript and Rust.
+- Consumer SDKs, first in TypeScript and Rust.
 
 ### Hardening
 

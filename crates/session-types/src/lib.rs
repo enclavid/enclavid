@@ -97,7 +97,7 @@ pub struct SessionMetadata {
     /// The props the consumer gave the session: a JSON value, empty when it
     /// gave none. The policy reads them as the type it declares for them.
     pub props: Vec<u8>,
-    pub client: Option<Client>,
+    pub consumer: Option<Consumer>,
     pub status: SessionStatus,
     pub created_at: u64,
     pub disclosure_count: u64,
@@ -513,25 +513,25 @@ pub struct SentStep {
 }
 
 // ---------------------------------------------------------------------
-// Client bundle
+// Consumer bundle
 // ---------------------------------------------------------------------
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Client {
-    pub access: Option<ClientAccess>,
+pub struct Consumer {
+    pub access: Option<ConsumerAccess>,
     pub disclosure_pubkey: String,
     pub r#ref: String,
     pub registry_auth: std::collections::HashMap<String, Vec<u8>>,
     pub plugins: Vec<PluginPin>,
 }
 
-impl std::fmt::Debug for Client {
+impl std::fmt::Debug for Consumer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `registry_auth` values are per-host bearer tokens — print only the
         // hostnames (its keys), never the tokens. Everything else is non-secret
         // (`plugins` carries `Key`, which redacts itself).
-        f.debug_struct("Client")
+        f.debug_struct("Consumer")
             .field("access", &self.access)
             .field("disclosure_pubkey", &self.disclosure_pubkey)
             .field("ref", &self.r#ref)
@@ -564,7 +564,7 @@ pub enum Key {
     /// POST /sessions. Valid only when the session creator is the artifact
     /// owner (it already holds the plaintext, so handing itself the key
     /// leaks nothing). MUST NOT be used for a third-party artifact — that
-    /// would let the client decrypt the IP.
+    /// would let the consumer decrypt the IP.
     Inline(Vec<u8>),
     /// The key is released by an attestation-gated KBS.
     Kbs(KbsKey),
@@ -586,7 +586,7 @@ impl std::fmt::Debug for Key {
 /// the KBS verifies and the JWE the released resource is sealed in — not
 /// on this value. The layer key is fetched as a standard Trustee **RCAR**
 /// resource; the resource URI (`kbs:///<repo>/<type>/<tag>`) lives in the
-/// artifact's digest-pinned `enc.keys.*` OCI annotation, so the client
+/// artifact's digest-pinned `enc.keys.*` OCI annotation, so the consumer
 /// supplies only which KBS to dial. See `[[project-trustee-rcar-protocol]]`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -598,7 +598,7 @@ pub struct KbsKey {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ClientAccess {
+pub struct ConsumerAccess {
     pub principal: Option<String>,
     pub session_token_hash: Vec<u8>,
 }

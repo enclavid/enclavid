@@ -6,7 +6,7 @@
 //!
 //! * `api` — the origin of the API the session was created at, where
 //!   every later request about it goes.
-//! * `token` — base64-decoded `client_session_token` from the
+//! * `token` — base64-decoded `session_token` from the
 //!   POST /sessions response (sent as `X-Session-Token` on every read).
 //! * `disclosure.key` — the disclosure secret, when `session create`
 //!   generated it or copied it from `--disclosure-key`. Absent when

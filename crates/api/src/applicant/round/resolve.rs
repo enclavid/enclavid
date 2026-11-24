@@ -29,7 +29,7 @@ where
     C: RemoteCallbacksAt<ExecutionWorker> + Send + Sync + 'static,
 {
     let composition = Composition::of(metadata).ok_or_else(|| {
-        safe_logger::debug!("run_resolved: metadata.client missing for {session_id}");
+        safe_logger::debug!("run_resolved: metadata.consumer missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     state

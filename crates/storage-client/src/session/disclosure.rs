@@ -1,7 +1,7 @@
 //! `DISCLOSURE` session field. An UNORDERED SET of age-encrypted
 //! consent records produced by the engine during a policy run. The
-//! TEE-side never decrypts — entries are forwarded to the client as
-//! opaque bytes (encryption is to the client's `client_disclosure_pubkey`,
+//! TEE-side never decrypts — entries are forwarded to the consumer as
+//! opaque bytes (encryption is to the consumer's `disclosure_pubkey`,
 //! engine-side, before the entry is staged for commit). Order is neither
 //! preserved by the store nor relied upon — the api commits to the set.
 
@@ -30,7 +30,7 @@ pub struct Disclosure;
 ///
 /// Payload is a [`DisclosureOp`] answered in full at [`Storage`] — built in
 /// `api::applicant::persister`, which holds the consumer's key. The bytes are
-/// already age-sealed to the consumer's `client_disclosure_pubkey`, with field
+/// already age-sealed to the consumer's `disclosure_pubkey`, with field
 /// order HKDF'd-shuffle'd inside the envelope; storage-client does no further
 /// sealing work and only adds it to the write.
 pub struct AppendDisclosure(pub Exposed<DisclosureOp, (), Storage>);
@@ -60,7 +60,7 @@ impl WriteField for AppendDisclosure {
     fn add_to(&self, ops: &mut Ops<Storage>, _ctx: &Ctx<'_>) -> Result<(), StoreError> {
         // Answered in full by `api::applicant::persister` (Covert → HKDF'd
         // shuffle, AuthZ → the applicant accepted this screen, AuthN → age-seal
-        // to client disclosure pubkey). Clone because `&self` forbids moving it
+        // to the consumer's disclosure pubkey). Clone because `&self` forbids moving it
         // out; a padded entry is a few KiB.
         ops.disclosure(self.0.clone());
         Ok(())

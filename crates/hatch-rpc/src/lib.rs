@@ -36,7 +36,7 @@ pub const MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// The consumer API's operations, which the hatch asks its authorization hook
 /// about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClientOperation {
+pub enum ConsumerOperation {
     /// POST /api/v1/sessions, and a warmup — which spends what a creation does.
     SessionCreate,
     /// GET /api/v1/sessions/:id.
@@ -50,7 +50,7 @@ pub struct AuthorizeRequest {
     /// The request's `Authorization` header, verbatim. The hatch's hook reads
     /// it; api never parses it.
     pub authorization_header: String,
-    pub operation: ClientOperation,
+    pub operation: ConsumerOperation,
 }
 
 /// The terms a session is held to, as the operator's limits hook gives them for

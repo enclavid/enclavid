@@ -318,7 +318,7 @@ impl PluginView {
 /// wire shape live in the api crate without an orphan-rule wrapper
 /// or a transport-layer serde-aware build.rs.
 ///
-/// Used by both client/session.rs and applicant/status.rs via
+/// Used by both consumer/session.rs and applicant/status.rs via
 /// `#[serde(with = "dto::SessionStatusDef")]` on a `SessionStatus`
 /// field — same wire string ("running", "completed", ...) for both
 /// audiences.
