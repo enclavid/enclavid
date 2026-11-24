@@ -1,0 +1,132 @@
+package enclavid:host@0.1.0;
+
+/// The tensors a model's `run` takes and gives: one resource for each element
+/// type, minted by the host from a tensor's dimensions and its elements, in
+/// row-major order and as many as the dimensions hold. A `run` borrows the
+/// tensors it is given and hands back tensors of its own; which element type
+/// each one is, and which dimensions it takes, is its graph's to say.
+///
+/// Half-precision elements are their bits: IEEE 754 binary16 for `f16`, the
+/// upper half of an `f32` for `bf16`.
+@since(version = 0.1.0)
+interface tensors {
+    @since(version = 0.1.0)
+    resource tensor-f32 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<f32>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<f32>;
+    }
+
+    @since(version = 0.1.0)
+    resource tensor-f64 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<f64>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<f64>;
+    }
+
+    @since(version = 0.1.0)
+    resource tensor-f16 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<u16>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<u16>;
+    }
+
+    @since(version = 0.1.0)
+    resource tensor-bf16 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<u16>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<u16>;
+    }
+
+    @since(version = 0.1.0)
+    resource tensor-i8 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<s8>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<s8>;
+    }
+
+    @since(version = 0.1.0)
+    resource tensor-u8 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<u8>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<u8>;
+    }
+
+    @since(version = 0.1.0)
+    resource tensor-i16 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<s16>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<s16>;
+    }
+
+    @since(version = 0.1.0)
+    resource tensor-u16 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<u16>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<u16>;
+    }
+
+    @since(version = 0.1.0)
+    resource tensor-i32 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<s32>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<s32>;
+    }
+
+    @since(version = 0.1.0)
+    resource tensor-u32 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<u32>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<u32>;
+    }
+
+    @since(version = 0.1.0)
+    resource tensor-i64 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<s64>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<s64>;
+    }
+
+    @since(version = 0.1.0)
+    resource tensor-u64 {
+        @since(version = 0.1.0)
+        constructor(dimensions: list<u64>, data: list<u64>);
+        @since(version = 0.1.0)
+        dimensions: func() -> list<u64>;
+        @since(version = 0.1.0)
+        data: func() -> list<u64>;
+    }
+}

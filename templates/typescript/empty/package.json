@@ -1,0 +1,24 @@
+{
+  "name": "my-policy",
+  "description": "An empty policy to start your own from: texts, disclosure fields and props laid out, a placeholder in each.",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "types": "jco guest-types wit --world-name policy --variants-inline-cases -q -o types",
+    "build": "node -e \"for (const d of ['dist', 'types']) require('node:fs').rmSync(d, { recursive: true, force: true })\" && jco guest-types wit --world-name policy --variants-inline-cases -q -o types && tsc && componentize-qjs --wit wit --world policy --js dist/policy.js --module-root . --sync --opt-size -o dist/policy.component.wasm && enclavid policy embed dist/policy.component.wasm -o dist/policy.wasm",
+    "playground": "npm run build && enclavid oci push dist/policy.wasm playground.enclavid.com/policies --quiet | enclavid session create --policy - --props @props.json --api https://playground.enclavid.com --applicants https://verify.enclavid.com",
+    "format": "prettier --write src"
+  },
+  "dependencies": {
+    "@enclavid/policy": "^0.1.0",
+    "@enclavid/policy-quickjs": "^0.1.0"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "1.42.0",
+    "@enclavid/cli": "^0.1.0",
+    "componentize-qjs": "0.6.0",
+    "prettier": "3.10.1",
+    "typescript": "~6.0.3"
+  }
+}

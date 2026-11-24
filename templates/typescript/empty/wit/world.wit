@@ -1,0 +1,71 @@
+package local:policy@0.1.0;
+
+// What this policy imports and exports. Every interface imported here is
+// the policy's own, the host's, or a plugin's; the consumer pins an
+// implementation of each plugin package the world imports when it creates a
+// session. This one imports no plugin yet.
+//
+// To use a plugin, import its interfaces here and run `npm run types`. The WIT
+// of the platform's plugins is in `deps/` already — `enclavid:well-known`,
+// `enclavid:face-detect`, `enclavid:face-age` and `enclavid:face-liveness` —
+// and another plugin's goes there too.
+world policy {
+    import enclavid-ext:policy/i18n@0.1.0;
+    import enclavid-ext:policy/disclosure-fields@0.1.0;
+    import enclavid-ext:policy/props@0.1.0;
+    // The round's randomness, which `@enclavid/policy-quickjs` serves
+    // `Math.random` and `crypto.getRandomValues` from.
+    import wasi:random/random@0.2.12;
+    export enclavid:policy/policy@0.1.0;
+}
+
+// The policy's slot: what the host serves this policy, of types that are its
+// own, so they are written here rather than taken from `deps/`. Leave out an
+// interface the policy has no use for, and its import.
+package enclavid-ext:policy@0.1.0 {
+    // The policy's texts: a case of `key` for each. The texts themselves are
+    // in `i18n/`, one JSON file per language (`en.json` to start), and
+    // `enclavid policy embed` checks them against these keys.
+    interface i18n {
+        use enclavid:host/refs@0.1.0.{localized-ref};
+
+        enum key {
+            // A placeholder, since WIT has no empty enum: the policy's first
+            // text takes its place.
+            example,
+        }
+
+        localized: func(key: key) -> localized-ref;
+    }
+
+    // The fields the consent screen may name: every field the consumer may
+    // receive, by its key. `disclosure-field` mints the field of a case, which
+    // a well-known helper then labels. `enclavid policy embed` writes the list
+    // into the policy, and the applicant is shown how long it is.
+    interface disclosure-fields {
+        use enclavid:host/refs@0.1.0.{disclosure-field-key-ref};
+
+        enum key {
+            // A placeholder, since WIT has no empty enum: the policy's first
+            // field takes its place.
+            example,
+        }
+
+        disclosure-field: func(key: key) -> disclosure-field-key-ref;
+    }
+
+    // The props this policy takes: what the consumer sets for each session.
+    // The interface's name and its `get` are the host's, which serves them;
+    // the record is this policy's own. The consumer gives the props as a JSON
+    // object keyed by these field names when it creates a session, and a
+    // session whose props do not fit the record fails.
+    interface props {
+        record props {
+            // A placeholder, since WIT has no empty record: the policy's first
+            // prop takes its place.
+            example: option<bool>,
+        }
+
+        get: func() -> props;
+    }
+}

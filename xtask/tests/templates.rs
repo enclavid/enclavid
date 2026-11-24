@@ -78,6 +78,11 @@ fn the_typescript_templates_carry_the_wit_they_copy() {
             "liveness",
             [&PLATFORM[..], &WELL_KNOWN, &FACES, &LIVENESS].concat(),
         ),
+        // Every plugin's, for a policy to import any of them.
+        (
+            "empty",
+            [&PLATFORM[..], &WELL_KNOWN, &FACES, &AGE, &LIVENESS].concat(),
+        ),
     ];
     for (template, copies) in &templates {
         let deps = repo
