@@ -14,7 +14,8 @@ screen — but is not a whole one. It does not:
 
 ## Build
 
-Needs Node and the `enclavid` CLI on the path.
+Needs Node. `npm install` brings the `enclavid` CLI too, `@enclavid/cli`,
+which `npx enclavid` runs.
 
 ```
 npm install
@@ -24,7 +25,7 @@ npm run build
 `dist/policy.wasm` is the policy, ready to push:
 
 ```
-enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
+npx enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
 ```
 
 `npm run format` formats `src/` with Prettier.
@@ -36,13 +37,13 @@ asks for no account: it pushes the policy there, and starts a session of it
 with the props in `props.json`.
 
 ```
-enclavid oci push dist/policy.wasm playground.enclavid.com/policies --quiet \
-  | enclavid session create --policy - --props @props.json \
+npx enclavid oci push dist/policy.wasm playground.enclavid.com/policies --quiet \
+  | npx enclavid session create --policy - --props @props.json \
       --api https://playground.enclavid.com --applicants https://verify.enclavid.com
 ```
 
-Open the applicant link it prints; `enclavid session get <id>` and
-`enclavid session disclosures <id>` show what came of it.
+Open the applicant link it prints; `npx enclavid session get <id>` and
+`npx enclavid session disclosures <id>` show what came of it.
 
 ## What is where
 

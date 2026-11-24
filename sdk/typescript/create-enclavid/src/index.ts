@@ -19,9 +19,6 @@ import { create, refusal, templates, type Template } from "./create.js";
 
 const TEMPLATES = join(dirname(fileURLToPath(import.meta.url)), "..", "templates");
 
-/// Where the CLI the build runs `enclavid policy embed` with is installed from.
-const CLI_INSTALL = "https://github.com/enclavid/enclavid/tree/main/crates/cli#install";
-
 /// Where a project goes when the visitor names no other.
 const FIRST_DIR = "my-policy";
 
@@ -98,7 +95,6 @@ function nextSteps(dir: string): string {
 
 function afterwards(): string {
   return `\`run playground\` builds the policy and runs it on the playground, which asks for no account.
-The build runs the enclavid CLI, which needs to be on the path: ${CLI_INSTALL}
 AGENTS.md says how a policy works and how to change one; README.md, how to build and push it.`;
 }
 

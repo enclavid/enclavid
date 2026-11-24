@@ -1,8 +1,16 @@
 # enclavid-cli
 
-CLI for Enclavid policies and plugins: embed a component's catalogs, validate them, push it to an OCI registry, and run it as a verification session. Single static binary, no runtime dependencies.
+CLI for enclavid policies and plugins: embed a component's catalogs, validate them, push it to an OCI registry, and run it as a verification session. Single static binary, no runtime dependencies.
 
 ## Install
+
+```bash
+npm install -g @enclavid/cli
+```
+
+`@enclavid/cli` carries the binary built for macOS (Apple silicon and Intel) and for Linux (x64 and arm64, linked statically). A project made with `npm create enclavid` has it as a dev dependency, which `npx enclavid` runs. Each release's binaries are on its GitHub release as well, attested with Sigstore: `gh attestation verify enclavid-<platform> --repo enclavid/enclavid`.
+
+Anywhere else, from source:
 
 ```bash
 cargo install --git https://github.com/enclavid/enclavid enclavid-cli

@@ -1,0 +1,227 @@
+# A package is released when the version in its package.json has no tag yet.
+# A pull request that raises a version is checked: the version is above the
+# package's last release, and the package builds and packs. Its merge
+# publishes the package to npm with provenance — signed with Sigstore, logged
+# in Rekor — then tags that commit `<component>-v<version>` and makes its
+# GitHub release. Only while the repository variable RELEASES is `on`; run by
+# hand, it releases what main has unreleased.
+name: Release
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Each component, its package and what else its release notes follow, in
+  # the order they are published: the templates create-enclavid hands out
+  # depend on the others.
+  COMPONENTS: |
+    cli crates/cli
+    policy sdk/typescript/policy
+    policy-quickjs sdk/typescript/policy-quickjs
+    create-enclavid sdk/typescript/create-enclavid templates/typescript
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      cli: ${{ steps.plan.outputs.cli }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: The CLI's packages are at one version
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const read = (path) => JSON.parse(fs.readFileSync(path, "utf8"));
+            const main = read("crates/cli/package.json");
+            const wrong = [];
+            for (const [name, version] of Object.entries(main.optionalDependencies))
+              if (version !== main.version) wrong.push(`the dependency on ${name} ${version}`);
+            for (const dir of fs.readdirSync("crates/cli/npm", { withFileTypes: true }))
+              if (dir.isDirectory()) {
+                const pkg = read(`crates/cli/npm/${dir.name}/package.json`);
+                if (pkg.version !== main.version) wrong.push(`${pkg.name} ${pkg.version}`);
+              }
+            if (wrong.length) {
+              console.error(`@enclavid/cli is ${main.version}, but: ${wrong.join(", ")}`);
+              process.exit(1);
+            }
+          '
+      - id: plan
+        name: The versions with no tag yet
+        shell: bash
+        env:
+          RELEASES: ${{ vars.RELEASES }}
+        run: |
+          release='[]'
+          echo "## Released on merge" >> "$GITHUB_STEP_SUMMARY"
+          while read -r component path more; do
+            [ -n "$component" ] || continue
+            version=$(jq -r .version "$path/package.json")
+            tag="$component-v$version"
+            git rev-parse -q --verify "refs/tags/$tag" > /dev/null && continue
+            previous=$(git -c versionsort.suffix=- tag --list "$component-v*" --sort=-v:refname | head -n 1)
+            if [ -n "$previous" ] && [ "$(printf '%s\n' "${previous#"$component-v"}" "$version" | sort -V | tail -n 1)" != "$version" ]; then
+              echo "::error::$component $version is below its last release, $previous"
+              exit 1
+            fi
+            release=$(jq -c --arg component "$component" --arg path "$path" --arg follows "$path $more" \
+              --arg version "$version" --arg tag "$tag" --arg previous "$previous" \
+              '. + [{$component, $path, $follows, $version, $tag, $previous}]' <<< "$release")
+            echo "- $tag${previous:+, after $previous}" >> "$GITHUB_STEP_SUMMARY"
+          done <<< "$COMPONENTS"
+          [ "$release" != '[]' ] || echo "Nothing." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$GITHUB_EVENT_NAME" != pull_request ] && [ "$RELEASES" != on ]; then
+            echo "Not now: the repository variable RELEASES is not \`on\`." >> "$GITHUB_STEP_SUMMARY"
+            release='[]'
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "cli=$(jq 'any(.component == "cli")' <<< "$release")" >> "$GITHUB_OUTPUT"
+
+  cli-build:
+    needs: plan
+    if: needs.plan.outputs.cli == 'true'
+    uses: ./.github/workflows/cli.yml
+    permissions:
+      contents: read
+
+  # The one check a pull request needs: it passes when there is nothing to
+  # release, and fails when the plan or a build of the CLI did.
+  check:
+    needs: [plan, cli-build]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      RELEASE: ${{ needs.plan.outputs.release }}
+    steps:
+      - if: needs.plan.result != 'success' || needs.cli-build.result == 'failure'
+        run: exit 1
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - if: needs.plan.outputs.cli == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: enclavid-*
+          path: built
+      # Artifacts lose the executable bit.
+      - if: needs.plan.outputs.cli == 'true'
+        name: Place the builds
+        run: |
+          for dir in crates/cli/npm/*/; do
+            install -m 755 "built/enclavid-$(basename "$dir")/enclavid" "$dir/enclavid"
+          done
+      - name: Pack each package
+        shell: bash
+        run: |
+          while read -r component path; do
+            if [ "$component" = cli ]; then
+              for dir in crates/cli/npm/*/; do
+                (cd "$dir" && npm pack --pack-destination "$RUNNER_TEMP")
+              done
+              (cd "$path" && npm pack --pack-destination "$RUNNER_TEMP")
+            else
+              (cd "$path" && corepack pnpm@10.34.0 install --frozen-lockfile && npm pack --pack-destination "$RUNNER_TEMP")
+            fi
+          done < <(jq -r '.[] | "\(.component) \(.path)"' <<< "$RELEASE")
+
+  publish:
+    needs: [plan, cli-build]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.plan.result == 'success' && needs.plan.outputs.release != '[]' && needs.cli-build.result != 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE: ${{ needs.plan.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - if: needs.plan.outputs.cli == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: enclavid-*
+          path: built
+      # Artifacts lose the executable bit.
+      - if: needs.plan.outputs.cli == 'true'
+        name: Place the builds
+        run: |
+          mkdir assets
+          for dir in crates/cli/npm/*/; do
+            platform=$(basename "$dir")
+            install -m 755 "built/enclavid-$platform/enclavid" "$dir/enclavid"
+            install -m 755 "built/enclavid-$platform/enclavid" "assets/enclavid-$platform"
+          done
+      - if: needs.plan.outputs.cli == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: assets/enclavid-*
+      # Each step is skipped when done already, so a run that failed halfway
+      # finishes when run again. A package with no trusted publisher on npm
+      # yet (one never published) goes with NPM_TOKEN.
+      - name: Publish each package, then tag it
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          publish() {
+            if [ -n "$(npm view "$(jq -r '.name + "@" + .version' package.json)" version 2> /dev/null)" ]; then
+              echo "$(jq -r '.name + " " + .version' package.json) is on npm already"
+            else
+              npm publish --provenance
+            fi
+          }
+          while read -r entry; do
+            component=$(jq -r .component <<< "$entry")
+            path=$(jq -r .path <<< "$entry")
+            tag=$(jq -r .tag <<< "$entry")
+            previous=$(jq -r .previous <<< "$entry")
+            assets=()
+            if [ "$component" = cli ]; then
+              for dir in crates/cli/npm/*/; do
+                (cd "$dir" && publish)
+              done
+              (cd "$path" && publish)
+              assets=(assets/enclavid-*)
+            else
+              (cd "$path" && corepack pnpm@10.34.0 install --frozen-lockfile && publish)
+            fi
+            if gh release view "$tag" > /dev/null 2>&1; then
+              echo "$tag is released already"
+              continue
+            fi
+            if [ -n "$previous" ]; then
+              # Word-split on purpose: the paths the notes follow.
+              notes=$(git log --format='- %s' "$previous..$GITHUB_SHA" -- $(jq -r .follows <<< "$entry"))
+            else
+              notes="The first release."
+            fi
+            gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --notes "$notes" "${assets[@]}"
+          done < <(jq -c '.[]' <<< "$RELEASE")

@@ -13,8 +13,9 @@ mod wit_role;
 
 #[derive(Parser)]
 #[command(name = "enclavid")]
-#[command(about = "Manage Enclavid policies — embed, push, run", long_about = None)]
-#[command(version)]
+#[command(about = "Manage enclavid policies — embed, push, run", long_about = None)]
+// The version of the npm package the CLI is released as (build.rs).
+#[command(version = env!("ENCLAVID_CLI_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -40,7 +41,7 @@ enum Commands {
         command: PluginCommand,
     },
 
-    /// Registry operations on Enclavid artifacts — role-agnostic. A
+    /// Registry operations on enclavid artifacts — role-agnostic. A
     /// policy and a plugin are the same wasm component on the wire
     /// (single `application/wasm` layer, digest-pinned), so push/pull
     /// live here once rather than duplicated per role.
@@ -49,7 +50,7 @@ enum Commands {
         command: OciCommand,
     },
 
-    /// Lifecycle of verification sessions against an Enclavid API:
+    /// Lifecycle of verification sessions against an enclavid API:
     /// enclavid's own, or the playground's, which answers as it does and
     /// asks no credentials. Useful for smoke-testing, dev iteration on a
     /// policy, and inspecting consented data after applicants finish
@@ -181,7 +182,7 @@ enum PluginCommand {
 
 #[derive(Subcommand)]
 enum OciCommand {
-    /// Push an Enclavid artifact (a policy OR a plugin wasm component)
+    /// Push an enclavid artifact (a policy OR a plugin wasm component)
     /// to an OCI registry as an `application/wasm` layer, and the files of
     /// its models beside it. Role-agnostic: the bytes are self-contained
     /// (the `policy` / `plugin embed` step welded the embedded declarations

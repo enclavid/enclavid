@@ -14,8 +14,8 @@ versions of the SDK and the WIT released with it. The project gets the
 template's files, its `README.md` on how to build and push it, and
 `AGENTS.md` on how a policy works and how to change one.
 
-The build runs the `enclavid` CLI, which needs to be on the path:
-[installing it](https://github.com/enclavid/enclavid/tree/main/crates/cli#install).
+The project's `npm install` brings the `enclavid` CLI its build runs,
+`@enclavid/cli`, built for macOS and Linux.
 
 ## In this repository
 

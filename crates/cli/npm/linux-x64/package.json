@@ -1,0 +1,17 @@
+{
+  "name": "@enclavid/cli-linux-x64",
+  "version": "0.1.0",
+  "description": "The enclavid CLI built for Linux on x64, linked statically; @enclavid/cli runs it.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/enclavid/enclavid",
+    "directory": "crates/cli"
+  },
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["enclavid"],
+  "publishConfig": {
+    "access": "public"
+  }
+}

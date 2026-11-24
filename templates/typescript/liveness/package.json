@@ -16,6 +16,7 @@
   },
   "devDependencies": {
     "@bytecodealliance/jco": "1.42.0",
+    "@enclavid/cli": "^0.1.0",
     "componentize-qjs": "0.6.0",
     "prettier": "3.10.1",
     "typescript": "~6.0.3"

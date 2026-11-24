@@ -55,6 +55,9 @@ base64 = "0.22"
 # wac-graph's, so the dep tree does not fan out across versions.
 wasmparser = "0.258"
 
+[build-dependencies]
+serde_json = "1"
+
 [dev-dependencies]
 # Vendor-style models built in code, which the models check is tested against.
 enclavid-inference = { path = "../inference", features = ["test-models"] }

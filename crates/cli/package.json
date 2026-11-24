@@ -1,0 +1,29 @@
+{
+  "name": "@enclavid/cli",
+  "version": "0.1.0",
+  "description": "The enclavid CLI: embed, validate and push policies and plugins, and run them as sessions.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/enclavid/enclavid",
+    "directory": "crates/cli"
+  },
+  "bin": {
+    "enclavid": "npm/enclavid.js"
+  },
+  "files": [
+    "npm/enclavid.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@enclavid/cli-darwin-arm64": "0.1.0",
+    "@enclavid/cli-darwin-x64": "0.1.0",
+    "@enclavid/cli-linux-arm64": "0.1.0",
+    "@enclavid/cli-linux-x64": "0.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

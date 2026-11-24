@@ -14,7 +14,7 @@ covers props, texts, disclosure fields and the runtime:
 ```
 npm install
 npm run build
-enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
+npx enclavid oci push dist/policy.wasm <registry>/<repository>:<tag>
 ```
 
 `npm run playground` runs it on the playground, with the props in `props.json`.

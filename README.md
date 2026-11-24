@@ -39,7 +39,6 @@ before you apply it.
 A policy built on your own machine runs there too, with no account:
 
 ```sh
-cargo install --git https://github.com/enclavid/enclavid enclavid-cli
 npm create enclavid@latest my-policy -- --template kyc
 cd my-policy && npm install && npm run playground
 ```
