@@ -194,14 +194,14 @@ rec {
   # unit carrying it: a passt, which opens on this host's network the
   # connections the guest opens — TCP and UDP over IPv4 — and takes none in.
   # The guest is 10.0.2.15, its gateway 10.0.2.2, and neither address is
-  # mapped to anything of this host: the host's loopback is out of the guest's
-  # reach, but for a resolver. The guest asks 10.0.2.3 for names, whatever
-  # answers: passt carries what it sends there on ports 53 and 853, and nothing
-  # else, to `nameserver`, or, where null, to this host's own resolver — the
-  # first in its /etc/resolv.conf, loopback or not, which passt reads as it
-  # starts only when told no resolver to hand out itself. So the guest's
-  # resolver is the same address whatever network its passt is on, and a passt
-  # started again on another one resolves through that one at once.
+  # mapped to anything of this host. Nor is any address of this host's own in
+  # the guest's reach: a connection to one, its public ones among them, goes
+  # over loopback, which the unit may not use. The guest asks 10.0.2.3 for
+  # names, whatever answers: passt carries what it sends there on ports 53 and
+  # 853, and nothing else, to `nameserver` — so never to a resolver on this
+  # host's loopback. So the guest's resolver is the same address whatever
+  # network its passt is on, and a passt started again on another one resolves
+  # through that one at once.
   netSocket = name: "/run/enclavid-${name}-net/sock";
   netService = { name, nameserver }: {
     description = "Enclavid: the network of the hatch ${name}";
@@ -237,7 +237,11 @@ rec {
         "none"
         "--dns-forward"
         "10.0.2.3"
-      ] ++ lib.optionals (nameserver != null) [ "--dns" "10.0.2.3" "--dns-host" nameserver ]);
+        "--dns"
+        "10.0.2.3"
+        "--dns-host"
+        nameserver
+      ]);
       # The guest reconnects to a passt started again, at the same addresses.
       Restart = "always";
       RestartSec = 1;
@@ -256,6 +260,10 @@ rec {
       # it is stopped. Its sandbox, which makes namespaces of its own, is left to
       # it.
       RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+      # Every address of this host's own is reached over loopback, its public
+      # ones among them, which the guest takes for the internet's: kept off
+      # loopback, the guest reaches this host at none of them.
+      RestrictNetworkInterfaces = "~lo";
       NoNewPrivileges = true;
       SystemCallArchitectures = "native";
       LockPersonality = true;

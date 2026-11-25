@@ -438,9 +438,10 @@ in
         default = null;
         example = "192.0.2.53";
         description = ''
-          The resolver the hatch looks up the registries and key brokers
-          consumers name at, as an IPv4 address its network reaches. Null for
-          this host's own, the first in its /etc/resolv.conf.
+          The resolver the hatch looks up the registries, key brokers and
+          webhooks consumers name at, as an IPv4 address its network reaches:
+          not one on this host's loopback, which the hatch's network may not
+          use. Required where a release's guests run on this host.
         '';
       };
     };
@@ -655,6 +656,12 @@ in
         {
           assertion = lib.all (r: r.guests || r.entrances != null) releases;
           message = "enclavid.releases: a release whose guests run on another host is reached at its entrances there";
+        }
+        {
+          assertion =
+            local == [ ]
+            || (cfg.hatch.nameserver != null && !lib.hasPrefix "127." cfg.hatch.nameserver);
+          message = "enclavid.hatch.nameserver: a hatch runs here, and looks names up at a resolver its network reaches — not one on this host's loopback";
         }
         {
           assertion = lib.all (r: r.guests || gatewayHere) releases;

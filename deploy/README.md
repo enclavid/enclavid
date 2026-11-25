@@ -117,20 +117,24 @@ dependencies log.
 
 The hatch is the guest that reaches outside for the others. It fetches what
 consumers name — their registries, and wherever a registry's token service or
-its redirects lead; their key brokers — and asks your hooks. It is the one
-guest with a network interface, carried by `enclavid-main-hatch-net`, a passt
-on this host: each connection the hatch opens, TCP or UDP over IPv4, is opened
-from this host's network, and none is taken in. Whatever this host reaches, a
-consumer can have the hatch fetch — this host's own addresses among them,
-though not its loopback — and whatever it reaches sees this host's address.
-Names are looked up at this host's own resolver, which the hatch reaches at
-one address and its DNS ports, or at `hatch.nameserver`. TLS to what it
-fetches ends inside the hatch, against the roots in its measurement, and api
-pins the hatch's measurement as it does every guest's it dials — so what the
-hatch carries for a session is not this host's to read, but for which
-registries and brokers it reaches, and how much. A registry or broker the
-consumer writes `http://` is the exception: it is reached in the clear, and api
-sends a bearer to none — a session naming one for it is refused.
+its redirects lead; their key brokers; their webhooks — and asks your hooks. It
+is the one guest with a network interface, carried by `enclavid-main-hatch-net`,
+a passt on this host: each connection the hatch opens, TCP or UDP over IPv4, is
+opened from this host's network, and none is taken in. The hatch itself sends
+only to public addresses: it refuses a registry, broker or webhook written as,
+or resolving to, any other — private, loopback, link-local, the cloud's
+metadata among them. Of the public ones, a consumer can have it reach whatever
+this host reaches but this host itself: every address of this host's own is
+reached over loopback, which the passt may not use. Whatever it reaches sees
+this host's address. Names are looked up at `hatch.nameserver`, which the hatch
+reaches at one address and its DNS ports, and which cannot be a resolver on
+this host's loopback. TLS to what it fetches ends inside the hatch, against the
+roots in its measurement, and api pins the hatch's measurement as it does every
+guest's it dials — so what the hatch carries for a session is not this host's
+to read, but for which registries, brokers and endpoints it reaches, and how
+much. A registry or broker the consumer writes `http://` is the exception: it
+is reached in the clear, and api sends a bearer to none — a session naming one
+for it is refused.
 
 The passt runs as a user of its own, given `CAP_SYS_ADMIN` to build its own
 sandbox where unprivileged users may not make user namespaces; it drops that,
