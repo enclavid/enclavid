@@ -19,9 +19,10 @@ use tokio::io::split;
 
 use fleet_stream::{Incoming, StreamLen};
 use storage_rpc::{
-    BlobName, BlobStream, CacheBlob, CacheError, DisclosureOp, Dropped, Expected, Fields, Kept,
-    LegSettings, MediaName, MediaOp, MetadataOp, Ops, RecordName, ResetOp, ScalarSlot,
-    SessionError, Slot, StateOp, StorageLeg, Version,
+    BlobName, BlobStream, CacheBlob, CacheError, DisclosureOp, Dropped, DueNotice, Expected,
+    Fields, Kept, LegSettings, MAX_NOTICE_BYTES, MediaName, MediaOp, MetadataOp, NextDue,
+    NoticeDue, NoticeName, NoticeOp, Ops, RecordName, ResetOp, ScalarSlot, SessionError, Settle,
+    Settled, Slot, StateOp, StorageLeg, TakeRequest, Version,
 };
 
 use crate::boundary::AnyCaller;
@@ -51,6 +52,11 @@ boundary! {
         Expected,
         Fields<Api>,
         BlobStream,
+        NoticeName,
+        NoticeDue,
+        NoticeOp,
+        TakeRequest,
+        Settle,
     }
     in (AuthN,) {
         /// test fixture
@@ -62,6 +68,9 @@ boundary! {
         Dropped,
         SessionError,
         CacheError,
+        DueNotice,
+        NextDue,
+        Settled,
     }
 }
 
@@ -378,6 +387,103 @@ async fn one_caller_cannot_reach_another_caller() {
     write(&api, Expected::Version(1), reset(1)).await.unwrap();
     api_server.abort();
     other_server.abort();
+}
+
+fn notice_name(tag: u8) -> Exposed<NoticeName, (), Api> {
+    Api::expose(NoticeName([tag; 32]))
+}
+
+/// A notice under `tag`, due at once.
+fn notice(ops: &mut Ops<Api>, tag: u8, sealed: Vec<u8>) {
+    ops.notice(
+        notice_name(tag),
+        Api::expose(NoticeDue(0)),
+        Api::expose(NoticeOp(sealed)),
+    );
+}
+
+/// The notices due, as api takes them, and when the next is due.
+async fn take_next(leg: &StorageLeg<Api>) -> (Vec<DueNotice>, Option<u64>) {
+    let ask = TakeRequest {
+        max: 8,
+        hold_secs: 60,
+    };
+    let (notices, next) = leg.take_notices(Api::expose(ask)).await.unwrap();
+    let NextDue(next) = next.into_inner();
+    (notices.into_iter().map(|n| n.into_inner()).collect(), next)
+}
+
+async fn take(leg: &StorageLeg<Api>) -> Vec<DueNotice> {
+    take_next(leg).await.0
+}
+
+async fn settle(leg: &StorageLeg<Api>, tag: u8, settle: Settle) {
+    leg.settle_notice(notice_name(tag), Api::expose(settle))
+        .await
+        .unwrap()
+        .into_inner();
+}
+
+/// A notice added with a write is its caller's alone: another caller neither
+/// takes it nor settles it, though it names it the same. Taken, it is held;
+/// settled again, it is due again; settled done, it is gone.
+#[tokio::test]
+async fn a_notice_reaches_its_own_caller_alone() {
+    let (_dir, store) = store();
+    let (api, _, api_server) = connected(Caller::new(store.clone(), peer("ab"))).await;
+    let (other, _, other_server) = connected(Caller::new(store, peer("cd"))).await;
+
+    let ended = ops(1, |o| {
+        o.metadata(metadata(b"ended"));
+        notice(o, 1, b"sealed notice".to_vec());
+    });
+    write(&api, create(), ended).await.unwrap();
+
+    assert_eq!(
+        take_next(&other).await,
+        (vec![], None),
+        "nor learns when one is due"
+    );
+    settle(&other, 1, Settle::Done).await;
+
+    assert_eq!(
+        take(&api).await,
+        vec![DueNotice {
+            name: NoticeName([1; 32]),
+            value: b"sealed notice".to_vec(),
+        }]
+    );
+    assert!(take(&api).await.is_empty(), "held for the take");
+    settle(&api, 1, Settle::Again { due_unix_secs: 0 }).await;
+    assert_eq!(take(&api).await.len(), 1);
+    settle(&api, 1, Settle::Done).await;
+    settle(&api, 1, Settle::Again { due_unix_secs: 0 }).await;
+    assert_eq!(
+        take_next(&api).await,
+        (vec![], None),
+        "gone, so nothing to make due"
+    );
+    api_server.abort();
+    other_server.abort();
+}
+
+/// A notice past its bound is refused with the write that carries it: neither
+/// the record nor the notice is kept.
+#[tokio::test]
+async fn an_oversized_notice_is_refused_with_its_write() {
+    let (_dir, store) = store();
+    let (api, _, server) = connected(Caller::new(store, peer("ab"))).await;
+    let oversized = ops(1, |o| {
+        o.metadata(metadata(b"m"));
+        notice(o, 1, vec![0; MAX_NOTICE_BYTES + 1]);
+    });
+    assert!(matches!(
+        write(&api, create(), oversized).await,
+        Err(SessionError::Internal(_))
+    ));
+    assert_eq!(read(&api, 1, |_| {}).await.1, 0);
+    assert!(take(&api).await.is_empty());
+    server.abort();
 }
 
 /// The TTL is not partitioned, and must not be: one sweeper, one clock, every

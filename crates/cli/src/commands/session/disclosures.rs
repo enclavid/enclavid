@@ -3,7 +3,7 @@
 //! secret, parse to JSON, pretty-print as an array.
 //!
 //! Layout: server returns `{ items: [<base64-sealed-box>, ...] }`.
-//! Each item is a libsodium sealed box to `client_disclosure_pubkey`
+//! Each item is a libsodium sealed box to `disclosure_pubkey`
 //! (we picked the recipient at `session create` time). Order is the
 //! engine's append order; index = i-th disclosure emitted.
 //!

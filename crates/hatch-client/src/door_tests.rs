@@ -10,12 +10,14 @@ use enclavid_boundary_macros::boundary;
 use fleet_stream::{StreamLen, bin};
 use futures::TryStreamExt;
 use hatch_rpc::{
-    AuthorizeError, AuthorizeRequest, BlobRequest, ClientOperation, HatchLeg, KbsError, KbsRequest,
-    KbsResponse, LegSettings, Manifest, ManifestRequest, PullError, RemoteHatchAt, SessionTerms,
-    Verdict,
+    AuthorizeError, AuthorizeRequest, BlobRequest, ConsumerOperation, HatchLeg, KbsError,
+    KbsRequest, KbsResponse, LegSettings, Manifest, ManifestRequest, PullError, RemoteHatchAt,
+    SessionTerms, Verdict, WebhookAnswer, WebhookError, WebhookRequest,
 };
 
-use crate::{AuthClient, AuthVerdict, BridgeError, KbsClient, Link, Principal, RegistryClient};
+use crate::{
+    AuthClient, AuthVerdict, BridgeError, KbsClient, Link, Principal, RegistryClient, WebhookClient,
+};
 
 boundary! {
     /// The calling end, for the test: every concern answered.
@@ -30,6 +32,7 @@ boundary! {
         ManifestRequest,
         BlobRequest,
         KbsRequest,
+        WebhookRequest,
     }
     in (AuthN,) {
         /// test fixture
@@ -41,6 +44,8 @@ boundary! {
         bin::Receiver,
         KbsResponse,
         KbsError,
+        WebhookAnswer,
+        WebhookError,
     }
 }
 
@@ -57,6 +62,7 @@ boundary! {
         ManifestRequest,
         BlobRequest,
         KbsRequest,
+        WebhookRequest,
     }
     out (AuthN,) {
         /// test fixture
@@ -68,6 +74,8 @@ boundary! {
         bin::Receiver,
         KbsResponse,
         KbsError,
+        WebhookAnswer,
+        WebhookError,
     }
 }
 
@@ -133,6 +141,19 @@ impl RemoteHatchAt<Served> for FakeHatch {
             body: req.body,
         }))
     }
+
+    async fn webhook(
+        &self,
+        req: Untrusted<WebhookRequest, (), Served>,
+    ) -> Result<Exposed<WebhookAnswer, (), Served>, WebhookError> {
+        let req = req.into_inner();
+        if req.url != "https://answered" {
+            return Err(WebhookError("the endpoint did not answer".into()));
+        }
+        Ok(Served::expose(WebhookAnswer {
+            accepted: req.body.len() == 204,
+        }))
+    }
 }
 
 /// The leg, always up.
@@ -182,7 +203,7 @@ async fn a_verdict_crosses_as_its_hatch_gave_it() {
     let ask = |header: &str| {
         Api::expose(AuthorizeRequest {
             authorization_header: header.into(),
-            operation: ClientOperation::SessionRead,
+            operation: ConsumerOperation::SessionRead,
         })
     };
     let verdict = auth
@@ -274,6 +295,31 @@ async fn a_blob_streams_whole_and_one_never_started_fails_its_first_piece() {
         .into_inner();
     assert!(matches!(
         silent.try_next().await,
+        Err(BridgeError::Transport(_))
+    ));
+}
+
+/// A webhook crosses whole, and whether its endpoint took it comes back; one
+/// that got no answer crosses as a webhook the hatch could not send.
+#[tokio::test]
+async fn a_webhook_crosses_and_its_answer_comes_back() {
+    let webhooks = WebhookClient::<Api>::new(hatch().await, DEADLINE);
+    let send = |url: &str, body: usize| {
+        Api::expose(WebhookRequest {
+            url: url.into(),
+            headers: vec![("webhook-id".into(), "msg_1".into())],
+            body: vec![0; body],
+        })
+    };
+    let accepted = |answer: Untrusted<WebhookAnswer, (), Api>| answer.into_inner().accepted;
+    assert!(accepted(
+        webhooks.send(send("https://answered", 204)).await.unwrap()
+    ));
+    assert!(!accepted(
+        webhooks.send(send("https://answered", 10)).await.unwrap()
+    ));
+    assert!(matches!(
+        webhooks.send(send("https://silent", 204)).await,
         Err(BridgeError::Transport(_))
     ));
 }

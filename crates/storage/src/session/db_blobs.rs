@@ -249,7 +249,7 @@ fn apply_ops(tx: &Transaction, ops: Vec<Op>) -> Result<(), StoreErr> {
             // because that is what a session is. They are safe to drop only
             // because nothing served them: the read waits for a completed
             // session and a completed session cannot be reset
-            // (`enclavid-api::client::disclosures`, `enclavid-api::applicant::reset`)
+            // (`enclavid-api::consumer::disclosures`, `enclavid-api::applicant::reset`)
             // — which holds because this commits under the version the reset
             // read the session at.
             Op::Reset => {
@@ -259,6 +259,13 @@ fn apply_ops(tx: &Transaction, ops: Vec<Op>) -> Result<(), StoreErr> {
                 )?;
                 tx.execute("DELETE FROM media", [])?;
                 tx.execute("DELETE FROM disclosure", [])?;
+            }
+            // A notice is kept in the index, beside the record, before the
+            // record's ops: the facade takes it out of the write first.
+            Op::Notice(_) => {
+                return Err(StoreErr::Internal(
+                    "a notice reached the record's own ops".into(),
+                ));
             }
         }
     }

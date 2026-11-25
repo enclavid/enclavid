@@ -4,8 +4,8 @@
 //!     the actual session data (state / metadata / version / media / disclosure),
 //!     a round committing atomically in one transaction.
 //!   * [`db_meta`] — the global cross-session index (`meta.sqlite`), the
-//!     "metadata" tier: today the absolute TTL deadline, extensible to any future
-//!     globally-queryable per-session metadata.
+//!     "metadata" tier: the absolute TTL deadline of each record, and every
+//!     caller's notices.
 //!
 //! [`SessionStore`] is the facade over both: it owns the name → path mapping
 //! (hashed, which guards path traversal; it hides nothing, since the index keeps
@@ -29,11 +29,27 @@ mod db_meta;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use storage_rpc::{ReadRequest, ReadResponse, SessionError, WriteRequest, WriteResponse};
+use storage_rpc::{
+    DueNotice, NoticeName, ReadRequest, ReadResponse, SessionError, Settle, WriteRequest,
+    WriteResponse,
+};
 
 use crate::scope::Name;
 use db_blobs::DbBlobs;
-use db_meta::DbMeta;
+use db_meta::{DbMeta, NoticeRow};
+
+/// How long past its due time a notice is kept before the sweep drops it: one
+/// no caller took in that time is one no caller is taking.
+const STALE_NOTICE_SECS: u64 = 7 * 24 * 3600;
+
+/// A notice as a write adds it: under the name its caller's partition derived
+/// for it (`crate::scope`), with the name the caller gave beside it.
+pub(crate) struct Notice {
+    pub(crate) name: Name,
+    pub(crate) asked: NoticeName,
+    pub(crate) due: u64,
+    pub(crate) value: Vec<u8>,
+}
 
 /// How long a statement waits on a file another operation holds locked before
 /// it fails, unless the host says otherwise (the storage role's `db-busy-secs`
@@ -103,19 +119,48 @@ impl SessionStore {
             .map_err(SessionError::from)
     }
 
-    /// Atomic CAS write. `expected_version == None` dispatches to a create,
-    /// `Some(v)` to a CAS update. A create's deadline is recorded in the index
-    /// FIRST — after the must-not-exist check passes (so a duplicate create can't
-    /// reset an existing session's deadline) and as its OWN durable commit BEFORE
-    /// the session file — so a committed session always has a durable deadline
-    /// row (the reverse is harmless, swept self-healingly). An update's deadline
-    /// is ignored: a record's deadline is set once. `req.ops` must be non-empty.
+    /// [`Self::write_noting`], adding no notice.
+    #[cfg(test)]
     pub(crate) fn write(
         &self,
         name: &Name,
         req: WriteRequest,
     ) -> Result<WriteResponse, SessionError> {
+        let list = crate::scope::Scope::new(String::new()).notices();
+        self.write_noting(name, req, &list, Vec::new())
+    }
+
+    /// Atomic CAS write, adding `notices` to `list`. `expected_version == None`
+    /// dispatches to a create, `Some(v)` to a CAS update. A create's deadline is
+    /// recorded in the index FIRST — after the must-not-exist check passes (so a
+    /// duplicate create can't reset an existing session's deadline) and as its
+    /// OWN durable commit BEFORE the session file — so a committed session always
+    /// has a durable deadline row (the reverse is harmless, swept
+    /// self-healingly). An update's deadline is ignored: a record's deadline is
+    /// set once.
+    ///
+    /// The notices are committed the same way, before the session file: a record
+    /// that changed has its notice kept, and a write refused after them leaves
+    /// theirs behind, which their taker reads the record to act on. `req.ops`
+    /// are the record's own, and must be non-empty: a write of notices alone is
+    /// refused before anything is kept.
+    pub(crate) fn write_noting(
+        &self,
+        name: &Name,
+        req: WriteRequest,
+        list: &Name,
+        notices: Vec<Notice>,
+    ) -> Result<WriteResponse, SessionError> {
         let name = name.as_str();
+        let rows: Vec<NoticeRow<'_>> = notices
+            .iter()
+            .map(|n| NoticeRow {
+                name: n.name.as_str(),
+                asked: &n.asked,
+                due: n.due,
+                value: &n.value,
+            })
+            .collect();
         (|| -> Result<WriteResponse, StoreErr> {
             if req.ops.is_empty() {
                 return Err(StoreErr::Internal("write with no ops".to_string()));
@@ -128,12 +173,39 @@ impl SessionStore {
                     if let Some(dl) = req.deadline_unix_secs {
                         self.meta.put_deadline(name, dl)?;
                     }
+                    self.meta.put_notices(list.as_str(), &rows)?;
                     self.blobs.create(name, req.ops)
                 }
-                Some(expected) => self.blobs.update(name, req.ops, expected),
+                Some(expected) => {
+                    self.meta.put_notices(list.as_str(), &rows)?;
+                    self.blobs.update(name, req.ops, expected)
+                }
             }
         })()
         .map_err(SessionError::from)
+    }
+
+    /// The notices of `list` due by `now`, earliest first, at most `max` — each
+    /// held, not due, until `hold` seconds past `now` — and when the earliest of
+    /// `list` is due after that, if it keeps any.
+    pub(crate) fn take_notices(
+        &self,
+        list: &Name,
+        now: u64,
+        max: usize,
+        hold: u64,
+    ) -> Result<(Vec<DueNotice>, Option<u64>), SessionError> {
+        self.meta
+            .take_notices(list.as_str(), now, max, now.saturating_add(hold))
+            .map_err(SessionError::from)
+    }
+
+    /// Drop the notice kept under `name`, or make it due again, as `settle` says;
+    /// a no-op where none is kept.
+    pub(crate) fn settle_notice(&self, name: &Name, settle: Settle) -> Result<(), SessionError> {
+        self.meta
+            .settle_notice(name.as_str(), settle)
+            .map_err(SessionError::from)
     }
 
     /// Existence probe (see [`DbBlobs::exists`]).
@@ -151,6 +223,10 @@ impl SessionStore {
     /// Deliberately unscoped: a TTL is a TTL, and every caller's records expire
     /// on the same terms. The names it sweeps are opaque to it, so it needs to
     /// know nothing about whose they are.
+    ///
+    /// The same call drops up to `max` notices still due [`STALE_NOTICE_SECS`]
+    /// after they were: a notice its caller takes is held or settled, so one
+    /// left that long has no taker. How many sessions went is what it returns.
     pub fn sweep_once(&self, now: u64, max: usize) -> Result<usize, SessionError> {
         (|| -> Result<usize, StoreErr> {
             let names = self.meta.expired(now, max)?;
@@ -158,6 +234,8 @@ impl SessionStore {
                 self.blobs.remove_files(name);
             }
             self.meta.remove(&names)?;
+            self.meta
+                .drop_stale_notices(now.saturating_sub(STALE_NOTICE_SECS), max)?;
             Ok(names.len())
         })()
         .map_err(SessionError::from)
@@ -166,11 +244,12 @@ impl SessionStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_BUSY_TIMEOUT, SessionStore};
+    use super::{DEFAULT_BUSY_TIMEOUT, Notice, STALE_NOTICE_SECS, SessionStore};
     use crate::scope::{Name, Scope};
     use storage_rpc::{
-        BlobField, BlobWrite, FieldSelector, ListAppend, ListField, ListSlot, MediaName,
-        MediaWrite, Op, ReadRequest, RecordName, ScalarSlot, SessionError, Slot, WriteRequest,
+        BlobField, BlobWrite, DueNotice, FieldSelector, ListAppend, ListField, ListSlot, MediaName,
+        MediaWrite, NoticeName, Op, ReadRequest, RecordName, ScalarSlot, SessionError, Settle,
+        Slot, WriteRequest,
     };
 
     fn tmp_store() -> (tempfile::TempDir, SessionStore) {
@@ -534,5 +613,207 @@ mod tests {
         assert_eq!(s.sweep_once(1_000, 1).unwrap(), 1);
         assert_eq!(s.sweep_once(1_000, 1024).unwrap(), 1);
         assert!(s.exists(&n(3)).unwrap());
+    }
+
+    fn peer(tag: &str) -> Scope {
+        Scope::new(tag.repeat(48))
+    }
+
+    /// The notice `tag` in the list of `peer`, due at `due`.
+    fn notice(peer: &Scope, tag: u8, due: u64, value: &[u8]) -> Notice {
+        Notice {
+            name: peer.notice(&NoticeName([tag; 32])),
+            asked: NoticeName([tag; 32]),
+            due,
+            value: value.to_vec(),
+        }
+    }
+
+    fn values(taken: &[DueNotice]) -> Vec<Vec<u8>> {
+        taken.iter().map(|t| t.value.clone()).collect()
+    }
+
+    /// The notices of `peer` a take at `now` hands out, each held 60 s.
+    fn take(s: &SessionStore, peer: &Scope, now: u64) -> Vec<DueNotice> {
+        s.take_notices(&peer.notices(), now, 8, 60).unwrap().0
+    }
+
+    /// Taken once it is due, under the name it was added by; held for the take,
+    /// and due again once the hold passes.
+    #[test]
+    fn a_notice_rides_its_write_and_is_taken_when_due() {
+        let (_d, s) = tmp_store();
+        let a = peer("aa");
+        s.write_noting(
+            &n(1),
+            create(BlobField::Metadata, b"m", 1_000),
+            &a.notices(),
+            vec![notice(&a, 1, 100, b"ended")],
+        )
+        .unwrap();
+        assert!(take(&s, &a, 99).is_empty());
+        assert_eq!(
+            take(&s, &a, 100),
+            vec![DueNotice {
+                name: NoticeName([1; 32]),
+                value: b"ended".to_vec(),
+            }]
+        );
+        assert!(take(&s, &a, 159).is_empty(), "held for the take");
+        assert_eq!(take(&s, &a, 160).len(), 1);
+    }
+
+    /// A take tells when the caller's next notice is due, the ones it holds
+    /// among them; and that none is, once all are settled.
+    #[test]
+    fn a_take_tells_when_the_next_notice_is_due() {
+        let (_d, s) = tmp_store();
+        let a = peer("aa");
+        s.write_noting(
+            &n(1),
+            create(BlobField::Metadata, b"m", 1_000),
+            &a.notices(),
+            vec![notice(&a, 1, 100, b"one"), notice(&a, 2, 400, b"two")],
+        )
+        .unwrap();
+        let next = |now| s.take_notices(&a.notices(), now, 8, 60).unwrap();
+        assert_eq!(next(99), (vec![], Some(100)));
+        assert_eq!(next(100).1, Some(160), "the one held, due again");
+        s.settle_notice(&a.notice(&NoticeName([1; 32])), Settle::Done)
+            .unwrap();
+        assert_eq!(next(100), (vec![], Some(400)));
+        s.settle_notice(&a.notice(&NoticeName([2; 32])), Settle::Done)
+            .unwrap();
+        assert_eq!(next(1_000), (vec![], None));
+    }
+
+    /// Settled done, a notice is gone; settled again, it is due at the time
+    /// given. Settling one not kept is no error.
+    #[test]
+    fn a_settled_notice_is_dropped_or_due_again() {
+        let (_d, s) = tmp_store();
+        let a = peer("aa");
+        s.write_noting(
+            &n(1),
+            create(BlobField::Metadata, b"m", 1_000),
+            &a.notices(),
+            vec![notice(&a, 1, 100, b"one"), notice(&a, 2, 100, b"two")],
+        )
+        .unwrap();
+        assert_eq!(take(&s, &a, 100).len(), 2);
+        s.settle_notice(&a.notice(&NoticeName([1; 32])), Settle::Done)
+            .unwrap();
+        s.settle_notice(
+            &a.notice(&NoticeName([2; 32])),
+            Settle::Again { due_unix_secs: 500 },
+        )
+        .unwrap();
+        assert!(take(&s, &a, 499).is_empty());
+        assert_eq!(values(&take(&s, &a, 500)), [b"two".to_vec()]);
+        s.settle_notice(&a.notice(&NoticeName([9; 32])), Settle::Done)
+            .unwrap();
+    }
+
+    /// Added again under its name, a notice takes the place of the first.
+    #[test]
+    fn a_notice_added_again_takes_the_place_of_the_first() {
+        let (_d, s) = tmp_store();
+        let a = peer("aa");
+        let created = s
+            .write_noting(
+                &n(1),
+                create(BlobField::Metadata, b"m", 1_000),
+                &a.notices(),
+                vec![notice(&a, 1, 900, b"later")],
+            )
+            .unwrap();
+        let mut update = set_blob(BlobField::State, b"st");
+        update.expected_version = Some(created.new_version);
+        s.write_noting(
+            &n(1),
+            update,
+            &a.notices(),
+            vec![notice(&a, 1, 100, b"now")],
+        )
+        .unwrap();
+        assert_eq!(values(&take(&s, &a, 1_000)), [b"now".to_vec()]);
+    }
+
+    /// A take reaches its caller's own list, and a settle its own notice, even
+    /// where two callers gave the same names.
+    #[test]
+    fn a_caller_reaches_its_own_notices_alone() {
+        let (_d, s) = tmp_store();
+        let (a, b) = (peer("aa"), peer("bb"));
+        for (who, value) in [(&a, b"a's"), (&b, b"b's")] {
+            s.write_noting(
+                &who.session(&RecordName([1; 32])),
+                create(BlobField::Metadata, b"m", 1_000),
+                &who.notices(),
+                vec![notice(who, 1, 100, value)],
+            )
+            .unwrap();
+        }
+        assert_eq!(values(&take(&s, &a, 100)), [b"a's".to_vec()]);
+        s.settle_notice(&b.notice(&NoticeName([1; 32])), Settle::Done)
+            .unwrap();
+        assert!(take(&s, &b, 1_000).is_empty());
+        assert_eq!(values(&take(&s, &a, 1_000)), [b"a's".to_vec()]);
+    }
+
+    /// A write refused after its notices leaves them behind; a write of notices
+    /// alone is refused before any is kept.
+    #[test]
+    fn a_notice_is_kept_before_its_record_is_written() {
+        let (_d, s) = tmp_store();
+        let a = peer("aa");
+        s.write(&n(1), create(BlobField::Metadata, b"m", 1_000))
+            .unwrap();
+        let mut stale = set_blob(BlobField::State, b"st");
+        stale.expected_version = Some(7);
+        assert!(matches!(
+            s.write_noting(
+                &n(1),
+                stale,
+                &a.notices(),
+                vec![notice(&a, 1, 100, b"left")]
+            ),
+            Err(SessionError::VersionMismatch)
+        ));
+        assert_eq!(values(&take(&s, &a, 100)), [b"left".to_vec()]);
+
+        let alone = WriteRequest {
+            ops: vec![],
+            expected_version: Some(1),
+            deadline_unix_secs: None,
+        };
+        assert!(
+            s.write_noting(
+                &n(1),
+                alone,
+                &a.notices(),
+                vec![notice(&a, 2, 100, b"alone")]
+            )
+            .is_err()
+        );
+        assert!(values(&take(&s, &a, 10_000)).iter().all(|v| v != b"alone"));
+    }
+
+    /// A notice still due a week past its time is dropped by the sweep; a later
+    /// one stays.
+    #[test]
+    fn a_notice_no_one_takes_is_swept() {
+        let (_d, s) = tmp_store();
+        let a = peer("aa");
+        let now = 100 + STALE_NOTICE_SECS;
+        s.write_noting(
+            &n(1),
+            create(BlobField::Metadata, b"m", 10 * now),
+            &a.notices(),
+            vec![notice(&a, 1, 100, b"old"), notice(&a, 2, now, b"recent")],
+        )
+        .unwrap();
+        s.sweep_once(now, 1024).unwrap();
+        assert_eq!(values(&take(&s, &a, now)), [b"recent".to_vec()]);
     }
 }

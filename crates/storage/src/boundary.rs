@@ -24,8 +24,9 @@
 use enclavid_boundary::{AuthN, AuthZ, Covert};
 use enclavid_boundary_macros::boundary;
 use storage_rpc::{
-    BlobName, CacheBlob, CacheError, Dropped, Kept, ReadRequest, ReadResponse, RecordName,
-    SessionError, WriteRequest, WriteResponse,
+    BlobName, CacheBlob, CacheError, Dropped, Kept, NoticeName, ReadRequest, ReadResponse,
+    RecordName, SessionError, Settle, Settled, TakeRequest, TakeResponse, WriteRequest,
+    WriteResponse,
 };
 
 boundary! {
@@ -61,6 +62,21 @@ boundary! {
         /// It is kept only under the name its call gives, in the caller's own
         /// partition.
         CacheBlob: AuthZ::Scoped,
+        /// Filed as a record's name is, in the notices' half of the partition.
+        NoticeName: AuthN::Indifferent,
+        /// Drawn from the caller's own measurement, as a record's name is.
+        NoticeName: AuthZ::Scoped,
+        /// How many to take and how long to hold them, each held to a bound:
+        /// whatever a caller asks, it takes only from its own list.
+        TakeRequest: AuthN::Indifferent,
+        /// It takes only from the caller's own list of notices.
+        TakeRequest: AuthZ::Scoped,
+        /// Dropped, or due again at a time: whatever a caller settles is a
+        /// notice of its own.
+        Settle: AuthN::Indifferent,
+        /// It settles only the notice its call names, in the caller's own
+        /// partition.
+        Settle: AuthZ::Scoped,
     }
 
     out (AuthZ, Covert) {
@@ -85,6 +101,14 @@ boundary! {
         Dropped: AuthZ::NoSecret,
         /// One fixed value.
         Dropped: Covert::Bounded,
+        /// Taken from the caller's own list of notices.
+        TakeResponse: AuthZ::Scoped,
+        /// Names, bytes and a time off the volume the host provisions and reads.
+        TakeResponse: Covert::AlreadyHeld,
+        /// That the notice this call named is settled, and nothing else.
+        Settled: AuthZ::NoSecret,
+        /// One fixed value.
+        Settled: Covert::Bounded,
         /// A failure of this call: its write lost the version race, or the store
         /// failed it.
         SessionError: AuthZ::NoSecret,

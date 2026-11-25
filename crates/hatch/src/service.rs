@@ -4,11 +4,13 @@
 use enclavid_boundary::{Exposed, Untrusted};
 use fleet_stream::bin;
 use hatch_rpc::{
-    AuthorizeError, AuthorizeRequest, BlobRequest, ClientOperation, KbsError, KbsRequest,
+    AuthorizeError, AuthorizeRequest, BlobRequest, ConsumerOperation, KbsError, KbsRequest,
     KbsResponse, Manifest, ManifestRequest, PullError, RemoteHatchAt, SessionTerms, Verdict,
+    WebhookAnswer, WebhookError, WebhookRequest,
 };
 
 use crate::boundary::AnyCaller;
+use crate::egress;
 use crate::hooks::{Authorization, Hooks, Limits};
 use crate::oci::Pulls;
 
@@ -16,7 +18,8 @@ use crate::oci::Pulls;
 pub struct Hatch {
     pub hooks: Hooks,
     pub pulls: Pulls,
-    pub kbs: reqwest::Client,
+    pub kbs: egress::Client,
+    pub webhooks: egress::Client,
 }
 
 impl Hatch {
@@ -38,7 +41,7 @@ impl Hatch {
             Some(Authorization::Unauthenticated) => return Ok(Verdict::Unauthenticated),
             Some(Authorization::Denied) => return Ok(Verdict::Denied),
         };
-        if req.operation != ClientOperation::SessionCreate {
+        if req.operation != ConsumerOperation::SessionCreate {
             return Ok(Verdict::Allowed {
                 principal,
                 terms: SessionTerms::default(),
@@ -96,6 +99,15 @@ impl RemoteHatchAt<AnyCaller> for Hatch {
             .await
             .map(AnyCaller::expose)
     }
+
+    async fn webhook(
+        &self,
+        req: Untrusted<WebhookRequest, (), AnyCaller>,
+    ) -> Result<Exposed<WebhookAnswer, (), AnyCaller>, WebhookError> {
+        crate::webhook::send(&self.webhooks, req.into_inner())
+            .await
+            .map(AnyCaller::expose)
+    }
 }
 
 #[cfg(test)]
@@ -107,14 +119,21 @@ mod tests {
     use super::*;
 
     fn hatch(hooks: Hooks) -> Hatch {
+        let hosts = egress::Hosts::new(false).unwrap();
         Hatch {
             hooks,
-            pulls: Pulls::new(1, 1),
-            kbs: crate::kbs::client().unwrap(),
+            pulls: Pulls::new(1, 1, hosts.clone()),
+            kbs: crate::kbs::client(hosts.clone()).unwrap(),
+            webhooks: crate::webhook::client(
+                hosts,
+                crate::webhook::DEFAULT_WEBHOOK_CONNECT,
+                crate::webhook::DEFAULT_WEBHOOK_SEND,
+            )
+            .unwrap(),
         }
     }
 
-    fn ask(operation: ClientOperation) -> Untrusted<AuthorizeRequest, (), AnyCaller> {
+    fn ask(operation: ConsumerOperation) -> Untrusted<AuthorizeRequest, (), AnyCaller> {
         inbound::<AnyCaller, _>(AuthorizeRequest {
             authorization_header: "Bearer anything".into(),
             operation,
@@ -128,7 +147,7 @@ mod tests {
         let h = hatch(Hooks::new(None, None, Duration::from_secs(1)));
         for _ in 0..100 {
             let verdict = h
-                .authorize(ask(ClientOperation::SessionCreate))
+                .authorize(ask(ConsumerOperation::SessionCreate))
                 .await
                 .unwrap()
                 .into_inner();

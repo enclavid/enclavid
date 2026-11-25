@@ -100,7 +100,7 @@ enclavid-attestation = { path = "../attestation", default-features = false }
 # Intra-fleet mutual RA-TLS on the api -> worker dials. Dev-bypass = the mock
 # attestation backend (default); the prod flip is this crate's own `sev-snp`, off
 # the defaults — `enclavid-ra-tls` names no backend and has no features. Separate
-# from the client-facing session quotes above (that stays snp-dev).
+# from the consumer-facing session quotes above (that stays snp-dev).
 enclavid-ra-tls = { path = "../ra-tls" }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 # `http2` because the gateway reaches api over HTTP/2 — see `crate::transport`.
@@ -133,6 +133,11 @@ sha2 = "0.10"
 # HKDF-SHA256 for deriving the per-session DisplayField shuffle seed
 # from `tee_seal_key`. See `crate::shuffle` for derivation chain.
 hkdf = "0.12"
+# HMAC-SHA256, the Standard Webhooks signature a webhook is sent with. See
+# `crate::webhooks`.
+hmac = "0.12"
+# A webhook's URL read as the hatch reads it, and kept so.
+url = "2"
 # DisplayField order shuffle inside disclosure envelopes — ChaCha20
 # seeded from `ShuffleKey::derive_envelope_seed`. See `crate::shuffle`.
 rand = { version = "0.8", default-features = false }

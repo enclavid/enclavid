@@ -4,7 +4,7 @@
 //! drive lives in `round`, the consent rule in `consent`, and the JSON view
 //! types in `views`.
 //!
-//! Auth model mirrors the client API: a single `enforce` middleware,
+//! Auth model mirrors the consumer API: a single `enforce` middleware,
 //! attached per-route via `.layer(auth())`. See `auth.rs` for cache
 //! semantics. `/status` (GET), `/attestation` (GET), `/state` (DELETE,
 //! recovery path) and `/warmup` (POST, before the applicant has a key) are
@@ -68,7 +68,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let auth = || from_fn(enforce);
 
     // Applicant API routes live under the same `/api/v1/sessions/...`
-    // prefix as the client API (see `client::router`) for a consistent
+    // prefix as the consumer API (see `consumer::router`) for a consistent
     // surface across the two audiences. The page calls them by paths
     // relative to itself, so wherever the page was reached the calls
     // follow. The page is served by the fallback below, at the root and
@@ -114,13 +114,13 @@ pub fn router(state: Arc<AppState>) -> Router {
     let routes = routes.fallback(page);
 
     // Mark the bearer the applicant sends on /connect /input as
-    // sensitive. See `client::router` for the rationale; same posture
+    // sensitive. See `consumer::router` for the rationale; same posture
     // applies here — http/2 HPACK side-channel + tracing-safe Debug
     // formatting. Applicant flow only uses `Authorization`; there's
     // no X-Session-Token equivalent on this surface.
     let routes = routes.layer(SetSensitiveRequestHeadersLayer::new([AUTHORIZATION]));
 
-    // Outermost safety net: see client/mod.rs for rationale. Caches
+    // Outermost safety net: see consumer/mod.rs for rationale. Caches
     // panics from any source into clean 500s.
     routes.layer(CatchPanicLayer::new()).with_state(state)
 }

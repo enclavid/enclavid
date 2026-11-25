@@ -1,16 +1,18 @@
 //! The **global session index** — the cross-session "metadata" tier. One shared
 //! SQLite file (`meta.sqlite`) holding data that must be queried ACROSS sessions
-//! rather than per-session. Today that is only the absolute TTL `deadline`; it is
-//! the home for any future globally-queryable per-session metadata.
+//! rather than per-session: the absolute TTL `deadline` of each record, and every
+//! caller's notices.
 //!
 //! Kept apart from the per-session files ([`super::db_blobs`]) because its access
-//! pattern is different: it is a single shared table touched only on create
-//! (insert a deadline) and sweep (range-select + delete), never on the hot
-//! per-round update path. A held `Mutex<Connection>` serialises those infrequent
-//! writers; the hot path never contends it.
+//! pattern is different: shared tables touched on create (insert a deadline), on
+//! the write that adds a notice, on a take and a settle, and on the sweep — never
+//! on a plain per-round update. A held `Mutex<Connection>` serialises those
+//! writers; a plain round never contends it.
 //!
 //! The row key is the record name, not the session id — the sweep has to name a
-//! file, and after [`crate::scope`] the file is not a function of the id alone.
+//! file, and after [`crate::scope`] the file is not a function of the id alone. A
+//! notice is keyed the same way, by the name the caller's partition gave it, and
+//! kept in that partition's list.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -18,18 +20,49 @@ use std::time::Duration;
 
 use rusqlite::{Connection, params};
 
+use storage_rpc::{DueNotice, NoticeName, Settle};
+
 use super::StoreErr;
 
-/// Absolute `deadline` per record, indexed for the range sweep.
+/// Absolute `deadline` per record, indexed for the range sweep; and each
+/// notice, in its caller's `list` beside the name that caller gave it
+/// (`asked`), indexed for a take and for the sweep.
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS deadlines(name TEXT PRIMARY KEY, deadline INTEGER NOT NULL) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS deadlines_by_time ON deadlines(deadline);";
+CREATE INDEX IF NOT EXISTS deadlines_by_time ON deadlines(deadline);
+CREATE TABLE IF NOT EXISTS notices(name TEXT PRIMARY KEY, list TEXT NOT NULL, asked BLOB NOT NULL, due INTEGER NOT NULL, value BLOB NOT NULL) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS notices_by_list ON notices(list, due);
+CREATE INDEX IF NOT EXISTS notices_by_time ON notices(due);";
 
 /// Every statement this store issues, named here so [`DbMeta::open`] can compile
 /// them all against the file it just opened.
 const PUT: &str = "INSERT OR REPLACE INTO deadlines(name, deadline) VALUES(?1, ?2)";
 const EXPIRED: &str = "SELECT name FROM deadlines WHERE deadline <= ?1 ORDER BY deadline LIMIT ?2";
 const REMOVE: &str = "DELETE FROM deadlines WHERE name = ?1";
+const PUT_NOTICE: &str =
+    "INSERT OR REPLACE INTO notices(name, list, asked, due, value) VALUES(?1, ?2, ?3, ?4, ?5)";
+const DUE_NOTICES: &str =
+    "SELECT name, asked, value FROM notices WHERE list = ?1 AND due <= ?2 ORDER BY due LIMIT ?3";
+const MOVE_NOTICE: &str = "UPDATE notices SET due = ?2 WHERE name = ?1";
+const NEXT_NOTICE: &str = "SELECT MIN(due) FROM notices WHERE list = ?1";
+const DROP_NOTICE: &str = "DELETE FROM notices WHERE name = ?1";
+const STALE_NOTICES: &str = "DELETE FROM notices WHERE name IN \
+     (SELECT name FROM notices WHERE due <= ?1 ORDER BY due LIMIT ?2)";
+
+/// A notice as the index keeps it: under the name its caller's partition gave
+/// it, with the name the caller gave beside it, to hand back when it is taken.
+pub(super) struct NoticeRow<'a> {
+    pub(super) name: &'a str,
+    pub(super) asked: &'a NoticeName,
+    pub(super) due: u64,
+    pub(super) value: &'a [u8],
+}
+
+/// A time in unix seconds as SQLite keeps an integer, one past its range held at
+/// the end of it.
+fn secs(t: u64) -> i64 {
+    i64::try_from(t).unwrap_or(i64::MAX)
+}
 
 pub(super) struct DbMeta {
     conn: Mutex<Connection>,
@@ -60,7 +93,17 @@ impl DbMeta {
         // this from crying wolf: reindenting the SQL above changes no statement's
         // meaning and changes nothing here, where a stamp over the text would
         // have refused a perfectly good file.
-        for sql in [PUT, EXPIRED, REMOVE] {
+        for sql in [
+            PUT,
+            EXPIRED,
+            REMOVE,
+            PUT_NOTICE,
+            DUE_NOTICES,
+            MOVE_NOTICE,
+            NEXT_NOTICE,
+            DROP_NOTICE,
+            STALE_NOTICES,
+        ] {
             conn.prepare(sql)?;
         }
         Ok(DbMeta {
@@ -99,6 +142,89 @@ impl DbMeta {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Keep `notices` in `list`, each in place of any kept under its name, in one
+    /// durable commit. No-op on empty.
+    pub(super) fn put_notices(
+        &self,
+        list: &str,
+        notices: &[NoticeRow<'_>],
+    ) -> Result<(), StoreErr> {
+        if notices.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        for n in notices {
+            tx.execute(
+                PUT_NOTICE,
+                params![n.name, list, n.asked.0.as_slice(), secs(n.due), n.value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The notices of `list` due by `now`, earliest first, at most `max` — each
+    /// made due at `held_until` in the same commit, so no other take hands it out
+    /// before then — and when the earliest of `list` is due after that, if it
+    /// keeps any.
+    pub(super) fn take_notices(
+        &self,
+        list: &str,
+        now: u64,
+        max: usize,
+        held_until: u64,
+    ) -> Result<(Vec<DueNotice>, Option<u64>), StoreErr> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let rows = {
+            let mut stmt = tx.prepare(DUE_NOTICES)?;
+            stmt.query_map(params![list, secs(now), max as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut taken = Vec::with_capacity(rows.len());
+        for (name, asked, value) in rows {
+            tx.execute(MOVE_NOTICE, params![name, secs(held_until)])?;
+            let asked = <[u8; 32]>::try_from(asked)
+                .map_err(|_| StoreErr::Internal("a notice kept beside a short name".into()))?;
+            taken.push(DueNotice {
+                name: NoticeName(asked),
+                value,
+            });
+        }
+        let next = tx
+            .query_row(NEXT_NOTICE, params![list], |r| r.get::<_, Option<i64>>(0))?
+            .map(|due| u64::try_from(due).unwrap_or(0));
+        tx.commit()?;
+        Ok((taken, next))
+    }
+
+    /// Drop the notice kept under `name`, or make it due at another time, as
+    /// `settle` says. A no-op where none is kept.
+    pub(super) fn settle_notice(&self, name: &str, settle: Settle) -> Result<(), StoreErr> {
+        let conn = self.lock()?;
+        match settle {
+            Settle::Done => conn.execute(DROP_NOTICE, params![name])?,
+            Settle::Again { due_unix_secs } => {
+                conn.execute(MOVE_NOTICE, params![name, secs(due_unix_secs)])?
+            }
+        };
+        Ok(())
+    }
+
+    /// Drop the notices due at or before `before`, at most `max`, earliest first;
+    /// how many went.
+    pub(super) fn drop_stale_notices(&self, before: u64, max: usize) -> Result<usize, StoreErr> {
+        let conn = self.lock()?;
+        Ok(conn.execute(STALE_NOTICES, params![secs(before), max as i64])?)
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreErr> {

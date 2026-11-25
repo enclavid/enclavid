@@ -20,7 +20,12 @@
 //!     pull: the raw manifest a pinned reference names, then one blob of it
 //!     streaming beside the reply;
 //!   * [`kbs`](HatchLeg::kbs) — one leg of a key broker's attestation
-//!     handshake, relayed.
+//!     handshake, relayed;
+//!   * [`webhook`](HatchLeg::webhook) — one attempt at a consumer's webhook.
+//!
+//! A broker's leg, a webhook and a registry's pull go where the consumer said,
+//! and in the attested build only to a host that is public: as written
+//! ([`public_as_written`]), and by every address its name has ([`is_public`]).
 //!
 //! Each end declares how it judges what crosses it: api's in `api::boundary`,
 //! the hatch's in `enclavid_hatch::boundary`.
@@ -29,6 +34,9 @@ use serde::{Deserialize, Serialize};
 
 use fleet_stream::StreamLen;
 
+mod public;
+pub use public::{is_public, public_as_written};
+
 /// The longest blob the hatch streams, in bytes: 2 GiB, above the largest a
 /// composition carries — its components together are held to 1.5 GiB.
 pub const MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -36,7 +44,7 @@ pub const MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// The consumer API's operations, which the hatch asks its authorization hook
 /// about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClientOperation {
+pub enum ConsumerOperation {
     /// POST /api/v1/sessions, and a warmup — which spends what a creation does.
     SessionCreate,
     /// GET /api/v1/sessions/:id.
@@ -50,7 +58,7 @@ pub struct AuthorizeRequest {
     /// The request's `Authorization` header, verbatim. The hatch's hook reads
     /// it; api never parses it.
     pub authorization_header: String,
-    pub operation: ClientOperation,
+    pub operation: ConsumerOperation,
 }
 
 /// The terms a session is held to, as the operator's limits hook gives them for
@@ -172,6 +180,31 @@ pub struct KbsResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KbsError(pub String);
 
+/// One webhook, as api built it, for the hatch to send once: a `POST` of `body`
+/// with `headers` to `url`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookRequest {
+    /// The consumer's endpoint, as it named it at the creation.
+    pub url: String,
+    /// The headers to send beside the body's type: the webhook's id, its
+    /// timestamp and its signature.
+    pub headers: Vec<(String, String)>,
+    #[serde(with = "serde_bytes")]
+    pub body: Vec<u8>,
+}
+
+/// The endpoint's answer to a webhook: whether it took it, with a `2xx`. Its
+/// body is not read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookAnswer {
+    pub accepted: bool,
+}
+
+/// Why a webhook got no answer: the endpoint did not answer, or not in time, or
+/// the request is not one the hatch sends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookError(pub String);
+
 macro_rules! opaque {
     ($name:ident, $what:literal) => {
         impl std::fmt::Display for $name {
@@ -189,6 +222,7 @@ macro_rules! opaque {
 }
 opaque!(AuthorizeError, "authorize");
 opaque!(KbsError, "kbs");
+opaque!(WebhookError, "webhook");
 
 impl std::fmt::Display for PullError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

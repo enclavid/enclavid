@@ -1,14 +1,19 @@
 //! What the host decides about api at launch, outside its measurement
 //! (`fleet_transport::launch`): how long a session lives, how long and how
 //! often api waits on its legs and on the hatch, how many pulls one consumer
-//! may have under way at once, and how it holds up its own end of each leg.
+//! may have under way at once, how it holds up its own end of each leg, and
+//! when and how many webhooks it sends.
 //!
 //! None of them reaches the terms between applicant, consumer and policy, and
 //! none opens anything to the host. The host splices the hatch's leg, so how
 //! long api waits on the hatch was the host's to stall already; a leg is dialed
 //! at the host; and a session's lifetime is swept on the host's clock. The framing
 //! that keeps a round's sizes constant on a leg is the contract's, above the
-//! connection these set. Read once, before api talks to anything.
+//! connection these set. A webhook goes out through the host's network, which
+//! can hold it back, and from a store whose notices the host can put back to
+//! send it again — so when and how often it goes was the host's already; the
+//! padding that keeps its length one is not among these. Read once, before api
+//! talks to anything.
 
 use std::time::Duration;
 
@@ -52,6 +57,8 @@ pub struct Settings {
     /// How long a listener waits after an accept this process could not
     /// complete (`accept-retry-ms`).
     pub accept_retry: Duration,
+    /// When and how many webhooks are sent (`webhook-*`, `webhooks-*`).
+    pub webhooks: crate::webhooks::Settings,
 }
 
 /// The host's settings for api, or no boot: a key api does not know, one given
@@ -62,6 +69,7 @@ pub struct Settings {
 pub fn load() -> Settings {
     let mut launch = Launch::load("api").unwrap_or_else(|e| refused(e));
     let leg = LegSettings::default();
+    let webhooks = crate::webhooks::Settings::default();
     let settings = Settings {
         session_ttl_secs: number(&mut launch, "session-ttl-secs", DEFAULT_SESSION_TTL_SECS),
         leg_dial: Dial {
@@ -112,6 +120,23 @@ pub fn load() -> Settings {
             "accept-retry-ms",
             u64::try_from(fleet_transport::DEFAULT_ACCEPT_RETRY.as_millis()).unwrap_or(u64::MAX),
         )),
+        webhooks: crate::webhooks::Settings {
+            schedule: rising_secs(&mut launch, "webhook-schedule-secs", webhooks.schedule),
+            deadline: secs(&mut launch, "webhook-deadline-secs", webhooks.deadline),
+            turn_wait: secs(&mut launch, "webhook-turn-wait-secs", webhooks.turn_wait),
+            look: secs(&mut launch, "webhook-look-secs", webhooks.look),
+            held: number(&mut launch, "webhooks-held", webhooks.held),
+            held_per_consumer: number(
+                &mut launch,
+                "webhooks-held-per-consumer",
+                webhooks.held_per_consumer,
+            ),
+            sending_per_consumer: number(
+                &mut launch,
+                "webhooks-sending-per-consumer",
+                webhooks.sending_per_consumer,
+            ),
+        },
     };
     launch.finish().unwrap_or_else(|e| refused(e));
     if let Some(refusal) = settings.leg.refusal() {
@@ -124,7 +149,48 @@ pub fn load() -> Settings {
             reason!("a constant, emitted once at boot before any request exists")
         );
     }
+    if let Some(refusal) = settings.webhooks.refusal() {
+        safe_logger::error_and_panic!(
+            "api: {}. Stopping.",
+            safe(
+                &refusal,
+                reason!("a constant naming which of this role's settings")
+            ),
+            reason!("a constant, emitted once at boot before any request exists")
+        );
+    }
     settings
+}
+
+/// A setting of whole seconds, comma-separated, each above zero and past the
+/// one before: `default` when the host gave none, and no boot when it gave one
+/// that is not.
+fn rising_secs(launch: &mut Launch, key: &'static str, default: Vec<u64>) -> Vec<u64> {
+    let Some(value) = launch.take(key) else {
+        return default;
+    };
+    rising(&value).unwrap_or_else(|| {
+        safe_logger::error_and_panic!(
+            "api: the setting {} is not seconds above zero, each past the one before. Stopping.",
+            safe(
+                &key,
+                reason!("a constant naming one of this role's settings")
+            ),
+            reason!("a constant, emitted once at boot before any request exists")
+        )
+    })
+}
+
+/// `value` as whole seconds, comma-separated, each above zero and past the one
+/// before; `None` where it is not.
+fn rising(value: &str) -> Option<Vec<u64>> {
+    let steps = value
+        .split(',')
+        .map(|step| step.trim().parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    let rises = steps.first().is_some_and(|first| *first > 0)
+        && steps.windows(2).all(|pair| pair[0] < pair[1]);
+    rises.then_some(steps)
 }
 
 /// A setting above zero.
@@ -175,4 +241,20 @@ fn refused(e: LaunchError) -> ! {
         e,
         reason!("a constant, emitted once at boot before any request exists")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rising;
+
+    /// A schedule is whole seconds above zero, each past the one before;
+    /// nothing else is one.
+    #[test]
+    fn a_schedule_rises() {
+        assert_eq!(rising("5,305, 2105"), Some(vec![5, 305, 2105]));
+        assert_eq!(rising("60"), Some(vec![60]));
+        for not in ["", "0,5", "5,5", "305,5", "5,,305", "5,a", "-5"] {
+            assert_eq!(rising(not), None, "{not:?}");
+        }
+    }
 }

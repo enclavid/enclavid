@@ -33,6 +33,7 @@ mod disclosure;
 mod lock;
 mod media;
 mod metadata;
+mod notice;
 mod state;
 
 pub use self::core::{ReadField, ReadTuple, WriteField};
@@ -41,11 +42,13 @@ pub use disclosure::{AppendDisclosure, Disclosure};
 pub use lock::{DataKeys, MAX_DATA_KEYS, lock_data_keys, lock_digest, unlock_data_keys};
 pub use media::SetMedia;
 pub use metadata::{Metadata, SetMetadata};
+pub use notice::{AddNotice, NoticeHandle, Take, TakenNotice};
 pub use state::{SealedState, SetState, StateBinding, encode_padded};
 
 use std::sync::Arc;
 
 use secrecy::{ExposeSecret, SecretBox};
+use tokio::sync::Notify;
 
 use session_types::{SessionMetadata, SessionState};
 use storage_rpc::{Expected, Fields, Ops, RecordName, Slot, Version};
@@ -123,6 +126,8 @@ pub struct SessionStore {
     /// volume regardless. Sized so the consumer has time to pull disclosures
     /// post-completion. `None` = no expiry.
     ttl_secs: Option<u64>,
+    /// Woken by each write that adds a notice ([`notice_written`](Self::notice_written)).
+    noticed: Arc<Notify>,
 }
 
 impl SessionStore {
@@ -139,6 +144,7 @@ impl SessionStore {
             )))),
             tee_seal_key: Arc::new(SecretBox::new(Box::new(tee_seal_key))),
             ttl_secs,
+            noticed: Arc::new(Notify::new()),
         }
     }
 
@@ -289,7 +295,11 @@ impl SessionStore {
             },
             Some(version) => Expected::Version(version),
         });
+        let adds_notice = ops.as_inner().has_notice();
         let version = storage(self.link.as_ref())?.write(expected, ops).await?;
+        if adds_notice {
+            self.noticed.notify_one();
+        }
         Ok(version.map(|Version(v)| v))
     }
 

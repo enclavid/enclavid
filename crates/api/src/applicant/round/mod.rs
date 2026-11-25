@@ -208,7 +208,7 @@ impl SessionRunCtx {
         // hand over. The raw callback server is not engine-rpc's to export, so this
         // side has no unwrapped contract available to implement by accident.
         let composition = Composition::of(&metadata).ok_or_else(|| {
-            safe_logger::debug!("session_run_ctx: metadata.client missing for {session_id}");
+            safe_logger::debug!("session_run_ctx: metadata.consumer missing for {session_id}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
         let callbacks = CallbackServer {

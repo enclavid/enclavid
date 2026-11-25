@@ -14,10 +14,12 @@ use std::time::Duration;
 
 use reqwest::Method;
 use reqwest::header::SET_COOKIE;
-use reqwest::redirect::Policy;
+use url::Url;
 
 use hatch_rpc::{KbsError, KbsRequest, KbsResponse};
 use safe_logger::debug;
+
+use crate::egress::{self, BuildError, Hosts};
 
 /// An attestation token or a wrapped key fits in far less.
 const ANSWER_BYTES: usize = 1 << 20;
@@ -25,22 +27,22 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Under api's own wait for a leg.
 const LEG_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The relay's one client, made at startup.
-pub fn client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
-        .redirect(Policy::none())
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(LEG_TIMEOUT)
-        .build()
+/// The relay's one client, made at startup: it sends to `hosts` alone.
+pub fn client(hosts: Hosts) -> Result<egress::Client, BuildError> {
+    egress::Client::new(hosts, CONNECT_TIMEOUT, LEG_TIMEOUT)
 }
 
 /// Send one leg and read its answer.
-pub async fn relay(client: &reqwest::Client, req: KbsRequest) -> Result<KbsResponse, KbsError> {
+pub async fn relay(client: &egress::Client, req: KbsRequest) -> Result<KbsResponse, KbsError> {
     let url = join_url(&req.endpoint, &req.path)?;
     let method =
         Method::from_bytes(req.method.as_bytes()).map_err(|_| KbsError("invalid method".into()))?;
 
-    let mut builder = client.request(method, url).body(req.body);
+    let mut builder = client
+        .request(method, &url)
+        .await
+        .ok_or_else(|| KbsError("not a broker this hatch sends to".into()))?
+        .body(req.body);
     for (k, v) in &req.headers {
         builder = builder.header(k, v);
     }
@@ -80,8 +82,12 @@ pub async fn relay(client: &reqwest::Client, req: KbsRequest) -> Result<KbsRespo
     })
 }
 
-/// `endpoint` + `path` as an absolute http(s) URL, and nothing else.
+/// `endpoint` + `path` as an absolute http(s) URL, and nothing else: an
+/// endpoint that names no host would take one from the path.
 fn join_url(endpoint: &str, path: &str) -> Result<String, KbsError> {
+    if Url::parse(endpoint).map_or(true, |url| url.host().is_none()) {
+        return Err(KbsError("a broker is reached over http(s)".into()));
+    }
     let base = endpoint.trim_end_matches('/');
     let url = if path.starts_with('/') {
         format!("{base}{path}")
@@ -108,8 +114,17 @@ mod tests {
             join_url("http://kbs.example", "kbs/v0/auth").unwrap(),
             "http://kbs.example/kbs/v0/auth"
         );
-        for refused in ["file:///etc", "kbs.example", "ftp://kbs.example"] {
+        for refused in [
+            "file:///etc",
+            "kbs.example",
+            "ftp://kbs.example",
+            "https://",
+            "https:///",
+            "https://\\",
+        ] {
             assert!(join_url(refused, "/kbs/v0/auth").is_err(), "{refused}");
         }
+        // A path never names the host.
+        assert!(join_url("https://", "//127.0.0.1/kbs").is_err());
     }
 }

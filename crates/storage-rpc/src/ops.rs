@@ -52,8 +52,10 @@ use enclavid_boundary::Exposed;
 use fleet_stream::StreamLen;
 use futures_util::stream::BoxStream;
 
-use crate::session::{BlobField, BlobWrite, FieldSelector, ListAppend, ListField, MediaWrite, Op};
-use crate::{MAX_CACHE_BLOB_BYTES, MediaName, RecordName};
+use crate::session::{
+    BlobField, BlobWrite, FieldSelector, ListAppend, ListField, MediaWrite, NoticeWrite, Op,
+};
+use crate::{MAX_CACHE_BLOB_BYTES, MediaName, NoticeName, RecordName};
 
 /// A record's metadata, sealed.
 pub struct MetadataOp(pub Vec<u8>);
@@ -72,6 +74,14 @@ pub struct DisclosureOp(pub Vec<u8>);
 /// Dropping a record's state, media and disclosures, keeping its metadata and
 /// version.
 pub struct ResetOp;
+
+/// One notice, sealed. Its name and when it is due are parts of their own
+/// ([`Ops::notice`]).
+pub struct NoticeOp(pub Vec<u8>);
+
+/// When a notice is due, in unix seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoticeDue(pub u64);
 
 /// The ops of one write to one record, in the order they were added, each
 /// answered at end `B` before it was. The record is named when the set is
@@ -126,6 +136,21 @@ impl<B> Ops<B> {
         self.ops.push(Op::Reset);
     }
 
+    /// A notice under `name`, due at `due`: kept before the rest of the write
+    /// lands, and whether or not it does ([`Op::Notice`]).
+    pub fn notice(
+        &mut self,
+        name: Exposed<NoticeName, (), B>,
+        due: Exposed<NoticeDue, (), B>,
+        op: Exposed<NoticeOp, (), B>,
+    ) {
+        self.ops.push(Op::Notice(NoticeWrite {
+            name: name.into_inner(),
+            due_unix_secs: due.into_inner().0,
+            value: op.into_inner().0,
+        }));
+    }
+
     /// How many ops the write makes.
     pub fn len(&self) -> usize {
         self.ops.len()
@@ -133,6 +158,11 @@ impl<B> Ops<B> {
 
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
+    }
+
+    /// Whether the write adds a notice.
+    pub fn has_notice(&self) -> bool {
+        self.ops.iter().any(|op| matches!(op, Op::Notice(_)))
     }
 
     pub(crate) fn into_parts(self) -> (RecordName, Vec<Op>) {

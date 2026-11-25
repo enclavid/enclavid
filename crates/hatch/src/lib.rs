@@ -17,7 +17,9 @@
 //! consumer writes — a name, a literal, a redirect — leads to one.
 
 pub mod boundary;
+pub mod egress;
 pub mod hooks;
 pub mod kbs;
 pub mod oci;
 pub mod service;
+pub mod webhook;

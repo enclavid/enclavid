@@ -318,7 +318,7 @@ impl PluginView {
 /// wire shape live in the api crate without an orphan-rule wrapper
 /// or a transport-layer serde-aware build.rs.
 ///
-/// Used by both client/session.rs and applicant/status.rs via
+/// Used by both consumer/session.rs and applicant/status.rs via
 /// `#[serde(with = "dto::SessionStatusDef")]` on a `SessionStatus`
 /// field — same wire string ("running", "completed", ...) for both
 /// audiences.
@@ -347,9 +347,9 @@ pub const ENVELOPE_VERSION: u32 = 1;
 ///
 /// `session_id` is embedded as defense-in-depth: the per-session
 /// metadata set commitment already binds the list to its session,
-/// but a redundant in-envelope copy lets a consumer receiving a
-/// disclosure out-of-band (future webhook payloads) also verify the
-/// binding without round-tripping to the TEE.
+/// but a redundant in-envelope copy lets a consumer holding a
+/// disclosure apart from its pull also verify the binding without
+/// round-tripping to the TEE.
 #[derive(Serialize)]
 pub struct DisclosureEnvelope {
     pub version: u32,

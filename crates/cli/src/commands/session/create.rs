@@ -33,7 +33,7 @@ pub struct Asked {
     /// The props: a JSON object, or `@<path>` of a file holding one.
     pub props: Option<String>,
     pub disclosure_key: Option<PathBuf>,
-    pub client_ref: Option<String>,
+    pub consumer_ref: Option<String>,
     pub measurement: Option<String>,
     /// The API's origin.
     pub api: String,
@@ -47,7 +47,7 @@ enum DisclosureSource {
     /// The CLI knows the secret (generated, or read from `--disclosure-key`)
     /// → cache it so reads decrypt with no extra flags.
     Known { secret: String, label: &'static str },
-    /// `--from-file` supplied its own `client_disclosure_pubkey`; the secret
+    /// `--from-file` supplied its own `disclosure_pubkey`; the secret
     /// lives with the caller, so `session disclosures` needs `--disclosure-key`.
     Caller,
 }
@@ -55,7 +55,7 @@ enum DisclosureSource {
 #[derive(Deserialize, Debug)]
 struct CreateResponse {
     session_id: String,
-    client_session_token: String,
+    session_token: String,
     resolved_policy: ResolvedPolicyView,
     attestation: AttestationView,
 }
@@ -105,12 +105,12 @@ pub async fn run(asked: Asked) -> Result<()> {
     if let Some(props) = asked.props.as_deref() {
         body["props"] = props_from(props)?;
     }
-    if let Some(r) = asked.client_ref.as_deref() {
-        body["client_ref"] = serde_json::Value::String(r.to_string());
+    if let Some(r) = asked.consumer_ref.as_deref() {
+        body["consumer_ref"] = serde_json::Value::String(r.to_string());
     }
 
     // 2. Disclosure recipient. Precedence: --disclosure-key (explicit) >
-    //    a `client_disclosure_pubkey` already in the body (--from-file) >
+    //    a `disclosure_pubkey` already in the body (--from-file) >
     //    auto-generate. We cache the secret whenever the CLI knows it so
     //    `session disclosures` decrypts without re-passing anything.
     let obj = body
@@ -125,13 +125,13 @@ pub async fn run(asked: Asked) -> Result<()> {
                 p.display()
             )
         })?;
-        obj.insert("client_disclosure_pubkey".into(), public.into());
+        obj.insert("disclosure_pubkey".into(), public.into());
         DisclosureSource::Known {
             secret,
             label: "copied from --disclosure-key",
         }
     } else if obj
-        .get("client_disclosure_pubkey")
+        .get("disclosure_pubkey")
         .and_then(|v| v.as_str())
         .is_some_and(|s| !s.is_empty())
     {
@@ -140,7 +140,7 @@ pub async fn run(asked: Asked) -> Result<()> {
         DisclosureSource::Caller
     } else {
         let (secret, public) = enclavid_crypto::generate_recipient();
-        obj.insert("client_disclosure_pubkey".into(), public.into());
+        obj.insert("disclosure_pubkey".into(), public.into());
         DisclosureSource::Known {
             secret,
             label: "auto-generated",
@@ -192,8 +192,7 @@ pub async fn run(asked: Asked) -> Result<()> {
         .as_deref()
         .map(|group| cache::store_group(&created.session_id, group))
         .transpose()?;
-    let token_path =
-        cache::store_session_token(&created.session_id, &created.client_session_token)?;
+    let token_path = cache::store_session_token(&created.session_id, &created.session_token)?;
     let key_cache = match &disclosure {
         DisclosureSource::Known { secret, label } => {
             let path = cache::store_disclosure_key(&created.session_id, secret)?;
@@ -214,8 +213,8 @@ pub async fn run(asked: Asked) -> Result<()> {
         created.resolved_policy.reference, created.resolved_policy.digest
     );
     println!("  attestation:      {}", created.attestation.format);
-    if let Some(r) = asked.client_ref.as_deref() {
-        println!("  client_ref:       {r}");
+    if let Some(r) = asked.consumer_ref.as_deref() {
+        println!("  consumer_ref:     {r}");
     }
     if let Some(group) = group.as_deref() {
         println!("  group:            {group}");

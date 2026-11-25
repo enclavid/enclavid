@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::MediaName;
+use crate::{MediaName, NoticeName};
 
 // Every byte field below is a CBOR byte string. ciborium writes a bare
 // `Vec<u8>` element by element — two bytes for every byte over 0x17 — so
@@ -137,7 +137,67 @@ pub enum Op {
     /// session's metadata and version — the `/reset` path. In order with the
     /// ops beside it, so under the same version check and in the same commit.
     Reset,
+    /// Keep a notice in the caller's list. It is committed before the record's
+    /// own ops and stays whether or not they land, so a record that changed has
+    /// its notice kept, and a write refused can leave one behind: its taker
+    /// acts on what the record says, never on the notice alone. A write of
+    /// notices and nothing else is refused.
+    Notice(NoticeWrite),
 }
+
+/// A notice as a write adds it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoticeWrite {
+    pub name: NoticeName,
+    /// When it is due, in unix seconds.
+    pub due_unix_secs: u64,
+    /// Sealed bytes, at most [`MAX_NOTICE_BYTES`](crate::MAX_NOTICE_BYTES).
+    #[serde(with = "serde_bytes")]
+    pub value: Vec<u8>,
+}
+
+/// How many of the caller's due notices to take, and how long to hold each.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TakeRequest {
+    /// Held to [`MAX_NOTICES_TAKEN`](crate::MAX_NOTICES_TAKEN).
+    pub max: u32,
+    /// For how long a notice taken is not due, so no other take hands it out
+    /// meanwhile: it is due again once they pass unless it is settled first.
+    /// Held to [`MAX_NOTICE_HOLD_SECS`](crate::MAX_NOTICE_HOLD_SECS).
+    pub hold_secs: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TakeResponse {
+    /// Those of the caller's notices that were due, earliest first.
+    pub notices: Vec<DueNotice>,
+    /// When the earliest of the caller's notices is due once these are held, in
+    /// unix seconds; `None` when it has no other.
+    pub next_due_unix_secs: Option<u64>,
+}
+
+/// One notice taken.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DueNotice {
+    /// The name it was added under, which settles it.
+    pub name: NoticeName,
+    #[serde(with = "serde_bytes")]
+    pub value: Vec<u8>,
+}
+
+/// What becomes of a notice taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Settle {
+    /// Dropped: it was acted on, or never will be.
+    Done,
+    /// Due again at this time, in unix seconds.
+    Again { due_unix_secs: u64 },
+}
+
+/// The store's answer that a notice is settled, whether or not one was kept
+/// under its name.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Settled;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobWrite {

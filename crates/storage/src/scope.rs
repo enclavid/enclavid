@@ -28,7 +28,7 @@
 
 use sha2::{Digest, Sha256};
 
-use storage_rpc::{BlobName, RecordName};
+use storage_rpc::{BlobName, NoticeName, RecordName};
 
 /// Session records. Domain-separated from [`BLOB`] so one caller's two stores
 /// cannot be made to collide by a chosen key, independently of the fact that
@@ -36,6 +36,10 @@ use storage_rpc::{BlobName, RecordName};
 const SESSION: &str = "session";
 /// L2 cache blobs.
 const BLOB: &str = "cache";
+/// One notice.
+const NOTICE: &str = "notice";
+/// A caller's list of notices as a whole.
+const NOTICES: &str = "notices";
 
 /// One caller's namespace: everything it stores, and everything it can address.
 /// Built once per connection, from the digest that connection proved.
@@ -75,6 +79,17 @@ impl Scope {
     /// The name an L2 cache blob is stored under, for the blob name a call gave.
     pub(crate) fn blob(&self, blob: &BlobName) -> Name {
         self.derive(BLOB, &blob.0)
+    }
+
+    /// The name a notice is stored under, for the notice name a call gave.
+    pub(crate) fn notice(&self, notice: &NoticeName) -> Name {
+        self.derive(NOTICE, &notice.0)
+    }
+
+    /// The name of this caller's list of notices, which every notice it adds is
+    /// kept in: a take reaches that list and no other.
+    pub(crate) fn notices(&self) -> Name {
+        self.derive(NOTICES, &[])
     }
 
     /// Length-prefixed rather than concatenated. Digests are fixed-width today,
@@ -127,6 +142,27 @@ mod tests {
         assert_ne!(
             s.session(&RECORD).as_str(),
             s.blob(&BlobName(RECORD.0)).as_str()
+        );
+        assert_ne!(
+            s.session(&RECORD).as_str(),
+            s.notice(&NoticeName(RECORD.0)).as_str()
+        );
+    }
+
+    /// Each caller has a list of notices of its own, the same across its
+    /// connections.
+    #[test]
+    fn a_caller_has_one_list_of_notices_of_its_own() {
+        let a = Scope::new("aa".repeat(48));
+        let b = Scope::new("bb".repeat(48));
+        assert_ne!(a.notices().as_str(), b.notices().as_str());
+        assert_eq!(
+            a.notices().as_str(),
+            Scope::new("aa".repeat(48)).notices().as_str()
+        );
+        assert_ne!(
+            a.notice(&NoticeName([7; 32])).as_str(),
+            b.notice(&NoticeName([7; 32])).as_str()
         );
     }
 

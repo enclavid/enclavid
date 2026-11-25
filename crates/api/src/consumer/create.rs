@@ -15,17 +15,17 @@ use sha2::{Digest, Sha256};
 use enclavid_attestation::ReportData;
 use enclavid_boundary::{Covert, reason};
 use session_types::{
-    Client, ClientAccess, Key, PluginPin, SessionMetadata, SessionQuote, SessionStatus, is_wit_name,
+    Consumer, ConsumerAccess, Key, PluginPin, SessionMetadata, SessionQuote, SessionStatus,
+    Webhook, is_wit_name,
 };
 use storage_client::boundary::Storage;
 use storage_client::{MetadataOp, SetMetadata};
 
-use crate::client_state::ClientState;
 use crate::dto::{PluginView, ResolvedPolicyView};
 use crate::init;
 use crate::limits::{
-    CLIENT_SESSION_TOKEN_BYTES, MAX_CLIENT_REF_LEN, MAX_PLUGINS, MAX_REGISTRY_AUTH_LEN,
-    SESSION_ID_RANDOM_BYTES,
+    MAX_CONSUMER_REF_LEN, MAX_PLUGINS, MAX_REGISTRY_AUTH_LEN, MAX_WEBHOOK_URL_LEN,
+    SESSION_ID_RANDOM_BYTES, SESSION_TOKEN_BYTES, WEBHOOK_SECRET_BYTES,
 };
 use crate::policy_pull;
 use crate::props;
@@ -33,6 +33,7 @@ use crate::props;
 use hatch_client::SessionTerms;
 
 use super::auth::{Principal, Terms};
+use super::state::ConsumerState;
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
@@ -45,15 +46,15 @@ pub struct CreateSessionRequest {
     pub policy: String,
     /// Disclosure recipient pubkey: applicant-consented data is
     /// encrypted to this. Provided as age recipient string `age1...`.
-    pub client_disclosure_pubkey: String,
-    /// Opaque client-side identifier for this verification — proxied
+    pub disclosure_pubkey: String,
+    /// Opaque consumer-side identifier for this verification — proxied
     /// back in webhook payloads and `GET /sessions/:id`. NOT
-    /// indexed: clients reconcile `client_ref → session_id` on their
+    /// indexed: consumers reconcile `consumer_ref → session_id` on their
     /// own side. Optional. Validated at deserialization (length and
     /// charset) so a malformed value surfaces as a serde error → 400
     /// before the handler even runs.
     #[serde(default, deserialize_with = "deserialize_external_ref")]
-    pub client_ref: Option<String>,
+    pub consumer_ref: Option<String>,
     /// Per-hostname registry bearer map. Key = registry hostname
     /// (authority portion of an OCI ref, e.g. `closed.vendor.com`);
     /// value = the full `Authorization` header value the host should
@@ -70,7 +71,7 @@ pub struct CreateSessionRequest {
     #[serde(default)]
     pub registry_auth: BTreeMap<String, String>,
 
-    /// Plugin pins declared by the client at session creation. One
+    /// Plugin pins declared by the consumer at session creation. One
     /// entry per non-host-provided WIT package the policy imports.
     /// Each `impl_ref` MUST be digest-pinned (`@sha256:<hex>`).
     /// Hostname portion of `impl_ref` drives the
@@ -103,6 +104,80 @@ pub struct CreateSessionRequest {
     /// `POST /api/v1/sessions/{id}/warmup` on the session once it is created.
     #[serde(default)]
     pub warmup: bool,
+
+    /// The consumer's webhook, told when the session ends — its policy gave a
+    /// decision, or it could not be prepared to run. Omit for none.
+    #[serde(default)]
+    pub webhook: Option<WebhookSetup>,
+}
+
+/// A webhook as a creation gives it. Every field is required.
+#[derive(Deserialize)]
+pub struct WebhookSetup {
+    /// The endpoint: an `https://` URL; `http://` only in a build that is not
+    /// measured, and, in one that is, at a public address. Kept as the hatch
+    /// reads it — scheme in lowercase, host in ASCII — and at most
+    /// [`MAX_WEBHOOK_URL_LEN`] bytes so.
+    pub url: String,
+    /// The Standard Webhooks signing secret: `whsec_`, then its key in base64.
+    pub secret: String,
+    /// The X25519 public key, as 64 hex digits, that `sealed_session_id` is
+    /// sealed to. A pair of the webhook's own, not the disclosures', with the id
+    /// opened only once the signature checks: a forged webhook then gets nothing
+    /// opened.
+    pub pubkey: String,
+}
+
+/// The webhook `setup` asks for, as the session keeps it; a 400 where any part
+/// of it is not as [`WebhookSetup`] says.
+fn webhook(setup: WebhookSetup) -> Result<Webhook, StatusCode> {
+    let WebhookSetup {
+        url,
+        secret,
+        pubkey,
+    } = setup;
+    // Read as the hatch reads it, and refused where reading it took a guess: a
+    // slash too many, a backslash, a character a URL does not carry.
+    let guessed = std::cell::Cell::new(false);
+    let parsed = url::Url::options()
+        .syntax_violation_callback(Some(&|_| guessed.set(true)))
+        .parse(&url)
+        .ok()
+        .filter(|_| !guessed.get())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    // The endpoint is reached from the hatch, where TLS ends: in the clear, the
+    // host would read what the webhook carries.
+    let scheme = match parsed.scheme() {
+        "https" => true,
+        "http" => !cfg!(feature = "sev-snp"),
+        _ => false,
+    };
+    let url = String::from(parsed);
+    // The measured hatch sends only to a public address: a URL that writes
+    // another, or names localhost, is refused here, where the consumer hears of
+    // it. A name that resolves to one only the hatch can tell.
+    if !scheme
+        || url.len() > MAX_WEBHOOK_URL_LEN
+        || !url.chars().all(|c| c.is_ascii_graphic())
+        || (cfg!(feature = "sev-snp") && !hatch_rpc::public_as_written(&url))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let secret = secret
+        .strip_prefix("whsec_")
+        .and_then(|key| Base64::decode_vec(key).ok())
+        .filter(|key| WEBHOOK_SECRET_BYTES.contains(&key.len()))
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let pubkey = hex::decode(&pubkey)
+        .ok()
+        .filter(|key| key.len() == 32)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    Ok(Webhook {
+        id: generate_webhook_id(),
+        url,
+        secret,
+        pubkey: hex::encode(pubkey),
+    })
 }
 
 /// One plugin pin in the create-session request. Mirrors the sealed
@@ -122,11 +197,11 @@ pub struct PluginRequest {
     pub key: Option<KeyRequest>,
 }
 
-/// Client-supplied artifact key. Either the key itself as a base64 string
+/// Consumer-supplied artifact key. Either the key itself as a base64 string
 /// (`"key": "<base64>"`, owner-supplied) or a KBS reference
 /// (`"key": { "kbs": { endpoint } }`). The KBS resource URI naming the key
 /// lives in the artifact's digest-pinned `enc.keys.*` annotation, so the
-/// client supplies only which KBS to dial. Converted to the sealed
+/// consumer supplies only which KBS to dial. Converted to the sealed
 /// [`session_types::Key`] before persistence (the secrets then only ride
 /// inside AEAD-sealed metadata).
 #[derive(Deserialize)]
@@ -258,6 +333,20 @@ fn pins(
         })
         .collect::<Result<_, StatusCode>>()?;
 
+    // The hatch reads a ref's scheme only as `http://` or `https://` in
+    // lowercase, once at its front: a ref written another way is one it cannot
+    // pull.
+    let schemed = |r: &str| {
+        let rest = r
+            .strip_prefix("http://")
+            .or_else(|| r.strip_prefix("https://"))
+            .unwrap_or(r);
+        !rest.contains("://")
+    };
+    if !schemed(&policy) || plugins.iter().any(|p| !schemed(&p.impl_ref)) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     // A registry written `http://` is reached in the clear, across the host's
     // network: a bearer for it would cross there too, readable by the host. So
     // plain HTTP is for anonymous pulls alone, and a bearer the consumer names
@@ -266,6 +355,19 @@ fn pins(
         r.starts_with("http://") && !policy_pull::bearer_for_ref(&registry_auth, r).is_empty()
     };
     if in_clear(&policy) || plugins.iter().any(|p| in_clear(&p.impl_ref)) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // The measured hatch pulls only from a public registry: one a ref names by
+    // another address, or as localhost, is refused here, where the consumer
+    // hears of it. A name that resolves to one only the hatch can tell.
+    let public = |r: &str| {
+        policy_pull::registry_hostname(r)
+            .is_some_and(|host| hatch_rpc::public_as_written(&format!("https://{host}/")))
+    };
+    if cfg!(feature = "sev-snp")
+        && !(public(&policy) && plugins.iter().all(|p| public(&p.impl_ref)))
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -278,7 +380,7 @@ fn pins(
     })
 }
 
-/// Length-bound + printable-ASCII gate on `client_ref`. Empty
+/// Length-bound + printable-ASCII gate on `consumer_ref`. Empty
 /// strings collapse to `None` (treated identically to "missing").
 /// The restricted charset avoids host-side key parsing surprises
 /// and disallows zero-width / RTL-override confusables that could
@@ -289,9 +391,9 @@ fn deserialize_external_ref<'de, D: Deserializer<'de>>(d: D) -> Result<Option<St
     if s.is_empty() {
         return Ok(None);
     }
-    if s.len() > MAX_CLIENT_REF_LEN {
+    if s.len() > MAX_CONSUMER_REF_LEN {
         return Err(serde::de::Error::custom(format!(
-            "must not exceed {MAX_CLIENT_REF_LEN} bytes"
+            "must not exceed {MAX_CONSUMER_REF_LEN} bytes"
         )));
     }
     if s.chars().any(|c| !c.is_ascii_graphic()) {
@@ -314,14 +416,14 @@ pub struct AttestationView {
 #[derive(Serialize)]
 pub struct CreateSessionResponse {
     pub session_id: String,
-    /// Per-session bearer the client MUST present in the `X-Session-Token`
+    /// Per-session bearer the consumer MUST present in the `X-Session-Token`
     /// header on every subsequent `GET /sessions/:id*` call. Base64-
     /// standard encoded 32 random bytes. Generated by the TEE here,
     /// returned **only** in this TLS-encrypted response (host doesn't
-    /// see it). Client should persist it alongside `session_id` —
+    /// see it). The consumer should persist it alongside `session_id` —
     /// losing it means losing read access to that session (TTL bounded
     /// to session lifetime).
-    pub client_session_token: String,
+    pub session_token: String,
     pub resolved_policy: ResolvedPolicyView,
     pub attestation: AttestationView,
 }
@@ -350,14 +452,14 @@ fn held(
 }
 
 /// Route factory: bare `post(handler)` MethodRouter. Auth is attached
-/// at the router level via `.layer(auth(op))` — see `client::router`.
-pub(super) fn post_create() -> MethodRouter<Arc<ClientState>> {
+/// at the router level via `.layer(auth(op))` — see `consumer::router`.
+pub(super) fn post_create() -> MethodRouter<Arc<ConsumerState>> {
     post(create)
 }
 
 /// POST /api/v1/sessions — full session-creation flow in one shot.
 ///
-/// 1. Parse + validate `policy` reference, `client_ref`, plugin pins.
+/// 1. Parse + validate `policy` reference, `consumer_ref`, plugin pins.
 /// 2. Mint an attestation quote binding the session id to this TEE
 ///    measurement — the one the session's applicant page is served too, so it
 ///    binds nothing else (see `ReportData::Session`). That the request reached
@@ -369,7 +471,7 @@ pub(super) fn post_create() -> MethodRouter<Arc<ClientState>> {
 /// The persisted metadata blob is AEAD'd with the TEE-side key,
 /// AAD=session_id, so the host sees opaque bytes only.
 async fn create(
-    State(state): State<Arc<ClientState>>,
+    State(state): State<Arc<ConsumerState>>,
     Principal(principal): Principal,
     Terms(asked): Terms,
     Json(body): Json<CreateSessionRequest>,
@@ -396,19 +498,20 @@ async fn create(
     // Held to their size here, before persistence; whether they fit the type
     // the policy declares is read when the session is prepared.
     let props = props::encode(body.props.as_ref()).ok_or(StatusCode::BAD_REQUEST)?;
+    let webhook = body.webhook.map(webhook).transpose()?;
 
     let session_id = generate_session_id();
 
-    // Per-session capability bearer. Returned to the client below
+    // Per-session capability bearer. Returned to the consumer below
     // (TLS-encrypted, host doesn't see); stored only as SHA-256 hash
     // in the sealed metadata so tee_seal_key compromise alone doesn't
-    // leak the token (pre-image resistance on 256-bit input). Client
+    // leak the token (pre-image resistance on 256-bit input). The consumer
     // presents the raw bytes in `X-Session-Token` on read endpoints;
     // TEE recomputes the hash, constant-time compares with stored.
     // SecretBox so plaintext zeroizes on drop and is redacted from
     // Debug output.
-    let client_session_token = generate_client_session_token();
-    let client_session_token_hash = Sha256::digest(client_session_token.expose_secret()).to_vec();
+    let session_token = generate_session_token();
+    let session_token_hash = Sha256::digest(session_token.expose_secret()).to_vec();
 
     let report_data = ReportData::session(session_id.clone());
     let quote = state
@@ -420,28 +523,29 @@ async fn create(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let client_block = Client {
+    let consumer = Consumer {
         // Per-session access gate (defense-in-depth) — see
-        // ClientAccess proto doc.
-        access: Some(ClientAccess {
+        // ConsumerAccess proto doc.
+        access: Some(ConsumerAccess {
             // Principal is crypto-pinned here for the TEE-side
             // cross-tenant check on reads. There is NO plaintext host
             // copy: the storage-CVM is blind, so host-side tenant
             // indexing is gone (see the metadata-only write below).
             principal: principal.clone(),
-            // SHA-256 of the bearer we returned to the client in the
+            // SHA-256 of the bearer we returned to the consumer in the
             // POST /sessions response.
-            session_token_hash: client_session_token_hash,
+            session_token_hash,
         }),
-        disclosure_pubkey: body.client_disclosure_pubkey,
-        r#ref: body.client_ref.unwrap_or_default(),
+        disclosure_pubkey: body.disclosure_pubkey,
+        r#ref: body.consumer_ref.unwrap_or_default(),
         registry_auth,
         plugins,
+        webhook,
     };
     let metadata = SessionMetadata {
         policy_ref: policy_ref.clone(),
         props,
-        client: Some(client_block),
+        consumer: Some(consumer),
         // TEE-trusted lifecycle status — the sole copy there is.
         status: SessionStatus::Running,
         created_at,
@@ -477,13 +581,13 @@ async fn create(
     // Write ONLY the sealed metadata. The plaintext STATUS byte and PRINCIPAL
     // host hooks are gone: TTL is enforced inside the storage-CVM (its sweeper,
     // fed the deadline over RA-TLS), and the TEE-trusted status + principal
-    // already live crypto-pinned in `metadata` (status / client.access.principal).
+    // already live crypto-pinned in `metadata` (status / consumer.access.principal).
     // A blind storage-CVM exposes no host query surface, so a plaintext copy would
     // leak lifecycle + tenant identity for zero benefit.
     let set_metadata = SetMetadata(Storage::expose_builder::<MetadataOp, _>(&metadata).vouch(
         reason!(
             Covert::NotChosen,
-            "initial /create write before any policy runs; fields are client-controlled, not policy-controlled — zero covert bandwidth"
+            "initial /create write before any policy runs; fields are consumer-controlled, not policy-controlled — zero covert bandwidth"
         ),
     ));
     let ops = state
@@ -516,7 +620,7 @@ async fn create(
 
     Ok(Json(CreateSessionResponse {
         session_id,
-        client_session_token: Base64::encode_string(client_session_token.expose_secret()),
+        session_token: Base64::encode_string(session_token.expose_secret()),
         resolved_policy: ResolvedPolicyView {
             reference: policy_ref,
             digest: policy_digest,
@@ -536,11 +640,17 @@ fn generate_session_id() -> String {
     format!("ses_{}", hex::encode(bytes))
 }
 
-/// Mint a fresh 32-byte per-session bearer for client reads. Wrapped
+fn generate_webhook_id() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    format!("msg_{}", hex::encode(bytes))
+}
+
+/// Mint a fresh 32-byte per-session bearer for consumer reads. Wrapped
 /// in `SecretBox` so the plaintext zeroizes on drop and never lands in
 /// debug logs.
-fn generate_client_session_token() -> SecretBox<Vec<u8>> {
-    let mut bytes = vec![0u8; CLIENT_SESSION_TOKEN_BYTES];
+fn generate_session_token() -> SecretBox<Vec<u8>> {
+    let mut bytes = vec![0u8; SESSION_TOKEN_BYTES];
     OsRng.fill_bytes(&mut bytes);
     SecretBox::new(Box::new(bytes))
 }
@@ -608,6 +718,48 @@ mod tests {
         );
     }
 
+    /// In the measured build a ref names a public registry: the policy's and
+    /// each plugin's, by address or as localhost refused.
+    #[test]
+    fn a_registry_is_one_the_hatch_reaches() {
+        let plugin = |impl_ref: String| PluginRequest {
+            package: "vendor:plugin@0.1.0".into(),
+            impl_ref,
+            key: None,
+        };
+        let kept = |policy: String, plugins| pins(policy, plugins, BTreeMap::new(), None).is_ok();
+        for private in ["127.0.0.1:5000", "http://10.0.0.5:5000", "localhost:5000"] {
+            assert_eq!(
+                kept(pinned(private), vec![]),
+                !cfg!(feature = "sev-snp"),
+                "{private}"
+            );
+            assert_eq!(
+                kept(pinned("r.example"), vec![plugin(pinned(private))]),
+                !cfg!(feature = "sev-snp"),
+                "{private}"
+            );
+        }
+        assert!(kept(
+            pinned("r.example"),
+            vec![plugin(pinned("1.1.1.1:5000"))]
+        ));
+        assert!(kept("enclavid/policy@sha256:00".into(), vec![]));
+        // A scheme the hatch does not read, in any build.
+        for unread in [
+            "HTTP://r.example",
+            "Https://r.example",
+            "http://http://r.example",
+            "oci://r.example",
+        ] {
+            assert!(!kept(pinned(unread), vec![]), "{unread}");
+            assert!(
+                !kept(pinned("r.example"), vec![plugin(pinned(unread))]),
+                "{unread}"
+            );
+        }
+    }
+
     /// A broker's key names a broker reached over http(s); the measured build
     /// takes none.
     #[test]
@@ -632,6 +784,80 @@ mod tests {
                 "{reachable}"
             );
         }
+    }
+
+    /// A webhook is kept only whole: an https endpoint, a Standard Webhooks
+    /// secret, and a 32-byte key in hex.
+    #[test]
+    fn a_webhook_is_kept_only_whole() {
+        let setup = |url: &str, secret: &str, pubkey: &str| WebhookSetup {
+            url: url.into(),
+            secret: secret.into(),
+            pubkey: pubkey.into(),
+        };
+        let key = "ab".repeat(32);
+        let k = key.as_str();
+        let s = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+        let kept = webhook(setup("https://hooks.example/enclavid?ref=1", s, k)).unwrap();
+        assert_eq!(kept.url, "https://hooks.example/enclavid?ref=1");
+        assert_eq!(kept.secret.len(), 24);
+        assert_eq!(kept.pubkey, key);
+        assert!(kept.id.starts_with("msg_") && kept.id.len() == 36);
+        assert_ne!(
+            kept.id,
+            webhook(setup("https://hooks.example", s, k)).unwrap().id
+        );
+        // Kept as the hatch reads it.
+        for (written, read) in [
+            ("HTTPS://Hooks.Example/x", "https://hooks.example/x"),
+            (
+                "https://bücher.example/x",
+                "https://xn--bcher-kva.example/x",
+            ),
+            ("https://hooks.example", "https://hooks.example/"),
+        ] {
+            assert_eq!(
+                webhook(setup(written, s, k)).unwrap().url,
+                read,
+                "{written}"
+            );
+        }
+
+        let not_hex = "zz".repeat(32);
+        let too_long = format!("https://hooks.example/{}", "a".repeat(MAX_WEBHOOK_URL_LEN));
+        for (url, secret, pubkey) in [
+            ("hooks.example/enclavid", s, k),
+            ("https://", s, k),
+            ("https:///path", s, k),
+            ("https:\\\\hooks.example/x", s, k),
+            ("https://hooks.example/a b", s, k),
+            ("https://hooks.ex\tample/x", s, k),
+            ("ftp://hooks.example", s, k),
+            (too_long.as_str(), s, k),
+            (
+                "https://hooks.example",
+                "MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw",
+                k,
+            ),
+            ("https://hooks.example", "whsec_c2hvcnQ=", k),
+            ("https://hooks.example", "whsec_!!!", k),
+            ("https://hooks.example", s, "ab"),
+            ("https://hooks.example", s, not_hex.as_str()),
+        ] {
+            assert_eq!(
+                webhook(setup(url, secret, pubkey)).err(),
+                Some(StatusCode::BAD_REQUEST),
+                "{url} {secret} {pubkey}"
+            );
+        }
+        assert_eq!(
+            webhook(setup("http://hooks.example", s, k)).is_ok(),
+            !cfg!(feature = "sev-snp")
+        );
+        assert_eq!(
+            webhook(setup("https://127.0.0.1/hook", s, k)).is_ok(),
+            !cfg!(feature = "sev-snp")
+        );
     }
 
     /// A term asked for past the fleet's ceiling is the ceiling.

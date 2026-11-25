@@ -33,7 +33,7 @@ let
   # carrying nothing. The ports api's legs dial, and those of the hooks the
   # hatch asks, are not on a command line: they are handed to the guest at
   # launch, from these same relays.
-  apiPort = { client = "8443"; applicant = "8444"; };
+  apiPort = { consumer = "8443"; applicant = "8444"; };
   # A vsock relay takes calls only from the guests meant to dial it: any other
   # guest on the host — one that has broken out of what it runs, say — reaches
   # nothing through it.
@@ -48,7 +48,7 @@ let
     # Where a gateway on another host reaches this release's api: over the
     # network, to a relay here, and on into the guest. Nothing is opened on the
     # way — the gateway's leg is RA-TLS to api itself.
-    client-entrance = { listen = entrance r 19443; to = "vsock:${cidOf r "api"}:${apiPort.client}"; };
+    consumer-entrance = { listen = entrance r 19443; to = "vsock:${cidOf r "api"}:${apiPort.consumer}"; };
     applicant-entrance = { listen = entrance r 19444; to = "vsock:${cidOf r "api"}:${apiPort.applicant}"; };
   };
   entrance = r: base: "tcp:${r.entrances}:${portOf r base}";
@@ -69,9 +69,9 @@ let
   # this host, or to its entrances wherever they are. One relay each, which
   # every gateway dials.
   gatewayToRelease = r: {
-    client = {
+    consumer = {
       listen = "vsock:${portOf r 9443}";
-      to = if r.entrances == null then "vsock:${cidOf r "api"}:${apiPort.client}" else entrance r 19443;
+      to = if r.entrances == null then "vsock:${cidOf r "api"}:${apiPort.consumer}" else entrance r 19443;
       flags = onlyFrom (map gatewayCid gateways);
     };
     applicant = {
@@ -147,7 +147,7 @@ let
   into = relay: lib.last (lib.splitString ":" relay.to);
   carried = r: with releaseRelays r; {
     api = [
-      "ENCLAVID_ADDRESS_IN_CLIENT=${apiPort.client}"
+      "ENCLAVID_ADDRESS_IN_CONSUMER=${apiPort.consumer}"
       "ENCLAVID_ADDRESS_IN_APPLICANT=${apiPort.applicant}"
       "ENCLAVID_ADDRESS_IN_HEALTH=${into health}"
     ];
@@ -438,9 +438,10 @@ in
         default = null;
         example = "192.0.2.53";
         description = ''
-          The resolver the hatch looks up the registries and key brokers
-          consumers name at, as an IPv4 address its network reaches. Null for
-          this host's own, the first in its /etc/resolv.conf.
+          The resolver the hatch looks up the registries, key brokers and
+          webhooks consumers name at, as an IPv4 address its network reaches:
+          not one on this host's loopback, which the hatch's network may not
+          use. Required where a release's guests run on this host.
         '';
       };
     };
@@ -655,6 +656,12 @@ in
         {
           assertion = lib.all (r: r.guests || r.entrances != null) releases;
           message = "enclavid.releases: a release whose guests run on another host is reached at its entrances there";
+        }
+        {
+          assertion =
+            local == [ ]
+            || (cfg.hatch.nameserver != null && !lib.hasPrefix "127." cfg.hatch.nameserver);
+          message = "enclavid.hatch.nameserver: a hatch runs here, and looks names up at a resolver its network reaches — not one on this host's loopback";
         }
         {
           assertion = lib.all (r: r.guests || gatewayHere) releases;

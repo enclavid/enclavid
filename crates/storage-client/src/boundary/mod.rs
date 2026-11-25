@@ -11,8 +11,9 @@
 use enclavid_boundary::{AuthN, AuthZ, Covert, Replay};
 use enclavid_boundary_macros::boundary;
 use storage_rpc::{
-    BlobName, BlobStream, CacheBlob, CacheError, DisclosureOp, Dropped, Expected, Fields, Kept,
-    MediaName, MediaOp, MetadataOp, Ops, RecordName, ResetOp, SessionError, Slot, StateOp, Version,
+    BlobName, BlobStream, CacheBlob, CacheError, DisclosureOp, Dropped, DueNotice, Expected,
+    Fields, Kept, MediaName, MediaOp, MetadataOp, NextDue, NoticeDue, NoticeName, NoticeOp, Ops,
+    RecordName, ResetOp, SessionError, Settle, Settled, Slot, StateOp, TakeRequest, Version,
 };
 
 boundary! {
@@ -102,15 +103,43 @@ boundary! {
         /// the consumer pinned, which the host watched pulled — and carries
         /// nothing of an applicant's.
         BlobStream: Covert::AlreadyHeld,
+        /// Derived from the session id, so a notice can only be the notice of
+        /// the session it is about.
+        NoticeName: AuthZ::Scoped,
+        /// Derived from a session id the TEE minted at random: no party with
+        /// something to leak picked it.
+        NoticeName: Covert::NotChosen,
+        /// Sealed under a key only api holds: the store keeps what opens nowhere
+        /// else.
+        NoticeOp: AuthZ::NoSecret,
+        NoticeDue,
+        /// How many notices a take asks for and how long it holds them, and
+        /// nothing else.
+        TakeRequest: AuthN::Indifferent,
+        /// The store learns only that this side takes its own notices.
+        TakeRequest: AuthZ::NoSecret,
+        /// Constants of the measured image.
+        TakeRequest: Covert::NotChosen,
+        /// Dropped, or due again at a time, and nothing else.
+        Settle: AuthN::Indifferent,
+        /// The store learns only what becomes of its own notice.
+        Settle: AuthZ::NoSecret,
+        /// Whether the notice was acted on, which the host watched happen, and
+        /// when it is due again, which a fixed schedule sets from when it was
+        /// first due, a write the host watched land.
+        Settle: Covert::AlreadyHeld,
     }
 
     in (AuthN, AuthZ, Replay) {
         Slot,
+        DueNotice,
         /// Fed back only as the version a write expects: any value makes that write
         /// land or refuse, and nothing else is decided on it.
         Version: AuthN::Indifferent,
         /// A return value on this side's own call, which grants nothing.
         Version: AuthZ::NoPrincipal,
+        /// A time on this side's own call, which grants nothing.
+        NextDue: AuthZ::NoPrincipal,
         /// A return value on this side's own call, from api's own cache of
         /// compiles: there is no party to authorize.
         Option<CacheBlob>: AuthZ::NoPrincipal,
@@ -143,6 +172,11 @@ boundary! {
         CacheError: AuthN::Indifferent,
         /// A return value on this side's own call.
         CacheError: AuthZ::NoPrincipal,
+        /// One fixed value, on which nothing is decided: a notice not settled is
+        /// taken again.
+        Settled: AuthN::Indifferent,
+        /// A return value on this side's own call.
+        Settled: AuthZ::NoPrincipal,
     }
 }
 
@@ -188,7 +222,7 @@ mod tests {
     /// under a key only api holds — never answered here for the type.
     #[test]
     fn a_name_is_answered_where_it_is_derived() {
-        for name in ["RecordName", "MediaName", "BlobName"] {
+        for name in ["RecordName", "MediaName", "BlobName", "NoticeName"] {
             assert_eq!(left(name), ["AuthN"], "{name}");
         }
     }
@@ -203,6 +237,7 @@ mod tests {
             "MediaOp",
             "DisclosureOp",
             "BlobStream",
+            "NoticeOp",
         ] {
             assert!(left(ty).contains(&"AuthN"), "{ty}");
         }

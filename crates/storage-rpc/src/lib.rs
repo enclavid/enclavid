@@ -22,6 +22,11 @@
 //! [`Ops`] of each kind, [`Expected`], a [`BlobStream`] — and cross as what the
 //! doors build of them.
 //!
+//! Beside the records, the session store keeps each caller a list of notices:
+//! sealed bytes under a name, due at a time, which the caller takes once they
+//! are due and settles when it has acted on them. A notice is added by the same
+//! write as the record it is about.
+//!
 //! A SEPARATE crate from `engine-rpc` on purpose: the storage-CVM is a distinct
 //! fleet role with its own measured image; it must not link the engine
 //! compile/execute contract. The session store's payloads are in [`session`].
@@ -35,14 +40,26 @@ use serde::{Deserialize, Serialize};
 use fleet_stream::{StreamLen, bin};
 
 pub use session::{
-    BlobField, BlobWrite, FieldSelector, ListAppend, ListField, ListSlot, MediaWrite, Op,
-    ReadRequest, ReadResponse, ScalarSlot, Slot, WriteRequest, WriteResponse,
+    BlobField, BlobWrite, DueNotice, FieldSelector, ListAppend, ListField, ListSlot, MediaWrite,
+    NoticeWrite, Op, ReadRequest, ReadResponse, ScalarSlot, Settle, Settled, Slot, TakeRequest,
+    TakeResponse, WriteRequest, WriteResponse,
 };
 
 mod ops;
 pub use ops::{
-    BlobStream, DisclosureOp, Expected, Fields, MediaOp, MetadataOp, Ops, ResetOp, StateOp,
+    BlobStream, DisclosureOp, Expected, Fields, MediaOp, MetadataOp, NoticeDue, NoticeOp, Ops,
+    ResetOp, StateOp,
 };
+
+/// The most bytes a notice's sealed value may have: the store refuses a write
+/// that adds a larger one.
+pub const MAX_NOTICE_BYTES: usize = 4096;
+
+/// The most notices one take hands back, whatever it asks for.
+pub const MAX_NOTICES_TAKEN: u32 = 64;
+
+/// The longest a take may hold a notice, in seconds, whatever it asks for.
+pub const MAX_NOTICE_HOLD_SECS: u32 = 3600;
 
 /// The longest blob the cache takes or gives, in bytes: 2 GiB.
 ///
@@ -75,6 +92,12 @@ pub struct RecordName(#[serde(with = "serde_bytes")] pub [u8; 32]);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MediaName(#[serde(with = "serde_bytes")] pub [u8; 32]);
 
+/// The name a notice is kept under: derived in api from the session it is
+/// about, under a key only api holds. One notice a session: a notice added under
+/// the name of one kept already takes its place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NoticeName(#[serde(with = "serde_bytes")] pub [u8; 32]);
+
 /// The name a cache blob is kept under: derived in api from what the blob is a
 /// compile of, under a key only api holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -85,6 +108,12 @@ pub struct BlobName(#[serde(with = "serde_bytes")] pub [u8; 32]);
 /// [`WriteResponse`]; api's end of the leg is handed it as this type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version(pub u64);
+
+/// When the caller's next notice is due, in unix seconds, as a take left its
+/// list: `None` when none is kept. It crosses as a field of [`TakeResponse`];
+/// api's end of the leg is handed it as this type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextDue(pub Option<u64>);
 
 /// A cache blob crossing the leg: its exact length in the call, its bytes on a
 /// `bin` channel beside it.

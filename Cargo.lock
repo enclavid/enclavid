@@ -1413,6 +1413,7 @@ dependencies = [
  "hatch-rpc",
  "hex",
  "hkdf",
+ "hmac",
  "hyper",
  "hyper-util",
  "rand 0.8.8",
@@ -1433,6 +1434,7 @@ dependencies = [
  "tokio-rustls",
  "tower",
  "tower-http",
+ "url",
 ]
 
 [[package]]
@@ -1578,6 +1580,7 @@ dependencies = [
  "fleet-transport",
  "futures",
  "hatch-rpc",
+ "hickory-resolver",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -1590,6 +1593,7 @@ dependencies = [
  "timesync",
  "tokio",
  "tokio-rustls",
+ "url",
  "utoipa",
 ]
 
@@ -2290,6 +2294,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "tokio",
+ "url",
 ]
 
 [[package]]

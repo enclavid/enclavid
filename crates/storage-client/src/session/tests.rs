@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 use enclavid_boundary::reason;
 use session_types::{SessionMetadata, SessionState};
-use storage_rpc::{DisclosureOp, MediaOp, MetadataOp, StateOp};
+use storage_rpc::{DisclosureOp, MediaOp, MetadataOp, Settle, StateOp};
 
 use super::*;
 use crate::memory::Disk;
@@ -520,4 +520,156 @@ async fn a_handoff_opens_only_here_and_for_its_session() {
         elsewhere.open_handoff("ses_a", &sealed),
         Err(StoreError::Crypto(_))
     ));
+}
+
+/// The notice of a session, due at once, carrying `value`.
+fn add_notice(value: &[u8]) -> AddNotice {
+    AddNotice {
+        due: Storage::expose(storage_rpc::NoticeDue(0))
+            .vouch(reason!(AuthN::Indifferent, "test fixture"))
+            .vouch(reason!(AuthZ::NoSecret, "test fixture"))
+            .vouch(reason!(Covert::AlreadyHeld, "test fixture")),
+        value: Storage::expose_builder::<storage_rpc::NoticeOp, _>(value.to_vec())
+            .vouch(reason!(Covert::NotChosen, "test fixture")),
+    }
+}
+
+/// The notices due, each held a minute, as the store hands them over opened.
+async fn take(store: &SessionStore) -> Vec<TakenNotice> {
+    store
+        .take_notices(8, std::time::Duration::from_secs(60))
+        .await
+        .unwrap()
+        .notices
+        .into_iter()
+        .map(|t| {
+            t.trust(reason!(AuthZ::NoPrincipal, "test fixture"))
+                .trust(reason!(Replay::Harmless, "test fixture"))
+                .into_inner()
+        })
+        .collect()
+}
+
+/// When the store says the next notice is due.
+async fn next_due(store: &SessionStore) -> Option<u64> {
+    let take = store
+        .take_notices(0, std::time::Duration::from_secs(60))
+        .await
+        .unwrap();
+    let storage_rpc::NextDue(next) = take
+        .next_due
+        .trust(reason!(AuthN::Indifferent, "test fixture"))
+        .trust(reason!(Replay::Harmless, "test fixture"))
+        .into_inner();
+    next
+}
+
+/// A session with a notice of `value`, written beside its metadata.
+async fn noted(store: &SessionStore, id: &str, value: &[u8]) {
+    let md = metadata(id);
+    let version = create(store, id, &md).await;
+    let (set, notice) = (set_metadata(&md), add_notice(value));
+    write(store, id, version, &[&set, &notice]).await;
+}
+
+/// A notice rides the write it is added with, is kept sealed, opens when it is
+/// taken, is held for the take, and is gone once settled done. Added again, it
+/// takes the place of the first: one notice a session.
+#[tokio::test]
+async fn a_notice_rides_its_write_and_opens_when_taken() {
+    let disk = Arc::new(Disk::default());
+    let store = store_on(&disk, KEY).await;
+    noted(&store, "ses_a", b"ended").await;
+
+    let kept: Vec<Vec<u8>> = disk
+        .notices
+        .lock()
+        .unwrap()
+        .values()
+        .map(|n| n.value.clone())
+        .collect();
+    assert_eq!(kept.len(), 1);
+    assert!(!kept[0].windows(5).any(|w| w == b"ended"), "kept sealed");
+
+    assert_eq!(next_due(&store).await, Some(0));
+    let taken = take(&store).await;
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].value, b"ended");
+    assert!(take(&store).await.is_empty(), "held for the take");
+
+    store
+        .settle_notice(&taken[0].handle, Settle::Again { due_unix_secs: 0 })
+        .await
+        .unwrap();
+    assert_eq!(take(&store).await.len(), 1, "due again");
+    store
+        .settle_notice(&taken[0].handle, Settle::Done)
+        .await
+        .unwrap();
+    assert!(disk.notices.lock().unwrap().is_empty());
+    assert_eq!(next_due(&store).await, None);
+
+    let md = metadata("ses_a");
+    let version = read_version(&store, "ses_a").await;
+    let (set, again) = (set_metadata(&md), add_notice(b"again"));
+    write(&store, "ses_a", version, &[&set, &again]).await;
+    let (set, last) = (set_metadata(&md), add_notice(b"last"));
+    write(&store, "ses_a", version + 1, &[&set, &last]).await;
+    let taken = take(&store).await;
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].value, b"last");
+}
+
+/// A notice that does not open under the name it is kept under — moved there
+/// from another, or sealed under another key — is dropped as it is found, never
+/// handed over.
+#[tokio::test]
+async fn a_notice_that_does_not_open_is_dropped() {
+    let disk = Arc::new(Disk::default());
+    let store = store_on(&disk, KEY).await;
+    noted(&store, "ses_a", b"a").await;
+    noted(&store, "ses_b", b"b").await;
+    {
+        let mut notices = disk.notices.lock().unwrap();
+        let names: Vec<_> = notices.keys().copied().collect();
+        let first = notices[&names[0]].value.clone();
+        let second = std::mem::replace(&mut notices.get_mut(&names[1]).unwrap().value, first);
+        notices.get_mut(&names[0]).unwrap().value = second;
+    }
+    assert!(take(&store).await.is_empty());
+    assert!(disk.notices.lock().unwrap().is_empty(), "dropped as found");
+
+    noted(&store, "ses_c", b"c").await;
+    let elsewhere = store_on(&disk, [8; 32]).await;
+    assert!(take(&elsewhere).await.is_empty());
+    assert!(disk.notices.lock().unwrap().is_empty());
+}
+
+/// A write that adds a notice wakes whoever waits for one, through any clone
+/// of the store, and once is enough however many were written meanwhile; a
+/// write without one wakes nobody.
+#[tokio::test]
+async fn a_write_that_adds_a_notice_wakes_its_taker() {
+    let disk = Arc::new(Disk::default());
+    let store = store_on(&disk, KEY).await;
+    let taker = store.clone();
+    let woken =
+        || tokio::time::timeout(std::time::Duration::from_millis(50), taker.notice_written());
+
+    let md = metadata("ses_a");
+    create(&store, "ses_a", &md).await;
+    assert!(woken().await.is_err(), "no notice, nobody woken");
+
+    noted(&store, "ses_b", b"b").await;
+    noted(&store, "ses_c", b"c").await;
+    assert!(woken().await.is_ok());
+    assert!(woken().await.is_err(), "once for both");
+}
+
+/// The record's version, as a read returns it.
+async fn read_version(store: &SessionStore, id: &str) -> u64 {
+    let ((_md,), version) = store.read(id, (Metadata,)).await.unwrap();
+    version
+        .trust(reason!(Replay::Harmless, "test fixture"))
+        .into_inner()
 }

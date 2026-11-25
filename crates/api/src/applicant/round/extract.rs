@@ -142,7 +142,7 @@ count fails the consumer's own chain check. But it also brings back `Running`
 for a session that finished, so `ended` lets a round through and the policy
 can reach `finish` again — another disclosure sealed, the decision the
 consumer already read rewritten. Closing that needs a freshness source outside
-the host, as `client::disclosures` says of the same rollback.
+the host, as `consumer::disclosures` says of the same rollback.
             "#
             ))
             .into_inner()
@@ -231,11 +231,11 @@ one is refused: the CAS is its freshness check.
         // uses it is built in `run`, which is the first point that knows what
         // the round consented to.
         let disclosure_pubkey = metadata
-            .client
+            .consumer
             .as_ref()
             .map(|c| c.disclosure_pubkey.clone())
             .ok_or_else(|| {
-                safe_logger::debug!("session_run_ctx: metadata.client missing for {session_id}",);
+                safe_logger::debug!("session_run_ctx: metadata.consumer missing for {session_id}",);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
         // The live host blob store: the worker's `blob::from-blob-ref` reads
@@ -287,14 +287,14 @@ fn session_composition_key(
     session_id: &str,
     metadata: &SessionMetadata,
 ) -> Result<CompositionKey, StatusCode> {
-    let client = metadata.client.as_ref().ok_or_else(|| {
-        safe_logger::debug!("session_composition_key: metadata.client missing for {session_id}");
+    let consumer = metadata.consumer.as_ref().ok_or_else(|| {
+        safe_logger::debug!("session_composition_key: metadata.consumer missing for {session_id}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     Ok(composition_key(
         &metadata.policy_ref,
         metadata.policy_key.as_ref(),
-        &client.plugins,
+        &consumer.plugins,
     ))
 }
 

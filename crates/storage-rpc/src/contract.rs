@@ -12,8 +12,9 @@ use remoc::codec::Ciborium;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BlobName, CacheBlob, CacheError, Dropped, Kept, ReadRequest, ReadResponse, RecordName,
-    SessionError, WriteRequest, WriteResponse,
+    BlobName, CacheBlob, CacheError, Dropped, Kept, NoticeName, ReadRequest, ReadResponse,
+    RecordName, SessionError, Settle, Settled, TakeRequest, TakeResponse, WriteRequest,
+    WriteResponse,
 };
 
 /// A session's record: its state, media and disclosures, one record per
@@ -45,6 +46,19 @@ pub trait RemoteSessionStore {
         record: RecordName,
         req: WriteRequest,
     ) -> Result<WriteResponse, SessionError>;
+
+    /// The caller's notices that are due by the store's clock, earliest first,
+    /// at most `req.max` of them. Each is held — not due — for `req.hold_secs`,
+    /// so no other take hands it out meanwhile.
+    async fn take_notices(&self, req: TakeRequest) -> Result<TakeResponse, SessionError>;
+
+    /// Drop the caller's notice `notice` names, or make it due again, as `settle`
+    /// says — whether or not one is still kept under that name.
+    async fn settle_notice(
+        &self,
+        notice: NoticeName,
+        settle: Settle,
+    ) -> Result<Settled, SessionError>;
 }
 
 /// The L2 compiled-artifact (cwasm) cache — a blind opaque-blob KV under the

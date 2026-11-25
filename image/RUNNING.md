@@ -297,11 +297,20 @@ What each measurement-relevant part is doing:
   | | `authorize-deadline-secs` | 25 |
   | | `kbs-deadline-secs` | 20 |
   | | `callback-request-buffer` | 4 |
+  | | `webhook-schedule-secs` | 5,305,2105,9305,27305,63305,99305 |
+  | | `webhook-deadline-secs` | 20 |
+  | | `webhook-turn-wait-secs` | 30 |
+  | | `webhook-look-secs` | 60 |
+  | | `webhooks-held` | 1024 |
+  | | `webhooks-held-per-consumer` | 256 |
+  | | `webhooks-sending-per-consumer` | 4 |
   | hatch | `concurrent-manifests` | 128 |
   | | `concurrent-blobs` | 8 |
   | | `authorize-hook-port` | none: no authorization |
   | | `limits-hook-port` | none: no limits |
   | | `hook-deadline-secs` | 10 |
+  | | `webhook-connect-secs` | 5 |
+  | | `webhook-send-secs` | 15 |
   | | `request-buffer` | 16 |
   | all five | `leg-timeout-secs` | 20 |
   | | `leg-max-ports` | 256 |

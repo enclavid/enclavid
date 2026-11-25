@@ -14,7 +14,7 @@ use engine_rpc::{
 use fleet_stream::bin;
 use hatch_rpc::{
     AuthorizeError, AuthorizeRequest, BlobRequest, KbsError, KbsRequest, KbsResponse, Manifest,
-    ManifestRequest, PullError, Verdict,
+    ManifestRequest, PullError, Verdict, WebhookAnswer, WebhookError, WebhookRequest,
 };
 use session_types::{Decision, SessionState};
 
@@ -192,6 +192,10 @@ boundary! {
         /// The broker is the consumer's, the resource the one the artifact's pinned
         /// manifest names, and each leg's shape the protocol's; no policy chose any.
         KbsRequest: Covert::NotChosen,
+        WebhookRequest,
+        /// The webhook goes to the endpoint the consumer named for the session when
+        /// it created it: the party the session's end is told to.
+        WebhookRequest: AuthZ::Matched,
     }
 
     in (AuthN, AuthZ) {
@@ -220,6 +224,17 @@ boundary! {
         KbsError: AuthN::Indifferent,
         /// A return value on this side's own call.
         KbsError: AuthZ::NoPrincipal,
+        /// Decides only whether the notice is tried again: a false yes loses a
+        /// webhook the host can as well keep from the endpoint on its own network,
+        /// and a false no sends it again on the schedule.
+        WebhookAnswer: AuthN::Indifferent,
+        /// A return value on this side's own call.
+        WebhookAnswer: AuthZ::NoPrincipal,
+        /// One case, no answer, which ends the attempt as an answer that does not
+        /// take it does; its text reaches only the debug log.
+        WebhookError: AuthN::Indifferent,
+        /// A return value on this side's own call.
+        WebhookError: AuthZ::NoPrincipal,
     }
 }
 

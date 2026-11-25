@@ -9,10 +9,10 @@ use serde::Serialize;
 use session_types::{SessionStatus, Terms};
 use storage_client::Metadata;
 
-use crate::client_state::ClientState;
 use crate::dto::{self, DecisionView, InitErrorView, ResolvedPolicyView};
 
 use super::auth::{Principal, SessionToken, trust_metadata};
+use super::state::ConsumerState;
 
 #[derive(Serialize)]
 pub struct SessionView {
@@ -23,17 +23,13 @@ pub struct SessionView {
     #[serde(with = "dto::SessionStatusDef")]
     pub status: SessionStatus,
     pub policy: ResolvedPolicyView,
-    /// The client's own reconciliation key, echoed back as supplied at
+    /// The consumer's own reconciliation key, echoed back as supplied at
     /// session create. Skipped when missing so the JSON shape stays
-    /// minimal for clients who never set it.
+    /// minimal for consumers who never set it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_ref: Option<String>,
+    pub consumer_ref: Option<String>,
     /// Number of disclosure entries the engine has appended for this
-    /// session. Mirrors the same field in the future webhook payload
-    /// so client SDKs can deserialize both shapes with one struct.
-    /// Counter rather than bool to support delta-detection at the
-    /// webhook receiver (`new_count - last_seen_count` = how many new
-    /// disclosures arrived since the last poll/notification).
+    /// session.
     pub disclosures: u64,
     /// Unix seconds at session create time. Surfaced for ops /
     /// observability (age, latency); not a security signal.
@@ -68,7 +64,7 @@ pub struct TermsView {
 }
 
 impl TermsView {
-    fn of(terms: &Terms, state: &ClientState) -> Self {
+    fn of(terms: &Terms, state: &ConsumerState) -> Self {
         let ttl = state.session_store.ttl_secs();
         Self {
             components_bytes: Terms::within(
@@ -86,13 +82,13 @@ impl TermsView {
 }
 
 /// Route factory: bare `get(handler)` MethodRouter. Auth attached at
-/// router level via `.layer(auth(op))` — see `client::router`.
-pub(super) fn get_session() -> MethodRouter<Arc<ClientState>> {
+/// router level via `.layer(auth(op))` — see `consumer::router`.
+pub(super) fn get_session() -> MethodRouter<Arc<ConsumerState>> {
     get(read)
 }
 
 async fn read(
-    State(state): State<Arc<ClientState>>,
+    State(state): State<Arc<ConsumerState>>,
     Principal(presented_principal): Principal,
     SessionToken(presented_token): SessionToken,
     Path(session_id): Path<String>,
@@ -114,18 +110,18 @@ async fn read(
     // shared helper; returns verified `SessionMetadata`.
     let metadata = trust_metadata(metadata_untrusted, &presented_token, &presented_principal)?;
 
-    // `metadata.client` is `Option<Client>` purely because of proto3
+    // `metadata.consumer` is `Option<Consumer>` purely because of proto3
     // semantics: sub-messages are always presence-tracked at the
     // wire level (proto3 has no `required` for messages). TEE always
-    // populates `client` at session create, and `check_client_access`
+    // populates `consumer` at session create, and `check_consumer_access`
     // inside the trust predicate above already returns 500 on the
     // malformed-None path — so None here is unreachable in practice.
     // We still `.ok_or` (not `.expect`) to fail gracefully instead
     // of panicking; aborts at this layer would corrupt the HTTP
     // response and add noise to logs without operational benefit.
-    let client = metadata.client.ok_or_else(|| {
+    let consumer = metadata.consumer.ok_or_else(|| {
         safe_logger::debug!(
-            "client/session: metadata.client unexpectedly None for {session_id} \
+            "consumer/session: metadata.consumer unexpectedly None for {session_id} \
              — TEE invariant violation (always populated at create)",
         );
         StatusCode::INTERNAL_SERVER_ERROR
@@ -137,7 +133,7 @@ async fn read(
     let digest = crate::policy_pull::split_pinned_ref(&metadata.policy_ref)
         .map(|(_, d)| d.to_string())
         .unwrap_or_default();
-    let plugins = client
+    let plugins = consumer
         .plugins
         .iter()
         .map(dto::PluginView::from_pin)
@@ -154,10 +150,10 @@ async fn read(
             digest,
             plugins,
         },
-        client_ref: if client.r#ref.is_empty() {
+        consumer_ref: if consumer.r#ref.is_empty() {
             None
         } else {
-            Some(client.r#ref)
+            Some(consumer.r#ref)
         },
         disclosures: metadata.disclosure_count,
         created_at: metadata.created_at,

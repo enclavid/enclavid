@@ -6,7 +6,7 @@
 //! grpc/cmd/native keyprovider transports, because the TEE has no outbound
 //! network — the KBS handshake is relayed leg-by-leg through the hatch.
 //!
-//! - [`Key::Inline`] → the client-supplied bytes ARE the private-opts JSON
+//! - [`Key::Inline`] → the consumer-supplied bytes ARE the private-opts JSON
 //!   (valid only when the session creator owns the artifact).
 //! - [`Key::Kbs`]    → run the standard Trustee **RCAR** handshake against
 //!   the author's KBS and fetch the layer key as a KBS *resource*. The
@@ -274,7 +274,7 @@ fn session_cookie(headers: &[(String, String)]) -> Result<String, KeyError> {
 /// artifact's `org.opencontainers.image.enc.keys.*` annotation. Author-
 /// written and covered by the manifest digest, so the pinned reference
 /// integrity-protects which resource the layer key comes from — the hatch
-/// / client cannot redirect the TEE to a different key.
+/// / consumer cannot redirect the TEE to a different key.
 fn resource_uri(annotations: &HashMap<String, String>) -> Result<String, KeyError> {
     annotations
         .iter()

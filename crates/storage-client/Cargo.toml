@@ -31,13 +31,14 @@ enclavid-boundary-macros = { path = "../boundary-macros" }
 # Wraps the raw `tee_seal_key` master + its HKDF subkeys: zeroize-on-drop and
 # Debug-redaction, with `expose_secret()` making every key use explicit.
 secrecy = "0.10"
-# The pipe a store in memory is served over (`memory`).
-tokio = { version = "1", features = ["io-util", "rt"], optional = true }
+# What wakes the taker of notices when a write adds one; and the pipe a store
+# in memory is served over (`memory`).
+tokio = { version = "1", features = ["sync"] }
 
 [features]
 # A store in memory, served over a pipe as the storage-CVM serves its volume:
 # for the tests of a crate whose code holds a store.
-memory = ["dep:tokio"]
+memory = ["tokio/io-util", "tokio/rt"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt", "io-util", "time"] }

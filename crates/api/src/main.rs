@@ -1,10 +1,9 @@
 mod applicant;
 mod assets;
 mod boundary;
-mod client;
-mod client_state;
 mod compiler;
 mod compositions;
+mod consumer;
 mod cwasm_cache;
 mod disclosure_commit;
 mod dto;
@@ -28,6 +27,7 @@ mod storage;
 mod tee;
 mod transport;
 mod turns;
+mod webhooks;
 
 use std::sync::Arc;
 
@@ -35,7 +35,7 @@ use enclavid_attestation::Attestor;
 use safe_logger::{debug, info, reason};
 use storage_client::{CacheStore, SessionStore};
 
-use crate::client_state::ClientState;
+use crate::consumer::ConsumerState;
 use crate::state::AppState;
 
 #[tokio::main]
@@ -130,7 +130,7 @@ async fn main() {
 
     // SessionStore is storage-client's per-session typed-field store. It holds
     // no connection — it calls through the storage leg's link, built below,
-    // which dials the storage-CVM over RA-TLS. Shared between the client API
+    // which dials the storage-CVM over RA-TLS. Shared between the consumer API
     // (writes metadata/status on /create and /init) and the applicant API
     // (reads/writes state on /connect and /input), so the Arc is what gives
     // both state structs the same connection underneath.
@@ -172,9 +172,9 @@ async fn main() {
 
     // Two listeners, two routers, one process. Topology rationale: TLS
     // terminates inside this TEE, so a host-side proxy can only route by
-    // SNI on raw TCP. Each surface (clients vs applicants) gets its own
+    // SNI on raw TCP. Each surface (consumers vs applicants) gets its own
     // certificate, port, optional mTLS posture, and rate-limit policy.
-    // Each surface owns its route table — see `client::router` and
+    // Each surface owns its route table — see `consumer::router` and
     // `applicant::router` for the endpoint inventory.
     // Minted ONCE and cloned into both surfaces. `server_config` mints a fresh
     // certificate on every call, so one per surface would give this process two
@@ -195,7 +195,17 @@ async fn main() {
         )
         .await,
     );
-    let client_state = Arc::new(ClientState::new(
+    // Webhooks: each session's notice sent through the hatch as it comes due.
+    tokio::spawn(
+        webhooks::Webhooks::new(
+            session_store.clone(),
+            hatch.clone(),
+            settings.webhooks.clone(),
+        )
+        .run(),
+    );
+
+    let consumer_state = Arc::new(ConsumerState::new(
         hatch,
         session_store,
         attestor,
@@ -204,27 +214,27 @@ async fn main() {
         settings.pull_deadline,
     ));
 
-    let client_app = client::router(client_state);
+    let consumer_app = consumer::router(consumer_state);
     let applicant_app = applicant::router(applicant_state);
 
     // Each surface reports when its listener is BOUND, not when its task is
     // spawned — `healthy` says "I am listening", and a field that fires a few
     // microseconds before the bind would be saying it on trust.
-    let (client_bound, client_is_bound) = tokio::sync::oneshot::channel();
+    let (consumer_bound, consumer_is_bound) = tokio::sync::oneshot::channel();
     let (applicant_bound, applicant_is_bound) = tokio::sync::oneshot::channel();
 
-    let client_handle = tokio::spawn({
-        let addr = std::env::var("ENCLAVID_ADDRESS_IN_CLIENT").unwrap_or_else(|e| {
+    let consumer_handle = tokio::spawn({
+        let addr = std::env::var("ENCLAVID_ADDRESS_IN_CONSUMER").unwrap_or_else(|e| {
             debug!("{e}");
             safe_logger::error_and_panic!(
-                "api: ENCLAVID_ADDRESS_IN_CLIENT is not set. Stopping.",
+                "api: ENCLAVID_ADDRESS_IN_CONSUMER is not set. Stopping.",
                 reason!("a constant naming a configuration key the host itself supplied")
             )
         });
         let acceptor = acceptor.clone();
         let accept_retry = settings.accept_retry;
         async move {
-            transport::serve(client_app, &addr, client_bound, acceptor, accept_retry).await;
+            transport::serve(consumer_app, &addr, consumer_bound, acceptor, accept_retry).await;
         }
     });
     let applicant_handle = tokio::spawn({
@@ -261,8 +271,8 @@ async fn main() {
     // which is what the check exists for. Neither branch reaches
     // `declare_serving`, so there is no path on which this guest claims to be
     // listening and is not.
-    let (client_bind, applicant_bind) = tokio::join!(client_is_bound, applicant_is_bound);
-    if client_bind.is_err() || applicant_bind.is_err() {
+    let (consumer_bind, applicant_bind) = tokio::join!(consumer_is_bound, applicant_is_bound);
+    if consumer_bind.is_err() || applicant_bind.is_err() {
         safe_logger::error_and_panic!(
             "api: a serving listener ended before it reported itself bound. Stopping.",
             reason!("constant text about ports on the measured command line")
@@ -274,7 +284,7 @@ async fn main() {
         reason!("a constant, and the ports are on the measured command line")
     );
 
-    let _ = tokio::join!(client_handle, applicant_handle);
+    let _ = tokio::join!(consumer_handle, applicant_handle);
 }
 
 /// Dial the storage-CVM (session KV + L2 cwasm cache) over RA-TLS and hand back

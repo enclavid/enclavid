@@ -1,4 +1,4 @@
-//! Client-facing API: session lifecycle endpoints.
+//! Consumer-facing API: session lifecycle endpoints.
 //!
 //! Routes:
 //!   POST /api/v1/sessions                    — create + activate (one shot)
@@ -9,7 +9,7 @@
 //!   POST /api/v1/sessions/:id/warmup         — prepare the session ahead of
 //!                                              its first round
 //!
-//! Session creation is a single endpoint: the client supplies the
+//! Session creation is a single endpoint: the consumer supplies the
 //! policy ref + disclosure pubkey + per-plugin pins in one body, the
 //! TEE mints attestation, persists metadata (AEAD-sealed under
 //! tee_seal_key), and returns the session_id ready for applicant
@@ -18,10 +18,10 @@
 //! reading its props — happens at applicant /connect, or when the
 //! applicant's page asks for it, so abandoned sessions don't pay
 //! compile-cost and TEE restarts don't strand in-flight work — unless the
-//! client asks for it sooner: `"warmup": true` on the creation, or a warmup
+//! consumer asks for it sooner: `"warmup": true` on the creation, or a warmup
 //! of the session, prepares it right after the answer.
 //!
-//! See architecture.md → Client-Facing Session Creation for the
+//! See architecture.md → Consumer-Facing Session Creation for the
 //! protocol shape and threat model. Counterparts to the applicant
 //! API live in the sibling `applicant` module — different audience,
 //! different auth (JWT via host vs BearerKey), different state.
@@ -30,7 +30,10 @@ mod auth;
 mod create;
 mod disclosures;
 mod session;
+mod state;
 mod warmup;
+
+pub use state::ConsumerState;
 
 use std::sync::Arc;
 
@@ -42,20 +45,18 @@ use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 
-use hatch_client::ClientOperation;
-
-use crate::client_state::ClientState;
+use hatch_client::ConsumerOperation;
 
 use self::auth::enforce;
 
-/// Per-session capability bearer client sends on every read endpoint.
-/// Mirrors `client::auth::SESSION_TOKEN_HEADER`; duplicated as a
+/// Per-session capability bearer the consumer sends on every read endpoint.
+/// Mirrors `consumer::auth::SESSION_TOKEN_HEADER`; duplicated as a
 /// constant here so the sensitive-headers layer can reference it
 /// without dragging the auth module into the public surface of
 /// `mod.rs`.
 const SESSION_TOKEN_HEADER: HeaderName = HeaderName::from_static("x-session-token");
 
-/// Build the client-facing router.
+/// Build the consumer-facing router.
 ///
 /// Each handler module exposes a `verb_action() -> MethodRouter` factory
 /// returning a bare `post(handler)` / `get(handler)` route. Auth is
@@ -64,12 +65,12 @@ const SESSION_TOKEN_HEADER: HeaderName = HeaderName::from_static("x-session-toke
 /// (`from_fn_with_state(enforce)` + `Extension(op)`) in the right layer
 /// order. Tower's outer-runs-first ordering means this stack has to be
 /// per-route — see `auth::enforce` for the rationale.
-pub fn router(state: Arc<ClientState>) -> Router {
+pub fn router(state: Arc<ConsumerState>) -> Router {
     // ServiceBuilder layer order: the first `.layer(...)` is the
     // OUTERMOST (runs first on the request). `Extension(op)` must
     // wrap `enforce` so the operation tag is already in the request
     // extensions by the time the middleware reads it.
-    let auth = |op: ClientOperation| {
+    let auth = |op: ConsumerOperation| {
         ServiceBuilder::new()
             .layer(Extension(op))
             .layer(from_fn_with_state(state.clone(), enforce))
@@ -78,21 +79,21 @@ pub fn router(state: Arc<ClientState>) -> Router {
     Router::new()
         .route(
             "/api/v1/sessions",
-            create::post_create().layer(auth(ClientOperation::SessionCreate)),
+            create::post_create().layer(auth(ConsumerOperation::SessionCreate)),
         )
         .route(
             "/api/v1/sessions/{id}",
-            session::get_session().layer(auth(ClientOperation::SessionRead)),
+            session::get_session().layer(auth(ConsumerOperation::SessionRead)),
         )
         .route(
             "/api/v1/sessions/{id}/disclosures",
-            disclosures::get_disclosures().layer(auth(ClientOperation::DataRead)),
+            disclosures::get_disclosures().layer(auth(ConsumerOperation::DataRead)),
         )
         // Authorized as a creation: it spends what creating the session with
         // `"warmup": true` would have, and nothing a creation does not.
         .route(
             "/api/v1/sessions/{id}/warmup",
-            warmup::post_warmup().layer(auth(ClientOperation::SessionCreate)),
+            warmup::post_warmup().layer(auth(ConsumerOperation::SessionCreate)),
         )
         // Mark auth-bearing request headers as sensitive. Two
         // payoffs: (1) when http/2 is enabled, sensitive headers go

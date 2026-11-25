@@ -216,12 +216,12 @@ enum OciCommand {
         /// Encrypt the artifact (ocicrypt `AES_256_CTR_HMAC_SHA256`) under a
         /// new layer key, written to `--key-out`. Omit for a plaintext push
         /// (today's default).
-        ///   `inline` — the client passes the key, base64, as
+        ///   `inline` — the consumer passes the key, base64, as
         ///     `"key": "<base64>"` in POST /sessions (owner == the
         ///     session creator).
         ///   `kbs` — writes the `--kbs-resource` URI into the artifact's
         ///     `enc.keys.*` annotation; the key is registered as that KBS
-        ///     resource, the client passes `"key": { "kbs": { endpoint } }`
+        ///     resource, the consumer passes `"key": { "kbs": { endpoint } }`
         ///     and the TEE fetches it under attestation.
         #[arg(long, value_enum, requires = "key_out")]
         encrypt: Option<EncryptMode>,
@@ -272,7 +272,7 @@ enum SessionCommand {
     /// registry_auth). Either way the CLI generates an ephemeral
     /// disclosure keypair (unless one is supplied), caches the secret
     /// locally so subsequent `session disclosures` can decrypt, and caches
-    /// the API and the returned `client_session_token` for `session get` /
+    /// the API and the returned `session_token` for `session get` /
     /// `session disclosures`.
     ///
     /// The playground runs a policy pushed to it with no credentials,
@@ -295,7 +295,7 @@ enum SessionCommand {
         /// Path to a JSON file holding the **entire** `POST /sessions`
         /// body — `policy`, `plugins: [{package, impl_ref, key?}]`,
         /// `policy_key`, `registry_auth`, `props`, etc. (the same shape a
-        /// consumer backend would send). If it omits `client_disclosure_pubkey`,
+        /// consumer backend would send). If it omits `disclosure_pubkey`,
         /// the CLI injects an auto-generated one and caches its secret.
         /// Mutually exclusive with `--policy`.
         #[arg(short = 'f', long = "from-file", conflicts_with = "policy")]
@@ -303,7 +303,7 @@ enum SessionCommand {
 
         /// Path to a file holding the disclosure secret (an X25519 secret
         /// as hex) whose public key is the disclosure recipient.
-        /// Wins over a `client_disclosure_pubkey` in `--from-file`. When
+        /// Wins over a `disclosure_pubkey` in `--from-file`. When
         /// absent (and the file supplies none), generate an ephemeral
         /// keypair and stash the secret under `enclavid/sessions/<id>/`
         /// in the platform config directory (`~/.config` on Linux,
@@ -311,11 +311,11 @@ enum SessionCommand {
         #[arg(long)]
         disclosure_key: Option<PathBuf>,
 
-        /// Opaque client-side identifier — echoed back in
+        /// Opaque consumer-side identifier — echoed back in
         /// `session get` and webhook payloads. Use for reconciling
         /// session_id → your-side record on your dashboard.
         #[arg(long)]
-        client_ref: Option<String>,
+        consumer_ref: Option<String>,
 
         /// The api build the session must run on, as 96 lowercase hex
         /// characters (the launch measurement). Sent to a gateway in
@@ -340,7 +340,7 @@ enum SessionCommand {
     },
 
     /// Fetch and print the session record (status, policy, disclosure
-    /// count, ...). Uses the cached `client_session_token`.
+    /// count, ...). Uses the cached `session_token`.
     Get {
         /// Session id (the `ses_...` value from `session create`).
         id: String,
@@ -428,7 +428,7 @@ async fn main() -> Result<()> {
                 from_file,
                 props,
                 disclosure_key,
-                client_ref,
+                consumer_ref,
                 measurement,
                 api,
                 applicants,
@@ -438,7 +438,7 @@ async fn main() -> Result<()> {
                     from_file,
                     props,
                     disclosure_key,
-                    client_ref,
+                    consumer_ref,
                     measurement,
                     api,
                     applicants,

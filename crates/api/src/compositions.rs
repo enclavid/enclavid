@@ -23,7 +23,8 @@ use tokio::sync::Semaphore;
 use engine_rpc::{BundleSource, CompatToken, CompileError, CompileSource, CompositionKey};
 use hatch_client::{KbsClient, RegistryClient};
 use session_types::{
-    Artifact, Client, CompileFault, InitError, Key, PluginPin, PullProblem, SessionMetadata, Terms,
+    Artifact, CompileFault, Consumer, InitError, Key, PluginPin, PullProblem, SessionMetadata,
+    Terms,
 };
 use storage_client::CacheStore;
 
@@ -55,15 +56,15 @@ pub struct Composition {
 
 impl Composition {
     /// A session's composition, as its sealed metadata pins it. `None` for
-    /// metadata with no client block, which a created session always has.
+    /// metadata with no consumer block, which a created session always has.
     pub fn of(metadata: &SessionMetadata) -> Option<Self> {
-        let client = metadata.client.as_ref()?;
+        let consumer = metadata.consumer.as_ref()?;
         Some(Self {
             policy_ref: metadata.policy_ref.clone(),
             policy_key: metadata.policy_key.clone(),
-            plugins: client.plugins.clone(),
-            registry_auth: client.registry_auth.clone(),
-            consumer: consumer(client).to_owned(),
+            plugins: consumer.plugins.clone(),
+            registry_auth: consumer.registry_auth.clone(),
+            consumer: principal(consumer).to_owned(),
             terms: metadata.terms,
         })
     }
@@ -121,8 +122,8 @@ pub fn max_cwasm_bytes(terms: &Terms) -> u64 {
 
 /// The consumer a session's pulls count against ([`crate::turns`]): the
 /// organization that created it, as its sealed metadata records.
-pub fn consumer(client: &Client) -> &str {
-    client
+pub fn principal(consumer: &Consumer) -> &str {
+    consumer
         .access
         .as_ref()
         .and_then(|access| access.principal.as_deref())
@@ -482,8 +483,8 @@ fn classify_compile_error(for_whom: &str, policy_ref: &str, e: CompileError) -> 
 ///   * **Decrypt authority** — the [`Key`] — is in the key ([`Decrypt`]):
 ///     plaintext shares; an inline key (the owner's secret) only with holders of
 ///     the same key; a KBS with anyone. Encryption's job is secrecy from the
-///     PLATFORM (KBS releases only to the attested TEE), NOT per-client
-///     licensing — that is the download gate — so a KBS needs no per-client
+///     PLATFORM (KBS releases only to the attested TEE), NOT per-consumer
+///     licensing — that is the download gate — so a KBS needs no per-consumer
 ///     credential here. (A metered/licensed KBS would be consulted every session
 ///     as the registry is, never folded into this key: the cache only ever skips
 ///     the decrypt+compile, never a per-session check.)
