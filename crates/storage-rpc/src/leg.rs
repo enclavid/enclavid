@@ -26,8 +26,9 @@ use crate::contract::{
     StorageClients,
 };
 use crate::{
-    BlobName, BlobStream, CacheBlob, CacheError, Dropped, Expected, Fields, Kept, Ops, ReadRequest,
-    ReadResponse, RecordName, SessionError, Slot, Version, WriteRequest, WriteResponse,
+    BlobName, BlobStream, CacheBlob, CacheError, Dropped, DueNotice, Expected, Fields, Kept,
+    NextDue, NoticeName, Ops, ReadRequest, ReadResponse, RecordName, SessionError, Settle, Settled,
+    Slot, TakeRequest, TakeResponse, Version, WriteRequest, WriteResponse,
 };
 
 /// Why the leg did not come up, or stopped being served.
@@ -153,6 +154,43 @@ impl<B> StorageLeg<B> {
         }
         let WriteResponse { new_version } = self.session.write(record, req).await?;
         Ok(inbound::<B, _>(Version(new_version)))
+    }
+
+    /// The caller's notices that are due, as `req` asks, each held for the take,
+    /// and when its next one is due: each comes back open on what `B` left open
+    /// on it, the response taken apart here so each part is judged on its own
+    /// grounds.
+    #[allow(clippy::type_complexity)]
+    pub async fn take_notices(
+        &self,
+        req: Exposed<TakeRequest, (), B>,
+    ) -> Result<
+        (
+            Vec<Untrusted<DueNotice, <B as Receives<DueNotice>>::Open, B>>,
+            Untrusted<NextDue, <B as Receives<NextDue>>::Open, B>,
+        ),
+        SessionError,
+    > {
+        let TakeResponse {
+            notices,
+            next_due_unix_secs,
+        } = self.session.take_notices(req.into_inner()).await?;
+        Ok((
+            notices.into_iter().map(inbound::<B, _>).collect(),
+            inbound::<B, _>(NextDue(next_due_unix_secs)),
+        ))
+    }
+
+    /// Drop the notice `notice` names, or make it due again, as `settle` says.
+    pub async fn settle_notice(
+        &self,
+        notice: Exposed<NoticeName, (), B>,
+        settle: Exposed<Settle, (), B>,
+    ) -> Result<Untrusted<Settled, <B as Receives<Settled>>::Open, B>, SessionError> {
+        self.session
+            .settle_notice(notice.into_inner(), settle.into_inner())
+            .await
+            .map(inbound::<B, _>)
     }
 }
 

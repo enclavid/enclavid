@@ -29,12 +29,15 @@ use fleet_stream::{Incoming, StreamLen, bin};
 use safe_logger::debug;
 use storage_rpc::{
     BlobName, CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheError, Dropped, Kept,
-    ReadRequest, ReadResponse, RecordName, RemoteCacheAt, RemoteSessionStoreAt, SessionError,
-    WriteRequest, WriteResponse,
+    MAX_NOTICE_BYTES, MAX_NOTICE_HOLD_SECS, MAX_NOTICES_TAKEN, NoticeName, Op, ReadRequest,
+    ReadResponse, RecordName, RemoteCacheAt, RemoteSessionStoreAt, SessionError, Settle, Settled,
+    TakeRequest, TakeResponse, WriteRequest, WriteResponse,
 };
 
 pub use cache::CacheBlobs;
 pub use session::{DEFAULT_BUSY_TIMEOUT, SessionStore};
+
+use session::Notice;
 
 use boundary::AnyCaller;
 use scope::Scope;
@@ -153,10 +156,66 @@ impl RemoteSessionStoreAt<AnyCaller> for Caller {
     ) -> Result<Exposed<WriteResponse, (), AnyCaller>, SessionError> {
         let s = self.svc.sessions.clone();
         let name = self.scope.session(&record.into_inner());
-        let req = req.into_inner();
-        blocking(move || s.write(&name, req))
+        let list = self.scope.notices();
+        let mut req = req.into_inner();
+        // The notices go in the caller's own list, each under a name of its
+        // partition; the rest are the record's.
+        let mut notices = Vec::new();
+        let mut ops = Vec::with_capacity(req.ops.len());
+        for op in req.ops {
+            match op {
+                Op::Notice(n) if n.value.len() > MAX_NOTICE_BYTES => {
+                    return Err(session_failed(SessionError::Internal(format!(
+                        "a notice past {MAX_NOTICE_BYTES} bytes"
+                    ))));
+                }
+                Op::Notice(n) => notices.push(Notice {
+                    name: self.scope.notice(&n.name),
+                    asked: n.name,
+                    due: n.due_unix_secs,
+                    value: n.value,
+                }),
+                op => ops.push(op),
+            }
+        }
+        req.ops = ops;
+        blocking(move || s.write_noting(&name, req, &list, notices))
             .await
             .map(AnyCaller::expose)
+            .map_err(session_failed)
+    }
+
+    async fn take_notices(
+        &self,
+        req: Untrusted<TakeRequest, (), AnyCaller>,
+    ) -> Result<Exposed<TakeResponse, (), AnyCaller>, SessionError> {
+        let s = self.svc.sessions.clone();
+        let list = self.scope.notices();
+        let req = req.into_inner();
+        let max = req.max.min(MAX_NOTICES_TAKEN) as usize;
+        let hold = u64::from(req.hold_secs.min(MAX_NOTICE_HOLD_SECS));
+        blocking(move || s.take_notices(&list, now_unix(), max, hold))
+            .await
+            .map(|(notices, next_due_unix_secs)| {
+                AnyCaller::expose(TakeResponse {
+                    notices,
+                    next_due_unix_secs,
+                })
+            })
+            .map_err(session_failed)
+    }
+
+    async fn settle_notice(
+        &self,
+        notice: Untrusted<NoticeName, (), AnyCaller>,
+        settle: Untrusted<Settle, (), AnyCaller>,
+    ) -> Result<Exposed<Settled, (), AnyCaller>, SessionError> {
+        let s = self.svc.sessions.clone();
+        let name = self.scope.notice(&notice.into_inner());
+        let settle = settle.into_inner();
+        blocking(move || s.settle_notice(&name, settle))
+            .await
+            .map(|()| AnyCaller::expose(Settled))
             .map_err(session_failed)
     }
 }

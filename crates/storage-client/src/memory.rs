@@ -14,9 +14,10 @@ use fleet_stream::{Incoming, StreamLen, bin};
 use futures::StreamExt;
 use storage_rpc::{
     BlobField, BlobName, CACHE_STREAM_DEADLINE, CACHE_STREAM_IDLE, CacheBlob, CacheError, Dropped,
-    FieldSelector, Kept, LegSettings, ListField, ListSlot, MediaName, Op, ReadRequest,
-    ReadResponse, RecordName, RemoteCacheAt, RemoteSessionStoreAt, ScalarSlot, SessionError, Slot,
-    StorageLeg, WriteRequest, WriteResponse,
+    DueNotice, FieldSelector, Kept, LegSettings, ListField, ListSlot, MediaName, NoticeName, Op,
+    ReadRequest, ReadResponse, RecordName, RemoteCacheAt, RemoteSessionStoreAt, ScalarSlot,
+    SessionError, Settle, Settled, Slot, StorageLeg, TakeRequest, TakeResponse, WriteRequest,
+    WriteResponse,
 };
 
 use crate::boundary::Storage;
@@ -38,6 +39,9 @@ boundary! {
         ReadRequest,
         WriteRequest,
         CacheBlob,
+        TakeRequest,
+        NoticeName,
+        Settle,
     }
 
     out (AuthN,) {
@@ -50,7 +54,23 @@ boundary! {
         Dropped,
         SessionError,
         CacheError,
+        TakeResponse,
+        Settled,
     }
+}
+
+/// One notice, as the store keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub due_unix_secs: u64,
+    pub value: Vec<u8>,
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// One session's record, as the store keeps it.
@@ -70,6 +90,7 @@ pub struct Record {
 pub struct Disk {
     pub records: Mutex<HashMap<RecordName, Record>>,
     pub blobs: Mutex<HashMap<BlobName, Vec<u8>>>,
+    pub notices: Mutex<HashMap<NoticeName, Notice>>,
     /// Answer every read with one slot fewer than it asked for: a store that
     /// does not keep to the contract.
     pub short_reads: AtomicBool,
@@ -157,9 +178,27 @@ impl RemoteSessionStoreAt<Volume> for Served {
         record: Untrusted<RecordName, (), Volume>,
         req: Untrusted<WriteRequest, (), Volume>,
     ) -> Result<Exposed<WriteResponse, (), Volume>, SessionError> {
-        let req = req.into_inner();
-        if req.ops.is_empty() {
+        let mut req = req.into_inner();
+        // The notices are kept first, and stay whether or not the rest lands,
+        // as the storage-CVM keeps them; a write of notices alone is refused.
+        let (notices, ops): (Vec<Op>, Vec<Op>) = req
+            .ops
+            .into_iter()
+            .partition(|op| matches!(op, Op::Notice(_)));
+        if ops.is_empty() {
             return Err(SessionError::Internal("write with no ops".into()));
+        }
+        req.ops = ops;
+        for op in notices {
+            if let Op::Notice(n) = op {
+                self.0.notices.lock().unwrap().insert(
+                    n.name,
+                    Notice {
+                        due_unix_secs: n.due_unix_secs,
+                        value: n.value,
+                    },
+                );
+            }
         }
         let mut records = self.0.records.lock().unwrap();
         let name = record.into_inner();
@@ -188,12 +227,64 @@ impl RemoteSessionStoreAt<Volume> for Served {
                     record.media.clear();
                     record.disclosures.clear();
                 }
+                Op::Notice(_) => unreachable!("taken out of the write above"),
             }
         }
         record.version += 1;
         Ok(Volume::expose(WriteResponse {
             new_version: record.version,
         }))
+    }
+
+    async fn take_notices(
+        &self,
+        req: Untrusted<TakeRequest, (), Volume>,
+    ) -> Result<Exposed<TakeResponse, (), Volume>, SessionError> {
+        let req = req.into_inner();
+        let now = now_unix();
+        let mut notices = self.0.notices.lock().unwrap();
+        let mut due: Vec<(NoticeName, u64)> = notices
+            .iter()
+            .filter(|(_, n)| n.due_unix_secs <= now)
+            .map(|(name, n)| (*name, n.due_unix_secs))
+            .collect();
+        due.sort_by_key(|&(_, at)| at);
+        due.truncate(req.max as usize);
+        let taken = due
+            .into_iter()
+            .map(|(name, _)| {
+                let notice = notices.get_mut(&name).expect("listed just above");
+                notice.due_unix_secs = now + u64::from(req.hold_secs);
+                DueNotice {
+                    name,
+                    value: notice.value.clone(),
+                }
+            })
+            .collect();
+        Ok(Volume::expose(TakeResponse {
+            notices: taken,
+            next_due_unix_secs: notices.values().map(|n| n.due_unix_secs).min(),
+        }))
+    }
+
+    async fn settle_notice(
+        &self,
+        notice: Untrusted<NoticeName, (), Volume>,
+        settle: Untrusted<Settle, (), Volume>,
+    ) -> Result<Exposed<Settled, (), Volume>, SessionError> {
+        let mut notices = self.0.notices.lock().unwrap();
+        let name = notice.into_inner();
+        match settle.into_inner() {
+            Settle::Done => {
+                notices.remove(&name);
+            }
+            Settle::Again { due_unix_secs } => {
+                if let Some(n) = notices.get_mut(&name) {
+                    n.due_unix_secs = due_unix_secs;
+                }
+            }
+        }
+        Ok(Volume::expose(Settled))
     }
 }
 

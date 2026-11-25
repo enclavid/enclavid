@@ -260,6 +260,13 @@ fn apply_ops(tx: &Transaction, ops: Vec<Op>) -> Result<(), StoreErr> {
                 tx.execute("DELETE FROM media", [])?;
                 tx.execute("DELETE FROM disclosure", [])?;
             }
+            // A notice is kept in the index, beside the record, before the
+            // record's ops: the facade takes it out of the write first.
+            Op::Notice(_) => {
+                return Err(StoreErr::Internal(
+                    "a notice reached the record's own ops".into(),
+                ));
+            }
         }
     }
     Ok(())
